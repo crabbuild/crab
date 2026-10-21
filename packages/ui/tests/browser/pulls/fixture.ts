@@ -394,7 +394,14 @@ export async function mockPullRequest(page: Page) {
       return route.fulfill({
         json: {
           items: matches
-            ? [{ ...item, comment_count: comments.length, reaction_count: 0 }]
+            ? [
+                {
+                  ...item,
+                  kind: "pull",
+                  comment_count: comments.length,
+                  reaction_count: 0,
+                },
+              ]
             : [],
           next: null,
           counts: {

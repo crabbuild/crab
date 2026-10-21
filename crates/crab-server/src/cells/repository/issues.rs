@@ -534,46 +534,35 @@ impl Mutation for UpdateComment {
     }
 }
 
-pub(crate) struct ListIssues;
-impl Read for ListIssues {
-    const ID: u32 = 3;
-    type Input = SearchInput;
-    type Output = search::index::Page<IssueSummary>;
-    fn execute(
-        context: &mut RepositoryTransaction<'_>,
-        input: Self::Input,
-    ) -> crate::cells::Result<Self::Output> {
-        search::index::page(
-            context,
-            input,
-            collaboration::SubjectKind::Issue,
-            |context, number, metrics| {
-                let result = context.sql(&SqlBatch { statements: vec![statement("SELECT number, author_issuer, author_subject, author_name, title, state, label_ids, assignee_subjects, version, created_at_ms, updated_at_ms FROM repository_issues WHERE number = ?", vec![integer(number)?])] })?;
-                let row = result[0]
-                    .rows
-                    .first()
-                    .ok_or(crate::cells::Error::Invalid("indexed issue is missing"))?;
-                Ok(IssueSummary {
-                    number: result_u64_from_row(row, 0)?,
-                    author: RepositoryAuthor {
-                        issuer: result_text(row, 1)?,
-                        subject: result_text(row, 2)?,
-                        name: result_text(row, 3)?,
-                    },
-                    title: result_text(row, 4)?,
-                    state: u8::try_from(result_u64_from_row(row, 5)?).map_err(|_| {
-                        crate::cells::Error::Invalid("indexed issue state is invalid")
-                    })?,
-                    label_ids: decode_label_ids(result_blob(row, 6)?)?,
-                    assignee_subjects: decode_assignees(result_blob(row, 7)?)?,
-                    version: result_u64_from_row(row, 8)?,
-                    created_at_ms: result_u64_from_row(row, 9)?,
-                    updated_at_ms: result_u64_from_row(row, 10)?,
-                    comment_count: metrics.comments,
-                    reaction_count: metrics.reactions,
-                })
+impl IssueSummary {
+    pub(in crate::cells::repository) fn load(
+        context: &RepositoryTransaction<'_>,
+        number: u64,
+        metrics: search::index::Metrics,
+    ) -> crate::cells::Result<Self> {
+        let result = context.sql(&SqlBatch { statements: vec![statement("SELECT number, author_issuer, author_subject, author_name, title, state, label_ids, assignee_subjects, version, created_at_ms, updated_at_ms FROM repository_issues WHERE number = ?", vec![integer(number)?])] })?;
+        let row = result[0]
+            .rows
+            .first()
+            .ok_or(crate::cells::Error::Invalid("indexed issue is missing"))?;
+        Ok(IssueSummary {
+            number: result_u64_from_row(row, 0)?,
+            author: RepositoryAuthor {
+                issuer: result_text(row, 1)?,
+                subject: result_text(row, 2)?,
+                name: result_text(row, 3)?,
             },
-        )
+            title: result_text(row, 4)?,
+            state: u8::try_from(result_u64_from_row(row, 5)?)
+                .map_err(|_| crate::cells::Error::Invalid("indexed issue state is invalid"))?,
+            label_ids: decode_label_ids(result_blob(row, 6)?)?,
+            assignee_subjects: decode_assignees(result_blob(row, 7)?)?,
+            version: result_u64_from_row(row, 8)?,
+            created_at_ms: result_u64_from_row(row, 9)?,
+            updated_at_ms: result_u64_from_row(row, 10)?,
+            comment_count: metrics.comments,
+            reaction_count: metrics.reactions,
+        })
     }
 }
 

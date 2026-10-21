@@ -4,7 +4,6 @@ fn input(query: &str, cursor: usize) -> CompletionInput {
     CompletionInput {
         query: query.into(),
         cursor: cursor.try_into().unwrap(),
-        kind: SubjectKind::Issue,
     }
 }
 
@@ -55,14 +54,14 @@ fn completion_rejects_invalid_utf16_cursors_and_control_characters() {
 }
 
 #[test]
-fn issue_suggestions_exclude_pull_only_qualifiers_and_report_syntax_errors() {
+fn suggestions_discover_both_discussion_kinds_and_report_syntax_errors() {
     let result = complete(&input("", 0));
-    assert!(
-        !result
-            .items
-            .iter()
-            .any(|item| item.value.starts_with("draft:") || item.value == "is:merged")
-    );
+    for expected in ["is:issue", "is:pr", "draft:true", "is:merged"] {
+        assert!(
+            result.items.iter().any(|item| item.value == expected),
+            "{expected}"
+        );
+    }
     let result = complete(&input("label:\"Help", 11));
     assert!(result.error.is_some());
     assert_eq!(result.items[0].value, "label:\"Help wanted\"");

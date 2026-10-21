@@ -1283,8 +1283,10 @@ Every route prefix is `/api/repos/{owner}/{name}`. Browser mutations require the
 
 List endpoints accept `q` (up to 256 characters), `limit` (1–50), `sort`,
 `direction`, and an opaque exclusive `before` cursor. State belongs in the query,
-for example `q=is:closed label:bug`. An absent `q` defaults to `is:open`; an
-explicit query is authoritative and has no additional hidden state filter.
+for example `q=is:closed label:bug`. An absent `q` defaults to
+`is:issue is:open` for the issue workspace and `is:open` for the PR workspace.
+An explicit query has no additional hidden state filter. The issue endpoint
+searches both discussion kinds; the PR endpoint retains its PR scope.
 Use `is:issue` or `is:pr` to include all states of that kind. The former separate
 `state` parameter is rejected; milestone and release state parameters keep their
 own contracts. Text terms search titles, bodies, and recorded author names. Spaces and `AND` require both terms; `OR` matches either; parentheses
@@ -1297,11 +1299,11 @@ Repeated label qualifiers mean AND; comma-separated label names mean OR.
 Prefix a term or qualifier with `-` to exclude it. Missing-metadata qualifiers
 cannot be negated. Unknown qualifiers and malformed syntax return 400.
 
-`GET .../discussion-search?query=label:he&cursor=8&kind=issue` returns authorized
+`GET .../discussion-search?query=label:he&cursor=8` returns authorized
 repository suggestions and syntax feedback. `cursor`, `start`, and `end` count
-browser UTF-16 units; replacement offsets enclose the current token. `kind` is
-`issue` or `pull`. Suggestions are limited to 20 active labels and never cross
-the repository authorization boundary.
+browser UTF-16 units; replacement offsets enclose the current token.
+Suggestions discover both kinds, draft/merge predicates, and up to 20 active
+labels without crossing the repository authorization boundary.
 
 Lists query a native SQLite/FTS5 projection across all matching records. Each
 response includes `matching` for the exact query, `counts: {open, closed,
@@ -1316,7 +1318,10 @@ state facet. Non-state atom spelling, quoted literals, and boolean grouping
 survive state changes. A state destination is null when it cannot fit the
 grammar's size/depth/term limits; the UI disables that control and explains the
 limit without truncating filters. Counts, ordered rows, selected label
-names/colors, and navigation share a native snapshot. Summaries omit bodies;
+names/colors, and navigation share a native snapshot. Each list item carries
+`kind: "issue"` or `kind: "pull"`; PR items also include draft and branch metadata.
+Clients must use kind with number for identity and destination links because
+issues and PRs allocate numbers independently. Summaries omit bodies;
 `comment_count` counts conversation comments, and `reaction_count` counts
 reactions on the issue/PR body.
 
@@ -1326,8 +1331,8 @@ reactions on the issue/PR body.
 comment/reaction writes do not fabricate edit timestamps. Relevance sums FTS5
 BM25 ranks for positive text terms; terms shorter than three Unicode scalars
 retain literal substring matching without trigram ranking. `direction` is
-`desc` (default) or `asc`. Discussion number breaks ties in the same direction.
-`next` is null on the last page. Cursors bind the repository, query, kind,
+`desc` (default) or `asc`. Discussion number, then kind, break ties in the same direction.
+`next` is null on the last page. Cursors bind the repository, query, endpoint kind scope,
 ordering, generation and revision. Malformed cursors return 400; changed
 queries or index contents return 409 `stale_search_cursor`. Restart at the first
 page to obtain a fresh snapshot. Comment pagination remains numeric.
@@ -1514,7 +1519,7 @@ Stored assignments use stable IDs or subjects. Label renames appear immediately.
 
 ### Understand pagination and storage
 
-Issue, pull, comment, and review lists default to 30 items and accept 1 to 50. Each page scans at most 200 allocated numbers. A filtered page can be empty and still return `next`; clients must follow that cursor. Label lists return the complete bounded catalog of at most 500 active labels.
+Issue, pull, comment, and review lists default to 30 items and accept 1 to 50. Indexed discussion lists return matching summaries and use the opaque cursor contract above. Comment/review lists scan at most 200 allocated numbers; a page can be empty and still return `next`. Label lists return the complete bounded catalog of at most 500 active labels.
 
 Titles accept 1 to 256 characters. Markdown bodies accept 64 KiB. Collaboration requests use an 80 KiB body limit, eight concurrent application slots, and a 30-second handler deadline.
 

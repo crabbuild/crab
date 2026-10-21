@@ -273,30 +273,38 @@ impl Read for ListPulls {
         search::index::page(
             context,
             input,
-            collaboration::SubjectKind::Pull,
-            |context, number, metrics| {
-                let result = context.sql(&SqlBatch { statements: vec![statement("SELECT number, author_issuer, author_subject, author_name, title, state, base_ref, head_ref, label_ids, assignee_subjects, version, created_at_ms, updated_at_ms FROM repository_pulls WHERE number = ?", vec![integer(number)?])] })?;
-                let row = result[0].rows.first().ok_or(crate::cells::Error::Invalid(
-                    "indexed pull request is missing",
-                ))?;
-                Ok(PullSummary {
-                    number: result_u64_from_row(row, 0)?,
-                    author: author_from_row(row, 1)?,
-                    title: result_text(row, 4)?,
-                    state: PullState::from_code(result_u64_from_row(row, 5)?)?,
-                    base_ref: result_text(row, 6)?,
-                    head_ref: result_text(row, 7)?,
-                    label_ids: decode_label_ids(result_blob(row, 8)?)?,
-                    assignee_subjects: decode_assignees(result_blob(row, 9)?)?,
-                    version: result_u64_from_row(row, 10)?,
-                    created_at_ms: result_u64_from_row(row, 11)?,
-                    updated_at_ms: result_u64_from_row(row, 12)?,
-                    draft: readiness::load(context, number)? == PullReadiness::Draft,
-                    comment_count: metrics.comments,
-                    reaction_count: metrics.reactions,
-                })
-            },
+            Some(collaboration::SubjectKind::Pull),
+            |context, subject, metrics| PullSummary::load(context, subject.number, metrics),
         )
+    }
+}
+
+impl PullSummary {
+    pub(in crate::cells::repository) fn load(
+        context: &RepositoryTransaction<'_>,
+        number: u64,
+        metrics: search::index::Metrics,
+    ) -> crate::cells::Result<Self> {
+        let result = context.sql(&SqlBatch { statements: vec![statement("SELECT number, author_issuer, author_subject, author_name, title, state, base_ref, head_ref, label_ids, assignee_subjects, version, created_at_ms, updated_at_ms FROM repository_pulls WHERE number = ?", vec![integer(number)?])] })?;
+        let row = result[0].rows.first().ok_or(crate::cells::Error::Invalid(
+            "indexed pull request is missing",
+        ))?;
+        Ok(PullSummary {
+            number: result_u64_from_row(row, 0)?,
+            author: author_from_row(row, 1)?,
+            title: result_text(row, 4)?,
+            state: PullState::from_code(result_u64_from_row(row, 5)?)?,
+            base_ref: result_text(row, 6)?,
+            head_ref: result_text(row, 7)?,
+            label_ids: decode_label_ids(result_blob(row, 8)?)?,
+            assignee_subjects: decode_assignees(result_blob(row, 9)?)?,
+            version: result_u64_from_row(row, 10)?,
+            created_at_ms: result_u64_from_row(row, 11)?,
+            updated_at_ms: result_u64_from_row(row, 12)?,
+            draft: readiness::load(context, number)? == PullReadiness::Draft,
+            comment_count: metrics.comments,
+            reaction_count: metrics.reactions,
+        })
     }
 }
 

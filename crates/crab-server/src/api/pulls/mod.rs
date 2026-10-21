@@ -271,12 +271,13 @@ fn merge_requirements(
     }
 }
 
-fn pull_list_view(
+pub(super) fn pull_list_view(
     pull: &PullSummary,
     labels: &[crate::cells::repository::search::index::LabelSummary],
     assignees: &[Assignee],
 ) -> Value {
     json!({
+        "kind": "pull",
         "draft": pull.draft,
         "version": pull.version,
         "comment_count": pull.comment_count,
@@ -308,7 +309,7 @@ async fn list(
     let page = app::query_output(
         routed
             .client
-            .query::<ListPulls>(&routed.target, None, params.input()?)
+            .query::<ListPulls>(&routed.target, None, params.input("is:open")?)
             .await,
     )?;
     let pulls = &page.items;

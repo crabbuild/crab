@@ -22,6 +22,7 @@ async function searchFixture(page: Page) {
       json: {
         items: [
           {
+            kind: "issue",
             number: 1,
             title: "Keyboard focus",
             state: "open",
@@ -213,6 +214,7 @@ for (const view of ["issues", "pulls"] as const) {
           items: [
             {
               number: 1,
+              kind: view === "issues" ? "issue" : "pull",
               title: "Indexed discussion",
               author: "Alice",
               state:
@@ -264,7 +266,9 @@ for (const view of ["issues", "pulls"] as const) {
     await expect
       .poll(() => new URL(page.url()).searchParams.get("direction"))
       .toBe("asc");
-    const older = page.getByRole("link", { name: `Older ${view} →` });
+    const older = page.getByRole("link", {
+      name: `Older ${view === "issues" ? "results" : "pulls"} →`,
+    });
     await older.click();
     await expect
       .poll(() => new URL(page.url()).searchParams.get("before"))
@@ -334,4 +338,113 @@ test("maximum queries explain unavailable state changes without discarding the q
     "Shorten this search to change its state filter.",
   );
   await expectNoAccessibilityViolations(page);
+});
+
+test("issue search renders mixed kinds with colliding numbers and follows pull links", async ({
+  page,
+}) => {
+  await mockPullRequest(page);
+  const common = {
+    number: 2,
+    author: "Alice",
+    created_at: 1700000000000,
+    labels: [],
+    assignees: [],
+    comment_count: 1,
+    reaction_count: 0,
+  };
+  const items = [
+    {
+      ...common,
+      kind: "issue",
+      title: "Issue with the same number",
+      state: "open",
+    },
+    {
+      ...common,
+      kind: "pull",
+      title: "Improve the README",
+      state: "open",
+      draft: true,
+      base_ref: "refs/heads/main",
+      head_ref: "refs/heads/feature",
+    },
+    {
+      ...common,
+      kind: "pull",
+      number: 3,
+      title: "Merged change",
+      state: "merged",
+      draft: false,
+      base_ref: "refs/heads/main",
+      head_ref: "refs/heads/merged",
+    },
+  ];
+  await page.route("**/api/repos/team/project/issues?**", (route) => {
+    const query = new URL(route.request().url()).searchParams.get("q");
+    const selected =
+      query === "is:pr" ? items.filter((item) => item.kind === "pull") : items;
+    return route.fulfill({
+      json: {
+        items: selected,
+        next: null,
+        matching: selected.length,
+        counts: { open: selected.length - 1, closed: 1, merged: 1 },
+        navigation: { kind: "results" },
+      },
+    });
+  });
+  await page.route("**/api/repos/team/project/discussion-search?**", (route) =>
+    route.fulfill({
+      json: {
+        start: 0,
+        end:
+          new URL(route.request().url()).searchParams.get("query")?.length ?? 0,
+        items: [{ value: "is:pr", description: "Pull requests" }],
+        error: null,
+      },
+    }),
+  );
+  await page.goto("/team/project/issues?q=is%3Aissue+OR+is%3Apr&powerbar=1");
+  await expect(page.locator(".issue-list > li")).toHaveCount(3);
+  await expect(
+    page.getByRole("link", { name: "Issue with the same number", exact: true }),
+  ).toHaveAttribute("href", "/team/project/issues/2");
+  await expect(
+    page.getByRole("link", { name: "Improve the README", exact: true }),
+  ).toHaveAttribute("href", "/team/project/pull/2");
+  await expect(page.locator(".pull-status-icon.draft")).toHaveCount(1);
+  await expect(page.locator(".pull-status-icon.merged")).toHaveCount(1);
+  await expect(
+    page.getByRole("heading", { name: "3 results", exact: true }),
+  ).toBeVisible();
+  await expectNoAccessibilityViolations(page);
+  await selectDarkTheme(page);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await expectNoAccessibilityViolations(page);
+  await page.reload();
+  await expect(page.locator(".issue-list > li")).toHaveCount(3);
+  const input = page.getByRole("combobox", {
+    name: "Search issues",
+    exact: true,
+  });
+  await input.fill("is:");
+  await page
+    .getByRole("option", { name: "is:pr Pull requests", exact: true })
+    .click();
+  await input.press("Enter");
+  await expect(
+    page.getByRole("heading", { name: "2 results", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "Issue with the same number", exact: true }),
+  ).toHaveCount(0);
+  await expect(page).toHaveURL(/q=is%3Apr/);
+  await page
+    .getByRole("link", { name: "Improve the README", exact: true })
+    .click();
+  await expect(page).toHaveURL(/\/pull\/2\?powerbar=1$/);
+  await expect(
+    page.getByRole("heading", { name: /Improve the README/ }),
+  ).toBeVisible();
 });

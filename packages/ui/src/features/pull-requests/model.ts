@@ -29,7 +29,7 @@ export interface PullSummary {
 }
 
 export type PullListItem = Omit<PullSummary, "labels"> &
-  DiscussionTotals & { labels: ListLabel[] };
+  DiscussionTotals & { kind: "pull"; labels: ListLabel[] };
 
 export interface PullRequest extends PullSummary {
   reactions: ReactionSummary;

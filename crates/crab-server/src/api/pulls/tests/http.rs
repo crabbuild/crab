@@ -800,6 +800,7 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
     assert_eq!(
         h.json(ROOT, &bob).await["items"][0],
         json!({
+            "kind":"pull",
             "number":1,
             "draft":false,
             "title":"Proposed change",

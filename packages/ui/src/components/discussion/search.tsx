@@ -20,14 +20,12 @@ interface Suggestions {
 
 export function DiscussionSearch({
   repo,
-  kind,
   label,
   placeholder,
   value,
   onSearch,
 }: {
   repo: Repository;
-  kind: "issue" | "pull";
   label: string;
   placeholder: string;
   value: string;
@@ -66,7 +64,6 @@ export function DiscussionSearch({
       ? endpoint(repo, "discussion-search", {
           query: completion.query,
           cursor: String(completion.cursor),
-          kind,
         })
       : null,
   );

@@ -234,11 +234,6 @@ pub(crate) struct IssueSummary {
     pub comment_count: u64,
     pub reaction_count: u64,
 }
-impl super::search::index::Labelled for IssueSummary {
-    fn label_ids(&self) -> &[u64] {
-        &self.label_ids
-    }
-}
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct ListCommentsInput {

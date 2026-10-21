@@ -187,7 +187,9 @@ async function setup(page: Page, initialDraft: boolean) {
       }
       return route.fulfill({
         json: {
-          items: [{ ...pull(), comment_count: 0, reaction_count: 0 }],
+          items: [
+            { ...pull(), kind: "pull", comment_count: 0, reaction_count: 0 },
+          ],
           next: null,
           counts: { open: 1, closed: 0, merged: 0 },
           matching: 1,

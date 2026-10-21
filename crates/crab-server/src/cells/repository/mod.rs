@@ -21,7 +21,7 @@ pub(crate) use checks::{
     CreateCheckRunOutcome, GetCheckCreateSubmission, GetCheckRun, GetCheckUpdateSubmission,
     ListCheckRuns, ListCheckRunsInput, UpdateCheckRun, UpdateCheckRunInput, UpdateCheckRunOutcome,
 };
-pub(crate) use issues::{ListComments, ListIssues, UpdateComment, UpdateIssue};
+pub(crate) use issues::{ListComments, UpdateComment, UpdateIssue};
 pub(crate) use labels::{CreateLabel, DeleteLabel, ListLabels, UpdateLabel};
 pub(crate) use pulls::review_requests;
 pub(crate) use pulls::review_threads::{
@@ -89,6 +89,7 @@ pub(crate) mod search;
 mod settings;
 mod statuses;
 pub(crate) use search::index::SearchInput;
+pub(crate) use search::results::{DiscussionSummary, ListDiscussions};
 
 fn statement(sql: &str, parameters: Vec<SqlValue>) -> SqlStatement {
     SqlStatement {

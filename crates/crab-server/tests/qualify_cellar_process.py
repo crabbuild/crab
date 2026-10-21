@@ -319,7 +319,7 @@ with open(run / "commands.log", "w") as log:
         })
         assert [item["number"] for item in request(issue_search)["items"]] == [number]
         completion_path = "/api/repos/team/project/discussion-search?" + urllib.parse.urlencode({
-            "query": "label:rust", "cursor": 10, "kind": "issue",
+            "query": "label:rust", "cursor": 10,
         })
         completion = request(completion_path)
         assert completion["items"][0]["value"] == 'label:"RustFS qualification"'
@@ -358,6 +358,17 @@ with open(run / "commands.log", "w") as log:
         })
         assert [item["number"] for item in request(pull_search)["items"]] == [pull["number"]]
 
+        mixed_search = "/api/repos/team/project/issues?" + urllib.parse.urlencode({
+            "q": "is:issue OR is:pr", "sort": "comments", "direction": "asc", "limit": 1,
+        })
+        mixed_first = request(mixed_search)
+        mixed_second = request(mixed_search + "&before=" + urllib.parse.quote(mixed_first["next"]))
+        assert [(page["items"][0]["kind"], page["items"][0]["number"]) for page in [mixed_first, mixed_second]] == [("issue", number), ("pull", pull["number"])]
+        assert mixed_first["matching"] == 2 and mixed_second["next"] is None
+        assert mixed_second["items"][0]["draft"] is True
+        pull_in_issues = "/api/repos/team/project/issues?" + urllib.parse.urlencode({"q": "is:pr draft:true"})
+        assert request(pull_in_issues)["items"][0]["kind"] == "pull"
+
         merge_input = {"request_id": str(uuid.uuid4()), "version": pull["version"],
                        "method": "fast_forward", "base_oid": pull["base_oid"], "head_oid": pull["head_oid"]}
         try:
@@ -393,6 +404,7 @@ with open(run / "commands.log", "w") as log:
         assert (saved_milestone["open_count"], saved_milestone["closed_count"]) == (0, 1)
         work = request(f"/api/repos/team/project/milestones/{milestone['number']}/items")
         assert work["items"][0]["subject"] == {"kind": "issue", "number": number} and work["items"][0]["state"] == "closed"
+        assert request(mixed_search) == mixed_first
         for _ in range(2):
             removed = request(reaction_path, {"kind": "heart", "active": False}, method="PUT")
             assert removed["groups"]["heart"] == {"count": 0, "reacted": False}
@@ -403,6 +415,7 @@ with open(run / "commands.log", "w") as log:
         assert request(pull_path + "/links") == pull_links
         assert request(link_path) == {"active": True, "version": 3}
         assert request(pull_path)["draft"] is True
+        assert request(pull_in_issues)["items"][0]["draft"] is True
         assert [item["number"] for item in request(issue_search)["items"]] == [number]
         assert [item["number"] for item in request(pull_search)["items"]] == [pull["number"]]
         assert request(completion_path) == completion
@@ -504,6 +517,7 @@ with open(run / "commands.log", "w") as log:
             "repository_creation": True,
             "issue_replay": True,
             "discussion_search_restart": True,
+            "mixed_discussion_cursor_restart": True,
             "search_suggestions_restart": True,
             "search_index_rebuild_restart": True,
             "activity_restart": True,

@@ -51,11 +51,14 @@ pub(super) struct ListParameters {
     pub direction: Option<crate::cells::repository::search::index::Direction>,
 }
 impl ListParameters {
-    pub(super) fn input(&self) -> Result<crate::cells::repository::SearchInput> {
+    pub(super) fn input(
+        &self,
+        default_query: &str,
+    ) -> Result<crate::cells::repository::SearchInput> {
         let input = crate::cells::repository::SearchInput {
             before: self.before.clone(),
             limit: self.limit.unwrap_or(30),
-            query: app::search_query(self.q.as_deref().or(Some("is:open")))?,
+            query: app::search_query(self.q.as_deref().or(Some(default_query)))?,
             sort: self.sort.unwrap_or_default(),
             direction: self.direction.unwrap_or_default(),
         };

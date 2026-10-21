@@ -43,15 +43,21 @@ async fn create(cell: &RepositoryCell, title: &str, body: &str) {
         CreateIssueOutcome::Created(_)
     ));
 }
-async fn page(cell: &RepositoryCell, input: SearchInput) -> Page<IssueSummary> {
+async fn page(cell: &RepositoryCell, input: SearchInput) -> Page<DiscussionSummary> {
     cell.client
-        .query::<ListIssues>(&cell.target, None, input)
+        .query::<ListDiscussions>(&cell.target, None, input)
         .await
         .unwrap()
         .output
 }
-fn numbers(page: &Page<IssueSummary>) -> Vec<u64> {
-    page.items.iter().map(|item| item.number).collect()
+fn numbers(page: &Page<DiscussionSummary>) -> Vec<u64> {
+    page.items
+        .iter()
+        .map(|item| match item {
+            DiscussionSummary::Issue(issue) => issue.number,
+            DiscussionSummary::Pull(pull) => pull.number,
+        })
+        .collect()
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -161,7 +167,7 @@ async fn tied_sort_keys_paginate_both_directions_and_bind_cursors_to_the_query()
     ] {
         let error = cell
             .client
-            .query::<ListIssues>(
+            .query::<ListDiscussions>(
                 &cell.target,
                 None,
                 SearchInput {
@@ -180,7 +186,7 @@ async fn tied_sort_keys_paginate_both_directions_and_bind_cursors_to_the_query()
     create(&cell, "New mutation", "").await;
     let error = cell
         .client
-        .query::<ListIssues>(
+        .query::<ListDiscussions>(
             &cell.target,
             None,
             SearchInput {
@@ -243,8 +249,11 @@ async fn comments_reactions_and_rejected_edits_keep_index_totals_consistent() {
         )
         .await;
         assert_eq!(numbers(&result), [1, 2]);
-        assert_eq!(result.items[0].comment_count, 1);
-        assert_eq!(result.items[0].reaction_count, 2);
+        let DiscussionSummary::Issue(issue) = &result.items[0] else {
+            panic!("expected issue")
+        };
+        assert_eq!(issue.comment_count, 1);
+        assert_eq!(issue.reaction_count, 2);
     }
     let rejected = write::<UpdateIssue>(
         &cell,
@@ -264,7 +273,9 @@ async fn comments_reactions_and_rejected_edits_keep_index_totals_consistent() {
     assert!(matches!(rejected, UpdateIssueOutcome::Conflict));
     let result = page(&cell, SearchInput::default()).await;
     assert_eq!(result.counts.open, 2);
-    assert!(result.items.iter().all(|item| item.title == "Discussion"));
+    assert!(result.items.iter().all(
+        |item| matches!(item, DiscussionSummary::Issue(issue) if issue.title == "Discussion")
+    ));
     fixtures::close(&server).await;
 }
 
@@ -368,7 +379,7 @@ async fn bounded_rebuild_blocks_fresh_writes_preserves_replays_and_invalidates_c
     assert_eq!(ready.matching, 11);
     assert!(matches!(
         cell.client
-            .query::<ListIssues>(
+            .query::<ListDiscussions>(
                 &cell.target,
                 None,
                 SearchInput {

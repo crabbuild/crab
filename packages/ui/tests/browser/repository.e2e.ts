@@ -689,6 +689,7 @@ test.beforeEach(async ({ page }) => {
         json: {
           items: [
             {
+              kind: "issue",
               number: url.searchParams.get("q") === "is:closed" ? 43 : 42,
               comment_count: 0,
               reaction_count: 0,

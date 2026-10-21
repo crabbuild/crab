@@ -82,7 +82,7 @@ async fn fixture(
 async fn matches(cell: &crate::cells::RepositoryCell, query: &str) -> bool {
     !cell
         .client
-        .query::<ListIssues>(
+        .query::<ListDiscussions>(
             &cell.target,
             None,
             SearchInput {
@@ -293,13 +293,15 @@ async fn native_issue_and_pull_search_share_labels_boolean_logic_and_readiness()
     }
     let issues = cell
         .client
-        .query::<ListIssues>(
+        .query::<ListDiscussions>(
             &cell.target,
             None,
             SearchInput {
                 before: None,
                 limit: 1,
-                query: Some("(label:\"help wanted\" OR no:label) keyboard -missing".into()),
+                query: Some(
+                    "is:issue (label:\"help wanted\" OR no:label) keyboard -missing".into(),
+                ),
                 ..Default::default()
             },
         )
@@ -310,19 +312,24 @@ async fn native_issue_and_pull_search_share_labels_boolean_logic_and_readiness()
         issues
             .items
             .iter()
-            .map(|item| item.number)
+            .map(|item| match item {
+                DiscussionSummary::Issue(issue) => issue.number,
+                DiscussionSummary::Pull(pull) => pull.number,
+            })
             .collect::<Vec<_>>(),
         vec![2]
     );
     let next = cell
         .client
-        .query::<ListIssues>(
+        .query::<ListDiscussions>(
             &cell.target,
             None,
             SearchInput {
                 before: issues.next.clone(),
                 limit: 1,
-                query: Some("(label:\"help wanted\" OR no:label) keyboard -missing".into()),
+                query: Some(
+                    "is:issue (label:\"help wanted\" OR no:label) keyboard -missing".into(),
+                ),
                 ..Default::default()
             },
         )
@@ -332,7 +339,10 @@ async fn native_issue_and_pull_search_share_labels_boolean_logic_and_readiness()
     assert_eq!(
         next.items
             .iter()
-            .map(|item| item.number)
+            .map(|item| match item {
+                DiscussionSummary::Issue(issue) => issue.number,
+                DiscussionSummary::Pull(pull) => pull.number,
+            })
             .collect::<Vec<_>>(),
         vec![1]
     );
@@ -380,7 +390,7 @@ async fn native_issue_and_pull_search_share_labels_boolean_logic_and_readiness()
     };
     let labelled = cell
         .client
-        .query::<ListIssues>(
+        .query::<ListDiscussions>(
             &cell.target,
             None,
             SearchInput {
@@ -407,7 +417,7 @@ async fn native_issue_and_pull_search_share_labels_boolean_logic_and_readiness()
         .unwrap();
     let deleted = cell
         .client
-        .query::<ListIssues>(
+        .query::<ListDiscussions>(
             &cell.target,
             None,
             SearchInput {
@@ -423,13 +433,13 @@ async fn native_issue_and_pull_search_share_labels_boolean_logic_and_readiness()
     assert!(deleted.items.is_empty());
     let unlabelled = cell
         .client
-        .query::<ListIssues>(
+        .query::<ListDiscussions>(
             &cell.target,
             None,
             SearchInput {
                 before: None,
                 limit: 30,
-                query: Some("no:label".into()),
+                query: Some("is:issue no:label".into()),
                 ..Default::default()
             },
         )

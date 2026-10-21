@@ -6,6 +6,12 @@ Vercel/Geist semantic tokens. GitHub issue and pull request layouts and interact
 contracts are the reference. Existing collaboration and Git publication behavior
 must remain reachable and correct throughout the rewrite.
 
+The scope now also includes complete Projects and Milestones workflows on
+Cellar, using Fern's implementations as references. The source assessment,
+native authority design, missing capabilities and delivery sequence live in
+[GitHub collaboration on Cellar](github-collaboration-parity.md). GitHub remains
+the layout/interaction reference; Geist remains the color/typography foundation.
+
 ## Reference audit
 
 The nine supplied images show repository issue and pull request lists. They are
@@ -34,7 +40,8 @@ Current entry points are `packages/ui/src/features/issues/index.tsx`,
 `packages/ui/src/features/issues/workspace.tsx`, and
 `packages/ui/src/components/discussion/search.tsx`. The two HTTP list handlers
 accept typed query, sort/direction, page size, and an opaque before cursor.
-Native owners are `cells/repository/issues.rs` and `pulls/operations.rs`.
+Native owners are `cells/repository/search/results/`, `issues.rs` and
+`pulls/operations.rs`.
 Existing milestones, reactions, activity, links, readiness, and review requests
 are described in `repository-collaboration.md`; reuse these canonical owners.
 
@@ -52,9 +59,9 @@ are described in `repository-collaboration.md`; reuse these canonical owners.
 - [ ] A canonical typed search grammar with quoting, qualifiers, negation and
       boolean grouping, helpful validation and suggestions, stable sort/cursors,
       exact filtered state counts, and URL-preserved filters/navigation.
-- [ ] A unified tagged discussion result model for cross-kind queries. GitHub's
-      issue search can show PR rows when `is:pr` is explicit; Crab's current
-      issue/PR list APIs still constrain results to their endpoint kind.
+- [x] A unified tagged discussion result model for cross-kind queries. GitHub's
+      issue search can show PR rows when `is:pr` is explicit; Crab's
+      issue workspace now searches both kinds; the PR workspace retains PR scope.
 - [ ] Native models, commands, indexes and HTTP contracts for issue types,
       project membership/custom fields, saved views, and qualified public actor
       profiles. Organization/project/team scope must be real authorization
@@ -91,7 +98,7 @@ assignments, and index changes share the native mutation/receipt transaction.
 Counts cover the complete predicate, independent of the page; rows and selected
 label names/colors come from the same native snapshot. Created/updated,
 comments, total/per-kind body reactions, and relevance sorts support both
-directions with number tie breakers. Opaque cursors bind the repository,
+directions with number/kind tie breakers. Opaque cursors bind the repository,
 normalized query, kind/order, index generation and revision. Changed
 results return 409 and the UI provides a first-page recovery link.
 
@@ -108,10 +115,21 @@ one snapshot. Arbitrary boolean, excluded-state, merged-state and unrestricted
 queries show their matching result count, following the live GitHub reference;
 they are not rewritten into state tabs. Boolean grouping and quoted literals
 remain intact.
-Explicit searches have no hidden Open filter. An absent query defaults to open
-work. The separate state parameter and browser list addresses using it are
+Explicit searches have no hidden Open filter. An absent query defaults to open issues in the issue workspace and open PRs in
+the PR workspace. Explicit issue searches can return either kind. The separate state parameter and browser list addresses using it are
 rejected. Maximum-sized queries receive disabled state controls and a visible
 explanation when another qualifier cannot fit.
+
+The issue workspace consumes a native tagged discussion result model. Mixed
+results share the index snapshot, counts, selected labels and output limits.
+Number and kind break sort ties; opaque cursors retain both so equally numbered
+issues and PRs cannot disappear between pages. Rows share one renderer, use
+kind-qualified React keys, preserve draft/closed/merged icons and branch metadata,
+and navigate to the correct detail route. Completion now discovers both kinds
+and draft/merge predicates without a redundant workspace-kind input. The PR
+workspace continues to use a PR-scoped native read over the same query engine.
+This is not yet complete GitHub PR-workspace query normalization: its handling
+of an explicit contradictory `is:issue` predicate remains to be matched.
 
 Actor/project/type/milestone predicates and complete GitHub workspace controls
 remain delivery work. This slice does not finish the full parity checklist.
@@ -205,6 +223,20 @@ preparation, resumed through the mTLS CLI, and compared unchanged source records
 The existing local preview's two repositories were explicitly prepared and their
 records compared exactly before/after. These prove this slice, not the remaining
 parity checklist or production qualification.
+
+The mixed-result slice passed 20 native search/index tests, 63 API tests (one
+pre-existing ignored case), 107 UI unit tests and all 69 browser tests. Browser
+coverage includes colliding issue/PR numbers, kind-specific links/icons, query
+completion, reload, dark/mobile accessibility and PR detail navigation. The full
+browser run passed at the configured origin; an alternate-port run exposed two
+existing fixed-origin expectations, without a product failure or relaxed checks.
+UI/server builds, all-target Clippy, formatting and architecture checks passed.
+An isolated RustFS process run exercised mixed search through the browser,
+retained a mixed-result cursor across restart, and preserved Git/review/merge,
+replay, milestone and index-rebuild recovery. The persistent preview's two
+repositories were compared exactly across its server-only restart; domain
+records were unchanged. This slice changes query/result contracts, not stored
+index/domain formats, so existing prepared indexes need no rebuild.
 
 ## Primary references
 

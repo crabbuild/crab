@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::{Query, SubjectKind};
+use super::Query;
 use crate::cells::application::{Read, RepositoryTransaction};
 use crate::cells::repository::{LabelRecord, ListLabels};
 
@@ -10,7 +10,6 @@ pub(crate) struct CompletionInput {
     pub query: String,
     // Browser selection offsets count UTF-16 units, not UTF-8 bytes.
     pub cursor: u16,
-    pub kind: SubjectKind,
 }
 
 impl CompletionInput {
@@ -129,25 +128,20 @@ fn suggestions(
             }
         }
     } else {
-        for (value, description, pulls_only) in [
-            ("is:open", "Open work", false),
-            (
-                "is:closed",
-                "Closed work, including merged pull requests",
-                false,
-            ),
-            ("is:merged", "Merged pull requests", true),
-            ("is:unmerged", "Pull requests that have not merged", true),
-            ("draft:true", "Draft pull requests", true),
-            ("draft:false", "Non-draft pull requests", true),
-            ("label:", "Filter by repository label", false),
-            ("no:label", "Work without labels", false),
-            ("no:assignee", "Unassigned work", false),
+        for (value, description) in [
+            ("is:open", "Open work"),
+            ("is:closed", "Closed work, including merged pull requests"),
+            ("is:issue", "Issues"),
+            ("is:pr", "Pull requests"),
+            ("is:merged", "Merged pull requests"),
+            ("is:unmerged", "Pull requests that have not merged"),
+            ("draft:true", "Draft pull requests"),
+            ("draft:false", "Non-draft pull requests"),
+            ("label:", "Filter by repository label"),
+            ("no:label", "Work without labels"),
+            ("no:assignee", "Unassigned work"),
         ] {
-            if pulls_only && input.kind != SubjectKind::Pull
-                || negative && value.starts_with("no:")
-                || !value.starts_with(&prefix)
-            {
+            if negative && value.starts_with("no:") || !value.starts_with(&prefix) {
                 continue;
             }
             items.push(Suggestion {

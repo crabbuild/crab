@@ -20,7 +20,10 @@ export interface Issue extends Comment {
   can_label: boolean;
   can_assign: boolean;
 }
-export type IssueListItem = DiscussionTotals & { labels: ListLabel[] } & Pick<
+export type IssueListItem = DiscussionTotals & {
+  kind: "issue";
+  labels: ListLabel[];
+} & Pick<
     Issue,
     "number" | "title" | "state" | "author" | "created_at" | "assignees"
   >;

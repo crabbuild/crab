@@ -1,22 +1,18 @@
 import {
   DiscussionListControls,
-  DiscussionCommentCount,
   discussionFilters,
   type DiscussionPage,
 } from "@/components/discussion/list";
 import { endpoint, navigate, useRequest, type Repository } from "@/lib/api";
-import { AssigneeAvatars } from "@/components/discussion/metadata";
 import { DiscussionSearch } from "@/components/discussion/search";
 import { Button } from "@/components/ui/button";
-import { LabelBadges } from "@/features/labels/selection";
 import { repoHref } from "@/lib/repository-route";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { GitPullRequestIcon } from "@primer/octicons-react";
 
-import { timestamp } from "@/components/discussion/time";
 import type { PullListItem } from "./model";
-import { branch, pullIcons, pullStatus } from "./presentation";
+import { DiscussionRow } from "@/components/discussion/row";
 
 export function PullList({ repo, url }: { repo: Repository; url: URL }) {
   const filters = discussionFilters(url);
@@ -43,7 +39,6 @@ export function PullList({ repo, url }: { repo: Repository; url: URL }) {
       <p className="muted">Review and discuss changes between branches.</p>
       <DiscussionSearch
         repo={repo}
-        kind="pull"
         label="Search pulls"
         placeholder="Search titles, descriptions, or authors"
         value={query}
@@ -83,50 +78,13 @@ export function PullList({ repo, url }: { repo: Repository; url: URL }) {
             />
             {data.items.length ? (
               <ul className="issue-list panel">
-                {data.items.map((pull) => {
-                  const status = pullStatus(pull);
-                  const Icon = pullIcons[status];
-                  return (
-                    <li key={pull.number}>
-                      <span
-                        className={`pull-status-icon ${status}`}
-                        role="img"
-                        aria-label={status}
-                      >
-                        <Icon />
-                      </span>
-                      <div>
-                        <Link
-                          className="issue-link"
-                          href={repoHref(repo, {
-                            view: "pulls",
-                            pull: String(pull.number),
-                          })}
-                        >
-                          {pull.title}
-                        </Link>
-                        <LabelBadges labels={pull.labels} />
-                        <p className="muted">
-                          #{pull.number} opened {timestamp(pull.created_at)} by{" "}
-                          {pull.author}
-                        </p>
-                        <p className="pull-branches muted">
-                          <code>{branch(pull.head_ref)}</code>
-                          <span>into</span>
-                          <code>{branch(pull.base_ref)}</code>
-                        </p>
-                      </div>
-                      <AssigneeAvatars assignees={pull.assignees} />
-                      <DiscussionCommentCount
-                        count={pull.comment_count}
-                        href={repoHref(repo, {
-                          view: "pulls",
-                          pull: String(pull.number),
-                        })}
-                      />
-                    </li>
-                  );
-                })}
+                {data.items.map((item) => (
+                  <DiscussionRow
+                    key={`${item.kind}:${item.number}`}
+                    item={item}
+                    repo={repo}
+                  />
+                ))}
               </ul>
             ) : (
               <div className="notice issue-empty">

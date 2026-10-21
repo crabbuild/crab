@@ -121,7 +121,7 @@ pub(in crate::cells) fn dispatch_read(
         <GetIssue as Read>::ID => invoke_read::<GetIssue>(context, input),
         <GetIssueDetail as Read>::ID => invoke_read::<GetIssueDetail>(context, input),
         <GetComment as Read>::ID => invoke_read::<GetComment>(context, input),
-        <ListIssues as Read>::ID => invoke_read::<ListIssues>(context, input),
+        <ListDiscussions as Read>::ID => invoke_read::<ListDiscussions>(context, input),
         <ListComments as Read>::ID => invoke_read::<ListComments>(context, input),
         <ListLabels as Read>::ID => invoke_read::<ListLabels>(context, input),
         <ListCommitStatuses as Read>::ID => invoke_read::<ListCommitStatuses>(context, input),

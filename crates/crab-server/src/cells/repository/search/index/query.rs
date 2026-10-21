@@ -114,7 +114,7 @@ struct Cursor {
     revision: u64,
     query: String,
     key: Key,
-    number: u64,
+    subject: Subject,
 }
 impl Cursor {
     fn decode(value: &str) -> Result<Self, &'static str> {
@@ -128,8 +128,8 @@ impl Cursor {
             serde_json::from_slice(&bytes).map_err(|_| "Discussion cursor is invalid")?;
         if cursor.generation.is_nil()
             || cursor.revision > MAX_NUMBER
-            || cursor.number == 0
-            || cursor.number > MAX_NUMBER
+            || cursor.subject.number == 0
+            || cursor.subject.number > MAX_NUMBER
             || cursor.query.len() != 64
             || !cursor
                 .query
@@ -153,7 +153,7 @@ pub(in crate::cells::repository) struct Metrics {
     pub reactions: u64,
 }
 struct Candidate {
-    number: u64,
+    subject: Subject,
     key: Key,
     metrics: Metrics,
 }
@@ -175,8 +175,8 @@ impl Bindings {
 pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
     context: &RepositoryTransaction<'_>,
     input: SearchInput,
-    subject_kind: SubjectKind,
-    mut summary: impl FnMut(&RepositoryTransaction<'_>, u64, Metrics) -> crate::cells::Result<T>,
+    subject_kind: Option<SubjectKind>,
+    mut summary: impl FnMut(&RepositoryTransaction<'_>, Subject, Metrics) -> crate::cells::Result<T>,
 ) -> crate::cells::Result<Page<T>> {
     input.validate().map_err(crate::cells::Error::Invalid)?;
     let generation = ensure_ready(context)?;
@@ -220,12 +220,12 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
         return Err(crate::cells::Error::StaleSearch);
     }
     let mut bindings = Bindings::default();
-    let kind_filter = bindings.bind(SqlValue::Integer(kind(subject_kind)));
+    let kind_clause = kind_filter(subject_kind, &mut bindings);
     // Each counter describes its navigation query, even when the current query
     // selects only closed work. Rows and both targets share this native snapshot.
     let (base, navigation) = query.state_navigation();
     let predicate = expression(&base, &mut bindings);
-    let count_filter = format!("d.kind = {kind_filter} AND ({predicate})");
+    let count_filter = format!("{kind_clause} AND ({predicate})");
     let totals = context.sql(&SqlBatch {
         statements: vec![statement(
             &format!(
@@ -257,9 +257,9 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
             "discussion count exceeds its range",
         ))?;
     let mut bindings = Bindings::default();
-    let kind_filter = bindings.bind(SqlValue::Integer(kind(subject_kind)));
+    let kind_clause = kind_filter(subject_kind, &mut bindings);
     let predicate = expression(&query.expression, &mut bindings);
-    let filter = format!("d.kind = {kind_filter} AND ({predicate})");
+    let filter = format!("{kind_clause} AND ({predicate})");
     let matching = match &navigation {
         super::super::navigation::StateNavigation::State { selected, .. } => match selected {
             super::super::navigation::StateSelection::Open => counts.open,
@@ -278,21 +278,26 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
         Direction::Asc => "ASC",
         Direction::Desc => "DESC",
     };
+    // Issues and PRs allocate numbers independently. The kind breaks equal
+    // number/sort ties so crossing a page boundary cannot skip either subject.
     let seek = if let Some(cursor) = cursor {
         let key = bindings.bind(cursor.key.sql()?);
-        let number = bindings.bind(integer(cursor.number)?);
+        let number = bindings.bind(integer(cursor.subject.number)?);
+        let kind = bindings.bind(SqlValue::Integer(kind(cursor.subject.kind)));
         let operator = if input.direction == Direction::Asc {
             ">"
         } else {
             "<"
         };
-        format!("(sort_key {operator} {key} OR (sort_key = {key} AND number {operator} {number}))")
+        format!(
+            "(sort_key {operator} {key} OR (sort_key = {key} AND (number {operator} {number} OR (number = {number} AND kind {operator} {kind}))))"
+        )
     } else {
         "1".into()
     };
     let limit = bindings.bind(SqlValue::Integer(i64::from(input.limit) + 1));
     let sql = format!(
-        "SELECT number, sort_key, comments, reactions FROM (SELECT d.number, {order} AS sort_key, d.comments, d.reactions FROM discussion_index d WHERE {filter}) WHERE {seek} ORDER BY sort_key {direction}, number {direction} LIMIT {limit}"
+        "SELECT number, sort_key, comments, reactions, kind FROM (SELECT d.kind, d.number, {order} AS sort_key, d.comments, d.reactions FROM discussion_index d WHERE {filter}) WHERE {seek} ORDER BY sort_key {direction}, number {direction}, kind {direction} LIMIT {limit}"
     );
     let rows = context.sql(&SqlBatch {
         statements: vec![statement(&sql, bindings.values)],
@@ -314,7 +319,7 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
             }
         };
         candidates.push(Candidate {
-            number: crate::cells::repository::result_u64_from_row(row, 0)?,
+            subject: subject(&[row[4].clone(), row[0].clone()])?,
             key,
             metrics: Metrics {
                 comments: crate::cells::repository::result_u64_from_row(row, 2)?,
@@ -325,7 +330,7 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
     let mut items = Vec::with_capacity(usize::from(input.limit));
     let mut bytes = 0usize;
     for candidate in candidates.iter().take(usize::from(input.limit)) {
-        let item = summary(context, candidate.number, candidate.metrics)?;
+        let item = summary(context, candidate.subject, candidate.metrics)?;
         let size = serde_json::to_vec(&item)?.len();
         if size > super::super::super::MAX_LIST_OUTPUT_BYTES {
             return Err(crate::cells::Error::Invalid(
@@ -357,7 +362,7 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
                 revision,
                 query: digest,
                 key: last.key.clone(),
-                number: last.number,
+                subject: last.subject,
             }
             .encode()?,
         )
@@ -399,6 +404,16 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
         navigation,
         labels,
     })
+}
+
+fn kind_filter(subject_kind: Option<SubjectKind>, bindings: &mut Bindings) -> String {
+    match subject_kind {
+        Some(subject_kind) => {
+            let value = bindings.bind(SqlValue::Integer(kind(subject_kind)));
+            format!("d.kind = {value}")
+        }
+        None => "1".into(),
+    }
 }
 
 fn expression(expression: &Expression, bindings: &mut Bindings) -> String {

@@ -20,10 +20,10 @@ use crate::{
     cells::repository::collaboration::Target,
     cells::repository::{
         CommentKey, CommentPage, CommentRecord, CreateComment, CreateCommentInput,
-        CreateCommentOutcome, CreateIssue, CreateIssueInput, CreateIssueOutcome, GetComment,
-        GetIssueDetail, IssueRecord, IssueSummary, ListComments, ListCommentsInput, ListIssues,
-        RepositoryAuthor, UpdateComment, UpdateCommentInput, UpdateCommentOutcome, UpdateIssue,
-        UpdateIssueInput, UpdateIssueOutcome,
+        CreateCommentOutcome, CreateIssue, CreateIssueInput, CreateIssueOutcome, DiscussionSummary,
+        GetComment, GetIssueDetail, IssueRecord, IssueSummary, ListComments, ListCommentsInput,
+        ListDiscussions, RepositoryAuthor, UpdateComment, UpdateCommentInput, UpdateCommentOutcome,
+        UpdateIssue, UpdateIssueInput, UpdateIssueOutcome,
     },
     server::Server,
 };
@@ -79,6 +79,7 @@ fn issue_summary_view(
     assignees: &[Assignee],
 ) -> Value {
     json!({
+        "kind": "issue",
         "number": issue.number,
         "title": issue.title,
         "state": state_name(issue.state),
@@ -176,13 +177,18 @@ async fn list(
     let page = crate::app::query_output(
         routed
             .client
-            .query::<ListIssues>(&routed.target, None, params.input()?)
+            .query::<ListDiscussions>(&routed.target, None, params.input("is:issue is:open")?)
             .await,
     )?;
     let items = page
         .items
         .iter()
-        .map(|issue| issue_summary_view(issue, &page.labels, &assignees))
+        .map(|item| match item {
+            DiscussionSummary::Issue(issue) => issue_summary_view(issue, &page.labels, &assignees),
+            DiscussionSummary::Pull(pull) => {
+                super::pulls::pull_list_view(pull, &page.labels, &assignees)
+            }
+        })
         .collect::<Vec<_>>();
     Ok(Json(
         json!({"items":items,"next":page.next,"counts":page.counts,"matching":page.matching,"navigation":page.navigation}),

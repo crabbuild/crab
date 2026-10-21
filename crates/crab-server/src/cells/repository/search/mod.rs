@@ -5,6 +5,7 @@ use super::collaboration::{SubjectKind, SubjectState};
 pub(crate) mod completion;
 pub(crate) mod index;
 mod navigation;
+pub(crate) mod results;
 
 const MAX_TERMS: usize = 64;
 const MAX_DEPTH: usize = 5;
