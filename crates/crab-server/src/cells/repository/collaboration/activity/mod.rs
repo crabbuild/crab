@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::super::{
-    Read, RepositoryAuthor, RepositoryTransaction, timestamp, validate_author, validate_number,
+    Read, RepositoryAuthor, Transaction, timestamp, validate_author, validate_number,
     validate_title,
 };
 use super::{Page, Subject, Target};
@@ -124,7 +124,7 @@ fn events(subject: Option<Subject>) -> String {
 }
 
 pub(in crate::cells::repository) fn append(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     target: Target,
     actor: &RepositoryAuthor,
     action: Action,
@@ -182,14 +182,12 @@ pub(crate) struct Query {
 
 pub(crate) struct ListActivity;
 impl Read for ListActivity {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 220;
     type Input = Query;
     type Output = Option<Page<Event>>;
 
-    fn execute(
-        context: &mut RepositoryTransaction<'_>,
-        input: Query,
-    ) -> crate::cells::Result<Self::Output> {
+    fn execute(context: &mut Transaction<'_>, input: Query) -> crate::cells::Result<Self::Output> {
         if !(1..=50).contains(&input.limit) {
             return Err(crate::cells::Error::Invalid(
                 "activity pages require 1–50 events",

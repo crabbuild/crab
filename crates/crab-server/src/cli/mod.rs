@@ -52,6 +52,8 @@ enum Command {
 
 #[derive(Subcommand)]
 enum CellsCommand {
+    /// Initialize the shared native actor directory without changing repositories.
+    InitializeDirectory,
     /// Print the resource-derived Cell admission envelope.
     Capacity {
         #[arg(long, required = true)]
@@ -202,6 +204,14 @@ pub(super) async fn run() -> crab_server::Result<()> {
 
 async fn cells(config: &crab_server::Config, command: CellsCommand) -> crab_server::Result<()> {
     let bytes = match command {
+        CellsCommand::InitializeDirectory => {
+            management_request(config, reqwest::Method::POST, "/internal/directory", None)
+                .await?
+                .bytes()
+                .await
+                .map_err(|source| crab_server::Error::Healthcheck { source })?
+                .to_vec()
+        }
         CellsCommand::Capacity {
             json: true,
             live: true,

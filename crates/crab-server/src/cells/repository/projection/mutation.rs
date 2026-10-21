@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) fn begin(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     source: &SourceIdentity,
 ) -> crate::cells::Result<Option<u64>> {
     let existing = context.sql(&SqlBatch {
@@ -102,7 +102,7 @@ pub(super) fn begin(
 }
 
 fn update_probe_state(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     source: &SourceIdentity,
 ) -> crate::cells::Result<()> {
     let now = u64::try_from(context.now_ms())
@@ -124,7 +124,7 @@ fn update_probe_state(
 }
 
 pub(super) fn apply_refs(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     epoch_id: u64,
     rows: &[RefRow],
 ) -> crate::cells::Result<()> {
@@ -149,7 +149,7 @@ pub(super) fn apply_refs(
 }
 
 pub(super) fn apply_commits(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     epoch_id: u64,
     rows: &[CommitRow],
 ) -> crate::cells::Result<()> {
@@ -178,7 +178,7 @@ pub(super) fn apply_commits(
 }
 
 pub(super) fn apply_attribution(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     epoch_id: u64,
     batch: &AttributionBatch,
 ) -> crate::cells::Result<()> {
@@ -219,7 +219,7 @@ pub(super) fn apply_attribution(
 }
 
 pub(super) fn promote(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     epoch_id: u64,
     source: &SourceIdentity,
 ) -> crate::cells::Result<()> {
@@ -251,7 +251,7 @@ pub(super) fn promote(
 }
 
 fn verify_epoch(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     epoch_id: u64,
     source: &SourceIdentity,
 ) -> crate::cells::Result<()> {
@@ -300,10 +300,7 @@ fn verify_epoch(
     Ok(())
 }
 
-pub(super) fn supersede(
-    context: &RepositoryTransaction<'_>,
-    epoch_id: u64,
-) -> crate::cells::Result<()> {
+pub(super) fn supersede(context: &Transaction<'_>, epoch_id: u64) -> crate::cells::Result<()> {
     context.sql(&SqlBatch {
         statements: vec![statement(
             "UPDATE git_projection_epochs SET state = 'superseded' WHERE epoch_id = ? AND state = 'building'",
@@ -313,7 +310,7 @@ pub(super) fn supersede(
     Ok(())
 }
 
-pub(super) fn collect(context: &RepositoryTransaction<'_>) -> crate::cells::Result<()> {
+pub(super) fn collect(context: &Transaction<'_>) -> crate::cells::Result<()> {
     let keep = r#"
         WITH keep(epoch_id) AS (
             SELECT ready_epoch

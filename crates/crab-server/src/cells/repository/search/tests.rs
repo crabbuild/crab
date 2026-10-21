@@ -12,7 +12,7 @@ async fn fixture(
 ) {
     let server = fixtures::fixture().await;
     let cell = server
-        .repository_cells()
+        .cells()
         .unwrap()
         .repository(server.repositories.values()[0].id)
         .unwrap();
@@ -197,7 +197,7 @@ async fn native_issue_and_pull_search_share_labels_boolean_logic_and_readiness()
     use uuid::Uuid;
     let server = fixtures::fixture().await;
     let cell = server
-        .repository_cells()
+        .cells()
         .unwrap()
         .repository(server.repositories.values()[0].id)
         .unwrap();

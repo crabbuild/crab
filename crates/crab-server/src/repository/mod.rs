@@ -177,7 +177,7 @@ impl Repository {
                 maintenance::Pass::BackgroundMaintenance,
                 Some(maintenance::ProjectionContext {
                     repository_id: self.id,
-                    client: server.repository_cells().map(|router| (*router).clone()),
+                    client: server.cells().map(|router| (*router).clone()),
                     metrics: server.metrics.clone(),
                     identity: self.identity.clone(),
                     runtime: Arc::clone(&server.runtime),

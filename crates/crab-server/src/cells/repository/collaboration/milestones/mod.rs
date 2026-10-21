@@ -1,6 +1,6 @@
 use super::super::{
-    Mutation, MutationResult, Read, RepositoryAuthor, RepositoryTransaction, advance_revision,
-    settings, timestamp, validate_author, validate_number, validate_title,
+    Mutation, MutationResult, Read, RepositoryAuthor, Transaction, advance_revision, settings,
+    timestamp, validate_author, validate_number, validate_title,
 };
 use super::{Decision, PREFIX, Page, Subject, SubjectSummary, next_version};
 use super::{
@@ -173,10 +173,7 @@ pub(crate) fn validate_fields(
     Ok(())
 }
 
-fn load(
-    context: &RepositoryTransaction<'_>,
-    number: u64,
-) -> crate::cells::Result<Option<Milestone>> {
+fn load(context: &Transaction<'_>, number: u64) -> crate::cells::Result<Option<Milestone>> {
     validate_number(number)?;
     let milestone: Option<Milestone> = context.document(&key(number))?;
     if let Some(value) = &milestone {
@@ -202,11 +199,12 @@ fn load(
 
 pub(crate) struct CreateMilestone;
 impl Mutation for CreateMilestone {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 200;
     type Input = CreateMilestoneInput;
     type Output = Decision<Milestone>;
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         if settings::archived(context)? {
@@ -277,11 +275,12 @@ impl Mutation for CreateMilestone {
 
 pub(crate) struct EditMilestone;
 impl Mutation for EditMilestone {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 201;
     type Input = EditMilestoneInput;
     type Output = Decision<Milestone>;
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         if settings::archived(context)? {
@@ -326,24 +325,23 @@ impl Mutation for EditMilestone {
 
 pub(crate) struct GetMilestone;
 impl Read for GetMilestone {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 200;
     type Input = u64;
     type Output = Option<Milestone>;
-    fn execute(
-        context: &mut RepositoryTransaction<'_>,
-        number: u64,
-    ) -> crate::cells::Result<Self::Output> {
+    fn execute(context: &mut Transaction<'_>, number: u64) -> crate::cells::Result<Self::Output> {
         load(context, number)
     }
 }
 
 pub(crate) struct ListMilestones;
 impl Read for ListMilestones {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 201;
     type Input = ListMilestonesInput;
     type Output = Page<Milestone>;
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         if !(1..=50).contains(&input.limit) {
@@ -413,11 +411,12 @@ impl Read for ListMilestones {
 
 pub(crate) struct GetAssignment;
 impl Read for GetAssignment {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 202;
     type Input = Subject;
     type Output = Option<Assignment>;
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         subject: Subject,
     ) -> crate::cells::Result<Self::Output> {
         if subject.closed(context)?.is_none() {
@@ -429,7 +428,7 @@ impl Read for GetAssignment {
 }
 
 fn assignment(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     subject: Subject,
 ) -> crate::cells::Result<StoredAssignment> {
     let value: StoredAssignment =
@@ -455,7 +454,7 @@ fn assignment(
 }
 
 fn assignment_view(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     value: StoredAssignment,
 ) -> crate::cells::Result<Assignment> {
     let milestone = value
@@ -474,7 +473,7 @@ fn assignment_view(
 }
 
 fn adjust(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     number: u64,
     closed: bool,
     add: bool,
@@ -503,11 +502,12 @@ fn adjust(
 
 pub(crate) struct AssignMilestone;
 impl Mutation for AssignMilestone {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 202;
     type Input = AssignMilestoneInput;
     type Output = Decision<Assignment>;
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         if settings::archived(context)? {
@@ -585,7 +585,7 @@ impl Mutation for AssignMilestone {
 }
 
 pub(crate) fn state_changed(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     subject: Subject,
     was_closed: bool,
     closed: bool,
@@ -617,11 +617,12 @@ pub(crate) struct ListMilestoneItemsInput {
 
 pub(crate) struct ListMilestoneItems;
 impl Read for ListMilestoneItems {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 203;
     type Input = ListMilestoneItemsInput;
     type Output = Option<Page<SubjectSummary>>;
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         if !(1..=50).contains(&input.limit) {

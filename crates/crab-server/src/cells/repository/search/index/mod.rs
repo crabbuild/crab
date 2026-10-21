@@ -3,7 +3,7 @@
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::cells::application::{Mutation, MutationResult, Read, RepositoryTransaction, SqlValue};
+use crate::cells::application::{Mutation, MutationResult, Read, SqlValue, Transaction};
 use crate::cells::repository::collaboration::{Subject, SubjectKind};
 use crate::cells::repository::{MAX_NUMBER, SqlBatch, integer, result_u64, statement};
 
@@ -63,7 +63,7 @@ pub enum SearchIndexStatus {
     },
 }
 
-fn state(context: &RepositoryTransaction<'_>) -> crate::cells::Result<Option<State>> {
+fn state(context: &Transaction<'_>) -> crate::cells::Result<Option<State>> {
     let state = context.document::<State>(STATE_KEY)?;
     if state.as_ref().is_some_and(|state| state.format != FORMAT) {
         return Err(crate::cells::Error::Invalid(
@@ -73,7 +73,7 @@ fn state(context: &RepositoryTransaction<'_>) -> crate::cells::Result<Option<Sta
     Ok(state)
 }
 
-pub(crate) fn ensure_ready(context: &RepositoryTransaction<'_>) -> crate::cells::Result<Uuid> {
+pub(crate) fn ensure_ready(context: &Transaction<'_>) -> crate::cells::Result<Uuid> {
     let Some(state) = state(context)? else {
         return Err(crate::cells::Error::IndexUnavailable);
     };
@@ -83,7 +83,7 @@ pub(crate) fn ensure_ready(context: &RepositoryTransaction<'_>) -> crate::cells:
     Ok(state.generation)
 }
 
-fn revision(context: &RepositoryTransaction<'_>) -> crate::cells::Result<u64> {
+fn revision(context: &Transaction<'_>) -> crate::cells::Result<u64> {
     let rows = context.sql(&SqlBatch {
         statements: vec![statement(
             "SELECT revision FROM discussion_index_revision WHERE singleton = 1",
@@ -93,10 +93,7 @@ fn revision(context: &RepositoryTransaction<'_>) -> crate::cells::Result<u64> {
     result_u64(&rows, 0, 0)
 }
 
-pub(crate) fn initialize(
-    context: &RepositoryTransaction<'_>,
-    generation: Uuid,
-) -> crate::cells::Result<()> {
+pub(crate) fn initialize(context: &Transaction<'_>, generation: Uuid) -> crate::cells::Result<()> {
     context.install_schema(include_str!("schema.sql"))?;
     context.put_document(
         STATE_KEY,
@@ -110,18 +107,16 @@ pub(crate) fn initialize(
 
 pub(crate) struct GetSearchIndexStatus;
 impl Read for GetSearchIndexStatus {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 270;
     type Input = ();
     type Output = SearchIndexStatus;
-    fn execute(
-        context: &mut RepositoryTransaction<'_>,
-        _: (),
-    ) -> crate::cells::Result<SearchIndexStatus> {
+    fn execute(context: &mut Transaction<'_>, _: ()) -> crate::cells::Result<SearchIndexStatus> {
         status(context)
     }
 }
 
-fn status(context: &RepositoryTransaction<'_>) -> crate::cells::Result<SearchIndexStatus> {
+fn status(context: &Transaction<'_>) -> crate::cells::Result<SearchIndexStatus> {
     Ok(match state(context)? {
         None => SearchIndexStatus::Missing,
         Some(State {
@@ -144,7 +139,7 @@ fn status(context: &RepositoryTransaction<'_>) -> crate::cells::Result<SearchInd
 }
 
 pub(in crate::cells::repository) fn dirty(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     subject: Subject,
 ) -> crate::cells::Result<()> {
     context.sql(&SqlBatch {
@@ -159,7 +154,7 @@ pub(in crate::cells::repository) fn dirty(
     Ok(())
 }
 
-pub(crate) fn flush(context: &RepositoryTransaction<'_>) -> crate::cells::Result<()> {
+pub(crate) fn flush(context: &Transaction<'_>) -> crate::cells::Result<()> {
     let rows = context.sql(&SqlBatch {
         statements: vec![statement(
             "SELECT kind, number FROM discussion_index_dirty ORDER BY kind, number LIMIT 129",

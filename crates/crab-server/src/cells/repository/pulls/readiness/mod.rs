@@ -17,7 +17,7 @@ fn key(number: u64) -> String {
 }
 
 pub(in crate::cells::repository) fn load(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     number: u64,
 ) -> crate::cells::Result<PullReadiness> {
     // Absence is the normal ready state. Reading an existing PR must not
@@ -26,7 +26,7 @@ pub(in crate::cells::repository) fn load(
 }
 
 pub(super) fn store(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     number: u64,
     state: PullReadiness,
 ) -> crate::cells::Result<()> {
@@ -56,12 +56,13 @@ pub(crate) enum SetPullReadinessOutcome {
 
 pub(crate) struct SetPullReadiness;
 impl Mutation for SetPullReadiness {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 240;
     type Input = SetPullReadinessInput;
     type Output = SetPullReadinessOutcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         use SetPullReadinessOutcome as Outcome;

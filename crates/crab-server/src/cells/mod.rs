@@ -1,7 +1,10 @@
 use std::time::{SystemTime, UNIX_EPOCH};
 
+mod address;
+pub(crate) use address::Address;
 pub(crate) mod application;
 mod client;
+pub(crate) mod directory;
 mod initializer;
 mod records;
 pub(crate) mod runtime;
@@ -9,34 +12,36 @@ pub(crate) use initializer::initialize_repository;
 pub(crate) mod repository;
 
 pub(crate) use application::MutationIdentity;
-pub(crate) use client::{Committed, Observed, RepositoryCell, RepositoryClient};
+pub(crate) use client::{CellClient, Committed, Observed, RepositoryCell};
 
-/// Repository execution and transport failures with original error sources.
+/// Cell execution and transport failures with original error sources.
 #[derive(Debug, thiserror::Error)]
 pub enum Error {
-    #[error("invalid repository Cell request: {0}")]
+    #[error("invalid Cell request: {0}")]
     Invalid(&'static str),
-    #[error("repository Cell operation failed")]
+    #[error("Cell operation failed")]
     Runtime {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
-    #[error("repository Cell JSON encoding failed")]
+    #[error("Cell JSON encoding failed")]
     Json(#[from] serde_json::Error),
-    #[error("repository Cell request ID was reused with another payload")]
+    #[error("Cell request ID was reused with another payload")]
     RequestConflict,
-    #[error("repository Cell request has expired")]
+    #[error("Cell request has expired")]
     Expired,
-    #[error("repository Cell is unavailable")]
+    #[error("Cell is unavailable")]
     Unavailable,
+    #[error("Cell requires explicit initialization")]
+    NotInitialized,
     #[error("discussion index requires explicit preparation")]
     IndexUnavailable,
-    #[error("repository command may have committed; retry with the same submission ID")]
+    #[error("Cell command may have committed; retry with the same submission ID")]
     Pending {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
-    #[error("repository Cell has not reached the requested revision")]
+    #[error("Cell has not reached the requested revision")]
     StaleRead,
     #[error("discussion cursor no longer matches the index snapshot or query")]
     StaleSearch,

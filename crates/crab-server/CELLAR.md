@@ -13,10 +13,13 @@ is required before release; a smoke pass cannot qualify away the dependency bug.
 
 ## Execution and persistence
 
-The compiled application binds the `REPOSITORIES` namespace to one native
-`Repository` Cell per catalog UUID. `cells/client.rs` sends bounded requests
-through the node's native ingress. `cells/application.rs` dispatches typed
-repository operations inside Cellar storage transactions. The bounded envelope
+The compiled application binds `REPOSITORIES` to one native `Repository` Cell
+per catalog UUID and `DIRECTORY` to a shared native `Directory` Cell. The latter
+stores private qualified account keys and chosen public actor profiles.
+`cells/client.rs` sends bounded typed requests through native ingress and checks
+the operation's class and read receipt's target before routing.
+`cells/application.rs` shares transaction, replay and output handling; each
+native class owns its schema and operation dispatch. The bounded envelope
 is buffered before owner dispatch so Cellar can safely retry stale routes; it is
 not forwarded as a non-replayable upload stream. Successful HTTP output
 uses the SDK output gate, including its ownership and durability checks.
@@ -29,7 +32,22 @@ their receipt. Identical retries recover the original decision; conflicting
 payloads fail. Receipts expire after the request expiry plus a 24-hour retention
 window, with bounded pruning on subsequent mutations.
 
-`cells/schema.sql` owns canonical domain tables;
+Native target addresses now distinguish Repository UUIDs from Directory. This
+changes the private peer application envelope: upgrade the fleet together;
+mixed-version operation is not supported or qualified. The compiled script name
+and existing Repository class/namespace are unchanged because Cellar uses these
+names in durable identities. Repository SQL/KV records and stored replay replies
+retain their formats.
+
+`cells/directory/schema.sql` is a separate initial schema. Run
+`cells initialize-directory` through the running server's private mTLS listener
+before exposing profiles. Repeating initialization verifies the existing schema;
+reads and writes never install tables. Missing preparation returns a visible
+503 `directory_unavailable` from profile APIs. Global readiness still verifies
+repositories; it does not certify the optional profile directory. This directory
+adds no organization, team, project or repository grant authority.
+
+`cells/schema.sql` owns canonical repository domain tables;
 `cells/repository/search/index/schema.sql` owns the derived discussion index. Initialization
 creates it directly, including replay receipts; no historical DDL upgrade chain
 or lazy table creation runs during serving. Explicit repository
@@ -73,7 +91,7 @@ publications leave the async executor available for lease renewal.
 ## Operator changes
 
 Supported `cells` commands are `capacity --json [--live]`, `metrics`,
-`status --owner OWNER --name NAME`, `runtime`, and
+`status --owner OWNER --name NAME`, `runtime`, `initialize-directory`, and
 `rebuild-search --owner OWNER --name NAME`. Repository create/adopt and
 storage probing remain available. Reads use the authoritative Cell owner. `local_disk_limit_bytes` bounds the
 Crab staging envelope; Cellar 0.1.0 has no injected shared disk budget. Place its
@@ -122,13 +140,24 @@ that membership revocation remains effective after installation.
 
 The process smoke test creates a private RustFS instance and synthetic repository,
 performs an HTTP issue mutation and replay, pushes Git, restarts the actual server,
-then verifies the issue, replay, Git ref, management status, and native objects:
+then verifies profiles, issues, replay, Git refs, management status, and native objects:
 
 ```sh
 python3 crates/crab-server/tests/qualify_cellar_process.py \
   --binary "$CARGO_TARGET_DIR/debug/crab-server" \
   --artifacts "$CARGO_TARGET_DIR/cellar-process-proof"
 ```
+
+Directory/profile native tests cover explicit preparation, authority/receipt
+isolation, concurrent handle claims, qualified identity separation, stable IDs,
+versions, replay and restart. The full isolated server suite passed 325 tests
+(five existing cases ignored), including Directory remote reads and receipt
+replay after mTLS handoff in object and fleet durability modes. A real RustFS
+browser run enrolled and renamed an actor, visited its stable public URL and
+verified unchanged profile data after process restart and repository-index
+rebuild. HTTP tests cover session/CSRF, private-claim exclusion and Git-token
+rejection. All 72 UI browser tests and 107 unit tests passed; UI/server builds,
+all-target Clippy and architecture checks passed.
 
 Local process runs passed against RustFS. The script retains its JSON receipt
 and logs, and removes its own RustFS container on exit. The latest build and

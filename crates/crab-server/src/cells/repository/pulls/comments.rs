@@ -7,12 +7,13 @@ use crate::cells::repository::collaboration::{
 pub(crate) struct CreatePullComment;
 
 impl Mutation for CreatePullComment {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 18;
     type Input = CreatePullCommentInput;
     type Output = CreatePullCommentOutcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         if settings::archived(context)? {
@@ -85,12 +86,13 @@ impl Mutation for CreatePullComment {
 pub(crate) struct UpdatePullComment;
 
 impl Mutation for UpdatePullComment {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 19;
     type Input = UpdatePullCommentInput;
     type Output = UpdatePullCommentOutcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         if settings::archived(context)? {
@@ -133,11 +135,12 @@ impl Mutation for UpdatePullComment {
 
 pub(crate) struct GetPullComment;
 impl Read for GetPullComment {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 18;
     type Input = PullChildKey;
     type Output = Option<PullCommentRecord>;
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         key: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         load_comment_query(context, key)
@@ -145,11 +148,12 @@ impl Read for GetPullComment {
 }
 pub(crate) struct ListPullComments;
 impl Read for ListPullComments {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 19;
     type Input = PullChildListInput;
     type Output = Option<PullCommentPage>;
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         if load_pull_query(context, input.pull)?.is_none() {

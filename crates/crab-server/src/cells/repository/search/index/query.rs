@@ -173,10 +173,10 @@ impl Bindings {
 }
 
 pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     input: SearchInput,
     subject_kind: Option<SubjectKind>,
-    mut summary: impl FnMut(&RepositoryTransaction<'_>, Subject, Metrics) -> crate::cells::Result<T>,
+    mut summary: impl FnMut(&Transaction<'_>, Subject, Metrics) -> crate::cells::Result<T>,
 ) -> crate::cells::Result<Page<T>> {
     input.validate().map_err(crate::cells::Error::Invalid)?;
     let generation = ensure_ready(context)?;

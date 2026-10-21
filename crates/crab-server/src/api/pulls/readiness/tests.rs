@@ -8,12 +8,7 @@ const ROOT: &str = "/api/repos/team/private/pulls/1";
 async fn seed(h: &Harness) -> uuid::Uuid {
     let submission = uuid::Uuid::now_v7();
     let repository = h.server.repositories.values()[0].id;
-    let cell = h
-        .server
-        .repository_cells()
-        .unwrap()
-        .repository(repository)
-        .unwrap();
+    let cell = h.server.cells().unwrap().repository(repository).unwrap();
     cell.client
         .command::<CreatePull>(
             &cell.target,
@@ -228,11 +223,7 @@ async fn merge_recovery_after_archive(published: bool) {
     git::success(path, &["commit", "-am", "feature"]).await;
     let head_oid = git::success(path, &["rev-parse", "HEAD"]).await;
     git::success(path, &["push", &git_url, "feature"]).await;
-    let cell = server
-        .repository_cells()
-        .unwrap()
-        .repository(entry.id)
-        .unwrap();
+    let cell = server.cells().unwrap().repository(entry.id).unwrap();
     let principal = crate::auth::Principal::Local;
     let actor = crate::app::actor(&principal).unwrap();
     let created = cell

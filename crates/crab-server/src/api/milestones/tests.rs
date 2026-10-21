@@ -165,12 +165,7 @@ async fn milestone_writes_require_membership_csrf_and_an_unarchived_repository()
         StatusCode::NOT_FOUND
     );
     let repo = h.server.repositories.values()[0].id;
-    let cell = h
-        .server
-        .repository_cells()
-        .unwrap()
-        .repository(repo)
-        .unwrap();
+    let cell = h.server.cells().unwrap().repository(repo).unwrap();
     cell.client
         .command::<crate::cells::repository::ReplaceRepositoryLifecycle>(
             &cell.target,

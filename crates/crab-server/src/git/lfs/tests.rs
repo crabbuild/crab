@@ -720,7 +720,7 @@ async fn lfs_invalid_upload_is_rejected_before_cell_readiness() {
     let mut server = fixtures::fixture().await;
     Arc::get_mut(&mut server)
         .expect("fixture must not have another server owner")
-        .repository_cells = None;
+        .cells = None;
 
     let response = request(
         &server,

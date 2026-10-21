@@ -3,12 +3,13 @@ use super::*;
 pub(crate) struct ReserveReleaseAsset;
 
 impl Mutation for ReserveReleaseAsset {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 28;
     type Input = ReserveReleaseAssetInput;
     type Output = ReserveReleaseAssetOutcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         let reservation = input.reservation;
@@ -70,12 +71,13 @@ impl Mutation for ReserveReleaseAsset {
 pub(crate) struct AttachReleaseAsset;
 
 impl Mutation for AttachReleaseAsset {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 29;
     type Input = AttachReleaseAssetInput;
     type Output = AttachReleaseAssetOutcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         validate_reservation(&input.reservation)?;
@@ -173,12 +175,13 @@ impl Mutation for AttachReleaseAsset {
 pub(crate) struct DeleteReleaseAsset;
 
 impl Mutation for DeleteReleaseAsset {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 30;
     type Input = DeleteReleaseAssetInput;
     type Output = DeleteReleaseAssetOutcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         validate_number(input.release)?;

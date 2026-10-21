@@ -291,6 +291,14 @@ with open(run / "commands.log", "w") as log:
         cmd(server_command("storage-probe"), env=env)
         server = start()
         wait()
+        cmd(server_command("cells", "initialize-directory"), env=env)
+        assert request("/api/profile") == {"profile": None}
+        profile_input = {"request_id": str(uuid.uuid4()), "handle": "qualification-actor", "name": "Qualification actor"}
+        actor_profile = request("/api/profile", profile_input)
+        profile_id = actor_profile["id"]
+        actor_profile = request("/api/profile", {"version": actor_profile["version"], "handle": "qualification-actor-renamed", "name": "Qualification actor renamed"}, method="PATCH")
+        assert actor_profile["id"] == profile_id
+        assert request("/api/profile", profile_input) == actor_profile
         body = {
             "request_id": str(uuid.uuid4()),
             "title": "Cellar RustFS qualification",
@@ -393,6 +401,8 @@ with open(run / "commands.log", "w") as log:
         stop()
         server = start()
         wait()
+        assert request("/api/profile")["profile"] == actor_profile
+        assert request("/api/actors/" + profile_id) == actor_profile
         restored = request(f"/api/repos/team/project/issues/{number}")
         assert restored["title"] == body["title"]
         assert restored["reactions"]["groups"] == reaction["groups"]
@@ -458,6 +468,7 @@ with open(run / "commands.log", "w") as log:
         generation = str(uuid.uuid4())
         building = index_request({"action": "begin", "expected": previous_index["generation"], "generation": generation})
         assert building["state"] == "building"
+        assert request("/api/profile")["profile"] == actor_profile
         index_request({"action": "step", "generation": generation, "version": building["progress"]["version"]})
         try:
             request(issue_search)
@@ -516,6 +527,8 @@ with open(run / "commands.log", "w") as log:
             "image_ref": args.image,
             "repository_creation": True,
             "issue_replay": True,
+            "actor_directory_restart": True,
+            "actor_profile_retry": True,
             "discussion_search_restart": True,
             "mixed_discussion_cursor_restart": True,
             "search_suggestions_restart": True,

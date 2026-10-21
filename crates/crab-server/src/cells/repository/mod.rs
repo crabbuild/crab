@@ -1,3 +1,6 @@
+pub(in crate::cells) const CLASS: &str = "Repository";
+pub(in crate::cells) const NAMESPACE: &str = "REPOSITORIES";
+
 pub(super) use dispatch::{dispatch_mutation, dispatch_read};
 pub(crate) use issues::{CreateComment, CreateIssue, GetComment, GetIssue, GetIssueDetail};
 pub(crate) use models::{
@@ -13,7 +16,7 @@ pub(crate) use models::{
 use crate::cells::application::{SqlBatch, SqlResultSet, SqlStatement, SqlValue};
 use crate::cells::records::{RecordDecoder, RecordEncoder, StoredRecord};
 
-use crate::cells::application::{Mutation, MutationResult, Read, RepositoryTransaction};
+use crate::cells::application::{Mutation, MutationResult, Read, Transaction};
 
 pub(crate) use checks::{
     CheckAnnotationRecord, CheckOutputRecord, CheckReportInput, CheckRunDetail, CheckRunKey,
@@ -85,9 +88,11 @@ mod models;
 pub(crate) mod projection;
 mod pulls;
 mod releases;
+mod schema;
 pub(crate) mod search;
 mod settings;
 mod statuses;
+pub(in crate::cells) use schema::initialize;
 pub(crate) use search::index::SearchInput;
 pub(crate) use search::results::{DiscussionSummary, ListDiscussions};
 
@@ -98,10 +103,7 @@ fn statement(sql: &str, parameters: Vec<SqlValue>) -> SqlStatement {
     }
 }
 
-fn insert_issue(
-    context: &RepositoryTransaction<'_>,
-    record: &IssueRecord,
-) -> crate::cells::Result<()> {
+fn insert_issue(context: &Transaction<'_>, record: &IssueRecord) -> crate::cells::Result<()> {
     context.sql(&SqlBatch {
         statements: vec![statement(
             "INSERT INTO repository_issues(number, author_issuer, author_subject, author_name, title, body, state, label_ids, assignee_subjects, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -124,10 +126,7 @@ fn insert_issue(
     Ok(())
 }
 
-fn insert_comment(
-    context: &RepositoryTransaction<'_>,
-    record: &CommentRecord,
-) -> crate::cells::Result<()> {
+fn insert_comment(context: &Transaction<'_>, record: &CommentRecord) -> crate::cells::Result<()> {
     context.sql(&SqlBatch {
         statements: vec![statement(
             "INSERT INTO repository_issue_comments(issue_number, number, author_issuer, author_subject, author_name, body, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -193,7 +192,7 @@ fn integer(value: u64) -> crate::cells::Result<SqlValue> {
     })?))
 }
 
-fn advance_revision(context: &RepositoryTransaction<'_>) -> crate::cells::Result<()> {
+fn advance_revision(context: &Transaction<'_>) -> crate::cells::Result<()> {
     let result = context.sql(&SqlBatch {
         statements: vec![statement(
             "UPDATE repository_identity SET app_revision = app_revision + 1 WHERE singleton = 1 AND app_revision < 9007199254740991",

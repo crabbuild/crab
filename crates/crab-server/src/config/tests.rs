@@ -277,3 +277,14 @@ fn public_listeners_require_identity_and_https() {
         assert!(config.validate().is_err(), "{replacement}");
     }
 }
+
+#[test]
+fn repository_owners_cannot_shadow_global_server_namespaces() {
+    for owner in ["api", "assets", "auth", "git", "-"] {
+        let repository: RepositoryConfig = toml::from_str(&format!(
+            "owner='{owner}'\nname='project'\nbucket='bucket'\nprefix='project'"
+        ))
+        .unwrap();
+        assert!(validate_repository(&repository).is_err(), "{owner}");
+    }
+}

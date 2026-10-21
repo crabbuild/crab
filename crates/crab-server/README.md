@@ -124,6 +124,14 @@ rendering. In-app navigation retains the flag; `powerbar=0` disables it.
 | Settings | `/settings`, `/settings/branches`, `/settings/access` |
 | File creation, upload, editing, deletion | `/new/{ref}/{directory?}`, `/upload/{ref}/{directory?}`, `/edit/{ref}/{path}`, `/delete/{ref}/{path}` |
 
+Account pages live outside repository routes: `/-/profile` edits the signed-in
+account's public profile; `/-/users/{actor-uuid}` shows its stable public URL.
+The header's profile icon opens account settings. Initialize the shared directory
+first with `cells initialize-directory` against the running private mTLS
+listener. Users choose a username and display name; authentication claims are
+never published as profile fields. Changing a profile grants no repository or
+organization access. `-` is reserved as a server route owner.
+
 Generated links encode a slash-containing ref as one URL segment. Pasted paths
 with unescaped ref slashes resolve against the longest known ref. Raw Git
 filename bytes are percent-encoded without UTF-8 replacement; literal percent
@@ -209,6 +217,9 @@ native runtime version. Existing native repositories require
 `cells rebuild-search --owner OWNER --name NAME` against the running private
 mTLS listener before admitting traffic with the indexed discussion lists. The
 command resumes an interrupted rebuild without changing domain records.
+To enable account profiles, run `cells initialize-directory` against that same
+running listener. It initializes a separate native Directory and leaves
+repository records unchanged; users enroll their own profiles afterward.
 The supported management surface and retired commands
 are listed in [CELLAR.md](CELLAR.md).
 

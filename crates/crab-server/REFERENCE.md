@@ -1258,6 +1258,55 @@ are authoritative in object storage. Milestones and reactions use bounded typed 
 documents in that same SQLite transaction boundary. Collaboration does not mutate
 Git refs unless a pull request merge publishes a ref update.
 
+### Prepare and use account profiles
+
+With the server running, explicitly initialize its shared native Directory:
+
+```sh
+"$SERVER" --config /secure/server.toml cells initialize-directory
+```
+
+The command uses the configured private mTLS management listener. It is
+idempotent, leaves repository state unchanged and does not enroll accounts.
+`GET /internal/directory` reports `missing` or `ready` with the directory's
+revision. Missing preparation returns 503 `directory_unavailable` from profile
+APIs; ordinary repository readiness does not imply profile readiness.
+
+Open `/-/profile` through the header's profile icon to choose a public username
+and display name. The stable profile URL is `/-/users/{actor-uuid}`; `-` is a
+reserved server route owner. These pages use the shared shadcn/Geist foundation
+and retain request diagnostics behind `powerbar=1`.
+
+| Endpoint | Contract |
+| --- | --- |
+| `GET /api/profile` | Current account's `{profile: object or null}` |
+| `POST /api/profile` | Enroll with `{request_id, handle, name}`; returns 201 |
+| `PATCH /api/profile` | Edit own profile with `{version, handle, name}` |
+| `GET /api/actors/{id}` | Public profile by stable actor UUID |
+
+Profiles require an active account session or trusted loopback local-operator
+mode. Repository Git credentials alone cannot read or edit them. Mutations use
+the existing session, Origin and CSRF checks and a 2 KiB body limit. Inputs
+reject unknown fields; callers cannot supply an authentication identity or edit
+another actor. Responses expose only `id`, `handle`, `name`, `version`,
+`created_at_ms` and `updated_at_ms`, visible to signed-in users of this server.
+Private `(issuer, subject)` keys are unique and never inferred from matching
+email or display names.
+
+Handles are unique, 1–39 lowercase ASCII letters/digits with single internal
+hyphens. Display names contain 1–100 Unicode scalar values, without surrounding
+whitespace or control characters. Enrollment retains its submission identity:
+an identical retry resolves the current profile; conflicting payloads fail.
+Edits use the captured version. An identical immediate successor acknowledges a
+lost reply without another write; other stale edits return 409. The UI retains
+the draft and offers an explicit choice of saved values or rebasing that draft.
+Renaming preserves the actor UUID and never changes repository permissions.
+
+Profiles currently establish public identities only. Existing discussion author
+snapshots and catalog membership remain unchanged; organization/team authority,
+owner registration and profile-backed authors/assignees are unfinished. Choosing
+a handle matching a catalog owner label does not acquire ownership.
+
 ### Use the collaboration route families
 
 | Surface | Routes |
@@ -1527,6 +1576,7 @@ Serving data currently uses these roots:
 
 | Root | Content |
 | --- | --- |
+| Directory Cell/LTX namespace | Qualified private account keys, stable public profiles, enrollment submissions and command receipts |
 | Repository Cell/LTX namespace | Issues, comments, labels, commit statuses, check runs, branch protections, lifecycle, Pulls/reviews, Releases/asset references, counters, publication intent, and permanent submission ledgers |
 | `app/v1/issues` | Retired issue documents; serving ignores them and operators delete them at hard cutover |
 | `app/v1/pulls` | Retired Pull documents; serving ignores them and operators delete them at hard cutover |

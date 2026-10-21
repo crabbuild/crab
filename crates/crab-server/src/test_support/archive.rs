@@ -3,7 +3,7 @@ use futures_util::future::join_all;
 use uuid::Uuid;
 
 use crate::auth::Identity;
-use crate::cells::RepositoryClient;
+use crate::cells::CellClient;
 use crate::cells::repository::{
     CreateLabel, CreateLabelInput, CreateLabelOutcome, GetRepositoryLifecycle, ListLabels,
     ReplaceRepositoryLifecycle, ReplaceRepositoryLifecycleInput, ReplaceRepositoryLifecycleOutcome,
@@ -17,7 +17,7 @@ pub(crate) struct RecordedLabel {
 }
 
 pub(crate) async fn run(
-    client: &RepositoryClient,
+    client: &CellClient,
     repository: Uuid,
     principal: &Identity,
 ) -> Vec<RecordedLabel> {
@@ -136,7 +136,7 @@ pub(crate) async fn run(
 }
 
 pub(crate) async fn verify_recovered(
-    client: &RepositoryClient,
+    client: &CellClient,
     repository: Uuid,
     recorded: &[RecordedLabel],
 ) {

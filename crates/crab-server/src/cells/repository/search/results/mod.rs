@@ -1,5 +1,5 @@
 use super::index::{self, Labelled, Page, SearchInput};
-use crate::cells::application::{Read, RepositoryTransaction};
+use crate::cells::application::{Read, Transaction};
 use crate::cells::repository::{IssueSummary, PullSummary, collaboration::SubjectKind};
 use serde::{Deserialize, Serialize};
 
@@ -21,11 +21,12 @@ impl Labelled for DiscussionSummary {
 
 pub(crate) struct ListDiscussions;
 impl Read for ListDiscussions {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 3;
     type Input = SearchInput;
     type Output = Page<DiscussionSummary>;
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         index::page(

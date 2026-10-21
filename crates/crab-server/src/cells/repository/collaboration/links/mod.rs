@@ -1,8 +1,8 @@
 use serde::{Deserialize, Serialize};
 
 use super::super::{
-    Mutation, MutationResult, Read, RepositoryAuthor, RepositoryTransaction, advance_revision,
-    settings, validate_author, validate_number,
+    Mutation, MutationResult, Read, RepositoryAuthor, Transaction, advance_revision, settings,
+    validate_author, validate_number,
 };
 use super::{Page, Subject, SubjectKind, SubjectSummary, Target, activity, next_version};
 
@@ -38,7 +38,7 @@ impl Pair {
         ]
     }
 
-    fn exists(self, context: &RepositoryTransaction<'_>) -> crate::cells::Result<bool> {
+    fn exists(self, context: &Transaction<'_>) -> crate::cells::Result<bool> {
         for subject in self.subjects() {
             if subject.closed(context)?.is_none() {
                 return Ok(false);
@@ -56,7 +56,7 @@ pub(crate) struct Link {
     pub version: u64,
 }
 
-fn load(context: &RepositoryTransaction<'_>, pair: Pair) -> crate::cells::Result<Link> {
+fn load(context: &Transaction<'_>, pair: Pair) -> crate::cells::Result<Link> {
     pair.validate()?;
     match context.document::<Link>(&pair.key())? {
         None => Ok(Link {
@@ -103,12 +103,13 @@ pub(crate) enum Outcome {
 
 pub(crate) struct SetLink;
 impl Mutation for SetLink {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 230;
     type Input = Selection;
     type Output = Outcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Selection,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         if settings::archived(context)? {
@@ -174,14 +175,12 @@ impl Mutation for SetLink {
 
 pub(crate) struct GetLink;
 impl Read for GetLink {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 230;
     type Input = Pair;
     type Output = Option<Link>;
 
-    fn execute(
-        context: &mut RepositoryTransaction<'_>,
-        pair: Pair,
-    ) -> crate::cells::Result<Self::Output> {
+    fn execute(context: &mut Transaction<'_>, pair: Pair) -> crate::cells::Result<Self::Output> {
         pair.validate()?;
         if !pair.exists(context)? {
             return Ok(None);
@@ -207,14 +206,12 @@ pub(crate) struct LinkedWork {
 
 pub(crate) struct ListLinks;
 impl Read for ListLinks {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 231;
     type Input = Query;
     type Output = Option<Page<LinkedWork>>;
 
-    fn execute(
-        context: &mut RepositoryTransaction<'_>,
-        input: Query,
-    ) -> crate::cells::Result<Self::Output> {
+    fn execute(context: &mut Transaction<'_>, input: Query) -> crate::cells::Result<Self::Output> {
         if !(1..=50).contains(&input.limit) {
             return Err(crate::cells::Error::Invalid(
                 "linked work pages require 1–50 items",

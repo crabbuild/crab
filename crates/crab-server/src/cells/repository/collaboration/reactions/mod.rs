@@ -3,8 +3,8 @@ use std::collections::BTreeMap;
 use serde::{Deserialize, Serialize};
 
 use super::super::{
-    MAX_NUMBER, Mutation, MutationResult, Read, RepositoryAuthor, RepositoryTransaction,
-    advance_revision, settings, validate_author,
+    MAX_NUMBER, Mutation, MutationResult, Read, RepositoryAuthor, Transaction, advance_revision,
+    settings, validate_author,
 };
 use super::{PREFIX, Target};
 
@@ -99,7 +99,7 @@ fn member_key(
 }
 
 pub(in crate::cells::repository) fn counts(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     target: Target,
 ) -> crate::cells::Result<Counts> {
     let counts: Counts = context.document(&counts_key(target))?.unwrap_or_default();
@@ -114,7 +114,7 @@ pub(in crate::cells::repository) fn counts(
     Ok(counts)
 }
 
-fn membership(context: &RepositoryTransaction<'_>, key: &str) -> crate::cells::Result<bool> {
+fn membership(context: &Transaction<'_>, key: &str) -> crate::cells::Result<bool> {
     match context.document::<bool>(key)? {
         None => Ok(false),
         Some(true) => Ok(true),
@@ -125,7 +125,7 @@ fn membership(context: &RepositoryTransaction<'_>, key: &str) -> crate::cells::R
 }
 
 fn summary(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     target: Target,
     actor: &RepositoryAuthor,
 ) -> crate::cells::Result<Summary> {
@@ -155,12 +155,13 @@ pub(crate) enum Outcome {
 
 pub(crate) struct SetReaction;
 impl Mutation for SetReaction {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 210;
     type Input = Selection;
     type Output = Outcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         if settings::archived(context)? {
@@ -220,12 +221,13 @@ impl Mutation for SetReaction {
 
 pub(crate) struct GetReactions;
 impl Read for GetReactions {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 210;
     type Input = Query;
     type Output = Vec<Option<Summary>>;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         validate_author(&input.actor)?;

@@ -27,7 +27,7 @@ fn identity() -> MutationIdentity {
 
 fn cell(server: &Server) -> RepositoryCell {
     server
-        .repository_cells()
+        .cells()
         .unwrap()
         .repository(server.repositories.values()[0].id)
         .unwrap()

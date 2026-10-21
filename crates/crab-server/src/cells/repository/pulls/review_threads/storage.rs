@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) fn pull_state(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     pull: u64,
 ) -> crate::cells::Result<Option<u64>> {
     let result = context.sql(&SqlBatch {
@@ -18,7 +18,7 @@ pub(super) fn pull_state(
 }
 
 pub(super) fn next_number(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     table: &str,
     pull: u64,
 ) -> crate::cells::Result<u64> {
@@ -43,7 +43,7 @@ pub(super) fn next_number(
 }
 
 pub(super) fn next_reply_number(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     pull: u64,
     thread: u64,
 ) -> crate::cells::Result<u64> {
@@ -211,7 +211,7 @@ fn optional_author_field(
 }
 
 pub(super) fn load_thread(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     key: PullReviewThreadKey,
 ) -> crate::cells::Result<Option<PullReviewThreadRecord>> {
     validate_thread_key(&key)?;
@@ -226,7 +226,7 @@ pub(super) fn load_thread(
 }
 
 pub(super) fn load_thread_query(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     key: PullReviewThreadKey,
 ) -> crate::cells::Result<Option<PullReviewThreadRecord>> {
     validate_thread_key(&key)?;
@@ -282,7 +282,7 @@ pub(super) fn thread_from_row(row: &[SqlValue]) -> crate::cells::Result<PullRevi
 }
 
 pub(super) fn load_reply(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     key: PullReviewReplyKey,
 ) -> crate::cells::Result<Option<PullReviewReplyRecord>> {
     validate_reply_key(&key)?;
@@ -297,7 +297,7 @@ pub(super) fn load_reply(
 }
 
 pub(super) fn load_reply_query(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     key: PullReviewReplyKey,
 ) -> crate::cells::Result<Option<PullReviewReplyRecord>> {
     validate_reply_key(&key)?;
@@ -388,7 +388,7 @@ fn result_optional_u64(row: &[SqlValue], column: usize) -> crate::cells::Result<
 }
 
 pub(super) fn list_threads(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     input: &PullReviewThreadListInput,
 ) -> crate::cells::Result<Vec<Vec<SqlValue>>> {
     let upper = input.before.map_or(MAX_NUMBER, |value| value - 1);
@@ -435,7 +435,7 @@ pub(super) fn list_threads(
 }
 
 pub(super) fn list_replies(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     input: &PullReviewReplyListInput,
 ) -> crate::cells::Result<Vec<Vec<SqlValue>>> {
     let upper = input.before.map_or(MAX_NUMBER, |value| value - 1);
@@ -455,7 +455,7 @@ pub(super) fn list_replies(
 }
 
 pub(super) fn pull_exists_query(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     pull: u64,
 ) -> crate::cells::Result<bool> {
     let result = context.sql(&SqlBatch {
@@ -468,7 +468,7 @@ pub(super) fn pull_exists_query(
 }
 
 pub(super) fn thread_exists_query(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     pull: u64,
     thread: u64,
 ) -> crate::cells::Result<bool> {

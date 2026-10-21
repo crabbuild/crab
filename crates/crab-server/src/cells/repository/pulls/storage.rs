@@ -28,7 +28,7 @@ pub(super) fn insert_pull_statement(record: &PullRecord) -> crate::cells::Result
 }
 
 pub(super) fn update_pull_row(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     record: &PullRecord,
     expected: u64,
 ) -> crate::cells::Result<()> {
@@ -79,7 +79,7 @@ fn pull_select() -> &'static str {
 }
 
 pub(super) fn load_pull(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     number: u64,
 ) -> crate::cells::Result<Option<PullRecord>> {
     let result = context.sql(&SqlBatch { statements: vec![statement(pull_select(), vec![integer(number)?]), statement("SELECT review_number, author_issuer, author_subject, author_name, state, commit_oid FROM repository_pull_review_decisions WHERE pull_number = ? ORDER BY review_number", vec![integer(number)?])] })?;
@@ -91,7 +91,7 @@ pub(super) fn load_pull(
 }
 
 pub(super) fn load_pull_query(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     number: u64,
 ) -> crate::cells::Result<Option<PullRecord>> {
     let result = context.sql(&SqlBatch { statements: vec![statement(pull_select(), vec![integer(number)?]), statement("SELECT review_number, author_issuer, author_subject, author_name, state, commit_oid FROM repository_pull_review_decisions WHERE pull_number = ? ORDER BY review_number", vec![integer(number)?])] })?;
@@ -103,7 +103,7 @@ pub(super) fn load_pull_query(
 }
 
 fn pull_from_rows(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     row: &[SqlValue],
     decisions: &[Vec<SqlValue>],
 ) -> crate::cells::Result<PullRecord> {
@@ -156,7 +156,7 @@ pub(super) fn author_from_row(
 }
 
 pub(super) fn next_child_number(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     table: &str,
     pull: u64,
 ) -> crate::cells::Result<u64> {
@@ -228,7 +228,7 @@ pub(super) fn decode_record<T: StoredRecord>(bytes: &[u8]) -> crate::cells::Resu
 }
 
 pub(super) fn load_comment(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     key: PullChildKey,
 ) -> crate::cells::Result<Option<PullCommentRecord>> {
     let result = context.sql(&SqlBatch { statements: vec![statement("SELECT pull_number, number, author_issuer, author_subject, author_name, body, version, created_at_ms, updated_at_ms FROM repository_pull_comments WHERE pull_number = ? AND number = ?", vec![integer(key.pull)?, integer(key.number)?])] })?;
@@ -239,7 +239,7 @@ pub(super) fn load_comment(
         .transpose()
 }
 pub(super) fn load_comment_query(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     key: PullChildKey,
 ) -> crate::cells::Result<Option<PullCommentRecord>> {
     validate_number(key.pull)?;
@@ -263,7 +263,7 @@ pub(super) fn comment_from_row(row: &[SqlValue]) -> crate::cells::Result<PullCom
     })
 }
 pub(super) fn load_review(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     key: PullChildKey,
 ) -> crate::cells::Result<Option<PullReviewRecord>> {
     let result = context.sql(&SqlBatch { statements: vec![statement("SELECT pull_number, number, author_issuer, author_subject, author_name, body, state, commit_oid, version, created_at_ms, updated_at_ms FROM repository_pull_reviews WHERE pull_number = ? AND number = ?", vec![integer(key.pull)?, integer(key.number)?])] })?;
@@ -274,7 +274,7 @@ pub(super) fn load_review(
         .transpose()
 }
 pub(super) fn load_review_query(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     key: PullChildKey,
 ) -> crate::cells::Result<Option<PullReviewRecord>> {
     validate_number(key.pull)?;
@@ -300,7 +300,7 @@ pub(super) fn review_from_row(row: &[SqlValue]) -> crate::cells::Result<PullRevi
     })
 }
 pub(super) fn list_child_rows(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     table: &str,
     input: &PullChildListInput,
     columns: &str,

@@ -8,6 +8,8 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { GitAccess } from "@/features/git-access";
 import { GitImport } from "@/features/imports";
 import { gitOwnerSuggestion } from "@/features/imports/source";
+import { ProfileSettings, UserProfile } from "@/features/profile";
+import { CircleUserRoundIcon } from "lucide-react";
 import { RepositoryPage } from "@/features/repository/page";
 import {
   navigate,
@@ -93,7 +95,12 @@ export function App() {
     };
   }, [codeTheme, resolved]);
   const url = new URL(location, window.location.origin);
-  const route = repositoryRoute(url);
+  const profileSettings = url.pathname === "/-/profile";
+  const actorId =
+    /^\/-\/users\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.exec(
+      url.pathname,
+    )?.[1];
+  const route = profileSettings || actorId ? undefined : repositoryRoute(url);
   const session = useRequest<Session>("/api/session");
   const [signingOut, setSigningOut] = useState(false);
   const [sessionError, setSessionError] = useState<string>();
@@ -208,6 +215,17 @@ export function App() {
               </Button>
             </div>
           )}
+          {session.data?.authenticated && (
+            <Button asChild variant="ghost" size="icon-sm">
+              <Link
+                href="/-/profile"
+                aria-label="Your profile"
+                title="Your profile"
+              >
+                <CircleUserRoundIcon size={16} />
+              </Link>
+            </Button>
+          )}
           <ThemeControl
             theme={theme}
             setTheme={setTheme}
@@ -260,6 +278,13 @@ export function App() {
                   : "Continue to sign in"}
               </Button>
             </div>
+          ) : profileSettings ? (
+            <ProfileSettings
+              csrf={session.data.csrf ?? ""}
+              suggestedName={session.data.user?.name ?? ""}
+            />
+          ) : actorId ? (
+            <UserProfile id={actorId} />
           ) : url.pathname !== "/" && !route ? (
             <div className="notice error" role="alert">
               <h1>Page not found</h1>

@@ -8,7 +8,7 @@ const ROOT: &str = "/api/repos/team/private/pulls/1/review-requests";
 async fn seed(h: &Harness) {
     let cell = h
         .server
-        .repository_cells()
+        .cells()
         .unwrap()
         .repository(h.server.repositories.values()[0].id)
         .unwrap();

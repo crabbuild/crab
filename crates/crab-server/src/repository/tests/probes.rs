@@ -113,10 +113,7 @@ async fn wide_raw_byte_tree_preserves_cell_attribution_across_batches() {
         crate::repository::maintenance::Pass::BackgroundMaintenance,
         Some(crate::repository::maintenance::ProjectionContext {
             repository_id: repo.id,
-            client: server
-                .repository_cells
-                .as_ref()
-                .map(|router| (**router).clone()),
+            client: server.cells.as_ref().map(|router| (**router).clone()),
             metrics: server.metrics.clone(),
             identity: repo.identity.clone(),
             runtime: Arc::clone(&server.runtime),

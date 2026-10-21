@@ -338,7 +338,10 @@ pub(crate) fn validate_repository(repository: &RepositoryConfig) -> Result<()> {
             "protected branches require at most 100 unique valid names, at most 20 approvals, and at most 50 unique check names",
         ));
     }
-    if matches!(repository.owner.as_str(), "api" | "assets" | "auth" | "git") {
+    if matches!(
+        repository.owner.as_str(),
+        "api" | "assets" | "auth" | "git" | "-"
+    ) {
         return Err(Error::Config(
             "repository owner conflicts with a server route",
         ));

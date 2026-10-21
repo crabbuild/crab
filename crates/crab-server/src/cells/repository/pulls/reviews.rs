@@ -7,12 +7,13 @@ use crate::cells::repository::collaboration::{
 pub(crate) struct CreatePullReview;
 
 impl Mutation for CreatePullReview {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 20;
     type Input = CreatePullReviewInput;
     type Output = CreatePullReviewOutcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         if settings::archived(context)? {
@@ -150,12 +151,13 @@ impl Mutation for CreatePullReview {
 pub(crate) struct UpdatePullReview;
 
 impl Mutation for UpdatePullReview {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 21;
     type Input = UpdatePullReviewInput;
     type Output = UpdatePullReviewOutcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         if settings::archived(context)? {
@@ -196,11 +198,12 @@ impl Mutation for UpdatePullReview {
 
 pub(crate) struct GetPullReview;
 impl Read for GetPullReview {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 20;
     type Input = PullChildKey;
     type Output = Option<PullReviewRecord>;
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         key: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         load_review_query(context, key)
@@ -208,11 +211,12 @@ impl Read for GetPullReview {
 }
 pub(crate) struct ListPullReviews;
 impl Read for ListPullReviews {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 21;
     type Input = PullChildListInput;
     type Output = Option<PullReviewPage>;
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         if load_pull_query(context, input.pull)?.is_none() {
@@ -234,11 +238,12 @@ impl Read for ListPullReviews {
 }
 pub(crate) struct GetPullReviewSubmission;
 impl Read for GetPullReviewSubmission {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 22;
     type Input = PullSubmissionKey;
     type Output = Option<PullReviewRecord>;
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         key: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         let pull = key.pull.ok_or(crate::cells::Error::Invalid(

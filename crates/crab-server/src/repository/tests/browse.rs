@@ -6,7 +6,7 @@ use crab_remote_git::OperationKind;
 async fn projection_reads_reuse_the_runtime_cell_during_background_ingestion() {
     let server = fixture().await;
     let repo = repository(&server);
-    let router = server.repository_cells.as_ref().unwrap();
+    let router = server.cells.as_ref().unwrap();
     crate::repository::projection::state(router, repo.id)
         .await
         .unwrap();
@@ -52,10 +52,7 @@ async fn projected_attribution_survives_force_push_rewind_with_retained_graph_re
             crate::repository::maintenance::Pass::BackgroundMaintenance,
             Some(crate::repository::maintenance::ProjectionContext {
                 repository_id: repo.id,
-                client: server
-                    .repository_cells
-                    .as_ref()
-                    .map(|router| (**router).clone()),
+                client: server.cells.as_ref().map(|router| (**router).clone()),
                 metrics: server.metrics.clone(),
                 identity: repo.identity.clone(),
                 runtime: Arc::clone(&server.runtime),

@@ -20,7 +20,7 @@ assessment. Existing Fern test source was inspected, not executed here.
 
 | Surface                                 | Fern evidence, paths relative to Fern                                                                                                                                   | Crab evidence, paths relative to Crab                                                                                                                                                | Delivery consequence                                                                                                                                                 |
 | --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Identity and organization access        | `apps/web/worker/project-data.ts`: current principal, tenant membership, source ACL/version guards; `issue-types-data.ts`: organization-only catalog                    | `crates/crab-server/src/catalog/mod.rs`: repository catalog/members; `app.rs`: admission/membership; `cells/runtime.rs`: repository namespace only                                   | Add real public actor identities, owners, organizations, teams and project grants before organization planning UI. An owner string is not an organization authority. |
+| Identity and organization access        | `apps/web/worker/project-data.ts`: current principal, tenant membership, source ACL/version guards; `issue-types-data.ts`: organization-only catalog                    | `crates/crab-server/src/catalog/mod.rs`: repository catalog/members; `app.rs`: admission/membership; `cells/directory/`: native public profiles; `cells/runtime.rs`: Repository and Directory namespaces                                   | Add real public actor identities, owners, organizations, teams and project grants before organization planning UI. An owner string is not an organization authority. |
 | Issue lists and management              | `packages/contracts/src/issues.ts`, `issue-query.ts`; `apps/web/test/issues-authority.test.ts`: atomic bulk edits, closure time/reason, pins and replay                 | `cells/repository/issues.rs`, `search/`, `api/issues/`, `packages/ui/src/features/issues/`                                                                                           | Extend the canonical query/index and native commands; retain truthful counts, cursor invalidation and replay.                                                        |
 | Types and saved views                   | `packages/contracts/src/issue-types.ts`, `issues.ts`; `apps/web/worker/issue-types-data.ts`, `issue-views-data.ts`                                                      | No organization type catalog or durable saved-view owner                                                                                                                             | Implement organization-owned types and private/shared saved views with separate administration permissions.                                                          |
 | Hierarchy and dependencies              | `packages/contracts/src/issue-hierarchy.ts`, `issue-dependencies.ts`; `apps/web/worker/issue-hierarchy-data.ts`, `issue-dependency-data.ts`; related test suites        | `cells/repository/collaboration/links/` provides same-repository issue-to-PR related-work links                                                                                      | Parent/child, blocked-by/blocking, duplicate and related work need distinct typed invariants; existing links do not implement those semantics.                       |
@@ -75,11 +75,13 @@ read in the published dependency's `application/mod.rs`, `application/cells.rs`,
 and `application/storage/{transaction.rs,mod.rs}`. They support this direction;
 they do not supply a distributed project/repository transaction.
 
-Crab currently registers only `Repository` and `REPOSITORIES` in
-`crates/crab-server/src/cells/{application,runtime}.rs`. Additional authorities,
-their initialization, typed clients, admission, shutdown and recovery are new
-implementation work. Do not pass organization/project UUIDs through the existing
-repository request envelope or its repository dispatch table.
+Crab now registers `Repository`/`REPOSITORIES` and `Directory`/`DIRECTORY` in
+`crates/crab-server/src/cells/{application,runtime}.rs`. Typed target addresses,
+class-bound commands/reads and target-bound read receipts share native ingress,
+transactions and replay handling. Directory has explicit private initialization
+and its own schema/dispatch. Organization and Project authorities, authorization
+and recovery remain new work; their UUIDs must not masquerade as Repository
+addresses or use its dispatch table.
 
 Keep authoritative issue/PR content, versions, local metadata, activity and
 receipts in the existing Repository Cell. Project items store typed source
@@ -173,8 +175,24 @@ The existing [UI checklist](github-ui-parity.md) and
 [collaboration evidence](repository-collaboration.md) record completed Crab
 slices and their native/HTTP/browser/object-store qualification. Fern's cited
 tests are acceptance references, not evidence that their Cellar ports pass.
-No new product capability, cloud deployment or data migration was performed in
-this assessment.
+The initial Fern assessment did not deploy or migrate anything. The subsequent
+native profile slice adds a shared Directory with stable actor UUIDs, unique
+chosen handles/names and private qualified `(issuer, subject)` keys. Its profile
+HTTP routes and `/-/profile`/`/-/users/{uuid}` pages support enrollment,
+versioned edits, explicit stale-draft recovery and reload. No Fern code was
+copied. No organization/team/project grants, owner registry or catalog authority
+cutover is implemented; matching a handle with an existing catalog owner grants
+nothing. Discussion author snapshots and subject-based assignments have not yet
+been integrated with public actors. The authority phase remains incomplete.
+
+The slice passed 325 isolated server tests (five existing ignored cases), 107 UI
+unit tests and 72 browser tests, plus builds, Clippy and architecture checks.
+Native proof includes Directory remote reads and replay after mTLS handoff.
+A real RustFS browser run created/renamed a profile and verified its stable ID
+and state after process restart and repository-index rebuild, alongside existing
+Git/review/merge/replay proof. The persistent preview initializes the directory
+empty and preserves both repositories' records; the operator chooses their own
+profile. These checks qualify the implemented slice, not complete parity.
 
 [CELLAR.md](../../../crates/crab-server/CELLAR.md) already records a release
 blocker: the published SDK links SQLite 3.45.0, before the upstream WAL-reset

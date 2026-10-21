@@ -131,6 +131,17 @@ workspace continues to use a PR-scoped native read over the same query engine.
 This is not yet complete GitHub PR-workspace query normalization: its handling
 of an explicit contradictory `is:issue` predicate remains to be matched.
 
+Public actor profiles now have a separate native Directory, session-authenticated
+HTTP routes and `/-/profile`/`/-/users/{uuid}` pages. Qualified private account
+keys map to stable UUIDs; chosen handles/names can change without changing IDs
+or granting repository/organization access. Schema preparation is explicit via
+`cells initialize-directory`; reads never create it. The form handles lost
+replies, stale versions, handle collisions and unavailable preparation without
+claiming an unsaved result. Existing authors/assignees are not yet linked to
+these profiles. Owners, organization/team/project grants and their explicit
+catalog authority cutover remain required; the combined model checklist above
+stays incomplete.
+
 Actor/project/type/milestone predicates and complete GitHub workspace controls
 remain delivery work. This slice does not finish the full parity checklist.
 
@@ -237,6 +248,19 @@ replay, milestone and index-rebuild recovery. The persistent preview's two
 repositories were compared exactly across its server-only restart; domain
 records were unchanged. This slice changes query/result contracts, not stored
 index/domain formats, so existing prepared indexes need no rebuild.
+
+The profile slice passed the full isolated server suite (325 passed, five
+existing ignored), 107 UI unit tests and all 72 browser tests. Native tests prove
+qualified identity separation, concurrent handle claims, class/receipt boundaries,
+version/replay behavior, restart and mTLS owner handoff. HTTP proof covers
+session/CSRF, Git-token rejection and private-claim exclusion. Browser proof
+covers enrollment/lost-reply retry, stable public URLs, edits, stale drafts,
+handle collisions, missing preparation and dark/mobile accessibility. A real
+RustFS browser run enrolled/renamed an actor and verified it after server restart
+and repository-index rebuild. UI/server builds, all-target Clippy and
+architecture checks passed. The local preview preserves both repositories and
+leaves profile enrollment to its operator. The private native envelope changes
+require a coordinated fleet restart; mixed-version operation is unqualified.
 
 ## Primary references
 

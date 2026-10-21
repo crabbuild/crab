@@ -4,7 +4,7 @@ use crate::cells::repository::{
     decode_assignees, decode_label_ids, result_blob, result_text, result_u64_from_row,
 };
 
-pub(super) fn remove(context: &RepositoryTransaction<'_>, id: u64) -> crate::cells::Result<()> {
+pub(super) fn remove(context: &Transaction<'_>, id: u64) -> crate::cells::Result<()> {
     context.sql(&SqlBatch {
         statements: vec![
             statement(
@@ -20,10 +20,7 @@ pub(super) fn remove(context: &RepositoryTransaction<'_>, id: u64) -> crate::cel
     Ok(())
 }
 
-pub(super) fn refresh(
-    context: &RepositoryTransaction<'_>,
-    subject: Subject,
-) -> crate::cells::Result<()> {
+pub(super) fn refresh(context: &Transaction<'_>, subject: Subject) -> crate::cells::Result<()> {
     let (table, comments, foreign, target) = match subject.kind {
         SubjectKind::Issue => (
             "repository_issues",

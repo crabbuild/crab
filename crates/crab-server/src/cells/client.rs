@@ -9,18 +9,18 @@ use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
 use super::{
-    Error, Result,
+    Address, Error, Result,
     application::{self, Mutation, MutationIdentity, Read},
 };
 
 #[derive(Clone)]
-pub(crate) struct RepositoryClient {
+pub(crate) struct CellClient {
     ingress: IngressHandle,
 }
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) struct Receipt {
-    pub repository: Uuid,
+    pub target: Address,
     pub revision: u64,
 }
 
@@ -37,10 +37,10 @@ pub(crate) struct Observed<T> {
 
 pub(crate) struct RepositoryCell {
     pub target: Uuid,
-    pub client: RepositoryClient,
+    pub client: CellClient,
 }
 
-impl RepositoryClient {
+impl CellClient {
     pub(crate) fn new(ingress: IngressHandle) -> Self {
         Self { ingress }
     }
@@ -70,26 +70,30 @@ impl RepositoryClient {
         self.ingress.is_closed()
     }
 
-    pub(crate) async fn initialize(&self, repository: Uuid) -> Result<()> {
-        self.call(repository, application::INITIALIZE, None, (), None)
+    pub(crate) async fn initialize(&self, target: impl Into<Address>) -> Result<()> {
+        self.call(target.into(), application::INITIALIZE, None, (), None)
             .await?;
         Ok(())
     }
 
     pub(crate) async fn command<C: Mutation>(
         &self,
-        repository: &Uuid,
+        target: impl Into<Address>,
         identity: MutationIdentity,
         input: C::Input,
     ) -> Result<Committed<C::Output>> {
+        let target = target.into();
+        if target.class() != C::CLASS {
+            return Err(Error::Invalid("command belongs to another Cell authority"));
+        }
         let reply = self
-            .call(*repository, C::ID, Some(identity), input, None)
+            .call(target, C::ID, Some(identity), input, None)
             .await?;
         let output = serde_json::from_value(reply.output)?;
         Ok(Committed {
             output,
             receipt: Receipt {
-                repository: *repository,
+                target,
                 revision: reply.revision,
             },
         })
@@ -97,16 +101,20 @@ impl RepositoryClient {
 
     pub(crate) async fn query<Q: Read>(
         &self,
-        repository: &Uuid,
+        target: impl Into<Address>,
         minimum: Option<Receipt>,
         input: Q::Input,
     ) -> Result<Observed<Q::Output>> {
-        if minimum.is_some_and(|receipt| receipt.repository != *repository) {
-            return Err(Error::Invalid("read receipt belongs to another repository"));
+        let target = target.into();
+        if target.class() != Q::CLASS {
+            return Err(Error::Invalid("query belongs to another Cell authority"));
+        }
+        if minimum.is_some_and(|receipt| receipt.target != target) {
+            return Err(Error::Invalid("read receipt belongs to another Cell"));
         }
         let reply = self
             .call(
-                *repository,
+                target,
                 Q::ID,
                 None,
                 input,
@@ -117,7 +125,7 @@ impl RepositoryClient {
         Ok(Observed {
             output,
             receipt: Receipt {
-                repository: *repository,
+                target,
                 revision: reply.revision,
             },
         })
@@ -125,14 +133,14 @@ impl RepositoryClient {
 
     async fn call(
         &self,
-        repository: Uuid,
+        target: Address,
         operation: u32,
         mutation: Option<MutationIdentity>,
         input: impl Serialize,
         minimum: Option<u64>,
     ) -> Result<application::Reply> {
         let request = application::Request {
-            repository,
+            target,
             operation,
             mutation,
             input: serde_json::to_value(input)?,
@@ -140,9 +148,9 @@ impl RepositoryClient {
         };
         let bytes = serde_json::to_vec(&request)?;
         if bytes.len() > 4 * 1024 * 1024 {
-            return Err(Error::Invalid("repository request exceeds its byte limit"));
+            return Err(Error::Invalid("Cell request exceeds its byte limit"));
         }
-        let request = Request::post(format!("http://crab/repositories/{repository}"))
+        let request = Request::post(format!("http://crab{}", target.path()))
             .header("content-type", "application/json")
             .body(Body::from(bytes))
             .map_err(Error::sdk)?;
@@ -157,11 +165,10 @@ impl RepositoryClient {
                 StatusCode::CONFLICT => Err(Error::RequestConflict),
                 StatusCode::GONE => Err(Error::Expired),
                 StatusCode::PRECONDITION_FAILED => Err(Error::StaleRead),
+                StatusCode::PRECONDITION_REQUIRED => Err(Error::NotInitialized),
                 StatusCode::FAILED_DEPENDENCY => Err(Error::IndexUnavailable),
                 StatusCode::RANGE_NOT_SATISFIABLE => Err(Error::StaleSearch),
-                StatusCode::BAD_REQUEST => {
-                    Err(Error::Invalid("repository Cell rejected the request"))
-                }
+                StatusCode::BAD_REQUEST => Err(Error::Invalid("Cell rejected the request")),
                 _ => Err(Error::Unavailable),
             }
         })
@@ -172,6 +179,7 @@ impl RepositoryClient {
                 error @ (Error::RequestConflict
                 | Error::Expired
                 | Error::Invalid(_)
+                | Error::NotInitialized
                 | Error::IndexUnavailable
                 | Error::StaleSearch),
             )) => Err(error),

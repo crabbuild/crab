@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) fn insert_check_version(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     run: &CheckRunRecord,
     output: &CheckOutputRecord,
 ) -> crate::cells::Result<()> {
@@ -33,7 +33,7 @@ pub(super) fn insert_check_version(
 }
 
 pub(super) fn load_check_version(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     number: u64,
     version: u64,
 ) -> crate::cells::Result<CheckRunDetail> {
@@ -54,7 +54,7 @@ pub(super) fn load_check_version(
 }
 
 pub(super) fn load_current_check(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     oid: &str,
     number: u64,
 ) -> crate::cells::Result<Option<CheckRunDetail>> {

@@ -23,11 +23,12 @@ pub(crate) enum RebuildSearchOutcome {
 
 pub(crate) struct RebuildIndex;
 impl Mutation for RebuildIndex {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 271;
     type Input = RebuildSearchInput;
     type Output = RebuildSearchOutcome;
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         let current = state(context)?;
@@ -159,14 +160,14 @@ impl Mutation for RebuildIndex {
     }
 }
 fn progress(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
 ) -> crate::cells::Result<MutationResult<RebuildSearchOutcome>> {
     Ok(MutationResult::Success(RebuildSearchOutcome::Progress {
         status: status(context)?,
     }))
 }
 fn conflict(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
 ) -> crate::cells::Result<MutationResult<RebuildSearchOutcome>> {
     Ok(MutationResult::Rejected(RebuildSearchOutcome::Conflict {
         status: status(context)?,

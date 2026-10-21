@@ -23,6 +23,12 @@ pub(crate) const MAX_NUMBER: u64 = 9_007_199_254_740_991;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
+    #[error("Sign in to use account profiles")]
+    SessionRequired,
+    #[error("This username is already taken")]
+    ProfileHandleTaken,
+    #[error("Your profile is already registered; reload to edit it")]
+    ProfileExists,
     #[error("{0}")]
     Invalid(&'static str),
     #[error("Not found")]
@@ -100,7 +106,7 @@ pub(crate) enum Error {
     #[error("Pull request merge object construction failed")]
     MergeObject(#[source] Box<crab_remote::objects::Error>),
     #[error(
-        "This submission ID was already used for different content; check the existing discussion before submitting again"
+        "This submission ID was already used for different content; check the existing result before submitting again"
     )]
     RequestConflict,
     #[error("Collaboration Cell routing is unavailable")]
@@ -149,7 +155,7 @@ pub(crate) fn repository_cell(
     repository: &Repository,
 ) -> Result<crate::cells::RepositoryCell> {
     server
-        .repository_cells()
+        .cells()
         .ok_or(Error::CellUnavailable)?
         .repository(repository.id)
         .map_err(Error::Cell)
@@ -192,6 +198,26 @@ impl IntoResponse for Error {
                 .into_response();
         }
         let (status, code, message) = match &self {
+            Self::SessionRequired => (
+                StatusCode::UNAUTHORIZED,
+                "session_required",
+                "Sign in to use account profiles",
+            ),
+            Self::ProfileHandleTaken => (
+                StatusCode::CONFLICT,
+                "handle_taken",
+                "This username is already taken",
+            ),
+            Self::ProfileExists => (
+                StatusCode::CONFLICT,
+                "profile_exists",
+                "Your profile is already registered; reload to edit it",
+            ),
+            Self::Cell(crate::cells::Error::NotInitialized) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "directory_unavailable",
+                "Profiles are not ready. Contact your server administrator.",
+            ),
             Self::Invalid(message) => (StatusCode::BAD_REQUEST, "invalid_request", *message),
             Self::NotFound => (StatusCode::NOT_FOUND, "not_found", "Discussion not found"),
             Self::CommitNotFound => (StatusCode::NOT_FOUND, "not_found", "Commit not found"),
@@ -348,7 +374,7 @@ impl IntoResponse for Error {
             Self::RequestConflict => (
                 StatusCode::CONFLICT,
                 "submission_conflict",
-                "This submission ID was already used for different content; check the existing discussion before submitting again",
+                "This submission ID was already used for different content; check the existing result before submitting again",
             ),
             Self::Cell(crate::cells::Error::IndexUnavailable) => (
                 StatusCode::SERVICE_UNAVAILABLE,

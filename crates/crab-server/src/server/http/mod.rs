@@ -47,7 +47,7 @@ mod tests {
     use tower::ServiceExt;
     use uuid::Uuid;
     #[tokio::test]
-    async fn scoped_catalog_skips_unrelated_repository_cells() {
+    async fn scoped_catalog_skips_unrelated_cells() {
         let server = crate::test_support::server::fixture().await;
         let existing = server.repositories.values().pop().unwrap();
         let mut config = existing.config.clone();

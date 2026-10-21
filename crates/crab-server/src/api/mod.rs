@@ -11,6 +11,7 @@ mod labels;
 mod links;
 mod members;
 mod milestones;
+mod profiles;
 mod pulls;
 mod reactions;
 mod releases;
@@ -286,7 +287,7 @@ pub(crate) async fn read(
         let repository = &opened.git;
         generation = Some(repository.generation());
         let projection_source = if matches!(action, Action::TreeAttribution) {
-            if let Some(router) = server.repository_cells() {
+            if let Some(router) = server.cells() {
                 // Attribution must identify the same immutable snapshot as the
                 // directory reader, even if refs advance during this request.
                 let source = &opened.source;
@@ -411,6 +412,7 @@ pub(crate) async fn read(
 
 pub(crate) fn routes(server: Arc<Server>) -> axum::Router<Arc<Server>> {
     axum::Router::new()
+        .merge(profiles::routes(Arc::clone(&server)))
         .merge(members::routes())
         .merge(milestones::routes(Arc::clone(&server)))
         .merge(activity::routes(Arc::clone(&server)))

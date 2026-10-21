@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::Query;
-use crate::cells::application::{Read, RepositoryTransaction};
+use crate::cells::application::{Read, Transaction};
 use crate::cells::repository::{LabelRecord, ListLabels};
 
 #[derive(Debug, Deserialize, Serialize)]
@@ -37,12 +37,13 @@ pub(crate) struct Suggestion {
 pub(crate) struct CompleteSearch;
 
 impl Read for CompleteSearch {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 260;
     type Input = CompletionInput;
     type Output = Suggestions;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         let (start, end, cursor) = replacement(&input).map_err(crate::cells::Error::Invalid)?;

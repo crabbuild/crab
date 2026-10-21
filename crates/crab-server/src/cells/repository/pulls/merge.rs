@@ -7,12 +7,13 @@ use crate::cells::repository::collaboration::{
 pub(crate) struct ReservePullMerge;
 
 impl Mutation for ReservePullMerge {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 22;
     type Input = ReservePullMergeInput;
     type Output = ReservePullMergeOutcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         if settings::archived(context)? {
@@ -51,12 +52,13 @@ impl Mutation for ReservePullMerge {
 pub(crate) struct TransitionPullMerge;
 
 impl Mutation for TransitionPullMerge {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 23;
     type Input = TransitionPullMergeInput;
     type Output = TransitionPullMergeOutcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         validate_number(input.pull)?;
@@ -177,11 +179,12 @@ impl Mutation for TransitionPullMerge {
 
 pub(crate) struct GetPullMergeSubmission;
 impl Read for GetPullMergeSubmission {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 23;
     type Input = PullSubmissionKey;
     type Output = Option<PullMerge>;
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         key: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         let pull = key.pull.ok_or(crate::cells::Error::Invalid(

@@ -59,11 +59,7 @@ fn validate(request: &Request, id: &str) -> crate::cells::Result<()> {
     Ok(())
 }
 
-fn load(
-    context: &RepositoryTransaction<'_>,
-    pull: u64,
-    id: &str,
-) -> crate::cells::Result<Option<Request>> {
+fn load(context: &Transaction<'_>, pull: u64, id: &str) -> crate::cells::Result<Option<Request>> {
     validate_number(pull)?;
     validate_id(id)?;
     let request = context.document::<Request>(&format!("{}{id}", prefix(pull)))?;
@@ -73,11 +69,7 @@ fn load(
     Ok(request)
 }
 
-fn store(
-    context: &RepositoryTransaction<'_>,
-    pull: u64,
-    request: &Request,
-) -> crate::cells::Result<()> {
+fn store(context: &Transaction<'_>, pull: u64, request: &Request) -> crate::cells::Result<()> {
     context.put_document(
         &format!("{}{}", prefix(pull), reviewer_id(&request.reviewer)),
         request,
@@ -109,12 +101,13 @@ pub(crate) enum Outcome {
 
 pub(crate) struct SetReviewRequest;
 impl Mutation for SetReviewRequest {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 250;
     type Input = Selection;
     type Output = Outcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Selection,
     ) -> crate::cells::Result<MutationResult<Outcome>> {
         if settings::archived(context)? {
@@ -197,7 +190,7 @@ impl Mutation for SetReviewRequest {
 // Called only for a newly created review, after submission replay is resolved.
 // Keeping this inside review creation prevents a retry fulfilling a newer request.
 pub(super) fn fulfill(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     review: &PullReviewRecord,
 ) -> crate::cells::Result<bool> {
     let Some(mut request) = load(context, review.pull, &reviewer_id(&review.author))? else {
@@ -223,13 +216,11 @@ pub(crate) struct Key {
 
 pub(crate) struct GetReviewRequest;
 impl Read for GetReviewRequest {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 250;
     type Input = Key;
     type Output = Option<Request>;
-    fn execute(
-        context: &mut RepositoryTransaction<'_>,
-        key: Key,
-    ) -> crate::cells::Result<Self::Output> {
+    fn execute(context: &mut Transaction<'_>, key: Key) -> crate::cells::Result<Self::Output> {
         load(context, key.pull, &key.id)
     }
 }
@@ -255,13 +246,11 @@ pub(crate) struct Page {
 
 pub(crate) struct ListReviewRequests;
 impl Read for ListReviewRequests {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 251;
     type Input = Query;
     type Output = Option<Page>;
-    fn execute(
-        context: &mut RepositoryTransaction<'_>,
-        input: Query,
-    ) -> crate::cells::Result<Self::Output> {
+    fn execute(context: &mut Transaction<'_>, input: Query) -> crate::cells::Result<Self::Output> {
         validate_number(input.pull)?;
         if !(1..=50).contains(&input.limit) {
             return Err(crate::cells::Error::Invalid(

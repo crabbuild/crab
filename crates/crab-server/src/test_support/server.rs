@@ -75,7 +75,7 @@ pub(crate) async fn fixture() -> Arc<Server> {
             .unwrap();
     }
     let mutable = Arc::get_mut(&mut server).unwrap();
-    mutable.repository_cells = Some(cells.client.clone());
+    mutable.cells = Some(cells.client.clone());
     mutable.cell_test_runtime = Some(cells);
     server
 }

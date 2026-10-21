@@ -7,12 +7,13 @@ use crate::cells::repository::collaboration::{
 pub(crate) struct CreatePull;
 
 impl Mutation for CreatePull {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 16;
     type Input = CreatePullInput;
     type Output = CreatePullOutcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         if settings::archived(context)? {
@@ -89,12 +90,13 @@ impl Mutation for CreatePull {
 pub(crate) struct UpdatePull;
 
 impl Mutation for UpdatePull {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 17;
     type Input = UpdatePullInput;
     type Output = UpdatePullOutcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         if settings::archived(context)? {
@@ -215,12 +217,13 @@ impl Mutation for UpdatePull {
 pub(crate) struct GetPull;
 
 impl Read for GetPull {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 15;
     type Input = u64;
     type Output = Option<PullRecord>;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         number: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         validate_number(number)?;
@@ -231,12 +234,13 @@ impl Read for GetPull {
 pub(crate) struct GetPullSubmission;
 
 impl Read for GetPullSubmission {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 16;
     type Input = PullSubmissionKey;
     type Output = Option<PullRecord>;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         key: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         if key.pull.is_some() {
@@ -263,11 +267,12 @@ impl Read for GetPullSubmission {
 
 pub(crate) struct ListPulls;
 impl Read for ListPulls {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 17;
     type Input = SearchInput;
     type Output = search::index::Page<PullSummary>;
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         search::index::page(
@@ -281,7 +286,7 @@ impl Read for ListPulls {
 
 impl PullSummary {
     pub(in crate::cells::repository) fn load(
-        context: &RepositoryTransaction<'_>,
+        context: &Transaction<'_>,
         number: u64,
         metrics: search::index::Metrics,
     ) -> crate::cells::Result<Self> {

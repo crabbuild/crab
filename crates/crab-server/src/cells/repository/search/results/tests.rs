@@ -70,7 +70,7 @@ fn subjects(page: &Page<DiscussionSummary>) -> Vec<(SubjectKind, u64)> {
 async fn colliding_numbers_paginate_without_skips_for_tied_sorts_in_both_directions() {
     let server = fixtures::fixture().await;
     let cell = server
-        .repository_cells()
+        .cells()
         .unwrap()
         .repository(server.repositories.values()[0].id)
         .unwrap();
@@ -127,7 +127,7 @@ async fn colliding_numbers_paginate_without_skips_for_tied_sorts_in_both_directi
 async fn mixed_query_kinds_counts_and_scoped_cursors_share_the_authoritative_snapshot() {
     let server = fixtures::fixture().await;
     let cell = server
-        .repository_cells()
+        .cells()
         .unwrap()
         .repository(server.repositories.values()[0].id)
         .unwrap();

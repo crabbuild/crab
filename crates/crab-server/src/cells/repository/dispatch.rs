@@ -5,9 +5,10 @@ use super::collaboration::milestones::{
 };
 use super::collaboration::reactions::{GetReactions, SetReaction};
 use super::*;
+use crate::cells::application::{invoke_mutation, invoke_read};
 
 pub(in crate::cells) fn dispatch_mutation(
-    context: &mut RepositoryTransaction<'_>,
+    context: &mut Transaction<'_>,
     id: u32,
     input: serde_json::Value,
 ) -> crate::cells::Result<MutationResult<serde_json::Value>> {
@@ -97,7 +98,7 @@ pub(in crate::cells) fn dispatch_mutation(
 }
 
 pub(in crate::cells) fn dispatch_read(
-    context: &mut RepositoryTransaction<'_>,
+    context: &mut Transaction<'_>,
     id: u32,
     input: serde_json::Value,
 ) -> crate::cells::Result<serde_json::Value> {
@@ -181,25 +182,4 @@ pub(in crate::cells) fn dispatch_read(
         }
         _ => Err(crate::cells::Error::Invalid("unknown repository operation")),
     }
-}
-
-fn invoke_mutation<T: Mutation>(
-    context: &mut RepositoryTransaction<'_>,
-    input: serde_json::Value,
-) -> crate::cells::Result<MutationResult<serde_json::Value>> {
-    let input = serde_json::from_value(input)?;
-    Ok(match T::execute(context, input)? {
-        MutationResult::Success(value) => MutationResult::Success(serde_json::to_value(value)?),
-        MutationResult::Rejected(value) => MutationResult::Rejected(serde_json::to_value(value)?),
-    })
-}
-
-fn invoke_read<T: Read>(
-    context: &mut RepositoryTransaction<'_>,
-    input: serde_json::Value,
-) -> crate::cells::Result<serde_json::Value> {
-    Ok(serde_json::to_value(T::execute(
-        context,
-        serde_json::from_value(input)?,
-    )?)?)
 }

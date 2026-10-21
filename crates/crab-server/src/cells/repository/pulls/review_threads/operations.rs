@@ -7,12 +7,13 @@ use crate::cells::repository::collaboration::{
 pub(crate) struct CreatePullReviewThread;
 
 impl Mutation for CreatePullReviewThread {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 32;
     type Input = CreatePullReviewThreadInput;
     type Output = CreatePullReviewThreadOutcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         if settings::archived(context)? {
@@ -118,12 +119,13 @@ impl Mutation for CreatePullReviewThread {
 pub(crate) struct UpdatePullReviewThread;
 
 impl Mutation for UpdatePullReviewThread {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 33;
     type Input = UpdatePullReviewThreadInput;
     type Output = UpdatePullReviewThreadOutcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         if settings::archived(context)? {
@@ -230,12 +232,13 @@ impl Mutation for UpdatePullReviewThread {
 pub(crate) struct CreatePullReviewReply;
 
 impl Mutation for CreatePullReviewReply {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 34;
     type Input = CreatePullReviewReplyInput;
     type Output = CreatePullReviewReplyOutcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         if settings::archived(context)? {
@@ -335,12 +338,13 @@ impl Mutation for CreatePullReviewReply {
 pub(crate) struct UpdatePullReviewReply;
 
 impl Mutation for UpdatePullReviewReply {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 35;
     type Input = UpdatePullReviewReplyInput;
     type Output = UpdatePullReviewReplyOutcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         if settings::archived(context)? {
@@ -405,12 +409,13 @@ impl Mutation for UpdatePullReviewReply {
 pub(crate) struct GetPullReviewThread;
 
 impl Read for GetPullReviewThread {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 29;
     type Input = PullReviewThreadKey;
     type Output = Option<PullReviewThreadRecord>;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         key: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         validate_thread_key(&key)?;
@@ -421,12 +426,13 @@ impl Read for GetPullReviewThread {
 pub(crate) struct ListPullReviewThreads;
 
 impl Read for ListPullReviewThreads {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 30;
     type Input = PullReviewThreadListInput;
     type Output = Option<PullReviewThreadPage>;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         validate_thread_list(&input)?;
@@ -446,12 +452,13 @@ impl Read for ListPullReviewThreads {
 pub(crate) struct GetPullReviewThreadSubmission;
 
 impl Read for GetPullReviewThreadSubmission {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 31;
     type Input = PullReviewThreadSubmissionKey;
     type Output = Option<PullReviewThreadRecord>;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         key: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         let pull = key.pull.ok_or(crate::cells::Error::Invalid(
@@ -478,12 +485,13 @@ impl Read for GetPullReviewThreadSubmission {
 pub(crate) struct GetPullReviewReply;
 
 impl Read for GetPullReviewReply {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 32;
     type Input = PullReviewReplyKey;
     type Output = Option<PullReviewReplyRecord>;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         key: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         validate_reply_key(&key)?;
@@ -494,12 +502,13 @@ impl Read for GetPullReviewReply {
 pub(crate) struct ListPullReviewReplies;
 
 impl Read for ListPullReviewReplies {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 33;
     type Input = PullReviewReplyListInput;
     type Output = Option<PullReviewReplyPage>;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         validate_reply_list(&input)?;
@@ -519,12 +528,13 @@ impl Read for ListPullReviewReplies {
 pub(crate) struct GetPullReviewReplySubmission;
 
 impl Read for GetPullReviewReplySubmission {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 34;
     type Input = PullReviewReplySubmissionKey;
     type Output = Option<PullReviewReplyRecord>;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         key: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         let pull = key.pull.ok_or(crate::cells::Error::Invalid(

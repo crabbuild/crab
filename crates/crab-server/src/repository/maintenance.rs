@@ -65,7 +65,7 @@ async fn publish(
 
 pub(crate) struct ProjectionContext {
     pub(crate) repository_id: Uuid,
-    pub(crate) client: Option<crate::cells::RepositoryClient>,
+    pub(crate) client: Option<crate::cells::CellClient>,
     pub(crate) metrics: crate::metrics::Metrics,
     pub(crate) identity: RepositoryIdentity,
     pub(crate) runtime: Arc<RemoteGitRuntime>,

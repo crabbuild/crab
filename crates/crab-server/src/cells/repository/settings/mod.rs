@@ -4,7 +4,7 @@ use super::*;
 
 const MAX_PROTECTION_BYTES: u32 = 64 * 1024;
 
-pub(super) fn archived(context: &RepositoryTransaction<'_>) -> crate::cells::Result<bool> {
+pub(super) fn archived(context: &Transaction<'_>) -> crate::cells::Result<bool> {
     // Read lifecycle in the mutation's transaction so a queued command cannot
     // write after archive commits. Runtime receipt replay precedes this check.
     let result = context.sql(&SqlBatch {
@@ -63,12 +63,13 @@ pub(crate) enum ReplaceRepositoryLifecycleOutcome {
 pub(crate) struct ReplaceBranchProtections;
 
 impl Mutation for ReplaceBranchProtections {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 14;
     type Input = ReplaceBranchProtectionsInput;
     type Output = ReplaceBranchProtectionsOutcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         validate_settings_version(input.expected_version, true)?;
@@ -109,12 +110,13 @@ impl Mutation for ReplaceBranchProtections {
 pub(crate) struct ReplaceRepositoryLifecycle;
 
 impl Mutation for ReplaceRepositoryLifecycle {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 15;
     type Input = ReplaceRepositoryLifecycleInput;
     type Output = ReplaceRepositoryLifecycleOutcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         validate_settings_version(input.expected_version, true)?;
@@ -160,12 +162,13 @@ impl Mutation for ReplaceRepositoryLifecycle {
 pub(crate) struct GetBranchProtections;
 
 impl Read for GetBranchProtections {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 13;
     type Input = ();
     type Output = Option<BranchProtectionSettings>;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         (): Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         let result = context.sql(&SqlBatch {
@@ -188,12 +191,13 @@ impl Read for GetBranchProtections {
 pub(crate) struct GetRepositoryLifecycle;
 
 impl Read for GetRepositoryLifecycle {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 14;
     type Input = ();
     type Output = RepositoryLifecycleRecord;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         (): Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         let result = context.sql(&SqlBatch {

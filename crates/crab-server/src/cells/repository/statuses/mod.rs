@@ -3,12 +3,13 @@ use super::*;
 pub(crate) struct CreateCommitStatus;
 
 impl Mutation for CreateCommitStatus {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 11;
     type Input = CreateCommitStatusInput;
     type Output = CreateCommitStatusOutcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         validate_author(&input.author)?;
@@ -111,12 +112,13 @@ impl Mutation for CreateCommitStatus {
 pub(crate) struct ListCommitStatuses;
 
 impl Read for ListCommitStatuses {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 7;
     type Input = String;
     type Output = CommitStatusCatalog;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         oid: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         validate_status_fields(&oid, "status", 0, None, None)?;
@@ -153,12 +155,13 @@ impl Read for ListCommitStatuses {
 pub(crate) struct GetCommitStatusSubmission;
 
 impl Read for GetCommitStatusSubmission {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 8;
     type Input = CommitStatusSubmissionKey;
     type Output = Option<CommitStatusRecord>;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         key: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         validate_status_fields(&key.oid, "status", 0, None, None)?;
@@ -180,7 +183,7 @@ impl Read for GetCommitStatusSubmission {
 }
 
 fn status_context_available(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     oid: &str,
     status_context: &str,
 ) -> crate::cells::Result<bool> {

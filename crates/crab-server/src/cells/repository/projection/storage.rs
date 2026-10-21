@@ -1,7 +1,7 @@
 use super::*;
 
 pub(super) fn require_epoch(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     epoch_id: u64,
     source: &SourceIdentity,
 ) -> crate::cells::Result<()> {
@@ -56,7 +56,7 @@ pub(super) fn statement(sql: &str, parameters: Vec<SqlValue>) -> SqlStatement {
 }
 
 pub(super) fn execute_statements(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     mut statements: Vec<SqlStatement>,
 ) -> crate::cells::Result<()> {
     while !statements.is_empty() {

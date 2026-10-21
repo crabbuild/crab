@@ -7,12 +7,13 @@ use crate::cells::repository::collaboration::{
 pub(crate) struct CreateIssue;
 
 impl Mutation for CreateIssue {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 1;
     type Input = CreateIssueInput;
     type Output = CreateIssueOutcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         if settings::archived(context)? {
@@ -104,12 +105,13 @@ impl Mutation for CreateIssue {
 pub(crate) struct CreateComment;
 
 impl Mutation for CreateComment {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 2;
     type Input = CreateCommentInput;
     type Output = CreateCommentOutcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         if settings::archived(context)? {
@@ -217,14 +219,12 @@ pub(crate) struct IssueDetail {
 pub(crate) struct GetIssueDetail;
 
 impl Read for GetIssueDetail {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 36;
     type Input = u64;
     type Output = IssueDetail;
 
-    fn execute(
-        context: &mut RepositoryTransaction<'_>,
-        number: u64,
-    ) -> crate::cells::Result<IssueDetail> {
+    fn execute(context: &mut Transaction<'_>, number: u64) -> crate::cells::Result<IssueDetail> {
         // Detail metadata shares the issue's observation point and routing
         // decision, so one HTTP request consumes exactly one reader turn.
         Ok(IssueDetail {
@@ -237,12 +237,13 @@ impl Read for GetIssueDetail {
 pub(crate) struct GetIssue;
 
 impl Read for GetIssue {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 1;
     type Input = u64;
     type Output = Option<IssueRecord>;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         number: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         validate_number(number)?;
@@ -263,12 +264,13 @@ impl Read for GetIssue {
 pub(crate) struct GetComment;
 
 impl Read for GetComment {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 2;
     type Input = CommentKey;
     type Output = Option<CommentRecord>;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         key: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         validate_number(key.issue)?;
@@ -290,12 +292,13 @@ impl Read for GetComment {
 pub(crate) struct UpdateIssue;
 
 impl Mutation for UpdateIssue {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 3;
     type Input = UpdateIssueInput;
     type Output = UpdateIssueOutcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         if settings::archived(context)? {
@@ -462,12 +465,13 @@ impl Mutation for UpdateIssue {
 pub(crate) struct UpdateComment;
 
 impl Mutation for UpdateComment {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 4;
     type Input = UpdateCommentInput;
     type Output = UpdateCommentOutcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         if settings::archived(context)? {
@@ -536,7 +540,7 @@ impl Mutation for UpdateComment {
 
 impl IssueSummary {
     pub(in crate::cells::repository) fn load(
-        context: &RepositoryTransaction<'_>,
+        context: &Transaction<'_>,
         number: u64,
         metrics: search::index::Metrics,
     ) -> crate::cells::Result<Self> {
@@ -569,12 +573,13 @@ impl IssueSummary {
 pub(crate) struct ListComments;
 
 impl Read for ListComments {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 4;
     type Input = ListCommentsInput;
     type Output = CommentPage;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         validate_number(input.issue)?;

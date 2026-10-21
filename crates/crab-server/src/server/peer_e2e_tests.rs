@@ -166,6 +166,36 @@ async fn qualify_handoff(
         title: "Remote Cellar issue".into(),
         body: "Published through the mTLS fleet transport".into(),
     };
+    use crate::cells::{
+        Address,
+        directory::{CreateProfile, CreateProfileInput, GetActor, IdentityKey, ProfileOutcome},
+    };
+    first
+        .cells
+        .client
+        .initialize(Address::Directory)
+        .await
+        .unwrap();
+    let profile_input = CreateProfileInput {
+        submission_id: Uuid::now_v7(),
+        identity: IdentityKey {
+            issuer: "https://identity.test".into(),
+            subject: "alice".into(),
+        },
+        handle: "alice".into(),
+        name: "Alice".into(),
+    };
+    // A command ID is scoped to its authority. Reusing it for the repository
+    // must neither conflict with nor replay the directory's decision.
+    let actor = first
+        .cells
+        .client
+        .command::<CreateProfile>(Address::Directory, identity, profile_input.clone())
+        .await
+        .unwrap();
+    let ProfileOutcome::Saved(profile) = &actor.output else {
+        panic!("profile was rejected")
+    };
     let created = cell
         .client
         .command::<CreateIssue>(&repository, identity, input.clone())
@@ -182,7 +212,27 @@ async fn qualify_handoff(
         .await
         .unwrap();
     assert_eq!(observed.output.as_ref(), Some(record.as_ref()));
+    let actor_read = observer
+        .cells
+        .client
+        .query::<GetActor>(Address::Directory, Some(actor.receipt), profile.id)
+        .await
+        .unwrap();
+    assert_eq!(actor_read.output.as_ref(), Some(profile));
     first.stop(ShutdownMode::Handoff).await;
+    let actor_replay = remote
+        .client
+        .command::<CreateProfile>(Address::Directory, identity, profile_input)
+        .await
+        .unwrap();
+    assert_eq!(actor_replay, actor);
+    let restored_actor = remote
+        .client
+        .query::<GetActor>(Address::Directory, Some(actor.receipt), profile.id)
+        .await
+        .unwrap();
+    assert_eq!(restored_actor.output.as_ref(), Some(profile));
+
     let replayed = remote
         .client
         .command::<CreateIssue>(&repository, identity, input)

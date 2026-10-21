@@ -45,8 +45,16 @@ inside domain commands so their SQL/KV changes and events commit together.
 single activity event is indexed into both timelines.
 
 The native runtime lives in `src/cells/runtime.rs`; `src/cells/client.rs` owns
-typed ingress, `src/cells/application.rs` owns transaction/replay dispatch, and
-`src/cells/schema.sql` is the canonical initial schema. HTTP authorization and
+the authority-checked `CellClient` and target-bound read receipts.
+`src/cells/application.rs` owns shared `Transaction`, replay dispatch and the
+output gate. `src/cells/address.rs` identifies Repository and Directory targets;
+commands and reads declare their native class. Repository initialization lives
+in `src/cells/repository/schema.rs`, using the canonical `src/cells/schema.sql`.
+`src/cells/directory/` owns qualified private identity keys and stable public
+actor profiles; its `profiles/` commands and schema have colocated tests.
+`src/api/profiles/` exposes session-authenticated profile reads/edits without
+exposing authentication claims. `src/server/management/directory.rs` owns explicit
+private initialization; serving never creates its schema implicitly. HTTP authorization and
 Cell error mapping stay in `src/app.rs`. No previous-runtime readers or catalog
 and session migration paths are supported.
 
@@ -99,7 +107,8 @@ No declared Cargo features. Both library and auto-discovered main binary exist. 
 
 Tests live under their owner: `api/tests.rs`, `auth/tests/`,
 `api/<feature>/tests.rs`, `auth/<feature>/tests.rs`, `catalog/tests.rs`,
-`cells/repository/<feature>/tests.rs`, `git/receive/tests/`, `git/lfs/tests.rs`,
+`cells/repository/<feature>/tests.rs`, `cells/directory/tests.rs`,
+`cells/directory/profiles/tests.rs`, `git/receive/tests/`, `git/lfs/tests.rs`,
 `api/pulls/tests/`, and `repository/tests/`. `server/peer_e2e_tests.rs`
 exercises process composition and native peer handoff.
 Shared setup lives in test-only `src/test_support/`; feature suites never import

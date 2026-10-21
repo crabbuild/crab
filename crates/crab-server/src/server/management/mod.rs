@@ -18,11 +18,13 @@ use std::{
     time::Duration,
 };
 
+mod directory;
 mod search;
 
 pub(crate) fn router(server: Arc<Server>, peers: Router) -> Router {
     Router::new()
         .merge(search::routes())
+        .merge(directory::routes())
         .route("/healthz", get(|| async { Json(json!({"status": "ok"})) }))
         .route("/readyz", get(readiness))
         .route("/capacity", get(render_capacity))
@@ -52,7 +54,7 @@ async fn cell_status(
     let Some(repository) = server.repositories.get(&key) else {
         return StatusCode::NOT_FOUND.into_response();
     };
-    let Some(router) = server.repository_cells() else {
+    let Some(router) = server.cells() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
     let result: Result<_> = async {
@@ -178,7 +180,7 @@ async fn check_readiness(server: &Server) -> Result<()> {
     catalog.load().await?;
     for repository in server.repositories.values() {
         let cell = server
-            .repository_cells()
+            .cells()
             .ok_or(crate::Error::Config("repository Cells are unavailable"))?
             .repository(repository.id)?;
         let index = cell

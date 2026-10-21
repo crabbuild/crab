@@ -166,7 +166,7 @@ impl Harness {
                     4,
                 ),
             );
-            server.repository_cells = Some(cells.client.clone());
+            server.cells = Some(cells.client.clone());
             server.cell_test_runtime = Some(cells);
             server.cursor_key = [7; 32];
             server.auth = Some(auth);
