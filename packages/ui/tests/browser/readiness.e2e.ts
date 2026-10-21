@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { emptyReactions } from "./fixtures";
+import { emptyReactions, emptyReviewRequests } from "./fixtures";
 import {
   expectNoAccessibilityViolations,
   selectDarkTheme,
@@ -192,6 +192,8 @@ async function setup(page: Page, initialDraft: boolean) {
       return route.fulfill({ json: { items: [], next: null } });
     if (path.endsWith("/activity"))
       return route.fulfill({ json: { items: events, next: null } });
+    if (path.endsWith("/review-requests"))
+      return route.fulfill({ json: emptyReviewRequests() });
     if (path.endsWith("/links"))
       return route.fulfill({
         json: { items: [], next: null, can_manage: false },

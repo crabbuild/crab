@@ -6934,3 +6934,36 @@ main {
 .pull-merge-note.draft .merge-summary > svg {
   color: var(--fgColor-muted);
 }
+
+.review-requests ul {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+}
+.review-requests li {
+  display: flex;
+  align-items: start;
+  gap: 8px;
+  margin-block: 12px;
+}
+.review-requests li > svg {
+  flex-shrink: 0;
+  margin-top: 2px;
+  color: var(--fgColor-muted);
+}
+.review-requests li > svg.review-fulfilled {
+  color: var(--fgColor-success);
+}
+.review-requests li > div {
+  flex: 1;
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.review-requests li p {
+  margin-block: 4px;
+}
+.review-requests form {
+  display: grid;
+  gap: 8px;
+  margin-top: 12px;
+}

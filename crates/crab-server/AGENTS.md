@@ -27,7 +27,8 @@ The Cell repository facade in `src/cells/repository/mod.rs` exposes typed
 operations. `models.rs` owns common records/inputs; `issues.rs` owns issue and
 comment operations. Feature commands and their persistence helpers live under
 `checks/`, `labels/`, `statuses/`, `settings/`, `releases/`, and `pulls/`. Pull
-readiness belongs to `pulls/readiness/`, and review threads belong to
+readiness belongs to `pulls/readiness/`, reviewer invitations and fulfillment
+belong to `pulls/review_requests/`, and review threads belong to
 `pulls/review_threads/`; browse projection reads and
 writes belong to `projection/`. `dispatch.rs` alone decodes operation IDs.
 

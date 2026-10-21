@@ -31,6 +31,7 @@ type Action =
         | "resolved"
         | "unresolved";
     }
+  | { kind: "review_requested" | "review_request_cancelled"; reviewer: string }
   | { kind: "milestone_assigned"; number: number; title: string }
   | { kind: "milestone_removed"; number: number; title: string }
   | { kind: "issue_linked" | "issue_unlinked"; number: number; title: string };
@@ -80,6 +81,10 @@ function action(event: ActivityEvent): string {
       return "converted to draft";
     case "ready_for_review":
       return "marked ready for review";
+    case "review_requested":
+      return `requested a review from ${event.action.reviewer} on`;
+    case "review_request_cancelled":
+      return `cancelled the review request for ${event.action.reviewer} on`;
     case "updated":
       return "updated";
     case "closed":

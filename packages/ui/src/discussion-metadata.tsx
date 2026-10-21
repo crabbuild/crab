@@ -8,6 +8,7 @@ import {
   type RepositoryAssignee,
   type RepositoryLabel,
 } from "./api";
+import { ReviewRequests } from "./collaboration/review-requests";
 import { LinkedWork } from "./collaboration/links";
 import { MilestonePicker } from "./collaboration/milestones/picker";
 import { LabelBadges, LabelPicker } from "./discussion-labels";
@@ -179,6 +180,15 @@ export function DiscussionMetadata({
 }) {
   return (
     <aside className="discussion-metadata" aria-label="Metadata">
+      {path.startsWith("pulls/") && (
+        <ReviewRequests
+          key={`reviewers:${version}`}
+          repo={repo}
+          pull={Number(path.split("/")[1])}
+          csrf={csrf}
+          onSaved={onSaved}
+        />
+      )}
       <section>
         <header>
           <strong>Assignees</strong>

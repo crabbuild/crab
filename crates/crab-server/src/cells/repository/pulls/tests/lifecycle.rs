@@ -303,6 +303,19 @@ async fn every_fresh_pull_mutation_obeys_archive_while_committed_receipts_replay
         },
     )
     .await;
+    rejected::<review_requests::SetReviewRequest>(
+        &cell,
+        revision,
+        review_requests::Selection {
+            pull: 1,
+            version: pull.version,
+            actor: actor("Alice"),
+            can_manage: false,
+            reviewer: actor("Bob"),
+            requested: true,
+        },
+    )
+    .await;
     let merge = merge(&pull);
     rejected::<ReservePullMerge>(
         &cell,

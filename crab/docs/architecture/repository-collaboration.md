@@ -1,7 +1,7 @@
 # Repository collaboration expansion
 
-Status: implementation in progress. Extend Crab's existing repository application
-with durable GitHub-style collaboration and matching browser workflows.
+Status: all six capabilities implemented with native, HTTP, browser, and RustFS
+recovery proof. Broad runtime and cross-platform gates run in CI.
 
 ## Required capabilities
 
@@ -23,8 +23,8 @@ publication contracts remain authoritative.
 Use typed, bounded JSON documents under `collaboration/v1/` in the repository
 Cell's native KV storage. Cellar's KV and application SQL share the same SQLite
 transaction and durability/output gate. Existing repository SQL schema and
-binary record codecs remain unchanged. New entity state is canonical native storage,
-not a process cache or a fallback reader. Existing repositories gain entities
+binary record codecs remain unchanged. New entity state is canonical native
+storage, not a process cache or a fallback reader. Existing repositories gain entities
 through explicit commands; reading optional metadata does not create data.
 
 Use keyset indexes and bounded pages, including for state-filtered milestone
@@ -63,9 +63,8 @@ native Cellar objects were present in the bucket. Desktop and mobile dark views
 had no accessibility violations; the existing footer contrast check required
 manual review. The 390px viewport had no horizontal document overflow.
 
-This verifies the milestone slice locally, not the entire expansion. Review
-requests still require their model, HTTP/browser workflow, and evidence.
-Cross-platform/runtime proof remains a CI responsibility.
+This verifies the milestone workflow locally. Cross-platform/runtime proof
+remains a CI responsibility; the other capability evidence follows below.
 
 ### Reaction evidence
 
@@ -213,5 +212,55 @@ archive views, recovery of already-admitted merges, and light/dark mobile
 accessibility. Archived conversations retain merge outcomes and expose a retry
 for pending publications; abort errors offer an explicit metadata refresh.
 Dedicated RustFS process qualification restores a draft after restart, proves
-a draft merge leaves the base ref unchanged, marks it ready, publishes a real merge, and restores the
-merged state and activity through another restart.
+a draft merge leaves the base ref unchanged, marks it ready, publishes a real
+merge, and restores the merged state and activity through another restart.
+
+### Review request contract
+
+A PR retains one request state per qualified reviewer (identity issuer and stable
+subject). Names are snapshots, not keys. States are requested, cancelled, and
+fulfilled with the submitted review number. Re-requesting a cancelled or fulfilled
+reviewer starts another request; cancellation retains the record. Pages use
+bounded, exclusive opaque identity cursors.
+
+Authors or repository writers request and cancel reviews on open PRs. The author
+cannot be selected as a reviewer. The HTTP boundary resolves durable catalog
+membership for participant selection and current caller access, so background
+catalog materialization cannot re-offer a removed member. Renamed members keep
+their identity; removed members remain visible on existing requests and can still
+be cancelled. Public request items expose opaque IDs and display names, not
+identity claims. Local operator mode has no other identity-provider members.
+
+The existing PR version orders requests, cancellation, review decisions, and
+merge admission. Repeated desired state does not advance it. Pending merges
+freeze request changes. Requests are invitations; they do not add a merge gate
+or replace branch protection's approval requirements.
+
+A newly submitted review fulfills its author's matching outstanding request in
+the review's native transaction. Comment-only reviews count as submitted reviews.
+Request fulfillment advances the PR version once, including for comment-only
+reviews; approval decisions and fulfillment do not advance it twice. Review
+submission replay returns the original review without fulfilling a later
+re-request. The ordinary review activity event describes fulfillment; request
+and cancellation have their own actor/action events.
+
+### Review request evidence
+
+Native tests cover qualified identity, renamed displays, concurrent duplicate
+requests, desired-state retries, stale cancellation after re-request, permissions,
+archive, exclusive pagination, merge admission, fulfillment, and native restart.
+HTTP tests exercise actual Git pushes and review submission, CSRF, roles,
+malformed cursors, membership rename/revocation, and cancellation after removal.
+Browser tests cover failed writes with retained choices, reload, cancellation,
+fulfilled status, explicit conflict refresh, read-only/archive views, pagination,
+whole-widget timing, and mobile light/dark accessibility.
+
+A dedicated RustFS instance with two synthetic OIDC identities exercised real
+native Git pushes and browser PR creation. Alice requested, cancelled, reloaded,
+and re-requested Bob's review. Bob signed in separately and submitted an approval;
+the sidebar and activity reflected the native review. Another request survived a
+server restart at PR version 6. Bob's comment-only follow-up fulfilled it as
+review 2 and advanced the PR version once to 7. Another restart preserved the
+request, both reviews, and activity. Finally, starting with an empty local Cellar
+data directory recovered that same state from RustFS. The prior directory was
+retained separately; no local-state fallback was used.

@@ -15,3 +15,7 @@ export function emptyReactions(revision = 1): ReactionSummary {
     },
   };
 }
+
+export function emptyReviewRequests() {
+  return { items: [], next: null, version: 1, can_manage: false, eligible: [] };
+}

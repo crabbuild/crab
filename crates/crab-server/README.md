@@ -79,6 +79,10 @@ for review. Draft badges appear in lists and details; merge admission rejects
 drafts and stale readiness changes. Authors or writers manage readiness, and
 conversion is blocked while a merge is pending.
 
+The reviewer sidebar requests or cancels reviews from current repository members.
+Submitted reviews fulfill matching requests; stale changes require explicit
+reload. Requests invite review and retain the existing branch protection rules.
+
 Pull request conversations show merge requirements above the comment editor.
 Choose a merge method, review the commit message, and confirm the merge; an
 uncertain publication can be retried using the original submission.

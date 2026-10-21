@@ -463,6 +463,43 @@ pub(crate) fn repository(
         .ok_or(Error::NotFound)
 }
 
+pub(crate) struct Membership {
+    pub members: Vec<crate::RepositoryMember>,
+    pub can_write: bool,
+}
+
+pub(crate) async fn membership(
+    server: &Server,
+    principal: &Principal,
+    repo: &Repository,
+) -> Result<Membership> {
+    if matches!(principal, Principal::Local) {
+        return Ok(Membership {
+            members: Vec::new(),
+            can_write: true,
+        });
+    }
+    let catalog = server.catalog().ok_or(Error::NotFound)?;
+    // Participant selection must use durable membership, not a background
+    // materialization that could still offer a renamed or revoked reviewer.
+    let snapshot = catalog
+        .membership(&repo.config.owner, &repo.config.name)
+        .await
+        .map_err(|error| match error {
+            crate::catalog::CatalogError::NotFound => Error::NotFound,
+            error => Error::Repository(crate::Error::Catalog(error)),
+        })?;
+    let mut config = repo.config.clone();
+    config.members = snapshot.members;
+    if !principal.can_read(&config) {
+        return Err(Error::NotFound);
+    }
+    Ok(Membership {
+        can_write: principal.can_write(&config),
+        members: config.members,
+    })
+}
+
 pub(crate) fn actor(principal: &Principal) -> Result<Identity> {
     let mut identity = principal.identity().ok_or(Error::Forbidden)?;
     identity.name = identity.name.chars().take(160).collect();

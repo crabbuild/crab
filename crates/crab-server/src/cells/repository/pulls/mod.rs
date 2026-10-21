@@ -408,6 +408,8 @@ pub(super) mod review_threads;
 #[cfg(test)]
 mod tests;
 
+pub(crate) mod review_requests;
+
 mod readiness;
 pub(crate) use readiness::{
     PullReadiness, SetPullReadiness, SetPullReadinessInput, SetPullReadinessOutcome,

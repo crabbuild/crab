@@ -1,5 +1,5 @@
 import { expect, test, type Locator } from "@playwright/test";
-import { emptyReactions } from "./fixtures";
+import { emptyReactions, emptyReviewRequests } from "./fixtures";
 import {
   expectNoAccessibilityViolations,
   selectDarkTheme,
@@ -153,6 +153,8 @@ test("pull request creation, discussion, and files follow the GitHub review flow
     const request = route.request();
     const url = new URL(request.url());
     const path = url.pathname;
+    if (path.endsWith("/review-requests"))
+      return route.fulfill({ json: emptyReviewRequests() });
     if (path.endsWith("/links"))
       return route.fulfill({
         json: { items: [], next: null, can_manage: false },

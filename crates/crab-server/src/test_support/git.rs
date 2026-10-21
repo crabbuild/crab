@@ -350,3 +350,22 @@ pub(crate) async fn success(path: &Path, args: &[&str]) -> String {
     }
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
+
+/// Publishes a real main/feature pair through native HTTP Git receive.
+pub(crate) async fn push_review_branches(path: &Path, url: &str) -> String {
+    success(
+        path,
+        &["init", "--initial-branch=main", "--object-format=sha1", "."],
+    )
+    .await;
+    std::fs::write(path.join("README.md"), "base\n").unwrap();
+    success(path, &["add", "README.md"]).await;
+    success(path, &["commit", "-m", "base"]).await;
+    success(path, &["push", url, "main"]).await;
+    success(path, &["checkout", "-b", "feature"]).await;
+    std::fs::write(path.join("README.md"), "base\nfeature\n").unwrap();
+    success(path, &["commit", "-am", "feature"]).await;
+    let head = success(path, &["rev-parse", "HEAD"]).await;
+    success(path, &["push", url, "feature"]).await;
+    head
+}

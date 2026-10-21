@@ -15,6 +15,8 @@ pub(crate) enum Action {
     Created,
     Drafted,
     ReadyForReview,
+    ReviewRequested { reviewer: String },
+    ReviewRequestCancelled { reviewer: String },
     Updated,
     Closed,
     Reopened,
@@ -63,6 +65,8 @@ impl Action {
                     | Self::Merged
                     | Self::Drafted
                     | Self::ReadyForReview
+                    | Self::ReviewRequested { .. }
+                    | Self::ReviewRequestCancelled { .. }
                     | Self::IssueLinked { .. }
                     | Self::IssueUnlinked { .. }
                     | Self::MilestoneAssigned { .. }
@@ -87,6 +91,10 @@ impl Action {
         {
             validate_number(*number)?;
             validate_title(title)?;
+        }
+        if let Self::ReviewRequested { reviewer } | Self::ReviewRequestCancelled { reviewer } = self
+        {
+            validate_title(reviewer)?;
         }
         if !valid {
             return Err(crate::cells::Error::Invalid(

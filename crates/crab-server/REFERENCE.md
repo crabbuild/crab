@@ -398,6 +398,7 @@ The blame view links commit OIDs and subjects to immutable commit details. Its a
 | Go to file | Bounded full-tree fuzzy search without blob reads; `T` opens and focuses search |
 | Releases | Releases/Tags navigation, search, drafts, publication, edits, deletion, source ZIPs, and binary assets |
 | Pull requests | Conversation, Commits, Checks, Files changed, reviews, shared Markdown formatting, approval state, and merge controls |
+| Review requests | Versioned member requests, cancellation, submitted-review fulfillment, and reviewer sidebar |
 | Pull readiness | `PUT /api/repos/{owner}/{name}/pulls/{number}/readiness`; list/detail responses include `draft` |
 | Issues and metadata | Searchable issues, comments, labels, assignees, Markdown formatting and preview, and conflict recovery |
 | Settings | Default branch, exact protection rules, and archive state with stale-version checks |
@@ -1313,6 +1314,28 @@ is aborted without changing Git. Archived conversations retain merge status and
 allow recovery of a pending publication, with explicit refresh after an abort.
 These recovery paths retain ordinary membership, writer, Origin, CSRF,
 immutable-submission, and exact-ref checks.
+
+### Request pull request reviews
+
+`GET /api/repos/{owner}/{name}/pulls/{number}/review-requests` returns bounded
+pages with an opaque exclusive `before` cursor, the current PR version, eligible
+members, and the caller's management permission. Items retain requested,
+cancelled, or fulfilled state. Fulfilled items name their submitted review.
+
+`PUT` to the same endpoint takes `version` and a typed `change`:
+`{"version":1,"change":{"kind":"request","subject":"member-subject"}}` or
+`{"version":2,"change":{"kind":"cancel","id":"opaque-request-id"}}`. Authors or writers manage open
+PR requests; pending merges block changes and archived repositories reject them.
+The PR author cannot request their own review. Selection resolves durable
+membership instead of waiting for background catalog materialization. A renamed
+member retains identity; an existing request for a removed member can be cancelled
+by its opaque ID. Public request items omit identity issuer/subject claims.
+
+New reviews fulfill a matching outstanding request atomically. Reviewing twice
+or replaying an earlier submission cannot fulfill a later re-request. The PR
+version advances once for fulfillment and a decision committed together. Requests
+do not add a merge gate or alter required approvals. The sidebar keeps failed
+choices, requires explicit conflict refresh, and preserves read-only status.
 
 ### Link related work
 

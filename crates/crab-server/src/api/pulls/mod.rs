@@ -29,6 +29,7 @@ use crate::{
 mod comments;
 mod merge;
 mod readiness;
+mod review_requests;
 mod review_threads;
 mod reviews;
 mod storage;
@@ -52,6 +53,7 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         .merge(review_threads::routes())
         .merge(merge::routes())
         .merge(readiness::routes())
+        .merge(review_requests::routes())
         .layer(axum::extract::DefaultBodyLimit::max(160 * 1024))
         .route_layer(middleware::from_fn_with_state(server, app::admit))
 }

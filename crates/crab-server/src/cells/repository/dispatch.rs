@@ -12,6 +12,9 @@ pub(in crate::cells) fn dispatch_mutation(
     input: serde_json::Value,
 ) -> crate::cells::Result<MutationResult<serde_json::Value>> {
     match id {
+        <review_requests::SetReviewRequest as Mutation>::ID => {
+            invoke_mutation::<review_requests::SetReviewRequest>(context, input)
+        }
         <SetPullReadiness as Mutation>::ID => invoke_mutation::<SetPullReadiness>(context, input),
         <SetLink as Mutation>::ID => invoke_mutation::<SetLink>(context, input),
         <SetReaction as Mutation>::ID => invoke_mutation::<SetReaction>(context, input),
@@ -120,6 +123,12 @@ pub(in crate::cells) fn dispatch_read(
         }
         <GetPull as Read>::ID => invoke_read::<GetPull>(context, input),
         <GetPullSubmission as Read>::ID => invoke_read::<GetPullSubmission>(context, input),
+        <review_requests::GetReviewRequest as Read>::ID => {
+            invoke_read::<review_requests::GetReviewRequest>(context, input)
+        }
+        <review_requests::ListReviewRequests as Read>::ID => {
+            invoke_read::<review_requests::ListReviewRequests>(context, input)
+        }
         <ListPulls as Read>::ID => invoke_read::<ListPulls>(context, input),
         <GetPullComment as Read>::ID => invoke_read::<GetPullComment>(context, input),
         <ListPullComments as Read>::ID => invoke_read::<ListPullComments>(context, input),

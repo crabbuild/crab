@@ -1,0 +1,322 @@
+use super::*;
+use crate::cells::repository::collaboration::{
+    Target,
+    activity::{self, Action},
+};
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
+pub(crate) enum State {
+    Requested,
+    Cancelled,
+    Fulfilled { review: u64 },
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Request {
+    pub reviewer: RepositoryAuthor,
+    pub requested_by: RepositoryAuthor,
+    pub state: State,
+    pub requested_at: u64,
+    pub updated_at: u64,
+}
+
+fn prefix(pull: u64) -> String {
+    format!("collaboration/v1/pulls/{pull:016x}/review-requests/")
+}
+
+pub(crate) fn reviewer_id(reviewer: &RepositoryAuthor) -> String {
+    let mut hash = blake3::Hasher::new();
+    hash.update(b"crab.pull-reviewer.v1\0");
+    hash_text(&mut hash, &reviewer.issuer);
+    hash_text(&mut hash, &reviewer.subject);
+    hash.finalize().to_hex().to_string()
+}
+
+fn validate_id(id: &str) -> crate::cells::Result<()> {
+    if id.len() != 64
+        || !id
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(crate::cells::Error::Invalid("review request ID is invalid"));
+    }
+    Ok(())
+}
+
+fn validate(request: &Request, id: &str) -> crate::cells::Result<()> {
+    validate_author(&request.reviewer)?;
+    validate_author(&request.requested_by)?;
+    if reviewer_id(&request.reviewer) != id {
+        return Err(crate::cells::Error::Invalid(
+            "review request does not match its key",
+        ));
+    }
+    if let State::Fulfilled { review } = request.state {
+        validate_number(review)?;
+    }
+    Ok(())
+}
+
+fn load(
+    context: &RepositoryTransaction<'_>,
+    pull: u64,
+    id: &str,
+) -> crate::cells::Result<Option<Request>> {
+    validate_number(pull)?;
+    validate_id(id)?;
+    let request = context.document::<Request>(&format!("{}{id}", prefix(pull)))?;
+    if let Some(request) = &request {
+        validate(request, id)?;
+    }
+    Ok(request)
+}
+
+fn store(
+    context: &RepositoryTransaction<'_>,
+    pull: u64,
+    request: &Request,
+) -> crate::cells::Result<()> {
+    context.put_document(
+        &format!("{}{}", prefix(pull), reviewer_id(&request.reviewer)),
+        request,
+    )
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Selection {
+    pub pull: u64,
+    pub version: u64,
+    pub actor: RepositoryAuthor,
+    pub can_manage: bool,
+    pub reviewer: RepositoryAuthor,
+    pub requested: bool,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
+pub(crate) enum Outcome {
+    Applied(Request),
+    Archived,
+    NotFound,
+    Forbidden,
+    OwnReview,
+    Closed,
+    MergePending,
+    Conflict,
+}
+
+pub(crate) struct SetReviewRequest;
+impl Mutation for SetReviewRequest {
+    const ID: u32 = 250;
+    type Input = Selection;
+    type Output = Outcome;
+
+    fn execute(
+        context: &mut RepositoryTransaction<'_>,
+        input: Selection,
+    ) -> crate::cells::Result<MutationResult<Outcome>> {
+        if settings::archived(context)? {
+            return Ok(MutationResult::Rejected(Outcome::Archived));
+        }
+        validate_number(input.pull)?;
+        validate_number(input.version)?;
+        validate_author(&input.actor)?;
+        validate_author(&input.reviewer)?;
+        let Some(mut pull) = load_pull(context, input.pull)? else {
+            return Ok(MutationResult::Rejected(Outcome::NotFound));
+        };
+        if !(input.can_manage || same_author(&input.actor, &pull.author)) {
+            return Ok(MutationResult::Rejected(Outcome::Forbidden));
+        }
+        if same_author(&input.reviewer, &pull.author) {
+            return Ok(MutationResult::Rejected(Outcome::OwnReview));
+        }
+        if pull.state != PullState::Open {
+            return Ok(MutationResult::Rejected(Outcome::Closed));
+        }
+        if pull.merge_pending.is_some() {
+            return Ok(MutationResult::Rejected(Outcome::MergePending));
+        }
+        let existing = load(context, pull.number, &reviewer_id(&input.reviewer))?;
+        if let Some(request) = &existing {
+            if (request.state == State::Requested) == input.requested {
+                return Ok(MutationResult::Success(Outcome::Applied(request.clone())));
+            }
+        } else if !input.requested {
+            return Ok(MutationResult::Rejected(Outcome::NotFound));
+        }
+        if pull.version != input.version {
+            return Ok(MutationResult::Rejected(Outcome::Conflict));
+        }
+        let now = timestamp(context.now_ms())?;
+        let request = if input.requested {
+            Request {
+                reviewer: input.reviewer,
+                requested_by: input.actor.clone(),
+                state: State::Requested,
+                requested_at: now,
+                updated_at: now,
+            }
+        } else {
+            let Some(mut request) = existing else {
+                return Ok(MutationResult::Rejected(Outcome::NotFound));
+            };
+            request.state = State::Cancelled;
+            request.updated_at = now;
+            request
+        };
+        store(context, pull.number, &request)?;
+        let old_version = pull.version;
+        pull.version = next_version(pull.version)?;
+        pull.updated_at_ms = now;
+        update_pull_row(context, &pull, old_version)?;
+        let action = if input.requested {
+            Action::ReviewRequested {
+                reviewer: request.reviewer.name.clone(),
+            }
+        } else {
+            Action::ReviewRequestCancelled {
+                reviewer: request.reviewer.name.clone(),
+            }
+        };
+        activity::append(
+            context,
+            Target::Pull {
+                number: pull.number,
+            },
+            &input.actor,
+            action,
+        )?;
+        advance_revision(context)?;
+        Ok(MutationResult::Success(Outcome::Applied(request)))
+    }
+}
+
+// Called only for a newly created review, after submission replay is resolved.
+// Keeping this inside review creation prevents a retry fulfilling a newer request.
+pub(super) fn fulfill(
+    context: &RepositoryTransaction<'_>,
+    review: &PullReviewRecord,
+) -> crate::cells::Result<bool> {
+    let Some(mut request) = load(context, review.pull, &reviewer_id(&review.author))? else {
+        return Ok(false);
+    };
+    if request.state != State::Requested {
+        return Ok(false);
+    }
+    request.state = State::Fulfilled {
+        review: review.number,
+    };
+    request.updated_at = review.created_at_ms;
+    store(context, review.pull, &request)?;
+    Ok(true)
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Key {
+    pub pull: u64,
+    pub id: String,
+}
+
+pub(crate) struct GetReviewRequest;
+impl Read for GetReviewRequest {
+    const ID: u32 = 250;
+    type Input = Key;
+    type Output = Option<Request>;
+    fn execute(
+        context: &mut RepositoryTransaction<'_>,
+        key: Key,
+    ) -> crate::cells::Result<Self::Output> {
+        load(context, key.pull, &key.id)
+    }
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Query {
+    pub pull: u64,
+    pub before: Option<String>,
+    pub limit: u8,
+}
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Page {
+    pub items: Vec<Request>,
+    pub next: Option<String>,
+    pub author: RepositoryAuthor,
+    pub version: u64,
+    pub open: bool,
+    pub merge_pending: bool,
+}
+
+pub(crate) struct ListReviewRequests;
+impl Read for ListReviewRequests {
+    const ID: u32 = 251;
+    type Input = Query;
+    type Output = Option<Page>;
+    fn execute(
+        context: &mut RepositoryTransaction<'_>,
+        input: Query,
+    ) -> crate::cells::Result<Self::Output> {
+        validate_number(input.pull)?;
+        if !(1..=50).contains(&input.limit) {
+            return Err(crate::cells::Error::Invalid(
+                "review request page size is invalid",
+            ));
+        }
+        if let Some(before) = &input.before {
+            validate_id(before)?;
+        }
+        // The sidebar needs lifecycle/version metadata, not the PR body or
+        // every review decision. Keep this read bounded by request-page data.
+        let metadata = context.sql(&SqlBatch { statements: vec![statement(
+            "SELECT author_issuer, author_subject, author_name, version, state, pending_merge IS NOT NULL FROM repository_pulls WHERE number = ?",
+            vec![integer(input.pull)?],
+        )] })?;
+        let Some(row) = metadata[0].rows.first() else {
+            return Ok(None);
+        };
+        let author = author_from_row(row, 0)?;
+        let version = result_u64_from_row(row, 3)?;
+        let open = PullState::from_code(result_u64_from_row(row, 4)?)? == PullState::Open;
+        let merge_pending = result_u64_from_row(row, 5)? != 0;
+        let prefix = prefix(input.pull);
+        let before = input.before.map(|id| format!("{prefix}{id}"));
+        let mut rows = context.documents::<Request>(
+            &prefix,
+            before.as_deref(),
+            usize::from(input.limit) + 1,
+        )?;
+        for (key, request) in &rows {
+            let id = key
+                .strip_prefix(&prefix)
+                .ok_or(crate::cells::Error::Invalid(
+                    "review request key is invalid",
+                ))?;
+            validate(request, id)?;
+        }
+        let more = rows.len() > usize::from(input.limit);
+        rows.truncate(usize::from(input.limit));
+        let next = if more {
+            rows.last()
+                .map(|(_, request)| reviewer_id(&request.reviewer))
+        } else {
+            None
+        };
+        Ok(Some(Page {
+            items: rows.into_iter().map(|(_, request)| request).collect(),
+            next,
+            author,
+            version,
+            open,
+            merge_pending,
+        }))
+    }
+}
+
+#[cfg(test)]
+mod tests;
