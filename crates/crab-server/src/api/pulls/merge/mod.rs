@@ -249,7 +249,7 @@ async fn execute(
 ) -> Result<impl IntoResponse> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
     let repo = repo.as_ref();
-    if !principal.can_write(&repo.config) {
+    if !principal.can_write(repo.id) {
         return Err(Error::MergePermission);
     }
     let id = app::number(id)?;

@@ -177,7 +177,7 @@ async fn list(
             .await,
     )?;
     Ok(Json(
-        json!({"items":page.items.iter().map(view).collect::<Vec<_>>(),"next":page.next,"can_manage":principal.can_write(&repo.config)}),
+        json!({"items":page.items.iter().map(view).collect::<Vec<_>>(),"next":page.next,"can_manage":principal.can_write(repo.id)}),
     ))
 }
 
@@ -197,7 +197,7 @@ async fn detail(
     )?
     .ok_or(Error::NotFound)?;
     Ok(Json(
-        json!({"milestone":view(&value),"can_manage":principal.can_write(&repo.config)}),
+        json!({"milestone":view(&value),"can_manage":principal.can_write(repo.id)}),
     ))
 }
 
@@ -208,7 +208,7 @@ async fn create(
     input: std::result::Result<Json<NewMilestone>, JsonRejection>,
 ) -> Result<(StatusCode, Json<Value>)> {
     let repo = app::repository(&server, &principal, &key)?;
-    if !principal.can_write(&repo.config) {
+    if !principal.can_write(repo.id) {
         return Err(Error::MilestonePermission);
     }
     let author = app::actor(&principal)?;
@@ -242,7 +242,7 @@ async fn edit(
     input: std::result::Result<Json<MilestoneEdit>, JsonRejection>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
-    if !principal.can_write(&repo.config) {
+    if !principal.can_write(repo.id) {
         return Err(Error::MilestonePermission);
     }
     let actor = app::actor(&principal)?;
@@ -293,7 +293,7 @@ async fn selection(
     .ok_or(Error::NotFound)?;
     let permissions = app::membership(&server, &principal, &repo).await?;
     Ok(Json(
-        json!({"milestone":value.milestone.as_ref().map(view),"version":value.version,"can_manage":permissions.can_triage}),
+        json!({"milestone":value.milestone.as_ref().map(view),"version":value.version,"can_manage":permissions.principal.can_triage(repo.id)}),
     ))
 }
 
@@ -307,7 +307,8 @@ async fn assign(
     let repo = app::repository(&server, &principal, &(owner, name))?;
     if !app::membership(&server, &principal, &repo)
         .await?
-        .can_triage
+        .principal
+        .can_triage(repo.id)
     {
         return Err(Error::MilestonePermission);
     }

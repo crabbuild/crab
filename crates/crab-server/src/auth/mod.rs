@@ -11,7 +11,7 @@ use git_tokens::{issue_git_token, revoke_git_tokens};
 use http::{callback, login, logout, session};
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::{AuthProvider, OidcConfig, RepositoryAccess, RepositoryConfig};
+use crate::{AuthProvider, OidcConfig, RepositoryAccess};
 use axum::{
     Json,
     http::{HeaderMap, HeaderValue, StatusCode, header},
@@ -50,6 +50,8 @@ pub(crate) enum AuthError {
     Verification(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("sign-in capacity exceeded")]
     Busy,
+    #[error("repository authorization unavailable")]
+    Authority(#[source] Box<crate::app::Error>),
     #[error("identity provider request failed")]
     Provider(#[source] Box<dyn std::error::Error + Send + Sync>),
     #[error("shared identity state storage failed")]
@@ -85,6 +87,11 @@ impl IntoResponse for AuthError {
                 StatusCode::TOO_MANY_REQUESTS,
                 "sign_in_busy",
                 "Sign-in is busy. Try again shortly.",
+            ),
+            Self::Authority(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "membership_unavailable",
+                "Repository permissions are temporarily unavailable.",
             ),
             Self::Provider(_) | Self::Storage(_) | Self::Json(_) => (
                 StatusCode::BAD_GATEWAY,
@@ -123,6 +130,7 @@ impl Session {
 }
 
 pub(crate) struct GitToken {
+    repository_id: uuid::Uuid,
     session: Arc<Session>,
     owner: String,
     repository: String,
@@ -136,79 +144,8 @@ impl GitToken {
     }
 }
 
-#[derive(Clone)]
-pub(crate) enum Principal {
-    Anonymous,
-    Local,
-    User(Arc<Session>),
-    Git(Arc<GitToken>),
-}
-
-impl Principal {
-    pub(crate) fn identity(&self) -> Option<Identity> {
-        match self {
-            Self::User(session) if session.active() => Some(session.identity.clone()),
-            Self::Git(token) if token.active() => Some(token.session.identity.clone()),
-            Self::Local => Some(Identity {
-                issuer: "urn:crab:local".into(),
-                subject: "operator".into(),
-                name: "Local operator".into(),
-            }),
-            _ => None,
-        }
-    }
-    pub fn can_read(&self, repository: &RepositoryConfig) -> bool {
-        self.access(repository).is_some()
-    }
-
-    pub fn can_triage(&self, repository: &RepositoryConfig) -> bool {
-        self.access(repository)
-            .is_some_and(|access| access >= RepositoryAccess::Triage)
-    }
-
-    pub fn can_write(&self, repository: &RepositoryConfig) -> bool {
-        matches!(
-            self.access(repository),
-            Some(RepositoryAccess::Write | RepositoryAccess::Admin)
-        )
-    }
-
-    pub fn can_admin(&self, repository: &RepositoryConfig) -> bool {
-        self.access(repository) == Some(RepositoryAccess::Admin)
-    }
-
-    fn access(&self, repository: &RepositoryConfig) -> Option<RepositoryAccess> {
-        let (session, ceiling) = match self {
-            Self::Local => return Some(RepositoryAccess::Admin),
-            Self::User(session) => (session, RepositoryAccess::Admin),
-            Self::Git(token)
-                if token.active()
-                    && token.owner == repository.owner
-                    && token.repository == repository.name =>
-            {
-                (&token.session, token.access)
-            }
-            _ => return None,
-        };
-        if !session.active() {
-            return None;
-        }
-        repository
-            .members
-            .iter()
-            .find(|member| member.subject == session.identity.subject)
-            .map(|member| std::cmp::min(member.access, ceiling))
-    }
-
-    pub fn authenticated(&self) -> bool {
-        match self {
-            Self::Anonymous => false,
-            Self::Local => true,
-            Self::User(session) => session.active(),
-            Self::Git(token) => token.active(),
-        }
-    }
-}
+mod principal;
+pub(crate) use principal::Principal;
 
 struct Flow {
     provider: AuthProvider,
@@ -258,6 +195,8 @@ struct IdentitySessionMarker {
 #[derive(Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 struct StoredGitToken {
+    format: u8,
+    repository_id: uuid::Uuid,
     session_key: Key,
     owner: String,
     repository: String,
@@ -335,6 +274,10 @@ impl Authentication {
         })
     }
 
+    pub(crate) fn issuer(&self) -> &str {
+        self.config.issuer.as_str()
+    }
+
     pub(crate) fn cursor_key(&self) -> [u8; 32] {
         self.cursor_key
     }
@@ -381,16 +324,16 @@ impl Authentication {
 
     pub async fn principal(&self, headers: &HeaderMap) -> Principal {
         let Some(token) = cookie_value(headers, self.cookie_name(false)) else {
-            return Principal::Anonymous;
+            return Principal::anonymous();
         };
         self.load_session(key(token))
             .await
-            .map(Principal::User)
-            .unwrap_or(Principal::Anonymous)
+            .map(Principal::user)
+            .unwrap_or(Principal::anonymous())
     }
 
     pub fn accepts_mutation(&self, principal: &Principal, headers: &HeaderMap) -> bool {
-        let Principal::User(session) = principal else {
+        let Some(session) = principal.user_session() else {
             return false;
         };
         let origin = headers

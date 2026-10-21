@@ -59,7 +59,7 @@ async fn set(
                     version,
                     state,
                     actor: (&actor).into(),
-                    can_manage: principal.can_write(&repo.config),
+                    can_manage: principal.can_write(repo.id),
                 },
             )
             .await,

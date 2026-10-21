@@ -15,7 +15,7 @@ and migration limitations.
 1. `crates/crab-server/src/main.rs` — thin binary entry; `src/cli/mod.rs` owns command parsing and dispatch, with ECS discovery and CLI tests beside it.
 2. `crates/crab-server/src/server/mod.rs` — `serve`: process composition and ordered shutdown; `src/server/http/mod.rs` composes routes and `src/repository/mod.rs` owns pinned reads and maintenance.
 3. `crates/crab-server/src/app.rs` — `admit / repository`: request repository/principal boundary and error mapping.
-4. `crates/crab-server/src/auth/mod.rs` — `Principal / Authentication`: identity and configuration; `auth/state.rs` owns durable sessions, `auth/http/mod.rs` owns login/session endpoints, and `auth/transport.rs` bounds provider requests.
+4. `crates/crab-server/src/auth/mod.rs` — `Authentication`: identity and configuration; `auth/principal/` owns credentials and UUID-bound current grants; `auth/state.rs` owns durable sessions, `auth/http/mod.rs` owns login/session endpoints, and `auth/transport.rs` bounds provider requests.
 5. `crates/crab-server/src/git/receive/mod.rs` — `receive / publish_objects`: bounded native receive and publication orchestration.
 
 Trace one path: `crates/crab-server/src/main.rs` → `src/cli/mod.rs` → `serve` in
@@ -120,7 +120,7 @@ No declared Cargo features. Both library and auto-discovered main binary exist. 
 ## Verification
 
 Tests live under their owner: `api/tests.rs`, `auth/tests/`,
-`api/<feature>/tests.rs`, `auth/<feature>/tests.rs`, `catalog/tests.rs`,
+`api/<feature>/tests.rs` (larger suites such as membership use `tests/mod.rs`), `auth/<feature>/tests.rs`, `catalog/tests.rs`,
 `cells/repository/<feature>/tests.rs`, `cells/directory/tests.rs`,
 `cells/directory/profiles/tests.rs`, `git/receive/tests/`, `git/lfs/tests.rs`,
 `cells/directory/lookup/tests.rs`, `cells/directory/search/tests.rs`,

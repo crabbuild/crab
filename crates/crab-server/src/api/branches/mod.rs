@@ -286,7 +286,7 @@ async fn create(
     let Json(input) = input?;
     let repository = app::repository(&server, &principal, &(owner.clone(), name.clone()))?;
     let repository = repository.as_ref();
-    if !principal.can_write(&repository.config) {
+    if !principal.can_write(repository.id) {
         return Err(Error::Permission);
     }
     let branch = branch_ref(&input.name).map_err(Error::Input)?;
@@ -320,7 +320,7 @@ async fn remove(
     let Json(input) = input?;
     let repository = app::repository(&server, &principal, &(owner.clone(), name.clone()))?;
     let repository = repository.as_ref();
-    if !principal.can_write(&repository.config) {
+    if !principal.can_write(repository.id) {
         return Err(Error::Permission);
     }
     let branch = branch_ref(&input.name).map_err(Error::Input)?;
@@ -365,7 +365,7 @@ async fn set_default(
     let Json(input) = input?;
     let repository = app::repository(&server, &principal, &(owner.clone(), name.clone()))?;
     let repository = repository.as_ref();
-    if !principal.can_admin(&repository.config) {
+    if !principal.can_admin(repository.id) {
         return Err(Error::AdminPermission);
     }
     let branch = branch_ref(&input.name).map_err(Error::Input)?;
@@ -403,7 +403,7 @@ async fn set_branch_protections(
     let Json(input) = input?;
     let repository = app::repository(&server, &principal, &(owner, name))?;
     let repository = repository.as_ref();
-    if !principal.can_admin(&repository.config) {
+    if !principal.can_admin(repository.id) {
         return Err(Error::AdminPermission);
     }
     app::actor(&principal)?;
@@ -421,7 +421,7 @@ async fn set_archive(
     let Json(input) = input?;
     let repository = app::repository(&server, &principal, &(owner.clone(), name.clone()))?;
     let repository = repository.as_ref();
-    if !principal.can_admin(&repository.config) {
+    if !principal.can_admin(repository.id) {
         return Err(Error::AdminPermission);
     }
     if input.repository != format!("{owner}/{name}") {

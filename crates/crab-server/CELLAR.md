@@ -48,6 +48,14 @@ author-enriched lists. Global readiness still verifies repositories; it does
 not certify Directory readiness. This directory
 adds no organization, team, project or repository grant authority.
 
+Current repository grants still belong to the catalog. HTTP admission resolves
+those grants before repository access, checks the configured issuer and stable
+repository UUID, and never derives authority from the routing snapshot. Git
+publication and LFS upload refresh grants at their late authorization checkpoints.
+This is not a native membership migration or atomic authority fencing. Git-token
+format 2 adds the stable UUID; previous tokens require revocation/reissue and
+coordinated replica deployment. Sessions and canonical Cell schemas are unchanged.
+
 List author enrichment uses the bounded native `LookupActors` read (Directory
 operation 6). It resolves qualified private keys into public UUID/handle/name
 summaries in one snapshot, with no repository record or schema change. Directory

@@ -95,7 +95,8 @@ async fn list(
     )?
     .ok_or(Error::NotFound)?;
     let is_author = page.author.issuer == actor.issuer && page.author.subject == actor.subject;
-    let can_manage = page.open && !page.merge_pending && (membership.can_triage || is_author);
+    let can_manage =
+        page.open && !page.merge_pending && (membership.principal.can_triage(repo.id) || is_author);
     let items: Vec<_> = page
         .items
         .iter()
@@ -142,7 +143,7 @@ async fn set(
     let cell = app::repository_cell(&server, &repo)?;
     let (reviewer, requested) = match input.change {
         Change::Request { subject } => {
-            if matches!(principal, Principal::Local) {
+            if principal.is_local() {
                 return Err(Error::Invalid(
                     "Review requests require members from the configured identity provider",
                 ));
@@ -185,7 +186,7 @@ async fn set(
                     pull: number,
                     version,
                     actor: (&actor).into(),
-                    can_manage: membership.can_triage,
+                    can_manage: membership.principal.can_triage(repo.id),
                     reviewer,
                     requested,
                 },

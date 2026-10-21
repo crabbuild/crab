@@ -25,6 +25,8 @@ pub(crate) const MAX_NUMBER: u64 = 9_007_199_254_740_991;
 pub(crate) enum Error {
     #[error("Sign in to use account profiles")]
     SessionRequired,
+    #[error("Repository permissions are temporarily unavailable")]
+    Membership(#[source] Box<crate::catalog::CatalogError>),
     #[error("This username is already taken")]
     ProfileHandleTaken,
     #[error("Your profile is already registered; reload to edit it")]
@@ -174,6 +176,7 @@ impl IntoResponse for Error {
                     | Self::Json(_)
                     | Self::Clock(_)
                     | Self::Repository(_)
+                    | Self::Membership(_)
                     | Self::Merge(_)
                     | Self::MergeObject(_)
                     | Self::Release(_)
@@ -198,6 +201,11 @@ impl IntoResponse for Error {
                 .into_response();
         }
         let (status, code, message) = match &self {
+            Self::Membership(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "membership_unavailable",
+                "Repository permissions are temporarily unavailable.",
+            ),
             Self::SessionRequired => (
                 StatusCode::UNAUTHORIZED,
                 "session_required",
@@ -495,14 +503,13 @@ pub(crate) fn repository(
     server
         .repositories
         .get(key)
-        .filter(|repo| principal.can_read(&repo.config))
+        .filter(|repo| principal.can_read(repo.id))
         .ok_or(Error::NotFound)
 }
 
 pub(crate) struct Membership {
     pub members: Vec<crate::RepositoryMember>,
-    pub can_write: bool,
-    pub can_triage: bool,
+    pub principal: Principal,
 }
 
 pub(crate) async fn membership(
@@ -510,32 +517,34 @@ pub(crate) async fn membership(
     principal: &Principal,
     repo: &Repository,
 ) -> Result<Membership> {
-    if matches!(principal, Principal::Local) {
+    if principal.is_local() {
         return Ok(Membership {
             members: Vec::new(),
-            can_write: true,
-            can_triage: true,
+            principal: principal.clone(),
         });
     }
-    let catalog = server.catalog().ok_or(Error::NotFound)?;
-    // Participant selection must use durable membership, not a background
-    // materialization that could still offer a renamed or revoked reviewer.
-    let snapshot = catalog
+    let issuer = server.auth.as_ref().ok_or(Error::NotFound)?.issuer();
+    let snapshot = server
+        .catalog()
+        .ok_or(Error::NotFound)?
         .membership(&repo.config.owner, &repo.config.name)
         .await
         .map_err(|error| match error {
             crate::catalog::CatalogError::NotFound => Error::NotFound,
-            error => Error::Repository(crate::Error::Catalog(error)),
+            error => Error::Membership(Box::new(error)),
         })?;
+    if snapshot.repository_id != repo.id {
+        return Err(Error::NotFound);
+    }
     let mut config = repo.config.clone();
     config.members = snapshot.members;
-    if !principal.can_read(&config) {
+    let principal = principal.with_membership(repo.id, &config, issuer);
+    if !principal.can_read(repo.id) {
         return Err(Error::NotFound);
     }
     Ok(Membership {
-        can_write: principal.can_write(&config),
-        can_triage: principal.can_triage(&config),
         members: config.members,
+        principal,
     })
 }
 

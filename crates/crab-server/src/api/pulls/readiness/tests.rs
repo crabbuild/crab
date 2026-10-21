@@ -224,7 +224,7 @@ async fn merge_recovery_after_archive(published: bool) {
     let head_oid = git::success(path, &["rev-parse", "HEAD"]).await;
     git::success(path, &["push", &git_url, "feature"]).await;
     let cell = server.cells().unwrap().repository(entry.id).unwrap();
-    let principal = crate::auth::Principal::Local;
+    let principal = crate::auth::Principal::local();
     let actor = crate::app::actor(&principal).unwrap();
     let created = cell
         .client

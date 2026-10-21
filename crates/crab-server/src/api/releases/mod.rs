@@ -347,7 +347,7 @@ async fn create(
 ) -> Result<impl IntoResponse> {
     let repo = app::repository(&server, &principal, &key)?;
     let repo = repo.as_ref();
-    if !principal.can_write(&repo.config) {
+    if !principal.can_write(repo.id) {
         return Err(Error::ReleasePermission);
     }
     let Json(input) = input?;
@@ -398,7 +398,7 @@ async fn visible_release(
 ) -> Result<Release> {
     app::actor(principal)?;
     let release = storage::release(server, repo, app::number(number)?).await?;
-    visible_release_record(release, principal.can_write(&repo.config))
+    visible_release_record(release, principal.can_write(repo.id))
 }
 
 fn visible_release_record(release: Option<Release>, include_drafts: bool) -> Result<Release> {
@@ -477,7 +477,7 @@ async fn upload_asset(
     let key = (owner, name);
     let repo = app::repository(&server, &principal, &key)?;
     let repo = repo.as_ref();
-    if !principal.can_write(&repo.config) {
+    if !principal.can_write(repo.id) {
         return Err(Error::ReleasePermission);
     }
     let actor = app::actor(&principal)?;
@@ -576,7 +576,7 @@ async fn upload_asset(
             if crate::repository::settings::load_lifecycle(&worker_server, repo)
                 .await?
                 .archived
-                || !principal.can_write(&repo.config)
+                || !principal.can_write(repo.id)
             {
                 return Err(Error::Archived);
             }
@@ -614,7 +614,7 @@ async fn remove_asset(
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
     let repo = repo.as_ref();
-    if !principal.can_write(&repo.config) {
+    if !principal.can_write(repo.id) {
         return Err(Error::ReleasePermission);
     }
     app::actor(&principal)?;
@@ -656,7 +656,7 @@ async fn detail_by_tag(
     let (tag, _) = tag_name(&tag)?;
     app::actor(&principal)?;
     let release = storage::release_by_tag(&server, &repo, tag).await?;
-    let release = visible_release_record(release, principal.can_write(&repo.config))?;
+    let release = visible_release_record(release, principal.can_write(repo.id))?;
     Ok(Json(view(&release)))
 }
 
@@ -669,7 +669,7 @@ async fn edit(
     let key = (owner, name);
     let repo = app::repository(&server, &principal, &key)?;
     let repo = repo.as_ref();
-    if !principal.can_write(&repo.config) {
+    if !principal.can_write(repo.id) {
         return Err(Error::ReleasePermission);
     }
     let Json(input) = input?;
@@ -706,7 +706,7 @@ async fn remove(
 ) -> Result<StatusCode> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
     let repo = repo.as_ref();
-    if !principal.can_write(&repo.config) {
+    if !principal.can_write(repo.id) {
         return Err(Error::ReleasePermission);
     }
     let Json(input) = input?;
@@ -723,7 +723,7 @@ async fn list(
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &key)?;
     let repo = repo.as_ref();
-    let include_drafts = principal.can_write(&repo.config);
+    let include_drafts = principal.can_write(repo.id);
     let limit = u8::try_from(parameters.limit()?)
         .map_err(|_| Error::Invalid("Release page size or cursor is invalid"))?;
     let query = parameters.query()?;

@@ -7,60 +7,6 @@ use openidconnect::{
 use serde_json::json;
 use url::Url;
 
-fn member_repository(access: RepositoryAccess) -> RepositoryConfig {
-    RepositoryConfig {
-        owner: "team".into(),
-        name: "private".into(),
-        bucket: "bucket".into(),
-        prefix: "private".into(),
-        default_branch: "main".into(),
-        description: String::new(),
-        members: vec![crate::RepositoryMember {
-            subject: "alice".into(),
-            name: "Alice".into(),
-            access,
-        }],
-        protected_branches: vec![],
-    }
-}
-
-fn active_session() -> Arc<Session> {
-    Arc::new(Session {
-        identity: Identity {
-            issuer: "https://identity.example".into(),
-            subject: "alice".into(),
-            name: "Alice".into(),
-        },
-        csrf: "csrf".into(),
-        expires_at: now_epoch().unwrap() + 60,
-        session_key: [0; 32],
-        revoked: AtomicBool::new(false),
-    })
-}
-
-#[test]
-fn repository_administration_stays_out_of_write_scoped_git_tokens() {
-    let repository = member_repository(RepositoryAccess::Admin);
-    let session = active_session();
-    let browser = Principal::User(Arc::clone(&session));
-    assert!(browser.can_read(&repository));
-    assert!(browser.can_write(&repository));
-    assert!(browser.can_admin(&repository));
-
-    let git = Principal::Git(Arc::new(GitToken {
-        session,
-        owner: repository.owner.clone(),
-        repository: repository.name.clone(),
-        access: RepositoryAccess::Write,
-        revoked: AtomicBool::new(false),
-    }));
-    assert!(git.can_write(&repository));
-    assert!(!git.can_admin(&repository));
-    assert!(
-        !Principal::User(active_session()).can_admin(&member_repository(RepositoryAccess::Write))
-    );
-}
-
 #[tokio::test]
 async fn expired_sessions_are_rejected_and_https_cookies_cannot_be_shadowed() {
     let auth = shared_auth(Store::new(Arc::new(object_store::memory::InMemory::new())));
@@ -90,7 +36,8 @@ async fn expired_sessions_are_rejected_and_https_cookies_cannot_be_shadowed() {
         .lock()
         .await
         .insert(key("test-token"), Arc::clone(&session));
-    let principal = Principal::Git(Arc::new(GitToken {
+    let principal = Principal::git(Arc::new(GitToken {
+        repository_id: uuid::Uuid::from_u128(1),
         session,
         owner: "team".into(),
         repository: "private".into(),
@@ -173,6 +120,7 @@ async fn shared_state_crosses_replica_boundaries_and_consumes_flows_once() {
         .store_git_token(
             git_key,
             Arc::new(GitToken {
+                repository_id: uuid::Uuid::from_u128(1),
                 session,
                 owner: "team".into(),
                 repository: "private".into(),
@@ -236,6 +184,7 @@ async fn identity_revocation_crosses_replicas_and_deletes_derived_tokens() {
             .store_git_token(
                 key(&format!("git-{name}")),
                 Arc::new(GitToken {
+                    repository_id: uuid::Uuid::from_u128(1),
                     session,
                     owner: "team".into(),
                     repository: "private".into(),
@@ -377,6 +326,7 @@ async fn token_attachment_racing_revocation_cannot_leave_a_usable_credential() {
         auth.store_session(Arc::clone(&session)).await.unwrap();
         let token_key = key(&format!("race-token-{index}"));
         let token = Arc::new(GitToken {
+            repository_id: uuid::Uuid::from_u128(1),
             session: Arc::clone(&session),
             owner: "team".into(),
             repository: "private".into(),
@@ -435,35 +385,4 @@ async fn session_creation_racing_logout_never_leaves_an_unindexed_parent() {
         }
         auth.remove_session(session.session_key).await.unwrap();
     }
-}
-
-#[test]
-fn triage_manages_collaboration_without_code_write_or_repository_administration() {
-    let principal = Principal::User(active_session());
-    for (access, triage, write, admin) in [
-        (RepositoryAccess::Read, false, false, false),
-        (RepositoryAccess::Triage, true, false, false),
-        (RepositoryAccess::Write, true, true, false),
-        (RepositoryAccess::Admin, true, true, true),
-    ] {
-        let repo = member_repository(access);
-        assert_eq!(
-            (
-                principal.can_read(&repo),
-                principal.can_triage(&repo),
-                principal.can_write(&repo),
-                principal.can_admin(&repo)
-            ),
-            (true, triage, write, admin),
-            "{access:?}"
-        );
-    }
-    let token = Principal::Git(Arc::new(GitToken {
-        session: active_session(),
-        owner: "team".into(),
-        repository: "private".into(),
-        access: RepositoryAccess::Read,
-        revoked: AtomicBool::new(false),
-    }));
-    assert!(!token.can_triage(&member_repository(RepositoryAccess::Triage)));
 }

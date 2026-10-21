@@ -316,8 +316,8 @@ async fn list(
     )
     .await?
     .ok_or(Error::NotFound)?;
-    let can_resolve = principal.can_write(&repo.config) || same_author(&pull.author, &actor);
-    let can_reply = principal.can_read(&repo.config);
+    let can_resolve = principal.can_write(repo.id) || same_author(&pull.author, &actor);
+    let can_reply = principal.can_read(repo.id);
     let targets = page
         .0
         .iter()
@@ -354,8 +354,8 @@ async fn detail(
         .ok_or(Error::NotFound)?;
     let (_, path) = parse_path(&path_hex(&thread.path))?;
     let (old_blob_oid, new_blob_oid) = current_blobs(&server, &comparison, &path).await?;
-    let can_resolve = principal.can_write(&repo.config) || same_author(&pull.author, &actor);
-    let can_reply = principal.can_read(&repo.config);
+    let can_resolve = principal.can_write(repo.id) || same_author(&pull.author, &actor);
+    let can_reply = principal.can_read(repo.id);
     let status = comparison_status(
         &thread,
         &comparison,
@@ -434,8 +434,8 @@ async fn create(
             Json(thread_view(
                 &existing,
                 &actor,
-                principal.can_read(&repo.config),
-                principal.can_write(&repo.config) || same_author(&pull.author, &actor),
+                principal.can_read(repo.id),
+                principal.can_write(repo.id) || same_author(&pull.author, &actor),
                 status,
                 &reaction,
             )),
@@ -517,8 +517,8 @@ async fn create(
         Json(thread_view(
             &thread,
             &actor,
-            principal.can_read(&repo.config),
-            principal.can_write(&repo.config) || same_author(&pull.author, &actor),
+            principal.can_read(repo.id),
+            principal.can_write(repo.id) || same_author(&pull.author, &actor),
             status,
             &reaction,
         )),
@@ -553,7 +553,7 @@ async fn edit(
         number,
         storage::PullReviewThreadEdit {
             actor: actor.clone(),
-            can_resolve: principal.can_write(&repo.config) || same_author(&pull.author, &actor),
+            can_resolve: principal.can_write(repo.id) || same_author(&pull.author, &actor),
             version: input.version,
             body: input.body,
             suggested_text: input.suggested_text,
@@ -576,8 +576,8 @@ async fn edit(
     Ok(Json(thread_view(
         &updated,
         &actor,
-        principal.can_read(&repo.config),
-        principal.can_write(&repo.config) || same_author(&pull.author, &actor),
+        principal.can_read(repo.id),
+        principal.can_write(repo.id) || same_author(&pull.author, &actor),
         status,
         &reaction,
     )))

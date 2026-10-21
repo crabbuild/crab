@@ -462,6 +462,32 @@ qualification also passed. Both persistent preview repositories retained all
 field; no profile was enrolled or schema/index rebuilt. Native authority fencing,
 remaining role capabilities and the full parity checklist remain unfinished.
 
+Current-grant admission replaces cached routing membership across browser APIs,
+Git and LFS. Credentials alone no longer grant repository access; an admitted
+principal binds the current role to the immutable repository UUID and configured
+issuer. Global catalog reads and body-scoped token issuance resolve their targets
+explicitly. Late publication/upload checkpoints refresh the durable grant.
+Git-token format 2 also binds that UUID; older tokens require revocation/reissue
+and replicas must deploy together. This remains catalog authorization, with
+qualified persistent grants and atomic native fencing still outstanding.
+
+The current-grant slice passed 354 isolated server tests (five existing ignored),
+all-target Clippy with warnings denied, frontend/server builds, formatting,
+architecture gates and changed relative documentation links. Regressions cover
+promotion and downgrade before routing refresh, revoked reads, encoded paths,
+failed authority reads, repository UUID reuse, issuer isolation, and rejected
+retired token records with working revocation.
+
+Real browser sessions against native Cellar and an isolated RustFS bucket passed
+role edits and issue actions. A previously issued write token lost Git receive
+and LFS upload permission after its owner was downgraded; read access and the
+same permission decisions survived process restart. The existing Git publication,
+review/merge, replay, search, milestone and rebuild workflow also passed, leaving
+56 durable Cellar objects. Updating the persistent preview preserved all 18
+captured collaboration resources across both repositories exactly, without a
+schema/index rebuild or profile enrollment. This proves the implemented slice,
+not full role parity or production qualification of the embedded SDK.
+
 ## Primary references
 
 - [GitHub issue/PR filtering](https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/filtering-and-searching-issues-and-pull-requests)

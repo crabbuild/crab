@@ -91,7 +91,7 @@ async fn list(
     let available = available(repo, &app::actor(&principal)?);
     Ok(Json(json!({
         "items":available.iter().map(view).collect::<Vec<_>>(),
-        "can_manage":membership.can_triage,
+        "can_manage":membership.principal.can_triage(repo.id),
     })))
 }
 

@@ -237,7 +237,7 @@ async fn create(
 ) -> Result<impl IntoResponse> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
     let repo = repo.as_ref();
-    if !principal.can_write(&repo.config) {
+    if !principal.can_write(repo.id) {
         return Err(Error::StatusPermission);
     }
     let Json(input) = input?;
@@ -300,7 +300,7 @@ async fn create(
         return Ok((StatusCode::CREATED, Json(status_view(&status))));
     }
     let oid = require_commit(&server, repo, parsed_oid).await?;
-    if !principal.can_write(&repo.config) {
+    if !principal.can_write(repo.id) {
         return Err(Error::StatusPermission);
     }
     let routed = crate::app::repository_cell(&server, repo)?;

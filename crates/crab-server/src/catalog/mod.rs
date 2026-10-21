@@ -77,6 +77,7 @@ pub struct MembershipActor {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct MembershipSnapshot {
+    pub repository_id: Uuid,
     pub revision: u64,
     pub members: Vec<RepositoryMember>,
 }
@@ -301,6 +302,7 @@ impl CatalogStore {
             })
             .ok_or(CatalogError::NotFound)?;
         Ok(MembershipSnapshot {
+            repository_id: record.id,
             revision: document.version,
             members: record.members.clone(),
         })

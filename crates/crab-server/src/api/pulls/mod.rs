@@ -100,8 +100,8 @@ async fn pull_view(
     )
     .await?;
     let permissions = app::membership(server, principal, repo).await?;
-    let can_write = permissions.can_write;
-    let can_triage = permissions.can_triage;
+    let can_write = permissions.principal.can_write(repo.id);
+    let can_triage = permissions.principal.can_triage(repo.id);
     Ok(json!({
         "draft": pull.draft,
         "number": pull.number,
@@ -510,7 +510,10 @@ async fn edit(
         .is_some_and(|labels| !labels.is_empty())
         || (input.label_ids.is_none() && !pull.label_ids.is_empty());
     let assignee_change = input.assignees.is_some();
-    let can_triage = app::membership(&server, &principal, repo).await?.can_triage;
+    let can_triage = app::membership(&server, &principal, repo)
+        .await?
+        .principal
+        .can_triage(repo.id);
     let author = same_author(&pull.author, &actor);
     if pull.merge_pending.is_some() {
         return Err(Error::MergePending);
@@ -565,7 +568,10 @@ async fn edit(
         .transpose()?;
     // Metadata reads yield before dispatch. Recheck the durable role because
     // routing snapshots can lag permission changes.
-    let can_triage = app::membership(&server, &principal, repo).await?.can_triage;
+    let can_triage = app::membership(&server, &principal, repo)
+        .await?
+        .principal
+        .can_triage(repo.id);
     if label_change && !can_triage {
         return Err(Error::LabelPermission);
     }

@@ -379,7 +379,7 @@ The internal owners are:
 | `server/management/mod.rs`, `server/capacity.rs`, `server/storage.rs` | Private management, resource policy, and storage preflight |
 | `repository/` | Pinned Git snapshots, maintenance, browse projections, and atomic catalog installation |
 | `catalog/` | Durable catalog records and membership audit |
-| `auth/mod.rs`, `auth/state.rs`, `auth/http/mod.rs`, `auth/transport.rs` | Identity, durable sessions, login endpoints, and bounded provider transport |
+| `auth/` | Identity, durable sessions, UUID-bound current grants in `principal/`, login endpoints, and bounded provider transport |
 | `git_import/mod.rs`, `git_import/source.rs`, `git_import/git.rs` | Import jobs/workflow, source validation, and isolated Git processes |
 | `api/` | Browse HTTP orchestration, feature handlers, Git queries, and wire encoding |
 | `git/` | Native Git protocol, object, receive, and LFS endpoints |

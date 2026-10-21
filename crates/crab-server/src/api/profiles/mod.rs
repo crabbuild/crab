@@ -37,7 +37,7 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
 fn account_identity(principal: &Principal) -> Result<IdentityKey> {
     // Git tokens are repository-scoped credentials, even when their issuing
     // account can administer a repository. They cannot manage account identity.
-    if !matches!(principal, Principal::User(_) | Principal::Local) {
+    if !(principal.is_user() || principal.is_local()) {
         return Err(app::Error::SessionRequired);
     }
     let actor = principal.identity().ok_or(app::Error::SessionRequired)?;

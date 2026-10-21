@@ -222,7 +222,7 @@ pub(crate) async fn read(
     let Some(entry) = server
         .repositories
         .get(&(owner, name))
-        .filter(|entry| principal.can_read(&entry.config))
+        .filter(|entry| principal.can_read(entry.id))
     else {
         return (
             StatusCode::NOT_FOUND,

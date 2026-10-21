@@ -263,3 +263,11 @@ issue close capability. This advances authority modeling without inventing an
 owner from a name, migrating grants implicitly or adding a second grant store.
 It does not finish Maintain, native authority fencing, owner/organization/team
 registration, qualified assignee migration or required-review role weighting.
+
+Current-grant admission now resolves durable catalog roles before repository
+access across browser APIs, Git and LFS, independently of routing refresh.
+Credentials alone grant nothing; repository UUID and configured issuer bind the
+admitted scope. Git-token format 2 also binds that UUID and retires name-only
+tokens. Promotion, downgrade, authority failure, UUID reuse and real OAuth/RustFS
+restart behavior are qualified. This improves the existing catalog boundary;
+it does not migrate grants to Directory or supply atomic native authority fencing.

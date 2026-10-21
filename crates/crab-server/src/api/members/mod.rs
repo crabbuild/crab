@@ -54,7 +54,7 @@ async fn authorized(
     owner: &str,
     name: &str,
 ) -> Result<(CatalogStore, CatalogDocument), Box<Response>> {
-    if !matches!(principal, Principal::Local | Principal::User(_)) {
+    if !(principal.is_local() || principal.is_user()) {
         return Err(boxed_error(
             StatusCode::NOT_FOUND,
             "repository_not_found",
@@ -107,7 +107,19 @@ async fn authorized(
                 "Repository not found.",
             )
         })?;
-    if !principal.can_admin(&config) {
+    if active.id != record.id {
+        return Err(boxed_error(
+            StatusCode::NOT_FOUND,
+            "repository_not_found",
+            "Repository not found.",
+        ));
+    }
+    let issuer = server
+        .auth
+        .as_ref()
+        .map_or("urn:crab:local", |auth| auth.issuer());
+    let current = principal.with_membership(record.id, &config, issuer);
+    if !current.can_admin(record.id) {
         return Err(boxed_error(
             StatusCode::NOT_FOUND,
             "repository_not_found",
@@ -172,32 +184,18 @@ async fn replace(
             "Membership changed. Reload members and try again.",
         );
     }
-    let actor = match principal {
-        Principal::Local => MembershipActor {
-            issuer: "urn:crab:local".into(),
-            subject: "operator".into(),
-        },
-        Principal::User(_) => match principal.identity() {
-            Some(identity) => MembershipActor {
-                issuer: identity.issuer,
-                subject: identity.subject,
-            },
-            None => {
-                return error(
-                    StatusCode::NOT_FOUND,
-                    "repository_not_found",
-                    "Repository not found.",
-                );
-            }
-        },
-        _ => {
-            return error(
-                StatusCode::NOT_FOUND,
-                "repository_not_found",
-                "Repository not found.",
-            );
-        }
+    let Some(identity) = principal.identity() else {
+        return error(
+            StatusCode::NOT_FOUND,
+            "repository_not_found",
+            "Repository not found.",
+        );
     };
+    let actor = MembershipActor {
+        issuer: identity.issuer,
+        subject: identity.subject,
+    };
+
     let old = document
         .repositories
         .iter()

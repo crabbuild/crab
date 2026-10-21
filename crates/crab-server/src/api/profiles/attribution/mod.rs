@@ -31,7 +31,7 @@ impl Authors {
     ) -> Result<Self> {
         // The HTTP boundary admits browser sessions and the local operator.
         // Keep account lookup closed if another credential reaches this owner.
-        if !matches!(principal, Principal::User(_) | Principal::Local) {
+        if !(principal.is_user() || principal.is_local()) {
             return Err(app::Error::SessionRequired);
         }
         let keys: std::collections::BTreeSet<_> = authors

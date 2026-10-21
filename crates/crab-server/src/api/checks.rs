@@ -288,7 +288,7 @@ async fn create(
 ) -> Result<impl IntoResponse> {
     let repo = app::repository(&server, &principal, &key)?;
     let repo = repo.as_ref();
-    if !principal.can_write(&repo.config) {
+    if !principal.can_write(repo.id) {
         return Err(Error::CheckPermission);
     }
     let Json(mut input) = input?;
@@ -337,7 +337,7 @@ async fn create(
     }
 
     input.head_sha = statuses::require_commit(&server, repo, parsed_oid).await?;
-    if !principal.can_write(&repo.config) {
+    if !principal.can_write(repo.id) {
         return Err(Error::CheckPermission);
     }
     let routed = crate::app::repository_cell(&server, repo)?;
@@ -439,7 +439,7 @@ async fn edit(
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
     let repo = repo.as_ref();
-    if !principal.can_write(&repo.config) {
+    if !principal.can_write(repo.id) {
         return Err(Error::CheckPermission);
     }
     let parsed_oid = statuses::parse_oid(&oid)?;
@@ -485,7 +485,7 @@ async fn edit(
     }
 
     let oid = statuses::require_commit(&server, repo, parsed_oid).await?;
-    if !principal.can_write(&repo.config) {
+    if !principal.can_write(repo.id) {
         return Err(Error::CheckPermission);
     }
     let routed = crate::app::repository_cell(&server, repo)?;

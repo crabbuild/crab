@@ -802,7 +802,8 @@ kubectl --namespace crab exec --stdin deployment/crab-server -- \
 | Access | Capabilities |
 | --- | --- |
 | `read` | Browse, fetch, download LFS, and participate in issues, pull requests, comments, and reviews |
-| `write` | All member actions plus Git writes, LFS upload, merge, releases, labels, assignees, statuses, checks, and scoped write-token issuance |
+| `triage` | Read actions plus closing/reopening discussions, assigning existing labels, assignees and milestones, and requesting reviews; no code writes or definition management |
+| `write` | All Triage actions plus Git writes, LFS upload, merge, releases, labels, assignees, statuses, checks, and scoped write-token issuance |
 | `admin` | All write actions plus repository settings and branch protections |
 
 Subjects can contain at most 512 characters. Names can contain at most 160 characters. Subjects and case-insensitive names must be unique within a repository.
@@ -858,8 +859,21 @@ There is no browser audit-history API yet.
 
 An authenticated account without membership sees an empty catalog. Unauthorized
 and absent repositories both return HTTP 404 after authentication. Catalog
-membership changes do not invalidate the user's shared session and become
-effective on every replica after refresh.
+membership changes do not invalidate the user's shared session. Every authenticated
+repository request resolves the current durable catalog grant before repository
+access, independently of routing refresh. Global repository lists resolve grants
+from one catalog snapshot; body-scoped Git-token issuance resolves its target
+explicitly. Failed authority reads fail closed. Decoded route names select a
+repository, but the admitted grant and Git token bind its immutable UUID. The
+provider issuer must also match; display names and public handles grant nothing.
+Git publication and LFS upload refresh grants at their existing late checkpoints.
+These reads do not make catalog changes and repository publications one atomic
+transaction: cross-authority fencing remains unfinished. Admission adds one
+bounded catalog object read per authenticated repository request; handlers with
+late permission checks perform additional reads. Repository listing reads the
+catalog once and indexes grants by UUID. There is no permission cache that waits
+for the routing refresh interval. Explicit local-operator mode bypasses these
+member lookups.
 
 ### Configure protected branches
 
@@ -890,7 +904,13 @@ root rather than pod memory.
 
 Session cookies use `HttpOnly` and `SameSite=Lax`. HTTPS deployments also use `Secure` and the `__Host-` prefix. OIDC sessions expire at the earlier of ID-token expiry or eight hours; GitHub sessions expire after eight hours. The server does not retain refresh tokens or GitHub access tokens.
 
-Restarting or replacing a replica preserves sessions and Git tokens. Logout
+Restarting or replacing a replica preserves sessions and current-format Git
+tokens. Git-token format 2 requires the immutable repository UUID. Older tokens
+are rejected and must be revoked/reissued; there is no name-only reader or
+conversion. Upgrade all serving replicas together so an older replica cannot
+continue accepting retired credentials. Browser sessions retain their existing
+format. Revoking all Git tokens remains available even when an old token cannot
+be decoded. Logout
 requires the canonical `Origin` and the session's cross-site request forgery
 (CSRF) token. It removes the durable session, invalidating subsequent browser
 and Git-token authentication on every replica, but does not sign the account

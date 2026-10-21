@@ -432,7 +432,7 @@ async fn upload(
     let Json(input) = input?;
     let repo = app::repository(&server, &principal, &(owner.clone(), name.clone()))?;
     let repo = repo.as_ref();
-    if !principal.can_write(&repo.config) {
+    if !principal.can_write(repo.id) {
         return Err(Error::Permission);
     }
     validate_branch(&input.branch)?;
@@ -525,7 +525,7 @@ async fn change(
 ) -> Result<impl IntoResponse, Error> {
     let repo = app::repository(&server, &principal, &(owner.clone(), name.clone()))?;
     let repo = repo.as_ref();
-    if !principal.can_write(&repo.config) {
+    if !principal.can_write(repo.id) {
         return Err(Error::Permission);
     }
     let path = validate_input(&input)?;

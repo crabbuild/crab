@@ -79,7 +79,7 @@ async fn list(
     )?
     .ok_or(Error::NotFound)?;
     Ok(Json(
-        json!({"items":page.items,"next":page.next,"can_manage":principal.can_write(&repo.config)}),
+        json!({"items":page.items,"next":page.next,"can_manage":principal.can_write(repo.id)}),
     ))
 }
 
@@ -113,7 +113,7 @@ async fn set(
     input: std::result::Result<Json<Edit>, JsonRejection>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
-    if !principal.can_write(&repo.config) {
+    if !principal.can_write(repo.id) {
         return Err(Error::LinkPermission);
     }
     let actor = app::actor(&principal)?;

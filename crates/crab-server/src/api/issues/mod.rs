@@ -277,7 +277,7 @@ async fn create(
             &author,
             &labels,
             &assignees,
-            permissions.can_triage,
+            permissions.principal.can_triage(repo.id),
             &reaction,
         )),
     );
@@ -337,7 +337,7 @@ async fn detail(
         &author,
         &labels,
         &assignees,
-        permissions.can_triage,
+        permissions.principal.can_triage(repo.id),
         &reaction,
     ))
     .into_response();
@@ -374,7 +374,8 @@ async fn edit(
     }
     let can_triage = app::membership(&server, &principal, &repo)
         .await?
-        .can_triage;
+        .principal
+        .can_triage(repo.id);
     if input.label_ids.is_some() && !can_triage {
         return Err(Error::LabelPermission);
     }
@@ -403,7 +404,8 @@ async fn edit(
     // routing snapshots can lag permission changes.
     let can_triage = app::membership(&server, &principal, &repo)
         .await?
-        .can_triage;
+        .principal
+        .can_triage(repo.id);
     let routed = crate::app::repository_cell(&server, &repo)?;
     let output = crate::app::command_output(
         routed

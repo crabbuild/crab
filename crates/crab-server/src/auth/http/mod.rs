@@ -439,15 +439,14 @@ pub(crate) async fn session(
             AuthProvider::GitHub => "github",
         })
         .unwrap_or("local");
-    Json(match principal {
-        Principal::Local => json!({"authenticated":true,"mode":"local","user":null,"csrf":null}),
-        Principal::Anonymous | Principal::Git(_) => {
-            json!({"authenticated":false,"mode":mode,"user":null,"csrf":null})
-        }
-        Principal::User(session) => {
-            json!({"authenticated":true,"mode":mode,"user":session.identity,"csrf":session.csrf})
-        }
-    })
+    let value = if principal.is_local() {
+        json!({"authenticated":true,"mode":"local","user":null,"csrf":null})
+    } else if let Some(session) = principal.user_session() {
+        json!({"authenticated":true,"mode":mode,"user":session.identity,"csrf":session.csrf})
+    } else {
+        json!({"authenticated":false,"mode":mode,"user":null,"csrf":null})
+    };
+    Json(value)
 }
 
 pub(crate) async fn logout(
