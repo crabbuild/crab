@@ -1,3 +1,4 @@
+import { conversationPage } from "./conversation";
 import { expect, test, type Page } from "@playwright/test";
 import type { RepositoryAssignee } from "@/lib/api";
 import { emptyReactions } from "./fixtures";
@@ -30,6 +31,7 @@ async function fixture(page: Page) {
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
+    if (path.endsWith("/conversation")) return conversationPage(route);
     if (path === "/api/session")
       return route.fulfill({
         json: {

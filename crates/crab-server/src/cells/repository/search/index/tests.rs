@@ -372,7 +372,8 @@ async fn bounded_rebuild_blocks_fresh_writes_preserves_replays_and_invalidates_c
             serde_json::to_value(retry).unwrap()
         );
         steps += 1;
-        assert!(steps < 20);
+        // Conversation preparation adds separate bounded source frames.
+        assert!(steps < 32, "the small fixture did not finish rebuilding");
     }
     assert!(steps > 3);
     let ready = page(&cell, SearchInput::default()).await;

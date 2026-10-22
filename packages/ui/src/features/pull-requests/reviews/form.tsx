@@ -22,7 +22,11 @@ import {
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { repoHref } from "@/lib/repository-route";
 import { short } from "@/lib/format";
-import type { PullRequest, PullReview, ReviewState } from "../model";
+import type { PullRequest } from "../model";
+import type {
+  Review,
+  ReviewState,
+} from "@/components/discussion/conversation/model";
 
 export interface ReviewDraft {
   body: string;
@@ -59,6 +63,7 @@ export function ReviewChanges({
   draft,
   onDraft,
   submission,
+  disabled,
 }: {
   repo: Repository;
   pull: PullRequest;
@@ -67,6 +72,7 @@ export function ReviewChanges({
   draft: ReviewDraft | undefined;
   onDraft: (draft: ReviewDraft | undefined) => void;
   submission: (input: object) => string;
+  disabled: boolean;
 }) {
   const [open, setOpen] = useState(false);
   const id = useId();
@@ -87,7 +93,9 @@ export function ReviewChanges({
         }}
       >
         <DialogTrigger asChild>
-          <Button aria-label="Review changes">Review changes</Button>
+          <Button disabled={disabled} aria-label="Review changes">
+            Review changes
+          </Button>
         </DialogTrigger>
         {open && draft && (
           <DialogContent className="max-h-[calc(100svh-2rem)] overflow-y-auto sm:max-w-xl">
@@ -101,12 +109,13 @@ export function ReviewChanges({
               className="flex flex-col gap-4"
               onSubmit={async (event) => {
                 event.preventDefault();
+                if (disabled) return;
                 const input = {
                   body: draft.body,
                   state: draft.state,
                   commit_oid: draft.commit_oid,
                 };
-                const created = await mutation.run<PullReview>(
+                const created = await mutation.run<Review>(
                   endpoint(repo, `pulls/${pull.number}/reviews`),
                   "POST",
                   { ...input, request_id: submission(input) },
@@ -190,7 +199,15 @@ export function ReviewChanges({
               )}
               <div className="flex flex-wrap justify-end gap-2">
                 {mutation.conflict && (
-                  <Button type="button" variant="outline" onClick={refresh}>
+                  <Button
+                    type="button"
+                    variant="outline"
+                    onClick={() => {
+                      mutation.reset();
+                      setOpen(false);
+                      refresh();
+                    }}
+                  >
                     Reload comparison
                   </Button>
                 )}
@@ -209,6 +226,7 @@ export function ReviewChanges({
                 <Button
                   type="submit"
                   disabled={
+                    disabled ||
                     mutation.pending ||
                     mutation.conflict ||
                     stale ||

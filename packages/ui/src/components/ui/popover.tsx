@@ -1,11 +1,13 @@
 import * as React from "react";
+import { OverlayVisibility, useOverlayState } from "./use-overlay-state";
 import { cn } from "@/lib/utils";
 import { Popover as PopoverPrimitive } from "radix-ui";
 
 function Popover({
   ...props
 }: React.ComponentProps<typeof PopoverPrimitive.Root>) {
-  return <PopoverPrimitive.Root data-slot="popover" {...props} />;
+  const state = useOverlayState(props);
+  return <PopoverPrimitive.Root data-slot="popover" {...props} {...state} />;
 }
 
 function PopoverTrigger({
@@ -20,6 +22,10 @@ function PopoverContent({
   sideOffset = 4,
   ...props
 }: React.ComponentProps<typeof PopoverPrimitive.Content>) {
+  const visible = React.useContext(OverlayVisibility);
+  // Hidden panels must remove the portal itself, including an unfinished exit
+  // animation. Keeping a closed portal can leave it over the next tab.
+  if (!visible) return null;
   return (
     <PopoverPrimitive.Portal>
       <PopoverPrimitive.Content

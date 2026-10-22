@@ -2246,7 +2246,7 @@ test("mobile Code menu stays within the viewport and theme selection persists", 
     await page.locator(".clone-menu summary").click();
     await expect(
       page.getByLabel("Repository URL", { exact: true }),
-    ).toHaveValue("http://127.0.0.1:5175/git/team/project.git");
+    ).toHaveValue(`${new URL(page.url()).origin}/git/team/project.git`);
     await expect(
       page.getByRole("button", { name: "Copy URL", exact: true }),
     ).toBeVisible();

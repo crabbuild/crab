@@ -1,5 +1,6 @@
+import { conversationPage } from "./conversation";
 import { expect, test, type Page } from "@playwright/test";
-import type { ReviewState } from "../../src/features/pull-requests/model";
+import type { ReviewState } from "../../src/components/discussion/conversation/model";
 import { emptyReactions } from "./fixtures";
 import {
   expectNoAccessibilityViolations,
@@ -27,6 +28,7 @@ async function fixture(page: Page) {
     const request = route.request();
     const url = new URL(request.url()),
       path = url.pathname;
+    if (path.endsWith("/conversation")) return conversationPage(route);
     if (path === "/api/session")
       return route.fulfill({
         json: {

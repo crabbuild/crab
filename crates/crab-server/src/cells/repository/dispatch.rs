@@ -17,11 +17,16 @@ pub(in crate::cells) fn dispatch_mutation(
     #[cfg(test)]
     let maintenance = maintenance
         || id == assignments::migration::tests::SeedSubjects::ID
-        || id == reviewers::tests::PreviousIndex::ID;
+        || id == reviewers::tests::PreviousIndex::ID
+        || id == collaboration::conversation::tests::Inspect::ID;
     if !maintenance {
         search::index::ensure_ready(context)?;
     }
     let result = match id {
+        #[cfg(test)]
+        collaboration::conversation::tests::Inspect::ID => {
+            invoke_mutation::<collaboration::conversation::tests::Inspect>(context, input)
+        }
         #[cfg(test)]
         reviewers::tests::PreviousIndex::ID => {
             invoke_mutation::<reviewers::tests::PreviousIndex>(context, input)
@@ -147,6 +152,9 @@ pub(in crate::cells) fn dispatch_read(
         }
         <GetLink as Read>::ID => invoke_read::<GetLink>(context, input),
         <ListLinks as Read>::ID => invoke_read::<ListLinks>(context, input),
+        <collaboration::conversation::ListConversation as Read>::ID => {
+            invoke_read::<collaboration::conversation::ListConversation>(context, input)
+        }
         <collaboration::activity::ListActivity as Read>::ID => {
             invoke_read::<collaboration::activity::ListActivity>(context, input)
         }

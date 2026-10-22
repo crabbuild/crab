@@ -71,6 +71,7 @@ impl Mutation for RebuildIndex {
                 super::super::contributions::install(context)?;
                 super::super::reviews::reset(context)?;
                 super::super::contributions::reset(context)?;
+                crate::cells::repository::collaboration::conversation::reset(context)?;
                 State {
                     format: FORMAT,
                     generation,
@@ -126,6 +127,9 @@ impl Mutation for RebuildIndex {
                         super::super::contributions::clear(context)?
                     }
                     SearchIndexPhase::Commenters => super::super::contributions::rebuild(context)?,
+                    SearchIndexPhase::Conversation => {
+                        crate::cells::repository::collaboration::conversation::step(context)?
+                    }
                     SearchIndexPhase::Reviews => super::super::reviews::reviews(context)?,
                     SearchIndexPhase::ReviewRequests => super::super::reviews::requests(context)?,
                     SearchIndexPhase::Milestones => {
@@ -241,6 +245,10 @@ impl Mutation for RebuildIndex {
                             build.after = 0;
                         }
                         SearchIndexPhase::Commenters => {
+                            build.phase = SearchIndexPhase::Conversation;
+                            build.after = 0;
+                        }
+                        SearchIndexPhase::Conversation => {
                             context.sql(&SqlBatch { statements: vec![
                                 statement("DELETE FROM discussion_index_dirty", vec![]),
                                 statement("UPDATE discussion_index_revision SET revision = 0 WHERE singleton = 1", vec![]),

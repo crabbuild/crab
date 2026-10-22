@@ -1,3 +1,4 @@
+import { conversationPage } from "./conversation";
 import { expect, test } from "@playwright/test";
 import { emptyReactions } from "./fixtures";
 import {
@@ -103,23 +104,20 @@ test("reactions persist on refresh, stay scoped, and ignore older snapshots", as
           reactions: staleRefresh ? emptyReactions() : issueReactions,
         },
       });
-    if (path === "/api/repos/team/project/issues/1/comments")
-      return route.fulfill({
-        json: {
-          items: [
-            {
-              number: 1,
-              body: "Comment body",
-              author: { name: "Bob", profile: null },
-              version: 1,
-              created_at: 1700000001000,
-              updated_at: 1700000001000,
-              can_edit: false,
-              reactions: commentReactions,
-            },
-          ],
-          next: null,
-        },
+    if (path.endsWith("/conversation"))
+      return conversationPage(route, {
+        comments: [
+          {
+            number: 1,
+            body: "Comment body",
+            author: { name: "Bob", profile: null },
+            version: 1,
+            created_at: 1700000001000,
+            updated_at: 1700000001000,
+            can_edit: false,
+            reactions: commentReactions,
+          },
+        ],
       });
     return route.fulfill({
       status: 404,

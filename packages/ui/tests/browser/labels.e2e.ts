@@ -1,3 +1,4 @@
+import { conversationPage } from "./conversation";
 import { emptyReactions } from "./fixtures";
 import { expect, test } from "@playwright/test";
 import {
@@ -15,6 +16,7 @@ test("repository metadata can be managed and assigned to an issue", async ({
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
+    if (path.endsWith("/conversation")) return conversationPage(route);
     if (path.endsWith("/links"))
       return route.fulfill({
         json: { items: [], next: null, can_manage: false },

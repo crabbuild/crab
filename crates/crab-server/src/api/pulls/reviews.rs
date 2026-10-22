@@ -38,7 +38,7 @@ pub(super) fn routes() -> Router<Arc<Server>> {
         )
 }
 
-fn review_view(
+pub(in crate::api) fn review_view(
     authors: &Authors,
     review: &PullReview,
     actor: &Identity,

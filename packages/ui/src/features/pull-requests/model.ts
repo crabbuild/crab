@@ -4,17 +4,6 @@ import { type RepositoryAssignee, type RepositoryLabel } from "@/lib/api";
 import { type ReactionSummary } from "@/components/discussion/reactions";
 import { type InlineDiffThread } from "@/features/repository/diff/model";
 
-export interface PullComment {
-  reactions: ReactionSummary;
-  number: number;
-  author: DiscussionAuthor;
-  body: string;
-  version: number;
-  created_at: number;
-  updated_at: number;
-  can_edit: boolean;
-}
-
 export interface PullSummary {
   draft: boolean;
   number: number;
@@ -84,26 +73,6 @@ export interface PullRequest extends PullSummary {
     }>;
     satisfied: boolean;
   };
-}
-
-export type ReviewState = "commented" | "approved" | "changes_requested";
-
-export interface PullReview {
-  reactions: ReactionSummary;
-  number: number;
-  author: DiscussionAuthor;
-  body: string;
-  state: ReviewState;
-  commit_oid: string;
-  current: boolean | null;
-  version: number;
-  created_at: number;
-  updated_at: number;
-  can_edit: boolean;
-}
-
-export interface PullReviewPage extends Page<PullReview> {
-  head_oid: string | null;
 }
 
 export interface PullReviewThread extends InlineDiffThread {

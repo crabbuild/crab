@@ -1371,12 +1371,12 @@ the draft and offers an explicit choice of saved values or rebasing that draft.
 Renaming preserves the actor UUID and never changes repository permissions.
 
 Issue/PR list and detail authors, comments, reviews, inline threads/replies,
-thread resolving actors and merge/pending-merge actors use `{name, profile}`: `name` is the recorded display-name
+thread resolving actors, activity actors and merge/pending-merge actors use `{name, profile}`: `name` is the recorded display-name
 snapshot; `profile` is either `{id, handle, name}` from the current Directory or
 null when that qualified account has not enrolled. The browser links the current
 handle to the stable UUID; it never guesses a handle from the snapshot name.
 The previous string shape is removed for these responses, including mutations
-and submission replays. Git commit signatures, activity actors, check/status
+and submission replays. Git commit signatures and check/status
 actors retain their separate contracts; reviewer invitations use the same
 public author shape for reviewers and requesters. Actor-based
 assignments use the separate contract below; catalog membership is unchanged.
@@ -1421,6 +1421,7 @@ owner label does not acquire ownership.
 | Assignees | `GET /api/repos/{owner}/{name}/assignees`; issue and pull `PATCH` requests replace assignments |
 | Milestones | `GET/POST /api/repos/{owner}/{name}/milestones`, `GET/PATCH /api/repos/{owner}/{name}/milestones/{number}`, `GET /api/repos/{owner}/{name}/milestones/{number}/items`; issue/pull `GET/PUT .../{number}/milestone` |
 | Reactions | `PUT /api/repos/{owner}/{name}/reactions/{target}`; discussion responses include personalized summaries |
+| Conversation | `GET /api/repos/{owner}/{name}/issues/{number}/conversation`, `GET /api/repos/{owner}/{name}/pulls/{number}/conversation` |
 | Activity | `GET /api/repos/{owner}/{name}/activity`, `GET /api/repos/{owner}/{name}/issues/{number}/activity`, `GET /api/repos/{owner}/{name}/pulls/{number}/activity` |
 | Linked work | Issue/pull `GET .../{number}/links`; `GET/PUT /api/repos/{owner}/{name}/pulls/{pull}/linked-issues/{issue}` |
 
@@ -1564,10 +1565,11 @@ handle invalidates its old cursor even without a repository mutation. Malformed 
 queries or index contents return 409 `stale_search_cursor`. Restart at the first
 page to obtain a fresh snapshot. Comment pagination remains numeric.
 
-The current discussion index format is 8. It retains qualified author identities,
+The current discussion index format is 10. It retains qualified author identities,
 milestone catalog entries and stable actor assignment keys, and adds searchable
 assignment name snapshots, transactional reviewer relationships and per-source
-commenter identities, with transactional contribution text/FTS. Older indexes report
+commenter identities, transactional contribution text/FTS, latest-review/decision
+references and chronological conversation references. Older indexes report
 `outdated`; run the explicit rebuild below before admitting indexed traffic.
 It rebuilds only derived tables and preserves canonical milestone and assignment
 records. Clearing, milestone catalog preparation and discussion projection are
@@ -1660,9 +1662,10 @@ are unchanged. Both FTS indexes are checked before indexed readiness.
 
 ### Browse activity
 
-Repository activity lives at `/{owner}/{name}/activity`. Issue and PR conversation
-pages include their own activity panel. Feeds use `limit` (1–50, default 30) and
-an exclusive numeric `before` cursor, ordered newest first by event number.
+Repository activity lives at `/{owner}/{name}/activity`. Its feed APIs use `limit`
+(1–50, default 30) and an exclusive numeric `before` cursor, ordered newest first
+by event number. Issue and PR pages use the unified chronological conversation
+below; they do not render a second activity panel.
 
 Events record new discussion changes, review decisions, inline conversations,
 merge completion, and milestone assignments. They capture actor names and subject
@@ -1717,22 +1720,40 @@ freshness contract. The review list envelope includes nullable `head_oid` from
 that read; all loaded review cards follow this head, including older pages kept
 during refresh. Storage errors remain errors rather than missing refs.
 
-Conversation comments and submitted reviews expose independent “Load earlier”
-controls using their exclusive numeric `before` cursors (default 30, maximum 50).
-A failed page keeps already loaded cards and offers a retry of that same range.
-A newer saved contribution version cannot be replaced by an older page. Loaded
-PR contributions display by creation time; compact activity remains a separate
-feed. One unified, indexed activity/contribution timeline is still delivery work.
+Issue and PR pages read `GET .../{issues|pulls}/{number}/conversation`. The
+response contains chronological tagged `items` (`comment`, `review`, `activity`),
+nullable opaque `start`/`end` cursors, `has_earlier`/`has_later`, and nullable
+`head_oid`. `limit` is 1–50 (default 30); the native page is also byte bounded.
+Use exactly one of `before`, `after`, or `focus=comment:N|review:N|activity:N`;
+omit all three for the latest window. Focus seeks a window ending at that entry,
+without walking intervening pages. Cursors bind subject, creation time, source,
+number and index generation. Malformed/cross-subject inputs return 400; a
+changed index generation or absent cursor boundary returns 409. Missing focused
+entries return 404. Storage failures remain errors.
 
-Comment timestamps link to `#issuecomment-{number}` on issue and PR detail pages;
-review timestamps and sidebar decisions link to `#pullrequestreview-{number}`.
-Opening a link uses the existing authorized single-contribution endpoint and
-focuses its card, without walking intervening pages or advancing the history
-cursor. Missing or inaccessible targets show a retryable failure. These URLs
-support reload, back/forward navigation, modifier clicks, and diagnostics.
-The PR detail owner retains the comment draft, pending write and submission
-identity across tabs and metadata refreshes. Successful recovery clears the
-submitted draft; deliberately posting the same text again uses a new identity.
+Native index format 10 references existing canonical records and events without
+copying bodies. Creation time, source and number define order even if historical
+timestamps run backwards. Opening and contribution activity snapshots do not
+duplicate the description or editable cards. Inline and metadata/lifecycle events
+remain compact linked entries. `cells rebuild-search` prepares historical source
+rows in bounded, restartable frames; no serving scan or fallback is used.
+
+The shared UI offers earlier/later windows and same-range retry while retaining
+loaded content. Explicit refresh returns to the selected/latest window. Cached
+editors retain their drafts and captured versions; stale pages cannot replace a
+newer record. All review cards use the settled window's selected source head.
+Comment timestamps use `#issuecomment-N`, reviews/sidebar decisions use
+`#pullrequestreview-N`, and compact events use `#event-N`. Window reads support
+reload/back/forward, focus the requested entry, and expose failures for recovery.
+There is one whole-conversation timing widget, shown only with `powerbar=1`.
+
+PR detail retains comment drafts, pending writes and submission identity across
+tabs and metadata refreshes. Hidden panels pause conversation reads and remove
+portaled controls, while cached editors and pending writes stay mounted until
+the discussion actually unmounts. Successful recovery
+clears the submitted draft; intentional same-text posts get a new identity.
+Posting from an old window preserves navigation and offers an explicit View
+comment link; posting at the end extends the window with a bounded forward read.
 
 Pages contain at most 50 accounts, an opaque exclusive ascending `after` cursor,
 current PR version, management permission, and public `candidates` in

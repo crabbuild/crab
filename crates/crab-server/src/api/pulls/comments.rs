@@ -32,7 +32,7 @@ pub(super) fn routes() -> Router<Arc<Server>> {
         )
 }
 
-fn comment_view(
+pub(in crate::api) fn comment_view(
     authors: &Authors,
     comment: &PullComment,
     actor: &Identity,

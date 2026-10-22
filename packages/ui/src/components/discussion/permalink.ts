@@ -4,11 +4,18 @@ import { useLocation } from "@/lib/api";
 export function useDiscussionPermalink() {
   const location = useLocation();
   const hash = new URL(location, window.location.origin).hash;
-  const match = /^#(issuecomment|pullrequestreview)-([1-9]\d*)$/.exec(hash);
+  const match = /^#(issuecomment|pullrequestreview|event)-([1-9]\d*)$/.exec(
+    hash,
+  );
   const number = Number(match?.[2]);
-  return match && Number.isSafeInteger(number)
-    ? { kind: match[1], number, id: hash.slice(1) }
-    : undefined;
+  if (!match || !Number.isSafeInteger(number)) return undefined;
+  const source =
+    match[1] === "issuecomment"
+      ? "comment"
+      : match[1] === "pullrequestreview"
+        ? "review"
+        : "activity";
+  return { id: hash.slice(1), query: `${source}:${number}` };
 }
 
 export function useContributionFocus(id: string | undefined, ready: boolean) {

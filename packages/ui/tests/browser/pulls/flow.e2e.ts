@@ -88,11 +88,7 @@ test("pull creation and review navigation preserve GitHub-style controls", async
     commentPosition!.y,
   );
   await page.goto("/team/project/pull/2?powerbar=1");
-  for (const component of [
-    "Pull request",
-    "Conversation comments",
-    "Pull request reviews",
-  ]) {
+  for (const component of ["Pull request", "Conversation"]) {
     const timing = page.locator(
       `details[aria-label="${component} request timing"]`,
     );

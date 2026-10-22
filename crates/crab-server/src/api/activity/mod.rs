@@ -10,6 +10,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{
+    api::profiles::attribution::Authors,
     app::{self, Error, Result},
     auth::Principal,
     cells::repository::collaboration::{
@@ -73,17 +74,27 @@ async fn page(
             .await,
     )?
     .ok_or(Error::NotFound)?;
+    let authors = Authors::load(
+        server,
+        principal,
+        page.items.iter().map(|event| &event.actor),
+    )
+    .await?;
+    app::membership(server, principal, &repo).await?;
     let items = page
         .items
-        .into_iter()
-        .map(|event| {
-            json!({
-                "number":event.number,"target":event.target,"title":event.title,
-                "actor":event.actor.name,"action":event.action,"created_at":event.created_at,
-            })
-        })
+        .iter()
+        .map(|event| view(&authors, event))
         .collect::<Vec<_>>();
     Ok(Json(json!({"items":items,"next":page.next})))
+}
+
+pub(in crate::api) fn view(
+    authors: &Authors,
+    event: &crate::cells::repository::collaboration::activity::Event,
+) -> Value {
+    json!({"number":event.number,"target":event.target,"title":event.title,
+    "actor":authors.view(&event.actor),"action":event.action,"created_at":event.created_at})
 }
 
 async fn repository(

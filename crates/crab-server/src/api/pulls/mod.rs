@@ -26,14 +26,14 @@ use crate::{
     server::Server,
 };
 
-mod comments;
+pub(super) mod comments;
 mod merge;
 mod readiness;
 mod review_requests;
 mod review_threads;
 mod reviewers;
-mod reviews;
-mod storage;
+pub(super) mod reviews;
+pub(super) mod storage;
 use crate::cells::repository::{ListPulls, PullSummary};
 use storage::{NewPullRequest, PullRequest, PullState};
 

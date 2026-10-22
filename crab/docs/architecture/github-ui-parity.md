@@ -732,3 +732,40 @@ with no pending requests. Desktop and narrow dark screenshots were inspected.
 Both persistent preview repositories explicitly rebuilt to format 6 and retained
 all 18 captured resources exactly, with no profile enrollment. Owned qualification
 browsers, identity provider, server and RustFS container were closed.
+
+## Unified conversation
+
+Issue and PR detail now share `components/discussion/conversation/`: typed cards,
+one chronological reader, editors, composer, paging and permalink focus. Native
+`collaboration/conversation/` references canonical comments/reviews and compact
+activity, without duplicating opening or contribution snapshots. SQL reference
+seeks use creation time/source/number, including historical clock rollback;
+opaque before/after/focus windows have count and byte bounds. Derived index
+format 10 requires explicit bounded `cells rebuild-search` preparation.
+
+Hidden panels pause timeline reads and close their menus/portals. Cached editors
+retain drafts and captured versions through windows, tabs and root refreshes;
+pending writes remain observable. Posting into an older focused window offers an
+explicit link without changing navigation. Review freshness follows the settled
+source head; compact event actors resolve the same public profiles as cards.
+Independent comment/review REST collections remain canonical CRUD APIs; the UI
+has one history reader and one diagnostic widget behind `powerbar=1`.
+
+This slice passed 84 HTTP tests (one existing ignored), 118 native Repository
+regression tests, 107 UI unit tests and all 113 browser scenarios. Strict Clippy,
+architecture gates, Rustfmt and frontend/server builds passed. Native tests also
+cover serialized byte limits, indexed query plans, historical rows, cross-subject
+cursors, rebuild invalidation, relationships and inline thread events. Browser
+checks cover failed ranges, back/reload/direct links, old-window posts, lost reply
+identity, stale edits, pending completion across tabs, hidden portals, accessibility,
+themes and mobile containment.
+
+Real embedded-UI RustFS qualification reconstructed 38 comments and 56 reviews
+alongside compact events, posted from a retained draft, changed PR state, followed
+an old sidebar decision and comment, and recovered them after restart. It also
+interrupted the native `conversation` preparation phase and compared preserved
+records after resumption. Both preview repositories were explicitly upgraded;
+18 existing resource payloads compare unchanged after accounting for the public
+activity actor DTO. No profile was enrolled, no Fern code copied, and Cloudflare
+compute remains off. Complete parity, Projects/organization authorities, advanced
+review/merge workflows, moderation, notifications and bulk/saved views remain open.

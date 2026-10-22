@@ -26,7 +26,7 @@ use crate::{
     server::Server,
 };
 
-mod view;
+pub(super) mod view;
 
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()

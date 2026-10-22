@@ -64,7 +64,10 @@ async fn member_activity_is_paginated_and_subject_scoped_without_identity_claims
         older["items"][0]["target"],
         json!({"kind":"issue_comment","issue":1,"number":1})
     );
-    assert_eq!(older["items"][1]["actor"], "Alice");
+    assert_eq!(
+        older["items"][1]["actor"],
+        json!({"name":"Alice","profile":null})
+    );
     let encoded = older.to_string();
     for private in [
         "issuer",

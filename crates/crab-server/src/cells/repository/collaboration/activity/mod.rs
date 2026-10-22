@@ -33,7 +33,7 @@ pub(crate) enum Action {
 }
 
 impl Action {
-    fn related_subject(&self) -> Option<Subject> {
+    pub(super) fn related_subject(&self) -> Option<Subject> {
         match self {
             Self::IssueLinked { number, .. } | Self::IssueUnlinked { number, .. } => {
                 Some(Subject {
@@ -169,6 +169,7 @@ pub(in crate::cells::repository) fn append(
         // A relationship is one repository event visible from both subjects.
         context.put_document(&format!("{}{number:016x}", events(Some(related))), &true)?;
     }
+    super::conversation::project_event(context, &event)?;
     Ok(())
 }
 
@@ -241,6 +242,18 @@ impl Read for ListActivity {
         };
         Ok(Some(Page { items, next }))
     }
+}
+
+pub(super) fn event(
+    context: &Transaction<'_>,
+    number: u64,
+    subject: Option<Subject>,
+) -> crate::cells::Result<Option<Event>> {
+    validate_number(number)?;
+    context
+        .document::<Event>(&format!("{}{number:016x}", events(None)))?
+        .map(|event| validate(event, number, subject))
+        .transpose()
 }
 
 fn number(key: &str, prefix: &str) -> crate::cells::Result<u64> {

@@ -24,7 +24,7 @@ is buffered before owner dispatch so Cellar can safely retry stale routes; it is
 not forwarded as a non-replayable upload stream. Successful HTTP output
 uses the SDK output gate, including its ownership and durability checks.
 
-Repository assignment format 2 and discussion index format 9 require the explicit
+Repository assignment format 2 and discussion index format 10 require the explicit
 preparation described below. Other canonical records retain their formats.
 Transport requests and replies use bounded JSON. Mutation receipts store
 the payload digest and outcome in the same transaction as application writes.
@@ -177,6 +177,27 @@ time, preserving canonical records, source IDs, versions, and receipts. Reads
 and new writes fail closed until preparation completes. Interrupted frames use
 the existing generation/version cursor. No serving-time rebuild or old reader
 is supplied.
+
+## Conversation preparation
+
+Discussion index format 10 adds an ordered reference index over canonical issue
+comments, PR comments, submitted reviews, and compact activity. Contributions
+are one editable card; their immutable activity snapshots and the opening event
+do not duplicate cards or the root description. Inline thread/reply events remain
+compact links. Relationship events retain the same identity in both subjects.
+New contributions and lifecycle events project in their native transaction.
+Canonical bodies and timestamps remain unchanged; order uses creation time,
+source kind and number, including historical clock rollback.
+
+Run `cells rebuild-search` on existing repositories before indexed traffic.
+The `conversation` phase clears and scans at most eight references per frame,
+with durable source/composite-key cursors. It includes historical SQL comments
+that predate activity collection. Restart resumes preparation; missing/building
+indexes fail closed. No implicit schema installation or alternate reader runs
+while serving. Canonical records, versions, public submissions and receipts need
+no conversion. Drain and upgrade peers together for the new native read and
+public activity actor DTO; cursors bind subject and index generation. A rebuild
+invalidates earlier conversation cursors.
 
 ## Commenter search preparation
 

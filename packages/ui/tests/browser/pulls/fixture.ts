@@ -1,3 +1,4 @@
+import { conversationPage } from "../conversation";
 import type { DiscussionAuthor } from "@/components/discussion/author";
 import { expect, type Locator, type Page } from "@playwright/test";
 import { emptyReactions, emptyReviewers } from "../fixtures";
@@ -169,6 +170,12 @@ export async function mockPullRequest(
           items: [],
           error: null,
         },
+      });
+    if (path.endsWith("/conversation"))
+      return conversationPage(route, {
+        comments,
+        reviews,
+        head: lifecycle.branchesAvailable ? lifecycle.head : null,
       });
     if (path.endsWith("/reviewers"))
       return route.fulfill({ json: emptyReviewers() });

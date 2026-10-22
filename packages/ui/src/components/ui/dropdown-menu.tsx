@@ -1,4 +1,5 @@
 import * as React from "react";
+import { OverlayVisibility, useOverlayState } from "./use-overlay-state";
 import { cn } from "@/lib/utils";
 import { DropdownMenu as DropdownMenuPrimitive } from "radix-ui";
 import { CheckIcon, ChevronRightIcon } from "lucide-react";
@@ -6,7 +7,14 @@ import { CheckIcon, ChevronRightIcon } from "lucide-react";
 function DropdownMenu({
   ...props
 }: React.ComponentProps<typeof DropdownMenuPrimitive.Root>) {
-  return <DropdownMenuPrimitive.Root data-slot="dropdown-menu" {...props} />;
+  const state = useOverlayState(props);
+  return (
+    <DropdownMenuPrimitive.Root
+      data-slot="dropdown-menu"
+      {...props}
+      {...state}
+    />
+  );
 }
 
 function DropdownMenuPortal({
@@ -34,6 +42,10 @@ function DropdownMenuContent({
   sideOffset = 4,
   ...props
 }: React.ComponentProps<typeof DropdownMenuPrimitive.Content>) {
+  const visible = React.useContext(OverlayVisibility);
+  // Hidden panels must remove the portal itself, including an unfinished exit
+  // animation. Keeping a closed portal can leave it over the next tab.
+  if (!visible) return null;
   return (
     <DropdownMenuPrimitive.Portal>
       <DropdownMenuPrimitive.Content

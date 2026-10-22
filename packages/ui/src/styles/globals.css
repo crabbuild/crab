@@ -6784,25 +6784,25 @@ main {
   padding: 0;
   margin: 0;
 }
-.activity-events > li {
+.conversation-activity:not([hidden]) {
   display: flex;
   gap: 12px;
   padding: 12px 0;
   border-top: 1px solid var(--border);
 }
-.activity-events > li > svg {
+.conversation-activity > svg {
   flex-shrink: 0;
   margin-top: 3px;
   color: var(--muted-foreground);
 }
-.activity-events > li > div {
+.conversation-activity > div {
   min-width: 0;
   overflow-wrap: anywhere;
 }
-.activity-events a {
+.conversation-activity a {
   text-decoration: underline;
 }
-.activity-events time {
+.conversation-activity time {
   display: block;
   color: var(--muted-foreground);
   font-size: 12px;
@@ -6993,4 +6993,40 @@ main {
 
 .assignee-avatars + .discussion-comment-count {
   margin-left: 0;
+}
+
+.conversation-history {
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+.conversation-events {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: block;
+}
+.conversation-events > li:not([hidden]) {
+  position: relative;
+  padding: 0 0 16px 32px;
+}
+.conversation-events > li:not([hidden])::before {
+  content: "";
+  position: absolute;
+  inset: 0 auto 0 11px;
+  width: 2px;
+  background: var(--border);
+}
+.conversation-events > li > article {
+  margin: 0;
+}
+.conversation-events > .conversation-activity:not([hidden]) {
+  padding-top: 16px;
+  border: 0;
+}
+.conversation-events > .conversation-activity > svg {
+  margin-left: -28px;
+  position: relative;
+  background: var(--background);
+  outline: 4px solid var(--background);
 }

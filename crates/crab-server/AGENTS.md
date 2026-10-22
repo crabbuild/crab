@@ -60,6 +60,10 @@ Collaboration documents live in `cells/repository/collaboration/`. Its `target.r
 owns shared discussion addresses, `activity/` owns append-only events and subject
 indexes, and `reactions/` owns actor membership/counts. Activity append calls stay
 inside domain commands so their SQL/KV changes and events commit together.
+`conversation/` owns the chronological contribution/event reference index,
+bounded before/after/focus reads, and explicit restartable preparation under the
+shared discussion-index lifecycle. `api/conversation/` enriches these native
+windows with public authors, reactions and selected-head review freshness.
 `links/` owns versioned issue/PR relationships and both subject indexes; its
 single activity event is indexed into both timelines.
 

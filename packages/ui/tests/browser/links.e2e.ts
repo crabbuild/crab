@@ -1,3 +1,4 @@
+import { conversationPage } from "./conversation";
 import { expect, test, type Page } from "@playwright/test";
 import { emptyReactions, emptyReviewers } from "./fixtures";
 import {
@@ -106,6 +107,26 @@ async function setup(page: Page) {
         },
       });
     }
+    if (path.endsWith("/conversation"))
+      return conversationPage(route, {
+        activity: version
+          ? [
+              {
+                number: version,
+                target: { kind: "pull", number: 1 },
+                title: "Related pull",
+                actor: { name: "Alice", profile: null },
+                action: {
+                  kind: active ? "issue_linked" : "issue_unlinked",
+                  number: 1,
+                  title: "Related issue",
+                },
+                created_at: 1700000000000,
+              },
+            ]
+          : [],
+        head: "b".repeat(40),
+      });
     if (path.endsWith("/activity"))
       return route.fulfill({
         json: {
@@ -115,7 +136,7 @@ async function setup(page: Page) {
                   number: version,
                   target: { kind: "pull", number: 1 },
                   title: "Related pull",
-                  actor: "Alice",
+                  actor: { name: "Alice", profile: null },
                   action: {
                     kind: active ? "issue_linked" : "issue_unlinked",
                     number: 1,
@@ -210,7 +231,7 @@ test("linking and unlinking related work updates both pages and retains failed d
     panel.getByRole("link", { name: "#1 Related issue" }),
   ).toBeVisible();
   await expect(
-    page.getByRole("region", { name: "Activity", exact: true }),
+    page.getByRole("region", { name: "Conversation history", exact: true }),
   ).toContainText("linked issue Related issue on #1 Related pull");
   await page.reload();
   await panel.getByRole("link", { name: "#1 Related issue" }).click();
@@ -233,7 +254,7 @@ test("linking and unlinking related work updates both pages and retains failed d
   await page.goto("/team/project/pull/1");
   await expect(panel).toContainText("No linked issues.");
   await expect(
-    page.getByRole("region", { name: "Activity", exact: true }),
+    page.getByRole("region", { name: "Conversation history", exact: true }),
   ).toContainText("unlinked issue");
   expect(state.unexpected).toEqual([]);
 });

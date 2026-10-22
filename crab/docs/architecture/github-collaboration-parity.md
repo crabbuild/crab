@@ -326,3 +326,12 @@ personal navigation. Author and reviewer resolution use the same public Director
 snapshot and final durable membership recheck. This does not implement team
 requests, current-head review-status/merge policy, notifications/mentions,
 general participant predicates, native authority cutover or complete parity.
+
+The unified conversation slice replaces split UI history readers with native
+indexed comment/review/activity windows, shared typed cards and explicit
+format-10 preparation. It retains canonical source records and replay identities,
+and verifies bounded rebuild restart, mixed history and real UI writes against
+RustFS. All 113 browser scenarios and the affected native/HTTP suites pass; the
+[UI evidence](github-ui-parity.md#unified-conversation) records the exact scope.
+This advances the Issues/PR foundation; organization/team/project authority and
+the remaining Projects/Milestones/issue/review inventory are still incomplete.

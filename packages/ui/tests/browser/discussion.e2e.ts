@@ -1,3 +1,4 @@
+import { conversationPage } from "./conversation";
 import { emptyReactions } from "./fixtures";
 import { expect, test, type Page } from "@playwright/test";
 import {
@@ -22,6 +23,8 @@ async function openDiscussion(page: Page) {
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
+    if (path.endsWith("/conversation"))
+      return conversationPage(route, { comments });
     if (path.endsWith("/links"))
       return route.fulfill({
         json: { items: [], next: null, can_manage: false },
@@ -270,7 +273,7 @@ test("failed posts preserve drafts and slow replies do not steal focus", async (
       editor.getByRole("button", { name: "Posting…", exact: true }),
     ).toBeDisabled();
     const elsewhere = page.getByRole("button", {
-      name: "Refresh discussion",
+      name: "Refresh conversation",
       exact: true,
     });
     await elsewhere.focus();

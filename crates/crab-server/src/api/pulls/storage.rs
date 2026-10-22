@@ -70,7 +70,7 @@ pub(super) struct PullRequest {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct PullComment {
+pub(in crate::api) struct PullComment {
     pub number: u64,
     pub author: Identity,
     pub body: String,
@@ -81,7 +81,7 @@ pub(super) struct PullComment {
 
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct PullReview {
+pub(in crate::api) struct PullReview {
     pub number: u64,
     pub author: Identity,
     pub body: String,
@@ -693,7 +693,9 @@ pub(super) fn from_pull(value: PullRecord) -> PullRequest {
         updated_at: value.updated_at_ms,
     }
 }
-fn from_comment(value: crate::cells::repository::PullCommentRecord) -> PullComment {
+pub(in crate::api) fn from_comment(
+    value: crate::cells::repository::PullCommentRecord,
+) -> PullComment {
     PullComment {
         number: value.number,
         author: from_author(value.author),
@@ -703,7 +705,7 @@ fn from_comment(value: crate::cells::repository::PullCommentRecord) -> PullComme
         updated_at: value.updated_at_ms,
     }
 }
-fn from_review(value: crate::cells::repository::PullReviewRecord) -> PullReview {
+pub(in crate::api) fn from_review(value: crate::cells::repository::PullReviewRecord) -> PullReview {
     PullReview {
         number: value.number,
         author: from_author(value.author),

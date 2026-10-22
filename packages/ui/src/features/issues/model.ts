@@ -1,18 +1,8 @@
 import type { DiscussionTotals, ListLabel } from "@/components/discussion/list";
 import type { DiscussionAuthor } from "@/components/discussion/author";
-import type { ReactionSummary } from "@/components/discussion/reactions";
+import type { Comment } from "@/components/discussion/conversation/model";
 import type { RepositoryLabel, RepositoryAssignee } from "@/lib/api";
 
-export interface Comment {
-  reactions: ReactionSummary;
-  number: number;
-  author: DiscussionAuthor;
-  body: string;
-  version: number;
-  created_at: number;
-  updated_at: number;
-  can_edit: boolean;
-}
 export interface Issue extends Comment {
   title: string;
   state: "open" | "closed";

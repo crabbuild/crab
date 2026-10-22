@@ -1,6 +1,6 @@
 use crate::{
     cells::repository::{
-        CreateIssue, CreateIssueInput, CreatePull, CreatePullInput, RepositoryAuthor,
+        CreateIssue, CreateIssueInput, CreatePull, CreatePullInput, GetIssue, RepositoryAuthor,
     },
     test_support::http::Harness,
 };
@@ -89,7 +89,11 @@ async fn author_filters_bind_qualified_accounts_and_rebound_handle_cursors_witho
         )
         .await
         .unwrap();
-    let source = h.json(&format!("{root}/issues/1"), &alice).await;
+    let source = client
+        .query::<GetIssue>(repo, None, 1)
+        .await
+        .unwrap()
+        .output;
     let options = h.json(&format!("{root}/discussion-search/authors?query=is%3Aopen%20-author%3Abob&search=%40PUBLIC-A"), &alice).await;
     assert_eq!(options["items"].as_array().unwrap().len(), 1);
     assert_eq!(options["items"][0]["actor"]["id"], profile["id"]);
@@ -189,7 +193,17 @@ async fn author_filters_bind_qualified_accounts_and_rebound_handle_cursors_witho
             .await["matching"],
         2
     );
-    assert_eq!(h.json(&format!("{root}/issues/1"), &alice).await, source);
+    // Public profiles deliberately follow renames; the canonical source must not.
+    assert_eq!(
+        client
+            .query::<GetIssue>(repo, None, 1)
+            .await
+            .unwrap()
+            .output,
+        source
+    );
+    let detail = h.json(&format!("{root}/issues/1"), &alice).await;
+    assert_eq!(detail["author"]["profile"]["handle"], "renamed-alice");
     h.close().await;
 }
 

@@ -1,9 +1,10 @@
 import { expect, test, type Page } from "@playwright/test";
 import type {
-  PullComment,
-  PullReview,
-} from "../../../src/features/pull-requests/model";
+  Comment,
+  Review,
+} from "../../../src/components/discussion/conversation/model";
 import { mockPullRequest } from "./fixture";
+import { conversationPage } from "../conversation";
 import { emptyReactions } from "../fixtures";
 import {
   expectNoAccessibilityViolations,
@@ -12,7 +13,7 @@ import {
 
 async function historyFixture(page: Page) {
   await mockPullRequest(page);
-  const comments: PullComment[] = Array.from({ length: 65 }, (_, index) => ({
+  const comments: Comment[] = Array.from({ length: 65 }, (_, index) => ({
     number: index + 1,
     author: { name: "Alice", profile: null },
     body: `Conversation comment ${index + 1}`,
@@ -22,7 +23,7 @@ async function historyFixture(page: Page) {
     updated_at: 1_700_000_000_000 + index * 2000,
     can_edit: true,
   }));
-  const reviews: PullReview[] = comments.map((comment) => ({
+  const reviews: Review[] = comments.map((comment) => ({
     ...comment,
     author: { name: "Bob", profile: null },
     body: `Submitted review ${comment.number}`,
@@ -33,7 +34,7 @@ async function historyFixture(page: Page) {
   }));
   const reads: string[] = [];
   const writes: Array<{ body: string; request_id: string }> = [];
-  const submissions = new Map<string, PullComment>();
+  const submissions = new Map<string, Comment>();
   let reviewHead: string | null = "b".repeat(40);
   let failEarlier = true,
     loseReply = true;
@@ -84,6 +85,32 @@ async function historyFixture(page: Page) {
           candidates: [],
         },
       });
+    if (
+      path === `${root}/pulls/1/conversation` ||
+      path === `${root}/issues/1/conversation`
+    ) {
+      reads.push(`${path}${url.search}`);
+      if (url.searchParams.has("before") && failEarlier) {
+        failEarlier = false;
+        return route.fulfill({
+          status: 503,
+          json: { error: { message: "History temporarily unavailable" } },
+        });
+      }
+      const focus = url.searchParams.get("focus");
+      const canonical = <T extends Comment>(items: T[]) =>
+        items.map((item) =>
+          focus ===
+          `${path.includes("/pulls/") && "state" in item ? "review" : "comment"}:${item.number}`
+            ? { ...item, body: `${item.body} (canonical)`, version: 2 }
+            : item,
+        );
+      return conversationPage(route, {
+        comments: canonical(comments),
+        reviews: path.includes("/pulls/") ? canonical(reviews) : [],
+        head: reviewHead,
+      });
+    }
     const match =
       /^\/api\/repos\/team\/project\/(pulls|issues)\/1\/(comments|reviews)(?:\/(\d+))?$/.exec(
         path,
@@ -104,29 +131,28 @@ async function historyFixture(page: Page) {
               json: { error: { message: "Contribution not found" } },
             });
       }
-      const before = Number(
-        url.searchParams.get("before") ?? Number.MAX_SAFE_INTEGER,
-      );
-      if (
-        match[2] === "comments" &&
-        url.searchParams.has("before") &&
-        failEarlier
-      ) {
-        failEarlier = false;
+      throw new Error(`Unexpected split history read: ${path}`);
+    }
+    if (method === "PATCH" && match[2] === "comments" && match[3]) {
+      const item = comments.find((item) => item.number === Number(match[3]));
+      if (!item) throw new Error("Missing edit source");
+      const input = route.request().postDataJSON() as {
+        body: string;
+        version: number;
+      };
+      if (input.version !== item.version)
         return route.fulfill({
-          status: 503,
-          json: { error: { message: "History temporarily unavailable" } },
+          status: 409,
+          json: {
+            error: { code: "conflict", message: "Newer content was saved" },
+          },
         });
-      }
-      const available = source.filter((item) => item.number < before).reverse(),
-        items = available.slice(0, 30);
-      return route.fulfill({
-        json: {
-          items,
-          next: available.length > 30 ? items.at(-1)!.number : null,
-          ...(match[2] === "reviews" ? { head_oid: reviewHead } : {}),
-        },
+      Object.assign(item, {
+        body: input.body,
+        version: item.version + 1,
+        updated_at: Date.now(),
       });
+      return route.fulfill({ json: item });
     }
     if (method === "POST" && match[2] === "comments") {
       const input = route.request().postDataJSON() as {
@@ -172,51 +198,51 @@ async function historyFixture(page: Page) {
   };
 }
 
-test("all PR comments and reviews remain reachable when an older page fails", async ({
+test("one chronological history remains reachable after an earlier page fails", async ({
   page,
 }) => {
   const model = await historyFixture(page);
   await page.goto("/team/project/pull/1?powerbar=1");
-  const timeline = page.locator(".pull-timeline");
-  await expect(timeline.locator("article")).toHaveCount(60);
-  await page.getByRole("button", { name: "Load earlier comments" }).click();
+  const timeline = page.locator(".pull-timeline"),
+    cards = timeline.locator("article:visible");
+  await expect(cards).toHaveCount(30);
+  await page.getByRole("button", { name: "Load earlier activity" }).click();
   const failure = page
     .getByRole("alert")
     .filter({ hasText: "History temporarily unavailable" });
   await expect(failure).toBeVisible();
-  await expect(timeline.locator("article")).toHaveCount(60);
-  await page.getByRole("button", { name: "Load earlier reviews" }).click();
-  await expect(timeline.locator("article")).toHaveCount(90);
+  await expect(cards).toHaveCount(30);
   await failure.getByRole("button", { name: "Try again" }).click();
-  await expect(timeline.locator("article")).toHaveCount(120);
-  await page.getByRole("button", { name: "Load earlier comments" }).click();
-  await page.getByRole("button", { name: "Load earlier reviews" }).click();
-  await expect(timeline.locator("article")).toHaveCount(130);
+  await expect(cards).toHaveCount(60);
+  for (const count of [90, 120, 130]) {
+    await page.getByRole("button", { name: "Load earlier activity" }).click();
+    await expect(cards).toHaveCount(count);
+  }
   await expect(
-    page.getByRole("button", { name: /Load earlier (comments|reviews)/ }),
+    page.getByRole("button", { name: "Load earlier activity" }),
   ).toHaveCount(0);
-  await page.getByRole("button", { name: "Refresh conversation" }).click();
-  await expect(timeline.locator("article")).toHaveCount(130);
   expect(
-    await timeline
-      .locator("article")
-      .evaluateAll((nodes) => nodes.map((node) => node.id)),
+    await cards.evaluateAll((nodes) => nodes.map((node) => node.id)),
   ).toEqual(
     Array.from({ length: 65 }, (_, i) => [
       `issuecomment-${i + 1}`,
       `pullrequestreview-${i + 1}`,
     ]).flat(),
   );
+  expect(model.reads.filter((read) => read.includes("before="))).toHaveLength(
+    5,
+  );
+  expect(model.reads.at(1)).toBe(model.reads.at(2));
   for (const [head, label] of [
     ["c".repeat(40), "Outdated"],
     [null, "Head unavailable"],
   ] as const) {
     model.head(head);
     await page.getByRole("button", { name: "Refresh conversation" }).click();
-    await expect(timeline.locator(".review-outdated")).toHaveCount(65);
+    await expect(cards).toHaveCount(30);
     await expect(
-      timeline.locator(".review-outdated").filter({ hasText: label }),
-    ).toHaveCount(65);
+      timeline.locator(".review-outdated:visible").filter({ hasText: label }),
+    ).toHaveCount(15);
   }
   await page.setViewportSize({ width: 390, height: 844 });
   await selectDarkTheme(page);
@@ -228,12 +254,11 @@ test("all PR comments and reviews remain reachable when an older page fails", as
   ).toBe(true);
 });
 
-test("a reviewer decision opens its exact old review without walking history pages", async ({
+test("review permalinks seek one native window, then page forward and survive back/reload", async ({
   page,
 }) => {
   const model = await historyFixture(page);
   await page.goto("/team/project/pull/1?powerbar=1");
-  await expect(page.locator(".review-event")).toHaveCount(30);
   const link = page.getByRole("link", {
     name: "Open review #1 by Bob",
     exact: true,
@@ -243,11 +268,11 @@ test("a reviewer decision opens its exact old review without walking history pag
     "/team/project/pull/1#pullrequestreview-1",
   );
   await link.click();
-  await expect(page).toHaveURL(/\?powerbar=1#pullrequestreview-1$/);
   const target = page.locator("#pullrequestreview-1");
+  await expect(page).toHaveURL(/\?powerbar=1#pullrequestreview-1$/);
   await expect(target).toBeFocused();
   await expect(target).toContainText("Submitted review 1 (canonical)");
-  await expect(page.locator(".review-event")).toHaveCount(31);
+  await expect(page.locator(".pull-timeline article:visible")).toHaveCount(2);
   expect(model.reads.filter((read) => read.includes("before="))).toHaveLength(
     0,
   );
@@ -255,24 +280,24 @@ test("a reviewer decision opens its exact old review without walking history pag
   await page.reload();
   await expect(target).toBeFocused();
   await expect(target).toBeInViewport();
-  await expect(page.locator(".review-event")).toHaveCount(31);
+  await page.getByRole("button", { name: "Load newer activity" }).click();
+  await expect(page.locator(".pull-timeline article:visible")).toHaveCount(32);
   await page
-    .getByRole("link", { name: "Comment #65 permalink", exact: true })
+    .getByRole("link", { name: "Comment #16 permalink", exact: true })
     .click();
-  await expect(page.locator("#issuecomment-65")).toBeFocused();
+  await expect(page.locator("#issuecomment-16")).toBeFocused();
   await page.goBack();
   await expect(target).toBeFocused();
   await page.goto("/team/project/pull/1#pullrequestreview-999");
   const failure = page
     .getByRole("alert")
     .filter({ hasText: "Contribution not found" });
-  await expect(failure).toContainText("Unable to open this contribution");
-  await expect(page.locator(".review-event")).toHaveCount(30);
+  await expect(failure).toContainText("Unable to load conversation");
   await failure.getByRole("button", { name: "Try again" }).click();
   await expect(failure).toBeVisible();
 });
 
-test("comment drafts and retry identities survive tabs and metadata refreshes", async ({
+test("comment drafts and retry identities survive tabs, metadata refresh and a lost response", async ({
   page,
 }) => {
   const model = await historyFixture(page);
@@ -348,7 +373,7 @@ test("comment drafts and retry identities survive tabs and metadata refreshes", 
   expect(model.writes[2].request_id).not.toBe(model.writes[0].request_id);
 });
 
-test("issue permalinks retain canonical edits when an older list page arrives", async ({
+test("issue focus and subsequent windows retain a newer canonical contribution", async ({
   page,
 }) => {
   const model = await historyFixture(page);
@@ -359,14 +384,12 @@ test("issue permalinks retain canonical edits when an older list page arrives", 
   expect(model.reads.filter((read) => read.includes("before="))).toHaveLength(
     0,
   );
-  await page.getByRole("button", { name: "Load earlier comments" }).click();
-  await page
-    .getByRole("alert")
-    .filter({ hasText: "History temporarily unavailable" })
-    .getByRole("button", { name: "Try again" })
-    .click();
-  await page.getByRole("button", { name: "Load earlier comments" }).click();
-  await expect(page.locator(".issue-comments article")).toHaveCount(65);
+  for (const count of [31, 61, 65]) {
+    await page.getByRole("button", { name: "Load newer activity" }).click();
+    await expect(page.locator(".issue-comments article:visible")).toHaveCount(
+      count,
+    );
+  }
   await expect(target).toHaveCount(1);
   await expect(target).toContainText("Conversation comment 1 (canonical)");
   await expect(target).toContainText("edited");
@@ -374,4 +397,139 @@ test("issue permalinks retain canonical edits when an older list page arrives", 
     target.getByRole("link", { name: "Comment #1 permalink" }),
   ).toHaveAttribute("href", "/team/project/issues/1#issuecomment-1");
   await expectNoAccessibilityViolations(page);
+});
+
+test("a pending card edit completes while another PR tab is visible", async ({
+  page,
+}) => {
+  await historyFixture(page);
+  await page.goto("/team/project/pull/1");
+  const card = page.locator("#issuecomment-65");
+  await card.getByRole("button", { name: "Edit comment" }).click();
+  const editor = card.getByRole("textbox", {
+    name: "Edit comment",
+    exact: true,
+  });
+  await editor.fill("Edited while inspecting checks");
+  let release = () => {};
+  const gate = new Promise<void>((resolve) => {
+    release = resolve;
+  });
+  await page.route(
+    "**/api/repos/team/project/pulls/1/comments/65?**",
+    async (route) => {
+      if (route.request().method() === "PATCH") await gate;
+      await route.fallback();
+    },
+  );
+  const saved = page.waitForResponse(
+    (response) =>
+      response.url().includes("/comments/65?") &&
+      response.request().method() === "PATCH",
+  );
+  try {
+    await card
+      .getByRole("button", { name: "Save comment", exact: true })
+      .click();
+    await expect(editor).toBeDisabled();
+    await page.getByRole("link", { name: "Checks", exact: true }).click();
+  } finally {
+    release();
+  }
+  await saved;
+  await page.getByRole("link", { name: "Conversation", exact: true }).click();
+  await expect(card).toContainText("Edited while inspecting checks");
+  await expect(
+    card.getByRole("button", { name: "Edit comment" }),
+  ).toBeEnabled();
+  await expect(card.getByRole("textbox")).toHaveCount(0);
+});
+
+test("posting from an old focused window offers an explicit link without changing location", async ({
+  page,
+}) => {
+  await historyFixture(page);
+  await page.goto("/team/project/pull/1#issuecomment-1");
+  await expect(page.locator("#issuecomment-1")).toBeFocused();
+  await page
+    .getByRole("textbox", { name: "Comment", exact: true })
+    .fill("New reply from an old window");
+  await page.getByRole("button", { name: "Comment", exact: true }).click();
+  await expect(page.getByRole("alert")).toContainText(
+    "Reply lost after saving",
+  );
+  await page.getByRole("button", { name: "Comment", exact: true }).click();
+  await expect(
+    page.getByRole("status").filter({ hasText: "Comment posted." }),
+  ).toBeVisible();
+  await expect(page).toHaveURL(/#issuecomment-1$/);
+  await expect(page.locator(".pull-timeline article:visible")).toHaveCount(1);
+  await page.getByRole("link", { name: "View comment", exact: true }).click();
+  await expect(page.locator("#issuecomment-66")).toBeFocused();
+});
+
+test("a cached edit survives focused windows and requires explicit review of a newer version", async ({
+  page,
+}) => {
+  const model = await historyFixture(page);
+  await page.goto("/team/project/pull/1");
+  const card = page.locator("#issuecomment-65");
+  await card.getByRole("button", { name: "Edit comment" }).click();
+  const editor = card.getByRole("textbox", {
+    name: "Edit comment",
+    exact: true,
+  });
+  await editor.fill("My draft across history windows");
+  await page
+    .getByRole("link", { name: "Open review #1 by Bob", exact: true })
+    .click();
+  await expect(page.locator("#pullrequestreview-1")).toBeFocused();
+  await expect(card).not.toBeVisible();
+  await page.goBack();
+  await expect(editor).toHaveValue("My draft across history windows");
+  Object.assign(model.comments[64], { body: "A concurrent edit", version: 2 });
+  await page.getByRole("button", { name: "Refresh conversation" }).click();
+  await expect(
+    page.getByRole("status").filter({ hasText: "Loading conversation" }),
+  ).toHaveCount(0);
+  await expect(editor).toHaveValue("My draft across history windows");
+  const save = card.getByRole("button", { name: "Save comment", exact: true });
+  await save.click();
+  const conflict = card.getByRole("region", { name: "Review newer content" });
+  await expect(conflict).toContainText("A concurrent edit");
+  await expect(save).toBeDisabled();
+  await expect(editor).toHaveValue("My draft across history windows");
+  await conflict
+    .getByRole("button", { name: "Continue with my draft" })
+    .click();
+  await save.click();
+  await expect(card).toContainText("My draft across history windows");
+  await expect(card.getByRole("textbox")).toHaveCount(0);
+  expect(model.comments[64].version).toBe(3);
+});
+
+test("hidden conversation portals do not cover another PR tab", async ({
+  page,
+}) => {
+  await historyFixture(page);
+  await page.goto("/team/project/pull/1/checks");
+  for (const selector of [".pull-conversation > article", "#issuecomment-65"]) {
+    await page.getByRole("link", { name: "Conversation", exact: true }).click();
+    await page
+      .locator(selector)
+      .getByRole("button", { name: "Add reaction", exact: true })
+      .click();
+    await expect(page.getByRole("menu")).toBeVisible();
+    await page.goBack();
+    await expect(
+      page.getByRole("heading", { name: "ci/test", exact: true }),
+    ).toBeVisible();
+    await expect(page.getByRole("menu")).toHaveCount(0);
+    await expect(
+      page.locator('[data-slot="dropdown-menu-content"]'),
+    ).toHaveCount(0);
+    await expect(
+      page.getByRole("link", { name: "Files changed", exact: true }),
+    ).toBeVisible();
+  }
 });

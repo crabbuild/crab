@@ -60,7 +60,7 @@ pub(super) fn summary(
     })
 }
 
-pub(super) fn comment(
+pub(in crate::api) fn comment(
     authors: &Authors,
     comment: &CommentRecord,
     author: &Identity,

@@ -1,3 +1,4 @@
+import { conversationPage } from "./conversation";
 import { expect, test, type Page } from "@playwright/test";
 import { emptyReactions, emptyReviewers } from "./fixtures";
 import {
@@ -81,6 +82,8 @@ async function setup(page: Page, initialDraft: boolean) {
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
+    if (path.endsWith("/conversation"))
+      return conversationPage(route, { activity: events, head });
     if (path === "/api/session")
       return route.fulfill({
         json: {
@@ -165,7 +168,7 @@ async function setup(page: Page, initialDraft: boolean) {
         number: version,
         target: { kind: "pull", number: 1 },
         title,
-        actor: "Alice",
+        actor: { name: "Alice", profile: null },
         action: { kind: draft ? "drafted" : "ready_for_review" },
         created_at: 1700000000000,
       });
@@ -284,7 +287,7 @@ test("draft creation, reload, readiness and conversion expose truthful merge con
     page.getByRole("button", { name: "Merge pull request", exact: true }),
   ).toBeVisible();
   await expect(
-    page.getByRole("region", { name: "Activity", exact: true }),
+    page.getByRole("region", { name: "Conversation history", exact: true }),
   ).toContainText("marked ready for review");
   await page
     .getByRole("button", { name: "Convert to draft", exact: true })
