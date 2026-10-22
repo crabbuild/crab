@@ -304,3 +304,15 @@ retry decision. Repository/index preparation uses column renames and bounded
 updates; serving never reads retired subject records. The shadcn metadata picker
 supports current choices and removing unavailable historical people. The Assignee
 list filter, native grants and cross-authority fencing remain separate work.
+
+
+Assignee list filtering now shares native stable account IDs, public-handle/`@me`
+resolution, boolean/count/cursor contracts and explicit actor-ID queries across
+issues and PRs. The searchable shadcn menu combines current members, public
+profiles and historical assignment snapshots; removed access does not erase
+filterable history. Assigned-to-me navigation uses native selection flags.
+Discussion index format 5 requires an explicit bounded rebuild for searchable
+name snapshots. No canonical assignment, Directory, catalog-grant or public
+submission conversion is needed for this derived-index step. Reviewer/involves/
+mention predicates, native authority cutover and the remaining full parity
+inventory remain open.

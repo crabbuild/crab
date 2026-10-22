@@ -109,17 +109,24 @@ fn replacement(input: &CompletionInput) -> Result<(usize, usize, usize), &'stati
     Ok((cursor, cursor, cursor))
 }
 
-pub(crate) fn author_prefix(input: &CompletionInput) -> Result<Option<String>, &'static str> {
+pub(crate) fn person_prefix(
+    input: &CompletionInput,
+) -> Result<Option<(String, String)>, &'static str> {
     let (start, _, cursor) = replacement(input)?;
     let prefix = input.query[start..cursor]
         .trim_start_matches('-')
         .to_ascii_lowercase();
-    Ok(prefix.strip_prefix("author:").map(value_prefix))
+    Ok(["author", "assignee"].into_iter().find_map(|kind| {
+        prefix
+            .strip_prefix(&format!("{kind}:"))
+            .map(|value| (kind.into(), value_prefix(value)))
+    }))
 }
 
-pub(crate) fn append_authors(
+pub(crate) fn append_people(
     input: &CompletionInput,
     result: &mut Suggestions,
+    qualifier: &str,
     handles: impl Iterator<Item = (String, String)>,
 ) -> Result<(), &'static str> {
     let (start, end, _) = replacement(input)?;
@@ -130,7 +137,7 @@ pub(crate) fn append_authors(
     };
     let retained = input.query[..start].chars().count() + input.query[end..].chars().count();
     for (handle, description) in handles {
-        let value = format!("{sign}author:{handle}");
+        let value = format!("{sign}{qualifier}:{handle}");
         if retained + value.chars().count() <= 256 && result.items.len() < 20 {
             result.items.push(Suggestion { value, description });
         }
@@ -185,12 +192,18 @@ fn suggestions(
                 .into(),
             });
         }
-    } else if prefix.starts_with("author:") {
-        if "author:@me".starts_with(&prefix) {
-            items.push(Suggestion {
-                value: format!("{sign}author:@me"),
-                description: "Work created by you".into(),
-            });
+    } else if prefix.starts_with("author:") || prefix.starts_with("assignee:") {
+        for (value, description) in [
+            ("author:@me", "Work created by you"),
+            ("assignee:@me", "Work assigned to you"),
+            ("assignee:*", "Work with any assignee"),
+        ] {
+            if value.starts_with(&prefix) {
+                items.push(Suggestion {
+                    value: format!("{sign}{value}"),
+                    description: description.into(),
+                });
+            }
         }
     } else {
         for (value, description) in [
@@ -209,6 +222,9 @@ fn suggestions(
             ("no:milestone", "Work without a milestone"),
             ("author:", "Filter by public username"),
             ("author:@me", "Work created by you"),
+            ("assignee:", "Filter by assignee"),
+            ("assignee:@me", "Work assigned to you"),
+            ("assignee:*", "Work with any assignee"),
         ] {
             if negative && value.starts_with("no:") || !value.starts_with(&prefix) {
                 continue;

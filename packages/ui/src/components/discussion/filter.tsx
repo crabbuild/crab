@@ -19,7 +19,12 @@ import {
 } from "@/components/ui/popover";
 import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { RequestWidget } from "@/components/request/result";
-import { endpoint, useRequest, type Repository } from "@/lib/api";
+import {
+  endpoint,
+  useRequest,
+  type Repository,
+  type RepositoryAssignee,
+} from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
 import { Link } from "@/components/navigation/link";
 import type { ActorProfile } from "@/features/profile/model";
@@ -40,13 +45,24 @@ type CatalogOption = Choice & {
 type AuthorOption = Choice & {
   actor: Pick<ActorProfile, "id" | "handle" | "name">;
 };
-type Item = CatalogOption | AuthorOption;
+type PersonOption = Choice & { person: RepositoryAssignee };
+type Item = CatalogOption | AuthorOption | PersonOption;
 type Options = { clear: Choice; truncated: boolean } & (
   | { items: CatalogOption[]; missing: Choice }
   | { items: AuthorOption[]; self: Choice }
+  | { items: PersonOption[]; self: Choice; missing: Choice; any: Choice }
 );
 
 const presentations = {
+  assignees: {
+    title: "Filter by assignee",
+    trigger: "Assignee",
+    find: "Find a person",
+    initial: "Assigned to nobody",
+    noun: "people",
+    singular: "assignee",
+    timing: "Assignee filters",
+  },
   authors: {
     title: "Filter by author",
     trigger: "Author",
@@ -117,6 +133,12 @@ export function DiscussionFilter({
           number: 0,
           title: text.initial,
         },
+        ...("any" in data
+          ? [
+              { ...data.self, number: -1, title: "Assigned to yourself" },
+              { ...data.any, number: -2, title: "Assigned to anybody" },
+            ]
+          : []),
         ...data.items,
       ]
     : [];
@@ -246,23 +268,38 @@ export function DiscussionFilter({
               id={`${id}-options`}
               role="listbox"
               aria-label={
-                kind === "authors"
-                  ? "Authors"
-                  : kind === "labels"
-                    ? "Labels"
-                    : "Milestones"
+                kind === "assignees"
+                  ? "Assignees"
+                  : kind === "authors"
+                    ? "Authors"
+                    : kind === "labels"
+                      ? "Labels"
+                      : "Milestones"
               }
               aria-multiselectable={kind === "labels" || undefined}
               className="max-h-64 overflow-y-auto"
             >
               {choices.map((choice, index) => {
-                const key = "actor" in choice ? choice.actor.id : choice.number;
+                const key =
+                  "person" in choice
+                    ? choice.person.id
+                    : "actor" in choice
+                      ? choice.actor.id
+                      : choice.number;
                 const title =
-                  "actor" in choice ? choice.actor.name : choice.title;
+                  "person" in choice
+                    ? choice.person.name
+                    : "actor" in choice
+                      ? choice.actor.name
+                      : choice.title;
                 const description =
-                  "actor" in choice
-                    ? `@${choice.actor.handle}`
-                    : choice.description;
+                  "person" in choice
+                    ? choice.person.profile
+                      ? `@${choice.person.profile.handle}`
+                      : ""
+                    : "actor" in choice
+                      ? `@${choice.actor.handle}`
+                      : choice.description;
                 const color = "color" in choice ? choice.color : undefined;
                 const excluded = "excluded" in choice && choice.excluded;
                 return (
@@ -301,7 +338,7 @@ export function DiscussionFilter({
                         )}
                       />
                     )}
-                    {"actor" in choice && (
+                    {("actor" in choice || "person" in choice) && (
                       <UserRoundIcon data-icon="inline-start" />
                     )}
                     {color && (
@@ -370,7 +407,7 @@ export function DiscussionFilter({
               Select labels to require all. Alt+click or Alt+Enter to exclude.
             </p>
           )}
-          {kind !== "authors" && (
+          {(kind === "labels" || kind === "milestones") && (
             <Button asChild variant="link" size="sm">
               <Link
                 href={repoHref(repo, { view: kind })}

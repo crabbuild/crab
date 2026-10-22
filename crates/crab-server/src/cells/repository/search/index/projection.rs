@@ -98,8 +98,8 @@ pub(super) fn refresh(context: &Transaction<'_>, subject: Subject) -> crate::cel
     }
     for assignee in assignees {
         statements.push(statement(
-            "INSERT INTO discussion_index_assignees(document, actor) VALUES (?, ?)",
-            vec![integer(id)?, SqlValue::Text(assignee.id.to_string())],
+            "INSERT INTO discussion_index_assignees(document, actor, name, name_key) VALUES (?, ?, ?, ?)",
+            vec![integer(id)?, SqlValue::Text(assignee.id.to_string()), SqlValue::Text(assignee.name.clone()), SqlValue::Text(assignee.name.to_lowercase())],
         ));
     }
     if let Some(milestone) =

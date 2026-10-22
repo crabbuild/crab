@@ -11,8 +11,16 @@ use axum::{
     routing::get,
 };
 use std::sync::Arc;
+mod assignees;
 mod authors;
-pub(super) use authors::resolve as resolve_authors;
+pub(super) async fn resolve_people(
+    server: &Server,
+    principal: &Principal,
+    input: &mut crate::cells::repository::SearchInput,
+) -> Result<()> {
+    authors::resolve(server, principal, input).await?;
+    assignees::resolve(server, principal, input).await
+}
 
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
@@ -27,6 +35,10 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         .route(
             "/api/repos/{owner}/{name}/discussion-search/authors",
             get(authors::options),
+        )
+        .route(
+            "/api/repos/{owner}/{name}/discussion-search/assignees",
+            get(assignees::options),
         )
         .route("/api/repos/{owner}/{name}/discussion-search", get(complete))
         .route_layer(middleware::from_fn_with_state(server, app::admit))
@@ -43,7 +55,7 @@ async fn complete(
     // because peer callers cross a separate trust boundary.
     input.validate().map_err(app::Error::Invalid)?;
     let routed = app::repository_cell(&server, &repo)?;
-    let prefix = crate::cells::repository::search::completion::author_prefix(&input)
+    let prefix = crate::cells::repository::search::completion::person_prefix(&input)
         .map_err(app::Error::Invalid)?;
     let mut result = app::query_output(
         routed
@@ -58,8 +70,8 @@ async fn complete(
             )
             .await,
     )?;
-    if let Some(prefix) =
-        prefix.filter(|prefix| crate::cells::directory::validate_handle_prefix(prefix).is_ok())
+    if let Some((qualifier, prefix)) =
+        prefix.filter(|(_, prefix)| crate::cells::directory::validate_handle_prefix(prefix).is_ok())
     {
         let cells = server.cells().ok_or(app::Error::CellUnavailable)?;
         let handles = app::query_output(
@@ -71,9 +83,10 @@ async fn complete(
                 )
                 .await,
         )?;
-        crate::cells::repository::search::completion::append_authors(
+        crate::cells::repository::search::completion::append_people(
             &input,
             &mut result,
+            &qualifier,
             handles
                 .items
                 .into_iter()
@@ -149,6 +162,7 @@ impl ListParameters {
             sort: self.sort.unwrap_or_default(),
             direction: self.direction.unwrap_or_default(),
             authors: Vec::new(),
+            assignees: Vec::new(),
         };
         input.validate().map_err(app::Error::Invalid)?;
         Ok(input)

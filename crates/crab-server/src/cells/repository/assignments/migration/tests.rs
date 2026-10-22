@@ -56,7 +56,7 @@ impl Mutation for SeedSubjects {
             .document("discussion-search/v1/state")?
             .ok_or(Error::Invalid("Missing test index"))?;
         context.install_schema(
-            "ALTER TABLE discussion_index_assignees RENAME COLUMN actor TO subject;",
+            "DROP TABLE discussion_index_assignees; CREATE TABLE discussion_index_assignees (document INTEGER NOT NULL REFERENCES discussion_index(rowid) ON DELETE CASCADE, subject TEXT NOT NULL, PRIMARY KEY(document, subject)) STRICT, WITHOUT ROWID; CREATE INDEX discussion_index_assignee_lookup ON discussion_index_assignees(subject, document);",
         )?;
         index["format"] = serde_json::json!(3);
         context.put_document("discussion-search/v1/state", &index)?;

@@ -15,8 +15,8 @@ use crate::{
 };
 
 mod resolution;
-pub(crate) use resolution::Roster;
 pub(crate) use resolution::Selection;
+pub(crate) use resolution::{Candidate, Roster};
 
 pub(crate) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()

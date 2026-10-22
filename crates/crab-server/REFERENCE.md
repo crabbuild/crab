@@ -1463,7 +1463,8 @@ support up to five nested groups. Quote phrases and multiword label names.
 Supported qualifiers are `is:open`, `is:closed`, `is:merged`, `is:unmerged`,
 `is:issue`, `is:pr`, `state:open`, `state:closed`, `draft:true`, `draft:false`,
 `label:name`, `milestone:"title"`, `author:username`, `author:@me`, `no:label`,
-`no:assignee`, and `no:milestone`. `is:closed` includes merged PRs.
+`no:assignee`, `no:milestone`, `assignee:username`, `assignee:@me`,
+`assignee:*`, and `assignee:actor/UUID`. `is:closed` includes merged PRs.
 Repeated label qualifiers mean AND; comma-separated label names mean OR.
 Milestone titles match exactly, case-insensitively, including closed milestones.
 Quote spaces, commas, colons or escaped quotation marks as literal title content.
@@ -1482,7 +1483,7 @@ the query. Public HTTP parameters cannot supply those bindings. Directory reads
 7/8 resolve at most 64 handles or return up to 20 public actor summaries from
 one indexed handle prefix. Read 8 returns `items` and `truncated`, rather than a
 bare array; update all native peers together. No older-output reader is supported.
-Integration-account author syntax and assignee/reviewer predicates remain open.
+Integration-account author syntax and reviewer/participant predicates remain open.
 
 The shared Author menu uses `GET .../discussion-search/authors` with `query` and
 `search`. It searches registered public usernames by prefix, ignoring ASCII case
@@ -1544,8 +1545,9 @@ handle invalidates its old cursor even without a repository mutation. Malformed 
 queries or index contents return 409 `stale_search_cursor`. Restart at the first
 page to obtain a fresh snapshot. Comment pagination remains numeric.
 
-The current discussion index format is 3, adding a qualified author-identity
-projection to format 2’s milestone catalog. Older indexes report
+The current discussion index format is 5. It retains qualified author identities,
+milestone catalog entries and stable actor assignment keys, and adds searchable
+assignment name snapshots. Older indexes report
 `outdated`; run the explicit rebuild below before admitting indexed traffic.
 It rebuilds only derived tables and preserves canonical milestone and assignment
 records. Clearing, milestone catalog preparation and discussion projection are
@@ -1559,6 +1561,18 @@ indexes return 503 `discussion_index_unavailable`; detail reads and recorded
 command replays remain available. The command never recreates domain records.
 Other actor qualifiers and advanced metadata predicates remain delivery work. Release
 search retains its separate plain-text contract.
+
+Assignee predicates resolve public handles to stable Directory accounts; `@me`
+uses the authenticated qualified account even without enrollment. Unknown accounts
+match nothing. A handle change/rebinding changes cursor identity; explicit
+`actor/UUID` values retain stable identity without requiring a public profile.
+The Assignee menu (`GET .../discussion-search/assignees?query=...&search=...`)
+combines historical snapshots, current members and public handle completion.
+It returns at most 20 deduplicated `person`/query choices, `truncated`, and
+`clear`, `missing`, `self`, and `any` destinations. Results recheck durable grants
+after awaited reads. Definitions, grants and canonical assignments are unchanged.
+Both list outputs include `assigned_to_me` for global positive self predicates;
+conditional/excluded predicates retain arbitrary-search navigation.
 
 ### Browse activity
 
@@ -1731,7 +1745,8 @@ The shadcn picker loads candidates when opened, searches names/handles, supports
 keyboard focus/Escape, and permits removing unavailable historical selections
 without re-adding them. It submits the record version captured when editing
 starts; conflicts retain choices and require a refreshed record. This is a
-metadata picker, not the still-missing Assignee discussion-list filter.
+metadata picker. The separate Assignee list menu supports native public-handle,
+current-account, historical actor-ID and assigned/unassigned filtering.
 
 Existing repositories need private `cells assignment-inventory`,
 `cells migrate-assignments` and then `cells rebuild-search`. Nonempty legacy
@@ -1801,9 +1816,12 @@ the chosen facet adds a global conjunction. The UI preserves sort/direction and
 bounds rather than truncating other filters. Keyboard selection, Escape/focus
 return, empty/loading, request failure and retry are supported.
 
-Assignments contain at most 10 distinct configured member subjects. Only repository writers can change label or assignee sets.
+Assignments contain at most 10 distinct stable account UUIDs. Current repository
+triage permission controls changes to label or assignee sets.
 
-Stored assignments use stable IDs or subjects. Label renames appear immediately. Deleted labels disappear without rewriting every discussion. Removed members disappear from resolved assignment responses.
+Stored assignments retain stable IDs and name snapshots after grant removal.
+Public profiles provide current presentation without granting access. Label
+renames appear immediately; deleted labels disappear without rewriting discussions.
 
 ### Understand pagination and storage
 

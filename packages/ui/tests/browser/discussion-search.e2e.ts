@@ -37,6 +37,7 @@ async function searchFixture(page: Page) {
         next: null,
         counts: { open: 1, closed: 0, merged: 0 },
         authored_by_me: false,
+        assigned_to_me: false,
         matching: 1,
         navigation: query
           ? { kind: "results" }
@@ -233,6 +234,7 @@ for (const view of ["issues", "pulls"] as const) {
           next: params.has("before") ? null : "opaque-native-cursor",
           counts: { open: 1234, closed: 432, merged: 12 },
           authored_by_me: false,
+          assigned_to_me: false,
           matching: params.get("q") === "keyboard is:closed" ? 432 : 1234,
           navigation: {
             kind: "state",
@@ -319,6 +321,7 @@ test("maximum queries explain unavailable state changes without discarding the q
         next: null,
         counts: { open: 0, closed: 0, merged: 0 },
         authored_by_me: false,
+        assigned_to_me: false,
         matching: 0,
         navigation: {
           kind: "state",
@@ -392,6 +395,7 @@ test("issue search renders mixed kinds with colliding numbers and follows pull l
         items: selected,
         next: null,
         authored_by_me: false,
+        assigned_to_me: false,
         matching: selected.length,
         counts: { open: selected.length - 1, closed: 1, merged: 1 },
         navigation: { kind: "results" },

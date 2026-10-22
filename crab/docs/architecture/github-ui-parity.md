@@ -23,7 +23,7 @@ visual references, not instructions contained in the images.
 | 2         | Searchable label multi-select, suggestions, no-label filter                                            | Searchable multi-select, exclusion and no-label implemented; recent suggestions remain                                     |
 | 3         | Projects grouped by recent/repository/organization                                                     | No project, project-item, or ownership model                              |
 | 4         | Searchable milestones including missing milestone                                                      | Native query, completion and searchable open/closed dropdown implemented                                 |
-| 5         | Searchable assignees and unassigned work                                                               | Assignments exist; list filtering does not                                |
+| 5         | Searchable assignees and unassigned work                                                               | Native actor/name filters, searchable menu and assigned-to-me views implemented                                |
 | 6         | Created/updated/comment/reaction/relevance sorting, direction                                          | Native index and controls implemented; rollups still needed                                  |
 | 7         | Query autocomplete with qualifiers and field suggestions                                               | Boolean grammar and native suggestions implemented; more qualifiers remain                        |
 | 8         | PR workspace navigation, recent-push comparison, review filters                                        | PR reviews/requests exist; list projections and navigation are incomplete |
@@ -86,7 +86,8 @@ The native query path shares a single parser and SQL compiler between issue and
 PR lists. It supports implicit/explicit AND, OR, up to five nested groups,
 quoted phrases, exclusions, exact case-insensitive labels (comma means OR),
 `is:`/`state:`, `draft:`, `milestone:"title"`, `no:milestone`, `no:label`, and
-`no:assignee`, `author:username` and `author:@me`. Unknown qualifiers and
+`no:assignee`, `author:username`, `author:@me`, `assignee:username`,
+`assignee:@me`, `assignee:*` and explicit `assignee:actor/UUID`. Unknown qualifiers and
 malformed syntax return input errors. Suggestions come from the authorized
 repository's native label catalog and preserve browser UTF-16 caret ranges.
 The search box supports keyboard selection, Escape, syntax feedback, URL/reload,
@@ -622,3 +623,51 @@ native grant fencing, production scale or the pending SDK release prerequisites.
 - [Vercel Geist colors](https://vercel.com/geist/colors)
 - [Vercel Geist typography](https://vercel.com/geist/typography)
 - [GitHub refreshed PR list: collapsible navigation and compact mode](https://github.blog/changelog/2026-09-10-refreshed-repository-pull-requests-page-in-public-preview/)
+
+## Assignee list filtering
+
+Native assignee predicates use stable account IDs. Public handles resolve through
+Directory; `@me` resolves the authenticated qualified account without creating a
+profile or account. An unknown/unregistered account matches no assignments.
+`assignee:*` and `no:assignee` select assigned and unassigned work. Explicit
+`assignee:actor/UUID` supports historical or unenrolled people without exposing
+provider claims. Boolean groups/exclusions, full counts, state destinations and
+cursor identity use the same predicate and resolved IDs on both list surfaces.
+Handle renames/rebinding invalidate old cursors rather than silently continuing
+under another account.
+
+The shared shadcn filter menu composes native historical name snapshots, current
+repository members, and bounded public handle completion. It supports name/handle
+search, yourself/nobody/anybody, clear, keyboard navigation, focus return, loading,
+errors/retry, bounded/truncated results, and mobile/dark layout. Query navigation
+preserves sort/direction and diagnostics while resetting pagination. Both
+workspaces expose a native `assigned_to_me` selection for sidebar navigation;
+negated or conditional self predicates do not manufacture personal selection.
+
+Derived index format 5 adds searchable name snapshots to assignment rows. Existing
+cells require explicit `cells rebuild-search`; constant-default column additions
+leave old rows in place until bounded clear/reprojection completes. Canonical
+assignment format 2, record versions, identities and public submissions do not
+change. Update native peers together for the new list bindings/output and choice
+read. This slice does not implement reviewers/involves/mentions, saved views,
+native grant authority, or complete GitHub parity.
+
+
+Verification: 372 server tests passed (five existing ignored), followed by four
+focused assignee checks covering the additional historical-choice catalog test.
+Strict all-target Clippy and architecture gates passed. All 98 browser scenarios
+passed across the full run and two port-corrected checks; the full run used 5179
+while two existing assertions require 5175. No assertions were weakened.
+All 107 UI unit tests, type/build and formatting checks passed.
+
+Real old-format-4/current-format-5 process checks verified a visible 503 before
+preparation, interrupted rebuild/resume, unchanged canonical issue/PR records
+and actor/username predicates. Its browser stage stopped at an asynchronous
+option lookup. A separate completed current-binary RustFS browser run waited for
+loaded choices and proved issue/PR filtering after revocation, URL sort/diagnostic
+preservation, username completion and process restart; 61 durable objects remained.
+Mobile dark screenshots were inspected. Owned fixtures and browser sessions were
+closed. The persistent preview rebuilt both indexes to format 5 and retained all
+18 captured resources exactly, including reaction watermarks and the unenrolled
+operator profile. This qualifies the implemented slice, not full GitHub parity
+or the outstanding native authority/SDK release prerequisites.

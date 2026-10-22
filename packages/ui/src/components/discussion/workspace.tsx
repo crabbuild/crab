@@ -30,7 +30,12 @@ import { useBrowserPreference } from "@/lib/browser-preference";
 import { repoHref } from "@/lib/repository-route";
 import { discussionQuery } from "./list";
 
-type Selection = { view: "issues" | "pulls"; query: string; mine: boolean };
+type Selection = {
+  view: "issues" | "pulls";
+  query: string;
+  mine: boolean;
+  assigned: boolean;
+};
 const Navigation = createContext<Dispatch<
   SetStateAction<Selection | undefined>
 > | null>(null);
@@ -39,11 +44,13 @@ export function useDiscussionNavigation(
   view: "issues" | "pulls",
   query: string,
   mine: boolean | undefined,
+  assigned: boolean | undefined,
 ) {
   const report = useContext(Navigation);
   useEffect(() => {
-    if (mine !== undefined) report?.({ view, query, mine });
-  }, [view, query, mine, report]);
+    if (mine !== undefined && assigned !== undefined)
+      report?.({ view, query, mine, assigned });
+  }, [view, query, mine, assigned, report]);
 }
 
 export function DiscussionWorkspace({
@@ -100,6 +107,10 @@ export function DiscussionWorkspace({
     selection?.view === view && selection.query === query
       ? selection.mine
       : undefined;
+  const assigned =
+    selection?.view === view && selection.query === query
+      ? selection.assigned
+      : undefined;
   const root = pulls ? "pulls" : "issues";
   const links = [
     {
@@ -108,15 +119,23 @@ export function DiscussionWorkspace({
       Icon: pulls ? GitPullRequestIcon : IssueOpenedIcon,
       active:
         view === root &&
-        (mine === false || (!url.searchParams.get("q") && mine !== true)),
+        ((mine === false && assigned === false) ||
+          (!url.searchParams.get("q") && mine !== true && assigned !== true)),
       query: undefined,
     },
     {
       view: root,
       label: pulls ? "Authored by me" : "Created by me",
       Icon: CircleIcon,
-      active: view === root && mine === true,
+      active: view === root && mine === true && assigned !== true,
       query: pulls ? "author:@me is:open" : "is:issue author:@me is:open",
+    },
+    {
+      view: root,
+      label: "Assigned to me",
+      Icon: CircleIcon,
+      active: view === root && assigned === true,
+      query: pulls ? "assignee:@me is:open" : "is:issue assignee:@me is:open",
     },
     {
       view: "milestones",

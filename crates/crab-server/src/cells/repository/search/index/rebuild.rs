@@ -62,6 +62,11 @@ impl Mutation for RebuildIndex {
                         "ALTER TABLE discussion_index_assignees RENAME COLUMN subject TO actor;",
                     )?;
                 }
+                if current.as_ref().is_some_and(|state| state.format < 5) {
+                    // Constant defaults avoid rewriting existing rows; bounded
+                    // clear/reprojection fills names before format 5 can serve.
+                    context.install_schema("ALTER TABLE discussion_index_assignees ADD COLUMN name TEXT NOT NULL DEFAULT ''; ALTER TABLE discussion_index_assignees ADD COLUMN name_key TEXT NOT NULL DEFAULT '';")?;
+                }
                 context.install_schema(include_str!("schema.sql"))?;
                 State {
                     format: FORMAT,

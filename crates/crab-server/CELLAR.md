@@ -24,7 +24,7 @@ is buffered before owner dispatch so Cellar can safely retry stale routes; it is
 not forwarded as a non-replayable upload stream. Successful HTTP output
 uses the SDK output gate, including its ownership and durability checks.
 
-Repository assignment format 2 and discussion index format 4 require the explicit
+Repository assignment format 2 and discussion index format 5 require the explicit
 preparation described below. Other canonical records retain their formats.
 Transport requests and replies use bounded JSON. Mutation receipts store
 the payload digest and outcome in the same transaction as application writes.
@@ -119,6 +119,25 @@ state navigation. Definitions, assignments, counts and cursors continue to use
 the existing native transaction and revision contracts. Prepared format-2
 repositories need no additional rebuild for the label menu.
 
+## Assignee search preparation
+
+Discussion index format 5 adds `name` and folded `name_key` to its assignment
+projection. Explicit rebuild begins with constant-default column additions;
+[SQLite stores those defaults without rewriting existing rows](https://sqlite.org/lang_altertable.html#alter_table_add_column). Existing bounded
+clear/reprojection phases fill snapshots before indexed serving resumes. A
+format-4 index is rejected until preparation, with no serving fallback or
+canonical record conversion. Interrupted rebuilds resume through the same CLI.
+
+Native list inputs add ordered public-name/account-ID bindings; list output adds
+`assigned_to_me`. Repository read 263 returns up to 20 unique historical actor
+snapshots plus truncation. Private peer applications must deploy together.
+HTTP resolves public handles and the current qualified account through Directory
+reads 7/12, then native SQL applies IDs. Literal `actor/UUID` and wildcard terms
+need no Directory binding. Counts/cursors include resolved IDs; names grant no
+authority. Menu presentation merges current members and optional public profiles,
+then rechecks durable repository membership. Canonical assignment format 2 and
+Directory format 2 are unchanged.
+
 ## Assignment preparation
 
 Repository assignment format 2 stores stable Directory account IDs with explicit
@@ -167,7 +186,7 @@ As documented by [SQLite](https://www.sqlite.org/lang_altertable.html), renames
 only edit schema text; conversion never drops a column or rewrites
 whole discussion tables. The empty canonical count encoding also preserves the
 existing SQL default. Completion preserves record versions/content/submissions
-and requires an explicit format-4 search rebuild. That rebuild renames its actor
+and requires an explicit search rebuild. Format 4 renames its actor
 lookup column and clears/repopulates entries through its existing bounded phases. Serving never decodes the retired subject format or rebuilds the
 index implicitly. Readiness requires both assignment preparation and search
 preparation. No dependency versions or storage grants change in this upgrade.

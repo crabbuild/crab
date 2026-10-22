@@ -308,7 +308,7 @@ async fn list(
     let repo = repo.as_ref();
     let routed = app::repository_cell(&server, repo)?;
     let mut input = params.input("is:open")?;
-    super::discussion_search::resolve_authors(&server, &principal, &mut input).await?;
+    super::discussion_search::resolve_people(&server, &principal, &mut input).await?;
     let page = app::query_output(
         routed
             .client
@@ -334,7 +334,7 @@ async fn list(
         .map(|pull| pull_list_view(&authors, pull, &page.labels, &assignees))
         .collect::<Vec<_>>();
     Ok(Json(
-        json!({"items":items,"next":page.next,"counts":page.counts,"matching":page.matching,"navigation":page.navigation,"authored_by_me":page.authored_by_me}),
+        json!({"items":items,"next":page.next,"counts":page.counts,"matching":page.matching,"navigation":page.navigation,"authored_by_me":page.authored_by_me,"assigned_to_me":page.assigned_to_me}),
     ))
 }
 

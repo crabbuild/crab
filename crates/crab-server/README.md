@@ -168,14 +168,18 @@ account's public profile; `/-/users/{actor-uuid}` shows its stable public URL.
 The header's profile icon opens account settings. Initialize the shared directory
 before serving profiles or nonempty issue/PR lists, using
 `cells initialize-directory` against the running private mTLS listener. Existing assignment data also requires explicit
-`cells migrate-assignments` and a format-4 `cells rebuild-search`; nonempty records
+`cells migrate-assignments` and a current-format `cells rebuild-search`; nonempty records
 need qualified-identity mappings. See [assignment preparation](CELLAR.md#assignment-preparation).
 Users choose a username and display name; authentication claims are
 never published as profile fields. Changing a profile grants no repository or
 organization access. `-` is reserved as a server route owner.
 Issue/PR list authors link enrolled profiles by stable UUID and show their current
 handle; unenrolled authors keep their recorded display name. Detail/comment/
-review attribution, assignee profiles and actor-based filters remain unfinished.
+review attribution and additional participant predicates remain unfinished.
+Assignee metadata links public profiles; list filters support usernames, `@me`,
+`*`, `no:assignee` and explicit `actor/UUID` values. The searchable Assignee menu
+and assigned-to-me sidebar use native queries. Existing derived indexes require
+a format-5 rebuild; canonical assignments remain format 2.
 
 Generated links encode a slash-containing ref as one URL segment. Pasted paths
 with unescaped ref slashes resolve against the longest known ref. Raw Git

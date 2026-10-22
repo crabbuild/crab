@@ -40,6 +40,7 @@ pub(crate) struct SearchInput {
     pub sort: Sort,
     pub direction: Direction,
     pub authors: Vec<super::super::authors::Binding>,
+    pub assignees: Vec<super::super::assignees::Binding>,
 }
 impl Default for SearchInput {
     fn default() -> Self {
@@ -50,6 +51,7 @@ impl Default for SearchInput {
             sort: Sort::Created,
             direction: Direction::Desc,
             authors: Vec::new(),
+            assignees: Vec::new(),
         }
     }
 }
@@ -81,6 +83,7 @@ pub(crate) struct Page<T> {
     pub counts: StateCounts,
     pub matching: u64,
     pub authored_by_me: bool,
+    pub assigned_to_me: bool,
     pub navigation: super::super::navigation::StateNavigation,
     pub labels: Vec<LabelSummary>,
 }
@@ -165,6 +168,7 @@ struct Candidate {
 struct Bindings<'a> {
     values: Vec<SqlValue>,
     authors: &'a [super::super::authors::Binding],
+    assignees: &'a [super::super::assignees::Binding],
 }
 impl Bindings<'_> {
     fn bind(&mut self, value: SqlValue) -> String {
@@ -189,6 +193,9 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
     query
         .validate_authors(&input.authors)
         .map_err(crate::cells::Error::Invalid)?;
+    query
+        .validate_assignees(&input.assignees)
+        .map_err(crate::cells::Error::Invalid)?;
     let identity = context.sql(&SqlBatch {
         statements: vec![statement(
             "SELECT repository_uuid FROM repository_identity WHERE singleton = 1",
@@ -210,6 +217,7 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
         input.direction,
         &query.expression,
         &input.authors,
+        &input.assignees,
     ))?)
     .to_hex()
     .to_string();
@@ -229,6 +237,7 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
     }
     let mut bindings = Bindings {
         authors: &input.authors,
+        assignees: &input.assignees,
         ..Bindings::default()
     };
     let kind_clause = kind_filter(subject_kind, &mut bindings);
@@ -269,6 +278,7 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
         ))?;
     let mut bindings = Bindings {
         authors: &input.authors,
+        assignees: &input.assignees,
         ..Bindings::default()
     };
     let kind_clause = kind_filter(subject_kind, &mut bindings);
@@ -416,6 +426,7 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
         counts,
         matching,
         authored_by_me: query.authored_by_me(),
+        assigned_to_me: query.assigned_to_me(),
         navigation,
         labels,
     })
@@ -461,6 +472,19 @@ fn expression(expression: &Expression, bindings: &mut Bindings<'_>) -> String {
                     Some(identity) => {
                         let value = bindings.bind(SqlValue::Blob(identity.to_vec()));
                         format!("EXISTS (SELECT 1 FROM discussion_index_authors a WHERE a.document = d.rowid AND a.identity = {value})")
+                    }
+                    None => "0".into(),
+                }
+            }
+            Term::Assignee(name) => {
+                if name == "*" {
+                    return "EXISTS (SELECT 1 FROM discussion_index_assignees a WHERE a.document = d.rowid)".into();
+                }
+                let id = name.strip_prefix("actor/").map(str::to_owned).or_else(|| bindings.assignees.iter().find(|binding| binding.name == *name).and_then(|binding| binding.id).map(|id| id.to_string()));
+                match id {
+                    Some(id) => {
+                        let value = bindings.text(&id);
+                        format!("EXISTS (SELECT 1 FROM discussion_index_assignees a WHERE a.document = d.rowid AND a.actor = {value})")
                     }
                     None => "0".into(),
                 }

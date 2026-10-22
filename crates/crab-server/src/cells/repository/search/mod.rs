@@ -2,6 +2,7 @@
 
 use super::collaboration::{SubjectKind, SubjectState};
 
+pub(crate) mod assignees;
 pub(crate) mod authors;
 pub(crate) mod completion;
 pub(crate) mod index;
@@ -36,6 +37,7 @@ enum Expression {
 #[derive(Clone, Debug, serde::Serialize)]
 enum Term {
     Author(String),
+    Assignee(String),
     Text(String),
     Label(Vec<String>),
     Milestone(String),
@@ -210,6 +212,7 @@ fn atom_expression(atom: &str) -> Result<Expression, &'static str> {
         None => Term::Text(unquote(atom)?.to_lowercase()),
         Some((qualifier, value)) => match qualifier.to_ascii_lowercase().as_str() {
             "author" => Term::Author(authors::name(&unquote(value)?)?),
+            "assignee" => Term::Assignee(assignees::name(&unquote(value)?)?),
             "label" => Term::Label(label_names(value)?),
             "milestone" => Term::Milestone(unquote(value)?.to_lowercase()),
             "is" | "state" => match unquote(value)?.to_ascii_lowercase().as_str() {

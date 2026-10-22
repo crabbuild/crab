@@ -38,7 +38,10 @@ sorting/query-bound cursors, and explicit bounded preparation; `search/completio
 suggestions and browser UTF-16 replacement ranges. `search/milestones/` owns
 milestone projection/catalog reads, grammar-preserving facet destinations and
 the native choice read. `search/authors/` owns qualified identity digests,
-resolved binding validation, global author-facet destinations and personal-view selection. `search/labels/` owns bounded active-label choices and
+resolved binding validation, global author-facet destinations and personal-view selection. `search/assignees/` owns stable-ID predicates, resolved binding validation,
+historical snapshot choices and personal selection; `api/discussion_search/assignees/`
+resolves handles/current accounts and composes authorized filter choices.
+`search/labels/` owns bounded active-label choices and
 include/exclude/no-label transitions; it reuses the canonical label decoder.
 `search/navigation/` shares global-conjunction extraction, bounded destinations
 and choice records between facets and state controls. Canonical milestone

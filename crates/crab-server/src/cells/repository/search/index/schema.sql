@@ -49,6 +49,8 @@ CREATE INDEX IF NOT EXISTS discussion_index_label_lookup ON discussion_index_lab
 CREATE TABLE IF NOT EXISTS discussion_index_assignees (
     document INTEGER NOT NULL REFERENCES discussion_index(rowid) ON DELETE CASCADE,
     actor TEXT NOT NULL,
+    name TEXT NOT NULL,
+    name_key TEXT NOT NULL,
     PRIMARY KEY (document, actor)
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS discussion_index_assignee_lookup ON discussion_index_assignees(actor, document);

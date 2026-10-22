@@ -33,6 +33,7 @@ export interface DiscussionPage<T> {
   counts: { open: number; closed: number; merged: number };
   matching: number;
   authored_by_me: boolean;
+  assigned_to_me: boolean;
   navigation:
     | { kind: "results" }
     | {
@@ -160,15 +161,17 @@ export function DiscussionListControls({
         )}
       </div>
       <div className="ml-auto flex min-w-0 max-w-full flex-wrap items-center justify-end gap-1">
-        {(["authors", "labels", "milestones"] as const).map((kind) => (
-          <DiscussionFilter
-            key={kind}
-            kind={kind}
-            repo={repo}
-            query={discussionQuery(url, view)}
-            onSelect={(q) => change({ q })}
-          />
-        ))}
+        {(["authors", "labels", "milestones", "assignees"] as const).map(
+          (kind) => (
+            <DiscussionFilter
+              key={kind}
+              kind={kind}
+              repo={repo}
+              query={discussionQuery(url, view)}
+              onSelect={(q) => change({ q })}
+            />
+          ),
+        )}
         <DropdownMenu modal={false} open={sortOpen} onOpenChange={setSortOpen}>
           <DropdownMenuTrigger asChild>
             <Button variant="ghost" size="sm" aria-label="Sort discussions">

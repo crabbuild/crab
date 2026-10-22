@@ -42,6 +42,7 @@ async function fixture(page: Page) {
           items: kind === "issues" ? [issue, pull] : [pull],
           next: null,
           authored_by_me: false,
+          assigned_to_me: false,
           matching: kind === "issues" ? 2 : 1,
           counts: { open: 2, closed: 0, merged: 0 },
           navigation: {

@@ -36,6 +36,7 @@ export function DiscussionResults({
     view,
     discussionQuery(url, view),
     page.data?.authored_by_me,
+    page.data?.assigned_to_me,
   );
   const Icon = view === "issues" ? IssueOpenedIcon : GitPullRequestIcon;
   return (

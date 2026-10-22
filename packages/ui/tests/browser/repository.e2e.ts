@@ -731,6 +731,7 @@ test.beforeEach(async ({ page }) => {
             merged: 0,
           },
           authored_by_me: false,
+          assigned_to_me: false,
           matching: 1,
           navigation: {
             kind: "state",

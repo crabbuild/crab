@@ -411,6 +411,7 @@ export async function mockPullRequest(page: Page) {
             merged: matches && item.state === "merged" ? 1 : 0,
           },
           authored_by_me: false,
+          assigned_to_me: false,
           matching: matches ? 1 : 0,
           navigation: query
             ? { kind: "results" }
