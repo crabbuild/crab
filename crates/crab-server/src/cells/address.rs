@@ -11,6 +11,7 @@ use uuid::Uuid;
 pub(crate) enum Address {
     Repository(Uuid),
     Directory,
+    Organization(Uuid),
 }
 
 impl Address {
@@ -18,6 +19,7 @@ impl Address {
         match self {
             Self::Repository(id) => id.to_string(),
             Self::Directory => "directory".into(),
+            Self::Organization(id) => id.to_string(),
         }
     }
 
@@ -25,6 +27,7 @@ impl Address {
         match self {
             Self::Repository(_) => super::repository::CLASS,
             Self::Directory => super::directory::CLASS,
+            Self::Organization(_) => super::organization::CLASS,
         }
     }
 
@@ -32,6 +35,7 @@ impl Address {
         match self {
             Self::Repository(_) => super::repository::NAMESPACE,
             Self::Directory => super::directory::NAMESPACE,
+            Self::Organization(_) => super::organization::NAMESPACE,
         }
     }
 
@@ -39,12 +43,20 @@ impl Address {
         match self {
             Self::Repository(id) => format!("/repositories/{id}"),
             Self::Directory => "/directory".into(),
+            Self::Organization(id) => format!("/organizations/{id}"),
         }
     }
 
     pub(crate) fn parse(path: &str) -> super::Result<Self> {
         if path == "/directory" {
             return Ok(Self::Directory);
+        }
+        if let Some(id) = path.strip_prefix("/organizations/") {
+            return Uuid::parse_str(id)
+                .ok()
+                .filter(|id| !id.is_nil())
+                .map(Self::Organization)
+                .ok_or(super::Error::Invalid("Cell address is invalid"));
         }
         let id = path
             .strip_prefix("/repositories/")

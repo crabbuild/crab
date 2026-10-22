@@ -163,6 +163,7 @@ impl CellClient {
             match status {
                 StatusCode::OK => Ok(serde_json::from_slice(&bytes)?),
                 StatusCode::CONFLICT => Err(Error::RequestConflict),
+                StatusCode::FORBIDDEN => Err(Error::AccessDenied),
                 StatusCode::GONE => Err(Error::Expired),
                 StatusCode::PRECONDITION_FAILED => Err(Error::StaleRead),
                 StatusCode::PRECONDITION_REQUIRED => Err(Error::NotInitialized),
@@ -179,6 +180,7 @@ impl CellClient {
             Ok(Err(
                 error @ (Error::RequestConflict
                 | Error::Expired
+                | Error::AccessDenied
                 | Error::Invalid(_)
                 | Error::SchemaUnavailable
                 | Error::NotInitialized

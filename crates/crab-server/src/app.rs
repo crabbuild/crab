@@ -23,7 +23,7 @@ pub(crate) const MAX_NUMBER: u64 = 9_007_199_254_740_991;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
-    #[error("Sign in to use account profiles")]
+    #[error("Sign in to use account features")]
     SessionRequired,
     #[error("Repository permissions are temporarily unavailable")]
     Membership(#[source] Box<crate::catalog::CatalogError>),
@@ -47,6 +47,8 @@ pub(crate) enum Error {
     DraftPull,
     #[error("This content changed; reload before saving your draft")]
     Conflict,
+    #[error("This list changed; reload from the first page")]
+    PageChanged,
     #[error("The pull request changes conflict or its branch tips changed")]
     MergeConflict,
     #[error("Git writes are busy")]
@@ -209,7 +211,7 @@ impl IntoResponse for Error {
             Self::SessionRequired => (
                 StatusCode::UNAUTHORIZED,
                 "session_required",
-                "Sign in to use account profiles",
+                "Sign in to use account features",
             ),
             Self::ProfileHandleTaken => (
                 StatusCode::CONFLICT,
@@ -221,6 +223,11 @@ impl IntoResponse for Error {
                 "profile_exists",
                 "Your profile is already registered; reload to edit it",
             ),
+            Self::Cell(crate::cells::Error::AccessDenied) => (
+                StatusCode::FORBIDDEN,
+                "permission_required",
+                "Current membership does not permit this operation",
+            ),
             Self::Cell(crate::cells::Error::SchemaUnavailable) => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "schema_upgrade_required",
@@ -231,8 +238,13 @@ impl IntoResponse for Error {
                 "directory_unavailable",
                 "Profiles are not ready. Contact your server administrator.",
             ),
+            Self::PageChanged => (
+                StatusCode::CONFLICT,
+                "page_changed",
+                "This list changed; reload from the first page",
+            ),
             Self::Invalid(message) => (StatusCode::BAD_REQUEST, "invalid_request", *message),
-            Self::NotFound => (StatusCode::NOT_FOUND, "not_found", "Discussion not found"),
+            Self::NotFound => (StatusCode::NOT_FOUND, "not_found", "Resource not found"),
             Self::CommitNotFound => (StatusCode::NOT_FOUND, "not_found", "Commit not found"),
             Self::Forbidden => (
                 StatusCode::FORBIDDEN,
@@ -466,6 +478,19 @@ impl IntoResponse for Error {
         )
             .into_response()
     }
+}
+
+pub(crate) fn account(principal: &Principal) -> Result<crate::cells::directory::IdentityKey> {
+    // Git tokens are repository-scoped credentials, even when their issuing
+    // account can administer a repository. They cannot manage account identity.
+    if !(principal.is_user() || principal.is_local()) {
+        return Err(Error::SessionRequired);
+    }
+    let actor = principal.identity().ok_or(Error::SessionRequired)?;
+    Ok(crate::cells::directory::IdentityKey {
+        issuer: actor.issuer,
+        subject: actor.subject,
+    })
 }
 
 pub(crate) async fn admit(

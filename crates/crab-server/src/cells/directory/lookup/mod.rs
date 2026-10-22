@@ -95,3 +95,29 @@ impl Read for LookupProfiles {
 
 #[cfg(test)]
 mod tests;
+
+pub(crate) struct AccountsExist;
+impl Read for AccountsExist {
+    const CLASS: &'static str = super::CLASS;
+    const ID: u32 = 14;
+    type Input = Vec<Uuid>;
+    type Output = Vec<bool>;
+    fn execute(context: &mut Transaction<'_>, ids: Self::Input) -> Result<Self::Output> {
+        if ids.len() > 100 || ids.iter().any(Uuid::is_nil) {
+            return Err(Error::Invalid(
+                "Account lookup requires at most 100 valid actor IDs",
+            ));
+        }
+        ids.into_iter()
+            .map(|id| {
+                Ok(!context
+                    .query(
+                        "SELECT 1 FROM accounts WHERE id = ?",
+                        &[SqlValue::Blob(id.as_bytes().to_vec())],
+                    )?
+                    .rows
+                    .is_empty())
+            })
+            .collect()
+    }
+}

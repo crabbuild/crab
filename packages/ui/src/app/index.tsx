@@ -8,6 +8,10 @@ import { TooltipProvider } from "@/components/ui/tooltip";
 import { GitAccess } from "@/features/git-access";
 import { GitImport } from "@/features/imports";
 import { gitOwnerSuggestion } from "@/features/imports/source";
+import {
+  OrganizationPage,
+  OrganizationInvitation,
+} from "@/features/organizations";
 import { ProfileSettings, UserProfile } from "@/features/profile";
 import { CircleUserRoundIcon } from "lucide-react";
 import { RepositoryPage } from "@/features/repository/page";
@@ -100,7 +104,14 @@ export function App() {
     /^\/-\/users\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})$/i.exec(
       url.pathname,
     )?.[1];
-  const route = profileSettings || actorId ? undefined : repositoryRoute(url);
+  const organizationRoute =
+    /^\/-\/organizations\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(\/invitation)?$/i.exec(
+      url.pathname,
+    );
+  const route =
+    profileSettings || actorId || organizationRoute
+      ? undefined
+      : repositoryRoute(url);
   const session = useRequest<Session>("/api/session");
   const [signingOut, setSigningOut] = useState(false);
   const [sessionError, setSessionError] = useState<string>();
@@ -278,6 +289,21 @@ export function App() {
                   : "Continue to sign in"}
               </Button>
             </div>
+          ) : organizationRoute ? (
+            organizationRoute[2] ? (
+              <OrganizationInvitation
+                key={organizationRoute[1]}
+                id={organizationRoute[1]}
+                csrf={session.data.csrf ?? ""}
+              />
+            ) : (
+              <OrganizationPage
+                key={organizationRoute[1]}
+                id={organizationRoute[1]}
+                url={url}
+                csrf={session.data.csrf ?? ""}
+              />
+            )
           ) : profileSettings ? (
             <ProfileSettings
               csrf={session.data.csrf ?? ""}

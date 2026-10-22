@@ -70,7 +70,7 @@ single activity event is indexed into both timelines.
 The native runtime lives in `src/cells/runtime.rs`; `src/cells/client.rs` owns
 the authority-checked `CellClient` and target-bound read receipts.
 `src/cells/application.rs` owns shared `Transaction`, replay dispatch and the
-output gate. `src/cells/address.rs` identifies Repository and Directory targets;
+output gate. `src/cells/address.rs` identifies Repository, Directory and Organization targets;
 commands and reads declare their native class. Repository initialization lives
 in `src/cells/repository/schema.rs`, using the canonical `src/cells/schema.sql`.
 `cells/repository/assignments/` owns stable actor references and name snapshots;
@@ -97,6 +97,13 @@ before native reads and composes public choices with final membership checks.
 Directory read for lists, details and conversation responses; handlers recheck
 durable membership afterward. `api/issues/view.rs` owns issue/comment JSON
 presentation.
+`cells/organization/` owns native organization metadata, membership tombstones,
+versioned invitation decisions, indexed roster pages and transactional audit.
+`api/organizations/` owns account-to-actor resolution, late permission checks after
+Directory enrichment and browser routes. Explicit first-owner bootstrap belongs
+to `server/management/organizations.rs` and `cells bootstrap-organization`.
+Membership checks run inside the shared native transaction before receipt replay;
+repository grants stay catalog-owned. Public sessions cannot bootstrap authority.
 `src/api/profiles/` exposes session-authenticated profile reads/edits without
 exposing authentication claims. `src/server/management/directory.rs` owns explicit
 private initialization; serving never creates its schema implicitly. HTTP authorization and
@@ -154,7 +161,8 @@ Tests live under their owner: `api/tests.rs`, `auth/tests/`,
 `api/<feature>/tests.rs` (larger suites such as membership use `tests/mod.rs`), `auth/<feature>/tests.rs`, `catalog/tests.rs`,
 `cells/repository/<feature>/tests.rs`, `cells/directory/tests.rs`,
 `cells/directory/profiles/tests.rs`, `git/receive/tests/`, `git/lfs/tests.rs`,
-`cells/directory/lookup/tests.rs`, `cells/directory/search/tests.rs`,
+`cells/directory/lookup/tests.rs`, `cells/directory/search/tests.rs`, `cells/organization/tests/`,
+`api/organizations/tests/`,
 `cells/repository/search/authors/tests.rs`, `api/discussion_search/authors/tests.rs`,
 `api/profiles/attribution/tests.rs`,
 `api/pulls/tests/`, and `repository/tests/`. `server/peer_e2e_tests.rs`
@@ -189,7 +197,10 @@ are in `crab/scripts/check-crate-interface-builds.py` and
 - `crates/crab-server/REFERENCE.md` — detailed contracts and qualification history.
 - `crates/crab-server/Cargo.toml` — dependency and feature authority.
 
-Read `crates/crab-server/build.rs` and `packages/ui/package.json` for embedding changes. Dedicated image/service proof: `.github/workflows/http-server-container.yml`; native fetch proof: `.github/workflows/git-protocol-v2-partial-clone.yml`. Browser UI changes require their own frontend checks.
+Read `crates/crab-server/build.rs` and `packages/ui/package.json` for embedding changes. Dedicated image/service proof: `.github/workflows/http-server-container.yml`; native fetch proof: `.github/workflows/git-protocol-v2-partial-clone.yml`. Browser UI changes require their own frontend checks. The explicitly ignored
+`api::organizations::tests::browser` qualification requires `agent-browser` and
+built embedded UI assets; it drives two real OIDC sessions through invitation,
+consent and removal against isolated native Cells.
 
 Update this guide when entry points, ownership, invariants, features, or test
 routes change. Keep detailed API preconditions in rustdoc rather than copying

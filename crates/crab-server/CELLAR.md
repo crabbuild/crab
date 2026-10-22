@@ -14,8 +14,11 @@ is required before release; a smoke pass cannot qualify away the dependency bug.
 ## Execution and persistence
 
 The compiled application binds `REPOSITORIES` to one native `Repository` Cell
-per catalog UUID and `DIRECTORY` to a shared native `Directory` Cell. The latter
-stores private qualified account keys and chosen public actor profiles.
+per catalog UUID, `DIRECTORY` to a shared native `Directory` Cell, and
+`ORGANIZATIONS` to independent native `Organization` Cells. Directory stores
+private qualified account keys and chosen public actor profiles. Organization
+stores explicit membership and invitation authority; repository grants remain
+in the catalog.
 `cells/client.rs` sends bounded typed requests through native ingress and checks
 the operation's class and read receipt's target before routing.
 `cells/application.rs` shares transaction, replay and output handling; each
@@ -33,7 +36,7 @@ their receipt. Identical retries recover the original decision; conflicting
 payloads fail. Receipts expire after the request expiry plus a 24-hour retention
 window, with bounded pruning on subsequent mutations.
 
-Native target addresses now distinguish Repository UUIDs from Directory. This
+Native target addresses distinguish Repository and Organization UUIDs from Directory. This
 changes the private peer application envelope: upgrade the fleet together;
 mixed-version operation is not supported or qualified. The compiled script name
 and existing Repository class/namespace are unchanged because Cellar uses these
@@ -76,6 +79,58 @@ Enrollment reuses those IDs. Account registration grants no repository or other
 permissions. This is an identity foundation for assignment/participant/owner
 models; existing assignments convert through the explicit repository preparation
 described below. It is not a native grant cutover.
+
+## Organization authority
+
+Organization schema 1 lives in `cells/organization/schema.sql`. Prepare Directory,
+then explicitly bootstrap through the private mTLS listener:
+
+```sh
+crab-server --config server.toml cells bootstrap-organization \
+  --organization 01900000-0000-7000-8000-000000000001 \
+  --input-file organization.json
+```
+
+The JSON supplies `owner: {issuer, subject}`, `name` and optional `description`.
+Use a new organization UUID and the owner's exact provider-qualified account.
+Metadata is validated before account registration or schema creation. Bootstrap
+registers that stable account without enrolling a public profile; retries with
+identical intent preserve the organization. Different bootstrap intent conflicts.
+Neither a catalog owner string nor a public handle creates authority. Upgrade
+all peers before bootstrapping this new class; existing Repository/Directory
+schemas and identities do not change, and no rebuild is required.
+
+The returned `/-/organizations/{uuid}` page has People, Invitations and profile
+settings. Public APIs accept account sessions or local operator identity, never
+repository Git tokens. HTTP resolves the qualified account to its stable UUID;
+every native read/write checks current membership in its own transaction, before
+receipt replay. A demoted or removed owner cannot replay privileged reads/writes.
+Member and invitation pages seek indexed UUIDs with limits 1–50 and
+organization/revision-bound cursors. Public profile enrichment is bounded and
+followed by a current organization permission check.
+
+Owners edit/remove active memberships; the final owner cannot be removed or
+demoted. Removed memberships retain their versions. Subsequent membership is
+created only by accepting a versioned invitation. The authenticated recipient
+alone can accept/decline; cancellation or offer edits invalidate old decisions.
+Pending offers expire at seven days, may be edited without extending their
+deadline, and may be explicitly retried after expiry. They are organization-owned
+offers until cancellation/expiry, independent of the inviter's later role.
+Acceptance commits its offer state, membership version and audit event atomically.
+Reads do not mutate expired offers. Closed offers cannot regrant access after
+removal or disclose current organization metadata to a former member. Their
+recipient can still inspect the historical invitation status. Immutable activity entries share the command's SQL/KV transaction;
+no-ops and rejected operations append nothing.
+
+Invitations currently target registered accounts, with public-username search and
+a shareable acceptance link. There is no email delivery, organization owner-name
+registry/discovery, teams, organization deletion, personal-owner namespace, or
+repository/project grant inheritance yet. The native authority is groundwork for
+those features, not a claim of complete organization or Projects parity. There
+is no distributed transaction between Organization and Repository Cells; native
+repository authority fencing/cutover remains separate work.
+
+## Repository collaboration
 
 Discussion author enrichment uses the bounded native `LookupActors` read (Directory
 operation 6). It resolves qualified private keys into public UUID/handle/name

@@ -18,7 +18,7 @@ use crate::{
         Address,
         directory::{
             self, ActorProfile, CreateProfile, CreateProfileInput, EditProfile, EditProfileInput,
-            GetActor, GetOwnProfile, IdentityKey, ProfileOutcome,
+            GetActor, GetOwnProfile, ProfileOutcome,
         },
     },
     server::Server,
@@ -34,31 +34,18 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         .route_layer(middleware::from_fn_with_state(server, app::admit))
 }
 
-fn account_identity(principal: &Principal) -> Result<IdentityKey> {
-    // Git tokens are repository-scoped credentials, even when their issuing
-    // account can administer a repository. They cannot manage account identity.
-    if !(principal.is_user() || principal.is_local()) {
-        return Err(app::Error::SessionRequired);
-    }
-    let actor = principal.identity().ok_or(app::Error::SessionRequired)?;
-    Ok(IdentityKey {
-        issuer: actor.issuer,
-        subject: actor.subject,
-    })
-}
-
 async fn own(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
 ) -> Result<Json<Value>> {
-    let identity = account_identity(&principal)?;
+    let identity = app::account(&principal)?;
     let cells = server.cells().ok_or(app::Error::CellUnavailable)?;
     let profile = app::query_output(
         cells
             .query::<GetOwnProfile>(Address::Directory, None, identity)
             .await,
     )?;
-    account_identity(&principal)?;
+    app::account(&principal)?;
     Ok(Json(json!({"profile":profile})))
 }
 async fn actor(
@@ -66,11 +53,11 @@ async fn actor(
     Extension(principal): Extension<Principal>,
     Path(id): Path<Uuid>,
 ) -> Result<Json<ActorProfile>> {
-    account_identity(&principal)?;
+    app::account(&principal)?;
     let cells = server.cells().ok_or(app::Error::CellUnavailable)?;
     let profile = app::query_output(cells.query::<GetActor>(Address::Directory, None, id).await)?
         .ok_or(app::Error::NotFound)?;
-    account_identity(&principal)?;
+    app::account(&principal)?;
     Ok(Json(profile))
 }
 #[derive(Deserialize)]
@@ -93,7 +80,7 @@ async fn create(
     Extension(principal): Extension<Principal>,
     input: std::result::Result<Json<NewProfile>, JsonRejection>,
 ) -> Result<(StatusCode, Json<ActorProfile>)> {
-    let identity = account_identity(&principal)?;
+    let identity = app::account(&principal)?;
     let Json(input) = input.map_err(app::Error::Body)?;
     directory::validate_profile(&input.handle, &input.name).map_err(app::Error::Invalid)?;
     if input.request_id.is_nil() {
@@ -111,7 +98,7 @@ async fn create(
             .command::<CreateProfile>(Address::Directory, app::mutation_identity()?, input)
             .await,
     )?;
-    account_identity(&principal)?;
+    app::account(&principal)?;
     Ok((StatusCode::CREATED, Json(saved(outcome)?)))
 }
 async fn edit(
@@ -119,7 +106,7 @@ async fn edit(
     Extension(principal): Extension<Principal>,
     input: std::result::Result<Json<ProfileEdit>, JsonRejection>,
 ) -> Result<Json<ActorProfile>> {
-    let identity = account_identity(&principal)?;
+    let identity = app::account(&principal)?;
     let Json(input) = input.map_err(app::Error::Body)?;
     directory::validate_profile(&input.handle, &input.name).map_err(app::Error::Invalid)?;
     if !(1..=app::MAX_NUMBER).contains(&input.version) {
@@ -137,7 +124,7 @@ async fn edit(
             .command::<EditProfile>(Address::Directory, app::mutation_identity()?, input)
             .await,
     )?;
-    account_identity(&principal)?;
+    app::account(&principal)?;
     Ok(Json(saved(outcome)?))
 }
 fn saved(outcome: ProfileOutcome) -> Result<ActorProfile> {

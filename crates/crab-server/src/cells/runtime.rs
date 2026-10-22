@@ -13,7 +13,7 @@ use cellar::{
 };
 use tokio::net::TcpListener;
 
-use super::{CellClient, Error, Result, application, directory, repository};
+use super::{CellClient, Error, Result, application, directory, organization, repository};
 use crate::{CellDurabilityMode, Config};
 
 pub(crate) struct RunningCells {
@@ -232,10 +232,15 @@ fn graph() -> DeploymentGraph {
             stream_bindings: Vec::new(),
             src: String::new(),
             script_name: application::SCRIPT.into(),
-            do_classes: vec![repository::CLASS.into(), directory::CLASS.into()],
+            do_classes: vec![
+                repository::CLASS.into(),
+                directory::CLASS.into(),
+                organization::CLASS.into(),
+            ],
             bindings: vec![
                 (repository::NAMESPACE.into(), repository::CLASS.into()),
                 (directory::NAMESPACE.into(), directory::CLASS.into()),
+                (organization::NAMESPACE.into(), organization::CLASS.into()),
             ],
             sql_bindings: Vec::new(),
             kv_bindings: Vec::new(),

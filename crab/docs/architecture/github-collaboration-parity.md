@@ -20,7 +20,7 @@ assessment. Existing Fern test source was inspected, not executed here.
 
 | Surface                                 | Fern evidence, paths relative to Fern                                                                                                                                   | Crab evidence, paths relative to Crab                                                                                                                                                | Delivery consequence                                                                                                                                                 |
 | --------------------------------------- | ----------------------------------------------------------------------------------------------------------------------------------------------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ | -------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Identity and organization access        | `apps/web/worker/project-data.ts`: current principal, tenant membership, source ACL/version guards; `issue-types-data.ts`: organization-only catalog                    | `crates/crab-server/src/catalog/mod.rs`: repository catalog/members; `app.rs`: admission/membership; `cells/directory/`: native public profiles; `cells/runtime.rs`: Repository and Directory namespaces                                   | Add real public actor identities, owners, organizations, teams and project grants before organization planning UI. An owner string is not an organization authority. |
+| Identity and organization access        | `apps/web/worker/project-data.ts`: current principal, tenant membership, source ACL/version guards; `issue-types-data.ts`: organization-only catalog                    | `crates/crab-server/src/catalog/mod.rs`: repository catalog/members; `app.rs`: admission/membership; `cells/directory/`: native public profiles; `cells/runtime.rs`: Repository, Directory and Organization namespaces                                   | Complete owner registry, teams, repository/project grants and cross-authority fencing. Native organization membership and public actor identities are implemented. |
 | Issue lists and management              | `packages/contracts/src/issues.ts`, `issue-query.ts`; `apps/web/test/issues-authority.test.ts`: atomic bulk edits, closure time/reason, pins and replay                 | `cells/repository/issues.rs`, `search/`, `api/issues/`, `packages/ui/src/features/issues/`                                                                                           | Extend the canonical query/index and native commands; retain truthful counts, cursor invalidation and replay.                                                        |
 | Types and saved views                   | `packages/contracts/src/issue-types.ts`, `issues.ts`; `apps/web/worker/issue-types-data.ts`, `issue-views-data.ts`                                                      | No organization type catalog or durable saved-view owner                                                                                                                             | Implement organization-owned types and private/shared saved views with separate administration permissions.                                                          |
 | Hierarchy and dependencies              | `packages/contracts/src/issue-hierarchy.ts`, `issue-dependencies.ts`; `apps/web/worker/issue-hierarchy-data.ts`, `issue-dependency-data.ts`; related test suites        | `cells/repository/collaboration/links/` provides same-repository issue-to-PR related-work links                                                                                      | Parent/child, blocked-by/blocking, duplicate and related work need distinct typed invariants; existing links do not implement those semantics.                       |
@@ -75,13 +75,15 @@ read in the published dependency's `application/mod.rs`, `application/cells.rs`,
 and `application/storage/{transaction.rs,mod.rs}`. They support this direction;
 they do not supply a distributed project/repository transaction.
 
-Crab now registers `Repository`/`REPOSITORIES` and `Directory`/`DIRECTORY` in
+Crab registers `Repository`/`REPOSITORIES`, `Directory`/`DIRECTORY` and
+`Organization`/`ORGANIZATIONS` in
 `crates/crab-server/src/cells/{application,runtime}.rs`. Typed target addresses,
 class-bound commands/reads and target-bound read receipts share native ingress,
 transactions and replay handling. Directory has explicit private initialization
-and its own schema/dispatch. Organization and Project authorities, authorization
-and recovery remain new work; their UUIDs must not masquerade as Repository
-addresses or use its dispatch table.
+and its own schema/dispatch. Organization owns membership/invitation authority
+in its own native transactions. Project authority and cross-Cell recovery remain
+new work; its UUIDs must not masquerade as Repository addresses or use that
+dispatch table.
 
 Keep authoritative issue/PR content, versions, local metadata, activity and
 receipts in the existing Repository Cell. Project items store typed source
@@ -335,3 +337,20 @@ RustFS. All 113 browser scenarios and the affected native/HTTP suites pass; the
 [UI evidence](github-ui-parity.md#unified-conversation) records the exact scope.
 This advances the Issues/PR foundation; organization/team/project authority and
 the remaining Projects/Milestones/issue/review inventory are still incomplete.
+
+
+The organization foundation now has an independent native `Organization` class,
+explicit provider-qualified first-owner bootstrap, current transactional member/
+owner checks before receipt replay, membership tombstones, last-owner guards,
+seven-day versioned invitations and recipient consent. Native SQL/KV audit and
+state changes commit together. The shadcn/Geist People, Invitations, acceptance and
+settings pages use those APIs. Fern's organization membership/current-role model
+in `apps/web/worker/organization-data.ts` informed the ownership boundary; no Fern
+code or direct-add membership behavior was copied. GitHub's documented invitation
+acceptance/expiry contract informs consent and deadlines.
+
+This does not finish phase 1: owner registry/discovery, personal owner namespaces,
+teams, organization lifecycle/email invitations, repository authority cutover and
+cross-Cell fencing remain open. Catalog grants retain their existing authority;
+organization ownership grants no repository permissions. Existing issue/PR models
+are preserved, and Projects/type/saved-view/advanced-review parity remains pending.

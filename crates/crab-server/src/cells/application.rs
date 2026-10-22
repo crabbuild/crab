@@ -7,7 +7,7 @@ use serde_json::Value;
 use std::sync::Arc;
 use uuid::Uuid;
 
-use super::{Address, Error, Result, directory, repository};
+use super::{Address, Error, Result, directory, organization, repository};
 
 pub(crate) use cellar::sdk::storage::SqlValue;
 
@@ -273,6 +273,9 @@ impl Cell for ApplicationCell {
                         request.operation,
                         request.mutation.is_some(),
                     )?,
+                    Address::Organization(id) => {
+                        organization::initialize(&transaction, id, create)?
+                    }
                     Address::Directory => directory::initialize(
                         &transaction,
                         create,
@@ -301,6 +304,7 @@ impl Cell for ApplicationCell {
                         Some(Error::SchemaUnavailable) => 423,
                         Some(Error::NotInitialized) => 428,
                         Some(Error::StaleSearch) => 416,
+                        Some(Error::AccessDenied) => 403,
                         Some(Error::RequestConflict) => 409,
                         Some(Error::Expired) => 410,
                         Some(Error::StaleRead) => 412,
@@ -321,6 +325,14 @@ impl Cell for ApplicationCell {
 }
 
 fn execute(context: &mut Transaction<'_>, request: &Request) -> Result<Reply> {
+    if matches!(request.target, Address::Organization(_)) && request.operation != INITIALIZE {
+        organization::authorize(
+            context,
+            request.operation,
+            request.mutation.is_some(),
+            &request.input,
+        )?;
+    }
     let Some(identity) = request.mutation else {
         if request.operation == INITIALIZE {
             return Ok(Reply {
@@ -336,6 +348,9 @@ fn execute(context: &mut Transaction<'_>, request: &Request) -> Result<Reply> {
         let output = match request.target {
             Address::Repository(_) => {
                 repository::dispatch_read(context, request.operation, request.input.clone())?
+            }
+            Address::Organization(_) => {
+                organization::dispatch_read(context, request.operation, request.input.clone())?
             }
             Address::Directory => {
                 directory::dispatch_read(context, request.operation, request.input.clone())?
@@ -356,6 +371,7 @@ fn execute(context: &mut Transaction<'_>, request: &Request) -> Result<Reply> {
     let receipts = match request.target {
         Address::Repository(_) => "repository_command_receipts",
         Address::Directory => "directory_command_receipts",
+        Address::Organization(_) => "organization_command_receipts",
     };
     // Prune a bounded batch after the retry retention window so
     // receipts cannot grow forever or turn one command into an unbounded GC.
@@ -406,6 +422,11 @@ fn execute(context: &mut Transaction<'_>, request: &Request) -> Result<Reply> {
                     request.operation,
                     request.input.clone(),
                 )?,
+                Address::Organization(_) => organization::dispatch_mutation(
+                    &mut application,
+                    request.operation,
+                    request.input.clone(),
+                )?,
                 Address::Directory => directory::dispatch_mutation(
                     &mut application,
                     request.operation,
@@ -444,6 +465,9 @@ fn revision(context: &Transaction<'_>, target: Address) -> Result<u64> {
             "SELECT app_revision FROM repository_identity WHERE singleton = 1"
         }
         Address::Directory => "SELECT app_revision FROM directory_identity WHERE singleton = 1",
+        Address::Organization(_) => {
+            "SELECT app_revision FROM organization_identity WHERE singleton = 1"
+        }
     };
     let result = context.sql(&SqlBatch {
         statements: vec![SqlStatement {
@@ -495,6 +519,13 @@ pub(crate) fn compiled() -> Result<Arc<dyn Application>> {
         }))
     })
     .map_err(Error::sdk)?;
+    let registry = registry
+        .cell(organization::CLASS, |_, _| {
+            Ok(Arc::new(ApplicationCell {
+                class: organization::CLASS,
+            }))
+        })
+        .map_err(Error::sdk)?;
     Ok(Arc::new(registry))
 }
 

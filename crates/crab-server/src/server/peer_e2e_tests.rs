@@ -200,6 +200,25 @@ async fn qualify_handoff(
     let ProfileOutcome::Saved(profile) = &actor.output else {
         panic!("profile was rejected")
     };
+    use crate::cells::organization::{
+        self, Bootstrap, BootstrapInput, Caller, ChangeOutcome, GetOrganization,
+    };
+    let organization = Address::Organization(Uuid::now_v7());
+    first.cells.client.initialize(organization).await.unwrap();
+    let organization_input = BootstrapInput {
+        actor: profile.id,
+        name: "Peer organization".into(),
+        description: "Independent native authority".into(),
+    };
+    let bootstrapped = first
+        .cells
+        .client
+        .command::<Bootstrap>(organization, identity, organization_input.clone())
+        .await
+        .unwrap();
+    let ChangeOutcome::Applied(organization_record) = &bootstrapped.output else {
+        panic!("organization rejected");
+    };
     let created = cell
         .client
         .command::<CreateIssue>(&repository, identity, input.clone())
@@ -223,7 +242,40 @@ async fn qualify_handoff(
         .await
         .unwrap();
     assert_eq!(actor_read.output.as_ref(), Some(profile));
+    let organization_read = observer
+        .cells
+        .client
+        .query::<GetOrganization>(
+            organization,
+            Some(bootstrapped.receipt),
+            Caller { actor: profile.id },
+        )
+        .await
+        .unwrap();
+    assert_eq!(
+        organization_read.output.as_ref().unwrap().organization,
+        *organization_record
+    );
     first.stop(ShutdownMode::Handoff).await;
+    let organization_replay = remote
+        .client
+        .command::<Bootstrap>(organization, identity, organization_input)
+        .await
+        .unwrap();
+    assert_eq!(organization_replay, bootstrapped);
+    let organization_restored = remote
+        .client
+        .query::<GetOrganization>(
+            organization,
+            Some(organization_read.receipt),
+            Caller { actor: profile.id },
+        )
+        .await
+        .unwrap()
+        .output
+        .unwrap();
+    assert_eq!(organization_restored.role, organization::Role::Owner);
+    assert_eq!(organization_restored.organization, *organization_record);
     let actor_replay = remote
         .client
         .command::<CreateProfile>(Address::Directory, identity, profile_input)

@@ -20,6 +20,7 @@ use std::{
 
 mod assignments;
 mod directory;
+mod organizations;
 mod search;
 
 pub(crate) fn router(server: Arc<Server>, peers: Router) -> Router {
@@ -27,6 +28,7 @@ pub(crate) fn router(server: Arc<Server>, peers: Router) -> Router {
         .merge(search::routes())
         .merge(assignments::routes())
         .merge(directory::routes())
+        .merge(organizations::routes())
         .route("/healthz", get(|| async { Json(json!({"status": "ok"})) }))
         .route("/readyz", get(readiness))
         .route("/capacity", get(render_capacity))

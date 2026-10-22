@@ -68,3 +68,13 @@ with addons use `InputGroup`, menus compose their groups/items, and forms use
 `Field`/`FieldGroup`. The shared Button defaults to `type="button"`; mutations
 must opt into `type="submit"`. Keep native permission, version and replay checks
 in the server even when the UI disables an action.
+
+
+Organization foundation pages live in `src/features/organizations/` at
+`/-/organizations/{uuid}` and `/-/organizations/{uuid}/invitation`. The first owner
+is explicitly bootstrapped through the server's private management CLI; opening a
+page never creates authority. People, pending invitations, recipient decisions
+and profile settings use native organization APIs with version checks. Public
+username search selects stable accounts; invitations currently use a manually
+shared link, with no email delivery. Organization discovery, owner-name routing,
+teams and cross-repository Projects are still separate work.

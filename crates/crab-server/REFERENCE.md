@@ -2217,3 +2217,40 @@ The interface follows these upstream contracts:
 - [GitHub repository archive behavior](https://docs.github.com/en/repositories/archiving-a-github-repository/archiving-repositories)
 
 The OIDC dependency includes `rsa` for public-key signature verification. [RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071.html) concerns private-key timing leakage. This relying party holds no RSA signing keys and decrypts no RSA ciphertext. The test issuer uses Ed25519 only in the test harness. No advisory suppression or dependency override is present; a complete dependency audit remains part of production qualification.
+
+
+## Organization authority foundation
+
+The new `Organization` native class uses schema 1 under `cells/organization/` and
+shares the Cellar transaction, receipt and output gate. Explicit private
+`cells bootstrap-organization --organization UUID --input-file JSON` resolves the
+first owner's exact `{issuer, subject}` through Directory without profile
+enrollment. It returns `/-/organizations/UUID`. Public HTTP has no bootstrap route.
+
+`/api/organizations/{id}` reads/edits metadata; `/members` lists bounded current
+members, and `/members/{actor}` changes/removes active grants with expected
+membership versions. `/invitations` lists bounded pending/expired offers;
+`/invitations/candidates` searches public usernames;
+`/invitations/{recipient}` reads, creates/edits/retries or cancels an offer.
+`/invitation` reads/decides only the authenticated recipient's offer. Bodies deny
+unknown fields. Repository Git tokens cannot access these account features.
+Native authorization precedes receipt replay and mutations; last-owner guards,
+invitation decisions, membership tombstones and audit append are transactional.
+
+Organization authority grants no catalog repository access. Registered-account
+invitations currently use manually shared acceptance links; email delivery,
+owner-name discovery, teams, owner registry and cross-authority repository/project
+fencing remain unfinished. See `CELLAR.md` for preparation, expiry and coordinated
+deployment contracts. Native tests live in `cells/organization/tests/`, HTTP tests
+in `api/organizations/tests/`, and browser fixtures in
+`packages/ui/tests/browser/organizations.e2e.ts`. The process qualifier also covers
+private bootstrap, metadata persistence, profile enrichment and last-owner denial.
+
+The manual `api::organizations::tests::browser` qualification uses two actual
+browser/OIDC sessions and the embedded bundle. With `agent-browser` available,
+build the UI, set the checkout's mounted `CARGO_TARGET_DIR`, and run
+`cargo test -p crab-server --locked --lib api::organizations::tests::browser -- --ignored --nocapture`.
+It creates a public profile, creates/accepts an invitation, observes the native
+membership and checks that removal hides current metadata while retaining only
+the recipient's historical decision. Browser cleanup is bounded and scoped to
+its own sessions. The normal suite ignores it because it needs an external browser.

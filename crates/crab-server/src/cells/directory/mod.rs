@@ -21,7 +21,9 @@ mod lookup;
 mod search;
 pub(crate) use search::{CompleteHandles, ResolveHandles, validate_handle_prefix};
 mod profiles;
-pub(crate) use lookup::{ActorSummary, LookupAccounts, LookupActors, LookupProfiles};
+pub(crate) use lookup::{
+    AccountsExist, ActorSummary, LookupAccounts, LookupActors, LookupProfiles,
+};
 pub(crate) use profiles::{
     CreateProfile, CreateProfileInput, EditProfile, EditProfileInput, ProfileOutcome,
     validate_handle, validate_profile,
@@ -214,6 +216,7 @@ pub(in crate::cells) fn dispatch_read(
     input: Value,
 ) -> Result<Value> {
     match id {
+        <AccountsExist as Read>::ID => invoke_read::<AccountsExist>(context, input),
         <LookupAccounts as Read>::ID => invoke_read::<LookupAccounts>(context, input),
         <LookupProfiles as Read>::ID => invoke_read::<LookupProfiles>(context, input),
         #[cfg(test)]

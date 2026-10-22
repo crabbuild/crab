@@ -292,12 +292,37 @@ with open(run / "commands.log", "w") as log:
         server = start()
         wait()
         cmd(server_command("cells", "initialize-directory"), env=env)
+        organization_id = str(uuid.uuid4())
+        organization_bootstrap = run / "organization.json"
+        organization_bootstrap.write_text(json.dumps({"owner": {"issuer": "urn:crab:local", "subject": "operator"}, "name": "Qualification organization", "description": "Native authority"}))
+        organization_command = server_command("cells", "bootstrap-organization", "--organization", organization_id, "--input-file", organization_bootstrap)
+        organization_created = json.loads(subprocess.check_output(organization_command, env=env, text=True))
+        organization_root = "/api/organizations/" + organization_id
+        organization_before = request(organization_root)
+        assert organization_before["role"] == "owner"
+        assert organization_before["actor"] == organization_created["owner"]
+        assert organization_created["url"] == "/-/organizations/" + organization_id
+        assert json.loads(subprocess.check_output(organization_command, env=env, text=True)) == organization_created
+        organization_before["organization"] = request(organization_root, {"version": organization_before["organization"]["version"], "name": "Qualification organization renamed", "description": "Persisted across process restart"}, method="PATCH")
+        organization_members = request(organization_root + "/members")
+        assert len(organization_members["items"]) == 1
+        assert organization_members["items"][0]["profile"] is None
+        assert organization_members["can_manage"] is True
+        try:
+            request(organization_root + "/members/" + organization_created["owner"], {"version": 1}, method="DELETE")
+        except urllib.error.HTTPError as error:
+            assert error.code == 400
+        else:
+            raise AssertionError("the last organization owner must survive")
         assert request("/api/profile") == {"profile": None}
         profile_input = {"request_id": str(uuid.uuid4()), "handle": "qualification-actor", "name": "Qualification actor"}
         actor_profile = request("/api/profile", profile_input)
         profile_id = actor_profile["id"]
         actor_profile = request("/api/profile", {"version": actor_profile["version"], "handle": "qualification-actor-renamed", "name": "Qualification actor renamed"}, method="PATCH")
         assert actor_profile["id"] == profile_id
+        organization_members = request(organization_root + "/members")
+        assert organization_members["items"][0]["actor"] == profile_id
+        assert organization_members["items"][0]["profile"]["handle"] == actor_profile["handle"]
         assert request("/api/profile", profile_input) == actor_profile
         body = {
             "request_id": str(uuid.uuid4()),
@@ -414,6 +439,8 @@ with open(run / "commands.log", "w") as log:
         server = start()
         wait()
         assert request("/api/profile")["profile"] == actor_profile
+        assert request(organization_root) == organization_before
+        assert request(organization_root + "/members") == organization_members
         assert request("/api/actors/" + profile_id) == actor_profile
         assert request("/api/repos/team/project/issues?q=is%3Aissue")["items"][0]["author"] == author_summary
         restored = request(f"/api/repos/team/project/issues/{number}")
@@ -484,6 +511,8 @@ with open(run / "commands.log", "w") as log:
         building = index_request({"action": "begin", "expected": previous_index["generation"], "generation": generation})
         assert building["state"] == "building"
         assert request("/api/profile")["profile"] == actor_profile
+        assert request(organization_root) == organization_before
+        assert request(organization_root + "/members") == organization_members
         index_request({"action": "step", "generation": generation, "version": building["progress"]["version"]})
         try:
             request(issue_search)
@@ -570,6 +599,10 @@ with open(run / "commands.log", "w") as log:
             "image_ref": args.image,
             "repository_creation": True,
             "issue_replay": True,
+            "organization_explicit_bootstrap": True,
+            "organization_metadata_restart": True,
+            "organization_last_owner_guard": True,
+            "organization_profile_enrichment_restart": True,
             "actor_directory_restart": True,
             "actor_profile_retry": True,
             "actor_attribution_restart": True,

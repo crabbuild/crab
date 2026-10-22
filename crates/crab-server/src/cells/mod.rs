@@ -6,6 +6,7 @@ pub(crate) mod application;
 mod client;
 pub(crate) mod directory;
 mod initializer;
+pub(crate) mod organization;
 mod records;
 pub(crate) mod runtime;
 pub(crate) use initializer::initialize_repository;
@@ -43,6 +44,8 @@ pub enum Error {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },
+    #[error("Current Cell membership does not permit this operation")]
+    AccessDenied,
     #[error("Cell has not reached the requested revision")]
     StaleRead,
     #[error("discussion cursor no longer matches the index snapshot or query")]

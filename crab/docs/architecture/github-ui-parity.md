@@ -769,3 +769,50 @@ records after resumption. Both preview repositories were explicitly upgraded;
 activity actor DTO. No profile was enrolled, no Fern code copied, and Cloudflare
 compute remains off. Complete parity, Projects/organization authorities, advanced
 review/merge workflows, moderation, notifications and bulk/saved views remain open.
+
+
+## Organization authority foundation
+
+`cells/organization/` owns metadata, current member/owner grants, membership
+versions/tombstones, versioned seven-day invitations and transactional SQL/KV
+audit. Explicit private bootstrap registers the first owner's qualified account
+without profile enrollment. Native checks precede reads, writes and receipt
+replay. Invitations require the exact recipient's consent; direct member edits
+cannot create grants, removal cannot be undone by old offers, and the final owner
+cannot be removed/demoted. Closed offers retain recipient history without
+returning current organization metadata to a former member. Collection/revision/
+organization-bound cursors keep member and invitation pages distinct and bounded.
+
+The shadcn/Geist People, Invitations, acceptance and settings views use these
+APIs. Drafts survive version conflicts until the user reviews saved metadata;
+links currently provide invitation delivery. The embedded server now recognizes
+organization and public-profile deep links in its reserved account namespace.
+Repository grants remain exclusively catalog-owned; organization ownership
+creates no repository permissions. No owner is inferred from a catalog name.
+
+Verification includes 146 native Cell regression checks, 86 HTTP checks, three
+asset checks, strict all-target Clippy, architecture gates, Rustfmt, frontend/
+server builds and 107 UI unit checks. All 116 existing browser scenarios passed;
+seven final focused checks cover the nullable history response and related
+profile flows. Thirteen final native/HTTP organization checks cover current
+permissions, qualified identities, consent, stale versions, cancellation races,
+last-owner protection, cursors, audit and restart. Object/fleet peer qualification
+also exercised Organization alongside Repository and Directory through mTLS and
+owner handoff.
+
+The explicitly run two-account browser/OIDC qualification exercises the actual
+embedded UI and APIs: public-profile enrollment, invitation, recipient consent,
+visible member roster, removal and access-scoped historical display. Driver
+readiness waits cover asynchronous username/offer reads; no request mocking or
+permission bypass is used. A separate final RustFS process run saved organization
+metadata through the browser, displayed the last-owner error, restarted and
+re-read the saved profile in the browser. It also retained issue/PR/Git/search/
+rebuild behavior across restart, with 79 durable native objects. Desktop and
+390px screenshots were inspected; its owned services and browsers were closed.
+
+This is phase-1 groundwork, not complete GitHub parity. Owner discovery/registry,
+personal namespaces, teams, full organization lifecycle/email delivery, native
+repository grant cutover and cross-Cell fencing remain unfinished. Projects,
+organization issue types, advanced review/merge flows and the remaining Issues/
+Milestones inventory still follow the collaboration plan. Cellar's documented
+SQLite WAL-reset release blocker remains unchanged.

@@ -12,11 +12,20 @@ pub(crate) async fn serve(request: Request) -> Response {
     }
     let path = request.uri().path().trim_start_matches('/');
     let asset = ASSETS.iter().find(|(name, _)| *name == path);
-    // Repository deep links must survive reloads. Reserve service namespaces
+    // Application deep links must survive reloads. Reserve service namespaces
     // and recognize only browser pages so missing APIs/assets still return 404.
     let components: Vec<_> = path.trim_end_matches('/').split('/').collect();
+    let account_route = match components.as_slice() {
+        ["-", "profile"] => true,
+        ["-", "users" | "organizations", id] | ["-", "organizations", id, "invitation"] => {
+            uuid::Uuid::parse_str(id).is_ok_and(|id| !id.is_nil())
+        }
+        _ => false,
+    };
     let application_route = path.is_empty()
+        || account_route
         || (components.len() >= 2
+            && components[0] != "-"
             && components[0] != "api"
             && components[0] != "assets"
             && components[0] != "auth"
@@ -114,6 +123,29 @@ mod tests {
             ("/team/repo.name/compare/main...feature%2Fx", StatusCode::OK),
             ("/team/repo.name/releases/tag/v1.0.0", StatusCode::OK),
             ("/team/repo.name/settings/access", StatusCode::OK),
+            ("/-/profile", StatusCode::OK),
+            (
+                "/-/users/01900000-0000-7000-8000-000000000001",
+                StatusCode::OK,
+            ),
+            (
+                "/-/organizations/01900000-0000-7000-8000-000000000001",
+                StatusCode::OK,
+            ),
+            (
+                "/-/organizations/01900000-0000-7000-8000-000000000001/invitation",
+                StatusCode::OK,
+            ),
+            ("/-/organizations/not-a-uuid", StatusCode::NOT_FOUND),
+            (
+                "/-/organizations/00000000-0000-0000-0000-000000000000",
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                "/-/organizations/01900000-0000-7000-8000-000000000001/unknown",
+                StatusCode::NOT_FOUND,
+            ),
+            ("/-/unknown", StatusCode::NOT_FOUND),
             ("/team/repo.name/unknown.js", StatusCode::NOT_FOUND),
             ("/assets/missing.js", StatusCode::NOT_FOUND),
             ("/assets/repo/blob/main/missing.js", StatusCode::NOT_FOUND),

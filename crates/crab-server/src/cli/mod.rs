@@ -80,6 +80,13 @@ enum CellsCommand {
         #[arg(long)]
         identities_file: PathBuf,
     },
+    /// Bootstrap native organization authority with an explicit qualified owner.
+    BootstrapOrganization {
+        #[arg(long)]
+        organization: uuid::Uuid,
+        #[arg(long)]
+        input_file: PathBuf,
+    },
     /// Print the resource-derived Cell admission envelope.
     Capacity {
         #[arg(long, required = true)]
@@ -240,6 +247,28 @@ async fn cells(config: &crab_server::Config, command: CellsCommand) -> crab_serv
         } => assignments::migrate(config, &owner, &name, mappings_file.as_deref()).await?,
         CellsCommand::InitializeDirectory => {
             management_request(config, reqwest::Method::POST, "/internal/directory", None)
+                .await?
+                .bytes()
+                .await
+                .map_err(|source| crab_server::Error::Healthcheck { source })?
+                .to_vec()
+        }
+        CellsCommand::BootstrapOrganization {
+            organization,
+            input_file,
+        } => {
+            let mut bytes = Vec::new();
+            std::fs::File::open(input_file)?
+                .take(32 * 1024 + 1)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() > 32 * 1024 {
+                return Err(crab_server::Error::Config(
+                    "Organization bootstrap input exceeds 32 KiB",
+                ));
+            }
+            let input: serde_json::Value = serde_json::from_slice(&bytes)?;
+            let path = format!("/internal/organizations/{organization}");
+            management_request(config, reqwest::Method::POST, &path, Some(&input))
                 .await?
                 .bytes()
                 .await
