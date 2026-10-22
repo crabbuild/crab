@@ -1384,6 +1384,17 @@ jobs:
             --work-dir "${RUNNER_TEMP}/crab-s3-gateway-ecosystem" \
             --report "${RUNNER_TEMP}/crab-s3-gateway-evidence/ecosystem-proof.json"
 
+      - name: Qualify sustained native repository writes
+        env:
+          S3_GATEWAY_WORKLOAD_ACCESS_KEY: ${{ env.GATEWAY_ACCESS_KEY }}
+          S3_GATEWAY_WORKLOAD_SECRET_KEY: ${{ env.GATEWAY_SECRET_KEY }}
+        run: |
+          python3 -B crab/scripts/e2e/s3_gateway_workload.py \
+            --gateway-endpoint http://127.0.0.1:18080 \
+            --gateway-bucket gateway-native-repository \
+            --duration-seconds 300 --window-seconds 30 --writers 16 \
+            --report "${RUNNER_TEMP}/crab-s3-gateway-evidence/native-soak-proof.json"
+
       - name: Qualify sustained signed writes
         id: soak
         if: ${{ github.event_name == 'workflow_dispatch' && inputs.sustained_soak }}
@@ -1685,6 +1696,7 @@ jobs:
         run: |
           set -euo pipefail
           report_root="${RUNNER_TEMP}/crab-s3-gateway-evidence"
+          git status --short --untracked-files=all
           qualification_root="${RUNNER_TEMP}/crab-s3-gateway-client"
           gateway_image_id="$(docker image inspect crab-s3-gateway:test \
             --format '{{.Id}}' 2>/dev/null || printf unavailable)"
@@ -1881,6 +1893,7 @@ jobs:
             ${{ runner.temp }}/crab-s3-gateway-evidence/report.json
             ${{ runner.temp }}/crab-s3-gateway-evidence/boto3-proof.json
             ${{ runner.temp }}/crab-s3-gateway-evidence/boto3-native-proof.json
+            ${{ runner.temp }}/crab-s3-gateway-evidence/native-soak-proof.json
             ${{ runner.temp }}/crab-s3-gateway-evidence/ecosystem-proof.json
             ${{ runner.temp }}/crab-s3-gateway-evidence/soak-proof.json
             ${{ runner.temp }}/crab-s3-gateway-evidence/owner-proof.json
