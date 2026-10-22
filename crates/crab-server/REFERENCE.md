@@ -2105,6 +2105,13 @@ active decision and appends one conversation event. An older dismissal cannot
 erase a newer decision or revive a prior approval. Merge publication blocks
 fresh dismissals until its reservation resolves.
 
+The configured version-zero policy applies before the first administrative save,
+as it does for merge and Git publication. Native dismissal receives that initial
+branch classification from HTTP composition; rules saved in the native transaction
+take precedence, including an explicitly empty set. Review create/edit/detail/list
+and conversation capabilities use the same precedence. This retains the existing
+configuration seed contract; native cross-Cell authority fencing remains separate.
+
 Public review details, lists and conversation entries expose effective state
 `dismissed`, nullable `dismissal: {author, body, created_at}` and `can_dismiss`.
 Original submitted state/body remain available to their native receipt contract;

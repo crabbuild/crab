@@ -1269,3 +1269,32 @@ recoverable shadcn interaction. Submitted review commands remain under one owner
 the duplicate HTTP review record/converter was deleted. Original receipt formats
 remain canonical. No dependency, lockfile, environment option or compatibility
 reader was added.
+
+### Configured protection precedence
+
+Tracing review-status filters exposed a dismissal permission mismatch: merge and
+Git publication honored configured initial branch protections, while dismissal
+treated an absent saved policy as unprotected. The prior binary reproduced a
+Write user's visible dismissal action and successful mutation for a configured
+protected branch. Native snapshot details now distinguish absent rules from an
+explicitly empty saved set and carry the exact base ref. HTTP supplies the initial
+branch classification; the command applies current stored rules ahead of that
+classification in its transaction. Review controls share this precedence across
+create/edit responses, details, lists and conversation entries. The existing
+version-zero configuration contract remains; no new fallback or policy format
+was added.
+
+Native and two-user HTTP regression cases prove configured denial, explicit
+clearing, saved protection overriding an unprotected seed, and recovery after
+seed/role changes. The full library suite passed 456 tests with six existing
+opt-in qualifications ignored; the seven focused dismissal cases and strict
+all-target Clippy also passed. This correction adds 27 production lines for
+policy provenance and the shared capability composition, without changing public
+review fields, SQL storage, dependencies or receipt formats.
+
+The current binary passed the real two-account RustFS/browser scenario: configured
+protection hid the writer's action and returned a proven 403 rejection; saving an
+empty rule set exposed the action and allowed dismissal. Its lost reply recovered
+after Write revocation, archive and process restart, retaining the reason and one
+event. The final binary runs in the local preview, where all 18 captured canonical
+resources remained identical through restart and no profile was enrolled.

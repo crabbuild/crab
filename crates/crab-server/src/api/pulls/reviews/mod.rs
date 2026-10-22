@@ -28,6 +28,15 @@ fn same_author(left: &Identity, right: &Identity) -> bool {
     left.issuer == right.issuer && left.subject == right.subject
 }
 
+fn configured_protected(repo: &crate::repository::Repository, base_ref: &str) -> bool {
+    base_ref.strip_prefix("refs/heads/").is_some_and(|branch| {
+        repo.config
+            .protected_branches
+            .iter()
+            .any(|rule| rule.branch == branch)
+    })
+}
+
 pub(super) fn routes() -> Router<Arc<Server>> {
     Router::new()
         .merge(dismissals::routes())
@@ -58,11 +67,14 @@ pub(in crate::api) fn review_view(
     actor: &Identity,
     current_head: Option<&str>,
     reactions: &reactions::View,
-    can_write: bool,
-    can_admin: bool,
+    principal: &Principal,
+    repo: &crate::repository::Repository,
 ) -> Value {
     let review = &detail.review;
     let state = state(review.state, detail.dismissal.is_some());
+    let admin_required = detail
+        .admin_required
+        .unwrap_or_else(|| configured_protected(repo, &detail.base_ref));
     json!({
         "number": review.number,
         "author": authors.view(&review.author),
@@ -74,7 +86,7 @@ pub(in crate::api) fn review_view(
             "body": value.body,
             "created_at": value.created_at_ms,
         })),
-        "can_dismiss": detail.dismissible && can_write && (!detail.admin_required || can_admin),
+        "can_dismiss": detail.dismissible && principal.can_write(repo.id) && (!admin_required || principal.can_admin(repo.id)),
         "commit_oid": review.commit_oid,
         "current": current_head.map(|oid| oid == review.commit_oid),
         "version": review.version,
@@ -164,8 +176,8 @@ async fn list(
                 &actor,
                 head.as_deref(),
                 &reactions,
-                principal.can_write(repo.id),
-                principal.can_admin(repo.id),
+                &principal,
+                repo,
             )
         })
         .collect::<Vec<_>>();
@@ -272,8 +284,8 @@ async fn create(
             &actor,
             head.as_deref(),
             &reaction,
-            principal.can_write(repo.id),
-            principal.can_admin(repo.id),
+            &principal,
+            repo,
         )),
     ))
 }
@@ -315,8 +327,8 @@ async fn detail(
         &actor,
         head.as_deref(),
         &reaction,
-        principal.can_write(repo.id),
-        principal.can_admin(repo.id),
+        &principal,
+        repo,
     )))
 }
 
@@ -381,8 +393,8 @@ async fn edit(
         &actor,
         head.as_deref(),
         &reaction,
-        principal.can_write(repo.id),
-        principal.can_admin(repo.id),
+        &principal,
+        repo,
     )))
 }
 

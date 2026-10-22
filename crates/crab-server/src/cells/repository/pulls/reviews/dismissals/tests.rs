@@ -87,6 +87,7 @@ fn input(review: &PullReviewRecord) -> Input {
         body: "The concern has been addressed.".into(),
         can_write: true,
         can_admin: false,
+        configured_protected: false,
     }
 }
 async fn events(
@@ -264,7 +265,7 @@ async fn protected_branch_policy_versions_and_invalid_states_leave_no_dismissal(
     )
     .await
     .unwrap();
-    assert!(detail.admin_required && detail.dismissal.is_none());
+    assert!(detail.admin_required == Some(true) && detail.dismissal.is_none());
     let mut allowed = input(&approval);
     allowed.can_admin = true;
     assert_eq!(
@@ -299,6 +300,7 @@ async fn permanent_recovery_does_not_reapply_the_dismissal_after_a_new_review_or
     retry.actor.name = "Renamed writer".into();
     retry.can_write = false;
     retry.can_admin = false;
+    retry.configured_protected = true;
     assert_eq!(
         write::<DismissReview>(&cell, retry).await,
         Outcome::Dismissed
@@ -508,6 +510,63 @@ async fn original_review_receipts_replay_without_restoring_a_dismissed_decision(
             .unwrap()
             .review_decisions
             .is_empty()
+    );
+    fixtures::close(&server).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn persisted_protections_override_the_configured_seed_in_both_directions() {
+    let server = fixtures::fixture().await;
+    let cell = cell(&server);
+    seed(&cell).await;
+    let approval = review(&cell, "Bob", ReviewState::Approved).await;
+    let mut configured = input(&approval);
+    configured.configured_protected = true;
+    assert_eq!(
+        write::<DismissReview>(&cell, configured.clone()).await,
+        Outcome::Forbidden
+    );
+    let original = read::<GetReviewDetail>(&cell, configured.key.clone())
+        .await
+        .unwrap();
+    assert_eq!(
+        (original.base_ref.as_str(), original.admin_required),
+        ("refs/heads/main", None)
+    );
+    write::<ReplaceBranchProtections>(
+        &cell,
+        ReplaceBranchProtectionsInput {
+            expected_version: 0,
+            rules: vec![],
+        },
+    )
+    .await;
+    assert_eq!(
+        write::<DismissReview>(&cell, configured).await,
+        Outcome::Dismissed
+    );
+    let approval = review(&cell, "Bob", ReviewState::Approved).await;
+    write::<ReplaceBranchProtections>(
+        &cell,
+        ReplaceBranchProtectionsInput {
+            expected_version: 1,
+            rules: vec![BranchProtectionRecord {
+                branch: "main".into(),
+                required_approvals: 1,
+                required_checks: vec![],
+            }],
+        },
+    )
+    .await;
+    assert_eq!(
+        write::<DismissReview>(&cell, input(&approval)).await,
+        Outcome::Forbidden
+    );
+    let mut admin = input(&approval);
+    admin.can_admin = true;
+    assert_eq!(
+        write::<DismissReview>(&cell, admin).await,
+        Outcome::Dismissed
     );
     fixtures::close(&server).await;
 }

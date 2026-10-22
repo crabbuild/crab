@@ -669,3 +669,10 @@ SQL stores the complete reason under the existing body limit. Detail/conversatio
 pages include it in their byte budget before admitting an entry, so large reasons
 remain paged and complete. Current catalog grants still supply capabilities;
 this does not implement native cross-Cell grant fencing or new team restrictions.
+
+Before protections are saved, HTTP composition supplies the configured initial
+branch classification. The command prefers stored rules from its own transaction;
+an empty saved set overrides the initial policy. Review snapshot details preserve
+the distinction between absent and empty rules and include the exact base ref for
+public capability composition. Update serving peers together for this private
+native input/read contract; no persisted schema or receipt rewrite is needed.

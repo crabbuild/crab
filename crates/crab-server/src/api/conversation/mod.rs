@@ -171,8 +171,8 @@ async fn page(
                         &actor,
                         head.as_deref(),
                         &reaction,
-                        principal.can_write(repo.id),
-                        principal.can_admin(repo.id),
+                        &principal,
+                        &repo,
                     ),
                 ),
                 Entry::Activity(_) => {

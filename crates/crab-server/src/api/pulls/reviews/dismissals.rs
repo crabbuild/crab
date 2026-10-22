@@ -32,6 +32,11 @@ async fn dismiss(
         Err(error) => return Ok(write::rejected(error)),
     };
     let principal = app::membership(&server, &principal, &repo).await?.principal;
+    let pull_number = app::number(pull)?;
+    let pull = storage::pull(&server, &repo, pull_number)
+        .await?
+        .ok_or(Error::NotFound)?;
+    let configured_protected = configured_protected(&repo, &pull.base_ref);
     let cell = app::repository_cell(&server, &repo)?;
     let outcome = app::command_output(
         cell.client
@@ -41,7 +46,7 @@ async fn dismiss(
                 review_dismissals::Input {
                     submission_id: storage::submission_id(&input.request_id)?,
                     key: PullChildKey {
-                        pull: app::number(pull)?,
+                        pull: pull_number,
                         number: app::number(review)?,
                     },
                     version: app::number(input.version)?,
@@ -49,6 +54,7 @@ async fn dismiss(
                     body,
                     can_write: principal.can_write(repo.id),
                     can_admin: principal.can_admin(repo.id),
+                    configured_protected,
                 },
             )
             .await,

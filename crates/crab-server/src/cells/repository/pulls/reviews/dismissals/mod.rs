@@ -19,7 +19,10 @@ pub(crate) struct Detail {
     pub review: PullReviewRecord,
     pub dismissal: Option<Dismissal>,
     pub dismissible: bool,
-    pub admin_required: bool,
+    pub base_ref: String,
+    // None uses configured initial policy. Some(false) is an administrative
+    // override and must not restore that seed after protections are cleared.
+    pub admin_required: Option<bool>,
 }
 fn ready(context: &Transaction<'_>) -> crate::cells::Result<LifecycleStatus> {
     match context.document::<u8>(SCHEMA)? {
@@ -76,9 +79,12 @@ impl Mutation for PrepareReviewState {
         )))
     }
 }
-fn protected(context: &mut Transaction<'_>, pull: &PullRecord) -> crate::cells::Result<bool> {
+fn protected(
+    context: &mut Transaction<'_>,
+    pull: &PullRecord,
+) -> crate::cells::Result<Option<bool>> {
     let settings = GetBranchProtections::execute(context, ())?;
-    Ok(settings.is_some_and(|settings| {
+    Ok(settings.map(|settings| {
         settings
             .rules
             .iter()
@@ -111,8 +117,8 @@ pub(in crate::cells::repository) fn load(
 fn detail(
     context: &Transaction<'_>,
     review: PullReviewRecord,
-    admin_required: bool,
-    merge_pending: bool,
+    admin_required: Option<bool>,
+    pull: &PullRecord,
 ) -> crate::cells::Result<Detail> {
     let dismissal = load(
         context,
@@ -131,13 +137,14 @@ fn detail(
         ));
     }
     let dismissible = !settings::archived(context)?
-        && !merge_pending
+        && pull.merge_pending.is_none()
         && review.state != ReviewState::Commented
         && dismissal.is_none();
     Ok(Detail {
         review,
         dismissal,
         dismissible,
+        base_ref: pull.base_ref.clone(),
         admin_required,
     })
 }
@@ -158,12 +165,7 @@ impl Read for GetReviewDetail {
         let pull = load_pull(context, key.pull)?
             .ok_or(crate::cells::Error::Invalid("review parent is missing"))?;
         let protected = protected(context, &pull)?;
-        Ok(Some(detail(
-            context,
-            review,
-            protected,
-            pull.merge_pending.is_some(),
-        )?))
+        Ok(Some(detail(context, review, protected, &pull)?))
     }
 }
 pub(crate) struct ListReviewDetails;
@@ -187,7 +189,7 @@ impl Read for ListReviewDetails {
         let mut bytes = 4096;
         let mut next = page.next;
         for review in page.items {
-            let item = detail(context, review, protected, pull.merge_pending.is_some())?;
+            let item = detail(context, review, protected, &pull)?;
             let size = serde_json::to_vec(&item)?.len() + 1;
             if bytes + size > MAX_LIST_OUTPUT_BYTES {
                 next = items.last().map(|item| item.review.number);
@@ -212,6 +214,7 @@ pub(crate) struct Input {
     pub body: String,
     pub can_write: bool,
     pub can_admin: bool,
+    pub configured_protected: bool,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) enum Outcome {
@@ -273,7 +276,13 @@ impl Mutation for DismissReview {
         let Some(existing) = GetReviewDetail::execute(context, input.key.clone())? else {
             return Ok(MutationResult::Rejected(Outcome::NotFound));
         };
-        if existing.admin_required && !input.can_admin {
+        // Configuration seeds policy only until the first administrative save.
+        // Persisted rules in this transaction override a stale configured seed.
+        if existing
+            .admin_required
+            .unwrap_or(input.configured_protected)
+            && !input.can_admin
+        {
             return Ok(MutationResult::Rejected(Outcome::Forbidden));
         }
         if existing.review.version != input.version {
