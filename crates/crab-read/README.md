@@ -49,6 +49,9 @@ Maintenance and writers requiring exact admission sets continue using the
 complete metadata entry point. Checkpoint visibility, catalog and source/ref
 enumeration are still eager; total bounded opening remains unqualified.
 
+Selected-ref control reads retain only their bounded in-flight names and return
+`Send` futures for multithreaded callers. They do not fetch capsule payloads.
+
 Full-capsule and control-only views share borrowed visibility readiness/application
 checks. Canonical transaction decoding guarantees unique ref names; matched-row
 counts reject extra evidence without copying the per-object edit lists.
