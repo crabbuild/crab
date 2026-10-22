@@ -339,6 +339,7 @@ jobs:
           docker image inspect crab-s3-gateway:test --format '{{json .Config.Healthcheck.Test}}' | grep -F -- '"--healthcheck"'
           test "$(docker run --rm --entrypoint /usr/bin/id crab-s3-gateway:test -u)" = "10001"
           test "$(docker run --rm --entrypoint /usr/bin/id crab-s3-gateway:test -g)" = "10001"
+          docker run --rm --entrypoint /usr/bin/git crab-s3-gateway:test --version
           docker run --rm crab-s3-gateway:test --help | grep -F -- "--healthcheck"
           docker run --rm crab-s3-gateway:test --help | grep -F -- "--readiness-check"
 
@@ -1234,6 +1235,8 @@ jobs:
             export AWS_ALLOW_HTTP=true
             export AWS_VIRTUAL_HOSTED_STYLE_REQUEST=false
             export CRAB_CACHE_DIR="${native_root}/reader-cache"
+            # The helper's local cursor belongs to the fixture, not this checkout.
+            cd "${native_root}"
             crab clone --lazy \
               crab://crab-s3-gateway-qualification/repositories/native-qualification \
               "${native_root}/clone"
@@ -1674,10 +1677,10 @@ jobs:
           CRAB_S3_GATEWAY_IMAGE: crab-s3-gateway:test
           CRAB_S3_GATEWAY_SECRET_FILE: ${{ runner.temp }}/crab-s3-gateway/gateway-secret
         run: |
-          docker logs crab-s3-gateway 2>&1 || true
-          docker logs crab-s3-gateway-rustfs 2>&1 || true
+          docker logs --tail 200 crab-s3-gateway 2>&1 || true
+          docker logs --tail 200 crab-s3-gateway-rustfs 2>&1 || true
           docker compose -f crates/crab-s3-gateway/deploy/compose.yaml \
-            logs --no-color gateway gateway-standby rustfs 2>&1 || true
+            logs --no-color --tail 200 gateway gateway-standby rustfs 2>&1 || true
 
       - name: Clean up services
         if: always()

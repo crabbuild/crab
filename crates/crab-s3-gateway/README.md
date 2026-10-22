@@ -463,6 +463,9 @@ fanout across branches, then merge through ordinary Git policy.
 
 ## Initialize and run
 
+Native Git must be available on `PATH` for capsule checkpoint and repack work.
+The packaged image includes this runtime dependency.
+
 Build from the repository root. Keep Cargo artifacts on the mounted workspace
 volume:
 

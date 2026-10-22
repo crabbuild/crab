@@ -8,6 +8,10 @@ persistent gateway caches, and a persistent RustFS data volume. The caches are
 disposable and survive gateway-container replacement; they are never
 authoritative repository state.
 
+The image includes native Git. Capsule checkpoint admission and physical
+maintenance invoke Git against private scratch repositories; omitting Git
+causes sustained v2 writes to fail when the frontier needs maintenance.
+
 The checked ECS Fargate deployment profile is in [`ecs/`](ecs/), with the
 CloudFormation template, parameter example, static lint contract, and live-
 qualification boundary documented in [`ecs/README.md`](ecs/README.md).
