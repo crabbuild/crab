@@ -1377,7 +1377,8 @@ null when that qualified account has not enrolled. The browser links the current
 handle to the stable UUID; it never guesses a handle from the snapshot name.
 The previous string shape is removed for these responses, including mutations
 and submission replays. Git commit signatures, activity actors, check/status
-actors and reviewer invitations retain their separate contracts. Actor-based
+actors retain their separate contracts; reviewer invitations use the same
+public author shape for reviewers and requesters. Actor-based
 assignments use the separate contract below; catalog membership is unchanged.
 
 The HTTP owner deduplicates page actors into one native Directory read
@@ -1695,25 +1696,45 @@ immutable-submission, and exact-ref checks.
 
 ### Request pull request reviews
 
-`GET /api/repos/{owner}/{name}/pulls/{number}/review-requests` returns bounded
-pages with an opaque exclusive `before` cursor, the current PR version, eligible
-members, and the caller's management permission. Items retain requested,
-cancelled, or fulfilled state. Fulfilled items name their submitted review.
+The reviewer sidebar uses a searchable shadcn popover and stable actor UUIDs.
+`GET /api/repos/{owner}/{name}/pulls/{number}/review-requests` returns public `candidates` as
+`{id, name, profile}` records, excluding the pull author. Pages include an opaque
+exclusive `before` cursor, the current PR version, and management permission.
+Each request exposes `reviewer` and `requested_by` author objects, an opaque
+request `id`, and a nullable `candidate_id`. The latter identifies a currently selectable member;
+null preserves visible historical attribution without permitting another request.
+No authentication subject or issuer is returned. Selection sends
+`{version, change: {kind: "request", actor_id: "UUID"}}`; cancellation uses
+`{version, change: {kind: "cancel", id: "opaque request ID"}}`.
 
-`PUT` to the same endpoint takes `version` and a typed `change`:
-`{"version":1,"change":{"kind":"request","subject":"member-subject"}}` or
-`{"version":2,"change":{"kind":"cancel","id":"opaque-request-id"}}`. Authors or writers manage open
-PR requests; pending merges block changes and archived repositories reject them.
-The PR author cannot request their own review. Selection resolves durable
-membership instead of waiting for background catalog materialization. A renamed
-member retains identity; an existing request for a removed member can be cancelled
-by its opaque ID. Public request items omit identity issuer/subject claims.
+Directory UUIDs bind to immutable qualified accounts. The server resolves the
+chosen UUID against its current member roster; another provider's account,
+a removed member or an unknown UUID cannot acquire eligibility through a name
+or public profile. Private account registration creates no grants or handles.
+Reviewer and requester profiles are enriched before the final durable grant read.
+Following [GitHub’s review permissions](https://docs.github.com/en/pull-requests/reference/pull-request-reviews#requesting-and-requiring-reviews),
+both HTTP and native commands require triage/write authority, including for a
+pull author. Read access still permits submitting a review. Public profile
+renames change displayed handles without rewriting the request record. For
+unenrolled accounts, the sidebar retains the recorded request name; picker
+candidates use current catalog labels.
+Removed reviewers remain visible and their stored request can be cancelled by
+an authorized manager. Fulfilled requests can be explicitly requested again;
+review submission replay never fulfills a newer request.
 
-New reviews fulfill a matching outstanding request atomically. Reviewing twice
-or replaying an earlier submission cannot fulfill a later re-request. The PR
-version advances once for fulfillment and a decision committed together. Requests
-do not add a merge gate or alter required approvals. The sidebar keeps failed
-choices, requires explicit conflict refresh, and preserves read-only status.
+Update serving peers and the bundled UI together for these DTOs and the stricter
+permission rule. There is no subject-selection alias or old response decoder.
+Canonical request keys, qualified records, receipts, search indexes and Directory
+formats are unchanged; no repository preparation is required. The neutral
+“Review submitted” indicator denotes fulfillment only. Full reviewer decision
+aggregation, current-head status, teams, code-owner suggestions and notifications
+remain unfinished; fulfillment is never displayed as an approval.
+
+Pending merges block changes and archived repositories reject them. New reviews
+fulfill a matching outstanding request atomically. The PR version advances once
+for fulfillment and a decision committed together. Requests do not add a merge
+gate or alter required approvals. The sidebar keeps failed choices and requires
+explicit conflict refresh.
 
 ### Link related work
 
@@ -1793,6 +1814,29 @@ Pull creation records exact base and head branch names plus their opening commit
 If either branch is deleted, the conversation and original OIDs remain visible while live comparison becomes unavailable. A completed merge retains its pre-merge comparison after source deletion.
 
 Reviews record `commented`, `approved`, or `changes_requested` against the exact current head. Pull authors cannot approve or request changes on their own pull. Advancing the head marks older reviews as not current.
+
+Review submission opens a shadcn “Review changes” dialog above the diff. The
+modal stays fixed while asynchronous file content loads. Comment, Approve and
+Request changes use the shared radio-group component. Draft text and submission
+identity stay with the pull detail, surviving dialog closure and data reloads.
+They are discarded when leaving the pull; no browser storage is used.
+
+`POST .../pulls/{number}/reviews` requires `request_id`, `body`, `state` and
+`commit_oid`. The latter is the exact lowercase, nonzero SHA-1 inspected by the
+browser. A fresh submission is rejected with 409 `conflict` if the live head
+has advanced. Reloading preserves the draft and its old commit pin; the user
+must explicitly choose “Use current comparison” after inspecting the updated
+comparison. A changed pin creates a new submission identity. There is no
+implicit latest-head default or old-payload decoder.
+
+Existing submissions are verified by the native immutable ledger, including
+the original body, decision and commit. Editing the current review does not
+invalidate a valid retry; a mismatched payload returns `submission_conflict`.
+Replays do not add another review or fulfill a newer request. Current native
+permission and archival policy still applies. Review freshness after merge
+uses the recorded source head, matching the PR comparison, rather than the
+synthetic merge commit. Canonical records and native inputs are unchanged.
+Deploy the API and bundled UI together for the required commit pin.
 
 Inline threads store a raw Git path, old/new side, inclusive line range, exact base/head OIDs, and the anchored blob OIDs. Root comments publish immediately; repository members can create and reply, replies are durable child records, and every creation is idempotent by UUID. Pull authors and writers can resolve or reopen a thread, while only the thread author can edit its body or suggestion. A thread is marked outdated when the comparison OIDs or anchored blob no longer match; deleted paths remain listed with the original anchor evidence.
 

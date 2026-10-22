@@ -41,7 +41,8 @@ export async function mockPullRequest(
   const lifecycle: {
     state: "open" | "closed" | "merged";
     branchesAvailable: boolean;
-  } = { state: "open", branchesAvailable: true };
+    head: string;
+  } = { state: "open", branchesAvailable: true, head };
   let created = false;
   let mergePending = false;
   let mergeRequest = "";
@@ -94,9 +95,9 @@ export async function mockPullRequest(
       base_ref: "refs/heads/main",
       base_oid: base,
       head_ref: "refs/heads/feature/docs",
-      head_oid: head,
+      head_oid: lifecycle.head,
       original_base_oid: base,
-      original_head_oid: head,
+      original_head_oid: lifecycle.head,
       version: lifecycle.state === "open" ? 1 : 2,
       created_at: 1_700_000_000_000,
       updated_at: 1_700_000_000_000,
@@ -137,7 +138,7 @@ export async function mockPullRequest(
           ? {
               author: author("Local operator"),
               method: mergeMethod,
-              commit_oid: head,
+              commit_oid: lifecycle.head,
               message: mergeMessage,
               created_at: 1_700_000_200_000,
             }
@@ -149,7 +150,7 @@ export async function mockPullRequest(
             method: mergeMethod,
             pull_version: 1,
             base_oid: base,
-            head_oid: head,
+            head_oid: lifecycle.head,
             message: mergeMessage,
             created_at: 1_700_000_150_000,
           }
@@ -215,7 +216,7 @@ export async function mockPullRequest(
           unborn_head: null,
           refs: [
             { name: "refs/heads/main", oid: base },
-            { name: "refs/heads/feature/docs", oid: head },
+            { name: "refs/heads/feature/docs", oid: lifecycle.head },
           ],
           generation: 2,
         },
@@ -224,7 +225,7 @@ export async function mockPullRequest(
       return route.fulfill({
         json: {
           base,
-          commit: head,
+          commit: lifecycle.head,
           changes: [
             {
               path: "README.md",
@@ -252,7 +253,7 @@ export async function mockPullRequest(
       return route.fulfill({
         json: {
           base,
-          commit: head,
+          commit: lifecycle.head,
           path: "README.md",
           old: {
             oid: "c".repeat(40),
@@ -271,7 +272,7 @@ export async function mockPullRequest(
         },
       });
     if (path === "/api/repos/team/project/file") {
-      expect(url.searchParams.get("rev")).toBe(head);
+      expect(url.searchParams.get("rev")).toBe(lifecycle.head);
       expect(url.searchParams.get("path_hex")).toBe(pathHex);
       return route.fulfill({
         json: {
@@ -290,7 +291,7 @@ export async function mockPullRequest(
     ) {
       const input = request.postDataJSON();
       expect(input.branch).toBe("refs/heads/feature/docs");
-      expect(input.expected_head).toBe(head);
+      expect(input.expected_head).toBe(lifecycle.head);
       expect(input.expected_blob).toBe("d".repeat(40));
       expect(input.path_hex).toBe(pathHex);
       expect(input.content).toBe("Applied content\n");
@@ -301,14 +302,14 @@ export async function mockPullRequest(
       });
     }
     if (path === "/api/repos/team/project/commits") {
-      expect(url.searchParams.get("rev")).toBe(head);
+      expect(url.searchParams.get("rev")).toBe(lifecycle.head);
       expect(url.searchParams.get("base")).toBe(base);
       expect(url.searchParams.get("limit")).toBe("50");
       return route.fulfill({
         json: {
           items: [
             {
-              oid: head,
+              oid: lifecycle.head,
               tree: "e".repeat(40),
               parents: [base],
               author: "Alice",
@@ -320,15 +321,17 @@ export async function mockPullRequest(
         },
       });
     }
-    if (path === `/api/repos/team/project/commits/${head}/check-runs`) {
+    if (
+      path === `/api/repos/team/project/commits/${lifecycle.head}/check-runs`
+    ) {
       expect(url.searchParams.get("limit")).toBe("50");
       return route.fulfill({
         json: {
-          sha: head,
+          sha: lifecycle.head,
           items: [
             {
               id: 7,
-              head_sha: head,
+              head_sha: lifecycle.head,
               name: "ci/test",
               status: "completed",
               conclusion: "success",
@@ -346,11 +349,13 @@ export async function mockPullRequest(
         },
       });
     }
-    if (path === `/api/repos/team/project/commits/${head}/check-runs/7`)
+    if (
+      path === `/api/repos/team/project/commits/${lifecycle.head}/check-runs/7`
+    )
       return route.fulfill({
         json: {
           id: 7,
-          head_sha: head,
+          head_sha: lifecycle.head,
           name: "ci/test",
           status: "completed",
           conclusion: "success",
@@ -562,14 +567,26 @@ export async function mockPullRequest(
     }
     if (/\/pulls\/\d+\/reviews$/.test(path)) {
       if (request.method() === "POST") {
+        const input = request.postDataJSON();
+        if (input.commit_oid !== lifecycle.head)
+          return route.fulfill({
+            status: 409,
+            json: {
+              error: {
+                code: "conflict",
+                message:
+                  "The pull request head changed. Reload the comparison.",
+              },
+            },
+          });
         checkState = "success";
         reviews.push({
           number: 1,
           author: author("Bob"),
-          body: "Ready to merge.",
+          body: input.body,
           reactions: reactions("pulls/2/reviews/1"),
-          state: "approved",
-          commit_oid: head,
+          state: input.state,
+          commit_oid: lifecycle.head,
           current: lifecycle.branchesAvailable,
           version: 1,
           created_at: 1_700_000_050_000,

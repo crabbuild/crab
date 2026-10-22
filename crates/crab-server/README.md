@@ -90,9 +90,14 @@ for review. Draft badges appear in lists and details; merge admission rejects
 drafts and stale readiness changes. Authors or writers manage readiness, and
 conversion is blocked while a merge is pending.
 
-The reviewer sidebar requests or cancels reviews from current repository members.
-Submitted reviews fulfill matching requests; stale changes require explicit
-reload. Requests invite review and retain the existing branch protection rules.
+The reviewer sidebar searches current members by public handle or display name,
+selects stable actor UUIDs, and links public profiles. Triage or write authority
+is required to request, cancel or re-request reviews. Submitted reviews fulfill
+matching requests; stale changes require explicit reload. Fulfillment does not
+imply approval or current-head validity. Branch protection rules stay separate.
+The “Review changes” dialog keeps submission stable while the diff loads and
+pins a review to the inspected commit. A changed head requires comparison
+reload and explicit draft rebasing; retries use the native submission ledger.
 
 Stable qualified account UUIDs now exist independently of public profiles.
 Private `cells register-accounts --identities-file` registration creates no

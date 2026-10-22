@@ -335,7 +335,7 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
         json!({
             "request_id":"00000000-0000-4000-8000-000000000011",
             "body":"",
-            "state":"approved"
+            "state":"approved", "commit_oid":first_head
         }),
     )
     .await;
@@ -703,7 +703,7 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
             json!({
                 "request_id":"00000000-0000-4000-8000-000000000012",
                 "body":"",
-                "state":"approved"
+                "state":"approved", "commit_oid":first_head
             }),
         )
         .await
@@ -744,6 +744,66 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
     assert_eq!(stale["can_merge"], false);
     let reviews = h.json(&format!("{ROOT}/1/reviews"), &bob).await;
     assert_eq!(reviews["items"][0]["current"], false);
+    let stale_review = mutate(
+        &h,
+        &bob,
+        bob_csrf,
+        reqwest::Method::POST,
+        &format!("{ROOT}/1/reviews"),
+        json!({
+            "request_id":uuid::Uuid::now_v7(),
+            "body":"Do not approve unseen changes",
+            "state":"approved",
+            "commit_oid":first_head
+        }),
+    )
+    .await;
+    assert_eq!(stale_review.0, StatusCode::CONFLICT);
+    assert_eq!(stale_review.1["error"]["code"], "conflict");
+    let replay_review = mutate(
+        &h,
+        &bob,
+        bob_csrf,
+        reqwest::Method::POST,
+        &format!("{ROOT}/1/reviews"),
+        json!({
+            "request_id":"00000000-0000-4000-8000-000000000011",
+            "body":"",
+            "state":"approved",
+            "commit_oid":first_head
+        }),
+    )
+    .await;
+    assert_eq!(replay_review.0, StatusCode::CREATED);
+    assert_eq!(replay_review.1["commit_oid"], first_head);
+    assert_eq!(replay_review.1["current"], false);
+    let changed_replay = mutate(
+        &h,
+        &bob,
+        bob_csrf,
+        reqwest::Method::POST,
+        &format!("{ROOT}/1/reviews"),
+        json!({
+            "request_id":"00000000-0000-4000-8000-000000000011",
+            "body":"",
+            "state":"approved",
+            "commit_oid":second_head
+        }),
+    )
+    .await;
+    assert_eq!(changed_replay.0, StatusCode::CONFLICT);
+    assert_eq!(changed_replay.1["error"]["code"], "submission_conflict");
+    assert_eq!(
+        h.json(&format!("{ROOT}/1/reviews"), &bob).await["items"]
+            .as_array()
+            .unwrap()
+            .len(),
+        1
+    );
+    assert_eq!(
+        h.json(&format!("{ROOT}/1"), &bob).await["version"],
+        stale["version"]
+    );
     let requested = mutate(
         &h,
         &bob,
@@ -753,7 +813,7 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
         json!({
             "request_id":"00000000-0000-4000-8000-000000000013",
             "body":"Please address the remaining concern.",
-            "state":"changes_requested"
+            "state":"changes_requested", "commit_oid":second_head
         }),
     )
     .await;
@@ -773,7 +833,7 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
         json!({
             "request_id":"00000000-0000-4000-8000-000000000016",
             "body":"",
-            "state":"approved"
+            "state":"approved", "commit_oid":second_head
         }),
     )
     .await;

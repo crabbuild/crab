@@ -120,7 +120,7 @@ impl Mutation for SetReviewRequest {
         let Some(mut pull) = load_pull(context, input.pull)? else {
             return Ok(MutationResult::Rejected(Outcome::NotFound));
         };
-        if !(input.can_manage || same_author(&input.actor, &pull.author)) {
+        if !input.can_manage {
             return Ok(MutationResult::Rejected(Outcome::Forbidden));
         }
         if same_author(&input.reviewer, &pull.author) {

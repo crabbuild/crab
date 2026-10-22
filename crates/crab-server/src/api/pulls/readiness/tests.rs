@@ -191,6 +191,12 @@ async fn merge_recovery_after_archive(published: bool) {
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
     let server = fixtures::fixture().await;
+    server
+        .cells()
+        .unwrap()
+        .initialize(crate::cells::Address::Directory)
+        .await
+        .unwrap();
     let entry = server.repositories.values()[0].clone();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();

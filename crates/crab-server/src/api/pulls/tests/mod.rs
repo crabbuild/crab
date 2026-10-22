@@ -171,9 +171,25 @@ async fn pull_requests_follow_live_branches_and_persist_discussion_state() {
     let review = json!({
         "request_id":"00000000-0000-4000-8000-000000000003",
         "body":"I left notes without deciding on my own change.",
-        "state":"commented"
+        "state":"commented", "commit_oid":first_head
     });
     let review_url = format!("{pull_url}/reviews");
+    for (commit, expected) in [
+        (None, StatusCode::UNPROCESSABLE_ENTITY),
+        (Some("0".repeat(40)), StatusCode::BAD_REQUEST),
+        (Some("A".repeat(40)), StatusCode::BAD_REQUEST),
+        (Some("g".repeat(40)), StatusCode::BAD_REQUEST),
+        (Some("a".repeat(39)), StatusCode::BAD_REQUEST),
+    ] {
+        let mut invalid = review.clone();
+        if let Some(commit) = commit {
+            invalid["commit_oid"] = json!(commit);
+        } else {
+            invalid.as_object_mut().unwrap().remove("commit_oid");
+        }
+        let response = json_request(&client, reqwest::Method::POST, &review_url, invalid).await;
+        assert_eq!(response.0, expected);
+    }
     let created_review =
         json_request(&client, reqwest::Method::POST, &review_url, review.clone()).await;
     assert_eq!(created_review.0, StatusCode::CREATED);
@@ -187,7 +203,7 @@ async fn pull_requests_follow_live_branches_and_persist_discussion_state() {
             json!({
                 "request_id":"00000000-0000-4000-8000-000000000004",
                 "body":"Self approval is forbidden.",
-                "state":"approved"
+                "state":"approved", "commit_oid":first_head
             }),
         )
         .await
@@ -628,6 +644,19 @@ async fn pull_request_merge_methods_use_canonical_ref_publication() {
     )
     .await;
     assert_eq!(second.0, StatusCode::CREATED);
+    let review = json_request(
+        &client,
+        reqwest::Method::POST,
+        &format!("{root}/2/reviews"),
+        json!({
+            "request_id":uuid::Uuid::now_v7(),
+            "body":"Reviewed source head",
+            "state":"commented",
+            "commit_oid":conflict_head
+        }),
+    )
+    .await;
+    assert_eq!(review.0, StatusCode::CREATED);
     let merge_commit = json_request(
         &client,
         reqwest::Method::POST,
@@ -644,6 +673,18 @@ async fn pull_request_merge_methods_use_canonical_ref_publication() {
     .await;
     assert_eq!(merge_commit.0, StatusCode::OK, "{}", merge_commit.1);
     assert_eq!(merge_commit.1["merge"]["method"], "merge_commit");
+    let reviews: Value = client
+        .get(format!("{root}/2/reviews"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(reviews["items"][0]["commit_oid"], conflict_head);
+    assert_eq!(reviews["items"][0]["current"], true);
     assert_eq!(
         merge_commit.1["merge"]["message"],
         "Merge the diverged change"

@@ -1900,46 +1900,6 @@ main {
   font-size: 11px;
   font-weight: 600;
 }
-.review-form {
-  max-width: 820px;
-  margin-top: 28px;
-  padding: 16px;
-}
-.review-form h3 {
-  margin-top: 0;
-}
-.review-choices {
-  display: grid;
-  gap: 0;
-  margin: 16px 0;
-  padding: 0;
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-}
-.review-choices label {
-  display: flex;
-  gap: 10px;
-  padding: 10px 12px;
-  cursor: pointer;
-}
-.review-choices label + label {
-  border-top: 1px solid var(--border);
-}
-.review-choices label:has(input:disabled) {
-  cursor: not-allowed;
-  opacity: 0.55;
-}
-.review-choices input {
-  margin-top: 4px;
-}
-.review-choices span,
-.review-choices small {
-  display: block;
-}
-.review-choices small {
-  margin-top: 2px;
-  color: var(--muted-foreground);
-}
 .pull-merge-note {
   margin-top: 24px;
   border: 1px solid var(--border);
@@ -6923,9 +6883,6 @@ main {
   margin-top: 2px;
   color: var(--muted-foreground);
 }
-.review-requests li > svg.review-fulfilled {
-  color: var(--success);
-}
 .review-requests li > div {
   flex: 1;
   min-width: 0;
@@ -6933,11 +6890,6 @@ main {
 }
 .review-requests li p {
   margin-block: 4px;
-}
-.review-requests form {
-  display: grid;
-  gap: 8px;
-  margin-top: 12px;
 }
 
 @theme inline {

@@ -5,7 +5,11 @@ import {
   selectDarkTheme,
 } from "./accessibility";
 
+const actorId = "01900000-0000-7000-8000-000000000002";
 async function fixture(page: Page) {
+  let enrolled = false,
+    removed = false,
+    handle = "public-bob";
   let version = 1;
   let state: "requested" | "cancelled" | "fulfilled" | null = null;
   let fail = false,
@@ -104,9 +108,11 @@ async function fixture(page: Page) {
         const input = request.postDataJSON() as {
           version: number;
           change:
-            | { kind: "request"; subject: string }
+            | { kind: "request"; actor_id: string }
             | { kind: "cancel"; id: string };
         };
+        if (input.change.kind === "request")
+          expect(input.change.actor_id).toBe(actorId);
         writes.push(input);
         if (fail) {
           fail = false;
@@ -128,9 +134,14 @@ async function fixture(page: Page) {
       }
       const bob = {
         id,
-        name: "Bob",
-        available: true,
-        requested_by: "Alice",
+        reviewer: {
+          name: "Bob",
+          profile: enrolled
+            ? { id: actorId, handle, name: "Public Bob" }
+            : null,
+        },
+        candidate_id: removed ? null : actorId,
+        requested_by: { name: "Alice", profile: null },
         state:
           state === "fulfilled"
             ? { kind: state, review: 1 }
@@ -138,8 +149,8 @@ async function fixture(page: Page) {
       };
       const carol = {
         id: "a".repeat(64),
-        name: "Carol",
-        available: false,
+        reviewer: { name: "Carol", profile: null },
+        candidate_id: null,
         requested_by: "Alice",
         state: { kind: "requested" },
       };
@@ -155,7 +166,17 @@ async function fixture(page: Page) {
           next: paginated && !url.searchParams.has("before") ? id : null,
           version,
           can_manage: canManage,
-          eligible: [{ subject: "bob-id", name: "Bob" }],
+          candidates: removed
+            ? []
+            : [
+                {
+                  id: actorId,
+                  name: "Bob",
+                  profile: enrolled
+                    ? { id: actorId, handle, name: "Public Bob" }
+                    : null,
+                },
+              ],
         },
       });
     }
@@ -199,12 +220,28 @@ async function fixture(page: Page) {
     pages: () => {
       paginated = true;
     },
+    enroll: () => {
+      enrolled = true;
+    },
+    rename: () => {
+      handle = "renamed-bob";
+    },
+    remove: () => {
+      removed = true;
+    },
     writes,
     unexpected,
   };
 }
 
-test("review requests retain failed choices, persist on reload, cancel and show fulfilled reviews", async ({
+async function openPicker(page: Page) {
+  await page
+    .getByRole("button", { name: "Request reviewers", exact: true })
+    .click();
+  return page.getByRole("dialog", { name: "Request reviewers", exact: true });
+}
+
+test("review requests retain failed choices, persist on reload, cancel and can be requested again", async ({
   page,
 }) => {
   const model = await fixture(page);
@@ -213,19 +250,20 @@ test("review requests retain failed choices, persist on reload, cancel and show 
     name: "Review requests",
     exact: true,
   });
-  const choice = widget.getByLabel("Request a reviewer");
-  await choice.selectOption("bob-id");
   model.fail();
-  await widget
-    .getByRole("button", { name: "Request review", exact: true })
-    .click();
-  await expect(widget.getByRole("alert")).toHaveText(
+  const picker = await openPicker(page);
+  const search = picker.getByRole("textbox", { name: "Find a reviewer" });
+  await search.fill("bo");
+  const choose = picker.getByRole("button", {
+    name: "Request review from Bob",
+    exact: true,
+  });
+  await choose.click();
+  await expect(picker.getByRole("alert")).toHaveText(
     "Review request storage unavailable",
   );
-  await expect(choice).toHaveValue("bob-id");
-  await widget
-    .getByRole("button", { name: "Request review", exact: true })
-    .click();
+  await expect(search).toHaveValue("bo");
+  await choose.click();
   await expect(
     widget.getByRole("button", { name: "Cancel review request for Bob" }),
   ).toBeVisible();
@@ -235,10 +273,8 @@ test("review requests retain failed choices, persist on reload, cancel and show 
     .getByRole("button", { name: "Cancel review request for Bob" })
     .click();
   await expect(widget.getByText("No reviews requested.")).toBeVisible();
-  await choice.selectOption("bob-id");
-  await widget
-    .getByRole("button", { name: "Request review", exact: true })
-    .click();
+  await openPicker(page);
+  await choose.click();
   await expect(widget.getByText("Requested by Alice")).toBeVisible();
   model.fulfill();
   await page.reload();
@@ -248,7 +284,11 @@ test("review requests retain failed choices, persist on reload, cancel and show 
   await expect(
     widget.getByRole("button", { name: "Cancel review request for Bob" }),
   ).toHaveCount(0);
-  expect(model.writes).toHaveLength(4);
+  await widget
+    .getByRole("button", { name: "Re-request review from Bob" })
+    .click();
+  await expect(widget.getByText("Requested by Alice")).toBeVisible();
+  expect(model.writes).toHaveLength(5);
   expect(model.unexpected).toEqual([]);
 });
 
@@ -261,33 +301,33 @@ test("stale requests require explicit reload and permissions preserve read-only 
     name: "Review requests",
     exact: true,
   });
-  const choice = widget.getByLabel("Request a reviewer");
-  await choice.selectOption("bob-id");
+  const picker = await openPicker(page);
+  const choice = picker.getByRole("button", {
+    name: "Request review from Bob",
+  });
   model.race();
-  await widget
-    .getByRole("button", { name: "Request review", exact: true })
-    .click();
-  await expect(widget.getByRole("alert")).toHaveText("Review requests changed");
-  await expect(
-    widget.getByRole("button", { name: "Request review", exact: true }),
-  ).toBeDisabled();
-  await widget.getByRole("button", { name: "Reload review requests" }).click();
-  await expect(choice).toHaveValue("bob-id");
-  await widget
-    .getByRole("button", { name: "Request review", exact: true })
-    .click();
+  await choice.click();
+  await expect(picker.getByRole("alert")).toHaveText("Review requests changed");
+  await expect(choice).toBeDisabled();
+  await picker.getByRole("button", { name: "Reload review requests" }).click();
+  await expect(choice).toBeEnabled();
+  await choice.click();
   await expect(widget.getByText("Requested by Alice")).toBeVisible();
   model.readOnly();
   await page.reload();
   await expect(widget.getByText("Requested by Alice")).toBeVisible();
-  await expect(widget.getByRole("combobox")).toHaveCount(0);
+  await expect(
+    widget.getByRole("button", { name: "Request reviewers" }),
+  ).toHaveCount(0);
   await expect(
     widget.getByRole("button", { name: "Cancel review request for Bob" }),
   ).toHaveCount(0);
   model.archive();
   await page.reload();
   await expect(widget.getByText("Requested by Alice")).toBeVisible();
-  await expect(widget.getByRole("combobox")).toHaveCount(0);
+  await expect(
+    widget.getByRole("button", { name: "Request reviewers" }),
+  ).toHaveCount(0);
   expect(model.unexpected).toEqual([]);
 });
 
@@ -306,23 +346,88 @@ test("reviewer pagination, whole-widget timing and mobile themes remain accessib
     exact: true,
   });
   await expect(
-    timing.getByRole("button", { name: "Request review", exact: true }),
+    timing.getByRole("button", { name: "Request reviewers", exact: true }),
   ).toBeVisible();
   await widget.getByRole("button", { name: "More reviewers" }).click();
   await expect(widget.getByText("Carol", { exact: true })).toBeVisible();
-  await expect(widget.getByText("No longer a repository member")).toBeVisible();
+  await expect(
+    widget.getByText("Unavailable for new review requests."),
+  ).toBeVisible();
   await widget.getByRole("button", { name: "First reviewer page" }).click();
   await expect(
     widget.getByRole("listitem").getByText("Bob", { exact: true }),
   ).toBeVisible();
   await page.setViewportSize({ width: 390, height: 844 });
+  await openPicker(page);
   await expectNoAccessibilityViolations(page);
+  await page.keyboard.press("Escape");
   await selectDarkTheme(page);
+  await openPicker(page);
   await expectNoAccessibilityViolations(page);
   expect(
     await page.evaluate(
       () => document.documentElement.scrollWidth <= innerWidth,
     ),
   ).toBe(true);
+  expect(model.unexpected).toEqual([]);
+});
+
+test("public reviewer search uses UUIDs and keeps profile links through rename and removal", async ({
+  page,
+}) => {
+  const model = await fixture(page);
+  model.enroll();
+  await page.goto("/team/project/pull/1");
+  const trigger = page.getByRole("button", {
+    name: "Request reviewers",
+    exact: true,
+  });
+  await trigger.focus();
+  await page.keyboard.press("Enter");
+  const picker = page.getByRole("dialog", {
+    name: "Request reviewers",
+    exact: true,
+  });
+  const search = picker.getByRole("textbox", { name: "Find a reviewer" });
+  await expect(search).toBeFocused();
+  await search.fill("no-match");
+  await expect(picker.getByRole("status")).toHaveText(
+    "No people match your search.",
+  );
+  await search.fill("public-bob");
+  await page.keyboard.press("Tab");
+  await page.keyboard.press("Enter");
+  const widget = page.getByRole("region", {
+    name: "Review requests",
+    exact: true,
+  });
+  await expect(
+    widget.getByRole("link", { name: "public-bob", exact: true }),
+  ).toHaveAttribute("href", `/-/users/${actorId}`);
+  expect(model.writes[0]).toEqual({
+    version: 1,
+    change: { kind: "request", actor_id: actorId },
+  });
+  model.rename();
+  await page.reload();
+  await expect(
+    widget.getByRole("link", { name: "renamed-bob", exact: true }),
+  ).toHaveAttribute("href", `/-/users/${actorId}`);
+  model.fulfill();
+  await page.reload();
+  await expect(
+    widget.getByRole("button", { name: "Re-request review from renamed-bob" }),
+  ).toBeVisible();
+  model.remove();
+  await page.reload();
+  await expect(
+    widget.getByRole("link", { name: "renamed-bob", exact: true }),
+  ).toHaveAttribute("href", `/-/users/${actorId}`);
+  await expect(
+    widget.getByText("Unavailable for new review requests."),
+  ).toBeVisible();
+  await expect(widget.getByRole("button", { name: /Re-request/ })).toHaveCount(
+    0,
+  );
   expect(model.unexpected).toEqual([]);
 });

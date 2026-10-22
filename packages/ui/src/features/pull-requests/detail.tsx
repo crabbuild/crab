@@ -1,3 +1,5 @@
+import { useState } from "react";
+import { useSubmission } from "@/components/discussion/hooks";
 import { Author } from "@/components/discussion/author";
 import { endpoint, useRequest, type Repository } from "@/lib/api";
 import { CheckRuns } from "./checks";
@@ -17,7 +19,7 @@ import { PullCommits } from "./commits";
 import { PullConversation } from "./conversation";
 import type { PullRequest } from "./model";
 import { branch, pullIcons, pullStatus } from "./presentation";
-import { ReviewForm } from "./reviews/form";
+import { ReviewChanges, type ReviewDraft } from "./reviews/form";
 import { PullReviewThreads } from "./reviews/threads";
 
 function PullBadge({ pull }: { pull: PullRequest }) {
@@ -46,6 +48,8 @@ export function PullDetail({
   theme: "light" | "dark";
   codeThemes: CodeThemes;
 }) {
+  const [reviewDraft, setReviewDraft] = useState<ReviewDraft>();
+  const reviewSubmission = useSubmission();
   const path = endpoint(repo, `pulls/${number}`);
   const pull = useRequest<PullRequest>(path);
   const requestedTab = repositoryRoute(url)?.pullTab;
@@ -166,6 +170,17 @@ export function PullDetail({
             ) : tab === "files" ? (
               data.branches_available ? (
                 <>
+                  {data.state === "open" && !repo.archived && (
+                    <ReviewChanges
+                      repo={repo}
+                      pull={data}
+                      csrf={csrf}
+                      refresh={pull.retry}
+                      draft={reviewDraft}
+                      onDraft={setReviewDraft}
+                      submission={reviewSubmission}
+                    />
+                  )}
                   <PullReviewThreads
                     repo={repo}
                     pull={data}
@@ -174,14 +189,6 @@ export function PullDetail({
                     codeThemes={codeThemes}
                     refresh={pull.retry}
                   />
-                  {data.state === "open" && !repo.archived && (
-                    <ReviewForm
-                      repo={repo}
-                      pull={data}
-                      csrf={csrf}
-                      refresh={pull.retry}
-                    />
-                  )}
                 </>
               ) : null
             ) : (

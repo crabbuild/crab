@@ -188,6 +188,9 @@ test("pull conversations share stable profile links across comments, reviews and
       .getByRole("link", { name: profile.handle, exact: true }),
   ).toHaveAttribute("href", `/-/users/${id}`);
   await page
+    .getByRole("button", { name: "Review changes", exact: true })
+    .click();
+  await page
     .getByRole("textbox", { name: "Review summary", exact: true })
     .fill("An unenrolled review");
   await page

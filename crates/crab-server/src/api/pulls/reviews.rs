@@ -70,7 +70,8 @@ async fn pull_and_head(
         .await?
         .ok_or(Error::NotFound)?;
     if let Some(merge) = &pull.merge {
-        let head = merge.commit_oid.clone();
+        // Freshness follows the reviewed source head, including after a synthetic merge commit.
+        let head = merge.head_oid.clone();
         return Ok((pull, Some(head)));
     }
     let repository = repo
@@ -147,6 +148,7 @@ struct NewReview {
     request_id: String,
     body: String,
     state: ReviewState,
+    commit_oid: String,
 }
 
 fn validate_body(body: &str, state: ReviewState) -> Result<()> {
@@ -164,48 +166,39 @@ async fn create(
     let id = app::number(id)?;
     let Json(input) = input?;
     validate_body(&input.body, input.state)?;
-    let actor = app::actor(&principal)?;
-    let request_id = app::submission(&input.request_id)?;
-    if let Some(review) = storage::review_submission(&server, repo, id, &request_id).await? {
-        if !same_author(&review.author, &actor)
-            || review.body != input.body
-            || review.state != input.state
-        {
-            return Err(Error::RequestConflict);
-        }
-        let (_, head) = pull_and_head(&server, repo, id).await?;
-        let reaction = reactions::one(
-            &server,
-            repo,
-            &actor,
-            Target::PullReview {
-                pull: id,
-                number: review.number,
-            },
-        )
-        .await?;
-        let authors = Authors::load(&server, &principal, std::iter::once(&review.author)).await?;
-        app::membership(&server, &principal, repo).await?;
-        return Ok((
-            StatusCode::CREATED,
-            Json(review_view(
-                &authors,
-                &review,
-                &actor,
-                head.as_deref(),
-                &reaction,
-            )),
+    if input.commit_oid.len() != 40
+        || input.commit_oid.bytes().all(|byte| byte == b'0')
+        || !input
+            .commit_oid
+            .bytes()
+            .all(|byte| byte.is_ascii_digit() || (b'a'..=b'f').contains(&byte))
+    {
+        return Err(Error::Invalid(
+            "Review requires an exact lowercase SHA-1 commit ID",
         ));
     }
+    let actor = app::actor(&principal)?;
+    let request_id = app::submission(&input.request_id)?;
+    let replay = storage::review_submission(&server, repo, id, &request_id)
+        .await?
+        .is_some();
     let (pull, head) = pull_and_head(&server, repo, id).await?;
-    if pull.state != PullState::Open {
-        return Err(Error::Invalid("Closed pull requests cannot be reviewed"));
-    }
-    let head = head.ok_or(Error::Invalid(
-        "Pull request branches must exist before submitting a review",
-    ))?;
-    if input.state != ReviewState::Commented && same_author(&pull.author, &actor) {
-        return Err(Error::OwnReview);
+    if !replay {
+        if pull.state != PullState::Open {
+            return Err(Error::Invalid("Closed pull requests cannot be reviewed"));
+        }
+        let current_head = head.as_deref().ok_or(Error::Invalid(
+            "Pull request branches must exist before submitting a review",
+        ))?;
+        // A new review applies only to the commit inspected, never unseen code.
+        // A replay is verified by the native ledger against its original payload;
+        // the current review body may already have been edited.
+        if input.commit_oid != current_head {
+            return Err(Error::Conflict);
+        }
+        if input.state != ReviewState::Commented && same_author(&pull.author, &actor) {
+            return Err(Error::OwnReview);
+        }
     }
     let review = storage::create_review(
         &server,
@@ -216,7 +209,7 @@ async fn create(
             request_id,
             body: input.body,
             state: input.state,
-            commit_oid: head.clone(),
+            commit_oid: input.commit_oid,
         },
     )
     .await?;
@@ -238,7 +231,7 @@ async fn create(
             &authors,
             &review,
             &actor,
-            Some(&head),
+            head.as_deref(),
             &reaction,
         )),
     ))

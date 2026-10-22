@@ -253,6 +253,9 @@ test("review conversations and ambiguous merge recovery preserve the pull workfl
   await expectNoAccessibilityViolations(page);
 
   await page
+    .getByRole("button", { name: "Review changes", exact: true })
+    .click();
+  await page
     .getByRole("textbox", { name: "Review summary", exact: true })
     .fill("Ready to merge.");
   await page.getByLabel("Approve").check();

@@ -70,10 +70,12 @@ commands and reads declare their native class. Repository initialization lives
 in `src/cells/repository/schema.rs`, using the canonical `src/cells/schema.sql`.
 `cells/repository/assignments/` owns stable actor references and name snapshots;
 its `migration/` alone reads retired subject bytes and performs bounded explicit
-conversion. `api/assignees/resolution.rs` binds current candidates and renders
-historical assignees with public profiles, rechecking grants after Directory
-reads. Private assignment inventory/migration live in `server/management/assignments.rs`
-and `cli/assignments.rs`. `src/cells/directory/` owns qualified private account identities and optional
+conversion. `api/members/roster.rs` binds current member UUIDs to qualified private
+accounts and public candidate profiles for assignments and reviewer selection.
+`api/assignees/resolution.rs` owns assignment selection limits and historical
+assignee presentation. Both refresh grants after Directory reads. Private
+assignment inventory/migration live in `server/management/assignments.rs` and
+`cli/assignments.rs`. `src/cells/directory/` owns qualified private account identities and optional
 public profiles. `accounts/` owns stable UUID registration; `profiles/` owns
 chosen names/handles and immutable submissions. `migration/` alone reads format 1,
 with bounded, restartable format-2 conversion and colocated historical-input tests.

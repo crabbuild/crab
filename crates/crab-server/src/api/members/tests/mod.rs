@@ -559,7 +559,7 @@ async fn triage_uses_durable_grants_for_issue_and_pull_management_without_git_wr
             Method::PUT,
             &requests,
             &bob,
-            json!({"version":reviews["version"],"change":{"kind":"request","subject":"bob-id"}}),
+            json!({"version":reviews["version"],"change":{"kind":"request","actor_id":bob_id}}),
         )
         .await
         .error_for_status()

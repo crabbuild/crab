@@ -86,6 +86,19 @@ the separate Directory read; profiles never act as grants. Counts/cursors keep
 their repository snapshot. Prepare Directory before enabling this DTO contract
 and update peers together; unsupported operations have no fallback reader.
 
+Reviewer selection also uses Directory account UUIDs. The HTTP member roster
+binds them back to current qualified repository members and emits only public
+candidates. Native request records remain qualified and retain their existing
+keys, versions and replay semantics. HTTP and native mutations now both require
+triage/write authority; authorship alone is insufficient. Deploy serving peers
+and the bundled UI together. These public DTO and permission changes need no
+schema, assignment or discussion-index rebuild. Read access still permits review
+submission. Public profile attribution does not grant management authority.
+Review HTTP writes now require the inspected `commit_oid`; fresh writes verify
+the live head, while retries use the existing native immutable submission
+ledger. This adds no native field or schema change. Deploy the API and bundled
+UI together; old HTTP payloads have no fallback decoder.
+
 The Author list menu composes Directory handle completion with native query
 navigation. Directory read 8 returns a bounded `items`/`truncated` result, using
 21 indexed matches to distinguish exactly 20 from an incomplete result. Update

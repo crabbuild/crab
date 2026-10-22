@@ -7,7 +7,7 @@ use axum::{
 use serde::Serialize;
 
 use crate::{
-    api::assignees::{Candidate, Roster},
+    api::members::roster::{Candidate, Roster},
     app::{self, Error, Result},
     auth::Principal,
     cells::{

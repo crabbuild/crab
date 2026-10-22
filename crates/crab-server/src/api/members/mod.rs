@@ -1,3 +1,5 @@
+pub(in crate::api) mod roster;
+
 use std::sync::Arc;
 
 use axum::{

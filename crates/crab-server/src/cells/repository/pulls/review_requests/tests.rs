@@ -49,7 +49,7 @@ fn request(subject: &str, version: u64, requested: bool) -> Selection {
         pull: 1,
         version,
         actor: author("Alice"),
-        can_manage: false,
+        can_manage: true,
         reviewer: author(subject),
         requested,
     }
@@ -237,11 +237,16 @@ async fn submitted_reviews_fulfill_once_and_replays_cannot_fulfill_a_new_request
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn requests_require_an_author_or_writer_and_an_open_unarchived_pull() {
+async fn requests_require_triage_authority_and_an_open_unarchived_pull() {
     let server = fixtures::fixture().await;
     let cell = cell(&server);
     seed(&cell).await;
     let mut input = request("Bob", 1, true);
+    input.can_manage = false;
+    assert_eq!(
+        write::<SetReviewRequest>(&cell, input.clone()).await,
+        Outcome::Forbidden
+    );
     input.actor = author("Carol");
     assert_eq!(
         write::<SetReviewRequest>(&cell, input.clone()).await,

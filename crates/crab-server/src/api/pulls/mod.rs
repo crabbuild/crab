@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 
 use crate::{
     BranchProtection,
-    api::assignees::{self, Selection},
+    api::assignees::Selection,
     api::checks::{self, CheckRun},
     api::labels,
     api::reactions,
@@ -574,11 +574,11 @@ async fn edit(
         .transpose()?;
     // Assignment eligibility and caller role must share the final current roster.
     let (can_triage, assignees) = if let Some(ids) = input.assignee_ids {
-        let roster = assignees::Roster::load(&server, &principal, repo).await?;
+        let roster = crate::api::members::roster::Roster::load(&server, &principal, repo).await?;
         if !roster.principal.can_triage(repo.id) {
             return Err(Error::AssigneePermission);
         }
-        (true, Some(roster.validate(ids)?))
+        (true, Some(Selection::validate(&roster, ids)?))
     } else {
         let permissions = app::membership(&server, &principal, repo).await?;
         (permissions.principal.can_triage(repo.id), None)
