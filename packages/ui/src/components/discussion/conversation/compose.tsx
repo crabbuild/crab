@@ -144,7 +144,7 @@ export function useCommentSubmission(
       };
       return run({
         kind: "state",
-        input: { ...input, request_id: submission(input) },
+        input: { ...input, request_id: crypto.randomUUID() },
       });
     },
     retry() {

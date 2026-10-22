@@ -886,11 +886,19 @@ Each action has a permanent, subject-scoped submission identity. Its digest bind
 qualified actor, expected version, desired state/reason and original comment.
 Display-name/current-role snapshots do not change that identity. Recovery precedes
 later archive/version/merge checks and reads the existing canonical comment; it
-cannot execute the state operation again. No new SQL format, preparation, second
-comment writer or replacement for original command outcomes is needed.
+cannot execute the state operation again. Terminal domain rejections are also
+persisted; a failed action cannot become executable after unarchive or a role
+change. A nested SDK transaction rolls back tentative domain work before its
+rejection is recorded. Existing issue/pull state preparation commands explicitly
+convert historical successful submissions to decision format 2 in bounded frames.
+Canonical records, history, digests and comment references stay unchanged. Old
+failed decisions cannot be reconstructed; drain requests, coordinate peer/UI
+updates and reload sessions at cutover. Ordinary serving has one current decoder.
+Standalone comment contracts and transport receipt bytes remain unchanged.
 
 The shared composer controller preserves the original action through failures,
-metadata refresh and PR tabs. A confirmed rejection permits revision after reload;
+metadata refresh and PR tabs. A confirmed rejection permits revision after reload
+with a fresh UUID, even if the new action has identical content;
 an uncertain response offers Retry original action. Only the submitted draft is
 cleared; newer text remains. Hidden PR responses cannot move the visible history.
 Archived repositories retain drafts and permit recovery of an existing action.
@@ -1443,3 +1451,53 @@ controllers for delayed transports across mutable rejection conditions. Teams
 have permanent terminal decisions; this slice does not establish that stronger
 contract for every older repository workflow. That audit accompanies the remaining
 hierarchy, grants, team review requests and Projects work.
+
+
+## Terminal close and reopen decisions
+
+The HTTP regression reproduced a correctness gap for both discussion kinds: an
+archived repository rejected a close-with-comment action with a proven-rejection
+header, but the identical public UUID closed it after unarchive. Only successful
+submissions had permanent records. State actions now persist applied and rejected
+decisions; a nested SDK transaction discards tentative domain work before the
+terminal rejection commits. Replaying that UUID never reevaluates mutable domain
+conditions. Current HTTP membership remains required.
+
+A new browser action after confirmed rejection gets a new UUID, even when its
+payload is unchanged. Uncertain retries retain the original UUID, version and
+text. Existing issue/pull state preparation explicitly converts historical
+successful submissions in eight-record frames. Keys, digests and canonical
+comment references are preserved; ordinary state serving has one decoder and
+returns unavailable until preparation completes. Historical failed decisions
+cannot be reconstructed. Coordinate private peer/UI cutover and reload sessions.
+
+Validation: 479 native library tests passed, with six existing opt-in
+qualifications ignored; 13 CLI tests, 164 browser cases and 107 UI unit tests
+passed. Strict all-target Clippy, architecture gates, Rustfmt, frontend formatting
+and frontend/server builds passed. Native cases cover rollback, concurrent
+retries, changed roles, conflicting payloads, stale preparation, corrupt input and
+failed-frame atomicity. The HTTP regression also proves a deliberate new UUID
+can succeed after the old rejected action remains fenced.
+
+Real RustFS/OIDC upgrade qualification seeded twenty successful actions with the
+previous backend. Preparation paused after eight records, survived process
+restart and resumed through the CLI. All 39 canonical domain tables and public
+content/history remained unchanged, and the original actions replayed without
+duplication. A separate real embedded-UI qualification recovered a successful
+close after losing its reply, retained a newer unsent draft, and replayed after
+restart without another comment. Rejections remained terminal after unarchive
+and restart; new deliberate actions succeeded. Desktop and mobile captures were
+inspected. Owned qualification processes, browsers and object stores were closed.
+
+The persistent local preview runs that qualified binary. Both repositories have
+ready issue/pull decision ledgers, including the archived repository. Its 18
+captured public resources and all 39 canonical tables per repository Cell remain
+unchanged. No public profile or organization was fabricated; transport receipts
+retain their normal 24-hour expiry.
+
+Production growth is about 360 lines, chiefly explicit historical conversion and
+its bounded private management path. No second serving decoder or comment writer
+was added. This closes the combined state-action gap; bulk edits, pin replacement
+and other submission owners/controllers still require their own audit. Native
+cross-Cell authority cutover, the pinned Cellar release blocker and the wider
+Issues/PR/Projects/Milestones parity inventory remain open.

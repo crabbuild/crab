@@ -168,19 +168,38 @@ async fn rejection_rolls_back_child_numbers_history_and_search_contributions() {
     for kind in [SubjectKind::Issue, SubjectKind::Pull] {
         let command = input(kind);
         let mut denied = command.clone();
+        denied.submission_id = *Uuid::now_v7().as_bytes();
         denied.actor.subject = "bob".into();
         denied.body = Some("orphanneedle".into());
         assert!(matches!(
+            write::<ChangeState>(&cell, denied.clone()).await,
+            Outcome::Rejected(Rejection::Forbidden)
+        ));
+        denied.can_triage = true;
+        assert!(matches!(
+            write::<ChangeState>(&cell, denied.clone()).await,
+            Outcome::Rejected(Rejection::Forbidden)
+        ));
+        let changed = Input {
+            body: Some("Changed payload".into()),
+            ..denied.clone()
+        };
+        assert!(matches!(
+            write::<ChangeState>(&cell, changed).await,
+            Outcome::RequestConflict
+        ));
+        assert!(matches!(
             write::<ChangeState>(&cell, denied).await,
-            Outcome::Forbidden
+            Outcome::Rejected(Rejection::Forbidden)
         ));
         let bad = Input {
+            submission_id: *Uuid::now_v7().as_bytes(),
             reason: Some(Reason::Reopened),
             ..command.clone()
         };
         assert!(matches!(
             write::<ChangeState>(&cell, bad).await,
-            Outcome::InvalidState
+            Outcome::Rejected(Rejection::InvalidState)
         ));
         assert_eq!(number(&write::<ChangeState>(&cell, command).await), 1);
     }
@@ -247,7 +266,7 @@ async fn state_submission_recovery_survives_restart_and_later_archive() {
         };
         assert!(matches!(
             write::<ChangeState>(&cell, fresh).await,
-            Outcome::Archived
+            Outcome::Rejected(Rejection::Archived)
         ));
     }
     stop(restored.node).await;
@@ -289,7 +308,7 @@ async fn concurrent_retries_and_competing_versions_cannot_duplicate_comments() {
         assert_eq!(
             results
                 .iter()
-                .filter(|outcome| matches!(outcome, Outcome::Conflict))
+                .filter(|outcome| matches!(outcome, Outcome::Rejected(Rejection::Conflict)))
                 .count(),
             1
         );
@@ -305,5 +324,226 @@ async fn concurrent_retries_and_competing_versions_cannot_duplicate_comments() {
         .unwrap();
         assert_eq!(events.items.len(), 5);
     }
+    fixtures::close(&server).await;
+}
+
+pub(in crate::cells::repository) struct Historical;
+impl Mutation for Historical {
+    const CLASS: &'static str = repository::CLASS;
+    const ID: u32 = 65_519;
+    type Input = (SubjectKind, bool);
+    type Output = ();
+    fn execute(
+        context: &mut Transaction<'_>,
+        (kind, corrupt): Self::Input,
+    ) -> Result<MutationResult<()>> {
+        let rows = context.documents::<Submission>(preparation::prefix(kind), None, 51)?;
+        for (index, (key, saved)) in rows.iter().enumerate() {
+            let Resolution::Applied { comment } = &saved.resolution else {
+                return Err(Error::Invalid(
+                    "historical fixture requires applied submissions",
+                ));
+            };
+            let digest = if corrupt && index == rows.len() - 1 {
+                "bad"
+            } else {
+                &saved.digest
+            };
+            context.put_document(key, &serde_json::json!({"digest":digest,"comment":comment}))?;
+        }
+        context.delete_document(preparation::key(kind))?;
+        Ok(MutationResult::Success(()))
+    }
+}
+pub(in crate::cells::repository) struct Inspect;
+impl Read for Inspect {
+    const CLASS: &'static str = repository::CLASS;
+    const ID: u32 = 65_519;
+    type Input = SubjectKind;
+    type Output = Vec<(String, serde_json::Value)>;
+    fn execute(context: &mut Transaction<'_>, kind: SubjectKind) -> Result<Self::Output> {
+        context.documents(preparation::prefix(kind), None, 51)
+    }
+}
+pub(in crate::cells::repository) struct FailedPreparation;
+impl Mutation for FailedPreparation {
+    const CLASS: &'static str = repository::CLASS;
+    const ID: u32 = 65_520;
+    type Input = preparation::Input;
+    type Output = ();
+    fn execute(context: &mut Transaction<'_>, input: Self::Input) -> Result<MutationResult<()>> {
+        preparation::Prepare::execute(context, input)?;
+        Err(Error::Invalid("interrupted state submission preparation"))
+    }
+}
+async fn history(cell: &RepositoryCell, kind: SubjectKind) -> Vec<Input> {
+    let mut commands = Vec::new();
+    for index in 0..10 {
+        let command = Input {
+            version: index + 1,
+            state: if index % 2 == 0 {
+                State::Closed
+            } else {
+                State::Open
+            },
+            ..input(kind)
+        };
+        assert!(matches!(
+            write::<ChangeState>(cell, command.clone()).await,
+            Outcome::Applied(_)
+        ));
+        commands.push(command);
+    }
+    commands
+}
+#[tokio::test(flavor = "multi_thread")]
+async fn state_submission_preparation_is_bounded_atomic_and_preserves_replay_and_history() {
+    use crate::cells::repository::collaboration::lifecycle::{
+        LifecycleStatus, PrepareLifecycleOutcome,
+    };
+    let server = fixtures::fixture().await;
+    let cell = server
+        .cells()
+        .unwrap()
+        .repository(server.repositories.values()[0].id)
+        .unwrap();
+    seed(&cell).await;
+    for kind in [SubjectKind::Issue, SubjectKind::Pull] {
+        let commands = history(&cell, kind).await;
+        let before = serde_json::to_value(
+            read::<ListActivity>(
+                &cell,
+                Query {
+                    subject: Some(Subject { kind, number: 1 }),
+                    before: None,
+                    limit: 50,
+                },
+            )
+            .await,
+        )
+        .unwrap();
+        write::<Historical>(&cell, (kind, false)).await;
+        assert_eq!(
+            read::<preparation::GetPreparation>(&cell, kind).await,
+            LifecycleStatus::Outdated
+        );
+        assert!(matches!(
+            cell.client
+                .command::<ChangeState>(
+                    &cell.target,
+                    crate::app::mutation_identity().unwrap(),
+                    Input {
+                        version: 11,
+                        ..input(kind)
+                    }
+                )
+                .await
+                .err()
+                .unwrap(),
+            Error::SchemaUnavailable
+        ));
+        assert!(matches!(
+            write::<preparation::Prepare>(&cell, preparation::Input { kind, version: 0 }).await,
+            PrepareLifecycleOutcome::Applied(LifecycleStatus::Migrating {
+                version: 1,
+                copied: 8
+            })
+        ));
+        let staged = read::<Inspect>(&cell, kind).await;
+        assert!(
+            cell.client
+                .command::<FailedPreparation>(
+                    &cell.target,
+                    crate::app::mutation_identity().unwrap(),
+                    preparation::Input { kind, version: 1 }
+                )
+                .await
+                .is_err()
+        );
+        assert_eq!(read::<Inspect>(&cell, kind).await, staged);
+        assert!(matches!(
+            write::<preparation::Prepare>(&cell, preparation::Input { kind, version: 0 }).await,
+            PrepareLifecycleOutcome::Conflict(_)
+        ));
+        assert!(matches!(
+            write::<preparation::Prepare>(&cell, preparation::Input { kind, version: 1 }).await,
+            PrepareLifecycleOutcome::Applied(LifecycleStatus::Ready)
+        ));
+        for command in commands {
+            let expected = command.version;
+            assert_eq!(
+                number(&write::<ChangeState>(&cell, command).await),
+                expected
+            );
+        }
+        let after = serde_json::to_value(
+            read::<ListActivity>(
+                &cell,
+                Query {
+                    subject: Some(Subject { kind, number: 1 }),
+                    before: None,
+                    limit: 50,
+                },
+            )
+            .await,
+        )
+        .unwrap();
+        assert_eq!(after, before);
+        let current = read::<Inspect>(&cell, kind).await;
+        for (key, old) in staged {
+            let saved = &current
+                .iter()
+                .find(|(candidate, _)| candidate == &key)
+                .unwrap()
+                .1;
+            assert_eq!(saved["digest"], old["digest"]);
+            if old.get("resolution").is_none() {
+                assert_eq!(saved["resolution"]["comment"], old["comment"]);
+            }
+        }
+    }
+    fixtures::close(&server).await;
+}
+#[tokio::test(flavor = "multi_thread")]
+async fn corrupt_historical_submission_rolls_back_its_entire_current_frame() {
+    use crate::cells::repository::collaboration::lifecycle::{
+        LifecycleStatus, PrepareLifecycleOutcome,
+    };
+    let server = fixtures::fixture().await;
+    let cell = server
+        .cells()
+        .unwrap()
+        .repository(server.repositories.values()[0].id)
+        .unwrap();
+    seed(&cell).await;
+    history(&cell, SubjectKind::Issue).await;
+    let kind = SubjectKind::Issue;
+    write::<Historical>(&cell, (kind, true)).await;
+    assert!(matches!(
+        write::<preparation::Prepare>(&cell, preparation::Input { kind, version: 0 }).await,
+        PrepareLifecycleOutcome::Applied(LifecycleStatus::Migrating {
+            version: 1,
+            copied: 8
+        })
+    ));
+    let before = read::<Inspect>(&cell, kind).await;
+    assert!(
+        cell.client
+            .command::<preparation::Prepare>(
+                &cell.target,
+                crate::app::mutation_identity().unwrap(),
+                preparation::Input { kind, version: 1 }
+            )
+            .await
+            .is_err()
+    );
+    assert_eq!(read::<Inspect>(&cell, kind).await, before);
+    assert_eq!(
+        read::<preparation::GetPreparation>(&cell, kind).await,
+        LifecycleStatus::Migrating {
+            version: 1,
+            copied: 8
+        }
+    );
     fixtures::close(&server).await;
 }

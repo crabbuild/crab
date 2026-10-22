@@ -205,3 +205,100 @@ async fn state_routes_require_current_membership_and_csrf_even_for_recovery() {
     );
     h.close().await;
 }
+
+#[tokio::test]
+async fn proven_state_rejections_remain_terminal_after_repository_unarchive() {
+    use crate::cells::repository::{
+        GetRepositoryLifecycle, ReplaceRepositoryLifecycle, ReplaceRepositoryLifecycleInput,
+    };
+    let h = Harness::new(false).await;
+    let alice = h.login().await;
+    seed(&h, &alice).await;
+    let cell = h
+        .server
+        .cells()
+        .unwrap()
+        .repository(h.server.repositories.values()[0].id)
+        .unwrap();
+    let commands = ["issues", "pulls"].map(|kind| {
+        let input = json!({
+            "request_id": uuid::Uuid::now_v7(),
+            "version": 1,
+            "state": "closed",
+            "body": "Declined close action"
+        });
+        (format!("{ROOT}/{kind}/1"), input)
+    });
+    for archived in [true, false] {
+        let lifecycle = cell
+            .client
+            .query::<GetRepositoryLifecycle>(&cell.target, None, ())
+            .await
+            .unwrap()
+            .output;
+        cell.client
+            .command::<ReplaceRepositoryLifecycle>(
+                &cell.target,
+                crate::app::mutation_identity().unwrap(),
+                ReplaceRepositoryLifecycleInput {
+                    expected_version: lifecycle.version,
+                    archived,
+                },
+            )
+            .await
+            .unwrap();
+        if archived {
+            for (path, input) in &commands {
+                let response = h
+                    .write(
+                        Method::POST,
+                        &format!("{path}/state"),
+                        &alice,
+                        input.clone(),
+                    )
+                    .await;
+                assert_eq!(response.status(), StatusCode::FORBIDDEN);
+                assert_eq!(response.headers()["x-crab-write-outcome"], "rejected");
+                assert_eq!(
+                    h.json(&format!("{path}/comments"), &alice).await["items"],
+                    json!([])
+                );
+                assert_eq!(h.json(path, &alice).await["state"], "open");
+            }
+        }
+    }
+    let mut statuses = Vec::new();
+    for (path, input) in &commands {
+        let response = h
+            .write(
+                Method::POST,
+                &format!("{path}/state"),
+                &alice,
+                input.clone(),
+            )
+            .await;
+        statuses.push(response.status());
+    }
+    assert_eq!(statuses, vec![StatusCode::FORBIDDEN; 2]);
+    for (path, mut input) in commands {
+        assert_eq!(
+            h.json(&format!("{path}/comments"), &alice).await["items"],
+            json!([])
+        );
+        assert_eq!(h.json(&path, &alice).await["state"], "open");
+        input["request_id"] = json!(uuid::Uuid::now_v7());
+        h.write(Method::POST, &format!("{path}/state"), &alice, input)
+            .await
+            .error_for_status()
+            .unwrap();
+        assert_eq!(h.json(&path, &alice).await["state"], "closed");
+        assert_eq!(
+            h.json(&format!("{path}/comments"), &alice).await["items"]
+                .as_array()
+                .unwrap()
+                .len(),
+            1
+        );
+    }
+    h.close().await;
+}

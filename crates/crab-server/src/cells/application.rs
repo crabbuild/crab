@@ -45,6 +45,27 @@ impl Transaction<'_> {
         self.now_ms
     }
 
+    pub(crate) fn apply<T>(
+        &self,
+        operation: impl FnOnce(&mut Transaction<'_>) -> Result<MutationResult<T>>,
+    ) -> Result<MutationResult<T>> {
+        // Rejected domain work rolls back in its own scope. Its caller may
+        // still commit a terminal decision alongside the transport receipt.
+        self.storage
+            .transaction_sync(|storage| {
+                let mut application = Transaction {
+                    storage,
+                    now_ms: self.now_ms,
+                };
+                let result = operation(&mut application)?;
+                if matches!(result, MutationResult::Rejected(_)) {
+                    storage.rollback()?;
+                }
+                Ok(result)
+            })
+            .map_err(|error| error.downcast::<Error>().unwrap_or_else(Error::sdk))
+    }
+
     pub(crate) fn document<T: DeserializeOwned>(&self, key: &str) -> Result<Option<T>> {
         self.storage
             .get(key)
@@ -407,38 +428,17 @@ fn execute(context: &mut Transaction<'_>, request: &Request) -> Result<Reply> {
     if identity.expires_at_ms <= context.now_ms {
         return Err(Error::Expired);
     }
-    // Rejection rolls application writes back while its receipt commits.
-    // Use the SDK's nested transaction API; raw SQL savepoints are forbidden.
-    let result = context
-        .storage
-        .transaction_sync(|storage| {
-            let mut application = Transaction {
-                storage,
-                now_ms: context.now_ms,
-            };
-            let result = match request.target {
-                Address::Repository(_) => repository::dispatch_mutation(
-                    &mut application,
-                    request.operation,
-                    request.input.clone(),
-                )?,
-                Address::Organization(_) => organization::dispatch_mutation(
-                    &mut application,
-                    request.operation,
-                    request.input.clone(),
-                )?,
-                Address::Directory => directory::dispatch_mutation(
-                    &mut application,
-                    request.operation,
-                    request.input.clone(),
-                )?,
-            };
-            if matches!(result, MutationResult::Rejected(_)) {
-                storage.rollback()?;
-            }
-            Ok(result)
-        })
-        .map_err(|error| error.downcast::<Error>().unwrap_or_else(Error::sdk))?;
+    let result = context.apply(|application| match request.target {
+        Address::Repository(_) => {
+            repository::dispatch_mutation(application, request.operation, request.input.clone())
+        }
+        Address::Organization(_) => {
+            organization::dispatch_mutation(application, request.operation, request.input.clone())
+        }
+        Address::Directory => {
+            directory::dispatch_mutation(application, request.operation, request.input.clone())
+        }
+    })?;
     let (rejected, output) = match result {
         MutationResult::Success(value) => (false, value),
         MutationResult::Rejected(value) => (true, value),

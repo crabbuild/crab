@@ -1725,8 +1725,21 @@ orphan comment or advance progress. Immutable-payload validation and confirmed
 native domain rejection carry `X-Crab-Write-Outcome: rejected`. Context errors
 (access, routing, transport, decoding) and submission-identity conflicts stay
 unmarked: a previous attempt may already have committed. Preserve the original
-intent until it can be recovered. No
-new schema preparation or discussion-index rebuild is needed.
+intent until it can be recovered. A confirmed native rejection is permanent for
+that UUID; archive, version or permission changes cannot turn it into a new write.
+After resolving a rejection, a deliberate new action uses a fresh UUID.
+
+Existing repositories must run both `cells prepare-issue-state` and
+`cells prepare-pull-state`. These now also convert historical successful state
+submissions to decision format 2, eight records per restartable frame, preserving
+keys, digests, comment references and canonical history. State writes remain
+unavailable until their kind is prepared. No discussion-index rebuild is needed.
+The private mTLS GET/POST endpoint is
+`/internal/repositories/{owner}/{name}/state-submissions/{issue|pull}`; POST uses
+`{version}` and returns the existing lifecycle preparation status. Drain requests,
+update private peers and UI together, and reload browser sessions before resuming
+state actions. Historical failed actions cannot be recovered from absent records.
+See [native state decisions](CELLAR.md#atomic-discussion-state-actions).
 
 ### Bulk discussion triage
 

@@ -16,7 +16,8 @@ pub(in crate::cells) fn dispatch_mutation(
         || id == <assignments::MigrateAssignments as Mutation>::ID
         || id == issues::lifecycle::PrepareIssueLifecycle::ID
         || id == PreparePullLifecycle::ID
-        || id == review_dismissals::PrepareReviewState::ID;
+        || id == review_dismissals::PrepareReviewState::ID
+        || id == collaboration::state::preparation::Prepare::ID;
     #[cfg(test)]
     let maintenance = maintenance
         || id == assignments::migration::tests::SeedSubjects::ID
@@ -24,12 +25,25 @@ pub(in crate::cells) fn dispatch_mutation(
         || id == rollups::tests::PreviousFormat::ID
         || id == search::reviews::status::tests::PreviousFormat::ID
         || id == collaboration::conversation::tests::Inspect::ID
+        || id == collaboration::state::tests::Historical::ID
+        || id == collaboration::state::tests::FailedPreparation::ID
         || id == issues::lifecycle::tests::Historical::ID
         || id == pulls::lifecycle::tests::Historical::ID;
     if !maintenance {
         search::index::ensure_ready(context)?;
     }
     let result = match id {
+        #[cfg(test)]
+        collaboration::state::tests::Historical::ID => {
+            invoke_mutation::<collaboration::state::tests::Historical>(context, input)
+        }
+        #[cfg(test)]
+        collaboration::state::tests::FailedPreparation::ID => {
+            invoke_mutation::<collaboration::state::tests::FailedPreparation>(context, input)
+        }
+        collaboration::state::preparation::Prepare::ID => {
+            invoke_mutation::<collaboration::state::preparation::Prepare>(context, input)
+        }
         issues::pins::SetPins::ID => invoke_mutation::<issues::pins::SetPins>(context, input),
         collaboration::bulk::Edit::ID => {
             invoke_mutation::<collaboration::bulk::Edit>(context, input)
@@ -172,6 +186,13 @@ pub(in crate::cells) fn dispatch_read(
     input: serde_json::Value,
 ) -> crate::cells::Result<serde_json::Value> {
     match id {
+        #[cfg(test)]
+        collaboration::state::tests::Inspect::ID => {
+            invoke_read::<collaboration::state::tests::Inspect>(context, input)
+        }
+        collaboration::state::preparation::GetPreparation::ID => {
+            invoke_read::<collaboration::state::preparation::GetPreparation>(context, input)
+        }
         pulls::rollups::GetRollups::ID => invoke_read::<pulls::rollups::GetRollups>(context, input),
         issues::pins::GetPins::ID => invoke_read::<issues::pins::GetPins>(context, input),
         collaboration::bulk::Select::ID => {

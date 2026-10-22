@@ -647,23 +647,40 @@ implemented by the native collaboration state operation below.
 ## Atomic discussion state actions
 
 `cells/repository/collaboration/state/` composes canonical comment writers and
-issue/PR state commands in one native transaction. SQL/KV/search/activity/progress
-commit together, and rejection rolls all application work back before its native
-rejection receipt commits. `collaboration/v1/state-submissions/{subject}/{uuid}`
-retains the original payload digest and optional canonical comment number. A
-committed intent recovers before later archive/version/merge checks, without
-repeating the state write. Current HTTP repository membership still gates access.
+issue/PR state commands in one native transaction. A nested SDK transaction rolls
+back tentative comments, counters, search, activity and progress on rejection.
+The enclosing scope commits the terminal applied/rejected decision and transport
+receipt together. `collaboration/v1/state-submissions/{subject}/{uuid}` retains
+the original digest and either the canonical comment number or minimal rejection
+reason. Both decisions recover before later archive/version/role/merge checks;
+a rejected intent cannot become executable after circumstances change. Current
+HTTP repository membership still gates access.
 
-No new SQL schema, migration or index rebuild is required. Original standalone
-comment inputs, submission digests and record/outcome formats stay unchanged;
-only their canonical contribution writers are shared. HTTP marks immutable-payload
+Existing repositories explicitly run `cells prepare-issue-state` and
+`cells prepare-pull-state`. In addition to lifecycle metadata, these commands now
+convert successful submission documents to decision format 2 in bounded,
+restartable eight-record frames. Digests, keys and canonical comment references
+stay identical; no discussion-index rebuild is required. Ordinary state writes
+return unavailable until preparation completes; ordinary reads remain available.
+Historical decoding exists only inside `state/preparation/`. Corrupt input aborts
+the current frame, including its progress. Fresh repositories initialize ready.
+Old rejected actions were never permanently recorded and cannot be reconstructed.
+Drain requests and update private peers and bundled UI together, reload existing
+browser sessions, then prepare before resuming state actions. Older transport
+receipts retain their original bytes and 24-hour expiry; they are not rewritten.
+
+Standalone comment inputs and digests stay unchanged. HTTP marks immutable-payload
 validation and confirmed native domain rejection with
 `X-Crab-Write-Outcome: rejected`. Context errors and submission-identity conflicts
 remain uncertain, including errors before a retry reaches native execution; an
-earlier attempt may have committed. Retry the unchanged
-original intent after resolving availability/access. Public output exposes only
-existing comment DTOs, with final membership checks after enrichment.
+earlier attempt may have committed. Retry the unchanged original intent after
+resolving availability/access. After a confirmed rejection, a deliberate new
+browser action gets a fresh UUID even with unchanged content. Public output
+exposes existing comment DTOs, with final membership checks after enrichment.
 
+This qualification covers combined state actions. Bulk edits, pin replacement,
+and other submission controllers require their own terminal-rejection audit; this
+change does not establish their retry guarantees.
 
 ## Bounded bulk discussion edits
 

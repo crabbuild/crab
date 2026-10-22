@@ -310,13 +310,13 @@ async fn cells(config: &crab_server::Config, command: CellsCommand) -> crab_serv
             actor,
         } => teams::prepare(config, organization, actor).await?,
         CellsCommand::PrepareIssueState { owner, name } => {
-            lifecycle::prepare(config, &owner, &name, "issue-state").await?
+            lifecycle::prepare(config, &owner, &name, lifecycle::Scope::Issue).await?
         }
         CellsCommand::PreparePullState { owner, name } => {
-            lifecycle::prepare(config, &owner, &name, "pull-state").await?
+            lifecycle::prepare(config, &owner, &name, lifecycle::Scope::Pull).await?
         }
         CellsCommand::PrepareReviewState { owner, name } => {
-            lifecycle::prepare(config, &owner, &name, "review-state").await?
+            lifecycle::prepare(config, &owner, &name, lifecycle::Scope::Review).await?
         }
         CellsCommand::DirectoryStatus => management_body(config, "/internal/directory").await?,
         CellsCommand::MigrateDirectory => migrate_directory(config).await?,

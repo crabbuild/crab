@@ -30,6 +30,7 @@ async function fixture(page: Page, kind: "issues" | "pulls") {
   };
   const comments: Comment[] = [];
   const submissions = new Map<string, Comment | null>();
+  const rejections = new Set<string>();
   const writes: Array<{
     request_id: string;
     version: number;
@@ -57,8 +58,9 @@ async function fixture(page: Page, kind: "issues" | "pulls") {
             },
           },
         });
-      if (reject) {
+      if (reject || rejections.has(input.request_id)) {
         reject = false;
+        rejections.add(input.request_id);
         return route.fulfill({
           status: 409,
           headers: { "X-Crab-Write-Outcome": "rejected" },
@@ -245,6 +247,7 @@ test("rejected issue actions retain drafts and explicit refresh permits a revise
     .click();
   await expect(editor).toHaveValue("");
   expect(model.comments).toHaveLength(1);
+  expect(model.writes[1].request_id).not.toBe(model.writes[0].request_id);
 });
 
 test("a permission error after commit retains the original state intent", async ({

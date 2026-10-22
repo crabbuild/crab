@@ -125,17 +125,19 @@ async fn change(
     .map_err(IntoResponse::into_response)?;
     let comment = match output {
         Outcome::Applied(comment) => comment,
-        Outcome::Archived => return Err(rejected(Error::Archived)),
-        Outcome::NotFound => return Err(rejected(Error::NotFound)),
-        Outcome::Forbidden => return Err(rejected(Error::Forbidden)),
-        Outcome::Conflict => return Err(rejected(Error::Conflict)),
+        Outcome::Rejected(state::Rejection::Archived) => return Err(rejected(Error::Archived)),
+        Outcome::Rejected(state::Rejection::NotFound) => return Err(rejected(Error::NotFound)),
+        Outcome::Rejected(state::Rejection::Forbidden) => return Err(rejected(Error::Forbidden)),
+        Outcome::Rejected(state::Rejection::Conflict) => return Err(rejected(Error::Conflict)),
         Outcome::RequestConflict => return Err(Error::RequestConflict.into_response()),
-        Outcome::InvalidState => {
+        Outcome::Rejected(state::Rejection::InvalidState) => {
             return Err(rejected(Error::Invalid(
                 "The requested discussion state or close reason is invalid",
             )));
         }
-        Outcome::MergePending => return Err(rejected(Error::MergePending)),
+        Outcome::Rejected(state::Rejection::MergePending) => {
+            return Err(rejected(Error::MergePending));
+        }
     };
     let value = if let Some(comment) = comment {
         let (actor, target) = match &comment {

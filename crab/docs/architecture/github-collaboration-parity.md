@@ -366,7 +366,11 @@ remain unfinished.
 
 The atomic composer slice now commits a comment and close/reopen together for
 both discussion kinds. Canonical writers, rollback, milestone/search/history and
-permanent intent recovery remain in the Repository transaction. Shared shadcn
+permanent applied/rejected decisions remain in the Repository transaction. Nested
+SDK scopes discard tentative domain writes before committing a rejection. Explicit
+issue/pull state preparation converts historical successful submissions without
+rewriting canonical content or history; old failed decisions cannot be reconstructed.
+Shared shadcn
 controls retain drafts and distinguish confirmed rejections from uncertain replies,
 including a permission failure after commit. See
 [atomic action evidence](github-ui-parity.md#atomic-comment-and-state-actions).
@@ -438,3 +442,12 @@ Existing organizations require explicit bounded team preparation. Hierarchy,
 repository/project grants, team review requests/mentions and full parity remain
 open; this is not a catalog authority cutover. See the
 [team evidence and remaining scope](github-ui-parity.md#native-standalone-teams).
+
+
+Combined issue/PR state actions now retain terminal domain rejections as well as
+applied submissions. The archived-action HTTP regression failed before the fix
+and passes afterward; real upgrade/restart and browser recovery proof is recorded
+under [terminal state decisions](github-ui-parity.md#terminal-close-and-reopen-decisions).
+This establishes that contract for combined close/reopen actions. Bulk/pin and
+other repository submission owners remain in the audit queue; complete parity,
+project authority and native cross-Cell fencing remain delivery work.
