@@ -414,3 +414,15 @@ reason drafts. Existing repositories explicitly run `cells prepare-review-state`
 No source receipt or search-index format is rewritten. See the [review lifecycle
 slice](github-ui-parity.md#pr-review-dismissal). Full custom/team restrictions,
 remaining review workflows and native grant cutover remain delivery work.
+
+
+Repository-wide review-status search now combines canonical active decisions,
+effective native/configured protections and a verified immutable Git ref epoch.
+The shared query supplies both list kinds, full counts and invalidated cursors;
+merged source heads survive branch deletion through the native codec. Index
+format 12 requires explicit bounded preparation. The Reviews menu uses native
+status/personal destinations with shadcn interactions and Geist styling.
+Unresolved requests for changes now remain active across pushes in filters,
+rollups and protected merge checks. See the [review filter contracts and proof](github-ui-parity.md#repository-wide-review-filters).
+Team review requests, owner/team/project authority, saved views and the wider
+four-surface parity goal remain unfinished.

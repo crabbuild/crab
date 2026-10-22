@@ -54,11 +54,14 @@ async fn page(cell: &RepositoryCell, oid: Option<&str>) -> Rollup {
         .query::<GetRollups>(
             &cell.target,
             None,
-            vec![Head {
-                number: 1,
-                version: version(cell).await,
-                oid: oid.map(str::to_owned),
-            }],
+            Input {
+                heads: vec![Head {
+                    number: 1,
+                    version: version(cell).await,
+                    oid: oid.map(str::to_owned),
+                }],
+                source_token: None,
+            },
         )
         .await
         .unwrap()
@@ -221,7 +224,7 @@ async fn decisions_and_request_counters_follow_fulfillment_cancellation_and_sour
         page(&cell, Some(&"c".repeat(40))).await.reviews.unwrap(),
         Reviews {
             approved: 0,
-            changes_requested: 0,
+            changes_requested: 1,
             requested: 1,
             outdated: 2
         }
@@ -233,11 +236,14 @@ async fn decisions_and_request_counters_follow_fulfillment_cancellation_and_sour
         .query::<GetRollups>(
             &cell.target,
             None,
-            vec![Head {
-                number: 1,
-                version: 1,
-                oid: Some("b".repeat(40)),
-            }],
+            Input {
+                heads: vec![Head {
+                    number: 1,
+                    version: 1,
+                    oid: Some("b".repeat(40)),
+                }],
+                source_token: None,
+            },
         )
         .await
         .unwrap()
@@ -318,11 +324,14 @@ async fn format_ten_preparation_rebuilds_request_counts_and_is_repeatable_withou
                     .query::<GetRollups>(
                         &cell.target,
                         None,
-                        vec![Head {
-                            number: 1,
-                            version: before.as_ref().unwrap().version,
-                            oid: Some("b".repeat(40))
-                        }]
+                        Input {
+                            heads: vec![Head {
+                                number: 1,
+                                version: before.as_ref().unwrap().version,
+                                oid: Some("b".repeat(40))
+                            }],
+                            source_token: None
+                        }
                     )
                     .await
                     .is_err()

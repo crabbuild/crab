@@ -168,3 +168,11 @@ END;
 CREATE TRIGGER IF NOT EXISTS discussion_reviewer_delete AFTER DELETE ON discussion_index_reviewers BEGIN
     UPDATE discussion_index_revision SET revision = revision + 1 WHERE singleton = 1;
 END;
+
+CREATE TABLE IF NOT EXISTS discussion_index_pull_sources (
+    document INTEGER PRIMARY KEY REFERENCES discussion_index(rowid) ON DELETE CASCADE,
+    base_ref TEXT NOT NULL,
+    head_ref BLOB NOT NULL CHECK (length(head_ref) > 0),
+    merged_head_oid TEXT CHECK (merged_head_oid IS NULL OR length(merged_head_oid) = 40),
+    CHECK (document % 2 = 1)
+) STRICT;

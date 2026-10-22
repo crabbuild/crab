@@ -22,6 +22,7 @@ pub(in crate::cells) fn dispatch_mutation(
         || id == assignments::migration::tests::SeedSubjects::ID
         || id == reviewers::tests::PreviousIndex::ID
         || id == rollups::tests::PreviousFormat::ID
+        || id == search::reviews::status::tests::PreviousFormat::ID
         || id == collaboration::conversation::tests::Inspect::ID
         || id == issues::lifecycle::tests::Historical::ID
         || id == pulls::lifecycle::tests::Historical::ID;
@@ -35,6 +36,10 @@ pub(in crate::cells) fn dispatch_mutation(
         }
         collaboration::state::ChangeState::ID => {
             invoke_mutation::<collaboration::state::ChangeState>(context, input)
+        }
+        #[cfg(test)]
+        search::reviews::status::tests::PreviousFormat::ID => {
+            invoke_mutation::<search::reviews::status::tests::PreviousFormat>(context, input)
         }
         #[cfg(test)]
         rollups::tests::PreviousFormat::ID => {
@@ -173,6 +178,9 @@ pub(in crate::cells) fn dispatch_read(
             invoke_read::<collaboration::bulk::Select>(context, input)
         }
         GetPullLifecycleStatus::ID => invoke_read::<GetPullLifecycleStatus>(context, input),
+        search::reviews::status::GetSourceState::ID => {
+            invoke_read::<search::reviews::status::GetSourceState>(context, input)
+        }
         review_dismissals::GetReviewState::ID => {
             invoke_read::<review_dismissals::GetReviewState>(context, input)
         }

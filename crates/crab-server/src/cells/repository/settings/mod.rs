@@ -229,7 +229,9 @@ fn validate_settings_version(version: u64, allow_zero: bool) -> crate::cells::Re
     Ok(())
 }
 
-fn validate_protections(rules: &[BranchProtectionRecord]) -> crate::cells::Result<()> {
+pub(in crate::cells::repository) fn validate_protections(
+    rules: &[BranchProtectionRecord],
+) -> crate::cells::Result<()> {
     let rules = rules
         .iter()
         .map(|rule| crate::BranchProtection {

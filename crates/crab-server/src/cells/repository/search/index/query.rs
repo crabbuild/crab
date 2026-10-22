@@ -44,6 +44,7 @@ pub(crate) struct SearchInput {
     pub direction: Direction,
     pub people: Vec<super::super::people::Binding>,
     pub assignees: Vec<super::super::assignees::Binding>,
+    pub review_context: Option<super::super::reviews::status::Context>,
 }
 impl Default for SearchInput {
     fn default() -> Self {
@@ -55,6 +56,7 @@ impl Default for SearchInput {
             direction: Direction::Desc,
             people: Vec::new(),
             assignees: Vec::new(),
+            review_context: None,
         }
     }
 }
@@ -173,8 +175,27 @@ struct Bindings<'a> {
     values: Vec<SqlValue>,
     people: &'a [super::super::people::Binding],
     assignees: &'a [super::super::assignees::Binding],
+    review: Option<super::super::reviews::status::Bound>,
 }
-impl Bindings<'_> {
+impl<'a> Bindings<'a> {
+    fn new(
+        input: &'a SearchInput,
+        prepared: Option<&super::super::reviews::status::Prepared>,
+    ) -> crate::cells::Result<Self> {
+        let mut values = Self {
+            people: &input.people,
+            assignees: &input.assignees,
+            ..Self::default()
+        };
+        if let Some(prepared) = prepared {
+            values.review = Some(super::super::reviews::status::Bound::new(
+                prepared,
+                |value| values.bind(value),
+            )?);
+        }
+        Ok(values)
+    }
+
     fn bind(&mut self, value: SqlValue) -> String {
         self.values.push(value);
         format!("?{}", self.values.len())
@@ -193,7 +214,7 @@ impl Bindings<'_> {
 }
 
 pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
-    context: &Transaction<'_>,
+    context: &mut Transaction<'_>,
     input: SearchInput,
     subject_kind: Option<SubjectKind>,
     mut summary: impl FnMut(&Transaction<'_>, Subject, Metrics) -> crate::cells::Result<T>,
@@ -202,6 +223,15 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
     let generation = ensure_ready(context)?;
     let revision = revision(context)?;
     let query = Query::parse(input.query.as_deref()).map_err(crate::cells::Error::Invalid)?;
+    let review = if query.needs_review_source() {
+        Some(super::super::reviews::status::prepare(
+            context,
+            input.review_context.as_ref(),
+        )?)
+    } else {
+        None
+    };
+
     if subject_kind != Some(SubjectKind::Pull) || query.needs_lifecycle() {
         super::super::super::issues::lifecycle::ensure_ready(context)?;
     }
@@ -234,6 +264,8 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
         &query.expression,
         &input.people,
         &input.assignees,
+        &input.review_context,
+        review.as_ref().map(|prepared| &prepared.rules),
     ))?)
     .to_hex()
     .to_string();
@@ -251,16 +283,12 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
     }) {
         return Err(crate::cells::Error::StaleSearch);
     }
-    let mut bindings = Bindings {
-        people: &input.people,
-        assignees: &input.assignees,
-        ..Bindings::default()
-    };
+    let mut bindings = Bindings::new(&input, review.as_ref())?;
     let kind_clause = kind_filter(subject_kind, &mut bindings);
     // Each counter describes its navigation query, even when the current query
     // selects only closed work. Rows and both targets share this native snapshot.
     let (base, navigation) = query.state_navigation();
-    let predicate = expression(&base, &mut bindings);
+    let predicate = expression(&base, &mut bindings)?;
     let count_filter = format!("{kind_clause} AND ({predicate})");
     let totals = context.sql(&SqlBatch {
         statements: vec![statement(
@@ -292,13 +320,9 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
         .ok_or(crate::cells::Error::Invalid(
             "discussion count exceeds its range",
         ))?;
-    let mut bindings = Bindings {
-        people: &input.people,
-        assignees: &input.assignees,
-        ..Bindings::default()
-    };
+    let mut bindings = Bindings::new(&input, review.as_ref())?;
     let kind_clause = kind_filter(subject_kind, &mut bindings);
-    let predicate = expression(&query.expression, &mut bindings);
+    let predicate = expression(&query.expression, &mut bindings)?;
     let filter = format!("{kind_clause} AND ({predicate})");
     let matching = match &navigation {
         super::super::navigation::StateNavigation::State { selected, .. } => match selected {
@@ -459,21 +483,24 @@ fn kind_filter(subject_kind: Option<SubjectKind>, bindings: &mut Bindings<'_>) -
     }
 }
 
-fn expression(expression: &Expression, bindings: &mut Bindings<'_>) -> String {
+fn expression(
+    expression: &Expression,
+    bindings: &mut Bindings<'_>,
+) -> crate::cells::Result<String> {
     scoped_expression(expression, bindings, Fields::ALL)
 }
 fn scoped_expression(
     expression: &Expression,
     bindings: &mut Bindings<'_>,
     fields: Fields,
-) -> String {
-    match expression {
+) -> crate::cells::Result<String> {
+    Ok(match expression {
         Expression::All => "1".into(),
-        Expression::Not(inner) => format!("NOT ({})",scoped_expression(inner, bindings, fields)),
-        Expression::Scope { fields: selected, expression } => scoped_expression(expression, bindings, *selected),
+        Expression::Not(inner) => format!("NOT ({})",scoped_expression(inner, bindings, fields)?),
+        Expression::Scope { fields: selected, expression } => scoped_expression(expression, bindings, *selected)?,
         Expression::And(parts) | Expression::Or(parts) => {
             let operator = if matches!(expression, Expression::And(_)) { " AND " } else { " OR " };
-            parts.iter().map(|part| format!("({})",scoped_expression(part, bindings, fields))).collect::<Vec<_>>().join(operator)
+            parts.iter().map(|part| scoped_expression(part, bindings, fields).map(|value|format!("({value})"))).collect::<crate::cells::Result<Vec<_>>>()?.join(operator)
         }
         Expression::Term { value: term, .. } => match term {
             Term::Count(filter) => filter.sql(|value| bindings.bind(SqlValue::Integer(value))),
@@ -490,7 +517,7 @@ fn scoped_expression(
             }),
             Term::Assignee(name) => {
                 if name == "*" {
-                    return "EXISTS (SELECT 1 FROM discussion_index_assignees a WHERE a.document = d.rowid)".into();
+                    return Ok("EXISTS (SELECT 1 FROM discussion_index_assignees a WHERE a.document = d.rowid)".into());
                 }
                 let id = name.strip_prefix("actor/").map(str::to_owned).or_else(|| bindings.assignees.iter().find(|binding| binding.name == *name).and_then(|binding| binding.id).map(|id| id.to_string()));
                 match id {
@@ -501,6 +528,9 @@ fn scoped_expression(
                     None => "0".into(),
                 }
             }
+            Term::ReviewStatus(super::super::reviews::status::Status::None) => super::super::reviews::status::UNREVIEWED.into(),
+            Term::ReviewStatus(super::super::reviews::status::Status::ChangesRequested) => super::super::reviews::status::CHANGES_REQUESTED.into(),
+            Term::ReviewStatus(status)=> bindings.review.as_ref().ok_or(crate::cells::Error::Invalid("Review source was not bound"))?.predicate(*status),
             Term::Reviewer { kind, name } => bindings.person(name).map_or_else(|| "0".into(), |value| {
                 let predicate = kind.predicate();
                 format!("d.kind = 1 AND EXISTS (SELECT 1 FROM discussion_index_reviewers r WHERE r.pull = d.number AND r.identity = {value} AND ({predicate}))")
@@ -521,7 +551,7 @@ fn scoped_expression(
             Term::Missing(Metadata::Assignee) => "NOT EXISTS (SELECT 1 FROM discussion_index_assignees a WHERE a.document = d.rowid)".into(),
             Term::Missing(Metadata::Milestone) => "NOT EXISTS (SELECT 1 FROM discussion_index_milestones m WHERE m.document = d.rowid)".into(),
         }
-    }
+    })
 }
 
 fn sort_expression(sort: Sort, expression: &Expression, bindings: &mut Bindings<'_>) -> String {

@@ -230,13 +230,12 @@ fn merge_requirements(
     let mut approvals = 0;
     let mut changes_requested = 0;
     for decision in &pull.review_decisions {
-        if decision.commit_oid != head_oid {
-            continue;
-        }
+        // New commits require fresh approval; they cannot resolve a reviewer's
+        // requested changes without a new decision or authorized dismissal.
         match decision.state {
-            storage::ReviewState::Approved => approvals += 1,
+            storage::ReviewState::Approved if decision.commit_oid == head_oid => approvals += 1,
             storage::ReviewState::ChangesRequested => changes_requested += 1,
-            storage::ReviewState::Commented => {}
+            storage::ReviewState::Approved | storage::ReviewState::Commented => {}
         }
     }
     let required_approvals = usize::from(rule.required_approvals);
@@ -332,14 +331,18 @@ async fn list(
     let repo = repo.as_ref();
     let routed = app::repository_cell(&server, repo)?;
     let mut input = params.input("is:open")?;
-    super::discussion_search::resolve_people(&server, &principal, &mut input).await?;
+    super::discussion_search::resolve_people(&server, &principal, repo, &mut input).await?;
+    let review_source = input
+        .review_context
+        .as_ref()
+        .and_then(|value| value.source_token.clone());
     let page = app::query_output(
         routed
             .client
             .query::<ListPulls>(&routed.target, None, input)
             .await,
     )?;
-    let rollups = rollups::load(&server, repo, page.items.iter()).await?;
+    let rollups = rollups::load(&server, repo, review_source.as_deref(), page.items.iter()).await?;
     let authors = super::profiles::attribution::Authors::load(
         &server,
         &principal,

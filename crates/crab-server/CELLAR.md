@@ -27,7 +27,7 @@ is buffered before owner dispatch so Cellar can safely retry stale routes; it is
 not forwarded as a non-replayable upload stream. Successful HTTP output
 uses the SDK output gate, including its ownership and durability checks.
 
-Repository assignment format 2 and discussion index format 11 require the explicit
+Repository assignment format 2 and discussion index format 12 require the explicit
 preparation described below. Issue lifecycle metadata also requires explicit
 `cells prepare-issue-state` on existing repositories. Pull lifecycle metadata
 requires `cells prepare-pull-state`. Other canonical records
@@ -208,14 +208,14 @@ review key or exclusive KV bound. Both phases process at most eight source recor
 per transaction; unrelated pull metadata also advances the request cursor. Reads
 remain unavailable until all sources complete. Domain records, versions, request
 history, receipts and public submission mappings are unchanged. Older indexes
-require `cells rebuild-search`; fresh repositories initialize current format 11.
+require `cells rebuild-search`; fresh repositories initialize current format 12.
 
 Native list output adds `review_requested_from_me`. Author, reviewer and commenter
 names now share one ordered `people` binding collection, one Directory snapshot,
 digest encoding and validation. Public HTTP cannot supply bindings.
 Update peers together; there is no old list-shape reader or source-scan fallback.
-Team requests, review-status/merge-policy predicates, mention relationships and
-native grant authority remain separate delivery work.
+Team requests, mention relationships and native grant authority remain separate
+delivery work. Review-status predicates are described below.
 
 ## Reviewer status preparation
 
@@ -660,7 +660,7 @@ its format marker. Existing repositories use the private mTLS GET/POST
 It installs an empty canonical relation, not a derived index or historical reader.
 Review details, conversation review entries and reviewer summaries fail with
 503 `schema_upgrade_required` until preparation completes. Other canonical
-review records, existing receipt bytes and discussion index format 11 stay intact.
+review records, existing receipt bytes and the discussion index stay intact.
 Deploy all serving peers and embedded UI together before reopening traffic.
 
 Dismissal, exact-decision removal, review/PR version changes, immutable activity
@@ -676,3 +676,30 @@ an empty saved set overrides the initial policy. Review snapshot details preserv
 the distinction between absent and empty rules and include the exact base ref for
 public capability composition. Update serving peers together for this private
 native input/read contract; no persisted schema or receipt rewrite is needed.
+
+
+### Prepare review status search
+
+Discussion index format 12 adds `discussion_index_pull_sources`, a derived
+relation containing base/head refs and the completed merge's recorded source
+head. Run the existing private `cells rebuild-search --owner OWNER --name REPO`
+for each repository before reopening list traffic. Missing preparation returns
+503 `discussion_index_unavailable`; request handlers never install its schema.
+The bounded rebuild decodes completed merges through their native binary codec
+and preserves canonical records and permanent submission ledgers. Native
+transport receipts continue their existing bounded append/pruning lifecycle.
+
+Required/approved filters validate a captured source token against the ready
+immutable Git ref epoch. Counts and page rows share one native read. Filtered
+rollups reuse that epoch and reject source-version changes; cursors also bind
+source identity and effective branch rules. HTTP schedules existing bounded
+reconciliation and returns `review_index_pending` when refs are not ready.
+No-review and changes-requested predicates use canonical active decisions and
+need no ref projection. New commits invalidate approval freshness but do not
+resolve another reviewer's requested changes; list summaries and protected merge
+checks share this rule.
+
+Deploy serving peers and embedded UI together: private search inputs carry
+optional captured source context and private rollup inputs carry a source token.
+There is no old-input decoder, canonical review migration, new environment
+option, dependency override or implicit preparation.

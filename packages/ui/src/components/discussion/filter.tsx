@@ -1,3 +1,4 @@
+import { ReviewFilter } from "@/features/pull-requests/reviews/filter";
 import { useEffect, useId, useRef, useState } from "react";
 import {
   CheckIcon,
@@ -54,15 +55,6 @@ type Options = { clear: Choice; truncated: boolean } & (
 );
 
 const presentations = {
-  reviewers: {
-    title: "Filter by reviewer",
-    trigger: "Reviews",
-    find: "Find a username",
-    initial: "Yourself",
-    noun: "reviewers",
-    singular: "reviewer",
-    timing: "Reviewer filters",
-  },
   assignees: {
     title: "Filter by assignee",
     trigger: "Assignee",
@@ -101,7 +93,23 @@ const presentations = {
   },
 } as const;
 
-export function DiscussionFilter({
+export function DiscussionFilter(props: {
+  repo: Repository;
+  query: string;
+  onSelect: (query: string) => void;
+  kind: keyof typeof presentations | "reviewers";
+}) {
+  if (props.kind === "reviewers")
+    return (
+      <ReviewFilter
+        repo={props.repo}
+        query={props.query}
+        onSelect={props.onSelect}
+      />
+    );
+  return <CatalogFilter {...props} kind={props.kind} />;
+}
+function CatalogFilter({
   repo,
   query,
   onSelect,
@@ -118,9 +126,7 @@ export function DiscussionFilter({
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [requested, setRequested] = useState("");
-  const [state, setState] = useState(
-    kind === "reviewers" ? "review_requested" : "open",
-  );
+  const [state, setState] = useState("open");
   const [active, setActive] = useState(-1);
   useEffect(() => {
     const timer = setTimeout(() => setRequested(search), 150);
@@ -132,7 +138,6 @@ export function DiscussionFilter({
           query,
           search: requested,
           state: kind === "milestones" ? state : undefined,
-          relation: kind === "reviewers" ? state : undefined,
         })
       : null,
   );
@@ -191,7 +196,7 @@ export function DiscussionFilter({
         <PopoverContent
           align="end"
           collisionPadding={16}
-          className="w-80 max-w-[calc(100vw-2rem)]"
+          className="max-h-(--radix-popover-content-available-height) w-80 max-w-[calc(100vw-2rem)] overflow-y-auto"
           aria-labelledby={`${id}-title`}
         >
           <PopoverHeader>
@@ -258,28 +263,6 @@ export function DiscussionFilter({
               <ToggleGroupItem value="closed">Closed</ToggleGroupItem>
             </ToggleGroup>
           )}
-          {kind === "reviewers" && (
-            <ToggleGroup
-              type="single"
-              value={state}
-              aria-label="Review relationship"
-              onValueChange={(value) => {
-                if (value) {
-                  setState(value);
-                  setActive(-1);
-                  input.current?.focus();
-                }
-              }}
-            >
-              <ToggleGroupItem value="review_requested">
-                Requested
-              </ToggleGroupItem>
-              <ToggleGroupItem value="reviewed_by">Reviewed</ToggleGroupItem>
-              <ToggleGroupItem value="review_involves">
-                Involved
-              </ToggleGroupItem>
-            </ToggleGroup>
-          )}
           <RequestWidget timing={options.timing} label={text.timing}>
             {(!current || options.loading) && (
               <p role="status" className="p-2 text-xs text-muted-foreground">
@@ -302,15 +285,13 @@ export function DiscussionFilter({
               id={`${id}-options`}
               role="listbox"
               aria-label={
-                kind === "reviewers"
-                  ? "Reviewers"
-                  : kind === "assignees"
-                    ? "Assignees"
-                    : kind === "authors"
-                      ? "Authors"
-                      : kind === "labels"
-                        ? "Labels"
-                        : "Milestones"
+                kind === "assignees"
+                  ? "Assignees"
+                  : kind === "authors"
+                    ? "Authors"
+                    : kind === "labels"
+                      ? "Labels"
+                      : "Milestones"
               }
               aria-multiselectable={kind === "labels" || undefined}
               className="max-h-64 overflow-y-auto"
@@ -408,7 +389,7 @@ export function DiscussionFilter({
                 No{" "}
                 {kind === "milestones"
                   ? `${state} milestones`
-                  : kind === "authors" || kind === "reviewers"
+                  : kind === "authors"
                     ? "usernames"
                     : text.noun}{" "}
                 match.

@@ -34,23 +34,30 @@ pub(crate) struct Rollup {
     pub reviews: Option<Reviews>,
 }
 
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct Input {
+    pub heads: Vec<Head>,
+    pub source_token: Option<String>,
+}
 pub(crate) struct GetRollups;
 impl Read for GetRollups {
     const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 321;
-    type Input = Vec<Head>;
+    type Input = Input;
     type Output = Option<Vec<Rollup>>;
     fn execute(
         context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
-        if input.len() > 100
+        if input.heads.len() > 100
             || input
+                .heads
                 .iter()
                 .map(|head| head.number)
                 .collect::<BTreeSet<_>>()
                 .len()
-                != input.len()
+                != input.heads.len()
         {
             return Err(crate::cells::Error::Invalid(
                 "Pull rollup selection is invalid",
@@ -58,8 +65,13 @@ impl Read for GetRollups {
         }
         search::index::ensure_ready(context)?;
         let mut commits = BTreeMap::<String, Checks>::new();
-        let mut items = Vec::with_capacity(input.len());
-        for head in input {
+        let mut items = Vec::with_capacity(input.heads.len());
+        let epoch = input
+            .source_token
+            .as_deref()
+            .map(|token| crate::cells::repository::projection::ready_epoch(context, token))
+            .transpose()?;
+        for head in input.heads {
             validate_number(head.number)?;
             validate_number(head.version)?;
             if let Some(oid) = &head.oid {
@@ -78,7 +90,18 @@ impl Read for GetRollups {
                 return Ok(None);
             }
             let merged: Option<PullMerge> = storage::decode_optional_record(&row[1])?;
-            let oid = merged.map(|merge| merge.head_oid).or(head.oid);
+            // Filtered lists retain the search's immutable ref snapshot. A later
+            // Git lookup could display rollups that no longer satisfy the filter.
+            let selected = if let Some(epoch) = epoch {
+                let rows=context.query("SELECT lower(hex(r.target_oid)) FROM discussion_index_pull_sources s JOIN git_projection_refs r ON r.name=s.head_ref AND r.epoch_id=? WHERE s.document=?", &[integer(epoch)?,integer(head.number*2+1)?])?;
+                rows.rows
+                    .first()
+                    .map(|row| result_text(row, 0))
+                    .transpose()?
+            } else {
+                head.oid
+            };
+            let oid = merged.map(|merge| merge.head_oid).or(selected);
             let (checks, reviews) = if let Some(oid) = &oid {
                 let checks = if let Some(checks) = commits.get(oid) {
                     checks.clone()
@@ -180,14 +203,16 @@ fn reviews(context: &Transaction<'_>, pull: u64, oid: &str) -> crate::cells::Res
         &[integer(pull)?],
     )?;
     for row in &rows.rows {
-        if result_text(row, 1)? != oid {
+        let current = result_text(row, 1)? == oid;
+        if !current {
             counts.outdated += 1;
-            continue;
         }
+        // Requested changes remain active after a push; only approvals depend
+        // on the selected head. The anchor can still be reported as outdated.
         match ReviewState::from_code(result_u64_from_row(row, 0)?)? {
-            ReviewState::Approved => counts.approved += 1,
+            ReviewState::Approved if current => counts.approved += 1,
             ReviewState::ChangesRequested => counts.changes_requested += 1,
-            ReviewState::Commented => {}
+            ReviewState::Approved | ReviewState::Commented => {}
         }
     }
     Ok(counts)

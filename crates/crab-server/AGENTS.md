@@ -57,7 +57,10 @@ and personal-view selection. `search/contributions/` owns per-contribution quali
 identities, text/FTS maintenance, canonical deletion triggers and bounded five-source rebuilding;
 `search/text/` owns field scopes, text predicates and relevance SQL;
 `search/reviews/` owns reviewer predicates, transactional
-review/request projections and bounded rebuild source cursors. `search/assignees/` owns stable-ID predicates, resolved binding validation,
+review/request projections and bounded rebuild source cursors. Its `status/`
+owner binds source epochs and effective branch rules for repository-wide review
+status predicates and grammar-preserving menu choices; tests stay beside it.
+`search/assignees/` owns stable-ID predicates, resolved binding validation,
 historical snapshot choices and personal selection; `api/discussion_search/assignees/`
 resolves handles/current accounts and composes authorized filter choices.
 `search/labels/` owns bounded active-label choices and

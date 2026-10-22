@@ -68,7 +68,7 @@ export function PullRollups({
         : reviews.outdated
           ? "Reviews outdated"
           : null;
-  const reviewDetails = `${reviews.approved} approvals, ${reviews.changes_requested} changes requested, ${reviews.requested} outstanding review requests, ${reviews.outdated} outdated decisions. This summary is not merge eligibility.`;
+  const reviewDetails = `${reviews.approved} approvals, ${reviews.changes_requested} changes requested, ${reviews.requested} outstanding review requests, ${reviews.outdated} decisions on earlier commits. Approval counts use the selected head. Requested changes remain active after new commits. This summary is not merge eligibility.`;
   return (
     <>
       {total > 0 && (

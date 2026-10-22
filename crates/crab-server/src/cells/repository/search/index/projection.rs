@@ -87,6 +87,15 @@ pub(super) fn refresh(context: &Transaction<'_>, subject: Subject) -> crate::cel
         vec![integer(id)?, SqlValue::Integer(kind(subject.kind)), integer(subject.number)?, integer(state)?, SqlValue::Integer(i64::from(draft)), integer(created)?, integer(updated)?, SqlValue::Text(title.clone()), SqlValue::Text(body.clone()), integer(comments)?, integer(total)?],
     )] })?;
     let mut statements = Vec::with_capacity(labels.len() + assignees.len() + counts.len() + 1);
+    if subject.kind == SubjectKind::Pull {
+        let (base, head, merged) =
+            crate::cells::repository::pulls::review_source(context, subject.number)?;
+        statements.push(statement(
+            "INSERT INTO discussion_index_pull_sources(document,base_ref,head_ref,merged_head_oid) VALUES (?,?,?,?)",
+            vec![integer(id)?, SqlValue::Text(base), SqlValue::Blob(head.into_bytes()), merged.map_or(SqlValue::Null,SqlValue::Text)],
+        ));
+    }
+
     statements.push(statement(
         "INSERT INTO discussion_index_authors(document, identity) VALUES (?, ?)",
         vec![integer(id)?, SqlValue::Blob(author_identity.to_vec())],

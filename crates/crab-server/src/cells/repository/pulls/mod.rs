@@ -416,3 +416,22 @@ pub(in crate::cells::repository) mod readiness;
 pub(crate) use readiness::{
     PullReadiness, SetPullReadiness, SetPullReadinessInput, SetPullReadinessOutcome,
 };
+
+pub(in crate::cells::repository) fn review_source(
+    context: &Transaction<'_>,
+    pull: u64,
+) -> crate::cells::Result<(String, String, Option<String>)> {
+    let rows = context.query(
+        "SELECT base_ref, head_ref, completed_merge FROM repository_pulls WHERE number=?",
+        &[integer(pull)?],
+    )?;
+    let row = rows.rows.first().ok_or(crate::cells::Error::Invalid(
+        "pull review source is missing",
+    ))?;
+    let merged: Option<PullMerge> = storage::decode_optional_record(&row[2])?;
+    Ok((
+        result_text(row, 0)?,
+        result_text(row, 1)?,
+        merged.map(|value| value.head_oid),
+    ))
+}

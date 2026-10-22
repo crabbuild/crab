@@ -106,7 +106,11 @@ async fn list(
     let repo = repository(&server, &principal, &key)?;
     let routed = crate::app::repository_cell(&server, &repo)?;
     let mut input = params.input("is:issue is:open")?;
-    super::discussion_search::resolve_people(&server, &principal, &mut input).await?;
+    super::discussion_search::resolve_people(&server, &principal, &repo, &mut input).await?;
+    let review_source = input
+        .review_context
+        .as_ref()
+        .and_then(|value| value.source_token.clone());
     let page = crate::app::query_output(
         routed
             .client
@@ -116,6 +120,7 @@ async fn list(
     let rollups = super::pulls::rollups::load(
         &server,
         &repo,
+        review_source.as_deref(),
         page.items.iter().filter_map(|item| match item {
             DiscussionSummary::Pull(pull) => Some(pull),
             DiscussionSummary::Issue(_) => None,

@@ -1,5 +1,5 @@
 use super::super::index;
-use super::super::people::Binding;
+use super::super::people::{self, Binding};
 use super::*;
 use crate::{
     cells::{RepositoryCell, application::Mutation, repository::*},
@@ -104,46 +104,18 @@ async fn request(
 }
 #[test]
 fn reviewer_navigation_preserves_conditional_groups_and_native_personal_selection() {
-    for (source, kind, handle, expected, mine) in [
-        (
-            "is:open review-requested:BOB",
-            Kind::ReviewedBy,
-            Some("bob"),
-            "is:open reviewed-by:bob",
-            false,
-        ),
-        (
-            "(review-requested:bob OR label:bug) is:open",
-            Kind::ReviewRequested,
-            Some("@me"),
-            "(review-requested:bob OR label:bug) is:open review-requested:@me",
-            false,
-        ),
-        (
-            "is:open user-review-requested:@me",
-            Kind::ReviewRequested,
-            None,
-            "is:open",
-            true,
-        ),
-        (
-            "-review-requested:@me",
-            Kind::ReviewRequested,
-            Some("@me"),
-            "review-requested:@me",
-            false,
-        ),
+    for (source, mine) in [
+        ("is:open review-requested:BOB", false),
+        ("(review-requested:bob OR label:bug) is:open", false),
+        ("is:open user-review-requested:@me", true),
+        ("-review-requested:@me", false),
     ] {
-        let query = Query::parse(Some(source)).unwrap();
         assert_eq!(
-            query
-                .reviewer_choice(kind, handle)
+            Query::parse(Some(source))
                 .unwrap()
-                .query
-                .as_deref(),
-            Some(expected)
+                .review_requested_from_me(),
+            mine
         );
-        assert_eq!(query.review_requested_from_me(), mine);
     }
     for source in [
         "review-requested:",

@@ -202,6 +202,21 @@ fn suggestions(
                 .into(),
             });
         }
+    } else if prefix.starts_with("review:") {
+        for (value, description) in [
+            ("none", "No opinionated reviews"),
+            ("required", "Reviews required before merging"),
+            ("approved", "Approved review"),
+            ("changes_requested", "Changes requested"),
+        ] {
+            let value = format!("review:{value}");
+            if value.starts_with(&prefix) {
+                items.push(Suggestion {
+                    value: format!("{sign}{value}"),
+                    description: description.into(),
+                });
+            }
+        }
     } else if PEOPLE_QUALIFIERS
         .iter()
         .any(|kind| prefix.starts_with(&format!("{kind}:")))
@@ -248,6 +263,7 @@ fn suggestions(
             ("assignee:", "Filter by assignee"),
             ("assignee:@me", "Work assigned to you"),
             ("assignee:*", "Work with any assignee"),
+            ("review:", "Filter review status"),
             ("review-requested:", "Filter pending reviewers"),
             ("reviewed-by:", "Filter submitted reviewers"),
             (

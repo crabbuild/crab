@@ -5,11 +5,10 @@ use crate::{
     },
     test_support::http::Harness,
 };
-use reqwest::Method;
+use reqwest::{Method, StatusCode};
 use serde_json::{Value, json};
 #[tokio::test]
-async fn reviewer_filters_resolve_public_handles_and_current_accounts_and_expose_native_menu_choices()
- {
+async fn reviewer_filters_resolve_public_handles_and_current_accounts() {
     let h = Harness::new(false).await;
     h.initialize_directory().await;
     let alice = h.login().await;
@@ -72,7 +71,7 @@ async fn reviewer_filters_resolve_public_handles_and_current_accounts_and_expose
         ),
         (json!(1), json!(true))
     );
-    let profile: Value = h
+    let _: Value = h
         .write(
             Method::POST,
             "/api/profile",
@@ -94,14 +93,6 @@ async fn reviewer_filters_resolve_public_handles_and_current_accounts_and_expose
             .await;
         assert_eq!(page["matching"], 1);
     }
-    let options=h.json(&format!("{root}/discussion-search/reviewers?query=is%3Aopen%20-review-requested%3Aother&search=%40PUBLIC&relation=reviewed_by"),&alice).await;
-    assert_eq!(options["items"][0]["actor"]["id"], profile["id"]);
-    assert_eq!(
-        options["items"][0]["query"],
-        "is:open reviewed-by:public-bob"
-    );
-    assert_eq!(options["self"]["query"], "is:open reviewed-by:@me");
-    assert!(!options.to_string().contains("bob-id") && !options.to_string().contains("issuer"));
     assert_eq!(h.json(&format!("{root}/pulls/1"), &alice).await, before);
     assert_eq!(
         h.json(&format!("{root}/pulls?q=commenter%3Apublic-bob"), &alice)
@@ -170,6 +161,221 @@ async fn reviewer_filters_resolve_public_handles_and_current_accounts_and_expose
             &alice
         )
         .await["matching"],
+        1
+    );
+    h.close().await;
+}
+
+#[tokio::test]
+async fn reference_menu_choices_are_scoped_native_destinations_without_account_enrollment() {
+    let h = Harness::new(false).await;
+    let alice = h.login().await;
+    let path = "/api/repos/team/private/discussion-search/reviews";
+    let mut url = url::Url::parse(&format!("{}{path}", h.origin)).unwrap();
+    url.query_pairs_mut()
+        .append_pair("query", "is:open -reviewed-by:@me label:Bug");
+    let menu: Value = h
+        .http
+        .get(url)
+        .header("cookie", &alice)
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(menu["items"].as_array().unwrap().len(), 7);
+    assert_eq!(
+        menu["items"][2]["query"],
+        "is:open label:Bug review:approved"
+    );
+    assert_eq!(menu["items"][5]["selected"], true);
+    assert_eq!(
+        h.json("/api/profile", &alice).await,
+        json!({"profile":null})
+    );
+    let empty = h
+        .json("/api/repos/team/private/pulls?q=review%3Aapproved", &alice)
+        .await;
+    assert_eq!(empty["matching"], 0);
+    assert_eq!(
+        h.http
+            .get(format!("{}{path}?query=review%3Aunknown", h.origin))
+            .header("cookie", &alice)
+            .send()
+            .await
+            .unwrap()
+            .status(),
+        StatusCode::BAD_REQUEST
+    );
+    h.close().await;
+}
+
+async fn ready_review_search(h: &Harness, cookie: &str, view: &str, query: &str) -> Value {
+    let mut url = url::Url::parse(&format!("{}/api/repos/team/private/{view}", h.origin)).unwrap();
+    url.query_pairs_mut().append_pair("q", query);
+    for _ in 0..150 {
+        let response = h
+            .http
+            .get(url.clone())
+            .header("cookie", cookie)
+            .send()
+            .await
+            .unwrap();
+        let status = response.status();
+        let body: Value = response.json().await.unwrap();
+        if status == StatusCode::OK {
+            return body;
+        }
+        assert_eq!(
+            (status, body["error"]["code"].as_str()),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                Some("review_index_pending")
+            ),
+            "{body}"
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    }
+    panic!("review reference projection did not become ready");
+}
+#[tokio::test]
+async fn real_git_review_transitions_filter_both_list_kinds_with_consistent_rollups() {
+    use crate::test_support::git;
+    let h = Harness::new(false).await;
+    let alice = h.login().await;
+    let root = "/api/repos/team/private";
+    let token: Value = h
+        .write(
+            Method::POST,
+            "/api/git-token",
+            &alice,
+            json!({"owner":"team","repository":"private","access":"write"}),
+        )
+        .await
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    let mut remote = url::Url::parse(&format!("{}/git/team/private.git", h.origin)).unwrap();
+    remote.set_username("crab").unwrap();
+    remote.set_password(token["token"].as_str()).unwrap();
+    let source = tempfile::tempdir().unwrap();
+    let head = git::push_review_branches(source.path(), remote.as_str()).await;
+    h.write(Method::POST,&format!("{root}/pulls"),&alice,json!({"request_id":uuid::Uuid::now_v7(),"title":"Review status search","body":"Full native query","base_ref":"refs/heads/main","head_ref":"refs/heads/feature"})).await.error_for_status().unwrap();
+    let required = ready_review_search(&h, &alice, "pulls", "is:open review:required").await;
+    assert_eq!(required["matching"], 1);
+    *h.provider.mode.lock().await = "member".into();
+    let bob = h.login().await;
+    for state in ["approved", "changes_requested"] {
+        h.write(Method::POST,&format!("{root}/pulls/1/reviews"),&bob,json!({"request_id":uuid::Uuid::now_v7(),"state":state,"body":"Review feedback","commit_oid":head})).await.error_for_status().unwrap();
+        for view in ["issues", "pulls"] {
+            let result =
+                ready_review_search(&h, &bob, view, &format!("is:pr review:{state}")).await;
+            assert_eq!(result["matching"], 1);
+            assert_eq!(result["counts"]["open"], 1);
+            assert_eq!(result["items"][0]["rollup"]["head_oid"], head);
+            assert_eq!(result["items"][0]["rollup"]["reviews"][state], 1);
+        }
+    }
+    assert_eq!(
+        ready_review_search(&h, &bob, "pulls", "review:approved").await["matching"],
+        0
+    );
+    assert_eq!(
+        ready_review_search(&h, &bob, "pulls", "reviewed-by:@me").await["matching"],
+        1
+    );
+    std::fs::write(source.path().join("README.md"), "base\nfeature\nupdated\n").unwrap();
+    git::success(source.path(), &["commit", "-am", "updated"]).await;
+    let advanced = git::success(source.path(), &["rev-parse", "HEAD"]).await;
+    git::success(source.path(), &["push", remote.as_str(), "feature"]).await;
+    let blocked = h.json(&format!("{root}/pulls/1"), &alice).await;
+    assert_eq!(blocked["merge_requirements"]["changes_requested"], 1);
+    assert_eq!(blocked["merge_requirements"]["satisfied"], false);
+    for query in ["review:changes_requested", "review:required"] {
+        let result = ready_review_search(&h, &bob, "pulls", query).await;
+        assert_eq!(
+            result["matching"],
+            if query == "review:required" { 0 } else { 1 }
+        );
+        if query == "review:changes_requested" {
+            assert_eq!(result["items"][0]["rollup"]["head_oid"], advanced);
+            assert_eq!(
+                result["items"][0]["rollup"]["reviews"]["changes_requested"],
+                1
+            );
+            assert_eq!(result["items"][0]["rollup"]["reviews"]["outdated"], 1);
+        }
+    }
+    let carol = h
+        .server
+        .cells()
+        .unwrap()
+        .repository(h.server.repositories.values()[0].id)
+        .unwrap();
+    let CreatePullReviewOutcome::Created(carol_review) = carol
+        .client
+        .command::<CreatePullReview>(
+            &carol.target,
+            crate::app::mutation_identity().unwrap(),
+            CreatePullReviewInput {
+                pull: 1,
+                submission_id: *uuid::Uuid::now_v7().as_bytes(),
+                author: RepositoryAuthor {
+                    issuer: h.provider.issuer.clone(),
+                    subject: "carol-id".into(),
+                    name: "Carol".into(),
+                },
+                state: ReviewState::Approved,
+                body: String::new(),
+                commit_oid: advanced.clone(),
+            },
+        )
+        .await
+        .unwrap()
+        .output
+    else {
+        panic!("review rejected")
+    };
+    let blocked = h.json(&format!("{root}/pulls/1"), &alice).await;
+    assert_eq!(blocked["merge_requirements"]["approvals"], 1);
+    // Passing checks and another approval cannot resolve Bob's requested changes.
+    h.write(
+        Method::POST,
+        &format!("{root}/statuses/{advanced}"),
+        &alice,
+        json!({"request_id":uuid::Uuid::now_v7(),"context":"ci/test","state":"success"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let denied=h.write(Method::POST,&format!("{root}/pulls/1/merge"),&alice,json!({"request_id":uuid::Uuid::now_v7(),"version":blocked["version"],"method":"fast_forward","base_oid":blocked["base_oid"],"head_oid":advanced})).await;
+    assert_eq!(denied.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        denied.json::<Value>().await.unwrap()["error"]["code"],
+        "merge_blocked"
+    );
+    h.write(Method::PUT,&format!("{root}/pulls/1/reviews/{}/dismissals",carol_review.number),&alice,json!({"request_id":uuid::Uuid::now_v7(),"version":carol_review.version,"body":"Remove temporary approval"})).await.error_for_status().unwrap();
+    let review = h.json(&format!("{root}/pulls/1/reviews/2"), &alice).await;
+    h.write(
+        Method::PUT,
+        &format!("{root}/pulls/1/reviews/2/dismissals"),
+        &alice,
+        json!({"request_id":uuid::Uuid::now_v7(),"version":review["version"],"body":"Resolved"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    assert_eq!(
+        ready_review_search(&h, &bob, "pulls", "review:none").await["matching"],
+        1
+    );
+    assert_eq!(
+        ready_review_search(&h, &bob, "pulls", "review:required").await["matching"],
         1
     );
     h.close().await;

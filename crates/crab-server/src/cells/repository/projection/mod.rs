@@ -400,3 +400,18 @@ use storage::{
     optional_u64, require_epoch, result_i64, result_text, result_u64, statement, text,
     validate_source,
 };
+
+pub(in crate::cells::repository) fn ready_epoch(
+    context: &Transaction<'_>,
+    token: &str,
+) -> crate::cells::Result<u64> {
+    let result=context.query("SELECT s.ready_epoch,e.source_token FROM git_projection_state s LEFT JOIN git_projection_epochs e ON e.epoch_id=s.ready_epoch WHERE s.singleton=1",&[])?;
+    let row = result
+        .rows
+        .first()
+        .ok_or(crate::cells::Error::StaleSearch)?;
+    if optional_text(row, 1)?.as_deref() != Some(token) {
+        return Err(crate::cells::Error::StaleSearch);
+    }
+    optional_u64(row, 0)?.ok_or(crate::cells::Error::StaleSearch)
+}

@@ -23,6 +23,8 @@ pub(crate) const MAX_NUMBER: u64 = 9_007_199_254_740_991;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
+    #[error("Git references are being indexed. Retry shortly")]
+    ReviewIndexPending,
     #[error("Sign in to use account features")]
     SessionRequired,
     #[error("Repository permissions are temporarily unavailable")]
@@ -300,7 +302,7 @@ impl IntoResponse for Error {
             Self::MergeBlocked => (
                 StatusCode::CONFLICT,
                 "merge_blocked",
-                "Required approvals or status checks are not satisfied on the current head",
+                "Required reviews or status checks are not satisfied",
             ),
             Self::StatusPermission => (
                 StatusCode::FORBIDDEN,
@@ -416,6 +418,11 @@ impl IntoResponse for Error {
                 StatusCode::CONFLICT,
                 "submission_conflict",
                 "This submission ID was already used for different content; check the existing result before submitting again",
+            ),
+            Self::ReviewIndexPending => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "review_index_pending",
+                "Git references are being indexed. Retry shortly",
             ),
             Self::Cell(crate::cells::Error::IndexUnavailable) => (
                 StatusCode::SERVICE_UNAVAILABLE,

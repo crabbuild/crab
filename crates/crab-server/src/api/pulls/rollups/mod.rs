@@ -12,6 +12,7 @@ use std::collections::{BTreeMap, BTreeSet};
 pub(in crate::api) async fn load<'a>(
     server: &Server,
     repo: &Repository,
+    source_token: Option<&str>,
     pulls: impl Iterator<Item = &'a PullSummary>,
 ) -> Result<BTreeMap<u64, Rollup>> {
     let pulls: Vec<_> = pulls.collect();
@@ -20,7 +21,7 @@ pub(in crate::api) async fn load<'a>(
     }
     let refs: BTreeSet<_> = pulls
         .iter()
-        .filter(|pull| pull.state != PullState::Merged)
+        .filter(|pull| pull.state != PullState::Merged && source_token.is_none())
         .map(|pull| pull.head_ref.clone())
         .collect();
     let heads = if refs.is_empty() {
@@ -28,7 +29,7 @@ pub(in crate::api) async fn load<'a>(
     } else {
         repo.ref_oids(&refs).await?
     };
-    let input = pulls
+    let heads = pulls
         .iter()
         .map(|pull| Head {
             number: pull.number,
@@ -36,6 +37,10 @@ pub(in crate::api) async fn load<'a>(
             oid: heads.get(&pull.head_ref).cloned(),
         })
         .collect();
+    let input = crate::cells::repository::rollups::Input {
+        heads,
+        source_token: source_token.map(str::to_owned),
+    };
     let cell = app::repository_cell(server, repo)?;
     let rows = app::query_output(
         cell.client

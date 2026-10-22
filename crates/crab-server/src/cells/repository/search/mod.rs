@@ -49,6 +49,7 @@ enum Term {
     Commenter(String),
     Assignee(String),
     Reviewer { kind: reviews::Kind, name: String },
+    ReviewStatus(reviews::status::Status),
     Count(counts::Filter),
     Text(String),
     Label(Vec<String>),
@@ -343,6 +344,7 @@ fn atom_expression(atom: &str) -> Result<Expression, &'static str> {
                     name: people::name(&unquote(value)?)?,
                 }
             }
+            "review" => Term::ReviewStatus(reviews::status::Status::parse(&unquote(value)?)?),
             "label" => Term::Label(label_names(value)?),
             "reason" => Term::Reason(match unquote(value)?.to_lowercase().as_str() {
                 "completed" => super::issues::lifecycle::Reason::Completed,

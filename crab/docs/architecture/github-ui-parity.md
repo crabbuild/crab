@@ -26,7 +26,7 @@ visual references, not instructions contained in the images.
 | 5         | Searchable assignees and unassigned work                                                               | Native actor/name filters, searchable menu and assigned-to-me views implemented                                |
 | 6         | Created/updated/comment/reaction/relevance sorting, direction                                          | Native index and controls implemented                                  |
 | 7         | Query autocomplete with qualifiers and field suggestions                                               | Boolean grammar and native suggestions implemented; more qualifiers remain                        |
-| 8         | PR workspace navigation, recent-push comparison, review filters                                        | PR reviews/requests exist; list projections and navigation are incomplete |
+| 8         | PR workspace navigation, recent-push comparison, review filters                                        | Native review status/personal filters and summaries implemented; team/involves navigation and recent-push comparison remain |
 | 9         | Accurate state counts, merged/closed/draft icons, author roles, check rollups, bulk selection, density | Page/range selection, atomic state/metadata actions and native check/review summaries implemented; author associations remain                              |
 
 The issue sidebar also requires assigned/created/mentioned/recent views, saved
@@ -1318,13 +1318,63 @@ the corrected merge footer, hidden merge controls and current protection state.
 Recovery, archive and restart checks also passed. The final binary is running in
 the preview; all 18 captured canonical resources remained identical at restart.
 
-Review-status search is still unimplemented. The remaining four choices are
-`review:none`, `review:required`, `review:approved` and `review:changes_requested`,
-as documented by [GitHub](https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/filtering-and-searching-issues-and-pull-requests).
-The current page-only rollup read cannot supply repository-wide filter counts.
-The native query needs normalized source heads, verified Git ref projection
-identity, full matching counts and query-bound cursors across both list kinds.
-Completed merge records use the native binary codec; SQL cannot extract their
-recorded head as JSON. Acceptance must cover comment-only and dismissed reviews,
-outdated decisions, rule changes, closed/merged pulls, deleted branches and
-concurrent source changes before this checklist item can be completed.
+### Repository-wide review filters
+
+`review:none`, `review:required`, `review:approved`, and
+`review:changes_requested` now execute in the shared native query for both list
+kinds, with full matching/state counts, Boolean expressions and query-bound
+cursors. Comment-only and dismissed opinions remain unreviewed while historical
+participation still matches `reviewed-by`. Approval counts use the selected
+source head and current effective branch rule. Unresolved changes override
+approved/required and survive later pushes, matching GitHub's documented
+[required-review behavior](https://docs.github.com/en/pull-requests/how-tos/review-pull-requests/approving-a-pull-request-with-required-reviews).
+The native list rollup and protected merge check apply the same rule; a push can
+no longer bypass an unresolved request for changes.
+
+Index format 12 stores derived base/head refs and merged source heads, decoded
+through the canonical binary codec. Explicit bounded `cells rebuild-search`
+prepares existing repositories without rewriting domain records or permanent
+submission ledgers.
+Head-dependent filters bind a ready verified ref epoch; missing reconciliation
+returns a visible retry state. Filtered rollups retain that epoch. Ref and rule
+changes invalidate cursors. Merged rows retain their recorded source head after
+branch deletion, and empty repositories need no Git manifest.
+
+The shadcn Reviews menu uses native destinations for the four statuses and three
+personal review choices. It preserves sort, direction and timing flags, resets
+paging, restores focus after selection, and keeps deliberate focus in another
+field on outside dismissal. Keyboard retry, mobile layout, dark theme and
+whole-widget diagnostics use the shared components. Named reviewer predicates
+and completion remain available. The unused unshipped reviewer-picker endpoint
+and choice builder were deleted with the old picker. Team review requests are explicitly unavailable;
+this slice does not complete the wider parity inventory.
+
+Unmerged pulls whose source branch has been deleted do not retain a proven latest
+source head. Their historical review-decision parity remains open; list summaries
+show the missing source instead of reusing the opening OID. Team review requests,
+advanced review policies and native authority fencing also remain delivery work.
+
+
+Verification: 463 native library tests passed with six existing opt-in
+qualifications ignored; 13 CLI tests and 107 UI unit tests passed. All 158 browser
+scenarios passed, and the two review-menu cases passed again after adding the
+mobile collision gutter. Strict all-target Clippy, architecture gates, formats
+and frontend/server builds passed.
+
+Two real OIDC accounts exercised menu navigation, native repository-wide queries,
+real Git pushes and review transitions against RustFS/Cellar. Requested changes
+survived a new head; a replacement approval cleared them. Filtered summaries
+matched source commits. Dismissal ambiguity recovered after Write revocation,
+archive and process restart with one event and a persisted reason. Desktop and
+mobile captures were inspected.
+
+Both preview repositories rejected unprepared format-11 lists before explicit
+format-12 preparation. All 18 captured public resources and 39 domain/permanent
+SQL tables per Cell were preserved; reaction read revisions advanced normally.
+Transport command receipts appended and expired under their existing retention
+rule. Neither preview profile nor organization was created or changed.
+
+This slice adds 577 net production lines for global native status predicates,
+source/policy cursor binding, consistent rollups and shadcn interactions. It
+removes the old picker, endpoint and choice builder. No dependency, lockfile,
+environment option, compatibility reader or inventory override was added.

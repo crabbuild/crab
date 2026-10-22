@@ -18,10 +18,12 @@ mod reviews;
 pub(super) async fn resolve_people(
     server: &Server,
     principal: &Principal,
+    repo: &crate::repository::Repository,
     input: &mut crate::cells::repository::SearchInput,
 ) -> Result<()> {
     people::resolve(server, principal, input).await?;
-    assignees::resolve(server, principal, input).await
+    assignees::resolve(server, principal, input).await?;
+    reviews::bind_source(server, repo, input).await
 }
 
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
@@ -43,8 +45,8 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
             get(assignees::options),
         )
         .route(
-            "/api/repos/{owner}/{name}/discussion-search/reviewers",
-            get(reviews::options),
+            "/api/repos/{owner}/{name}/discussion-search/reviews",
+            get(reviews::menu),
         )
         .route("/api/repos/{owner}/{name}/discussion-search", get(complete))
         .route_layer(middleware::from_fn_with_state(server, app::admit))
@@ -169,6 +171,7 @@ impl ListParameters {
             direction: self.direction.unwrap_or_default(),
             people: Vec::new(),
             assignees: Vec::new(),
+            review_context: None,
         };
         input.validate().map_err(app::Error::Invalid)?;
         Ok(input)

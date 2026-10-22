@@ -1636,15 +1636,9 @@ The PR workspace adds Review requests navigation from the native
 `review_requested_from_me` result flag. Negated/conditional self terms do not
 select that personal view.
 
-`GET .../discussion-search/reviewers?query=...&search=...&relation=...` returns
-bounded public reviewer/query choices with `self`, `clear`, and truncation.
-Relations are `review_requested`, `reviewed_by`, `review_involves`, and
-`user_review_requested`. The shared shadcn Reviews menu exposes the first three,
-search, keyboard selection, focus return, failure/retry and mobile/dark support.
-Choosing a relationship replaces only global reviewer terms; conditional OR
-groups and unrelated facets keep their meaning. Sort/direction and diagnostics
-persist, while pagination resets. Review-status predicates remain unsupported
-until connected to current Git head and branch protection policy.
+Named reviewer predicates use shared public-handle completion. The Reviews menu
+uses the status/personal destinations described below; the former unshipped
+reviewer-picker endpoint and its choice builder are removed.
 
 `commenter:username` and `commenter:@me` match conversation comments, all submitted
 reviews (including empty approvals), inline thread comments and replies. An author
@@ -2037,8 +2031,10 @@ Pull list rows, including PR rows returned by issue search, include `rollup` wit
 success, neutral, skipped, pending and failed outcomes. Latest commit statuses
 and latest check runs remain separate sources; the newest run number wins per
 case-insensitive run name, matching the existing native check presentation.
-Review counts include current-head approvals/changes requested, outstanding
-requests and outdated decisions. They describe recorded reviews, not merge
+Review counts include selected-head approvals, unresolved requests for changes,
+outstanding review requests and decisions anchored on earlier commits. Requested
+changes remain active after a new push until the same reviewer replaces the
+decision or an authorized user dismisses it. They describe recorded reviews, not merge
 eligibility or current branch-protection satisfaction.
 
 The API captures the selected source refs in one verified ref view, then one
@@ -2091,7 +2087,44 @@ Inline threads store a raw Git path, old/new side, inclusive line range, exact b
 
 Suggestions are allowed only on new-side text anchors. The browser applies a current suggestion through the existing exact-head/exact-blob contents update contract, so it creates the normal Git commit and stale branch or blob tips return a conflict rather than silently changing a different file.
 
-For protected branches, only each reviewer's latest decision on the current head counts. A current request for changes blocks merge until the same reviewer submits a current approval.
+For protected branches requiring review, only each reviewer's latest approval on the current head counts. Unresolved requests for changes also block merging when anchored on an older commit; pushing new commits cannot resolve another reviewer's decision. The same reviewer must submit a current approval, or an authorized user must dismiss the active review. This follows [GitHub's required-review behavior](https://docs.github.com/en/pull-requests/how-tos/review-pull-requests/approving-a-pull-request-with-required-reviews).
+
+### Review status filters
+
+Both discussion list kinds accept `review:none`, `review:required`,
+`review:approved`, and `review:changes_requested`, including negation and Boolean
+expressions. These predicates, matching totals, state destinations and paging
+operate over the whole repository in one native snapshot. Comment-only reviews
+and dismissed opinions do not count as an active decision for `review:none`;
+`reviewed-by` still includes their historical participation. Changes requested
+remain active across pushes. Required/approved compare selected-head approval
+counts against the effective base-branch rule; unresolved changes take precedence.
+An unprotected branch is never review-required, and an approved match still needs
+at least one active approval. Checks and other merge conditions are independent.
+
+Head-dependent filters bind the verified Git source token to a ready immutable
+ref projection. Pending reconciliation returns 503 `review_index_pending` with
+visible retry. Source changes and effective rule edits invalidate cursors.
+An empty repository requires no Git manifest. Completed merges use the recorded
+source head, decoded by the canonical binary codec, even after branch deletion.
+Filtered rollups retain the same captured source rather than resolving newer refs.
+Missing unmerged source refs have no proven latest head: rollups report null
+source/check/review fields. Retaining that historical source head remains parity
+work; the opening OID is not used as a freshness fallback.
+
+`GET .../discussion-search/reviews?query=...` returns grammar-preserving native
+menu destinations and selection. The shadcn Reviews menu exposes the four status
+filters plus reviewed-by-you, not-reviewed-by-you and awaiting-your-review.
+Existing named reviewer search/completion remains available. Team requests are
+explicitly unavailable until their native model exists. Menu reads do not enroll
+a profile. Diagnostics remain behind `powerbar=1`.
+
+Discussion index format 12 adds derived source-ref/merged-head columns. Run
+`cells rebuild-search --owner OWNER --name REPO` explicitly for existing Cells.
+Preparation preserves canonical SQL/KV records, versions and permanent submission
+ledgers. Transport receipts retain their normal bounded expiry. Serving never
+installs this relation. Upgrade all peers and embedded UI together
+for the changed private search/rollup input contract.
 
 ### Dismiss a pull request review
 
