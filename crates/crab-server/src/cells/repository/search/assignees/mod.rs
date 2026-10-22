@@ -32,7 +32,7 @@ pub(super) fn name(value: &str) -> std::result::Result<String, &'static str> {
         }
         return Ok(format!("actor/{id}"));
     }
-    super::authors::name(&value)
+    super::people::name(&value)
 }
 
 pub(crate) enum Filter<'a> {

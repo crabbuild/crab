@@ -8,7 +8,7 @@ use crate::cells::repository::collaboration::{Subject, SubjectKind};
 use crate::cells::repository::{MAX_NUMBER, SqlBatch, integer, result_u64, statement};
 
 const STATE_KEY: &str = "discussion-search/v1/state";
-const FORMAT: u16 = 5;
+const FORMAT: u16 = 6;
 const BATCH: usize = 8;
 const MAX_DIRTY: usize = 128;
 
@@ -27,9 +27,12 @@ pub(crate) use rebuild::RebuildSearchOutcome;
 pub enum SearchIndexPhase {
     Clear,
     ClearMilestones,
+    ClearReviewers,
     Milestones,
     Issues,
     Pulls,
+    Reviews,
+    ReviewRequests,
 }
 
 /// The bounded preparation cursor and compare-and-swap version.

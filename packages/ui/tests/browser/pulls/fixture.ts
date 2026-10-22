@@ -412,6 +412,7 @@ export async function mockPullRequest(page: Page) {
           },
           authored_by_me: false,
           assigned_to_me: false,
+          review_requested_from_me: false,
           matching: matches ? 1 : 0,
           navigation: query
             ? { kind: "results" }

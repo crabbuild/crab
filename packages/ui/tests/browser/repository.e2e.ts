@@ -732,6 +732,7 @@ test.beforeEach(async ({ page }) => {
           },
           authored_by_me: false,
           assigned_to_me: false,
+          review_requested_from_me: false,
           matching: 1,
           navigation: {
             kind: "state",

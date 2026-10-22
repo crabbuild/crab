@@ -68,6 +68,7 @@ impl Mutation for RebuildIndex {
                     context.install_schema("ALTER TABLE discussion_index_assignees ADD COLUMN name TEXT NOT NULL DEFAULT ''; ALTER TABLE discussion_index_assignees ADD COLUMN name_key TEXT NOT NULL DEFAULT '';")?;
                 }
                 context.install_schema(include_str!("schema.sql"))?;
+                super::super::reviews::reset(context)?;
                 State {
                     format: FORMAT,
                     generation,
@@ -99,6 +100,9 @@ impl Mutation for RebuildIndex {
                     return conflict(context);
                 }
                 let done = match build.phase {
+                    SearchIndexPhase::ClearReviewers => super::super::reviews::clear(context)?,
+                    SearchIndexPhase::Reviews => super::super::reviews::reviews(context)?,
+                    SearchIndexPhase::ReviewRequests => super::super::reviews::requests(context)?,
                     SearchIndexPhase::Milestones => {
                         use crate::cells::repository::collaboration::milestones::{
                             ListMilestones, ListMilestonesInput,
@@ -172,7 +176,15 @@ impl Mutation for RebuildIndex {
                 if done {
                     match build.phase {
                         SearchIndexPhase::Clear => {
+                            build.phase = SearchIndexPhase::ClearReviewers;
+                            build.after = 0;
+                        }
+                        SearchIndexPhase::ClearReviewers => {
                             build.phase = SearchIndexPhase::ClearMilestones;
+                            build.after = 0;
+                        }
+                        SearchIndexPhase::Reviews => {
+                            build.phase = SearchIndexPhase::ReviewRequests;
                             build.after = 0;
                         }
                         SearchIndexPhase::ClearMilestones => {
@@ -188,6 +200,10 @@ impl Mutation for RebuildIndex {
                             build.after = 0;
                         }
                         SearchIndexPhase::Pulls => {
+                            build.phase = SearchIndexPhase::Reviews;
+                            build.after = 0;
+                        }
+                        SearchIndexPhase::ReviewRequests => {
                             context.sql(&SqlBatch { statements: vec![
                                 statement("DELETE FROM discussion_index_dirty", vec![]),
                                 statement("UPDATE discussion_index_revision SET revision = 0 WHERE singleton = 1", vec![]),

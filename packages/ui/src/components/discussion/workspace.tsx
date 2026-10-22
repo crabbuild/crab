@@ -35,6 +35,7 @@ type Selection = {
   query: string;
   mine: boolean;
   assigned: boolean;
+  reviewRequested: boolean;
 };
 const Navigation = createContext<Dispatch<
   SetStateAction<Selection | undefined>
@@ -45,12 +46,17 @@ export function useDiscussionNavigation(
   query: string,
   mine: boolean | undefined,
   assigned: boolean | undefined,
+  reviewRequested: boolean | undefined,
 ) {
   const report = useContext(Navigation);
   useEffect(() => {
-    if (mine !== undefined && assigned !== undefined)
-      report?.({ view, query, mine, assigned });
-  }, [view, query, mine, assigned, report]);
+    if (
+      mine !== undefined &&
+      assigned !== undefined &&
+      reviewRequested !== undefined
+    )
+      report?.({ view, query, mine, assigned, reviewRequested });
+  }, [view, query, mine, assigned, reviewRequested, report]);
 }
 
 export function DiscussionWorkspace({
@@ -111,6 +117,10 @@ export function DiscussionWorkspace({
     selection?.view === view && selection.query === query
       ? selection.assigned
       : undefined;
+  const reviewRequested =
+    selection?.view === view && selection.query === query
+      ? selection.reviewRequested
+      : undefined;
   const root = pulls ? "pulls" : "issues";
   const links = [
     {
@@ -119,24 +129,42 @@ export function DiscussionWorkspace({
       Icon: pulls ? GitPullRequestIcon : IssueOpenedIcon,
       active:
         view === root &&
-        ((mine === false && assigned === false) ||
-          (!url.searchParams.get("q") && mine !== true && assigned !== true)),
+        ((mine === false && assigned === false && reviewRequested === false) ||
+          (!url.searchParams.get("q") &&
+            mine !== true &&
+            assigned !== true &&
+            reviewRequested !== true)),
       query: undefined,
     },
     {
       view: root,
       label: pulls ? "Authored by me" : "Created by me",
       Icon: CircleIcon,
-      active: view === root && mine === true && assigned !== true,
+      active:
+        view === root &&
+        mine === true &&
+        assigned !== true &&
+        reviewRequested !== true,
       query: pulls ? "author:@me is:open" : "is:issue author:@me is:open",
     },
     {
       view: root,
       label: "Assigned to me",
       Icon: CircleIcon,
-      active: view === root && assigned === true,
+      active: view === root && assigned === true && reviewRequested !== true,
       query: pulls ? "assignee:@me is:open" : "is:issue assignee:@me is:open",
     },
+    ...(pulls
+      ? [
+          {
+            view: root,
+            label: "Review requests",
+            Icon: CircleIcon,
+            active: view === root && reviewRequested === true,
+            query: "is:open review-requested:@me",
+          },
+        ]
+      : []),
     {
       view: "milestones",
       label: "Milestones",

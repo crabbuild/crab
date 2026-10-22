@@ -76,6 +76,7 @@ async function fixture(page: Page) {
         next: null,
         authored_by_me: false,
         assigned_to_me: false,
+        review_requested_from_me: false,
         matching,
         counts: { open: matching, closed: 0, merged: 0 },
         navigation: { kind: "results" },

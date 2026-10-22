@@ -13,12 +13,14 @@ use axum::{
 use std::sync::Arc;
 mod assignees;
 mod authors;
+mod people;
+mod reviews;
 pub(super) async fn resolve_people(
     server: &Server,
     principal: &Principal,
     input: &mut crate::cells::repository::SearchInput,
 ) -> Result<()> {
-    authors::resolve(server, principal, input).await?;
+    people::resolve(server, principal, input).await?;
     assignees::resolve(server, principal, input).await
 }
 
@@ -39,6 +41,10 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         .route(
             "/api/repos/{owner}/{name}/discussion-search/assignees",
             get(assignees::options),
+        )
+        .route(
+            "/api/repos/{owner}/{name}/discussion-search/reviewers",
+            get(reviews::options),
         )
         .route("/api/repos/{owner}/{name}/discussion-search", get(complete))
         .route_layer(middleware::from_fn_with_state(server, app::admit))
@@ -163,6 +169,7 @@ impl ListParameters {
             direction: self.direction.unwrap_or_default(),
             authors: Vec::new(),
             assignees: Vec::new(),
+            reviewers: Vec::new(),
         };
         input.validate().map_err(app::Error::Invalid)?;
         Ok(input)

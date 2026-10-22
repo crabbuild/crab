@@ -179,7 +179,11 @@ review attribution and additional participant predicates remain unfinished.
 Assignee metadata links public profiles; list filters support usernames, `@me`,
 `*`, `no:assignee` and explicit `actor/UUID` values. The searchable Assignee menu
 and assigned-to-me sidebar use native queries. Existing derived indexes require
-a format-5 rebuild; canonical assignments remain format 2.
+a format-6 rebuild; canonical assignments remain format 2.
+PR lists also support `review-requested`, `reviewed-by`, `review-involves` and
+`user-review-requested` with a public username or `@me`. The Reviews filter and
+Review requests sidebar use those native relationships; submitted reviews leave
+pending results and retain review participation.
 
 Generated links encode a slash-containing ref as one URL segment. Pasted paths
 with unescaped ref slashes resolve against the longest known ref. Raw Git

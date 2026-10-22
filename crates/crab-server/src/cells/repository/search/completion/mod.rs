@@ -34,6 +34,15 @@ pub(crate) struct Suggestion {
     pub description: String,
 }
 
+const PEOPLE_QUALIFIERS: &[&str] = &[
+    "author",
+    "assignee",
+    "review-requested",
+    "reviewed-by",
+    "review-involves",
+    "user-review-requested",
+];
+
 pub(crate) struct CompleteSearch;
 
 impl Read for CompleteSearch {
@@ -116,10 +125,10 @@ pub(crate) fn person_prefix(
     let prefix = input.query[start..cursor]
         .trim_start_matches('-')
         .to_ascii_lowercase();
-    Ok(["author", "assignee"].into_iter().find_map(|kind| {
+    Ok(PEOPLE_QUALIFIERS.iter().find_map(|kind| {
         prefix
             .strip_prefix(&format!("{kind}:"))
-            .map(|value| (kind.into(), value_prefix(value)))
+            .map(|value| ((*kind).to_owned(), value_prefix(value)))
     }))
 }
 
@@ -192,11 +201,18 @@ fn suggestions(
                 .into(),
             });
         }
-    } else if prefix.starts_with("author:") || prefix.starts_with("assignee:") {
+    } else if PEOPLE_QUALIFIERS
+        .iter()
+        .any(|kind| prefix.starts_with(&format!("{kind}:")))
+    {
         for (value, description) in [
             ("author:@me", "Work created by you"),
             ("assignee:@me", "Work assigned to you"),
             ("assignee:*", "Work with any assignee"),
+            ("review-requested:@me", "Awaiting your review"),
+            ("reviewed-by:@me", "Reviewed by you"),
+            ("review-involves:@me", "Your review involvement"),
+            ("user-review-requested:@me", "Directly awaiting your review"),
         ] {
             if value.starts_with(&prefix) {
                 items.push(Suggestion {
@@ -225,6 +241,13 @@ fn suggestions(
             ("assignee:", "Filter by assignee"),
             ("assignee:@me", "Work assigned to you"),
             ("assignee:*", "Work with any assignee"),
+            ("review-requested:", "Filter pending reviewers"),
+            ("reviewed-by:", "Filter submitted reviewers"),
+            (
+                "review-involves:",
+                "Filter requested or submitted reviewers",
+            ),
+            ("user-review-requested:", "Filter direct review requests"),
         ] {
             if negative && value.starts_with("no:") || !value.starts_with(&prefix) {
                 continue;
@@ -241,6 +264,7 @@ fn suggestions(
             + input.query[end..].chars().count()
             <= 256
     });
+    items.truncate(20);
     let error = Query::parse((!input.query.trim().is_empty()).then(|| input.query.trim()))
         .err()
         .map(str::to_owned);

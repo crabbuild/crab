@@ -263,7 +263,7 @@ async fn qualify_handoff(
         .unwrap();
     assert_eq!(completed.output.items, vec![profile.clone().into()]);
     assert!(!completed.output.truncated);
-    use crate::cells::repository::{ListDiscussions, SearchInput, search::authors};
+    use crate::cells::repository::{ListDiscussions, SearchInput, search::people};
     let authored = remote
         .client
         .query::<ListDiscussions>(
@@ -271,10 +271,10 @@ async fn qualify_handoff(
             Some(created.receipt),
             SearchInput {
                 query: Some("author:@me".into()),
-                authors: vec![authors::Binding {
+                authors: vec![people::Binding {
                     name: "@me".into(),
                     identity: Some(
-                        authors::identity(&lookup_identity.issuer, &lookup_identity.subject)
+                        people::identity(&lookup_identity.issuer, &lookup_identity.subject)
                             .unwrap(),
                     ),
                 }],

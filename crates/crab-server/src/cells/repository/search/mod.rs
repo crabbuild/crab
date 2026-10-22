@@ -9,6 +9,8 @@ pub(crate) mod index;
 pub(crate) mod labels;
 pub(crate) mod milestones;
 mod navigation;
+pub(crate) mod people;
+pub(crate) mod reviews;
 pub(crate) use navigation::Choice;
 pub(crate) mod results;
 
@@ -38,6 +40,7 @@ enum Expression {
 enum Term {
     Author(String),
     Assignee(String),
+    Reviewer { kind: reviews::Kind, name: String },
     Text(String),
     Label(Vec<String>),
     Milestone(String),
@@ -211,8 +214,14 @@ fn atom_expression(atom: &str) -> Result<Expression, &'static str> {
     let term = match qualifier {
         None => Term::Text(unquote(atom)?.to_lowercase()),
         Some((qualifier, value)) => match qualifier.to_ascii_lowercase().as_str() {
-            "author" => Term::Author(authors::name(&unquote(value)?)?),
+            "author" => Term::Author(people::name(&unquote(value)?)?),
             "assignee" => Term::Assignee(assignees::name(&unquote(value)?)?),
+            "review-requested" | "reviewed-by" | "review-involves" | "user-review-requested" => {
+                Term::Reviewer {
+                    kind: reviews::Kind::parse(&qualifier.to_ascii_lowercase())?,
+                    name: people::name(&unquote(value)?)?,
+                }
+            }
             "label" => Term::Label(label_names(value)?),
             "milestone" => Term::Milestone(unquote(value)?.to_lowercase()),
             "is" | "state" => match unquote(value)?.to_ascii_lowercase().as_str() {

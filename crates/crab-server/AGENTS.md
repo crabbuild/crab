@@ -37,8 +37,10 @@ list operation; `search/navigation/` owns query edits and state destinations;
 sorting/query-bound cursors, and explicit bounded preparation; `search/completion/` owns repository-scoped
 suggestions and browser UTF-16 replacement ranges. `search/milestones/` owns
 milestone projection/catalog reads, grammar-preserving facet destinations and
-the native choice read. `search/authors/` owns qualified identity digests,
-resolved binding validation, global author-facet destinations and personal-view selection. `search/assignees/` owns stable-ID predicates, resolved binding validation,
+the native choice read. `search/people/` owns qualified identity digests, public name validation and
+shared resolved bindings. `search/authors/` owns global author-facet destinations
+and personal-view selection. `search/reviews/` owns reviewer predicates, transactional
+review/request projections and bounded rebuild source cursors. `search/assignees/` owns stable-ID predicates, resolved binding validation,
 historical snapshot choices and personal selection; `api/discussion_search/assignees/`
 resolves handles/current accounts and composes authorized filter choices.
 `search/labels/` owns bounded active-label choices and
@@ -76,9 +78,9 @@ the `cells` CLI. Registration does not grant permissions.
 `cells/directory/lookup/` owns bounded qualified account-ID reads and public
 profile reads by qualified key or actor UUID. `cells/directory/search/` owns bounded indexed handle resolution
 and completion. Handle completion returns bounded public matches plus an exact
-truncation flag. `api/discussion_search/authors/` binds public qualifiers to
-qualified accounts before native repository reads and exposes the authorized
-Author menu using those same public Directory choices. `api/profiles/attribution/` deduplicates list authors into one
+truncation flag. `api/discussion_search/people/` resolves the shared author/reviewer name union
+before native reads and composes public choices with final membership checks.
+`api/discussion_search/authors/` and `reviews/` own their filter endpoints. `api/profiles/attribution/` deduplicates list authors into one
 Directory read; issue and PR handlers recheck durable membership afterward.
 `src/api/profiles/` exposes session-authenticated profile reads/edits without
 exposing authentication claims. `src/server/management/directory.rs` owns explicit

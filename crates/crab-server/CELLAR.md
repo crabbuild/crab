@@ -24,7 +24,7 @@ is buffered before owner dispatch so Cellar can safely retry stale routes; it is
 not forwarded as a non-replayable upload stream. Successful HTTP output
 uses the SDK output gate, including its ownership and durability checks.
 
-Repository assignment format 2 and discussion index format 5 require the explicit
+Repository assignment format 2 and discussion index format 6 require the explicit
 preparation described below. Other canonical records retain their formats.
 Transport requests and replies use bounded JSON. Mutation receipts store
 the payload digest and outcome in the same transaction as application writes.
@@ -118,6 +118,33 @@ destinations share the parser and global-conjunction rules with milestone and
 state navigation. Definitions, assignments, counts and cursors continue to use
 the existing native transaction and revision contracts. Prepared format-2
 repositories need no additional rebuild for the label menu.
+
+## Reviewer search preparation
+
+Discussion index format 6 adds qualified reviewer projections. Each PR/identity
+row records whether a review was submitted and whether a direct request remains
+pending. The canonical review/request commands update that row in their native
+transaction, after permanent submission replay checks. A commented review counts
+as review participation and fulfills a pending request. Cancelling a request
+preserves submitted participation, and retrying an old review cannot fulfill a
+newer request. Reviewer rows reference canonical PRs rather than disposable index
+documents, so ordinary text/label projection refreshes retain relationships.
+
+Explicit rebuild adds bounded reviewer clearing, SQL review-history paging, and
+KV request-source paging. SQL paging [seeks by the composite primary key](https://www.sqlite.org/rowvalue.html#scrolling_window_queries).
+A separate typed source cursor persists the composite
+review key or exclusive KV bound. Both phases process at most eight source records
+per transaction; unrelated pull metadata also advances the request cursor. Reads
+remain unavailable until all sources complete. Domain records, versions, request
+history, receipts and public submission mappings are unchanged. Older indexes
+require `cells rebuild-search`; fresh repositories initialize format 6.
+
+Native list input adds exact ordered reviewer identity bindings; output adds
+`review_requested_from_me`. Author and reviewer bindings share the same Directory
+snapshot, digest encoding and validation. Public HTTP cannot supply bindings.
+Update peers together; there is no old list-shape reader or source-scan fallback.
+Team requests, review-status/merge-policy predicates, general participants and
+native grant authority remain separate delivery work.
 
 ## Assignee search preparation
 

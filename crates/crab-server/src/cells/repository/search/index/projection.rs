@@ -58,7 +58,7 @@ pub(super) fn refresh(context: &Transaction<'_>, subject: Subject) -> crate::cel
     let updated = result_u64_from_row(row, 7)?;
     let issuer = result_text(row, 8)?;
     let subject_key = result_text(row, 9)?;
-    let author_identity = super::super::authors::identity(&issuer, &subject_key)?;
+    let author_identity = super::super::people::identity(&issuer, &subject_key)?;
     let draft = subject.kind == SubjectKind::Pull
         && crate::cells::repository::pulls::readiness::load(context, subject.number)?
             == crate::cells::repository::PullReadiness::Draft;
@@ -80,6 +80,8 @@ pub(super) fn refresh(context: &Transaction<'_>, subject: Subject) -> crate::cel
     let comments = result_u64(&comment_rows, 0, 0)?;
     // Folded text and all metadata rows commit with the domain mutation. FTS5
     // contentless-delete avoids triggers that require trusted-schema access.
+    // Reviewer rows attach to canonical PRs and survive this replacement.
+    // Tying them to these disposable documents would erase review relationships.
     remove(context, id)?;
     context.sql(&SqlBatch { statements: vec![statement(
         "INSERT INTO discussion_index(rowid, kind, number, state, draft, created_at_ms, updated_at_ms, title, body, author, comments, reactions) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",

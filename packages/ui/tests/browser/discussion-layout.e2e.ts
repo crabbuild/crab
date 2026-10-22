@@ -43,6 +43,7 @@ async function fixture(page: Page) {
           next: null,
           authored_by_me: false,
           assigned_to_me: false,
+          review_requested_from_me: false,
           matching: kind === "issues" ? 2 : 1,
           counts: { open: 2, closed: 0, merged: 0 },
           navigation: {

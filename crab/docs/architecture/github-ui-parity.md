@@ -671,3 +671,64 @@ closed. The persistent preview rebuilt both indexes to format 5 and retained all
 18 captured resources exactly, including reaction watermarks and the unenrolled
 operator profile. This qualifies the implemented slice, not full GitHub parity
 or the outstanding native authority/SDK release prerequisites.
+
+
+## Reviewer relationships and navigation
+
+Native format-6 projections support `review-requested`, `reviewed-by`,
+`review-involves` and direct `user-review-requested` with public handles or `@me`.
+Requests and submitted reviews update relationship rows transactionally; comment
+reviews participate too. Canonical request/review records and submission replay
+remain their existing owners. An old review retry cannot fulfill a later request.
+Reviewer rows survive ordinary discussion text/label refreshes. Issuer-qualified
+identity digests keep otherwise equal subjects distinct.
+
+The shared shadcn Reviews filter offers requested/reviewed/involved modes,
+bounded searchable public choices and Yourself/Clear actions. It preserves query
+boolean groups and URL sort/direction/diagnostics, resets cursors, and supports
+keyboard/focus, loading/errors/retry and narrow dark layouts. The PR sidebar adds
+Review requests based on native positive global self selection. Mixed issue search
+accepts the same predicates; its toolbar retains the issue-specific layout.
+Author and reviewer resolution/menu behavior share explicit `people/` owners,
+without keeping renamed adapters or another Directory-resolution path.
+
+Existing indexes require explicit preparation. Rebuild clears reviewer rows,
+pages canonical SQL reviews, then pages canonical KV requests with persisted
+source cursors. Each transaction handles at most eight source records, including
+unrelated documents in sparse request ranges. Serving remains gated until all
+sources complete. Canonical versions, histories, private Directory state, grants
+and public submissions need no conversion for this derived-index step.
+
+Remaining work includes review-status predicates, current-head/check rollups,
+team requests, general participants/mentions/involves, saved views and the broader
+issue/PR/project/milestone inventory. Merge-policy status is not approximated by
+review-request presence. Full GitHub and production parity remain unproven.
+
+
+Verification: 377 server tests passed (five existing ignored), followed by four
+focused checks on the final composite-key review pager. Strict all-target Clippy,
+architecture gates, frontend build/type checks, 107 UI unit tests and all 100
+browser scenarios passed. Native tests cover qualified identities, cancellation,
+comment-review fulfillment, permanent submission retry after a newer request,
+ordinary document refresh and complete multi-page reconstruction.
+
+A real format-5/format-6 process upgrade reconstructed 17 existing reviews and a
+pending request, restarting in both the SQL-review and sparse-KV-request phases.
+The three captured detail/history/request resources matched except for 18
+reaction ordering watermarks advancing 59→63. `api/reactions/` deliberately
+reports the repository receipt revision; browse projection writes can advance it.
+All record versions, contents, timestamps, request state and reaction groups were
+unchanged. Read-only comparison of canonical distinct reviewers and projected
+reviewers matched, with the pending request retained. The initial strict-equality
+harness stopped at those metadata revisions; browser verification was completed
+separately against the current binary.
+
+The completed current-binary RustFS run also restarted within both rebuild sources,
+then used actual browser actions to request a review, choose sidebar/username
+filters, submit a comment review and view reviewed/involved results. Completion
+and relationship state survived another restart; 114 durable Cellar objects
+remained. Canonical/projected distinct-reviewer counts matched again after review,
+with no pending requests. Desktop and narrow dark screenshots were inspected.
+Both persistent preview repositories explicitly rebuilt to format 6 and retained
+all 18 captured resources exactly, with no profile enrollment. Owned qualification
+browsers, identity provider, server and RustFS container were closed.

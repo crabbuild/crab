@@ -134,3 +134,21 @@ END;
 CREATE TRIGGER IF NOT EXISTS discussion_label_delete AFTER DELETE ON repository_labels BEGIN
     UPDATE discussion_index_revision SET revision = revision + 1 WHERE singleton = 1;
 END;
+
+CREATE TABLE IF NOT EXISTS discussion_index_reviewers (
+    pull INTEGER NOT NULL REFERENCES repository_pulls(number) ON DELETE CASCADE,
+    identity BLOB NOT NULL CHECK(length(identity) = 32),
+    reviewed INTEGER NOT NULL CHECK(reviewed IN (0, 1)),
+    requested INTEGER NOT NULL CHECK(requested IN (0, 1)),
+    PRIMARY KEY(pull, identity)
+) STRICT, WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS discussion_index_reviewer_lookup ON discussion_index_reviewers(identity, pull);
+CREATE TRIGGER IF NOT EXISTS discussion_reviewer_insert AFTER INSERT ON discussion_index_reviewers BEGIN
+    UPDATE discussion_index_revision SET revision = revision + 1 WHERE singleton = 1;
+END;
+CREATE TRIGGER IF NOT EXISTS discussion_reviewer_update AFTER UPDATE ON discussion_index_reviewers BEGIN
+    UPDATE discussion_index_revision SET revision = revision + 1 WHERE singleton = 1;
+END;
+CREATE TRIGGER IF NOT EXISTS discussion_reviewer_delete AFTER DELETE ON discussion_index_reviewers BEGIN
+    UPDATE discussion_index_revision SET revision = revision + 1 WHERE singleton = 1;
+END;

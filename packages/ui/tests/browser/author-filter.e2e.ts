@@ -29,6 +29,7 @@ for (const view of ["issues", "pulls"] as const) {
           counts: { open: 0, closed: 0, merged: 0 },
           authored_by_me: personal,
           assigned_to_me: false,
+          review_requested_from_me: false,
           navigation: personal
             ? {
                 kind: "state",
@@ -149,6 +150,7 @@ async function authorMenuFixture(page: Page) {
           counts: { open: 0, closed: 0, merged: 0 },
           authored_by_me: false,
           assigned_to_me: false,
+          review_requested_from_me: false,
           navigation: { kind: "results" },
         },
       }),

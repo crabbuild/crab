@@ -160,7 +160,14 @@ impl Mutation for SetReviewRequest {
             request.updated_at = now;
             request
         };
+        super::super::search::index::ensure_ready(context)?;
         store(context, pull.number, &request)?;
+        super::super::search::reviews::requested(
+            context,
+            pull.number,
+            &request.reviewer,
+            request.state == State::Requested,
+        )?;
         let old_version = pull.version;
         pull.version = next_version(pull.version)?;
         pull.updated_at_ms = now;
@@ -305,6 +312,49 @@ impl Read for ListReviewRequests {
             merge_pending,
         }))
     }
+}
+
+pub(in crate::cells::repository) struct IndexPage {
+    pub items: Vec<(u64, Request)>,
+    pub next: Option<String>,
+}
+
+// Rebuild advances over at most eight source documents, including unrelated
+// pull metadata. Filtering before advancing could turn sparse requests into an
+// unbounded walk. The original qualified request remains canonical.
+pub(in crate::cells::repository) fn index_page(
+    context: &Transaction<'_>,
+    before: Option<&str>,
+) -> crate::cells::Result<IndexPage> {
+    let prefix = "collaboration/v1/pulls/";
+    if before.is_some_and(|key| !key.starts_with(prefix)) {
+        return Err(crate::cells::Error::Invalid(
+            "Review request source cursor is invalid",
+        ));
+    }
+    let rows = context.documents::<serde_json::Value>(prefix, before, 8)?;
+    let next = (rows.len() == 8)
+        .then(|| rows.last().map(|(key, _)| key.clone()))
+        .flatten();
+    let mut requests = Vec::new();
+    for (key, value) in rows {
+        let Some((pull, rest)) = key.strip_prefix(prefix).and_then(|key| key.split_once('/'))
+        else {
+            continue;
+        };
+        let Some(id) = rest.strip_prefix("review-requests/") else {
+            continue;
+        };
+        let pull = u64::from_str_radix(pull, 16).map_err(crate::cells::Error::sdk)?;
+        validate_number(pull)?;
+        let request: Request = serde_json::from_value(value)?;
+        validate(&request, id)?;
+        requests.push((pull, request));
+    }
+    Ok(IndexPage {
+        items: requests,
+        next,
+    })
 }
 
 #[cfg(test)]

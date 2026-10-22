@@ -52,6 +52,7 @@ impl Mutation for CreatePullReview {
                 record,
             )));
         }
+        super::super::search::index::ensure_ready(context)?;
         let Some(mut pull) = load_pull(context, input.pull)? else {
             return Ok(MutationResult::Rejected(
                 CreatePullReviewOutcome::PullNotFound,
@@ -131,6 +132,9 @@ impl Mutation for CreatePullReview {
             statements.push(statement("UPDATE repository_pulls SET version = ?, updated_at_ms = ? WHERE number = ? AND version = ?", vec![integer(pull.version)?, integer(now)?, integer(pull.number)?, integer(pull.version - 1)?]));
         }
         context.sql(&SqlBatch { statements })?;
+        // Comment-only reviews count as participation and fulfill requests too.
+        // Record this after submission replay, in the review transaction.
+        super::super::search::reviews::reviewed(context, record.pull, &record.author)?;
         advance_revision(context)?;
         let action = match record.state {
             ReviewState::Commented => Action::Commented,

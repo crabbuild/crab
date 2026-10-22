@@ -35,7 +35,10 @@ fn author_grammar_and_global_self_selection_keep_boolean_meaning() {
     ] {
         assert!(Query::parse(Some(source)).is_err(), "{source}");
     }
-    assert_ne!(identity("ab", "c").unwrap(), identity("a", "bc").unwrap());
+    assert_ne!(
+        super::super::people::identity("ab", "c").unwrap(),
+        super::super::people::identity("a", "bc").unwrap()
+    );
 }
 
 async fn page(
@@ -113,7 +116,9 @@ async fn qualified_author_projection_filters_both_kinds_and_binds_cursors_to_res
         )
         .await
         .unwrap();
-    let key = |index: usize| Some(identity(&actors[index].issuer, &actors[index].subject).unwrap());
+    let key = |index: usize| {
+        Some(super::super::people::identity(&actors[index].issuer, &actors[index].subject).unwrap())
+    };
     let binding = |name: &str, index| Binding {
         name: name.into(),
         identity: key(index),

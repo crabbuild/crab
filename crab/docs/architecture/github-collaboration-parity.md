@@ -316,3 +316,13 @@ name snapshots. No canonical assignment, Directory, catalog-grant or public
 submission conversion is needed for this derived-index step. Reviewer/involves/
 mention predicates, native authority cutover and the remaining full parity
 inventory remain open.
+
+
+Reviewer relationship filtering now projects canonical qualified review/request
+sources into native index format 6. Pending requests, submitted reviewers and
+review involvement share transaction, count, cursor and explicit bounded rebuild
+contracts. The PR workspace adds a shadcn Reviews menu and native Review requests
+personal navigation. Author and reviewer resolution use the same public Directory
+snapshot and final durable membership recheck. This does not implement team
+requests, current-head review-status/merge policy, notifications/mentions,
+general participant predicates, native authority cutover or complete parity.

@@ -1545,9 +1545,9 @@ handle invalidates its old cursor even without a repository mutation. Malformed 
 queries or index contents return 409 `stale_search_cursor`. Restart at the first
 page to obtain a fresh snapshot. Comment pagination remains numeric.
 
-The current discussion index format is 5. It retains qualified author identities,
+The current discussion index format is 6. It retains qualified author identities,
 milestone catalog entries and stable actor assignment keys, and adds searchable
-assignment name snapshots. Older indexes report
+assignment name snapshots and transactional reviewer relationships. Older indexes report
 `outdated`; run the explicit rebuild below before admitting indexed traffic.
 It rebuilds only derived tables and preserves canonical milestone and assignment
 records. Clearing, milestone catalog preparation and discussion projection are
@@ -1573,6 +1573,27 @@ It returns at most 20 deduplicated `person`/query choices, `truncated`, and
 after awaited reads. Definitions, grants and canonical assignments are unchanged.
 Both list outputs include `assigned_to_me` for global positive self predicates;
 conditional/excluded predicates retain arbitrary-search navigation.
+
+Reviewer predicates accept public usernames or `@me`: `review-requested`,
+`reviewed-by`, `review-involves`, and `user-review-requested`. The last qualifier
+selects direct requests; team relationships are not implemented. A submitted
+review fulfills its pending direct request and remains a participant; cancellation
+without a review removes participation. Qualified issuer/subject bindings prevent
+cross-provider subject collisions. Exclusion, boolean groups, exact full counts
+and query-bound cursors use the same native predicate on mixed and PR-only lists.
+The PR workspace adds Review requests navigation from the native
+`review_requested_from_me` result flag. Negated/conditional self terms do not
+select that personal view.
+
+`GET .../discussion-search/reviewers?query=...&search=...&relation=...` returns
+bounded public reviewer/query choices with `self`, `clear`, and truncation.
+Relations are `review_requested`, `reviewed_by`, `review_involves`, and
+`user_review_requested`. The shared shadcn Reviews menu exposes the first three,
+search, keyboard selection, focus return, failure/retry and mobile/dark support.
+Choosing a relationship replaces only global reviewer terms; conditional OR
+groups and unrelated facets keep their meaning. Sort/direction and diagnostics
+persist, while pagination resets. Review-status predicates remain unsupported
+until connected to current Git head and branch protection policy.
 
 ### Browse activity
 

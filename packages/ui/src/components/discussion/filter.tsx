@@ -54,6 +54,15 @@ type Options = { clear: Choice; truncated: boolean } & (
 );
 
 const presentations = {
+  reviewers: {
+    title: "Filter by reviewer",
+    trigger: "Reviews",
+    find: "Find a username",
+    initial: "Yourself",
+    noun: "reviewers",
+    singular: "reviewer",
+    timing: "Reviewer filters",
+  },
   assignees: {
     title: "Filter by assignee",
     trigger: "Assignee",
@@ -109,7 +118,9 @@ export function DiscussionFilter({
   const [open, setOpen] = useState(false);
   const [search, setSearch] = useState("");
   const [requested, setRequested] = useState("");
-  const [state, setState] = useState("open");
+  const [state, setState] = useState(
+    kind === "reviewers" ? "review_requested" : "open",
+  );
   const [active, setActive] = useState(-1);
   useEffect(() => {
     const timer = setTimeout(() => setRequested(search), 150);
@@ -121,6 +132,7 @@ export function DiscussionFilter({
           query,
           search: requested,
           state: kind === "milestones" ? state : undefined,
+          relation: kind === "reviewers" ? state : undefined,
         })
       : null,
   );
@@ -246,6 +258,28 @@ export function DiscussionFilter({
               <ToggleGroupItem value="closed">Closed</ToggleGroupItem>
             </ToggleGroup>
           )}
+          {kind === "reviewers" && (
+            <ToggleGroup
+              type="single"
+              value={state}
+              aria-label="Review relationship"
+              onValueChange={(value) => {
+                if (value) {
+                  setState(value);
+                  setActive(-1);
+                  input.current?.focus();
+                }
+              }}
+            >
+              <ToggleGroupItem value="review_requested">
+                Requested
+              </ToggleGroupItem>
+              <ToggleGroupItem value="reviewed_by">Reviewed</ToggleGroupItem>
+              <ToggleGroupItem value="review_involves">
+                Involved
+              </ToggleGroupItem>
+            </ToggleGroup>
+          )}
           <RequestWidget timing={options.timing} label={text.timing}>
             {(!current || options.loading) && (
               <p role="status" className="p-2 text-xs text-muted-foreground">
@@ -268,13 +302,15 @@ export function DiscussionFilter({
               id={`${id}-options`}
               role="listbox"
               aria-label={
-                kind === "assignees"
-                  ? "Assignees"
-                  : kind === "authors"
-                    ? "Authors"
-                    : kind === "labels"
-                      ? "Labels"
-                      : "Milestones"
+                kind === "reviewers"
+                  ? "Reviewers"
+                  : kind === "assignees"
+                    ? "Assignees"
+                    : kind === "authors"
+                      ? "Authors"
+                      : kind === "labels"
+                        ? "Labels"
+                        : "Milestones"
               }
               aria-multiselectable={kind === "labels" || undefined}
               className="max-h-64 overflow-y-auto"
@@ -372,7 +408,7 @@ export function DiscussionFilter({
                 No{" "}
                 {kind === "milestones"
                   ? `${state} milestones`
-                  : kind === "authors"
+                  : kind === "authors" || kind === "reviewers"
                     ? "usernames"
                     : text.noun}{" "}
                 match.

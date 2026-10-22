@@ -23,6 +23,7 @@ async function fixture(page: Page) {
         counts: { open: 0, closed: 0, merged: 0 },
         authored_by_me: false,
         assigned_to_me: assigned,
+        review_requested_from_me: false,
         navigation: {
           kind: "state",
           selected: q.includes("is:closed") ? "closed" : "open",
