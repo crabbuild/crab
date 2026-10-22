@@ -11,6 +11,7 @@ use tracing_subscriber::EnvFilter;
 mod assignments;
 mod ecs;
 mod lifecycle;
+mod teams;
 
 #[derive(Parser)]
 #[command(version, about = "Serve and administer Crab repositories")]
@@ -87,6 +88,13 @@ enum CellsCommand {
         organization: uuid::Uuid,
         #[arg(long)]
         input_file: PathBuf,
+    },
+    /// Prepare team authority for an existing organization using its current owner.
+    PrepareOrganizationTeams {
+        #[arg(long)]
+        organization: uuid::Uuid,
+        #[arg(long)]
+        actor: uuid::Uuid,
     },
     /// Prepare canonical issue closure metadata in restartable bounded frames.
     PrepareIssueState {
@@ -297,6 +305,10 @@ async fn cells(config: &crab_server::Config, command: CellsCommand) -> crab_serv
                 .map_err(|source| crab_server::Error::Healthcheck { source })?
                 .to_vec()
         }
+        CellsCommand::PrepareOrganizationTeams {
+            organization,
+            actor,
+        } => teams::prepare(config, organization, actor).await?,
         CellsCommand::PrepareIssueState { owner, name } => {
             lifecycle::prepare(config, &owner, &name, "issue-state").await?
         }
@@ -523,7 +535,11 @@ fn management_target(
         .to_owned();
     url.set_host(Some(&tls_name))
         .map_err(|_| crab_server::Error::Config("Cell peer TLS server name is invalid"))?;
+    let (path, query) = path
+        .split_once('?')
+        .map_or((path, None), |(path, query)| (path, Some(query)));
     url.set_path(path);
+    url.set_query(query);
     let resolution = if tls_name.parse::<std::net::IpAddr>().is_err() {
         let listen_ip = config.management_listen.ip();
         let local_ip = if listen_ip.is_unspecified() {

@@ -9,47 +9,10 @@ use crate::{
 use axum::http::{StatusCode, header};
 use reqwest::Method;
 
-async fn fixture(h: &Harness) -> (Uuid, Uuid, Uuid) {
-    let cells = h.server.cells().unwrap();
-    let issuer = h.provider.issuer.clone();
-    let actors = cells
-        .command::<RegisterAccounts>(
-            Address::Directory,
-            app::mutation_identity().unwrap(),
-            vec![
-                IdentityKey {
-                    issuer: issuer.clone(),
-                    subject: "alice-id".into(),
-                },
-                IdentityKey {
-                    issuer,
-                    subject: "bob-id".into(),
-                },
-            ],
-        )
-        .await
-        .unwrap()
-        .output;
-    let id = Uuid::now_v7();
-    cells.initialize(Address::Organization(id)).await.unwrap();
-    cells
-        .command::<Bootstrap>(
-            Address::Organization(id),
-            app::mutation_identity().unwrap(),
-            BootstrapInput {
-                actor: actors[0],
-                name: "Crab engineering".into(),
-                description: "Organization authority".into(),
-            },
-        )
-        .await
-        .unwrap();
-    (id, actors[0], actors[1])
-}
 #[tokio::test]
 async fn invitations_require_consent_and_current_qualified_authority_without_repository_grants() {
     let h = Harness::new(false).await;
-    let (id, alice_id, bob_id) = fixture(&h).await;
+    let (id, alice_id, bob_id) = crate::test_support::http::organizations::bootstrap(&h).await;
     let alice = h.login().await;
     *h.provider.mode.lock().await = "member".into();
     let bob = h.login().await;
@@ -261,7 +224,7 @@ async fn invitations_require_consent_and_current_qualified_authority_without_rep
 #[tokio::test]
 async fn organization_accounts_are_issuer_qualified_and_git_tokens_cannot_manage_them() {
     let h = Harness::new(false).await;
-    let (id, _, _) = fixture(&h).await;
+    let (id, _, _) = crate::test_support::http::organizations::bootstrap(&h).await;
     let alice = h.login().await;
     let root = format!("/api/organizations/{id}");
     assert_eq!(

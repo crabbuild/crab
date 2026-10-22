@@ -59,6 +59,7 @@ impl Mutation for Bootstrap {
                 record(context)?.ok_or(Error::Invalid("organization bootstrap has no record"))?;
             return Ok(MutationResult::Success(ChangeOutcome::Applied(value)));
         }
+        teams::initialize(context)?;
         context.query("INSERT INTO organization_details(singleton, name, description, created_at_ms, updated_at_ms) VALUES (1, ?, ?, ?, ?)", &[SqlValue::Text(input.name), SqlValue::Text(input.description), SqlValue::Integer(context.now_ms()), SqlValue::Integer(context.now_ms())])?;
         context.query("INSERT INTO organization_members(actor, role, active, version) VALUES (?, 'owner', 1, 1)", &[blob(input.actor)])?;
         context.query(
@@ -67,6 +68,16 @@ impl Mutation for Bootstrap {
                 blob(input.actor),
                 SqlValue::Blob(digest.as_bytes().to_vec()),
             ],
+        )?;
+        teams::membership_changed(
+            context,
+            &Member {
+                actor: input.actor,
+                role: Role::Owner,
+                active: true,
+                version: 1,
+            },
+            None,
         )?;
         advance(context, input.actor, Action::Created)?;
         let value =
@@ -116,6 +127,7 @@ impl Mutation for ChangeMember {
         context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> Result<MutationResult<Self::Output>> {
+        teams::ensure_ready(context)?;
         actor(input.member)?;
         let Some(old) = member(context, input.member)?.filter(|member| member.active) else {
             return Ok(MutationResult::Rejected(ChangeOutcome::NotFound));
@@ -151,6 +163,16 @@ impl Mutation for ChangeMember {
                 integer(version)?,
                 blob(input.member),
             ],
+        )?;
+        teams::membership_changed(
+            context,
+            &Member {
+                actor: input.member,
+                role,
+                active,
+                version,
+            },
+            Some(old.active),
         )?;
         advance(
             context,

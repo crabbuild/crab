@@ -209,6 +209,7 @@ impl Mutation for DecideInvitation {
             return Ok(MutationResult::Rejected(ChangeOutcome::Conflict));
         }
         if input.accept {
+            teams::ensure_ready(context)?;
             let old = member(context, input.actor)?;
             if old.as_ref().is_some_and(|member| member.active)
                 || old.map_or(0, |member| member.version) != value.member_version
@@ -219,6 +220,16 @@ impl Mutation for DecideInvitation {
             // The offer is an organization-owned capability until cancelled or
             // expired. Acceptance and the exact membership version commit together.
             context.query("INSERT INTO organization_members(actor, role, active, version) VALUES (?, ?, 1, ?) ON CONFLICT(actor) DO UPDATE SET role = excluded.role, active = 1, version = excluded.version", &[blob(input.actor), SqlValue::Text(value.role.name().into()), integer(version)?])?;
+            teams::membership_changed(
+                context,
+                &Member {
+                    actor: input.actor,
+                    role: value.role,
+                    active: true,
+                    version,
+                },
+                Some(false),
+            )?;
         }
         value.version = next_version(value.version)?;
         value.state = if input.accept {

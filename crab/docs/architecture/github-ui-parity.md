@@ -811,7 +811,7 @@ rebuild behavior across restart, with 79 durable native objects. Desktop and
 390px screenshots were inspected; its owned services and browsers were closed.
 
 This is phase-1 groundwork, not complete GitHub parity. Owner discovery/registry,
-personal namespaces, teams, full organization lifecycle/email delivery, native
+personal namespaces, nested teams, full organization lifecycle/email delivery, native
 repository grant cutover and cross-Cell fencing remain unfinished. Projects,
 organization issue types, advanced review/merge flows and the remaining Issues/
 Milestones inventory still follow the collaboration plan. Cellar's documented
@@ -1378,3 +1378,68 @@ This slice adds 577 net production lines for global native status predicates,
 source/policy cursor binding, consistent rollups and shadcn interactions. It
 removes the old picker, endpoint and choice builder. No dependency, lockfile,
 environment option, compatibility reader or inventory override was added.
+
+
+## Native standalone teams
+
+Organization now owns standalone team metadata, member/maintainer roles,
+visible/secret access, creation policy and versioned direct membership. Native
+organization membership incarnations prevent removal/reinvitation from restoring
+old team access. Permanent actor/digest submission outcomes serialize normal
+writes and cancellation, including minimal recovery after revocation. Domain rejections remain terminal
+even if names or candidate eligibility later change. Current
+content and authority checks still precede native transport receipt replay.
+Existing organizations require explicit bounded preparation; fresh private
+bootstrap prepares teams atomically. No implicit serving migration is added.
+
+The organization Teams tab supplies searchable native pages, new-team forms,
+member/candidate pagination, role/removal controls, conflict-preserving settings,
+visibility, deletion and owner creation policy. It uses shadcn and the existing
+Geist tokens. An account-bound controller above application routing retains exact
+uncertain submissions across navigation and organization access failure.
+Cancellation reports a completed operation or fences an unapplied one, without
+inventing success or returning protected team content.
+
+GitHub's [team visibility](https://docs.github.com/en/organizations/organizing-members-into-teams/about-teams),
+[team creation policy](https://docs.github.com/en/organizations/organizing-members-into-teams/creating-a-team)
+and [team maintainer](https://docs.github.com/en/organizations/organizing-members-into-teams/assigning-the-team-maintainer-role-to-a-team-member)
+contracts informed this slice. Fern's pinned organization worker confirms the
+current-organization membership boundary; no Fern source was copied.
+
+This remains a foundation slice. Parent/child teams, inherited membership,
+username autocomplete, team repository/project grants, review requests,
+notification mentions, owner registry/cutover and full Issues/PR/Projects/
+Milestones parity remain unfinished. The SQLite WAL-reset release blocker is
+unchanged. See `crates/crab-server/CELLAR.md#standalone-teams` for operator and
+wire contracts; current verification evidence follows below.
+
+Verification for this slice: 476 native checks pass with six existing opt-in
+qualifications ignored; all 13 CLI checks, 164 browser scenarios and 107 UI unit
+checks pass. Strict all-target Clippy, architecture gates, Rustfmt, frontend
+format checks and frontend/server builds pass. Thirteen focused native/HTTP team
+checks cover privacy, current authority, membership incarnations, scoped pages,
+explicit preparation, cancellation races and permanent rejection across changed
+name/candidate preconditions. The UI checks enforce strict edit DTO fields as
+well as conflict review, account-bound recovery and mobile/dark accessibility.
+
+Two final isolated RustFS process runs used actual OIDC sessions and the embedded
+UI. They created a team, added/promoted a member, edited metadata, deliberately
+lost the successful edit response, removed its actor, recovered only the terminal
+result, reinvited without restoring old team access, explicitly re-added a member,
+and restarted. Cancelled and rejected creates stayed terminal after restart;
+deleting and recreating the same team name produced a new UUID without inherited
+membership. The final screenshots use the actual theme control at 390px, with no
+horizontal overflow. Owned services/browsers were cleaned up.
+
+The local preview now runs the qualified binary. Its 18 public repository
+resources and 39 canonical tables in each repository Cell are unchanged. Transport
+receipts retain normal append/24-hour expiry semantics. No organization or public
+profile was fabricated in that preview. Production growth is about 2.9k lines for
+the new native authority/preparation, bounded HTTP contract and shadcn management/
+recovery UI; the existing organization and transport owners remain shared.
+
+Before full parity, audit existing repository mutation owners and their UI intent
+controllers for delayed transports across mutable rejection conditions. Teams
+have permanent terminal decisions; this slice does not establish that stronger
+contract for every older repository workflow. That audit accompanies the remaining
+hierarchy, grants, team review requests and Projects work.

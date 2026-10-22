@@ -1428,7 +1428,7 @@ Response enrichment follows the repository transaction, so an enrichment error
 does not imply a rolled-back mutation. Retry creates with the same submission
 ID; reload versioned edits before retrying.
 
-Organization/team authority, owner registration and remaining actor-backed
+Organization/team repository grants, owner registration and remaining actor-backed
 contracts and predicates remain unfinished. Choosing a handle matching a catalog
 owner label does not acquire ownership.
 
@@ -1905,7 +1905,7 @@ participants per frame, replaces the empty derived table, and replays review
 and request sources in bounded frames. It preserves canonical records and
 submission receipts. Update serving peers and bundled UI together for the new
 native read and public DTO; see [reviewer status preparation](CELLAR.md#reviewer-status-preparation).
-Pending/dismissed reviews, teams, code-owner suggestions, and notifications
+Pending/dismissed reviews, team review requests, code-owner suggestions, and notifications
 remain separate delivery work.
 
 ### Link related work
@@ -2507,7 +2507,7 @@ invitation decisions, membership tombstones and audit append are transactional.
 
 Organization authority grants no catalog repository access. Registered-account
 invitations currently use manually shared acceptance links; email delivery,
-owner-name discovery, teams, owner registry and cross-authority repository/project
+owner-name discovery, nested teams, owner registry and cross-authority repository/project
 fencing remain unfinished. See `CELLAR.md` for preparation, expiry and coordinated
 deployment contracts. Native tests live in `cells/organization/tests/`, HTTP tests
 in `api/organizations/tests/`, and browser fixtures in
@@ -2522,3 +2522,33 @@ It creates a public profile, creates/accepts an invitation, observes the native
 membership and checks that removal hides current metadata while retaining only
 the recipient's historical decision. Browser cleanup is bounded and scoped to
 its own sessions. The normal suite ignores it because it needs an external browser.
+
+
+### Native standalone teams
+
+`cells/organization/teams/` and `api/organizations/teams/` own direct teams,
+current-incarnation memberships, visible/secret reads, maintainer controls,
+creation policy, bounded pages and permanent submission cancellation/recovery.
+Organization membership transitions update the same native authority. Fresh
+private bootstrap prepares teams; existing organizations require
+`cells prepare-organization-teams --organization UUID --actor OWNER_ACTOR_UUID`.
+Read [the team preparation and API contract](CELLAR.md#standalone-teams).
+
+The UI owner is `packages/ui/src/features/organizations/teams/`. Its account-bound
+submission controller lives above application routing, so lost acknowledgements
+can recover after navigation or organization removal without retargeting the
+write. New native/HTTP tests live beside their team owners; responsive,
+accessibility, conflict and recovery scenarios live in
+`packages/ui/tests/browser/teams.e2e.ts`. Native team authority does not yet bind
+repository permissions or PR review requests; hierarchy, autocomplete and Projects
+remain separate work.
+
+Current team qualification: 13 native/HTTP team checks, all 476 native regressions
+(six existing opt-in qualifications ignored), 13 CLI checks, 164 browser scenarios,
+107 UI unit checks, strict all-target Clippy and architecture/format/build checks.
+Real RustFS/two-account OIDC browser runs cover native side effects, a lost edit
+reply followed by revocation, non-restoring rejoin, permanent rejected/cancelled
+submissions, restart and team name reuse. Desktop and actual mobile dark screens
+were inspected. The local preview preserves all 18 public repository resources
+and 39 canonical tables per repository Cell. These results qualify the standalone
+team slice; they do not complete hierarchy, repository authority or Projects.

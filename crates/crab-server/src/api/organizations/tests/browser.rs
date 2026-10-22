@@ -63,7 +63,7 @@ impl Drop for Browser {
 #[ignore = "requires agent-browser and the built embedded UI; uses isolated real OIDC/native Cell fixtures"]
 async fn native_browser_invitation_consent_and_removed_member_privacy() {
     let h = Harness::new(false).await;
-    let (id, alice, bob) = fixture(&h).await;
+    let (id, alice, bob) = crate::test_support::http::organizations::bootstrap(&h).await;
     let owner = Browser::new("owner");
     let invitee = Browser::new("invitee");
     let root = format!("{}/-/organizations/{id}", h.origin);

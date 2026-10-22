@@ -22,6 +22,8 @@ import type {
   OrganizationRole,
   OrganizationView,
 } from "./model";
+import { Teams } from "./teams";
+import type { Commands } from "./teams/commands";
 import { Invitations } from "./invitations";
 export { OrganizationInvitation } from "./invitations";
 
@@ -29,10 +31,12 @@ export function OrganizationPage({
   id,
   url,
   csrf,
+  commands,
 }: {
   id: string;
   url: URL;
   csrf: string;
+  commands: Commands;
 }) {
   const endpoint = `/api/organizations/${id}`;
   const own = useRequest<OrganizationView>(endpoint);
@@ -41,7 +45,7 @@ export function OrganizationPage({
   return (
     <section className="mx-auto w-full max-w-6xl p-4 sm:p-8">
       <Result state={own} timingLabel="Organization">
-        {({ organization, role }) => (
+        {({ organization, role, actor }) => (
           <>
             <header className="mb-6 flex min-w-0 items-center gap-4">
               <Building2Icon
@@ -63,6 +67,7 @@ export function OrganizationPage({
             >
               {[
                 { key: "people", label: "People", icon: UsersIcon },
+                { key: "teams", label: "Teams", icon: UsersIcon },
                 ...(role === "owner"
                   ? [
                       {
@@ -101,7 +106,15 @@ export function OrganizationPage({
                 {notice}
               </p>
             )}
-            {tab === "people" ? (
+            {tab === "teams" ? (
+              <Teams
+                id={id}
+                actor={actor}
+                owner={role === "owner"}
+                url={url}
+                commands={commands}
+              />
+            ) : tab === "people" ? (
               <People
                 endpoint={endpoint}
                 csrf={csrf}

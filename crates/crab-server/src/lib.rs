@@ -22,6 +22,7 @@ mod test_support;
 mod transfer_admission;
 
 pub use cells::directory::DirectoryState;
+pub use cells::organization::teams::OrganizationTeamState;
 pub use cells::repository::collaboration::lifecycle::LifecycleStatus;
 pub use cells::repository::search::index::{
     RebuildSearchInput, SearchIndexPhase, SearchIndexProgress, SearchIndexStatus,

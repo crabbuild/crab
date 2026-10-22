@@ -18,6 +18,7 @@ const MAX_VERSION: u64 = 9_007_199_254_740_991;
 mod commands;
 mod invitations;
 mod reads;
+pub(crate) mod teams;
 pub(crate) use commands::{
     Bootstrap, BootstrapInput, ChangeMember, ChangeOutcome, Edit, EditInput, MemberChange,
 };
@@ -150,6 +151,23 @@ fn record(context: &Transaction<'_>) -> Result<Option<Organization>> {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Action {
     Created,
+    TeamCreated {
+        team: Uuid,
+    },
+    TeamEdited {
+        team: Uuid,
+    },
+    TeamDeleted {
+        team: Uuid,
+    },
+    TeamMembership {
+        team: Uuid,
+        member: Uuid,
+        role: Option<teams::Role>,
+    },
+    TeamCreationPolicy {
+        member_creation: bool,
+    },
     Edited {
         name: bool,
         description: bool,
@@ -242,15 +260,18 @@ pub(in crate::cells) fn initialize(
     Ok(())
 }
 
-// Membership is checked in the same native transaction as every read/write,
-// before receipt replay too. A former owner cannot recover privileged results
-// using an admission snapshot or a command recorded before their removal.
+// Current membership protects organization content and authority before receipt
+// replay. Teams separately permit actor-bound minimal acknowledgements after
+// revocation; their exception cannot replay privileged content or grants.
 pub(in crate::cells) fn authorize(
     context: &Transaction<'_>,
     operation: u32,
     mutation: bool,
     input: &Value,
 ) -> Result<()> {
+    if teams::handles(operation, mutation) {
+        return teams::authorize(context, operation, mutation, input);
+    }
     let owner = match (operation, mutation) {
         (GetOrganization::ID | ListMembers::ID, false) => false,
         (GetMember::ID | ListActivity::ID | ListInvitations::ID, false)
@@ -272,6 +293,8 @@ pub(in crate::cells) fn authorize(
             let decision: Decision = serde_json::from_value(input.clone())?;
             return actor(decision.actor);
         }
+        #[cfg(test)]
+        (teams::tests::WithoutTeams::ID | teams::tests::FailedStep::ID, true) => true,
         _ => return Err(Error::Invalid("unknown organization operation")),
     };
     #[derive(Deserialize)]
@@ -296,6 +319,13 @@ pub(in crate::cells) fn dispatch_read(
     input: Value,
 ) -> Result<Value> {
     match operation {
+        teams::GetPreparation::ID => invoke_read::<teams::GetPreparation>(context, input),
+        teams::List::ID => invoke_read::<teams::List>(context, input),
+        teams::Get::ID => invoke_read::<teams::Get>(context, input),
+        teams::Members::ID => invoke_read::<teams::Members>(context, input),
+        teams::GetMembership::ID => invoke_read::<teams::GetMembership>(context, input),
+        teams::Candidates::ID => invoke_read::<teams::Candidates>(context, input),
+        teams::GetPolicy::ID => invoke_read::<teams::GetPolicy>(context, input),
         GetOrganization::ID => invoke_read::<GetOrganization>(context, input),
         ListMembers::ID => invoke_read::<ListMembers>(context, input),
         GetMember::ID => invoke_read::<GetMember>(context, input),
@@ -311,6 +341,15 @@ pub(in crate::cells) fn dispatch_mutation(
     input: Value,
 ) -> Result<MutationResult<Value>> {
     match operation {
+        #[cfg(test)]
+        teams::tests::WithoutTeams::ID => {
+            invoke_mutation::<teams::tests::WithoutTeams>(context, input)
+        }
+        #[cfg(test)]
+        teams::tests::FailedStep::ID => invoke_mutation::<teams::tests::FailedStep>(context, input),
+        teams::Prepare::ID => invoke_mutation::<teams::Prepare>(context, input),
+        teams::Change::ID => invoke_mutation::<teams::Change>(context, input),
+        teams::Cancel::ID => invoke_mutation::<teams::Cancel>(context, input),
         Bootstrap::ID => invoke_mutation::<Bootstrap>(context, input),
         Edit::ID => invoke_mutation::<Edit>(context, input),
         ChangeMember::ID => invoke_mutation::<ChangeMember>(context, input),

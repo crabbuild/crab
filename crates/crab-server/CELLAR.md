@@ -17,7 +17,7 @@ The compiled application binds `REPOSITORIES` to one native `Repository` Cell
 per catalog UUID, `DIRECTORY` to a shared native `Directory` Cell, and
 `ORGANIZATIONS` to independent native `Organization` Cells. Directory stores
 private qualified account keys and chosen public actor profiles. Organization
-stores explicit membership and invitation authority; repository grants remain
+stores explicit membership, invitation and standalone team authority; repository grants remain
 in the catalog.
 `cells/client.rs` sends bounded typed requests through native ingress and checks
 the operation's class and read receipt's target before routing.
@@ -103,11 +103,14 @@ Neither a catalog owner string nor a public handle creates authority. Upgrade
 all peers before bootstrapping this new class; existing Repository/Directory
 schemas and identities do not change, and no rebuild is required.
 
-The returned `/-/organizations/{uuid}` page has People, Invitations and profile
+The returned `/-/organizations/{uuid}` page has People, Teams, Invitations and profile
 settings. Public APIs accept account sessions or local operator identity, never
 repository Git tokens. HTTP resolves the qualified account to its stable UUID;
-every native read/write checks current membership in its own transaction, before
-receipt replay. A demoted or removed owner cannot replay privileged reads/writes.
+native content reads and authority writes check current membership in their own
+transaction before receipt replay. Team commands separately permit recovery of
+actor-bound terminal decisions after revocation; they return only an
+already-known target UUID or rejection code. Privileged content and
+grants cannot pass that exception.
 Member and invitation pages seek indexed UUIDs with limits 1–50 and
 organization/revision-bound cursors. Public profile enrichment is bounded and
 followed by a current organization permission check.
@@ -127,11 +130,72 @@ no-ops and rejected operations append nothing.
 
 Invitations currently target registered accounts, with public-username search and
 a shareable acceptance link. There is no email delivery, organization owner-name
-registry/discovery, teams, organization deletion, personal-owner namespace, or
+registry/discovery, nested teams, organization deletion, personal-owner namespace, or
 repository/project grant inheritance yet. The native authority is groundwork for
 those features, not a claim of complete organization or Projects parity. There
 is no distributed transaction between Organization and Repository Cells; native
 repository authority fencing/cutover remains separate work.
+
+### Standalone teams
+
+`cells/organization/teams/` owns team metadata, visibility, direct member/maintainer
+edges, organization membership incarnations and permanent submission outcomes.
+Fresh private organization bootstrap installs this feature atomically. For an
+existing organization, update all peers, then explicitly prepare through mTLS:
+
+```sh
+crab-server --config server.toml cells prepare-organization-teams \
+  --organization ORGANIZATION_UUID --actor CURRENT_OWNER_ACTOR_UUID
+```
+
+Preparation installs the feature relations and indexes membership incarnations
+in frames of eight. Progress is versioned, restartable and transactionally rolled
+back on failure. Existing membership versions, organization metadata and old
+receipts are preserved. Serving never installs upgrade DDL. Fresh organization
+member changes and invitation acceptance fail closed until preparation completes;
+ordinary organization reads and invitation declines remain available.
+
+All current organization members see visible (`closed`) teams. Secret teams are
+visible only to their current direct members and organization owners. Owners and
+current team maintainers edit metadata and direct memberships or delete a
+standalone team. Members may create teams by default; owners can restrict creation
+to owners. Creation makes its actor a maintainer. Leaving/rejoining the organization
+advances a membership incarnation; old team edges cannot become grants again.
+Role changes retain the same incarnation. Team deletion preserves tombstones and
+submissions; name reuse creates a new UUID without inherited membership.
+
+Public `/api/organizations/{id}/teams` reads searchable, bounded native pages.
+`/{team}` reads a team, `/{team}/members` its current roster,
+`/{team}/candidates` the paginated current organization roster for managers, and
+`/{team}/members/{actor}` a manager's versioned membership read. `/policy` is
+owner-only. Cursors bind organization, revision, query/collection and team;
+team-list cursors contain a UUID rather than a potentially private team name.
+Directory enrichment rechecks current team access and the same native revision
+before exposing associations. Candidate pages currently have pagination, without
+username autocomplete.
+
+POST `/teams/commands` accepts `{request_id, command}` with a tagged
+`create`, `edit`, `delete`, `member` or `policy` command. POST `/teams/cancel`
+accepts the identical body. The native transaction serializes execution and
+cancellation against one permanent actor/digest ledger. Cancellation recovers an
+applied write or durably fences an unapplied one; a late original cannot execute.
+Terminal domain rejections are permanent too: freeing a name or enrolling a
+candidate cannot make a delayed rejected request execute. Their guards run before
+any domain write; the terminal decision commits without changing team data or
+audit. Only matching minimal terminal decisions recover after revocation. A current or
+historical organization member may fence their own fresh submission; outsiders
+cannot allocate cancellation records. Changed payloads/accounts conflict.
+
+Browser submission ownership stays above route and organization loading, bound
+to the original account, organization, UUID and payload. Unproven denials and lost
+responses retain that intent; only a validated acknowledgement or canonical
+rejection releases it. Reload/closing warns while an intent is uncertain. A
+conflicted settings draft survives refresh until saved metadata is reviewed.
+The UI uses shadcn components and existing Geist/Vercel tokens.
+
+These teams do not yet own repository/project grants, nested membership, review
+requests or mention notifications. Catalog repository grants are unchanged, and
+there is still no atomic cross-Cell authority cutover.
 
 ## Repository collaboration
 

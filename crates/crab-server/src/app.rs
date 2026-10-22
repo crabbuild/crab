@@ -83,6 +83,8 @@ pub(crate) enum Error {
     MilestoneConflict,
     #[error("A repository label with this name already exists")]
     LabelConflict,
+    #[error("A team with this name already exists")]
+    TeamNameConflict,
     #[error("Repository label not found")]
     LabelNotFound,
     #[error("Triage access is required to manage assignees")]
@@ -344,6 +346,11 @@ impl IntoResponse for Error {
                 StatusCode::CONFLICT,
                 "label_conflict",
                 "A repository label with this name already exists",
+            ),
+            Self::TeamNameConflict => (
+                StatusCode::CONFLICT,
+                "team_name_conflict",
+                "A team with this name already exists",
             ),
             Self::LabelNotFound => (
                 StatusCode::NOT_FOUND,

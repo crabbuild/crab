@@ -26,6 +26,7 @@ use crate::{
 };
 
 mod invitations;
+mod teams;
 
 #[cfg(test)]
 mod tests;
@@ -33,6 +34,7 @@ mod tests;
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
         .merge(invitations::routes())
+        .merge(teams::routes())
         .route("/api/organizations/{id}", get(own).patch(edit))
         .route("/api/organizations/{id}/members", get(members))
         .route(

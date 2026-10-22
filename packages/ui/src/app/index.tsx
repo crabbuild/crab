@@ -12,6 +12,10 @@ import {
   OrganizationPage,
   OrganizationInvitation,
 } from "@/features/organizations";
+import {
+  TeamFeedback,
+  useTeamCommands,
+} from "@/features/organizations/teams/commands";
 import { ProfileSettings, UserProfile } from "@/features/profile";
 import { CircleUserRoundIcon } from "lucide-react";
 import { RepositoryPage } from "@/features/repository/page";
@@ -113,6 +117,14 @@ export function App() {
       ? undefined
       : repositoryRoute(url);
   const session = useRequest<Session>("/api/session");
+  const teamAccount = !session.data?.authenticated
+    ? null
+    : session.data.mode === "local"
+      ? "local"
+      : session.data.user
+        ? JSON.stringify([session.data.user.issuer, session.data.user.subject])
+        : null;
+  const teamCommands = useTeamCommands(session.data?.csrf ?? "", teamAccount);
   const [signingOut, setSigningOut] = useState(false);
   const [sessionError, setSessionError] = useState<string>();
   useEffect(() => {
@@ -245,6 +257,13 @@ export function App() {
           />
         </header>
         <main id="main" tabIndex={-1}>
+          {(teamCommands.intent ||
+            teamCommands.failure ||
+            teamCommands.resolved) && (
+            <div className="mx-auto w-full max-w-6xl px-4 pt-5 sm:px-8">
+              <TeamFeedback commands={teamCommands} />
+            </div>
+          )}
           {sessionError && (
             <p className="notice error" role="alert">
               {sessionError}
@@ -298,6 +317,7 @@ export function App() {
               />
             ) : (
               <OrganizationPage
+                commands={teamCommands}
                 key={organizationRoute[1]}
                 id={organizationRoute[1]}
                 url={url}

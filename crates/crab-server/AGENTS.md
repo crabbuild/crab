@@ -130,6 +130,11 @@ durable membership afterward. `api/issues/view.rs` owns issue/comment JSON
 presentation.
 `cells/organization/` owns native organization metadata, membership tombstones,
 versioned invitation decisions, indexed roster pages and transactional audit.
+`cells/organization/teams/` owns standalone teams, current-incarnation direct
+memberships, visibility/creation policy, bounded explicit preparation and permanent
+applied/cancelled submissions. `api/organizations/teams/` owns its browser contract
+and revision-checked profile enrichment. Existing organizations require private
+`cells prepare-organization-teams`; ordinary serving never installs its feature DDL.
 `api/organizations/` owns account-to-actor resolution, late permission checks after
 Directory enrichment and browser routes. Explicit first-owner bootstrap belongs
 to `server/management/organizations.rs` and `cells bootstrap-organization`.
