@@ -2093,6 +2093,42 @@ Suggestions are allowed only on new-side text anchors. The browser applies a cur
 
 For protected branches, only each reviewer's latest decision on the current head counts. A current request for changes blocks merge until the same reviewer submits a current approval.
 
+### Dismiss a pull request review
+
+PUT `/api/repos/{owner}/{name}/pulls/{number}/reviews/{review}/dismissals`
+accepts `{request_id, version, body}`. The nonempty reason uses the existing
+64 KiB discussion-body contract. Write permission is required; on a protected
+base branch, Admin permission is required. The native transaction reads current
+branch protection, archive and pending merge state, verifies the review version,
+records the explanation, advances review/PR versions, removes only the matching
+active decision and appends one conversation event. An older dismissal cannot
+erase a newer decision or revive a prior approval. Merge publication blocks
+fresh dismissals until its reservation resolves.
+
+Public review details, lists and conversation entries expose effective state
+`dismissed`, nullable `dismissal: {author, body, created_at}` and `can_dismiss`.
+Original submitted state/body remain available to their native receipt contract;
+dismissal is a separate canonical SQL relation. Public attribution resolves both
+actors without exposing provider-qualified keys and rechecks current membership.
+Dismissed latest reviews remain visible in the reviewer sidebar; active decision
+and list/merge summaries use the canonical decision table. Search participation
+still records the submitted review. A discussion-index rebuild cannot revive it.
+
+A permanent submission UUID binds actor, review, expected version and reason.
+Exact retries do not reapply the action after later reviews, archive or Write
+revocation; current Read access is still required. Changed intent conflicts.
+Proven rejections carry the shared write-outcome header; uncertain errors retain
+the original payload. The shadcn dialog preserves the reason through cancellation
+and conflicts, requires inspection of a newer version, and returns keyboard focus
+to the review after success. Reasons appear with the original review; the later
+conversation event links directly to it.
+
+Run private `cells prepare-review-state --owner OWNER --name REPO` on existing
+repositories. Serving never installs missing schemas. Full per-user/team review
+dismissal restrictions and broader review/workspace parity remain open. This
+workflow follows [GitHub review dismissal](https://docs.github.com/en/pull-requests/how-tos/review-pull-requests/dismissing-a-pull-request-review)
+and its [protected-branch permission contract](https://docs.github.com/en/rest/pulls/reviews#dismiss-a-review-for-a-pull-request), checked 2026-10-22.
+
 ### Merge a pull request
 
 Writers call `POST /api/repos/{owner}/{name}/pulls/{number}/merge` with a UUID `request_id`, pull `version`, `method`, exact base and head OIDs, and commit message.

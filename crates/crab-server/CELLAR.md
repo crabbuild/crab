@@ -647,3 +647,25 @@ transaction as the canonical pull, milestone progress and activity. Ordinary
 edits and exact merge retries preserve it. No search-index format change or
 rebuild is required. Update all peers and embedded UI together; mixed-version
 serving is unsupported.
+
+### Prepare review dismissal storage
+
+```sh
+"$SERVER" --config /secure/server.toml cells prepare-review-state --owner OWNER --name REPO
+```
+
+Fresh repository initialization creates `repository_pull_review_dismissals` and
+its format marker. Existing repositories use the private mTLS GET/POST
+`review-state` route and version-zero preparation above; repeating it is a no-op.
+It installs an empty canonical relation, not a derived index or historical reader.
+Review details, conversation review entries and reviewer summaries fail with
+503 `schema_upgrade_required` until preparation completes. Other canonical
+review records, existing receipt bytes and discussion index format 11 stay intact.
+Deploy all serving peers and embedded UI together before reopening traffic.
+
+Dismissal, exact-decision removal, review/PR version changes, immutable activity
+and permanent recovery ledger share one native transaction and SDK output gate.
+SQL stores the complete reason under the existing body limit. Detail/conversation
+pages include it in their byte budget before admitting an entry, so large reasons
+remain paged and complete. Current catalog grants still supply capabilities;
+this does not implement native cross-Cell grant fencing or new team restrictions.

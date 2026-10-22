@@ -33,7 +33,7 @@ function projected(value: object) {
   return (
     target !== "issue_comment" &&
     target !== "pull_comment" &&
-    target !== "pull_review" &&
+    (target !== "pull_review" || action === "review_dismissed") &&
     !(action === "created" && (target === "issue" || target === "pull"))
   );
 }

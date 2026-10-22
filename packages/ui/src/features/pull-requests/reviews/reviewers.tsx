@@ -33,7 +33,7 @@ import { Result } from "@/components/request/result";
 
 interface ReviewSummary {
   number: number;
-  state: ReviewState;
+  state: ReviewState | "dismissed";
   commit_oid: string;
   current: boolean | null;
 }
@@ -281,7 +281,9 @@ export function Reviewers({
                                   ? "Approved"
                                   : summary.state === "changes_requested"
                                     ? "Changes requested"
-                                    : "Commented"}
+                                    : summary.state === "dismissed"
+                                      ? "Dismissed"
+                                      : "Commented"}
                               </Link>
                             </Badge>
                             {summary.current === false && (

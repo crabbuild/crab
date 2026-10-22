@@ -403,3 +403,14 @@ and whole-widget timing. Explicit bounded preparation preserves source records.
 See [summary contracts and proof](github-ui-parity.md#pr-list-check-and-review-summaries).
 This does not complete review-state search, branch-rule rollups, role associations,
 advanced review/merge workflows, Projects or the full parity inventory.
+
+
+Review dismissal now has a canonical native lifecycle, required explanation,
+protected-branch permission checks, version/publication fencing and permanent
+recovery. Its SQL changes, exact decision removal and conversation event share
+the native transaction. Public review presentation uses canonical native records
+and public actor attribution; shadcn dialogs preserve uncertain intent and stale
+reason drafts. Existing repositories explicitly run `cells prepare-review-state`.
+No source receipt or search-index format is rewritten. See the [review lifecycle
+slice](github-ui-parity.md#pr-review-dismissal). Full custom/team restrictions,
+remaining review workflows and native grant cutover remain delivery work.

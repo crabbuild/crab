@@ -15,7 +15,8 @@ pub(in crate::cells) fn dispatch_mutation(
     let maintenance = id == <search::index::RebuildIndex as Mutation>::ID
         || id == <assignments::MigrateAssignments as Mutation>::ID
         || id == issues::lifecycle::PrepareIssueLifecycle::ID
-        || id == PreparePullLifecycle::ID;
+        || id == PreparePullLifecycle::ID
+        || id == review_dismissals::PrepareReviewState::ID;
     #[cfg(test)]
     let maintenance = maintenance
         || id == assignments::migration::tests::SeedSubjects::ID
@@ -46,6 +47,16 @@ pub(in crate::cells) fn dispatch_mutation(
         #[cfg(test)]
         pulls::lifecycle::tests::Historical::ID => {
             invoke_mutation::<pulls::lifecycle::tests::Historical>(context, input)
+        }
+        review_dismissals::PrepareReviewState::ID => {
+            invoke_mutation::<review_dismissals::PrepareReviewState>(context, input)
+        }
+        #[cfg(test)]
+        review_dismissals::tests::Historical::ID => {
+            invoke_mutation::<review_dismissals::tests::Historical>(context, input)
+        }
+        review_dismissals::DismissReview::ID => {
+            invoke_mutation::<review_dismissals::DismissReview>(context, input)
         }
         PreparePullLifecycle::ID => invoke_mutation::<PreparePullLifecycle>(context, input),
         issues::lifecycle::PrepareIssueLifecycle::ID => {
@@ -162,6 +173,15 @@ pub(in crate::cells) fn dispatch_read(
             invoke_read::<collaboration::bulk::Select>(context, input)
         }
         GetPullLifecycleStatus::ID => invoke_read::<GetPullLifecycleStatus>(context, input),
+        review_dismissals::GetReviewState::ID => {
+            invoke_read::<review_dismissals::GetReviewState>(context, input)
+        }
+        review_dismissals::GetReviewDetail::ID => {
+            invoke_read::<review_dismissals::GetReviewDetail>(context, input)
+        }
+        review_dismissals::ListReviewDetails::ID => {
+            invoke_read::<review_dismissals::ListReviewDetails>(context, input)
+        }
         GetPullDetail::ID => invoke_read::<GetPullDetail>(context, input),
         issues::lifecycle::GetIssueLifecycleStatus::ID => {
             invoke_read::<issues::lifecycle::GetIssueLifecycleStatus>(context, input)

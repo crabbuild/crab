@@ -33,7 +33,13 @@ struct Parameters {
 }
 
 fn review_view(review: &reviewers::Review, head: Option<&str>) -> Value {
-    json!({"number":review.number,"state":review.state,"commit_oid":review.commit_oid,"current":head.map(|head| head == review.commit_oid)})
+    let state = super::reviews::state(review.state, review.dismissed);
+    json!({
+        "number": review.number,
+        "state": state,
+        "commit_oid": review.commit_oid,
+        "current": head.map(|head| head == review.commit_oid),
+    })
 }
 async fn list(
     State(server): State<Arc<Server>>,

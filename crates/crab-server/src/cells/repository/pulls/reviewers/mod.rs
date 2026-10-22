@@ -6,6 +6,7 @@ use crate::cells::repository::{result_blob, search};
 pub(crate) struct Review {
     pub number: u64,
     pub state: ReviewState,
+    pub dismissed: bool,
     pub commit_oid: String,
 }
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -56,6 +57,7 @@ fn review(row: &[SqlValue], start: usize) -> crate::cells::Result<Option<Review>
     }
     Ok(Some(Review {
         number: result_u64_from_row(row, start)?,
+        dismissed: false,
         state: ReviewState::from_code(result_u64_from_row(row, start + 1)?)?,
         commit_oid: result_text(row, start + 2)?,
     }))
@@ -112,7 +114,17 @@ impl Read for ListReviewers {
                     ));
                 }
             };
-            let latest = review(row, 5)?;
+            let mut latest = review(row, 5)?;
+            if let Some(value) = &mut latest {
+                value.dismissed = review_dismissals::load(
+                    context,
+                    PullChildKey {
+                        pull: input.pull,
+                        number: value.number,
+                    },
+                )?
+                .is_some();
+            }
             if latest.is_some() != (row[11] != SqlValue::Null) {
                 return Err(crate::cells::Error::Invalid(
                     "Reviewer review source is missing",

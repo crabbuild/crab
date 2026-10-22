@@ -387,6 +387,7 @@ pub(crate) use lifecycle::{
 };
 
 mod reviews;
+pub(crate) use reviews::dismissals as review_dismissals;
 pub(crate) use reviews::{
     CreatePullReview, GetPullReview, GetPullReviewSubmission, ListPullReviews, UpdatePullReview,
 };

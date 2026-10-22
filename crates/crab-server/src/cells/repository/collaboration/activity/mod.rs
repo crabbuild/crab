@@ -35,6 +35,7 @@ pub(crate) enum Action {
     Unpinned,
     Approved,
     ChangesRequested,
+    ReviewDismissed,
     Commented,
     Merged,
     Resolved,
@@ -106,7 +107,11 @@ impl Action {
             }
             Target::PullReview { .. } => matches!(
                 self,
-                Self::Approved | Self::ChangesRequested | Self::Commented | Self::Updated
+                Self::Approved
+                    | Self::ChangesRequested
+                    | Self::Commented
+                    | Self::Updated
+                    | Self::ReviewDismissed
             ),
             Target::PullThread { .. } => matches!(
                 self,

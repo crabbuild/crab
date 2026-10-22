@@ -1212,3 +1212,60 @@ shadcn tooltip/link presentation. Existing Git, status, run and review writers
 remain canonical. Latest-status selection removes historical decoding from the
 shared reader. No dependency, lockfile, environment option or compatibility path
 was added.
+
+
+## PR review dismissal
+
+Submitted reviews now have a native dismissal lifecycle. Write users can dismiss
+an approval or change request with a required reason; protected branches require
+Admin permission. Native commands fence review versions and pending publication,
+remove only that exact active decision, advance review/PR versions, and record
+one event and permanent recovery intent in the same transaction. Older review
+dismissals cannot erase replacements or revive previous approvals. Original
+submission receipt shapes remain unchanged.
+
+Review cards retain original feedback, show the dismissal actor/reason/time, and
+use an effective dismissed state. The later event links to the original review.
+Sidebar, list rollups and merge requirements use the canonical active decisions.
+Shadcn action menus/dialogs support cancellation, inspection of changed content,
+exact uncertain retry, responsive themes and focus return. Current Read access
+permits recovery after Write revocation or archive. The public endpoint requires
+the captured repository UUID; both review and dismissal actors use qualified
+Directory attribution followed by a membership check.
+
+`cells prepare-review-state` explicitly prepares existing repositories. It creates
+an empty canonical SQL relation; serving does not create tables or read a retired
+shape. No discussion-index format change is needed. Native review detail/list
+reads and conversation entries return review and dismissal in one snapshot;
+complete reasons count toward bounded output pages. This contributes to the
+review-workflow checklist; review filters, custom/team dismissal restrictions,
+pending reviews and the wider parity inventory remain open.
+
+Validation: 454 server library tests passed (six existing opt-in qualifications
+ignored), alongside 13 CLI tests, 107 UI unit tests and all 157 browser scenarios.
+The new native cases cover exact active-decision removal, replacement reviews,
+protected-branch permissions, stale versions, pending publication, transactional
+rollback, schema preparation, immutable receipt replay and full-size reasons in
+bounded pages. HTTP coverage checks both qualified actors, membership changes,
+archive recovery, proof headers and all public review projections. Browser cases
+cover required reasons, focus return, cancelled drafts, lost replies, explicit
+conflict inspection, narrow dark screens and accessibility. Strict Clippy,
+architecture gates, formatting and frontend/server builds passed.
+
+Two real OIDC browser sessions qualified the embedded UI against RustFS/native
+Cellar. Dismissal removed a required approval; a simulated lost reply after the
+native commit recovered after Write revocation, archive and a server restart.
+The reason persisted and exactly one dismissal event remained. Desktop/mobile
+captures were inspected. The local preview explicitly prepared both repositories,
+including the archived repository; all 18 captured canonical resources were
+preserved, with only additive review fields and monotonic reaction revisions.
+Embedded and Vite read-only browser checks passed. No preview profile,
+organization, issue or PR was created or edited. The pinned Cellar release blocker
+and native authority fencing remain open.
+
+This slice adds 853 net production lines for the native dismissal relation and
+transaction, bounded snapshot reads, explicit preparation, HTTP policy and the
+recoverable shadcn interaction. Submitted review commands remain under one owner;
+the duplicate HTTP review record/converter was deleted. Original receipt formats
+remain canonical. No dependency, lockfile, environment option or compatibility
+reader was added.

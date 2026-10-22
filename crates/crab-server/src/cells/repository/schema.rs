@@ -23,6 +23,7 @@ pub(in crate::cells) fn initialize(
         context.install_schema(include_str!("../schema.sql"))?;
         super::issues::lifecycle::initialize(context)?;
         super::pulls::lifecycle::initialize(context)?;
+        review_dismissals::initialize(context)?;
         search::index::initialize(context, repository)?;
         assignments::initialize(context)?;
         context.query(
@@ -48,6 +49,8 @@ pub(in crate::cells) fn initialize(
             | (issues::lifecycle::PrepareIssueLifecycle::ID, true)
             | (GetPullLifecycleStatus::ID, false)
             | (PreparePullLifecycle::ID, true)
+            | (review_dismissals::GetReviewState::ID, false)
+            | (review_dismissals::PrepareReviewState::ID, true)
             | (GetRepositoryLifecycle::ID, false)
             | (GetBranchProtections::ID, false)
             | (search::index::GetSearchIndexStatus::ID, false)

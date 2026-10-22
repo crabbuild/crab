@@ -20,6 +20,7 @@ export function Conversation({
   revision,
   active,
   children,
+  onChanged,
 }: {
   repo: Repository;
   target: string;
@@ -27,6 +28,7 @@ export function Conversation({
   csrf: string;
   revision: string;
   active: boolean;
+  onChanged?: () => void;
   children: (busy: boolean, posted: (comment: Comment) => void) => ReactNode;
 }) {
   const focus = useDiscussionPermalink();
@@ -149,6 +151,10 @@ export function Conversation({
                     />
                   ) : (
                     <ReviewCard
+                      onSaved={() => {
+                        history.refresh();
+                        onChanged?.();
+                      }}
                       review={{
                         ...entry.value,
                         current: history.head

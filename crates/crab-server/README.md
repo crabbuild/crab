@@ -97,6 +97,14 @@ for review. Draft badges appear in lists and details; merge admission rejects
 drafts and stale readiness changes. Authors or writers manage readiness, and
 conversion is blocked while a merge is pending.
 
+Writers can dismiss an approval or change request with a required explanation.
+Protected branches require an administrator. The conversation retains the review
+and reason; merge requirements and list/sidebar summaries stop counting that
+exact decision. An uncertain retry keeps its original intent, including after
+archive or loss of Write access while Read access remains. Prepare existing
+repositories with `cells prepare-review-state --owner OWNER --name REPO` before
+reopening traffic. No discussion-index rebuild is needed.
+
 The reviewer sidebar searches current members by public handle or display name,
 selects stable actor UUIDs, and links public profiles. Triage or write authority
 is required to request, cancel or re-request reviews. Submitted reviews fulfill

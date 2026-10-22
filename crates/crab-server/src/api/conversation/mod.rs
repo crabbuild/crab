@@ -129,8 +129,18 @@ async fn page(
     let mut reactions = reactions::read(server, &repo, &actor, targets)
         .await?
         .into_iter();
-    let authors = Authors::load(server, principal, page.items.iter().map(Entry::author)).await?;
-    app::membership(server, principal, &repo).await?;
+    let actors: Vec<_> = page
+        .items
+        .iter()
+        .flat_map(|entry| {
+            std::iter::once(entry.author()).chain(match entry {
+                Entry::Review(detail) => detail.dismissal.as_ref().map(|value| &value.author),
+                _ => None,
+            })
+        })
+        .collect();
+    let authors = Authors::load(server, principal, actors.into_iter()).await?;
+    let principal = app::membership(server, principal, &repo).await?.principal;
     let items = page
         .items
         .into_iter()
@@ -153,19 +163,18 @@ async fn page(
                         pulls::comments::comment_view(&authors, &comment, &actor, &reaction),
                     )
                 }
-                Entry::Review(review) => {
-                    let review = pulls::storage::from_review(review);
-                    (
-                        "review",
-                        pulls::reviews::review_view(
-                            &authors,
-                            &review,
-                            &actor,
-                            head.as_deref(),
-                            &reaction,
-                        ),
-                    )
-                }
+                Entry::Review(review) => (
+                    "review",
+                    pulls::reviews::review_view(
+                        &authors,
+                        &review,
+                        &actor,
+                        head.as_deref(),
+                        &reaction,
+                        principal.can_write(repo.id),
+                        principal.can_admin(repo.id),
+                    ),
+                ),
                 Entry::Activity(_) => {
                     return Err(Error::CellContract("Conversation activity was not handled"));
                 }

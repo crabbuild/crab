@@ -61,6 +61,7 @@ export function PullConversation({
         csrf={csrf}
         revision={revision}
         active={active}
+        onChanged={refresh}
       >
         {(busy, posted) => (
           <>

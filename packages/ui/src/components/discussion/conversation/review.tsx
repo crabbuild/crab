@@ -1,3 +1,6 @@
+import { ReviewDismissal } from "@/features/pull-requests/reviews/dismissal";
+import { RelativeTime } from "../time";
+import { Badge } from "@/components/ui/badge";
 import { Author } from "../author";
 import { Reactions } from "../reactions";
 import { DiscussionMarkdown } from "../markdown";
@@ -19,12 +22,14 @@ export function ReviewCard({
   csrf,
   target,
   review,
+  onSaved,
 }: {
   repo: Repository;
   href: string;
   target: string;
   csrf: string;
   review: Review;
+  onSaved: () => void;
 }) {
   const action =
     review.state === "approved"
@@ -45,7 +50,7 @@ export function ReviewCard({
       className={cn(
         "panel review-event conversation-contribution",
         review.state,
-        review.current && "current",
+        review.current && review.state !== "dismissed" && "current",
       )}
     >
       <header>
@@ -56,6 +61,9 @@ export function ReviewCard({
           <Author author={review.author} />
         </strong>
         <span> {action}</span>
+        {review.state === "dismissed" && (
+          <Badge variant="secondary">Dismissed</Badge>
+        )}
         {review.current !== true && (
           <span className="review-outdated">
             {review.current === null ? "Head unavailable" : "Outdated"}
@@ -70,8 +78,24 @@ export function ReviewCard({
             {timestamp(review.created_at)}
           </time>
         </Link>
+        <ReviewDismissal
+          repo={repo}
+          target={target}
+          csrf={csrf}
+          review={review}
+          onSaved={onSaved}
+        />
       </header>
       {review.body && <DiscussionMarkdown>{review.body}</DiscussionMarkdown>}
+      {review.dismissal && (
+        <div className="review-dismissal mx-4 mb-4 rounded-md border p-3 text-sm">
+          <p className="mb-2 text-muted-foreground">
+            <Author author={review.dismissal.author} /> dismissed this review{" "}
+            <RelativeTime value={review.dismissal.created_at} />.
+          </p>
+          <DiscussionMarkdown>{review.dismissal.body}</DiscussionMarkdown>
+        </div>
+      )}
       <Reactions
         repo={repo}
         csrf={csrf}

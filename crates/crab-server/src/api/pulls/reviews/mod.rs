@@ -11,6 +11,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use super::storage;
+use crate::cells::repository::review_dismissals::Detail;
 use crate::{
     api::{profiles::attribution::Authors, reactions},
     app::{self, Error, Result},
@@ -18,7 +19,8 @@ use crate::{
     cells::repository::collaboration::Target,
     server::Server,
 };
-use storage::{NewPullReview, PullRequest, PullReview, PullState, ReviewState};
+use storage::{NewPullReview, PullRequest, PullState, ReviewState};
+mod dismissals;
 
 const MAX_NUMBER: u64 = 9_007_199_254_740_991;
 
@@ -28,6 +30,7 @@ fn same_author(left: &Identity, right: &Identity) -> bool {
 
 pub(super) fn routes() -> Router<Arc<Server>> {
     Router::new()
+        .merge(dismissals::routes())
         .route(
             "/api/repos/{owner}/{name}/pulls/{number}/reviews",
             get(list).post(create),
@@ -38,25 +41,46 @@ pub(super) fn routes() -> Router<Arc<Server>> {
         )
 }
 
+pub(super) fn state(review: ReviewState, dismissed: bool) -> &'static str {
+    if dismissed {
+        return "dismissed";
+    }
+    match review {
+        ReviewState::Approved => "approved",
+        ReviewState::ChangesRequested => "changes_requested",
+        ReviewState::Commented => "commented",
+    }
+}
+
 pub(in crate::api) fn review_view(
     authors: &Authors,
-    review: &PullReview,
+    detail: &Detail,
     actor: &Identity,
     current_head: Option<&str>,
     reactions: &reactions::View,
+    can_write: bool,
+    can_admin: bool,
 ) -> Value {
+    let review = &detail.review;
+    let state = state(review.state, detail.dismissal.is_some());
     json!({
         "number": review.number,
         "author": authors.view(&review.author),
         "body": review.body,
         "reactions": reactions,
-        "state": review.state,
+        "state": state,
+        "dismissal": detail.dismissal.as_ref().map(|value| json!({
+            "author": authors.view(&value.author),
+            "body": value.body,
+            "created_at": value.created_at_ms,
+        })),
+        "can_dismiss": detail.dismissible && can_write && (!detail.admin_required || can_admin),
         "commit_oid": review.commit_oid,
         "current": current_head.map(|oid| oid == review.commit_oid),
         "version": review.version,
-        "created_at": review.created_at,
-        "updated_at": review.updated_at,
-        "can_edit": same_author(&review.author, actor),
+        "created_at": review.created_at_ms,
+        "updated_at": review.updated_at_ms,
+        "can_edit": review.author.issuer==actor.issuer && review.author.subject==actor.subject,
     })
 }
 
@@ -117,18 +141,32 @@ async fn list(
         .iter()
         .map(|review| Target::PullReview {
             pull: id,
-            number: review.number,
+            number: review.review.number,
         })
         .collect();
     let reactions = reactions::read(&server, repo, &actor, targets).await?;
-    let authors =
-        Authors::load(&server, &principal, reviews.iter().map(|item| &item.author)).await?;
-    app::membership(&server, &principal, repo).await?;
+    let actors: Vec<_> = reviews
+        .iter()
+        .flat_map(|item| {
+            std::iter::once(&item.review.author)
+                .chain(item.dismissal.as_ref().map(|value| &value.author))
+        })
+        .collect();
+    let authors = Authors::load(&server, &principal, actors.into_iter()).await?;
+    let principal = app::membership(&server, &principal, repo).await?.principal;
     let items = reviews
         .iter()
         .zip(reactions)
         .map(|(review, reactions)| {
-            review_view(&authors, review, &actor, head.as_deref(), &reactions)
+            review_view(
+                &authors,
+                review,
+                &actor,
+                head.as_deref(),
+                &reactions,
+                principal.can_write(repo.id),
+                principal.can_admin(repo.id),
+            )
         })
         .collect::<Vec<_>>();
     Ok(Json(json!({"items":items,"next":next,"head_oid":head})))
@@ -215,8 +253,17 @@ async fn create(
         },
     )
     .await?;
-    let authors = Authors::load(&server, &principal, std::iter::once(&review.author)).await?;
-    app::membership(&server, &principal, repo).await?;
+    let review = storage::review(&server, repo, id, review.number)
+        .await?
+        .ok_or(Error::NotFound)?;
+    let authors = Authors::load(
+        &server,
+        &principal,
+        std::iter::once(&review.review.author)
+            .chain(review.dismissal.as_ref().map(|value| &value.author)),
+    )
+    .await?;
+    let principal = app::membership(&server, &principal, repo).await?.principal;
     Ok((
         StatusCode::CREATED,
         Json(review_view(
@@ -225,6 +272,8 @@ async fn create(
             &actor,
             head.as_deref(),
             &reaction,
+            principal.can_write(repo.id),
+            principal.can_admin(repo.id),
         )),
     ))
 }
@@ -248,18 +297,26 @@ async fn detail(
         &actor,
         Target::PullReview {
             pull: id,
-            number: review.number,
+            number: review.review.number,
         },
     )
     .await?;
-    let authors = Authors::load(&server, &principal, std::iter::once(&review.author)).await?;
-    app::membership(&server, &principal, repo).await?;
+    let authors = Authors::load(
+        &server,
+        &principal,
+        std::iter::once(&review.review.author)
+            .chain(review.dismissal.as_ref().map(|value| &value.author)),
+    )
+    .await?;
+    let principal = app::membership(&server, &principal, repo).await?.principal;
     Ok(Json(review_view(
         &authors,
         &review,
         &actor,
         head.as_deref(),
         &reaction,
+        principal.can_write(repo.id),
+        principal.can_admin(repo.id),
     )))
 }
 
@@ -285,7 +342,7 @@ async fn edit(
     let existing = storage::review(&server, repo, id, review_number)
         .await?
         .ok_or(Error::NotFound)?;
-    validate_body(&input.body, existing.state)?;
+    validate_body(&input.body, existing.review.state)?;
     let review = storage::update_review(
         &server,
         repo,
@@ -307,13 +364,27 @@ async fn edit(
         },
     )
     .await?;
-    let authors = Authors::load(&server, &principal, std::iter::once(&review.author)).await?;
-    app::membership(&server, &principal, repo).await?;
+    let review = storage::review(&server, repo, id, review.number)
+        .await?
+        .ok_or(Error::NotFound)?;
+    let authors = Authors::load(
+        &server,
+        &principal,
+        std::iter::once(&review.review.author)
+            .chain(review.dismissal.as_ref().map(|value| &value.author)),
+    )
+    .await?;
+    let principal = app::membership(&server, &principal, repo).await?.principal;
     Ok(Json(review_view(
         &authors,
         &review,
         &actor,
         head.as_deref(),
         &reaction,
+        principal.can_write(repo.id),
+        principal.can_admin(repo.id),
     )))
 }
+
+#[cfg(test)]
+mod tests;

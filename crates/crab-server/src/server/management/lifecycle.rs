@@ -24,6 +24,11 @@ pub(super) fn routes() -> Router<Arc<Server>> {
             get(status::<crate::cells::repository::GetPullLifecycleStatus>)
                 .post(prepare::<crate::cells::repository::PreparePullLifecycle>),
         )
+        .route(
+            "/internal/repositories/{owner}/{name}/review-state",
+            get(status::<crate::cells::repository::review_dismissals::GetReviewState>)
+                .post(prepare::<crate::cells::repository::review_dismissals::PrepareReviewState>),
+        )
         .layer(axum::extract::DefaultBodyLimit::max(1024))
 }
 async fn status<R: crate::cells::application::Read<Input = (), Output = LifecycleStatus>>(

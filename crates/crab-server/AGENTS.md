@@ -37,7 +37,11 @@ belong to `pulls/review_requests/`, bounded reviewer summaries to
 `pulls/reviewers/`. `pulls/rollups/` owns bounded current-head check/review summaries;
 `api/pulls/rollups/` captures selected source refs once for both list kinds and
 checks source versions before composition. Outstanding request counts live in
-the transactional discussion projection. Review threads belong to
+the transactional discussion projection. `pulls/reviews/` owns submitted review commands; `reviews/dismissals/` owns
+canonical dismissal SQL, effective detail reads, and permanent recovery. Public
+review presentation uses these native records directly in `api/pulls/reviews/`.
+Private `cells prepare-review-state` installs the empty feature relation on
+existing repositories, without rewriting reviews or receipts. Review threads belong to
 `pulls/review_threads/`; browse projection reads and
 writes belong to `projection/`. `dispatch.rs` alone decodes operation IDs. `search/` owns the shared issue/PR
 query grammar; `search/results/` owns tagged issue/PR results and the mixed

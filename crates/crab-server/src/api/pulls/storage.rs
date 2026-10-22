@@ -7,10 +7,10 @@ use crate::{
     cells::repository::{
         CreatePull, CreatePullComment, CreatePullCommentInput, CreatePullCommentOutcome,
         CreatePullInput, CreatePullOutcome, CreatePullReview, CreatePullReviewInput,
-        CreatePullReviewOutcome, GetPull, GetPullComment, GetPullMergeSubmission, GetPullReview,
-        GetPullReviewSubmission, GetPullSubmission, ListPullComments, ListPullReviews,
-        PullChildKey, PullChildListInput, PullMergeTransition, PullRecord, PullSubmissionKey,
-        ReservePullMerge, ReservePullMergeInput, ReservePullMergeOutcome, TransitionPullMerge,
+        CreatePullReviewOutcome, GetPull, GetPullComment, GetPullMergeSubmission,
+        GetPullReviewSubmission, GetPullSubmission, ListPullComments, PullChildKey,
+        PullChildListInput, PullMergeTransition, PullRecord, PullSubmissionKey, ReservePullMerge,
+        ReservePullMergeInput, ReservePullMergeOutcome, TransitionPullMerge,
         TransitionPullMergeInput, TransitionPullMergeOutcome, UpdatePull, UpdatePullComment,
         UpdatePullCommentInput, UpdatePullCommentOutcome, UpdatePullInput, UpdatePullOutcome,
         UpdatePullReview, UpdatePullReviewInput, UpdatePullReviewOutcome,
@@ -74,19 +74,6 @@ pub(in crate::api) struct PullComment {
     pub number: u64,
     pub author: Identity,
     pub body: String,
-    pub version: u64,
-    pub created_at: u64,
-    pub updated_at: u64,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(in crate::api) struct PullReview {
-    pub number: u64,
-    pub author: Identity,
-    pub body: String,
-    pub state: ReviewState,
-    pub commit_oid: String,
     pub version: u64,
     pub created_at: u64,
     pub updated_at: u64,
@@ -382,12 +369,17 @@ pub(super) async fn reviews(
     pull: u64,
     before: Option<u64>,
     limit: u8,
-) -> Result<Option<(Vec<PullReview>, Option<u64>)>> {
+) -> Result<
+    Option<(
+        Vec<crate::cells::repository::review_dismissals::Detail>,
+        Option<u64>,
+    )>,
+> {
     let routed = crate::app::repository_cell(server, repo)?;
     let page = crate::app::query_output(
         routed
             .client
-            .query::<ListPullReviews>(
+            .query::<crate::cells::repository::review_dismissals::ListReviewDetails>(
                 &routed.target,
                 None,
                 PullChildListInput {
@@ -398,7 +390,7 @@ pub(super) async fn reviews(
             )
             .await,
     )?;
-    Ok(page.map(|page| (page.items.into_iter().map(from_review).collect(), page.next)))
+    Ok(page.map(|page| (page.items, page.next)))
 }
 
 pub(super) async fn review(
@@ -406,15 +398,18 @@ pub(super) async fn review(
     repo: &Repository,
     pull: u64,
     number: u64,
-) -> Result<Option<PullReview>> {
+) -> Result<Option<crate::cells::repository::review_dismissals::Detail>> {
     let routed = crate::app::repository_cell(server, repo)?;
     crate::app::query_output(
         routed
             .client
-            .query::<GetPullReview>(&routed.target, None, PullChildKey { pull, number })
+            .query::<crate::cells::repository::review_dismissals::GetReviewDetail>(
+                &routed.target,
+                None,
+                PullChildKey { pull, number },
+            )
             .await,
     )
-    .map(|value| value.map(from_review))
 }
 
 pub(super) async fn review_submission(
@@ -422,7 +417,7 @@ pub(super) async fn review_submission(
     repo: &Repository,
     pull: u64,
     request_id: &str,
-) -> Result<Option<PullReview>> {
+) -> Result<Option<crate::cells::repository::PullReviewRecord>> {
     let routed = crate::app::repository_cell(server, repo)?;
     crate::app::query_output(
         routed
@@ -437,7 +432,6 @@ pub(super) async fn review_submission(
             )
             .await,
     )
-    .map(|value| value.map(from_review))
 }
 
 pub(super) async fn create_review(
@@ -445,7 +439,7 @@ pub(super) async fn create_review(
     repo: &Repository,
     pull: u64,
     input: NewPullReview,
-) -> Result<PullReview> {
+) -> Result<crate::cells::repository::PullReviewRecord> {
     let routed = crate::app::repository_cell(server, repo)?;
     match crate::app::command_output(
         routed
@@ -465,7 +459,7 @@ pub(super) async fn create_review(
             .await,
     )? {
         CreatePullReviewOutcome::Archived => Err(Error::Archived),
-        CreatePullReviewOutcome::Created(review) => Ok(from_review(review)),
+        CreatePullReviewOutcome::Created(review) => Ok(review),
         CreatePullReviewOutcome::PullNotFound => Err(Error::NotFound),
         CreatePullReviewOutcome::PullClosed => {
             Err(Error::Invalid("Closed pull requests cannot be reviewed"))
@@ -487,7 +481,7 @@ pub(super) async fn update_review(
     actor: Identity,
     version: u64,
     body: String,
-) -> Result<PullReview> {
+) -> Result<crate::cells::repository::PullReviewRecord> {
     let routed = crate::app::repository_cell(server, repo)?;
     match crate::app::command_output(
         routed
@@ -505,7 +499,7 @@ pub(super) async fn update_review(
             .await,
     )? {
         UpdatePullReviewOutcome::Archived => Err(Error::Archived),
-        UpdatePullReviewOutcome::Updated(review) => Ok(from_review(review)),
+        UpdatePullReviewOutcome::Updated(review) => Ok(review),
         UpdatePullReviewOutcome::NotFound => Err(Error::NotFound),
         UpdatePullReviewOutcome::Forbidden => Err(Error::Forbidden),
         UpdatePullReviewOutcome::Conflict => Err(Error::Conflict),
@@ -722,18 +716,6 @@ pub(in crate::api) fn from_comment(
         number: value.number,
         author: from_author(value.author),
         body: value.body,
-        version: value.version,
-        created_at: value.created_at_ms,
-        updated_at: value.updated_at_ms,
-    }
-}
-pub(in crate::api) fn from_review(value: crate::cells::repository::PullReviewRecord) -> PullReview {
-    PullReview {
-        number: value.number,
-        author: from_author(value.author),
-        body: value.body,
-        state: value.state,
-        commit_oid: value.commit_oid,
         version: value.version,
         created_at: value.created_at_ms,
         updated_at: value.updated_at_ms,

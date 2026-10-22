@@ -1895,6 +1895,9 @@ main {
 .review-event .discussion-markdown {
   padding: 16px;
 }
+.review-event .review-dismissal .discussion-markdown {
+  padding: 0;
+}
 .review-event footer {
   padding: 0 16px 12px;
   font-size: 12px;

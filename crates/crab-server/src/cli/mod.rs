@@ -102,6 +102,13 @@ enum CellsCommand {
         #[arg(long)]
         name: String,
     },
+    /// Prepare canonical review dismissal storage before reopening traffic.
+    PrepareReviewState {
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        name: String,
+    },
     /// Print the resource-derived Cell admission envelope.
     Capacity {
         #[arg(long, required = true)]
@@ -295,6 +302,9 @@ async fn cells(config: &crab_server::Config, command: CellsCommand) -> crab_serv
         }
         CellsCommand::PreparePullState { owner, name } => {
             lifecycle::prepare(config, &owner, &name, "pull-state").await?
+        }
+        CellsCommand::PrepareReviewState { owner, name } => {
+            lifecycle::prepare(config, &owner, &name, "review-state").await?
         }
         CellsCommand::DirectoryStatus => management_body(config, "/internal/directory").await?,
         CellsCommand::MigrateDirectory => migrate_directory(config).await?,

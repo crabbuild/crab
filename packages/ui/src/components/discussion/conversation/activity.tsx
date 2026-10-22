@@ -61,6 +61,8 @@ function action(event: ActivityEvent): string {
       return "unpinned";
     case "approved":
       return "approved";
+    case "review_dismissed":
+      return "dismissed a review on";
     case "changes_requested":
       return "requested changes to";
     case "commented":
@@ -137,7 +139,14 @@ export function ActivityItem({
             <Link href={relatedHref}>{related.title}</Link> on{" "}
           </>
         )}
-        <Link href={parentHref}>
+        <Link
+          href={
+            event.action.kind === "review_dismissed" &&
+            event.target.kind === "pull_review"
+              ? `${parentHref}#pullrequestreview-${event.target.number}`
+              : parentHref
+          }
+        >
           #{parent.number} {event.title}
         </Link>
         <Link

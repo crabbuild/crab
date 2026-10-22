@@ -13,7 +13,13 @@ export interface Comment {
 }
 export type ReviewState = "commented" | "approved" | "changes_requested";
 export interface Review extends Comment {
-  state: ReviewState;
+  state: ReviewState | "dismissed";
+  dismissal: {
+    author: DiscussionAuthor;
+    body: string;
+    created_at: number;
+  } | null;
+  can_dismiss: boolean;
   commit_oid: string;
   current: boolean | null;
 }
@@ -46,6 +52,7 @@ export type Action =
         | "unpinned"
         | "approved"
         | "changes_requested"
+        | "review_dismissed"
         | "commented"
         | "merged"
         | "resolved"

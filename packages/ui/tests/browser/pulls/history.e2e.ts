@@ -29,6 +29,8 @@ async function historyFixture(page: Page) {
     body: `Submitted review ${comment.number}`,
     created_at: comment.created_at + 1000,
     state: "approved",
+    dismissal: null,
+    can_dismiss: false,
     current: true,
     commit_oid: "b".repeat(40),
   }));

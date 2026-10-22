@@ -8,9 +8,8 @@ use crate::cells::{
     Error, Result,
     application::{Read, SqlValue, Transaction},
     repository::{
-        self, CommentKey, CommentRecord, GetComment, GetPullComment, GetPullReview, PullChildKey,
-        PullCommentRecord, PullReviewRecord, RepositoryAuthor, integer, result_u64_from_row,
-        validate_number,
+        self, CommentKey, CommentRecord, GetComment, GetPullComment, PullChildKey,
+        PullCommentRecord, RepositoryAuthor, integer, result_u64_from_row, validate_number,
     },
 };
 use serde::{Deserialize, Serialize};
@@ -83,7 +82,7 @@ pub(crate) struct Cursor {
 pub(crate) enum Entry {
     IssueComment(CommentRecord),
     PullComment(PullCommentRecord),
-    Review(PullReviewRecord),
+    Review(repository::review_dismissals::Detail),
     Activity(Event),
 }
 impl Entry {
@@ -91,7 +90,7 @@ impl Entry {
         match self {
             Self::IssueComment(c) => &c.author,
             Self::PullComment(c) => &c.author,
-            Self::Review(r) => &r.author,
+            Self::Review(r) => &r.review.author,
             Self::Activity(e) => &e.actor,
         }
     }
@@ -106,8 +105,8 @@ impl Entry {
                 number: c.number,
             },
             Self::Review(r) => Target::PullReview {
-                pull: r.pull,
-                number: r.number,
+                pull: r.review.pull,
+                number: r.review.number,
             },
             Self::Activity(e) => e.target,
         }
@@ -124,7 +123,7 @@ impl Entry {
             },
             Self::Review(r) => Key {
                 source: Source::Review,
-                number: r.number,
+                number: r.review.number,
             },
             Self::Activity(e) => Key {
                 source: Source::Activity,
@@ -136,7 +135,7 @@ impl Entry {
         match self {
             Self::IssueComment(c) => c.created_at_ms,
             Self::PullComment(c) => c.created_at_ms,
-            Self::Review(r) => r.created_at_ms,
+            Self::Review(r) => r.review.created_at_ms,
             Self::Activity(e) => e.created_at,
         }
     }
@@ -164,8 +163,9 @@ pub(super) fn project_event(context: &Transaction<'_>, event: &Event) -> Result<
     if matches!(
         event.target,
         Target::IssueComment { .. } | Target::PullComment { .. } | Target::PullReview { .. }
-    ) || event.action == Action::Created
-        && matches!(event.target, Target::Issue { .. } | Target::Pull { .. })
+    ) && event.action != Action::ReviewDismissed
+        || event.action == Action::Created
+            && matches!(event.target, Target::Issue { .. } | Target::Pull { .. })
     {
         return Ok(());
     }
@@ -203,14 +203,16 @@ fn load(context: &mut Transaction<'_>, subject: Subject, key: Key) -> Result<Ent
             },
         )?
         .map(Entry::PullComment),
-        (SubjectKind::Pull, Source::Review) => GetPullReview::execute(
-            context,
-            PullChildKey {
-                pull: subject.number,
-                number: key.number,
-            },
-        )?
-        .map(Entry::Review),
+        (SubjectKind::Pull, Source::Review) => {
+            repository::review_dismissals::GetReviewDetail::execute(
+                context,
+                PullChildKey {
+                    pull: subject.number,
+                    number: key.number,
+                },
+            )?
+            .map(Entry::Review)
+        }
         (_, Source::Activity) => {
             activity::event(context, key.number, Some(subject))?.map(Entry::Activity)
         }
