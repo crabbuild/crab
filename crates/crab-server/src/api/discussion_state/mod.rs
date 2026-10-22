@@ -1,3 +1,4 @@
+use super::write::rejected;
 use crate::{
     api::{issues, profiles::attribution::Authors, pulls, reactions},
     app::{self, Error},
@@ -20,14 +21,6 @@ use serde_json::{Value, json};
 use std::sync::Arc;
 
 type Result<T> = std::result::Result<T, Response>;
-fn rejected(error: Error) -> Response {
-    let mut response = error.into_response();
-    response.headers_mut().insert(
-        "x-crab-write-outcome",
-        axum::http::HeaderValue::from_static("rejected"),
-    );
-    response
-}
 
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
@@ -62,7 +55,10 @@ async fn issue(
             kind: SubjectKind::Issue,
             number,
         },
-        input.map_err(Error::from).map_err(rejected)?.0,
+        input
+            .map_err(Error::from)
+            .map_err(IntoResponse::into_response)?
+            .0,
     )
     .await
 }
@@ -80,7 +76,10 @@ async fn pull(
             kind: SubjectKind::Pull,
             number,
         },
-        input.map_err(Error::from).map_err(rejected)?.0,
+        input
+            .map_err(Error::from)
+            .map_err(IntoResponse::into_response)?
+            .0,
     )
     .await
 }
@@ -91,18 +90,18 @@ async fn change(
     mut subject: Subject,
     input: Input,
 ) -> Result<Json<Value>> {
-    let repo = app::repository(server, principal, &key).map_err(rejected)?;
+    let repo = app::repository(server, principal, &key).map_err(IntoResponse::into_response)?;
     subject.number = app::number(subject.number).map_err(rejected)?;
     app::number(input.version).map_err(rejected)?;
     if let Some(body) = &input.body {
         app::body(body, true).map_err(rejected)?;
     }
-    let author = app::actor(principal).map_err(rejected)?;
+    let author = app::actor(principal).map_err(IntoResponse::into_response)?;
     let membership = app::membership(server, principal, &repo)
         .await
-        .map_err(rejected)?;
-    let routed = app::repository_cell(server, &repo).map_err(rejected)?;
-    let identity = app::mutation_identity().map_err(rejected)?;
+        .map_err(IntoResponse::into_response)?;
+    let routed = app::repository_cell(server, &repo).map_err(IntoResponse::into_response)?;
+    let identity = app::mutation_identity().map_err(IntoResponse::into_response)?;
     let submission_id = app::submission_id(&input.request_id).map_err(rejected)?;
     let output = app::command_output(
         routed
@@ -130,7 +129,7 @@ async fn change(
         Outcome::NotFound => return Err(rejected(Error::NotFound)),
         Outcome::Forbidden => return Err(rejected(Error::Forbidden)),
         Outcome::Conflict => return Err(rejected(Error::Conflict)),
-        Outcome::RequestConflict => return Err(rejected(Error::RequestConflict)),
+        Outcome::RequestConflict => return Err(Error::RequestConflict.into_response()),
         Outcome::InvalidState => {
             return Err(rejected(Error::Invalid(
                 "The requested discussion state or close reason is invalid",

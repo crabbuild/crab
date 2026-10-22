@@ -6,6 +6,7 @@ mod catalog;
 mod checks;
 mod contents;
 mod conversation;
+mod discussion_bulk;
 mod discussion_search;
 mod discussion_state;
 mod issues;
@@ -19,6 +20,7 @@ mod pulls;
 mod reactions;
 mod releases;
 mod statuses;
+mod write;
 
 mod query;
 mod representation;
@@ -422,6 +424,7 @@ pub(crate) fn routes(server: Arc<Server>) -> axum::Router<Arc<Server>> {
         .merge(activity::routes(Arc::clone(&server)))
         .merge(conversation::routes(Arc::clone(&server)))
         .merge(discussion_state::routes(Arc::clone(&server)))
+        .merge(discussion_bulk::routes(Arc::clone(&server)))
         .merge(links::routes(Arc::clone(&server)))
         .merge(reactions::routes(Arc::clone(&server)))
         .merge(assignees::routes(Arc::clone(&server)))

@@ -6,7 +6,15 @@ import { Button } from "@/components/ui/button";
 import { repoHref } from "@/lib/repository-route";
 import { Link } from "@/components/navigation/link";
 
-export function PullList({ repo, url }: { repo: Repository; url: URL }) {
+export function PullList({
+  repo,
+  url,
+  csrf,
+}: {
+  repo: Repository;
+  url: URL;
+  csrf: string;
+}) {
   const filters = discussionFilters(url);
   const query = url.searchParams.get("q") ?? "";
   return (
@@ -45,7 +53,7 @@ export function PullList({ repo, url }: { repo: Repository; url: URL }) {
           Labels
         </Link>
       </div>
-      <DiscussionResults repo={repo} url={url} view="pulls" />
+      <DiscussionResults repo={repo} url={url} view="pulls" csrf={csrf} />
     </section>
   );
 }

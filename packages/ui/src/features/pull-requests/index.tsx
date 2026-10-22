@@ -61,5 +61,5 @@ export function PullRequests({
       />
     );
   }
-  return <PullList repo={repo} url={url} />;
+  return <PullList repo={repo} url={url} csrf={csrf} />;
 }

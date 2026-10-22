@@ -60,7 +60,11 @@ choice endpoint stays with other search reads in `api/discussion_search/`.
 
 Collaboration documents live in `cells/repository/collaboration/`. `state/`
 owns atomic close/reopen with optional comments and permanent submission recovery;
-`api/discussion_state/` owns current membership and commit-aware HTTP errors.
+`bulk/` owns bounded mixed-kind selection and atomic metadata/state edits.
+`api/discussion_bulk/` binds repository UUIDs, resolves current roster eligibility
+and owns the bulk HTTP contract.
+`api/write.rs` owns the shared proven-rejection response marker.
+`api/discussion_state/` owns current membership and state HTTP composition.
 Plain and combined comments share their canonical issue/PR writers. Its `target.rs`
 owns shared discussion addresses, `activity/` owns append-only events and subject
 indexes, and `reactions/` owns actor membership/counts. Activity append calls stay

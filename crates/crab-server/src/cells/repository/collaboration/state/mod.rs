@@ -55,19 +55,6 @@ impl Mutation for ChangeState {
     type Input = Input;
     type Output = Outcome;
     fn execute(context: &mut Transaction<'_>, input: Input) -> Result<MutationResult<Outcome>> {
-        validate_number(input.subject.number)?;
-        validate_number(input.version)?;
-        validate_author(&input.actor)?;
-        if let Some(body) = &input.body {
-            validate_body(body, true)?;
-        }
-        if input.reason.is_some()
-            && (input.subject.kind == SubjectKind::Pull
-                || input.state == State::Open
-                || input.reason == Some(Reason::Reopened))
-        {
-            return Ok(MutationResult::Rejected(Outcome::InvalidState));
-        }
         let digest = blake3::hash(&serde_json::to_vec(&(
             input.subject,
             input.version,
@@ -95,6 +82,19 @@ impl Mutation for ChangeState {
                 input.subject,
                 saved.comment,
             )?)));
+        }
+        validate_number(input.subject.number)?;
+        validate_number(input.version)?;
+        validate_author(&input.actor)?;
+        if let Some(body) = &input.body {
+            validate_body(body, true)?;
+        }
+        if input.reason.is_some()
+            && (input.subject.kind == SubjectKind::Pull
+                || input.state == State::Open
+                || input.reason == Some(Reason::Reopened))
+        {
+            return Ok(MutationResult::Rejected(Outcome::InvalidState));
         }
         if settings::archived(context)? {
             return Ok(MutationResult::Rejected(Outcome::Archived));

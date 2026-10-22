@@ -94,12 +94,11 @@ async fn combined_issue_and_pull_actions_commit_one_comment_and_recover_the_same
         let activity = h.json(&format!("{path}/activity"), &alice).await;
         assert_eq!(activity["items"].as_array().unwrap().len(), 3);
         input["body"] = json!("Different request");
-        assert_eq!(
-            h.write(Method::POST, &format!("{path}/state"), &alice, input)
-                .await
-                .status(),
-            StatusCode::CONFLICT
-        );
+        let conflict = h
+            .write(Method::POST, &format!("{path}/state"), &alice, input)
+            .await;
+        assert_eq!(conflict.status(), StatusCode::CONFLICT);
+        assert!(!conflict.headers().contains_key("x-crab-write-outcome"));
         let stale = json!({"request_id":uuid::Uuid::now_v7(),"version":1,"state":"open","body":"Must roll back"});
         assert_eq!(
             h.write(Method::POST, &format!("{path}/state"), &alice, stale)

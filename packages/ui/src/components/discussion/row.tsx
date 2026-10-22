@@ -15,15 +15,22 @@ import { DiscussionCommentCount } from "./list";
 import { AssigneeAvatars } from "./metadata";
 import { timestamp } from "./time";
 import { Author } from "./author";
+import { Checkbox } from "@/components/ui/checkbox";
 
 export type DiscussionItem = IssueListItem | PullListItem;
 
 export function DiscussionRow({
   item,
   repo,
+  selection,
 }: {
   item: DiscussionItem;
   repo: Repository;
+  selection?: {
+    checked: boolean;
+    disabled: boolean;
+    toggle: (range: boolean) => void;
+  };
 }) {
   const status =
     item.kind === "pull"
@@ -47,6 +54,21 @@ export function DiscussionRow({
   );
   return (
     <li>
+      {selection && (
+        <Checkbox
+          className="mt-1"
+          aria-label={`Select ${item.kind === "pull" ? "pull request" : "issue"} #${item.number}: ${item.title}`}
+          checked={selection.checked}
+          disabled={selection.disabled}
+          onCheckedChange={() => selection.toggle(false)}
+          onClick={(event) => {
+            if (event.shiftKey) {
+              event.preventDefault();
+              selection.toggle(true);
+            }
+          }}
+        />
+      )}
       <span
         className={`${item.kind === "pull" ? "pull" : "issue"}-status-icon ${status}`}
         role="img"

@@ -28,10 +28,16 @@ Build the UI before building `crab-server`; its build script embeds `dist/`.
 - `src/components/discussion/`: shared Markdown rendering, composer, search,
   metadata, mutations, conflict review, and permalink focus. Its `conversation/`
   owns one chronological reader, typed comment/review/activity cards, bounded
-  windows, and the shared composer. Markdown tests stay beside the renderer.
+  windows, and the shared composer. `bulk/` owns page/range selection, versioned
+  bulk state/metadata actions and uncertain-intent recovery for both list kinds.
+  Lists, preparation and writes bind the stable repository UUID; queued selections
+  cannot follow a reused owner/name route.
+  Metadata deltas retain unrelated values; milestone search covers the native
+  catalog. Bulk controls require current Triage capability. Markdown tests stay
+  beside the renderer.
 - `src/features/issues/`: issue models, routing, list, creation, detail and
   comments. `state.tsx` owns close-reason selection, reason changes and reopen
-  actions beside the comment button. State changes preserve drafts and reject
+  actions beside the comment button. Failures preserve drafts and reject
   stale writes. Close/reopen can submit the current draft in the same native
   transaction; close-reason edits leave it unsubmitted. Not-planned closures
   have distinct header/list presentation and typed conversation events.
@@ -88,5 +94,7 @@ The shared composer retains one original comment/state intent through uncertain
 responses, metadata refresh and PR tabs. Retry original action recovers that
 submission; newer text remains unsent. State replies need an explicit confirmed-
 rejection marker before the controller releases an intent. A bare late permission
-error can follow a successful commit. Drafts remain available after archive, and
+or routing error on a retry can follow a successful earlier commit. New comments
+are checked against UTF-8 body and encoded request limits before submission.
+Drafts remain available after archive, and
 hidden responses cannot move the visible conversation.

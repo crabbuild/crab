@@ -22,6 +22,7 @@ export type IssueListItem = DiscussionTotals & {
 } & Pick<
     Issue,
     | "number"
+    | "version"
     | "title"
     | "state"
     | "state_reason"

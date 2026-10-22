@@ -344,7 +344,7 @@ async fn list(
         .map(|pull| pull_list_view(&authors, pull, &page.labels, &assignees))
         .collect::<Vec<_>>();
     Ok(Json(
-        json!({"items":items,"next":page.next,"counts":page.counts,"matching":page.matching,"navigation":page.navigation,"authored_by_me":page.authored_by_me,"assigned_to_me":page.assigned_to_me,"review_requested_from_me":page.review_requested_from_me}),
+        json!({"repository_id":repo.id,"can_bulk_edit":assignees.principal.can_triage(repo.id),"items":items,"next":page.next,"counts":page.counts,"matching":page.matching,"navigation":page.navigation,"authored_by_me":page.authored_by_me,"assigned_to_me":page.assigned_to_me,"review_requested_from_me":page.review_requested_from_me}),
     ))
 }
 

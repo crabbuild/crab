@@ -38,5 +38,5 @@ export function Issues({
       );
     return <IssueDetail key={number} repo={repo} number={number} csrf={csrf} />;
   }
-  return <IssueList repo={repo} url={url} />;
+  return <IssueList repo={repo} url={url} csrf={csrf} />;
 }

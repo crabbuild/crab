@@ -25,6 +25,9 @@ pub(in crate::cells) fn dispatch_mutation(
         search::index::ensure_ready(context)?;
     }
     let result = match id {
+        collaboration::bulk::Edit::ID => {
+            invoke_mutation::<collaboration::bulk::Edit>(context, input)
+        }
         collaboration::state::ChangeState::ID => {
             invoke_mutation::<collaboration::state::ChangeState>(context, input)
         }
@@ -140,6 +143,9 @@ pub(in crate::cells) fn dispatch_read(
     input: serde_json::Value,
 ) -> crate::cells::Result<serde_json::Value> {
     match id {
+        collaboration::bulk::Select::ID => {
+            invoke_read::<collaboration::bulk::Select>(context, input)
+        }
         issues::lifecycle::GetIssueLifecycleStatus::ID => {
             invoke_read::<issues::lifecycle::GetIssueLifecycleStatus>(context, input)
         }

@@ -579,8 +579,30 @@ repeating the state write. Current HTTP repository membership still gates access
 
 No new SQL schema, migration or index rebuild is required. Original standalone
 comment inputs, submission digests and record/outcome formats stay unchanged;
-only their canonical contribution writers are shared. HTTP marks confirmed
-pre-execution/native rejection with `X-Crab-Write-Outcome: rejected`. Post-commit
-enrichment and late permission errors remain uncertain; retry the unchanged
+only their canonical contribution writers are shared. HTTP marks immutable-payload
+validation and confirmed native domain rejection with
+`X-Crab-Write-Outcome: rejected`. Context errors and submission-identity conflicts
+remain uncertain, including errors before a retry reaches native execution; an
+earlier attempt may have committed. Retry the unchanged
 original intent after resolving availability/access. Public output exposes only
 existing comment DTOs, with final membership checks after enrichment.
+
+
+## Bounded bulk discussion edits
+
+`cells/repository/collaboration/bulk/` composes existing issue/PR edit and milestone
+assignment commands inside one native transaction. HTTP preparation and edits bind
+the stable repository UUID; reused owner/name routes cannot retarget a selection.
+Selection reads bind record and independent milestone assignment versions. Up to 100 explicit subjects share one
+success/rejection; no unbounded query mutation or cross-Cell transaction is implied.
+Labels are merged against one active catalog snapshot so retired source IDs cannot
+block a later delta. Plain per-item writers and their receipt formats are unchanged.
+
+Permanent `collaboration/v1/bulk-submissions/{uuid}` documents bind the exact targets,
+versions, action and qualified actor. They store a count and digest, not a second
+copy of discussion records. Recovery precedes fresh role/archive/version checks;
+current HTTP read access still gates every response. Current-roster assignee/name
+snapshots are excluded from intent identity, and fresh additions require a complete
+eligible match. The proven-rejection marker is shared in `api/write.rs`; context,
+repository-identity and submission-identity errors preserve the original intent. No new DDL, preparation, index
+format, dependency, compatibility reader or automatic authority cutover is involved.

@@ -243,3 +243,28 @@ test("a delayed menu focus return preserves a newer editor focus", async ({
   await page.keyboard.type("!");
   await expect(editor).toHaveValue("Keep typing here!");
 });
+
+for (const [name, body] of [
+  ["UTF-8 body", "界".repeat(23000)],
+  ["encoded envelope", "\\".repeat(50000) + "context"],
+])
+  test(`an oversized ${name} can be revised before creating a state intent`, async ({
+    page,
+  }) => {
+    const model = await fixture(page, "issues");
+    const editor = page.getByRole("textbox", { name: "Comment", exact: true });
+    await editor.fill(body);
+    await page
+      .getByRole("button", { name: "Close with comment", exact: true })
+      .click();
+    await expect(page.getByRole("alert")).toContainText(
+      "This comment is too long",
+    );
+    expect(model.writes).toHaveLength(0);
+    await editor.fill("Fits the request");
+    await page
+      .getByRole("button", { name: "Close with comment", exact: true })
+      .click();
+    await expect(editor).toHaveValue("");
+    expect(model.writes).toHaveLength(1);
+  });

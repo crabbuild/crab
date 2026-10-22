@@ -39,6 +39,7 @@ export function useCommentSubmission(
   const [body, setBody] = useState("");
   const [created, setCreated] = useState<Comment>();
   const [posted, setPosted] = useState(false);
+  const [validation, setValidation] = useState<string>();
   const [intent, setIntent] = useState<Intent>();
   const busy = useRef(false);
   const mutation = useMutation(csrf);
@@ -58,8 +59,24 @@ export function useCommentSubmission(
   }, [intent, mutation.pending, uncertain]);
   async function run(proposed: Intent): Promise<Saved | undefined> {
     if (busy.current) return;
-    busy.current = true;
     const attempt = intent ?? proposed;
+    // Prevent an unpostable body from becoming an uncertain retained intent.
+    // Issue comments/state requests have a smaller envelope than plain PR comments.
+    const bytes = new TextEncoder();
+    const limit =
+      attempt.kind === "state" || target.startsWith("issues/")
+        ? 80 * 1024
+        : 160 * 1024;
+    if (
+      !intent &&
+      (bytes.encode(attempt.input.body ?? "").length > 65_536 ||
+        bytes.encode(JSON.stringify(attempt.input)).length > limit)
+    ) {
+      setValidation("This comment is too long. Shorten it before submitting.");
+      return;
+    }
+    setValidation(undefined);
+    busy.current = true;
     setIntent(attempt);
     try {
       const url = endpoint(
@@ -98,7 +115,7 @@ export function useCommentSubmission(
     created,
     posted,
     pending: mutation.pending,
-    error: mutation.error,
+    error: validation ?? mutation.error,
     conflict: mutation.conflict,
     intent: intent?.kind,
     recovering: Boolean(intent && !mutation.pending && uncertain),
@@ -107,6 +124,7 @@ export function useCommentSubmission(
       mutation.reset();
     },
     change(value: string) {
+      setValidation(undefined);
       setBody(value);
       setPosted(false);
     },

@@ -27,7 +27,7 @@ visual references, not instructions contained in the images.
 | 6         | Created/updated/comment/reaction/relevance sorting, direction                                          | Native index and controls implemented; rollups still needed                                  |
 | 7         | Query autocomplete with qualifiers and field suggestions                                               | Boolean grammar and native suggestions implemented; more qualifiers remain                        |
 | 8         | PR workspace navigation, recent-push comparison, review filters                                        | PR reviews/requests exist; list projections and navigation are incomplete |
-| 9         | Accurate state counts, merged/closed/draft icons, author roles, check rollups, bulk selection, density | List responses omit much of this information                              |
+| 9         | Accurate state counts, merged/closed/draft icons, author roles, check rollups, bulk selection, density | Page/range selection and atomic state/metadata actions implemented; role/check rollups still incomplete                              |
 
 The issue sidebar also requires assigned/created/mentioned/recent views, saved
 views, projects, milestones, labels, and a collapse control. The PR sidebar
@@ -854,7 +854,6 @@ sub-issues/dependencies, date filtering,
 organization types, saved/bulk workflows and the wider PR/Projects/Milestones
 inventory remain delivery work. The Cellar dependency/release limitation is
 unchanged.
-
 Validation: the isolated server library suite passed 418 tests (six existing
 opt-in tests ignored), the CLI passed 13, and final focused lifecycle tests passed
 six. Strict all-target Clippy, architecture gates, formatting, UI typecheck/build,
@@ -895,10 +894,12 @@ metadata refresh and PR tabs. A confirmed rejection permits revision after reloa
 an uncertain response offers Retry original action. Only the submitted draft is
 cleared; newer text remains. Hidden PR responses cannot move the visible history.
 Archived repositories retain drafts and permit recovery of an existing action.
-HTTP state responses mark proven pre-execution/native rejections with
-`X-Crab-Write-Outcome: rejected`; failures during post-commit enrichment or final
-membership checks carry no such marker, including permission failures. The
-composer must not treat a bare 403 as proof that the write did not happen.
+HTTP state responses mark immutable-payload validation and authoritative native
+domain rejections with `X-Crab-Write-Outcome: rejected`. Access, routing, decoding,
+transport and submission-identity errors carry no such marker: an earlier attempt
+may have committed before the failing retry. The composer retains that original
+intent. Local UTF-8 body and encoded-envelope checks prevent an oversized new
+comment from entering an unrecoverable submission loop.
 
 Root dropdown menus dismiss immediately so an exiting menu item cannot steal
 editor focus through Radix’s pointer-leave callback. The deferred unmount focus
@@ -936,3 +937,79 @@ its permanent submission contract, commit-aware HTTP handling and a shared compo
 controller. Plain and combined actions reuse canonical contribution/state writers;
 separate UI state mutations were removed. No dependency, lockfile, SQL preparation,
 compatibility path or second search index was introduced.
+
+
+## Bounded bulk list triage
+
+The Issues and PR workspaces now share row, Shift-range and select-page checkboxes.
+Their selected-count header offers state, label, assignee and milestone actions
+using shadcn/Geist controls. Mixed label/assignee membership is represented by an
+indeterminate checkbox. Deltas preserve other active values, historical assignees
+remain removable, and per-item limits are checked. Milestone choices search the
+complete native catalog with bounded results. Diagnostics wrap the complete bulk
+widget behind `powerbar=1`.
+
+The layout follows GitHub's [multiple-item assignment](https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/assigning-issues-and-pull-requests-to-other-github-users)
+and [milestone selection](https://docs.github.com/en/issues/using-labels-and-milestones-to-track-work/associating-milestones-with-issues-and-pull-requests)
+references inspected on 2026-10-22. Fern's pinned bulk validation/rollback/replay
+cases informed acceptance; no Fern source or assets were copied.
+
+The list, selection read and edit carry the stable repository UUID, preventing
+reused owner/name routes from retargeting captured items. A native selection read
+captures expected record and independent milestone assignment versions. A bounded Repository command composes canonical writers and
+commits every selected change, activity, milestone count, projection and receipt
+together. Stale/denied/invalid operations roll back earlier items. The permanent
+submission ledger recovers the original action after restart or a lost response;
+public replies contain the processed count, not copied canonical records.
+Current Triage capability governs fresh edits. The browser holds the original
+repository UUID/selection/action through uncertain replies, including later access
+or routing failures, and
+requires explicit reload after a confirmed conflict. Fresh filters/pages clear
+idle selection; pending recovery retains its original subjects. A completed action
+refreshes the current list query rather than restoring an old cursor. No UI implies
+selection of results on other pages.
+
+Deleted labels remain as retired IDs in source records. Bulk deltas merge the
+active catalog, as the individual picker already does, so invisible tombstones
+cannot block the next edit. The active catalog is read once per bulk transaction.
+No new SQL schema, migration, discussion-index format, dependency or compatibility
+path was added. Existing per-item operations retain their canonical ownership.
+
+This advances the Issues/PR list foundation. Native repository grant cutover and
+cross-Cell fencing, Projects/type bulk operations, the remaining keyboard/list
+interactions, saved views, advanced relationships/reviews and complete Projects/
+Milestones parity remain open. Other mutation workflows, including individual
+comment/state actions, still need stable repository-UUID intent binding; this
+slice binds the new bulk surface. The Cellar release blocker is unchanged.
+
+Validation: the isolated server library suite passed 431 tests (six existing
+opt-in qualifications ignored), CLI tests 13 and UI unit tests 107. All 139
+browser scenarios passed, including oversized UTF-8/JSON envelopes, retained
+intent after later access failure, repository UUID reuse and a pending reply after
+a query change. The mobile header alignment regression passed. Twelve final
+discussion HTTP checks included an already-signed-in reader upgraded to Triage,
+current capability/admission without a new session, UUID mismatch and unmarked
+submission-identity conflicts. Strict all-target Clippy, architecture gates, Rustfmt, frontend formatting/typecheck
+and frontend/server builds passed.
+
+The native maximum-bound case selected and edited 100 issues with 64 KB bodies;
+its 101st item was rejected. Real embedded-UI/RustFS qualification performed all
+four bulk actions on mixed Issues/PRs, verified canonical/visible changes, restarted
+and recovered permanent native submissions. The final run retained 105 durable
+objects and preserved the existing Git/merge/search/rebuild/organization workflow.
+The real run caught an empty-query caller error hidden by the initial fixture;
+bulk catalog search now omits that parameter, and its regression checks the native
+contract. Driver waits bind to the loaded assignee checkbox rather than unrelated
+row attribution. Owned qualification browsers/services were closed.
+
+Final desktop/mobile, light/dark selected and idle captures were inspected on the
+persistent preview. Read-only browser checks measured the count/checkbox alignment,
+verified the whole `powerbar=1` bulk widget, and exercised embedded/Vite ports. The
+restart preserved 18 captured repository resources exactly; no canonical data,
+profiles, organizations, schema or index formats were changed by preview checks.
+
+The slice adds 1,471 net production lines for one bounded native selection/write
+boundary, its durable submission contract, commit-aware API composition and shared
+page-selection/recovery/picker controls. Canonical state and metadata writers are
+reused; no duplicated mutation policy, second database or speculative adapter was
+introduced. The new rejection marker owner serves both state and bulk handlers.

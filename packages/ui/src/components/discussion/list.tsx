@@ -1,4 +1,4 @@
-import { useState } from "react";
+import { useState, type ReactNode } from "react";
 import {
   AlignJustifyIcon,
   Rows2Icon,
@@ -28,6 +28,8 @@ import { DiscussionFilter } from "./filter";
 
 export type ListLabel = Pick<RepositoryLabel, "id" | "name" | "color">;
 export interface DiscussionPage<T> {
+  repository_id: string;
+  can_bulk_edit: boolean;
   items: T[];
   next: string | null;
   counts: { open: number; closed: number; merged: number };
@@ -89,6 +91,7 @@ export function DiscussionListControls({
   loading,
   density,
   onDensityChange,
+  selection,
 }: {
   repo: Repository;
   url: URL;
@@ -97,6 +100,7 @@ export function DiscussionListControls({
   loading: boolean;
   density: "comfortable" | "compact";
   onDensityChange: (density: "comfortable" | "compact") => void;
+  selection?: ReactNode;
 }) {
   const filters = discussionFilters(url);
   const [sortOpen, setSortOpen] = useState(false);
@@ -113,7 +117,8 @@ export function DiscussionListControls({
     navigate(repoHref(repo, { view, ...filters, ...values }));
   return (
     <div className="issues-filters flex-wrap">
-      <div className="discussion-counts">
+      <div className="discussion-counts gap-3">
+        {selection}
         {!data ? (
           <span role="status" className="text-sm text-muted-foreground">
             {loading ? "Loading results…" : "Results unavailable"}

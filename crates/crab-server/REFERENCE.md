@@ -1698,10 +1698,59 @@ reason and body. Recovery returns the existing comment without changing state
 again, even after later archive or version changes. Altered payloads conflict.
 Current repository access is always required. State permissions, archive, pending
 merge and merged-state restrictions remain canonical; rejection cannot leave an
-orphan comment or advance progress. Confirmed validation/domain rejection carries
-`X-Crab-Write-Outcome: rejected`. An error without this marker may follow commit,
-including a late permission failure, and must preserve the original intent. No
+orphan comment or advance progress. Immutable-payload validation and confirmed
+native domain rejection carry `X-Crab-Write-Outcome: rejected`. Context errors
+(access, routing, transport, decoding) and submission-identity conflicts stay
+unmarked: a previous attempt may already have committed. Preserve the original
+intent until it can be recovered. No
 new schema preparation or discussion-index rebuild is needed.
+
+### Bulk discussion triage
+
+Issue and PR lists expose the stable `repository_id` and `can_bulk_edit` from
+current repository Triage authority.
+Row checkboxes, Shift selection and Select all operate on the current page only.
+
+GET `/api/repos/{owner}/{name}/discussions/selection?repository_id={uuid}&items=issue:1:3,pull:2:4`
+checks 1–100 distinct subjects and their expected record versions in one native
+snapshot. Its `{repository_id, items}` response contains `{item: {subject: {kind, number}, version},
+milestone_version}` entries. A stale or missing subject rejects preparation;
+current Triage permission is required. The UUID must match the resolved repository;
+a reused owner/name cannot retarget the captured selection. The browser retains
+these exact entries and UUID.
+
+POST `/api/repos/{owner}/{name}/discussions/bulk` accepts
+`{repository_id, request_id, items, action}`. Supported action shapes:
+
+- `{kind: "state", state: "open" | "closed", reason?: "completed" | "not_planned"}`;
+  explicit reasons require an issue-only closed selection. Merged PRs retain
+  their state and pending merges reject state changes.
+- `{kind: "labels", add: [label IDs], remove: [label IDs]}`;
+  disjoint additions/removals preserve other active labels, with at most 20 per item.
+- `{kind: "assignees", add: [actor UUIDs], remove: [actor UUIDs]}`;
+  additions require current repository membership, with at most 10 per item.
+  Historical assignees remain removable after losing access.
+- `{kind: "milestone", number: milestone number or null}`;
+  both source record and independent milestone assignment versions are checked.
+
+All selected changes, source versions, progress, activity, index effects and the
+permanent submission receipt commit together. Any rejection rolls all items back;
+there is no partial-success response. Success returns `{count}` for the selected
+items processed, including items already carrying the requested value. Reload
+counts/results; a changed list cursor starts again at the first page.
+
+Uncertain retries must retain the original repository UUID, request UUID, entries
+and action. Qualified
+actor and payload bind the permanent receipt; name, role and eligibility snapshots
+do not alter it. Recovery cannot reapply an edit after later versions, archive or
+membership changes, but always requires current repository read access. The shared
+`X-Crab-Write-Outcome: rejected` marker has the same commit-aware meaning as the
+combined comment/state endpoint. An explicit reload permits a new selection after
+a confirmed conflict. Context and repository-identity errors cannot release a
+retained intent; native submission-identity conflicts also remain unmarked. No new
+schema preparation or index rebuild is required.
+Catalog-owned grants remain the authority; native grant cutover/cross-Cell fencing,
+Projects/type bulk actions and wider GitHub parity remain delivery work.
 
 ### Browse activity
 

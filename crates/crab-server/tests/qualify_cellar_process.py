@@ -600,6 +600,28 @@ with open(run / "commands.log", "w") as log:
             state_actions.append((path, body, saved["comment"]["number"], count_before + 1))
         current_issue = request(issue_path)
         request(issue_path + "/state", {"request_id": str(uuid.uuid4()), "version": current_issue["version"], "state": "closed"})
+        bulk_issue = request("/api/repos/team/project/issues", {"request_id": str(uuid.uuid4()), "title": "Bulk qualification", "body": "Native bulk workflow"})
+        bulk_paths = ["/api/repos/team/project/issues/" + str(bulk_issue["number"]), state_pull_path]
+        bulk_actions = []
+        bulk_repository = request("/api/repos/team/project/issues")["repository_id"]
+        for action in [
+            {"kind": "state", "state": "open"},
+            {"kind": "labels", "add": [qualification_label["id"]], "remove": []},
+            {"kind": "assignees", "add": [request("/api/repos/team/project/assignees")["items"][0]["id"]], "remove": []},
+            {"kind": "milestone", "number": milestone["number"]},
+        ]:
+            targets = []
+            for path in bulk_paths:
+                value = request(path)
+                targets.append(("issue" if "/issues/" in path else "pull") + ":" + str(value["number"]) + ":" + str(value["version"]))
+            selected = request("/api/repos/team/project/discussions/selection?" + urllib.parse.urlencode({"repository_id":bulk_repository,"items": ",".join(targets)}))["items"]
+            body = {"repository_id":bulk_repository,"request_id": str(uuid.uuid4()), "items": selected, "action": action}
+            assert request("/api/repos/team/project/discussions/bulk", body) == {"count": 2}
+            bulk_actions.append(body)
+        bulk_saved = []
+        for path in bulk_paths:
+            value = request(path)
+            bulk_saved.append({key: value[key] for key in ["state", "version", "labels", "assignees"]})
         # State submissions recover after a complete process restart.
         stop()
         server = start()
@@ -610,6 +632,12 @@ with open(run / "commands.log", "w") as log:
             assert len(request(path + "/comments")["items"]) == expected_count
             search = "/api/repos/team/project/issues?" + urllib.parse.urlencode({"q": 'in:comments "Atomic context"'})
             assert request(search)["matching"] == 2
+        for body in bulk_actions:
+            assert request("/api/repos/team/project/discussions/bulk", body) == {"count": 2}
+        for path, saved in zip(bulk_paths, bulk_saved):
+            value = request(path)
+            assert {key: value[key] for key in saved} == saved
+            assert request(path + "/milestone")["milestone"]["number"] == milestone["number"]
         stop()
         count = subprocess.check_output(
             [
@@ -636,6 +664,8 @@ with open(run / "commands.log", "w") as log:
             "image_ref": args.image,
             "repository_creation": True,
             "issue_replay": True,
+            "bulk_state_metadata_restart": True,
+            "bulk_submission_recovery": True,
             "atomic_comment_state_restart": True,
             "atomic_state_submission_recovery": True,
             "atomic_comment_search": True,

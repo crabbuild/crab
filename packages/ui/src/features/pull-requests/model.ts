@@ -20,6 +20,7 @@ export interface PullSummary {
 
 export type PullListItem = Omit<PullSummary, "labels"> &
   DiscussionTotals & {
+    version: number;
     kind: "pull";
     labels: ListLabel[];
   };

@@ -2,7 +2,7 @@ import { useBrowserPreference } from "@/lib/browser-preference";
 import { IssueOpenedIcon, GitPullRequestIcon } from "@primer/octicons-react";
 import { Link } from "@/components/navigation/link";
 import { Result, RequestWidget } from "@/components/request/result";
-import { endpoint, useRequest, type Repository } from "@/lib/api";
+import { endpoint, navigate, useRequest, type Repository } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
 import {
   DiscussionListControls,
@@ -12,15 +12,18 @@ import {
 } from "./list";
 import { useDiscussionNavigation } from "./workspace";
 import { DiscussionRow, type DiscussionItem } from "./row";
+import { BulkActions, BulkCheckbox, useBulkEdit } from "./bulk";
 
 export function DiscussionResults({
   repo,
   url,
   view,
+  csrf,
 }: {
   repo: Repository;
   url: URL;
   view: "issues" | "pulls";
+  csrf: string;
 }) {
   const [density, setDensity] = useBrowserPreference(
     "crab-discussion-density",
@@ -32,6 +35,27 @@ export function DiscussionResults({
   const page = useRequest<DiscussionPage<DiscussionItem>>(
     endpoint(repo, view, { ...filters, before }),
   );
+  const bulk = useBulkEdit(
+    repo,
+    csrf,
+    page.data?.items ?? [],
+    page.data?.repository_id,
+    url.pathname + url.search,
+    () => {
+      if (before) navigate(repoHref(repo, { view, ...filters }));
+      else page.retry();
+    },
+  );
+  const selectable = Boolean(page.data?.can_bulk_edit && !repo.archived);
+  const selection =
+    selectable || bulk.selected.length ? (
+      <BulkCheckbox
+        bulk={bulk}
+        count={page.data?.items.length ?? 0}
+        disabled={!selectable || page.loading}
+        loading={page.loading}
+      />
+    ) : undefined;
   useDiscussionNavigation(
     view,
     discussionQuery(url, view),
@@ -57,15 +81,19 @@ export function DiscussionResults({
         <div className="issue-list-panel panel">
           {/* Filters retain their open interaction across refreshes. Counts and
             rows clear while loading; one timing boundary owns the whole list. */}
-          <DiscussionListControls
-            repo={repo}
-            url={url}
-            view={view}
-            data={page.data}
-            loading={page.loading}
-            density={density}
-            onDensityChange={setDensity}
-          />
+          <BulkActions repo={repo} bulk={bulk} selection={selection} />
+          {!bulk.selected.length && (
+            <DiscussionListControls
+              repo={repo}
+              url={url}
+              view={view}
+              data={page.data}
+              loading={page.loading}
+              density={density}
+              onDensityChange={setDensity}
+              selection={selection}
+            />
+          )}
           <Result state={{ ...page, timing: undefined }}>
             {(data) => (
               <>
@@ -76,6 +104,18 @@ export function DiscussionResults({
                         key={`${item.kind}:${item.number}`}
                         item={item}
                         repo={repo}
+                        selection={
+                          selectable || bulk.selected.length
+                            ? {
+                                checked: bulk.checked(item),
+                                disabled:
+                                  !selectable ||
+                                  bulk.locked ||
+                                  bulk.identityChanged,
+                                toggle: (range) => bulk.toggle(item, range),
+                              }
+                            : undefined
+                        }
                       />
                     ))}
                   </ul>

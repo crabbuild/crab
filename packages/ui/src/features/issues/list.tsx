@@ -8,7 +8,15 @@ import { navigate, type Repository } from "@/lib/api";
 
 import { DiscussionSearch } from "@/components/discussion/search";
 
-export function IssueList({ repo, url }: { repo: Repository; url: URL }) {
+export function IssueList({
+  repo,
+  url,
+  csrf,
+}: {
+  repo: Repository;
+  url: URL;
+  csrf: string;
+}) {
   const filters = discussionFilters(url);
   const query = url.searchParams.get("q") ?? "";
   return (
@@ -41,7 +49,7 @@ export function IssueList({ repo, url }: { repo: Repository; url: URL }) {
           )
         }
       />
-      <DiscussionResults repo={repo} url={url} view="issues" />
+      <DiscussionResults repo={repo} url={url} view="issues" csrf={csrf} />
     </section>
   );
 }
