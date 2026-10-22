@@ -1660,6 +1660,28 @@ shape is recreated without recorded-author text; all five contribution sources
 then rebuild with their existing keyset cursor. Canonical records and versions
 are unchanged. Both FTS indexes are checked before indexed readiness.
 
+### Issue close reasons
+
+Issue details and list summaries include nullable `state_reason`
+(`completed`, `not_planned`, `reopened`) and `closed_at` (Unix milliseconds).
+PATCH accepts optional `state_reason` alongside the expected `version`. Closing
+without a reason chooses completed; an explicit not-planned close uses
+`{"version":1,"state":"closed","state_reason":"not_planned"}`. An already
+closed issue can change its reason without resetting the original close time.
+Reopening clears `closed_at` and records reopened. Invalid state/reason pairs
+return 400; permissions and version conflicts retain the existing contracts.
+The native record, metadata, progress and events commit together.
+
+Search supports `reason:completed`, `reason:"not planned"`, `reason:reopened`
+and `no:reason`, including Boolean grouping and exclusions. Positive reason
+predicates match only issues. Unknown historical reasons remain null; no-reason
+also matches never-closed issues. Duplicate reasons/links and close-date search
+are not implemented. Existing repositories require private explicit
+`cells prepare-issue-state --owner OWNER --name REPO`; absent or partial
+preparation returns 503 `schema_upgrade_required`. The command pages existing
+issues/activity and recovers only proven history, without changing record
+versions or original command outcomes. No discussion-index rebuild is required.
+
 ### Browse activity
 
 Repository activity lives at `/{owner}/{name}/activity`. Its feed APIs use `limit`

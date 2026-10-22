@@ -287,6 +287,7 @@ async fn count_filters_share_live_issue_and_pull_projections_navigation_and_curs
         write::<UpdateIssue>(
             &cell,
             UpdateIssueInput {
+                state_reason: None,
                 number: 2,
                 actor,
                 can_triage: true,

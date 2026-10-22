@@ -2713,6 +2713,9 @@ main {
 .issue-status-icon.open {
   color: var(--success);
 }
+.issue-status-icon.not-planned {
+  color: var(--muted-foreground);
+}
 .issue-status-icon.closed {
   color: var(--done);
 }
@@ -2854,6 +2857,10 @@ main {
 }
 .issue-state.open {
   background: var(--success);
+}
+.issue-state.not-planned {
+  background: var(--muted);
+  color: var(--muted-foreground);
 }
 .issue-state.closed {
   background: var(--done);

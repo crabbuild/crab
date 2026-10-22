@@ -1,8 +1,11 @@
 use super::*;
+pub(crate) mod lifecycle;
+mod reads;
 use crate::cells::repository::collaboration::{
     Target,
     activity::{self, Action},
 };
+pub(crate) use reads::{GetComment, GetIssue, GetIssueDetail, ListComments};
 
 pub(crate) struct CreateIssue;
 
@@ -19,6 +22,7 @@ impl Mutation for CreateIssue {
         if settings::archived(context)? {
             return Ok(MutationResult::Rejected(CreateIssueOutcome::Archived));
         }
+        lifecycle::ensure_ready(context)?;
         validate_author(&input.author)?;
         validate_title(&input.title)?;
         validate_body(&input.body, false)?;
@@ -91,6 +95,7 @@ impl Mutation for CreateIssue {
             )],
         })?;
         insert_issue(context, &record)?;
+        lifecycle::create(context, record.number)?;
         advance_revision(context)?;
         let target = Target::Issue {
             number: record.number,
@@ -211,85 +216,6 @@ impl Mutation for CreateComment {
     }
 }
 
-#[derive(serde::Serialize, serde::Deserialize)]
-pub(crate) struct IssueDetail {
-    pub(crate) issue: Option<IssueRecord>,
-    pub(crate) labels: LabelCatalog,
-}
-
-pub(crate) struct GetIssueDetail;
-
-impl Read for GetIssueDetail {
-    const CLASS: &'static str = crate::cells::repository::CLASS;
-    const ID: u32 = 36;
-    type Input = u64;
-    type Output = IssueDetail;
-
-    fn execute(context: &mut Transaction<'_>, number: u64) -> crate::cells::Result<IssueDetail> {
-        // Detail metadata shares the issue's observation point and routing
-        // decision, so one HTTP request consumes exactly one reader turn.
-        Ok(IssueDetail {
-            issue: GetIssue::execute(context, number)?,
-            labels: ListLabels::execute(context, ())?,
-        })
-    }
-}
-
-pub(crate) struct GetIssue;
-
-impl Read for GetIssue {
-    const CLASS: &'static str = crate::cells::repository::CLASS;
-    const ID: u32 = 1;
-    type Input = u64;
-    type Output = Option<IssueRecord>;
-
-    fn execute(
-        context: &mut Transaction<'_>,
-        number: Self::Input,
-    ) -> crate::cells::Result<Self::Output> {
-        validate_number(number)?;
-        let result = context.sql(&SqlBatch {
-            statements: vec![statement(
-                "SELECT number, author_issuer, author_subject, author_name, title, body, state, label_ids, assignees, version, created_at_ms, updated_at_ms FROM repository_issues WHERE number = ?",
-                vec![integer(number)?],
-            )],
-        })?;
-        result[0]
-            .rows
-            .first()
-            .map(|row| issue_from_row(row.as_slice()))
-            .transpose()
-    }
-}
-
-pub(crate) struct GetComment;
-
-impl Read for GetComment {
-    const CLASS: &'static str = crate::cells::repository::CLASS;
-    const ID: u32 = 2;
-    type Input = CommentKey;
-    type Output = Option<CommentRecord>;
-
-    fn execute(
-        context: &mut Transaction<'_>,
-        key: Self::Input,
-    ) -> crate::cells::Result<Self::Output> {
-        validate_number(key.issue)?;
-        validate_number(key.number)?;
-        let result = context.sql(&SqlBatch {
-            statements: vec![statement(
-                "SELECT issue_number, number, author_issuer, author_subject, author_name, body, version, created_at_ms, updated_at_ms FROM repository_issue_comments WHERE issue_number = ? AND number = ?",
-                vec![integer(key.issue)?, integer(key.number)?],
-            )],
-        })?;
-        result[0]
-            .rows
-            .first()
-            .map(|row| comment_from_row(row.as_slice()))
-            .transpose()
-    }
-}
-
 pub(crate) struct UpdateIssue;
 
 impl Mutation for UpdateIssue {
@@ -305,12 +231,14 @@ impl Mutation for UpdateIssue {
         if settings::archived(context)? {
             return Ok(MutationResult::Rejected(UpdateIssueOutcome::Archived));
         }
+        lifecycle::ensure_ready(context)?;
         validate_number(input.number)?;
         validate_number(input.version)?;
         validate_author(&input.actor)?;
         if input.title.is_none()
             && input.body.is_none()
             && input.state.is_none()
+            && input.state_reason.is_none()
             && input.label_ids.is_none()
             && input.assignees.is_none()
         {
@@ -380,7 +308,8 @@ impl Mutation for UpdateIssue {
                 .is_some_and(|value| value != &issue.assignees);
         let author = same_author(&issue.author, &input.actor);
         if (input.title.is_some() || input.body.is_some()) && !author
-            || input.state.is_some() && !(author || input.can_triage)
+            || (input.state.is_some() || input.state_reason.is_some())
+                && !(author || input.can_triage)
         {
             return Ok(MutationResult::Rejected(UpdateIssueOutcome::Forbidden));
         }
@@ -419,6 +348,19 @@ impl Mutation for UpdateIssue {
                 "repository issue version is exhausted",
             ))?;
         issue.updated_at_ms = timestamp(context.now_ms())?;
+        let Some((previous_lifecycle, lifecycle)) = lifecycle::change(
+            context,
+            issue.number,
+            was_closed,
+            issue.state != 0,
+            input.state_reason,
+            issue.updated_at_ms,
+        )?
+        else {
+            return Ok(MutationResult::Rejected(
+                UpdateIssueOutcome::InvalidStateReason,
+            ));
+        };
         let updated = context.sql(&SqlBatch {
             statements: vec![statement(
                 "UPDATE repository_issues SET title = ?, body = ?, state = ?, label_ids = ?, assignees = ?, version = ?, updated_at_ms = ? WHERE number = ? AND version = ?",
@@ -455,9 +397,29 @@ impl Mutation for UpdateIssue {
             let action = if issue.state == 0 {
                 Action::Reopened
             } else {
-                Action::Closed
+                Action::IssueClosed {
+                    reason: lifecycle
+                        .state_reason
+                        .ok_or(crate::cells::Error::Invalid("new closure has no reason"))?,
+                }
             };
             activity::append(context, target, &input.actor, action)?;
+        }
+        if was_closed
+            && issue.state != 0
+            && previous_lifecycle.state_reason != lifecycle.state_reason
+        {
+            activity::append(
+                context,
+                target,
+                &input.actor,
+                Action::IssueCloseReasonChanged {
+                    from: previous_lifecycle.state_reason,
+                    to: lifecycle.state_reason.ok_or(crate::cells::Error::Invalid(
+                        "closure reason change is missing",
+                    ))?,
+                },
+            )?;
         }
         Ok(MutationResult::Success(UpdateIssueOutcome::Updated(
             Box::new(issue),
@@ -539,128 +501,5 @@ impl Mutation for UpdateComment {
         Ok(MutationResult::Success(UpdateCommentOutcome::Updated(
             comment,
         )))
-    }
-}
-
-impl IssueSummary {
-    pub(in crate::cells::repository) fn load(
-        context: &Transaction<'_>,
-        number: u64,
-        metrics: search::index::Metrics,
-    ) -> crate::cells::Result<Self> {
-        let result = context.sql(&SqlBatch { statements: vec![statement("SELECT number, author_issuer, author_subject, author_name, title, state, label_ids, assignees, version, created_at_ms, updated_at_ms FROM repository_issues WHERE number = ?", vec![integer(number)?])] })?;
-        let row = result[0]
-            .rows
-            .first()
-            .ok_or(crate::cells::Error::Invalid("indexed issue is missing"))?;
-        Ok(IssueSummary {
-            number: result_u64_from_row(row, 0)?,
-            author: RepositoryAuthor {
-                issuer: result_text(row, 1)?,
-                subject: result_text(row, 2)?,
-                name: result_text(row, 3)?,
-            },
-            title: result_text(row, 4)?,
-            state: u8::try_from(result_u64_from_row(row, 5)?)
-                .map_err(|_| crate::cells::Error::Invalid("indexed issue state is invalid"))?,
-            label_ids: decode_label_ids(result_blob(row, 6)?)?,
-            assignees: assignments::decode(result_blob(row, 7)?)?,
-            version: result_u64_from_row(row, 8)?,
-            created_at_ms: result_u64_from_row(row, 9)?,
-            updated_at_ms: result_u64_from_row(row, 10)?,
-            comment_count: metrics.comments,
-            reaction_count: metrics.reactions,
-        })
-    }
-}
-
-pub(crate) struct ListComments;
-
-impl Read for ListComments {
-    const CLASS: &'static str = crate::cells::repository::CLASS;
-    const ID: u32 = 4;
-    type Input = ListCommentsInput;
-    type Output = CommentPage;
-
-    fn execute(
-        context: &mut Transaction<'_>,
-        input: Self::Input,
-    ) -> crate::cells::Result<Self::Output> {
-        validate_number(input.issue)?;
-        validate_list(input.before, input.limit)?;
-        let exists = context.sql(&SqlBatch {
-            statements: vec![statement(
-                "SELECT 1 FROM repository_issues WHERE number = ?",
-                vec![integer(input.issue)?],
-            )],
-        })?;
-        if exists[0].rows.is_empty() {
-            return Ok(CommentPage::IssueNotFound);
-        }
-        let sequence = context.sql(&SqlBatch {
-            statements: vec![statement(
-                "SELECT last FROM repository_comment_sequences WHERE issue_number = ?",
-                vec![integer(input.issue)?],
-            )],
-        })?;
-        let last = sequence[0]
-            .rows
-            .first()
-            .map(|row| result_u64_from_row(row, 0))
-            .transpose()?
-            .unwrap_or(0);
-        let maximum = input.before.map_or(last, |before| (before - 1).min(last));
-        let mut cursor = maximum;
-        let mut scanned = 0_u64;
-        // Variant tag, collection count and trailing optional cursor are part of
-        // the published result bound, not just the encoded comment bodies.
-        let mut encoded_bytes = 5_usize;
-        let mut items = Vec::new();
-        while cursor > 0 && scanned < MAX_LIST_SCAN && items.len() < usize::from(input.limit) {
-            let count = 8_u64.min(MAX_LIST_SCAN - scanned).min(cursor);
-            let bottom = cursor - count + 1;
-            let result = context.sql(&SqlBatch {
-                statements: vec![statement(
-                    "SELECT issue_number, number, author_issuer, author_subject, author_name, body, version, created_at_ms, updated_at_ms FROM repository_issue_comments WHERE issue_number = ? AND number BETWEEN ? AND ? ORDER BY number DESC",
-                    vec![integer(input.issue)?, integer(bottom)?, integer(cursor)?],
-                )],
-            })?;
-            let mut rows = result[0].rows.iter().peekable();
-            let mut output_full = false;
-            for number in (bottom..=cursor).rev() {
-                let matches = rows
-                    .peek()
-                    .is_some_and(|row| result_u64_from_row(row, 1).ok() == Some(number));
-                let row = matches.then(|| rows.next()).flatten();
-                scanned += 1;
-                cursor -= 1;
-                let Some(row) = row else {
-                    continue;
-                };
-                let comment = comment_from_row(row)?;
-                let comment_bytes = encoded_size(&comment)?;
-                if encoded_bytes
-                    .checked_add(comment_bytes)
-                    .and_then(|bytes| bytes.checked_add(9))
-                    .is_none_or(|bytes| bytes > MAX_LIST_OUTPUT_BYTES)
-                {
-                    cursor += 1;
-                    output_full = true;
-                    break;
-                }
-                encoded_bytes += comment_bytes;
-                items.push(comment);
-                if items.len() == usize::from(input.limit) {
-                    break;
-                }
-            }
-            if output_full {
-                break;
-            }
-        }
-        Ok(CommentPage::Found {
-            items,
-            next: (cursor > 0).then_some(cursor + 1),
-        })
     }
 }

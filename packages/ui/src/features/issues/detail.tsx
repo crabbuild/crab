@@ -1,10 +1,12 @@
 import { Author } from "@/components/discussion/author";
 import { Reactions } from "@/components/discussion/reactions";
 import { repoHref } from "@/lib/repository-route";
-import { useEffect, useRef, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
 
+import { CircleSlashIcon } from "lucide-react";
 import { IssueClosedIcon, IssueOpenedIcon } from "@primer/octicons-react";
+import { IssueStateControls } from "./state";
 import { endpoint, useRequest, type Repository } from "@/lib/api";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
@@ -20,11 +22,26 @@ import { Issue } from "./model";
 import { timestamp } from "@/components/discussion/time";
 import { Comments } from "./comments";
 
-function IssueBadge({ state }: { state: Issue["state"] }) {
+function IssueBadge({ issue }: { issue: Issue }) {
+  const { state, state_reason: reason } = issue;
+  const notPlanned = state === "closed" && reason === "not_planned";
   return (
-    <span className={`issue-state ${state}`} aria-live="polite">
-      {state === "open" ? <IssueOpenedIcon /> : <IssueClosedIcon />}
-      {state === "open" ? "Open" : "Closed"}
+    <span
+      className={`issue-state ${notPlanned ? "not-planned" : state}`}
+      aria-live="polite"
+    >
+      {state === "open" ? (
+        <IssueOpenedIcon />
+      ) : notPlanned ? (
+        <CircleSlashIcon className="size-4" />
+      ) : (
+        <IssueClosedIcon />
+      )}
+      {state === "open"
+        ? "Open"
+        : notPlanned
+          ? "Closed as not planned"
+          : "Closed"}
     </span>
   );
 }
@@ -44,14 +61,13 @@ export function IssueDetail({
   const [metadataEpoch, setMetadataEpoch] = useState(0);
   const mutation = useMutation(csrf);
   const editTrigger = useReturnFocus<HTMLButtonElement>(editing);
-  const stateTrigger = useReturnFocus<HTMLButtonElement>(mutation.pending);
+  // A delayed state/edit response must not replace a newer metadata refresh.
+  const accept = useCallback((incoming: Issue) => {
+    setIssue((old) => (old && old.version > incoming.version ? old : incoming));
+  }, []);
   useEffect(() => {
-    const incoming = resource.data;
-    if (incoming)
-      setIssue((old) =>
-        old && old.version > incoming.version ? old : incoming,
-      );
-  }, [resource.data]);
+    if (resource.data) accept(resource.data);
+  }, [resource.data, accept]);
   const current = issue ?? resource.data;
   if (!current) return <Result state={resource}>{() => null}</Result>;
   return (
@@ -84,7 +100,7 @@ export function IssueDetail({
         </div>
       </div>
       <p className="issue-meta">
-        <IssueBadge state={current.state} />
+        <IssueBadge issue={current} />
         <span className="muted">
           <Author author={current.author} /> opened this issue{" "}
           {timestamp(current.created_at)}
@@ -104,13 +120,9 @@ export function IssueDetail({
               repo={repo}
               csrf={csrf}
               onCancel={() => setEditing(false)}
-              onReviewed={(latest) =>
-                setIssue((old) =>
-                  old && old.version > latest.version ? old : latest,
-                )
-              }
+              onReviewed={accept}
               onSaved={(issue) => {
-                setIssue(issue);
+                accept(issue);
                 setEditing(false);
               }}
             />
@@ -134,38 +146,24 @@ export function IssueDetail({
               />
             </article>
           )}
-          {current.can_close && !repo.archived && (
-            <div className="issue-state-controls">
-              <Button
-                variant="outline"
-                ref={stateTrigger}
-                disabled={mutation.pending || editing}
-                onClick={async () => {
-                  const updated = await mutation.run<Issue>(
-                    endpoint(repo, `issues/${number}`),
-                    "PATCH",
-                    {
-                      version: current.version,
-                      state: current.state === "open" ? "closed" : "open",
-                    },
-                  );
-                  if (updated) setIssue(updated);
-                }}
-              >
-                {current.state === "open" ? "Close issue" : "Reopen issue"}
-              </Button>
-              {mutation.error && (
-                <p className="notice error" role="alert">
-                  {mutation.error}
-                </p>
-              )}
-            </div>
-          )}
           <Comments
             repo={repo}
             issue={number}
             version={`${current.version}:${metadataEpoch}`}
             csrf={csrf}
+            actions={(busy) =>
+              current.can_close &&
+              !repo.archived && (
+                <IssueStateControls
+                  issue={current}
+                  repo={repo}
+                  csrf={csrf}
+                  disabled={busy || editing}
+                  onSaved={accept}
+                  onRefresh={resource.retry}
+                />
+              )
+            }
           />
         </div>
         <DiscussionMetadata

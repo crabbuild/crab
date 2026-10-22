@@ -194,6 +194,7 @@ async fn linked_work_uses_live_subject_summaries_and_exclusive_pages() {
     write::<UpdateIssue>(
         &cell,
         UpdateIssueInput {
+            state_reason: None,
             number: 2,
             version: 1,
             actor: actor(),

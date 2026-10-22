@@ -30,7 +30,11 @@ Build the UI before building `crab-server`; its build script embeds `dist/`.
   owns one chronological reader, typed comment/review/activity cards, bounded
   windows, and the shared composer. Markdown tests stay beside the renderer.
 - `src/features/issues/`: issue models, routing, list, creation, detail and
-  comments. `src/features/pull-requests/` separates lists, creation, detail,
+  comments. `state.tsx` owns close-reason selection, reason changes and reopen
+  actions beside the comment button. State changes preserve drafts and reject
+  stale writes; comments and state still submit separately. Not-planned closures
+  have distinct header/list presentation and typed conversation events.
+  `src/features/pull-requests/` separates lists, creation, detail,
   conversation, commits, reviews, checks, and merge/recovery. PR detail retains
   draft/write state across tab switches and refreshes. Hidden panels pause
   conversation reads and close portaled menus; cached editors and pending writes

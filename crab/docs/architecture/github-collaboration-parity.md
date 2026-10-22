@@ -354,3 +354,13 @@ teams, organization lifecycle/email invitations, repository authority cutover an
 cross-Cell fencing remain open. Catalog grants retain their existing authority;
 organization ownership grants no repository permissions. Existing issue/PR models
 are preserved, and Projects/type/saved-view/advanced-review parity remains pending.
+
+The issue lifecycle slice adds completed/not-planned reasons, reopening, nullable
+close timestamps, typed timeline events and canonical reason search. A bounded
+private preparation recovers only historically proven metadata without changing
+original issue records, event history or command outcomes. Shadcn close controls
+preserve comment drafts and stale-edit handling. See the
+[issue lifecycle evidence](github-ui-parity.md#issue-closure-lifecycle).
+Duplicate closure/relationships, atomic comment-and-state submission, date
+predicates, organization issue types, saved/bulk workflows and complete parity
+remain unfinished.

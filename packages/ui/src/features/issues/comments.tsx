@@ -1,3 +1,4 @@
+import type { ReactNode } from "react";
 import { Conversation } from "@/components/discussion/conversation";
 import {
   CommentComposer,
@@ -10,11 +11,13 @@ export function Comments({
   issue,
   version,
   csrf,
+  actions,
 }: {
   repo: Repository;
   issue: number;
   version: string;
   csrf: string;
+  actions?: (busy: boolean) => ReactNode;
 }) {
   const target = "issues/" + issue;
   const comment = useCommentSubmission(repo, target, csrf);
@@ -38,6 +41,7 @@ export function Comments({
               className="new-comment"
               comment={comment}
               busy={busy}
+              actions={actions?.(comment.pending)}
             />
           )
         }

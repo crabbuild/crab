@@ -466,3 +466,73 @@ async fn advanced_search_preserves_caseful_operators_and_reports_invalid_syntax(
     }
     h.close().await;
 }
+
+#[tokio::test]
+async fn closure_metadata_is_coherent_across_edits_details_search_and_timeline() {
+    let h = Harness::new(false).await;
+    h.initialize_directory().await;
+    let cookie = h.login().await;
+    let (_, issue) = write(&h, &cookie, "POST", ROOT, input(991)).await;
+    assert!(issue["state_reason"].is_null() && issue["closed_at"].is_null());
+    let path = format!("{ROOT}/{}", issue["number"]);
+    let (status, closed) = write(
+        &h,
+        &cookie,
+        "PATCH",
+        &path,
+        json!({"version":1,"state":"closed","state_reason":"not_planned"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(closed["state_reason"], "not_planned");
+    assert_eq!(closed["closed_at"], closed["updated_at"]);
+    assert_eq!(h.json(&path, &cookie).await, closed);
+    let search = h
+        .json(
+            &format!("{ROOT}?q=is:closed%20reason:%22not%20planned%22"),
+            &cookie,
+        )
+        .await;
+    assert_eq!(search["matching"], 1);
+    assert_eq!(search["items"][0]["closed_at"], closed["closed_at"]);
+    let (status, changed) = write(
+        &h,
+        &cookie,
+        "PATCH",
+        &path,
+        json!({"version":2,"state_reason":"completed"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(changed["closed_at"], closed["closed_at"]);
+    let activity = h.json(&format!("{path}/activity"), &cookie).await;
+    assert_eq!(
+        activity["items"][0]["action"],
+        json!({"kind":"issue_close_reason_changed","from":"not_planned","to":"completed"})
+    );
+    assert_eq!(
+        write(
+            &h,
+            &cookie,
+            "PATCH",
+            &path,
+            json!({"version":3,"state_reason":"reopened"})
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(h.json(&path, &cookie).await, changed);
+    let (status, reopened) = write(
+        &h,
+        &cookie,
+        "PATCH",
+        &path,
+        json!({"version":3,"state":"open"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(reopened["state_reason"], "reopened");
+    assert!(reopened["closed_at"].is_null());
+    h.close().await;
+}

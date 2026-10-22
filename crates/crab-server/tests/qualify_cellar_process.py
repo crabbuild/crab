@@ -349,9 +349,16 @@ with open(run / "commands.log", "w") as log:
             "description": "Process restart qualification", "due_on": "2028-01-01",
         })
         request(issue_path + "/milestone", {"version": 0, "milestone": milestone["number"]}, method="PUT")
-        request(issue_path, {"version": created["version"], "state": "closed"}, method="PATCH")
+        assert created["state_reason"] is None and created["closed_at"] is None
+        closed_issue = request(issue_path, {"version": created["version"], "state": "closed", "state_reason": "not_planned"}, method="PATCH")
+        assert closed_issue["state_reason"] == "not_planned"
+        assert closed_issue["closed_at"] == closed_issue["updated_at"]
+        reason_search = "/api/repos/team/project/issues?" + urllib.parse.urlencode({"q": 'is:closed reason:"not planned"'})
+        assert request(reason_search)["items"][0]["closed_at"] == closed_issue["closed_at"]
+        prepared_issues = json.loads(subprocess.check_output(server_command("cells", "prepare-issue-state", "--owner", "team", "--name", "project"), env=env, text=True))
+        assert prepared_issues == {"state": "ready"}
         activity = request(issue_path + "/activity")
-        assert [event["action"]["kind"] for event in activity["items"]] == ["closed", "milestone_assigned", "created"]
+        assert [event["action"]["kind"] for event in activity["items"]] == ["issue_closed", "milestone_assigned", "created"]
         qualification_label = request("/api/repos/team/project/labels", {
             "request_id": str(uuid.uuid4()), "name": "RustFS qualification", "color": "abcdef", "description": "Native search suggestions",
         })
@@ -444,6 +451,8 @@ with open(run / "commands.log", "w") as log:
         assert request("/api/actors/" + profile_id) == actor_profile
         assert request("/api/repos/team/project/issues?q=is%3Aissue")["items"][0]["author"] == author_summary
         restored = request(f"/api/repos/team/project/issues/{number}")
+        assert restored["state_reason"] == "not_planned" and restored["closed_at"] == closed_issue["closed_at"]
+        assert request(reason_search)["matching"] == 1
         assert restored["title"] == body["title"]
         assert restored["reactions"]["groups"] == reaction["groups"]
         assert restored["reactions"]["revision"] >= reaction["revision"]
@@ -599,6 +608,10 @@ with open(run / "commands.log", "w") as log:
             "image_ref": args.image,
             "repository_creation": True,
             "issue_replay": True,
+            "issue_close_reason_restart": True,
+            "issue_close_timestamp_restart": True,
+            "issue_reason_search_restart": True,
+            "issue_state_private_preparation": True,
             "organization_explicit_bootstrap": True,
             "organization_metadata_restart": True,
             "organization_last_owner_guard": True,

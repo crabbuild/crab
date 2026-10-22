@@ -24,8 +24,10 @@ Receive continues through `crates/crab-server/src/git/receive/mod.rs` to the
 shared publication owner `crates/crab-write/src/journal.rs`.
 
 The Cell repository facade in `src/cells/repository/mod.rs` exposes typed
-operations. `models.rs` owns common records/inputs; `issues.rs` owns issue and
-comment operations. Feature commands and their persistence helpers live under
+operations. `models.rs` owns common records/inputs; `issues/` owns issue and
+comment operations, `reads.rs` owns snapshot presentation reads and `lifecycle/`
+owns canonical close reasons/times and explicit bounded preparation. Tests stay
+with that owner. Private preparation is `cells prepare-issue-state`. Feature commands and their persistence helpers live under
 `checks/`, `labels/`, `statuses/`, `settings/`, `releases/`, and `pulls/`. Pull
 readiness belongs to `pulls/readiness/`, reviewer invitations and fulfillment
 belong to `pulls/review_requests/`, bounded reviewer summaries to

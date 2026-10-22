@@ -308,6 +308,7 @@ async fn qualified_commenters_cover_all_sources_survive_rebuild_and_follow_sourc
         write::<UpdateIssue>(
             &cell,
             UpdateIssueInput {
+                state_reason: None,
                 number: 1,
                 actor: owner.clone(),
                 can_triage: true,

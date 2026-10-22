@@ -28,7 +28,9 @@ not forwarded as a non-replayable upload stream. Successful HTTP output
 uses the SDK output gate, including its ownership and durability checks.
 
 Repository assignment format 2 and discussion index format 10 require the explicit
-preparation described below. Other canonical records retain their formats.
+preparation described below. Issue lifecycle metadata also requires explicit
+`cells prepare-issue-state` on existing repositories. Other canonical records
+retain their formats.
 Transport requests and replies use bounded JSON. Mutation receipts store
 the payload digest and outcome in the same transaction as application writes.
 Rejections roll application writes back in a nested SDK transaction while keeping
@@ -535,3 +537,31 @@ These checks do not qualify mixed-version upgrades, protected cloud fault
 matrices, or production scale. Release publication remains disabled by a direct workflow gate until those
 native contracts are implemented and verified. The obsolete qualification
 framework, fleet fixtures, and runtime-specific deployment recipes are removed.
+
+## Issue lifecycle preparation
+
+`cells/repository/issues/lifecycle/` owns one canonical SQL row per issue for
+nullable close reason and time. Fresh Repository initialization creates it. For
+each existing repository, run:
+
+```sh
+"$SERVER" --config /secure/server.toml cells prepare-issue-state --owner OWNER --name REPO
+```
+
+Private mTLS GET/POST `issue-state` status/preparation operations use versioned
+frames of eight issue/activity steps. Preparation preserves the exact issue
+record and immutable events, recovers close time only from matching historical
+activity, and leaves missing reasons unknown. SQL rows and the persisted issue/
+activity cursor commit together; replay and restart resume the same frame.
+Mixed-version serving is unsupported. Prepare before reopening traffic. Missing/
+partial metadata returns public 503 `schema_upgrade_required`; serving never
+installs DDL or guesses a missing row. PR-only queries without reason predicates
+remain independent. No discussion-index format change or rebuild is needed.
+
+State/reason changes, timestamps, milestone progress, typed activity, search
+revision and command receipts share the native SDK transaction/output gate.
+Existing issue command input digests with no reason and original record/outcome
+bytes are retained for durable receipt replay; HTTP renders a causal detail read
+after the commit. Existing generic closure events remain immutable history and
+continue to represent current PR closure. New issue closures carry their reason.
+Duplicate relationships and combined comment/state submission remain unfinished.

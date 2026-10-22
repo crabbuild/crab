@@ -15,10 +15,21 @@ pub(crate) enum Action {
     Created,
     Drafted,
     ReadyForReview,
-    ReviewRequested { reviewer: String },
-    ReviewRequestCancelled { reviewer: String },
+    ReviewRequested {
+        reviewer: String,
+    },
+    ReviewRequestCancelled {
+        reviewer: String,
+    },
     Updated,
     Closed,
+    IssueClosed {
+        reason: crate::cells::repository::issues::lifecycle::Reason,
+    },
+    IssueCloseReasonChanged {
+        from: Option<crate::cells::repository::issues::lifecycle::Reason>,
+        to: crate::cells::repository::issues::lifecycle::Reason,
+    },
     Reopened,
     Approved,
     ChangesRequested,
@@ -26,10 +37,22 @@ pub(crate) enum Action {
     Merged,
     Resolved,
     Unresolved,
-    MilestoneAssigned { number: u64, title: String },
-    MilestoneRemoved { number: u64, title: String },
-    IssueLinked { number: u64, title: String },
-    IssueUnlinked { number: u64, title: String },
+    MilestoneAssigned {
+        number: u64,
+        title: String,
+    },
+    MilestoneRemoved {
+        number: u64,
+        title: String,
+    },
+    IssueLinked {
+        number: u64,
+        title: String,
+    },
+    IssueUnlinked {
+        number: u64,
+        title: String,
+    },
 }
 
 impl Action {
@@ -53,6 +76,8 @@ impl Action {
                     | Self::Updated
                     | Self::Closed
                     | Self::Reopened
+                    | Self::IssueClosed { .. }
+                    | Self::IssueCloseReasonChanged { .. }
                     | Self::MilestoneAssigned { .. }
                     | Self::MilestoneRemoved { .. }
             ),
@@ -95,6 +120,22 @@ impl Action {
         if let Self::ReviewRequested { reviewer } | Self::ReviewRequestCancelled { reviewer } = self
         {
             validate_title(reviewer)?;
+        }
+        if matches!(
+            self,
+            Self::IssueClosed {
+                reason: super::super::issues::lifecycle::Reason::Reopened
+            } | Self::IssueCloseReasonChanged {
+                from: Some(super::super::issues::lifecycle::Reason::Reopened),
+                ..
+            } | Self::IssueCloseReasonChanged {
+                to: super::super::issues::lifecycle::Reason::Reopened,
+                ..
+            }
+        ) {
+            return Err(crate::cells::Error::Invalid(
+                "closure activity reason is invalid",
+            ));
         }
         if !valid {
             return Err(crate::cells::Error::Invalid(

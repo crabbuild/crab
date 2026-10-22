@@ -98,6 +98,7 @@ async fn assignment_progress_tracks_issue_state_and_duplicate_commands() {
     assert_eq!(applied(selected.output).milestone.unwrap().open_count, 1);
     let request = identity();
     let close = UpdateIssueInput {
+        state_reason: None,
         number: issue.number,
         actor: actor(),
         can_triage: true,

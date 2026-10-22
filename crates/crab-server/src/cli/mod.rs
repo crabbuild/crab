@@ -10,6 +10,7 @@ use tracing_subscriber::EnvFilter;
 
 mod assignments;
 mod ecs;
+mod issues;
 
 #[derive(Parser)]
 #[command(version, about = "Serve and administer Crab repositories")]
@@ -86,6 +87,13 @@ enum CellsCommand {
         organization: uuid::Uuid,
         #[arg(long)]
         input_file: PathBuf,
+    },
+    /// Prepare canonical issue closure metadata in restartable bounded frames.
+    PrepareIssueState {
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        name: String,
     },
     /// Print the resource-derived Cell admission envelope.
     Capacity {
@@ -274,6 +282,9 @@ async fn cells(config: &crab_server::Config, command: CellsCommand) -> crab_serv
                 .await
                 .map_err(|source| crab_server::Error::Healthcheck { source })?
                 .to_vec()
+        }
+        CellsCommand::PrepareIssueState { owner, name } => {
+            issues::prepare(config, &owner, &name).await?
         }
         CellsCommand::DirectoryStatus => management_body(config, "/internal/directory").await?,
         CellsCommand::MigrateDirectory => migrate_directory(config).await?,

@@ -144,6 +144,7 @@ async fn historical_choice_catalog_is_bounded_deduplicated_and_tracks_last_assig
                 &cell.target,
                 crate::app::mutation_identity().unwrap(),
                 UpdateIssueInput {
+                    state_reason: None,
                     number,
                     actor: actor.clone(),
                     can_triage: true,
@@ -195,6 +196,7 @@ async fn historical_choice_catalog_is_bounded_deduplicated_and_tracks_last_assig
                 &cell.target,
                 crate::app::mutation_identity().unwrap(),
                 UpdateIssueInput {
+                    state_reason: None,
                     number,
                     actor: actor.clone(),
                     can_triage: true,

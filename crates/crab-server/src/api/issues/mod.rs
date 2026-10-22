@@ -164,56 +164,31 @@ async fn create(
     let title = title(&input.title)?;
     body(&input.body, false)?;
     let routed = crate::app::repository_cell(&server, &repo)?;
-    let output = crate::app::command_output(
-        routed
-            .client
-            .command::<CreateIssue>(
-                &routed.target,
-                crate::app::mutation_identity()?,
-                CreateIssueInput {
-                    submission_id: app::submission_id(&input.request_id)?,
-                    author: crate::cells::repository::RepositoryAuthor::from(&author),
-                    title,
-                    body: input.body,
-                },
-            )
-            .await,
-    )?;
+    let committed = routed
+        .client
+        .command::<CreateIssue>(
+            &routed.target,
+            crate::app::mutation_identity()?,
+            CreateIssueInput {
+                submission_id: app::submission_id(&input.request_id)?,
+                author: crate::cells::repository::RepositoryAuthor::from(&author),
+                title,
+                body: input.body,
+            },
+        )
+        .await
+        .map_err(Error::Cell)?;
+    let minimum = Some(committed.receipt);
+    let output = committed.output;
     let issue = match output {
         CreateIssueOutcome::Archived => return Err(Error::Archived),
         CreateIssueOutcome::Created(issue) => issue,
         CreateIssueOutcome::RequestConflict => return Err(Error::RequestConflict),
     };
     let enrichment_started = Instant::now();
-    // A replay returns the issue's current state, which may have acquired labels
-    // since creation. Decide from that result, not from the create input.
-    let labels = if issue.label_ids.is_empty() {
-        vec![]
-    } else {
-        labels::catalog(&server, &repo).await?
-    };
-    let reaction = reactions::one(
-        &server,
-        &repo,
-        &author,
-        Target::Issue {
-            number: issue.number,
-        },
-    )
-    .await?;
-    let authors = Authors::load(&server, &principal, std::iter::once(&issue.author)).await?;
-    let assignees = Selection::load(&server, &principal, &repo, issue.assignees.iter()).await?;
     let response = (
         StatusCode::CREATED,
-        Json(view::issue(
-            &authors,
-            &issue,
-            &author,
-            &labels,
-            &assignees,
-            assignees.principal.can_triage(repo.id),
-            &reaction,
-        )),
+        rendered(&server, &principal, &repo, issue.number, minimum).await?,
     );
     tracing::debug!(
         target: "crab_server::action",
@@ -238,45 +213,15 @@ async fn detail(
     Query(params): Query<DetailParameters>,
 ) -> Result<Response> {
     let repo = repository(&server, &principal, &(owner, name))?;
-    let author = actor(&principal)?;
     if params.read.as_deref().is_some_and(|mode| mode != "owner")
         || params.after_incarnation.is_some()
         || params.after_sequence.is_some()
     {
         return Err(Error::Invalid("Cellar supports owner-routed issue reads"));
     }
-    let routed = crate::app::repository_cell(&server, &repo)?;
-    let detail = crate::app::query_output(
-        routed
-            .client
-            .query::<GetIssueDetail>(&routed.target, None, number(id)?)
-            .await,
-    )?;
-    let issue = detail.issue;
-    let labels = detail.labels.labels;
-    let issue = issue.ok_or(Error::NotFound)?;
-    let reaction = reactions::one(
-        &server,
-        &repo,
-        &author,
-        Target::Issue {
-            number: issue.number,
-        },
-    )
-    .await?;
-    let authors = Authors::load(&server, &principal, std::iter::once(&issue.author)).await?;
-    let assignees = Selection::load(&server, &principal, &repo, issue.assignees.iter()).await?;
-    let response = Json(view::issue(
-        &authors,
-        &issue,
-        &author,
-        &labels,
-        &assignees,
-        assignees.principal.can_triage(repo.id),
-        &reaction,
-    ))
-    .into_response();
-    Ok(response)
+    Ok(rendered(&server, &principal, &repo, number(id)?, None)
+        .await?
+        .into_response())
 }
 
 #[derive(Deserialize)]
@@ -286,6 +231,7 @@ struct IssueEdit {
     title: Option<String>,
     body: Option<String>,
     state: Option<IssueState>,
+    state_reason: Option<crate::cells::repository::issues::lifecycle::Reason>,
     label_ids: Option<Vec<u64>>,
     assignee_ids: Option<Vec<uuid::Uuid>>,
 }
@@ -302,6 +248,7 @@ async fn edit(
     if input.title.is_none()
         && input.body.is_none()
         && input.state.is_none()
+        && input.state_reason.is_none()
         && input.label_ids.is_none()
         && input.assignee_ids.is_none()
     {
@@ -342,27 +289,34 @@ async fn edit(
         (permissions.principal.can_triage(repo.id), None)
     };
     let routed = crate::app::repository_cell(&server, &repo)?;
-    let output = crate::app::command_output(
-        routed
-            .client
-            .command::<UpdateIssue>(
-                &routed.target,
-                crate::app::mutation_identity()?,
-                UpdateIssueInput {
-                    number: number(id)?,
-                    actor: crate::cells::repository::RepositoryAuthor::from(&author),
-                    can_triage,
-                    version: input.version,
-                    title,
-                    body: input.body,
-                    state: input.state.map(IssueState::code),
-                    label_ids,
-                    assignees,
-                },
-            )
-            .await,
-    )?;
+    let committed = routed
+        .client
+        .command::<UpdateIssue>(
+            &routed.target,
+            crate::app::mutation_identity()?,
+            UpdateIssueInput {
+                state_reason: input.state_reason,
+                number: number(id)?,
+                actor: crate::cells::repository::RepositoryAuthor::from(&author),
+                can_triage,
+                version: input.version,
+                title,
+                body: input.body,
+                state: input.state.map(IssueState::code),
+                label_ids,
+                assignees,
+            },
+        )
+        .await
+        .map_err(Error::Cell)?;
+    let minimum = Some(committed.receipt);
+    let output = committed.output;
     let issue = match output {
+        UpdateIssueOutcome::InvalidStateReason => {
+            return Err(Error::Invalid(
+                "Close reasons require a closed issue; reopening clears the close reason",
+            ));
+        }
         UpdateIssueOutcome::Archived => return Err(Error::Archived),
         UpdateIssueOutcome::Updated(issue) => issue,
         UpdateIssueOutcome::NotFound => return Err(Error::NotFound),
@@ -376,29 +330,39 @@ async fn edit(
         UpdateIssueOutcome::AssigneeForbidden => return Err(Error::AssigneePermission),
         UpdateIssueOutcome::Conflict => return Err(Error::Conflict),
     };
-    // An edit without label changes can return existing selections. Reuse any
-    // catalog fetched for validation; otherwise fetch only for actual rendering.
-    let labels = if labels.is_empty() && !issue.label_ids.is_empty() {
-        labels::catalog(&server, &repo).await?
-    } else {
-        labels
-    };
-    let reaction = reactions::one(
-        &server,
-        &repo,
-        &author,
-        Target::Issue {
-            number: issue.number,
-        },
-    )
-    .await?;
-    let authors = Authors::load(&server, &principal, std::iter::once(&issue.author)).await?;
-    let assignees = Selection::load(&server, &principal, &repo, issue.assignees.iter()).await?;
+    rendered(&server, &principal, &repo, issue.number, minimum).await
+}
+
+async fn rendered(
+    server: &Server,
+    principal: &Principal,
+    repo: &crate::repository::Repository,
+    id: u64,
+    minimum: Option<crate::cells::Receipt>,
+) -> Result<Json<Value>> {
+    let author = actor(principal)?;
+    let routed = app::repository_cell(server, repo)?;
+    // Mutation receipts keep their original record bytes. Read lifecycle and
+    // content together after the commit so replay/enrichment cannot mix versions.
+    let detail = app::query_output(
+        routed
+            .client
+            .query::<GetIssueDetail>(&routed.target, minimum, id)
+            .await,
+    )?;
+    let issue = detail.issue.ok_or(Error::NotFound)?;
+    let lifecycle = detail
+        .lifecycle
+        .ok_or(Error::CellContract("Issue lifecycle is missing"))?;
+    let reaction = reactions::one(server, repo, &author, Target::Issue { number: id }).await?;
+    let authors = Authors::load(server, principal, std::iter::once(&issue.author)).await?;
+    let assignees = Selection::load(server, principal, repo, issue.assignees.iter()).await?;
     Ok(Json(view::issue(
         &authors,
         &issue,
+        &lifecycle,
         &author,
-        &labels,
+        &detail.labels.labels,
         &assignees,
         assignees.principal.can_triage(repo.id),
         &reaction,

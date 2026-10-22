@@ -1,3 +1,4 @@
+import { CircleSlashIcon } from "lucide-react";
 import { IssueClosedIcon, IssueOpenedIcon } from "@primer/octicons-react";
 import { Link } from "@/components/navigation/link";
 import { LabelBadges } from "@/features/labels/selection";
@@ -24,13 +25,20 @@ export function DiscussionRow({
   item: DiscussionItem;
   repo: Repository;
 }) {
-  const status = item.kind === "pull" ? pullStatus(item) : item.state;
+  const status =
+    item.kind === "pull"
+      ? pullStatus(item)
+      : item.state === "closed" && item.state_reason === "not_planned"
+        ? "not-planned"
+        : item.state;
   const Icon =
     item.kind === "pull"
-      ? pullIcons[status]
+      ? pullIcons[pullStatus(item)]
       : item.state === "open"
         ? IssueOpenedIcon
-        : IssueClosedIcon;
+        : item.state_reason === "not_planned"
+          ? CircleSlashIcon
+          : IssueClosedIcon;
   const href = repoHref(
     repo,
     item.kind === "pull"

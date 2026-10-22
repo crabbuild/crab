@@ -40,7 +40,7 @@ Current entry points are `packages/ui/src/features/issues/index.tsx`,
 `packages/ui/src/components/discussion/workspace.tsx`, and
 `packages/ui/src/components/discussion/search.tsx`. The two HTTP list handlers
 accept typed query, sort/direction, page size, and an opaque before cursor.
-Native owners are `cells/repository/search/results/`, `issues.rs` and
+Native owners are `cells/repository/search/results/`, `issues/` and
 `pulls/operations.rs`.
 Existing milestones, reactions, activity, links, readiness, and review requests
 are described in `repository-collaboration.md`; reuse these canonical owners.
@@ -816,3 +816,58 @@ repository grant cutover and cross-Cell fencing remain unfinished. Projects,
 organization issue types, advanced review/merge flows and the remaining Issues/
 Milestones inventory still follow the collaboration plan. Cellar's documented
 SQLite WAL-reset release blocker remains unchanged.
+
+## Issue closure lifecycle
+
+Issues now carry canonical nullable `state_reason` and `closed_at` metadata.
+Completed/not-planned closure, reason changes and reopen operations share the
+Repository transaction with the record version, milestone counts, activity,
+search revision and durable command receipt. Reopening clears the close time;
+changing an already-closed reason preserves it. Authors and current triage
+members may change state/reason; stale, archived and unauthorized writes cannot
+change the metadata. Invalid reason/state combinations have a typed rejection.
+
+The shadcn split close action lives beside the comment button. Choosing an open
+issue's reason does not write until Close is pressed. Closed issues support
+reason changes and reopening. Header/list presentation distinguishes not-planned
+closures, and typed timeline events explain the change. Pending comment drafts
+survive state actions; history reads do not disable independent state actions.
+Delayed mutation replies cannot replace a newer issue refresh. Atomic comment-
+and-close remains unfinished; the current controls are explicitly separate.
+
+`reason:completed`, `reason:"not planned"`, `reason:reopened` and `no:reason`
+participate in the shared Boolean query, counts and cursor contract. Positive
+reason predicates match issues only. The normalized canonical relation supplies
+metadata without another derived index format or rebuild. Cursor fingerprints
+include its format so old list cursors cannot silently change meaning.
+
+Existing repositories require explicit `cells prepare-issue-state --owner OWNER
+--name REPO` before issue detail, mixed search and issue writes. Serving never
+creates missing lifecycle rows. Bounded frames retain both an issue cursor and
+an activity cursor; preparation resumes across restart. Immutable historical
+close/reopen events can prove dates or reopened state, while absent reasons stay
+unknown. An edit timestamp is never substituted for a close date. Original
+mutation outcome bytes and absent-field request digests remain unchanged.
+
+This advances the issue foundation. Duplicate closure and typed duplicate links,
+sub-issues/dependencies, atomic comment-and-state submission, date filtering,
+organization types, saved/bulk workflows and the wider PR/Projects/Milestones
+inventory remain delivery work. The Cellar dependency/release limitation is
+unchanged.
+
+Validation: the isolated server library suite passed 418 tests (six existing
+opt-in tests ignored), the CLI passed 13, and final focused lifecycle tests passed
+six. Strict all-target Clippy, architecture gates, formatting, UI typecheck/build,
+107 UI unit tests and a clean 119-scenario browser run passed. The real embedded-
+UI/RustFS run exercised reason selection/changes, reopen/reclose, retained drafts,
+metadata/search restart, and the existing Git/PR/merge/milestone/index-rebuild
+workflow, leaving 87 durable native objects. Desktop/mobile captures were
+inspected; owned test browsers/services were closed. The persistent preview's two
+repositories were explicitly prepared without an index rebuild; 18 canonical
+resource payloads were preserved, apart from proven nullable lifecycle fields
+and advancing reaction receipt watermarks. No profile or organization was created.
+
+The change adds 816 net production lines for canonical lifecycle storage,
+transactional behavior, bounded preparation, management/CLI and state controls.
+Shared HTTP rendering removes duplicate enrichment; no dependency, compatibility
+reader, second index format or speculative date-query surface was added.

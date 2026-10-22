@@ -28,6 +28,12 @@ export type Target =
     }
   | { kind: "pull_reply"; pull: number; thread: number; number: number };
 export type Action =
+  | { kind: "issue_closed"; reason: "completed" | "not_planned" }
+  | {
+      kind: "issue_close_reason_changed";
+      from: "completed" | "not_planned" | null;
+      to: "completed" | "not_planned";
+    }
   | {
       kind:
         | "drafted"

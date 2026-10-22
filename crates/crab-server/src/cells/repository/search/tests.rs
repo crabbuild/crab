@@ -62,6 +62,7 @@ async fn fixture(
             &cell.target,
             crate::app::mutation_identity().unwrap(),
             UpdateIssueInput {
+                state_reason: None,
                 number: 1,
                 actor: author,
                 can_triage: true,
@@ -254,6 +255,7 @@ async fn native_issue_and_pull_search_share_labels_boolean_logic_and_readiness()
                     &cell.target,
                     crate::app::mutation_identity().unwrap(),
                     UpdateIssueInput {
+                        state_reason: None,
                         number: issue.number,
                         actor: author.clone(),
                         can_triage: true,

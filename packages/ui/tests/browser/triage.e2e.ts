@@ -17,6 +17,8 @@ test("triage closes and reopens another author's issue without showing descripti
     author: { name: "Alice", profile: null },
     body: "Original report",
     state: "open",
+    state_reason: null as "completed" | "not_planned" | "reopened" | null,
+    closed_at: null as number | null,
     version: 1,
     created_at: 1700000000000,
     updated_at: 1700000000000,
@@ -54,9 +56,20 @@ test("triage closes and reopens another author's issue without showing descripti
       if (route.request().method() === "PATCH") {
         const input = route.request().postDataJSON();
         expect(input.version).toBe(issue.version);
-        expect(Object.keys(input).sort()).toEqual(["state", "version"]);
+        expect(Object.keys(input).sort()).toEqual(
+          input.state === "closed"
+            ? ["state", "state_reason", "version"]
+            : ["state", "version"],
+        );
         writes.push(input);
-        issue = { ...issue, state: input.state, version: issue.version + 1 };
+        issue = {
+          ...issue,
+          state: input.state,
+          state_reason:
+            input.state === "closed" ? input.state_reason : "reopened",
+          closed_at: input.state === "closed" ? 1700000000100 : null,
+          version: issue.version + 1,
+        };
       }
       return route.fulfill({
         json: {

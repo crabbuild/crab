@@ -209,6 +209,7 @@ async fn native_label_choices_search_the_whole_catalog_and_follow_assignments_re
         write::<UpdateIssue>(
             &cell,
             UpdateIssueInput {
+                state_reason: None,
                 number,
                 actor: author(),
                 can_triage: true,

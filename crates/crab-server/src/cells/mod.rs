@@ -13,7 +13,7 @@ pub(crate) use initializer::initialize_repository;
 pub(crate) mod repository;
 
 pub(crate) use application::MutationIdentity;
-pub(crate) use client::{CellClient, Committed, Observed, RepositoryCell};
+pub(crate) use client::{CellClient, Committed, Observed, Receipt, RepositoryCell};
 
 /// Cell execution and transport failures with original error sources.
 #[derive(Debug, thiserror::Error)]

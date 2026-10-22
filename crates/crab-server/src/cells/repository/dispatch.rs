@@ -13,16 +13,25 @@ pub(in crate::cells) fn dispatch_mutation(
     input: serde_json::Value,
 ) -> crate::cells::Result<MutationResult<serde_json::Value>> {
     let maintenance = id == <search::index::RebuildIndex as Mutation>::ID
-        || id == <assignments::MigrateAssignments as Mutation>::ID;
+        || id == <assignments::MigrateAssignments as Mutation>::ID
+        || id == issues::lifecycle::PrepareIssueLifecycle::ID;
     #[cfg(test)]
     let maintenance = maintenance
         || id == assignments::migration::tests::SeedSubjects::ID
         || id == reviewers::tests::PreviousIndex::ID
-        || id == collaboration::conversation::tests::Inspect::ID;
+        || id == collaboration::conversation::tests::Inspect::ID
+        || id == issues::lifecycle::tests::Historical::ID;
     if !maintenance {
         search::index::ensure_ready(context)?;
     }
     let result = match id {
+        #[cfg(test)]
+        issues::lifecycle::tests::Historical::ID => {
+            invoke_mutation::<issues::lifecycle::tests::Historical>(context, input)
+        }
+        issues::lifecycle::PrepareIssueLifecycle::ID => {
+            invoke_mutation::<issues::lifecycle::PrepareIssueLifecycle>(context, input)
+        }
         #[cfg(test)]
         collaboration::conversation::tests::Inspect::ID => {
             invoke_mutation::<collaboration::conversation::tests::Inspect>(context, input)
@@ -128,6 +137,9 @@ pub(in crate::cells) fn dispatch_read(
     input: serde_json::Value,
 ) -> crate::cells::Result<serde_json::Value> {
     match id {
+        issues::lifecycle::GetIssueLifecycleStatus::ID => {
+            invoke_read::<issues::lifecycle::GetIssueLifecycleStatus>(context, input)
+        }
         #[cfg(test)]
         assignments::migration::tests::InspectColumns::ID => {
             invoke_read::<assignments::migration::tests::InspectColumns>(context, input)

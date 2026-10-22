@@ -82,7 +82,7 @@ pub(crate) mod assignments;
 mod checks;
 pub(crate) mod collaboration;
 mod dispatch;
-mod issues;
+pub(crate) mod issues;
 mod labels;
 mod models;
 pub(crate) mod projection;

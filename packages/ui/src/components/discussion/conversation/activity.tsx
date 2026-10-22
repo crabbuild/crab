@@ -44,6 +44,12 @@ function action(event: ActivityEvent): string {
       return `cancelled the review request for ${event.action.reviewer} on`;
     case "updated":
       return "updated";
+    case "issue_closed":
+      return event.action.reason === "not_planned"
+        ? "closed as not planned"
+        : "closed as completed";
+    case "issue_close_reason_changed":
+      return `changed the close reason to ${event.action.to === "not_planned" ? "not planned" : "completed"} on`;
     case "closed":
       return "closed";
     case "reopened":

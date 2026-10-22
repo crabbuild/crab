@@ -258,6 +258,7 @@ async fn comments_reactions_and_rejected_edits_keep_index_totals_consistent() {
     let rejected = write::<UpdateIssue>(
         &cell,
         UpdateIssueInput {
+            state_reason: None,
             number: 1,
             actor: actor(),
             can_triage: true,
@@ -420,6 +421,7 @@ async fn state_counters_equal_their_navigation_queries_across_boolean_and_litera
     let closed = write::<UpdateIssue>(
         &cell,
         UpdateIssueInput {
+            state_reason: None,
             number: 2,
             actor: actor(),
             can_triage: true,

@@ -122,6 +122,7 @@ async fn one_ordered_stream_contains_contributions_and_lifecycle_without_duplica
         write::<UpdateIssue>(
             &cell,
             UpdateIssueInput {
+                state_reason: None,
                 number: 1,
                 actor: actor("Alice"),
                 can_triage: true,

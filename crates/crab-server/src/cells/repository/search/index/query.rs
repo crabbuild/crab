@@ -202,6 +202,9 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
     let generation = ensure_ready(context)?;
     let revision = revision(context)?;
     let query = Query::parse(input.query.as_deref()).map_err(crate::cells::Error::Invalid)?;
+    if subject_kind != Some(SubjectKind::Pull) || query.needs_lifecycle() {
+        super::super::super::issues::lifecycle::ensure_ready(context)?;
+    }
     query
         .validate_people(&input.people)
         .map_err(crate::cells::Error::Invalid)?;
@@ -223,6 +226,7 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
     let repository = crate::cells::repository::result_blob(identity, 0)?;
     let digest = blake3::hash(&serde_json::to_vec(&(
         FORMAT,
+        "issue-lifecycle/v1",
         repository,
         subject_kind,
         input.sort,
@@ -505,6 +509,8 @@ fn scoped_expression(
                 let value = bindings.text(title);
                 format!("EXISTS (SELECT 1 FROM discussion_index_milestones dm JOIN discussion_index_milestone_catalog m ON m.number = dm.milestone WHERE dm.document = d.rowid AND m.title_key = {value})")
             }
+            Term::Reason(reason)=>format!("d.kind=0 AND EXISTS (SELECT 1 FROM repository_issue_lifecycle il WHERE il.issue=d.number AND il.state_reason={})",bindings.text(reason.name())),
+            Term::Missing(Metadata::Reason)=>"d.kind=0 AND EXISTS (SELECT 1 FROM repository_issue_lifecycle il WHERE il.issue=d.number AND il.state_reason IS NULL)".into(),
             Term::State(SubjectState::Open) => "d.state = 0".into(),
             Term::State(SubjectState::Closed) => "d.state <> 0".into(),
             Term::State(SubjectState::Merged) => "d.state = 2".into(),

@@ -356,7 +356,7 @@ Read these sources in order:
 | [app.rs](src/app.rs) | Admission timeout, repository access, input validation, and HTTP error mapping |
 | [cells/client.rs](src/cells/client.rs) | Typed requests through native ingress |
 | [cells/application.rs](src/cells/application.rs) | Transaction, replay receipts, and native output gate |
-| [cells/repository/issues.rs](src/cells/repository/issues.rs) | SQLite transaction, submission reservation, number allocation, and typed outcome |
+| [cells/repository/issues/](src/cells/repository/issues/mod.rs) | SQLite transaction, submission reservation, number allocation, and typed outcome |
 | [Cellar SDK](https://github.com/crabbuild/cellar) | Native ownership, persistence, recovery, and output durability |
 
 Example JSON body, subject to the server's authentication and mutation checks:

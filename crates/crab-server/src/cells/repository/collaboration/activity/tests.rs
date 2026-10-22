@@ -101,6 +101,7 @@ async fn state_and_content_changes_are_ordered_and_rejected_or_noop_edits_emit_n
     let cell = cell(&server);
     write::<CreateIssue>(&cell, issue("Issue")).await;
     let input = UpdateIssueInput {
+        state_reason: None,
         number: 1,
         version: 1,
         actor: actor("Alice"),
@@ -133,7 +134,12 @@ async fn state_and_content_changes_are_ordered_and_rejected_or_noop_edits_emit_n
             .map(|event| (event.number, event.action.clone()))
             .collect::<Vec<_>>(),
         vec![
-            (3, Action::Closed),
+            (
+                3,
+                Action::IssueClosed {
+                    reason: crate::cells::repository::issues::lifecycle::Reason::Completed
+                }
+            ),
             (2, Action::Updated),
             (1, Action::Created)
         ]

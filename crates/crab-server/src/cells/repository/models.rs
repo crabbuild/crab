@@ -180,6 +180,9 @@ pub(crate) struct CommentKey {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct UpdateIssueInput {
+    // Absence retains the persisted command digest for pre-lifecycle receipts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_reason: Option<super::issues::lifecycle::Reason>,
     pub number: u64,
     pub actor: RepositoryAuthor,
     pub can_triage: bool,
@@ -200,6 +203,7 @@ pub(crate) enum UpdateIssueOutcome {
     LabelForbidden,
     LabelInvalid,
     AssigneeForbidden,
+    InvalidStateReason,
     Conflict,
 }
 
@@ -222,6 +226,7 @@ pub(crate) enum UpdateCommentOutcome {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct IssueSummary {
+    pub lifecycle: super::issues::lifecycle::Lifecycle,
     pub number: u64,
     pub author: RepositoryAuthor,
     pub title: String,

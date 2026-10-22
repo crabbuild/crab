@@ -54,6 +54,7 @@ enum Term {
     Label(Vec<String>),
     Milestone(String),
     State(SubjectState),
+    Reason(super::issues::lifecycle::Reason),
     Kind(SubjectKind),
     Unmerged,
     Draft(bool),
@@ -62,6 +63,7 @@ enum Term {
 
 #[derive(Clone, Debug, serde::Serialize)]
 enum Metadata {
+    Reason,
     Label,
     Assignee,
     Milestone,
@@ -95,6 +97,23 @@ impl Query {
         let mut names = std::collections::BTreeSet::new();
         collect(&self.expression, select, &mut names);
         names
+    }
+    pub(super) fn needs_lifecycle(&self) -> bool {
+        fn has(expression: &Expression) -> bool {
+            match expression {
+                Expression::Term {
+                    value: Term::Reason(_) | Term::Missing(Metadata::Reason),
+                    ..
+                } => true,
+                Expression::Not(inner)
+                | Expression::Scope {
+                    expression: inner, ..
+                } => has(inner),
+                Expression::And(parts) | Expression::Or(parts) => parts.iter().any(has),
+                _ => false,
+            }
+        }
+        has(&self.expression)
     }
     pub(crate) fn parse(source: Option<&str>) -> Result<Self, &'static str> {
         let Some(source) = source else {
@@ -325,6 +344,14 @@ fn atom_expression(atom: &str) -> Result<Expression, &'static str> {
                 }
             }
             "label" => Term::Label(label_names(value)?),
+            "reason" => Term::Reason(match unquote(value)?.to_lowercase().as_str() {
+                "completed" => super::issues::lifecycle::Reason::Completed,
+                "not planned" => super::issues::lifecycle::Reason::NotPlanned,
+                "reopened" => super::issues::lifecycle::Reason::Reopened,
+                _ => {
+                    return Err("Search reason must be completed, quoted not planned, or reopened");
+                }
+            }),
             "milestone" => Term::Milestone(unquote(value)?.to_lowercase()),
             "is" | "state" => match unquote(value)?.to_ascii_lowercase().as_str() {
                 "open" => Term::State(SubjectState::Open),
@@ -350,7 +377,12 @@ fn atom_expression(atom: &str) -> Result<Expression, &'static str> {
                     "label" => Term::Missing(Metadata::Label),
                     "assignee" => Term::Missing(Metadata::Assignee),
                     "milestone" => Term::Missing(Metadata::Milestone),
-                    _ => return Err("Search no qualifier supports label, assignee and milestone"),
+                    "reason" => Term::Missing(Metadata::Reason),
+                    _ => {
+                        return Err(
+                            "Search no qualifier supports label, assignee, milestone and reason",
+                        );
+                    }
                 }
             }
             _ => {

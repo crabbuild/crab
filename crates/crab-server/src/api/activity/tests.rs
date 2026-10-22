@@ -43,7 +43,10 @@ async fn member_activity_is_paginated_and_subject_scoped_without_identity_claims
     *h.provider.mode.lock().await = "member".into();
     let bob = h.login().await;
     let page = h.json(&format!("{ROOT}/activity?limit=1"), &bob).await;
-    assert_eq!(page["items"][0]["action"]["kind"], "closed");
+    assert_eq!(
+        page["items"][0]["action"],
+        json!({"kind":"issue_closed","reason":"completed"})
+    );
     let next = page["next"].as_u64().unwrap();
     let older = h
         .json(
