@@ -202,7 +202,7 @@ async fn linked_work_uses_live_subject_summaries_and_exclusive_pages() {
             body: None,
             state: Some(1),
             label_ids: None,
-            assignee_subjects: None,
+            assignees: None,
         },
     )
     .await;

@@ -413,7 +413,7 @@ async fn missing_closed_and_archived_pulls_reject_readiness_changes() {
             body: None,
             state: Some(PullState::Closed),
             label_ids: None,
-            assignee_subjects: None,
+            assignees: None,
         },
     )
     .await
@@ -497,7 +497,7 @@ async fn closing_and_reopening_a_draft_preserves_its_merge_block() {
         body: None,
         state: Some(PullState::Closed),
         label_ids: None,
-        assignee_subjects: None,
+        assignees: None,
     };
     let UpdatePullOutcome::Updated(closed) = write::<UpdatePull>(&cell, close.clone()).await else {
         panic!("draft did not close")

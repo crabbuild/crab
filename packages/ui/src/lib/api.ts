@@ -1,3 +1,4 @@
+import type { ActorProfile } from "@/features/profile/model";
 import { useCallback, useEffect, useState, useSyncExternalStore } from "react";
 
 export interface Session {
@@ -59,8 +60,9 @@ export interface RepositoryLabel {
   updated_at: number;
 }
 export interface RepositoryAssignee {
-  subject: string;
+  id: string;
   name: string;
+  profile: Pick<ActorProfile, "id" | "handle" | "name"> | null;
 }
 export interface Ref {
   name: string;

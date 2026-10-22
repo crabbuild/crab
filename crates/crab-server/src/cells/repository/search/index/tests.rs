@@ -266,7 +266,7 @@ async fn comments_reactions_and_rejected_edits_keep_index_totals_consistent() {
             body: None,
             state: Some(1),
             label_ids: None,
-            assignee_subjects: None,
+            assignees: None,
         },
     )
     .await;
@@ -427,7 +427,7 @@ async fn state_counters_equal_their_navigation_queries_across_boolean_and_litera
             body: None,
             state: Some(1),
             label_ids: None,
-            assignee_subjects: None,
+            assignees: None,
         },
     )
     .await;

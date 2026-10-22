@@ -167,7 +167,9 @@ Account pages live outside repository routes: `/-/profile` edits the signed-in
 account's public profile; `/-/users/{actor-uuid}` shows its stable public URL.
 The header's profile icon opens account settings. Initialize the shared directory
 before serving profiles or nonempty issue/PR lists, using
-`cells initialize-directory` against the running private mTLS listener.
+`cells initialize-directory` against the running private mTLS listener. Existing assignment data also requires explicit
+`cells migrate-assignments` and a format-4 `cells rebuild-search`; nonempty records
+need qualified-identity mappings. See [assignment preparation](CELLAR.md#assignment-preparation).
 Users choose a username and display name; authentication claims are
 never published as profile fields. Changing a profile grants no repository or
 organization access. `-` is reserved as a server route owner.

@@ -82,7 +82,7 @@ fn edit(version: u64, title: &str) -> UpdatePullInput {
         body: None,
         state: None,
         label_ids: None,
-        assignee_subjects: None,
+        assignees: None,
     }
 }
 async fn rejected<M: Mutation>(cell: &RepositoryCell, revision: u64, input: M::Input)

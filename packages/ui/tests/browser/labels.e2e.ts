@@ -73,8 +73,20 @@ test("repository metadata can be managed and assigned to an issue", async ({
       return route.fulfill({
         json: {
           items: [
-            { subject: "operator", name: "Local operator" },
-            { subject: "maintainer", name: "Repository maintainer" },
+            {
+              id: "00000000-0000-4000-8000-000000000001",
+              name: "Local operator",
+              profile: null,
+            },
+            {
+              id: "00000000-0000-4000-8000-000000000002",
+              name: "Repository maintainer",
+              profile: {
+                id: "00000000-0000-4000-8000-000000000002",
+                handle: "maintainer",
+                name: "Repository maintainer",
+              },
+            },
           ],
           can_manage: true,
         },
@@ -100,10 +112,10 @@ test("repository metadata can be managed and assigned to an issue", async ({
         const input = request.postDataJSON() as {
           version: number;
           label_ids?: number[];
-          assignees?: string[];
+          assignee_ids?: string[];
         };
         if (input.label_ids) selected = input.label_ids;
-        if (input.assignees) assigned = input.assignees;
+        if (input.assignee_ids) assigned = input.assignee_ids;
         issueVersion += 1;
       }
       return route.fulfill({
@@ -125,9 +137,21 @@ test("repository metadata can be managed and assigned to an issue", async ({
             selected.includes(label.id as number),
           ),
           assignees: [
-            { subject: "operator", name: "Local operator" },
-            { subject: "maintainer", name: "Repository maintainer" },
-          ].filter((assignee) => assigned.includes(assignee.subject)),
+            {
+              id: "00000000-0000-4000-8000-000000000001",
+              name: "Local operator",
+              profile: null,
+            },
+            {
+              id: "00000000-0000-4000-8000-000000000002",
+              name: "Repository maintainer",
+              profile: {
+                id: "00000000-0000-4000-8000-000000000002",
+                handle: "maintainer",
+                name: "Repository maintainer",
+              },
+            },
+          ].filter((assignee) => assigned.includes(assignee.id)),
         },
       });
     }
@@ -164,7 +188,9 @@ test("repository metadata can be managed and assigned to an issue", async ({
   await metadata.getByLabel("Edit assignees").click();
   await page.getByRole("checkbox", { name: "Repository maintainer" }).check();
   await page.getByRole("button", { name: "Apply assignees" }).click();
-  await expect(metadata).toContainText("Repository maintainer");
+  await expect(
+    metadata.getByRole("link", { name: "maintainer", exact: true }),
+  ).toHaveAttribute("href", "/-/users/00000000-0000-4000-8000-000000000002");
   await expectNoAccessibilityViolations(page);
 
   await page.goto("/team/project/labels");

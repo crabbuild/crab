@@ -59,7 +59,7 @@ pub(super) struct PullRequest {
     pub head_ref: String,
     pub head_oid: String,
     pub label_ids: Vec<u64>,
-    pub assignee_subjects: Vec<String>,
+    pub assignees: Vec<crate::cells::repository::assignments::Assignee>,
     pub merge_pending: Option<PullMerge>,
     pub merge: Option<PullMerge>,
     pub review_decisions: Vec<PullReviewDecision>,
@@ -112,7 +112,7 @@ pub(super) struct PullEdit {
     pub body: Option<String>,
     pub state: Option<PullState>,
     pub label_ids: Option<Vec<u64>>,
-    pub assignee_subjects: Option<Vec<String>>,
+    pub assignees: Option<Vec<crate::cells::repository::assignments::Assignee>>,
 }
 
 pub(super) struct NewPullReview {
@@ -224,7 +224,7 @@ pub(super) async fn update_pull(
                     body: input.body,
                     state: input.state,
                     label_ids: input.label_ids,
-                    assignee_subjects: input.assignee_subjects,
+                    assignees: input.assignees,
                 },
             )
             .await,
@@ -675,7 +675,7 @@ pub(super) fn from_pull(value: PullRecord) -> PullRequest {
         head_ref: value.head_ref,
         head_oid: value.head_oid,
         label_ids: value.label_ids,
-        assignee_subjects: value.assignee_subjects,
+        assignees: value.assignees,
         merge_pending: value.merge_pending.map(from_merge),
         merge: value.merge.map(from_merge),
         review_decisions: value

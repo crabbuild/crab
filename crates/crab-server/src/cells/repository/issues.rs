@@ -38,7 +38,7 @@ impl Mutation for CreateIssue {
             let number = result_u64_from_row(row, 1)?;
             let current = context.sql(&SqlBatch {
                 statements: vec![statement(
-                    "SELECT number, author_issuer, author_subject, author_name, title, body, state, label_ids, assignee_subjects, version, created_at_ms, updated_at_ms FROM repository_issues WHERE number = ?",
+                    "SELECT number, author_issuer, author_subject, author_name, title, body, state, label_ids, assignees, version, created_at_ms, updated_at_ms FROM repository_issues WHERE number = ?",
                     vec![integer(number)?],
                 )],
             })?;
@@ -75,7 +75,7 @@ impl Mutation for CreateIssue {
             body: input.body,
             state: 0,
             label_ids: vec![],
-            assignee_subjects: vec![],
+            assignees: vec![],
             version: 1,
             created_at_ms: now,
             updated_at_ms: now,
@@ -249,7 +249,7 @@ impl Read for GetIssue {
         validate_number(number)?;
         let result = context.sql(&SqlBatch {
             statements: vec![statement(
-                "SELECT number, author_issuer, author_subject, author_name, title, body, state, label_ids, assignee_subjects, version, created_at_ms, updated_at_ms FROM repository_issues WHERE number = ?",
+                "SELECT number, author_issuer, author_subject, author_name, title, body, state, label_ids, assignees, version, created_at_ms, updated_at_ms FROM repository_issues WHERE number = ?",
                 vec![integer(number)?],
             )],
         })?;
@@ -311,7 +311,7 @@ impl Mutation for UpdateIssue {
             && input.body.is_none()
             && input.state.is_none()
             && input.label_ids.is_none()
-            && input.assignee_subjects.is_none()
+            && input.assignees.is_none()
         {
             return Err(crate::cells::Error::Invalid(
                 "repository issue update has no changes",
@@ -346,13 +346,13 @@ impl Mutation for UpdateIssue {
                 }
             }
         }
-        if let Some(assignees) = input.assignee_subjects.as_deref() {
-            validate_assignees(assignees)?;
+        if let Some(assignees) = input.assignees.as_deref() {
+            assignments::validate(assignees)?;
         }
 
         let current = context.sql(&SqlBatch {
             statements: vec![statement(
-                "SELECT number, author_issuer, author_subject, author_name, title, body, state, label_ids, assignee_subjects, version, created_at_ms, updated_at_ms FROM repository_issues WHERE number = ?",
+                "SELECT number, author_issuer, author_subject, author_name, title, body, state, label_ids, assignees, version, created_at_ms, updated_at_ms FROM repository_issues WHERE number = ?",
                 vec![integer(input.number)?],
             )],
         })?;
@@ -374,9 +374,9 @@ impl Mutation for UpdateIssue {
                 .as_ref()
                 .is_some_and(|value| value != &issue.label_ids)
             || input
-                .assignee_subjects
+                .assignees
                 .as_ref()
-                .is_some_and(|value| value != &issue.assignee_subjects);
+                .is_some_and(|value| value != &issue.assignees);
         let author = same_author(&issue.author, &input.actor);
         if (input.title.is_some() || input.body.is_some()) && !author
             || input.state.is_some() && !(author || input.can_triage)
@@ -386,7 +386,7 @@ impl Mutation for UpdateIssue {
         if input.label_ids.is_some() && !input.can_triage {
             return Ok(MutationResult::Rejected(UpdateIssueOutcome::LabelForbidden));
         }
-        if input.assignee_subjects.is_some() && !input.can_triage {
+        if input.assignees.is_some() && !input.can_triage {
             return Ok(MutationResult::Rejected(
                 UpdateIssueOutcome::AssigneeForbidden,
             ));
@@ -407,8 +407,8 @@ impl Mutation for UpdateIssue {
         if let Some(value) = input.label_ids {
             issue.label_ids = value;
         }
-        if let Some(value) = input.assignee_subjects {
-            issue.assignee_subjects = value;
+        if let Some(value) = input.assignees {
+            issue.assignees = value;
         }
         issue.version = issue
             .version
@@ -420,13 +420,13 @@ impl Mutation for UpdateIssue {
         issue.updated_at_ms = timestamp(context.now_ms())?;
         let updated = context.sql(&SqlBatch {
             statements: vec![statement(
-                "UPDATE repository_issues SET title = ?, body = ?, state = ?, label_ids = ?, assignee_subjects = ?, version = ?, updated_at_ms = ? WHERE number = ? AND version = ?",
+                "UPDATE repository_issues SET title = ?, body = ?, state = ?, label_ids = ?, assignees = ?, version = ?, updated_at_ms = ? WHERE number = ? AND version = ?",
                 vec![
                     SqlValue::Text(issue.title.clone()),
                     SqlValue::Text(issue.body.clone()),
                     SqlValue::Integer(i64::from(issue.state)),
                     SqlValue::Blob(encode_label_ids(&issue.label_ids)?),
-                    SqlValue::Blob(encode_assignees(&issue.assignee_subjects)?),
+                    SqlValue::Blob(assignments::encode(&issue.assignees)?),
                     integer(issue.version)?,
                     integer(issue.updated_at_ms)?,
                     integer(issue.number)?,
@@ -546,7 +546,7 @@ impl IssueSummary {
         number: u64,
         metrics: search::index::Metrics,
     ) -> crate::cells::Result<Self> {
-        let result = context.sql(&SqlBatch { statements: vec![statement("SELECT number, author_issuer, author_subject, author_name, title, state, label_ids, assignee_subjects, version, created_at_ms, updated_at_ms FROM repository_issues WHERE number = ?", vec![integer(number)?])] })?;
+        let result = context.sql(&SqlBatch { statements: vec![statement("SELECT number, author_issuer, author_subject, author_name, title, state, label_ids, assignees, version, created_at_ms, updated_at_ms FROM repository_issues WHERE number = ?", vec![integer(number)?])] })?;
         let row = result[0]
             .rows
             .first()
@@ -562,7 +562,7 @@ impl IssueSummary {
             state: u8::try_from(result_u64_from_row(row, 5)?)
                 .map_err(|_| crate::cells::Error::Invalid("indexed issue state is invalid"))?,
             label_ids: decode_label_ids(result_blob(row, 6)?)?,
-            assignee_subjects: decode_assignees(result_blob(row, 7)?)?,
+            assignees: assignments::decode(result_blob(row, 7)?)?,
             version: result_u64_from_row(row, 8)?,
             created_at_ms: result_u64_from_row(row, 9)?,
             updated_at_ms: result_u64_from_row(row, 10)?,

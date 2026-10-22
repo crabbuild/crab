@@ -58,7 +58,7 @@ impl Mutation for CreatePull {
             head_ref: input.head_ref,
             head_oid: input.head_oid,
             label_ids: vec![],
-            assignee_subjects: vec![],
+            assignees: vec![],
             merge_pending: None,
             merge: None,
             review_decisions: vec![],
@@ -114,8 +114,8 @@ impl Mutation for UpdatePull {
         if let Some(labels) = &input.label_ids {
             validate_label_ids(labels)?;
         }
-        if let Some(assignees) = &input.assignee_subjects {
-            validate_assignees(assignees)?;
+        if let Some(assignees) = &input.assignees {
+            assignments::validate(assignees)?;
         }
         let Some(mut pull) = load_pull(context, input.number)? else {
             return Ok(MutationResult::Rejected(UpdatePullOutcome::NotFound));
@@ -131,9 +131,9 @@ impl Mutation for UpdatePull {
                 .as_ref()
                 .is_some_and(|value| value != &pull.label_ids)
             || input
-                .assignee_subjects
+                .assignees
                 .as_ref()
-                .is_some_and(|value| value != &pull.assignee_subjects);
+                .is_some_and(|value| value != &pull.assignees);
         if pull.version != input.version {
             return Ok(MutationResult::Rejected(UpdatePullOutcome::Conflict));
         }
@@ -143,7 +143,7 @@ impl Mutation for UpdatePull {
         let author = same_author(&pull.author, &input.actor);
         if (input.title.is_some() || input.body.is_some()) && !author
             || input.state.is_some() && !(author || input.can_triage)
-            || (input.label_ids.is_some() || input.assignee_subjects.is_some()) && !input.can_triage
+            || (input.label_ids.is_some() || input.assignees.is_some()) && !input.can_triage
         {
             return Ok(MutationResult::Rejected(UpdatePullOutcome::Forbidden));
         }
@@ -170,8 +170,8 @@ impl Mutation for UpdatePull {
         if let Some(value) = input.label_ids {
             pull.label_ids = value;
         }
-        if let Some(value) = input.assignee_subjects {
-            pull.assignee_subjects = value;
+        if let Some(value) = input.assignees {
+            pull.assignees = value;
         }
         pull.version = pull
             .version
@@ -290,7 +290,7 @@ impl PullSummary {
         number: u64,
         metrics: search::index::Metrics,
     ) -> crate::cells::Result<Self> {
-        let result = context.sql(&SqlBatch { statements: vec![statement("SELECT number, author_issuer, author_subject, author_name, title, state, base_ref, head_ref, label_ids, assignee_subjects, version, created_at_ms, updated_at_ms FROM repository_pulls WHERE number = ?", vec![integer(number)?])] })?;
+        let result = context.sql(&SqlBatch { statements: vec![statement("SELECT number, author_issuer, author_subject, author_name, title, state, base_ref, head_ref, label_ids, assignees, version, created_at_ms, updated_at_ms FROM repository_pulls WHERE number = ?", vec![integer(number)?])] })?;
         let row = result[0].rows.first().ok_or(crate::cells::Error::Invalid(
             "indexed pull request is missing",
         ))?;
@@ -302,7 +302,7 @@ impl PullSummary {
             base_ref: result_text(row, 6)?,
             head_ref: result_text(row, 7)?,
             label_ids: decode_label_ids(result_blob(row, 8)?)?,
-            assignee_subjects: decode_assignees(result_blob(row, 9)?)?,
+            assignees: assignments::decode(result_blob(row, 9)?)?,
             version: result_u64_from_row(row, 10)?,
             created_at_ms: result_u64_from_row(row, 11)?,
             updated_at_ms: result_u64_from_row(row, 12)?,

@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 
 use crate::{
     BranchProtection,
-    api::assignees::{self, Assignee},
+    api::assignees::{self, Selection},
     api::checks::{self, CheckRun},
     api::labels,
     api::reactions,
@@ -98,10 +98,9 @@ async fn pull_view(
         },
     )
     .await?;
-    let permissions = app::membership(server, principal, repo).await?;
-    let assignees = assignees::available(&permissions);
-    let can_write = permissions.principal.can_write(repo.id);
-    let can_triage = permissions.principal.can_triage(repo.id);
+    let assignees = Selection::load(server, principal, repo, pull.assignees.iter()).await?;
+    let can_write = assignees.principal.can_write(repo.id);
+    let can_triage = assignees.principal.can_triage(repo.id);
     Ok(json!({
         "draft": pull.draft,
         "number": pull.number,
@@ -120,7 +119,7 @@ async fn pull_view(
         "created_at": pull.created_at,
         "updated_at": pull.updated_at,
         "labels": labels::selection_view(&pull.label_ids, &labels),
-        "assignees": assignees::selection_view(&pull.assignee_subjects, &assignees),
+        "assignees": assignees.view(&pull.assignees),
         "can_label": can_triage,
         "can_assign": can_triage,
         "can_edit": same_author(&pull.author, actor),
@@ -278,7 +277,7 @@ pub(super) fn pull_list_view(
     authors: &super::profiles::attribution::Authors,
     pull: &PullSummary,
     labels: &[crate::cells::repository::search::index::LabelSummary],
-    assignees: &[Assignee],
+    assignees: &Selection,
 ) -> Value {
     json!({
         "kind": "pull",
@@ -295,7 +294,7 @@ pub(super) fn pull_list_view(
         "created_at": pull.created_at_ms,
         "updated_at": pull.updated_at_ms,
         "labels": pull.label_ids.iter().filter_map(|id|labels.iter().find(|label|label.id==*id)).collect::<Vec<_>>(),
-        "assignees": assignees::selection_view(&pull.assignee_subjects, assignees),
+        "assignees": assignees.view(&pull.assignees),
     })
 }
 
@@ -322,8 +321,13 @@ async fn list(
         page.items.iter().map(|pull| &pull.author),
     )
     .await?;
-    let permissions = app::membership(&server, &principal, repo).await?;
-    let assignees = assignees::available(&permissions);
+    let assignees = Selection::load(
+        &server,
+        &principal,
+        repo,
+        page.items.iter().flat_map(|pull| pull.assignees.iter()),
+    )
+    .await?;
     let pulls = &page.items;
     let items = pulls
         .iter()
@@ -485,7 +489,7 @@ struct PullEdit {
     body: Option<String>,
     state: Option<PullState>,
     label_ids: Option<Vec<u64>>,
-    assignees: Option<Vec<String>>,
+    assignee_ids: Option<Vec<uuid::Uuid>>,
 }
 
 async fn edit(
@@ -508,7 +512,7 @@ async fn edit(
         .as_ref()
         .is_some_and(|labels| !labels.is_empty())
         || (input.label_ids.is_none() && !pull.label_ids.is_empty());
-    let assignee_change = input.assignees.is_some();
+    let assignee_change = input.assignee_ids.is_some();
     let can_triage = app::membership(&server, &principal, repo)
         .await?
         .principal
@@ -539,7 +543,7 @@ async fn edit(
         && input.body.is_none()
         && input.state.is_none()
         && input.label_ids.is_none()
-        && input.assignees.is_none()
+        && input.assignee_ids.is_none()
     {
         return Err(Error::Invalid("No pull request changes supplied"));
     }
@@ -560,21 +564,20 @@ async fn edit(
         .label_ids
         .map(|value| labels::validate_selection(value, &labels))
         .transpose()?;
-    // Labels may yield. Use the same current membership for the caller's role
-    // and assignment eligibility so a stale route cannot retain removed members.
-    let permissions = app::membership(&server, &principal, repo).await?;
-    let can_triage = permissions.principal.can_triage(repo.id);
+    // Assignment eligibility and caller role must share the final current roster.
+    let (can_triage, assignees) = if let Some(ids) = input.assignee_ids {
+        let roster = assignees::Roster::load(&server, &principal, repo).await?;
+        if !roster.principal.can_triage(repo.id) {
+            return Err(Error::AssigneePermission);
+        }
+        (true, Some(roster.validate(ids)?))
+    } else {
+        let permissions = app::membership(&server, &principal, repo).await?;
+        (permissions.principal.can_triage(repo.id), None)
+    };
     if label_change && !can_triage {
         return Err(Error::LabelPermission);
     }
-    if assignee_change && !can_triage {
-        return Err(Error::AssigneePermission);
-    }
-    let assignees = assignees::available(&permissions);
-    let assignee_subjects = input
-        .assignees
-        .map(|value| assignees::validate_selection(value, &assignees))
-        .transpose()?;
     let pull = storage::update_pull(
         &server,
         repo,
@@ -587,7 +590,7 @@ async fn edit(
             body,
             state: input.state,
             label_ids,
-            assignee_subjects,
+            assignees,
         },
     )
     .await?;

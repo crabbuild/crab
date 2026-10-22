@@ -8,6 +8,7 @@ use crab_server::{RepositoryAccess, RepositoryMember};
 use serde::Deserialize;
 use tracing_subscriber::EnvFilter;
 
+mod assignments;
 mod ecs;
 
 #[derive(Parser)]
@@ -52,6 +53,22 @@ enum Command {
 
 #[derive(Subcommand)]
 enum CellsCommand {
+    /// Export bounded legacy assignment records as JSON Lines for explicit mapping.
+    AssignmentInventory {
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        name: String,
+    },
+    /// Migrate subject assignments to stable actors using explicit JSON Lines mappings.
+    MigrateAssignments {
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        mappings_file: Option<PathBuf>,
+    },
     /// Initialize the shared native actor directory without changing repositories.
     InitializeDirectory,
     /// Print the shared Directory schema and migration state.
@@ -213,6 +230,14 @@ pub(super) async fn run() -> crab_server::Result<()> {
 
 async fn cells(config: &crab_server::Config, command: CellsCommand) -> crab_server::Result<()> {
     let bytes = match command {
+        CellsCommand::AssignmentInventory { owner, name } => {
+            return assignments::inventory(config, &owner, &name).await;
+        }
+        CellsCommand::MigrateAssignments {
+            owner,
+            name,
+            mappings_file,
+        } => assignments::migrate(config, &owner, &name, mappings_file.as_deref()).await?,
         CellsCommand::InitializeDirectory => {
             management_request(config, reqwest::Method::POST, "/internal/directory", None)
                 .await?

@@ -18,12 +18,14 @@ use std::{
     time::Duration,
 };
 
+mod assignments;
 mod directory;
 mod search;
 
 pub(crate) fn router(server: Arc<Server>, peers: Router) -> Router {
     Router::new()
         .merge(search::routes())
+        .merge(assignments::routes())
         .merge(directory::routes())
         .route("/healthz", get(|| async { Json(json!({"status": "ok"})) }))
         .route("/readyz", get(readiness))
@@ -183,6 +185,20 @@ async fn check_readiness(server: &Server) -> Result<()> {
             .cells()
             .ok_or(crate::Error::Config("repository Cells are unavailable"))?
             .repository(repository.id)?;
+        let assignments = cell
+            .client
+            .query::<crate::cells::repository::assignments::GetAssignmentBatch>(
+                &cell.target,
+                None,
+                None,
+            )
+            .await?;
+        if assignments.output.state != crate::cells::repository::assignments::AssignmentState::Ready
+        {
+            return Err(crate::Error::Config(
+                "repository assignments require explicit preparation",
+            ));
+        }
         let index = cell
             .client
             .query::<crate::cells::repository::search::index::GetSearchIndexStatus>(

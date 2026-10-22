@@ -266,7 +266,13 @@ impl Cell for ApplicationCell {
                 let mut transaction = Transaction { storage, now_ms };
                 let create = request.operation == INITIALIZE && request.mutation.is_none();
                 match request.target {
-                    Address::Repository(id) => repository::initialize(&transaction, id, create)?,
+                    Address::Repository(id) => repository::initialize(
+                        &transaction,
+                        id,
+                        create,
+                        request.operation,
+                        request.mutation.is_some(),
+                    )?,
                     Address::Directory => directory::initialize(
                         &transaction,
                         create,

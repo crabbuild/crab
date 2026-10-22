@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) fn insert_pull_statement(record: &PullRecord) -> crate::cells::Result<SqlStatement> {
     Ok(statement(
-        "INSERT INTO repository_pulls(number, create_request_id, author_issuer, author_subject, author_name, title, body, state, base_ref, base_oid, head_ref, head_oid, label_ids, assignee_subjects, pending_merge, completed_merge, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO repository_pulls(number, create_request_id, author_issuer, author_subject, author_name, title, body, state, base_ref, base_oid, head_ref, head_oid, label_ids, assignees, pending_merge, completed_merge, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         vec![
             integer(record.number)?,
             SqlValue::Blob(record.create_submission_id.to_vec()),
@@ -17,7 +17,7 @@ pub(super) fn insert_pull_statement(record: &PullRecord) -> crate::cells::Result
             SqlValue::Text(record.head_ref.clone()),
             SqlValue::Text(record.head_oid.clone()),
             SqlValue::Blob(encode_label_ids(&record.label_ids)?),
-            SqlValue::Blob(encode_assignees(&record.assignee_subjects)?),
+            SqlValue::Blob(assignments::encode(&record.assignees)?),
             optional_record(&record.merge_pending)?,
             optional_record(&record.merge)?,
             integer(record.version)?,
@@ -32,7 +32,7 @@ pub(super) fn update_pull_row(
     record: &PullRecord,
     expected: u64,
 ) -> crate::cells::Result<()> {
-    let result = context.sql(&SqlBatch { statements: vec![statement("UPDATE repository_pulls SET title = ?, body = ?, state = ?, label_ids = ?, assignee_subjects = ?, pending_merge = ?, completed_merge = ?, version = ?, updated_at_ms = ? WHERE number = ? AND version = ?", vec![SqlValue::Text(record.title.clone()), SqlValue::Text(record.body.clone()), SqlValue::Integer(i64::from(record.state.code())), SqlValue::Blob(encode_label_ids(&record.label_ids)?), SqlValue::Blob(encode_assignees(&record.assignee_subjects)?), optional_record(&record.merge_pending)?, optional_record(&record.merge)?, integer(record.version)?, integer(record.updated_at_ms)?, integer(record.number)?, integer(expected)?])] })?;
+    let result = context.sql(&SqlBatch { statements: vec![statement("UPDATE repository_pulls SET title = ?, body = ?, state = ?, label_ids = ?, assignees = ?, pending_merge = ?, completed_merge = ?, version = ?, updated_at_ms = ? WHERE number = ? AND version = ?", vec![SqlValue::Text(record.title.clone()), SqlValue::Text(record.body.clone()), SqlValue::Integer(i64::from(record.state.code())), SqlValue::Blob(encode_label_ids(&record.label_ids)?), SqlValue::Blob(assignments::encode(&record.assignees)?), optional_record(&record.merge_pending)?, optional_record(&record.merge)?, integer(record.version)?, integer(record.updated_at_ms)?, integer(record.number)?, integer(expected)?])] })?;
     if result[0].rows_affected != 1 {
         return Err(crate::cells::Error::Invalid(
             "repository pull update lost its transaction",
@@ -75,7 +75,7 @@ fn decode_optional_record<T: StoredRecord>(value: &SqlValue) -> crate::cells::Re
 }
 
 fn pull_select() -> &'static str {
-    "SELECT number, create_request_id, author_issuer, author_subject, author_name, title, body, state, base_ref, base_oid, head_ref, head_oid, label_ids, assignee_subjects, pending_merge, completed_merge, version, created_at_ms, updated_at_ms FROM repository_pulls WHERE number = ?"
+    "SELECT number, create_request_id, author_issuer, author_subject, author_name, title, body, state, base_ref, base_oid, head_ref, head_oid, label_ids, assignees, pending_merge, completed_merge, version, created_at_ms, updated_at_ms FROM repository_pulls WHERE number = ?"
 }
 
 pub(super) fn load_pull(
@@ -134,7 +134,7 @@ fn pull_from_rows(
         head_ref: result_text(row, 10)?,
         head_oid: result_text(row, 11)?,
         label_ids: decode_label_ids(result_blob(row, 12)?)?,
-        assignee_subjects: decode_assignees(result_blob(row, 13)?)?,
+        assignees: assignments::decode(result_blob(row, 13)?)?,
         merge_pending: decode_optional_record(&row[14])?,
         merge: decode_optional_record(&row[15])?,
         review_decisions,

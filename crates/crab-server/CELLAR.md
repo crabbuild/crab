@@ -24,8 +24,9 @@ is buffered before owner dispatch so Cellar can safely retry stale routes; it is
 not forwarded as a non-replayable upload stream. Successful HTTP output
 uses the SDK output gate, including its ownership and durability checks.
 
-The SQL application schema and persisted binary records retain their existing
-formats. Transport requests and replies use bounded JSON. Mutation receipts store
+Repository assignment format 2 and discussion index format 4 require the explicit
+preparation described below. Other canonical records retain their formats.
+Transport requests and replies use bounded JSON. Mutation receipts store
 the payload digest and outcome in the same transaction as application writes.
 Rejections roll application writes back in a nested SDK transaction while keeping
 their receipt. Identical retries recover the original decision; conflicting
@@ -36,8 +37,11 @@ Native target addresses now distinguish Repository UUIDs from Directory. This
 changes the private peer application envelope: upgrade the fleet together;
 mixed-version operation is not supported or qualified. The compiled script name
 and existing Repository class/namespace are unchanged because Cellar uses these
-names in durable identities. Repository SQL/KV records and stored replay replies
-retain their formats.
+names in durable identities. Update and drain all application peers together for the changed repository DTOs;
+old private RPC envelopes are not supported after cutover. Public submission
+reservations continue to read the current canonical records. Native transport
+receipts retain their original bytes and normal expiry; they are not rewritten
+or interpreted through a compatibility decoder.
 
 Directory format 2 separates `accounts` from optional `profiles`. Canonical
 bootstrap DDL lives in `cells/directory/identity.sql`, `schema.sql`,
@@ -70,7 +74,8 @@ coordinated replica deployment. Sessions and canonical Cell schemas are unchange
 qualified private accounts without requiring or inventing a public profile.
 Enrollment reuses those IDs. Account registration grants no repository or other
 permissions. This is an identity foundation for assignment/participant/owner
-models, not a native grant cutover or a migration of existing subject assignments.
+models; existing assignments convert through the explicit repository preparation
+described below. It is not a native grant cutover.
 
 List author enrichment uses the bounded native `LookupActors` read (Directory
 operation 6). It resolves qualified private keys into public UUID/handle/name
@@ -113,6 +118,59 @@ destinations share the parser and global-conjunction rules with milestone and
 state navigation. Definitions, assignments, counts and cursors continue to use
 the existing native transaction and revision contracts. Prepared format-2
 repositories need no additional rebuild for the label menu.
+
+## Assignment preparation
+
+Repository assignment format 2 stores stable Directory account IDs with explicit
+display-name snapshots. Public responses expose `id`, `name`, and an optional
+public `profile`; HTTP edits accept `assignee_ids`. Candidate resolution registers
+missing qualified accounts without inventing profiles or granting access.
+Historical assignees retain their snapshots after membership removal, and chosen
+public profiles supply current names and stable profile links. Empty selections
+need no Directory read. Nonempty selections and assignment choices require the
+explicitly prepared Directory.
+
+Before exposing an existing repository after upgrade, run:
+
+```sh
+crab-server --config server.toml cells assignment-inventory --owner OWNER --name REPO
+crab-server --config server.toml cells migrate-assignments --owner OWNER --name REPO --mappings-file assignments.jsonl
+crab-server --config server.toml cells rebuild-search --owner OWNER --name REPO
+```
+
+Inventory streams bounded pages from the private mTLS listener. For each nonempty
+source assignment record, the operator supplies one JSON Lines mapping, ordered
+by issue number then pull number. Bare stored subjects do not prove a historical
+issuer; do not derive it from a current provider, name, repository owner or author.
+Each line has this shape, with an explicit mapping for every original subject:
+
+```json
+{"target":{"kind":"issue","number":1},"version":3,"mappings":[{"subject":"old-subject","identity":{"issuer":"https://identity.example","subject":"account-subject"},"name":"Recorded name"}]}
+```
+
+Empty records need no mapping; omit `--mappings-file` if all are empty. Mapping
+lines are bounded to 1 MiB and consumed incrementally. After interruption, rerun
+the same command/file: the CLI skips already converted records and resumes at the
+native cursor. A stale frame/record version is a recorded conflict, so retrying its native
+request preserves the decision even after migration completes. Missing/extra
+mappings, duplicate actors or invalid identities fail the current frame. Correct the file and resume; committed
+previous frames remain. Qualified account registration is idempotent and grants
+nothing. A failed repository frame can leave unused private account IDs because
+Directory and Repository transactions are independent.
+
+Eight discussions per native transaction bound conversion. Progress and canonical
+SQL commit together. Normal repository operations fail closed while format 1 is
+present; private inventory/migration and startup control reads remain available.
+The first frame renames the assignment column and converts its values in place;
+old application writes fail, and peers must still drain and update together.
+As documented by [SQLite](https://www.sqlite.org/lang_altertable.html), renames
+only edit schema text; conversion never drops a column or rewrites
+whole discussion tables. The empty canonical count encoding also preserves the
+existing SQL default. Completion preserves record versions/content/submissions
+and requires an explicit format-4 search rebuild. That rebuild renames its actor
+lookup column and clears/repopulates entries through its existing bounded phases. Serving never decodes the retired subject format or rebuilds the
+index implicitly. Readiness requires both assignment preparation and search
+preparation. No dependency versions or storage grants change in this upgrade.
 
 ## Fleet lifecycle
 

@@ -183,8 +183,8 @@ versioned edits, explicit stale-draft recovery and reload. No Fern code was
 copied. No organization/team/project grants, owner registry or catalog authority
 cutover is implemented; matching a handle with an existing catalog owner grants
 nothing. List authors now resolve their qualified snapshots to public actors;
-detail/comment/review attribution and subject-based assignments remain separate
-work. The authority phase remains incomplete.
+detail/comment/review attribution remains separate work. Actor assignments now
+have the explicit preparation described below. The authority phase remains incomplete.
 
 The slice passed 325 isolated server tests (five existing ignored cases), 107 UI
 unit tests and 72 browser tests, plus builds, Clippy and architecture checks.
@@ -285,10 +285,9 @@ Qualified registration has stable UUIDs, exact realm separation and no implicit
 grant effect. Existing format-1 profile identity/data/submissions migrate in
 bounded atomic frames with durable progress; a new-code old-data process upgrade
 and later UI enrollment preserve identity across restart. Explicit private CLI
-operations own preparation and registration. Subject-based assignment migration,
-actor-based filters, organization/team authority and cross-authority fencing
-remain delivery work; the registry does not guess
-those bindings from names or owner strings.
+operations own preparation and registration. Actor-based filters, organization/team authority and cross-authority fencing
+remain delivery work; the registry never guesses historical bindings from names
+or owner strings.
 
 Assignee candidates and display names now come from the current durable catalog
 membership, including additions, removals and renames before routing refresh.
@@ -296,6 +295,12 @@ Issue and PR edits validate selected members against the same late membership
 snapshot that supplies the caller's triage permission. List/detail responses use
 their final membership read for rendering. This follows Fern's current-access
 eligibility rule in `apps/web/worker/thread-assignee-data.ts`; no Fern code was
-copied. Native stored subjects, replay replies and the HTTP assignment shape are
-unchanged. Removed historical assignments still need the explicit actor-backed
-migration; this snapshot check does not provide atomic cross-authority fencing.
+copied. Canonical assignments now store actor UUIDs and name snapshots, with
+optional public profiles in their DTOs. Explicit native migration requires
+qualified per-record mappings for nonempty legacy assignments, preserves record
+versions/content/submissions, and resumes bounded frames after restart. Its
+conflict outcomes are recorded so later completion cannot change an earlier
+retry decision. Repository/index preparation uses column renames and bounded
+updates; serving never reads retired subject records. The shadcn metadata picker
+supports current choices and removing unavailable historical people. The Assignee
+list filter, native grants and cross-authority fencing remain separate work.

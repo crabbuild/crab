@@ -109,7 +109,7 @@ async fn state_and_content_changes_are_ordered_and_rejected_or_noop_edits_emit_n
         body: None,
         state: Some(1),
         label_ids: None,
-        assignee_subjects: None,
+        assignees: None,
     };
     assert!(matches!(
         write::<UpdateIssue>(&cell, input.clone()).await,

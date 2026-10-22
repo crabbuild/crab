@@ -106,7 +106,7 @@ async fn assignment_progress_tracks_issue_state_and_duplicate_commands() {
         body: None,
         state: Some(1),
         label_ids: None,
-        assignee_subjects: None,
+        assignees: None,
     };
     let first = cell
         .client
@@ -616,7 +616,7 @@ async fn pull_close_reopen_and_merge_completion_update_milestone_progress() {
                     body: None,
                     state: Some(state),
                     label_ids: None,
-                    assignee_subjects: None,
+                    assignees: None,
                 },
             )
             .await

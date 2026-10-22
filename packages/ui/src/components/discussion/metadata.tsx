@@ -1,6 +1,16 @@
-import { useEffect, useRef, useState } from "react";
+import { useId, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { PersonAddIcon } from "@primer/octicons-react";
+import { Checkbox } from "@/components/ui/checkbox";
+import { Input } from "@/components/ui/input";
+import { FieldError } from "@/components/ui/field";
+import {
+  Popover,
+  PopoverContent,
+  PopoverHeader,
+  PopoverTitle,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import { PersonAddIcon, XIcon } from "@primer/octicons-react";
 import {
   endpoint,
   useRequest,
@@ -9,6 +19,7 @@ import {
   type RepositoryLabel,
 } from "@/lib/api";
 import { ReviewRequests } from "@/features/pull-requests/reviews/requests";
+import { Author } from "./author";
 import { LinkedWork } from "./links";
 import { MilestonePicker } from "@/features/milestones/picker";
 import { LabelBadges, LabelPicker } from "@/features/labels/selection";
@@ -44,7 +55,7 @@ export function AssigneeAvatars({
       {assignees.map((assignee) => (
         <span
           className="assignee-avatar"
-          key={assignee.subject}
+          key={assignee.id}
           title={assignee.name}
           aria-hidden="true"
         >
@@ -70,89 +81,181 @@ function AssigneePicker({
   csrf: string;
   onSaved: () => void;
 }) {
-  const catalog = useRequest<AssigneeCatalog>(endpoint(repo, "assignees"));
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState("");
+  const [editingVersion, setEditingVersion] = useState(version);
+  const [selected, setSelected] = useState<string[]>([]);
+  const search = useRef<HTMLInputElement>(null);
+  const prefix = useId();
+  const catalog = useRequest<AssigneeCatalog>(
+    open ? endpoint(repo, "assignees") : null,
+  );
   const mutation = useMutation(csrf);
-  const details = useRef<HTMLDetailsElement>(null);
-  const [selected, setSelected] = useState(() =>
-    assigned.map((assignee) => assignee.subject),
-  );
-  useEffect(
-    () => setSelected(assigned.map((assignee) => assignee.subject)),
-    [assigned],
-  );
+  function changeOpen(next: boolean) {
+    if (next) {
+      setSelected(assigned.map((assignee) => assignee.id));
+      setEditingVersion(version);
+      setQuery("");
+      mutation.reset();
+    }
+    setOpen(next);
+  }
   return (
-    <div className="label-picker assignee-picker">
-      <details ref={details}>
-        <summary aria-label="Edit assignees">
-          <PersonAddIcon />
-        </summary>
-        <div className="label-picker-menu">
-          <header>
-            <strong>Assign people</strong>
+    <div className="assignee-picker">
+      <Popover open={open} onOpenChange={changeOpen}>
+        <PopoverTrigger asChild>
+          <Button
+            variant="ghost"
+            size="icon-sm"
+            aria-label="Edit assignees"
+            disabled={mutation.pending}
+          >
+            <PersonAddIcon />
+          </Button>
+        </PopoverTrigger>
+        <PopoverContent
+          align="end"
+          className="assignee-picker assignee-picker-content w-80 max-w-[calc(100vw-2rem)] gap-0 p-0"
+          aria-label="Assign people"
+          inert={!open}
+          onOpenAutoFocus={(event) => {
+            event.preventDefault();
+            search.current?.focus();
+          }}
+        >
+          <PopoverHeader className="flex-row items-center justify-between border-b p-3">
+            <PopoverTitle>Assign people</PopoverTitle>
             <Button
-              size="sm"
               variant="ghost"
+              size="icon-xs"
               aria-label="Close assignee picker"
-              onClick={() => details.current?.removeAttribute("open")}
+              onClick={() => setOpen(false)}
             >
-              ×
+              <XIcon />
             </Button>
-          </header>
+          </PopoverHeader>
+          <div className="p-2">
+            <Input
+              ref={search}
+              aria-label="Filter assignees"
+              placeholder="Find people…"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+            />
+          </div>
           <Result state={catalog} timingLabel="Assignees">
-            {(data) => (
-              <>
-                <fieldset disabled={mutation.pending}>
-                  <legend className="sr-only">Repository members</legend>
-                  {data.items.map((assignee) => (
-                    <label key={assignee.subject}>
-                      <input
-                        type="checkbox"
-                        checked={selected.includes(assignee.subject)}
-                        onChange={(event) =>
-                          setSelected((current) =>
-                            event.target.checked
-                              ? [...current, assignee.subject]
-                              : current.filter(
-                                  (subject) => subject !== assignee.subject,
-                                ),
-                          )
+            {(data) => {
+              const available = new Set(data.items.map((person) => person.id));
+              // Keep historical selections removable. Missing candidates cannot
+              // be added again, and never acquire eligibility through attribution.
+              const choices = [
+                ...assigned.filter((person) => !available.has(person.id)),
+                ...data.items,
+              ];
+              const needle = query.trim().toLowerCase();
+              const filtered = choices.filter((person) =>
+                `${person.name} ${person.profile?.handle ?? ""}`
+                  .toLowerCase()
+                  .includes(needle),
+              );
+              return (
+                <>
+                  <fieldset
+                    className="max-h-64 overflow-y-auto px-2 pb-2"
+                    disabled={mutation.pending || !data.can_manage}
+                  >
+                    <legend className="sr-only">Repository members</legend>
+                    {filtered.map((person) => {
+                      const checked = selected.includes(person.id);
+                      const unavailable = !available.has(person.id);
+                      const id = `${prefix}-${person.id}`;
+                      return (
+                        <label
+                          key={person.id}
+                          htmlFor={id}
+                          className="flex min-h-10 cursor-pointer items-center gap-2 rounded-md p-2 hover:bg-accent"
+                        >
+                          <Checkbox
+                            id={id}
+                            checked={checked}
+                            disabled={
+                              mutation.pending ||
+                              !data.can_manage ||
+                              (!checked &&
+                                (unavailable || selected.length >= 10))
+                            }
+                            onCheckedChange={(value) =>
+                              setSelected((current) =>
+                                value === true
+                                  ? [...current, person.id]
+                                  : current.filter((id) => id !== person.id),
+                              )
+                            }
+                          />
+                          <span className="assignee-avatar" aria-hidden="true">
+                            {initials(person.name)}
+                          </span>
+                          <span className="min-w-0">
+                            <span className="assignee-choice-name block truncate">
+                              {person.profile?.handle ?? person.name}
+                            </span>
+                            {person.profile && (
+                              <span className="block truncate text-muted-foreground">
+                                {person.name}
+                              </span>
+                            )}
+                            {unavailable && (
+                              <span className="block text-muted-foreground">
+                                Unavailable for new assignments
+                              </span>
+                            )}
+                          </span>
+                        </label>
+                      );
+                    })}
+                    {filtered.length === 0 && (
+                      <p className="p-2 text-muted-foreground" role="status">
+                        No people match your search.
+                      </p>
+                    )}
+                  </fieldset>
+                  {mutation.error && (
+                    <FieldError className="mx-3 mb-3">
+                      {mutation.error}
+                    </FieldError>
+                  )}
+                  <div className="flex items-center justify-between gap-2 border-t p-3">
+                    <span className="text-muted-foreground">
+                      {selected.length} of 10 selected
+                    </span>
+                    <Button
+                      size="sm"
+                      disabled={
+                        mutation.pending ||
+                        !data.can_manage ||
+                        selected.length > 10
+                      }
+                      onClick={async () => {
+                        const saved = await mutation.run(
+                          endpoint(repo, path),
+                          "PATCH",
+                          { version: editingVersion, assignee_ids: selected },
+                        );
+                        if (saved) {
+                          setOpen(false);
+                          onSaved();
                         }
-                      />
-                      <span className="assignee-avatar" aria-hidden="true">
-                        {initials(assignee.name)}
-                      </span>
-                      <span>{assignee.name}</span>
-                    </label>
-                  ))}
-                </fieldset>
-                {mutation.error && (
-                  <p className="error" role="alert">
-                    {mutation.error}
-                  </p>
-                )}
-                <Button
-                  size="sm"
-                  variant="default"
-                  disabled={mutation.pending || selected.length > 10}
-                  onClick={async () => {
-                    const saved = await mutation.run(
-                      endpoint(repo, path),
-                      "PATCH",
-                      { version, assignees: selected },
-                    );
-                    if (saved) {
-                      details.current?.removeAttribute("open");
-                      onSaved();
-                    }
-                  }}
-                >
-                  {mutation.pending ? "Saving…" : "Apply assignees"}
-                </Button>
-              </>
-            )}
+                      }}
+                    >
+                      {mutation.pending ? "Saving…" : "Apply assignees"}
+                    </Button>
+                  </div>
+                </>
+              );
+            }}
           </Result>
-        </div>
-      </details>
+        </PopoverContent>
+      </Popover>
     </div>
   );
 }
@@ -206,11 +309,11 @@ export function DiscussionMetadata({
         {assignees.length ? (
           <ul className="metadata-assignees">
             {assignees.map((assignee) => (
-              <li key={assignee.subject}>
+              <li key={assignee.id}>
                 <span className="assignee-avatar" aria-hidden="true">
                   {initials(assignee.name)}
                 </span>
-                <span>{assignee.name}</span>
+                <Author author={assignee} />
               </li>
             ))}
           </ul>

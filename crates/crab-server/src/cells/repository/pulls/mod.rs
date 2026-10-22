@@ -112,7 +112,7 @@ pub(crate) struct PullRecord {
     pub head_ref: String,
     pub head_oid: String,
     pub label_ids: Vec<u64>,
-    pub assignee_subjects: Vec<String>,
+    pub assignees: Vec<super::assignments::Assignee>,
     pub merge_pending: Option<PullMerge>,
     pub merge: Option<PullMerge>,
     pub review_decisions: Vec<PullReviewDecision>,
@@ -132,7 +132,7 @@ pub(crate) struct PullSummary {
     pub base_ref: String,
     pub head_ref: String,
     pub label_ids: Vec<u64>,
-    pub assignee_subjects: Vec<String>,
+    pub assignees: Vec<super::assignments::Assignee>,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
     pub version: u64,
@@ -240,7 +240,7 @@ pub(crate) struct UpdatePullInput {
     pub body: Option<String>,
     pub state: Option<PullState>,
     pub label_ids: Option<Vec<u64>>,
-    pub assignee_subjects: Option<Vec<String>>,
+    pub assignees: Option<Vec<super::assignments::Assignee>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]

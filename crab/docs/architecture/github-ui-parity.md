@@ -139,7 +139,8 @@ or granting repository/organization access. Schema preparation is explicit via
 `cells initialize-directory`; reads never create it. The form handles lost
 replies, stale versions, handle collisions and unavailable preparation without
 claiming an unsaved result. List authors now link to these profiles as described
-below; detail attribution and assignees remain separate work. Owners,
+below; detail attribution remains separate work. Actor assignments are described
+later in this document. Owners,
 organization/team/project grants and their explicit
 catalog authority cutover remain required; the combined model checklist above
 stays incomplete.
@@ -162,8 +163,9 @@ Existing profile UUIDs, versions, attributes, reservations and receipts survive
 bounded native migration, rollback and restart. Ordinary Directory operations
 reject format 1 until the private upgrade completes; no serving compatibility
 reader is added. This is a prerequisite for actor-based assignees and participants.
-Current subject assignments, native grant cutover and the missing Assignee list
-filter remain unfinished. Candidate eligibility uses current catalog membership.
+Actor-based assignments now use the explicit preparation described below. Native
+grant cutover and the Assignee list filter remain unfinished. Candidate eligibility
+uses current catalog membership.
 
 Other actor/project/type predicates and complete GitHub workspace controls
 remain delivery work. This slice does not finish the full parity checklist.
@@ -548,7 +550,8 @@ merge, search and authorization qualification also passed, leaving 73 durable
 Cellar objects. The persistent preview explicitly upgraded its empty Directory
 and retained all 18 captured collaboration resources exactly across both
 repositories, with no profile enrollment or repository/index rebuild.
-Assignment actor migration and the Assignee list menu still need implementation; this is not complete GitHub parity or SDK release approval.
+The Assignee list menu remains delivery work; this is not complete GitHub parity
+or SDK release approval.
 
 Current assignment candidates now resolve from durable membership, including
 additions, removals and renamed members before routing refresh. Issue and PR
@@ -560,9 +563,55 @@ server build, formatting and architecture gates. Real RustFS browser actions
 prove visible rejection of a stale open-picker selection without an edit,
 assignment to a newly added member on both surfaces, and renamed assignments
 after process restart. The preview update preserved all 18 captured resources
-across two repositories. Stored subject assignments and replay formats remain
-unchanged; actor migration, the Assignee filter and cross-authority fencing
+across two repositories. That checkpoint retained subject assignments; the actor
+upgrade below replaces them. The Assignee filter and cross-authority fencing
 remain required work.
+
+Actor assignment format 2 replaces provider subjects with stable account UUIDs
+and name snapshots. Public DTOs include optional current profiles; enrollment
+keeps an already assigned UUID, and membership removal preserves attribution.
+Native Directory reads bind account IDs and public profiles in bounded batches;
+final membership rechecks remain the permission boundary. This does not move
+membership authority out of the catalog.
+
+Explicit private inventory/migration consumes qualified per-record mappings,
+checks source versions, converts eight discussions per transaction, and retains
+progress plus successful/conflicting decisions through restart. Renaming the
+assignment column and updating values in place avoids unbounded column-drop
+rewrites. The canonical binary empty-set encoding preserves the existing SQL
+default. Format-4 search preparation renames its TEXT actor lookup and uses the
+existing bounded clear/rebuild phases. Normal serving has no retired-subject
+reader or old request-shape adapter.
+
+The shared shadcn metadata picker now has lazy loading, name/handle search,
+checkboxes, focus return, mobile containment and unavailable-person removal.
+An edit captures its original record version; a conflict retains choices rather
+than applying them to an unseen version. Closing content becomes inert while
+its exit animation finishes. These changes do not implement the Assignee list
+menu or finish the broader issue/PR/project/milestone parity inventory.
+
+The actor-assignment slice passed 369 server tests (five existing ignored),
+107 UI unit tests and all 95 browser tests, plus strict all-target Clippy,
+formatting and architecture gates. Final focused picker checks also cover the
+error-message inset. Native tests preserve canonical defaults, reject retired
+bytes during serving, retain versions/submissions, roll back schema and earlier
+row updates on failure, and replay successful/conflicting decisions after restart.
+
+A real previous-binary/current-binary RustFS upgrade converted 19 nonempty
+assignment records with explicit qualified mappings. It stopped after eight,
+restarted the process, resumed through the CLI, rebuilt format 4 and verified
+all other fields unchanged apart from monotonic reaction ordering watermarks;
+121 durable Cellar objects remained. A separate current-binary browser run
+proved stale-selection rejection, new-member assignment on issues and PRs,
+profile enrollment keeping the assigned UUID, navigation to that public profile,
+and attribution after revocation/restart, leaving 59 durable objects.
+
+The persistent preview's two native source inventories contained no legacy
+assignments. Explicit assignment/index preparation preserved all 18 captured
+resources; five reaction ordering watermarks advanced from 1291 to 1292, while
+all other fields and the unenrolled operator profile remained unchanged. These
+checks qualify the implemented assignment slice, not complete GitHub parity,
+native grant fencing, production scale or the pending SDK release prerequisites.
 
 ## Primary references
 

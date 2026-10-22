@@ -217,7 +217,7 @@ async fn native_label_choices_search_the_whole_catalog_and_follow_assignments_re
                 body: None,
                 state: None,
                 label_ids: Some(labels),
-                assignee_subjects: None,
+                assignees: None,
             },
         )
         .await;
@@ -298,7 +298,7 @@ async fn native_label_choices_search_the_whole_catalog_and_follow_assignments_re
             body: None,
             state: None,
             label_ids: Some(vec![1]),
-            assignee_subjects: None,
+            assignees: None,
         },
     )
     .await;

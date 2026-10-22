@@ -17,7 +17,13 @@ async function fixture(page: Page) {
     comment_count: 3,
     reaction_count: 0,
     labels: [{ id: 1, name: "Help wanted", color: "008672" }],
-    assignees: [{ subject: "alice", name: "Alice" }],
+    assignees: [
+      {
+        id: "00000000-0000-4000-8000-000000000001",
+        name: "Alice",
+        profile: null,
+      },
+    ],
   };
   for (const kind of ["issues", "pulls"]) {
     await page.route(`**/api/repos/team/project/${kind}?**`, (route) => {

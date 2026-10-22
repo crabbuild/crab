@@ -1,8 +1,7 @@
 use super::*;
+use crate::cells::repository::assignments;
 use crate::cells::repository::collaboration::{Target, reactions};
-use crate::cells::repository::{
-    decode_assignees, decode_label_ids, result_blob, result_text, result_u64_from_row,
-};
+use crate::cells::repository::{decode_label_ids, result_blob, result_text, result_u64_from_row};
 
 pub(super) fn remove(context: &Transaction<'_>, id: u64) -> crate::cells::Result<()> {
     context.sql(&SqlBatch {
@@ -40,7 +39,7 @@ pub(super) fn refresh(context: &Transaction<'_>, subject: Subject) -> crate::cel
         ),
     };
     let query = format!(
-        "SELECT title, body, author_name, state, label_ids, assignee_subjects, created_at_ms, updated_at_ms, author_issuer, author_subject FROM {table} WHERE number = ?"
+        "SELECT title, body, author_name, state, label_ids, assignees, created_at_ms, updated_at_ms, author_issuer, author_subject FROM {table} WHERE number = ?"
     );
     let rows = context.sql(&SqlBatch {
         statements: vec![statement(&query, vec![integer(subject.number)?])],
@@ -54,7 +53,7 @@ pub(super) fn refresh(context: &Transaction<'_>, subject: Subject) -> crate::cel
     let author = result_text(row, 2)?.to_lowercase();
     let state = result_u64_from_row(row, 3)?;
     let labels = decode_label_ids(result_blob(row, 4)?)?;
-    let assignees = decode_assignees(result_blob(row, 5)?)?;
+    let assignees = assignments::decode(result_blob(row, 5)?)?;
     let created = result_u64_from_row(row, 6)?;
     let updated = result_u64_from_row(row, 7)?;
     let issuer = result_text(row, 8)?;
@@ -97,10 +96,10 @@ pub(super) fn refresh(context: &Transaction<'_>, subject: Subject) -> crate::cel
             vec![integer(id)?, integer(label)?],
         ));
     }
-    for subject in assignees {
+    for assignee in assignees {
         statements.push(statement(
-            "INSERT INTO discussion_index_assignees(document, subject) VALUES (?, ?)",
-            vec![integer(id)?, SqlValue::Text(subject)],
+            "INSERT INTO discussion_index_assignees(document, actor) VALUES (?, ?)",
+            vec![integer(id)?, SqlValue::Text(assignee.id.to_string())],
         ));
     }
     if let Some(milestone) =

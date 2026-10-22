@@ -59,14 +59,19 @@ the authority-checked `CellClient` and target-bound read receipts.
 output gate. `src/cells/address.rs` identifies Repository and Directory targets;
 commands and reads declare their native class. Repository initialization lives
 in `src/cells/repository/schema.rs`, using the canonical `src/cells/schema.sql`.
-`src/cells/directory/` owns qualified private account identities and optional
+`cells/repository/assignments/` owns stable actor references and name snapshots;
+its `migration/` alone reads retired subject bytes and performs bounded explicit
+conversion. `api/assignees/resolution.rs` binds current candidates and renders
+historical assignees with public profiles, rechecking grants after Directory
+reads. Private assignment inventory/migration live in `server/management/assignments.rs`
+and `cli/assignments.rs`. `src/cells/directory/` owns qualified private account identities and optional
 public profiles. `accounts/` owns stable UUID registration; `profiles/` owns
 chosen names/handles and immutable submissions. `migration/` alone reads format 1,
 with bounded, restartable format-2 conversion and colocated historical-input tests.
 Private status/migration/registration are in `server/management/directory.rs` and
 the `cells` CLI. Registration does not grant permissions.
-`cells/directory/lookup/` owns bounded qualified-identity reads and minimal public
-actor summaries. `cells/directory/search/` owns bounded indexed handle resolution
+`cells/directory/lookup/` owns bounded qualified account-ID reads and public
+profile reads by qualified key or actor UUID. `cells/directory/search/` owns bounded indexed handle resolution
 and completion. Handle completion returns bounded public matches plus an exact
 truncation flag. `api/discussion_search/authors/` binds public qualifiers to
 qualified accounts before native repository reads and exposes the authorized

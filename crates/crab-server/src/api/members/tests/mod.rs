@@ -433,6 +433,7 @@ async fn triage_uses_durable_grants_for_issue_and_pull_management_without_git_wr
     use crate::cells::repository::{CreatePull, CreatePullInput, RepositoryAuthor};
     use reqwest::Method;
     let h = Harness::new(false).await;
+    h.initialize_directory().await;
     let alice = h.login().await;
     let root = "/api/repos/team/private";
     let issue: Value = h.write(Method::POST, &format!("{root}/issues"), &alice,
@@ -502,6 +503,7 @@ async fn triage_uses_durable_grants_for_issue_and_pull_management_without_git_wr
     // Routing still contains Bob's old read role. Every capability below must
     // come from the catalog decision rather than delayed materialization.
     assert_eq!(repo.config.members[1].access, crate::RepositoryAccess::Read);
+    let bob_id = h.assignee_id(&bob, "Bob").await;
     for kind in ["issues", "pulls"] {
         let path = format!("{root}/{kind}/1");
         let before = h.json(&path, &bob).await;
@@ -517,9 +519,9 @@ async fn triage_uses_durable_grants_for_issue_and_pull_management_without_git_wr
         let denied = h.write(Method::PATCH, &path, &bob, json!({"version":before["version"],"title":"Cannot edit another author's title","state":"closed"})).await;
         assert_eq!(denied.status(), StatusCode::FORBIDDEN);
         assert_eq!(h.json(&path, &bob).await["version"], before["version"]);
-        let closed: Value = h.write(Method::PATCH, &path, &bob, json!({"version":before["version"],"state":"closed","label_ids":[label["id"]],"assignees":["bob-id"]})).await.error_for_status().unwrap().json().await.unwrap();
+        let closed: Value = h.write(Method::PATCH, &path, &bob, json!({"version":before["version"],"state":"closed","label_ids":[label["id"]],"assignee_ids":[bob_id]})).await.error_for_status().unwrap().json().await.unwrap();
         assert_eq!(closed["state"], "closed");
-        assert_eq!(closed["assignees"][0]["subject"], "bob-id");
+        assert_eq!(closed["assignees"][0]["id"], bob_id);
         let reopened: Value = h
             .write(
                 Method::PATCH,

@@ -709,7 +709,13 @@ test.beforeEach(async ({ page }) => {
                   updated_at: 1_700_000_000_000,
                 },
               ],
-              assignees: [{ subject: "alice", name: "Alice" }],
+              assignees: [
+                {
+                  id: "00000000-0000-4000-8000-000000000001",
+                  name: "Alice",
+                  profile: null,
+                },
+              ],
               version: 1,
               created_at: 1_700_000_000_000,
               updated_at: 1_700_000_000_000,

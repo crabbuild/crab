@@ -1337,8 +1337,8 @@ Do not derive issuer/subject keys from names or owner labels. Profile enrollment
 reuses a registered UUID; when no account exists it creates that identity and its
 profile in the same native transaction. Public profile/list DTOs stay unchanged,
 and accounts without a chosen profile remain absent from public handle results.
-Existing subject-based assignments and membership still require their separate
-explicit actor-ID migration; this registry does not silently reinterpret them.
+Existing assignments require the explicit actor-ID preparation below; membership
+remains catalog-owned and still needs its separate native-authority cutover.
 
 Open `/-/profile` through the header's profile icon to choose a public username
 and display name. The stable profile URL is `/-/users/{actor-uuid}`; `-` is a
@@ -1376,7 +1376,8 @@ null when that qualified account has not enrolled. The browser links the current
 handle to the stable UUID; it never guesses a handle from the snapshot name.
 The old list-author string shape is removed. Detail, comment, review and other
 attribution contracts retain their existing display names pending their own
-integration; assignments and catalog membership are also unchanged.
+integration. Actor-based assignments use the separate contract below; catalog
+membership is unchanged.
 
 The HTTP owner deduplicates at most 50 page authors into one native Directory
 read. Its private `LookupActors` operation accepts at most 100 qualified keys,
@@ -1716,6 +1717,30 @@ Merge-commit construction rejects binary conflicts, type conflicts, delete/modif
 The server revalidates live refs, approvals, required checks, pointer dependencies, and visibility under the base-ref lease and both GC fences. A durable merge marker supports recovery after response loss or restart.
 
 ### Manage labels and assignees
+
+Assignments store stable Directory account UUIDs and explicit display-name
+snapshots. `GET .../assignees` returns `{items:[{id,name,profile}],can_manage}`;
+`profile` is `{id,handle,name}` or null. Issue/PR edits accept
+`{version,assignee_ids:[UUID]}`. The old provider-subject request shape is removed.
+Current membership determines eligibility and triage permission after awaited
+Directory reads. Account registration creates no profile or grant. Historical
+assignments remain visible after membership removal and link to a chosen public
+profile when one exists.
+
+The shadcn picker loads candidates when opened, searches names/handles, supports
+keyboard focus/Escape, and permits removing unavailable historical selections
+without re-adding them. It submits the record version captured when editing
+starts; conflicts retain choices and require a refreshed record. This is a
+metadata picker, not the still-missing Assignee discussion-list filter.
+
+Existing repositories need private `cells assignment-inventory`,
+`cells migrate-assignments` and then `cells rebuild-search`. Nonempty legacy
+assignments require explicit per-record qualified-identity JSON Lines mappings;
+empty records convert without a file. Migration uses eight records per native
+transaction, durable progress, conflict receipts and rename/update operations
+that avoid whole-table rewrites. See [assignment preparation](CELLAR.md#assignment-preparation)
+for the exact format, prerequisites, interruption and fleet upgrade procedure.
+
 
 Label constraints:
 

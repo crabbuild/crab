@@ -55,6 +55,13 @@ impl Mutation for RebuildIndex {
                         "discussion index generation is invalid",
                     ));
                 }
+                // Preserve the existing TEXT lookup and its index. Clear/rebuild
+                // removes old subjects in bounded frames before serving UUID keys.
+                if current.as_ref().is_some_and(|state| state.format < 4) {
+                    context.install_schema(
+                        "ALTER TABLE discussion_index_assignees RENAME COLUMN subject TO actor;",
+                    )?;
+                }
                 context.install_schema(include_str!("schema.sql"))?;
                 State {
                     format: FORMAT,

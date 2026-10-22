@@ -70,7 +70,7 @@ async fn fixture(
                 body: None,
                 state: None,
                 label_ids: Some(vec![1, 2]),
-                assignee_subjects: None,
+                assignees: None,
             },
         )
         .await
@@ -263,7 +263,7 @@ async fn native_issue_and_pull_search_share_labels_boolean_logic_and_readiness()
                         body: None,
                         state: None,
                         label_ids: Some(vec![label.number]),
-                        assignee_subjects: None,
+                        assignees: None,
                     },
                 )
                 .await

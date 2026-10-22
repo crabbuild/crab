@@ -271,7 +271,7 @@ async fn requests_require_an_author_or_writer_and_an_open_unarchived_pull() {
         body: None,
         state: Some(PullState::Closed),
         label_ids: None,
-        assignee_subjects: None,
+        assignees: None,
     };
     write::<UpdatePull>(&cell, edit).await;
     assert_eq!(

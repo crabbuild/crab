@@ -48,10 +48,10 @@ CREATE INDEX IF NOT EXISTS discussion_index_label_lookup ON discussion_index_lab
 
 CREATE TABLE IF NOT EXISTS discussion_index_assignees (
     document INTEGER NOT NULL REFERENCES discussion_index(rowid) ON DELETE CASCADE,
-    subject TEXT NOT NULL,
-    PRIMARY KEY (document, subject)
+    actor TEXT NOT NULL,
+    PRIMARY KEY (document, actor)
 ) STRICT, WITHOUT ROWID;
-CREATE INDEX IF NOT EXISTS discussion_index_assignee_lookup ON discussion_index_assignees(subject, document);
+CREATE INDEX IF NOT EXISTS discussion_index_assignee_lookup ON discussion_index_assignees(actor, document);
 
 CREATE TABLE IF NOT EXISTS discussion_index_milestone_catalog (
     number INTEGER PRIMARY KEY CHECK (number BETWEEN 1 AND 9007199254740991),

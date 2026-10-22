@@ -20,7 +20,12 @@ fn maximum_pull_decisions_fit_the_registered_output_bound() {
         head_ref: "refs/heads/feature".into(),
         head_oid: "89abcdef0123456789abcdef0123456789abcdef".into(),
         label_ids: (1..=20).collect(),
-        assignee_subjects: (0..10).map(|index| format!("s{index}")).collect(),
+        assignees: (1..=10)
+            .map(|index| crate::cells::repository::assignments::Assignee {
+                id: uuid::Uuid::from_u128(index),
+                name: "🦀".repeat(160),
+            })
+            .collect(),
         merge_pending: None,
         merge: None,
         review_decisions: (1..=96)

@@ -12,7 +12,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{
-    api::assignees::{self, Assignee},
+    api::assignees::{self, Selection},
     api::labels::{self, Label},
     api::reactions,
     app::{self, Error, Result, actor, body, number, repository, title},
@@ -51,7 +51,7 @@ fn issue_view(
     issue: &IssueRecord,
     author: &Identity,
     labels: &[Label],
-    assignees: &[Assignee],
+    assignees: &Selection,
     can_triage: bool,
     reactions: &reactions::View,
 ) -> Value {
@@ -66,7 +66,7 @@ fn issue_view(
         "created_at": issue.created_at_ms,
         "updated_at": issue.updated_at_ms,
         "labels": labels::selection_view(&issue.label_ids, labels),
-        "assignees": assignees::selection_view(&issue.assignee_subjects, assignees),
+        "assignees": assignees.view(&issue.assignees),
         "can_edit": same_author(&issue.author, author),
         "can_close": same_author(&issue.author, author) || can_triage,
         "can_label": can_triage,
@@ -78,7 +78,7 @@ fn issue_summary_view(
     authors: &super::profiles::attribution::Authors,
     issue: &IssueSummary,
     labels: &[crate::cells::repository::search::index::LabelSummary],
-    assignees: &[Assignee],
+    assignees: &Selection,
 ) -> Value {
     json!({
         "kind": "issue",
@@ -92,7 +92,7 @@ fn issue_summary_view(
         "comment_count": issue.comment_count,
         "reaction_count": issue.reaction_count,
         "labels": issue.label_ids.iter().filter_map(|id| labels.iter().find(|label|label.id==*id)).collect::<Vec<_>>(),
-        "assignees": assignees::selection_view(&issue.assignee_subjects, assignees),
+        "assignees": assignees.view(&issue.assignees),
     })
 }
 
@@ -191,8 +191,16 @@ async fn list(
         }),
     )
     .await?;
-    let permissions = app::membership(&server, &principal, &repo).await?;
-    let assignees = assignees::available(&permissions);
+    let assignees = Selection::load(
+        &server,
+        &principal,
+        &repo,
+        page.items.iter().flat_map(|item| match item {
+            DiscussionSummary::Issue(issue) => issue.assignees.iter(),
+            DiscussionSummary::Pull(pull) => pull.assignees.iter(),
+        }),
+    )
+    .await?;
     let items = page
         .items
         .iter()
@@ -267,8 +275,7 @@ async fn create(
         },
     )
     .await?;
-    let permissions = app::membership(&server, &principal, &repo).await?;
-    let assignees = assignees::available(&permissions);
+    let assignees = Selection::load(&server, &principal, &repo, issue.assignees.iter()).await?;
     let response = (
         StatusCode::CREATED,
         Json(issue_view(
@@ -276,7 +283,7 @@ async fn create(
             &author,
             &labels,
             &assignees,
-            permissions.principal.can_triage(repo.id),
+            assignees.principal.can_triage(repo.id),
             &reaction,
         )),
     );
@@ -329,14 +336,13 @@ async fn detail(
         },
     )
     .await?;
-    let permissions = app::membership(&server, &principal, &repo).await?;
-    let assignees = assignees::available(&permissions);
+    let assignees = Selection::load(&server, &principal, &repo, issue.assignees.iter()).await?;
     let response = Json(issue_view(
         &issue,
         &author,
         &labels,
         &assignees,
-        permissions.principal.can_triage(repo.id),
+        assignees.principal.can_triage(repo.id),
         &reaction,
     ))
     .into_response();
@@ -351,7 +357,7 @@ struct IssueEdit {
     body: Option<String>,
     state: Option<IssueState>,
     label_ids: Option<Vec<u64>>,
-    assignees: Option<Vec<String>>,
+    assignee_ids: Option<Vec<uuid::Uuid>>,
 }
 
 async fn edit(
@@ -367,7 +373,7 @@ async fn edit(
         && input.body.is_none()
         && input.state.is_none()
         && input.label_ids.is_none()
-        && input.assignees.is_none()
+        && input.assignee_ids.is_none()
     {
         return Err(Error::Invalid("No issue changes supplied"));
     }
@@ -378,7 +384,7 @@ async fn edit(
     if input.label_ids.is_some() && !can_triage {
         return Err(Error::LabelPermission);
     }
-    if input.assignees.is_some() && !can_triage {
+    if input.assignee_ids.is_some() && !can_triage {
         return Err(Error::AssigneePermission);
     }
     let labels = if input.label_ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
@@ -394,18 +400,17 @@ async fn edit(
         .label_ids
         .map(|value| labels::validate_selection(value, &labels))
         .transpose()?;
-    // Labels may yield. Use the same current membership for the caller's role
-    // and assignment eligibility so a stale route cannot retain removed members.
-    let permissions = app::membership(&server, &principal, &repo).await?;
-    let can_triage = permissions.principal.can_triage(repo.id);
-    if input.assignees.is_some() && !can_triage {
-        return Err(Error::AssigneePermission);
-    }
-    let assignees = assignees::available(&permissions);
-    let assignee_subjects = input
-        .assignees
-        .map(|value| assignees::validate_selection(value, &assignees))
-        .transpose()?;
+    // Assignment eligibility and caller role must share the final current roster.
+    let (can_triage, assignees) = if let Some(ids) = input.assignee_ids {
+        let roster = assignees::Roster::load(&server, &principal, &repo).await?;
+        if !roster.principal.can_triage(repo.id) {
+            return Err(Error::AssigneePermission);
+        }
+        (true, Some(roster.validate(ids)?))
+    } else {
+        let permissions = app::membership(&server, &principal, &repo).await?;
+        (permissions.principal.can_triage(repo.id), None)
+    };
     let routed = crate::app::repository_cell(&server, &repo)?;
     let output = crate::app::command_output(
         routed
@@ -422,7 +427,7 @@ async fn edit(
                     body: input.body,
                     state: input.state.map(IssueState::code),
                     label_ids,
-                    assignee_subjects,
+                    assignees,
                 },
             )
             .await,
@@ -457,14 +462,13 @@ async fn edit(
         },
     )
     .await?;
-    let permissions = app::membership(&server, &principal, &repo).await?;
-    let assignees = assignees::available(&permissions);
+    let assignees = Selection::load(&server, &principal, &repo, issue.assignees.iter()).await?;
     Ok(Json(issue_view(
         &issue,
         &author,
         &labels,
         &assignees,
-        permissions.principal.can_triage(repo.id),
+        assignees.principal.can_triage(repo.id),
         &reaction,
     )))
 }

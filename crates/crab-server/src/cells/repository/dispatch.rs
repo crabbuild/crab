@@ -12,11 +12,21 @@ pub(in crate::cells) fn dispatch_mutation(
     id: u32,
     input: serde_json::Value,
 ) -> crate::cells::Result<MutationResult<serde_json::Value>> {
-    let maintenance = id == <search::index::RebuildIndex as Mutation>::ID;
+    let maintenance = id == <search::index::RebuildIndex as Mutation>::ID
+        || id == <assignments::MigrateAssignments as Mutation>::ID;
+    #[cfg(test)]
+    let maintenance = maintenance || id == assignments::migration::tests::SeedSubjects::ID;
     if !maintenance {
         search::index::ensure_ready(context)?;
     }
     let result = match id {
+        #[cfg(test)]
+        assignments::migration::tests::SeedSubjects::ID => {
+            invoke_mutation::<assignments::migration::tests::SeedSubjects>(context, input)
+        }
+        <assignments::MigrateAssignments as Mutation>::ID => {
+            invoke_mutation::<assignments::MigrateAssignments>(context, input)
+        }
         <search::index::RebuildIndex as Mutation>::ID => {
             invoke_mutation::<search::index::RebuildIndex>(context, input)
         }
@@ -103,6 +113,13 @@ pub(in crate::cells) fn dispatch_read(
     input: serde_json::Value,
 ) -> crate::cells::Result<serde_json::Value> {
     match id {
+        #[cfg(test)]
+        assignments::migration::tests::InspectColumns::ID => {
+            invoke_read::<assignments::migration::tests::InspectColumns>(context, input)
+        }
+        <assignments::GetAssignmentBatch as Read>::ID => {
+            invoke_read::<assignments::GetAssignmentBatch>(context, input)
+        }
         <search::index::GetSearchIndexStatus as Read>::ID => {
             invoke_read::<search::index::GetSearchIndexStatus>(context, input)
         }

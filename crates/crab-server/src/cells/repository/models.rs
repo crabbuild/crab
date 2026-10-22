@@ -139,7 +139,7 @@ pub(crate) struct IssueRecord {
     pub body: String,
     pub state: u8,
     pub label_ids: Vec<u64>,
-    pub assignee_subjects: Vec<String>,
+    pub assignees: Vec<super::assignments::Assignee>,
     pub version: u64,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
@@ -188,7 +188,7 @@ pub(crate) struct UpdateIssueInput {
     pub body: Option<String>,
     pub state: Option<u8>,
     pub label_ids: Option<Vec<u64>>,
-    pub assignee_subjects: Option<Vec<String>>,
+    pub assignees: Option<Vec<super::assignments::Assignee>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -227,7 +227,7 @@ pub(crate) struct IssueSummary {
     pub title: String,
     pub state: u8,
     pub label_ids: Vec<u64>,
-    pub assignee_subjects: Vec<String>,
+    pub assignees: Vec<super::assignments::Assignee>,
     pub version: u64,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,

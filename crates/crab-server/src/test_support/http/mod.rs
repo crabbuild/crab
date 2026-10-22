@@ -36,6 +36,17 @@ impl Harness {
             .unwrap();
     }
 
+    pub(crate) async fn assignee_id(&self, cookie: &str, name: &str) -> Value {
+        let catalog = self.json("/api/repos/team/private/assignees", cookie).await;
+        catalog["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["name"] == name)
+            .unwrap()["id"]
+            .clone()
+    }
+
     pub(crate) async fn write(
         &self,
         method: reqwest::Method,

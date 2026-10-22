@@ -2659,8 +2659,9 @@ main {
 .assignee-avatars .assignee-avatar + .assignee-avatar {
   margin-left: -5px;
 }
-.assignee-picker .label-picker-menu fieldset label {
-  min-height: 36px;
+.assignee-picker-content [data-slot="popover-title"] {
+  font-size: var(--text-sm);
+  line-height: var(--text-sm--line-height);
 }
 .labels-page {
   max-width: 1080px;

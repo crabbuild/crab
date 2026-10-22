@@ -76,9 +76,9 @@ const MAX_LABELS: usize = 20;
 const MAX_REPOSITORY_LABELS: u64 = 500;
 const MAX_STATUS_CONTEXTS: u64 = 128;
 const MAX_STATUS_SUBMISSIONS: u64 = 1_000;
-const MAX_ASSIGNEES: usize = 10;
 const MAX_LIST_OUTPUT_BYTES: usize = 1024 * 1024;
 
+pub(crate) mod assignments;
 mod checks;
 pub(crate) mod collaboration;
 mod dispatch;
@@ -106,7 +106,7 @@ fn statement(sql: &str, parameters: Vec<SqlValue>) -> SqlStatement {
 fn insert_issue(context: &Transaction<'_>, record: &IssueRecord) -> crate::cells::Result<()> {
     context.sql(&SqlBatch {
         statements: vec![statement(
-            "INSERT INTO repository_issues(number, author_issuer, author_subject, author_name, title, body, state, label_ids, assignee_subjects, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO repository_issues(number, author_issuer, author_subject, author_name, title, body, state, label_ids, assignees, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             vec![
                 integer(record.number)?,
                 SqlValue::Text(record.author.issuer.clone()),
@@ -116,7 +116,7 @@ fn insert_issue(context: &Transaction<'_>, record: &IssueRecord) -> crate::cells
                 SqlValue::Text(record.body.clone()),
                 SqlValue::Integer(i64::from(record.state)),
                 SqlValue::Blob(encode_label_ids(&record.label_ids)?),
-                SqlValue::Blob(encode_assignees(&record.assignee_subjects)?),
+                SqlValue::Blob(assignments::encode(&record.assignees)?),
                 integer(record.version)?,
                 integer(record.created_at_ms)?,
                 integer(record.updated_at_ms)?,
@@ -266,7 +266,7 @@ fn issue_from_row(row: &[SqlValue]) -> crate::cells::Result<IssueRecord> {
         body: result_text(row, 5)?,
         state,
         label_ids: decode_label_ids(result_blob(row, 7)?)?,
-        assignee_subjects: decode_assignees(result_blob(row, 8)?)?,
+        assignees: assignments::decode(result_blob(row, 8)?)?,
         version: result_u64_from_row(row, 9)?,
         created_at_ms: result_u64_from_row(row, 10)?,
         updated_at_ms: result_u64_from_row(row, 11)?,
@@ -361,7 +361,7 @@ fn validate_issue(record: &IssueRecord) -> crate::cells::Result<()> {
     validate_title(&record.title)?;
     validate_body(&record.body, false)?;
     validate_label_ids(&record.label_ids)?;
-    validate_assignees(&record.assignee_subjects)?;
+    assignments::validate(&record.assignees)?;
     validate_number(record.version)?;
     if record.state > 1 || record.updated_at_ms < record.created_at_ms {
         return Err(crate::cells::Error::Invalid(
@@ -378,22 +378,6 @@ fn validate_label_ids(labels: &[u64]) -> crate::cells::Result<()> {
     {
         return Err(crate::cells::Error::Invalid(
             "repository issue labels are invalid",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_assignees(assignees: &[String]) -> crate::cells::Result<()> {
-    if assignees.len() > MAX_ASSIGNEES
-        || assignees.iter().any(|subject| {
-            subject.is_empty()
-                || subject.chars().count() > 512
-                || subject.chars().any(char::is_control)
-        })
-        || assignees.windows(2).any(|pair| pair[0] >= pair[1])
-    {
-        return Err(crate::cells::Error::Invalid(
-            "repository issue assignees are invalid",
         ));
     }
     Ok(())
@@ -453,49 +437,6 @@ fn decode_label_ids(bytes: &[u8]) -> crate::cells::Result<Vec<u64>> {
         .map_err(|_| crate::cells::Error::Invalid("repository label encoding is invalid"))?;
     validate_label_ids(&labels)?;
     Ok(labels)
-}
-
-fn encode_assignees(assignees: &[String]) -> crate::cells::Result<Vec<u8>> {
-    let mut encoder = RecordEncoder::new(16 * 1024)
-        .map_err(|_| crate::cells::Error::Invalid("repository assignee encoding failed"))?;
-    encoder
-        .write_count(assignees.len())
-        .map_err(|_| crate::cells::Error::Invalid("repository assignee encoding failed"))?;
-    for assignee in assignees {
-        encoder
-            .write_text(assignee)
-            .map_err(|_| crate::cells::Error::Invalid("repository assignee encoding failed"))?;
-    }
-    Ok(encoder.finish())
-}
-
-fn decode_assignees(bytes: &[u8]) -> crate::cells::Result<Vec<String>> {
-    let mut decoder = RecordDecoder::new(bytes, 16 * 1024)
-        .map_err(|_| crate::cells::Error::Invalid("repository assignee encoding is invalid"))?;
-    let count = decoder
-        .read_count()
-        .map_err(|_| crate::cells::Error::Invalid("repository assignee encoding is invalid"))?;
-    if count > MAX_ASSIGNEES {
-        return Err(crate::cells::Error::Invalid(
-            "repository assignee encoding is invalid",
-        ));
-    }
-    let mut assignees = Vec::with_capacity(count);
-    for _ in 0..count {
-        assignees.push(
-            decoder
-                .read_text()
-                .map_err(|_| {
-                    crate::cells::Error::Invalid("repository assignee encoding is invalid")
-                })?
-                .to_owned(),
-        );
-    }
-    decoder
-        .finish()
-        .map_err(|_| crate::cells::Error::Invalid("repository assignee encoding is invalid"))?;
-    validate_assignees(&assignees)?;
-    Ok(assignees)
 }
 
 fn encoded_size<T: serde::Serialize>(value: &T) -> crate::cells::Result<usize> {
