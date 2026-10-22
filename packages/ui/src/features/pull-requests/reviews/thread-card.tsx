@@ -1,3 +1,4 @@
+import { Author } from "@/components/discussion/author";
 import { endpoint, type Repository } from "@/lib/api";
 import { Reactions } from "@/components/discussion/reactions";
 import { Editor } from "@/components/discussion/editor";
@@ -76,11 +77,13 @@ export function ReviewThreadCard({
         <summary className="review-thread-summary">
           <span className="review-thread-summary-main">
             <span className="review-author-avatar" aria-hidden="true">
-              {initials(thread.author)}
+              {initials(thread.author.profile?.name ?? thread.author.name)}
             </span>
             <span className="review-thread-summary-copy">
               <span className="review-thread-author-line">
-                <strong>{thread.author}</strong>
+                <strong>
+                  <Author author={thread.author} />
+                </strong>{" "}
                 <span className="muted">left a review comment</span>
               </span>
               <span className="review-thread-location">

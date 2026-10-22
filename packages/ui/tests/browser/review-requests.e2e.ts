@@ -66,7 +66,7 @@ async function fixture(page: Page) {
           draft: false,
           version,
           state: "open",
-          author: "Alice",
+          author: { name: "Alice", profile: null },
           created_at: 1700000000000,
           updated_at: 1700000000000,
           base_ref: "refs/heads/main",

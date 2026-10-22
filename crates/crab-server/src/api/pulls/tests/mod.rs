@@ -376,6 +376,12 @@ async fn pull_creation_rejects_invalid_branch_pairs_before_writing_app_state() {
 #[tokio::test(flavor = "multi_thread")]
 async fn pull_request_merge_methods_use_canonical_ref_publication() {
     let mut server = fixtures::fixture().await;
+    server
+        .cells()
+        .unwrap()
+        .initialize(crate::cells::Address::Directory)
+        .await
+        .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let mutable = Arc::get_mut(&mut server).unwrap();

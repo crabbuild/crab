@@ -13,7 +13,7 @@ use serde_json::{Value, json};
 
 use super::{current_branches, storage};
 use crate::{
-    api::reactions,
+    api::{profiles::attribution::Authors, reactions},
     app::{self, Error, Result},
     auth::{Identity, Principal},
     cells::repository::collaboration::Target,
@@ -40,6 +40,7 @@ pub(super) fn routes() -> Router<Arc<Server>> {
 }
 
 fn review_view(
+    authors: &Authors,
     review: &PullReview,
     actor: &Identity,
     current_head: Option<&str>,
@@ -47,7 +48,7 @@ fn review_view(
 ) -> Value {
     json!({
         "number": review.number,
-        "author": review.author.name,
+        "author": authors.view(&review.author),
         "body": review.body,
         "reactions": reactions,
         "state": review.state,
@@ -127,10 +128,15 @@ async fn list(
         })
         .collect();
     let reactions = reactions::read(&server, repo, &actor, targets).await?;
+    let authors =
+        Authors::load(&server, &principal, reviews.iter().map(|item| &item.author)).await?;
+    app::membership(&server, &principal, repo).await?;
     let items = reviews
         .iter()
         .zip(reactions)
-        .map(|(review, reactions)| review_view(review, &actor, head.as_deref(), &reactions))
+        .map(|(review, reactions)| {
+            review_view(&authors, review, &actor, head.as_deref(), &reactions)
+        })
         .collect::<Vec<_>>();
     Ok(Json(json!({"items":items,"next":next})))
 }
@@ -178,9 +184,17 @@ async fn create(
             },
         )
         .await?;
+        let authors = Authors::load(&server, &principal, std::iter::once(&review.author)).await?;
+        app::membership(&server, &principal, repo).await?;
         return Ok((
             StatusCode::CREATED,
-            Json(review_view(&review, &actor, head.as_deref(), &reaction)),
+            Json(review_view(
+                &authors,
+                &review,
+                &actor,
+                head.as_deref(),
+                &reaction,
+            )),
         ));
     }
     let (pull, head) = pull_and_head(&server, repo, id).await?;
@@ -216,9 +230,17 @@ async fn create(
         },
     )
     .await?;
+    let authors = Authors::load(&server, &principal, std::iter::once(&review.author)).await?;
+    app::membership(&server, &principal, repo).await?;
     Ok((
         StatusCode::CREATED,
-        Json(review_view(&review, &actor, Some(&head), &reaction)),
+        Json(review_view(
+            &authors,
+            &review,
+            &actor,
+            Some(&head),
+            &reaction,
+        )),
     ))
 }
 
@@ -245,7 +267,10 @@ async fn detail(
         },
     )
     .await?;
+    let authors = Authors::load(&server, &principal, std::iter::once(&review.author)).await?;
+    app::membership(&server, &principal, repo).await?;
     Ok(Json(review_view(
+        &authors,
         &review,
         &actor,
         head.as_deref(),
@@ -297,7 +322,10 @@ async fn edit(
         },
     )
     .await?;
+    let authors = Authors::load(&server, &principal, std::iter::once(&review.author)).await?;
+    app::membership(&server, &principal, repo).await?;
     Ok(Json(review_view(
+        &authors,
         &review,
         &actor,
         head.as_deref(),

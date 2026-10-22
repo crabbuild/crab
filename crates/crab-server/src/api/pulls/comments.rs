@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use super::{same_author, storage};
 use crate::{
-    api::reactions,
+    api::{profiles::attribution::Authors, reactions},
     app::{self, Error, Result},
     auth::{Identity, Principal},
     cells::repository::collaboration::Target,
@@ -32,12 +32,17 @@ pub(super) fn routes() -> Router<Arc<Server>> {
         )
 }
 
-fn comment_view(comment: &PullComment, actor: &Identity, reactions: &reactions::View) -> Value {
+fn comment_view(
+    authors: &Authors,
+    comment: &PullComment,
+    actor: &Identity,
+    reactions: &reactions::View,
+) -> Value {
     json!({
         "number": comment.number,
         "body": comment.body,
         "reactions": reactions,
-        "author": comment.author.name,
+        "author": authors.view(&comment.author),
         "version": comment.version,
         "created_at": comment.created_at,
         "updated_at": comment.updated_at,
@@ -71,10 +76,17 @@ async fn comments(
         })
         .collect();
     let reactions = reactions::read(&server, repo, &actor, targets).await?;
+    let authors = Authors::load(
+        &server,
+        &principal,
+        comments.iter().map(|item| &item.author),
+    )
+    .await?;
+    app::membership(&server, &principal, repo).await?;
     let items = comments
         .iter()
         .zip(reactions)
-        .map(|(comment, reactions)| comment_view(comment, &actor, &reactions))
+        .map(|(comment, reactions)| comment_view(&authors, comment, &actor, &reactions))
         .collect::<Vec<_>>();
     Ok(Json(json!({"items":items,"next":next})))
 }
@@ -117,9 +129,11 @@ async fn comment(
         },
     )
     .await?;
+    let authors = Authors::load(&server, &principal, std::iter::once(&comment.author)).await?;
+    app::membership(&server, &principal, repo).await?;
     Ok((
         StatusCode::CREATED,
-        Json(comment_view(&comment, &actor, &reaction)),
+        Json(comment_view(&authors, &comment, &actor, &reaction)),
     ))
 }
 
@@ -144,7 +158,9 @@ async fn comment_detail(
         },
     )
     .await?;
-    Ok(Json(comment_view(&comment, &actor, &reaction)))
+    let authors = Authors::load(&server, &principal, std::iter::once(&comment.author)).await?;
+    app::membership(&server, &principal, repo).await?;
+    Ok(Json(comment_view(&authors, &comment, &actor, &reaction)))
 }
 
 #[derive(Deserialize)]
@@ -185,7 +201,9 @@ async fn edit_comment(
         },
     )
     .await?;
-    Ok(Json(comment_view(&comment, &actor, &reaction)))
+    let authors = Authors::load(&server, &principal, std::iter::once(&comment.author)).await?;
+    app::membership(&server, &principal, repo).await?;
+    Ok(Json(comment_view(&authors, &comment, &actor, &reaction)))
 }
 
 #[derive(Default, serde::Deserialize)]

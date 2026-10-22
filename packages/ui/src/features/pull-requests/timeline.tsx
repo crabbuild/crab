@@ -1,3 +1,4 @@
+import { Author } from "@/components/discussion/author";
 import { type Repository } from "@/lib/api";
 import { Reactions } from "@/components/discussion/reactions";
 import { DiscussionMarkdown } from "@/components/discussion/markdown";
@@ -40,7 +41,9 @@ export function PullTimeline({
             key={`comment-${event.value.number}`}
           >
             <header>
-              <strong>{event.value.author}</strong>
+              <strong>
+                <Author author={event.value.author} />
+              </strong>
               <span className="muted">
                 commented {timestamp(event.value.created_at)}
               </span>
@@ -96,7 +99,9 @@ function ReviewEvent({
         <span className="review-icon" aria-hidden="true">
           <Icon />
         </span>
-        <strong>{review.author}</strong>
+        <strong>
+          <Author author={review.author} />
+        </strong>
         <span> {action}</span>
         {!review.current && <span className="review-outdated">Outdated</span>}
         <span className="muted">{timestamp(review.created_at)}</span>

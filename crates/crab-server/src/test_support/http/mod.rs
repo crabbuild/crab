@@ -67,6 +67,12 @@ impl Harness {
     }
 
     pub(crate) async fn new(confidential: bool) -> Self {
+        let harness = Self::new_unprepared(confidential).await;
+        harness.initialize_directory().await;
+        harness
+    }
+
+    pub(crate) async fn new_unprepared(confidential: bool) -> Self {
         Self::new_with_auth(confidential, false).await
     }
 

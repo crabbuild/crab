@@ -121,7 +121,7 @@ test("repository metadata can be managed and assigned to an issue", async ({
       return route.fulfill({
         json: {
           number: 1,
-          author: "Alice",
+          author: { name: "Alice", profile: null },
           title: "Needs triage",
           body: "Please investigate.",
           state: "open",

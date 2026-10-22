@@ -1370,30 +1370,36 @@ lost reply without another write; other stale edits return 409. The UI retains
 the draft and offers an explicit choice of saved values or rebasing that draft.
 Renaming preserves the actor UUID and never changes repository permissions.
 
-Issue/PR list authors use `{name, profile}`: `name` is the recorded display-name
+Issue/PR list and detail authors, comments, reviews, inline threads/replies,
+thread resolving actors and merge/pending-merge actors use `{name, profile}`: `name` is the recorded display-name
 snapshot; `profile` is either `{id, handle, name}` from the current Directory or
 null when that qualified account has not enrolled. The browser links the current
 handle to the stable UUID; it never guesses a handle from the snapshot name.
-The old list-author string shape is removed. Detail, comment, review and other
-attribution contracts retain their existing display names pending their own
-integration. Actor-based assignments use the separate contract below; catalog
-membership is unchanged.
+The previous string shape is removed for these responses, including mutations
+and submission replays. Git commit signatures, activity actors, check/status
+actors and reviewer invitations retain their separate contracts. Actor-based
+assignments use the separate contract below; catalog membership is unchanged.
 
-The HTTP owner deduplicates at most 50 page authors into one native Directory
-read. Its private `LookupActors` operation accepts at most 100 qualified keys,
+The HTTP owner deduplicates page actors into one native Directory read
+(at most 50 records, or 100 keys including thread resolving actors). Its private
+`LookupActors` operation accepts at most 100 qualified keys,
 returns minimal public summaries in input order and uses one Directory snapshot.
 It performs indexed identity lookups rather than a catalog scan. Inputs count
 Unicode scalar values, matching SQLite schema bounds and stored repository
-identities. Native receipt/class checks still apply. Both list handlers recheck
-durable repository membership after enrichment. Repository counts/cursors and
+identities. Native receipt/class checks still apply. Handlers recheck durable
+repository membership after enrichment; thread reply/resolve controls use those
+refreshed grants. Repository counts/cursors and
 Directory display names have separate snapshots; enrichment is not a distributed
 transaction or an access grant. A rename neither rewrites source records nor
-requires a discussion-index rebuild. Prepare the Directory before this list
-contract is deployed, and update all native fleet peers together for its new
-read operation. No missing-schema reader or old DTO alias is supplied.
+requires a discussion-index rebuild. Prepare the Directory before these enriched
+responses are deployed, and update serving peers and the bundled UI together
+for the DTO change. No missing-schema reader or old DTO alias is supplied.
+Response enrichment follows the repository transaction, so an enrichment error
+does not imply a rolled-back mutation. Retry creates with the same submission
+ID; reload versioned edits before retrying.
 
-Organization/team authority, owner registration, detail/assignee integration
-and other actor-backed predicates remain unfinished. Choosing a handle matching a catalog
+Organization/team authority, owner registration and remaining actor-backed
+contracts and predicates remain unfinished. Choosing a handle matching a catalog
 owner label does not acquire ownership.
 
 ### Use the collaboration route families

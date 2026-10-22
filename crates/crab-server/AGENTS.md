@@ -84,8 +84,10 @@ profile reads by qualified key or actor UUID. `cells/directory/search/` owns bou
 and completion. Handle completion returns bounded public matches plus an exact
 truncation flag. `api/discussion_search/people/` resolves the shared author/reviewer/commenter name union
 before native reads and composes public choices with final membership checks.
-`api/discussion_search/authors/` and `reviews/` own their filter endpoints. `api/profiles/attribution/` deduplicates list authors into one
-Directory read; issue and PR handlers recheck durable membership afterward.
+`api/discussion_search/authors/` and `reviews/` own their filter endpoints. `api/profiles/attribution/` deduplicates discussion authors into one
+Directory read for lists, details and conversation responses; handlers recheck
+durable membership afterward. `api/issues/view.rs` owns issue/comment JSON
+presentation.
 `src/api/profiles/` exposes session-authenticated profile reads/edits without
 exposing authentication claims. `src/server/management/directory.rs` owns explicit
 private initialization; serving never creates its schema implicitly. HTTP authorization and

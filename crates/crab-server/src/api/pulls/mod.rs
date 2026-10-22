@@ -98,6 +98,14 @@ async fn pull_view(
         },
     )
     .await?;
+    let authors = super::profiles::attribution::Authors::load(
+        server,
+        principal,
+        std::iter::once(&pull.author)
+            .chain(pull.merge.as_ref().map(|merge| &merge.author))
+            .chain(pull.merge_pending.as_ref().map(|merge| &merge.author)),
+    )
+    .await?;
     let assignees = Selection::load(server, principal, repo, pull.assignees.iter()).await?;
     let can_write = assignees.principal.can_write(repo.id);
     let can_triage = assignees.principal.can_triage(repo.id);
@@ -108,7 +116,7 @@ async fn pull_view(
         "body": pull.body,
         "reactions": reaction,
         "state": pull.state,
-        "author": pull.author.name,
+        "author": authors.view(&pull.author),
         "base_ref": pull.base_ref,
         "base_oid": base_oid,
         "head_ref": pull.head_ref,
@@ -153,7 +161,7 @@ async fn pull_view(
             "satisfied": requirements.satisfied,
         },
         "merge": pull.merge.as_ref().map(|merge| json!({
-            "author": merge.author.name,
+            "author": authors.view(&merge.author),
             "method": merge.method,
             "commit_oid": merge.commit_oid,
             "message": merge.message,
@@ -161,7 +169,7 @@ async fn pull_view(
         })),
         "merge_pending": pull.merge_pending.as_ref().map(|merge| json!({
             "request_id": merge.request_id,
-            "author": merge.author.name,
+            "author": authors.view(&merge.author),
             "method": merge.method,
             "pull_version": merge.pull_version,
             "base_oid": merge.base_oid,

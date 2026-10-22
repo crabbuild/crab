@@ -152,3 +152,68 @@ test("missing Directory preparation is a visible list failure with an explicit r
     page.getByRole("heading", { name: "No results", exact: true }),
   ).toBeVisible();
 });
+
+test("pull conversations share stable profile links across comments, reviews and replies after rename", async ({
+  page,
+}) => {
+  const profile = { id, handle: "public-alice", name: "Public Alice" };
+  await mockPullRequest(page, { Alice: profile });
+  await page.goto("/team/project/pull/1?powerbar=1");
+  const root = page.locator(".pull-conversation > article.discussion-card");
+  await expect(
+    root.getByRole("link", { name: profile.handle, exact: true }),
+  ).toHaveAttribute("href", `/-/users/${id}`);
+  await page
+    .getByRole("textbox", { name: "Comment", exact: true })
+    .fill("A linked comment");
+  await page.getByRole("button", { name: "Comment", exact: true }).click();
+  const comment = page.locator(".discussion-thread article.discussion-card");
+  await expect(
+    comment.getByRole("link", { name: profile.handle, exact: true }),
+  ).toHaveAttribute("href", `/-/users/${id}`);
+  await page.getByRole("link", { name: "Files changed", exact: true }).click();
+  await page.getByRole("button", { name: "Open review thread #1" }).click();
+  const thread = page.locator(".review-thread-card");
+  await expect(thread.locator(".review-thread-author-line")).toContainText(
+    "Bob left a review comment",
+  );
+  await expect(thread.locator(".review-thread-author-line a")).toHaveCount(0);
+  await thread
+    .getByRole("textbox", { name: "Reply", exact: true })
+    .fill("A linked reply");
+  await thread.getByRole("button", { name: "Reply", exact: true }).click();
+  await expect(
+    thread
+      .locator(".review-reply")
+      .getByRole("link", { name: profile.handle, exact: true }),
+  ).toHaveAttribute("href", `/-/users/${id}`);
+  await page
+    .getByRole("textbox", { name: "Review summary", exact: true })
+    .fill("An unenrolled review");
+  await page
+    .getByRole("button", { name: "Submit review", exact: true })
+    .click();
+  await expect(page.locator(".review-event strong")).toHaveText("Bob");
+  await expect(page.locator(".review-event strong a")).toHaveCount(0);
+  await page.getByRole("link", { name: "Files changed", exact: true }).click();
+  profile.handle = "renamed-alice";
+  profile.name = "Renamed Alice";
+  await page.reload();
+  await page.getByRole("button", { name: "Open review thread #1" }).click();
+  await expect(
+    thread
+      .locator(".review-reply")
+      .getByRole("link", { name: profile.handle, exact: true }),
+  ).toHaveAttribute("href", `/-/users/${id}`);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await selectDarkTheme(page);
+  await expectNoAccessibilityViolations(page);
+  await expect(page.locator("body")).not.toContainText("[object Object]");
+  await page.goto("/team/project/pull/1");
+  await expect(
+    root.getByRole("link", { name: profile.handle, exact: true }),
+  ).toHaveAttribute("href", `/-/users/${id}`);
+  await expect(
+    comment.getByRole("link", { name: profile.handle, exact: true }),
+  ).toHaveAttribute("href", `/-/users/${id}`);
+});

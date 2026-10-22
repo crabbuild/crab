@@ -1,3 +1,4 @@
+import { Author } from "@/components/discussion/author";
 import { endpoint, type Repository } from "@/lib/api";
 import { Reactions } from "@/components/discussion/reactions";
 import { Editor } from "@/components/discussion/editor";
@@ -133,7 +134,9 @@ function ReviewReplyItem({
   }
   return (
     <div className="review-reply">
-      <strong>{reply.author}</strong>
+      <strong>
+        <Author author={reply.author} />
+      </strong>
       <span className="muted">replied {timestamp(reply.created_at)}</span>
       {editing ? (
         <form className="review-reply-edit" onSubmit={save}>

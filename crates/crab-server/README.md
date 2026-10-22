@@ -103,6 +103,11 @@ reports preparation state. Update peers together; repository records and the
 search index are unchanged. Assignment and native grant migrations remain work.
 See [account preparation](REFERENCE.md#prepare-and-use-account-profiles).
 
+Issue/PR authors share public profile links across lists, details, comments,
+reviews and inline conversations. Renaming keeps the actor UUID and historical
+source attribution. Prepare Directory before serving these responses; missing
+preparation produces a visible error, and profiles grant no access.
+
 Issue and PR lists include a searchable Labels menu with colors, descriptions,
 multiple selections, exclusions and a no-label option. Choosing labels requires
 all selected labels; Alt+click or Alt+Enter toggles exclusion. The menu stays

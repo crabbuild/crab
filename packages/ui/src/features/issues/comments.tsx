@@ -1,3 +1,4 @@
+import { Author } from "@/components/discussion/author";
 import { ActivityTimeline } from "@/features/activity";
 import { Reactions } from "@/components/discussion/reactions";
 
@@ -214,7 +215,9 @@ function CommentCard({
   return (
     <article id={`comment-${comment.number}`} className="discussion-card panel">
       <header>
-        <strong>{comment.author}</strong>
+        <strong>
+          <Author author={comment.author} />
+        </strong>
         <time dateTime={new Date(comment.created_at).toISOString()}>
           {timestamp(comment.created_at)}
         </time>

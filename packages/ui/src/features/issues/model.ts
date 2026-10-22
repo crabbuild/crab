@@ -6,7 +6,7 @@ import type { RepositoryLabel, RepositoryAssignee } from "@/lib/api";
 export interface Comment {
   reactions: ReactionSummary;
   number: number;
-  author: string;
+  author: DiscussionAuthor;
   body: string;
   version: number;
   created_at: number;

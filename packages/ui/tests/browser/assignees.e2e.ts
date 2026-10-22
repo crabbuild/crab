@@ -88,7 +88,7 @@ async function fixture(page: Page) {
         json: {
           number: 1,
           title: "Preserve historical assignment",
-          author: "Alice",
+          author: { name: "Alice", profile: null },
           body: "Stored description",
           state: "open",
           version: state.version,

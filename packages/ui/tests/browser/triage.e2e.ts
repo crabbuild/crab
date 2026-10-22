@@ -14,7 +14,7 @@ test("triage closes and reopens another author's issue without showing descripti
   let issue = {
     number: 1,
     title: "Investigate reported behavior",
-    author: "Alice",
+    author: { name: "Alice", profile: null },
     body: "Original report",
     state: "open",
     version: 1,

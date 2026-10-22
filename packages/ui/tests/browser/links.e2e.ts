@@ -14,7 +14,7 @@ async function setup(page: Page) {
   const unexpected: string[] = [];
   const record = {
     number: 1,
-    author: "Alice",
+    author: { name: "Alice", profile: null },
     body: "Related work",
     state: "open",
     version: 1,

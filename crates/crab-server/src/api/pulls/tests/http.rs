@@ -131,6 +131,11 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
     let alice = h.login().await;
     let alice_session = h.json("/api/session", &alice).await;
     let alice_csrf = alice_session["csrf"].as_str().unwrap();
+    let profile: Value = h.write(reqwest::Method::POST, "/api/profile", &alice,
+        json!({"request_id":uuid::Uuid::now_v7(),"handle":"public-alice","name":"Public Alice"}))
+        .await.error_for_status().unwrap().json().await.unwrap();
+    let alice_author = json!({"name":"Alice","profile":{"id":profile["id"],"handle":"public-alice","name":"Public Alice"}});
+    let bob_author = json!({"name":"Bob","profile":null});
     let token = mutate(
         &h,
         &alice,
@@ -164,6 +169,7 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
     )
     .await;
     assert_eq!(created.0, StatusCode::CREATED);
+    assert_eq!(created.1["author"], alice_author);
     assert_eq!(created.1["can_decide"], false);
     assert_eq!(created.1["can_merge"], false);
     let blocked = mutate(
@@ -231,6 +237,7 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
     )
     .await;
     assert_eq!(thread.0, StatusCode::CREATED, "{}", thread.1);
+    assert_eq!(thread.1["author"], bob_author);
     assert_eq!(thread.1["number"], 1);
     assert_eq!(thread.1["path_hex"], "524541444d452e6d64");
     assert_eq!(thread.1["new_blob_oid"].as_str().unwrap().len(), 40);
@@ -248,6 +255,7 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
     )
     .await;
     assert_eq!(member_reply.0, StatusCode::CREATED, "{}", member_reply.1);
+    assert_eq!(member_reply.1["author"], bob_author);
     assert_eq!(member_reply.1["number"], 1);
     let old_suggestion = mutate(
         &h,
@@ -282,6 +290,7 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
     )
     .await;
     assert_eq!(reply.0, StatusCode::CREATED, "{}", reply.1);
+    assert_eq!(reply.1["author"], alice_author);
     assert_eq!(reply.1["number"], 2);
     let resolved = mutate(
         &h,
@@ -294,7 +303,7 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
     .await;
     assert_eq!(resolved.0, StatusCode::OK, "{}", resolved.1);
     assert_eq!(resolved.1["resolved"], true);
-    assert_eq!(resolved.1["resolved_by"], "Alice");
+    assert_eq!(resolved.1["resolved_by"], alice_author);
     let unauthorized_resolution = mutate(
         &h,
         &bob,
@@ -332,7 +341,37 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
     .await;
     assert_eq!(approved.0, StatusCode::CREATED);
     assert_eq!(approved.1["commit_oid"], first_head);
+    assert_eq!(approved.1["author"], bob_author);
     assert_eq!(approved.1["current"], true);
+    h.write(
+        reqwest::Method::PATCH,
+        "/api/profile",
+        &alice,
+        json!({"version":1,"handle":"renamed-alice","name":"Renamed Alice"}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let renamed = json!({"name":"Alice","profile":{"id":profile["id"],"handle":"renamed-alice","name":"Renamed Alice"}});
+    assert_eq!(h.json(&format!("{ROOT}/1"), &bob).await["author"], renamed);
+    assert_eq!(
+        h.json(&format!("{ROOT}/1/threads/1/replies/2"), &bob).await["author"],
+        renamed
+    );
+    for path in ["reviews/1", "threads/1", "threads/1/replies/1"] {
+        assert_eq!(
+            h.json(&format!("{ROOT}/1/{path}"), &alice).await["author"],
+            bob_author
+        );
+    }
+    for path in ["reviews", "threads", "threads/1/replies"] {
+        let page = h.json(&format!("{ROOT}/1/{path}"), &alice).await;
+        for record in page["items"].as_array().unwrap() {
+            assert!(record["author"].is_object());
+            assert!(!record["author"].to_string().contains("issuer"));
+            assert!(!record["author"].to_string().contains("subject"));
+        }
+    }
     let ready = h.json(&format!("{ROOT}/1"), &alice).await;
     assert_eq!(ready["version"], 2);
     assert_eq!(ready["merge_requirements"]["approvals"], 1);
@@ -808,7 +847,7 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
             "draft":false,
             "title":"Proposed change",
             "state":"open",
-            "author":{"name":"Alice","profile":null},
+            "author":renamed,
             "base_ref":"refs/heads/main",
             "head_ref":"refs/heads/feature",
             "created_at":assigned.1["created_at"],

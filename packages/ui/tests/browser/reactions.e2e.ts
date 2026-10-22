@@ -89,7 +89,7 @@ test("reactions persist on refresh, stay scoped, and ignore older snapshots", as
           number: 1,
           title: "Discuss reactions",
           body: "Issue body",
-          author: "Alice",
+          author: { name: "Alice", profile: null },
           version: 1,
           state: "open",
           created_at: 1700000000000,
@@ -110,7 +110,7 @@ test("reactions persist on refresh, stay scoped, and ignore older snapshots", as
             {
               number: 1,
               body: "Comment body",
-              author: "Bob",
+              author: { name: "Bob", profile: null },
               version: 1,
               created_at: 1700000001000,
               updated_at: 1700000001000,

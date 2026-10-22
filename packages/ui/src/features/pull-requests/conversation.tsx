@@ -1,3 +1,4 @@
+import { Author } from "@/components/discussion/author";
 import { endpoint, useRequest, type Repository } from "@/lib/api";
 import { ActivityTimeline } from "@/features/activity";
 import { Reactions } from "@/components/discussion/reactions";
@@ -40,7 +41,9 @@ export function PullConversation({
     <div className="pull-conversation">
       <article className="panel discussion-card">
         <header>
-          <strong>{pull.author}</strong>
+          <strong>
+            <Author author={pull.author} />
+          </strong>
           <span className="muted">commented {timestamp(pull.created_at)}</span>
         </header>
         <DiscussionMarkdown>{pull.body}</DiscussionMarkdown>

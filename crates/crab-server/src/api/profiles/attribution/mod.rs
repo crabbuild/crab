@@ -23,11 +23,32 @@ pub(in crate::api) struct Author<'a> {
 
 pub(in crate::api) struct Authors(BTreeMap<(String, String), ActorSummary>);
 
+pub(in crate::api) trait NamedActor {
+    fn qualified_key(&self) -> (&str, &str);
+    fn recorded_name(&self) -> &str;
+}
+impl NamedActor for RepositoryAuthor {
+    fn qualified_key(&self) -> (&str, &str) {
+        (&self.issuer, &self.subject)
+    }
+    fn recorded_name(&self) -> &str {
+        &self.name
+    }
+}
+impl NamedActor for crate::auth::Identity {
+    fn qualified_key(&self) -> (&str, &str) {
+        (&self.issuer, &self.subject)
+    }
+    fn recorded_name(&self) -> &str {
+        &self.name
+    }
+}
+
 impl Authors {
-    pub(in crate::api) async fn load<'a>(
+    pub(in crate::api) async fn load<'a, A: NamedActor + 'a>(
         server: &Server,
         principal: &Principal,
-        authors: impl Iterator<Item = &'a RepositoryAuthor>,
+        authors: impl Iterator<Item = &'a A>,
     ) -> Result<Self> {
         // The HTTP boundary admits browser sessions and the local operator.
         // Keep account lookup closed if another credential reaches this owner.
@@ -35,7 +56,10 @@ impl Authors {
             return Err(app::Error::SessionRequired);
         }
         let keys: std::collections::BTreeSet<_> = authors
-            .map(|author| (author.issuer.clone(), author.subject.clone()))
+            .map(|author| {
+                let (issuer, subject) = author.qualified_key();
+                (issuer.to_owned(), subject.to_owned())
+            })
             .collect();
         if keys.is_empty() {
             return Ok(Self(BTreeMap::new()));
@@ -73,10 +97,11 @@ impl Authors {
         ))
     }
 
-    pub(in crate::api) fn view<'a>(&'a self, author: &'a RepositoryAuthor) -> Author<'a> {
+    pub(in crate::api) fn view<'a, A: NamedActor>(&'a self, author: &'a A) -> Author<'a> {
+        let (issuer, subject) = author.qualified_key();
         Author {
-            name: &author.name,
-            profile: self.0.get(&(author.issuer.clone(), author.subject.clone())),
+            name: author.recorded_name(),
+            profile: self.0.get(&(issuer.to_owned(), subject.to_owned())),
         }
     }
 }

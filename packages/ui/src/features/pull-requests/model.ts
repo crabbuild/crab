@@ -7,7 +7,7 @@ import { type InlineDiffThread } from "@/features/repository/diff/model";
 export interface PullComment {
   reactions: ReactionSummary;
   number: number;
-  author: string;
+  author: DiscussionAuthor;
   body: string;
   version: number;
   created_at: number;
@@ -20,7 +20,7 @@ export interface PullSummary {
   number: number;
   title: string;
   state: "open" | "closed" | "merged";
-  author: string;
+  author: DiscussionAuthor;
   base_ref: string;
   head_ref: string;
   created_at: number;
@@ -29,11 +29,10 @@ export interface PullSummary {
   assignees: RepositoryAssignee[];
 }
 
-export type PullListItem = Omit<PullSummary, "labels" | "author"> &
+export type PullListItem = Omit<PullSummary, "labels"> &
   DiscussionTotals & {
     kind: "pull";
     labels: ListLabel[];
-    author: DiscussionAuthor;
   };
 
 export interface PullRequest extends PullSummary {
@@ -52,7 +51,7 @@ export interface PullRequest extends PullSummary {
   can_merge: boolean;
   branches_available: boolean;
   merge: {
-    author: string;
+    author: DiscussionAuthor;
     method: "fast_forward" | "merge_commit";
     commit_oid: string;
     message: string;
@@ -60,7 +59,7 @@ export interface PullRequest extends PullSummary {
   } | null;
   merge_pending: {
     request_id: string;
-    author: string;
+    author: DiscussionAuthor;
     method: "fast_forward" | "merge_commit";
     pull_version: number;
     base_oid: string;
@@ -92,7 +91,7 @@ export type ReviewState = "commented" | "approved" | "changes_requested";
 export interface PullReview {
   reactions: ReactionSummary;
   number: number;
-  author: string;
+  author: DiscussionAuthor;
   body: string;
   state: ReviewState;
   commit_oid: string;
@@ -110,7 +109,7 @@ export interface PullReviewThread extends InlineDiffThread {
   head_oid: string;
   old_blob_oid: string | null;
   new_blob_oid: string | null;
-  resolved_by: string | null;
+  resolved_by: DiscussionAuthor | null;
   resolved_at: number | null;
   current: boolean;
   version: number;
@@ -124,7 +123,7 @@ export interface PullReviewThread extends InlineDiffThread {
 export interface PullReviewReply {
   reactions: ReactionSummary;
   number: number;
-  author: string;
+  author: DiscussionAuthor;
   body: string;
   version: number;
   created_at: number;

@@ -47,7 +47,7 @@ Directory format 2 separates `accounts` from optional `profiles`. Canonical
 bootstrap DDL lives in `cells/directory/identity.sql`, `schema.sql`,
 `accounts/schema.sql` and `profiles/schema.sql`. Run
 `cells initialize-directory` through the running server's private mTLS listener
-before exposing profiles or nonempty issue/PR lists. Repeating initialization
+before exposing profiles or author-enriched issue/PR responses. Repeating initialization
 verifies the current schema; reads and writes never install tables. Format 1
 requires `cells migrate-directory`: bounded native transactions preserve actor
 UUIDs, profile versions/data, enrollment reservations and receipts. Progress is
@@ -58,7 +58,7 @@ tables; other operations fail closed until format 2 is ready. Private native
 The typed `DirectoryState` is shared with the CLI; `cells directory-status` reports
 outdated/migrating/ready state. Peers must update together. Missing
 preparation returns a visible 503 `directory_unavailable` from profile APIs and
-author-enriched lists. Global readiness still verifies repositories; it does
+author-enriched discussion responses. Global readiness still verifies repositories; it does
 not certify Directory readiness. This directory
 adds no organization, team, project or repository grant authority.
 
@@ -77,11 +77,11 @@ permissions. This is an identity foundation for assignment/participant/owner
 models; existing assignments convert through the explicit repository preparation
 described below. It is not a native grant cutover.
 
-List author enrichment uses the bounded native `LookupActors` read (Directory
+Discussion author enrichment uses the bounded native `LookupActors` read (Directory
 operation 6). It resolves qualified private keys into public UUID/handle/name
 summaries in one snapshot, with no repository record or schema change. Directory
 identity validation counts Unicode scalar values, matching SQLite length bounds
-and valid stored repository identities. Lists recheck durable membership after
+and valid stored repository identities. Handlers recheck durable membership after
 the separate Directory read; profiles never act as grants. Counts/cursors keep
 their repository snapshot. Prepare Directory before enabling this DTO contract
 and update peers together; unsupported operations have no fallback reader.

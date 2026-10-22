@@ -1,3 +1,4 @@
+import { Author } from "@/components/discussion/author";
 import { endpoint, useRequest, type Repository } from "@/lib/api";
 import { CheckRuns } from "./checks";
 import type { CodeThemes } from "@/lib/code-theme";
@@ -77,7 +78,9 @@ export function PullDetail({
                 <PullBadge pull={data} />
                 {data.merge ? (
                   <span>
-                    <strong>{data.merge.author}</strong>{" "}
+                    <strong>
+                      <Author author={data.merge.author} />
+                    </strong>{" "}
                     {data.merge.method === "merge_commit"
                       ? "created merge commit"
                       : "fast-forwarded"}{" "}
@@ -86,8 +89,10 @@ export function PullDetail({
                   </span>
                 ) : (
                   <span>
-                    <strong>{data.author}</strong> wants to merge{" "}
-                    <code>{short(data.head_oid)}</code> from{" "}
+                    <strong>
+                      <Author author={data.author} />
+                    </strong>{" "}
+                    wants to merge <code>{short(data.head_oid)}</code> from{" "}
                     <code>{branch(data.head_ref)}</code> into{" "}
                     <code>{branch(data.base_ref)}</code>
                   </span>

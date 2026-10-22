@@ -1,3 +1,4 @@
+import { Author } from "@/components/discussion/author";
 import { Reactions } from "@/components/discussion/reactions";
 import { repoHref } from "@/lib/repository-route";
 import { useEffect, useRef, useState } from "react";
@@ -85,7 +86,8 @@ export function IssueDetail({
       <p className="issue-meta">
         <IssueBadge state={current.state} />
         <span className="muted">
-          {current.author} opened this issue {timestamp(current.created_at)}
+          <Author author={current.author} /> opened this issue{" "}
+          {timestamp(current.created_at)}
         </span>
       </p>
       {resource.error && (
@@ -115,7 +117,9 @@ export function IssueDetail({
           ) : (
             <article className="discussion-card panel">
               <header>
-                <strong>{current.author}</strong>
+                <strong>
+                  <Author author={current.author} />
+                </strong>
                 <time dateTime={new Date(current.created_at).toISOString()}>
                   {timestamp(current.created_at)}
                 </time>

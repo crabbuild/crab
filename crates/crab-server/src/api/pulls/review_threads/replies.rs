@@ -12,7 +12,7 @@ use serde_json::{Value, json};
 
 use super::{MAX_NUMBER, load_pull, same_author, storage, validate_text};
 use crate::{
-    api::reactions,
+    api::{profiles::attribution::Authors, reactions},
     app::{self, Error, Result},
     auth::{Identity, Principal},
     cells::repository::collaboration::Target,
@@ -46,13 +46,14 @@ struct ReplyEdit {
 }
 
 fn reply_view(
+    authors: &Authors,
     reply: &storage::PullReviewReply,
     actor: &Identity,
     reactions: &reactions::View,
 ) -> Value {
     json!({
         "number": reply.number,
-        "author": reply.author.name,
+        "author": authors.view(&reply.author),
         "body": reply.body,
         "reactions": reactions,
         "version": reply.version,
@@ -115,8 +116,11 @@ async fn list_replies(
         })
         .collect();
     let reactions = reactions::read(&server, repo, &actor, targets).await?;
+    let authors =
+        Authors::load(&server, &principal, page.0.iter().map(|item| &item.author)).await?;
+    app::membership(&server, &principal, repo).await?;
     Ok(Json(json!({
-        "items": page.0.iter().zip(reactions).map(|(reply, reactions)| reply_view(reply, &actor, &reactions)).collect::<Vec<_>>(),
+        "items": page.0.iter().zip(reactions).map(|(reply, reactions)| reply_view(&authors, reply, &actor, &reactions)).collect::<Vec<_>>(),
         "next": page.1,
     })))
 }
@@ -152,9 +156,11 @@ async fn create_reply(
             },
         )
         .await?;
+        let authors = Authors::load(&server, &principal, std::iter::once(&existing.author)).await?;
+        app::membership(&server, &principal, repo).await?;
         return Ok((
             StatusCode::CREATED,
-            Json(reply_view(&existing, &actor, &reaction)),
+            Json(reply_view(&authors, &existing, &actor, &reaction)),
         ));
     }
     let reply = storage::create_reply(
@@ -180,9 +186,11 @@ async fn create_reply(
         },
     )
     .await?;
+    let authors = Authors::load(&server, &principal, std::iter::once(&reply.author)).await?;
+    app::membership(&server, &principal, repo).await?;
     Ok((
         StatusCode::CREATED,
-        Json(reply_view(&reply, &actor, &reaction)),
+        Json(reply_view(&authors, &reply, &actor, &reaction)),
     ))
 }
 
@@ -215,7 +223,9 @@ async fn reply_detail(
         },
     )
     .await?;
-    Ok(Json(reply_view(&reply, &actor, &reaction)))
+    let authors = Authors::load(&server, &principal, std::iter::once(&reply.author)).await?;
+    app::membership(&server, &principal, repo).await?;
+    Ok(Json(reply_view(&authors, &reply, &actor, &reaction)))
 }
 
 async fn edit_reply(
@@ -252,5 +262,7 @@ async fn edit_reply(
         },
     )
     .await?;
-    Ok(Json(reply_view(&reply, &actor, &reaction)))
+    let authors = Authors::load(&server, &principal, std::iter::once(&reply.author)).await?;
+    app::membership(&server, &principal, repo).await?;
+    Ok(Json(reply_view(&authors, &reply, &actor, &reaction)))
 }

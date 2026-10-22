@@ -28,7 +28,7 @@ async function setup(page: Page, initialDraft: boolean) {
     draft,
     version,
     state: merged ? "merged" : "open",
-    author: "Alice",
+    author: { name: "Alice", profile: null },
     created_at: 1700000000000,
     updated_at: 1700000000000,
     base_ref: "refs/heads/main",
@@ -48,7 +48,7 @@ async function setup(page: Page, initialDraft: boolean) {
     branches_available: true,
     merge: merged
       ? {
-          author: "Alice",
+          author: { name: "Alice", profile: null },
           method: "fast_forward",
           commit_oid: head,
           message: "",
@@ -58,7 +58,7 @@ async function setup(page: Page, initialDraft: boolean) {
     merge_pending: pending
       ? {
           request_id: "recorded-merge",
-          author: "Alice",
+          author: { name: "Alice", profile: null },
           method: "fast_forward",
           pull_version: version,
           base_oid: base,

@@ -1,3 +1,4 @@
+import type { DiscussionAuthor } from "@/components/discussion/author";
 import type { SelectedLineRange } from "@pierre/diffs";
 import { type ReactNode } from "react";
 
@@ -11,7 +12,7 @@ export interface InlineDiffThread {
   side: "old" | "new";
   start_line: number;
   end_line: number;
-  author: string;
+  author: DiscussionAuthor;
   body: string;
   suggested_text: string | null;
   resolved: boolean;

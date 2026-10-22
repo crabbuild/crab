@@ -9,7 +9,7 @@ fn registration(handle: &str) -> Value {
 
 #[tokio::test]
 async fn profiles_require_preparation_session_and_csrf_and_expose_only_public_fields() {
-    let h = Harness::new(false).await;
+    let h = Harness::new_unprepared(false).await;
     let alice = h.login().await;
     let response = h
         .http

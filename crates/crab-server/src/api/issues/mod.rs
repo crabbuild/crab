@@ -12,21 +12,26 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{
-    api::assignees::{self, Selection},
-    api::labels::{self, Label},
-    api::reactions,
+    api::{
+        assignees::{self, Selection},
+        labels,
+        profiles::attribution::Authors,
+        reactions,
+    },
     app::{self, Error, Result, actor, body, number, repository, title},
-    auth::{Identity, Principal},
+    auth::Principal,
     cells::repository::collaboration::Target,
     cells::repository::{
-        CommentKey, CommentPage, CommentRecord, CreateComment, CreateCommentInput,
-        CreateCommentOutcome, CreateIssue, CreateIssueInput, CreateIssueOutcome, DiscussionSummary,
-        GetComment, GetIssueDetail, IssueRecord, IssueSummary, ListComments, ListCommentsInput,
-        ListDiscussions, RepositoryAuthor, UpdateComment, UpdateCommentInput, UpdateCommentOutcome,
-        UpdateIssue, UpdateIssueInput, UpdateIssueOutcome,
+        CommentKey, CommentPage, CreateComment, CreateCommentInput, CreateCommentOutcome,
+        CreateIssue, CreateIssueInput, CreateIssueOutcome, DiscussionSummary, GetComment,
+        GetIssueDetail, ListComments, ListCommentsInput, ListDiscussions, UpdateComment,
+        UpdateCommentInput, UpdateCommentOutcome, UpdateIssue, UpdateIssueInput,
+        UpdateIssueOutcome,
     },
     server::Server,
 };
+
+mod view;
 
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
@@ -45,80 +50,6 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         )
         .layer(axum::extract::DefaultBodyLimit::max(80 * 1024))
         .route_layer(middleware::from_fn_with_state(server, crate::app::admit))
-}
-
-fn issue_view(
-    issue: &IssueRecord,
-    author: &Identity,
-    labels: &[Label],
-    assignees: &Selection,
-    can_triage: bool,
-    reactions: &reactions::View,
-) -> Value {
-    json!({
-        "number": issue.number,
-        "title": issue.title,
-        "body": issue.body,
-        "reactions": reactions,
-        "state": state_name(issue.state),
-        "author": issue.author.name,
-        "version": issue.version,
-        "created_at": issue.created_at_ms,
-        "updated_at": issue.updated_at_ms,
-        "labels": labels::selection_view(&issue.label_ids, labels),
-        "assignees": assignees.view(&issue.assignees),
-        "can_edit": same_author(&issue.author, author),
-        "can_close": same_author(&issue.author, author) || can_triage,
-        "can_label": can_triage,
-        "can_assign": can_triage,
-    })
-}
-
-fn issue_summary_view(
-    authors: &super::profiles::attribution::Authors,
-    issue: &IssueSummary,
-    labels: &[crate::cells::repository::search::index::LabelSummary],
-    assignees: &Selection,
-) -> Value {
-    json!({
-        "kind": "issue",
-        "number": issue.number,
-        "title": issue.title,
-        "state": state_name(issue.state),
-        "author": authors.view(&issue.author),
-        "version": issue.version,
-        "created_at": issue.created_at_ms,
-        "updated_at": issue.updated_at_ms,
-        "comment_count": issue.comment_count,
-        "reaction_count": issue.reaction_count,
-        "labels": issue.label_ids.iter().filter_map(|id| labels.iter().find(|label|label.id==*id)).collect::<Vec<_>>(),
-        "assignees": assignees.view(&issue.assignees),
-    })
-}
-
-fn comment_view(comment: &CommentRecord, author: &Identity, reactions: &reactions::View) -> Value {
-    json!({
-        "number": comment.number,
-        "body": comment.body,
-        "reactions": reactions,
-        "author": comment.author.name,
-        "version": comment.version,
-        "created_at": comment.created_at_ms,
-        "updated_at": comment.updated_at_ms,
-        "can_edit": same_author(&comment.author, author),
-    })
-}
-
-fn state_name(state: u8) -> &'static str {
-    match state {
-        0 => "open",
-        1 => "closed",
-        _ => "invalid",
-    }
-}
-
-fn same_author(left: &RepositoryAuthor, right: &Identity) -> bool {
-    left.issuer == right.issuer && left.subject == right.subject
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -206,7 +137,7 @@ async fn list(
         .iter()
         .map(|item| match item {
             DiscussionSummary::Issue(issue) => {
-                issue_summary_view(&authors, issue, &page.labels, &assignees)
+                view::summary(&authors, issue, &page.labels, &assignees)
             }
             DiscussionSummary::Pull(pull) => {
                 super::pulls::pull_list_view(&authors, pull, &page.labels, &assignees)
@@ -275,10 +206,12 @@ async fn create(
         },
     )
     .await?;
+    let authors = Authors::load(&server, &principal, std::iter::once(&issue.author)).await?;
     let assignees = Selection::load(&server, &principal, &repo, issue.assignees.iter()).await?;
     let response = (
         StatusCode::CREATED,
-        Json(issue_view(
+        Json(view::issue(
+            &authors,
             &issue,
             &author,
             &labels,
@@ -336,8 +269,10 @@ async fn detail(
         },
     )
     .await?;
+    let authors = Authors::load(&server, &principal, std::iter::once(&issue.author)).await?;
     let assignees = Selection::load(&server, &principal, &repo, issue.assignees.iter()).await?;
-    let response = Json(issue_view(
+    let response = Json(view::issue(
+        &authors,
         &issue,
         &author,
         &labels,
@@ -462,8 +397,10 @@ async fn edit(
         },
     )
     .await?;
+    let authors = Authors::load(&server, &principal, std::iter::once(&issue.author)).await?;
     let assignees = Selection::load(&server, &principal, &repo, issue.assignees.iter()).await?;
-    Ok(Json(issue_view(
+    Ok(Json(view::issue(
+        &authors,
         &issue,
         &author,
         &labels,
@@ -510,11 +447,18 @@ async fn comments(
         })
         .collect();
     let reactions = reactions::read(&server, &repo, &author, targets).await?;
+    let authors = Authors::load(
+        &server,
+        &principal,
+        items.iter().map(|comment| &comment.author),
+    )
+    .await?;
+    app::membership(&server, &principal, &repo).await?;
     Ok(Json(json!({
         "items": items
             .iter()
             .zip(reactions)
-            .map(|(comment, reactions)| comment_view(comment, &author, &reactions))
+            .map(|(comment, reactions)| view::comment(&authors, comment, &author, &reactions))
             .collect::<Vec<_>>(),
         "next": next,
     })))
@@ -569,9 +513,11 @@ async fn comment(
         },
     )
     .await?;
+    let authors = Authors::load(&server, &principal, std::iter::once(&comment.author)).await?;
+    app::membership(&server, &principal, &repo).await?;
     Ok((
         StatusCode::CREATED,
-        Json(comment_view(&comment, &author, &reaction)),
+        Json(view::comment(&authors, &comment, &author, &reaction)),
     ))
 }
 
@@ -607,7 +553,9 @@ async fn comment_detail(
         },
     )
     .await?;
-    Ok(Json(comment_view(&comment, &author, &reaction)))
+    let authors = Authors::load(&server, &principal, std::iter::once(&comment.author)).await?;
+    app::membership(&server, &principal, &repo).await?;
+    Ok(Json(view::comment(&authors, &comment, &author, &reaction)))
 }
 
 #[derive(Deserialize)]
@@ -663,7 +611,9 @@ async fn edit_comment(
         },
     )
     .await?;
-    Ok(Json(comment_view(&comment, &author, &reaction)))
+    let authors = Authors::load(&server, &principal, std::iter::once(&comment.author)).await?;
+    app::membership(&server, &principal, &repo).await?;
+    Ok(Json(view::comment(&authors, &comment, &author, &reaction)))
 }
 
 #[cfg(test)]

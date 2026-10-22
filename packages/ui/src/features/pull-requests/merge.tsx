@@ -1,3 +1,4 @@
+import { Author } from "@/components/discussion/author";
 import { endpoint, type Repository } from "@/lib/api";
 import { PullReadinessControl } from "./readiness";
 import { Failure } from "@/components/discussion/failure";
@@ -95,7 +96,7 @@ export function MergePanel({
           <div>
             <strong>Pull request merged</strong>
             <p>
-              {pull.merge.author}{" "}
+              <Author author={pull.merge.author} />{" "}
               {pull.merge.method === "merge_commit"
                 ? "created merge commit"
                 : "fast-forwarded commit"}{" "}
@@ -176,13 +177,20 @@ export function MergePanel({
         <StatusIcon size={24} />
         <div className="merge-action">
           <strong>
-            {pending
-              ? `${pending.author} started ${pending.method === "merge_commit" ? "a merge commit" : "a fast-forward merge"}`
-              : unavailable
-                ? "This pull request cannot be merged"
-                : ready
-                  ? "Merge requirements are satisfied"
-                  : "Merging is blocked"}
+            {pending ? (
+              <>
+                <Author author={pending.author} /> started{" "}
+                {pending.method === "merge_commit"
+                  ? "a merge commit"
+                  : "a fast-forward merge"}
+              </>
+            ) : unavailable ? (
+              "This pull request cannot be merged"
+            ) : ready ? (
+              "Merge requirements are satisfied"
+            ) : (
+              "Merging is blocked"
+            )}
           </strong>
           <p>
             {unavailable ? (

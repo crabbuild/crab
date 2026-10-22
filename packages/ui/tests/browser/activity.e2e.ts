@@ -144,7 +144,7 @@ test("issue changes and new comments refresh their durable activity panel", asyn
     number: 1,
     title: "Timeline issue",
     body: "Discussion",
-    author: "Alice",
+    author: { name: "Alice", profile: null },
     state,
     version,
     created_at: 1700000000000,
@@ -175,7 +175,7 @@ test("issue changes and new comments refresh their durable activity panel", asyn
         const input = request.postDataJSON();
         const comment = {
           number: 1,
-          author: "Alice",
+          author: { name: "Alice", profile: null },
           body: input.body,
           version: 1,
           created_at: 1700000000003,

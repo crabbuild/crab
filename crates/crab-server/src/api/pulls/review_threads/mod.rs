@@ -221,6 +221,7 @@ fn comparison_status(
 }
 
 fn thread_view(
+    authors: &crate::api::profiles::attribution::Authors,
     thread: &storage::PullReviewThread,
     actor: &Identity,
     can_reply: bool,
@@ -231,7 +232,7 @@ fn thread_view(
     let (outdated, vanished) = status;
     json!({
         "number": thread.number,
-        "author": thread.author.name,
+        "author": authors.view(&thread.author),
         "body": thread.body,
         "reactions": reactions,
         "suggested_text": thread.suggested_text,
@@ -245,7 +246,7 @@ fn thread_view(
         "start_line": thread.start_line,
         "end_line": thread.end_line,
         "resolved": thread.resolved,
-        "resolved_by": thread.resolved_by.as_ref().map(|author| author.name.clone()),
+        "resolved_by": thread.resolved_by.as_ref().map(|author| authors.view(author)),
         "resolved_at": thread.resolved_at,
         "outdated": outdated,
         "vanished": vanished,
@@ -316,8 +317,6 @@ async fn list(
     )
     .await?
     .ok_or(Error::NotFound)?;
-    let can_resolve = principal.can_write(repo.id) || same_author(&pull.author, &actor);
-    let can_reply = principal.can_read(repo.id);
     let targets = page
         .0
         .iter()
@@ -327,13 +326,32 @@ async fn list(
         })
         .collect();
     let reactions = reactions::read(&server, repo, &actor, targets).await?;
+    let actors: Vec<_> = page
+        .0
+        .iter()
+        .flat_map(|thread| std::iter::once(&thread.author).chain(thread.resolved_by.as_ref()))
+        .collect();
+    let authors =
+        crate::api::profiles::attribution::Authors::load(&server, &principal, actors.into_iter())
+            .await?;
+    let principal = app::membership(&server, &principal, repo).await?.principal;
+    let can_resolve = principal.can_write(repo.id) || same_author(&pull.author, &actor);
+    let can_reply = principal.can_read(repo.id);
     let items = page
         .0
         .iter()
         .zip(reactions)
         .map(|(thread, reactions)| {
             let status = comparison_status(thread, &comparison, None, None, false);
-            thread_view(thread, &actor, can_reply, can_resolve, status, &reactions)
+            thread_view(
+                &authors,
+                thread,
+                &actor,
+                can_reply,
+                can_resolve,
+                status,
+                &reactions,
+            )
         })
         .collect::<Vec<_>>();
     Ok(Json(json!({"items": items, "next": page.1})))
@@ -354,8 +372,6 @@ async fn detail(
         .ok_or(Error::NotFound)?;
     let (_, path) = parse_path(&path_hex(&thread.path))?;
     let (old_blob_oid, new_blob_oid) = current_blobs(&server, &comparison, &path).await?;
-    let can_resolve = principal.can_write(repo.id) || same_author(&pull.author, &actor);
-    let can_reply = principal.can_read(repo.id);
     let status = comparison_status(
         &thread,
         &comparison,
@@ -373,11 +389,19 @@ async fn detail(
         },
     )
     .await?;
+    let authors = crate::api::profiles::attribution::Authors::load(
+        &server,
+        &principal,
+        std::iter::once(&thread.author).chain(thread.resolved_by.as_ref()),
+    )
+    .await?;
+    let principal = app::membership(&server, &principal, repo).await?.principal;
     Ok(Json(thread_view(
+        &authors,
         &thread,
         &actor,
-        can_reply,
-        can_resolve,
+        principal.can_read(repo.id),
+        principal.can_write(repo.id) || same_author(&pull.author, &actor),
         status,
         &reaction,
     )))
@@ -429,9 +453,17 @@ async fn create(
             },
         )
         .await?;
+        let authors = crate::api::profiles::attribution::Authors::load(
+            &server,
+            &principal,
+            std::iter::once(&existing.author).chain(existing.resolved_by.as_ref()),
+        )
+        .await?;
+        let principal = app::membership(&server, &principal, repo).await?.principal;
         return Ok((
             StatusCode::CREATED,
             Json(thread_view(
+                &authors,
                 &existing,
                 &actor,
                 principal.can_read(repo.id),
@@ -512,9 +544,17 @@ async fn create(
         },
     )
     .await?;
+    let authors = crate::api::profiles::attribution::Authors::load(
+        &server,
+        &principal,
+        std::iter::once(&thread.author).chain(thread.resolved_by.as_ref()),
+    )
+    .await?;
+    let principal = app::membership(&server, &principal, repo).await?.principal;
     Ok((
         StatusCode::CREATED,
         Json(thread_view(
+            &authors,
             &thread,
             &actor,
             principal.can_read(repo.id),
@@ -573,7 +613,15 @@ async fn edit(
         },
     )
     .await?;
+    let authors = crate::api::profiles::attribution::Authors::load(
+        &server,
+        &principal,
+        std::iter::once(&updated.author).chain(updated.resolved_by.as_ref()),
+    )
+    .await?;
+    let principal = app::membership(&server, &principal, repo).await?.principal;
     Ok(Json(thread_view(
+        &authors,
         &updated,
         &actor,
         principal.can_read(repo.id),

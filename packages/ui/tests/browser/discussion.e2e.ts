@@ -9,7 +9,7 @@ async function openDiscussion(page: Page) {
   const record = {
     reactions: emptyReactions(),
     number: 1,
-    author: "Alice",
+    author: { name: "Alice", profile: null },
     body: "Original description",
     version: 1,
     created_at: 1_700_000_000_000,

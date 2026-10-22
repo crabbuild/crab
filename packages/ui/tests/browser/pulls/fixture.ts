@@ -1,3 +1,4 @@
+import type { DiscussionAuthor } from "@/components/discussion/author";
 import { expect, type Locator, type Page } from "@playwright/test";
 import { emptyReactions, emptyReviewRequests } from "../fixtures";
 
@@ -8,7 +9,14 @@ const pathHex = "README.md"
   .map((character) => character.charCodeAt(0).toString(16).padStart(2, "0"))
   .join("");
 
-export async function mockPullRequest(page: Page) {
+export async function mockPullRequest(
+  page: Page,
+  profiles: Record<string, DiscussionAuthor["profile"]> = {},
+) {
+  const author = (name: string): DiscussionAuthor => ({
+    name,
+    profile: profiles[name] ?? null,
+  });
   const reactionStates = new Map<string, ReturnType<typeof emptyReactions>>();
   const reactionWrites: string[] = [];
   function reactions(target: string) {
@@ -51,7 +59,7 @@ export async function mockPullRequest(page: Page) {
       side: "new",
       start_line: 1,
       end_line: 1,
-      author: "Bob",
+      author: author("Bob"),
       body: "Consider a clearer opening.",
       reactions: reactions("pulls/2/threads/1"),
       suggested_text: "Applied content",
@@ -82,7 +90,7 @@ export async function mockPullRequest(page: Page) {
       body: created ? "This explains the **new behavior**." : "Please review.",
       reactions: reactions(`pulls/${created ? 2 : 1}`),
       state: lifecycle.state,
-      author: "Alice",
+      author: author("Alice"),
       base_ref: "refs/heads/main",
       base_oid: base,
       head_ref: "refs/heads/feature/docs",
@@ -127,7 +135,7 @@ export async function mockPullRequest(page: Page) {
       merge:
         lifecycle.state === "merged"
           ? {
-              author: "Local operator",
+              author: author("Local operator"),
               method: mergeMethod,
               commit_oid: head,
               message: mergeMessage,
@@ -137,7 +145,7 @@ export async function mockPullRequest(page: Page) {
       merge_pending: mergePending
         ? {
             request_id: mergeRequest,
-            author: "Local operator",
+            author: author("Local operator"),
             method: mergeMethod,
             pull_version: 1,
             base_oid: base,
@@ -388,7 +396,7 @@ export async function mockPullRequest(page: Page) {
       const item = pull();
       const matches =
         !query ||
-        [item.title, item.body, item.author].some((value) =>
+        [item.title, item.body].some((value) =>
           value.toLowerCase().includes(query),
         );
       return route.fulfill({
@@ -397,7 +405,6 @@ export async function mockPullRequest(page: Page) {
             ? [
                 {
                   ...item,
-                  author: { name: item.author, profile: null },
                   kind: "pull",
                   comment_count: comments.length,
                   reaction_count: 0,
@@ -456,7 +463,7 @@ export async function mockPullRequest(page: Page) {
       if (request.method() === "POST") {
         comments.push({
           number: 1,
-          author: "Alice",
+          author: author("Alice"),
           body: "Verified in the browser.",
           reactions: reactions("pulls/2/comments/1"),
           version: 1,
@@ -480,7 +487,7 @@ export async function mockPullRequest(page: Page) {
           side: input.side,
           start_line: input.start_line,
           end_line: input.end_line,
-          author: "Alice",
+          author: author("Alice"),
           body: input.body,
           suggested_text: input.suggested_text,
           base_oid: input.base_oid,
@@ -522,7 +529,7 @@ export async function mockPullRequest(page: Page) {
           ),
           pull: 2,
           thread: Number(path.match(/threads\/(\d+)\/replies$/)?.[1] ?? 1),
-          author: "Alice",
+          author: author("Alice"),
           body: input.body,
           version: 1,
           created_at: 1_700_000_080_000,
@@ -558,7 +565,7 @@ export async function mockPullRequest(page: Page) {
         checkState = "success";
         reviews.push({
           number: 1,
-          author: "Bob",
+          author: author("Bob"),
           body: "Ready to merge.",
           reactions: reactions("pulls/2/reviews/1"),
           state: "approved",
