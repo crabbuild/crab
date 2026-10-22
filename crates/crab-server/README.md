@@ -179,7 +179,7 @@ review attribution and additional participant predicates remain unfinished.
 Assignee metadata links public profiles; list filters support usernames, `@me`,
 `*`, `no:assignee` and explicit `actor/UUID` values. The searchable Assignee menu
 and assigned-to-me sidebar use native queries. Existing derived indexes require
-a format-7 rebuild; canonical assignments remain format 2.
+a format-8 rebuild; canonical assignments remain format 2.
 PR lists also support `review-requested`, `reviewed-by`, `review-involves` and
 `user-review-requested` with a public username or `@me`. The Reviews filter and
 Review requests sidebar use those native relationships; submitted reviews leave
@@ -187,8 +187,11 @@ pending results and retain review participation.
 `commenter:username` and `commenter:@me` find conversation comments, submitted
 reviews (including empty approvals), inline threads and replies. Opening an issue
 or PR alone does not count. Public username completion uses the same current
-qualified identity as author/reviewer filters. Mentions, `involves`, and comment
-text search remain unfinished.
+qualified identity as author/reviewer filters. Mentions and `involves` remain unfinished.
+Text searches include titles, descriptions and all five contribution types. Use
+`in:title`, `in:body`, `in:comments`, or `in:title,body` to select fields. Native
+FTS updates with comment edits and deletion cascades. Author names require the
+explicit `author:` filter.
 Issue and PR search also accepts `comments`, `reactions`, and `interactions`
 counts: `comments:>=3`, `reactions:0`, `interactions:5..20`, `comments:10..*`,
 or `-reactions:>0`. Interactions sum conversation comments and reactions on the

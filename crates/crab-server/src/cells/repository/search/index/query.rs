@@ -2,7 +2,10 @@ use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
 
 use super::*;
 use crate::cells::repository::collaboration::{SubjectState, reactions::Kind};
-use crate::cells::repository::search::{Expression, Metadata, Query, Term};
+use crate::cells::repository::search::{
+    Expression, Metadata, Query, Term,
+    text::{self, Fields},
+};
 
 #[derive(Clone, Copy, Debug, Default, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -453,26 +456,24 @@ fn kind_filter(subject_kind: Option<SubjectKind>, bindings: &mut Bindings<'_>) -
 }
 
 fn expression(expression: &Expression, bindings: &mut Bindings<'_>) -> String {
+    scoped_expression(expression, bindings, Fields::ALL)
+}
+fn scoped_expression(
+    expression: &Expression,
+    bindings: &mut Bindings<'_>,
+    fields: Fields,
+) -> String {
     match expression {
         Expression::All => "1".into(),
-        Expression::Not(inner) => format!("NOT ({})",self::expression(inner, bindings)),
+        Expression::Not(inner) => format!("NOT ({})",scoped_expression(inner, bindings, fields)),
+        Expression::Scope { fields: selected, expression } => scoped_expression(expression, bindings, *selected),
         Expression::And(parts) | Expression::Or(parts) => {
             let operator = if matches!(expression, Expression::And(_)) { " AND " } else { " OR " };
-            parts.iter().map(|part| format!("({})",self::expression(part, bindings))).collect::<Vec<_>>().join(operator)
+            parts.iter().map(|part| format!("({})",scoped_expression(part, bindings, fields))).collect::<Vec<_>>().join(operator)
         }
         Expression::Term { value: term, .. } => match term {
             Term::Count(filter) => filter.sql(|value| bindings.bind(SqlValue::Integer(value))),
-            Term::Text(text) if text.chars().count() >= 3 => {
-                let phrase = quote(text);
-                let value = bindings.text(&phrase);
-                format!("d.rowid IN (SELECT rowid FROM discussion_fts WHERE discussion_fts MATCH {value})")
-            }
-            // Trigram MATCH cannot represent fewer than three Unicode scalars.
-            // The scalar predicate retains literal substring semantics for them.
-            Term::Text(text) => {
-                let value = bindings.text(text);
-                format!("(instr(d.title,{value}) > 0 OR instr(d.body,{value}) > 0 OR instr(d.author,{value}) > 0)")
-            }
+            Term::Text(value) => text::predicate(value, fields, |value| bindings.text(value)),
             Term::Label(names) => {
                 let values = names.iter().map(|name|bindings.text(name)).collect::<Vec<_>>().join(",");
                 format!("EXISTS (SELECT 1 FROM discussion_index_labels dl JOIN repository_labels l ON l.number = dl.label WHERE dl.document = d.rowid AND l.deleted_version IS NULL AND l.name_key IN ({values}))")
@@ -517,9 +518,6 @@ fn expression(expression: &Expression, bindings: &mut Bindings<'_>) -> String {
     }
 }
 
-fn quote(text: &str) -> String {
-    format!("\"{}\"", text.replace('"', "\"\""))
-}
 fn sort_expression(sort: Sort, expression: &Expression, bindings: &mut Bindings<'_>) -> String {
     match sort {
         Sort::Created => "d.created_at_ms".into(),
@@ -528,11 +526,11 @@ fn sort_expression(sort: Sort, expression: &Expression, bindings: &mut Bindings<
         Sort::Reactions => "d.reactions".into(),
         Sort::Relevance => {
             let mut terms = Vec::new();
-            positive_text(expression, false, &mut terms);
-            let ranks = terms.into_iter().filter(|text| text.chars().count() >= 3).map(|text| {
-                let phrase = quote(text); let value = bindings.text(&phrase);
-                format!("COALESCE((SELECT -bm25(discussion_fts) FROM discussion_fts WHERE discussion_fts MATCH {value} AND rowid = d.rowid),0.0)")
-            }).collect::<Vec<_>>();
+            positive_text(expression, false, Fields::ALL, &mut terms);
+            let ranks = terms
+                .into_iter()
+                .map(|(value, fields)| text::relevance(value, fields, |value| bindings.text(value)))
+                .collect::<Vec<_>>();
             if ranks.is_empty() {
                 "0.0".into()
             } else {
@@ -555,16 +553,25 @@ fn reaction_expression(kind: Kind, bindings: &mut Bindings<'_>) -> String {
         "COALESCE((SELECT count FROM discussion_index_reaction_counts r WHERE r.document = d.rowid AND r.kind = {kind}),0)"
     )
 }
-fn positive_text<'a>(expression: &'a Expression, negative: bool, output: &mut Vec<&'a str>) {
+fn positive_text<'a>(
+    expression: &'a Expression,
+    negative: bool,
+    fields: Fields,
+    output: &mut Vec<(&'a str, Fields)>,
+) {
     match expression {
         Expression::Term {
             value: Term::Text(text),
             ..
-        } if !negative => output.push(text),
-        Expression::Not(inner) => positive_text(inner, !negative, output),
+        } if !negative => output.push((text, fields)),
+        Expression::Scope {
+            fields: selected,
+            expression,
+        } => positive_text(expression, negative, *selected, output),
+        Expression::Not(inner) => positive_text(inner, !negative, fields, output),
         Expression::And(parts) | Expression::Or(parts) => {
             for part in parts {
-                positive_text(part, negative, output);
+                positive_text(part, negative, fields, output);
             }
         }
         _ => (),

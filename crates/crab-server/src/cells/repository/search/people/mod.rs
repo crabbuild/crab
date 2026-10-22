@@ -24,29 +24,12 @@ pub(crate) fn name(value: &str) -> Result<String, &'static str> {
 
 impl super::Query {
     pub(crate) fn people(&self) -> std::collections::BTreeSet<String> {
-        fn collect(expression: &super::Expression, names: &mut std::collections::BTreeSet<String>) {
-            match expression {
-                super::Expression::Term {
-                    value:
-                        super::Term::Author(name)
-                        | super::Term::Commenter(name)
-                        | super::Term::Reviewer { name, .. },
-                    ..
-                } => {
-                    names.insert(name.clone());
-                }
-                super::Expression::Not(inner) => collect(inner, names),
-                super::Expression::And(parts) | super::Expression::Or(parts) => {
-                    for part in parts {
-                        collect(part, names);
-                    }
-                }
-                _ => (),
-            }
-        }
-        let mut names = std::collections::BTreeSet::new();
-        collect(&self.expression, &mut names);
-        names
+        self.names(|term| match term {
+            super::Term::Author(name)
+            | super::Term::Commenter(name)
+            | super::Term::Reviewer { name, .. } => Some(name),
+            _ => None,
+        })
     }
 
     pub(super) fn validate_people(&self, bindings: &[Binding]) -> Result<(), &'static str> {

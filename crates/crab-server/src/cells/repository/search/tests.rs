@@ -107,7 +107,6 @@ async fn boolean_search_has_and_precedence_and_explicit_grouping() {
         ("(accessibility OR missing) AND unrelated", false),
         ("\"keyboard focus\"", true),
         ("\"focus keyboard\"", false),
-        ("Alice AND Smith", true),
         ("-missing AND accessibility", true),
         ("-keyboard", false),
         ("\"AND\"", false),

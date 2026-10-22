@@ -114,3 +114,15 @@ fn commenter_completion_uses_the_shared_people_path_and_keeps_utf16_ranges() {
     assert_eq!((result.start, result.end), (3, 15));
     assert_eq!(result.items[1].value, "-commenter:public-alice");
 }
+
+#[test]
+fn field_completion_replaces_the_whole_atom_and_rejects_negative_field_directives() {
+    let source = "🦀 in:comm OR label:bug";
+    let result = complete(&input(source, "🦀 in:comm".encode_utf16().count()));
+    assert_eq!((result.start, result.end), (3, 10));
+    assert_eq!(result.items[0].value, "in:comments");
+    let source = "in:title,";
+    let result = complete(&input(source, source.len()));
+    assert_eq!(result.items[0].value, "in:title,body");
+    assert!(complete(&input("-in:", 4)).items.is_empty());
+}

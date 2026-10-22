@@ -115,6 +115,13 @@ async fn assignee_filters_use_stable_accounts_across_profiles_revocation_boolean
     assert_eq!(profile["id"], bob_id);
     for (view, query, expected) in [
         ("issues", "assignee:public-bob", 2),
+        ("issues", "assignee:public-bob in:title", 2),
+        ("pulls", "assignee:public-bob assigned in:title", 1),
+        (
+            "issues",
+            "(assignee:public-bob in:comments) OR no:assignee",
+            3,
+        ),
         ("pulls", "assignee:public-bob", 1),
         ("issues", "assignee:*", 2),
         ("issues", "no:assignee", 1),

@@ -1457,10 +1457,10 @@ An explicit query has no additional hidden state filter. The issue endpoint
 searches both discussion kinds; the PR endpoint retains its PR scope.
 Use `is:issue` or `is:pr` to include all states of that kind. The former separate
 `state` parameter is rejected; milestone and release state parameters keep their
-own contracts. Text terms search titles, bodies, and recorded author names. Spaces and `AND` require both terms; `OR` matches either; parentheses
+own contracts. Text terms search titles, bodies, conversation comments, submitted reviews, inline threads and replies. Spaces and `AND` require both terms; `OR` matches either; parentheses
 support up to five nested groups. Quote phrases and multiword label names.
 
-Supported qualifiers are `is:open`, `is:closed`, `is:merged`, `is:unmerged`,
+Common qualifiers include `is:open`, `is:closed`, `is:merged`, `is:unmerged`,
 `is:issue`, `is:pr`, `state:open`, `state:closed`, `draft:true`, `draft:false`,
 `label:name`, `milestone:"title"`, `author:username`, `author:@me`, `no:label`,
 `no:assignee`, `no:milestone`, `assignee:username`, `assignee:@me`,
@@ -1547,8 +1547,8 @@ reactions on the issue/PR body.
 `sort` accepts `created` (default), `updated`, `comments`, `reactions`,
 `thumbs_up`, `thumbs_down`, `laugh`, `hooray`, `confused`, `heart`, `rocket`,
 `eyes`, and `relevance`. `updated` uses the source discussion's update timestamp;
-comment/reaction writes do not fabricate edit timestamps. Relevance sums FTS5
-BM25 ranks for positive text terms; terms shorter than three Unicode scalars
+comment/reaction writes do not fabricate edit timestamps. Relevance combines FTS5
+BM25 ranks for positive scoped text terms; terms shorter than three Unicode scalars
 retain literal substring matching without trigram ranking. `direction` is
 `desc` (default) or `asc`. Discussion number, then kind, break ties in the same direction.
 `next` is null on the last page. Cursors bind the repository, query, endpoint kind scope,
@@ -1557,10 +1557,10 @@ handle invalidates its old cursor even without a repository mutation. Malformed 
 queries or index contents return 409 `stale_search_cursor`. Restart at the first
 page to obtain a fresh snapshot. Comment pagination remains numeric.
 
-The current discussion index format is 7. It retains qualified author identities,
+The current discussion index format is 8. It retains qualified author identities,
 milestone catalog entries and stable actor assignment keys, and adds searchable
 assignment name snapshots, transactional reviewer relationships and per-source
-commenter identities. Older indexes report
+commenter identities, with transactional contribution text/FTS. Older indexes report
 `outdated`; run the explicit rebuild below before admitting indexed traffic.
 It rebuilds only derived tables and preserves canonical milestone and assignment
 records. Clearing, milestone catalog preparation and discussion projection are
@@ -1623,7 +1623,33 @@ in frames of eight, with a durable source cursor. Private list inputs consolidat
 author, reviewer and commenter names into one exact ordered `people` collection;
 update and drain peers together. No old-shape decoder is supported. Commenter
 completion includes public usernames and `@me`; no authentication claims cross
-HTTP. Comment text, mentions and `involves` remain unsupported.
+HTTP. Mentions and `involves` remain unsupported.
+
+Text fields use `in:title`, `in:body`, `in:comments`, or a comma-separated
+combination. Without `in:`, all three fields are searched. Repeated selectors in
+the same conjunction combine; explicit inner field scopes override enclosing
+fields, and OR branches retain their own scopes. For example,
+`(fix in:title) OR (workaround in:comments)` preserves each branch when another
+facet is selected. Negated field directives are rejected; use `-word in:comments`
+to exclude a word from comments. Unknown/empty fields return 400.
+
+Phrase matches stay within one title, description or contribution body. Separate
+terms may match different contributions to the same discussion. Text comparisons
+use folded literal substrings, including the existing one/two-scalar path for
+trigram-ineligible terms. Author names are not searchable discussion text; use
+`author:username` or `author:@me`. Best-match sorting sums positive-term header
+ranks and each term's best matching contribution rank, avoiding a bonus solely
+for repeating a word across many comments. This is native FTS5 ranking, not a
+claim to reproduce GitHub's private ranking algorithm.
+
+Format 8 adds a text row and contentless-delete trigram FTS entry for each
+contribution. Composite foreign keys preserve identity/source ownership. Dirty-ID
+triggers and bounded native flush keep inserts, edits, deletion cascades and
+receipts atomic, without virtual-table writes from untrusted triggers. During
+explicit preparation, header rows clear in bounded frames before their empty
+shape is recreated without recorded-author text; all five contribution sources
+then rebuild with their existing keyset cursor. Canonical records and versions
+are unchanged. Both FTS indexes are checked before indexed readiness.
 
 ### Browse activity
 

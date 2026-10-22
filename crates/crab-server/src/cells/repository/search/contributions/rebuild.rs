@@ -3,15 +3,6 @@ use crate::cells::repository::{result_text, result_u64_from_row};
 
 const CURSOR: &str = "discussion-search/v1/comment-source-cursor";
 
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Cursor {
-    source: Source,
-    discussion: u64,
-    thread: u64,
-    number: u64,
-}
-
 pub(in crate::cells::repository::search) fn reset(context: &Transaction<'_>) -> Result<()> {
     context.delete_document(CURSOR)?;
     Ok(())
@@ -22,11 +13,12 @@ pub(in crate::cells::repository::search) fn clear(context: &Transaction<'_>) -> 
     for row in &rows.rows {
         context.query("DELETE FROM discussion_index_commenters WHERE source = ? AND discussion = ? AND thread = ? AND number = ?", row)?;
     }
+    text::flush(context)?;
     Ok(rows.rows.len() < 8)
 }
 
 pub(in crate::cells::repository::search) fn rebuild(context: &Transaction<'_>) -> Result<bool> {
-    let mut cursor = context.document(CURSOR)?.unwrap_or(Cursor {
+    let mut cursor = context.document(CURSOR)?.unwrap_or(Key {
         source: Source::IssueComment,
         discussion: 0,
         thread: 0,
@@ -61,7 +53,7 @@ pub(in crate::cells::repository::search) fn rebuild(context: &Transaction<'_>) -
     // Seek the canonical composite primary key. OFFSET or a partially covered
     // tuple would make later frames scan all preceding comment history again.
     let sql = format!(
-        "SELECT {parent}, {thread}, number, author_issuer, author_subject FROM {table} WHERE ({keys}) > ({placeholders}) ORDER BY {keys} LIMIT 8"
+        "SELECT {parent}, {thread}, number, author_issuer, author_subject, body FROM {table} WHERE ({keys}) > ({placeholders}) ORDER BY {keys} LIMIT 8"
     );
     let rows = context.query(&sql, &values)?;
     for row in &rows.rows {
@@ -70,20 +62,19 @@ pub(in crate::cells::repository::search) fn rebuild(context: &Transaction<'_>) -
         cursor.number = result_u64_from_row(row, 2)?;
         insert(
             context,
-            cursor.source,
-            cursor.discussion,
-            cursor.thread,
-            cursor.number,
+            &cursor,
             &result_text(row, 3)?,
             &result_text(row, 4)?,
+            &result_text(row, 5)?,
         )?;
     }
+    text::flush(context)?;
     if rows.rows.len() < 8 {
         let Some(next) = cursor.source.next() else {
             reset(context)?;
             return Ok(true);
         };
-        cursor = Cursor {
+        cursor = Key {
             source: next,
             discussion: 0,
             thread: 0,

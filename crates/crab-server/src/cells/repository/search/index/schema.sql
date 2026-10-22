@@ -15,7 +15,6 @@ CREATE TABLE IF NOT EXISTS discussion_index (
     updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms),
     title TEXT NOT NULL,
     body TEXT NOT NULL,
-    author TEXT NOT NULL,
     comments INTEGER NOT NULL CHECK (comments BETWEEN 0 AND 9007199254740991),
     reactions INTEGER NOT NULL CHECK (reactions BETWEEN 0 AND 9007199254740991),
     UNIQUE (kind, number),
@@ -35,7 +34,7 @@ CREATE TABLE IF NOT EXISTS discussion_index_authors (
 CREATE INDEX IF NOT EXISTS discussion_index_author_lookup ON discussion_index_authors(identity, document);
 
 CREATE VIRTUAL TABLE IF NOT EXISTS discussion_fts USING fts5(
-    title, body, author, content='', contentless_delete=1,
+    title, body, content='', contentless_delete=1,
     tokenize='trigram case_sensitive 1'
 );
 

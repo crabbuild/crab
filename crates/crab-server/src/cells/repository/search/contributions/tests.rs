@@ -413,6 +413,10 @@ async fn qualified_commenters_cover_all_sources_survive_rebuild_and_follow_sourc
         subjects(&search(&cell, "commenter:@me", &issue_commenter).await),
         [(0, 2)]
     );
+    assert_eq!(
+        subjects(&search(&cell, "\"inline reply\" in:comments", &reply_author).await),
+        [(1, 1), (1, 2)]
+    );
     // Thread deletion cascades through replies and both source projections.
     for number in 1..=9 {
         write::<DeleteSource>(&cell, Target::PullThread { pull: 1, number }).await;
@@ -423,6 +427,10 @@ async fn qualified_commenters_cover_all_sources_survive_rebuild_and_follow_sourc
             [(1, 2)]
         );
     }
+    assert_eq!(
+        subjects(&search(&cell, "\"inline reply\" in:comments", &reply_author).await),
+        [(1, 2)]
+    );
     write::<DeleteSource>(&cell, Target::Pull { number: 2 }).await;
     for person in [&thread_author, &reply_author] {
         assert_eq!(search(&cell, "commenter:@me", person).await.matching, 0);
@@ -438,6 +446,48 @@ async fn qualified_commenters_cover_all_sources_survive_rebuild_and_follow_sourc
     write::<DeleteSource>(&cell, Target::Issue { number: 2 }).await;
     assert_eq!(
         search(&cell, "commenter:@me", &issue_commenter)
+            .await
+            .matching,
+        0
+    );
+    assert_eq!(
+        search(&cell, "\"inline reply\" in:comments", &reply_author)
+            .await
+            .matching,
+        0
+    );
+    assert!(matches!(
+        write::<CreateIssue>(
+            &cell,
+            CreateIssueInput {
+                submission_id: *Uuid::now_v7().as_bytes(),
+                author: owner.clone(),
+                title: "New discussion".into(),
+                body: String::new(),
+            }
+        )
+        .await,
+        CreateIssueOutcome::Created(_)
+    ));
+    assert!(matches!(
+        write::<CreateComment>(
+            &cell,
+            CreateCommentInput {
+                submission_id: *Uuid::now_v7().as_bytes(),
+                issue: 3,
+                author: owner.clone(),
+                body: "Rowreuseneedle".into(),
+            }
+        )
+        .await,
+        CreateCommentOutcome::Created(_)
+    ));
+    assert_eq!(
+        subjects(&search(&cell, "rowreuseneedle in:comments", &owner).await),
+        [(0, 3)]
+    );
+    assert_eq!(
+        search(&cell, "\"inline comment\" in:comments", &owner)
             .await
             .matching,
         0

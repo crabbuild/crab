@@ -8,9 +8,9 @@ use crate::cells::repository::collaboration::{Subject, SubjectKind};
 use crate::cells::repository::{MAX_NUMBER, SqlBatch, integer, result_u64, statement};
 
 const STATE_KEY: &str = "discussion-search/v1/state";
-const FORMAT: u16 = 7;
+const FORMAT: u16 = 8;
 const BATCH: usize = 8;
-const MAX_DIRTY: usize = 128;
+pub(super) const MAX_DIRTY: usize = 128;
 
 mod projection;
 mod query;
@@ -26,6 +26,7 @@ pub(crate) use rebuild::RebuildSearchOutcome;
 #[serde(rename_all = "snake_case")]
 pub enum SearchIndexPhase {
     Clear,
+    PrepareText,
     ClearMilestones,
     ClearReviewers,
     ClearCommenters,
@@ -109,7 +110,7 @@ fn revision(context: &Transaction<'_>) -> crate::cells::Result<u64> {
 
 pub(crate) fn initialize(context: &Transaction<'_>, generation: Uuid) -> crate::cells::Result<()> {
     context.install_schema(include_str!("schema.sql"))?;
-    super::commenters::install(context)?;
+    super::contributions::install(context)?;
     context.put_document(
         STATE_KEY,
         &State {
@@ -174,6 +175,7 @@ pub(in crate::cells::repository) fn dirty(
 }
 
 pub(crate) fn flush(context: &Transaction<'_>) -> crate::cells::Result<()> {
+    super::contributions::flush(context)?;
     let rows = context.sql(&SqlBatch {
         statements: vec![statement(
             "SELECT kind, number FROM discussion_index_dirty ORDER BY kind, number LIMIT 129",

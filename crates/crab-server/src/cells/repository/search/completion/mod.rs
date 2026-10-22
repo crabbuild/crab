@@ -252,6 +252,14 @@ fn suggestions(
             ),
             ("user-review-requested:", "Filter direct review requests"),
             ("comments:0", "Work without conversation comments"),
+            ("in:title", "Search titles"),
+            ("in:body", "Search descriptions"),
+            (
+                "in:comments",
+                "Search comments, reviews and inline conversations",
+            ),
+            ("in:title,body", "Search titles and descriptions"),
+            ("in:title,body,comments", "Search all discussion text"),
             ("comments:>0", "Work with conversation comments"),
             ("comments:1..10", "One to ten conversation comments"),
             ("reactions:0", "Work without reactions"),
@@ -264,7 +272,9 @@ fn suggestions(
                 "One to ten comments and reactions combined",
             ),
         ] {
-            if negative && value.starts_with("no:") || !value.starts_with(&prefix) {
+            if negative && (value.starts_with("no:") || value.starts_with("in:"))
+                || !value.starts_with(&prefix)
+            {
                 continue;
             }
             items.push(Suggestion {

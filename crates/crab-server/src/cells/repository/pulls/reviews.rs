@@ -145,7 +145,12 @@ impl Mutation for CreatePullReview {
             pull: record.pull,
             number: record.number,
         };
-        super::super::search::commenters::project(context, target, &record.author)?;
+        super::super::search::contributions::project(
+            context,
+            target,
+            &record.author,
+            &record.body,
+        )?;
         activity::append(context, target, &record.author, action)?;
         Ok(MutationResult::Success(CreatePullReviewOutcome::Created(
             record,
@@ -193,6 +198,7 @@ impl Mutation for UpdatePullReview {
                 pull: record.pull,
                 number: record.number,
             };
+            crate::cells::repository::search::contributions::edit(context, target, &record.body)?;
             activity::append(context, target, &input.actor, Action::Updated)?;
         }
         Ok(MutationResult::Success(UpdatePullReviewOutcome::Updated(

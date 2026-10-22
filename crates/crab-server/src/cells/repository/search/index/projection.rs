@@ -39,7 +39,7 @@ pub(super) fn refresh(context: &Transaction<'_>, subject: Subject) -> crate::cel
         ),
     };
     let query = format!(
-        "SELECT title, body, author_name, state, label_ids, assignees, created_at_ms, updated_at_ms, author_issuer, author_subject FROM {table} WHERE number = ?"
+        "SELECT title, body, state, label_ids, assignees, created_at_ms, updated_at_ms, author_issuer, author_subject FROM {table} WHERE number = ?"
     );
     let rows = context.sql(&SqlBatch {
         statements: vec![statement(&query, vec![integer(subject.number)?])],
@@ -50,14 +50,13 @@ pub(super) fn refresh(context: &Transaction<'_>, subject: Subject) -> crate::cel
     };
     let title = result_text(row, 0)?.to_lowercase();
     let body = result_text(row, 1)?.to_lowercase();
-    let author = result_text(row, 2)?.to_lowercase();
-    let state = result_u64_from_row(row, 3)?;
-    let labels = decode_label_ids(result_blob(row, 4)?)?;
-    let assignees = assignments::decode(result_blob(row, 5)?)?;
-    let created = result_u64_from_row(row, 6)?;
-    let updated = result_u64_from_row(row, 7)?;
-    let issuer = result_text(row, 8)?;
-    let subject_key = result_text(row, 9)?;
+    let state = result_u64_from_row(row, 2)?;
+    let labels = decode_label_ids(result_blob(row, 3)?)?;
+    let assignees = assignments::decode(result_blob(row, 4)?)?;
+    let created = result_u64_from_row(row, 5)?;
+    let updated = result_u64_from_row(row, 6)?;
+    let issuer = result_text(row, 7)?;
+    let subject_key = result_text(row, 8)?;
     let author_identity = super::super::people::identity(&issuer, &subject_key)?;
     let draft = subject.kind == SubjectKind::Pull
         && crate::cells::repository::pulls::readiness::load(context, subject.number)?
@@ -84,8 +83,8 @@ pub(super) fn refresh(context: &Transaction<'_>, subject: Subject) -> crate::cel
     // Tying them to these disposable documents would erase review relationships.
     remove(context, id)?;
     context.sql(&SqlBatch { statements: vec![statement(
-        "INSERT INTO discussion_index(rowid, kind, number, state, draft, created_at_ms, updated_at_ms, title, body, author, comments, reactions) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-        vec![integer(id)?, SqlValue::Integer(kind(subject.kind)), integer(subject.number)?, integer(state)?, SqlValue::Integer(i64::from(draft)), integer(created)?, integer(updated)?, SqlValue::Text(title.clone()), SqlValue::Text(body.clone()), SqlValue::Text(author.clone()), integer(comments)?, integer(total)?],
+        "INSERT INTO discussion_index(rowid, kind, number, state, draft, created_at_ms, updated_at_ms, title, body, comments, reactions) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        vec![integer(id)?, SqlValue::Integer(kind(subject.kind)), integer(subject.number)?, integer(state)?, SqlValue::Integer(i64::from(draft)), integer(created)?, integer(updated)?, SqlValue::Text(title.clone()), SqlValue::Text(body.clone()), integer(comments)?, integer(total)?],
     )] })?;
     let mut statements = Vec::with_capacity(labels.len() + assignees.len() + counts.len() + 1);
     statements.push(statement(
@@ -123,13 +122,8 @@ pub(super) fn refresh(context: &Transaction<'_>, subject: Subject) -> crate::cel
         ));
     }
     statements.push(statement(
-        "INSERT INTO discussion_fts(rowid, title, body, author) VALUES (?, ?, ?, ?)",
-        vec![
-            integer(id)?,
-            SqlValue::Text(title),
-            SqlValue::Text(body),
-            SqlValue::Text(author),
-        ],
+        "INSERT INTO discussion_fts(rowid, title, body) VALUES (?, ?, ?)",
+        vec![integer(id)?, SqlValue::Text(title), SqlValue::Text(body)],
     ));
     context.sql(&SqlBatch { statements })?;
     Ok(())

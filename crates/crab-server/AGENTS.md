@@ -40,8 +40,9 @@ suggestions and browser UTF-16 replacement ranges. `search/milestones/` owns
 milestone projection/catalog reads, grammar-preserving facet destinations and
 the native choice read. `search/people/` owns qualified identity digests, public name validation and
 shared resolved bindings. `search/authors/` owns global author-facet destinations
-and personal-view selection. `search/commenters/` owns per-contribution qualified
-identities, canonical deletion triggers and bounded five-source rebuilding;
+and personal-view selection. `search/contributions/` owns per-contribution qualified
+identities, text/FTS maintenance, canonical deletion triggers and bounded five-source rebuilding;
+`search/text/` owns field scopes, text predicates and relevance SQL;
 `search/reviews/` owns reviewer predicates, transactional
 review/request projections and bounded rebuild source cursors. `search/assignees/` owns stable-ID predicates, resolved binding validation,
 historical snapshot choices and personal selection; `api/discussion_search/assignees/`

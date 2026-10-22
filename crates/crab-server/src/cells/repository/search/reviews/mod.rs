@@ -97,6 +97,7 @@ impl Query {
                         },
                     ..
                 } => name == "@me",
+                Expression::Scope { expression, .. } => selected(expression),
                 Expression::And(parts) => parts.iter().any(selected),
                 _ => false,
             }

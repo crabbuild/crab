@@ -4,8 +4,8 @@ use super::collaboration::{SubjectKind, SubjectState};
 
 pub(crate) mod assignees;
 pub(crate) mod authors;
-pub(crate) mod commenters;
 pub(crate) mod completion;
+pub(crate) mod contributions;
 mod counts;
 pub(crate) mod index;
 pub(crate) mod labels;
@@ -13,6 +13,7 @@ pub(crate) mod milestones;
 mod navigation;
 pub(crate) mod people;
 pub(crate) mod reviews;
+mod text;
 pub(crate) use navigation::Choice;
 pub(crate) mod results;
 
@@ -36,6 +37,10 @@ enum Expression {
     Not(Box<Self>),
     And(Vec<Self>),
     Or(Vec<Self>),
+    Scope {
+        fields: text::Fields,
+        expression: Box<Self>,
+    },
 }
 
 #[derive(Clone, Debug, serde::Serialize)]
@@ -63,6 +68,34 @@ enum Metadata {
 }
 
 impl Query {
+    fn names(&self, select: fn(&Term) -> Option<&str>) -> std::collections::BTreeSet<String> {
+        fn collect(
+            expression: &Expression,
+            select: fn(&Term) -> Option<&str>,
+            names: &mut std::collections::BTreeSet<String>,
+        ) {
+            match expression {
+                Expression::Term { value, .. } => {
+                    if let Some(name) = select(value) {
+                        names.insert(name.to_owned());
+                    }
+                }
+                Expression::Not(inner)
+                | Expression::Scope {
+                    expression: inner, ..
+                } => collect(inner, select, names),
+                Expression::And(parts) | Expression::Or(parts) => {
+                    for part in parts {
+                        collect(part, select, names);
+                    }
+                }
+                _ => (),
+            }
+        }
+        let mut names = std::collections::BTreeSet::new();
+        collect(&self.expression, select, &mut names);
+        names
+    }
     pub(crate) fn parse(source: Option<&str>) -> Result<Self, &'static str> {
         let Some(source) = source else {
             return Ok(Self {
@@ -81,7 +114,7 @@ impl Query {
             tokens: &tokens,
             position: 0,
         };
-        let expression = parser.or(0)?;
+        let expression = parser.or(0)?.finish();
         if parser.position != tokens.len() {
             return Err("Search query has an unexpected closing parenthesis");
         }
@@ -148,8 +181,56 @@ struct Parser<'a> {
     position: usize,
 }
 
+// Keep parentheses until field directives have been attached to their local
+// conjunction. Flattening them earlier leaks a group's fields into its siblings.
+enum Parsed {
+    Atom(Expression),
+    Group(Box<Self>),
+    And(Vec<Self>),
+    Or(Vec<Self>),
+}
+impl Parsed {
+    fn finish(self) -> Expression {
+        match self {
+            Self::Atom(expression) => expression,
+            Self::Group(inner) => inner.finish(),
+            Self::Or(parts) => Expression::Or(parts.into_iter().map(Self::finish).collect()),
+            Self::And(parts) => {
+                let mut fields = None;
+                let mut terms = Vec::new();
+                for part in parts {
+                    match part {
+                        Self::Atom(Expression::Scope {
+                            fields: selected,
+                            expression,
+                        }) if matches!(*expression, Expression::All) => {
+                            fields =
+                                Some(fields.map_or(selected, |current: text::Fields| {
+                                    current.union(selected)
+                                }));
+                        }
+                        other => terms.push(other.finish()),
+                    }
+                }
+                let expression = match terms.len() {
+                    0 => Expression::All,
+                    1 => terms.remove(0),
+                    _ => Expression::And(terms),
+                };
+                match fields {
+                    Some(fields) => Expression::Scope {
+                        fields,
+                        expression: Box::new(expression),
+                    },
+                    None => expression,
+                }
+            }
+        }
+    }
+}
+
 impl Parser<'_> {
-    fn or(&mut self, depth: usize) -> Result<Expression, &'static str> {
+    fn or(&mut self, depth: usize) -> Result<Parsed, &'static str> {
         let mut parts = vec![self.and(depth)?];
         while self.tokens.get(self.position) == Some(&Token::Or) {
             self.position += 1;
@@ -158,11 +239,11 @@ impl Parser<'_> {
         Ok(if parts.len() == 1 {
             parts.remove(0)
         } else {
-            Expression::Or(parts)
+            Parsed::Or(parts)
         })
     }
 
-    fn and(&mut self, depth: usize) -> Result<Expression, &'static str> {
+    fn and(&mut self, depth: usize) -> Result<Parsed, &'static str> {
         let mut parts = vec![self.primary(depth)?];
         loop {
             match self.tokens.get(self.position) {
@@ -175,11 +256,11 @@ impl Parser<'_> {
         Ok(if parts.len() == 1 {
             parts.remove(0)
         } else {
-            Expression::And(parts)
+            Parsed::And(parts)
         })
     }
 
-    fn primary(&mut self, depth: usize) -> Result<Expression, &'static str> {
+    fn primary(&mut self, depth: usize) -> Result<Parsed, &'static str> {
         let token = self
             .tokens
             .get(self.position)
@@ -195,9 +276,9 @@ impl Parser<'_> {
                     return Err("Search query has an unclosed parenthesis");
                 }
                 self.position += 1;
-                Ok(inner)
+                Ok(Parsed::Group(Box::new(inner)))
             }
-            Token::Atom(atom) => atom_expression(atom),
+            Token::Atom(atom) => atom_expression(atom).map(Parsed::Atom),
             _ => Err("Search query needs a term between operators or parentheses"),
         }
     }
@@ -215,6 +296,18 @@ fn atom_expression(atom: &str) -> Result<Expression, &'static str> {
     let qualifier = atom
         .split_once(':')
         .filter(|(prefix, _)| !prefix.contains('"'));
+    if let Some((_, value)) =
+        qualifier.filter(|(qualifier, _)| qualifier.eq_ignore_ascii_case("in"))
+    {
+        if negative {
+            return Err("Search in qualifier cannot be negated; exclude a text term instead");
+        }
+        let fields = text::Fields::parse(&unquote(value)?)?;
+        return Ok(Expression::Scope {
+            fields,
+            expression: Box::new(Expression::All),
+        });
+    }
     let term = match qualifier {
         None => Term::Text(unquote(atom)?.to_lowercase()),
         Some((qualifier, value)) => match qualifier.to_ascii_lowercase().as_str() {

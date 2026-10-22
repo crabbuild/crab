@@ -68,9 +68,9 @@ impl Mutation for RebuildIndex {
                     context.install_schema("ALTER TABLE discussion_index_assignees ADD COLUMN name TEXT NOT NULL DEFAULT ''; ALTER TABLE discussion_index_assignees ADD COLUMN name_key TEXT NOT NULL DEFAULT '';")?;
                 }
                 context.install_schema(include_str!("schema.sql"))?;
-                super::super::commenters::install(context)?;
+                super::super::contributions::install(context)?;
                 super::super::reviews::reset(context)?;
-                super::super::commenters::reset(context)?;
+                super::super::contributions::reset(context)?;
                 State {
                     format: FORMAT,
                     generation,
@@ -102,9 +102,21 @@ impl Mutation for RebuildIndex {
                     return conflict(context);
                 }
                 let done = match build.phase {
+                    SearchIndexPhase::PrepareText => {
+                        // Header clearing already removed every row in bounded
+                        // frames. Recreate the empty derived shape without the
+                        // retired author-name text column or its FTS tokens.
+                        context.install_schema(
+                            "DROP TABLE discussion_index; DROP TABLE discussion_fts;",
+                        )?;
+                        context.install_schema(include_str!("schema.sql"))?;
+                        true
+                    }
                     SearchIndexPhase::ClearReviewers => super::super::reviews::clear(context)?,
-                    SearchIndexPhase::ClearCommenters => super::super::commenters::clear(context)?,
-                    SearchIndexPhase::Commenters => super::super::commenters::rebuild(context)?,
+                    SearchIndexPhase::ClearCommenters => {
+                        super::super::contributions::clear(context)?
+                    }
+                    SearchIndexPhase::Commenters => super::super::contributions::rebuild(context)?,
                     SearchIndexPhase::Reviews => super::super::reviews::reviews(context)?,
                     SearchIndexPhase::ReviewRequests => super::super::reviews::requests(context)?,
                     SearchIndexPhase::Milestones => {
@@ -180,6 +192,10 @@ impl Mutation for RebuildIndex {
                 if done {
                     match build.phase {
                         SearchIndexPhase::Clear => {
+                            build.phase = SearchIndexPhase::PrepareText;
+                            build.after = 0;
+                        }
+                        SearchIndexPhase::PrepareText => {
                             build.phase = SearchIndexPhase::ClearReviewers;
                             build.after = 0;
                         }
@@ -220,6 +236,7 @@ impl Mutation for RebuildIndex {
                                 statement("DELETE FROM discussion_index_dirty", vec![]),
                                 statement("UPDATE discussion_index_revision SET revision = 0 WHERE singleton = 1", vec![]),
                                 statement("INSERT INTO discussion_fts(discussion_fts) VALUES ('integrity-check')", vec![]),
+                                statement("INSERT INTO discussion_comment_fts(discussion_comment_fts) VALUES ('integrity-check')", vec![]),
                             ] })?;
                             current.progress = None;
                         }

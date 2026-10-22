@@ -43,27 +43,12 @@ pub(crate) enum Filter<'a> {
 
 impl Query {
     pub(crate) fn assignees(&self) -> BTreeSet<String> {
-        fn collect(expression: &Expression, names: &mut BTreeSet<String>) {
-            match expression {
-                Expression::Term {
-                    value: Term::Assignee(name),
-                    ..
-                } if name != "*" && !name.starts_with("actor/") => {
-                    names.insert(name.clone());
-                }
-                Expression::Not(inner) => collect(inner, names),
-                Expression::And(parts) | Expression::Or(parts) => {
-                    for part in parts {
-                        collect(part, names);
-                    }
-                }
-                _ => (),
-            }
-        }
-        let mut names = BTreeSet::new();
-        collect(&self.expression, &mut names);
-        names
+        self.names(|term| match term {
+            Term::Assignee(name) if name != "*" && !name.starts_with("actor/") => Some(name),
+            _ => None,
+        })
     }
+
     pub(super) fn validate_assignees(
         &self,
         bindings: &[Binding],
@@ -144,6 +129,7 @@ impl Query {
                     value: Term::Assignee(name),
                     ..
                 } => name == "@me",
+                Expression::Scope { expression, .. } => selected(expression),
                 Expression::And(parts) => parts.iter().any(selected),
                 _ => false,
             }

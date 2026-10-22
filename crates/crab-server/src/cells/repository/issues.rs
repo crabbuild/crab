@@ -203,7 +203,7 @@ impl Mutation for CreateComment {
             issue: record.issue,
             number: record.number,
         };
-        search::commenters::project(context, target, &record.author)?;
+        search::contributions::project(context, target, &record.author, &record.body)?;
         activity::append(context, target, &record.author, Action::Created)?;
         Ok(MutationResult::Success(CreateCommentOutcome::Created(
             record,
@@ -533,6 +533,7 @@ impl Mutation for UpdateComment {
                 issue: comment.issue,
                 number: comment.number,
             };
+            search::contributions::edit(context, target, &comment.body)?;
             activity::append(context, target, &input.actor, Action::Updated)?;
         }
         Ok(MutationResult::Success(UpdateCommentOutcome::Updated(

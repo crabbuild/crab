@@ -27,6 +27,13 @@ fn without_globals(
         removed.push(expression.clone());
         return None;
     }
+    if let Expression::Scope { fields, expression } = expression {
+        let expression = without_globals(expression, matches, removed).unwrap_or(Expression::All);
+        return Some(Expression::Scope {
+            fields: *fields,
+            expression: Box::new(expression),
+        });
+    }
     if let Expression::And(parts) = expression {
         let mut parts: Vec<_> = parts
             .iter()
@@ -126,6 +133,7 @@ impl Query {
 // manufacturing tabs for it would change the user's boolean predicate.
 fn global_state(expression: &Expression) -> Result<Option<StateSelection>, ()> {
     match expression {
+        Expression::Scope { expression, .. } => global_state(expression),
         Expression::Term {
             value: Term::State(SubjectState::Open),
             ..
@@ -148,6 +156,7 @@ fn global_state(expression: &Expression) -> Result<Option<StateSelection>, ()> {
 }
 fn has_state(expression: &Expression) -> bool {
     match expression {
+        Expression::Scope { expression, .. } => has_state(expression),
         Expression::Term {
             value: Term::State(_) | Term::Unmerged,
             ..
@@ -162,6 +171,15 @@ pub(super) fn source(expression: &Expression, parent: u8) -> String {
     match expression {
         Expression::All => String::new(),
         Expression::Term { source, .. } => source.clone(),
+        Expression::Scope { fields, expression } => {
+            let inner = source(expression, 0);
+            let fields = fields.source();
+            if inner.is_empty() {
+                format!("(in:{fields})")
+            } else {
+                format!("({inner} in:{fields})")
+            }
+        }
         Expression::Not(inner) => format!("-{}", source(inner, 3)),
         Expression::And(parts) | Expression::Or(parts) => {
             let (precedence, operator) = if matches!(expression, Expression::And(_)) {

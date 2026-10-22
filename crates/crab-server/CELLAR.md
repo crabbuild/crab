@@ -24,7 +24,7 @@ is buffered before owner dispatch so Cellar can safely retry stale routes; it is
 not forwarded as a non-replayable upload stream. Successful HTTP output
 uses the SDK output gate, including its ownership and durability checks.
 
-Repository assignment format 2 and discussion index format 7 require the explicit
+Repository assignment format 2 and discussion index format 8 require the explicit
 preparation described below. Other canonical records retain their formats.
 Transport requests and replies use bounded JSON. Mutation receipts store
 the payload digest and outcome in the same transaction as application writes.
@@ -137,7 +137,7 @@ review key or exclusive KV bound. Both phases process at most eight source recor
 per transaction; unrelated pull metadata also advances the request cursor. Reads
 remain unavailable until all sources complete. Domain records, versions, request
 history, receipts and public submission mappings are unchanged. Older indexes
-require `cells rebuild-search`; fresh repositories now initialize format 7.
+require `cells rebuild-search`; fresh repositories now initialize format 8.
 
 Native list output adds `review_requested_from_me`. Author, reviewer and commenter
 names now share one ordered `people` binding collection, one Directory snapshot,
@@ -165,7 +165,33 @@ versions, assignment formats or public submission records change. Upgrade and
 drain all peers together for the unified private people-binding input; there is
 no old-input decoder or serving-time scan. `commenter:username` and `commenter:@me`
 use current qualified identities and public username completion. Mentions,
-`involves` and comment text search still need their own models.
+`involves` still needs its mention relationship model.
+
+## Discussion text search preparation
+
+Discussion index format 8 adds indexed text for conversation comments, submitted
+reviews, inline threads and replies. Text rows reference their contribution
+identity through a composite foreign key, so canonical source deletion cascades
+through both projections. INSERT/UPDATE/DELETE triggers enqueue text IDs; native
+flush deletes old FTS tokens and inserts the current body in the same domain
+transaction. No virtual-table writes run from untrusted SQLite triggers. Fresh
+writes process one contribution, rebuilding processes eight, and dirty-ID fanout
+is capped at 128 per normal mutation. Overflow rolls the whole mutation back.
+
+Default text searches cover title, body and comments. Recorded author names are
+no longer indexed as free text; use `author:` for identity search. The `in:`
+qualifier selects title, body, comments, or comma-separated combinations. Repeated
+selectors in one conjunction combine; an explicitly scoped inner group overrides
+its enclosing text fields. Field scopes survive facet and state navigation.
+Negate text terms to exclude words; negated field directives are rejected.
+
+Run `cells rebuild-search` before serving existing indexes. Header clearing uses
+its existing eight-document frames; a separate preparation frame recreates the
+empty header/FTS tables without the retired author-name column. Contribution
+clearing and rebuilding use the same bounded source cursor as format 7 and flush
+FTS in each frame. All canonical data and public submissions retain their formats.
+Both FTS indexes pass integrity checks before readiness. Upgrade and drain peers
+together; indexed traffic remains unavailable until preparation finishes.
 
 ## Assignee search preparation
 
