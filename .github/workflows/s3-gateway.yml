@@ -565,11 +565,14 @@ jobs:
             git config user.name 'Gateway qualification'
             git config user.email 'qualification@example.invalid'
             crab init crab://crab-s3-gateway-qualification/repositories/native-qualification
+            crab track '*.bin'
             crab add xet.bin
             crab lfs install --local
             crab lfs track '*.dat'
             git add .gitattributes ordinary.txt lfs.dat
             git -c core.hooksPath=/dev/null commit -m 'add native gateway fixtures'
+            git show HEAD:xet.bin | grep -Fx 'version https://crab.build/spec/v1'
+            git show HEAD:lfs.dat | grep -Fx 'version https://git-lfs.github.com/spec/v1'
             crab lfs push origin main
             crab push crab://crab-s3-gateway-qualification/repositories/native-qualification main
           )
