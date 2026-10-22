@@ -47,6 +47,10 @@ pub(crate) enum Error {
     DraftPull,
     #[error("This content changed; reload before saving your draft")]
     Conflict,
+    #[error(
+        "This repository was replaced; reload before starting another action. An earlier action may have completed in the original repository"
+    )]
+    RepositoryChanged,
     #[error("This list changed; reload from the first page")]
     PageChanged,
     #[error("The pull request changes conflict or its branch tips changed")]
@@ -396,6 +400,11 @@ impl IntoResponse for Error {
                 "asset_storage",
                 "Release asset storage is unavailable. Retry shortly",
             ),
+            Self::RepositoryChanged => (
+                StatusCode::CONFLICT,
+                "repository_changed",
+                "This repository was replaced; reload before starting another action. An earlier action may have completed in the original repository",
+            ),
             Self::RequestConflict => (
                 StatusCode::CONFLICT,
                 "submission_conflict",
@@ -548,6 +557,9 @@ pub(crate) async fn membership(
     repo: &Repository,
 ) -> Result<Membership> {
     if principal.is_local() {
+        if !principal.can_read(repo.id) {
+            return Err(Error::NotFound);
+        }
         return Ok(Membership {
             members: Vec::new(),
             principal: principal.clone(),

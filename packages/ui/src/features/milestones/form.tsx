@@ -27,7 +27,7 @@ export function MilestoneForm({
   const [description, setDescription] = useState(milestone?.description ?? "");
   const [due, setDue] = useState(milestone?.due_on ?? "");
   const [version, setVersion] = useState(milestone?.version ?? 0);
-  const mutation = useMutation(csrf);
+  const mutation = useMutation(csrf, repo);
   const submission = useSubmission();
   const target = endpoint(
     repo,

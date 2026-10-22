@@ -210,7 +210,7 @@ function MemberRow({
   csrf: string;
   onChanged: (message: string) => void;
 }) {
-  const mutation = useMutation(csrf);
+  const mutation = useMutation(csrf, null);
   const [role, setRole] = useState<OrganizationRole>(member.role);
   const [removing, setRemoving] = useState(false);
   async function save(remove: boolean) {
@@ -311,7 +311,7 @@ function Settings({
 }) {
   const [name, setName] = useState(organization.name);
   const [description, setDescription] = useState(organization.description);
-  const mutation = useMutation(csrf);
+  const mutation = useMutation(csrf, null);
   const [version, setVersion] = useState(organization.version);
   const latest = useRequest<OrganizationView>(
     mutation.conflict ? endpoint : null,

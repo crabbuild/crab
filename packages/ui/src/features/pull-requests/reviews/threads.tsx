@@ -67,7 +67,7 @@ export function PullReviewThreads({
   const [body, setBody] = useState("");
   const [suggestion, setSuggestion] = useState("");
   const [suggestionEnabled, setSuggestionEnabled] = useState(false);
-  const mutation = useMutation(csrf);
+  const mutation = useMutation(csrf, repo);
   const submission = useSubmission();
   const reviewMetrics = useMemo(() => {
     const all = [...threads.items, ...outdatedThreads.items];

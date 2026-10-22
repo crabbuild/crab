@@ -71,6 +71,7 @@ pub(super) async fn list(
         let protections = crate::repository::settings::load(&server, &repository).await?;
         let lifecycle = crate::repository::settings::load_lifecycle(&server, &repository).await?;
         repositories.push(json!({
+            "id": repository.id,
             "owner": repository.config.owner, "name": repository.config.name,
             "description": repository.config.description,
             "access": if current.can_write(repository.id) { "write" } else { "read" },

@@ -38,7 +38,7 @@ export function ReviewThreadCard({
   onJumpToDiff?: (thread: PullReviewThread) => void;
   refresh: () => void;
 }) {
-  const mutation = useMutation(csrf);
+  const mutation = useMutation(csrf, repo);
   const [editing, setEditing] = useState(false);
   const [editBody, setEditBody] = useState(thread.body);
   const lineLocation =

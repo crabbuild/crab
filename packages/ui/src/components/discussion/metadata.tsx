@@ -90,7 +90,7 @@ function AssigneePicker({
   const catalog = useRequest<AssigneeCatalog>(
     open ? endpoint(repo, "assignees") : null,
   );
-  const mutation = useMutation(csrf);
+  const mutation = useMutation(csrf, repo);
   function changeOpen(next: boolean) {
     if (next) {
       setSelected(assigned.map((assignee) => assignee.id));

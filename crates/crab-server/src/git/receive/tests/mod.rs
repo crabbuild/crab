@@ -633,6 +633,7 @@ async fn exercise(server: Arc<Server>, branch: &str) {
             "http://127.0.0.1:{port}/api/repos/team/repo/contents"
         ))
         .header("content-type", "application/json")
+        .header("x-crab-repository-id", repo.id.to_string())
         .body(browser_payload.to_string())
         .send()
         .await
@@ -644,6 +645,7 @@ async fn exercise(server: Arc<Server>, branch: &str) {
             "http://127.0.0.1:{port}/api/repos/team/repo/contents"
         ))
         .header("content-type", "application/json")
+        .header("x-crab-repository-id", repo.id.to_string())
         .body(browser_payload.to_string())
         .send()
         .await
@@ -658,6 +660,7 @@ async fn exercise(server: Arc<Server>, branch: &str) {
             "http://127.0.0.1:{port}/api/repos/team/repo/contents"
         ))
         .header("content-type", "application/json")
+        .header("x-crab-repository-id", repo.id.to_string())
         .body(
             serde_json::json!({
                 "branch": format!("refs/heads/{branch}"),
@@ -696,6 +699,7 @@ async fn exercise(server: Arc<Server>, branch: &str) {
             "http://127.0.0.1:{port}/api/repos/team/repo/contents"
         ))
         .header("content-type", "application/json")
+        .header("x-crab-repository-id", repo.id.to_string())
         .body(
             serde_json::json!({
                 "branch": format!("refs/heads/{branch}"),
@@ -739,6 +743,7 @@ async fn exercise(server: Arc<Server>, branch: &str) {
             "http://127.0.0.1:{port}/api/repos/team/repo/contents"
         ))
         .header("content-type", "application/json")
+        .header("x-crab-repository-id", repo.id.to_string())
         .body(
             serde_json::json!({
                 "branch": format!("refs/heads/{branch}"),
@@ -758,6 +763,7 @@ async fn exercise(server: Arc<Server>, branch: &str) {
             "http://127.0.0.1:{port}/api/repos/team/repo/contents"
         ))
         .header("content-type", "application/json")
+        .header("x-crab-repository-id", repo.id.to_string())
         .body(
             serde_json::json!({
                 "branch": format!("refs/heads/{branch}"),
@@ -805,6 +811,7 @@ async fn exercise(server: Arc<Server>, branch: &str) {
             "http://127.0.0.1:{port}/api/repos/team/repo/uploads"
         ))
         .header("content-type", "application/json")
+        .header("x-crab-repository-id", repo.id.to_string())
         .body(
             serde_json::json!({
                 "branch": format!("refs/heads/{branch}"),
@@ -849,6 +856,7 @@ async fn exercise(server: Arc<Server>, branch: &str) {
             "http://127.0.0.1:{port}/api/repos/team/repo/uploads"
         ))
         .header("content-type", "application/json")
+        .header("x-crab-repository-id", repo.id.to_string())
         .body(
             serde_json::json!({
                 "branch": format!("refs/heads/{branch}"),
@@ -880,6 +888,7 @@ async fn exercise(server: Arc<Server>, branch: &str) {
             "http://127.0.0.1:{port}/api/repos/team/repo/contents"
         ))
         .header("content-type", "application/json")
+        .header("x-crab-repository-id", repo.id.to_string())
         .body(
             serde_json::json!({
                 "branch": format!("refs/heads/{branch}"),
@@ -933,6 +942,7 @@ async fn exercise(server: Arc<Server>, branch: &str) {
             "http://127.0.0.1:{port}/api/repos/team/repo/contents"
         ))
         .header("content-type", "application/json")
+        .header("x-crab-repository-id", repo.id.to_string())
         .body(
             serde_json::json!({
                 "branch": format!("refs/heads/{branch}"),
@@ -959,6 +969,7 @@ async fn exercise(server: Arc<Server>, branch: &str) {
             "http://127.0.0.1:{port}/api/repos/team/repo/uploads"
         ))
         .header("content-type", "application/json")
+        .header("x-crab-repository-id", repo.id.to_string())
         .body(
             serde_json::json!({
                 "branch": format!("refs/heads/{branch}"),
@@ -1064,6 +1075,7 @@ async fn exercise(server: Arc<Server>, branch: &str) {
             "http://127.0.0.1:{port}/api/repos/team/repo/contents"
         ))
         .header("content-type", "application/json")
+        .header("x-crab-repository-id", repo.id.to_string())
         .body(
             serde_json::json!({
                 "branch": reference,

@@ -55,7 +55,7 @@ export function NewPull({
   );
   const [body, setBody] = useState("");
   const [draft, setDraft] = useState(false);
-  const mutation = useMutation(csrf);
+  const mutation = useMutation(csrf, repo);
   const submission = useSubmission();
   const baseOid = branches.find((ref) => ref.name === base)?.oid;
   const headOid = branches.find((ref) => ref.name === head)?.oid;

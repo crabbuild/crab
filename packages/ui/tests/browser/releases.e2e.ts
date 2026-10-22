@@ -41,6 +41,7 @@ test("publishes and browses GitHub-style releases and source tags", async ({
         json: {
           repositories: [
             {
+              id: "00000000-0000-4000-8000-000000000099",
               owner: "team",
               name: "project",
               description: "A repository for our team.",

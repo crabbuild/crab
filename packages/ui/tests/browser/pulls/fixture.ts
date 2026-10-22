@@ -40,10 +40,16 @@ export async function mockPullRequest(
     ).toHaveAttribute("aria-pressed", "true");
   }
   const lifecycle: {
+    repositoryId: string;
     state: "open" | "closed" | "merged";
     branchesAvailable: boolean;
     head: string;
-  } = { state: "open", branchesAvailable: true, head };
+  } = {
+    repositoryId: "00000000-0000-4000-8000-000000000099",
+    state: "open",
+    branchesAvailable: true,
+    head,
+  };
   let created = false;
   let mergePending = false;
   let mergeRequest = "";
@@ -162,6 +168,13 @@ export async function mockPullRequest(
     const request = route.request();
     const url = new URL(request.url());
     const path = url.pathname;
+    if (
+      url.pathname.startsWith("/api/repos/team/project/") &&
+      !["GET", "HEAD"].includes(route.request().method())
+    )
+      expect(route.request().headers()["x-crab-repository-id"]).toBe(
+        lifecycle.repositoryId,
+      );
     if (path.endsWith("/discussion-search"))
       return route.fulfill({
         json: {
@@ -198,6 +211,7 @@ export async function mockPullRequest(
         json: {
           repositories: [
             {
+              id: lifecycle.repositoryId,
               owner: "team",
               name: "project",
               description: "A repository for our team.",

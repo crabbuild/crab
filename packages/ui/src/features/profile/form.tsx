@@ -24,7 +24,7 @@ export function ProfileForm({
   const [name, setName] = useState(profile?.name ?? suggestedName);
   const [version, setVersion] = useState(profile?.version ?? 0);
   const [notice, setNotice] = useState("");
-  const mutation = useMutation(csrf);
+  const mutation = useMutation(csrf, null);
   const submission = useSubmission();
   const latest = useRequest<OwnProfile>(
     mutation.conflict ? "/api/profile" : null,

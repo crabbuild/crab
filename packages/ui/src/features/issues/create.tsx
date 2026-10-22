@@ -15,7 +15,7 @@ import { Issue } from "./model";
 export function NewIssue({ repo, csrf }: { repo: Repository; csrf: string }) {
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
-  const mutation = useMutation(csrf);
+  const mutation = useMutation(csrf, repo);
   const submission = useSubmission();
   return (
     <section className="discussion-compose issues-page">

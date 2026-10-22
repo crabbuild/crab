@@ -98,3 +98,10 @@ or routing error on a retry can follow a successful earlier commit. New comments
 are checked against UTF-8 body and encoded request limits before submission.
 Drafts remain available after archive, and
 hidden responses cannot move the visible conversation.
+
+Repository catalog entries carry their stable `id`. Repository mutations pass the
+repository to `useMutation`; account/organization mutations pass `null`. Raw file,
+branch, upload, settings and release writers send `X-Crab-Repository-Id` themselves.
+The repository subtree is keyed by UUID so a reused owner/name cannot inherit an
+old draft/controller. Preserve a queued action's UUID rather than replacing it
+when the server reports `repository_changed`; an earlier attempt may have committed.

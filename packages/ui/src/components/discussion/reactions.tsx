@@ -42,7 +42,7 @@ export function Reactions({
 }) {
   const [current, setCurrent] = useState(summary);
   const [open, setOpen] = useState(false);
-  const mutation = useMutation(csrf);
+  const mutation = useMutation(csrf, repo);
   // A delayed discussion refresh must not overwrite a newer completed reaction.
   // The server uses the native Cell receipt for both reads and writes.
   useEffect(() => {

@@ -1,9 +1,9 @@
 import { useEffect, useRef, useState } from "react";
 import { Button } from "@/components/ui/button";
-import { useRequest } from "@/lib/api";
+import { useRequest, type Repository } from "@/lib/api";
 import { Result } from "@/components/request/result";
 
-export function useMutation(csrf: string) {
+export function useMutation(csrf: string, repo: Repository | null) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string>();
   const [conflict, setConflict] = useState(false);
@@ -35,7 +35,11 @@ export function useMutation(csrf: string) {
     try {
       const response = await fetch(url, {
         method,
-        headers: { "Content-Type": "application/json", "X-CSRF-Token": csrf },
+        headers: {
+          "Content-Type": "application/json",
+          "X-CSRF-Token": csrf,
+          ...(repo ? { "X-Crab-Repository-Id": repo.id } : {}),
+        },
         body: JSON.stringify(input),
         signal: AbortSignal.timeout(35_000),
       });

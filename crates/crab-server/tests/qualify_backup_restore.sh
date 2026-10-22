@@ -72,7 +72,12 @@ issue_request='01931b9e-4b3c-7b2a-b9f0-0123456789ab'
 issue_title='Restore qualification'
 issue_body='This issue must survive a complete-root restore.'
 curl --fail --silent --show-error \
+  --output "${work_dir}/source-catalog.json" \
+  "${source_origin}/api/repos?owner=demo&name=hello"
+source_repository_id="$(jq --exit-status --raw-output '.repositories[0].id' "${work_dir}/source-catalog.json")"
+curl --fail --silent --show-error \
   --header 'content-type: application/json' \
+  --header "x-crab-repository-id: ${source_repository_id}" \
   --data "{\"request_id\":\"${issue_request}\",\"title\":\"${issue_title}\",\"body\":\"${issue_body}\"}" \
   --output "${work_dir}/source-issue.json" \
   "${source_origin}/api/repos/demo/hello/issues"

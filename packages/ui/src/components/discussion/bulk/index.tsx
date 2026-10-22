@@ -59,7 +59,7 @@ export function useBulkEdit(
   const anchor = useRef<string | undefined>(undefined);
   const selectionScope = useRef(scope);
   const busy = useRef(false);
-  const mutation = useMutation(csrf);
+  const mutation = useMutation(csrf, repo);
   const refreshLatest = useRef(refresh);
   useLayoutEffect(() => {
     refreshLatest.current = refresh;

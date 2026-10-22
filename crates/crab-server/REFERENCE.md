@@ -26,6 +26,35 @@ Use this map to enter the reference without reading it in order.
 | Run verification | [Current verification](#current-verification) |
 | Assess release readiness | [Completion requirements](#completion-requirements) |
 
+## Bind browser mutations to repository identity
+
+Repository catalog responses expose an immutable `id` UUID. Session-authenticated
+and local-trust mutations under `/api/repos/{owner}/{name}/...` must send exactly
+one `X-Crab-Repository-Id` header containing the UUID captured when the repository
+was opened. Keep it with the original intent through retries; do not resolve a
+new UUID just to make an old action pass.
+
+The shared HTTP boundary compares the header with the decoded route's current
+repository after authentication, CSRF and durable membership checks. On resolved,
+authorized routes, missing, malformed, duplicate or different UUIDs return
+409 `repository_changed` before
+Cell, Git, upload or catalog mutation effects. The admitted principal retains an
+immutable repository constraint through routing and grant refreshes, including
+local trust. Case-insensitive membership resolution also requires that constraint;
+unresolved or unauthorized targets retain a hidden 404. This error has no proven-rejection
+marker: an earlier attempt may have committed in the original repository. Resolve
+the original outcome before starting another action. An unknown repository or
+revoked membership retains the usual hidden/not-found behavior.
+
+The embedded UI and browser clients send this precondition for discussion edits,
+reviews/merge, metadata catalogs, settings, files, branches, uploads and releases.
+Repository component state is keyed by UUID; a replacement cannot inherit the old
+repository's draft or pending controller. Account/organization APIs do not address
+repositories by these routes. Native Git and status/check integration tokens
+already bind their authenticated scope to a repository UUID and do not use this
+browser header. This updates the unreleased browser/API contract; no name-only
+mutation fallback or storage migration is introduced.
+
 ## Understand the runtime architecture
 
 Crab owns HTTP authentication and authorization, repository policy, the durable

@@ -33,7 +33,7 @@ export function MilestonePicker({
       ? endpoint(repo, "milestones", { state: "open", before, limit: "50" })
       : null,
   );
-  const mutation = useMutation(csrf);
+  const mutation = useMutation(csrf, repo);
   return (
     <section className="milestone-metadata">
       <header>

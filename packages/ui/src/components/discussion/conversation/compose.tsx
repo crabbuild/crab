@@ -42,7 +42,7 @@ export function useCommentSubmission(
   const [validation, setValidation] = useState<string>();
   const [intent, setIntent] = useState<Intent>();
   const busy = useRef(false);
-  const mutation = useMutation(csrf);
+  const mutation = useMutation(csrf, repo);
   const submission = useSubmission();
   // State replies can fail permission checks after the transaction committed.
   // Only their explicit rejection marker proves that no state/comment was saved.
@@ -51,7 +51,7 @@ export function useCommentSubmission(
       ? !mutation.rejected
       : mutation.status === undefined ||
         mutation.status >= 500 ||
-        [403, 404, 408].includes(mutation.status);
+        [403, 404, 408, 409].includes(mutation.status);
   // A definite rejection permits a revised intent. Ambiguous outcomes retain
   // the original ID, version, state and body through refreshes and PR tabs.
   useEffect(() => {

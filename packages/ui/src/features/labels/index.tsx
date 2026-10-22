@@ -15,7 +15,7 @@ import { LabelBadge } from "./selection";
 
 export function LabelsPage({ repo, csrf }: { repo: Repository; csrf: string }) {
   const catalog = useRequest<LabelCatalog>(endpoint(repo, "labels"));
-  const mutation = useMutation(csrf);
+  const mutation = useMutation(csrf, repo);
   const submission = useSubmission();
   const [name, setName] = useState("");
   const [color, setColor] = useState("0969da");
@@ -147,7 +147,7 @@ function LabelRow({
   repo: Repository;
   refresh: () => void;
 }) {
-  const mutation = useMutation(csrf);
+  const mutation = useMutation(csrf, repo);
   const [name, setName] = useState(label.name);
   const [color, setColor] = useState(label.color);
   const [description, setDescription] = useState(label.description ?? "");

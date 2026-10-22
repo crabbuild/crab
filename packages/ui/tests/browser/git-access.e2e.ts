@@ -26,7 +26,8 @@ test("Git tokens require a repository and keep secrets tied to that selection", 
     if (path === "/api/repos")
       return route.fulfill({
         json: {
-          repositories: ["first", "second"].map((name) => ({
+          repositories: ["first", "second"].map((name, index) => ({
+            id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
             owner: "team",
             name,
             description: "",

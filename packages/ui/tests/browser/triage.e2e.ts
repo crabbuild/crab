@@ -36,6 +36,7 @@ test("triage closes and reopens another author's issue without showing descripti
       json: {
         repositories: [
           {
+            id: "00000000-0000-4000-8000-000000000099",
             owner: "team",
             name: "project",
             description: "",

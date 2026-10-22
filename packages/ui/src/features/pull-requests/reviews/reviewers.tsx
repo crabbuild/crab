@@ -82,7 +82,7 @@ export function Reviewers({
   const resource = useRequest<Page>(
     endpoint(repo, `pulls/${pull}/reviewers`, { after }),
   );
-  const mutation = useMutation(csrf);
+  const mutation = useMutation(csrf, repo);
   async function save(version: number, change: Change) {
     const saved = await mutation.run(
       endpoint(repo, `pulls/${pull}/review-requests`),

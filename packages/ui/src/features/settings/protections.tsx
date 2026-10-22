@@ -70,6 +70,7 @@ export function BranchProtectionSettings({
             Accept: "application/json",
             "Content-Type": "application/json",
             "X-CSRF-Token": csrf,
+            "X-Crab-Repository-Id": repo.id,
           },
           body: JSON.stringify({
             expected_version: state.version,

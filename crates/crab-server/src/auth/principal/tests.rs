@@ -34,6 +34,23 @@ fn active_session() -> Arc<Session> {
 }
 
 #[test]
+fn request_scope_cannot_widen_when_browser_or_local_grants_refresh() {
+    let original = Uuid::from_u128(1);
+    let replacement = Uuid::from_u128(2);
+    let config = member_repository(RepositoryAccess::Admin);
+    for principal in [Principal::local(), Principal::user(active_session())] {
+        let admitted = principal
+            .with_membership(original, &config, "https://identity.example")
+            .scoped_to_repository(Some(original));
+        assert!(admitted.can_admin(original));
+        let rebound = admitted
+            .with_membership(replacement, &config, "https://identity.example")
+            .scoped_to_repository(Some(replacement));
+        assert!(!rebound.can_read(replacement));
+    }
+}
+
+#[test]
 fn repository_administration_stays_out_of_write_scoped_git_tokens() {
     let repository = member_repository(RepositoryAccess::Admin);
     let session = active_session();

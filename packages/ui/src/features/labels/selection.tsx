@@ -75,7 +75,7 @@ export function LabelPicker({
   compact?: boolean;
 }) {
   const catalog = useRequest<LabelCatalog>(endpoint(repo, "labels"));
-  const mutation = useMutation(csrf);
+  const mutation = useMutation(csrf, repo);
   const labels = assignedLabels ?? [];
   const details = useRef<HTMLDetailsElement>(null);
   const [selected, setSelected] = useState(

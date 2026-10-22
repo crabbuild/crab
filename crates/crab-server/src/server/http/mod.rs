@@ -46,6 +46,181 @@ mod tests {
 
     use tower::ServiceExt;
     use uuid::Uuid;
+
+    #[tokio::test]
+    async fn admitted_browser_write_cannot_follow_a_route_refresh_while_its_body_is_pending() {
+        let server = crate::test_support::server::fixture().await;
+        let repository = server.repositories.values().pop().unwrap();
+        let replacement = Uuid::now_v7();
+        let cells = server.cells().unwrap();
+        cells
+            .initialize(crate::cells::Address::Directory)
+            .await
+            .unwrap();
+        cells.initialize(replacement).await.unwrap();
+        let (started, waiting) = tokio::sync::oneshot::channel();
+        let (release, ready) = tokio::sync::oneshot::channel();
+        let body = Body::from_stream(futures_util::stream::once(async move {
+            started.send(()).unwrap();
+            ready.await.unwrap();
+            Ok::<_, std::io::Error>(bytes::Bytes::from(serde_json::json!({"request_id":Uuid::now_v7(),"title":"Original target","body":"Must not move"}).to_string()))
+        }));
+        let pending = tokio::spawn(
+            router(Arc::clone(&server)).oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/repos/team/repo/issues")
+                    .header("host", "localhost:8788")
+                    .header("content-type", "application/json")
+                    .header("x-crab-repository-id", repository.id.to_string())
+                    .body(body)
+                    .unwrap(),
+            ),
+        );
+        tokio::time::timeout(std::time::Duration::from_secs(5), waiting)
+            .await
+            .unwrap()
+            .unwrap();
+        server.repositories.replace(RepositoryIndex::new(
+            2,
+            BTreeMap::from([(
+                ("team".into(), "repo".into()),
+                Arc::new(Repository::new(
+                    replacement,
+                    repository.config.clone(),
+                    repository.layout.clone(),
+                    repository.identity.clone(),
+                )),
+            )]),
+        ));
+        release.send(()).unwrap();
+        let response = pending.await.unwrap().unwrap();
+        let record = cells
+            .repository(replacement)
+            .unwrap()
+            .client
+            .query::<crate::cells::repository::GetIssue>(replacement, None, 1)
+            .await
+            .unwrap()
+            .output;
+        crate::test_support::server::close(&server).await;
+        assert_eq!(
+            (response.status(), record.is_none()),
+            (StatusCode::NOT_FOUND, true)
+        );
+    }
+
+    #[tokio::test]
+    async fn browser_mutations_bind_repository_identity_before_native_effects() {
+        let server = crate::test_support::server::fixture().await;
+        server
+            .cells()
+            .unwrap()
+            .initialize(crate::cells::Address::Directory)
+            .await
+            .unwrap();
+        let repository = server.repositories.values().pop().unwrap();
+        let id = repository.id;
+        let app = router(Arc::clone(&server));
+        let input =
+            serde_json::json!({"request_id":Uuid::now_v7(),"title":"Bound creation","body":"Body"});
+        for headers in [
+            vec![],
+            vec!["invalid".to_owned()],
+            vec![Uuid::now_v7().to_string()],
+            vec![id.to_string(), id.to_string()],
+        ] {
+            let mut request = Request::builder()
+                .method("POST")
+                .uri("/api/repos/team/repo/issues")
+                .header("host", "localhost:8788")
+                .header("content-type", "application/json");
+            for value in headers {
+                request = request.header("x-crab-repository-id", value);
+            }
+            let response = app
+                .clone()
+                .oneshot(request.body(Body::from(input.to_string())).unwrap())
+                .await
+                .unwrap();
+            assert_eq!(response.status(), StatusCode::CONFLICT);
+            assert!(!response.headers().contains_key("x-crab-write-outcome"));
+        }
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/repos/team/repo/issues")
+                    .header("host", "localhost:8788")
+                    .header("content-type", "application/json")
+                    .header("x-crab-repository-id", id.to_string())
+                    .body(Body::from(input.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CREATED);
+        let bytes = response.into_body().collect().await.unwrap().to_bytes();
+        let issue: serde_json::Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(issue["number"], 1);
+
+        // Reuse the route while retaining the old native Cell and request UUID.
+        // The stale browser cannot create or recover content in the replacement.
+        let replacement = Uuid::now_v7();
+        server.repositories.replace(RepositoryIndex::new(
+            2,
+            BTreeMap::from([(
+                ("team".into(), "repo".into()),
+                Arc::new(Repository::new(
+                    replacement,
+                    repository.config.clone(),
+                    repository.layout.clone(),
+                    repository.identity.clone(),
+                )),
+            )]),
+        ));
+        let response = app
+            .clone()
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/repos/team/repo/issues")
+                    .header("host", "localhost:8788")
+                    .header("content-type", "application/json")
+                    .header("x-crab-repository-id", id.to_string())
+                    .body(Body::from(input.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::CONFLICT);
+        assert!(!response.headers().contains_key("x-crab-write-outcome"));
+        server.repositories.replace(RepositoryIndex::new(
+            3,
+            BTreeMap::from([(("team".into(), "repo".into()), repository)]),
+        ));
+        let recovered = app
+            .oneshot(
+                Request::builder()
+                    .method("POST")
+                    .uri("/api/repos/team/repo/issues")
+                    .header("host", "localhost:8788")
+                    .header("content-type", "application/json")
+                    .header("x-crab-repository-id", id.to_string())
+                    .body(Body::from(input.to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap();
+        assert_eq!(recovered.status(), StatusCode::CREATED);
+        let bytes = recovered.into_body().collect().await.unwrap().to_bytes();
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&bytes).unwrap()["number"],
+            1
+        );
+        crate::test_support::server::close(&server).await;
+    }
     #[tokio::test]
     async fn scoped_catalog_skips_unrelated_cells() {
         let server = crate::test_support::server::fixture().await;

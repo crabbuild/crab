@@ -48,6 +48,7 @@ export async function mutateRelease<T>(
       Accept: "application/json",
       "Content-Type": "application/json",
       "X-CSRF-Token": csrf,
+      "X-Crab-Repository-Id": repo.id,
     },
     body: JSON.stringify(body),
   });
@@ -83,6 +84,7 @@ export async function uploadReleaseAsset(
         Accept: "application/json",
         "Content-Type": file.type || "application/octet-stream",
         "X-CSRF-Token": csrf,
+        "X-Crab-Repository-Id": repo.id,
       },
       body: file,
     },
@@ -116,6 +118,7 @@ export async function removeReleaseAsset(
         Accept: "application/json",
         "Content-Type": "application/json",
         "X-CSRF-Token": csrf,
+        "X-Crab-Repository-Id": repo.id,
       },
       body: JSON.stringify({ version: release.version }),
     },

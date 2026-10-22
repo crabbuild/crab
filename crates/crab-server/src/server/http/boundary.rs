@@ -136,14 +136,22 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
             .is_some_and(|auth| !auth.accepts_mutation(&principal, request.headers()));
     // Resolve decoded route parameters using Axum's extractor. Credentials alone
     // never authorize repository access; routing config supplies no grant.
+    let params = request
+        .extract_parts::<Path<std::collections::HashMap<String, String>>>()
+        .await
+        .ok()
+        .map(|Path(params)| params);
+    let browser_repository = protected
+        && params
+            .as_ref()
+            .is_some_and(|params| params.contains_key("owner") && params.contains_key("name"))
+        && !principal.is_git();
+    let requested_repository = repository_identity(request.headers());
     let mut authorization_error = None;
     if !denied
         && !rejected_mutation
         && principal.authenticated()
-        && !principal.is_local()
-        && let Ok(Path(params)) = request
-            .extract_parts::<Path<std::collections::HashMap<String, String>>>()
-            .await
+        && let Some(params) = &params
         && let (Some(owner), Some(name)) = (params.get("owner"), params.get("name"))
         && let Some(name) = (if git_request {
             name.strip_suffix(".git")
@@ -152,11 +160,41 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
         })
         && let Some(repository) = server.repositories.get(&(owner.clone(), name.to_owned()))
     {
-        match app::membership(&server, &principal, &repository).await {
-            Ok(current) => principal = current.principal,
-            Err(app::Error::NotFound) => (),
-            Err(error) => authorization_error = Some(error.into_response()),
+        let current = if principal.is_local() {
+            true
+        } else {
+            match app::membership(&server, &principal, &repository).await {
+                Ok(current) => {
+                    principal = current.principal;
+                    true
+                }
+                Err(app::Error::NotFound) => false,
+                Err(error) => {
+                    authorization_error = Some(error.into_response());
+                    false
+                }
+            }
+        };
+        if current {
+            principal = principal.scoped_to_repository(Some(repository.id));
         }
+        // Browser sessions authorize names through the current catalog. Bind the
+        // captured UUID before any mutation, so a reused name cannot retarget it.
+        // Git credentials already carry the UUID in their authenticated scope.
+        if current
+            && unsafe_method
+            && protected
+            && !principal.is_git()
+            && requested_repository != Some(repository.id)
+        {
+            authorization_error = Some(app::Error::RepositoryChanged.into_response());
+        }
+    }
+    if browser_repository && unsafe_method {
+        // Membership can resolve a case-insensitive catalog name independently
+        // of the live routing key. Its refreshed grant must still match the
+        // captured UUID; absent/invalid identity denies repository access.
+        principal = principal.scoped_to_repository(requested_repository);
     }
     let check_archive = !denied
         && !rejected_mutation
@@ -219,6 +257,18 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
             ("content-security-policy", "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' https://extensions.duckdb.org; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:; img-src 'self' data: blob:; media-src 'self' blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"),
         ], response,
     ).into_response()
+}
+
+fn repository_identity(headers: &axum::http::HeaderMap) -> Option<Uuid> {
+    let mut values = headers.get_all("x-crab-repository-id").iter();
+    let identity = values
+        .next()
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<Uuid>().ok());
+    if values.next().is_some() {
+        return None;
+    }
+    identity
 }
 
 fn is_local_host(host: Option<&str>) -> bool {

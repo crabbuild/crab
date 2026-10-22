@@ -26,6 +26,10 @@ async fn write(
         .header(header::COOKIE, cookie)
         .header(header::ORIGIN, &h.origin)
         .header("x-csrf-token", session["csrf"].as_str().unwrap())
+        .header(
+            "x-crab-repository-id",
+            h.server.repositories.values()[0].id.to_string(),
+        )
         .header(header::CONTENT_TYPE, "application/json")
         .body(body.to_string())
         .send()

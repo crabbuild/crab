@@ -236,6 +236,7 @@ export function RepositoryPage({
         Accept: "application/json",
         "Content-Type": "application/json",
         "X-CSRF-Token": csrf,
+        "X-Crab-Repository-Id": repo.id,
       },
       body: JSON.stringify({ name, source_oid: rev }),
     });
@@ -273,6 +274,7 @@ export function RepositoryPage({
         Accept: "application/json",
         "Content-Type": "application/json",
         "X-CSRF-Token": csrf,
+        "X-Crab-Repository-Id": repo.id,
       },
       body: JSON.stringify({
         name: name.replace(/^refs\/heads\//, ""),

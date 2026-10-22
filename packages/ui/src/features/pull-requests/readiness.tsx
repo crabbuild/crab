@@ -18,7 +18,7 @@ export function PullReadinessControl({
   csrf: string;
   onSaved: () => void;
 }) {
-  const mutation = useMutation(csrf);
+  const mutation = useMutation(csrf, repo);
   if (!pull.can_manage || repo.archived) return null;
   return (
     <div

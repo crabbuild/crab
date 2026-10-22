@@ -18,10 +18,18 @@ struct Grant {
     access: RepositoryAccess,
 }
 
+#[derive(Clone, Copy)]
+enum RepositoryScope {
+    Unrestricted,
+    Target(Uuid),
+    Denied,
+}
+
 #[derive(Clone)]
 pub(crate) struct Principal {
     credential: Credential,
     grant: Option<Grant>,
+    repository_scope: RepositoryScope,
 }
 
 impl Principal {
@@ -29,28 +37,46 @@ impl Principal {
         Self {
             credential: Credential::Anonymous,
             grant: None,
+            repository_scope: RepositoryScope::Unrestricted,
         }
     }
     pub(crate) fn local() -> Self {
         Self {
             credential: Credential::Local,
             grant: None,
+            repository_scope: RepositoryScope::Unrestricted,
         }
     }
     pub(super) fn user(session: Arc<Session>) -> Self {
         Self {
             credential: Credential::User(session),
             grant: None,
+            repository_scope: RepositoryScope::Unrestricted,
         }
     }
     pub(super) fn git(token: Arc<GitToken>) -> Self {
         Self {
             credential: Credential::Git(token),
             grant: None,
+            repository_scope: RepositoryScope::Unrestricted,
         }
     }
     pub(crate) fn is_local(&self) -> bool {
         matches!(self.credential, Credential::Local)
+    }
+    /// Restrict repository access; an absent identity denies all repository access.
+    #[must_use]
+    pub(crate) fn scoped_to_repository(mut self, repository: Option<Uuid>) -> Self {
+        // Current grants may refresh during a request. They cannot widen its
+        // admitted target, including the otherwise unrestricted local principal.
+        self.repository_scope = match (self.repository_scope, repository) {
+            (RepositoryScope::Unrestricted, Some(target)) => RepositoryScope::Target(target),
+            (RepositoryScope::Target(current), Some(target)) if current == target => {
+                RepositoryScope::Target(current)
+            }
+            _ => RepositoryScope::Denied,
+        };
+        self
     }
     pub(crate) fn is_user(&self) -> bool {
         self.user_session().is_some()
@@ -120,10 +146,16 @@ impl Principal {
         Self {
             credential: self.credential.clone(),
             grant: access.map(|access| Grant { repository, access }),
+            repository_scope: self.repository_scope,
         }
     }
 
     fn access(&self, repository: Uuid) -> Option<RepositoryAccess> {
+        match self.repository_scope {
+            RepositoryScope::Denied => return None,
+            RepositoryScope::Target(target) if target != repository => return None,
+            _ => (),
+        }
         if self.is_local() {
             return Some(RepositoryAccess::Admin);
         }

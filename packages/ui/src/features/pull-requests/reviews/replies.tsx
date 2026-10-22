@@ -31,7 +31,7 @@ export function ReviewReplies({
     });
   const replies = usePagedRequest<PullReviewReply>(repliesPath);
   const [body, setBody] = useState("");
-  const mutation = useMutation(csrf);
+  const mutation = useMutation(csrf, repo);
   const submission = useSubmission();
   async function submit(event: React.FormEvent) {
     event.preventDefault();
@@ -113,7 +113,7 @@ function ReviewReplyItem({
   csrf: string;
   refresh: () => void;
 }) {
-  const mutation = useMutation(csrf);
+  const mutation = useMutation(csrf, repo);
   const [editing, setEditing] = useState(false);
   const [body, setBody] = useState(reply.body);
   async function save(event: React.FormEvent) {

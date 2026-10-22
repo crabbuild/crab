@@ -58,6 +58,7 @@ export function DefaultBranchSettings({
           Accept: "application/json",
           "Content-Type": "application/json",
           "X-CSRF-Token": csrf,
+          "X-Crab-Repository-Id": repo.id,
         },
         body: JSON.stringify({
           name: branchName(selected),

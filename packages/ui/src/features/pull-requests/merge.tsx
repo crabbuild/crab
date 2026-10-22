@@ -43,7 +43,7 @@ export function MergePanel({
   csrf: string;
   refresh: () => void;
 }) {
-  const mutation = useMutation(csrf);
+  const mutation = useMutation(csrf, repo);
   const submission = useSubmission();
   const pending = pull.merge_pending;
   const [confirming, setConfirming] = useState(false);

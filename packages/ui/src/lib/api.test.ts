@@ -2,6 +2,7 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { displayHex, endpoint, parentHex, request } from "./api";
 
 const repo = {
+  id: "00000000-0000-4000-8000-000000000099",
   owner: "team",
   name: "repo.name",
   description: "",

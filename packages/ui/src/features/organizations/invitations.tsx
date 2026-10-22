@@ -206,7 +206,7 @@ function InviteForm({
     selected ? `${endpoint}/invitations/${selected.id}` : null,
   );
   const [role, setRole] = useState<OrganizationRole>("member");
-  const mutation = useMutation(csrf);
+  const mutation = useMutation(csrf, null);
   return (
     <form
       onSubmit={(event) => {
@@ -329,7 +329,7 @@ function OfferRow({
   csrf: string;
   onChanged: () => void;
 }) {
-  const mutation = useMutation(csrf);
+  const mutation = useMutation(csrf, null);
   const value = item.invitation;
   async function change(cancel: boolean) {
     const result = await mutation.run(
@@ -386,7 +386,7 @@ export function OrganizationInvitation({
 }) {
   const endpoint = `/api/organizations/${id}/invitation`;
   const own = useRequest<InvitationView>(endpoint);
-  const mutation = useMutation(csrf);
+  const mutation = useMutation(csrf, null);
   async function answer(version: number, accept: boolean) {
     if (await mutation.run(endpoint, "POST", { version, accept })) own.retry();
   }

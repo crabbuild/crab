@@ -44,6 +44,19 @@ async function fixture(page: Page, kind: "issues" | "pulls") {
     async (route) => {
       const input = route.request().postDataJSON();
       writes.push(input);
+      if (
+        route.request().headers()["x-crab-repository-id"] !==
+        pull.lifecycle.repositoryId
+      )
+        return route.fulfill({
+          status: 409,
+          json: {
+            error: {
+              code: "repository_changed",
+              message: "Repository identity changed",
+            },
+          },
+        });
       if (reject) {
         reject = false;
         return route.fulfill({
@@ -110,6 +123,9 @@ async function fixture(page: Page, kind: "issues" | "pulls") {
   return {
     comments,
     writes,
+    repository(id: string) {
+      pull.lifecycle.repositoryId = id;
+    },
     lose(status = 503) {
       lose = status;
     },
@@ -118,6 +134,37 @@ async function fixture(page: Page, kind: "issues" | "pulls") {
     },
   };
 }
+
+test("a state retry stays bound to its original repository after the route is reused", async ({
+  page,
+}) => {
+  const model = await fixture(page, "issues");
+  const editor = page.getByRole("textbox", { name: "Comment", exact: true });
+  await editor.fill("Original repository context");
+  model.lose();
+  await page
+    .getByRole("button", { name: "Close with comment", exact: true })
+    .click();
+  await expect(
+    page.getByRole("button", { name: "Retry original action" }),
+  ).toBeVisible();
+  model.repository("00000000-0000-4000-8000-000000000100");
+  await page.getByRole("button", { name: "Retry original action" }).click();
+  await expect(page.getByRole("alert")).toContainText(
+    "Repository identity changed",
+  );
+  await expect(
+    page.getByRole("button", { name: "Retry original action" }),
+  ).toBeVisible();
+  expect(model.comments).toHaveLength(1);
+  model.repository("00000000-0000-4000-8000-000000000099");
+  await page.getByRole("button", { name: "Retry original action" }).click();
+  await expect(
+    page.getByRole("button", { name: "Retry original action" }),
+  ).toHaveCount(0);
+  expect(model.writes[2]).toEqual(model.writes[0]);
+  expect(model.comments).toHaveLength(1);
+});
 for (const kind of ["issues", "pulls"] as const) {
   test(`${kind}: close with comment commits once and clears only the submitted draft`, async ({
     page,
@@ -268,3 +315,53 @@ for (const [name, body] of [
     await expect(editor).toHaveValue("");
     expect(model.writes).toHaveLength(1);
   });
+
+test("an unmarked identity conflict retains a plain comment's original text and submission", async ({
+  page,
+}) => {
+  await fixture(page, "issues");
+  const writes: Array<{ request_id: string; body: string }> = [];
+  await page.route("**/issues/1/comments?**", (route) => {
+    expect(route.request().headers()["x-crab-repository-id"]).toBe(
+      "00000000-0000-4000-8000-000000000099",
+    );
+    const input = route.request().postDataJSON();
+    writes.push(input);
+    if (writes.length === 1)
+      return route.fulfill({
+        status: 409,
+        json: {
+          error: {
+            code: "repository_changed",
+            message: "Repository identity changed",
+          },
+        },
+      });
+    return route.fulfill({
+      status: 201,
+      json: {
+        number: 1,
+        body: input.body,
+        version: 1,
+        author: { name: "Alice", profile: null },
+        created_at: 1700000000000,
+        updated_at: 1700000000000,
+        can_edit: true,
+        reactions: emptyReactions(),
+      },
+    });
+  });
+  const editor = page.getByRole("textbox", { name: "Comment", exact: true });
+  await editor.fill("Original comment");
+  await page.getByRole("button", { name: "Comment", exact: true }).click();
+  await expect(
+    page.getByRole("button", { name: "Retry original action" }),
+  ).toBeVisible();
+  await editor.fill("Newer unsent draft");
+  await page.getByRole("button", { name: "Retry original action" }).click();
+  await expect(
+    page.getByRole("button", { name: "Retry original action" }),
+  ).toHaveCount(0);
+  await expect(editor).toHaveValue("Newer unsent draft");
+  expect(writes[1]).toEqual(writes[0]);
+});

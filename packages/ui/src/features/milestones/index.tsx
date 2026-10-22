@@ -171,7 +171,7 @@ function MilestoneDetailPage({
       : null,
   );
   const [editing, setEditing] = useState(false);
-  const mutation = useMutation(csrf);
+  const mutation = useMutation(csrf, repo);
   if (!Number.isSafeInteger(number) || number <= 0)
     return <p className="notice error">Milestone not found.</p>;
   return (

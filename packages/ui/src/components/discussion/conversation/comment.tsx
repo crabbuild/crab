@@ -28,7 +28,7 @@ export function CommentCard({
   onSaved: (comment: Comment) => void;
 }) {
   const [draft, setDraft] = useState<{ body: string; version: number }>();
-  const mutation = useMutation(csrf);
+  const mutation = useMutation(csrf, repo);
   const editTrigger = useReturnFocus<HTMLButtonElement>(Boolean(draft));
   const save = useReturnFocus<HTMLButtonElement>(mutation.conflict);
   return (

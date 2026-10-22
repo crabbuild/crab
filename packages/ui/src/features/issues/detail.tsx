@@ -58,7 +58,7 @@ export function IssueDetail({
   const [issue, setIssue] = useState<Issue>();
   const [editing, setEditing] = useState(false);
   const [metadataEpoch, setMetadataEpoch] = useState(0);
-  const mutation = useMutation(csrf);
+  const mutation = useMutation(csrf, repo);
   const editTrigger = useReturnFocus<HTMLButtonElement>(editing);
   // A delayed state/edit response must not replace a newer metadata refresh.
   const accept = useCallback((incoming: Issue) => {
@@ -191,7 +191,7 @@ function EditIssue({
 }) {
   const [title, setTitle] = useState(issue.title);
   const [body, setBody] = useState(issue.body);
-  const mutation = useMutation(csrf);
+  const mutation = useMutation(csrf, repo);
   // The edit retains the version at which the draft began, even if the parent refreshes.
   const version = useRef(issue.version);
   const save = useReturnFocus<HTMLButtonElement>(mutation.conflict);

@@ -130,6 +130,7 @@ export async function changeContent(
       Accept: "application/json",
       "Content-Type": "application/json",
       "X-CSRF-Token": csrf,
+      "X-Crab-Repository-Id": repo.id,
     },
     body: JSON.stringify(body),
   });
@@ -391,6 +392,7 @@ export function UploadFiles({
           Accept: "application/json",
           "Content-Type": "application/json",
           "X-CSRF-Token": csrf,
+          "X-Crab-Repository-Id": repo.id,
         },
         body: JSON.stringify({
           branch,

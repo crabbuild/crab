@@ -45,11 +45,22 @@ with open(run / "commands.log", "w") as log:
             s.bind(("127.0.0.1", 0))
             return s.getsockname()[1]
 
+    repository_ids = {}
+
     def request(path, body=None, *, method=None):
+        headers = {"Content-Type": "application/json"}
+        parts = urllib.parse.urlsplit(path).path.split("/")
+        if body is not None and parts[1:3] == ["api", "repos"] and len(parts) >= 5:
+            owner, name = parts[3:5]
+            key = (owner, name)
+            if key not in repository_ids:
+                catalog = request("/api/repos?" + urllib.parse.urlencode({"owner": owner, "name": name}))
+                repository_ids[key] = catalog["repositories"][0]["id"]
+            headers["X-Crab-Repository-Id"] = repository_ids[key]
         req = urllib.request.Request(
             origin + path,
             data=None if body is None else json.dumps(body).encode(),
-            headers={"Content-Type": "application/json"},
+            headers=headers,
             method=method,
         )
         with urllib.request.urlopen(req, timeout=35) as r:
@@ -332,6 +343,19 @@ with open(run / "commands.log", "w") as log:
         created = request("/api/repos/team/project/issues", body)
         number = created["number"]
         assert request("/api/repos/team/project/issues", body)["number"] == number
+        denied_identity = urllib.request.Request(
+            origin + "/api/repos/team/project/issues",
+            data=json.dumps({"request_id": str(uuid.uuid4()), "title": "Wrong identity must stay absent", "body": "No effect"}).encode(),
+            headers={"Content-Type": "application/json", "X-Crab-Repository-Id": str(uuid.uuid4())},
+        )
+        try:
+            urllib.request.urlopen(denied_identity, timeout=35)
+            raise AssertionError("Repository identity mismatch executed")
+        except urllib.error.HTTPError as error:
+            assert error.code == 409 and "X-Crab-Write-Outcome" not in error.headers
+            assert json.load(error)["error"]["code"] == "repository_changed"
+        absent = request("/api/repos/team/project/issues?" + urllib.parse.urlencode({"q": '"Wrong identity must stay absent"'}))
+        assert absent["matching"] == 0
         author_summary = {"name": "Local operator", "profile": {key: actor_profile[key] for key in ["id", "handle", "name"]}}
         assert request("/api/repos/team/project/issues")["items"][0]["author"] == author_summary
         author_search = "/api/repos/team/project/issues?" + urllib.parse.urlencode({"q": "author:" + actor_profile["handle"]})
@@ -663,6 +687,7 @@ with open(run / "commands.log", "w") as log:
             "version": runtime["version"],
             "image_ref": args.image,
             "repository_creation": True,
+            "repository_identity_precondition": True,
             "issue_replay": True,
             "bulk_state_metadata_restart": True,
             "bulk_submission_recovery": True,

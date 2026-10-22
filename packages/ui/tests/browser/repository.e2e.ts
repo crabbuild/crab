@@ -194,6 +194,13 @@ test.beforeEach(async ({ page }) => {
   }> = [];
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
+    if (
+      url.pathname.startsWith("/api/repos/team/project/") &&
+      !["GET", "HEAD"].includes(route.request().method())
+    )
+      expect(route.request().headers()["x-crab-repository-id"]).toBe(
+        "00000000-0000-4000-8000-000000000099",
+      );
     if (url.pathname === "/api/session")
       return route.fulfill({
         json: { authenticated: true, mode: "local", user: null, csrf: null },
@@ -203,6 +210,7 @@ test.beforeEach(async ({ page }) => {
         json: {
           repositories: [
             {
+              id: "00000000-0000-4000-8000-000000000099",
               owner: "team",
               name: "project",
               description: "A repository for our team.",
@@ -2448,6 +2456,7 @@ test("branch and tag pages follow the GitHub refs hierarchy", async ({
         json: {
           repositories: [
             {
+              id: "00000000-0000-4000-8000-000000000099",
               owner: "team",
               name: "project",
               description: "A repository for our team.",

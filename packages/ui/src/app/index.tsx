@@ -357,10 +357,7 @@ export function App() {
                     )}
                     <div className="repo-cards">
                       {data.repositories.map((repo) => (
-                        <article
-                          className="panel repo-card"
-                          key={`${repo.owner}/${repo.name}`}
-                        >
+                        <article className="panel repo-card" key={repo.id}>
                           <div className="repo-card-heading">
                             <RepoIcon size={18} aria-hidden="true" />
                             <h2>
@@ -382,7 +379,7 @@ export function App() {
                   </div>
                 ) : repo ? (
                   <RepositoryPage
-                    key={`${repo.owner}/${repo.name}`}
+                    key={repo.id}
                     repo={repo}
                     url={url}
                     theme={resolved}

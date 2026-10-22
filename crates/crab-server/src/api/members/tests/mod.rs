@@ -52,11 +52,43 @@ async fn replace(h: &Harness, cookie: &str, csrf: &str, body: Value) -> reqwest:
         .header(header::COOKIE, cookie)
         .header(header::ORIGIN, &h.origin)
         .header("x-csrf-token", csrf)
+        .header(
+            "x-crab-repository-id",
+            h.server.repositories.values()[0].id.to_string(),
+        )
         .header(header::CONTENT_TYPE, "application/json")
         .body(body.to_string())
         .send()
         .await
         .unwrap()
+}
+
+#[tokio::test]
+async fn case_insensitive_membership_mutations_require_the_captured_repository_uuid() {
+    let h = Harness::new(false).await;
+    let cookie = h.login().await;
+    let session = h.json("/api/session", &cookie).await;
+    let before = h.json("/api/repos/TEAM/PRIVATE/members", &cookie).await;
+    let input = json!({"expected_revision":before["revision"],"members":before["members"]});
+    let repository = h.server.repositories.values()[0].id;
+    for (identity, expected) in [
+        (None, StatusCode::NOT_FOUND),
+        (Some(uuid::Uuid::now_v7()), StatusCode::NOT_FOUND),
+        (Some(repository), StatusCode::OK),
+    ] {
+        let mut request = h
+            .http
+            .put(format!("{}/api/repos/TEAM/PRIVATE/members", h.origin))
+            .header(header::COOKIE, &cookie)
+            .header(header::ORIGIN, &h.origin)
+            .header("x-csrf-token", session["csrf"].as_str().unwrap())
+            .json(&input);
+        if let Some(identity) = identity {
+            request = request.header("x-crab-repository-id", identity.to_string());
+        }
+        assert_eq!(request.send().await.unwrap().status(), expected);
+    }
+    h.close().await;
 }
 
 #[tokio::test]

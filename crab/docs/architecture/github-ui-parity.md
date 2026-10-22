@@ -978,9 +978,8 @@ path was added. Existing per-item operations retain their canonical ownership.
 This advances the Issues/PR list foundation. Native repository grant cutover and
 cross-Cell fencing, Projects/type bulk operations, the remaining keyboard/list
 interactions, saved views, advanced relationships/reviews and complete Projects/
-Milestones parity remain open. Other mutation workflows, including individual
-comment/state actions, still need stable repository-UUID intent binding; this
-slice binds the new bulk surface. The Cellar release blocker is unchanged.
+Milestones parity remain open. The subsequent shared-identity slice below extends stable repository UUID
+binding to individual browser mutation workflows. The Cellar release blocker is unchanged.
 
 Validation: the isolated server library suite passed 431 tests (six existing
 opt-in qualifications ignored), CLI tests 13 and UI unit tests 107. All 139
@@ -989,8 +988,8 @@ intent after later access failure, repository UUID reuse and a pending reply aft
 a query change. The mobile header alignment regression passed. Twelve final
 discussion HTTP checks included an already-signed-in reader upgraded to Triage,
 current capability/admission without a new session, UUID mismatch and unmarked
-submission-identity conflicts. Strict all-target Clippy, architecture gates, Rustfmt, frontend formatting/typecheck
-and frontend/server builds passed.
+submission-identity conflicts. Strict all-target Clippy, architecture gates,
+Rustfmt, frontend formatting/typecheck and frontend/server builds passed.
 
 The native maximum-bound case selected and edited 100 issues with 64 KB bodies;
 its 101st item was rejected. Real embedded-UI/RustFS qualification performed all
@@ -1013,3 +1012,52 @@ boundary, its durable submission contract, commit-aware API composition and shar
 page-selection/recovery/picker controls. Canonical state and metadata writers are
 reused; no duplicated mutation policy, second database or speculative adapter was
 introduced. The new rejection marker owner serves both state and bulk handlers.
+
+
+## Repository identity for browser mutations
+
+The shared HTTP boundary now requires a captured repository UUID on browser and
+local-trust mutations, after current authentication, CSRF and durable grants and
+before domain effects. Catalogs expose the UUID. Individual issue/PR comments,
+state, metadata, review/merge, labels/milestones, settings, files, uploads, branches
+and releases all supply it. Git/status/check token scopes already bind repository
+UUIDs and keep their transport contract. No schema, preparation or dependency
+change is required; no name-only mutation path remains for browser repository APIs.
+
+The repository subtree is keyed by UUID. Replacing an owner/name route cannot
+reuse another repository's draft/controller or retarget a queued action. Missing,
+malformed, duplicate or mismatched identity returns unmarked `repository_changed`;
+an earlier request may already have committed. State and plain-comment controllers
+preserve the original action through that conflict. Current read access remains
+required to recover it. This is an unreleased API precondition, not a parallel
+membership authority or native cross-Cell authorization fence.
+
+
+A paused request-body regression initially created an issue in a replacement
+repository after the middleware check. The admitted principal now carries a
+monotonic target constraint, preserved through grant refreshes and honored by local
+trust too. Replacing routing while the body waits cannot write into the new Cell.
+The case-insensitive membership route resolves the catalog independently, so
+missing/invalid identity denies its repository capability rather than creating an
+unconstrained local or browser principal. Native role fencing remains separate work.
+
+
+Validation: 435 isolated server tests passed (six existing opt-in qualifications
+ignored), along with 141 browser scenarios and 107 UI unit tests. Strict all-target
+Clippy, architecture gates, frontend build/typecheck/formatting and Rustfmt passed.
+The streaming-body race failed before the request constraint and passed afterward;
+case-insensitive membership, duplicate headers and lost-reply recovery are covered.
+
+The final native binary passed real RustFS wrong-UUID rejection with no issue
+created, embedded UI bulk mutations, process restart and durable submission recovery.
+The run retained 107 durable objects; owned qualification services/browsers closed.
+The persistent preview preserved 18 resource payloads exactly, after accounting for
+the catalog's new UUID field from its already-published list identity. Index format
+10, profile enrollment and canonical records stayed unchanged. Read-only browser
+checks exercised both embedded/Vite ports, mobile alignment and whole-widget timing.
+
+This adds 109 net production lines for one shared request constraint, canonical
+catalog identity, the error contract and all repository mutation callers. Credentials,
+Cell data formats and dependencies stay unchanged. Native grant fencing, the wider
+Issues/PR/Projects/Milestones inventory and the pinned Cellar release blocker remain
+open; this slice does not establish complete parity or production release readiness.

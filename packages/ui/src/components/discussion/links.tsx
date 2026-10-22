@@ -42,7 +42,7 @@ export function LinkedWork({
   const resource = useRequest<LinkPage>(
     endpoint(repo, `${path}/links`, { before }),
   );
-  const mutation = useMutation(csrf);
+  const mutation = useMutation(csrf, repo);
   const pull = path.startsWith("pulls/")
     ? Number(path.split("/")[1])
     : undefined;

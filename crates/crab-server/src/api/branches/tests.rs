@@ -18,6 +18,10 @@ async fn create_branch(h: &Harness, cookie: &str, csrf: &str, body: Value) -> (S
         .header(header::COOKIE, cookie)
         .header(header::ORIGIN, &h.origin)
         .header("x-csrf-token", csrf)
+        .header(
+            "x-crab-repository-id",
+            h.server.repositories.values()[0].id.to_string(),
+        )
         .header(header::CONTENT_TYPE, "application/json")
         .body(body.to_string())
         .send()
@@ -35,6 +39,10 @@ async fn delete_branch(h: &Harness, cookie: &str, csrf: &str, body: Value) -> (S
         .header(header::COOKIE, cookie)
         .header(header::ORIGIN, &h.origin)
         .header("x-csrf-token", csrf)
+        .header(
+            "x-crab-repository-id",
+            h.server.repositories.values()[0].id.to_string(),
+        )
         .header(header::CONTENT_TYPE, "application/json")
         .body(body.to_string())
         .send()
@@ -57,6 +65,10 @@ async fn set_default_branch(
         .header(header::COOKIE, cookie)
         .header(header::ORIGIN, &h.origin)
         .header("x-csrf-token", csrf)
+        .header(
+            "x-crab-repository-id",
+            h.server.repositories.values()[0].id.to_string(),
+        )
         .header(header::CONTENT_TYPE, "application/json")
         .body(body.to_string())
         .send()
@@ -79,6 +91,10 @@ async fn set_branch_protections(
         .header(header::COOKIE, cookie)
         .header(header::ORIGIN, &h.origin)
         .header("x-csrf-token", csrf)
+        .header(
+            "x-crab-repository-id",
+            h.server.repositories.values()[0].id.to_string(),
+        )
         .header(header::CONTENT_TYPE, "application/json")
         .body(body.to_string())
         .send()
@@ -96,6 +112,10 @@ async fn set_archive(h: &Harness, cookie: &str, csrf: &str, body: Value) -> (Sta
         .header(header::COOKIE, cookie)
         .header(header::ORIGIN, &h.origin)
         .header("x-csrf-token", csrf)
+        .header(
+            "x-crab-repository-id",
+            h.server.repositories.values()[0].id.to_string(),
+        )
         .header(header::CONTENT_TYPE, "application/json")
         .body(body.to_string())
         .send()
@@ -123,6 +143,10 @@ async fn browser_branch_creation_publishes_an_existing_commit_for_native_git() {
         .header(header::COOKIE, &alice)
         .header(header::ORIGIN, &h.origin)
         .header("x-csrf-token", csrf)
+        .header(
+            "x-crab-repository-id",
+            h.server.repositories.values()[0].id.to_string(),
+        )
         .header(header::CONTENT_TYPE, "application/json")
         .body(json!({"owner":"team","repository":"private","access":"write"}).to_string())
         .send()
@@ -388,6 +412,10 @@ async fn browser_branch_creation_publishes_an_existing_commit_for_native_git() {
         .header(header::COOKIE, &alice)
         .header(header::ORIGIN, &h.origin)
         .header("x-csrf-token", csrf)
+        .header(
+            "x-crab-repository-id",
+            h.server.repositories.values()[0].id.to_string(),
+        )
         .header(header::CONTENT_TYPE, "application/json")
         .body(
             json!({
@@ -535,6 +563,10 @@ async fn browser_branch_creation_publishes_an_existing_commit_for_native_git() {
         .header(header::COOKIE, &alice)
         .header(header::ORIGIN, &h.origin)
         .header("x-csrf-token", csrf)
+        .header(
+            "x-crab-repository-id",
+            h.server.repositories.values()[0].id.to_string(),
+        )
         .header(header::CONTENT_TYPE, "application/json")
         .body("{}")
         .send()
@@ -586,6 +618,10 @@ async fn browser_branch_creation_publishes_an_existing_commit_for_native_git() {
             .header(header::COOKIE, &alice)
             .header(header::ORIGIN, &h.origin)
             .header("x-csrf-token", csrf)
+            .header(
+                "x-crab-repository-id",
+                h.server.repositories.values()[0].id.to_string(),
+            )
             .header(header::CONTENT_TYPE, "application/json")
             .body(body.to_string())
             .send()

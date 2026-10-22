@@ -209,7 +209,17 @@ async fn merge_recovery_after_archive(published: bool) {
             .await
             .unwrap()
     });
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .default_headers(reqwest::header::HeaderMap::from_iter([(
+            reqwest::header::HeaderName::from_static("x-crab-repository-id"),
+            server.repositories.values()[0]
+                .id
+                .to_string()
+                .parse()
+                .unwrap(),
+        )]))
+        .build()
+        .unwrap();
     let origin = format!("http://{address}");
     let source = tempfile::tempdir().unwrap();
     let path = source.path();

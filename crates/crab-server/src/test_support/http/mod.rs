@@ -55,15 +55,20 @@ impl Harness {
         body: Value,
     ) -> reqwest::Response {
         let session = self.json("/api/session", cookie).await;
-        self.http
+        let mut request = self
+            .http
             .request(method, format!("{}{path}", self.origin))
             .header(header::COOKIE, cookie)
             .header(header::ORIGIN, &self.origin)
-            .header("x-csrf-token", session["csrf"].as_str().unwrap())
-            .json(&body)
-            .send()
-            .await
-            .unwrap()
+            .header("x-csrf-token", session["csrf"].as_str().unwrap());
+        if let Some(repository) = self
+            .server
+            .repositories
+            .get(&("team".into(), "private".into()))
+        {
+            request = request.header("x-crab-repository-id", repository.id.to_string());
+        }
+        request.json(&body).send().await.unwrap()
     }
 
     pub(crate) async fn new(confidential: bool) -> Self {

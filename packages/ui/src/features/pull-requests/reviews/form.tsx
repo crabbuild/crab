@@ -76,7 +76,7 @@ export function ReviewChanges({
 }) {
   const [open, setOpen] = useState(false);
   const id = useId();
-  const mutation = useMutation(csrf);
+  const mutation = useMutation(csrf, repo);
   const stale = !!draft && draft.commit_oid !== pull.head_oid;
   return (
     <div className="flex justify-end py-3">

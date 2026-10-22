@@ -27,6 +27,7 @@ export interface GitImportJob {
 }
 
 export interface Repository {
+  id: string;
   owner: string;
   name: string;
   description: string;

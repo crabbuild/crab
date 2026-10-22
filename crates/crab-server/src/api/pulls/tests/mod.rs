@@ -73,7 +73,17 @@ async fn pull_requests_follow_live_branches_and_persist_discussion_state() {
     let first_head = git::success(path, &["rev-parse", "HEAD"]).await;
     git::success(path, &["push", &git_url, "feature"]).await;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .default_headers(reqwest::header::HeaderMap::from_iter([(
+            reqwest::header::HeaderName::from_static("x-crab-repository-id"),
+            server.repositories.values()[0]
+                .id
+                .to_string()
+                .parse()
+                .unwrap(),
+        )]))
+        .build()
+        .unwrap();
     let root = format!("http://127.0.0.1:{port}/api/repos/team/repo/pulls");
     let input = json!({
         "request_id":"00000000-0000-4000-8000-000000000001",
@@ -362,6 +372,7 @@ async fn pull_creation_rejects_invalid_branch_pairs_before_writing_app_state() {
                     .method("POST")
                     .uri("/api/repos/team/repo/pulls")
                     .header("host", "localhost:8788")
+                    .header("x-crab-repository-id", repo.id.to_string())
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(
                         json!({
@@ -482,7 +493,17 @@ async fn pull_request_merge_methods_use_canonical_ref_publication() {
         "main"
     );
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .default_headers(reqwest::header::HeaderMap::from_iter([(
+            reqwest::header::HeaderName::from_static("x-crab-repository-id"),
+            server.repositories.values()[0]
+                .id
+                .to_string()
+                .parse()
+                .unwrap(),
+        )]))
+        .build()
+        .unwrap();
     let root = format!("http://127.0.0.1:{port}/api/repos/team/repo/pulls");
     let created = json_request(
         &client,
