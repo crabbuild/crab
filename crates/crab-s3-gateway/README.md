@@ -165,7 +165,9 @@ again; external ref updates remain visible without a freshness TTL.
 
 S3 mutations of v2 repositories publish the generated Git pack, all four pack components,
 and exact visibility delta as one immutable capsule before the independently
-mutable ref-head CAS. Planned multipart retries resolve the v2 plan receipt,
+mutable ref-head CAS. Generated packs declare bounded cross-pack tree delta bases,
+matching native Git publication; shared readers and checkpoints resolve those bases
+from the pinned view. Planned multipart retries resolve the v2 plan receipt,
 and idle maintenance compacts the capsule frontier through the shared verified
 checkpoint path.
 

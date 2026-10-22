@@ -2018,9 +2018,6 @@ async fn upload_built_batch(
     let mut delta_bases = BTreeMap::new();
     let mut external_delta_bases = BTreeMap::new();
     let mut external_delta_bytes = 0usize;
-    // V2 checkpoint source validation uses generic Git and requires standalone packs.
-    // The v1 remote reader can retain its explicit cross-pack base contract.
-    let allow_external_delta_bases = matches!(&protocol, PublicationProtocol::Legacy);
     for (object, candidates) in delta_candidates {
         // One packed representation must match the final warm lineage. A tree
         // revisited within this batch is therefore emitted as a full entry.
@@ -2029,10 +2026,7 @@ async fn upload_built_batch(
         }
         let candidate = candidates
             .into_iter()
-            .filter(|candidate| {
-                seen.contains_key(&candidate.base)
-                    || (allow_external_delta_bases && candidate.external.is_some())
-            })
+            .filter(|candidate| seen.contains_key(&candidate.base) || candidate.external.is_some())
             .min_by_key(|candidate| (!seen.contains_key(&candidate.base), candidate.base));
         let Some(candidate) = candidate else {
             continue;
@@ -2213,16 +2207,25 @@ async fn upload_built_batch(
                 read(pack.kinds_path()),
                 upload_attributes(),
             )?;
+            // Match native Git publication: readers and checkpoints resolve
+            // declared cross-pack bases from the pinned repository view.
+            let external_delta_bases = pack
+                .external_delta_bases()
+                .iter()
+                .map(ToString::to_string)
+                .collect();
             UploadedArtifacts::Capsule(Box::new(CapsuleMutationArtifacts {
                 base: *base,
-                pack: crab_metadata::capsule_protocol::CapsuleGitPack::new(
-                    Bytes::from(pack_bytes),
-                    Bytes::from(index),
-                    Bytes::from(reverse_index),
-                    Bytes::from(locator),
-                    pack.git_sha1().to_string(),
-                    u64::from(pack.object_count()),
-                )?,
+                pack:
+                    crab_metadata::capsule_protocol::CapsuleGitPack::new_with_external_delta_bases(
+                        Bytes::from(pack_bytes),
+                        Bytes::from(index),
+                        Bytes::from(reverse_index),
+                        Bytes::from(locator),
+                        pack.git_sha1().to_string(),
+                        u64::from(pack.object_count()),
+                        external_delta_bases,
+                    )?,
                 visibility: evidence,
             }))
         }
@@ -4142,6 +4145,69 @@ mod tests {
             read(&repository, Arc::clone(&runtime), &cancel, "object").await,
             Bytes::from_static(b"after-checkpoint")
         );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn capsule_warm_tree_deltas_survive_checkpoint_and_cold_reads() {
+        let (repository, runtime, cancel) = capsule_fixture().await;
+        let coordinator = Coordinator::new(
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            cancel.clone(),
+            Metrics::new().unwrap(),
+        );
+        for index in 0..16 {
+            coordinated_put(
+                &coordinator,
+                &repository,
+                &cancel,
+                &format!("objects/item-{index:02}"),
+                b"value",
+            )
+            .await;
+        }
+        let view = crab_read::capsule_protocol::open_view(
+            &repository.layout,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: MAX_CAPSULE_READ_BYTES,
+                max_frontier_bytes: MAX_CAPSULE_READ_BYTES,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            view.capsules()
+                .iter()
+                .flat_map(|capsule| capsule.git_packs())
+                .any(|pack| !pack.external_delta_bases().is_empty()),
+            "native warm writes repeat whole directory trees instead of declared cross-pack deltas"
+        );
+        let repacked = crab_remote::checkpoint::repack_capsule_repository_from_view(
+            &repository.layout,
+            &view,
+            MAX_CAPSULE_READ_BYTES,
+            &cancel,
+        )
+        .await
+        .unwrap();
+        assert!(repacked.work.published && repacked.work.pack_bytes_written > 0);
+        let reader = Repository::new(repository.config.clone(), repository.store.clone()).unwrap();
+        let cold_runtime = Arc::new(crab_remote_git::RemoteGitRuntime::default());
+        for index in 0..16 {
+            assert_eq!(
+                read(
+                    &reader,
+                    Arc::clone(&cold_runtime),
+                    &cancel,
+                    &format!("objects/item-{index:02}")
+                )
+                .await,
+                b"value".as_slice()
+            );
+        }
+        cold_runtime.shutdown().await;
+        coordinator.shutdown().await;
         runtime.shutdown().await;
     }
 

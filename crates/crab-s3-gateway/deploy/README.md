@@ -137,6 +137,8 @@ that source alongside the large LFS fixture.
 It separately initializes a native capsule-protocol repository through the
 gateway, adopts and publishes it through the CLI, repeats Boto3's byte and
 listing checks against that logical bucket, and retains `boto3-native-proof.json`.
+The native write soak also retains metrics and the last 100 warning/error records
+before process-restart qualification, so checkpoint failures remain diagnosable.
 S3-authored ordinary and LFS
 objects must then appear through a native Git clone; CLI Xet hydration and LFS
 pull must reproduce the source bytes. This keeps native-protocol qualification
