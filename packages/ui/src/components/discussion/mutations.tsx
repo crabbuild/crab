@@ -7,9 +7,13 @@ export function useMutation(csrf: string) {
   const [pending, setPending] = useState(false);
   const [error, setError] = useState<string>();
   const [conflict, setConflict] = useState(false);
+  const [status, setStatus] = useState<number>();
+  const [rejected, setRejected] = useState(false);
   function reset() {
     setError(undefined);
     setConflict(false);
+    setStatus(undefined);
+    setRejected(false);
   }
   const active = useRef(true);
   const busy = useRef(false);
@@ -39,6 +43,12 @@ export function useMutation(csrf: string) {
         window.dispatchEvent(new Event("crab-session-expired"));
       const body: unknown = await response.json().catch(() => null);
       if (!response.ok) {
+        if (active.current) {
+          setStatus(response.status);
+          setRejected(
+            response.headers.get("X-Crab-Write-Outcome") === "rejected",
+          );
+        }
         const failure = body as {
           error?: { message?: string; code?: string };
         } | null;
@@ -65,7 +75,7 @@ export function useMutation(csrf: string) {
       if (active.current) setPending(false);
     }
   }
-  return { run, pending, error, conflict, reset };
+  return { run, pending, error, conflict, status, rejected, reset };
 }
 
 export function ConflictReview<

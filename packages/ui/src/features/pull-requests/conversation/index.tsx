@@ -6,12 +6,10 @@ import {
   CommentComposer,
   type useCommentSubmission,
 } from "@/components/discussion/conversation/compose";
-import { useMutation } from "@/components/discussion/mutations";
 import { useReturnFocus } from "@/components/discussion/hooks";
-import { Failure } from "@/components/discussion/failure";
 import { timestamp } from "@/components/discussion/time";
 import { Button } from "@/components/ui/button";
-import { endpoint, type Repository } from "@/lib/api";
+import { type Repository } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
 import { MergePanel } from "../merge";
 import type { PullRequest } from "../model";
@@ -34,9 +32,8 @@ export function PullConversation({
   revision: string;
   comment: ReturnType<typeof useCommentSubmission>;
 }) {
-  const stateMutation = useMutation(csrf);
   const stateTrigger = useReturnFocus<HTMLButtonElement>(
-    stateMutation.pending || refreshing,
+    (comment.pending && comment.intent === "state") || refreshing,
   );
   const target = "pulls/" + pull.number;
   const href = repoHref(repo, { view: "pulls", pull: String(pull.number) });
@@ -68,7 +65,7 @@ export function PullConversation({
         {(busy, posted) => (
           <>
             <MergePanel repo={repo} pull={pull} csrf={csrf} refresh={refresh} />
-            {!repo.archived && (
+            {(!repo.archived || comment.body || comment.intent) && (
               <CommentComposer
                 href={href}
                 onCreated={posted}
@@ -76,45 +73,48 @@ export function PullConversation({
                 className="pull-comment-form"
                 comment={comment}
                 busy={busy || refreshing}
-                actions={
-                  pull.can_manage && (
+                readOnly={repo.archived}
+                onStateChanged={refresh}
+                actions={(change) =>
+                  pull.can_manage &&
+                  !repo.archived && (
                     <Button
-                      ref={stateTrigger}
+                      ref={comment.conflict ? undefined : stateTrigger}
                       variant={
                         pull.state === "open" ? "destructive" : "outline"
                       }
                       disabled={
                         busy ||
                         refreshing ||
-                        stateMutation.pending ||
-                        stateMutation.conflict
+                        comment.pending ||
+                        Boolean(comment.intent) ||
+                        comment.conflict
                       }
-                      onClick={async () => {
-                        const updated = await stateMutation.run<PullRequest>(
-                          endpoint(repo, target),
-                          "PATCH",
-                          {
-                            version: pull.version,
-                            state: pull.state === "open" ? "closed" : "open",
-                          },
-                        );
-                        if (updated) refresh();
-                      }}
+                      onClick={() =>
+                        change({
+                          version: pull.version,
+                          state: pull.state === "open" ? "closed" : "open",
+                        })
+                      }
                     >
-                      {pull.state === "open"
-                        ? "Close pull request"
-                        : "Reopen pull request"}
+                      {comment.body.trim()
+                        ? pull.state === "open"
+                          ? "Close with comment"
+                          : "Reopen with comment"
+                        : pull.state === "open"
+                          ? "Close pull request"
+                          : "Reopen pull request"}
                     </Button>
                   )
                 }
               />
             )}
-            <Failure message={stateMutation.error} />
-            {stateMutation.conflict && (
+            {comment.conflict && (
               <Button
+                ref={stateTrigger}
                 variant="outline"
                 onClick={() => {
-                  stateMutation.reset();
+                  comment.review();
                   refresh();
                 }}
               >

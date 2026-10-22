@@ -582,6 +582,34 @@ with open(run / "commands.log", "w") as log:
             assert page["matching"] == 2 and page["counts"] == {"open": 0, "closed": 2, "merged": 1}
         assert request(author_completion)["items"][0]["value"] == "author:" + actor_profile["handle"]
         assert request("/api/repos/team/project/pulls?q=author%3A%40me")["matching"] == 1
+        (git / "atomic-state.md").write_text("Atomic comment and state qualification\n")
+        cmd(["git", "-C", git, "add", "atomic-state.md"])
+        cmd(["git", "-C", git, "commit", "-m", "Prepare atomic state review"])
+        cmd(["git", "-C", git, "push", origin + "/git/team/project.git", "HEAD:refs/heads/atomic-state"], env=env)
+        state_pull_input = {"request_id": str(uuid.uuid4()), "title": "Atomic state review", "body": "Combined comment actions", "base_ref": "refs/heads/main", "head_ref": "refs/heads/atomic-state"}
+        state_pull = request("/api/repos/team/project/pulls", state_pull_input)
+        state_pull_path = "/api/repos/team/project/pulls/" + str(state_pull["number"])
+        state_actions = []
+        for path, state in [(issue_path, "open"), (state_pull_path, "closed")]:
+            before = request(path)
+            body = {"request_id": str(uuid.uuid4()), "version": before["version"], "state": state, "body": "Atomic context for " + path}
+            count_before = len(request(path + "/comments")["items"])
+            saved = request(path + "/state", body)
+            assert saved["comment"]["body"] == body["body"]
+            assert request(path)["state"] == state
+            state_actions.append((path, body, saved["comment"]["number"], count_before + 1))
+        current_issue = request(issue_path)
+        request(issue_path + "/state", {"request_id": str(uuid.uuid4()), "version": current_issue["version"], "state": "closed"})
+        # State submissions recover after a complete process restart.
+        stop()
+        server = start()
+        wait()
+        for path, body, comment, expected_count in state_actions:
+            recovered = request(path + "/state", body)
+            assert recovered["comment"]["number"] == comment
+            assert len(request(path + "/comments")["items"]) == expected_count
+            search = "/api/repos/team/project/issues?" + urllib.parse.urlencode({"q": 'in:comments "Atomic context"'})
+            assert request(search)["matching"] == 2
         stop()
         count = subprocess.check_output(
             [
@@ -608,6 +636,9 @@ with open(run / "commands.log", "w") as log:
             "image_ref": args.image,
             "repository_creation": True,
             "issue_replay": True,
+            "atomic_comment_state_restart": True,
+            "atomic_state_submission_recovery": True,
+            "atomic_comment_search": True,
             "issue_close_reason_restart": True,
             "issue_close_timestamp_restart": True,
             "issue_reason_search_restart": True,

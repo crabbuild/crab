@@ -32,7 +32,8 @@ Build the UI before building `crab-server`; its build script embeds `dist/`.
 - `src/features/issues/`: issue models, routing, list, creation, detail and
   comments. `state.tsx` owns close-reason selection, reason changes and reopen
   actions beside the comment button. State changes preserve drafts and reject
-  stale writes; comments and state still submit separately. Not-planned closures
+  stale writes. Close/reopen can submit the current draft in the same native
+  transaction; close-reason edits leave it unsubmitted. Not-planned closures
   have distinct header/list presentation and typed conversation events.
   `src/features/pull-requests/` separates lists, creation, detail,
   conversation, commits, reviews, checks, and merge/recovery. PR detail retains
@@ -82,3 +83,10 @@ and profile settings use native organization APIs with version checks. Public
 username search selects stable accounts; invitations currently use a manually
 shared link, with no email delivery. Organization discovery, owner-name routing,
 teams and cross-repository Projects are still separate work.
+
+The shared composer retains one original comment/state intent through uncertain
+responses, metadata refresh and PR tabs. Retry original action recovers that
+submission; newer text remains unsent. State replies need an explicit confirmed-
+rejection marker before the controller releases an intent. A bare late permission
+error can follow a successful commit. Drafts remain available after archive, and
+hidden responses cannot move the visible conversation.

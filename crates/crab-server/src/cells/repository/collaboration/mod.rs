@@ -9,6 +9,7 @@ pub(crate) mod conversation;
 pub(crate) mod links;
 pub(crate) mod milestones;
 pub(crate) mod reactions;
+pub(crate) mod state;
 mod target;
 pub(crate) use target::Target;
 

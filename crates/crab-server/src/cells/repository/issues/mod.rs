@@ -163,34 +163,7 @@ impl Mutation for CreateComment {
                 comment_from_row(comment)?,
             )));
         }
-        let now = timestamp(context.now_ms())?;
-        let sequence = context.sql(&SqlBatch {
-            statements: vec![
-                statement(
-                    "INSERT INTO repository_comment_sequences(issue_number, last) VALUES (?, 1) ON CONFLICT(issue_number) DO UPDATE SET last = last + 1 WHERE last < 9007199254740991",
-                    vec![integer(input.issue)?],
-                ),
-                statement(
-                    "SELECT last FROM repository_comment_sequences WHERE issue_number = ?",
-                    vec![integer(input.issue)?],
-                ),
-            ],
-        })?;
-        if sequence[0].rows_affected != 1 {
-            return Err(crate::cells::Error::Invalid(
-                "repository comment numbering is exhausted",
-            ));
-        }
-        let number = result_u64(&sequence, 1, 0)?;
-        let record = CommentRecord {
-            issue: input.issue,
-            number,
-            author: input.author,
-            body: input.body,
-            version: 1,
-            created_at_ms: now,
-            updated_at_ms: now,
-        };
+        let record = append_comment(context, input.issue, &input.author, &input.body)?;
         context.sql(&SqlBatch {
             statements: vec![statement(
                 "INSERT INTO repository_comment_submissions(issue_number, request_id, payload_digest, comment_number) VALUES (?, ?, ?, ?)",
@@ -202,18 +175,58 @@ impl Mutation for CreateComment {
                 ],
             )],
         })?;
-        insert_comment(context, &record)?;
-        advance_revision(context)?;
-        let target = Target::IssueComment {
-            issue: record.issue,
-            number: record.number,
-        };
-        search::contributions::project(context, target, &record.author, &record.body)?;
-        activity::append(context, target, &record.author, Action::Created)?;
+
         Ok(MutationResult::Success(CreateCommentOutcome::Created(
             record,
         )))
     }
+}
+
+// Callers own validation, permissions and submission reservations; both plain
+// comments and atomic state actions use this canonical contribution writer.
+pub(in crate::cells::repository) fn append_comment(
+    context: &Transaction<'_>,
+    issue: u64,
+    author: &RepositoryAuthor,
+    body: &str,
+) -> crate::cells::Result<CommentRecord> {
+    let now = timestamp(context.now_ms())?;
+    let sequence = context.sql(&SqlBatch {
+        statements: vec![
+            statement(
+                "INSERT INTO repository_comment_sequences(issue_number, last) VALUES (?, 1) ON CONFLICT(issue_number) DO UPDATE SET last = last + 1 WHERE last < 9007199254740991",
+                vec![integer(issue)?],
+            ),
+            statement(
+                "SELECT last FROM repository_comment_sequences WHERE issue_number = ?",
+                vec![integer(issue)?],
+            ),
+        ],
+    })?;
+    if sequence[0].rows_affected != 1 {
+        return Err(crate::cells::Error::Invalid(
+            "repository comment numbering is exhausted",
+        ));
+    }
+    let number = result_u64(&sequence, 1, 0)?;
+    let record = CommentRecord {
+        issue,
+        number,
+        author: author.clone(),
+        body: body.to_owned(),
+        version: 1,
+        created_at_ms: now,
+        updated_at_ms: now,
+    };
+    insert_comment(context, &record)?;
+    advance_revision(context)?;
+    let target = Target::IssueComment {
+        issue: record.issue,
+        number: record.number,
+    };
+    search::contributions::project(context, target, &record.author, &record.body)?;
+    activity::append(context, target, &record.author, Action::Created)?;
+    Ok(record)
 }
 
 pub(crate) struct UpdateIssue;

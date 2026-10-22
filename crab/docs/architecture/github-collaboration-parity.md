@@ -361,6 +361,14 @@ private preparation recovers only historically proven metadata without changing
 original issue records, event history or command outcomes. Shadcn close controls
 preserve comment drafts and stale-edit handling. See the
 [issue lifecycle evidence](github-ui-parity.md#issue-closure-lifecycle).
-Duplicate closure/relationships, atomic comment-and-state submission, date
-predicates, organization issue types, saved/bulk workflows and complete parity
+Duplicate closure/relationships, date predicates, organization issue types, saved/bulk workflows and complete parity
 remain unfinished.
+
+The atomic composer slice now commits a comment and close/reopen together for
+both discussion kinds. Canonical writers, rollback, milestone/search/history and
+permanent intent recovery remain in the Repository transaction. Shared shadcn
+controls retain drafts and distinguish confirmed rejections from uncertain replies,
+including a permission failure after commit. See
+[atomic action evidence](github-ui-parity.md#atomic-comment-and-state-actions).
+The remaining owner/team/project authority, advanced issue relationships/reviews,
+saved/bulk workflows and complete parity inventory stay open.

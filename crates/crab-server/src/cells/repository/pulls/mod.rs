@@ -374,7 +374,7 @@ pub(crate) enum TransitionPullMergeOutcome {
 mod operations;
 pub(crate) use operations::{CreatePull, GetPull, GetPullSubmission, ListPulls, UpdatePull};
 
-mod comments;
+pub(in crate::cells::repository) mod comments;
 pub(crate) use comments::{CreatePullComment, GetPullComment, ListPullComments, UpdatePullComment};
 
 pub(crate) mod reviewers;

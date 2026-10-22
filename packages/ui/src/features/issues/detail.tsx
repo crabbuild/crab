@@ -6,7 +6,6 @@ import { Button } from "@/components/ui/button";
 
 import { CircleSlashIcon } from "lucide-react";
 import { IssueClosedIcon, IssueOpenedIcon } from "@primer/octicons-react";
-import { IssueStateControls } from "./state";
 import { endpoint, useRequest, type Repository } from "@/lib/api";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
@@ -148,22 +147,12 @@ export function IssueDetail({
           )}
           <Comments
             repo={repo}
-            issue={number}
+            issue={current}
             version={`${current.version}:${metadataEpoch}`}
             csrf={csrf}
-            actions={(busy) =>
-              current.can_close &&
-              !repo.archived && (
-                <IssueStateControls
-                  issue={current}
-                  repo={repo}
-                  csrf={csrf}
-                  disabled={busy || editing}
-                  onSaved={accept}
-                  onRefresh={resource.retry}
-                />
-              )
-            }
+            disabled={editing}
+            refreshing={resource.loading}
+            onChanged={resource.retry}
           />
         </div>
         <DiscussionMetadata

@@ -461,6 +461,24 @@ export async function mockPullRequest(
       reactionWrites.push(target);
       return route.fulfill({ json: summary });
     }
+    if (/\/pulls\/\d+\/state$/.test(path)) {
+      const input = request.postDataJSON();
+      lifecycle.state = input.state;
+      const saved = input.body
+        ? {
+            number: comments.length + 1,
+            author: author("Alice"),
+            body: input.body,
+            reactions: emptyReactions(),
+            version: 1,
+            created_at: Date.now(),
+            updated_at: Date.now(),
+            can_edit: true,
+          }
+        : null;
+      if (saved) comments.push(saved);
+      return route.fulfill({ json: { comment: saved } });
+    }
     if (/\/pulls\/\d+$/.test(path)) {
       if (request.method() === "PATCH") {
         lifecycle.state = "closed";

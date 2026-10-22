@@ -564,4 +564,23 @@ Existing issue command input digests with no reason and original record/outcome
 bytes are retained for durable receipt replay; HTTP renders a causal detail read
 after the commit. Existing generic closure events remain immutable history and
 continue to represent current PR closure. New issue closures carry their reason.
-Duplicate relationships and combined comment/state submission remain unfinished.
+Duplicate relationships remain unfinished. Combined comment/state actions are
+implemented by the native collaboration state operation below.
+
+## Atomic discussion state actions
+
+`cells/repository/collaboration/state/` composes canonical comment writers and
+issue/PR state commands in one native transaction. SQL/KV/search/activity/progress
+commit together, and rejection rolls all application work back before its native
+rejection receipt commits. `collaboration/v1/state-submissions/{subject}/{uuid}`
+retains the original payload digest and optional canonical comment number. A
+committed intent recovers before later archive/version/merge checks, without
+repeating the state write. Current HTTP repository membership still gates access.
+
+No new SQL schema, migration or index rebuild is required. Original standalone
+comment inputs, submission digests and record/outcome formats stay unchanged;
+only their canonical contribution writers are shared. HTTP marks confirmed
+pre-execution/native rejection with `X-Crab-Write-Outcome: rejected`. Post-commit
+enrichment and late permission errors remain uncertain; retry the unchanged
+original intent after resolving availability/access. Public output exposes only
+existing comment DTOs, with final membership checks after enrichment.

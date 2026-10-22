@@ -312,9 +312,8 @@ test("comment drafts and retry identities survive tabs, metadata refresh and a l
   await page.getByRole("link", { name: "Conversation", exact: true }).click();
   await expect(editor).toHaveValue(text);
   await page
-    .getByRole("button", { name: "Close pull request", exact: true })
+    .getByRole("button", { name: "Refresh conversation", exact: true })
     .click();
-  await expect(page.locator(".pull-state")).toHaveText("Closed");
   await expect(editor).toHaveValue(text);
   let release = () => {};
   const gate = new Promise<void>((resolve) => {

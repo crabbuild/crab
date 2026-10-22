@@ -58,7 +58,10 @@ commands update that projection in their transaction; assignment changes dirty
 the discussion projection. The HTTP
 choice endpoint stays with other search reads in `api/discussion_search/`.
 
-Collaboration documents live in `cells/repository/collaboration/`. Its `target.rs`
+Collaboration documents live in `cells/repository/collaboration/`. `state/`
+owns atomic close/reopen with optional comments and permanent submission recovery;
+`api/discussion_state/` owns current membership and commit-aware HTTP errors.
+Plain and combined comments share their canonical issue/PR writers. Its `target.rs`
 owns shared discussion addresses, `activity/` owns append-only events and subject
 indexes, and `reactions/` owns actor membership/counts. Activity append calls stay
 inside domain commands so their SQL/KV changes and events commit together.

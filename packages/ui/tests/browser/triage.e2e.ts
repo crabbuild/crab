@@ -51,26 +51,26 @@ test("triage closes and reopens another author's issue without showing descripti
     }),
   );
   await page.route(
-    (url) => url.pathname === "/api/repos/team/project/issues/1",
+    (url) =>
+      url.pathname.replace(/\/state$/, "") ===
+      "/api/repos/team/project/issues/1",
     async (route) => {
-      if (route.request().method() === "PATCH") {
+      if (route.request().method() === "POST") {
         const input = route.request().postDataJSON();
         expect(input.version).toBe(issue.version);
-        expect(Object.keys(input).sort()).toEqual(
-          input.state === "closed"
-            ? ["state", "state_reason", "version"]
-            : ["state", "version"],
-        );
+        expect(input.request_id).toMatch(/^[0-9a-f-]{36}$/);
+        expect(input.body).toBeUndefined();
         writes.push(input);
         issue = {
           ...issue,
           state: input.state,
-          state_reason:
-            input.state === "closed" ? input.state_reason : "reopened",
+          state_reason: input.state === "closed" ? input.reason : "reopened",
           closed_at: input.state === "closed" ? 1700000000100 : null,
           version: issue.version + 1,
         };
       }
+      if (route.request().method() === "POST")
+        return route.fulfill({ json: { comment: null } });
       return route.fulfill({
         json: {
           ...issue,

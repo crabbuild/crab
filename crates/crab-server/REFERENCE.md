@@ -1682,6 +1682,27 @@ preparation returns 503 `schema_upgrade_required`. The command pages existing
 issues/activity and recovers only proven history, without changing record
 versions or original command outcomes. No discussion-index rebuild is required.
 
+### Comment and state submission
+
+POST `/api/repos/{owner}/{name}/issues/{number}/state` or the corresponding
+`pulls/{number}/state` accepts `{request_id, version, state, reason?, body?}`.
+State is `open` or `closed`. Reasons are issue-only completed/not-planned closure
+reasons; omit the reason when reopening. An optional nonempty body posts a
+conversation comment in the same transaction as the state change. Responses are
+`{comment: object or null}` using the existing public comment DTO. Reload the
+subject for its current canonical state; a recovered action can predate later
+changes by another user.
+
+Retry an uncertain action with exactly the same UUID, expected version, state,
+reason and body. Recovery returns the existing comment without changing state
+again, even after later archive or version changes. Altered payloads conflict.
+Current repository access is always required. State permissions, archive, pending
+merge and merged-state restrictions remain canonical; rejection cannot leave an
+orphan comment or advance progress. Confirmed validation/domain rejection carries
+`X-Crab-Write-Outcome: rejected`. An error without this marker may follow commit,
+including a late permission failure, and must preserve the original intent. No
+new schema preparation or discussion-index rebuild is needed.
+
 ### Browse activity
 
 Repository activity lives at `/{owner}/{name}/activity`. Its feed APIs use `limit`

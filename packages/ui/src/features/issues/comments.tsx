@@ -1,4 +1,5 @@
-import type { ReactNode } from "react";
+import type { Issue } from "./model";
+import { IssueStateControls } from "./state";
 import { Conversation } from "@/components/discussion/conversation";
 import {
   CommentComposer,
@@ -11,17 +12,21 @@ export function Comments({
   issue,
   version,
   csrf,
-  actions,
+  disabled,
+  refreshing,
+  onChanged,
 }: {
   repo: Repository;
-  issue: number;
+  issue: Issue;
   version: string;
   csrf: string;
-  actions?: (busy: boolean) => ReactNode;
+  disabled: boolean;
+  refreshing: boolean;
+  onChanged: () => void;
 }) {
-  const target = "issues/" + issue;
+  const target = "issues/" + issue.number;
   const comment = useCommentSubmission(repo, target, csrf);
-  const href = repoHref(repo, { view: "issues", issue: String(issue) });
+  const href = repoHref(repo, { view: "issues", issue: String(issue.number) });
   return (
     <section className="issue-comments" aria-label="Discussion">
       <Conversation
@@ -33,7 +38,7 @@ export function Comments({
         active
       >
         {(busy, posted) =>
-          !repo.archived && (
+          (!repo.archived || comment.body || comment.intent) && (
             <CommentComposer
               href={href}
               onCreated={posted}
@@ -41,7 +46,31 @@ export function Comments({
               className="new-comment"
               comment={comment}
               busy={busy}
-              actions={actions?.(comment.pending)}
+              readOnly={repo.archived}
+              onStateChanged={onChanged}
+              actions={(change) =>
+                issue.can_close &&
+                !repo.archived && (
+                  <IssueStateControls
+                    issue={issue}
+                    disabled={
+                      disabled ||
+                      refreshing ||
+                      comment.pending ||
+                      Boolean(comment.intent)
+                    }
+                    pending={comment.pending && comment.intent === "state"}
+                    refreshing={refreshing}
+                    conflict={comment.conflict}
+                    withComment={Boolean(comment.body.trim())}
+                    onChange={change}
+                    onRefresh={() => {
+                      comment.review();
+                      onChanged();
+                    }}
+                  />
+                )
+              }
             />
           )
         }

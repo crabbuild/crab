@@ -58,6 +58,20 @@ async function openDiscussion(page: Page) {
           },
         ],
       };
+    } else if (path === "/api/repos/team/project/issues/1/state") {
+      const input = request.postDataJSON();
+      if (input.version !== issue.version)
+        return route.fulfill({
+          status: 409,
+          headers: { "X-Crab-Write-Outcome": "rejected" },
+          json: { error: { code: "conflict", message: "Content changed" } },
+        });
+      issue = { ...issue, state: input.state, version: issue.version + 1 };
+      const saved = input.body
+        ? { ...record, number: comments.length + 1, body: input.body }
+        : null;
+      if (saved) comments.push(saved);
+      json = { comment: saved };
     } else if (path === "/api/repos/team/project/issues/1") {
       if (request.method() === "PATCH") {
         const update = request.postDataJSON() as {

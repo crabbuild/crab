@@ -34,15 +34,18 @@ test("close reasons, stale changes and reopening retain the comment draft", asyn
   const writes: object[] = [];
   let conflict = false;
   await page.route(
-    (url) => url.pathname === "/api/repos/team/project/issues/1",
+    (url) =>
+      url.pathname.replace(/\/state$/, "") ===
+      "/api/repos/team/project/issues/1",
     async (route) => {
-      if (route.request().method() === "PATCH") {
+      if (route.request().method() === "POST") {
         const input = route.request().postDataJSON();
         writes.push(input);
         if (conflict) {
           conflict = false;
           return route.fulfill({
             status: 409,
+            headers: { "X-Crab-Write-Outcome": "rejected" },
             json: {
               error: { code: "conflict", message: "Issue changed elsewhere" },
             },
@@ -52,8 +55,7 @@ test("close reasons, stale changes and reopening retain the comment draft", asyn
         issue = {
           ...issue,
           state: input.state,
-          state_reason:
-            input.state === "closed" ? input.state_reason : "reopened",
+          state_reason: input.state === "closed" ? input.reason : "reopened",
           closed_at:
             input.state === "closed"
               ? (issue.closed_at ?? 1700000000100)
@@ -61,7 +63,9 @@ test("close reasons, stale changes and reopening retain the comment draft", asyn
           version: issue.version + 1,
         };
       }
-      await route.fulfill({ json: issue });
+      await route.fulfill({
+        json: route.request().method() === "POST" ? { comment: null } : issue,
+      });
     },
   );
   await page.route("**/issues/1/milestone", (route) =>
@@ -71,9 +75,6 @@ test("close reasons, stale changes and reopening retain the comment draft", asyn
   await expect(
     page.getByRole("heading", { name: "Issue lifecycle #1" }),
   ).toBeVisible();
-  await page
-    .getByLabel("Comment", { exact: true })
-    .fill("Keep this unfinished comment");
   await page.getByRole("button", { name: "Choose close reason" }).click();
   await page.getByRole("menuitemradio", { name: /Not planned/ }).click();
   expect(writes).toHaveLength(0);
@@ -83,12 +84,16 @@ test("close reasons, stale changes and reopening retain the comment draft", asyn
   await expect(page.locator(".issue-state")).toHaveText(
     "Closed as not planned",
   );
-  await expect(page.getByLabel("Comment", { exact: true })).toHaveValue(
-    "Keep this unfinished comment",
-  );
+  await page
+    .getByLabel("Comment", { exact: true })
+    .fill("Keep this unfinished comment");
   await page.getByRole("button", { name: "Change close reason" }).click();
   await page.getByRole("menuitemradio", { name: /Completed/ }).click();
   await expect(page.locator(".issue-state.closed")).toHaveText("Closed");
+  await expect(page.getByLabel("Comment", { exact: true })).toHaveValue(
+    "Keep this unfinished comment",
+  );
+  await page.getByLabel("Comment", { exact: true }).fill("");
   conflict = true;
   await page.getByRole("button", { name: "Reopen issue", exact: true }).click();
   await expect(page.getByRole("alert")).toContainText(
@@ -100,9 +105,6 @@ test("close reasons, stale changes and reopening retain the comment draft", asyn
     .click();
   await page.getByRole("button", { name: "Reopen issue", exact: true }).click();
   await expect(page.locator(".issue-state.open")).toHaveText("Open");
-  await expect(page.getByLabel("Comment", { exact: true })).toHaveValue(
-    "Keep this unfinished comment",
-  );
   expect(issue.closed_at).toBeNull();
   await expectNoAccessibilityViolations(page);
 });
@@ -121,9 +123,11 @@ test("a delayed close response cannot replace a newer refreshed issue", async ({
     begun = resolve;
   });
   await page.route(
-    (url) => url.pathname === "/api/repos/team/project/issues/1",
+    (url) =>
+      url.pathname.replace(/\/state$/, "") ===
+      "/api/repos/team/project/issues/1",
     async (route) => {
-      if (route.request().method() === "PATCH") {
+      if (route.request().method() === "POST") {
         const older: Issue = {
           ...issue,
           state: "closed",
@@ -134,9 +138,11 @@ test("a delayed close response cannot replace a newer refreshed issue", async ({
         issue = { ...older, title: "A newer title", version: 3 };
         begun();
         await gate;
-        return route.fulfill({ json: older });
+        return route.fulfill({ json: { comment: null } });
       }
-      await route.fulfill({ json: issue });
+      await route.fulfill({
+        json: route.request().method() === "POST" ? { comment: null } : issue,
+      });
     },
   );
   await page.route("**/issues/1/milestone", (route) =>

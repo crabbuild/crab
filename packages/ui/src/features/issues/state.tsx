@@ -14,55 +14,33 @@ import {
   DropdownMenuRadioItem,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
-import { Failure } from "@/components/discussion/failure";
-import { useMutation } from "@/components/discussion/mutations";
+import type { StateChange } from "@/components/discussion/conversation/compose";
 import { useReturnFocus } from "@/components/discussion/hooks";
-import { endpoint, type Repository } from "@/lib/api";
 import type { Issue, IssueStateReason } from "./model";
 
 export function IssueStateControls({
   issue,
-  repo,
-  csrf,
   disabled,
-  onSaved,
+  pending,
+  refreshing,
+  conflict,
+  withComment,
+  onChange,
   onRefresh,
 }: {
   issue: Issue;
-  repo: Repository;
-  csrf: string;
   disabled: boolean;
-  onSaved: (issue: Issue) => void;
+  pending: boolean;
+  refreshing: boolean;
+  conflict: boolean;
+  withComment: boolean;
+  onChange: (change: StateChange, mode?: "include" | "omit") => Promise<void>;
   onRefresh: () => void;
 }) {
   const [reason, setReason] =
     useState<Exclude<IssueStateReason, "reopened">>("completed");
-  const mutation = useMutation(csrf);
-  const trigger = useReturnFocus<HTMLButtonElement>(mutation.pending);
+  const trigger = useReturnFocus<HTMLButtonElement>(pending || refreshing);
   const closed = issue.state === "closed";
-  const pending = disabled || mutation.pending;
-  async function change(
-    state: Issue["state"],
-    state_reason?: IssueStateReason,
-  ) {
-    const saved = await mutation.run<Issue>(
-      endpoint(repo, `issues/${issue.number}`),
-      "PATCH",
-      {
-        version: issue.version,
-        state,
-        state_reason,
-      },
-    );
-    if (saved) {
-      if (
-        saved.state_reason === "completed" ||
-        saved.state_reason === "not_planned"
-      )
-        setReason(saved.state_reason);
-      onSaved(saved);
-    }
-  }
   const selected = closed ? (issue.state_reason ?? "") : reason;
   return (
     <div className="flex min-w-0 flex-col items-start gap-2">
@@ -75,10 +53,14 @@ export function IssueStateControls({
           type="button"
           variant="outline"
           className={closed ? "" : "rounded-r-none"}
-          ref={trigger}
-          disabled={pending}
+          ref={conflict ? undefined : trigger}
+          disabled={disabled || conflict}
           onClick={() =>
-            change(closed ? "open" : "closed", closed ? undefined : reason)
+            onChange({
+              version: issue.version,
+              state: closed ? "open" : "closed",
+              reason: closed ? undefined : reason,
+            })
           }
         >
           {closed ? (
@@ -88,11 +70,15 @@ export function IssueStateControls({
           ) : (
             <CircleCheckIcon data-icon="inline-start" />
           )}
-          {closed
-            ? "Reopen issue"
-            : reason === "not_planned"
-              ? "Close as not planned"
-              : "Close issue"}
+          {withComment
+            ? closed
+              ? "Reopen with comment"
+              : "Close with comment"
+            : closed
+              ? "Reopen issue"
+              : reason === "not_planned"
+                ? "Close as not planned"
+                : "Close issue"}
         </Button>
         <DropdownMenu>
           <DropdownMenuTrigger asChild>
@@ -101,7 +87,7 @@ export function IssueStateControls({
               variant="outline"
               size="icon"
               className={closed ? "ml-1" : "-ml-px rounded-l-none"}
-              disabled={pending}
+              disabled={disabled || conflict}
               aria-label={
                 closed ? "Change close reason" : "Choose close reason"
               }
@@ -117,8 +103,12 @@ export function IssueStateControls({
               value={selected}
               onValueChange={(value) => {
                 const next = value as Exclude<IssueStateReason, "reopened">;
-                if (closed) void change("closed", next);
-                else setReason(next);
+                setReason(next);
+                if (closed)
+                  void onChange(
+                    { version: issue.version, state: "closed", reason: next },
+                    "omit",
+                  );
               }}
             >
               <DropdownMenuRadioItem value="completed">
@@ -143,9 +133,14 @@ export function IssueStateControls({
           </DropdownMenuContent>
         </DropdownMenu>
       </div>
-      <Failure message={mutation.error} />
-      {mutation.conflict && (
-        <Button type="button" variant="outline" size="sm" onClick={onRefresh}>
+      {conflict && (
+        <Button
+          ref={trigger}
+          type="button"
+          variant="outline"
+          size="sm"
+          onClick={onRefresh}
+        >
           Refresh issue before retrying
         </Button>
       )}

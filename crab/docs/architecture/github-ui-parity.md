@@ -830,10 +830,10 @@ change the metadata. Invalid reason/state combinations have a typed rejection.
 The shadcn split close action lives beside the comment button. Choosing an open
 issue's reason does not write until Close is pressed. Closed issues support
 reason changes and reopening. Header/list presentation distinguishes not-planned
-closures, and typed timeline events explain the change. Pending comment drafts
-survive state actions; history reads do not disable independent state actions.
-Delayed mutation replies cannot replace a newer issue refresh. Atomic comment-
-and-close remains unfinished; the current controls are explicitly separate.
+closures, and typed timeline events explain the change. Reason-only changes
+retain comment drafts; history reads do not disable independent state actions.
+Delayed mutation replies cannot replace a newer issue refresh. Close/Reopen with
+a comment is delivered by the subsequent atomic submission slice below.
 
 `reason:completed`, `reason:"not planned"`, `reason:reopened` and `no:reason`
 participate in the shared Boolean query, counts and cursor contract. Positive
@@ -850,7 +850,7 @@ unknown. An edit timestamp is never substituted for a close date. Original
 mutation outcome bytes and absent-field request digests remain unchanged.
 
 This advances the issue foundation. Duplicate closure and typed duplicate links,
-sub-issues/dependencies, atomic comment-and-state submission, date filtering,
+sub-issues/dependencies, date filtering,
 organization types, saved/bulk workflows and the wider PR/Projects/Milestones
 inventory remain delivery work. The Cellar dependency/release limitation is
 unchanged.
@@ -871,3 +871,68 @@ The change adds 816 net production lines for canonical lifecycle storage,
 transactional behavior, bounded preparation, management/CLI and state controls.
 Shared HTTP rendering removes duplicate enrichment; no dependency, compatibility
 reader, second index format or speculative date-query surface was added.
+
+## Atomic comment and state actions
+
+The issue and PR composer now submits Close/Reopen with comment as one native
+Repository command. An empty draft changes only state; changing an already-closed
+issue's reason leaves the draft unsubmitted. The canonical issue/PR comment writers
+are shared by plain comments and state actions, and existing state owners retain
+permission, archive, version, merge-pending and merged-state policy. A rejected
+state operation rolls back the comment, child counter, search contribution,
+activity and milestone progress. Successful contributions precede their state
+event in the chronological conversation.
+
+Each action has a permanent, subject-scoped submission identity. Its digest binds
+qualified actor, expected version, desired state/reason and original comment.
+Display-name/current-role snapshots do not change that identity. Recovery precedes
+later archive/version/merge checks and reads the existing canonical comment; it
+cannot execute the state operation again. No new SQL format, preparation, second
+comment writer or replacement for original command outcomes is needed.
+
+The shared composer controller preserves the original action through failures,
+metadata refresh and PR tabs. A confirmed rejection permits revision after reload;
+an uncertain response offers Retry original action. Only the submitted draft is
+cleared; newer text remains. Hidden PR responses cannot move the visible history.
+Archived repositories retain drafts and permit recovery of an existing action.
+HTTP state responses mark proven pre-execution/native rejections with
+`X-Crab-Write-Outcome: rejected`; failures during post-commit enrichment or final
+membership checks carry no such marker, including permission failures. The
+composer must not treat a bare 403 as proof that the write did not happen.
+
+Root dropdown menus dismiss immediately so an exiting menu item cannot steal
+editor focus through Radix’s pointer-leave callback. The deferred unmount focus
+return also preserves a newer deliberate focus outside the menu. Submenus already
+suppress their own unmount return; other overlay types do not participate in this
+menu-item lifecycle.
+
+The new operation stays within current repository authority. Native repository
+role cutover/cross-Cell fencing, full branch/reopen parity, pending reviews,
+duplicate/dependency relationships, saved/bulk views and the wider PR/Projects/
+Milestones inventory remain delivery work. The published Cellar release blocker
+and dependency versions are unchanged.
+
+
+Validation: the final isolated server library suite passed 425 tests, with six
+existing opt-in qualifications ignored. CLI tests passed 13, UI unit tests 107,
+and the final clean browser suite 126. Strict all-target Clippy, architecture
+gates, Rustfmt, frontend formatting/typecheck and frontend/server builds passed.
+The focus regression failed before the fix; the final delayed-menu and reason-edit
+scenarios passed 30 repeated runs. Both issue and PR browser flows include lost
+responses, original-intent recovery, retained newer drafts and confirmed rejection.
+
+Real embedded-UI/RustFS qualification closed and reopened both kinds with comments,
+verified the visible conversation and canonical records, restarted the process,
+and recovered the exact native submissions without duplication. Search, milestones,
+Git push/merge, explicit preparation/rebuild and organization safeguards remained
+working across restart, with 101 durable objects in the final run. Desktop/mobile
+captures were inspected; owned qualification services and browsers were closed.
+The persistent preview was restarted with the rebuilt assets: 18 captured resource
+payloads compare unchanged, without migrations/rebuilds or profile/organization
+creation. Read-only browser checks passed on both embedded and Vite preview ports.
+
+The slice adds 617 net production lines for one new native transaction boundary,
+its permanent submission contract, commit-aware HTTP handling and a shared composer
+controller. Plain and combined actions reuse canonical contribution/state writers;
+separate UI state mutations were removed. No dependency, lockfile, SQL preparation,
+compatibility path or second search index was introduced.

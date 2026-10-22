@@ -193,6 +193,14 @@ test("issue changes and comments share one durable conversation without duplicat
       }
       return route.fulfill({ json: { items: comments, next: null } });
     }
+    if (path.endsWith("/issues/1/state")) {
+      const input = request.postDataJSON();
+      expect(input.version).toBe(version);
+      state = input.state;
+      version++;
+      events.unshift(event(2, "closed"));
+      return route.fulfill({ json: { comment: null } });
+    }
     if (path.endsWith("/issues/1")) {
       if (request.method() === "PATCH") {
         const input = request.postDataJSON();

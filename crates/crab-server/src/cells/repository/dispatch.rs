@@ -25,6 +25,9 @@ pub(in crate::cells) fn dispatch_mutation(
         search::index::ensure_ready(context)?;
     }
     let result = match id {
+        collaboration::state::ChangeState::ID => {
+            invoke_mutation::<collaboration::state::ChangeState>(context, input)
+        }
         #[cfg(test)]
         issues::lifecycle::tests::Historical::ID => {
             invoke_mutation::<issues::lifecycle::tests::Historical>(context, input)
