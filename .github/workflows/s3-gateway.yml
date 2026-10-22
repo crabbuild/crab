@@ -1143,6 +1143,7 @@ jobs:
           S3_GATEWAY_BOTO3_SECRET_KEY="${GATEWAY_SECRET_KEY}" \
           python3 crab/scripts/e2e/s3_gateway_boto3.py \
             --endpoint "${endpoint}" --bucket "${bucket}" \
+            --xet-fixture "${xet_root}/source/qualification/xet-large.bin" \
             --large-object-bytes $((512 * 1024 * 1024)) \
             --report "${RUNNER_TEMP}/crab-s3-gateway-evidence/boto3-proof.json"
 

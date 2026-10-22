@@ -191,9 +191,13 @@ impl WriteMaintenance {
     }
 
     pub(crate) fn begin(&self) {
-        self.epoch.fetch_add(1, Ordering::AcqRel);
+        self.record_batch();
         self.active.fetch_add(1, Ordering::AcqRel);
         self.state().scheduled.cancel();
+    }
+
+    pub(crate) fn record_batch(&self) {
+        self.epoch.fetch_add(1, Ordering::AcqRel);
     }
 
     pub(crate) fn finish(&self, parent: &CancellationToken) -> Option<(u64, CancellationToken)> {

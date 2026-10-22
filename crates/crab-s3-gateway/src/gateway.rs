@@ -206,12 +206,19 @@ fn verified_crab_stream(
     stream: crab_read::ReconstructionStream,
     expected_size: u64,
     expected_hash: [u8; 32],
+    verify_hash: bool,
 ) -> crab_read::ReconstructionStream {
     use futures_util::StreamExt as _;
 
     let expected_hash_hex = blake3::Hash::from_bytes(expected_hash).to_hex().to_string();
     Box::pin(futures_util::stream::try_unfold(
-        (stream, blake3::Hasher::new(), 0_u64, None::<Bytes>, false),
+        (
+            stream,
+            verify_hash.then(blake3::Hasher::new),
+            0_u64,
+            None::<Bytes>,
+            false,
+        ),
         move |(mut stream, mut hasher, mut received, mut pending, finished)| {
             let expected_hash_hex = expected_hash_hex.clone();
             async move {
@@ -231,7 +238,9 @@ fn verified_crab_stream(
                                         "reconstruction exceeded declared size {expected_size}"
                                     ),
                                 })?;
-                            hasher.update(&chunk);
+                            if let Some(hasher) = &mut hasher {
+                                hasher.update(&chunk);
+                            }
                             if let Some(previous) = pending.replace(chunk) {
                                 return Ok(Some((
                                     previous,
@@ -249,12 +258,14 @@ fn verified_crab_stream(
                                     ),
                                 });
                             }
-                            let actual = hasher.clone().finalize();
-                            if actual.as_bytes() != &expected_hash {
-                                return Err(crab_read::ReadError::HashMismatch {
-                                    requested: expected_hash_hex,
-                                    actual: actual.to_hex().to_string(),
-                                });
+                            if let Some(hasher) = &hasher {
+                                let actual = hasher.finalize();
+                                if actual.as_bytes() != &expected_hash {
+                                    return Err(crab_read::ReadError::HashMismatch {
+                                        requested: expected_hash_hex,
+                                        actual: actual.to_hex().to_string(),
+                                    });
+                                }
                             }
                             if let Some(last) = pending.take() {
                                 return Ok(Some((last, (stream, hasher, received, pending, true))));
@@ -273,11 +284,8 @@ impl ReadContent {
         self,
         repository: &Repository,
         range: std::ops::Range<u64>,
-        metrics: &Metrics,
-        direct_range: bool,
     ) -> S3Result<ContentStream> {
-        use futures_util::{StreamExt as _, TryStreamExt as _};
-        use tokio::io::AsyncReadExt as _;
+        use futures_util::TryStreamExt as _;
 
         match self {
             Self::Ordinary(bytes) => {
@@ -305,73 +313,20 @@ impl ReadContent {
                     return Err(s3_error!(InvalidObjectState));
                 };
                 let full = range.start == 0 && range.end == pointer.size;
-                if direct_range || full {
-                    let stream = repository
-                        .hydrator
-                        .reconstruct_range_stream(&pointer, range)
-                        .map_err(|error| gateway_error(error.into()))?;
-                    let stream = (if full {
-                        verified_crab_stream(stream, pointer.size, pointer.file_hash)
-                    } else {
-                        stream
-                    })
-                    .map_err(|error| Box::new(error) as s3s::StdError);
-                    return Ok(Box::pin(stream));
+                // A zero-length HTTP body may never be polled, so its whole-file
+                // digest must be checked before returning response headers.
+                if full && pointer.size == 0 && pointer.file_hash != *blake3::hash(b"").as_bytes() {
+                    return Err(s3_error!(InvalidObjectState));
                 }
                 let size = range.end - range.start;
-                let capacity = metrics
-                    .reserve_scratch(size)
-                    .map_err(scratch_capacity_error)?;
-                let mut scratch =
-                    metrics.start_scratch(crate::metrics::ScratchPurpose::XetReconstruction);
-                scratch.reserve(size);
-                let directory = tempfile::tempdir().map_err(|error| {
-                    scratch.record_failure(crate::metrics::ScratchFailure::Create);
-                    gateway_error(error.into())
-                })?;
-                let path = directory.path().join("content");
-                let reconstruction = if range.start == 0 && range.end == pointer.size {
-                    repository
-                        .hydrator
-                        .reconstruct_to_path(&pointer, &path)
-                        .await
-                } else {
-                    repository
-                        .hydrator
-                        .reconstruct_range_to_path(&pointer, range.start, range.end, &path)
-                        .await
-                };
-                if let Err(error) = reconstruction {
-                    if error.is_destination_io() {
-                        scratch.record_failure(crate::metrics::ScratchFailure::Write);
-                    }
-                    return Err(gateway_error(error.into()));
-                }
-                // The completed file is now reflected by statvfs, so future
-                // reservations no longer need its pre-write capacity claim.
-                drop(capacity);
-                scratch.record_written(size);
-                let file = tokio::fs::File::open(path).await.map_err(|error| {
-                    scratch.record_failure(crate::metrics::ScratchFailure::Read);
-                    gateway_error(error.into())
-                })?;
-                let reader = tokio_util::io::ReaderStream::new(file.take(size));
-                // The response stream owns the directory and accounting lease so a
-                // disconnect removes the reconstructed bytes and releases the gauges.
-                let stream = futures_util::stream::try_unfold(
-                    (reader, directory, scratch),
-                    |(mut reader, directory, scratch)| async move {
-                        match reader.next().await {
-                            Some(Ok(bytes)) => Ok(Some((bytes, (reader, directory, scratch)))),
-                            Some(Err(error)) => {
-                                scratch.record_failure(crate::metrics::ScratchFailure::Read);
-                                Err(error)
-                            }
-                            None => Ok(None),
-                        }
-                    },
-                )
-                .map_err(|error| Box::new(error) as s3s::StdError);
+                let stream = repository
+                    .hydrator
+                    .reconstruct_range_stream(&pointer, range)
+                    .map_err(|error| gateway_error(error.into()))?;
+                // Content-Length clients can stop at the final byte. Await Xet's
+                // terminal size/error result before releasing it, even for ranges.
+                let stream = verified_crab_stream(stream, size, pointer.file_hash, full)
+                    .map_err(|error| Box::new(error) as s3s::StdError);
                 Ok(Box::pin(stream))
             }
         }
@@ -387,7 +342,7 @@ impl ReadContent {
         use futures_util::StreamExt as _;
 
         let expected = range.end.saturating_sub(range.start);
-        let mut stream = self.stream(repository, range, metrics, false).await?;
+        let mut stream = self.stream(repository, range).await?;
         let mut writer = crate::content::SpoolWriter::new(metrics, Some(expected))
             .await
             .map_err(content_error)?;
@@ -813,7 +768,6 @@ impl Gateway {
                 .snapshot(&address.reference, &operation)
                 .await
                 .map_err(gateway_error)?;
-            let commit = snapshot.commit(&operation).await.map_err(remote_error)?;
             let blob = snapshot
                 .read_blob(&address.path, &operation)
                 .await
@@ -821,24 +775,34 @@ impl Gateway {
             if blob.metadata.kind != EntryKind::Blob {
                 return Err(s3_error!(InvalidObjectState));
             }
-            let manifest = match self.mutations.manifest(
+            let path = std::str::from_utf8(address.path.as_bytes())
+                .map_err(|_| s3_error!(InvalidObjectState))?;
+            // Share HEAD's pinned object lookup; GET must not replay unrelated
+            // attribute history or retain another repository-sized manifest.
+            let attributes = match self.mutations.manifest(
                 &repository.config.name,
                 &address.reference,
                 snapshot.commit_oid(),
             ) {
-                Some(manifest) => manifest,
+                Some(manifest) => manifest.object(path, blob.metadata.oid).cloned(),
                 None => repo
-                    .attributes(repository, snapshot.commit_oid())
+                    .object_attributes(repository, snapshot.commit_oid(), path, blob.metadata.oid)
                     .await
                     .map_err(gateway_error)?,
             };
-            let path = std::str::from_utf8(address.path.as_bytes())
-                .map_err(|_| s3_error!(InvalidObjectState))?;
-            let attributes = manifest.object(path, blob.metadata.oid).cloned();
-            let modified_seconds = attributes
-                .as_ref()
-                .and_then(|value| i64::try_from(value.modified_seconds).ok())
-                .unwrap_or(commit.committer.seconds);
+            let modified_seconds = match attributes.as_ref() {
+                Some(value) => {
+                    i64::try_from(value.modified_seconds).map_err(|_| s3_error!(InternalError))?
+                }
+                None => {
+                    snapshot
+                        .commit(&operation)
+                        .await
+                        .map_err(remote_error)?
+                        .committer
+                        .seconds
+                }
+            };
             let modified = timestamp(modified_seconds)?;
             let (content, size) = classify_blob(blob)?;
             let etag = match attributes.as_ref() {
@@ -1224,10 +1188,15 @@ async fn mutation_bytes(
     spool: &crate::content::Spool,
 ) -> S3Result<MutationContent> {
     if spool.size <= repository.config.git_blob_max_bytes {
-        return Ok(MutationContent {
-            bytes: spool.bytes().await.map_err(content_error)?,
-            track_lfs: false,
-        });
+        let bytes = spool.bytes().await.map_err(content_error)?;
+        if matches!(crab_git::classify(&bytes), PointerKind::NotAPointer) {
+            return Ok(MutationContent {
+                bytes,
+                track_lfs: false,
+            });
+        }
+        // S3 uploads are literal bytes. A pointer-shaped Git blob would instead
+        // hydrate its referenced object, so store that text as verified LFS data.
     }
     // The LFS object is content-addressed and uploaded before its pointer commit.
     // Crab's GC grace period protects this brief publication window and cleans an
@@ -1396,17 +1365,10 @@ impl S3 for Gateway {
             req.input.checksum_mode.as_ref(),
             selection.checksums.as_ref(),
         )?;
-        let direct_range = selection.content_range.is_some();
         let range = selection.range;
         let content_length =
             i64::try_from(range.end - range.start).map_err(|_| s3_error!(InternalError))?;
-        let body = hold_permit(
-            object
-                .content
-                .stream(repository, range, &self.metrics, direct_range)
-                .await?,
-            permit,
-        );
+        let body = hold_permit(object.content.stream(repository, range).await?, permit);
         let body =
             http_body_util::StreamBody::new(body.map(|result| result.map(http_body::Frame::data)));
         let output = GetObjectOutput {
@@ -4783,7 +4745,8 @@ mod tests {
             Ok(Bytes::from_static(b"hello")),
             Ok(Bytes::from_static(b" world")),
         ]));
-        let mut stream = verified_crab_stream(source, 11, *blake3::hash(b"hello world").as_bytes());
+        let mut stream =
+            verified_crab_stream(source, 11, *blake3::hash(b"hello world").as_bytes(), true);
 
         assert_eq!(
             stream.next().await.unwrap().unwrap(),
@@ -4804,7 +4767,7 @@ mod tests {
             Ok(Bytes::from_static(b"hello")),
             Ok(Bytes::from_static(b" world")),
         ]));
-        let mut stream = verified_crab_stream(source, 11, [0; 32]);
+        let mut stream = verified_crab_stream(source, 11, [0; 32], true);
 
         assert_eq!(
             stream.next().await.unwrap().unwrap(),
@@ -4814,6 +4777,41 @@ mod tests {
             stream.next().await,
             Some(Err(crab_read::ReadError::HashMismatch { .. }))
         ));
+        assert!(stream.next().await.is_none());
+    }
+
+    #[tokio::test]
+    async fn verified_crab_ranges_withhold_final_bytes_until_framing_succeeds() {
+        let cases = [
+            (
+                5,
+                Some(Err(crab_read::ReadError::CorruptObject {
+                    path: "range".to_owned(),
+                    reason: "terminal reconstruction failure".to_owned(),
+                })),
+            ),
+            (5, Some(Ok(Bytes::from_static(b"extra")))),
+            (6, None),
+        ];
+        for (size, tail) in cases {
+            let source = Box::pin(futures_util::stream::iter(
+                std::iter::once(Ok(Bytes::from_static(b"hello"))).chain(tail),
+            ));
+            let mut stream = verified_crab_stream(source, size, [0; 32], false);
+
+            // A Content-Length consumer must see an error before it receives
+            // all declared bytes; polling once more after them is too late.
+            assert!(matches!(
+                stream.next().await,
+                Some(Err(crab_read::ReadError::CorruptObject { .. }))
+            ));
+        }
+
+        let source = Box::pin(futures_util::stream::once(async {
+            Ok(Bytes::from_static(b"hello"))
+        }));
+        let mut stream = verified_crab_stream(source, 5, [0; 32], false);
+        assert_eq!(stream.next().await.unwrap().unwrap(), b"hello".as_slice());
         assert!(stream.next().await.is_none());
     }
 
@@ -5411,7 +5409,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn content_above_configured_git_blob_limit_is_stored_as_streamable_lfs() {
+    async fn uploaded_bytes_round_trip_without_interpreting_pointer_shaped_content() {
         use futures_util::TryStreamExt as _;
 
         let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
@@ -5424,7 +5422,7 @@ mod tests {
                 default_branch: "main".to_owned(),
                 members: Vec::new(),
                 protected_branches: Vec::new(),
-                git_blob_max_bytes: 8,
+                git_blob_max_bytes: 1024,
                 max_active_multipart_uploads: 16,
                 multipart_staging_bytes_per_upload: 50_000_000_000_000,
                 multipart_upload_ttl_seconds: 604_800,
@@ -5432,33 +5430,46 @@ mod tests {
             store,
         )
         .unwrap();
-        let content = b"content larger than the test inline limit";
         let metrics = Metrics::new().unwrap();
-        let mut writer = crate::content::SpoolWriter::new(&metrics, None)
-            .await
-            .unwrap();
-        writer.write(content, u64::MAX).await.unwrap();
-        let spool = writer.finish().await.unwrap();
-
-        let mutation = mutation_bytes(&repository, &spool).await.unwrap();
-        assert!(mutation.track_lfs);
-        let PointerKind::Lfs(pointer) = crab_git::classify(&mutation.bytes) else {
-            panic!("expected an LFS pointer");
-        };
-        let (_, _, stream) = repository
-            .lfs
-            .get_stream(&pointer.oid, pointer.size, None)
-            .await
-            .unwrap();
-        let actual = stream
-            .try_fold(Vec::new(), |mut bytes, chunk| async move {
-                bytes.extend_from_slice(&chunk);
-                Ok(bytes)
-            })
-            .await
-            .unwrap();
-
-        assert_eq!(actual, content);
+        let hash = "01".repeat(32);
+        for (content, expected_lfs) in [
+            (Vec::new(), false),
+            (b"ordinary Git content".to_vec(), false),
+            (vec![42; 1025], true),
+            (
+                format!(
+                    "version https://git-lfs.github.com/spec/v1\noid sha256:{hash}\nsize 512\n"
+                )
+                .into_bytes(),
+                true,
+            ),
+            (
+                format!("version https://crab.build/spec/v1\nfile-hash {hash}\nsize 512\n")
+                    .into_bytes(),
+                true,
+            ),
+        ] {
+            let mut writer = crate::content::SpoolWriter::new(&metrics, None)
+                .await
+                .unwrap();
+            writer.write(&content, u64::MAX).await.unwrap();
+            let spool = writer.finish().await.unwrap();
+            let mutation = mutation_bytes(&repository, &spool).await.unwrap();
+            let source = match crab_git::classify(&mutation.bytes) {
+                PointerKind::NotAPointer => ReadContent::Ordinary(mutation.bytes),
+                PointerKind::Lfs(pointer) => ReadContent::LfsPointer(pointer),
+                PointerKind::Crab(_) => ReadContent::CrabPointer(mutation.bytes),
+            };
+            let actual = source
+                .stream(&repository, 0..spool.size)
+                .await
+                .unwrap()
+                .try_collect::<Vec<_>>()
+                .await
+                .unwrap()
+                .concat();
+            assert_eq!((actual, mutation.track_lfs), (content, expected_lfs));
+        }
     }
 
     #[tokio::test]

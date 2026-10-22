@@ -281,6 +281,8 @@ object-store manifest and advances catalog coverage for that generation under
 the generation-owner and GC-writer fences. It yields after that bounded pass;
 newer transactions remain authoritative and become eligible after another 64
 epochs instead of triggering an immediate catch-up loop.
+Each batch within a retained GC-fence burst advances that cadence separately,
+so fence reuse cannot multiply the unindexed pack tail by eight.
 
 Read views use the newest catalog whose immutable pack inventory is a
 proven subset of their snapshot, then inspect only the remaining pack tail. This
@@ -326,7 +328,10 @@ canonical compatibility reference; this README is only an overview.
 Large uploads use bounded temporary spools and Crab's verified LFS path.
 `git_blob_max_bytes` is configured per repository, defaults to 1 MiB, and
 accepts values through 64 MiB. Objects at or below that limit remain ordinary
-Git blobs; larger PUTs and copies use LFS.
+Git blobs; larger PUTs and copies use LFS. Literal upload bytes that parse as a
+Crab or LFS pointer also use LFS, so downloading a pointer-text file returns its
+original text rather than the referenced content. PUT, COPY, and multipart
+completion share this representation rule.
 
 Multipart completion does not
 assemble objects above the configured limit into a second full-size local file;
@@ -338,6 +343,13 @@ Objects already represented by Crab/Xet keep their deduplication. A byte-range
 GET reconstructs only overlapping Xet chunks and streams the selected bytes
 through bounded backpressure. It does not hydrate the complete logical file or
 create response-sized scratch. Complete GETs retain whole-file verification.
+Every Xet response withholds its final chunk until reconstruction reaches
+successful EOF, including range responses. Multipart range copies use the same
+verified stream directly into their upload spool, avoiding a second on-disk copy.
+
+GET and HEAD share the same commit/path/blob-bound attribute lookup. A cold GET
+can stop at the object's newest attribute delta instead of loading the complete
+attribute history for unrelated objects.
 
 The process uses a required local read cache shared by its configured
 repositories. Put the cache on a private, capacity-limited volume separate from

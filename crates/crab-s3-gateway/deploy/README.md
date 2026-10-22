@@ -124,6 +124,12 @@ eight sequential 64 MiB parts, reads the complete object back, and reads a
 range crossing a persisted part boundary. Both reads are compared with the
 local SHA-256 fixture, and upload/full-read/range-read timings are retained
 without credentials or object names.
+Its byte-round-trip checks also cover empty and ordinary Git blobs, literal
+Crab/LFS pointer text, COPY, and small multipart completion. Given
+`--xet-fixture <local-source>`, it additionally verifies full, closed, open, and
+suffix Xet reads, conditions, full COPY, and multipart range copy against the
+SDK-published source selected by `--xet-key`. The packaged-image job supplies
+that source alongside the large LFS fixture.
 The same packaged-image job runs an identity-free ecosystem matrix against the
 gateway: AWS CLI and Boto3 (including SigV4 presigning), DuckDB CLI and Python,
 LanceDB, Spark S3A, PyArrow, Pandas, Polars, fsspec/s3fs, Dask, MinIO,

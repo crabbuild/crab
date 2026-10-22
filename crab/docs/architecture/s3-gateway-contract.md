@@ -361,7 +361,7 @@ multipart form uploads remain on their streaming path. Response streams use the
 same 60-second per-frame idle bound, releasing read admission and dropping the
 underlying provider or Xet stream on timeout; this is not a total-transfer
 deadline, so large downloads may continue while bytes keep arriving. Content
-spools, Xet range reconstruction, and generated Git packs share one atomic
+spools and generated Git packs share one atomic
 process-local gate. It retains 10% of
 visible capacity outside reservations, bounded to a 64 MiB minimum and 1 GiB
 maximum. A failed capacity probe fails closed, and reservation pressure returns
@@ -376,10 +376,15 @@ is the canonical LFS pointer and the S3 attribute record retains the logical
 size and ETag. That same Git
 commit appends an exact tracking rule to the nearest `.gitattributes`,
 preserving any existing rules, so ordinary Git/LFS checkout interprets the
-pointer consistently. GET streams LFS content directly. A Crab/Xet GET streams
+pointer consistently. Literal S3 uploads that themselves parse as Crab or LFS
+pointers use this LFS path even below the Git blob limit, preserving the uploaded
+text without recursively interpreting it. PUT, COPY, and multipart completion
+use the same rule. GET streams LFS content directly. A Crab/Xet GET streams
 verified reconstruction through a single bounded backpressure slot and cancels
-reconstruction when the response is dropped; a complete GET withholds its
-terminal chunk until the whole-file hash and declared size verify. Successful
+reconstruction when the response is dropped. Every Xet stream withholds its
+terminal chunk until EOF and the declared response size verify; complete reads
+also verify the whole-file hash. Multipart range copies feed this verified stream
+directly into one upload spool without separate reconstruction scratch. Successful
 writes are returned only after their committed outcome is durable and read-ready.
 Each process collects compatible same-branch mutations for at most 10 ms and
 drains at most 32 requests or 32 MiB of Git mutation payload per batch. A single
@@ -422,7 +427,8 @@ missing delta, legacy checkpoint, or Git-authored ancestor removes that proof an
 requires canonical Git-tree listing. Once a batch is drained, its worker is
 owned by the gateway rather than the HTTP request that won local admission, so
 one disconnected caller cannot cancel the remaining accepted mutations.
-Every 64 local publication epochs, one coalesced background worker folds active
+Each batch advances the local publication epoch, including batches that reuse
+one worker's GC fences. Every 64 epochs, one coalesced background worker folds active
 ref-journal transactions into the object-store manifest and advances exact-object
 catalog coverage under the generation-owner and GC-writer fences, even when writes
 remain continuous. Read views bind the newest catalog whose immutable pack

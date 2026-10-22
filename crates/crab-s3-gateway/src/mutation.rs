@@ -378,6 +378,10 @@ impl Coordinator {
                                 break;
                             }
                         };
+                        // Retaining GC fences still adds one pack per batch.
+                        // Count each batch so catalog refresh cannot lag by the
+                        // burst length and exhaust foreground read budgets.
+                        repository.maintenance.record_batch();
                         if batch
                             .first()
                             .is_some_and(|pending| pending.mutation.is_planned())
@@ -5439,7 +5443,13 @@ mod tests {
         .await
         .unwrap()
         .journal;
-        assert_eq!(journal.transactions.len(), 2);
+        assert_eq!(
+            (
+                journal.transactions.len(),
+                repository.maintenance.current_epoch()
+            ),
+            (2, 2)
+        );
         assert_eq!(journal.packs.len(), 2);
 
         let view = repository

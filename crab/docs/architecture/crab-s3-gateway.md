@@ -606,6 +606,8 @@ remain keyed by compacted generation and the validated committed-journal digest.
 Concurrent refreshes and branch-tip
 snapshot resolution use singleflight cells; Git trees reuse the generation-bound
 remote-read cache, and attributes are cached per immutable commit. The gateway
+shares GET and HEAD object-attribute cells keyed by commit, path, and blob OID,
+so an attributed GET need not replay unrelated attribute history. The gateway
 invalidates its mutable-ref view after publication. HEAD and attributed LIST
 resolve size and ETag from committed attributes without opening blob payloads.
 Committed journal packs and authenticated v2 capsule packs remain readable
@@ -632,9 +634,10 @@ ranges; the cache may fetch and retain a complete verified xorb when the
 selected chunks cover most of it. The selected bytes stream through one bounded
 backpressure slot, so the gateway does not hydrate the complete logical file,
 retain the requested range in memory, or reserve scratch proportional to the
-response. Dropping the response cancels reconstruction. A complete GET continues
-through the same bounded reconstruction stream; its terminal chunk is withheld
-until the pointer hash and declared size are verified before successful EOF.
+response. Copy-source ranges stream directly into their upload spool without
+another reconstructed temporary file. Dropping the response cancels
+reconstruction. Every Xet stream withholds its terminal chunk until exact length
+and successful EOF are proven; a complete GET also verifies the pointer hash.
 
 ### 3.2 Headers, conditions and ranges
 
@@ -856,7 +859,8 @@ derived catalog work releases its fences and yields to S3 mutation traffic. The
 gateway schedules maintenance again after the local write burst is idle and
 prevents overlapping maintenance waves from advancing ahead of visibility proof
 publication. Sustained traffic additionally claims one catalog-maintenance pass
-every 64 local publication epochs. The elected worker compacts one captured
+every 64 local publication epochs, counting every batch within a retained-fence
+burst separately. The elected worker compacts one captured
 durable journal wave, advances exact-object catalog coverage for that generation
 even when newer transactions exist, and then yields under the generation-owner
 and GC-writer fences. It neither chases the moving journal for additional waves
