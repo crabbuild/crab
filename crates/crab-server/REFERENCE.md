@@ -2012,6 +2012,25 @@ pure reorder does not add a timeline event.
 
 ### Work with pull requests and reviews
 
+Pull details and summaries expose nullable `closed_at` and `merged_at` in Unix
+milliseconds. A successful close records its transition time; reopening clears
+it. A completed merge sets both to the native completion time, independently of
+`merge.created_at` (reservation time). Later metadata edits, no-op closure changes
+and merge retries preserve these dates.
+
+List rows distinguish opened, closed and merged states and retain draft labels.
+The pinned MIT-licensed `@github/relative-time-element` 5.3.1 owns date rounding,
+live refresh and its default 30-day calendar-date threshold. shadcn tooltips show
+localized exact dates on hover or keyboard focus. Unknown historical dates remain
+explicitly unknown, including in the merge summary. See the [upstream component
+contract](https://github.com/github/relative-time-element) and [documentation](https://github.github.com/relative-time-element/).
+
+Existing native repositories require `cells prepare-pull-state --owner OWNER
+--name REPO`. This bounded, restartable preparation derives metadata only from
+matching immutable activity and leaves original records, versions and command
+receipts unchanged. Unprepared reads/writes return 503 `schema_upgrade_required`.
+No discussion-index rebuild is needed. See [native lifecycle preparation](CELLAR.md#prepare-pull-lifecycle-metadata).
+
 
 Pull list rows, including PR rows returned by issue search, include `rollup` with
 `number`, captured `head_oid`, `checks` and `reviews`. Check counts distinguish

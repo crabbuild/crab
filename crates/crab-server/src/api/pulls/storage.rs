@@ -133,6 +133,28 @@ pub(super) struct NewPullMerge {
     pub message: String,
 }
 
+pub(super) struct PullDetail {
+    pub pull: PullRequest,
+    pub lifecycle: crate::cells::repository::PullLifecycle,
+}
+pub(super) async fn detail(
+    server: &Server,
+    repo: &Repository,
+    number: u64,
+) -> Result<Option<PullDetail>> {
+    let routed = crate::app::repository_cell(server, repo)?;
+    let detail = crate::app::query_output(
+        routed
+            .client
+            .query::<crate::cells::repository::GetPullDetail>(&routed.target, None, number)
+            .await,
+    )?;
+    Ok(detail.map(|value| PullDetail {
+        pull: from_pull(value.pull),
+        lifecycle: value.lifecycle,
+    }))
+}
+
 pub(super) async fn pull(
     server: &Server,
     repo: &Repository,

@@ -50,7 +50,10 @@ pub(crate) use pulls::{
     UpdatePullCommentInput, UpdatePullCommentOutcome, UpdatePullInput, UpdatePullOutcome,
     UpdatePullReview, UpdatePullReviewInput, UpdatePullReviewOutcome,
 };
-pub(crate) use pulls::{review_requests, reviewers, rollups};
+pub(crate) use pulls::{
+    GetPullDetail, GetPullLifecycleStatus, PreparePullLifecycle, PullLifecycle, review_requests,
+    reviewers, rollups,
+};
 pub(crate) use releases::{
     AttachReleaseAsset, AttachReleaseAssetInput, AttachReleaseAssetOutcome,
     CompleteReleasePublication, CompleteReleasePublicationInput, CompleteReleasePublicationOutcome,

@@ -518,8 +518,11 @@ with open(run / "commands.log", "w") as log:
         merge_input["version"] = ready["version"]
         merged = request(pull_path + "/merge", merge_input)
         assert merged["state"] == "merged" and merged["draft"] is False
+        assert merged["closed_at"] == merged["merged_at"] == merged["updated_at"]
+        assert request(pull_path + "/merge", merge_input)["merged_at"] == merged["merged_at"]
         merged_activity = request("/api/repos/team/project/activity")
         assert [event["action"]["kind"] for event in merged_activity["items"][:2]] == ["merged", "ready_for_review"]
+        assert merged_activity["items"][0]["created_at"] == merged["merged_at"]
         stop()
         server = start()
         wait()
@@ -621,6 +624,10 @@ with open(run / "commands.log", "w") as log:
             saved = request(path + "/state", body)
             assert saved["comment"]["body"] == body["body"]
             assert request(path)["state"] == state
+            if path == state_pull_path:
+                closed_pull = request(path)
+                assert closed_pull["closed_at"] == closed_pull["updated_at"]
+                assert closed_pull["merged_at"] is None
             state_actions.append((path, body, saved["comment"]["number"], count_before + 1))
         current_issue = request(issue_path)
         request(issue_path + "/state", {"request_id": str(uuid.uuid4()), "version": current_issue["version"], "state": "closed"})
@@ -692,6 +699,11 @@ with open(run / "commands.log", "w") as log:
         assert missing_rollup == {"number":rollup_pull["number"],"head_oid":None,"checks":None,"reviews":None}
         merged_rollup = next(item["rollup"] for item in request("/api/repos/team/project/pulls?"+urllib.parse.urlencode({"q":"is:merged"}))["items"] if item["number"] == pull["number"])
         assert merged_rollup["head_oid"] == merged_head and merged_rollup["checks"]["success"] >= 1
+        lifecycle_saved = {path: {key: request(path)[key] for key in ["closed_at", "merged_at"]} for path in [pull_path, state_pull_path]}
+        assert lifecycle_saved[pull_path]["merged_at"] == merged["merged_at"]
+        assert lifecycle_saved[state_pull_path]["closed_at"] is None
+        assert lifecycle_saved[state_pull_path]["merged_at"] is None
+
         # State submissions recover after a complete process restart.
         stop()
         server = start()
@@ -703,6 +715,9 @@ with open(run / "commands.log", "w") as log:
             search = "/api/repos/team/project/issues?" + urllib.parse.urlencode({"q": 'in:comments "Atomic context"'})
             assert request(search)["matching"] == 2
         assert request(rollup_list)["items"][0]["rollup"] == missing_rollup
+        for path, saved in lifecycle_saved.items():
+            assert {key: request(path)[key] for key in saved} == saved
+
         assert request(pins_path, pin_original, method="PUT") == {"version": 1}
         assert request(pins_path) == pins_saved
         assert request(pinned_issue_path + "/activity") == pin_events
@@ -739,6 +754,7 @@ with open(run / "commands.log", "w") as log:
             "repository_creation": True,
             "repository_identity_precondition": True,
             "issue_replay": True,
+            "pull_lifecycle_completion_and_closure_restart": True,
             "pull_list_rollup_head_restart": True,
             "merged_rollup_survives_source_deletion": True,
             "pins_restart_current_cards": True,

@@ -108,6 +108,8 @@ export async function mockPullRequest(
       original_head_oid: lifecycle.head,
       version: lifecycle.state === "open" ? 1 : 2,
       created_at: 1_700_000_000_000,
+      closed_at: lifecycle.state === "open" ? null : 1_700_000_060_000,
+      merged_at: lifecycle.state === "merged" ? 1_700_000_060_000 : null,
       updated_at: 1_700_000_000_000,
       can_edit: true,
       can_manage: !mergePending,

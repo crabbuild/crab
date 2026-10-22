@@ -7,6 +7,7 @@ use super::{SqlBatch, SqlValue, Transaction, integer, statement, validate_number
 pub(crate) mod activity;
 pub(crate) mod bulk;
 pub(crate) mod conversation;
+pub(crate) mod lifecycle;
 pub(crate) mod links;
 pub(crate) mod milestones;
 pub(crate) mod reactions;

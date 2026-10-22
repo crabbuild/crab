@@ -85,6 +85,13 @@ Repository pages use GitHub-style paths. **Code**, **Issues**, **Pull requests**
 **Go to file** (keyboard `T`) opens file search, and **Add file** offers the
 existing create and upload actions.
 
+Issue and pull-request list rows show their opening, closing or merge-completion
+time, with relative dates and keyboard-accessible exact-time tooltips. Later
+edits keep the original closure time; reopening clears it. Prepare existing
+native repositories with `cells prepare-pull-state --owner OWNER --name REPO`
+before reopening traffic. Historical times come only from matching activity;
+missing evidence stays unknown. No discussion-index rebuild is needed.
+
 Pull requests can be created as drafts, converted to drafts, and marked ready
 for review. Draft badges appear in lists and details; merge admission rejects
 drafts and stale readiness changes. Authors or writers manage readiness, and

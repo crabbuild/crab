@@ -32,6 +32,8 @@ async function setup(page: Page, initialDraft: boolean) {
     state: merged ? "merged" : "open",
     author: { name: "Alice", profile: null },
     created_at: 1700000000000,
+    closed_at: merged ? 1700000060000 : null,
+    merged_at: merged ? 1700000060000 : null,
     updated_at: 1700000000000,
     base_ref: "refs/heads/main",
     head_ref: "refs/heads/feature",

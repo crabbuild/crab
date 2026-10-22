@@ -265,6 +265,8 @@ async fn pull_requests_follow_live_branches_and_persist_discussion_state() {
     .await;
     assert_eq!(closed.0, StatusCode::OK);
     assert_eq!(closed.1["state"], "closed");
+    assert_eq!(closed.1["closed_at"], closed.1["updated_at"]);
+    assert_eq!(closed.1["merged_at"], Value::Null);
     let recovered_review = json_request(&client, reqwest::Method::POST, &review_url, review).await;
     assert_eq!(recovered_review.0, StatusCode::CREATED);
     assert_eq!(recovered_review.1["number"], 1);
@@ -281,6 +283,7 @@ async fn pull_requests_follow_live_branches_and_persist_discussion_state() {
     )
     .unwrap();
     assert_eq!(closed_list["items"][0]["number"], 1);
+    assert_eq!(closed_list["items"][0]["closed_at"], closed.1["closed_at"]);
     let searched: Value = serde_json::from_slice(
         &client
             .get(format!("{root}?q=is:closed%20PLEASE%20REVIEW"))
@@ -578,6 +581,8 @@ async fn pull_request_merge_methods_use_canonical_ref_publication() {
     .await;
     assert_eq!(merged.0, StatusCode::OK);
     assert_eq!(merged.1["state"], "merged");
+    assert_eq!(merged.1["closed_at"], merged.1["updated_at"]);
+    assert_eq!(merged.1["merged_at"], merged.1["closed_at"]);
     assert_eq!(merged.1["base_oid"], base);
     assert_eq!(merged.1["head_oid"], head);
     assert_eq!(merged.1["merge"]["commit_oid"], head);

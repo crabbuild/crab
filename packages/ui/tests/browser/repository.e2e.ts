@@ -704,6 +704,10 @@ test.beforeEach(async ({ page }) => {
               author: { name: "Alice", profile: null },
               body: null,
               title: "Keep object storage reads bounded",
+              closed_at:
+                url.searchParams.get("q") === "is:closed"
+                  ? 1700000001000
+                  : null,
               state:
                 url.searchParams.get("q") === "is:closed" ? "closed" : "open",
               labels: [

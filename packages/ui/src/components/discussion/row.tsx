@@ -14,7 +14,7 @@ import type { Repository } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
 import { DiscussionCommentCount } from "./list";
 import { AssigneeAvatars } from "./metadata";
-import { timestamp } from "./time";
+import { RelativeTime } from "./time";
 import { Author } from "./author";
 import { Checkbox } from "@/components/ui/checkbox";
 
@@ -83,8 +83,25 @@ export function DiscussionRow({
         </Link>
         <LabelBadges labels={item.labels} />
         <p className="muted">
-          #{item.number} opened {timestamp(item.created_at)} by{" "}
-          <Author author={item.author} />
+          {item.state === "open" ? (
+            <>
+              #{item.number} opened <RelativeTime value={item.created_at} /> by{" "}
+              <Author author={item.author} />
+            </>
+          ) : (
+            <>
+              #{item.number} by <Author author={item.author} /> was{" "}
+              {item.state === "merged" ? "merged" : "closed"}{" "}
+              <RelativeTime
+                value={
+                  item.kind === "pull" && item.state === "merged"
+                    ? item.merged_at
+                    : item.closed_at
+                }
+              />
+            </>
+          )}
+          {item.kind === "pull" && item.draft && " · Draft"}
           {item.kind === "pull" && (
             <span className="ml-2 inline-flex flex-wrap items-center gap-2">
               <PullRollups repo={repo} rollup={item.rollup} />

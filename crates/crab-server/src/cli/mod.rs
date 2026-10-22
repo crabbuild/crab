@@ -10,7 +10,7 @@ use tracing_subscriber::EnvFilter;
 
 mod assignments;
 mod ecs;
-mod issues;
+mod lifecycle;
 
 #[derive(Parser)]
 #[command(version, about = "Serve and administer Crab repositories")]
@@ -90,6 +90,13 @@ enum CellsCommand {
     },
     /// Prepare canonical issue closure metadata in restartable bounded frames.
     PrepareIssueState {
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        name: String,
+    },
+    /// Prepare canonical PR close/merge times in restartable bounded frames.
+    PreparePullState {
         #[arg(long)]
         owner: String,
         #[arg(long)]
@@ -284,7 +291,10 @@ async fn cells(config: &crab_server::Config, command: CellsCommand) -> crab_serv
                 .to_vec()
         }
         CellsCommand::PrepareIssueState { owner, name } => {
-            issues::prepare(config, &owner, &name).await?
+            lifecycle::prepare(config, &owner, &name, "issue-state").await?
+        }
+        CellsCommand::PreparePullState { owner, name } => {
+            lifecycle::prepare(config, &owner, &name, "pull-state").await?
         }
         CellsCommand::DirectoryStatus => management_body(config, "/internal/directory").await?,
         CellsCommand::MigrateDirectory => migrate_directory(config).await?,

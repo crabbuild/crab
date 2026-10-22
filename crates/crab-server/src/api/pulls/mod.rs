@@ -61,13 +61,17 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
 }
 
 async fn pull_view(
-    pull: &PullRequest,
+    number: u64,
     actor: &Identity,
     server: &Server,
     repo: &Repository,
     principal: &Principal,
     current: Option<&(String, String)>,
 ) -> Result<Value> {
+    let details = storage::detail(server, repo, number)
+        .await?
+        .ok_or(Error::NotFound)?;
+    let pull = &details.pull;
     let base_oid = pull.merge.as_ref().map_or_else(
         || current.map_or(pull.base_oid.as_str(), |value| value.0.as_str()),
         |merge| merge.base_oid.as_str(),
@@ -128,6 +132,8 @@ async fn pull_view(
         "original_head_oid": pull.head_oid,
         "version": pull.version,
         "created_at": pull.created_at,
+        "closed_at":details.lifecycle.closed_at_ms,
+        "merged_at":details.lifecycle.merged_at_ms,
         "updated_at": pull.updated_at,
         "labels": labels::selection_view(&pull.label_ids, &labels),
         "assignees": assignees.view(&pull.assignees),
@@ -308,6 +314,8 @@ pub(super) fn pull_list_view(
         "base_ref": pull.base_ref,
         "head_ref": pull.head_ref,
         "created_at": pull.created_at_ms,
+        "closed_at":pull.closed_at_ms,
+        "merged_at":pull.merged_at_ms,
         "updated_at": pull.updated_at_ms,
         "labels": pull.label_ids.iter().filter_map(|id|labels.iter().find(|label|label.id==*id)).collect::<Vec<_>>(),
         "assignees": assignees.view(&pull.assignees),
@@ -441,7 +449,17 @@ async fn create(
             .and_then(|repository| current_branches(repository, &pull));
         return Ok((
             StatusCode::CREATED,
-            Json(pull_view(&pull, &actor, &server, repo, &principal, current.as_ref()).await?),
+            Json(
+                pull_view(
+                    pull.number,
+                    &actor,
+                    &server,
+                    repo,
+                    &principal,
+                    current.as_ref(),
+                )
+                .await?,
+            ),
         ));
     }
     let repository = repo
@@ -471,7 +489,17 @@ async fn create(
     let current = current_branches(&repository, &pull);
     Ok((
         StatusCode::CREATED,
-        Json(pull_view(&pull, &actor, &server, repo, &principal, current.as_ref()).await?),
+        Json(
+            pull_view(
+                pull.number,
+                &actor,
+                &server,
+                repo,
+                &principal,
+                current.as_ref(),
+            )
+            .await?,
+        ),
     ))
 }
 
@@ -494,7 +522,15 @@ async fn detail(
         .as_ref()
         .and_then(|repository| current_branches(repository, &pull));
     Ok(Json(
-        pull_view(&pull, &actor, &server, repo, &principal, current.as_ref()).await?,
+        pull_view(
+            pull.number,
+            &actor,
+            &server,
+            repo,
+            &principal,
+            current.as_ref(),
+        )
+        .await?,
     ))
 }
 
@@ -619,7 +655,15 @@ async fn edit(
         .as_ref()
         .and_then(|repository| current_branches(repository, &pull));
     Ok(Json(
-        pull_view(&pull, &actor, &server, repo, &principal, current.as_ref()).await?,
+        pull_view(
+            pull.number,
+            &actor,
+            &server,
+            repo,
+            &principal,
+            current.as_ref(),
+        )
+        .await?,
     ))
 }
 

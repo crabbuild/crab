@@ -924,6 +924,8 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
             "base_ref":"refs/heads/main",
             "head_ref":"refs/heads/feature",
             "created_at":assigned.1["created_at"],
+            "closed_at":null,
+            "merged_at":null,
             "updated_at":assigned.1["updated_at"],
             "labels":[{"id":label.1["id"],"name":"ready for merge","color":"1f883d"}],
             "version":assigned.1["version"],

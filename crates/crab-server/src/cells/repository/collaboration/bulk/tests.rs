@@ -155,13 +155,25 @@ async fn mixed_state_edits_rollback_on_stale_selection_and_recover_after_archive
         },
     );
     let mut stale = change.clone();
+    // The pull changes first, so the later issue conflict must also roll back
+    // its lifecycle row with the canonical record and activity.
+    stale.items.reverse();
     stale.items[1].item.version = 2;
     assert!(matches!(
         write::<Edit>(&cell, stale).await,
         Outcome::Rejected(Failure::Conflict)
     ));
     assert_eq!(read::<GetIssue>(&cell, 1).await.unwrap().version, 1);
+    assert_eq!(
+        read::<GetPullDetail>(&cell, 1).await.unwrap().lifecycle,
+        PullLifecycle::default()
+    );
     assert_eq!(applied(write::<Edit>(&cell, change.clone()).await), 2);
+    let closed = read::<GetPullDetail>(&cell, 1).await.unwrap();
+    assert_eq!(
+        closed.lifecycle.closed_at_ms,
+        Some(closed.pull.updated_at_ms)
+    );
     let mut altered = change.clone();
     altered.action = Action::State {
         state: State::Open,

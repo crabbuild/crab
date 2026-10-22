@@ -136,6 +136,8 @@ pub(crate) struct PullSummary {
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
     pub version: u64,
+    pub closed_at_ms: Option<u64>,
+    pub merged_at_ms: Option<u64>,
     pub comment_count: u64,
     pub reaction_count: u64,
 }
@@ -377,8 +379,12 @@ pub(crate) use operations::{CreatePull, GetPull, GetPullSubmission, ListPulls, U
 pub(in crate::cells::repository) mod comments;
 pub(crate) use comments::{CreatePullComment, GetPullComment, ListPullComments, UpdatePullComment};
 
+pub(in crate::cells::repository) mod lifecycle;
 pub(crate) mod reviewers;
 pub(crate) mod rollups;
+pub(crate) use lifecycle::{
+    GetPullDetail, GetPullLifecycleStatus, PreparePullLifecycle, PullLifecycle,
+};
 
 mod reviews;
 pub(crate) use reviews::{

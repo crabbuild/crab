@@ -13,6 +13,8 @@ export interface PullSummary {
   base_ref: string;
   head_ref: string;
   created_at: number;
+  closed_at: number | null;
+  merged_at: number | null;
   updated_at: number;
   labels: RepositoryLabel[];
   assignees: RepositoryAssignee[];

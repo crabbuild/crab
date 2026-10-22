@@ -28,7 +28,7 @@ import {
 import { ChevronDownIcon } from "lucide-react";
 import { useState } from "react";
 
-import { timestamp } from "@/components/discussion/time";
+import { RelativeTime } from "@/components/discussion/time";
 import type { PullRequest } from "./model";
 import { branch } from "./presentation";
 
@@ -102,7 +102,7 @@ export function MergePanel({
                 : "fast-forwarded commit"}{" "}
               <code>{short(pull.merge.commit_oid)}</code> into{" "}
               <code>{branch(pull.base_ref)}</code>{" "}
-              {timestamp(pull.merge.created_at)}.
+              <RelativeTime value={pull.merged_at} />.
             </p>
           </div>
         </div>

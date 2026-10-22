@@ -1,4 +1,7 @@
 use super::*;
+use crate::cells::repository::collaboration::lifecycle::{
+    LifecycleStatus, PrepareLifecycleInput, PrepareLifecycleOutcome,
+};
 use crate::cells::repository::collaboration::{
     Subject, SubjectKind, Target,
     activity::{self, Action, ListActivity, Query},
@@ -224,7 +227,7 @@ impl Mutation for Historical {
     type Output = ();
     fn execute(context: &mut Transaction<'_>, abort: bool) -> Result<MutationResult<()>> {
         if abort {
-            PrepareIssueLifecycle::execute(context, PrepareIssueLifecycleInput { version: 0 })?;
+            PrepareIssueLifecycle::execute(context, PrepareLifecycleInput { version: 0 })?;
             return Err(Error::Invalid("injected preparation rollback"));
         }
         for (number, action) in [
@@ -265,7 +268,7 @@ async fn explicit_preparation_is_bounded_replayable_and_preserves_unknown_histor
     let original = serde_json::to_value(read::<GetIssue>(&cell, 1).await).unwrap();
     assert_eq!(
         read::<GetIssueLifecycleStatus>(&cell, ()).await,
-        IssueLifecycleStatus::Outdated
+        LifecycleStatus::Outdated
     );
     assert!(
         cell.client
@@ -274,8 +277,8 @@ async fn explicit_preparation_is_bounded_replayable_and_preserves_unknown_histor
             .is_err()
     );
     assert!(matches!(
-        write::<PrepareIssueLifecycle>(&cell, PrepareIssueLifecycleInput { version: 1 }).await,
-        PrepareIssueLifecycleOutcome::Conflict(IssueLifecycleStatus::Outdated)
+        write::<PrepareIssueLifecycle>(&cell, PrepareLifecycleInput { version: 1 }).await,
+        PrepareLifecycleOutcome::Conflict(LifecycleStatus::Outdated)
     ));
     let request = crate::app::mutation_identity().unwrap();
     let first = cell
@@ -283,13 +286,13 @@ async fn explicit_preparation_is_bounded_replayable_and_preserves_unknown_histor
         .command::<PrepareIssueLifecycle>(
             &cell.target,
             request,
-            PrepareIssueLifecycleInput { version: 0 },
+            PrepareLifecycleInput { version: 0 },
         )
         .await
         .unwrap();
     assert_eq!(
         first.output,
-        PrepareIssueLifecycleOutcome::Applied(IssueLifecycleStatus::Migrating {
+        PrepareLifecycleOutcome::Applied(LifecycleStatus::Migrating {
             version: 1,
             copied: 1
         })
@@ -299,23 +302,23 @@ async fn explicit_preparation_is_bounded_replayable_and_preserves_unknown_histor
         .command::<PrepareIssueLifecycle>(
             &cell.target,
             request,
-            PrepareIssueLifecycleInput { version: 0 },
+            PrepareLifecycleInput { version: 0 },
         )
         .await
         .unwrap();
     assert_eq!(first.receipt, replay.receipt);
     for _ in 0..8 {
         match read::<GetIssueLifecycleStatus>(&cell, ()).await {
-            IssueLifecycleStatus::Ready => break,
-            IssueLifecycleStatus::Migrating { version, .. } => {
-                write::<PrepareIssueLifecycle>(&cell, PrepareIssueLifecycleInput { version }).await;
+            LifecycleStatus::Ready => break,
+            LifecycleStatus::Migrating { version, .. } => {
+                write::<PrepareIssueLifecycle>(&cell, PrepareLifecycleInput { version }).await;
             }
             _ => panic!("preparation lost its progress"),
         }
     }
     assert_eq!(
         read::<GetIssueLifecycleStatus>(&cell, ()).await,
-        IssueLifecycleStatus::Ready
+        LifecycleStatus::Ready
     );
     assert_eq!(
         serde_json::to_value(read::<GetIssue>(&cell, 1).await).unwrap(),
@@ -342,8 +345,8 @@ async fn explicit_preparation_is_bounded_replayable_and_preserves_unknown_histor
     );
     assert_eq!(lifecycle(&cell, 3).await, Lifecycle::default());
     assert_eq!(
-        write::<PrepareIssueLifecycle>(&cell, PrepareIssueLifecycleInput { version: 99 }).await,
-        PrepareIssueLifecycleOutcome::Applied(IssueLifecycleStatus::Ready)
+        write::<PrepareIssueLifecycle>(&cell, PrepareLifecycleInput { version: 99 }).await,
+        PrepareLifecycleOutcome::Applied(LifecycleStatus::Ready)
     );
     fixtures::close(&server).await;
 }
@@ -364,11 +367,11 @@ async fn preparation_rolls_back_schema_rows_and_cursor_on_a_failed_native_transa
     );
     assert_eq!(
         read::<GetIssueLifecycleStatus>(&cell, ()).await,
-        IssueLifecycleStatus::Outdated
+        LifecycleStatus::Outdated
     );
     assert!(matches!(
-        write::<PrepareIssueLifecycle>(&cell, PrepareIssueLifecycleInput { version: 0 }).await,
-        PrepareIssueLifecycleOutcome::Applied(IssueLifecycleStatus::Migrating {
+        write::<PrepareIssueLifecycle>(&cell, PrepareLifecycleInput { version: 0 }).await,
+        PrepareLifecycleOutcome::Applied(LifecycleStatus::Migrating {
             version: 1,
             copied: 1
         })
@@ -518,7 +521,7 @@ async fn preparation_cursor_and_original_command_bytes_survive_native_restart() 
         .command::<PrepareIssueLifecycle>(
             &cell.target,
             frame_id,
-            PrepareIssueLifecycleInput { version: 0 },
+            PrepareLifecycleInput { version: 0 },
         )
         .await
         .unwrap();
@@ -530,7 +533,7 @@ async fn preparation_cursor_and_original_command_bytes_survive_native_restart() 
         .command::<PrepareIssueLifecycle>(
             &cell.target,
             frame_id,
-            PrepareIssueLifecycleInput { version: 0 },
+            PrepareLifecycleInput { version: 0 },
         )
         .await
         .unwrap();
@@ -538,16 +541,16 @@ async fn preparation_cursor_and_original_command_bytes_survive_native_restart() 
     assert_eq!(replay.output, frame.output);
     for _ in 0..8 {
         match read::<GetIssueLifecycleStatus>(&cell, ()).await {
-            IssueLifecycleStatus::Ready => break,
-            IssueLifecycleStatus::Migrating { version, .. } => {
-                write::<PrepareIssueLifecycle>(&cell, PrepareIssueLifecycleInput { version }).await;
+            LifecycleStatus::Ready => break,
+            LifecycleStatus::Migrating { version, .. } => {
+                write::<PrepareIssueLifecycle>(&cell, PrepareLifecycleInput { version }).await;
             }
             _ => panic!("lost cursor"),
         }
     }
     assert_eq!(
         read::<GetIssueLifecycleStatus>(&cell, ()).await,
-        IssueLifecycleStatus::Ready
+        LifecycleStatus::Ready
     );
     let replay = cell
         .client

@@ -19,6 +19,7 @@ impl Mutation for CreatePull {
         if settings::archived(context)? {
             return Ok(MutationResult::Rejected(CreatePullOutcome::Archived));
         }
+        lifecycle::ensure_ready(context)?;
         validate_create_pull(&input)?;
         let digest = create_pull_digest(&input);
         let existing = context.sql(&SqlBatch { statements: vec![statement(
@@ -70,6 +71,7 @@ impl Mutation for CreatePull {
             statement("INSERT INTO repository_pull_submissions(request_id, payload_digest, pull_number) VALUES (?, ?, ?)", vec![SqlValue::Blob(record.create_submission_id.to_vec()), SqlValue::Blob(digest.as_bytes().to_vec()), integer(record.number)?]),
             insert_pull_statement(&record)?,
         ] })?;
+        lifecycle::create(context, record.number)?;
         let state = if input.draft {
             PullReadiness::Draft
         } else {
@@ -102,6 +104,7 @@ impl Mutation for UpdatePull {
         if settings::archived(context)? {
             return Ok(MutationResult::Rejected(UpdatePullOutcome::Archived));
         }
+        lifecycle::ensure_ready(context)?;
         validate_number(input.number)?;
         validate_author(&input.actor)?;
         validate_number(input.version)?;
@@ -120,6 +123,7 @@ impl Mutation for UpdatePull {
         let Some(mut pull) = load_pull(context, input.number)? else {
             return Ok(MutationResult::Rejected(UpdatePullOutcome::NotFound));
         };
+        let was_state = pull.state;
         let was_closed = pull.state != PullState::Open;
         let edited = input
             .title
@@ -182,6 +186,13 @@ impl Mutation for UpdatePull {
             ))?;
         pull.updated_at_ms = timestamp(context.now_ms())?;
         update_pull_row(context, &pull, input.version)?;
+        lifecycle::change(
+            context,
+            pull.number,
+            was_state,
+            pull.state,
+            pull.updated_at_ms,
+        )?;
         // Progress changes commit with close/reopen and merge completion.
         let subject = collaboration::Subject {
             kind: collaboration::SubjectKind::Pull,
@@ -294,11 +305,15 @@ impl PullSummary {
         let row = result[0].rows.first().ok_or(crate::cells::Error::Invalid(
             "indexed pull request is missing",
         ))?;
+        let state = PullState::from_code(result_u64_from_row(row, 5)?)?;
+        let lifecycle = lifecycle::get(context, number, state)?;
         Ok(PullSummary {
             number: result_u64_from_row(row, 0)?,
             author: author_from_row(row, 1)?,
             title: result_text(row, 4)?,
-            state: PullState::from_code(result_u64_from_row(row, 5)?)?,
+            state,
+            closed_at_ms: lifecycle.closed_at_ms,
+            merged_at_ms: lifecycle.merged_at_ms,
             base_ref: result_text(row, 6)?,
             head_ref: result_text(row, 7)?,
             label_ids: decode_label_ids(result_blob(row, 8)?)?,

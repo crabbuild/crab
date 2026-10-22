@@ -14,14 +14,16 @@ pub(in crate::cells) fn dispatch_mutation(
 ) -> crate::cells::Result<MutationResult<serde_json::Value>> {
     let maintenance = id == <search::index::RebuildIndex as Mutation>::ID
         || id == <assignments::MigrateAssignments as Mutation>::ID
-        || id == issues::lifecycle::PrepareIssueLifecycle::ID;
+        || id == issues::lifecycle::PrepareIssueLifecycle::ID
+        || id == PreparePullLifecycle::ID;
     #[cfg(test)]
     let maintenance = maintenance
         || id == assignments::migration::tests::SeedSubjects::ID
         || id == reviewers::tests::PreviousIndex::ID
         || id == rollups::tests::PreviousFormat::ID
         || id == collaboration::conversation::tests::Inspect::ID
-        || id == issues::lifecycle::tests::Historical::ID;
+        || id == issues::lifecycle::tests::Historical::ID
+        || id == pulls::lifecycle::tests::Historical::ID;
     if !maintenance {
         search::index::ensure_ready(context)?;
     }
@@ -41,6 +43,11 @@ pub(in crate::cells) fn dispatch_mutation(
         issues::lifecycle::tests::Historical::ID => {
             invoke_mutation::<issues::lifecycle::tests::Historical>(context, input)
         }
+        #[cfg(test)]
+        pulls::lifecycle::tests::Historical::ID => {
+            invoke_mutation::<pulls::lifecycle::tests::Historical>(context, input)
+        }
+        PreparePullLifecycle::ID => invoke_mutation::<PreparePullLifecycle>(context, input),
         issues::lifecycle::PrepareIssueLifecycle::ID => {
             invoke_mutation::<issues::lifecycle::PrepareIssueLifecycle>(context, input)
         }
@@ -154,6 +161,8 @@ pub(in crate::cells) fn dispatch_read(
         collaboration::bulk::Select::ID => {
             invoke_read::<collaboration::bulk::Select>(context, input)
         }
+        GetPullLifecycleStatus::ID => invoke_read::<GetPullLifecycleStatus>(context, input),
+        GetPullDetail::ID => invoke_read::<GetPullDetail>(context, input),
         issues::lifecycle::GetIssueLifecycleStatus::ID => {
             invoke_read::<issues::lifecycle::GetIssueLifecycleStatus>(context, input)
         }

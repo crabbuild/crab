@@ -89,7 +89,15 @@ async fn set(
         .as_ref()
         .and_then(|repository| current_branches(repository, &pull));
     Ok(Json(
-        pull_view(&pull, &actor, &server, &repo, &principal, current.as_ref()).await?,
+        pull_view(
+            pull.number,
+            &actor,
+            &server,
+            &repo,
+            &principal,
+            current.as_ref(),
+        )
+        .await?,
     ))
 }
 

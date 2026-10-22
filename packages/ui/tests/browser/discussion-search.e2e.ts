@@ -224,6 +224,9 @@ for (const view of ["issues", "pulls"] as const) {
               author: { name: "Alice", profile: null },
               state:
                 params.get("q") === "keyboard is:closed" ? "closed" : "open",
+              closed_at:
+                params.get("q") === "keyboard is:closed" ? 1700000001000 : null,
+              merged_at: null,
               created_at: 1700000000000,
               labels: [],
               assignees: [],
@@ -388,6 +391,8 @@ test("issue search renders mixed kinds with colliding numbers and follows pull l
       number: 3,
       title: "Merged change",
       state: "merged",
+      closed_at: 1700000001000,
+      merged_at: 1700000001000,
       draft: false,
       base_ref: "refs/heads/main",
       head_ref: "refs/heads/merged",

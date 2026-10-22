@@ -29,7 +29,8 @@ uses the SDK output gate, including its ownership and durability checks.
 
 Repository assignment format 2 and discussion index format 11 require the explicit
 preparation described below. Issue lifecycle metadata also requires explicit
-`cells prepare-issue-state` on existing repositories. Other canonical records
+`cells prepare-issue-state` on existing repositories. Pull lifecycle metadata
+requires `cells prepare-pull-state`. Other canonical records
 retain their formats.
 Transport requests and replies use bounded JSON. Mutation receipts store
 the payload digest and outcome in the same transaction as application writes.
@@ -618,3 +619,31 @@ snapshots are excluded from intent identity, and fresh additions require a compl
 eligible match. The proven-rejection marker is shared in `api/write.rs`; context,
 repository-identity and submission-identity errors preserve the original intent. No new DDL, preparation, index
 format, dependency, compatibility reader or automatic authority cutover is involved.
+
+### Prepare pull lifecycle metadata
+
+Before reopening traffic on an existing repository, run:
+
+```sh
+"$SERVER" --config /secure/server.toml cells prepare-pull-state --owner OWNER --name REPO
+```
+
+Private mTLS GET/POST `pull-state` exposes the same independently versioned
+status/frame contract as `issue-state`. The shared lifecycle preparation owner
+advances at most eight subject/activity steps per transaction. Fresh repositories
+initialize both metadata relations. Serving never installs missing schemas;
+pull detail/list reads and state/merge writers fail with 503
+`schema_upgrade_required` until preparation finishes.
+
+`repository_pull_lifecycle` stores nullable close and merge-completion times.
+Canonical pull records, original command payloads/outcomes and immutable events
+retain their formats. Preparation uses the latest direct state transition only
+when it agrees with canonical state. Missing or conflicting history stays null;
+reservation/last-edit times cannot prove completion. SQL rows and the preparation
+cursor commit together, and native receipts replay the original outcome.
+
+Close/reopen and merge completion update lifecycle metadata in the same native
+transaction as the canonical pull, milestone progress and activity. Ordinary
+edits and exact merge retries preserve it. No search-index format change or
+rebuild is required. Update all peers and embedded UI together; mixed-version
+serving is unsupported.

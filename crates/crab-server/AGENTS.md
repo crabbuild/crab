@@ -64,6 +64,11 @@ commands update that projection in their transaction; assignment changes dirty
 the discussion projection. The HTTP
 choice endpoint stays with other search reads in `api/discussion_search/`.
 
+`pulls/lifecycle/` owns canonical close/merge-completion times and a consistent
+pull-detail read. `collaboration/lifecycle/` shares bounded explicit preparation
+with issue lifecycle metadata; each owner recovers only matching transition events.
+Private `cells prepare-pull-state` prepares existing native repositories.
+
 Collaboration documents live in `cells/repository/collaboration/`. `state/`
 owns atomic close/reopen with optional comments and permanent submission recovery;
 `bulk/` owns bounded mixed-kind selection and atomic metadata/state edits.

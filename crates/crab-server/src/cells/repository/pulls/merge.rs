@@ -19,6 +19,7 @@ impl Mutation for ReservePullMerge {
         if settings::archived(context)? {
             return Ok(MutationResult::Rejected(ReservePullMergeOutcome::Archived));
         }
+        lifecycle::ensure_ready(context)?;
         validate_number(input.pull)?;
         validate_merge(&input.merge)?;
         let Some(pull) = load_pull(context, input.pull)? else {
@@ -61,6 +62,7 @@ impl Mutation for TransitionPullMerge {
         context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
+        lifecycle::ensure_ready(context)?;
         validate_number(input.pull)?;
         validate_merge(&input.merge)?;
         let Some(mut pull) = load_pull(context, input.pull)? else {
@@ -68,6 +70,7 @@ impl Mutation for TransitionPullMerge {
                 TransitionPullMergeOutcome::NotFound,
             ));
         };
+        let was_state = pull.state;
         let was_closed = pull.state != PullState::Open;
         let old_version = pull.version;
         match input.transition {
@@ -153,6 +156,15 @@ impl Mutation for TransitionPullMerge {
         pull.version = next_version(pull.version)?;
         pull.updated_at_ms = timestamp(context.now_ms())?;
         update_pull_row(context, &pull, old_version)?;
+        // The immutable merge record dates reservation for reproducible Git publication.
+        // Lifecycle metadata dates completion; later edits and retries must preserve it.
+        lifecycle::change(
+            context,
+            pull.number,
+            was_state,
+            pull.state,
+            pull.updated_at_ms,
+        )?;
         // Progress changes commit with close/reopen and merge completion.
         let subject = collaboration::Subject {
             kind: collaboration::SubjectKind::Pull,
