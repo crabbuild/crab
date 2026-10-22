@@ -26,7 +26,10 @@ shared publication owner `crates/crab-write/src/journal.rs`.
 The Cell repository facade in `src/cells/repository/mod.rs` exposes typed
 operations. `models.rs` owns common records/inputs; `issues/` owns issue and
 comment operations, `reads.rs` owns snapshot presentation reads and `lifecycle/`
-owns canonical close reasons/times and explicit bounded preparation. Tests stay
+owns canonical close reasons/times and explicit bounded preparation.
+`issues/pins/` owns the independently versioned, three-slot
+repository pin collection and permanent submissions; `api/issues/pins/` enriches
+its bounded current issue summaries and composes current Write capability. Tests stay
 with that owner. Private preparation is `cells prepare-issue-state`. Feature commands and their persistence helpers live under
 `checks/`, `labels/`, `statuses/`, `settings/`, `releases/`, and `pulls/`. Pull
 readiness belongs to `pulls/readiness/`, reviewer invitations and fulfillment

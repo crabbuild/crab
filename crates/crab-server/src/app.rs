@@ -71,6 +71,8 @@ pub(crate) enum Error {
     CheckNotFound,
     #[error("You do not have permission to change labels")]
     LabelPermission,
+    #[error("Write access is required to pin issues")]
+    PinPermission,
     #[error("You do not have permission to change milestones")]
     MilestonePermission,
     #[error("Write access is required to manage linked work")]
@@ -330,6 +332,11 @@ impl IntoResponse for Error {
                 StatusCode::FORBIDDEN,
                 "forbidden",
                 "You do not have permission to change labels",
+            ),
+            Self::PinPermission => (
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "Write access is required to pin issues",
             ),
             Self::LabelConflict => (
                 StatusCode::CONFLICT,

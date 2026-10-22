@@ -168,6 +168,10 @@ export async function mockPullRequest(
     const request = route.request();
     const url = new URL(request.url());
     const path = url.pathname;
+    if (path.endsWith("/issues/pins") && request.method() === "GET")
+      return route.fulfill({
+        json: { version: 0, items: [], can_manage: true },
+      });
     if (
       url.pathname.startsWith("/api/repos/team/project/") &&
       !["GET", "HEAD"].includes(route.request().method())

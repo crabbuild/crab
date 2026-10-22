@@ -42,6 +42,8 @@ export type Action =
         | "updated"
         | "closed"
         | "reopened"
+        | "pinned"
+        | "unpinned"
         | "approved"
         | "changes_requested"
         | "commented"

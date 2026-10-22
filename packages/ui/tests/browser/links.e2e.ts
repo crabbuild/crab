@@ -32,6 +32,14 @@ async function setup(page: Page) {
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
+    if (path.endsWith("/issues/pins") && request.method() === "GET")
+      return route.fulfill({
+        json: {
+          version: 0,
+          items: [],
+          can_manage: access === "write" && !archived,
+        },
+      });
     if (path === "/api/session")
       return route.fulfill({
         json: {

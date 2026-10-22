@@ -7,6 +7,7 @@ import { Button } from "@/components/ui/button";
 import { navigate, type Repository } from "@/lib/api";
 
 import { DiscussionSearch } from "@/components/discussion/search";
+import { PinnedIssues } from "./pins";
 
 export function IssueList({
   repo,
@@ -34,6 +35,7 @@ export function IssueList({
           </Button>
         )}
       </div>
+      <PinnedIssues repo={repo} csrf={csrf} />
       <DiscussionSearch
         repo={repo}
         label="Search issues"

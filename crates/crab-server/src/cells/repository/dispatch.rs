@@ -25,6 +25,7 @@ pub(in crate::cells) fn dispatch_mutation(
         search::index::ensure_ready(context)?;
     }
     let result = match id {
+        issues::pins::SetPins::ID => invoke_mutation::<issues::pins::SetPins>(context, input),
         collaboration::bulk::Edit::ID => {
             invoke_mutation::<collaboration::bulk::Edit>(context, input)
         }
@@ -143,6 +144,7 @@ pub(in crate::cells) fn dispatch_read(
     input: serde_json::Value,
 ) -> crate::cells::Result<serde_json::Value> {
     match id {
+        issues::pins::GetPins::ID => invoke_read::<issues::pins::GetPins>(context, input),
         collaboration::bulk::Select::ID => {
             invoke_read::<collaboration::bulk::Select>(context, input)
         }

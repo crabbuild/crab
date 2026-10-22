@@ -20,6 +20,7 @@ import { useReturnFocus } from "@/components/discussion/hooks";
 import { Issue } from "./model";
 import { timestamp } from "@/components/discussion/time";
 import { Comments } from "./comments";
+import { PinIssue } from "./pins";
 
 function IssueBadge({ issue }: { issue: Issue }) {
   const { state, state_reason: reason } = issue;
@@ -168,7 +169,18 @@ export function IssueDetail({
             resource.retry();
             setMetadataEpoch((value) => value + 1);
           }}
-        />
+        >
+          <PinIssue
+            repo={repo}
+            csrf={csrf}
+            number={number}
+            onChanged={() => {
+              // Pinning changes the conversation, not the issue record. A source
+              // refresh would activate unrelated close/reopen focus recovery.
+              setMetadataEpoch((value) => value + 1);
+            }}
+          />
+        </DiscussionMetadata>
       </div>
     </section>
   );

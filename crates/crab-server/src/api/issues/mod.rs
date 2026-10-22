@@ -26,10 +26,15 @@ use crate::{
     server::Server,
 };
 
+mod pins;
 pub(super) mod view;
 
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
+        .route(
+            "/api/repos/{owner}/{name}/issues/pins",
+            get(pins::list).put(pins::set),
+        )
         .route("/api/repos/{owner}/{name}/issues", get(list).post(create))
         .route(
             "/api/repos/{owner}/{name}/issues/{number}",

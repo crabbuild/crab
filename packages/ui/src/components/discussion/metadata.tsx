@@ -1,4 +1,4 @@
-import { useId, useRef, useState } from "react";
+import { useId, useRef, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Input } from "@/components/ui/input";
@@ -270,6 +270,7 @@ export function DiscussionMetadata({
   path,
   csrf,
   onSaved,
+  children,
 }: {
   repo: Repository;
   assignees?: RepositoryAssignee[];
@@ -280,6 +281,7 @@ export function DiscussionMetadata({
   path: string;
   csrf: string;
   onSaved: () => void;
+  children?: ReactNode;
 }) {
   return (
     <aside className="discussion-metadata" aria-label="Metadata">
@@ -356,6 +358,7 @@ export function DiscussionMetadata({
         csrf={csrf}
         onSaved={onSaved}
       />
+      {children}
     </aside>
   );
 }

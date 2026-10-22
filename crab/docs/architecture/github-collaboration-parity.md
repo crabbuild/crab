@@ -381,3 +381,14 @@ writers, permanent intent recovery and current catalog Triage authority; stale
 versions reject the entire bounded selection. It does not add Project/type
 mutations or solve native grant cutover. See the
 [bulk triage evidence](github-ui-parity.md#bounded-bulk-list-triage).
+
+
+The issue pin slice adds a native three-slot, independently versioned repository
+collection, permanent submissions and pin/unpin conversation events. Shadcn cards
+above search, sidebar pin/unpin and keyboard/drag ordering use current Write
+capability; Read/Triage users keep the cards without mutation controls. Lost
+replies retain their original intent, and recovery reloads the current order.
+Fern's pin authority tests informed acceptance cases; no source was copied. See
+[pin behavior and qualification](github-ui-parity.md#repository-issue-pins).
+This advances issue management; saved views, Projects, remaining authority and
+full Issues/PR/Milestones parity remain unfinished.

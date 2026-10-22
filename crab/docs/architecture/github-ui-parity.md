@@ -1061,3 +1061,76 @@ catalog identity, the error contract and all repository mutation callers. Creden
 Cell data formats and dependencies stay unchanged. Native grant fencing, the wider
 Issues/PR/Projects/Milestones inventory and the pinned Cellar release blocker remain
 open; this slice does not establish complete parity or production release readiness.
+
+
+## Repository issue pins
+
+GitHub's [pinning reference](https://docs.github.com/en/issues/tracking-your-work-with-issues/administering-issues/pinning-an-issue-to-your-repository)
+was checked on 2026-10-22: three repository pins, Write permission, cards above
+search and sidebar pin/unpin. The public GitHub issue list was inspected to
+confirm that closed cards remain visible while the list filters open work.
+Fern's `apps/web/test/issues-authority.test.ts` at the assessment commit supplies
+permission, maximum, complete-order concurrency, rollback and retry acceptance
+references. No Fern code or assets were copied.
+
+Native Repository `issues/pins/` owns one ordered collection with a separate
+version and permanent qualified-actor submissions. Pinning leaves issue edit
+versions untouched. Reads use at most three current issue/index point lookups;
+comment counts use the canonical transactional discussion projection. Missing
+initial KV means an empty new collection, with no SQL/index format change,
+compatibility reader or automatic preparation. Pin/unpin events share the native
+activity/conversation transaction; pure reorder has no issue timeline event.
+
+`api/issues/pins/` composes current membership, public author enrichment and
+Write capability. Fresh changes reject archive, stale collection versions,
+nonexistent/duplicate targets and a fourth pin. Replaying an exact submission
+requires current Read access and recovers its original receipt after archive or
+role change without restoring an old order. The shared archive presentation
+retains existing proven-rejection markers while leaving uncertain failures
+unmarked. The regression covers pins and the sibling issue-state path.
+
+`packages/ui/src/features/issues/pins/` owns shadcn cards above search, sidebar
+pin/unpin and keyboard/drag ordering. The three-card layout uses Geist tokens,
+full linked titles, current state/author/date and comment counts. Pending actions
+keep the last confirmed layout with controls disabled; read/access errors withdraw
+it. Lost replies preserve the original UUID, expected version and order across
+later context errors. Success/recovery reads the current collection; confirmed
+conflicts need explicit reload. Only the conversation refreshes after pinning,
+so unrelated close/reopen controls cannot steal focus. The whole pin widget is
+diagnostic only with `powerbar=1`.
+
+Native grants/cross-Cell fencing, saved views, advanced issue relationships,
+remaining review/merge features, Projects and full Milestones parity remain open.
+The pinned Cellar release blocker is unchanged; this slice is not complete parity.
+
+
+Validation: 440 server library tests passed (six existing opt-in qualifications
+ignored), alongside 13 CLI tests and 107 UI unit tests. All five new pin browser scenarios passed,
+including lost reply plus a later unmarked context failure, explicit conflict
+reload, keyboard/drag ordering, focus, read-only controls and mobile light/dark
+accessibility. The broad run passed 145 of 146 browser scenarios; an unrelated
+organization invite contrast audit sampled a transitioning button. All four
+organization scenarios passed on the isolated rerun without source/test changes.
+Strict all-target Clippy, architecture gates, formatting and frontend/server
+builds passed.
+
+Real RustFS plus the current embedded UI exercised sidebar pin/unpin, card
+ordering, current titles/comment counts, the three-card limit, closed cards,
+conversation events, full process restart and permanent receipt recovery. It
+preserved the wider Git/merge/search/bulk/organization workflow and retained 119
+durable objects. Desktop/mobile and dark captures were inspected. The owned
+qualification browser and services closed.
+
+The persistent preview restart preserved 18 canonical resource payloads and
+index format 10. Empty pin reads were verified on both repositories, including
+the archived repository's disabled management capability. Read-only browser
+checks exercised embedded/Vite ports, the sidebar pin control, whole-widget
+timing and existing bulk selection/mobile alignment. No preview pin was changed,
+profile enrolled, organization created, index rebuilt or data migrated.
+
+
+The slice adds 964 net production lines for the native collection/receipt owner,
+its bounded public HTTP read/write contract, generated shadcn Card primitive and
+feature-local controls/recovery. Existing issue, search, activity, conversation,
+identity and permission owners are reused; no second issue store, dependency,
+lockfile, schema or compatibility path was added.

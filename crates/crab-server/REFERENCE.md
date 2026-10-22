@@ -1985,6 +1985,31 @@ A retried creation returns the existing issue with its current labels.
 Response enrichment may fail after a mutation commits; retry creations with
 the original submission ID, or reload an edited issue and reconcile its version.
 
+### Pin repository issues
+
+`GET .../issues/pins` returns the ordered collection `version`, up to three
+current issue summaries and `can_manage`. Any current reader can view the cards,
+including closed issues. Current Write access is required to change pins;
+Triage alone does not grant it. Archived repositories retain their visible pins.
+
+`PUT .../issues/pins` accepts `{request_id, version, numbers}`. `numbers` is the
+complete ordered set of distinct existing issue numbers, with a maximum of three;
+an empty set removes all pins. The native transaction compares the collection
+version and changes the whole set atomically. Pinning leaves issue edit versions
+unchanged. The collection lives in native Repository KV storage, alongside its
+permanent submissions; cards use at most three indexed issue reads and maintained
+comment counters. It needs no schema/index preparation.
+
+A submission UUID binds its original ordered set, expected version and qualified
+actor. Exact retries recover the original version after reordering, archive or
+loss of Write access, provided current Read access remains. They do not restore
+the old collection. Reusing a UUID for another intent returns an unmarked
+submission conflict. Proven native rejections carry `X-Crab-Write-Outcome:
+rejected`, including when archive middleware changes their error presentation.
+Uncertain errors keep the original intent. The UI reloads the current collection
+after success/recovery and records pin/unpin events in each issue conversation;
+pure reorder does not add a timeline event.
+
 ### Work with pull requests and reviews
 
 Pull creation records exact base and head branch names plus their opening commit OIDs. Detail reads refresh both live tips without rewriting the immutable opening evidence.

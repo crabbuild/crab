@@ -31,6 +31,8 @@ pub(crate) enum Action {
         to: crate::cells::repository::issues::lifecycle::Reason,
     },
     Reopened,
+    Pinned,
+    Unpinned,
     Approved,
     ChangesRequested,
     Commented,
@@ -76,6 +78,8 @@ impl Action {
                     | Self::Updated
                     | Self::Closed
                     | Self::Reopened
+                    | Self::Pinned
+                    | Self::Unpinned
                     | Self::IssueClosed { .. }
                     | Self::IssueCloseReasonChanged { .. }
                     | Self::MilestoneAssigned { .. }

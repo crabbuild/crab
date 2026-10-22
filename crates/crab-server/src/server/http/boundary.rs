@@ -242,8 +242,21 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
     // a server error that may represent an ambiguous committed mutation.
     if let Some(uri) = deferred_archive
         && response.status().is_client_error()
-        && let Some(archived) = archived_mutation_response(&server, &principal, uri.path()).await
+        && let Some(mut archived) =
+            archived_mutation_response(&server, &principal, uri.path()).await
     {
+        // Changing the error presentation must retain a native proof of no
+        // effects. Unmarked context or submission conflicts remain uncertain.
+        if response
+            .headers()
+            .get("x-crab-write-outcome")
+            .is_some_and(|value| value == "rejected")
+        {
+            archived.headers_mut().insert(
+                "x-crab-write-outcome",
+                axum::http::HeaderValue::from_static("rejected"),
+            );
+        }
         response = archived;
     }
     response

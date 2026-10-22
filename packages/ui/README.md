@@ -41,6 +41,9 @@ Build the UI before building `crab-server`; its build script embeds `dist/`.
   stale writes. Close/reopen can submit the current draft in the same native
   transaction; close-reason edits leave it unsubmitted. Not-planned closures
   have distinct header/list presentation and typed conversation events.
+  `pins/` owns cards above the search list, sidebar pin/unpin, keyboard/drag ordering
+  and recovery. Only current Write capability enables changes; confirmed failures
+  require reload and uncertain responses retain their original submission.
   `src/features/pull-requests/` separates lists, creation, detail,
   conversation, commits, reviews, checks, and merge/recovery. PR detail retains
   draft/write state across tab switches and refreshes. Hidden panels pause

@@ -646,6 +646,29 @@ with open(run / "commands.log", "w") as log:
         for path in bulk_paths:
             value = request(path)
             bulk_saved.append({key: value[key] for key in ["state", "version", "labels", "assignees"]})
+        pins_path = "/api/repos/team/project/issues/pins"
+        assert request(pins_path)["items"] == []
+        pin_candidates = [number, bulk_issue["number"]]
+        for title in ["Pinned priority", "Fourth pin candidate"]:
+            candidate = request("/api/repos/team/project/issues", {"request_id": str(uuid.uuid4()), "title": title, "body": "Pin collection qualification"})
+            pin_candidates.append(candidate["number"])
+        pin_original = {"request_id": str(uuid.uuid4()), "version": 0, "numbers": pin_candidates[:3]}
+        assert request(pins_path, pin_original, method="PUT") == {"version": 1}
+        try:
+            request(pins_path, {"request_id": str(uuid.uuid4()), "version": 1, "numbers": pin_candidates}, method="PUT")
+            raise AssertionError("A fourth pin was accepted")
+        except urllib.error.HTTPError as error:
+            assert error.code == 400 and error.headers["X-Crab-Write-Outcome"] == "rejected"
+        assert request(pins_path, {"request_id": str(uuid.uuid4()), "version": 1, "numbers": list(reversed(pin_candidates[:3]))}, method="PUT") == {"version": 2}
+        pinned_issue_path = "/api/repos/team/project/issues/" + str(pin_candidates[2])
+        current = request(pinned_issue_path)
+        request(pinned_issue_path, {"version": current["version"], "title": "Current pinned priority"}, method="PATCH")
+        request(pinned_issue_path + "/comments", {"request_id": str(uuid.uuid4()), "body": "Current pinned comment count"})
+        pins_saved = request(pins_path)
+        assert pins_saved["items"][0]["title"] == "Current pinned priority"
+        assert pins_saved["items"][0]["comment_count"] == 1
+        assert any(item["state"] == "closed" for item in pins_saved["items"])
+        pin_events = request(pinned_issue_path + "/activity")
         # State submissions recover after a complete process restart.
         stop()
         server = start()
@@ -656,6 +679,9 @@ with open(run / "commands.log", "w") as log:
             assert len(request(path + "/comments")["items"]) == expected_count
             search = "/api/repos/team/project/issues?" + urllib.parse.urlencode({"q": 'in:comments "Atomic context"'})
             assert request(search)["matching"] == 2
+        assert request(pins_path, pin_original, method="PUT") == {"version": 1}
+        assert request(pins_path) == pins_saved
+        assert request(pinned_issue_path + "/activity") == pin_events
         for body in bulk_actions:
             assert request("/api/repos/team/project/discussions/bulk", body) == {"count": 2}
         for path, saved in zip(bulk_paths, bulk_saved):
@@ -689,6 +715,8 @@ with open(run / "commands.log", "w") as log:
             "repository_creation": True,
             "repository_identity_precondition": True,
             "issue_replay": True,
+            "pins_restart_current_cards": True,
+            "pins_limit_reorder_recovery": True,
             "bulk_state_metadata_restart": True,
             "bulk_submission_recovery": True,
             "atomic_comment_state_restart": True,

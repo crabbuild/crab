@@ -1,4 +1,5 @@
 import { HistoryIcon } from "@primer/octicons-react";
+import { PinIcon, PinOffIcon } from "lucide-react";
 import { Author } from "../author";
 import { Link } from "@/components/navigation/link";
 import { repoHref } from "@/lib/repository-route";
@@ -54,6 +55,10 @@ function action(event: ActivityEvent): string {
       return "closed";
     case "reopened":
       return "reopened";
+    case "pinned":
+      return "pinned";
+    case "unpinned":
+      return "unpinned";
     case "approved":
       return "approved";
     case "changes_requested":
@@ -96,6 +101,12 @@ export function ActivityItem({
   };
   const parentHref = repoHref(repo, parameters);
   const date = new Date(event.created_at);
+  const Icon =
+    event.action.kind === "pinned"
+      ? PinIcon
+      : event.action.kind === "unpinned"
+        ? PinOffIcon
+        : HistoryIcon;
   const related = "number" in event.action ? event.action : undefined;
   const linkedIssue =
     related?.kind === "issue_linked" || related?.kind === "issue_unlinked";
@@ -115,7 +126,7 @@ export function ActivityItem({
       hidden={hidden}
       data-activity-number={event.number}
     >
-      <HistoryIcon aria-hidden="true" />
+      <Icon aria-hidden="true" />
       <div>
         <strong>
           <Author author={event.actor} />

@@ -23,6 +23,10 @@ async function openDiscussion(page: Page) {
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
+    if (path.endsWith("/issues/pins") && request.method() === "GET")
+      return route.fulfill({
+        json: { version: 0, items: [], can_manage: true },
+      });
     if (path.endsWith("/conversation"))
       return conversationPage(route, { comments });
     if (path.endsWith("/links"))

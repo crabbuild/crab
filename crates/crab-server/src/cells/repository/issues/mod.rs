@@ -1,5 +1,6 @@
 use super::*;
 pub(crate) mod lifecycle;
+pub(crate) mod pins;
 mod reads;
 use crate::cells::repository::collaboration::{
     Target,
