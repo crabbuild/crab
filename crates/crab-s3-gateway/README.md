@@ -159,6 +159,9 @@ commit for a consistent view.
 A present capsule-protocol root is the exclusive
 read authority; corrupt v2 state fails closed and never falls back to a legacy
 manifest. Repositories without a v2 root retain the v1 read path.
+Each native read rechecks the root and visible ref transactions before reusing
+its validated immutable view. Stable reads avoid downloading capsule payloads
+again; external ref updates remain visible without a freshness TTL.
 
 S3 mutations of v2 repositories publish the generated Git pack, all four pack components,
 and exact visibility delta as one immutable capsule before the independently
@@ -473,9 +476,10 @@ CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-s3-gateway \
   --config /etc/crab/s3-gateway.toml
 ```
 
-`--initialize` creates missing canonical Crab metadata only for empty configured
-prefixes, then exits. It is idempotent. Normal serving never initializes,
-migrates, or converts repository storage.
+`--initialize` creates native v2 capsule roots only for empty configured
+prefixes, then exits. Existing v2 roots are adopted without changes. Nonempty
+prefixes without a v2 root are rejected; serve existing v1 repositories
+directly. Normal serving never initializes, migrates, or converts storage.
 
 SIGTERM and SIGINT trigger graceful connection draining.
 

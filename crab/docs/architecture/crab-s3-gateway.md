@@ -296,8 +296,8 @@ Phase-owned artifacts:
   The pinned Boto3 client also uploads a deterministic 512 MiB object as eight
   sequential 64 MiB parts, verifies a complete GET, and verifies a range that
   crosses a persisted part boundary against the source digest.
-  A separate CLI-initialized v2 repository exercises ordinary, LFS, and Xet
-  objects through signed clients, then independently clones and hydrates the
+  A separate gateway-initialized v2 repository, adopted by the CLI, exercises
+  ordinary, LFS, and Xet objects through signed clients, then clones and hydrates the
   S3-authored files. Its five-minute, 16-writer soak requires exact paginated
   acknowledgement recovery and the existing terminal throughput/latency gates.
   A forced process exit then leaves one live session, one synthetically frozen

@@ -443,12 +443,11 @@ impl Gateway {
     pub(crate) async fn initialize_repositories(&self) -> crate::Result<()> {
         for repository in self.repositories.values() {
             let head = format!("refs/heads/{}", repository.config.default_branch);
-            crab_write::initialize::initialize_repository(
-                &repository.store,
-                &repository.layout,
-                &head,
-            )
-            .await?;
+            let repository_id = blake3::hash(&ulid::Ulid::new().to_bytes())
+                .to_hex()
+                .to_string();
+            crab_write::capsule_protocol::initialize(&repository.layout, &repository_id, &head)
+                .await?;
         }
         Ok(())
     }
@@ -4955,15 +4954,7 @@ mod tests {
             Arc::clone(&local_cache),
         )
         .unwrap();
-        if capsule {
-            crab_write::capsule_protocol::initialize(
-                &repository.layout,
-                &"a".repeat(64),
-                "refs/heads/main",
-            )
-            .await
-            .unwrap();
-        } else {
+        if !capsule {
             crab_write::initialize::initialize_repository(
                 &repository.store,
                 &repository.layout,
@@ -5016,6 +5007,17 @@ mod tests {
             cancellation,
         };
         let repository = &gateway.repositories["repo"];
+        if capsule {
+            gateway.initialize_repositories().await.unwrap();
+            let root = crab_metadata::capsule_protocol::load_root(&repository.layout)
+                .await
+                .unwrap();
+            gateway.initialize_repositories().await.unwrap();
+            let adopted = crab_metadata::capsule_protocol::load_root(&repository.layout)
+                .await
+                .unwrap();
+            assert_eq!(adopted.record().bytes(), root.record().bytes());
+        }
         for path in [
             "prefix/a-1",
             "prefix/a/item",

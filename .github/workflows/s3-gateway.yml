@@ -476,6 +476,8 @@ jobs:
           docker stop --time 35 crab-s3-gateway-unready >/dev/null
           docker rm crab-s3-gateway-unready >/dev/null
 
+          sed 's|prefix = "repositories/qualification"|prefix = "repositories/native-qualification"|' \
+            "${config_root}/gateway.toml" > "${config_root}/initialize.toml"
           docker run --rm \
             --network crab-s3-gateway-qualification \
             --read-only \
@@ -487,7 +489,7 @@ jobs:
             --env AWS_ENDPOINT_URL_S3=http://crab-s3-gateway-rustfs:9000 \
             --env AWS_ALLOW_HTTP=true \
             --env AWS_VIRTUAL_HOSTED_STYLE_REQUEST=false \
-            --volume "${config_root}/gateway.toml:/etc/crab/s3-gateway.toml:ro" \
+            --volume "${config_root}/initialize.toml:/etc/crab/s3-gateway.toml:ro" \
             --volume "${config_root}/gateway-secret:/run/secrets/crab-s3-secret:ro" \
             --volume "${config_root}/gateway-session-secret:/run/secrets/crab-s3-session-secret:ro" \
             --volume "${config_root}/gateway-session-token:/run/secrets/crab-s3-session-token:ro" \
@@ -551,6 +553,7 @@ jobs:
           publisher_bin="${RUNNER_TEMP}/crab-s3-gateway-publisher-target/release"
           install -d "${native_root}/source"
           cp "${source_root}/qualification/xet-large.bin" "${native_root}/source/xet.bin"
+          cp "${source_root}/qualification/xet-large.bin" "${native_root}/source/lfs.dat"
           printf 'native capsule Git fixture\n' > "${native_root}/source/ordinary.txt"
           ln -sf crab "${publisher_bin}/git-remote-crab"
           export PATH="${publisher_bin}:${PATH}"
@@ -562,8 +565,11 @@ jobs:
             git config user.email 'qualification@example.invalid'
             crab init crab://crab-s3-gateway-qualification/repositories/native-qualification
             crab add xet.bin
-            git add ordinary.txt
+            crab lfs install --local
+            crab lfs track '*.dat'
+            git add .gitattributes ordinary.txt lfs.dat
             git -c core.hooksPath=/dev/null commit -m 'add native gateway fixtures'
+            crab lfs push origin main
             crab push crab://crab-s3-gateway-qualification/repositories/native-qualification main
           )
           aws s3api head-object --bucket crab-s3-gateway-qualification \
@@ -1204,6 +1210,10 @@ jobs:
             --report "${RUNNER_TEMP}/crab-s3-gateway-evidence/boto3-proof.json"
 
           native_root="${RUNNER_TEMP}/crab-s3-gateway-native"
+          aws --endpoint-url "${endpoint}" s3api get-object \
+            --bucket gateway-native-repository --key main/lfs.dat \
+            "${native_root}/s3-lfs-read.bin" >/dev/null
+          cmp "${native_root}/s3-lfs-read.bin" "${native_root}/source/lfs.dat"
           S3_GATEWAY_BOTO3_ACCESS_KEY="${GATEWAY_ACCESS_KEY}" \
           S3_GATEWAY_BOTO3_SECRET_KEY="${GATEWAY_SECRET_KEY}" \
           python3 crab/scripts/e2e/s3_gateway_boto3.py \
@@ -1233,6 +1243,7 @@ jobs:
             cmp ordinary.txt "${native_root}/source/ordinary.txt"
             cmp s3-visible.txt "${native_root}/source/ordinary.txt"
             cmp xet.bin "${native_root}/source/xet.bin"
+            cmp lfs.dat "${native_root}/source/lfs.dat"
             cmp s3-large.bin "${native_root}/source/xet.bin"
           )
 
@@ -1385,6 +1396,8 @@ jobs:
             --report "${RUNNER_TEMP}/crab-s3-gateway-evidence/ecosystem-proof.json"
 
       - name: Qualify sustained native repository writes
+        id: native_soak
+        continue-on-error: true
         env:
           S3_GATEWAY_WORKLOAD_ACCESS_KEY: ${{ env.GATEWAY_ACCESS_KEY }}
           S3_GATEWAY_WORKLOAD_SECRET_KEY: ${{ env.GATEWAY_SECRET_KEY }}
@@ -1768,6 +1781,8 @@ jobs:
             --source-sha "${GITHUB_SHA}" \
             --run-id "${GITHUB_RUN_ID}" \
             --run-attempt "${GITHUB_RUN_ATTEMPT}"
+          jq -e '.status == "passed" and .comparison.integrity_passed and .comparison.performance_passed' \
+            "${RUNNER_TEMP}/crab-s3-gateway-evidence/native-soak-proof.json" >/dev/null
           boto3_report="${RUNNER_TEMP}/crab-s3-gateway-evidence/boto3-proof.json"
           if grep -Fq \
             -e "${RUSTFS_ACCESS_KEY}" \

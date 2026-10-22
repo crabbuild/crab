@@ -130,9 +130,10 @@ Crab/LFS pointer text, COPY, and small multipart completion. Given
 suffix Xet reads, conditions, full COPY, and multipart range copy against the
 SDK-published source selected by `--xet-key`. The packaged-image job supplies
 that source alongside the large LFS fixture.
-It separately initializes and publishes a native capsule-protocol repository
-through the CLI, repeats Boto3's byte and listing checks against that logical
-bucket, and retains `boto3-native-proof.json`. S3-authored ordinary and LFS
+It separately initializes a native capsule-protocol repository through the
+gateway, adopts and publishes it through the CLI, repeats Boto3's byte and
+listing checks against that logical bucket, and retains `boto3-native-proof.json`.
+S3-authored ordinary and LFS
 objects must then appear through a native Git clone; CLI Xet hydration and LFS
 pull must reproduce the source bytes. This keeps native-protocol qualification
 independent of the SDK fixture's legacy layout.
