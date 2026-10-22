@@ -686,5 +686,5 @@ export async function mockPullRequest(
     });
   });
 
-  return { react, reactionWrites, lifecycle };
+  return { react, reactionWrites, lifecycle, pull };
 }

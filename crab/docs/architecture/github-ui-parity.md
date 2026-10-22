@@ -1298,3 +1298,33 @@ empty rule set exposed the action and allowed dismissal. Its lost reply recovere
 after Write revocation, archive and process restart, retaining the reason and one
 event. The final binary runs in the local preview, where all 18 captured canonical
 resources remained identical through restart and no profile was enrolled.
+
+### Current merge-panel guidance
+
+The merge panel now uses the pull response for its protection indicator and
+ineligibility guidance. A repository catalog can still describe a previous role
+or protection set while a pull refresh already reflects the new state. Ready
+pulls without merge capability explain the Write requirement; pending merges
+explain that recovering the original merge requires Write access. Unsatisfied
+requirements use guidance that remains true for either role. Existing publication
+and exact-submission recovery behavior remains unchanged.
+
+The regression covers a stale writable/protected catalog with an unprotected,
+read-only pull response, blocked requirements, pending recovery, mobile dark
+layout and accessibility. All 158 browser scenarios and 107 UI unit tests passed;
+formatting and frontend/server builds passed. A real two-account native
+Cellar/RustFS run revoked Write access after a lost dismissal reply and verified
+the corrected merge footer, hidden merge controls and current protection state.
+Recovery, archive and restart checks also passed. The final binary is running in
+the preview; all 18 captured canonical resources remained identical at restart.
+
+Review-status search is still unimplemented. The remaining four choices are
+`review:none`, `review:required`, `review:approved` and `review:changes_requested`,
+as documented by [GitHub](https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/filtering-and-searching-issues-and-pull-requests).
+The current page-only rollup read cannot supply repository-wide filter counts.
+The native query needs normalized source heads, verified Git ref projection
+identity, full matching counts and query-bound cursors across both list kinds.
+Completed merge records use the native binary codec; SQL cannot extract their
+recorded head as JSON. Acceptance must cover comment-only and dismissed reviews,
+outdated decisions, rule changes, closed/merged pulls, deleted branches and
+concurrent source changes before this checklist item can be completed.

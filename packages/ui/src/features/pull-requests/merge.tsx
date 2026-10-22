@@ -54,9 +54,6 @@ export function MergePanel({
     `Merge pull request #${pull.number} from ${branch(pull.head_ref)}`,
   );
   const requirements = pull.merge_requirements;
-  const protection = repo.protected_branches.find(
-    (rule) => rule.branch === branch(pull.base_ref),
-  );
   const reviewsSatisfied =
     requirements.required_approvals === 0 ||
     (requirements.changes_requested === 0 &&
@@ -154,6 +151,7 @@ export function MergePanel({
       </section>
     );
   const unavailable = !pull.branches_available && !pending;
+  // Pull eligibility and protection can refresh before the repository catalog.
   const ready = requirements.satisfied && !unavailable;
   const StatusIcon = pending
     ? ClockIcon
@@ -205,7 +203,7 @@ export function MergePanel({
               </>
             )}
           </p>
-          {!unavailable && protection && (
+          {!unavailable && requirements.protected && (
             <p className="protected-branch-note">
               <ShieldLockIcon />{" "}
               <span>
@@ -324,9 +322,11 @@ export function MergePanel({
             </div>
           ) : (
             <p className="muted">
-              {repo.access === "read"
-                ? "Write access is required to merge."
-                : "Complete the requirements above to enable merging."}
+              {pending
+                ? "Write access is required to recover the original merge."
+                : ready
+                  ? "Write access is required to merge."
+                  : "The requirements above must be satisfied before this pull request can be merged."}
             </p>
           )}
           <Failure message={mutation.error} />
