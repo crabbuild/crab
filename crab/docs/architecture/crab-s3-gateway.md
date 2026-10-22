@@ -658,6 +658,11 @@ EOF, disconnect, timeout and backend failure.
 
 ### 3.3 Listing projection and pagination
 
+Listing acceleration captures native ref heads under a v2 root and the journal
+under a legacy layout. It never requires a legacy manifest for a native
+repository. Reachable complete commit IDs use the canonical immutable Git
+listing path rather than being mistaken for missing branch names.
+
 ```mermaid
 flowchart LR
     Q[Prefix and listing options] --> A[Authorize and resolve view]

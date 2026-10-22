@@ -46,6 +46,25 @@ env:
   GATEWAY_SESSION_TOKEN: gateway-session-qualification-token
 
 jobs:
+  contracts:
+    name: Verify gateway and read contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: stable
+      - name: Place build artifacts outside the checkout
+        run: echo "CARGO_TARGET_DIR=${RUNNER_TEMP}/crab-s3-gateway-contracts-target" >> "${GITHUB_ENV}"
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: s3-gateway-contracts
+      - name: Check formatting
+        run: cargo fmt --check -p crab-read -p crab-s3-gateway
+      - name: Verify shared reads and S3 operations
+        run: cargo test --locked --lib -p crab-read -p crab-s3-gateway
+
   helm:
     name: Validate Helm chart
     runs-on: ubuntu-latest
@@ -525,6 +544,41 @@ jobs:
             --bucket crab-s3-gateway-qualification --prefix .crab/xorbs/ \
             --query 'length(Contents)' --output text > "${xet_root}/xorb-count"
           test "$(cat "${xet_root}/xorb-count")" -gt 0
+
+          native_root="${RUNNER_TEMP}/crab-s3-gateway-native"
+          publisher_bin="${RUNNER_TEMP}/crab-s3-gateway-publisher-target/release"
+          install -d "${native_root}/source"
+          cp "${source_root}/qualification/xet-large.bin" "${native_root}/source/xet.bin"
+          printf 'native capsule Git fixture\n' > "${native_root}/source/ordinary.txt"
+          ln -sf crab "${publisher_bin}/git-remote-crab"
+          export PATH="${publisher_bin}:${PATH}"
+          echo "${publisher_bin}" >> "${GITHUB_PATH}"
+          (
+            cd "${native_root}/source"
+            git init --initial-branch main
+            git config user.name 'Gateway qualification'
+            git config user.email 'qualification@example.invalid'
+            crab init crab://crab-s3-gateway-qualification/repositories/native-qualification
+            crab add xet.bin
+            git add ordinary.txt
+            git -c core.hooksPath=/dev/null commit -m 'add native gateway fixtures'
+            crab push crab://crab-s3-gateway-qualification/repositories/native-qualification main
+          )
+          aws s3api head-object --bucket crab-s3-gateway-qualification \
+            --key repositories/native-qualification/v2/root >/dev/null
+          cat >> "${config_root}/gateway.toml" <<'TOML'
+
+          [[repositories]]
+          name = "gateway-native-repository"
+          provider = "s3"
+          bucket = "crab-s3-gateway-qualification"
+          prefix = "repositories/native-qualification"
+          default_branch = "main"
+
+          [[repositories.members]]
+          principal = "service-account:qualification"
+          access = "write"
+          TOML
 
       - name: Start constrained gateway
         id: gateway
@@ -1146,6 +1200,39 @@ jobs:
             --xet-fixture "${xet_root}/source/qualification/xet-large.bin" \
             --large-object-bytes $((512 * 1024 * 1024)) \
             --report "${RUNNER_TEMP}/crab-s3-gateway-evidence/boto3-proof.json"
+
+          native_root="${RUNNER_TEMP}/crab-s3-gateway-native"
+          S3_GATEWAY_BOTO3_ACCESS_KEY="${GATEWAY_ACCESS_KEY}" \
+          S3_GATEWAY_BOTO3_SECRET_KEY="${GATEWAY_SECRET_KEY}" \
+          python3 crab/scripts/e2e/s3_gateway_boto3.py \
+            --endpoint "${endpoint}" --bucket gateway-native-repository \
+            --xet-fixture "${native_root}/source/xet.bin" --xet-key main/xet.bin \
+            --report "${RUNNER_TEMP}/crab-s3-gateway-evidence/boto3-native-proof.json"
+          aws --endpoint-url "${endpoint}" s3api put-object \
+            --bucket gateway-native-repository --key main/s3-visible.txt \
+            --body "${native_root}/source/ordinary.txt" >/dev/null
+          aws --endpoint-url "${endpoint}" s3api put-object \
+            --bucket gateway-native-repository --key main/s3-large.bin \
+            --body "${native_root}/source/xet.bin" >/dev/null
+          (
+            export AWS_ACCESS_KEY_ID="${RUSTFS_ACCESS_KEY}"
+            export AWS_SECRET_ACCESS_KEY="${RUSTFS_SECRET_KEY}"
+            unset AWS_SESSION_TOKEN
+            export AWS_ENDPOINT_URL_S3=http://127.0.0.1:19000
+            export AWS_ALLOW_HTTP=true
+            export AWS_VIRTUAL_HOSTED_STYLE_REQUEST=false
+            export CRAB_CACHE_DIR="${native_root}/reader-cache"
+            crab clone --lazy \
+              crab://crab-s3-gateway-qualification/repositories/native-qualification \
+              "${native_root}/clone"
+            cd "${native_root}/clone"
+            crab hydrate xet.bin
+            crab lfs pull
+            cmp ordinary.txt "${native_root}/source/ordinary.txt"
+            cmp s3-visible.txt "${native_root}/source/ordinary.txt"
+            cmp xet.bin "${native_root}/source/xet.bin"
+            cmp s3-large.bin "${native_root}/source/xet.bin"
+          )
 
           oversized_key=main/qualification/scratch-capacity.bin
           truncate --size 500M "${qualification_root}/oversized.bin"
@@ -1791,6 +1878,7 @@ jobs:
           path: |
             ${{ runner.temp }}/crab-s3-gateway-evidence/report.json
             ${{ runner.temp }}/crab-s3-gateway-evidence/boto3-proof.json
+            ${{ runner.temp }}/crab-s3-gateway-evidence/boto3-native-proof.json
             ${{ runner.temp }}/crab-s3-gateway-evidence/ecosystem-proof.json
             ${{ runner.temp }}/crab-s3-gateway-evidence/soak-proof.json
             ${{ runner.temp }}/crab-s3-gateway-evidence/owner-proof.json

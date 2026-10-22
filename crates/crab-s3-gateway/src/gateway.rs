@@ -13,7 +13,7 @@ use crab_cache_store::{CacheConfig as StoreCacheConfig, CacheObserver, CachingSt
 use crab_git::pointer_detect::PointerKind;
 use crab_remote_git::{
     ContentClassification, EntryKind, OperationKind, RemoteGitRuntime, RepositoryIdentity,
-    RepositoryOptions,
+    RepositoryOptions, Revision,
 };
 use crab_storage::{StorageProviderKind, Store, StoreLayout, build_static_env_store};
 use futures_util::StreamExt as _;
@@ -2945,7 +2945,8 @@ impl S3 for Gateway {
             );
         }
         let repo = self.open(repository).await?;
-        if repo.remote().refs().find(&reference).is_none() {
+        let commit_reference = matches!(Revision::parse(&reference), Ok(Revision::Commit(_)));
+        if !commit_reference && repo.remote().refs().find(&reference).is_none() {
             return empty_list_objects_response(&req, url_encode);
         }
         let operation = repo
@@ -4185,13 +4186,35 @@ impl Gateway {
         delimiter: Option<u8>,
         limit: usize,
     ) -> S3Result<Option<crate::attributes::ManifestListingPage>> {
-        let snapshot = crab_metadata::manifest_store::read_repository_snapshot(
-            &repository.store,
-            &repository.layout,
-        )
-        .await
-        .map_err(|error| gateway_error(error.into()))?;
-        let Some(tip) = snapshot.journal.refs.get(reference) else {
+        // The complete namespace index needs only a captured ref, not Git
+        // payloads. Native roots must use their mutable ref heads; consulting
+        // the legacy manifest would fail or select stale authority.
+        let tip = match crab_metadata::capsule_protocol::load_root(&repository.layout).await {
+            Ok(root) => {
+                let names = std::collections::BTreeSet::from([reference.to_owned()]);
+                crab_read::capsule_protocol::read_visible_refs_from_root_for_refs(
+                    &repository.layout,
+                    &root,
+                    &names,
+                )
+                .await
+                .map_err(|error| gateway_error(error.into()))?
+                .remove(reference)
+            }
+            Err(crab_metadata::error::MetadataError::Storage {
+                source: crab_storage::StorageError::NotFound { .. },
+            }) => crab_metadata::manifest_store::read_repository_snapshot(
+                &repository.store,
+                &repository.layout,
+            )
+            .await
+            .map_err(|error| gateway_error(error.into()))?
+            .journal
+            .refs
+            .remove(reference),
+            Err(error) => return Err(gateway_error(error.into())),
+        };
+        let Some(tip) = tip else {
             return Ok(None);
         };
         let tip = gix_hash::ObjectId::from_hex(tip.as_bytes())
@@ -4895,6 +4918,15 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn object_listing_pages_merge_blobs_and_prefixes_in_complete_key_order() {
+        check_object_listing_pages(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn capsule_object_listing_uses_the_native_ref_authority() {
+        check_object_listing_pages(true).await;
+    }
+
+    async fn check_object_listing_pages(capsule: bool) {
         let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
         let cache = tempfile::tempdir().unwrap();
         let local_cache = Arc::new(LocalCache::with_limits(
@@ -4923,13 +4955,23 @@ mod tests {
             Arc::clone(&local_cache),
         )
         .unwrap();
-        crab_write::initialize::initialize_repository(
-            &repository.store,
-            &repository.layout,
-            "refs/heads/main",
-        )
-        .await
-        .unwrap();
+        if capsule {
+            crab_write::capsule_protocol::initialize(
+                &repository.layout,
+                &"a".repeat(64),
+                "refs/heads/main",
+            )
+            .await
+            .unwrap();
+        } else {
+            crab_write::initialize::initialize_repository(
+                &repository.store,
+                &repository.layout,
+                "refs/heads/main",
+            )
+            .await
+            .unwrap();
+        }
         let secret = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(secret.path(), "listing-secret-value").unwrap();
         let auth = GatewayAuth::load(&Config {
@@ -5182,6 +5224,25 @@ mod tests {
                 .collect::<Vec<_>>(),
             ["main/lfs/.gitattributes", "main/lfs/model.bin"]
         );
+        let tip = listing_gateway
+            .open(repository)
+            .await
+            .unwrap()
+            .remote()
+            .refs()
+            .find("refs/heads/main")
+            .unwrap()
+            .target;
+        let immutable = listing_gateway
+            .list_objects_v2(list_request(ListObjectsV2Input {
+                bucket: "repo".to_owned(),
+                prefix: Some(format!("{tip}/prefix/")),
+                ..Default::default()
+            }))
+            .await
+            .unwrap()
+            .output;
+        assert_eq!(immutable.key_count, Some(5));
         listing_gateway.shutdown().await;
         gateway.shutdown().await;
     }

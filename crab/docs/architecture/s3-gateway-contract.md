@@ -210,6 +210,11 @@ multi-value write/delete validators are rejected.
 
 ## Listings and continuation
 
+Listings use the same ref namespace as object reads, including reachable complete
+commit IDs. The complete-attribute namespace index captures native v2 ref heads
+when a v2 root exists; only repositories without that root consult the legacy
+manifest/journal. Corrupt native authority fails closed.
+
 Keys are ordered by their complete UTF-8 byte representation, including the
 encoded ref prefix. `delimiter=/` groups each subtree once and counts a common
 prefix against `MaxKeys`. Each page seeks from its prefix and exclusive marker
