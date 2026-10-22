@@ -1397,7 +1397,7 @@ jobs:
         run: |
           python3 -B crab/scripts/e2e/s3_gateway_ecosystem.py \
             --endpoint http://127.0.0.1:18080 \
-            --bucket gateway-repository \
+            --bucket gateway-native-repository \
             --work-dir "${RUNNER_TEMP}/crab-s3-gateway-ecosystem" \
             --report "${RUNNER_TEMP}/crab-s3-gateway-evidence/ecosystem-proof.json"
 
