@@ -1,4 +1,5 @@
 use super::super::index;
+use super::super::people::Binding;
 use super::*;
 use crate::{
     cells::{RepositoryCell, application::Mutation, repository::*},
@@ -30,8 +31,8 @@ async fn search(
     reviewer: &RepositoryAuthor,
 ) -> index::Page<DiscussionSummary> {
     let parsed = Query::parse(Some(query)).unwrap();
-    let reviewers = parsed
-        .reviewers()
+    let people = parsed
+        .people()
         .into_iter()
         .map(|name| Binding {
             name,
@@ -44,7 +45,7 @@ async fn search(
             None,
             SearchInput {
                 query: Some(query.into()),
-                reviewers,
+                people,
                 ..Default::default()
             },
         )
@@ -153,10 +154,10 @@ fn reviewer_navigation_preserves_conditional_groups_and_native_personal_selectio
         assert!(Query::parse(Some(source)).is_err(), "{source}");
     }
     let query = Query::parse(Some("review-requested:@me")).unwrap();
-    assert!(query.validate_reviewers(&[]).is_err());
+    assert!(query.validate_people(&[]).is_err());
     assert!(
         query
-            .validate_reviewers(&[Binding {
+            .validate_people(&[Binding {
                 name: "@me".into(),
                 identity: None
             }])

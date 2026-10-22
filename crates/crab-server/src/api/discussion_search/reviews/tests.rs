@@ -103,6 +103,11 @@ async fn reviewer_filters_resolve_public_handles_and_current_accounts_and_expose
     assert_eq!(options["self"]["query"], "is:open reviewed-by:@me");
     assert!(!options.to_string().contains("bob-id") && !options.to_string().contains("issuer"));
     assert_eq!(h.json(&format!("{root}/pulls/1"), &alice).await, before);
+    assert_eq!(
+        h.json(&format!("{root}/pulls?q=commenter%3Apublic-bob"), &alice)
+            .await["matching"],
+        0
+    );
     client
         .command::<CreatePullReview>(
             repo,
@@ -127,6 +132,37 @@ async fn reviewer_filters_resolve_public_handles_and_current_accounts_and_expose
         h.json(&format!("{root}/pulls?q=reviewed-by%3Apublic-bob"), &alice)
             .await["matching"],
         1
+    );
+    for query in [
+        "commenter:PUBLIC-BOB",
+        "commenter:@me",
+        "reviewed-by:public-bob commenter:public-bob",
+        "commenter:@me review-involves:@me",
+    ] {
+        let response: Value = h
+            .http
+            .get(format!("{}{root}/pulls", h.origin))
+            .header(reqwest::header::COOKIE, &bob)
+            .query(&[("q", query)])
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(response["matching"], 1, "{query}");
+    }
+    let completion = h
+        .json(
+            &format!("{root}/discussion-search?query=commenter%3APUB&cursor=13"),
+            &alice,
+        )
+        .await;
+    assert_eq!(completion["items"][0]["value"], "commenter:public-bob");
+    assert!(
+        !completion.to_string().contains("bob-id") && !completion.to_string().contains("issuer")
     );
     assert_eq!(
         h.json(

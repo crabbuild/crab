@@ -145,6 +145,7 @@ impl Mutation for CreatePullReview {
             pull: record.pull,
             number: record.number,
         };
+        super::super::search::commenters::project(context, target, &record.author)?;
         activity::append(context, target, &record.author, action)?;
         Ok(MutationResult::Success(CreatePullReviewOutcome::Created(
             record,

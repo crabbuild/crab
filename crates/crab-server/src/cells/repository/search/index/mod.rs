@@ -8,7 +8,7 @@ use crate::cells::repository::collaboration::{Subject, SubjectKind};
 use crate::cells::repository::{MAX_NUMBER, SqlBatch, integer, result_u64, statement};
 
 const STATE_KEY: &str = "discussion-search/v1/state";
-const FORMAT: u16 = 6;
+const FORMAT: u16 = 7;
 const BATCH: usize = 8;
 const MAX_DIRTY: usize = 128;
 
@@ -28,11 +28,13 @@ pub enum SearchIndexPhase {
     Clear,
     ClearMilestones,
     ClearReviewers,
+    ClearCommenters,
     Milestones,
     Issues,
     Pulls,
     Reviews,
     ReviewRequests,
+    Commenters,
 }
 
 /// The bounded preparation cursor and compare-and-swap version.
@@ -107,6 +109,7 @@ fn revision(context: &Transaction<'_>) -> crate::cells::Result<u64> {
 
 pub(crate) fn initialize(context: &Transaction<'_>, generation: Uuid) -> crate::cells::Result<()> {
     context.install_schema(include_str!("schema.sql"))?;
+    super::commenters::install(context)?;
     context.put_document(
         STATE_KEY,
         &State {

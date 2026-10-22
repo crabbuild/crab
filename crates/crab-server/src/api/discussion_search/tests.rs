@@ -154,6 +154,10 @@ async fn issue_workspace_returns_tagged_pull_results_and_paginates_colliding_num
     .unwrap();
     for (endpoint, query, expected) in [
         ("issues", "comments:1", vec!["pull", "issue"]),
+        ("issues", "commenter:@me", vec!["pull", "issue"]),
+        ("issues", "author:@me commenter:@me", vec!["pull", "issue"]),
+        ("issues", "commenter:unknown", vec![]),
+        ("pulls", "commenter:@me", vec!["pull"]),
         ("issues", "is:open comments:1", vec!["issue"]),
         ("issues", "is:closed reactions:1", vec!["pull"]),
         ("pulls", "interactions:2..*", vec!["pull"]),

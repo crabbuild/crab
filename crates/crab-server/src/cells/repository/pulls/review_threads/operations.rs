@@ -109,6 +109,7 @@ impl Mutation for CreatePullReviewThread {
             pull: record.pull,
             number: record.number,
         };
+        crate::cells::repository::search::commenters::project(context, target, &record.author)?;
         activity::append(context, target, &record.author, Action::Created)?;
         Ok(MutationResult::Success(
             CreatePullReviewThreadOutcome::Created(Box::new(record)),
@@ -328,6 +329,7 @@ impl Mutation for CreatePullReviewReply {
             thread: record.thread,
             number: record.number,
         };
+        crate::cells::repository::search::commenters::project(context, target, &record.author)?;
         activity::append(context, target, &record.author, Action::Created)?;
         Ok(MutationResult::Success(
             CreatePullReviewReplyOutcome::Created(record),

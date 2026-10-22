@@ -1495,7 +1495,7 @@ the query. Public HTTP parameters cannot supply those bindings. Directory reads
 7/8 resolve at most 64 handles or return up to 20 public actor summaries from
 one indexed handle prefix. Read 8 returns `items` and `truncated`, rather than a
 bare array; update all native peers together. No older-output reader is supported.
-Integration-account author syntax and reviewer/participant predicates remain open.
+Integration-account author syntax, mentions and complete involvement predicates remain open.
 
 The shared Author menu uses `GET .../discussion-search/authors` with `query` and
 `search`. It searches registered public usernames by prefix, ignoring ASCII case
@@ -1557,9 +1557,10 @@ handle invalidates its old cursor even without a repository mutation. Malformed 
 queries or index contents return 409 `stale_search_cursor`. Restart at the first
 page to obtain a fresh snapshot. Comment pagination remains numeric.
 
-The current discussion index format is 6. It retains qualified author identities,
+The current discussion index format is 7. It retains qualified author identities,
 milestone catalog entries and stable actor assignment keys, and adds searchable
-assignment name snapshots and transactional reviewer relationships. Older indexes report
+assignment name snapshots, transactional reviewer relationships and per-source
+commenter identities. Older indexes report
 `outdated`; run the explicit rebuild below before admitting indexed traffic.
 It rebuilds only derived tables and preserves canonical milestone and assignment
 records. Clearing, milestone catalog preparation and discussion projection are
@@ -1606,6 +1607,23 @@ Choosing a relationship replaces only global reviewer terms; conditional OR
 groups and unrelated facets keep their meaning. Sort/direction and diagnostics
 persist, while pagination resets. Review-status predicates remain unsupported
 until connected to current Git head and branch protection policy.
+
+`commenter:username` and `commenter:@me` match conversation comments, all submitted
+reviews (including empty approvals), inline thread comments and replies. An author
+with no such contributions does not match. Merely being assigned or requested to
+review does not match. Public handles resolve against current Directory identities;
+equal subjects under different issuers remain distinct. Exclusions, Boolean groups,
+state counts and cursors share the native predicate on both list surfaces.
+
+Format 7 stores one source identity per canonical contribution, indexed by
+qualified identity and discussion kind/number. Source deletion triggers preserve
+other contributions by the same actor and follow canonical cascades. Bounded
+rebuild clears this projection separately and scans each canonical composite key
+in frames of eight, with a durable source cursor. Private list inputs consolidate
+author, reviewer and commenter names into one exact ordered `people` collection;
+update and drain peers together. No old-shape decoder is supported. Commenter
+completion includes public usernames and `@me`; no authentication claims cross
+HTTP. Comment text, mentions and `involves` remain unsupported.
 
 ### Browse activity
 

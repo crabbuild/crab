@@ -21,6 +21,10 @@ pub(in crate::cells) fn dispatch_mutation(
     }
     let result = match id {
         #[cfg(test)]
+        search::commenters::tests::DeleteSource::ID => {
+            invoke_mutation::<search::commenters::tests::DeleteSource>(context, input)
+        }
+        #[cfg(test)]
         assignments::migration::tests::SeedSubjects::ID => {
             invoke_mutation::<assignments::migration::tests::SeedSubjects>(context, input)
         }

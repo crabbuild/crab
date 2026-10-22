@@ -22,11 +22,9 @@ pub(in crate::api) async fn resolve(
     input: &mut SearchInput,
 ) -> Result<()> {
     let query = Query::parse(input.query.as_deref()).map_err(app::Error::Invalid)?;
-    let names: std::collections::BTreeSet<_> =
-        query.authors().union(&query.reviewers()).cloned().collect();
+    let names = query.people();
     if names.is_empty() {
-        input.authors.clear();
-        input.reviewers.clear();
+        input.people.clear();
         return Ok(());
     }
     let handles: Vec<_> = names
@@ -52,7 +50,8 @@ pub(in crate::api) async fn resolve(
     let mut by_handle: std::collections::BTreeMap<_, _> =
         handles.into_iter().zip(resolved).collect();
     let actor = app::actor(principal)?;
-    let resolved = names
+    // All people predicates bind against one parsed union and Directory snapshot.
+    input.people = names
         .into_iter()
         .map(|name| {
             let identity = if name == "@me" {
@@ -65,16 +64,9 @@ pub(in crate::api) async fn resolve(
                     .transpose()
                     .map_err(app::Error::Cell)?
             };
-            Ok((name, identity))
+            Ok(Binding { name, identity })
         })
-        .collect::<Result<std::collections::BTreeMap<_, _>>>()?;
-    // Both families bind against the same parsed union and Directory snapshot.
-    let bind = |name: String| Binding {
-        identity: resolved[&name],
-        name,
-    };
-    input.authors = query.authors().into_iter().map(bind).collect();
-    input.reviewers = query.reviewers().into_iter().map(bind).collect();
+        .collect::<Result<_>>()?;
     Ok(())
 }
 

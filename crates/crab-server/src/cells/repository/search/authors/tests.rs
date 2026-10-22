@@ -1,3 +1,4 @@
+use super::super::people::Binding;
 use super::*;
 use crate::{
     cells::{RepositoryCell, repository::*},
@@ -20,7 +21,7 @@ fn author_grammar_and_global_self_selection_keep_boolean_meaning() {
     ] {
         let query = Query::parse(Some(source)).unwrap();
         assert_eq!(
-            query.authors().into_iter().collect::<Vec<_>>(),
+            query.people().into_iter().collect::<Vec<_>>(),
             names,
             "{source}"
         );
@@ -54,7 +55,7 @@ async fn page(
             None,
             SearchInput {
                 query: Some(query.into()),
-                authors: bindings,
+                people: bindings,
                 before,
                 limit,
                 ..Default::default()

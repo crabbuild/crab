@@ -271,7 +271,7 @@ async fn qualify_handoff(
             Some(created.receipt),
             SearchInput {
                 query: Some("author:@me".into()),
-                authors: vec![people::Binding {
+                people: vec![people::Binding {
                     name: "@me".into(),
                     identity: Some(
                         people::identity(&lookup_identity.issuer, &lookup_identity.subject)

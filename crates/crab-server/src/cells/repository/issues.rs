@@ -203,6 +203,7 @@ impl Mutation for CreateComment {
             issue: record.issue,
             number: record.number,
         };
+        search::commenters::project(context, target, &record.author)?;
         activity::append(context, target, &record.author, Action::Created)?;
         Ok(MutationResult::Success(CreateCommentOutcome::Created(
             record,

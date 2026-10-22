@@ -93,3 +93,24 @@ fn count_suggestions_preserve_exclusions_and_produce_valid_numeric_queries() {
         assert!(complete(&input(&query, query.len())).error.is_none());
     }
 }
+
+#[test]
+fn commenter_completion_uses_the_shared_people_path_and_keeps_utf16_ranges() {
+    let query = "🦀 -commenter:@";
+    let input = input(query, query.encode_utf16().count());
+    let mut result = complete(&input);
+    assert_eq!(result.items[0].value, "-commenter:@me");
+    assert_eq!(
+        person_prefix(&input).unwrap(),
+        Some(("commenter".into(), "@".into()))
+    );
+    append_people(
+        &input,
+        &mut result,
+        "commenter",
+        [("public-alice".into(), "Alice".into())].into_iter(),
+    )
+    .unwrap();
+    assert_eq!((result.start, result.end), (3, 15));
+    assert_eq!(result.items[1].value, "-commenter:public-alice");
+}

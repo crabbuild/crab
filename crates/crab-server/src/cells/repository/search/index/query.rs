@@ -39,9 +39,8 @@ pub(crate) struct SearchInput {
     pub query: Option<String>,
     pub sort: Sort,
     pub direction: Direction,
-    pub authors: Vec<super::super::people::Binding>,
+    pub people: Vec<super::super::people::Binding>,
     pub assignees: Vec<super::super::assignees::Binding>,
-    pub reviewers: Vec<super::super::people::Binding>,
 }
 impl Default for SearchInput {
     fn default() -> Self {
@@ -51,9 +50,8 @@ impl Default for SearchInput {
             query: None,
             sort: Sort::Created,
             direction: Direction::Desc,
-            authors: Vec::new(),
+            people: Vec::new(),
             assignees: Vec::new(),
-            reviewers: Vec::new(),
         }
     }
 }
@@ -170,9 +168,8 @@ struct Candidate {
 #[derive(Default)]
 struct Bindings<'a> {
     values: Vec<SqlValue>,
-    authors: &'a [super::super::people::Binding],
+    people: &'a [super::super::people::Binding],
     assignees: &'a [super::super::assignees::Binding],
-    reviewers: &'a [super::super::people::Binding],
 }
 impl Bindings<'_> {
     fn bind(&mut self, value: SqlValue) -> String {
@@ -181,6 +178,14 @@ impl Bindings<'_> {
     }
     fn text(&mut self, value: &str) -> String {
         self.bind(SqlValue::Text(value.into()))
+    }
+    fn person(&mut self, name: &str) -> Option<String> {
+        let identity = self
+            .people
+            .iter()
+            .find(|binding| binding.name == name)?
+            .identity?;
+        Some(self.bind(SqlValue::Blob(identity.to_vec())))
     }
 }
 
@@ -195,13 +200,10 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
     let revision = revision(context)?;
     let query = Query::parse(input.query.as_deref()).map_err(crate::cells::Error::Invalid)?;
     query
-        .validate_authors(&input.authors)
+        .validate_people(&input.people)
         .map_err(crate::cells::Error::Invalid)?;
     query
         .validate_assignees(&input.assignees)
-        .map_err(crate::cells::Error::Invalid)?;
-    query
-        .validate_reviewers(&input.reviewers)
         .map_err(crate::cells::Error::Invalid)?;
     let identity = context.sql(&SqlBatch {
         statements: vec![statement(
@@ -223,9 +225,8 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
         input.sort,
         input.direction,
         &query.expression,
-        &input.authors,
+        &input.people,
         &input.assignees,
-        &input.reviewers,
     ))?)
     .to_hex()
     .to_string();
@@ -244,9 +245,8 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
         return Err(crate::cells::Error::StaleSearch);
     }
     let mut bindings = Bindings {
-        authors: &input.authors,
+        people: &input.people,
         assignees: &input.assignees,
-        reviewers: &input.reviewers,
         ..Bindings::default()
     };
     let kind_clause = kind_filter(subject_kind, &mut bindings);
@@ -286,9 +286,8 @@ pub(in crate::cells::repository) fn page<T: Serialize + Labelled>(
             "discussion count exceeds its range",
         ))?;
     let mut bindings = Bindings {
-        authors: &input.authors,
+        people: &input.people,
         assignees: &input.assignees,
-        reviewers: &input.reviewers,
         ..Bindings::default()
     };
     let kind_clause = kind_filter(subject_kind, &mut bindings);
@@ -478,16 +477,12 @@ fn expression(expression: &Expression, bindings: &mut Bindings<'_>) -> String {
                 let values = names.iter().map(|name|bindings.text(name)).collect::<Vec<_>>().join(",");
                 format!("EXISTS (SELECT 1 FROM discussion_index_labels dl JOIN repository_labels l ON l.number = dl.label WHERE dl.document = d.rowid AND l.deleted_version IS NULL AND l.name_key IN ({values}))")
             }
-            Term::Author(name) => {
-                let identity = bindings.authors.iter().find(|binding| binding.name == *name).and_then(|binding| binding.identity);
-                match identity {
-                    Some(identity) => {
-                        let value = bindings.bind(SqlValue::Blob(identity.to_vec()));
-                        format!("EXISTS (SELECT 1 FROM discussion_index_authors a WHERE a.document = d.rowid AND a.identity = {value})")
-                    }
-                    None => "0".into(),
-                }
-            }
+            Term::Author(name) => bindings.person(name).map_or_else(|| "0".into(), |value| {
+                format!("EXISTS (SELECT 1 FROM discussion_index_authors a WHERE a.document = d.rowid AND a.identity = {value})")
+            }),
+            Term::Commenter(name) => bindings.person(name).map_or_else(|| "0".into(), |value| {
+                format!("EXISTS (SELECT 1 FROM discussion_index_commenters c WHERE c.identity = {value} AND c.kind = d.kind AND c.discussion = d.number)")
+            }),
             Term::Assignee(name) => {
                 if name == "*" {
                     return "EXISTS (SELECT 1 FROM discussion_index_assignees a WHERE a.document = d.rowid)".into();
@@ -501,17 +496,10 @@ fn expression(expression: &Expression, bindings: &mut Bindings<'_>) -> String {
                     None => "0".into(),
                 }
             }
-            Term::Reviewer { kind, name } => {
-                let identity = bindings.reviewers.iter().find(|binding| binding.name == *name).and_then(|binding| binding.identity);
-                match identity {
-                    Some(identity) => {
-                        let value = bindings.bind(SqlValue::Blob(identity.to_vec()));
-                        let predicate = kind.predicate();
-                        format!("d.kind = 1 AND EXISTS (SELECT 1 FROM discussion_index_reviewers r WHERE r.pull = d.number AND r.identity = {value} AND ({predicate}))")
-                    }
-                    None => "0".into(),
-                }
-            }
+            Term::Reviewer { kind, name } => bindings.person(name).map_or_else(|| "0".into(), |value| {
+                let predicate = kind.predicate();
+                format!("d.kind = 1 AND EXISTS (SELECT 1 FROM discussion_index_reviewers r WHERE r.pull = d.number AND r.identity = {value} AND ({predicate}))")
+            }),
             Term::Milestone(title) => {
                 let value = bindings.text(title);
                 format!("EXISTS (SELECT 1 FROM discussion_index_milestones dm JOIN discussion_index_milestone_catalog m ON m.number = dm.milestone WHERE dm.document = d.rowid AND m.title_key = {value})")

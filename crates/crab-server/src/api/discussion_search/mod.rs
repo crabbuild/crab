@@ -167,9 +167,8 @@ impl ListParameters {
             query: app::search_query(self.q.as_deref().or(Some(default_query)))?,
             sort: self.sort.unwrap_or_default(),
             direction: self.direction.unwrap_or_default(),
-            authors: Vec::new(),
+            people: Vec::new(),
             assignees: Vec::new(),
-            reviewers: Vec::new(),
         };
         input.validate().map_err(app::Error::Invalid)?;
         Ok(input)

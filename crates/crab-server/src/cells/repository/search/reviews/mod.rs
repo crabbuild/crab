@@ -1,10 +1,9 @@
 use serde::{Deserialize, Serialize};
-use std::collections::BTreeSet;
 
 use super::{
     Expression, Query, Term,
     navigation::{self, Choice},
-    people::{self, Binding},
+    people,
 };
 
 mod projection;
@@ -49,15 +48,6 @@ impl Kind {
 }
 
 impl Query {
-    pub(crate) fn reviewers(&self) -> BTreeSet<String> {
-        people::names(self, |term| match term {
-            Term::Reviewer { name, .. } => Some(name),
-            _ => None,
-        })
-    }
-    pub(super) fn validate_reviewers(&self, bindings: &[Binding]) -> Result<(), &'static str> {
-        people::validate(&self.reviewers(), bindings)
-    }
     pub(crate) fn reviewer_choice(
         &self,
         kind: Kind,

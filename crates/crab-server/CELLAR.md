@@ -24,7 +24,7 @@ is buffered before owner dispatch so Cellar can safely retry stale routes; it is
 not forwarded as a non-replayable upload stream. Successful HTTP output
 uses the SDK output gate, including its ownership and durability checks.
 
-Repository assignment format 2 and discussion index format 6 require the explicit
+Repository assignment format 2 and discussion index format 7 require the explicit
 preparation described below. Other canonical records retain their formats.
 Transport requests and replies use bounded JSON. Mutation receipts store
 the payload digest and outcome in the same transaction as application writes.
@@ -137,14 +137,35 @@ review key or exclusive KV bound. Both phases process at most eight source recor
 per transaction; unrelated pull metadata also advances the request cursor. Reads
 remain unavailable until all sources complete. Domain records, versions, request
 history, receipts and public submission mappings are unchanged. Older indexes
-require `cells rebuild-search`; fresh repositories initialize format 6.
+require `cells rebuild-search`; fresh repositories now initialize format 7.
 
-Native list input adds exact ordered reviewer identity bindings; output adds
-`review_requested_from_me`. Author and reviewer bindings share the same Directory
-snapshot, digest encoding and validation. Public HTTP cannot supply bindings.
+Native list output adds `review_requested_from_me`. Author, reviewer and commenter
+names now share one ordered `people` binding collection, one Directory snapshot,
+digest encoding and validation. Public HTTP cannot supply bindings.
 Update peers together; there is no old list-shape reader or source-scan fallback.
-Team requests, review-status/merge-policy predicates, general participants and
+Team requests, review-status/merge-policy predicates, mention relationships and
 native grant authority remain separate delivery work.
+
+## Commenter search preparation
+
+Discussion index format 7 adds one qualified-identity projection per conversation
+comment, submitted review, inline thread or reply. Empty-body approvals count as
+submitted participation; opening a discussion or requesting a review alone does
+not. Canonical commands project only after submission replay, in their native
+transaction. Source keys distinguish equal child numbers across issues, PRs,
+threads and contribution types. Canonical deletion triggers remove only that
+source, including thread/reply and discussion cascades. Projection rows survive
+ordinary discussion document replacement.
+
+Run `cells rebuild-search` before indexed traffic on existing repositories.
+Clearing and source scanning each process at most eight records per transaction.
+A persisted source/composite-key cursor resumes across all five canonical tables;
+the final phase completes only after every source. No canonical records,
+versions, assignment formats or public submission records change. Upgrade and
+drain all peers together for the unified private people-binding input; there is
+no old-input decoder or serving-time scan. `commenter:username` and `commenter:@me`
+use current qualified identities and public username completion. Mentions,
+`involves` and comment text search still need their own models.
 
 ## Assignee search preparation
 

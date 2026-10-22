@@ -76,6 +76,7 @@ impl Mutation for CreatePullComment {
             pull: record.pull,
             number: record.number,
         };
+        super::super::search::commenters::project(context, target, &record.author)?;
         activity::append(context, target, &record.author, Action::Created)?;
         Ok(MutationResult::Success(CreatePullCommentOutcome::Created(
             record,

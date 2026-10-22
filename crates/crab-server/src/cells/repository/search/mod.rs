@@ -4,6 +4,7 @@ use super::collaboration::{SubjectKind, SubjectState};
 
 pub(crate) mod assignees;
 pub(crate) mod authors;
+pub(crate) mod commenters;
 pub(crate) mod completion;
 mod counts;
 pub(crate) mod index;
@@ -40,6 +41,7 @@ enum Expression {
 #[derive(Clone, Debug, serde::Serialize)]
 enum Term {
     Author(String),
+    Commenter(String),
     Assignee(String),
     Reviewer { kind: reviews::Kind, name: String },
     Count(counts::Filter),
@@ -217,6 +219,7 @@ fn atom_expression(atom: &str) -> Result<Expression, &'static str> {
         None => Term::Text(unquote(atom)?.to_lowercase()),
         Some((qualifier, value)) => match qualifier.to_ascii_lowercase().as_str() {
             "author" => Term::Author(people::name(&unquote(value)?)?),
+            "commenter" => Term::Commenter(people::name(&unquote(value)?)?),
             "assignee" => Term::Assignee(assignees::name(&unquote(value)?)?),
             "comments" | "reactions" | "interactions" => Term::Count(counts::Filter::parse(
                 &qualifier.to_ascii_lowercase(),

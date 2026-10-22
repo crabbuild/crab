@@ -1,6 +1,4 @@
-use std::collections::BTreeSet;
-
-use super::people::{self, Binding, name};
+use super::people::name;
 
 use super::{
     Expression, Query, Term,
@@ -8,17 +6,6 @@ use super::{
 };
 
 impl Query {
-    pub(crate) fn authors(&self) -> BTreeSet<String> {
-        people::names(self, |term| match term {
-            Term::Author(name) => Some(name),
-            _ => None,
-        })
-    }
-
-    pub(super) fn validate_authors(&self, bindings: &[Binding]) -> Result<(), &'static str> {
-        people::validate(&self.authors(), bindings)
-    }
-
     pub(crate) fn author_choice(&self, handle: Option<&str>) -> Result<Choice, &'static str> {
         fn author_atom(expression: &Expression) -> bool {
             match expression {

@@ -40,7 +40,9 @@ suggestions and browser UTF-16 replacement ranges. `search/milestones/` owns
 milestone projection/catalog reads, grammar-preserving facet destinations and
 the native choice read. `search/people/` owns qualified identity digests, public name validation and
 shared resolved bindings. `search/authors/` owns global author-facet destinations
-and personal-view selection. `search/reviews/` owns reviewer predicates, transactional
+and personal-view selection. `search/commenters/` owns per-contribution qualified
+identities, canonical deletion triggers and bounded five-source rebuilding;
+`search/reviews/` owns reviewer predicates, transactional
 review/request projections and bounded rebuild source cursors. `search/assignees/` owns stable-ID predicates, resolved binding validation,
 historical snapshot choices and personal selection; `api/discussion_search/assignees/`
 resolves handles/current accounts and composes authorized filter choices.
@@ -79,7 +81,7 @@ the `cells` CLI. Registration does not grant permissions.
 `cells/directory/lookup/` owns bounded qualified account-ID reads and public
 profile reads by qualified key or actor UUID. `cells/directory/search/` owns bounded indexed handle resolution
 and completion. Handle completion returns bounded public matches plus an exact
-truncation flag. `api/discussion_search/people/` resolves the shared author/reviewer name union
+truncation flag. `api/discussion_search/people/` resolves the shared author/reviewer/commenter name union
 before native reads and composes public choices with final membership checks.
 `api/discussion_search/authors/` and `reviews/` own their filter endpoints. `api/profiles/attribution/` deduplicates list authors into one
 Directory read; issue and PR handlers recheck durable membership afterward.

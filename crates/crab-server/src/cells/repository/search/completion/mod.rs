@@ -36,6 +36,7 @@ pub(crate) struct Suggestion {
 
 const PEOPLE_QUALIFIERS: &[&str] = &[
     "author",
+    "commenter",
     "assignee",
     "review-requested",
     "reviewed-by",
@@ -207,6 +208,7 @@ fn suggestions(
     {
         for (value, description) in [
             ("author:@me", "Work created by you"),
+            ("commenter:@me", "Work you commented on or reviewed"),
             ("assignee:@me", "Work assigned to you"),
             ("assignee:*", "Work with any assignee"),
             ("review-requested:@me", "Awaiting your review"),
@@ -237,6 +239,7 @@ fn suggestions(
             ("milestone:", "Filter by repository milestone"),
             ("no:milestone", "Work without a milestone"),
             ("author:", "Filter by public username"),
+            ("commenter:", "Filter discussion participants"),
             ("author:@me", "Work created by you"),
             ("assignee:", "Filter by assignee"),
             ("assignee:@me", "Work assigned to you"),
