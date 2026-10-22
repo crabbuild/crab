@@ -31,6 +31,7 @@ mod merge;
 mod readiness;
 mod review_requests;
 mod review_threads;
+mod reviewers;
 mod reviews;
 mod storage;
 use crate::cells::repository::{ListPulls, PullSummary};
@@ -53,6 +54,7 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         .merge(merge::routes())
         .merge(readiness::routes())
         .merge(review_requests::routes())
+        .merge(reviewers::routes())
         .layer(axum::extract::DefaultBodyLimit::max(160 * 1024))
         .route_layer(middleware::from_fn_with_state(server, app::admit))
 }

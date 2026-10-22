@@ -55,7 +55,9 @@ fn optional_record<T: StoredRecord>(value: &Option<T>) -> crate::cells::Result<S
     }
 }
 
-fn decode_optional_record<T: StoredRecord>(value: &SqlValue) -> crate::cells::Result<Option<T>> {
+pub(super) fn decode_optional_record<T: StoredRecord>(
+    value: &SqlValue,
+) -> crate::cells::Result<Option<T>> {
     match value {
         SqlValue::Null => Ok(None),
         SqlValue::Blob(bytes) => {

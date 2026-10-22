@@ -15,11 +15,17 @@ pub(in crate::cells) fn dispatch_mutation(
     let maintenance = id == <search::index::RebuildIndex as Mutation>::ID
         || id == <assignments::MigrateAssignments as Mutation>::ID;
     #[cfg(test)]
-    let maintenance = maintenance || id == assignments::migration::tests::SeedSubjects::ID;
+    let maintenance = maintenance
+        || id == assignments::migration::tests::SeedSubjects::ID
+        || id == reviewers::tests::PreviousIndex::ID;
     if !maintenance {
         search::index::ensure_ready(context)?;
     }
     let result = match id {
+        #[cfg(test)]
+        reviewers::tests::PreviousIndex::ID => {
+            invoke_mutation::<reviewers::tests::PreviousIndex>(context, input)
+        }
         #[cfg(test)]
         search::contributions::tests::DeleteSource::ID => {
             invoke_mutation::<search::contributions::tests::DeleteSource>(context, input)
@@ -176,9 +182,10 @@ pub(in crate::cells) fn dispatch_read(
         <review_requests::GetReviewRequest as Read>::ID => {
             invoke_read::<review_requests::GetReviewRequest>(context, input)
         }
-        <review_requests::ListReviewRequests as Read>::ID => {
-            invoke_read::<review_requests::ListReviewRequests>(context, input)
+        <reviewers::ListReviewers as Read>::ID => {
+            invoke_read::<reviewers::ListReviewers>(context, input)
         }
+
         <ListPulls as Read>::ID => invoke_read::<ListPulls>(context, input),
         <GetPullComment as Read>::ID => invoke_read::<GetPullComment>(context, input),
         <ListPullComments as Read>::ID => invoke_read::<ListPullComments>(context, input),

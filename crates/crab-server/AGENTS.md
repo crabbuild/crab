@@ -28,7 +28,8 @@ operations. `models.rs` owns common records/inputs; `issues.rs` owns issue and
 comment operations. Feature commands and their persistence helpers live under
 `checks/`, `labels/`, `statuses/`, `settings/`, `releases/`, and `pulls/`. Pull
 readiness belongs to `pulls/readiness/`, reviewer invitations and fulfillment
-belong to `pulls/review_requests/`, and review threads belong to
+belong to `pulls/review_requests/`, bounded reviewer summaries to
+`pulls/reviewers/`, and review threads belong to
 `pulls/review_threads/`; browse projection reads and
 writes belong to `projection/`. `dispatch.rs` alone decodes operation IDs. `search/` owns the shared issue/PR
 query grammar; `search/results/` owns tagged issue/PR results and the mixed
@@ -72,6 +73,8 @@ in `src/cells/repository/schema.rs`, using the canonical `src/cells/schema.sql`.
 its `migration/` alone reads retired subject bytes and performs bounded explicit
 conversion. `api/members/roster.rs` binds current member UUIDs to qualified private
 accounts and public candidate profiles for assignments and reviewer selection.
+`api/pulls/reviewers/` composes current-head status and public participant pages;
+`repository::ref_oid` uses the selected-ref data plane without opening packs.
 `api/assignees/resolution.rs` owns assignment selection limits and historical
 assignee presentation. Both refresh grants after Directory reads. Private
 assignment inventory/migration live in `server/management/assignments.rs` and

@@ -1,8 +1,16 @@
 import { useId, useRef, useState } from "react";
-import { ClockIcon, CodeReviewIcon } from "@primer/octicons-react";
+import {
+  ClockIcon,
+  CodeReviewIcon,
+  CheckCircleFillIcon,
+  XCircleFillIcon,
+} from "@primer/octicons-react";
 import { RotateCwIcon, SettingsIcon, XIcon } from "lucide-react";
 import { Author, type DiscussionAuthor } from "@/components/discussion/author";
 import { Button } from "@/components/ui/button";
+import { Badge } from "@/components/ui/badge";
+import { cn } from "@/lib/utils";
+import type { ReviewState } from "../model";
 import { Field, FieldError, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import {
@@ -21,17 +29,28 @@ import {
 import { useMutation } from "@/components/discussion/mutations";
 import { Result } from "@/components/request/result";
 
-interface ReviewRequest {
+interface ReviewSummary {
+  number: number;
+  state: ReviewState;
+  commit_oid: string;
+  current: boolean | null;
+}
+interface Reviewer {
   id: string;
   reviewer: DiscussionAuthor;
   candidate_id: string | null;
-  requested_by: DiscussionAuthor;
-  state:
-    | { kind: "requested" | "cancelled" }
-    | { kind: "fulfilled"; review: number };
+  request: {
+    id: string;
+    requested_by: DiscussionAuthor;
+    state:
+      | { kind: "requested" | "cancelled" }
+      | { kind: "fulfilled"; review: number };
+  } | null;
+  review: ReviewSummary | null;
+  decision: ReviewSummary | null;
 }
 interface Page {
-  items: ReviewRequest[];
+  items: Reviewer[];
   next: string | null;
   version: number;
   can_manage: boolean;
@@ -41,7 +60,7 @@ type Change =
   | { kind: "request"; actor_id: string }
   | { kind: "cancel"; id: string };
 
-export function ReviewRequests({
+export function Reviewers({
   repo,
   pull,
   csrf,
@@ -52,14 +71,14 @@ export function ReviewRequests({
   csrf: string;
   onSaved: () => void;
 }) {
-  const [before, setBefore] = useState<string>();
+  const [after, setAfter] = useState<string>();
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState("");
   const [selected, setSelected] = useState<string>();
   const searchId = useId();
   const search = useRef<HTMLInputElement>(null);
   const resource = useRequest<Page>(
-    endpoint(repo, `pulls/${pull}/review-requests`, { before }),
+    endpoint(repo, `pulls/${pull}/reviewers`, { after }),
   );
   const mutation = useMutation(csrf);
   async function save(version: number, change: Change) {
@@ -76,11 +95,9 @@ export function ReviewRequests({
     }
   }
   return (
-    <Result state={resource} timingLabel="Review requests">
+    <Result state={resource} timingLabel="Reviewers">
       {(page) => {
-        const requests = page.items.filter(
-          (request) => request.state.kind !== "cancelled",
-        );
+        const reviewers = page.items;
         const canManage = page.can_manage && !repo.archived;
         const disabled = mutation.pending || mutation.conflict;
         const needle = query.trim().toLowerCase();
@@ -90,7 +107,7 @@ export function ReviewRequests({
             .includes(needle),
         );
         return (
-          <section className="review-requests" aria-label="Review requests">
+          <section className="reviewers" aria-label="Reviewers">
             <header>
               <strong>Reviewers</strong>
               {canManage && (
@@ -205,41 +222,89 @@ export function ReviewRequests({
                 </Popover>
               )}
             </header>
-            {requests.length ? (
-              <ul>
-                {requests.map((request) => {
-                  const candidateId = request.candidate_id;
+            {reviewers.length ? (
+              <ul className="m-0 flex list-none flex-col gap-3 p-0">
+                {reviewers.map((reviewer) => {
+                  const candidateId = reviewer.candidate_id;
+                  const request = reviewer.request;
+                  const summary = reviewer.decision ?? reviewer.review;
+                  const requested = request?.state.kind === "requested";
                   const name =
-                    request.reviewer.profile?.handle ?? request.reviewer.name;
+                    reviewer.reviewer.profile?.handle ?? reviewer.reviewer.name;
+                  const Icon =
+                    summary?.current && summary.state === "approved"
+                      ? CheckCircleFillIcon
+                      : summary?.current &&
+                          summary.state === "changes_requested"
+                        ? XCircleFillIcon
+                        : summary
+                          ? CodeReviewIcon
+                          : ClockIcon;
                   return (
-                    <li key={request.id}>
-                      {request.state.kind === "fulfilled" ? (
-                        <CodeReviewIcon aria-label="Review submitted" />
-                      ) : (
-                        <ClockIcon aria-label="Review requested" />
-                      )}
-                      <div>
+                    <li key={reviewer.id} className="flex items-start gap-2">
+                      <Icon
+                        aria-hidden="true"
+                        className={cn(
+                          "mt-0.5 shrink-0",
+                          summary?.current && summary.state === "approved"
+                            ? "text-success"
+                            : summary?.current &&
+                                summary.state === "changes_requested"
+                              ? "text-destructive"
+                              : "text-muted-foreground",
+                        )}
+                      />
+                      <div className="flex min-w-0 flex-1 flex-col gap-1 wrap-anywhere">
                         <strong>
-                          <Author author={request.reviewer} />
+                          <Author author={reviewer.reviewer} />
                         </strong>
-                        <p className="muted">
-                          {request.state.kind === "fulfilled" ? (
-                            "Review submitted"
-                          ) : (
-                            <>
-                              Requested by{" "}
-                              <Author author={request.requested_by} />
-                            </>
+                        {summary && (
+                          <div className="flex flex-wrap gap-1">
+                            <Badge
+                              variant={
+                                summary.current && summary.state === "approved"
+                                  ? "success"
+                                  : summary.current &&
+                                      summary.state === "changes_requested"
+                                    ? "destructive"
+                                    : "secondary"
+                              }
+                            >
+                              {summary.state === "approved"
+                                ? "Approved"
+                                : summary.state === "changes_requested"
+                                  ? "Changes requested"
+                                  : "Commented"}
+                            </Badge>
+                            {summary.current === false && (
+                              <Badge variant="outline">Outdated review</Badge>
+                            )}
+                            {summary.current === null && (
+                              <Badge variant="outline">Head unavailable</Badge>
+                            )}
+                          </div>
+                        )}
+                        {requested && (
+                          <p className="m-0 text-muted-foreground">
+                            Review requested by{" "}
+                            <Author author={request.requested_by} />
+                          </p>
+                        )}
+                        {reviewer.decision &&
+                          reviewer.review?.number !==
+                            reviewer.decision.number && (
+                            <p className="m-0 text-muted-foreground">
+                              Commented after this decision.
+                            </p>
                           )}
-                        </p>
                         {!candidateId && (
-                          <p className="muted">
+                          <p className="m-0 text-muted-foreground">
                             Unavailable for new review requests.
                           </p>
                         )}
                       </div>
                       {canManage &&
-                        (request.state.kind === "requested" ? (
+                        (requested ? (
                           <Button
                             size="icon-xs"
                             variant="ghost"
@@ -277,14 +342,14 @@ export function ReviewRequests({
                 })}
               </ul>
             ) : (
-              <p className="muted">No reviews requested.</p>
+              <p className="text-muted-foreground">No reviews yet.</p>
             )}
             <div className="discussion-actions">
-              {before && (
+              {after && (
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => setBefore(undefined)}
+                  onClick={() => setAfter(undefined)}
                 >
                   First reviewer page
                 </Button>
@@ -293,7 +358,7 @@ export function ReviewRequests({
                 <Button
                   variant="outline"
                   size="sm"
-                  onClick={() => setBefore(page.next ?? undefined)}
+                  onClick={() => setAfter(page.next ?? undefined)}
                 >
                   More reviewers
                 </Button>

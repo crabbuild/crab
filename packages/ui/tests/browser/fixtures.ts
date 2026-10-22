@@ -16,7 +16,7 @@ export function emptyReactions(revision = 1): ReactionSummary {
   };
 }
 
-export function emptyReviewRequests() {
+export function emptyReviewers() {
   return {
     items: [],
     next: null,

@@ -685,6 +685,18 @@ async fn pull_request_merge_methods_use_canonical_ref_publication() {
         .unwrap();
     assert_eq!(reviews["items"][0]["commit_oid"], conflict_head);
     assert_eq!(reviews["items"][0]["current"], true);
+    let participants: Value = client
+        .get(format!("{root}/2/reviewers"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(participants["items"][0]["review"]["current"], true);
+    assert_eq!(participants["head_oid"], conflict_head);
     assert_eq!(
         merge_commit.1["merge"]["message"],
         "Merge the diverged change"

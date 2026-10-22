@@ -1,4 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
+import type { ReviewState } from "../../src/features/pull-requests/model";
 import { emptyReactions } from "./fixtures";
 import {
   expectNoAccessibilityViolations,
@@ -11,6 +12,9 @@ async function fixture(page: Page) {
     removed = false,
     handle = "public-bob";
   let version = 1;
+  let submitted: ReviewState | null = null;
+  let decision: ReviewState | null = null;
+  let current: boolean | null = true;
   let state: "requested" | "cancelled" | "fulfilled" | null = null;
   let fail = false,
     canManage = true,
@@ -102,7 +106,10 @@ async function fixture(page: Page) {
           },
         },
       });
-    if (path.endsWith("/review-requests")) {
+    if (
+      (path.endsWith("/reviewers") && request.method() === "GET") ||
+      (path.endsWith("/review-requests") && request.method() === "PUT")
+    ) {
       if (request.method() === "PUT") {
         expect(request.headers()["x-csrf-token"]).toBe("csrf");
         const input = request.postDataJSON() as {
@@ -141,29 +148,51 @@ async function fixture(page: Page) {
             : null,
         },
         candidate_id: removed ? null : actorId,
-        requested_by: { name: "Alice", profile: null },
-        state:
-          state === "fulfilled"
-            ? { kind: state, review: 1 }
-            : { kind: state ?? "requested" },
+        request:
+          state || paginated
+            ? {
+                id,
+                requested_by: { name: "Alice", profile: null },
+                state:
+                  state === "fulfilled"
+                    ? { kind: state, review: 1 }
+                    : { kind: state ?? "requested" },
+              }
+            : null,
+        review: submitted
+          ? {
+              number: submitted === "commented" && decision ? 2 : 1,
+              state: submitted,
+              commit_oid: "b".repeat(40),
+              current,
+            }
+          : null,
+        decision: decision
+          ? { number: 1, state: decision, commit_oid: "b".repeat(40), current }
+          : null,
       };
       const carol = {
         id: "a".repeat(64),
         reviewer: { name: "Carol", profile: null },
         candidate_id: null,
-        requested_by: "Alice",
-        state: { kind: "requested" },
+        request: {
+          id: "a".repeat(64),
+          requested_by: { name: "Alice", profile: null },
+          state: { kind: "requested" },
+        },
+        review: null,
+        decision: null,
       };
       return route.fulfill({
         json: {
           items: paginated
-            ? url.searchParams.has("before")
+            ? url.searchParams.has("after")
               ? [carol]
               : [bob]
-            : state
+            : submitted || (state && state !== "cancelled")
               ? [bob]
               : [],
-          next: paginated && !url.searchParams.has("before") ? id : null,
+          next: paginated && !url.searchParams.has("after") ? id : null,
           version,
           can_manage: canManage,
           candidates: removed
@@ -209,7 +238,13 @@ async function fixture(page: Page) {
     },
     fulfill: () => {
       state = "fulfilled";
+      submitted = "commented";
       version++;
+    },
+    review: (state: ReviewState, freshness: boolean | null = true) => {
+      submitted = state;
+      if (state !== "commented") decision = state;
+      current = freshness;
     },
     readOnly: () => {
       canManage = false;
@@ -247,7 +282,7 @@ test("review requests retain failed choices, persist on reload, cancel and can b
   const model = await fixture(page);
   await page.goto("/team/project/pull/1");
   const widget = page.getByRole("region", {
-    name: "Review requests",
+    name: "Reviewers",
     exact: true,
   });
   model.fail();
@@ -268,26 +303,24 @@ test("review requests retain failed choices, persist on reload, cancel and can b
     widget.getByRole("button", { name: "Cancel review request for Bob" }),
   ).toBeVisible();
   await page.reload();
-  await expect(widget.getByText("Requested by Alice")).toBeVisible();
+  await expect(widget.getByText("Review requested by Alice")).toBeVisible();
   await widget
     .getByRole("button", { name: "Cancel review request for Bob" })
     .click();
-  await expect(widget.getByText("No reviews requested.")).toBeVisible();
+  await expect(widget.getByText("No reviews yet.")).toBeVisible();
   await openPicker(page);
   await choose.click();
-  await expect(widget.getByText("Requested by Alice")).toBeVisible();
+  await expect(widget.getByText("Review requested by Alice")).toBeVisible();
   model.fulfill();
   await page.reload();
-  await expect(
-    widget.getByText("Review submitted", { exact: true }),
-  ).toBeVisible();
+  await expect(widget.getByText("Commented", { exact: true })).toBeVisible();
   await expect(
     widget.getByRole("button", { name: "Cancel review request for Bob" }),
   ).toHaveCount(0);
   await widget
     .getByRole("button", { name: "Re-request review from Bob" })
     .click();
-  await expect(widget.getByText("Requested by Alice")).toBeVisible();
+  await expect(widget.getByText("Review requested by Alice")).toBeVisible();
   expect(model.writes).toHaveLength(5);
   expect(model.unexpected).toEqual([]);
 });
@@ -298,7 +331,7 @@ test("stale requests require explicit reload and permissions preserve read-only 
   const model = await fixture(page);
   await page.goto("/team/project/pull/1");
   const widget = page.getByRole("region", {
-    name: "Review requests",
+    name: "Reviewers",
     exact: true,
   });
   const picker = await openPicker(page);
@@ -312,10 +345,10 @@ test("stale requests require explicit reload and permissions preserve read-only 
   await picker.getByRole("button", { name: "Reload review requests" }).click();
   await expect(choice).toBeEnabled();
   await choice.click();
-  await expect(widget.getByText("Requested by Alice")).toBeVisible();
+  await expect(widget.getByText("Review requested by Alice")).toBeVisible();
   model.readOnly();
   await page.reload();
-  await expect(widget.getByText("Requested by Alice")).toBeVisible();
+  await expect(widget.getByText("Review requested by Alice")).toBeVisible();
   await expect(
     widget.getByRole("button", { name: "Request reviewers" }),
   ).toHaveCount(0);
@@ -324,7 +357,7 @@ test("stale requests require explicit reload and permissions preserve read-only 
   ).toHaveCount(0);
   model.archive();
   await page.reload();
-  await expect(widget.getByText("Requested by Alice")).toBeVisible();
+  await expect(widget.getByText("Review requested by Alice")).toBeVisible();
   await expect(
     widget.getByRole("button", { name: "Request reviewers" }),
   ).toHaveCount(0);
@@ -338,11 +371,11 @@ test("reviewer pagination, whole-widget timing and mobile themes remain accessib
   model.pages();
   await page.goto("/team/project/pull/1?powerbar=1");
   const widget = page.getByRole("region", {
-    name: "Review requests",
+    name: "Reviewers",
     exact: true,
   });
   const timing = page.getByRole("group", {
-    name: "Review requests request widget",
+    name: "Reviewers request widget",
     exact: true,
   });
   await expect(
@@ -398,7 +431,7 @@ test("public reviewer search uses UUIDs and keeps profile links through rename a
   await page.keyboard.press("Tab");
   await page.keyboard.press("Enter");
   const widget = page.getByRole("region", {
-    name: "Review requests",
+    name: "Reviewers",
     exact: true,
   });
   await expect(
@@ -429,5 +462,42 @@ test("public reviewer search uses UUIDs and keeps profile links through rename a
   await expect(widget.getByRole("button", { name: /Re-request/ })).toHaveCount(
     0,
   );
+  expect(model.unexpected).toEqual([]);
+});
+
+test("uninvited reviewers show decisions independently of comments and freshness", async ({
+  page,
+}) => {
+  const model = await fixture(page);
+  model.review("approved");
+  await page.goto("/team/project/pull/1?powerbar=1");
+  const widget = page.getByRole("region", { name: "Reviewers", exact: true });
+  await expect(widget.getByText("Approved", { exact: true })).toBeVisible();
+  await expect(widget.getByText("Review requested by Alice")).toHaveCount(0);
+  await expect(
+    widget.getByRole("button", { name: "Re-request review from Bob" }),
+  ).toBeVisible();
+  model.review("commented");
+  await page.reload();
+  await expect(widget.getByText("Approved", { exact: true })).toBeVisible();
+  await expect(
+    widget.getByText("Commented after this decision."),
+  ).toBeVisible();
+  for (const [freshness, label] of [
+    [false, "Outdated review"],
+    [null, "Head unavailable"],
+  ] as const) {
+    model.review("changes_requested", freshness);
+    await page.reload();
+    await expect(
+      widget.getByText("Changes requested", { exact: true }),
+    ).toBeVisible();
+    await expect(widget.getByText(label, { exact: true })).toBeVisible();
+    await expect(widget.getByText("Approved", { exact: true })).toHaveCount(0);
+  }
+  await page.setViewportSize({ width: 390, height: 844 });
+  await selectDarkTheme(page);
+  await expectNoAccessibilityViolations(page);
+  expect(model.writes).toHaveLength(0);
   expect(model.unexpected).toEqual([]);
 });

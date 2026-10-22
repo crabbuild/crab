@@ -26,7 +26,6 @@ pub(crate) use checks::{
 };
 pub(crate) use issues::{ListComments, UpdateComment, UpdateIssue};
 pub(crate) use labels::{CreateLabel, DeleteLabel, ListLabels, UpdateLabel};
-pub(crate) use pulls::review_requests;
 pub(crate) use pulls::review_threads::{
     CreatePullReviewReply, CreatePullReviewReplyInput, CreatePullReviewReplyOutcome,
     CreatePullReviewThread, CreatePullReviewThreadInput, CreatePullReviewThreadOutcome,
@@ -51,6 +50,7 @@ pub(crate) use pulls::{
     UpdatePullCommentInput, UpdatePullCommentOutcome, UpdatePullInput, UpdatePullOutcome,
     UpdatePullReview, UpdatePullReviewInput, UpdatePullReviewOutcome,
 };
+pub(crate) use pulls::{review_requests, reviewers};
 pub(crate) use releases::{
     AttachReleaseAsset, AttachReleaseAssetInput, AttachReleaseAssetOutcome,
     CompleteReleasePublication, CompleteReleasePublicationInput, CompleteReleasePublicationOutcome,

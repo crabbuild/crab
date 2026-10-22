@@ -112,7 +112,16 @@ impl Mutation for RebuildIndex {
                         context.install_schema(include_str!("schema.sql"))?;
                         true
                     }
-                    SearchIndexPhase::ClearReviewers => super::super::reviews::clear(context)?,
+                    SearchIndexPhase::ClearReviewers => {
+                        let done = super::super::reviews::clear(context)?;
+                        if done {
+                            // Empty the derived table in bounded frames before replacing
+                            // its shape; adding CHECK columns would scan historical rows.
+                            context.install_schema("DROP TABLE discussion_index_reviewers;")?;
+                            context.install_schema(include_str!("schema.sql"))?;
+                        }
+                        done
+                    }
                     SearchIndexPhase::ClearCommenters => {
                         super::super::contributions::clear(context)?
                     }

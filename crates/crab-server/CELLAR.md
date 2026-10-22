@@ -24,7 +24,7 @@ is buffered before owner dispatch so Cellar can safely retry stale routes; it is
 not forwarded as a non-replayable upload stream. Successful HTTP output
 uses the SDK output gate, including its ownership and durability checks.
 
-Repository assignment format 2 and discussion index format 8 require the explicit
+Repository assignment format 2 and discussion index format 9 require the explicit
 preparation described below. Other canonical records retain their formats.
 Transport requests and replies use bounded JSON. Mutation receipts store
 the payload digest and outcome in the same transaction as application writes.
@@ -150,7 +150,7 @@ review key or exclusive KV bound. Both phases process at most eight source recor
 per transaction; unrelated pull metadata also advances the request cursor. Reads
 remain unavailable until all sources complete. Domain records, versions, request
 history, receipts and public submission mappings are unchanged. Older indexes
-require `cells rebuild-search`; fresh repositories now initialize format 8.
+require `cells rebuild-search`; fresh repositories now initialize format 9.
 
 Native list output adds `review_requested_from_me`. Author, reviewer and commenter
 names now share one ordered `people` binding collection, one Directory snapshot,
@@ -158,6 +158,25 @@ digest encoding and validation. Public HTTP cannot supply bindings.
 Update peers together; there is no old list-shape reader or source-scan fallback.
 Team requests, review-status/merge-policy predicates, mention relationships and
 native grant authority remain separate delivery work.
+
+## Reviewer status preparation
+
+Discussion index format 9 adds a latest-review number and optional canonical
+request key to each qualified reviewer row. Fresh review creation and request
+changes update these references in their native transaction, after replay
+checks. The latest decisive review remains in the canonical decision table;
+comments do not overwrite it. Private read 252 returns bounded participant pages,
+including uninvited commenters, with point joins to their canonical sources.
+The retired request-only read 251 is removed. Deploy matching native peers and UI.
+
+Run `cells rebuild-search` on existing repositories. The existing reviewer clear
+phase removes eight rows per frame, then replaces the empty derived table with
+the new constrained shape. This avoids the full-table constraint validation of
+ALTER ADD COLUMN. Review and request phases rebuild eight source records at a
+time, preserving canonical records, source IDs, versions, and receipts. Reads
+and new writes fail closed until preparation completes. Interrupted frames use
+the existing generation/version cursor. No serving-time rebuild or old reader
+is supplied.
 
 ## Commenter search preparation
 

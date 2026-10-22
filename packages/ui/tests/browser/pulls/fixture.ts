@@ -1,6 +1,6 @@
 import type { DiscussionAuthor } from "@/components/discussion/author";
 import { expect, type Locator, type Page } from "@playwright/test";
-import { emptyReactions, emptyReviewRequests } from "../fixtures";
+import { emptyReactions, emptyReviewers } from "../fixtures";
 
 const base = "a".repeat(40);
 const head = "b".repeat(40);
@@ -170,8 +170,8 @@ export async function mockPullRequest(
           error: null,
         },
       });
-    if (path.endsWith("/review-requests"))
-      return route.fulfill({ json: emptyReviewRequests() });
+    if (path.endsWith("/reviewers"))
+      return route.fulfill({ json: emptyReviewers() });
     if (path.endsWith("/links"))
       return route.fulfill({
         json: { items: [], next: null, can_manage: false },

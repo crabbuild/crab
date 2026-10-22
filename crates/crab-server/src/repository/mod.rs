@@ -221,6 +221,24 @@ impl Repository {
         .map_err(Into::into)
     }
 
+    pub(crate) async fn ref_oid(&self, name: &str) -> Result<Option<String>> {
+        let root = crab_metadata::capsule_protocol::load_root(&self.layout)
+            .await
+            .map_err(|source| crate::Error::Settings {
+                source: Box::new(source),
+            })?;
+        let names = std::collections::BTreeSet::from([name.to_owned()]);
+        // Review freshness needs one authoritative ref, not packs, locators,
+        // browse indexes, or every sibling branch. Preserve read errors.
+        let view = crab_read::capsule_protocol::open_ref_view_from_root_for_refs(
+            &self.layout,
+            root,
+            &names,
+        )
+        .await?;
+        Ok(view.refs().get(name).cloned())
+    }
+
     pub(crate) async fn open_ref_view(
         &self,
     ) -> Result<crab_read::capsule_protocol::CapsuleRefView> {

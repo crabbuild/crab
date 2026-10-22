@@ -59,7 +59,11 @@ fn validate(request: &Request, id: &str) -> crate::cells::Result<()> {
     Ok(())
 }
 
-fn load(context: &Transaction<'_>, pull: u64, id: &str) -> crate::cells::Result<Option<Request>> {
+pub(super) fn load(
+    context: &Transaction<'_>,
+    pull: u64,
+    id: &str,
+) -> crate::cells::Result<Option<Request>> {
     validate_number(pull)?;
     validate_id(id)?;
     let request = context.document::<Request>(&format!("{}{id}", prefix(pull)))?;
@@ -229,88 +233,6 @@ impl Read for GetReviewRequest {
     type Output = Option<Request>;
     fn execute(context: &mut Transaction<'_>, key: Key) -> crate::cells::Result<Self::Output> {
         load(context, key.pull, &key.id)
-    }
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct Query {
-    pub pull: u64,
-    pub before: Option<String>,
-    pub limit: u8,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct Page {
-    pub items: Vec<Request>,
-    pub next: Option<String>,
-    pub author: RepositoryAuthor,
-    pub version: u64,
-    pub open: bool,
-    pub merge_pending: bool,
-}
-
-pub(crate) struct ListReviewRequests;
-impl Read for ListReviewRequests {
-    const CLASS: &'static str = crate::cells::repository::CLASS;
-    const ID: u32 = 251;
-    type Input = Query;
-    type Output = Option<Page>;
-    fn execute(context: &mut Transaction<'_>, input: Query) -> crate::cells::Result<Self::Output> {
-        validate_number(input.pull)?;
-        if !(1..=50).contains(&input.limit) {
-            return Err(crate::cells::Error::Invalid(
-                "review request page size is invalid",
-            ));
-        }
-        if let Some(before) = &input.before {
-            validate_id(before)?;
-        }
-        // The sidebar needs lifecycle/version metadata, not the PR body or
-        // every review decision. Keep this read bounded by request-page data.
-        let metadata = context.sql(&SqlBatch { statements: vec![statement(
-            "SELECT author_issuer, author_subject, author_name, version, state, pending_merge IS NOT NULL FROM repository_pulls WHERE number = ?",
-            vec![integer(input.pull)?],
-        )] })?;
-        let Some(row) = metadata[0].rows.first() else {
-            return Ok(None);
-        };
-        let author = author_from_row(row, 0)?;
-        let version = result_u64_from_row(row, 3)?;
-        let open = PullState::from_code(result_u64_from_row(row, 4)?)? == PullState::Open;
-        let merge_pending = result_u64_from_row(row, 5)? != 0;
-        let prefix = prefix(input.pull);
-        let before = input.before.map(|id| format!("{prefix}{id}"));
-        let mut rows = context.documents::<Request>(
-            &prefix,
-            before.as_deref(),
-            usize::from(input.limit) + 1,
-        )?;
-        for (key, request) in &rows {
-            let id = key
-                .strip_prefix(&prefix)
-                .ok_or(crate::cells::Error::Invalid(
-                    "review request key is invalid",
-                ))?;
-            validate(request, id)?;
-        }
-        let more = rows.len() > usize::from(input.limit);
-        rows.truncate(usize::from(input.limit));
-        let next = if more {
-            rows.last()
-                .map(|(_, request)| reviewer_id(&request.reviewer))
-        } else {
-            None
-        };
-        Ok(Some(Page {
-            items: rows.into_iter().map(|(_, request)| request).collect(),
-            next,
-            author,
-            version,
-            open,
-            merge_pending,
-        }))
     }
 }
 

@@ -552,7 +552,7 @@ async fn triage_uses_durable_grants_for_issue_and_pull_management_without_git_wr
         assert_eq!(assigned["milestone"]["number"], milestone["number"]);
     }
     let requests = format!("{root}/pulls/1/review-requests");
-    let reviews = h.json(&requests, &bob).await;
+    let reviews = h.json(&format!("{root}/pulls/1/reviewers"), &bob).await;
     assert_eq!(reviews["can_manage"], true);
     let requested: Value = h
         .write(

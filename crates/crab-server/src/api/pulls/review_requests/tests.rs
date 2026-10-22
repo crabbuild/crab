@@ -5,6 +5,7 @@ use reqwest::Method;
 use serde_json::{Value, json};
 
 const ROOT: &str = "/api/repos/team/private/pulls/1/review-requests";
+const REVIEWERS: &str = "/api/repos/team/private/pulls/1/reviewers";
 async fn seed(h: &Harness) {
     let cell = h
         .server
@@ -69,7 +70,7 @@ async fn qualified_members_can_be_requested_cancelled_and_fulfilled_by_http_revi
     let source = tempfile::tempdir().unwrap();
     let head = git::push_review_branches(source.path(), url.as_str()).await;
     h.write(Method::POST,"/api/repos/team/private/pulls",&alice,json!({"request_id":uuid::Uuid::now_v7(),"title":"Please review","body":"Ready for another member","base_ref":"refs/heads/main","head_ref":"refs/heads/feature"})).await.error_for_status().unwrap();
-    let page = h.json(ROOT, &alice).await;
+    let page = h.json(REVIEWERS, &alice).await;
     assert_eq!(
         page["candidates"],
         json!([{"id":bob_id,"name":"Bob","profile":null}])
@@ -115,10 +116,10 @@ async fn qualified_members_can_be_requested_cancelled_and_fulfilled_by_http_revi
         .json::<Value>()
         .await
         .unwrap();
-    let page = h.json(ROOT, &alice).await;
+    let page = h.json(REVIEWERS, &alice).await;
     assert_eq!(page["version"], 5);
     assert_eq!(
-        page["items"][0]["state"],
+        page["items"][0]["request"]["state"],
         json!({"kind":"fulfilled","review":created["number"]})
     );
     change(&h, &alice, 5, json!({"kind":"request","actor_id":bob_id}))
@@ -135,7 +136,7 @@ async fn qualified_members_can_be_requested_cancelled_and_fulfilled_by_http_revi
     .error_for_status()
     .unwrap();
     assert_eq!(
-        h.json(ROOT, &alice).await["items"][0]["state"]["kind"],
+        h.json(REVIEWERS, &alice).await["items"][0]["request"]["state"]["kind"],
         "requested"
     );
     h.close().await;
@@ -178,10 +179,10 @@ async fn review_request_routes_enforce_membership_csrf_versions_and_archive() {
             .status(),
         StatusCode::BAD_REQUEST
     );
-    for suffix in ["?limit=0", "?limit=51", "?before=invalid"] {
+    for suffix in ["?limit=0", "?limit=51", "?after=invalid"] {
         assert_eq!(
             h.http
-                .get(format!("{}{ROOT}{suffix}", h.origin))
+                .get(format!("{}{REVIEWERS}{suffix}", h.origin))
                 .header(header::COOKIE, &alice)
                 .send()
                 .await
@@ -192,7 +193,7 @@ async fn review_request_routes_enforce_membership_csrf_versions_and_archive() {
     }
     *h.provider.mode.lock().await = "member".into();
     let bob = h.login().await;
-    assert_eq!(h.json(ROOT, &bob).await["can_manage"], false);
+    assert_eq!(h.json(REVIEWERS, &bob).await["can_manage"], false);
     assert_eq!(
         change(&h, &bob, 1, json!({"kind":"request","actor_id":bob_id}))
             .await
@@ -203,7 +204,7 @@ async fn review_request_routes_enforce_membership_csrf_versions_and_archive() {
     let outsider = h.login().await;
     assert_eq!(
         h.http
-            .get(format!("{}{ROOT}", h.origin))
+            .get(format!("{}{REVIEWERS}", h.origin))
             .header(header::COOKIE, &outsider)
             .send()
             .await
@@ -231,7 +232,7 @@ async fn review_request_routes_enforce_membership_csrf_versions_and_archive() {
         StatusCode::FORBIDDEN
     );
     assert_eq!(
-        h.json(ROOT, &alice).await["items"][0]["state"]["kind"],
+        h.json(REVIEWERS, &alice).await["items"][0]["request"]["state"]["kind"],
         "requested"
     );
     h.close().await;
@@ -253,12 +254,12 @@ async fn renaming_or_revoking_a_member_preserves_the_request_identity_and_cancel
     let members_path = "/api/repos/team/private/members";
     let members = h.json(members_path, &alice).await;
     let renamed=h.write(Method::PUT,members_path,&alice,json!({"expected_revision":members["revision"],"members":[{"subject":"alice-id","name":"Alice","access":"admin"},{"subject":"bob-id","name":"Robert","access":"read"}]})).await.error_for_status().unwrap().json::<Value>().await.unwrap();
-    let page = h.json(ROOT, &alice).await;
+    let page = h.json(REVIEWERS, &alice).await;
     assert_eq!(page["items"][0]["reviewer"]["name"], "Bob");
     assert_eq!(page["candidates"][0]["name"], "Robert");
-    assert_eq!(page["items"][0]["id"], created["id"]);
+    assert_eq!(page["items"][0]["request"]["id"], created["id"]);
     h.write(Method::PUT,members_path,&alice,json!({"expected_revision":renamed["revision"],"members":[{"subject":"alice-id","name":"Alice","access":"admin"}]})).await.error_for_status().unwrap();
-    let page = h.json(ROOT, &alice).await;
+    let page = h.json(REVIEWERS, &alice).await;
     assert_eq!(page["items"][0]["candidate_id"], Value::Null);
     assert_eq!(page["candidates"], json!([]));
     assert_eq!(
@@ -271,9 +272,11 @@ async fn renaming_or_revoking_a_member_preserves_the_request_identity_and_cancel
         .await
         .error_for_status()
         .unwrap();
-    assert_eq!(
-        h.json(ROOT, &alice).await["items"][0]["state"]["kind"],
-        "cancelled"
+    assert!(
+        h.json(REVIEWERS, &alice).await["items"]
+            .as_array()
+            .unwrap()
+            .is_empty()
     );
     h.close().await;
 }
@@ -287,7 +290,7 @@ async fn reviewer_ids_and_profiles_stay_qualified_and_survive_renames_and_revoca
     let h = Harness::new(false).await;
     let alice = h.login().await;
     seed(&h).await;
-    let page = h.json(ROOT, &alice).await;
+    let page = h.json(REVIEWERS, &alice).await;
     let bob_id = page["candidates"][0]["id"].clone();
     assert_eq!(page["candidates"][0]["name"], "Bob");
     for secret in ["issuer", "subject", "bob-id", "alice-id"] {
@@ -359,8 +362,8 @@ async fn reviewer_ids_and_profiles_stay_qualified_and_survive_renames_and_revoca
     .await
     .error_for_status()
     .unwrap();
-    let page = h.json(ROOT, &alice).await;
-    assert_eq!(page["items"][0]["id"], created["id"]);
+    let page = h.json(REVIEWERS, &alice).await;
+    assert_eq!(page["items"][0]["request"]["id"], created["id"]);
     assert_eq!(page["items"][0]["candidate_id"], bob_id);
     assert_eq!(
         page["items"][0]["reviewer"]["profile"]["handle"],
@@ -383,7 +386,7 @@ async fn reviewer_ids_and_profiles_stay_qualified_and_survive_renames_and_revoca
         )
         .await
         .unwrap();
-    let page = h.json(ROOT, &alice).await;
+    let page = h.json(REVIEWERS, &alice).await;
     assert_eq!(page["items"][0]["candidate_id"], Value::Null);
     assert_eq!(page["items"][0]["reviewer"]["profile"]["id"], bob_id);
     assert_eq!(page["candidates"], json!([]));
@@ -405,7 +408,7 @@ async fn a_read_only_pull_author_cannot_manage_reviewer_requests_after_downgrade
     let h = Harness::new(false).await;
     let alice = h.login().await;
     seed(&h).await;
-    let bob_id = h.json(ROOT, &alice).await["candidates"][0]["id"].clone();
+    let bob_id = h.json(REVIEWERS, &alice).await["candidates"][0]["id"].clone();
     let request: Value = change(&h, &alice, 1, json!({"kind":"request","actor_id":bob_id}))
         .await
         .error_for_status()
@@ -427,7 +430,7 @@ async fn a_read_only_pull_author_cannot_manage_reviewer_requests_after_downgrade
         .set_members("team", "private", members, true)
         .await
         .unwrap();
-    assert_eq!(h.json(ROOT, &alice).await["can_manage"], false);
+    assert_eq!(h.json(REVIEWERS, &alice).await["can_manage"], false);
     assert_eq!(
         change(&h, &alice, 2, json!({"kind":"cancel","id":request["id"]}))
             .await
@@ -435,7 +438,7 @@ async fn a_read_only_pull_author_cannot_manage_reviewer_requests_after_downgrade
         StatusCode::FORBIDDEN
     );
     assert_eq!(
-        h.json(ROOT, &alice).await["items"][0]["state"]["kind"],
+        h.json(REVIEWERS, &alice).await["items"][0]["request"]["state"]["kind"],
         "requested"
     );
     h.close().await;

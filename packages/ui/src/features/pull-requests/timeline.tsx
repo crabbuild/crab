@@ -103,7 +103,11 @@ function ReviewEvent({
           <Author author={review.author} />
         </strong>
         <span> {action}</span>
-        {!review.current && <span className="review-outdated">Outdated</span>}
+        {review.current !== true && (
+          <span className="review-outdated">
+            {review.current === null ? "Head unavailable" : "Outdated"}
+          </span>
+        )}
         <span className="muted">{timestamp(review.created_at)}</span>
       </header>
       {review.body && <DiscussionMarkdown>{review.body}</DiscussionMarkdown>}

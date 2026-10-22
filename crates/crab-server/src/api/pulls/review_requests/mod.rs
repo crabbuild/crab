@@ -5,14 +5,14 @@ use crate::{
     app::{self, Error, Result},
     auth::Principal,
     cells::repository::review_requests::{
-        self, GetReviewRequest, Key, ListReviewRequests, Outcome, Selection, SetReviewRequest,
+        self, GetReviewRequest, Key, Outcome, Selection, SetReviewRequest,
     },
     server::Server,
 };
 use axum::{
     Extension, Json, Router,
-    extract::{Path, Query, State, rejection::JsonRejection},
-    routing::get,
+    extract::{Path, State, rejection::JsonRejection},
+    routing::put,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -20,11 +20,11 @@ use serde_json::{Value, json};
 pub(super) fn routes() -> Router<Arc<Server>> {
     Router::new().route(
         "/api/repos/{owner}/{name}/pulls/{number}/review-requests",
-        get(list).put(set),
+        put(set),
     )
 }
 
-fn valid_id(id: &str) -> Result<()> {
+pub(super) fn valid_id(id: &str) -> Result<()> {
     if id.len() != 64
         || !id
             .bytes()
@@ -46,66 +46,6 @@ fn view(request: &review_requests::Request, roster: &Roster, authors: &Authors) 
         "requested_at":request.requested_at,
         "updated_at":request.updated_at,
     })
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct Parameters {
-    before: Option<String>,
-    limit: Option<u8>,
-}
-
-async fn list(
-    State(server): State<Arc<Server>>,
-    Extension(principal): Extension<Principal>,
-    Path((owner, name, number)): Path<(String, String, u64)>,
-    Query(params): Query<Parameters>,
-) -> Result<Json<Value>> {
-    let repo = app::repository(&server, &principal, &(owner, name))?;
-    let limit = params.limit.unwrap_or(30);
-    if !(1..=50).contains(&limit) {
-        return Err(Error::Invalid("Review request pages require 1–50 items"));
-    }
-    if let Some(before) = &params.before {
-        valid_id(before)?;
-    }
-    let cell = app::repository_cell(&server, &repo)?;
-    let page = app::query_output(
-        cell.client
-            .query::<ListReviewRequests>(
-                &cell.target,
-                None,
-                review_requests::Query {
-                    pull: app::number(number)?,
-                    before: params.before,
-                    limit,
-                },
-            )
-            .await,
-    )?
-    .ok_or(Error::NotFound)?;
-    let actors: Vec<_> = page
-        .items
-        .iter()
-        .flat_map(|request| [&request.reviewer, &request.requested_by])
-        .collect();
-    let authors = Authors::load(&server, &principal, actors.into_iter()).await?;
-    let roster = Roster::load(&server, &principal, &repo).await?;
-    let can_manage = page.open && !page.merge_pending && roster.principal.can_triage(repo.id);
-    let items: Vec<_> = page
-        .items
-        .iter()
-        .map(|request| view(request, &roster, &authors))
-        .collect();
-    let author_id = roster.candidate(&page.author).map(|candidate| candidate.id);
-    let candidates: Vec<_> = roster
-        .items
-        .iter()
-        .filter(|candidate| !principal.is_local() && Some(candidate.id) != author_id)
-        .collect();
-    Ok(Json(
-        json!({"items":items,"next":page.next,"version":page.version,"can_manage":can_manage,"candidates":candidates}),
-    ))
 }
 
 #[derive(Deserialize)]

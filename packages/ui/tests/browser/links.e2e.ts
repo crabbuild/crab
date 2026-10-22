@@ -1,5 +1,5 @@
 import { expect, test, type Page } from "@playwright/test";
-import { emptyReactions, emptyReviewRequests } from "./fixtures";
+import { emptyReactions, emptyReviewers } from "./fixtures";
 import {
   expectNoAccessibilityViolations,
   selectDarkTheme,
@@ -83,8 +83,8 @@ async function setup(page: Page) {
       }
       return route.fulfill({ json: { active, version } });
     }
-    if (path.endsWith("/review-requests"))
-      return route.fulfill({ json: emptyReviewRequests() });
+    if (path.endsWith("/reviewers"))
+      return route.fulfill({ json: emptyReviewers() });
     if (path.endsWith("/links")) {
       const pull = path.includes("/pulls/");
       return route.fulfill({

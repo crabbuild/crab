@@ -95,7 +95,7 @@ export interface PullReview {
   body: string;
   state: ReviewState;
   commit_oid: string;
-  current: boolean;
+  current: boolean | null;
   version: number;
   created_at: number;
   updated_at: number;

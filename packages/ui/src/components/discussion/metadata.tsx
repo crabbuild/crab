@@ -18,7 +18,7 @@ import {
   type RepositoryAssignee,
   type RepositoryLabel,
 } from "@/lib/api";
-import { ReviewRequests } from "@/features/pull-requests/reviews/requests";
+import { Reviewers } from "@/features/pull-requests/reviews/reviewers";
 import { Author } from "./author";
 import { LinkedWork } from "./links";
 import { MilestonePicker } from "@/features/milestones/picker";
@@ -284,7 +284,7 @@ export function DiscussionMetadata({
   return (
     <aside className="discussion-metadata" aria-label="Metadata">
       {path.startsWith("pulls/") && (
-        <ReviewRequests
+        <Reviewers
           key={`reviewers:${version}`}
           repo={repo}
           pull={Number(path.split("/")[1])}

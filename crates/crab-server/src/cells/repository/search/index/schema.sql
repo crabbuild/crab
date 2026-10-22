@@ -138,8 +138,11 @@ CREATE TABLE IF NOT EXISTS discussion_index_reviewers (
     pull INTEGER NOT NULL REFERENCES repository_pulls(number) ON DELETE CASCADE,
     identity BLOB NOT NULL CHECK(length(identity) = 32),
     reviewed INTEGER NOT NULL CHECK(reviewed IN (0, 1)),
+    review_number INTEGER CHECK(review_number BETWEEN 1 AND 9007199254740991),
+    request_id TEXT CHECK(length(request_id) = 64),
     requested INTEGER NOT NULL CHECK(requested IN (0, 1)),
-    PRIMARY KEY(pull, identity)
+    PRIMARY KEY(pull, identity),
+    FOREIGN KEY(pull, review_number) REFERENCES repository_pull_reviews(pull_number, number)
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS discussion_index_reviewer_lookup ON discussion_index_reviewers(identity, pull);
 CREATE TRIGGER IF NOT EXISTS discussion_reviewer_insert AFTER INSERT ON discussion_index_reviewers BEGIN

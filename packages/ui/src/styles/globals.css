@@ -6867,31 +6867,6 @@ main {
   color: var(--muted-foreground);
 }
 
-.review-requests ul {
-  list-style: none;
-  margin: 0;
-  padding: 0;
-}
-.review-requests li {
-  display: flex;
-  align-items: start;
-  gap: 8px;
-  margin-block: 12px;
-}
-.review-requests li > svg {
-  flex-shrink: 0;
-  margin-top: 2px;
-  color: var(--muted-foreground);
-}
-.review-requests li > div {
-  flex: 1;
-  min-width: 0;
-  overflow-wrap: anywhere;
-}
-.review-requests li p {
-  margin-block: 4px;
-}
-
 @theme inline {
   --font-heading: var(--font-sans);
   --font-sans: "Geist Variable", sans-serif;

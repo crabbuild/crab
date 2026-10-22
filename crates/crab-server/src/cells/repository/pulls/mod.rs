@@ -377,6 +377,8 @@ pub(crate) use operations::{CreatePull, GetPull, GetPullSubmission, ListPulls, U
 mod comments;
 pub(crate) use comments::{CreatePullComment, GetPullComment, ListPullComments, UpdatePullComment};
 
+pub(crate) mod reviewers;
+
 mod reviews;
 pub(crate) use reviews::{
     CreatePullReview, GetPullReview, GetPullReviewSubmission, ListPullReviews, UpdatePullReview,

@@ -47,7 +47,7 @@ pub(in crate::cells::repository::search) fn reviews(context: &Transaction<'_>) -
             subject: result_text(row, 3)?,
             name: result_text(row, 4)?,
         };
-        super::reviewed(context, pull, &author)?;
+        super::reviewed(context, pull, number, &author)?;
         context.put_document(CURSOR, &Cursor::Reviews { pull, number })?;
     }
     if rows.rows.len() < 8 {

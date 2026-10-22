@@ -7,11 +7,10 @@ use axum::{
     response::IntoResponse,
     routing::get,
 };
-use crab_remote_git::RepositoryOptions;
 use serde::Deserialize;
 use serde_json::{Value, json};
 
-use super::{current_branches, storage};
+use super::storage;
 use crate::{
     api::{profiles::attribution::Authors, reactions},
     app::{self, Error, Result},
@@ -53,7 +52,7 @@ fn review_view(
         "reactions": reactions,
         "state": review.state,
         "commit_oid": review.commit_oid,
-        "current": current_head.is_some_and(|oid| oid == review.commit_oid),
+        "current": current_head.map(|oid| oid == review.commit_oid),
         "version": review.version,
         "created_at": review.created_at,
         "updated_at": review.updated_at,
@@ -74,14 +73,7 @@ async fn pull_and_head(
         let head = merge.head_oid.clone();
         return Ok((pull, Some(head)));
     }
-    let repository = repo
-        .open_current(server, RepositoryOptions::default(), &server.cancellation)
-        .await
-        .ok();
-    let head = repository
-        .as_ref()
-        .and_then(|repository| current_branches(repository, &pull))
-        .map(|(_, head)| head);
+    let head = repo.ref_oid(&pull.head_ref).await?;
     Ok((pull, head))
 }
 
