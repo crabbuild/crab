@@ -5,6 +5,7 @@ use super::collaboration::{SubjectKind, SubjectState};
 pub(crate) mod assignees;
 pub(crate) mod authors;
 pub(crate) mod completion;
+mod counts;
 pub(crate) mod index;
 pub(crate) mod labels;
 pub(crate) mod milestones;
@@ -41,6 +42,7 @@ enum Term {
     Author(String),
     Assignee(String),
     Reviewer { kind: reviews::Kind, name: String },
+    Count(counts::Filter),
     Text(String),
     Label(Vec<String>),
     Milestone(String),
@@ -216,6 +218,10 @@ fn atom_expression(atom: &str) -> Result<Expression, &'static str> {
         Some((qualifier, value)) => match qualifier.to_ascii_lowercase().as_str() {
             "author" => Term::Author(people::name(&unquote(value)?)?),
             "assignee" => Term::Assignee(assignees::name(&unquote(value)?)?),
+            "comments" | "reactions" | "interactions" => Term::Count(counts::Filter::parse(
+                &qualifier.to_ascii_lowercase(),
+                &unquote(value)?,
+            )?),
             "review-requested" | "reviewed-by" | "review-involves" | "user-review-requested" => {
                 Term::Reviewer {
                     kind: reviews::Kind::parse(&qualifier.to_ascii_lowercase())?,
@@ -252,9 +258,7 @@ fn atom_expression(atom: &str) -> Result<Expression, &'static str> {
                 }
             }
             _ => {
-                return Err(
-                    "Unsupported search qualifier; use is, state, draft, label, milestone, or no",
-                );
+                return Err("Unsupported discussion search qualifier");
             }
         },
     };

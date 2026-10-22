@@ -132,6 +132,82 @@ async fn issue_workspace_returns_tagged_pull_results_and_paginates_colliding_num
     assert_eq!(open["matching"], 1);
     let default_pulls = h.json(&format!("{root}/pulls"), &cookie).await;
     assert!(default_pulls["items"].as_array().unwrap().is_empty());
+    for kind in ["issues", "pulls"] {
+        h.write(
+            reqwest::Method::POST,
+            &format!("{root}/{kind}/1/comments"),
+            &cookie,
+            json!({"request_id":uuid::Uuid::now_v7(), "body":"A conversation comment"}),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
+    }
+    h.write(
+        reqwest::Method::PUT,
+        &format!("{root}/reactions/pulls/1"),
+        &cookie,
+        json!({"kind":"heart", "active":true}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    for (endpoint, query, expected) in [
+        ("issues", "comments:1", vec!["pull", "issue"]),
+        ("issues", "is:open comments:1", vec!["issue"]),
+        ("issues", "is:closed reactions:1", vec!["pull"]),
+        ("pulls", "interactions:2..*", vec!["pull"]),
+        ("pulls", "comments:<1", vec![]),
+    ] {
+        let result: Value = h
+            .http
+            .get(format!("{}{root}/{endpoint}", h.origin))
+            .header(header::COOKIE, &cookie)
+            .query(&[("q", query)])
+            .send()
+            .await
+            .unwrap()
+            .error_for_status()
+            .unwrap()
+            .json()
+            .await
+            .unwrap();
+        assert_eq!(result["matching"], expected.len(), "{endpoint} {query}");
+        assert_eq!(
+            result["items"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .map(|item| item["kind"].as_str().unwrap())
+                .collect::<Vec<_>>(),
+            expected,
+            "{endpoint} {query}"
+        );
+    }
+    h.write(
+        reqwest::Method::PUT,
+        &format!("{root}/reactions/pulls/1"),
+        &cookie,
+        json!({"kind":"heart", "active":false}),
+    )
+    .await
+    .error_for_status()
+    .unwrap();
+    let result = h
+        .json(&format!("{root}/pulls?q=interactions%3A2"), &cookie)
+        .await;
+    assert_eq!(result["matching"], 0);
+    for endpoint in ["issues", "pulls"] {
+        let response = h
+            .http
+            .get(format!("{}{root}/{endpoint}", h.origin))
+            .header(header::COOKIE, &cookie)
+            .query(&[("q", "comments:2..1")])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST);
+    }
     *h.provider.mode.lock().await = "outsider".into();
     let outsider = h.login().await;
     let response = h

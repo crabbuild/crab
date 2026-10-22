@@ -32,7 +32,8 @@ belong to `pulls/review_requests/`, and review threads belong to
 `pulls/review_threads/`; browse projection reads and
 writes belong to `projection/`. `dispatch.rs` alone decodes operation IDs. `search/` owns the shared issue/PR
 query grammar; `search/results/` owns tagged issue/PR results and the mixed
-list operation; `search/navigation/` owns query edits and state destinations;
+list operation; `search/counts/` owns exact integer comment/reaction/interaction
+comparisons and ranges over the transactional index; `search/navigation/` owns query edits and state destinations;
 `search/index/` owns transactional projections, full counts,
 sorting/query-bound cursors, and explicit bounded preparation; `search/completion/` owns repository-scoped
 suggestions and browser UTF-16 replacement ranges. `search/milestones/` owns

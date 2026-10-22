@@ -77,3 +77,19 @@ fn label_prefix_decodes_escaped_quotes_without_losing_literal_characters() {
         assert_eq!(label_prefix(source).1, expected);
     }
 }
+
+#[test]
+fn count_suggestions_preserve_exclusions_and_produce_valid_numeric_queries() {
+    for qualifier in ["comments", "reactions", "interactions"] {
+        let query = format!("-{qualifier}:");
+        let result = complete(&input(&query, query.len()));
+        assert!(result.error.is_some());
+        assert_eq!(result.items.len(), 3);
+        for item in result.items {
+            assert!(item.value.starts_with(&query));
+            assert!(Query::parse(Some(&item.value)).is_ok());
+        }
+        let query = format!("{qualifier}:>0");
+        assert!(complete(&input(&query, query.len())).error.is_none());
+    }
+}

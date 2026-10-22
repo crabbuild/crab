@@ -184,6 +184,12 @@ PR lists also support `review-requested`, `reviewed-by`, `review-involves` and
 `user-review-requested` with a public username or `@me`. The Reviews filter and
 Review requests sidebar use those native relationships; submitted reviews leave
 pending results and retain review participation.
+Issue and PR search also accepts `comments`, `reactions`, and `interactions`
+counts: `comments:>=3`, `reactions:0`, `interactions:5..20`, `comments:10..*`,
+or `-reactions:>0`. Interactions sum conversation comments and reactions on the
+issue/PR itself. Inline review replies and reactions to individual comments are
+not included. These filters use the existing transactional index without a new
+preparation step; search completion offers examples.
 
 Generated links encode a slash-containing ref as one URL segment. Pasted paths
 with unescaped ref slashes resolve against the longest known ref. Raw Git

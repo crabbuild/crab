@@ -1473,6 +1473,18 @@ issues and PRs. Counts use the same authoritative predicate as results.
 Prefix a term or qualifier with `-` to exclude it. Missing-metadata qualifiers
 cannot be negated. Unknown qualifiers and malformed syntax return 400.
 
+Count qualifiers `comments`, `reactions`, and `interactions` accept a nonnegative
+integer, `>n`, `>=n`, `<n`, `<=n`, inclusive `n..n`, `n..*`, or `*..n`.
+For example, `is:open comments:>=3 -reactions:0` finds open work with at least
+three conversation comments and at least one reaction. Interactions are the sum
+of conversation comments and reactions on the issue/PR itself; inline review
+replies and reactions on individual comments/reviews remain separate targets.
+Each bound must fit a signed 64-bit integer. Negative/fractional counts,
+overflow, empty or reversed ranges return 400. Boolean grouping, exclusions,
+state counts, sorting and query-bound cursors use the same native predicate.
+No new schema/preparation is required: domain mutations already update these
+metrics in the discussion index transaction. Completion offers numeric examples.
+
 Author usernames match current Directory handles case-insensitively; `@me`
 binds the authenticated qualified account even without a public profile.
 Unknown handles match no records; exclusion, AND/OR and grouping retain their

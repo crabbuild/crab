@@ -248,6 +248,18 @@ fn suggestions(
                 "Filter requested or submitted reviewers",
             ),
             ("user-review-requested:", "Filter direct review requests"),
+            ("comments:0", "Work without conversation comments"),
+            ("comments:>0", "Work with conversation comments"),
+            ("comments:1..10", "One to ten conversation comments"),
+            ("reactions:0", "Work without reactions"),
+            ("reactions:>0", "Work with reactions"),
+            ("reactions:1..10", "One to ten reactions"),
+            ("interactions:0", "Work without comments or reactions"),
+            ("interactions:>0", "Work with comments or reactions"),
+            (
+                "interactions:1..10",
+                "One to ten comments and reactions combined",
+            ),
         ] {
             if negative && value.starts_with("no:") || !value.starts_with(&prefix) {
                 continue;

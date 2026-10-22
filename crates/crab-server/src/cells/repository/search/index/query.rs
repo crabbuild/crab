@@ -462,6 +462,7 @@ fn expression(expression: &Expression, bindings: &mut Bindings<'_>) -> String {
             parts.iter().map(|part| format!("({})",self::expression(part, bindings))).collect::<Vec<_>>().join(operator)
         }
         Expression::Term { value: term, .. } => match term {
+            Term::Count(filter) => filter.sql(|value| bindings.bind(SqlValue::Integer(value))),
             Term::Text(text) if text.chars().count() >= 3 => {
                 let phrase = quote(text);
                 let value = bindings.text(&phrase);
