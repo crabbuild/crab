@@ -33,6 +33,7 @@ mod review_requests;
 mod review_threads;
 mod reviewers;
 pub(super) mod reviews;
+pub(super) mod rollups;
 pub(super) mod storage;
 use crate::cells::repository::{ListPulls, PullSummary};
 use storage::{NewPullRequest, PullRequest, PullState};
@@ -288,9 +289,14 @@ pub(super) fn pull_list_view(
     pull: &PullSummary,
     labels: &[crate::cells::repository::search::index::LabelSummary],
     assignees: &Selection,
-) -> Value {
-    json!({
+    rollups: &std::collections::BTreeMap<u64, crate::cells::repository::rollups::Rollup>,
+) -> Result<Value> {
+    let rollup = rollups
+        .get(&pull.number)
+        .ok_or(Error::CellContract("Pull rollup is missing"))?;
+    Ok(json!({
         "kind": "pull",
+        "rollup": rollup,
         "draft": pull.draft,
         "version": pull.version,
         "comment_count": pull.comment_count,
@@ -305,7 +311,7 @@ pub(super) fn pull_list_view(
         "updated_at": pull.updated_at_ms,
         "labels": pull.label_ids.iter().filter_map(|id|labels.iter().find(|label|label.id==*id)).collect::<Vec<_>>(),
         "assignees": assignees.view(&pull.assignees),
-    })
+    }))
 }
 
 async fn list(
@@ -325,6 +331,7 @@ async fn list(
             .query::<ListPulls>(&routed.target, None, input)
             .await,
     )?;
+    let rollups = rollups::load(&server, repo, page.items.iter()).await?;
     let authors = super::profiles::attribution::Authors::load(
         &server,
         &principal,
@@ -341,8 +348,8 @@ async fn list(
     let pulls = &page.items;
     let items = pulls
         .iter()
-        .map(|pull| pull_list_view(&authors, pull, &page.labels, &assignees))
-        .collect::<Vec<_>>();
+        .map(|pull| pull_list_view(&authors, pull, &page.labels, &assignees, &rollups))
+        .collect::<Result<Vec<_>>>()?;
     Ok(Json(
         json!({"repository_id":repo.id,"can_bulk_edit":assignees.principal.can_triage(repo.id),"items":items,"next":page.next,"counts":page.counts,"matching":page.matching,"navigation":page.navigation,"authored_by_me":page.authored_by_me,"assigned_to_me":page.assigned_to_me,"review_requested_from_me":page.review_requested_from_me}),
     ))

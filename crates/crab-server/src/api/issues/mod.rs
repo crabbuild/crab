@@ -113,6 +113,15 @@ async fn list(
             .query::<ListDiscussions>(&routed.target, None, input)
             .await,
     )?;
+    let rollups = super::pulls::rollups::load(
+        &server,
+        &repo,
+        page.items.iter().filter_map(|item| match item {
+            DiscussionSummary::Pull(pull) => Some(pull),
+            DiscussionSummary::Issue(_) => None,
+        }),
+    )
+    .await?;
     let authors = super::profiles::attribution::Authors::load(
         &server,
         &principal,
@@ -137,13 +146,13 @@ async fn list(
         .iter()
         .map(|item| match item {
             DiscussionSummary::Issue(issue) => {
-                view::summary(&authors, issue, &page.labels, &assignees)
+                Ok(view::summary(&authors, issue, &page.labels, &assignees))
             }
             DiscussionSummary::Pull(pull) => {
-                super::pulls::pull_list_view(&authors, pull, &page.labels, &assignees)
+                super::pulls::pull_list_view(&authors, pull, &page.labels, &assignees, &rollups)
             }
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     Ok(Json(
         json!({"repository_id":repo.id,"can_bulk_edit":assignees.principal.can_triage(repo.id),"items":items,"next":page.next,"counts":page.counts,"matching":page.matching,"navigation":page.navigation,"authored_by_me":page.authored_by_me,"assigned_to_me":page.assigned_to_me,"review_requested_from_me":page.review_requested_from_me}),
     ))

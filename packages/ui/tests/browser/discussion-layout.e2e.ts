@@ -1,3 +1,4 @@
+import { emptyPullRollup } from "./fixtures";
 import { expect, test, type Page } from "@playwright/test";
 import { mockPullRequest } from "./pulls/fixture";
 import {
@@ -32,6 +33,7 @@ async function fixture(page: Page) {
       const pull = {
         ...shared,
         kind: "pull",
+        rollup: emptyPullRollup(),
         title: "Review navigation",
         draft: true,
         base_ref: "refs/heads/main",

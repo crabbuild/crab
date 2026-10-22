@@ -392,3 +392,14 @@ Fern's pin authority tests informed acceptance cases; no source was copied. See
 [pin behavior and qualification](github-ui-parity.md#repository-issue-pins).
 This advances issue management; saved views, Projects, remaining authority and
 full Issues/PR/Milestones parity remain unfinished.
+
+
+PR row summaries now read captured-head check and review totals for both list
+kinds. Native index format 11 maintains outstanding request counts, while latest
+status/run readers and bounded decisions remain canonical. Source-version
+mismatches, missing branches and read failures cannot reuse a green opening-head
+summary. Shadcn tooltips and links retain list density, keyboard/mobile behavior
+and whole-widget timing. Explicit bounded preparation preserves source records.
+See [summary contracts and proof](github-ui-parity.md#pr-list-check-and-review-summaries).
+This does not complete review-state search, branch-rule rollups, role associations,
+advanced review/merge workflows, Projects or the full parity inventory.

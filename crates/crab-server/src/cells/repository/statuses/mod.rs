@@ -124,25 +124,17 @@ impl Read for ListCommitStatuses {
         validate_status_fields(&oid, "status", 0, None, None)?;
         let result = context.sql(&SqlBatch {
             statements: vec![statement(
-                "SELECT number, request_id, author_issuer, author_subject, author_name, oid, context, state, description, target_url, created_at_ms, context_key FROM repository_commit_statuses WHERE oid = ? ORDER BY context_key, number DESC",
-                vec![SqlValue::Text(oid)],
+                "SELECT current.number, current.request_id, current.author_issuer, current.author_subject, current.author_name, current.oid, current.context, current.state, current.description, current.target_url, current.created_at_ms FROM (SELECT context_key, MAX(number) AS number FROM repository_commit_statuses WHERE oid = ? GROUP BY context_key) AS latest JOIN repository_commit_statuses AS current ON current.oid = ? AND current.number = latest.number ORDER BY latest.context_key",
+                vec![SqlValue::Text(oid.clone()), SqlValue::Text(oid)],
             )],
         })?;
-        if result[0].rows.len() > MAX_STATUS_SUBMISSIONS as usize {
-            return Err(crate::cells::Error::Invalid(
-                "repository commit status catalog exceeds its bound",
-            ));
-        }
-        let mut statuses = Vec::new();
-        let mut previous = None;
-        for row in &result[0].rows {
-            let key = result_text(row, 11)?;
-            if previous.as_deref() == Some(key.as_str()) {
-                continue;
-            }
-            statuses.push(status_from_row(&row[..11])?);
-            previous = Some(key);
-        }
+        // The covering context/number index selects winners before loading
+        // author/description fields. List rollups must not decode status history.
+        let statuses = result[0]
+            .rows
+            .iter()
+            .map(|row| status_from_row(row))
+            .collect::<crate::cells::Result<Vec<_>>>()?;
         if statuses.len() > MAX_STATUS_CONTEXTS as usize {
             return Err(crate::cells::Error::Invalid(
                 "repository commit status contexts exceed their bound",

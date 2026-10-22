@@ -22,6 +22,7 @@ export type PullListItem = Omit<PullSummary, "labels"> &
   DiscussionTotals & {
     version: number;
     kind: "pull";
+    rollup: import("./rollups").PullRollup;
     labels: ListLabel[];
   };
 

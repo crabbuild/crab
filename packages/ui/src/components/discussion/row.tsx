@@ -1,3 +1,4 @@
+import { PullRollups } from "@/features/pull-requests/rollups";
 import { CircleSlashIcon } from "lucide-react";
 import { IssueClosedIcon, IssueOpenedIcon } from "@primer/octicons-react";
 import { Link } from "@/components/navigation/link";
@@ -84,6 +85,11 @@ export function DiscussionRow({
         <p className="muted">
           #{item.number} opened {timestamp(item.created_at)} by{" "}
           <Author author={item.author} />
+          {item.kind === "pull" && (
+            <span className="ml-2 inline-flex flex-wrap items-center gap-2">
+              <PullRollups repo={repo} rollup={item.rollup} />
+            </span>
+          )}
         </p>
         {item.kind === "pull" && (
           <p className="pull-branches muted">

@@ -1,3 +1,4 @@
+import { emptyPullRollup } from "./fixtures";
 import { expect, test, type Page } from "@playwright/test";
 import { mockPullRequest } from "./pulls/fixture";
 import {
@@ -218,6 +219,7 @@ for (const view of ["issues", "pulls"] as const) {
             {
               number: 1,
               kind: view === "issues" ? "issue" : "pull",
+              rollup: emptyPullRollup(),
               title: "Indexed discussion",
               author: { name: "Alice", profile: null },
               state:
@@ -372,6 +374,7 @@ test("issue search renders mixed kinds with colliding numbers and follows pull l
     {
       ...common,
       kind: "pull",
+      rollup: emptyPullRollup(2),
       title: "Improve the README",
       state: "open",
       draft: true,
@@ -381,6 +384,7 @@ test("issue search renders mixed kinds with colliding numbers and follows pull l
     {
       ...common,
       kind: "pull",
+      rollup: emptyPullRollup(3),
       number: 3,
       title: "Merged change",
       state: "merged",

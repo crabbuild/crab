@@ -669,6 +669,29 @@ with open(run / "commands.log", "w") as log:
         assert pins_saved["items"][0]["comment_count"] == 1
         assert any(item["state"] == "closed" for item in pins_saved["items"])
         pin_events = request(pinned_issue_path + "/activity")
+        rollup_list = "/api/repos/team/project/pulls?" + urllib.parse.urlencode({"q": '"Atomic state review"'})
+        rollup_pull = request(state_pull_path)
+        rollup_head = rollup_pull["head_oid"]
+        rollup_ref = rollup_pull["head_ref"]
+        merged_head = request(pull_path)["head_oid"]
+        for oid in {rollup_head, merged_head}:
+            request("/api/repos/team/project/statuses/" + oid, {"request_id":str(uuid.uuid4()),"context":"ci/list-summary","state":"success"})
+        request("/api/repos/team/project/check-runs", {"request_id":str(uuid.uuid4()),"head_sha":rollup_head,"name":"ci/list-run","status":"completed","conclusion":"skipped","details_url":None,"output":{"title":"Skipped","summary":"List rollup qualification"}})
+        rollup = request(rollup_list)["items"][0]["rollup"]
+        assert rollup["head_oid"] == rollup_head
+        assert rollup["checks"]["success"] >= 1 and rollup["checks"]["skipped"] == 1
+        (git / "README.md").write_text("Source head advanced after list checks\n")
+        cmd(["git", "-C", git, "commit", "-am", "Advance list summary source"])
+        cmd(["git", "-C", git, "push", origin + "/git/team/project.git", "HEAD:" + rollup_ref], env=env)
+        advanced_head = subprocess.check_output(["git","-C",git,"rev-parse","HEAD"],text=True).strip()
+        advanced_rollup = request(rollup_list)["items"][0]["rollup"]
+        assert advanced_rollup["head_oid"] == advanced_head and advanced_head != rollup_head
+        assert sum(advanced_rollup["checks"].values()) == 0
+        cmd(["git", "-C", git, "push", origin + "/git/team/project.git", "--delete", rollup_ref, "refs/heads/feature"], env=env)
+        missing_rollup = request(rollup_list)["items"][0]["rollup"]
+        assert missing_rollup == {"number":rollup_pull["number"],"head_oid":None,"checks":None,"reviews":None}
+        merged_rollup = next(item["rollup"] for item in request("/api/repos/team/project/pulls?"+urllib.parse.urlencode({"q":"is:merged"}))["items"] if item["number"] == pull["number"])
+        assert merged_rollup["head_oid"] == merged_head and merged_rollup["checks"]["success"] >= 1
         # State submissions recover after a complete process restart.
         stop()
         server = start()
@@ -679,6 +702,7 @@ with open(run / "commands.log", "w") as log:
             assert len(request(path + "/comments")["items"]) == expected_count
             search = "/api/repos/team/project/issues?" + urllib.parse.urlencode({"q": 'in:comments "Atomic context"'})
             assert request(search)["matching"] == 2
+        assert request(rollup_list)["items"][0]["rollup"] == missing_rollup
         assert request(pins_path, pin_original, method="PUT") == {"version": 1}
         assert request(pins_path) == pins_saved
         assert request(pinned_issue_path + "/activity") == pin_events
@@ -715,6 +739,8 @@ with open(run / "commands.log", "w") as log:
             "repository_creation": True,
             "repository_identity_precondition": True,
             "issue_replay": True,
+            "pull_list_rollup_head_restart": True,
+            "merged_rollup_survives_source_deletion": True,
             "pins_restart_current_cards": True,
             "pins_limit_reorder_recovery": True,
             "bulk_state_metadata_restart": True,

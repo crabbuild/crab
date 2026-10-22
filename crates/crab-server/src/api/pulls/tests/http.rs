@@ -911,6 +911,11 @@ async fn pull_review_decisions_require_another_member_and_follow_the_exact_head(
         h.json(ROOT, &bob).await["items"][0],
         json!({
             "kind":"pull",
+            "rollup": {
+                "number":1,"head_oid":second_head,
+                "checks":{"success":1,"neutral":0,"skipped":0,"pending":0,"failed":0},
+                "reviews":{"approved":1,"changes_requested":0,"requested":0,"outdated":0}
+            },
             "number":1,
             "draft":false,
             "title":"Proposed change",

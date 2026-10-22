@@ -27,7 +27,7 @@ is buffered before owner dispatch so Cellar can safely retry stale routes; it is
 not forwarded as a non-replayable upload stream. Successful HTTP output
 uses the SDK output gate, including its ownership and durability checks.
 
-Repository assignment format 2 and discussion index format 10 require the explicit
+Repository assignment format 2 and discussion index format 11 require the explicit
 preparation described below. Issue lifecycle metadata also requires explicit
 `cells prepare-issue-state` on existing repositories. Other canonical records
 retain their formats.
@@ -207,7 +207,7 @@ review key or exclusive KV bound. Both phases process at most eight source recor
 per transaction; unrelated pull metadata also advances the request cursor. Reads
 remain unavailable until all sources complete. Domain records, versions, request
 history, receipts and public submission mappings are unchanged. Older indexes
-require `cells rebuild-search`; fresh repositories now initialize format 9.
+require `cells rebuild-search`; fresh repositories initialize current format 11.
 
 Native list output adds `review_requested_from_me`. Author, reviewer and commenter
 names now share one ordered `people` binding collection, one Directory snapshot,
@@ -236,6 +236,18 @@ the existing generation/version cursor. No serving-time rebuild or old reader
 is supplied.
 
 ## Conversation preparation
+
+Discussion index format 11 adds a per-PR outstanding-review-request counter.
+Reviewer projection insert/update/delete triggers maintain it in the source
+transaction. Lists combine its indexed point read with bounded canonical review
+decisions and current-head status/check catalogs; they never scan the participant
+history. Existing Cells require explicit `cells rebuild-search`. Bounded clearing
+removes each pull's aggregate before its reviewer rows and replays canonical
+sources; PR records and original reviews/requests remain unchanged. Native tests
+cover format-10 preparation, repeated rebuild and request fulfillment/cancellation.
+The API captures selected refs once, verifies PR versions in the native summary
+read and reports a missing head explicitly. Merged PRs retain their recorded
+source head after deletion. These counts do not establish merge eligibility.
 
 Discussion index format 10 adds an ordered reference index over canonical issue
 comments, PR comments, submitted reviews, and compact activity. Contributions

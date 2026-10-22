@@ -25,6 +25,12 @@ pub(in crate::cells::repository::search) fn clear(context: &Transaction<'_>) -> 
         &[],
     )?;
     for row in &rows.rows {
+        // Rebuild blocks serving. Drop the aggregate before clearing its source
+        // rows; replaying requested flags reconstructs it without stale counters.
+        context.query(
+            "DELETE FROM discussion_pull_rollups WHERE pull=?",
+            &row[..1],
+        )?;
         context.query(
             "DELETE FROM discussion_index_reviewers WHERE pull = ? AND identity = ?",
             row,

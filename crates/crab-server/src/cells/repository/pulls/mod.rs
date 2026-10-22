@@ -378,6 +378,7 @@ pub(in crate::cells::repository) mod comments;
 pub(crate) use comments::{CreatePullComment, GetPullComment, ListPullComments, UpdatePullComment};
 
 pub(crate) mod reviewers;
+pub(crate) mod rollups;
 
 mod reviews;
 pub(crate) use reviews::{

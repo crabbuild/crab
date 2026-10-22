@@ -1,3 +1,4 @@
+import { emptyPullRollup } from "./fixtures";
 import { expect, test } from "@playwright/test";
 import { mockPullRequest } from "./pulls/fixture";
 import {
@@ -47,6 +48,7 @@ test("mixed list attribution links stable actors and follows renamed profiles wi
           {
             ...shared,
             kind: "pull",
+            rollup: emptyPullRollup(),
             title: "Unenrolled author",
             draft: false,
             head_ref: "refs/heads/feature",

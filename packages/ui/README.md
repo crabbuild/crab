@@ -45,7 +45,9 @@ Build the UI before building `crab-server`; its build script embeds `dist/`.
   and recovery. Only current Write capability enables changes; confirmed failures
   require reload and uncertain responses retain their original submission.
   `src/features/pull-requests/` separates lists, creation, detail,
-  conversation, commits, reviews, checks, and merge/recovery. PR detail retains
+  conversation, commits, reviews, checks, and merge/recovery. `pull-requests/rollups/`
+  owns list check/review summaries in both workspaces; it uses native counts and
+  captured source commit identity, with no per-row fetches or merge eligibility claims. PR detail retains
   draft/write state across tab switches and refreshes. Hidden panels pause
   conversation reads and close portaled menus; cached editors and pending writes
   stay mounted until their discussion unmounts.

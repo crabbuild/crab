@@ -145,6 +145,20 @@ CREATE TABLE IF NOT EXISTS discussion_index_reviewers (
     FOREIGN KEY(pull, review_number) REFERENCES repository_pull_reviews(pull_number, number)
 ) STRICT, WITHOUT ROWID;
 CREATE INDEX IF NOT EXISTS discussion_index_reviewer_lookup ON discussion_index_reviewers(identity, pull);
+CREATE TABLE IF NOT EXISTS discussion_pull_rollups (
+    pull INTEGER PRIMARY KEY REFERENCES repository_pulls(number) ON DELETE CASCADE,
+    requested INTEGER NOT NULL CHECK(requested BETWEEN 0 AND 9007199254740991)
+) STRICT;
+CREATE TRIGGER IF NOT EXISTS discussion_rollup_reviewer_insert AFTER INSERT ON discussion_index_reviewers BEGIN
+    INSERT INTO discussion_pull_rollups(pull, requested) VALUES (NEW.pull, NEW.requested)
+    ON CONFLICT(pull) DO UPDATE SET requested = requested + NEW.requested;
+END;
+CREATE TRIGGER IF NOT EXISTS discussion_rollup_reviewer_update AFTER UPDATE OF requested ON discussion_index_reviewers BEGIN
+    UPDATE discussion_pull_rollups SET requested = requested + NEW.requested - OLD.requested WHERE pull = NEW.pull;
+END;
+CREATE TRIGGER IF NOT EXISTS discussion_rollup_reviewer_delete AFTER DELETE ON discussion_index_reviewers BEGIN
+    UPDATE discussion_pull_rollups SET requested = requested - OLD.requested WHERE pull = OLD.pull;
+END;
 CREATE TRIGGER IF NOT EXISTS discussion_reviewer_insert AFTER INSERT ON discussion_index_reviewers BEGIN
     UPDATE discussion_index_revision SET revision = revision + 1 WHERE singleton = 1;
 END;

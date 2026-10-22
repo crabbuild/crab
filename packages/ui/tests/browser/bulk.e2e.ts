@@ -1,3 +1,4 @@
+import { emptyPullRollup } from "./fixtures";
 import { expect, test, type Page } from "@playwright/test";
 import { mockPullRequest } from "./pulls/fixture";
 import {
@@ -23,6 +24,7 @@ async function fixture(page: Page) {
       { kind: "issue", number: 2, title: "Second issue", labels: [] },
     ].map((item) => ({
       ...item,
+      rollup: emptyPullRollup(item.number),
       state: "open",
       version: 1,
       draft: false,

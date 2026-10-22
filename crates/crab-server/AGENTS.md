@@ -34,7 +34,10 @@ with that owner. Private preparation is `cells prepare-issue-state`. Feature com
 `checks/`, `labels/`, `statuses/`, `settings/`, `releases/`, and `pulls/`. Pull
 readiness belongs to `pulls/readiness/`, reviewer invitations and fulfillment
 belong to `pulls/review_requests/`, bounded reviewer summaries to
-`pulls/reviewers/`, and review threads belong to
+`pulls/reviewers/`. `pulls/rollups/` owns bounded current-head check/review summaries;
+`api/pulls/rollups/` captures selected source refs once for both list kinds and
+checks source versions before composition. Outstanding request counts live in
+the transactional discussion projection. Review threads belong to
 `pulls/review_threads/`; browse projection reads and
 writes belong to `projection/`. `dispatch.rs` alone decodes operation IDs. `search/` owns the shared issue/PR
 query grammar; `search/results/` owns tagged issue/PR results and the mixed

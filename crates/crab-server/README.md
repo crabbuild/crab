@@ -97,7 +97,7 @@ matching requests; stale changes require explicit reload. Fulfillment does not
 imply approval or current-head validity. The sidebar includes uninvited reviewers,
 keeps approval decisions separate from later comments, and distinguishes an
 outdated review from a missing head. Existing discussion indexes require
-`cells rebuild-search` for format 9 before serving. Branch protection rules stay separate.
+`cells rebuild-search` for current format 11 before serving. Branch protection rules stay separate.
 The “Review changes” dialog keeps submission stable while the diff loads and
 pins a review to the inspected commit. A changed head requires comparison
 reload and explicit draft rebasing; retries use the native submission ledger.

@@ -2012,6 +2012,33 @@ pure reorder does not add a timeline event.
 
 ### Work with pull requests and reviews
 
+
+Pull list rows, including PR rows returned by issue search, include `rollup` with
+`number`, captured `head_oid`, `checks` and `reviews`. Check counts distinguish
+success, neutral, skipped, pending and failed outcomes. Latest commit statuses
+and latest check runs remain separate sources; the newest run number wins per
+case-insensitive run name, matching the existing native check presentation.
+Review counts include current-head approvals/changes requested, outstanding
+requests and outdated decisions. They describe recorded reviews, not merge
+eligibility or current branch-protection satisfaction.
+
+The API captures the selected source refs in one verified ref view, then one
+native read compares the selected PR versions and computes the summaries in one
+Cell snapshot. Concurrent source record changes return `page_changed`; failed
+ref/storage reads fail the list rather than returning green or empty counts.
+Missing source refs produce null head/check/review fields. Merged rows use the
+recorded merged source head, including after branch deletion. Issue-only pages
+open no Git ref view for this enrichment.
+
+Discussion index format 11 adds a per-PR outstanding-request counter, maintained
+by the reviewer projection's insert/update/delete triggers. It avoids scanning
+historical participants. Existing Cells require explicit `cells rebuild-search`
+preparation; serving never upgrades implicitly. The bounded clear/rebuild resets
+aggregate rows before clearing participants, then reconstructs them from canonical
+review/request records. SQL/KV records, issue/PR versions and original reviews
+remain unchanged. Update serving peers and the bundled UI together.
+
+
 Pull creation records exact base and head branch names plus their opening commit OIDs. Detail reads refresh both live tips without rewriting the immutable opening evidence.
 
 If either branch is deleted, the conversation and original OIDs remain visible while live comparison becomes unavailable. A completed merge retains its pre-merge comparison after source deletion.

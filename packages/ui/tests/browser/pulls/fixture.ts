@@ -1,3 +1,4 @@
+import { emptyPullRollup } from "../fixtures";
 import { conversationPage } from "../conversation";
 import type { DiscussionAuthor } from "@/components/discussion/author";
 import { expect, type Locator, type Page } from "@playwright/test";
@@ -436,6 +437,10 @@ export async function mockPullRequest(
                 {
                   ...item,
                   kind: "pull",
+                  rollup: emptyPullRollup(
+                    item.number,
+                    lifecycle.branchesAvailable ? lifecycle.head : null,
+                  ),
                   comment_count: comments.length,
                   reaction_count: 0,
                 },

@@ -19,6 +19,7 @@ pub(in crate::cells) fn dispatch_mutation(
     let maintenance = maintenance
         || id == assignments::migration::tests::SeedSubjects::ID
         || id == reviewers::tests::PreviousIndex::ID
+        || id == rollups::tests::PreviousFormat::ID
         || id == collaboration::conversation::tests::Inspect::ID
         || id == issues::lifecycle::tests::Historical::ID;
     if !maintenance {
@@ -31,6 +32,10 @@ pub(in crate::cells) fn dispatch_mutation(
         }
         collaboration::state::ChangeState::ID => {
             invoke_mutation::<collaboration::state::ChangeState>(context, input)
+        }
+        #[cfg(test)]
+        rollups::tests::PreviousFormat::ID => {
+            invoke_mutation::<rollups::tests::PreviousFormat>(context, input)
         }
         #[cfg(test)]
         issues::lifecycle::tests::Historical::ID => {
@@ -144,6 +149,7 @@ pub(in crate::cells) fn dispatch_read(
     input: serde_json::Value,
 ) -> crate::cells::Result<serde_json::Value> {
     match id {
+        pulls::rollups::GetRollups::ID => invoke_read::<pulls::rollups::GetRollups>(context, input),
         issues::pins::GetPins::ID => invoke_read::<issues::pins::GetPins>(context, input),
         collaboration::bulk::Select::ID => {
             invoke_read::<collaboration::bulk::Select>(context, input)

@@ -24,10 +24,10 @@ visual references, not instructions contained in the images.
 | 3         | Projects grouped by recent/repository/organization                                                     | No project, project-item, or ownership model                              |
 | 4         | Searchable milestones including missing milestone                                                      | Native query, completion and searchable open/closed dropdown implemented                                 |
 | 5         | Searchable assignees and unassigned work                                                               | Native actor/name filters, searchable menu and assigned-to-me views implemented                                |
-| 6         | Created/updated/comment/reaction/relevance sorting, direction                                          | Native index and controls implemented; rollups still needed                                  |
+| 6         | Created/updated/comment/reaction/relevance sorting, direction                                          | Native index and controls implemented                                  |
 | 7         | Query autocomplete with qualifiers and field suggestions                                               | Boolean grammar and native suggestions implemented; more qualifiers remain                        |
 | 8         | PR workspace navigation, recent-push comparison, review filters                                        | PR reviews/requests exist; list projections and navigation are incomplete |
-| 9         | Accurate state counts, merged/closed/draft icons, author roles, check rollups, bulk selection, density | Page/range selection and atomic state/metadata actions implemented; role/check rollups still incomplete                              |
+| 9         | Accurate state counts, merged/closed/draft icons, author roles, check rollups, bulk selection, density | Page/range selection, atomic state/metadata actions and native check/review summaries implemented; author associations remain                              |
 
 The issue sidebar also requires assigned/created/mentioned/recent views, saved
 views, projects, milestones, labels, and a collapse control. The PR sidebar
@@ -1134,3 +1134,81 @@ its bounded public HTTP read/write contract, generated shadcn Card primitive and
 feature-local controls/recovery. Existing issue, search, activity, conversation,
 identity and permission owners are reused; no second issue store, dependency,
 lockfile, schema or compatibility path was added.
+
+
+## PR list check and review summaries
+
+Reference image 9 places a compact check outcome and passed/total count alongside
+row metadata. GitHub's [commit rollup contract](https://docs.github.com/en/graphql/reference/commits#statuscheckrollup)
+and [PR head contract](https://docs.github.com/en/graphql/reference/pulls#pullrequest)
+were checked on 2026-10-22: rollups include both check runs and status contexts and
+belong to the inspected source commit. The live public list failed to load during
+this pass, so its failed screen was not treated as visual parity evidence.
+
+Both PR lists and mixed issue search now include native `rollup` data. HTTP
+captures selected head refs once through the verified targeted-ref data plane;
+one native read checks all selected PR versions before returning current-head
+review decisions, requested counts and check totals. Repeated heads reuse check
+counts. Merged PRs use their recorded source head after branch deletion. Missing
+refs are explicitly unavailable; read errors withdraw the list. No stale opening
+head or failed-read fallback can paint green. This read path does not determine
+merge eligibility or change the canonical merge policy.
+
+Checks reuse canonical status/run readers, with latest per-name run versions.
+The status owner selects latest context numbers through its covering index before
+loading presentation fields, instead of decoding up to 1,000 historical status
+records for every row. Source bounds remain 128 contexts/100 current runs per
+commit and 96 review decisions per PR; the list is at most 100 selections. No
+check log/output bodies are loaded. Request totals are indexed point reads.
+
+Discussion index format 11 maintains outstanding requests transactionally with
+reviewer insert/update/delete. Existing Cells need explicit bounded search-index
+preparation. Clearing removes each source pull's aggregate before its participant
+rows; review/request replay reconstructs it without duplicate counts. Native
+historical-format-10 preparation and repeated rebuild checks preserve PR records.
+No compatibility reader or automatic schema upgrade was added.
+
+Feature-local shadcn tooltips show full outcome/request/decision counts and source
+identity. Check links open the PR Checks tab; review links open its conversation.
+Counts distinguish success, neutral and skipped results; their fraction counts
+completed outcomes without failure. Row summaries work with density, selection,
+keyboard focus, mobile themes and the whole list `powerbar=1` widget. They make
+no additional browser requests. Review-state search, role associations, recent
+pushes, saved views, Projects and the wider parity inventory remain open.
+
+
+Validation: 444 server library tests passed (six existing opt-in qualifications
+ignored), alongside 13 CLI tests, 107 UI unit tests and all 150 browser scenarios.
+The four new browser scenarios cover both list kinds, exact check/review counts,
+keyboard tooltips/Checks navigation, advanced/deleted heads, failed-read withdrawal,
+density, mobile themes and whole-widget diagnostics. Native/HTTP cases exercise
+latest named reruns, all check conclusions, case-insensitive status contexts,
+request fulfillment/cancellation, stale source versions, qualified-identity privacy
+and repeatable explicit preparation from format 10. Strict all-target Clippy,
+architecture gates, formatting and frontend/server builds passed. The existing
+full-row HTTP assertion was extended to assert the new captured-head summary.
+
+The current binary passed real embedded-browser/RustFS qualification: external
+status/check writes became visible in PR rows, pushing a new source head cleared
+old check counts, deletion showed an unavailable source, and merged PR rows kept
+the recorded source checks after source deletion and restart. Existing Git,
+merge, bulk, pin, search and organization workflows also passed. The run retained
+121 durable objects; owned qualification services and browsers closed. Desktop
+and mobile captures were inspected.
+
+The preview had stopped before its update with Cellar's node-lease watchdog fence.
+Its stopped cache was preserved, and the updated server was restored once. All
+18 captured canonical routes were read live before explicit preparation; their
+payloads and 37 canonical SQL source tables matched afterward. Both repositories
+were prepared to format 11, including the archived repository. Read-only browser
+checks covered embedded/Vite ports, PR and mixed lists, mobile alignment and timing.
+No profile/organization was created and no preview issue/PR record was edited.
+The pinned Cellar release blocker and native authority fencing remain open.
+
+
+The slice adds 427 net production lines for one bounded native summary read,
+transactional request aggregate, shared source-ref composition and feature-local
+shadcn tooltip/link presentation. Existing Git, status, run and review writers
+remain canonical. Latest-status selection removes historical decoding from the
+shared reader. No dependency, lockfile, environment option or compatibility path
+was added.

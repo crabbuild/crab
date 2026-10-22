@@ -1,3 +1,4 @@
+import { emptyPullRollup } from "./fixtures";
 import { conversationPage } from "./conversation";
 import { expect, test, type Page } from "@playwright/test";
 import { emptyReactions, emptyReviewers } from "./fixtures";
@@ -192,7 +193,13 @@ async function setup(page: Page, initialDraft: boolean) {
       return route.fulfill({
         json: {
           items: [
-            { ...pull(), kind: "pull", comment_count: 0, reaction_count: 0 },
+            {
+              ...pull(),
+              kind: "pull",
+              rollup: emptyPullRollup(),
+              comment_count: 0,
+              reaction_count: 0,
+            },
           ],
           next: null,
           counts: { open: 1, closed: 0, merged: 0 },
