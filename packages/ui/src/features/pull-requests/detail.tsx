@@ -17,6 +17,7 @@ import {
 
 import { PullCommits } from "./commits";
 import { PullConversation } from "./conversation";
+import { usePullComment } from "./conversation/compose";
 import type { PullRequest } from "./model";
 import { branch, pullIcons, pullStatus } from "./presentation";
 import { ReviewChanges, type ReviewDraft } from "./reviews/form";
@@ -50,6 +51,8 @@ export function PullDetail({
 }) {
   const [reviewDraft, setReviewDraft] = useState<ReviewDraft>();
   const reviewSubmission = useSubmission();
+  // Draft and submission identity outlive tab changes and metadata refreshes.
+  const comment = usePullComment(repo, number, csrf);
   const path = endpoint(repo, `pulls/${number}`);
   const pull = useRequest<PullRequest>(path);
   const requestedTab = repositoryRoute(url)?.pullTab;
@@ -194,6 +197,7 @@ export function PullDetail({
             ) : (
               <div className="discussion-detail-layout">
                 <PullConversation
+                  comment={comment}
                   repo={repo}
                   pull={data}
                   csrf={csrf}

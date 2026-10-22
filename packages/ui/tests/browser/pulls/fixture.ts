@@ -597,6 +597,7 @@ export async function mockPullRequest(
       }
       return route.fulfill({
         json: {
+          head_oid: lifecycle.branchesAvailable ? lifecycle.head : null,
           items: reviews.map((review) => ({
             ...review,
             current: lifecycle.branchesAvailable,

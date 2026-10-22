@@ -1857,6 +1857,13 @@ main {
   align-self: center;
   text-align: center;
 }
+.conversation-contribution {
+  scroll-margin-block: 5rem;
+}
+.conversation-contribution:target {
+  outline: 2px solid var(--ring);
+  outline-offset: 3px;
+}
 .pull-timeline {
   display: grid;
   gap: 16px;
@@ -1879,10 +1886,10 @@ main {
   display: inline-flex;
   color: var(--muted-foreground);
 }
-.review-event.approved .review-icon {
+.review-event.approved.current .review-icon {
   color: var(--success);
 }
-.review-event.changes_requested .review-icon {
+.review-event.changes_requested.current .review-icon {
   color: var(--destructive);
 }
 .review-event .discussion-markdown {
@@ -2966,10 +2973,6 @@ main {
   overflow: auto;
   padding: 12px;
   background: var(--muted);
-}
-.load-comments {
-  margin: 12px 0;
-  width: 100%;
 }
 .new-comment {
   margin-top: 32px;

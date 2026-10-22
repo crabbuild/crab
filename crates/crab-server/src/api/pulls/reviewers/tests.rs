@@ -51,6 +51,10 @@ async fn unrequested_reviews_keep_decisions_and_use_the_live_head_without_privat
     let changed = h.json(&path, &alice).await;
     assert_eq!(changed["head_oid"], advanced);
     assert_eq!(changed["items"][0]["decision"]["current"], false);
+    assert_eq!(
+        h.json(&format!("{ROOT}/reviews"), &alice).await["head_oid"],
+        advanced
+    );
     assert_eq!(h.json(ROOT, &alice).await["original_head_oid"], head);
     git::success(
         source.path(),
@@ -62,6 +66,7 @@ async fn unrequested_reviews_keep_decisions_and_use_the_live_head_without_privat
     assert!(missing["items"][0]["decision"]["current"].is_null());
     assert_eq!(missing["items"][0]["decision"]["state"], "approved");
     let reviews = h.json(&format!("{ROOT}/reviews"), &alice).await;
+    assert!(reviews.get("head_oid").is_some_and(Value::is_null));
     assert!(reviews["items"][0]["current"].is_null());
     for suffix in ["?limit=0", "?limit=51", "?after=invalid"] {
         assert_eq!(

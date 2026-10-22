@@ -233,6 +233,7 @@ async fn pull_requests_follow_live_branches_and_persist_discussion_state() {
     .unwrap();
     assert_eq!(reviews["items"][0]["commit_oid"], first_head);
     assert_eq!(reviews["items"][0]["current"], false);
+    assert_eq!(reviews["head_oid"], second_head);
 
     assert_eq!(
         json_request(
@@ -683,6 +684,7 @@ async fn pull_request_merge_methods_use_canonical_ref_publication() {
         .json()
         .await
         .unwrap();
+    assert_eq!(reviews["head_oid"], conflict_head);
     assert_eq!(reviews["items"][0]["commit_oid"], conflict_head);
     assert_eq!(reviews["items"][0]["current"], true);
     let participants: Value = client

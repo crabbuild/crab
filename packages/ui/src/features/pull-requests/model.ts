@@ -102,6 +102,10 @@ export interface PullReview {
   can_edit: boolean;
 }
 
+export interface PullReviewPage extends Page<PullReview> {
+  head_oid: string | null;
+}
+
 export interface PullReviewThread extends InlineDiffThread {
   reactions: ReactionSummary;
   path: string;

@@ -26,10 +26,13 @@ Build the UI before building `crab-server`; its build script embeds `dist/`.
   accessible control behavior. Generate additions with the shadcn CLI using
   `components.json`, then review the generated source.
 - `src/components/discussion/`: shared Markdown rendering, composer, search,
-  metadata, mutations and conflict review. Markdown tests stay beside the renderer.
+  metadata, mutations, conflict review, bounded history accumulation and permalink
+  focus. Markdown tests stay beside the renderer.
 - `src/features/issues/`: issue models, routing, list, creation, detail and
   comments. `src/features/pull-requests/` separates lists, creation, detail,
-  conversation, commits, reviews, checks, and merge/recovery.
+  conversation, commits, reviews, checks, and merge/recovery. `conversation/`
+  colocates the timeline and composer; PR detail retains draft/write state across
+  tab switches and refreshes.
 - `src/features/repository/`: browsing, refs, tree, file rendering, commit details,
   and diffs. Preview engines, workers, and their tests stay under `files/`.
 - `src/features/settings/`, `releases/`, and `imports/`: feature screens with

@@ -1713,7 +1713,26 @@ gets a positive or negative status color; older decisions show “Outdated revie
 and an absent head shows “Head unavailable.” A re-request remains visible
 alongside the previous review. Fulfillment alone never implies approval.
 Conversation review responses and their timeline use the same three-state
-freshness contract. Storage errors remain errors rather than missing refs.
+freshness contract. The review list envelope includes nullable `head_oid` from
+that read; all loaded review cards follow this head, including older pages kept
+during refresh. Storage errors remain errors rather than missing refs.
+
+Conversation comments and submitted reviews expose independent “Load earlier”
+controls using their exclusive numeric `before` cursors (default 30, maximum 50).
+A failed page keeps already loaded cards and offers a retry of that same range.
+A newer saved contribution version cannot be replaced by an older page. Loaded
+PR contributions display by creation time; compact activity remains a separate
+feed. One unified, indexed activity/contribution timeline is still delivery work.
+
+Comment timestamps link to `#issuecomment-{number}` on issue and PR detail pages;
+review timestamps and sidebar decisions link to `#pullrequestreview-{number}`.
+Opening a link uses the existing authorized single-contribution endpoint and
+focuses its card, without walking intervening pages or advancing the history
+cursor. Missing or inaccessible targets show a retryable failure. These URLs
+support reload, back/forward navigation, modifier clicks, and diagnostics.
+The PR detail owner retains the comment draft, pending write and submission
+identity across tabs and metadata refreshes. Successful recovery clears the
+submitted draft; deliberately posting the same text again uses a new identity.
 
 Pages contain at most 50 accounts, an opaque exclusive ascending `after` cursor,
 current PR version, management permission, and public `candidates` in

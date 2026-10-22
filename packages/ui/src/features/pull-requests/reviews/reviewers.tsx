@@ -10,6 +10,8 @@ import { Author, type DiscussionAuthor } from "@/components/discussion/author";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { cn } from "@/lib/utils";
+import { Link } from "@/components/navigation/link";
+import { repoHref } from "@/lib/repository-route";
 import type { ReviewState } from "../model";
 import { Field, FieldError, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
@@ -261,6 +263,7 @@ export function Reviewers({
                         {summary && (
                           <div className="flex flex-wrap gap-1">
                             <Badge
+                              asChild
                               variant={
                                 summary.current && summary.state === "approved"
                                   ? "success"
@@ -270,11 +273,16 @@ export function Reviewers({
                                     : "secondary"
                               }
                             >
-                              {summary.state === "approved"
-                                ? "Approved"
-                                : summary.state === "changes_requested"
-                                  ? "Changes requested"
-                                  : "Commented"}
+                              <Link
+                                href={`${repoHref(repo, { view: "pulls", pull: String(pull) })}#pullrequestreview-${summary.number}`}
+                                aria-label={`Open review #${summary.number} by ${name}`}
+                              >
+                                {summary.state === "approved"
+                                  ? "Approved"
+                                  : summary.state === "changes_requested"
+                                    ? "Changes requested"
+                                    : "Commented"}
+                              </Link>
                             </Badge>
                             {summary.current === false && (
                               <Badge variant="outline">Outdated review</Badge>

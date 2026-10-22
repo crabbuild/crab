@@ -169,7 +169,7 @@ test("comment edits restore focus and Markdown preview posts reset to Write", as
   page,
 }) => {
   await openDiscussion(page);
-  const card = page.locator("#comment-1");
+  const card = page.locator("#issuecomment-1");
   const edit = card.getByRole("button", { name: "Edit comment", exact: true });
   await edit.click();
   const editComment = page.getByRole("textbox", {
@@ -231,7 +231,7 @@ test("comment edits restore focus and Markdown preview posts reset to Write", as
   await expect(
     editor.getByRole("textbox", { name: "Comment", exact: true }),
   ).toHaveValue("");
-  await expect(page.locator("#comment-2")).toContainText("New comment");
+  await expect(page.locator("#issuecomment-2")).toContainText("New comment");
 });
 
 test("failed posts preserve drafts and slow replies do not steal focus", async ({
@@ -388,7 +388,7 @@ for (const kind of ["issue", "comment"] as const) {
     const rendered =
       kind === "issue"
         ? page.locator(".issue-detail .discussion-main > .discussion-card")
-        : page.locator("#comment-1");
+        : page.locator("#issuecomment-1");
     await expect(rendered).toContainText("My additions");
     await page.reload();
     await expect(rendered).toContainText("Another concurrent edit");

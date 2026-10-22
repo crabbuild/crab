@@ -1,8 +1,11 @@
 import { Author } from "@/components/discussion/author";
 import { type Repository } from "@/lib/api";
+import { Link } from "@/components/navigation/link";
+import { repoHref } from "@/lib/repository-route";
 import { Reactions } from "@/components/discussion/reactions";
 import { DiscussionMarkdown } from "@/components/discussion/markdown";
 import { short } from "@/lib/format";
+import { cn } from "@/lib/utils";
 import {
   CheckCircleFillIcon,
   CodeReviewIcon,
@@ -10,7 +13,7 @@ import {
 } from "@primer/octicons-react";
 
 import { timestamp } from "@/components/discussion/time";
-import type { PullComment, PullReview } from "./model";
+import type { PullComment, PullReview } from "../model";
 
 export function PullTimeline({
   repo,
@@ -37,16 +40,25 @@ export function PullTimeline({
       {events.map((event) =>
         event.kind === "comment" ? (
           <article
-            className="panel discussion-card"
+            id={`issuecomment-${event.value.number}`}
+            tabIndex={-1}
+            className="panel discussion-card conversation-contribution"
             key={`comment-${event.value.number}`}
           >
             <header>
               <strong>
                 <Author author={event.value.author} />
               </strong>
-              <span className="muted">
-                commented {timestamp(event.value.created_at)}
-              </span>
+              <Link
+                className="muted"
+                aria-label={`Comment #${event.value.number} permalink`}
+                href={`${repoHref(repo, { view: "pulls", pull: String(pull) })}#issuecomment-${event.value.number}`}
+              >
+                commented{" "}
+                <time dateTime={new Date(event.value.created_at).toISOString()}>
+                  {timestamp(event.value.created_at)}
+                </time>
+              </Link>
             </header>
             <DiscussionMarkdown>{event.value.body}</DiscussionMarkdown>
             <Reactions
@@ -94,7 +106,15 @@ function ReviewEvent({
         ? XCircleFillIcon
         : CodeReviewIcon;
   return (
-    <article className={`panel review-event ${review.state}`}>
+    <article
+      id={`pullrequestreview-${review.number}`}
+      tabIndex={-1}
+      className={cn(
+        "panel review-event conversation-contribution",
+        review.state,
+        review.current && "current",
+      )}
+    >
       <header>
         <span className="review-icon" aria-hidden="true">
           <Icon />
@@ -108,7 +128,15 @@ function ReviewEvent({
             {review.current === null ? "Head unavailable" : "Outdated"}
           </span>
         )}
-        <span className="muted">{timestamp(review.created_at)}</span>
+        <Link
+          className="muted"
+          aria-label={`Review #${review.number} permalink`}
+          href={`${repoHref(repo, { view: "pulls", pull: String(pull) })}#pullrequestreview-${review.number}`}
+        >
+          <time dateTime={new Date(review.created_at).toISOString()}>
+            {timestamp(review.created_at)}
+          </time>
+        </Link>
       </header>
       {review.body && <DiscussionMarkdown>{review.body}</DiscussionMarkdown>}
       <Reactions

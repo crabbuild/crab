@@ -154,7 +154,7 @@ test("reactions persist on refresh, stay scoped, and ignore older snapshots", as
   staleRefresh = false;
   await page.reload();
   await expect(thumb).toHaveAttribute("aria-pressed", "true");
-  const comment = page.locator("#comment-1");
+  const comment = page.locator("#issuecomment-1");
   await comment
     .getByRole("button", { name: "Add reaction", exact: true })
     .click();

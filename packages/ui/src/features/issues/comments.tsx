@@ -2,11 +2,21 @@ import { Author } from "@/components/discussion/author";
 import { ActivityTimeline } from "@/features/activity";
 import { Reactions } from "@/components/discussion/reactions";
 
-import { useEffect, useState } from "react";
+import { useState } from "react";
+import {
+  HistoryControls,
+  useDiscussionHistory,
+} from "@/components/discussion/history";
+import {
+  useContributionFocus,
+  useDiscussionPermalink,
+} from "@/components/discussion/permalink";
+import { RequestWidget } from "@/components/request/result";
+import { Link } from "@/components/navigation/link";
+import { repoHref } from "@/lib/repository-route";
 import { Button } from "@/components/ui/button";
-import { Spinner } from "@/components/ui/spinner";
 
-import { endpoint, useRequest, type Repository } from "@/lib/api";
+import { endpoint, type Repository } from "@/lib/api";
 
 import { ConflictReview, useMutation } from "@/components/discussion/mutations";
 
@@ -15,7 +25,7 @@ import { Editor } from "@/components/discussion/editor";
 import { Failure } from "@/components/discussion/failure";
 import { useReturnFocus, useSubmission } from "@/components/discussion/hooks";
 
-import { Comment, Page } from "./model";
+import { Comment } from "./model";
 import { timestamp } from "@/components/discussion/time";
 
 export function Comments({
@@ -29,35 +39,25 @@ export function Comments({
   version: string;
   csrf: string;
 }) {
-  const [before, setBefore] = useState<string>();
-  const page = useRequest<Page<Comment>>(
-    endpoint(repo, `issues/${issue}/comments`, { before }),
+  const focus = useDiscussionPermalink();
+  const page = useDiscussionHistory<Comment>(
+    repo,
+    `issues/${issue}/comments`,
+    focus?.kind === "issuecomment" ? focus.number : undefined,
   );
-  const [items, setItems] = useState<Record<number, Comment>>({});
-  useEffect(() => {
-    const incoming = page.data;
-    if (incoming)
-      setItems((old) => {
-        const merged = { ...old };
-        for (const item of incoming.items) {
-          // An in-flight page must not replace a newer successful edit.
-          if (
-            !merged[item.number] ||
-            merged[item.number].version <= item.version
-          )
-            merged[item.number] = item;
-        }
-        return merged;
-      });
-  }, [page.data]);
+  const ready =
+    focus?.kind === "issuecomment" &&
+    !page.loading &&
+    !page.linked.loading &&
+    page.items.some((item) => item.number === focus.number);
+  useContributionFocus(
+    focus?.kind === "issuecomment" ? focus.id : undefined,
+    ready,
+  );
   const [activityEpoch, setActivityEpoch] = useState(0);
   function upsert(comment: Comment) {
     setActivityEpoch((value) => value + 1);
-    setItems((old) =>
-      old[comment.number]?.version > comment.version
-        ? old
-        : { ...old, [comment.number]: comment },
-    );
+    page.upsert([comment]);
   }
   return (
     <section className="issue-comments" aria-label="Discussion">
@@ -72,56 +72,33 @@ export function Comments({
           variant="outline"
           size="sm"
           disabled={page.loading}
-          onClick={() => {
-            setBefore(undefined);
-            page.retry();
-          }}
+          onClick={page.refresh}
         >
           Refresh discussion
         </Button>
       </div>
-      {page.data?.next && (
-        <Button
-          variant="outline"
-          className="load-comments"
-          onClick={() => setBefore(String(page.data?.next))}
-          disabled={page.loading}
-        >
-          Load earlier comments
-        </Button>
-      )}
-      {page.loading && (
-        <p role="status">
-          <Spinner /> Loading discussion…
-        </p>
-      )}
-      {page.error && (
-        <div className="notice error" role="alert">
-          <p>{page.error}</p>
-          <Button variant="outline" onClick={page.retry}>
-            Try again
-          </Button>
-        </div>
-      )}
-      {!page.loading && !page.error && !Object.keys(items).length && (
-        <p className="muted">
-          {page.data?.next
-            ? "No comments in this range. Load earlier comments."
-            : "No comments yet. Start the conversation."}
-        </p>
-      )}
-      {Object.values(items)
-        .sort((a, b) => a.number - b.number)
-        .map((comment) => (
-          <CommentCard
-            key={comment.number}
-            comment={comment}
-            repo={repo}
-            issue={issue}
-            csrf={csrf}
-            onSaved={upsert}
-          />
-        ))}
+      <RequestWidget timing={page.timing} label="Issue comments">
+        <HistoryControls label="comments" history={page} />
+        {!page.loading && !page.error && !page.items.length && (
+          <p className="muted">
+            {page.data?.next
+              ? "No comments in this range. Load earlier comments."
+              : "No comments yet. Start the conversation."}
+          </p>
+        )}
+        {page.items
+          .sort((a, b) => a.number - b.number)
+          .map((comment) => (
+            <CommentCard
+              key={comment.number}
+              comment={comment}
+              repo={repo}
+              issue={issue}
+              csrf={csrf}
+              onSaved={upsert}
+            />
+          ))}
+      </RequestWidget>
       {!repo.archived && (
         <NewComment repo={repo} issue={issue} csrf={csrf} onCreated={upsert} />
       )}
@@ -213,14 +190,24 @@ function CommentCard({
   const editTrigger = useReturnFocus<HTMLButtonElement>(Boolean(draft));
   const save = useReturnFocus<HTMLButtonElement>(mutation.conflict);
   return (
-    <article id={`comment-${comment.number}`} className="discussion-card panel">
+    <article
+      id={`issuecomment-${comment.number}`}
+      tabIndex={-1}
+      className="discussion-card panel conversation-contribution"
+    >
       <header>
         <strong>
           <Author author={comment.author} />
         </strong>
-        <time dateTime={new Date(comment.created_at).toISOString()}>
-          {timestamp(comment.created_at)}
-        </time>
+        <Link
+          className="muted"
+          aria-label={`Comment #${comment.number} permalink`}
+          href={`${repoHref(repo, { view: "issues", issue: String(issue) })}#issuecomment-${comment.number}`}
+        >
+          <time dateTime={new Date(comment.created_at).toISOString()}>
+            {timestamp(comment.created_at)}
+          </time>
+        </Link>
         {comment.version > 1 && <span className="muted">edited</span>}
         {comment.can_edit && !repo.archived && !draft && (
           <Button

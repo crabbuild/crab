@@ -301,7 +301,7 @@ test("review conversations and ambiguous merge recovery preserve the pull workfl
   await expect(page.locator(".pull-conversation")).toContainText(
     "Verified in the browser.",
   );
-  await expect(page.locator(".review-event")).toContainText("Outdated");
+  await expect(page.locator(".review-event")).toContainText("Head unavailable");
 
   lifecycle.branchesAvailable = true;
   lifecycle.state = "open";

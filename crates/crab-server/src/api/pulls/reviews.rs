@@ -131,7 +131,7 @@ async fn list(
             review_view(&authors, review, &actor, head.as_deref(), &reactions)
         })
         .collect::<Vec<_>>();
-    Ok(Json(json!({"items":items,"next":next})))
+    Ok(Json(json!({"items":items,"next":next,"head_oid":head})))
 }
 
 #[derive(Deserialize)]
