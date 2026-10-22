@@ -63,6 +63,8 @@ jobs:
       - name: Check formatting
         run: cargo fmt --check -p crab-read -p crab-s3-gateway
       - name: Verify shared reads and S3 operations
+        env:
+          RUST_MIN_STACK: "8388608"
         run: cargo test --locked --lib -p crab-read -p crab-s3-gateway
 
   helm:
