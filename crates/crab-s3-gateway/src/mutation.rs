@@ -1602,14 +1602,30 @@ async fn prepare_and_upload_batch(
 ) -> Result<PreparedBatch> {
     let mut protocol = publication_protocol(repository).await?;
     let mut cached = request.state.and_then(BranchState::take_latest);
-    if matches!(&protocol, PublicationProtocol::Capsule(_))
-        && cached.as_ref().is_some_and(|cached| {
-            cached.capsule_frontier.is_some_and(|frontier| {
-                frontier.count >= FOREGROUND_CAPSULE_THRESHOLD
-                    || frontier.bytes >= FOREGROUND_CAPSULE_BYTES
-            })
-        })
-    {
+    let mut current_view =
+        if cached.is_none() && matches!(&protocol, PublicationProtocol::Capsule(_)) {
+            Some(
+                repository
+                    .read_views
+                    .current(repository, Arc::clone(&runtime), options, cancel)
+                    .await?,
+            )
+        } else {
+            None
+        };
+    // Restarted and evicted writers must admit the same frontier as warm ones;
+    // otherwise their first large upload can exceed the read budget.
+    let frontier = cached
+        .as_ref()
+        .and_then(|cached| cached.capsule_frontier)
+        .or_else(|| {
+            current_view
+                .as_ref()
+                .and_then(|view| view.capsule_frontier(request.branch))
+        });
+    if frontier.is_some_and(|frontier| {
+        frontier.count >= FOREGROUND_CAPSULE_THRESHOLD || frontier.bytes >= FOREGROUND_CAPSULE_BYTES
+    }) {
         crab_remote::checkpoint::publish_capsule_checkpoint(
             &repository.layout,
             // Admission is due by count or bytes. Recheck only that some
@@ -1620,6 +1636,7 @@ async fn prepare_and_upload_batch(
         )
         .await?;
         repository.read_views.invalidate().await;
+        current_view = None;
         protocol = publication_protocol(repository).await?;
         cached = match (cached, &protocol) {
             (Some(mut cached), PublicationProtocol::Capsule(root)) => {
@@ -1697,10 +1714,15 @@ async fn prepare_and_upload_batch(
             None,
         ),
         PublicationProtocol::Capsule(_) => {
-            let view = repository
-                .read_views
-                .current(repository, Arc::clone(&runtime), options, cancel)
-                .await?;
+            let view = match current_view {
+                Some(view) => view,
+                None => {
+                    repository
+                        .read_views
+                        .current(repository, Arc::clone(&runtime), options, cancel)
+                        .await?
+                }
+            };
             (
                 view.remote().refs().find(request.branch).is_some(),
                 view.capsule_frontier(request.branch),
@@ -4156,11 +4178,20 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn sustained_capsule_mutations_checkpoint_at_the_native_rollup_window() {
+        checkpoint_at_native_rollup_window(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cold_capsule_writer_checkpoints_before_its_first_append() {
+        checkpoint_at_native_rollup_window(true).await;
+    }
+
+    async fn checkpoint_at_native_rollup_window(cold: bool) {
         let (repository, runtime, cancel) = capsule_fixture().await;
         let coordinator = Coordinator::new(
             Arc::clone(&runtime),
             crab_remote_git::RepositoryOptions::default(),
-            cancel.clone(),
+            cancel.child_token(),
             Metrics::new().unwrap(),
         );
         let path = crab_remote_git::GitPath::new(b"object".to_vec()).unwrap();
@@ -4196,6 +4227,18 @@ mod tests {
             FOREGROUND_CAPSULE_THRESHOLD
         );
 
+        let coordinator = if cold {
+            coordinator.shutdown().await;
+            Coordinator::new(
+                Arc::clone(&runtime),
+                crab_remote_git::RepositoryOptions::default(),
+                cancel.child_token(),
+                Metrics::new().unwrap(),
+            )
+        } else {
+            coordinator
+        };
+
         coordinator
             .apply(
                 &repository,
@@ -4213,11 +4256,13 @@ mod tests {
             .await
             .unwrap();
 
-        assert_eq!(
-            runtime.snapshot().await.object_entries,
-            0,
-            "checkpointing an unchanged tip must retain logical write state without rereading Git objects"
-        );
+        if !cold {
+            assert_eq!(
+                runtime.snapshot().await.object_entries,
+                0,
+                "checkpointing an unchanged tip must retain logical write state without rereading Git objects"
+            );
+        }
         let after = crab_read::capsule_protocol::open_view(
             &repository.layout,
             crab_read::capsule_protocol::CapsuleReadLimits {

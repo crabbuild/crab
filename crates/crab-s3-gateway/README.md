@@ -176,7 +176,9 @@ window, or when its physical run frontier reaches 1 GiB. The native writer
 compacts runs within the unchanged 64-segment/512-transaction-per-run limits;
 those segment counts are distinct from original transaction counts. Publication
 charges the exact prepared frontier bytes and rejects a successor above the
-2 GiB read budget before its ref CAS. V1 repositories retain the journal publisher.
+2 GiB read budget before its ref CAS. Cold captures after restart or cache eviction
+use the same checkpoint admission as warm branches. V1 repositories retain the
+journal publisher.
 
 ### Mutation batching and publication
 
