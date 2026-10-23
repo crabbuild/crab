@@ -257,7 +257,9 @@ delayed, failed, or superseded slot
 falls back to the immutable delta chain.
 
 Checkpoint markers remain optional in
-the existing version-2 delta format. Eligible checkpoints are gzip encoded and
+the existing version-2 delta format. Checkpoint serialization uses a bounded
+64 KiB buffer before compression to avoid per-field compressor work.
+Eligible checkpoints are gzip encoded and
 retain the existing 32 MiB stored-object bound; readers also accept earlier
 plain JSON checkpoints.
 

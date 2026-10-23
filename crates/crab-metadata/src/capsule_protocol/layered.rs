@@ -1,4 +1,4 @@
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::{Arc, OnceLock};
 
 use bytes::Bytes;
@@ -8,7 +8,7 @@ use crate::capsule_protocol::{CapsuleGitPack, CapsuleRun, CapsuleSectionKind, Po
 use crate::error::{MetadataError, Result};
 use crate::git_visibility::{
     GitVisibilityCheckpointTransition, GitVisibilityIndex, GitVisibilityOid,
-    GitVisibilityOrdinalTransition,
+    GitVisibilityOrdinalTransition, MAX_CHECKPOINT_FOOTER_TRANSITIONS_PER_REF, encode_oid,
 };
 use crate::validation::{validate_content_hash, validate_sha1};
 
@@ -198,8 +198,31 @@ impl LayeredVisibilitySnapshot {
     pub fn recent_transitions(
         &self,
     ) -> Result<BTreeMap<String, Vec<GitVisibilityCheckpointTransition>>> {
-        self.to_index(0, &"0".repeat(64), &"0".repeat(64), &self.catalog_digest)
-            .map(|index| index.recent_checkpoint_history())
+        self.validate()?;
+        // The footer needs only a bounded suffix. Restoring the complete
+        // index here duplicates every historical closure and transition.
+        Ok(self
+            .incremental_history
+            .iter()
+            .map(|(name, history)| {
+                let start = history
+                    .len()
+                    .saturating_sub(MAX_CHECKPOINT_FOOTER_TRANSITIONS_PER_REF);
+                let transitions = history[start..]
+                    .iter()
+                    .map(|transition| GitVisibilityCheckpointTransition {
+                        from_oid: encode_oid(&self.objects[transition.from_ordinal as usize]),
+                        to_oid: encode_oid(&self.objects[transition.to_ordinal as usize]),
+                        objects: transition
+                            .objects
+                            .iter()
+                            .map(|ordinal| encode_oid(&self.objects[*ordinal as usize]))
+                            .collect(),
+                    })
+                    .collect();
+                (name.clone(), transitions)
+            })
+            .collect())
     }
 
     /// Encode the proof as canonical authenticated pages.
@@ -248,12 +271,6 @@ impl LayeredVisibilitySnapshot {
             return Err(corrupt("layered visibility proof exceeds its count bound"));
         }
         let object_count = self.objects.len();
-        let mut seen = BTreeSet::new();
-        for object in &self.objects {
-            if !seen.insert(object) {
-                return Err(corrupt("layered visibility dictionary repeats an object"));
-            }
-        }
         if self.objects.windows(2).any(|window| window[0] >= window[1]) {
             return Err(corrupt(
                 "layered visibility dictionary is not in canonical order",
@@ -2193,6 +2210,37 @@ mod tests {
             Some(expected_digest.as_str())
         );
         assert_eq!(control.cold_clone_object_count(), Some(1));
+    }
+
+    #[test]
+    fn ordinal_footer_matches_materialized_history_after_dictionary_remap() {
+        let name = "refs/heads/main";
+        let oid = |value: usize| format!("{value:040x}");
+        let mut index = GitVisibilityIndex::new(
+            1,
+            "1".repeat(64),
+            "2".repeat(64),
+            BTreeMap::from([(name.to_owned(), vec![oid(600)])]),
+        )
+        .unwrap();
+        for value in (0..600).rev() {
+            index
+                .apply_ref_edit(
+                    name.to_owned(),
+                    &crate::git_visibility::GitVisibilityEdit::from_delta_objects(
+                        Some(oid(value + 1)),
+                        oid(value),
+                        vec![oid(value)],
+                        Vec::new(),
+                    ),
+                )
+                .unwrap();
+        }
+        let snapshot = LayeredVisibilitySnapshot::from_index(&index, &"3".repeat(64)).unwrap();
+        assert_eq!(
+            snapshot.recent_transitions().unwrap(),
+            index.recent_checkpoint_history()
+        );
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use std::{
     collections::{BTreeMap, HashMap},
-    io::{Read as _, Write as _},
+    io::{BufWriter, Read as _, Write as _},
     ops::Bound::{Excluded, Included, Unbounded},
     str::FromStr as _,
     sync::Arc,
@@ -600,17 +600,22 @@ pub(crate) fn prepare_checkpoint(
         return Ok(None);
     }
     let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
-    serde_json::to_writer(
-        &mut encoder,
-        &CheckpointPayload {
-            version: VERSION,
-            commit: commit.to_string(),
-            complete: manifest.complete,
-            objects: &manifest.objects,
-        },
-    )
-    .map_err(|source| crate::Error::Attributes { source })?;
-    encoder.flush()?;
+    {
+        // JSON emits many tiny fields. Buffer them before gzip so compressor
+        // setup and output-buffer clearing do not repeat for each field.
+        let mut buffered = BufWriter::with_capacity(64 * 1024, &mut encoder);
+        serde_json::to_writer(
+            &mut buffered,
+            &CheckpointPayload {
+                version: VERSION,
+                commit: commit.to_string(),
+                complete: manifest.complete,
+                objects: &manifest.objects,
+            },
+        )
+        .map_err(|source| crate::Error::Attributes { source })?;
+        buffered.flush()?;
+    }
     let bytes = encoder.finish()?;
     if bytes.len() as u64 > MAX_MANIFEST_BYTES {
         return Ok(None);
@@ -1051,6 +1056,31 @@ mod tests {
         manifest.update("known".to_owned(), Some(attributes("known")));
 
         assert!(manifest.complete_listing("", None, None, 1000).is_none());
+    }
+
+    #[test]
+    fn checkpoint_round_trips_a_large_namespace() {
+        let mut manifest = Manifest::empty_complete();
+        for index in 0..4096 {
+            let path = format!("namespace/object-{index:08}");
+            manifest.update(path.clone(), Some(attributes(&path)));
+        }
+        let commit = ObjectId::empty_tree(gix_hash::Kind::Sha1);
+        let payload = CheckpointPayload {
+            version: VERSION,
+            commit: commit.to_string(),
+            complete: true,
+            objects: &manifest.objects,
+        };
+        let expected = serde_json::to_vec(&payload).unwrap();
+        let checkpoint = prepare_checkpoint("refs/heads/main", commit, &manifest)
+            .unwrap()
+            .unwrap();
+        let mut actual = Vec::new();
+        GzDecoder::new(checkpoint.bytes.as_ref())
+            .read_to_end(&mut actual)
+            .unwrap();
+        assert_eq!(actual, expected);
     }
 
     #[test]

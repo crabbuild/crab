@@ -155,6 +155,8 @@ Protected keys and authenticated closure traversal are tracked separately.
 Complete checkpoint visibility proofs are authenticated once and shared across
 immutable checkpoint clones. Building a checkpoint retains its validated proof;
 control-only readers keep the visibility body cold.
+Checkpoint footer history projects its bounded suffix from validated ordinals
+without rebuilding the complete visibility index.
 
 Retired unshipped checkpoint formats through 8 are rejected without fallback.
 The six published release tags do not contain this capsule codec.
