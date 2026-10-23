@@ -198,10 +198,12 @@ canonical pack and sidecar preparation; they are not compressed and reinflated
 as synthetic wire input.
 
 Caller-proven predecessor relationships delta-compress
-successive generated tree versions inside a batch and, while warm state retains
-a verified prior depth, across packs by immutable Git object ID. A cold process,
-an unknown base depth, depth eight, or a target that is already an ancestor of
-the proposed base emits a new full base. The checksummed kind sidecar records
+successive generated tree versions inside a batch. Across packs, warm state
+retains a verified full-tree anchor by immutable Git object ID, so successive
+batches do not extend the previous batch's delta chain. Anchor bytes count
+toward the warm-state budget. A cold process, a missing anchor, depth eight
+within a batch, or a target that is already an ancestor of the proposed base
+emits a new full base. The checksummed kind sidecar records
 each external base so catalog and fallback readers select an acyclic physical
 representation when the same Git object exists in more than one pack.
 
@@ -230,7 +232,7 @@ discarded on a tip mismatch, restart, or memory-pressure
 eviction; idle branch state remains reusable below the shared watermark.
 After native checkpointing, an exact-tip control capture refreshes the cached
 transaction position and frontier count. Logical directories and attributes
-remain reusable; physical delta depth and ancestry are discarded because
+remain reusable; physical tree anchors and ancestry are discarded because
 consolidation can change their pack representations.
 
 Object storage remains the authority and a cold request reconstructs the same state from

@@ -2060,8 +2060,7 @@ async fn upload_built_batch(
             let external = candidate.external.ok_or_else(|| {
                 std::io::Error::other("external tree delta base bytes disappeared")
             })?;
-            let Some(next_external_bytes) = external_delta_bytes.checked_add(external.bytes.len())
-            else {
+            let Some(next_external_bytes) = external_delta_bytes.checked_add(external.len()) else {
                 continue;
             };
             if next_external_bytes > MAX_GENERATED_PACK_BYTES as usize {
@@ -2073,8 +2072,8 @@ async fn upload_built_batch(
                 crab_git::incoming_pack::ExternalDeltaBase::new(
                     candidate.base,
                     Kind::Tree,
-                    external.bytes,
-                    external.depth,
+                    external,
+                    0,
                 ),
             );
         }
@@ -2453,12 +2452,7 @@ struct BuiltCommit {
 struct TreeDeltaBase {
     object: ObjectId,
     base: ObjectId,
-    external: Option<ExternalTreeDeltaBase>,
-}
-
-struct ExternalTreeDeltaBase {
-    bytes: Vec<u8>,
-    depth: u32,
+    external: Option<Vec<u8>>,
 }
 
 enum Build {
@@ -2479,13 +2473,17 @@ struct DirectoryEdit {
     delta_ancestors: Vec<ObjectId>,
 }
 
-#[derive(Clone)]
 struct DirectoryState {
     oid: Option<ObjectId>,
     entries: Vec<tree::Entry>,
-    delta_depth: Option<u32>,
+    delta_anchor: Option<TreeDeltaAnchor>,
     delta_ancestors: Vec<ObjectId>,
     generated_in_batch: bool,
+}
+
+struct TreeDeltaAnchor {
+    oid: ObjectId,
+    bytes: Vec<u8>,
 }
 
 struct GeneratedAttributeBlob {
@@ -2508,12 +2506,12 @@ impl WarmTree {
 
     fn forget_pack_provenance(&mut self) {
         // A checkpoint preserves logical trees but can select different physical
-        // delta representations. Reuse entries, never the old depth/ancestry.
+        // delta representations. Reuse entries, never the old anchors/ancestry.
         for directory in self.directories.values_mut() {
             self.estimated_bytes = self
                 .estimated_bytes
-                .saturating_sub(estimated_delta_ancestors_bytes(&directory.delta_ancestors));
-            directory.delta_depth = None;
+                .saturating_sub(estimated_tree_provenance_bytes(directory));
+            directory.delta_anchor = None;
             directory.delta_ancestors = Vec::new();
             directory.generated_in_batch = false;
         }
@@ -2531,11 +2529,20 @@ impl WarmTree {
             let depth = pack.delta_depth(&oid).ok_or_else(|| {
                 std::io::Error::other("generated directory is absent from prepared pack")
             })?;
-            directory.delta_depth = Some(depth);
+            let previous_provenance = estimated_tree_provenance_bytes(directory);
             if depth == 0 {
-                directory.delta_ancestors.clear();
+                // Reuse a verified full entry across batches; chaining each new
+                // tip forces repeated full copies of growing directories.
+                let bytes = encode_tree(&directory.entries);
+                directory.delta_anchor = (bytes.len() <= MAX_GENERATED_TREE_DELTA_BYTES)
+                    .then_some(TreeDeltaAnchor { oid, bytes });
+                directory.delta_ancestors = Vec::new();
             }
             directory.generated_in_batch = false;
+            self.estimated_bytes = self
+                .estimated_bytes
+                .saturating_sub(previous_provenance)
+                .saturating_add(estimated_tree_provenance_bytes(directory));
         }
         Ok(())
     }
@@ -2606,7 +2613,7 @@ impl MutableTree {
                 let state = DirectoryState {
                     oid: directory_oid,
                     entries,
-                    delta_depth: None,
+                    delta_anchor: None,
                     delta_ancestors: Vec::new(),
                     generated_in_batch: false,
                 };
@@ -2671,20 +2678,19 @@ impl MutableTree {
                 }
             }
             state.oid = edit.oid;
-            let previous_ancestors = estimated_delta_ancestors_bytes(&state.delta_ancestors);
+            let previous_provenance = estimated_tree_provenance_bytes(state);
             if edit.oid.is_none() {
-                state.delta_depth = None;
-                state.delta_ancestors.clear();
+                state.delta_anchor = None;
+                state.delta_ancestors = Vec::new();
                 state.generated_in_batch = false;
             } else if edit.generated {
-                state.delta_depth = None;
                 state.delta_ancestors = edit.delta_ancestors;
                 state.generated_in_batch = true;
             }
             self.estimated_bytes = self
                 .estimated_bytes
-                .saturating_sub(previous_ancestors)
-                .saturating_add(estimated_delta_ancestors_bytes(&state.delta_ancestors));
+                .saturating_sub(previous_provenance)
+                .saturating_add(estimated_tree_provenance_bytes(state));
             if edit.path.is_empty() {
                 self.root_oid = edit.oid;
             }
@@ -2747,13 +2753,17 @@ fn estimated_directory_bytes(path: &[u8], directory: &DirectoryState) -> usize {
         .fold(path.len(), |total, entry| {
             total.saturating_add(estimated_tree_entry_bytes(entry))
         })
-        .saturating_add(estimated_delta_ancestors_bytes(&directory.delta_ancestors))
+        .saturating_add(estimated_tree_provenance_bytes(directory))
 }
 
-fn estimated_delta_ancestors_bytes(ancestors: &Vec<ObjectId>) -> usize {
-    ancestors
+fn estimated_tree_provenance_bytes(directory: &DirectoryState) -> usize {
+    directory
+        .delta_ancestors
         .capacity()
         .saturating_mul(std::mem::size_of::<ObjectId>())
+        .saturating_add(directory.delta_anchor.as_ref().map_or(0, |anchor| {
+            std::mem::size_of::<TreeDeltaAnchor>().saturating_add(anchor.bytes.capacity())
+        }))
 }
 
 fn estimated_tree_entry_bytes(entry: &tree::Entry) -> usize {
@@ -3349,29 +3359,27 @@ fn encode_tree_with_edits(
     let oid = object_id(Kind::Tree, &bytes)?;
     objects.push((Kind::Tree, bytes));
     let mut delta_ancestors = Vec::new();
-    if let Some(base) = old.oid {
-        let external = if old.generated_in_batch {
-            None
-        } else {
-            old.delta_depth
-                .filter(|depth| *depth < GENERATED_TREE_DELTA_DEPTH)
-                .map(|depth| ExternalTreeDeltaBase {
-                    bytes: encode_tree(entries),
-                    depth,
-                })
-        };
-        if oid != base
-            && !old.delta_ancestors.contains(&oid)
-            && (old.generated_in_batch || external.is_some())
-        {
+    let candidate = if old.generated_in_batch {
+        old.oid
+            .filter(|_| !old.delta_ancestors.contains(&oid))
+            .map(|base| (base, None))
+    } else {
+        old.delta_anchor
+            .as_ref()
+            .map(|anchor| (anchor.oid, Some(anchor.bytes.clone())))
+    };
+    if let Some((base, external)) = candidate
+        && oid != base
+    {
+        if old.generated_in_batch {
             delta_ancestors.clone_from(&old.delta_ancestors);
-            delta_ancestors.push(base);
-            delta_bases.push(TreeDeltaBase {
-                object: oid,
-                base,
-                external,
-            });
         }
+        delta_ancestors.push(base);
+        delta_bases.push(TreeDeltaBase {
+            object: oid,
+            base,
+            external,
+        });
     }
     Ok((oid, delta_ancestors))
 }
@@ -3548,7 +3556,7 @@ mod tests {
             &DirectoryState {
                 oid: None,
                 entries: entries.clone(),
-                delta_depth: None,
+                delta_anchor: None,
                 delta_ancestors: Vec::new(),
                 generated_in_batch: false,
             },
@@ -3625,7 +3633,7 @@ mod tests {
             &DirectoryState {
                 oid: Some(ObjectId::from([9; 20])),
                 entries: original.clone(),
-                delta_depth: Some(0),
+                delta_anchor: None,
                 delta_ancestors: Vec::new(),
                 generated_in_batch: true,
             },
@@ -3649,7 +3657,7 @@ mod tests {
     }
 
     #[test]
-    fn warm_tree_delta_base_is_external_and_resets_at_the_depth_limit() {
+    fn warm_tree_reuses_a_verified_full_anchor_until_provenance_is_forgotten() {
         let original = vec![tree::Entry {
             mode: tree::EntryKind::Blob.into(),
             filename: BString::from("existing"),
@@ -3667,9 +3675,12 @@ mod tests {
         let mut objects = Vec::new();
         let mut bases = Vec::new();
         let state = DirectoryState {
-            oid: Some(old_oid),
+            oid: Some(ObjectId::from([9; 20])),
             entries: original.clone(),
-            delta_depth: Some(0),
+            delta_anchor: Some(TreeDeltaAnchor {
+                oid: old_oid,
+                bytes: encode_tree(&original),
+            }),
             delta_ancestors: Vec::new(),
             generated_in_batch: false,
         };
@@ -3687,30 +3698,24 @@ mod tests {
         assert_eq!(bases[0].object, target);
         assert_eq!(bases[0].base, old_oid);
         let external = bases[0].external.as_ref().unwrap();
-        assert_eq!(external.bytes, encode_tree(&original));
-        assert_eq!(external.depth, 0);
+        assert_eq!(*external, encode_tree(&original));
         assert_eq!(ancestors, vec![old_oid]);
 
+        let path = b"directory".to_vec();
+        let estimated_bytes = estimated_directory_bytes(&path, &state);
+        let provenance_bytes = estimated_tree_provenance_bytes(&state);
+        let mut warm = WarmTree {
+            directories: HashMap::from([(path.clone(), state)]),
+            estimated_bytes,
+            ..Default::default()
+        };
+        assert!(provenance_bytes >= encode_tree(&original).len());
+        warm.forget_pack_provenance();
+        assert_eq!(warm.estimated_bytes(), estimated_bytes - provenance_bytes);
         let mut objects = Vec::new();
         let mut bases = Vec::new();
         encode_tree_with_edits(
-            &DirectoryState {
-                delta_depth: Some(GENERATED_TREE_DELTA_DEPTH),
-                ..state.clone()
-            },
-            &original,
-            std::slice::from_ref(&edit),
-            &mut objects,
-            &mut bases,
-        )
-        .unwrap();
-        assert!(bases.is_empty());
-
-        encode_tree_with_edits(
-            &DirectoryState {
-                delta_depth: None,
-                ..state
-            },
+            &warm.directories[&path],
             &original,
             &[edit],
             &mut objects,
@@ -3732,9 +3737,9 @@ mod tests {
         let state = DirectoryState {
             oid: Some(base_oid),
             entries: Vec::new(),
-            delta_depth: Some(1),
+            delta_anchor: None,
             delta_ancestors: vec![target_oid],
-            generated_in_batch: false,
+            generated_in_batch: true,
         };
         let edit = TreeEntryEdit {
             name: b"existing".to_vec(),
@@ -4421,6 +4426,59 @@ mod tests {
             .await
             .unwrap();
         manifest_lock.release().await.unwrap();
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn growing_directory_keeps_cross_batch_delta_reads_shallow() {
+        let (repository, runtime, cancel) = fixture().await;
+        let coordinator = Coordinator::new(
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            cancel.clone(),
+            Metrics::new().unwrap(),
+        );
+        for index in 0..32 {
+            let body = if index % 2 == 0 {
+                b"even".as_slice()
+            } else {
+                b"odd".as_slice()
+            };
+            coordinated_put(
+                &coordinator,
+                &repository,
+                &cancel,
+                &format!("objects/item-{index:02}"),
+                body,
+            )
+            .await;
+        }
+        let options = crab_remote_git::RepositoryOptions::new(
+            crab_remote_git::ObjectLimits {
+                max_delta_depth: 1,
+                ..Default::default()
+            },
+            crab_remote_git::OperationLimits::default(),
+        )
+        .unwrap();
+        let cold = crate::repository::ReadViewCache::new();
+        let view = cold
+            .current(&repository, Arc::clone(&runtime), options, &cancel)
+            .await
+            .unwrap();
+        let operation = view
+            .remote()
+            .operation(OperationKind::Repository, &cancel)
+            .await
+            .unwrap();
+        let snapshot = view.snapshot("refs/heads/main", &operation).await.unwrap();
+        for index in 0..32 {
+            let path = crab_remote_git::GitPath::new(format!("objects/item-{index:02}")).unwrap();
+            let blob = snapshot.read_blob(&path, &operation).await.unwrap();
+            assert_eq!(blob.bytes, if index % 2 == 0 { "even" } else { "odd" });
+        }
+        operation.finish(Ok(())).await.unwrap();
+        coordinator.shutdown().await;
         runtime.shutdown().await;
     }
 
