@@ -171,11 +171,12 @@ from the pinned view. Planned multipart retries resolve the v2 plan receipt,
 and idle maintenance compacts the capsule frontier through the shared verified
 checkpoint path.
 
-A busy ref starts canonical checkpoint work at 32 capsules while writes continue.
-At 56 capsules it waits for that work before admitting another write, preserving
-the hard 64-entry frontier. One canonical task runs at a time per gateway, with
-independent GC leases, verified publication and shutdown draining. V1 repositories
-retain the journal publisher.
+A busy ref checkpoints synchronously after the native 500-transaction roll-up
+window, or when its physical run frontier reaches 1 GiB. The native writer
+compacts runs within the unchanged 64-segment/512-transaction-per-run limits;
+those segment counts are distinct from original transaction counts. Publication
+charges the exact prepared frontier bytes and rejects a successor above the
+2 GiB read budget before its ref CAS. V1 repositories retain the journal publisher.
 
 ### Mutation batching and publication
 
@@ -234,7 +235,7 @@ publishing a commit or returning a prepared no-op or precondition result. It is
 discarded on a tip mismatch, restart, or memory-pressure
 eviction; idle branch state remains reusable below the shared watermark.
 After native checkpointing, an exact-tip control capture refreshes the cached
-transaction position and frontier count. Logical directories and attributes
+transaction position, transaction count, and physical frontier bytes. Logical directories and attributes
 remain reusable; physical tree anchors and ancestry are discarded because
 consolidation can change their pack representations.
 

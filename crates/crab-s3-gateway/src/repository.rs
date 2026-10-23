@@ -23,7 +23,7 @@ const FULL_MAINTENANCE_IDLE_DELAY: Duration = Duration::from_secs(5);
 const CATALOG_MAINTENANCE_EPOCHS: u64 = 64;
 const MAX_CACHED_SNAPSHOTS: usize = 64;
 const MAX_CAPSULE_READ_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-pub(crate) const CAPSULE_CHECKPOINT_THRESHOLD: u32 = 32;
+const CAPSULE_CHECKPOINT_THRESHOLD: u32 = 32;
 
 #[derive(Debug, thiserror::Error)]
 enum MaintenanceError {
@@ -56,11 +56,17 @@ struct CachedReadView {
     view: Arc<ReadView>,
 }
 
+#[derive(Clone, Copy, Default)]
+pub(crate) struct CapsuleFrontier {
+    pub count: u32,
+    pub bytes: u64,
+}
+
 /// Generation- and journal-keyed immutable repository state shared by requests.
 pub(crate) struct ReadView {
     key: ReadViewKey,
     remote: RemoteGitRepository,
-    capsule_ref_counts: Option<HashMap<String, u32>>,
+    capsule_frontiers: Option<HashMap<String, CapsuleFrontier>>,
     snapshots: Mutex<HashMap<String, Arc<OnceCell<RemoteGitSnapshot>>>>,
 }
 
@@ -69,8 +75,8 @@ impl ReadView {
         &self.remote
     }
 
-    pub(crate) fn capsule_ref_count(&self, ref_name: &str) -> Option<u32> {
-        self.capsule_ref_counts
+    pub(crate) fn capsule_frontier(&self, ref_name: &str) -> Option<CapsuleFrontier> {
+        self.capsule_frontiers
             .as_ref()
             .map(|counts| counts.get(ref_name).copied().unwrap_or_default())
     }
@@ -340,10 +346,18 @@ impl ReadViewCache {
                     generation: capsule.root().root().generation(),
                     snapshot_digest: capsule.state_digest(),
                 };
-                let capsule_ref_counts = capsule
+                let capsule_frontiers = capsule
                     .refs()
                     .keys()
-                    .map(|name| (name.clone(), capsule.ref_capsule_count(name)))
+                    .map(|name| {
+                        (
+                            name.clone(),
+                            CapsuleFrontier {
+                                count: capsule.ref_capsule_count(name),
+                                bytes: capsule.ref_frontier_bytes(name),
+                            },
+                        )
+                    })
                     .collect();
                 let remote = capsule
                     .git_repository_from_store(
@@ -358,7 +372,7 @@ impl ReadViewCache {
                 let view = Arc::new(ReadView {
                     key,
                     remote,
-                    capsule_ref_counts: Some(capsule_ref_counts),
+                    capsule_frontiers: Some(capsule_frontiers),
                     snapshots: Mutex::new(HashMap::new()),
                 });
                 *self.cached.write().await = Some(CachedReadView {
@@ -439,7 +453,7 @@ impl ReadViewCache {
                 Arc::new(ReadView {
                     key,
                     remote,
-                    capsule_ref_counts: None,
+                    capsule_frontiers: None,
                     snapshots: Mutex::new(HashMap::new()),
                 })
             }

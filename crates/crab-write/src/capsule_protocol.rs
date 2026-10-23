@@ -198,6 +198,24 @@ pub struct PreparedCapsulePublication {
 }
 
 impl PreparedCapsulePublication {
+    /// Return the physical frontier bytes retained by one prepared ref successor.
+    pub fn ref_frontier_bytes(&self, ref_name: &str) -> Result<u64> {
+        let state = self
+            .refs
+            .iter()
+            .find(|prepared| prepared.candidate.ref_name() == ref_name)
+            .ok_or_else(|| {
+                WriteError::Internal("prepared publication does not contain the ref".to_owned())
+            })?
+            .candidate
+            .visible(&std::collections::BTreeSet::new());
+        state.frontier().iter().try_fold(0u64, |total, pointer| {
+            total.checked_add(pointer.size()).ok_or_else(|| {
+                WriteError::Internal("prepared ref frontier byte count overflowed".to_owned())
+            })
+        })
+    }
+
     /// Return the exact coordinator payload that authorizes this publication.
     pub fn coordinated_publication(
         &self,
