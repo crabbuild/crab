@@ -1,12 +1,112 @@
-use std::collections::HashSet;
+use std::collections::{BTreeSet, HashMap, HashSet, VecDeque};
 use std::fs::File;
 use std::io::{BufReader, Read, Seek, SeekFrom, Write};
+use std::path::Path;
 
 use gix_pack::data::entry::Header;
 use sha1::{Digest, Sha1};
 
 use super::{RepackError, RepackSource, io_error};
 use crate::pack_locator::{PackLocationIter, PackObjectLocation};
+
+pub(super) struct Requirements {
+    pub(super) rewrite: bool,
+    pub(super) ref_bases: BTreeSet<gix_hash::ObjectId>,
+}
+
+pub(super) fn requirements(sources: &[RepackSource]) -> Result<Requirements, RepackError> {
+    let mut selected = HashMap::new();
+    let mut ref_bases = BTreeSet::new();
+    for source in sources {
+        let locations =
+            PackLocationIter::open(&source.index_path, &source.reverse_index_path, source.size)?
+                .collect::<Result<Vec<_>, _>>()?;
+        for entry in entry_headers(&source.canonical_id, &source.path, &locations)? {
+            let (location, header) = entry?;
+            let base = match header {
+                Header::OfsDelta { base_distance } => {
+                    let offset =
+                        Header::verified_base_pack_offset(location.pack_offset, base_distance)
+                            .ok_or_else(|| invalid(source, "OFS_DELTA base distance is invalid"))?;
+                    let position = locations
+                        .binary_search_by_key(&offset, |entry| entry.pack_offset)
+                        .map_err(|_| invalid(source, "OFS_DELTA base is not an indexed entry"))?;
+                    Some(locations[position].oid)
+                }
+                Header::RefDelta { base_id } => {
+                    ref_bases.insert(base_id);
+                    Some(base_id)
+                }
+                _ => None,
+            };
+            // Match the union writer's first-source encoding choice: a second
+            // physical alias cannot supply the same OID twice in one output pack.
+            selected.entry(location.oid).or_insert(base);
+        }
+    }
+    let mut children = HashMap::<_, Vec<_>>::new();
+    let mut pending = VecDeque::new();
+    for (oid, base) in &selected {
+        match base {
+            Some(base) if selected.contains_key(base) => {
+                children.entry(*base).or_default().push(*oid)
+            }
+            _ => pending.push_back(*oid),
+        }
+    }
+    let mut resolved = 0;
+    while let Some(oid) = pending.pop_front() {
+        resolved += 1;
+        pending.extend(children.remove(&oid).into_iter().flatten());
+    }
+    Ok(Requirements {
+        rewrite: resolved != selected.len(),
+        ref_bases,
+    })
+}
+
+// The complete body and paired index are already verified by the owner.
+// Dependency discovery must not inflate every historical object's zlib stream.
+pub(super) fn entry_headers<'a>(
+    pack_id: &'a str,
+    path: &'a Path,
+    locations: &'a [PackObjectLocation],
+) -> Result<
+    impl Iterator<Item = Result<(&'a PackObjectLocation, Header), RepackError>> + 'a,
+    RepackError,
+> {
+    let file = File::open(path).map_err(|error| io_error("open dependency source", error))?;
+    let mut input = BufReader::with_capacity(1024 * 1024, file);
+    let mut current = 0_u64;
+    let mut prefix = [0_u8; 64];
+    let invalid = move |reason| RepackError::SourceIntegrity {
+        pack_id: pack_id.to_owned(),
+        reason,
+    };
+    Ok(locations.iter().map(move |location| {
+        let skip = location
+            .pack_offset
+            .checked_sub(current)
+            .and_then(|value| i64::try_from(value).ok())
+            .ok_or_else(|| invalid("dependency entry offsets are invalid".to_owned()))?;
+        input
+            .seek_relative(skip)
+            .map_err(|error| io_error("seek dependency entry header", error))?;
+        let length = location.entry_len.min(prefix.len() as u64) as usize;
+        input
+            .read_exact(&mut prefix[..length])
+            .map_err(|error| io_error("read dependency entry header", error))?;
+        current = location.pack_offset + length as u64;
+        let entry = gix_pack::data::Entry::from_bytes(&prefix[..length], location.pack_offset, 20)
+            .map_err(|error| invalid(format!("invalid entry header: {error}")))?;
+        if entry.data_offset - location.pack_offset >= location.entry_len {
+            return Err(invalid(
+                "entry header exceeds its committed range".to_owned(),
+            ));
+        }
+        Ok((location, entry.header))
+    }))
+}
 
 pub(super) fn write_body(
     sources: &[RepackSource],

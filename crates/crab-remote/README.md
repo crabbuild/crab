@@ -59,7 +59,7 @@ suffix contains identical pack bytes.
 
 Bases already present in the selected pack inventory remain compressed in
 those bodies. Only outside bases and the additional REF bases required by an
-overlapping-object rewrite are reconstructed from the pinned view. Replacement
+overlapping or cyclic alias rewrite are reconstructed from the pinned view. Replacement
 kind metadata comes from the authenticated source sidecars retained by the
 installer. This avoids reinflating historical objects just to query their kinds;
 conflicting kinds fail publication. Temporary external bases never enter the

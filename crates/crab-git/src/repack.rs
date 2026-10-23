@@ -609,8 +609,11 @@ fn consolidate_pack_suffix_with_options(
     source_oids.sort_unstable();
     // Response callers already attempted structural concatenation before
     // choosing this path; do not repeat that failed strategy.
+    // Even disjoint OID sets can refer cyclically to older representations
+    // outside this suffix. Such aliases need verified anchors and a rewrite.
     let source_objects_are_disjoint = !matches!(validation, ConsolidationValidation::Response)
-        && !source_oids.windows(2).any(|pair| pair[0] == pair[1]);
+        && !source_oids.windows(2).any(|pair| pair[0] == pair[1])
+        && !deduplicate::requirements(sources)?.rewrite;
     source_oids.dedup();
     let expected_oids = source_oids
         .into_iter()
@@ -1173,44 +1176,20 @@ fn source_pack_inventory_object_ids(
 
 /// Return REF_DELTA bases needed by native selected-pack consolidation.
 ///
-/// Disjoint complete packs use Crab's byte-preserving concatenation path and
-/// therefore need no materialized bases. When duplicate OIDs require native
-/// Git to rewrite the selected object set, this scans only entry headers. All
-/// bases are returned so thin-pack repair is independent of pack order.
+/// Acyclic disjoint packs retain their compressed entries. Duplicate OIDs or
+/// cyclic selected aliases require native rewriting with verified anchors.
+/// Indexed header ranges avoid inflating historical objects during inspection;
+/// returned bases make thin-pack repair independent of source order. Source
+/// bodies must already match their committed identities.
 pub fn selected_pack_ref_delta_base_ids(
     sources: &[RepackSource],
 ) -> Result<Vec<gix_hash::ObjectId>, RepackError> {
     let inventory = source_pack_inventory_object_ids(sources)?;
-    if !inventory.windows(2).any(|pair| pair[0] == pair[1]) {
+    let requirements = deduplicate::requirements(sources)?;
+    if !requirements.rewrite && !inventory.windows(2).any(|pair| pair[0] == pair[1]) {
         return Ok(Vec::new());
     }
-    let mut bases = BTreeSet::new();
-    for source in sources {
-        let reader = BufReader::new(
-            File::open(&source.path)
-                .map_err(|error| io_error(format!("open {}", source.path.display()), error))?,
-        );
-        let entries = gix_pack::data::input::BytesToEntriesIter::new_from_header(
-            reader,
-            gix_pack::data::input::Mode::Verify,
-            gix_pack::data::input::EntryDataMode::Ignore,
-            gix_hash::Kind::Sha1,
-        )
-        .map_err(|error| RepackError::SourceIntegrity {
-            pack_id: source.canonical_id.clone(),
-            reason: format!("cannot scan pack entry headers: {error}"),
-        })?;
-        for entry in entries {
-            let entry = entry.map_err(|error| RepackError::SourceIntegrity {
-                pack_id: source.canonical_id.clone(),
-                reason: format!("cannot scan pack entry: {error}"),
-            })?;
-            if let gix_pack::data::entry::Header::RefDelta { base_id } = entry.header {
-                bases.insert(base_id);
-            }
-        }
-    }
-    Ok(bases.into_iter().collect())
+    Ok(requirements.ref_bases.into_iter().collect())
 }
 
 /// Repair selected packs against verified bases in a private Git repository.
@@ -1632,58 +1611,33 @@ fn generated_external_delta_bases(
     reverse_index_path: &Path,
     pack_size: u64,
 ) -> Result<BTreeMap<gix_hash::ObjectId, gix_hash::ObjectId>, RepackError> {
-    let locations = PackLocationIter::open(index_path, reverse_index_path, pack_size)?;
-    let mut object_ids_by_offset = BTreeMap::new();
-    for location in locations {
-        let location = location?;
-        object_ids_by_offset.insert(location.pack_offset, location.oid);
-    }
-    let object_ids = object_ids_by_offset
-        .values()
-        .copied()
+    let locations = PackLocationIter::open(index_path, reverse_index_path, pack_size)?
+        .collect::<Result<Vec<_>, _>>()?;
+    let object_ids = locations
+        .iter()
+        .map(|location| location.oid)
         .collect::<BTreeSet<_>>();
-    let file = File::open(pack_path)
-        .map_err(|source| io_error(format!("open {}", pack_path.display()), source))?;
-    let entries = gix_pack::data::input::BytesToEntriesIter::new_from_header(
-        BufReader::new(file),
-        gix_pack::data::input::Mode::AsIs,
-        gix_pack::data::input::EntryDataMode::Ignore,
-        gix_hash::Kind::Sha1,
-    )
-    .map_err(|error| RepackError::SourceIntegrity {
-        pack_id: pack_path.display().to_string(),
-        reason: format!("cannot scan generated pack entry headers: {error}"),
-    })?;
+    let pack_id = pack_path.display().to_string();
     let mut external = BTreeMap::new();
-    for entry in entries {
-        let entry = entry.map_err(|error| RepackError::SourceIntegrity {
-            pack_id: pack_path.display().to_string(),
-            reason: format!("cannot scan generated pack entry: {error}"),
-        })?;
-        let gix_pack::data::entry::Header::RefDelta { base_id } = entry.header else {
+    for entry in deduplicate::entry_headers(&pack_id, pack_path, &locations)? {
+        let (location, header) = entry?;
+        let gix_pack::data::entry::Header::RefDelta { base_id } = header else {
             continue;
         };
-        // Bases indexed by this pack are internal and need no source closure;
-        // only absent identities must remain reachable from an earlier layer.
+        // Internal identities are supplied by this pack; only absent bases
+        // remain dependencies of the earlier authenticated source inventory.
         if object_ids.contains(&base_id) {
             continue;
         }
-        let target = object_ids_by_offset
-            .get(&entry.pack_offset)
-            .copied()
-            .ok_or_else(|| RepackError::SourceIntegrity {
-                pack_id: pack_path.display().to_string(),
-                reason: format!(
-                    "generated REF_DELTA entry at offset {} is absent from its index",
-                    entry.pack_offset
-                ),
-            })?;
-        if let Some(previous) = external.insert(target, base_id)
+        if let Some(previous) = external.insert(location.oid, base_id)
             && previous != base_id
         {
             return Err(RepackError::SourceIntegrity {
-                pack_id: pack_path.display().to_string(),
-                reason: format!("generated object {target} has conflicting REF_DELTA bases"),
+                pack_id: pack_id.clone(),
+                reason: format!(
+                    "generated object {} has conflicting REF_DELTA bases",
+                    location.oid
+                ),
             });
         }
     }

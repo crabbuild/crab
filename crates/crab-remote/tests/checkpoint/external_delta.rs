@@ -489,3 +489,54 @@ async fn external_base_repack_verifies_bytes_and_fails_closed_on_corruption_or_c
         .await;
     }
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn suffix_aliases_keep_an_acyclic_pack_when_the_full_anchor_is_stable() {
+    let (layout, _) = empty_fixture().await;
+    let base = (0..32768_u32)
+        .flat_map(|ordinal| *blake3::hash(&ordinal.to_le_bytes()).as_bytes())
+        .collect::<Vec<_>>();
+    let mut changed = base.clone();
+    changed[..16].fill(b'x');
+    publish_blobs(&layout, &[("base", &base)]).await;
+    publish_dependent_blob(&layout, "changed", &base, &changed).await;
+    publish_dependent_blob(&layout, "revisited", &changed, &base).await;
+    let before = checkpoint(&layout).await;
+    crab_remote::checkpoint::repack_capsule_checkpoint_from_root(
+        &layout,
+        before.root_snapshot().clone(),
+        LIMIT,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let after = view(&layout).await;
+    let source = after
+        .layered_checkpoint()
+        .unwrap()
+        .sources()
+        .last()
+        .unwrap();
+    let range = source.members()[0].pack();
+    let bytes = layout
+        .store()
+        .range_get(
+            &layout.capsule_pack_layer_path(source.object_hash()),
+            range.offset()..range.offset() + range.length(),
+        )
+        .await
+        .unwrap();
+    let scratch = tempfile::tempdir().unwrap();
+    let path = scratch.path().join("replacement.pack");
+    std::fs::write(&path, bytes).unwrap();
+    let output = std::process::Command::new("git")
+        .args(["index-pack", "--strict"])
+        .arg(&path)
+        .output()
+        .unwrap();
+    assert!(
+        output.status.success(),
+        "{}",
+        String::from_utf8_lossy(&output.stderr)
+    );
+}

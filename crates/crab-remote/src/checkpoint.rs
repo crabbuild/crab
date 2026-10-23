@@ -755,8 +755,8 @@ async fn consolidate_layered_suffix(
         .await?;
     check_cancelled(cancel)?;
     let sources_for_repack = repack_sources(installed, &mut delta_base_ids)?;
-    // Internal bases move with the selected bodies. Only overlapping object
-    // sets need additional materialized bases for native Git's rewrite path.
+    // Internal bases usually move with the selected bodies. Overlapping OIDs
+    // or cyclic aliases still need verified anchors for native Git's rewrite.
     delta_base_ids.extend(crab_git::repack::selected_pack_ref_delta_base_ids(
         &sources_for_repack,
     )?);
