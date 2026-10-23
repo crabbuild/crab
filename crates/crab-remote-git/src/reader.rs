@@ -2251,6 +2251,38 @@ impl RemoteGitReader {
                 return Ok(Some((base_id, *locator)));
             }
         }
+        if let (Header::RefDelta { base_id }, Some(index)) = (header, &self.object_index) {
+            let oid: [u8; 20] = base_id
+                .as_bytes()
+                .try_into()
+                .map_err(|_| Error::UnsupportedObjectFormat)?;
+            let store = self
+                .store
+                .clone()
+                .with_read_admission(budget.read_admission(cancellation.clone()));
+            let oids = [oid];
+            let locations = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return Err(Error::Cancelled),
+                result = index.lookup(&store, &oids, &self.inventory) => result?,
+            };
+            let locator = locations
+                .into_iter()
+                .next()
+                .flatten()
+                .ok_or(Error::ObjectNotFound { oid: base_id })?;
+            // The captured primary already proves this in-pack representation;
+            // requiring an IDX sidecar would defeat authoritative page-only reads.
+            if locator.pack_id == pack_id {
+                return Ok(Some((base_id, locator)));
+            }
+            let local = tokio::select! {
+                biased;
+                () = cancellation.cancelled() => return Err(Error::Cancelled),
+                result = index.entry_in_pack(&store, pack_id, &oid, &self.inventory) => result?,
+            };
+            return Ok(local.map(|locator| (base_id, locator)));
+        }
         if let (Header::OfsDelta { base_distance }, Some(index)) = (header, &self.object_index) {
             let base_offset = Header::verified_base_pack_offset(pack_offset, base_distance).ok_or(
                 Error::Corrupt {

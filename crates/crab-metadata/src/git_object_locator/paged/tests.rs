@@ -355,9 +355,29 @@ async fn object_aliases_prefer_full_encodings_and_keep_every_physical_offset() {
         )
         .await
         .unwrap();
+    let alias = reader
+        .entry_in_pack(&store, entries[0].1.pack_id, &oid(0), &inventory)
+        .await
+        .unwrap();
+    let missing = reader
+        .entry_in_pack(&store, entries[0].1.pack_id, &oid(1), &inventory)
+        .await
+        .unwrap();
     assert_eq!(
-        (selected, physical, write.descriptor.offsets.count),
-        (vec![Some(full)], vec![Some(entries[0])], 2)
+        (
+            selected,
+            physical,
+            alias,
+            missing,
+            write.descriptor.offsets.count
+        ),
+        (
+            vec![Some(full)],
+            vec![Some(entries[0])],
+            Some(entries[0].1),
+            None,
+            2
+        )
     );
 }
 
@@ -690,4 +710,89 @@ async fn retired_physical_descriptor_shape_is_rejected_before_body_lookup() {
         .await,
         Err(crate::error::MetadataError::GitObjectIndexRecord { .. })
     ));
+}
+
+#[tokio::test]
+async fn reference_membership_search_skips_other_packs_and_obeys_encoded_limits() {
+    let (mut manifest, mut inventory, mut entries) = inputs(10_000);
+    let alias = GitObjectLocator {
+        pack_id: MerkleHash::from([4; 32]),
+        ..entries[0].1
+    };
+    inventory.push(GitPackInventoryEntry {
+        pack_id: alias.pack_id,
+        object_count: 1,
+        pack_size: 42,
+    });
+    entries.push((oid(0), alias));
+    let packs = inventory
+        .iter()
+        .map(|pack| crate::manifests::PackManifestEntry {
+            pack_id: pack.pack_id.to_string(),
+            size: pack.pack_size,
+            content_hash: pack.pack_id.to_string(),
+            ref_tips: Vec::new(),
+            object_count: pack.object_count,
+        })
+        .collect::<Vec<_>>();
+    manifest.pack_index_hash = crate::manifests::compact_pack_index(1, &packs).unwrap().0;
+    let write =
+        PagedGitObjectIndexWrite::build(&"c".repeat(64), &manifest, &inventory, &entries).unwrap();
+    let bytes = Arc::new(AtomicU64::new(0));
+    let observed = bytes.clone();
+    let store =
+        Store::new(Arc::new(InMemory::new())).with_read_byte_observer(Arc::new(move |read| {
+            observed.fetch_add(read, Ordering::Relaxed);
+        }));
+    let layout = StoreLayout::new(store.clone(), "reference-membership".into());
+    let hash = write.upload(&store, &layout).await.unwrap();
+    let reader = PagedGitObjectIndex::load(
+        &store,
+        &layout,
+        &hash,
+        &"c".repeat(64),
+        &manifest,
+        256 * 1024,
+    )
+    .await
+    .unwrap();
+    let inventory = inventory
+        .into_iter()
+        .map(|pack| (pack.pack_id, pack))
+        .collect();
+    bytes.store(0, Ordering::Relaxed);
+    let found = reader
+        .entry_in_pack(&store, alias.pack_id, &oid(0), &inventory)
+        .await
+        .unwrap();
+    let missing = reader
+        .entry_in_pack(&store, alias.pack_id, &oid(500), &inventory)
+        .await
+        .unwrap();
+    let scoped_bytes = bytes.load(Ordering::Relaxed);
+    let limited = PagedGitObjectIndex::load(
+        &store,
+        &layout,
+        &hash,
+        &"c".repeat(64),
+        &manifest,
+        16 * 1024,
+    )
+    .await
+    .unwrap();
+    bytes.store(0, Ordering::Relaxed);
+    let exhausted = limited
+        .entry_in_pack(&store, alias.pack_id, &oid(0), &inventory)
+        .await
+        .is_err();
+    assert_eq!(
+        (
+            found,
+            missing,
+            scoped_bytes < 128 * 1024,
+            exhausted,
+            bytes.load(Ordering::Relaxed) < 16 * 1024
+        ),
+        (Some(alias), None, true, true, true)
+    );
 }

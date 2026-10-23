@@ -32,8 +32,9 @@ base indexes even when its generation is unchanged. Snapshots without indexes
 make no additional index requests. Publication of capsule-bound browse indexes
 is a separate maintenance responsibility, not part of opening or pushing.
 
-Captured physical indexes resolve both OIDs and offset-delta bases through
-authenticated pages. Snapshot opening checks their state, origin and prefixes;
+Captured physical indexes resolve OIDs and both offset and reference delta
+bases through authenticated pages. Reference membership searches stay within
+the source pack's pages. Snapshot opening checks their state, origin and prefixes;
 queries retain storage admission, encoded-work limits and cancellation. Complete
 index misses are definitive. Physical placement never assigns catalog ordinals
 or authorizes ref visibility; ordinary unindexed snapshots retain their existing

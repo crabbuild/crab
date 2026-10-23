@@ -284,6 +284,61 @@ impl PageCache {
         Ok(rows)
     }
 
+    #[cfg(feature = "remote-index")]
+    #[expect(
+        clippy::too_many_arguments,
+        reason = "range search binds routing, origin and caller-owned aggregate admission"
+    )]
+    pub(crate) async fn find_row(
+        &self,
+        store: &Store,
+        path: &object_store::path::Path,
+        source: std::ops::Range<u64>,
+        root: &PageRef,
+        kind: Kind,
+        keys: std::ops::RangeInclusive<Vec<u8>>,
+        matches: impl Fn(&[u8]) -> bool,
+        work: &mut PageWork,
+    ) -> Result<Option<(Vec<u8>, Vec<u8>)>> {
+        let source_bytes = source
+            .end
+            .checked_sub(source.start)
+            .ok_or_else(|| corruption("invalid page source range"))?;
+        let mut pending = vec![root.clone()];
+        while let Some(reference) = pending.pop() {
+            reference.validate(kind, source_bytes)?;
+            if reference.last < *keys.start() || reference.first > *keys.end() {
+                continue;
+            }
+            self.admit(work, 0, source.start + reference.offset, &reference)?;
+            let page = self
+                .fetch(store, path, 0, source.clone(), &reference, kind)
+                .await?;
+            match page.as_ref() {
+                Page::Leaf(rows) => {
+                    if let Some(row) = rows
+                        .iter()
+                        .find(|(key, value)| keys.contains(key) && matches(value))
+                    {
+                        return Ok(Some(row.clone()));
+                    }
+                }
+                Page::Branch(children) => pending.extend(children.iter().rev().cloned()),
+            }
+            // Warm scans must still yield so caller cancellation can be observed.
+            let mut yielded = false;
+            std::future::poll_fn(|context| {
+                if std::mem::replace(&mut yielded, true) {
+                    return std::task::Poll::Ready(());
+                }
+                context.waker().wake_by_ref();
+                std::task::Poll::Pending
+            })
+            .await;
+        }
+        Ok(None)
+    }
+
     // Guards protect local cache work only, never origin I/O.
     fn state(&self) -> Result<MutexGuard<'_, State>> {
         self.state
