@@ -276,7 +276,9 @@ impl Coordinator {
                 };
                 let branch = branch.to_owned();
                 let queue = Arc::clone(&queued.queue);
-                let worker_cancel = cancel.clone();
+                // Renewal loss stops this admitted worker, not the service or
+                // sibling queues. Server shutdown still cancels every child.
+                let worker_cancel = cancel.child_token();
                 // A drained batch owns every accepted mutation. Detaching it
                 // prevents one disconnected HTTP caller from cancelling peers.
                 tokio::spawn(async move {
@@ -3552,6 +3554,9 @@ fn check_cancelled(cancel: &CancellationToken) -> Result<()> {
 }
 
 #[cfg(test)]
+mod lease_failure_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{RepositoryAccess, RepositoryConfig};
@@ -3942,7 +3947,7 @@ mod tests {
         fixture_with_protocol(false).await
     }
 
-    async fn capsule_fixture() -> (
+    pub(super) async fn capsule_fixture() -> (
         Repository,
         Arc<crab_remote_git::RemoteGitRuntime>,
         CancellationToken,
@@ -4000,7 +4005,7 @@ mod tests {
         )
     }
 
-    async fn read(
+    pub(super) async fn read(
         repository: &Repository,
         runtime: Arc<crab_remote_git::RemoteGitRuntime>,
         cancel: &CancellationToken,
@@ -4057,7 +4062,7 @@ mod tests {
             .target
     }
 
-    async fn coordinated_put(
+    pub(super) async fn coordinated_put(
         coordinator: &Coordinator,
         repository: &Repository,
         cancel: &CancellationToken,

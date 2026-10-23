@@ -225,6 +225,9 @@ alone so its durable exactly-once receipt cannot be coupled to another request.
 
 Once drained, a gateway-owned worker retains the batch even if an originating
 HTTP connection closes; one disconnected client cannot cancel peer mutations.
+Ref/GC renewal failure cancels only the owning write worker. Later requests and
+other queues remain usable after backend recovery; service shutdown still cancels
+every worker.
 Multi-delete retains one result and commit per successful entry; grouping never
 makes the whole request atomic.
 
