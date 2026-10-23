@@ -4489,7 +4489,11 @@ fn mutation_error(error: mutation::Error) -> s3s::S3Error {
         | mutation::Error::Publication(crab_remote::publication::Error::Cancelled) => {
             s3_error!(RequestTimeout)
         }
-        mutation::Error::Overloaded | mutation::Error::AdmissionTimeout => slow_down_error(),
+        mutation::Error::Overloaded
+        | mutation::Error::AdmissionTimeout
+        | mutation::Error::Remote(crab_remote_git::Error::LimitExceeded { .. }) => {
+            slow_down_error()
+        }
         mutation::Error::Capacity(error) => scratch_capacity_error(error),
         mutation::Error::PreconditionFailed => s3_error!(PreconditionFailed),
         mutation::Error::ConditionalTargetMissing => s3_error!(NoSuchKey),
@@ -4526,6 +4530,7 @@ fn shared_mutation_error(error: Arc<mutation::Error>) -> s3s::S3Error {
         }
         mutation::Error::Overloaded
         | mutation::Error::AdmissionTimeout
+        | mutation::Error::Remote(crab_remote_git::Error::LimitExceeded { .. })
         | mutation::Error::Capacity(_) => slow_down_error(),
         mutation::Error::Write(crab_write::WriteError::RefChanged { .. }) => s3_error!(
             OperationAborted,
@@ -6214,15 +6219,35 @@ mod tests {
     }
 
     #[test]
-    fn slow_down_tells_clients_when_to_retry() {
-        let error = slow_down_error();
-
-        assert_eq!(
-            error
-                .headers()
-                .and_then(|headers| headers.get(http::header::RETRY_AFTER)),
-            Some(&http::HeaderValue::from_static("1"))
-        );
+    fn admission_and_read_limits_tell_clients_when_to_retry() {
+        let limit = || crab_remote_git::Error::LimitExceeded {
+            limit: "entries",
+            actual: 129,
+            maximum: 128,
+        };
+        for error in [
+            slow_down_error(),
+            remote_error(limit()),
+            mutation_error(mutation::Error::Remote(limit())),
+            mutation_error(mutation::Error::Batch(Arc::new(mutation::Error::Remote(
+                limit(),
+            )))),
+        ] {
+            assert_eq!(
+                (
+                    error.code().as_str(),
+                    error.status_code(),
+                    error
+                        .headers()
+                        .and_then(|headers| headers.get(http::header::RETRY_AFTER)),
+                ),
+                (
+                    "SlowDown",
+                    Some(http::StatusCode::SERVICE_UNAVAILABLE),
+                    Some(&http::HeaderValue::from_static("1")),
+                )
+            );
+        }
     }
 
     #[test]

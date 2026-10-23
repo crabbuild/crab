@@ -189,6 +189,10 @@ Compatible same-branch
 requests wait up to 10 ms for a bounded batch of at most 32 requests or 32 MiB
 of Git payload. Their conditions are evaluated in FIFO order, their commits form
 one parent chain, and their Git objects share one pack and publication.
+Cold preparation pins one repository view and gives each mutation its own
+read-operation budget. An over-budget request returns `SlowDown` without spending
+its neighbors' allowances; failed reads publish no commit. Locator close or
+deadline failures after tree construction abort the batch before publication.
 
 One ref worker may retain the global and repository GC-writer
 fences for at most eight consecutive ordinary batches. Every batch still owns

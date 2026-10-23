@@ -402,6 +402,10 @@ journal marker. Failed conditions publish no commit. Multipart completion always
 runs alone because its durable plan receipt owns an independent exactly-once
 outcome. A competing process is serialized by the object-store ref lease; the
 losing bounded batch is rebuilt against the winning tip.
+Cold reconstruction uses independent read-operation budgets for each mutation
+against the same pinned view. Batching does not combine unrelated requests'
+allowances; an over-budget mutation returns `SlowDown` without consuming a
+neighbor's budget.
 The process retains at most 256 warm branch queues and may reuse materialized
 Git directory state and the S3 attribute manifest optimistically. The owner
 revalidates the cached parent while holding the object-store ref lease before

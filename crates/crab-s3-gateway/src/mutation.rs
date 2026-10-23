@@ -10,9 +10,7 @@ use std::{
 use bytes::Bytes;
 use crab_coordination::{GcFenceHeartbeat, GcFenceLease, PushLock};
 use crab_metadata::{git_visibility, manifests::PackManifestEntry, ref_journal::RefJournalEdit};
-#[cfg(test)]
-use crab_remote_git::RemoteGitRepository;
-use crab_remote_git::{EntryMode, OperationKind};
+use crab_remote_git::{EntryMode, OperationKind, RemoteGitRepository};
 use gix_hash::ObjectId;
 use gix_object::{Kind, bstr::BString, tree};
 use md5::Digest as _;
@@ -1776,35 +1774,34 @@ async fn prepare_and_upload_batch(
         .refs()
         .find(request.branch)
         .map(|reference| reference.target);
-    let operation = view
-        .remote()
-        .operation(OperationKind::Repository, cancel)
-        .await?;
-    let batch = async {
-        let snapshot = match original_parent {
-            Some(parent) => Some(view.snapshot(&parent.to_string(), &operation).await?),
-            None => None,
-        };
-        let manifest = match original_parent {
-            Some(parent) => (*repository.attributes.load(parent).await?).clone(),
-            None => attributes::Manifest::default(),
-        };
-        build_batch(
-            snapshot,
-            Some(&operation),
-            original_parent,
-            manifest,
-            None,
-            ATTRIBUTE_CHECKPOINT_BATCHES,
-            mutations,
-        )
-        .await
-    }
-    .await;
-    let batch = match operation.finish(Ok(())).await {
-        Ok(()) => batch?,
-        Err(error) => return Err(error.into()),
+    let snapshot = match original_parent {
+        Some(parent) => {
+            let operation = view
+                .remote()
+                .operation(OperationKind::Repository, cancel)
+                .await?;
+            let snapshot = view
+                .remote()
+                .snapshot(&crab_remote_git::Revision::Commit(parent), &operation)
+                .await;
+            Some(operation.finish(snapshot).await?)
+        }
+        None => None,
     };
+    let manifest = match original_parent {
+        Some(parent) => (*repository.attributes.load(parent).await?).clone(),
+        None => attributes::Manifest::default(),
+    };
+    let batch = build_batch(
+        snapshot,
+        Some((view.remote(), cancel)),
+        original_parent,
+        manifest,
+        None,
+        ATTRIBUTE_CHECKPOINT_BATCHES,
+        mutations,
+    )
+    .await?;
     upload_batch(
         repository,
         batch,
@@ -1823,7 +1820,7 @@ async fn prepare_and_upload_batch(
 
 async fn build_batch(
     snapshot: Option<crab_remote_git::RemoteGitSnapshot>,
-    operation: Option<&crab_remote_git::OperationContext>,
+    reads: Option<(&RemoteGitRepository, &CancellationToken)>,
     original_parent: Option<ObjectId>,
     mut manifest: attributes::Manifest,
     warm_tree: Option<WarmTree>,
@@ -1835,17 +1832,37 @@ async fn build_batch(
     let mut outcomes = Vec::with_capacity(mutations.len());
     let mut commits = Vec::with_capacity(mutations.len());
     for mutation in mutations {
-        match build_commit(
+        // Batching must not charge independent requests to one read budget.
+        // Every context still belongs to the same immutable repository view.
+        let operation = match reads {
+            Some((repository, cancel)) => Some(
+                repository
+                    .operation(OperationKind::Repository, cancel)
+                    .await?,
+            ),
+            None => None,
+        };
+        let result = build_commit(
             &mut tree_state,
-            operation,
+            operation.as_ref(),
             parent,
             &mutation.path,
             mutation.change.clone(),
             &mutation.principal,
             &mut manifest,
         )
-        .await
-        {
+        .await;
+        let result = match (operation, result) {
+            (Some(operation), Err(Error::Remote(error))) => {
+                operation.finish(Err(error)).await.map_err(Error::from)
+            }
+            // Read failures precede tree edits. A close or deadline failure
+            // after construction must abort the batch so unpublished edits
+            // cannot leak into another request's commit.
+            (Some(operation), result) => operation.finish(Ok(result)).await?,
+            (None, result) => result,
+        };
+        match result {
             Ok(Build::Noop(outcome)) => outcomes.push(Ok(outcome)),
             Ok(Build::Commit(mut built)) => {
                 built.parent = parent;
@@ -5504,6 +5521,106 @@ mod tests {
             "first"
         );
         runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cold_write_batch_preserves_each_requests_read_budget() {
+        for (batch_size, max_entries, directories) in [
+            (1, 128, [0, 1, 2, 3]),
+            (4, 128, [0, 1, 2, 3]),
+            (4, 32, [0, 4, 2, 5]),
+        ] {
+            let (repository, runtime, cancel) = capsule_fixture().await;
+            let metrics = Metrics::new().unwrap();
+            let mutation = |directory, entry| Mutation {
+                path: crab_remote_git::GitPath::new(format!(
+                    "directory-{directory}/entry-{entry:03}"
+                ))
+                .unwrap(),
+                change: Change::Put {
+                    bytes: Bytes::from_static(b"value"),
+                    track_lfs: false,
+                    attributes: Box::new(attributes::PutAttributes::default()),
+                    condition: PutCondition::None,
+                },
+                principal: "user".to_owned(),
+            };
+            let setup = (0..4)
+                .flat_map(|directory| (0..32).map(move |entry| mutation(directory, entry)))
+                .collect();
+            let request = || ApplyRequest {
+                branch: "refs/heads/main",
+                plan_id: None,
+                metrics: &metrics,
+                state: None,
+                checkpoints: None,
+            };
+            let seeded = apply_batch_admitted(
+                &repository,
+                Arc::clone(&runtime),
+                crab_remote_git::RepositoryOptions::default(),
+                setup,
+                request(),
+                &cancel,
+            )
+            .await
+            .unwrap();
+            assert!(seeded.iter().all(Result::is_ok), "seed: {seeded:?}");
+            let options = crab_remote_git::RepositoryOptions::new(
+                Default::default(),
+                crab_remote_git::OperationLimits {
+                    max_entries,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let mut results = Vec::new();
+            for directories in directories.chunks(batch_size) {
+                results.extend(
+                    apply_batch_admitted(
+                        &repository,
+                        Arc::clone(&runtime),
+                        options,
+                        directories
+                            .iter()
+                            .map(|directory| mutation(*directory, 32))
+                            .collect(),
+                        request(),
+                        &cancel,
+                    )
+                    .await
+                    .unwrap(),
+                );
+            }
+            let tip = tip(&repository, Arc::clone(&runtime), &cancel).await;
+            let manifest = repository.attributes.load(tip).await.unwrap();
+            let oid = object_id(Kind::Blob, b"value").unwrap();
+            let published = directories.map(|directory| {
+                manifest
+                    .object(&format!("directory-{directory}/entry-032"), oid)
+                    .is_some()
+            });
+            let admitted = directories.map(|directory| max_entries == 128 || directory >= 4);
+            runtime.shutdown().await;
+            assert!(
+                results.iter().zip(admitted).all(|(result, admitted)| {
+                    if admitted {
+                        result.is_ok()
+                    } else {
+                        matches!(
+                            result,
+                            Err(Error::Remote(crab_remote_git::Error::LimitExceeded {
+                                limit: "entries",
+                                maximum: 32,
+                                ..
+                            }))
+                        )
+                    }
+                }),
+                "batch size {batch_size}, limit {max_entries}: {results:?}"
+            );
+            assert_eq!(published, admitted);
+        }
     }
 
     #[tokio::test(flavor = "multi_thread")]
