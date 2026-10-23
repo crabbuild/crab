@@ -58,7 +58,7 @@ h1 {
   font-size: 24px;
   font-weight: 600;
 }
-h2 {
+h2:not([data-slot="popover-title"]) {
   font-size: 20px;
 }
 h3 {
@@ -2481,70 +2481,6 @@ main {
   white-space: nowrap;
   box-shadow: inset 0 0 0 1px rgb(0 0 0 / 15%);
 }
-.label-picker {
-  position: relative;
-}
-.label-picker summary {
-  display: inline-flex;
-  align-items: center;
-  gap: 6px;
-  cursor: pointer;
-  color: var(--foreground);
-  background: var(--background);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  padding: 4px 10px;
-  font-weight: 500;
-}
-.label-picker summary::marker,
-.label-picker summary::-webkit-details-marker {
-  display: none;
-}
-.label-picker summary span {
-  color: var(--muted-foreground);
-}
-.label-picker-menu {
-  position: absolute;
-  z-index: 10;
-  top: calc(100% + 6px);
-  left: 0;
-  width: 300px;
-  max-height: 360px;
-  overflow: auto;
-  padding: 12px;
-  background: var(--popover);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow-overlay);
-}
-.label-picker-menu header {
-  display: flex;
-  justify-content: space-between;
-  padding-bottom: 8px;
-  border-bottom: 1px solid var(--border);
-}
-.label-picker-menu header span {
-  display: flex;
-  align-items: center;
-  gap: 4px;
-}
-.label-picker-menu fieldset {
-  display: grid;
-  gap: 2px;
-  border: 0;
-  margin: 8px 0;
-  padding: 0;
-}
-.label-picker-menu fieldset label {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-  padding: 6px 4px;
-  cursor: pointer;
-}
-.label-picker-menu button {
-  width: 100%;
-}
 .discussion-detail-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 260px;
@@ -2573,21 +2509,6 @@ main {
   justify-content: space-between;
   min-height: 28px;
   margin-bottom: 4px;
-}
-.discussion-metadata .label-picker summary {
-  color: var(--muted-foreground);
-  background: transparent;
-  border: 0;
-  box-shadow: none;
-  padding: 4px;
-}
-.discussion-metadata .label-picker summary:hover {
-  color: var(--info);
-}
-.discussion-metadata .label-picker-menu {
-  right: 0;
-  left: auto;
-  font-size: 14px;
 }
 .discussion-metadata .discussion-labels {
   margin: 4px 0 0;
@@ -2628,10 +2549,6 @@ main {
 }
 .assignee-avatars .assignee-avatar + .assignee-avatar {
   margin-left: -5px;
-}
-.assignee-picker-content [data-slot="popover-title"] {
-  font-size: var(--text-sm);
-  line-height: var(--text-sm--line-height);
 }
 .labels-page {
   max-width: 1080px;
@@ -3083,24 +3000,12 @@ main {
   .label-row-edit {
     grid-template-columns: 1fr;
   }
-  .label-picker-menu {
-    position: fixed;
-    top: 72px;
-    right: 16px;
-    left: 16px;
-    width: auto;
-    max-height: calc(100vh - 88px);
-  }
   .discussion-detail-layout {
     grid-template-columns: 1fr;
     gap: 20px;
   }
   .discussion-metadata {
     grid-row: 1;
-  }
-  .discussion-metadata .label-picker-menu {
-    right: 16px;
-    left: 16px;
   }
 }
 
@@ -6664,48 +6569,6 @@ main {
   display: block;
   margin-top: 6px;
 }
-.milestone-picker {
-  position: relative;
-}
-.milestone-picker summary {
-  cursor: pointer;
-  list-style: none;
-  color: var(--muted-foreground);
-  padding: 4px;
-}
-.milestone-picker summary::-webkit-details-marker {
-  display: none;
-}
-.milestone-picker summary:focus-visible {
-  outline: 2px solid var(--ring);
-  outline-offset: 2px;
-  border-radius: 4px;
-}
-.milestone-picker-menu {
-  position: absolute;
-  right: 0;
-  top: 32px;
-  z-index: 30;
-  width: min(300px, calc(100vw - 48px));
-  padding: 16px;
-  border: 1px solid var(--border);
-  background: var(--background);
-  border-radius: var(--radius);
-  box-shadow: var(--shadow-overlay);
-}
-.milestone-picker-menu > label {
-  display: block;
-  font-weight: 600;
-  margin-bottom: 8px;
-}
-.milestone-picker-menu select {
-  width: 100%;
-}
-.milestone-picker-pages {
-  display: flex;
-  justify-content: space-between;
-  margin: 4px 0;
-}
 .milestone-conflict h3 {
   margin: 12px 0;
 }
@@ -6717,9 +6580,6 @@ main {
   }
   .milestone-form {
     padding: 16px;
-  }
-  .milestone-picker-menu {
-    right: -8px;
   }
 }
 .milestone-work {

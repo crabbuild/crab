@@ -1562,3 +1562,70 @@ establishes the contract for state, bulk and pin workflows; other mutation owner
 full-page intent persistence, native cross-Cell grant fencing and the wider
 GitHub parity roadmap remain unfinished. The pinned Cellar release blocker is
 unchanged.
+
+## Searchable sidebar metadata editors
+
+Issue and PR label/milestone assignments now use the existing shadcn Popover,
+Input, Checkbox and RadioGroup components with Geist tokens. Labels search the
+complete repository catalog by name/description, retain selected retired labels
+for removal, and enforce the twenty-label selection limit. Milestones use the
+native indexed search across the complete catalog, with open/closed choices and
+an explicit refinement notice when twenty results are insufficient. Selected
+milestones remain visible outside the current search/state results.
+
+The editor owns its opening selection and version. Discussion refreshes cannot
+replace that draft or silently advance its compare-and-set version. Milestone
+editors no longer remount on discussion version changes; their assignment version
+is independently refreshed for presentation. Failed/conflicting writes require
+reading and reviewing the saved selection before keeping a draft or using the
+saved values. These assignment APIs use version checks, not permanent submission
+UUIDs; uncertain responses are reconciled by a read, never presented as receipt
+recovery. Keeping a draft requires a subsequent explicit save. Closed popovers
+unmount their focus scopes so rapid reopening and Escape restore focus correctly.
+
+The shared `components/discussion/selection-review.tsx` owns that review boundary;
+feature-local pickers own label and milestone policy. Superseded details/select
+controls, the unused compact mode and their overlay CSS were removed. Global
+legacy heading styling now excludes shadcn PopoverTitle instead of requiring an
+assignee-only typography override. The assignee picker already captures its
+opening version and has no discussion-version remount; its selection path is
+unchanged.
+
+GitHub's [label](https://docs.github.com/en/issues/using-labels-and-milestones-to-track-work/managing-labels)
+and [milestone](https://docs.github.com/en/issues/using-labels-and-milestones-to-track-work/associating-milestones-with-issues-and-pull-requests)
+references guide the catalog search and sidebar organization. This slice retains
+Crab's explicit Apply action and does not establish exact interaction parity.
+Create-form metadata, label-management-page redesign, issue types, Projects,
+advanced PR features, native authority cutover and the remaining Milestones
+inventory are still open. The pinned Cellar release blocker is unchanged.
+
+Validation: 169 browser scenarios passed, followed by six focused scenarios for
+the final scroll layout. The regressions cover issue/PR draft retention,
+compare-and-set versions, explicit conflict review, lost committed replies,
+full-catalog milestone search, closed choices, focus, mobile dark layout and
+accessibility. The original label-refresh regression failed before the change.
+The 107 UI unit tests, 16 native milestone tests and five native label tests passed;
+production UI/server builds, formatting and diff checks passed. The native tests
+prove assignment versions, durable selections, counts, catalog search, retired
+labels and restart contracts used by these controls.
+
+Real RustFS/OIDC qualification exercised both discussion kinds against the
+embedded production UI: native label conflicts saved only after explicit review,
+milestone #55 was searchable beyond the initial page, closed milestones were
+selectable, and lost committed milestone replies were reconciled without another
+write or activity event. Selections and activity survived a full server restart.
+The owned browser/services closed. Desktop and mobile dark captures were checked.
+The persistent preview update preserved all twenty captured public resources and
+all 39 canonical tables in each Repository Cell; no profile or organization was
+created there. Cloudflare remains stopped.
+
+The production delta is 253 net lines for catalog search, retained versioned
+drafts and shared selection review; 141 lines of obsolete styling were removed.
+No backend, schema, dependency, lockfile or compatibility path changed.
+
+The final isolated receipt is run `2327dd61-3205-4a7a-a99c-dbcb2097c266`
+(`metadata-selection-process-final.log`); embedded binary SHA-256
+`84268e35f84362d256a6456be3209136236e43858f74df2ec1985fce9356656f`.
+The same binary is running in the preserved local preview. Native qualification
+used keyboard activation after screenshot capture; pointer interactions and
+accessibility were covered by the browser suite.

@@ -1,171 +1,340 @@
-import { useRef, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
+import { PencilIcon, XIcon } from "lucide-react";
 import { Button } from "@/components/ui/button";
-import { PencilIcon } from "@primer/octicons-react";
+import {
+  Field,
+  FieldError,
+  FieldLabel,
+  FieldLegend,
+  FieldSet,
+} from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
+import {
+  Popover,
+  PopoverContent,
+  PopoverHeader,
+  PopoverTitle,
+  PopoverTrigger,
+} from "@/components/ui/popover";
+import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
+import { Separator } from "@/components/ui/separator";
+import { ToggleGroup, ToggleGroupItem } from "@/components/ui/toggle-group";
 import { endpoint, useRequest, type Repository } from "@/lib/api";
 import { useMutation } from "@/components/discussion/mutations";
+import { SelectionReview } from "@/components/discussion/selection-review";
 import { repoHref } from "@/lib/repository-route";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
-import type { MilestoneAssignment, MilestonePage } from "./model";
+import type { Milestone, MilestoneAssignment } from "./model";
 import { MilestoneDate, MilestoneProgress } from "./progress";
+
+type Choice = Pick<Milestone, "number" | "title" | "state">;
+interface Choices {
+  items: Choice[];
+  truncated: boolean;
+}
 
 export function MilestonePicker({
   repo,
   path,
+  version,
   csrf,
   onSaved,
 }: {
   repo: Repository;
   path: string;
+  version: number;
   csrf: string;
   onSaved: () => void;
 }) {
   const selection = useRequest<MilestoneAssignment>(
     endpoint(repo, `${path}/milestone`),
   );
-  const details = useRef<HTMLDetailsElement>(null);
+  const [current, setCurrent] = useState<MilestoneAssignment>();
+  useEffect(() => {
+    if (selection.data) setCurrent(selection.data);
+  }, [selection.data]);
+  const observed = useRef(version);
+  useEffect(() => {
+    if (observed.current !== version) {
+      observed.current = version;
+      selection.retry();
+    }
+  }, [version, selection.retry]);
+  const saved = current ?? selection.data;
   const [open, setOpen] = useState(false);
-  const [chosen, setChosen] = useState("");
-  const [chosenTitle, setChosenTitle] = useState("");
-  const [before, setBefore] = useState<string>();
-  const catalog = useRequest<MilestonePage>(
+  const [chosen, setChosen] = useState<Choice | null>(null);
+  const [editingVersion, setEditingVersion] = useState(0);
+  const [query, setQuery] = useState("");
+  const [requested, setRequested] = useState("");
+  const [state, setState] = useState("open");
+  useEffect(() => {
+    const timer = setTimeout(() => setRequested(query), 150);
+    return () => clearTimeout(timer);
+  }, [query]);
+  const catalog = useRequest<Choices>(
     open
-      ? endpoint(repo, "milestones", { state: "open", before, limit: "50" })
+      ? endpoint(repo, "discussion-search/milestones", {
+          search: requested,
+          state,
+        })
       : null,
   );
+  const search = useRef<HTMLInputElement>(null);
+  const id = useId();
   const mutation = useMutation(csrf, repo);
+  function changeOpen(next: boolean) {
+    if (mutation.pending) return;
+    if (next && saved) {
+      setChosen(saved.milestone);
+      setEditingVersion(saved.version);
+      setQuery("");
+      setRequested("");
+      setState("open");
+      mutation.reset();
+      selection.retry();
+    }
+    setOpen(next);
+  }
   return (
     <section className="milestone-metadata">
       <header>
         <strong>Milestone</strong>
-        {selection.data?.can_manage && !repo.archived && (
-          <details
-            className="milestone-picker"
-            ref={details}
-            onToggle={(event) => {
-              setOpen(event.currentTarget.open);
-              if (event.currentTarget.open) {
-                setChosen(
-                  selection.data?.milestone
-                    ? String(selection.data.milestone.number)
-                    : "",
-                );
-                setChosenTitle(selection.data?.milestone?.title ?? "");
-                mutation.reset();
-              }
-            }}
-          >
-            <summary aria-label="Edit milestone">
-              <PencilIcon />
-            </summary>
-            <div className="milestone-picker-menu">
-              <label htmlFor="discussion-milestone">Assign a milestone</label>
-              <Result state={catalog} timingLabel="Open milestones">
-                {(page) => (
+        {saved?.can_manage && !repo.archived && (
+          <Popover open={open} onOpenChange={changeOpen}>
+            <PopoverTrigger asChild>
+              <Button
+                variant="ghost"
+                size="icon-sm"
+                aria-label="Edit milestone"
+                disabled={mutation.pending}
+              >
+                <PencilIcon />
+              </Button>
+            </PopoverTrigger>
+            {/* A fresh focus scope prevents closing animations from stealing focus on reopen. */}
+            {open && (
+              <PopoverContent
+                align="end"
+                className="block max-h-[var(--radix-popover-content-available-height)] w-80 max-w-[calc(100vw-2rem)] overflow-y-auto p-0"
+                aria-label="Assign a milestone"
+                inert={!open}
+                onOpenAutoFocus={(event) => {
+                  event.preventDefault();
+                  search.current?.focus();
+                }}
+              >
+                <PopoverHeader className="flex-row items-center justify-between p-3">
+                  <PopoverTitle>Assign a milestone</PopoverTitle>
+                  <Button
+                    size="icon-sm"
+                    variant="ghost"
+                    aria-label="Close milestone picker"
+                    disabled={mutation.pending}
+                    onClick={() => changeOpen(false)}
+                  >
+                    <XIcon />
+                  </Button>
+                </PopoverHeader>
+                <Separator />
+                <Field className="p-3">
+                  <FieldLabel htmlFor={id} className="sr-only">
+                    Filter milestones
+                  </FieldLabel>
+                  <Input
+                    id={id}
+                    ref={search}
+                    placeholder="Filter milestones"
+                    maxLength={256}
+                    value={query}
+                    onChange={(event) => setQuery(event.target.value)}
+                  />
+                </Field>
+                <ToggleGroup
+                  type="single"
+                  value={state}
+                  size="sm"
+                  className="mx-3 mb-3"
+                  aria-label="Milestone state"
+                  onValueChange={(value) => {
+                    if (value) setState(value);
+                  }}
+                >
+                  <ToggleGroupItem value="open" aria-label="Open milestones">
+                    Open
+                  </ToggleGroupItem>
+                  <ToggleGroupItem
+                    value="closed"
+                    aria-label="Closed milestones"
+                  >
+                    Closed
+                  </ToggleGroupItem>
+                </ToggleGroup>
+                <Result
+                  state={{
+                    ...catalog,
+                    loading: catalog.loading || query !== requested,
+                  }}
+                  timingLabel="Milestone choices"
+                >
+                  {(page) => {
+                    const choices =
+                      chosen &&
+                      !page.items.some(
+                        (value) => value.number === chosen.number,
+                      )
+                        ? [chosen, ...page.items]
+                        : page.items;
+                    return (
+                      <>
+                        <div
+                          role="region"
+                          aria-label="Milestone choices"
+                          tabIndex={0}
+                          className="max-h-64 overflow-y-auto outline-none focus-visible:ring-2 focus-visible:ring-ring"
+                        >
+                          <FieldSet
+                            disabled={
+                              mutation.pending || Boolean(mutation.error)
+                            }
+                            className="gap-0 px-3 pb-3"
+                          >
+                            <FieldLegend className="sr-only">
+                              Repository milestones
+                            </FieldLegend>
+                            <RadioGroup
+                              value={chosen ? String(chosen.number) : "none"}
+                              aria-label="Milestone assignment"
+                              className="gap-0"
+                              onValueChange={(value) =>
+                                setChosen(
+                                  choices.find(
+                                    (item) => String(item.number) === value,
+                                  ) ?? null,
+                                )
+                              }
+                            >
+                              <FieldLabel className="w-full cursor-pointer rounded-md p-2 hover:bg-accent">
+                                <RadioGroupItem value="none" />
+                                No milestone
+                              </FieldLabel>
+                              {choices.map((value) => (
+                                <FieldLabel
+                                  key={value.number}
+                                  className="w-full cursor-pointer rounded-md p-2 hover:bg-accent"
+                                >
+                                  <RadioGroupItem
+                                    value={String(value.number)}
+                                    aria-label={value.title}
+                                  />
+                                  <span className="min-w-0 break-words">
+                                    {value.title}
+                                    <span className="block text-muted-foreground">
+                                      {value.state === "closed"
+                                        ? "Closed"
+                                        : "Open"}
+                                      {chosen?.number === value.number
+                                        ? " · Selected"
+                                        : ""}
+                                    </span>
+                                  </span>
+                                </FieldLabel>
+                              ))}
+                            </RadioGroup>
+                            {page.items.length === 0 && (
+                              <p
+                                className="p-2 text-muted-foreground"
+                                role="status"
+                              >
+                                No milestones match your search.
+                              </p>
+                            )}
+                            {page.truncated && (
+                              <p
+                                className="p-2 text-muted-foreground"
+                                role="status"
+                              >
+                                More milestones match. Refine your search.
+                              </p>
+                            )}
+                          </FieldSet>
+                        </div>
+                      </>
+                    );
+                  }}
+                </Result>
+                {mutation.error && (
                   <>
-                    <select
-                      id="discussion-milestone"
-                      value={chosen}
-                      onChange={(event) => {
-                        setChosen(event.target.value);
-                        setChosenTitle(
-                          page.items.find(
-                            (value) =>
-                              String(value.number) === event.target.value,
-                          )?.title ?? "",
-                        );
+                    <FieldError className="px-3">
+                      {mutation.status === undefined
+                        ? "The response was lost. Review the saved selection before trying again."
+                        : mutation.error}
+                    </FieldError>
+                    <SelectionReview<MilestoneAssignment>
+                      url={endpoint(repo, `${path}/milestone`)}
+                      label="Review current milestone"
+                      canManage={(latest) =>
+                        latest.can_manage && !repo.archived
+                      }
+                      onResolve={(latest, choice) => {
+                        setEditingVersion(latest.version);
+                        if (choice === "saved") setChosen(latest.milestone);
+                        setCurrent(latest);
+                        selection.retry();
+                        mutation.reset();
+                        onSaved();
                       }}
-                      disabled={mutation.pending}
                     >
-                      <option value="">No milestone</option>
-                      {chosen &&
-                        !page.items.some(
-                          (value) => String(value.number) === chosen,
-                        ) && (
-                          <option value={chosen}>
-                            {chosenTitle || `Milestone #${chosen}`}
-                          </option>
-                        )}
-                      {page.items.map((value) => (
-                        <option key={value.number} value={value.number}>
-                          {value.title}
-                        </option>
-                      ))}
-                    </select>
-                    <div className="milestone-picker-pages">
-                      {before && (
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => setBefore(undefined)}
-                        >
-                          First page
-                        </Button>
+                      {(latest) => (
+                        <div>
+                          <strong>Saved milestone</strong>
+                          <p>{latest.milestone?.title ?? "No milestone"}</p>
+                        </div>
                       )}
-                      {page.next !== null && (
-                        <Button
-                          size="sm"
-                          variant="ghost"
-                          onClick={() => setBefore(String(page.next))}
-                        >
-                          More milestones
-                        </Button>
-                      )}
-                    </div>
+                    </SelectionReview>
                   </>
                 )}
-              </Result>
-              {mutation.error && (
-                <p className="error" role="alert">
-                  {mutation.error}
-                </p>
-              )}
-              {mutation.conflict && (
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => {
-                    selection.retry();
-                    details.current?.removeAttribute("open");
-                  }}
-                >
-                  Reload current assignment
-                </Button>
-              )}
-              <div className="discussion-actions">
-                <Button
-                  size="sm"
-                  variant="default"
-                  disabled={mutation.pending || !selection.data}
-                  onClick={async () => {
-                    if (!selection.data) return;
-                    const value = await mutation.run<MilestoneAssignment>(
-                      endpoint(repo, `${path}/milestone`),
-                      "PUT",
-                      {
-                        version: selection.data.version,
-                        milestone: chosen ? Number(chosen) : null,
-                      },
-                    );
-                    if (value) {
-                      details.current?.removeAttribute("open");
-                      selection.retry();
-                      onSaved();
+                <Separator />
+                <div className="flex flex-wrap gap-2 p-3">
+                  <Button
+                    size="sm"
+                    disabled={
+                      mutation.pending ||
+                      Boolean(mutation.error) ||
+                      !saved.can_manage ||
+                      repo.archived
                     }
-                  }}
-                >
-                  {mutation.pending ? "Saving…" : "Apply milestone"}
-                </Button>
-                <Button
-                  variant="outline"
-                  size="sm"
-                  onClick={() => details.current?.removeAttribute("open")}
-                >
-                  Cancel
-                </Button>
-              </div>
-            </div>
-          </details>
+                    onClick={async () => {
+                      const value = await mutation.run<MilestoneAssignment>(
+                        endpoint(repo, `${path}/milestone`),
+                        "PUT",
+                        {
+                          version: editingVersion,
+                          milestone: chosen?.number ?? null,
+                        },
+                      );
+                      if (value) {
+                        setCurrent(value);
+                        setOpen(false);
+                        selection.retry();
+                        onSaved();
+                      }
+                    }}
+                  >
+                    {mutation.pending ? "Saving…" : "Apply milestone"}
+                  </Button>
+                  <Button
+                    size="sm"
+                    variant="outline"
+                    disabled={mutation.pending}
+                    onClick={() => changeOpen(false)}
+                  >
+                    Cancel
+                  </Button>
+                </div>
+              </PopoverContent>
+            )}
+          </Popover>
         )}
       </header>
       <Result state={selection} timingLabel="Discussion milestone">

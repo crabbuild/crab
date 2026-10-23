@@ -462,3 +462,12 @@ full browser, real old-data upgrade, restart and lost-response evidence is recor
 under [shared terminal decisions](github-ui-parity.md#shared-terminal-discussion-decisions).
 Other mutation/intent owners and the remaining authority, Issues/PR, Projects and
 Milestones inventory remain open.
+
+Issue/PR sidebar labels and milestones now use searchable shadcn/Geist popovers.
+An open draft retains its expected version across discussion refreshes; conflicts
+and uncertain responses require reviewing the current saved selection. Milestone
+search covers the native catalog, including closed choices. This preserves the
+existing native assignment contracts and adds no storage/schema/dependency path.
+Explicit Apply remains a UX difference; complete create/detail, Projects and
+Milestones parity remains open. See the
+[metadata editor scope and evidence](github-ui-parity.md#searchable-sidebar-metadata-editors).

@@ -334,7 +334,6 @@ export function DiscussionMetadata({
               path={path}
               csrf={csrf}
               onSaved={onSaved}
-              compact
             />
           )}
         </header>
@@ -352,7 +351,7 @@ export function DiscussionMetadata({
         onSaved={onSaved}
       />
       <MilestonePicker
-        key={version}
+        version={version}
         repo={repo}
         path={path}
         csrf={csrf}
