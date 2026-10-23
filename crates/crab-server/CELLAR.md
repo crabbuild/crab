@@ -39,6 +39,13 @@ their receipt. Identical retries recover the original decision; conflicting
 payloads fail. Receipts expire after the request expiry plus a 24-hour retention
 window, with bounded pruning on subsequent mutations.
 
+The typed client retries one unavailable mutation response with the identical
+serialized request and receipt identity, within the original 30-second deadline.
+This recovers an ambiguous peer disconnect during handoff without duplicating
+application writes. A second failure remains pending; admission closure and
+terminal request errors do not trigger replay. Reads retain Cellar's native
+routing policy.
+
 Native target addresses distinguish Repository and Organization UUIDs from Directory. This
 changes the private peer application envelope: upgrade the fleet together;
 mixed-version operation is not supported or qualified. The compiled script name

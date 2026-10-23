@@ -146,15 +146,15 @@ impl CellClient {
             input: serde_json::to_value(input)?,
             minimum,
         };
-        let bytes = serde_json::to_vec(&request)?;
+        let bytes = bytes::Bytes::from(serde_json::to_vec(&request)?);
         if bytes.len() > 4 * 1024 * 1024 {
             return Err(Error::Invalid("Cell request exceeds its byte limit"));
         }
-        let request = Request::post(format!("http://crab{}", target.path()))
-            .header("content-type", "application/json")
-            .body(Body::from(bytes))
-            .map_err(Error::sdk)?;
-        let result = tokio::time::timeout(Duration::from_secs(30), async {
+        let attempt = || async {
+            let request = Request::post(format!("http://crab{}", target.path()))
+                .header("content-type", "application/json")
+                .body(Body::from(bytes.clone()))
+                .map_err(Error::sdk)?;
             let response = self.ingress.call(request).await;
             let status = response.status();
             let bytes = axum::body::to_bytes(Body::new(response.into_body()), 2 * 1024 * 1024)
@@ -173,6 +173,19 @@ impl CellClient {
                 StatusCode::BAD_REQUEST => Err(Error::Invalid("Cell rejected the request")),
                 _ => Err(Error::Unavailable),
             }
+        };
+        let result = tokio::time::timeout(Duration::from_secs(30), async {
+            let result = attempt().await;
+            // Cellar cannot replay ambiguous peer failures. Crab's atomic receipt
+            // permits one identical mutation retry, within the original deadline,
+            // without duplicating a write whose response was lost during handoff.
+            if matches!(result, Err(Error::Unavailable))
+                && mutation.is_some()
+                && !self.ingress.is_closed()
+            {
+                return attempt().await;
+            }
+            result
         })
         .await;
         match result {
