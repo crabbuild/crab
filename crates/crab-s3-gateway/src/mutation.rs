@@ -310,11 +310,10 @@ impl Coordinator {
         {
             return Ok(Some(manifest));
         }
-        let manifest = attributes::load(repository, tip).await?;
+        let manifest = repository.attributes.load(tip).await?;
         if !manifest.is_complete() {
             return Ok(None);
         }
-        let manifest = Arc::new(manifest);
         self.admission.store_complete_manifest(
             &repository.config.name,
             branch,
@@ -1719,7 +1718,7 @@ async fn prepare_and_upload_batch(
             None => None,
         };
         let manifest = match original_parent {
-            Some(parent) => (*view.attributes(repository, parent).await?).clone(),
+            Some(parent) => (*repository.attributes.load(parent).await?).clone(),
             None => attributes::Manifest::default(),
         };
         build_batch(
@@ -4634,7 +4633,7 @@ mod tests {
             )
         );
         let commit = tip(&repository, Arc::clone(&runtime), &cancel).await;
-        let manifest = attributes::load(&repository, commit).await.unwrap();
+        let manifest = repository.attributes.load(commit).await.unwrap();
         let attributes_oid = object_id(Kind::Blob, &stored_attributes).unwrap();
         let attributes_etag = crate::gateway::md5_hex(&stored_attributes);
         assert!(manifest.is_complete());
@@ -5853,7 +5852,7 @@ mod tests {
             .unwrap();
         first.checkpoints.wait_idle().await;
         let first_commit = tip(&repository, Arc::clone(&runtime), &cancel).await;
-        let first_manifest = attributes::load(&repository, first_commit).await.unwrap();
+        let first_manifest = repository.attributes.load(first_commit).await.unwrap();
         let stale =
             attributes::prepare_checkpoint("refs/heads/main", first_commit, &first_manifest)
                 .unwrap()
@@ -5900,7 +5899,7 @@ mod tests {
         ));
         repository.store.head(&checkpoint).await.unwrap();
 
-        let manifest = attributes::load(&repository, commit).await.unwrap();
+        let manifest = repository.attributes.load(commit).await.unwrap();
         let current = attributes::prepare_checkpoint("refs/heads/main", commit, &manifest)
             .unwrap()
             .unwrap();
@@ -5909,7 +5908,12 @@ mod tests {
             .put_overwrite(&checkpoint, stale.bytes())
             .await
             .unwrap();
-        let fallback = attributes::load(&repository, commit).await.unwrap();
+        // A new reader proves physical checkpoint fallback rather than reusing
+        // the immutable logical manifest already cached for this commit.
+        let fallback = attributes::Cache::new(repository.layout.clone())
+            .load(commit)
+            .await
+            .unwrap();
         for path in ["first.txt", "second.txt"] {
             let oid = object_id(Kind::Blob, path.as_bytes()).unwrap();
             assert!(fallback.object(path, oid).is_some());
@@ -5931,7 +5935,10 @@ mod tests {
             .repo_path(&format!("s3/attributes/{parent}.json"));
         repository.store.delete(&parent_delta).await.unwrap();
 
-        let manifest = attributes::load(&repository, commit).await.unwrap();
+        let manifest = attributes::Cache::new(repository.layout.clone())
+            .load(commit)
+            .await
+            .unwrap();
         for path in ["first.txt", "second.txt"] {
             let oid = object_id(Kind::Blob, path.as_bytes()).unwrap();
             assert!(manifest.object(path, oid).is_some());

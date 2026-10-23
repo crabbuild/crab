@@ -352,9 +352,10 @@ Every Xet response withholds its final chunk until reconstruction reaches
 successful EOF, including range responses. Multipart range copies use the same
 verified stream directly into their upload spool, avoiding a second on-disk copy.
 
-GET and HEAD share the same commit/path/blob-bound attribute lookup. A cold GET
-can stop at the object's newest attribute delta instead of loading the complete
-attribute history for unrelated objects.
+GET, HEAD, and listing share lazy attribute replay for each immutable commit.
+A lookup stops at the newest delta that answers its path; other paths reuse
+inspected changes and checkpoints. Blob-ID checks prevent a Git edit from
+inheriting metadata for older content.
 
 The process uses a required local read cache shared by its configured
 repositories. Put the cache on a private, capacity-limited volume separate from

@@ -39,6 +39,7 @@ pub(crate) struct Repository {
     pub(crate) layout: StoreLayout<Store>,
     pub(crate) identity: RepositoryIdentity,
     pub(crate) read_views: Arc<crate::repository::ReadViewCache>,
+    pub(crate) attributes: Arc<crate::attributes::Cache>,
     pub(crate) maintenance: Arc<crate::repository::WriteMaintenance>,
     hydrator: Arc<crab_read::ShardHydrator>,
     lfs: Arc<crab_lfs::LfsObjectStore>,
@@ -86,6 +87,7 @@ impl Repository {
             layout.global_prefix().to_owned(),
         );
         Ok(Self {
+            attributes: Arc::new(crate::attributes::Cache::new(layout.clone())),
             hydrator: Arc::new(
                 crab_read::ReadRuntimeBuilder::new(caching, read_layout, 16).build()?,
             ),
@@ -784,8 +786,9 @@ impl Gateway {
                 snapshot.commit_oid(),
             ) {
                 Some(manifest) => manifest.object(path, blob.metadata.oid).cloned(),
-                None => repo
-                    .object_attributes(repository, snapshot.commit_oid(), path, blob.metadata.oid)
+                None => repository
+                    .attributes
+                    .object(snapshot.commit_oid(), path, blob.metadata.oid)
                     .await
                     .map_err(gateway_error)?,
             };
@@ -853,8 +856,9 @@ impl Gateway {
                 snapshot.commit_oid(),
             ) {
                 Some(manifest) => manifest.object(path, entry.oid).cloned(),
-                None => view
-                    .object_attributes(repository, snapshot.commit_oid(), path, entry.oid)
+                None => repository
+                    .attributes
+                    .object(snapshot.commit_oid(), path, entry.oid)
                     .await
                     .map_err(gateway_error)?,
             };
@@ -925,8 +929,9 @@ impl Gateway {
                 snapshot.commit_oid(),
             ) {
                 Some(manifest) => Ok(manifest.object(path, entry.oid).cloned()),
-                None => view
-                    .object_attributes(repository, snapshot.commit_oid(), path, entry.oid)
+                None => repository
+                    .attributes
+                    .object(snapshot.commit_oid(), path, entry.oid)
                     .await
                     .map_err(gateway_error),
             }
@@ -3000,13 +3005,11 @@ impl S3 for Gateway {
                 snapshot.commit_oid(),
             ) {
                 Some(manifest) => manifest.listing(&page_objects),
-                None => crate::attributes::load_objects(
-                    repository,
-                    snapshot.commit_oid(),
-                    &page_objects,
-                )
-                .await
-                .map_err(gateway_error)?,
+                None => repository
+                    .attributes
+                    .objects(snapshot.commit_oid(), &page_objects)
+                    .await
+                    .map_err(gateway_error)?,
             };
             let mut contents = Vec::new();
             let mut common_prefixes = Vec::new();
