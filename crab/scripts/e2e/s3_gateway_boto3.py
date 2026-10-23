@@ -560,10 +560,12 @@ def run(
             delete_key,
         }:
             raise RuntimeError("Boto3 conditional DeleteObjects omitted successful deletes")
-        client.delete_objects(
+        deleted = client.delete_objects(
             Bucket=bucket,
             Delete={"Objects": [{"Key": object_key}, {"Key": copy_key}]},
         )
+        if deleted.get("Errors"):
+            raise RuntimeError("Boto3 DeleteObjects reported failed entries")
         checks["multi_delete"] = True
         checks["multi_delete_conditions"] = True
         large_object = None
@@ -598,11 +600,17 @@ def run(
         for key in keys:
             try:
                 client.head_object(Bucket=bucket, Key=key)
-            except ClientError:
+            except ClientError as error:
+                if error.response.get("ResponseMetadata", {}).get("HTTPStatusCode") != 404:
+                    raise
                 continue
             remaining.append({"Key": key})
         if remaining:
-            client.delete_objects(Bucket=bucket, Delete={"Objects": remaining, "Quiet": True})
+            deleted = client.delete_objects(
+                Bucket=bucket, Delete={"Objects": remaining, "Quiet": True}
+            )
+            if deleted.get("Errors"):
+                raise RuntimeError("Boto3 cleanup reported failed deletions")
 
 
 def main() -> int:
