@@ -2046,7 +2046,7 @@ async fn upload_built_batch(
         metrics,
     } = upload;
     let mut objects = Vec::new();
-    let mut seen = HashMap::new();
+    let mut seen = HashSet::new();
     let mut repeated_objects = HashSet::new();
     let mut delta_candidates = BTreeMap::<ObjectId, Vec<TreeDeltaBase>>::new();
     let final_commit = commits
@@ -2076,9 +2076,8 @@ async fn upload_built_batch(
                 .or_default()
                 .push(candidate);
         }
-        for (kind, bytes) in built.objects {
-            let oid = object_id(kind, &bytes)?;
-            if seen.insert(oid, ()).is_none() {
+        for GeneratedObject { oid, kind, bytes } in built.objects {
+            if seen.insert(oid) {
                 objects.push((kind, bytes));
             } else {
                 repeated_objects.insert(oid);
@@ -2096,12 +2095,12 @@ async fn upload_built_batch(
         }
         let candidate = candidates
             .into_iter()
-            .filter(|candidate| seen.contains_key(&candidate.base) || candidate.external.is_some())
-            .min_by_key(|candidate| (!seen.contains_key(&candidate.base), candidate.base));
+            .filter(|candidate| seen.contains(&candidate.base) || candidate.external.is_some())
+            .min_by_key(|candidate| (!seen.contains(&candidate.base), candidate.base));
         let Some(candidate) = candidate else {
             continue;
         };
-        if !seen.contains_key(&candidate.base) {
+        if !seen.contains(&candidate.base) {
             let external = candidate.external.ok_or_else(|| {
                 std::io::Error::other("external tree delta base bytes disappeared")
             })?;
@@ -2128,10 +2127,9 @@ async fn upload_built_batch(
     let capacity = metrics.reserve_scratch(scratch_bytes)?;
     let mut scratch = metrics.start_scratch(ScratchPurpose::GitPack);
     scratch.reserve(scratch_bytes);
-    let visible_objects = objects
-        .iter()
-        .map(|(kind, bytes)| object_id(*kind, bytes).map(|oid| oid.to_string()))
-        .collect::<std::result::Result<Vec<_>, _>>()?;
+    // Tree construction already hashed these bytes. Pack preparation still
+    // independently verifies identities before this inventory is published.
+    let visible_objects = seen.iter().map(ToString::to_string).collect();
     let generated_object_bytes = objects.iter().fold(0_usize, |total, (_, bytes)| {
         total.saturating_add(bytes.len())
     });
@@ -2519,9 +2517,15 @@ struct BuiltCommit {
     parent: Option<ObjectId>,
     commit: ObjectId,
     etag: Option<String>,
-    objects: Vec<(Kind, Vec<u8>)>,
+    objects: Vec<GeneratedObject>,
     tree_delta_bases: Vec<TreeDeltaBase>,
     attribute_changes: std::collections::BTreeMap<String, Option<attributes::ObjectAttributes>>,
+}
+
+struct GeneratedObject {
+    oid: ObjectId,
+    kind: Kind,
+    bytes: Vec<u8>,
 }
 
 struct TreeDeltaBase {
@@ -2951,7 +2955,7 @@ async fn build_commit(
             let changed = old
                 .filter(|(old_oid, _)| *old_oid == oid)
                 .map(|_| None)
-                .unwrap_or_else(|| Some(bytes.to_vec()));
+                .unwrap_or_else(|| Some((oid, bytes.to_vec())));
             (Some(etag), changed, Some((oid, attributes, logical_size)))
         }
         Change::Attributes {
@@ -2991,8 +2995,12 @@ async fn build_commit(
     let mut objects = Vec::new();
     let mut tree_delta_bases = Vec::new();
     let mut attribute_changes = std::collections::BTreeMap::new();
-    if let Some(bytes) = changed {
-        objects.push((Kind::Blob, bytes));
+    if let Some((oid, bytes)) = changed {
+        objects.push(GeneratedObject {
+            oid,
+            kind: Kind::Blob,
+            bytes,
+        });
     }
     if let Some(attributes) = lfs_attributes {
         let attributes_path = push_component(&directory_path, b".gitattributes")?;
@@ -3015,7 +3023,11 @@ async fn build_commit(
             }),
         });
         attribute_changes.insert(attributes_path, Some(generated_attributes));
-        objects.push((Kind::Blob, attributes.bytes));
+        objects.push(GeneratedObject {
+            oid: attributes.oid,
+            kind: Kind::Blob,
+            bytes: attributes.bytes,
+        });
     }
     let object_attributes = pending_attributes.map(|(oid, pending, size)| {
         attributes::ObjectAttributes::new(
@@ -3032,7 +3044,7 @@ async fn build_commit(
     let attribute_digest = blake3::hash(&attribute_identity).to_hex();
 
     let generated_attributes =
-        generated_attribute_update(tree_state, leaf_path, leaf_entries, &leaf_edits, &objects)?;
+        generated_attribute_update(tree_state, leaf_path, leaf_entries, &leaf_edits, &objects);
     let mut directory_edits = Vec::with_capacity(paths.len());
     let mut tree_oid = None;
     let mut entries = leaf_edits;
@@ -3081,7 +3093,11 @@ async fn build_commit(
     let tree = tree_oid.ok_or_else(|| std::io::Error::other("root tree was not encoded"))?;
     let commit_bytes = commit_bytes(tree, parent, principal, seconds, attribute_digest.as_str());
     let commit = object_id(Kind::Commit, &commit_bytes)?;
-    objects.push((Kind::Commit, commit_bytes));
+    objects.push(GeneratedObject {
+        oid: commit,
+        kind: Kind::Commit,
+        bytes: commit_bytes,
+    });
     tree_state.commit(directory_edits, generated_attributes)?;
     for (path, attributes) in &attribute_changes {
         manifest.update(path.clone(), attributes.clone());
@@ -3383,35 +3399,35 @@ fn generated_attribute_update(
     path: &[u8],
     entries: &[tree::Entry],
     edits: &[TreeEntryEdit],
-    objects: &[(Kind, Vec<u8>)],
-) -> Result<Option<(Vec<u8>, Option<GeneratedAttributeBlob>)>> {
+    objects: &[GeneratedObject],
+) -> Option<(Vec<u8>, Option<GeneratedAttributeBlob>)> {
     let current = tree_state.generated_attribute_blobs.get(path);
     let Some(attributes) = tree_entry_after_edits(entries, edits, b".gitattributes") else {
-        return Ok(current.is_some().then(|| (path.to_vec(), None)));
+        return current.is_some().then(|| (path.to_vec(), None));
     };
-    for (kind, bytes) in objects {
-        if *kind == Kind::Blob && object_id(*kind, bytes)? == attributes.oid {
-            return Ok(Some((
+    for object in objects {
+        if object.kind == Kind::Blob && object.oid == attributes.oid {
+            return Some((
                 path.to_vec(),
                 Some(GeneratedAttributeBlob {
                     oid: attributes.oid,
-                    bytes: bytes.clone(),
+                    bytes: object.bytes.clone(),
                 }),
-            )));
+            ));
         }
     }
-    Ok(match current {
+    match current {
         Some(current) if current.oid == attributes.oid => None,
         Some(_) => Some((path.to_vec(), None)),
         None => None,
-    })
+    }
 }
 
 fn encode_tree_with_edits(
     old: &DirectoryState,
     entries: &[tree::Entry],
     edits: &[TreeEntryEdit],
-    objects: &mut Vec<(Kind, Vec<u8>)>,
+    objects: &mut Vec<GeneratedObject>,
     delta_bases: &mut Vec<TreeDeltaBase>,
 ) -> Result<(ObjectId, Vec<ObjectId>)> {
     let mut replacements = edits
@@ -3439,7 +3455,11 @@ fn encode_tree_with_edits(
         append_tree_entry(&mut bytes, entry);
     }
     let oid = object_id(Kind::Tree, &bytes)?;
-    objects.push((Kind::Tree, bytes));
+    objects.push(GeneratedObject {
+        oid,
+        kind: Kind::Tree,
+        bytes,
+    });
     let mut delta_ancestors = Vec::new();
     let candidate = if old.generated_in_batch {
         old.oid
@@ -3657,7 +3677,13 @@ mod tests {
 
         assert_eq!(oid, object_id(Kind::Tree, &expected).unwrap());
         assert!(ancestors.is_empty());
-        assert_eq!(objects, vec![(Kind::Tree, expected)]);
+        assert_eq!(
+            objects
+                .into_iter()
+                .map(|object| (object.oid, object.kind, object.bytes))
+                .collect::<Vec<_>>(),
+            vec![(oid, Kind::Tree, expected)]
+        );
         assert!(delta_bases.is_empty());
     }
 
@@ -3735,7 +3761,13 @@ mod tests {
         assert_eq!(tree_entry_count_after_edits(&original, &edits), 3);
         assert!(tree_entries_changed(&original, &edits));
         assert_eq!(oid, object_id(Kind::Tree, &expected).unwrap());
-        assert_eq!(objects, vec![(Kind::Tree, expected)]);
+        assert_eq!(
+            objects
+                .into_iter()
+                .map(|object| (object.oid, object.kind, object.bytes))
+                .collect::<Vec<_>>(),
+            vec![(oid, Kind::Tree, expected)]
+        );
         assert_eq!(delta_bases.len(), 1);
         assert_eq!(delta_bases[0].object, oid);
         assert_eq!(delta_bases[0].base, ObjectId::from([9; 20]));

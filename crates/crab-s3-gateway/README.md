@@ -468,8 +468,10 @@ Additional replicas improve availability and scale independent repositories and
 branches, but they cannot make concurrent writes to the same ref commit in
 parallel.
 
-Generated packs use bounded tree deltas across warm batches, avoiding
-a repeated full broad-directory tree in every pack. REF_DELTA bases are immutable
+Generated object identities are carried from tree construction through batch
+deduplication and visibility evidence; pack preparation independently verifies
+the bytes before publication. Generated packs use bounded tree deltas across
+warm batches, avoiding a repeated full broad-directory tree in every pack. REF_DELTA bases are immutable
 Git object IDs retained by the repository object inventory; readers resolve them
 across packs, repack preserves the complete object universe, and client fetch
 materializes required bases. The depth-eight and cold-start full entries bound
