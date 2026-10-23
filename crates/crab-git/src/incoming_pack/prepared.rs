@@ -676,8 +676,10 @@ fn prefix_suffix_delta(base: &[u8], target: &[u8]) -> Result<Option<Vec<u8>>> {
     // Most bytes in successive trees are unchanged. Compare whole blocks so
     // long common edges use slice equality instead of one branch per byte.
     let prefix_blocks = base
-        .chunks_exact(64)
-        .zip(target.chunks_exact(64))
+        .as_chunks::<64>()
+        .0
+        .iter()
+        .zip(target.as_chunks::<64>().0)
         .take_while(|(left, right)| left == right)
         .count()
         * 64;
