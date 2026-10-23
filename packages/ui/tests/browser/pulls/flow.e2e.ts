@@ -44,7 +44,7 @@ test("pull creation and review navigation preserve GitHub-style controls", async
     "refs/heads/feature/docs",
   );
   await page.getByLabel("Title", { exact: true }).fill("Document the feature");
-  const pullForm = page.locator(".pull-form");
+  const pullForm = page.getByRole("form", { name: "Create discussion" });
   const description = pullForm.getByRole("textbox", {
     name: "Description",
     exact: true,

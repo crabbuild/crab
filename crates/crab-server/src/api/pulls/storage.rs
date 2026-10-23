@@ -80,6 +80,7 @@ pub(in crate::api) struct PullComment {
 }
 
 pub(super) struct NewPullRequest {
+    pub metadata: crate::cells::repository::collaboration::creation::Input,
     pub draft: bool,
     pub author: Identity,
     pub request_id: String,
@@ -161,7 +162,7 @@ pub(super) async fn pull_submission(
     server: &Server,
     repo: &Repository,
     request_id: &str,
-) -> Result<Option<PullRequest>> {
+) -> Result<Option<crate::cells::repository::collaboration::creation::Comparison>> {
     let routed = crate::app::repository_cell(server, repo)?;
     crate::app::query_output(
         routed
@@ -176,7 +177,6 @@ pub(super) async fn pull_submission(
             )
             .await,
     )
-    .map(|pull| pull.map(from_pull))
 }
 
 pub(super) async fn create_pull(
@@ -192,6 +192,7 @@ pub(super) async fn create_pull(
                 &routed.target,
                 crate::app::mutation_identity()?,
                 CreatePullInput {
+                    metadata: input.metadata,
                     draft: input.draft,
                     submission_id: submission_id(&input.request_id)?,
                     author: crate::cells::repository::RepositoryAuthor::from(&input.author),
@@ -205,6 +206,7 @@ pub(super) async fn create_pull(
             )
             .await,
     )? {
+        CreatePullOutcome::MetadataRejected(reason) => Err(Error::CreationRejected(reason)),
         CreatePullOutcome::Archived => Err(Error::Archived),
         CreatePullOutcome::Created(pull) => Ok(from_pull(*pull)),
         CreatePullOutcome::RequestConflict => Err(Error::RequestConflict),

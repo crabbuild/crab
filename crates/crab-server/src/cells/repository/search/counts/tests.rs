@@ -119,6 +119,7 @@ async fn count_filters_share_live_issue_and_pull_projections_navigation_and_curs
             write::<CreateIssue>(
                 &cell,
                 CreateIssueInput {
+                    metadata: Default::default(),
                     submission_id: *Uuid::now_v7().as_bytes(),
                     author: actor.clone(),
                     title: format!("Issue {number}"),
@@ -132,6 +133,7 @@ async fn count_filters_share_live_issue_and_pull_projections_navigation_and_curs
             write::<CreatePull>(
                 &cell,
                 CreatePullInput {
+                    metadata: Default::default(),
                     submission_id: *Uuid::now_v7().as_bytes(),
                     author: actor.clone(),
                     draft: false,

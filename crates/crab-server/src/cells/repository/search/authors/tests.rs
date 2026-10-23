@@ -89,6 +89,7 @@ async fn qualified_author_projection_filters_both_kinds_and_binds_cursors_to_res
                 cell.target,
                 crate::app::mutation_identity().unwrap(),
                 CreateIssueInput {
+                    metadata: Default::default(),
                     submission_id: *uuid::Uuid::now_v7().as_bytes(),
                     author: author.clone(),
                     title: "Authorship".into(),
@@ -104,6 +105,7 @@ async fn qualified_author_projection_filters_both_kinds_and_binds_cursors_to_res
             cell.target,
             crate::app::mutation_identity().unwrap(),
             CreatePullInput {
+                metadata: Default::default(),
                 submission_id: *uuid::Uuid::now_v7().as_bytes(),
                 author: actors[0].clone(),
                 draft: false,

@@ -212,6 +212,7 @@ pub(crate) struct PullReviewPage {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CreatePullInput {
+    pub metadata: super::collaboration::creation::Input,
     #[serde(default)]
     pub draft: bool,
     pub submission_id: [u8; 16],
@@ -226,6 +227,7 @@ pub(crate) struct CreatePullInput {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) enum CreatePullOutcome {
+    MetadataRejected(super::collaboration::creation::Failure),
     Archived,
     Created(Box<PullRecord>),
     RequestConflict,

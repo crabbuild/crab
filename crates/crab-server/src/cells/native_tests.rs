@@ -13,6 +13,7 @@ fn identity() -> MutationIdentity {
 
 fn issue() -> CreateIssueInput {
     CreateIssueInput {
+        metadata: Default::default(),
         submission_id: [1; 16],
         author: RepositoryAuthor {
             issuer: "https://identity.test".into(),

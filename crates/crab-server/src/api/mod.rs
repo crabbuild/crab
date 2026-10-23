@@ -7,6 +7,7 @@ mod checks;
 mod contents;
 mod conversation;
 mod discussion_bulk;
+mod discussion_creation;
 mod discussion_search;
 mod discussion_state;
 mod issues;

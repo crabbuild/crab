@@ -44,6 +44,7 @@ async fn seed(cell: &RepositoryCell) {
     write::<CreatePull>(
         cell,
         CreatePullInput {
+            metadata: Default::default(),
             draft: false,
             submission_id: *Uuid::now_v7().as_bytes(),
             author: actor("Alice"),

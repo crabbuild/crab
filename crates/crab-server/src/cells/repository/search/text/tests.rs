@@ -122,6 +122,7 @@ async fn field_search_covers_all_contribution_bodies_and_keeps_edits_deletion_an
         write::<CreateIssue>(
             &cell,
             CreateIssueInput {
+                metadata: Default::default(),
                 submission_id: *Uuid::now_v7().as_bytes(),
                 author: actor(),
                 title: "Titleneedle".into(),
@@ -135,6 +136,7 @@ async fn field_search_covers_all_contribution_bodies_and_keeps_edits_deletion_an
         write::<CreatePull>(
             &cell,
             CreatePullInput {
+                metadata: Default::default(),
                 submission_id: *Uuid::now_v7().as_bytes(),
                 author: actor(),
                 title: "Pull title".into(),

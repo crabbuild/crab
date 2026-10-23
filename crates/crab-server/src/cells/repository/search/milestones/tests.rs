@@ -71,6 +71,7 @@ async fn milestone_queries_share_assignments_counts_renames_and_rebuilds_for_bot
         write::<CreateIssue>(
             &cell,
             CreateIssueInput {
+                metadata: Default::default(),
                 submission_id: *Uuid::now_v7().as_bytes(),
                 author: author(),
                 title: "Issue".into(),
@@ -82,6 +83,7 @@ async fn milestone_queries_share_assignments_counts_renames_and_rebuilds_for_bot
     write::<CreatePull>(
         &cell,
         CreatePullInput {
+            metadata: Default::default(),
             submission_id: *Uuid::now_v7().as_bytes(),
             author: author(),
             draft: false,

@@ -23,6 +23,7 @@ fn cell(server: &crate::server::Server) -> RepositoryCell {
 }
 fn input(draft: bool) -> CreatePullInput {
     CreatePullInput {
+        metadata: Default::default(),
         draft,
         submission_id: *Uuid::now_v7().as_bytes(),
         author: actor("Alice"),

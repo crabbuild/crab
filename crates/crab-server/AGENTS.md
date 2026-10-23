@@ -76,7 +76,11 @@ pull-detail read. `collaboration/lifecycle/` shares bounded explicit preparation
 with issue lifecycle metadata; each owner recovers only matching transition events.
 Private `cells prepare-pull-state` prepares existing native repositories.
 
-Collaboration documents live in `cells/repository/collaboration/`. `state/`
+Collaboration documents live in `cells/repository/collaboration/`. `creation/`
+owns initial metadata validation, stable selection digest terms, terminal metadata
+rejections and canonical initial milestone assignment. Both create writers commit
+labels/assignee snapshots at version one; `api/discussion_creation/` resolves the
+current roster and triage capability. Its tests stay with those owners. `state/`
 owns atomic close/reopen with optional comments; `bulk/` owns bounded mixed-kind
 selection and atomic metadata/state edits. `submissions/` owns their shared
 applied/rejected decision storage with issue pins. Its `preparation/` alone reads

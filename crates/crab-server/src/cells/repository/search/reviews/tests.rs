@@ -57,6 +57,7 @@ async fn create_pull(cell: &RepositoryCell, author: &RepositoryAuthor, number: u
     let outcome = write::<CreatePull>(
         cell,
         CreatePullInput {
+            metadata: Default::default(),
             submission_id: *Uuid::now_v7().as_bytes(),
             author: author.clone(),
             draft: false,

@@ -182,6 +182,10 @@ export async function mockPullRequest(
       expect(route.request().headers()["x-crab-repository-id"]).toBe(
         lifecycle.repositoryId,
       );
+    if (path.endsWith("/assignees"))
+      return route.fulfill({ json: { items: [], can_manage: true } });
+    if (path.endsWith("/labels"))
+      return route.fulfill({ json: { items: [], can_manage: true } });
     if (path.endsWith("/discussion-search"))
       return route.fulfill({
         json: {

@@ -384,9 +384,17 @@ Example JSON body, subject to the server's authentication and mutation checks:
 }
 ```
 
+Issue and PR create bodies optionally accept `metadata` with `label_ids`,
+`assignee_ids` (stable actor UUIDs), and `milestone` (number or null). Setting any
+initial metadata requires triage access. The targets must be available when the
+native creation runs; selected metadata and milestone progress commit atomically
+with the discussion at version one.
+
 Generate a fresh submission ID for a new issue. If the response is lost, retry
-with the same ID and original title/body: the reservation preserves the issue
-number. Reusing that ID with different content or another author is a conflict.
+with the same ID and entire original payload, including metadata: the reservation
+preserves the issue number. Reusing that ID with different content or another
+author is a conflict. A replay returns the current record and preserves later
+metadata edits.
 
 The Cell command commits and publishes before the handler loads label and
 assignee presentation data. A lost or failed HTTP response therefore does not

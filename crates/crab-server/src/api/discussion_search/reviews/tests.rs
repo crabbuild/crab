@@ -30,6 +30,7 @@ async fn reviewer_filters_resolve_public_handles_and_current_accounts() {
             repo,
             crate::app::mutation_identity().unwrap(),
             CreatePullInput {
+                metadata: Default::default(),
                 submission_id: *uuid::Uuid::now_v7().as_bytes(),
                 author: author.clone(),
                 draft: false,

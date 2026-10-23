@@ -55,6 +55,7 @@ async fn assignee_filters_use_stable_accounts_across_profiles_revocation_boolean
             repo,
             crate::app::mutation_identity().unwrap(),
             CreatePullInput {
+                metadata: Default::default(),
                 submission_id: *uuid::Uuid::now_v7().as_bytes(),
                 author: author.clone(),
                 draft: false,

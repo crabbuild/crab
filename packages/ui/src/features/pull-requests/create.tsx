@@ -1,12 +1,28 @@
-import { Editor } from "@/components/discussion/editor";
-import { Failure } from "@/components/discussion/failure";
-import { useSubmission } from "@/components/discussion/hooks";
-import { useMutation } from "@/components/discussion/mutations";
+import { CreationForm } from "@/components/discussion/create/form";
+import {
+  selection,
+  type MetadataDraft,
+} from "@/components/discussion/create/metadata";
+import { useCreateSubmission } from "@/components/discussion/create/submission";
+import {
+  NativeSelect,
+  NativeSelectOption,
+} from "@/components/ui/native-select";
+import {
+  DropdownMenu,
+  DropdownMenuTrigger,
+  DropdownMenuContent,
+  DropdownMenuLabel,
+  DropdownMenuGroup,
+  DropdownMenuRadioGroup,
+  DropdownMenuRadioItem,
+} from "@/components/ui/dropdown-menu";
+import { Field, FieldLabel } from "@/components/ui/field";
+import { ChevronDownIcon } from "lucide-react";
 import { Link } from "@/components/navigation/link";
 import { Button } from "@/components/ui/button";
-import { Checkbox } from "@/components/ui/checkbox";
 import { ComparisonView } from "@/features/repository/diff";
-import { endpoint, navigate, type Refs, type Repository } from "@/lib/api";
+import { navigate, type Refs, type Repository } from "@/lib/api";
 import type { CodeThemes } from "@/lib/code-theme";
 import { repoHref, repositoryRoute } from "@/lib/repository-route";
 import { GitMergeIcon } from "@primer/octicons-react";
@@ -55,8 +71,18 @@ export function NewPull({
   );
   const [body, setBody] = useState("");
   const [draft, setDraft] = useState(false);
-  const mutation = useMutation(csrf, repo);
-  const submission = useSubmission();
+  const [metadata, setMetadata] = useState<MetadataDraft>({
+    labels: [],
+    assignees: [],
+    milestone: null,
+  });
+  const creation = useCreateSubmission<PullRequest>({
+    repo,
+    kind: "pulls",
+    csrf,
+    onCreated: (created) =>
+      navigate(repoHref(repo, { view: "pulls", pull: String(created.number) })),
+  });
   const baseOid = branches.find((ref) => ref.name === base)?.oid;
   const headOid = branches.find((ref) => ref.name === head)?.oid;
   const comparable = Boolean(baseOid && headOid && baseOid !== headOid);
@@ -71,33 +97,37 @@ export function NewPull({
       </div>
       <div className="panel compare-picker">
         <GitMergeIcon />
-        <label>
-          <span>base:</span>
-          <select
+        <Field orientation="horizontal" className="w-auto gap-2">
+          <FieldLabel htmlFor="pull-base">base:</FieldLabel>
+          <NativeSelect
+            id="pull-base"
+            disabled={creation.locked}
             value={base}
             onChange={(event) => setBase(event.target.value)}
           >
             {branches.map((ref) => (
-              <option key={ref.name} value={ref.name}>
+              <NativeSelectOption key={ref.name} value={ref.name}>
                 {branch(ref.name)}
-              </option>
+              </NativeSelectOption>
             ))}
-          </select>
-        </label>
+          </NativeSelect>
+        </Field>
         <span aria-hidden="true">←</span>
-        <label>
-          <span>compare:</span>
-          <select
+        <Field orientation="horizontal" className="w-auto gap-2">
+          <FieldLabel htmlFor="pull-head">compare:</FieldLabel>
+          <NativeSelect
+            id="pull-head"
+            disabled={creation.locked}
             value={head}
             onChange={(event) => setHead(event.target.value)}
           >
             {branches.map((ref) => (
-              <option key={ref.name} value={ref.name}>
+              <NativeSelectOption key={ref.name} value={ref.name}>
                 {branch(ref.name)}
-              </option>
+              </NativeSelectOption>
             ))}
-          </select>
-        </label>
+          </NativeSelect>
+        </Field>
       </div>
       {branches.length < 2 ? (
         <div className="notice">
@@ -111,9 +141,21 @@ export function NewPull({
         </div>
       ) : (
         <>
-          <form
-            className="panel discussion-form pull-form"
-            onSubmit={async (event) => {
+          <h3>Open a pull request</h3>
+          <CreationForm
+            repo={repo}
+            title={title}
+            body={body}
+            onTitle={setTitle}
+            onBody={setBody}
+            metadata={metadata}
+            onMetadata={setMetadata}
+            disabled={creation.locked}
+            error={creation.error}
+            recovering={creation.recovering}
+            rejected={creation.rejected}
+            onReview={creation.review}
+            onSubmit={(event) => {
               event.preventDefault();
               const input = {
                 title,
@@ -121,62 +163,57 @@ export function NewPull({
                 draft,
                 base_ref: base,
                 head_ref: head,
+                metadata: selection(metadata),
               };
-              const created = await mutation.run<PullRequest>(
-                endpoint(repo, "pulls"),
-                "POST",
-                { ...input, request_id: submission(input) },
-              );
-              if (created)
-                navigate(
-                  repoHref(repo, {
-                    view: "pulls",
-                    pull: String(created.number),
-                  }),
-                );
+              void creation.submit(input);
             }}
           >
-            <h3>Open a pull request</h3>
-            <label htmlFor="pull-title">Title</label>
-            <input
-              id="pull-title"
-              autoFocus
-              required
-              maxLength={256}
-              value={title}
-              disabled={mutation.pending}
-              onChange={(event) => setTitle(event.target.value)}
-            />
-            <Editor
-              id="pull-body"
-              label="Description"
-              value={body}
-              onChange={setBody}
-              disabled={mutation.pending}
-            />
-            <Failure message={mutation.error} />
-            <label className="pull-draft-option">
-              <Checkbox
-                checked={draft}
-                disabled={mutation.pending}
-                onCheckedChange={(value) => setDraft(value === true)}
-              />
-              Create as draft
-            </label>
-            <div className="discussion-actions">
+            <div className="inline-flex items-center rounded-lg bg-primary text-primary-foreground">
               <Button
                 type="submit"
-                variant="default"
-                disabled={mutation.pending || !title.trim()}
+                className="rounded-r-none"
+                disabled={
+                  creation.pending || creation.rejected || !title.trim()
+                }
               >
-                {mutation.pending
+                {creation.pending
                   ? "Creating…"
-                  : draft
-                    ? "Create draft pull request"
-                    : "Create pull request"}
+                  : creation.recovering
+                    ? "Retry original submission"
+                    : draft
+                      ? "Create draft pull request"
+                      : "Create pull request"}
               </Button>
+              <DropdownMenu>
+                <DropdownMenuTrigger asChild>
+                  <Button
+                    className="rounded-l-none border-l border-primary-foreground/30"
+                    size="icon"
+                    aria-label="Choose pull request mode"
+                    disabled={creation.locked}
+                  >
+                    <ChevronDownIcon />
+                  </Button>
+                </DropdownMenuTrigger>
+                <DropdownMenuContent align="end">
+                  <DropdownMenuLabel>Pull request mode</DropdownMenuLabel>
+                  <DropdownMenuGroup>
+                    <DropdownMenuRadioGroup
+                      value={draft ? "draft" : "ready"}
+                      onValueChange={(value) => setDraft(value === "draft")}
+                    >
+                      <DropdownMenuRadioItem value="ready">
+                        Create pull request
+                      </DropdownMenuRadioItem>
+                      <DropdownMenuRadioItem value="draft">
+                        Create draft pull request
+                      </DropdownMenuRadioItem>
+                    </DropdownMenuRadioGroup>
+                  </DropdownMenuGroup>
+                </DropdownMenuContent>
+              </DropdownMenu>
             </div>
-          </form>
+          </CreationForm>
           <ComparisonView
             repo={repo}
             base={baseOid ?? ""}

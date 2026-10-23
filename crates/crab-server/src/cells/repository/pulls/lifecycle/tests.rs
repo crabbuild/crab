@@ -44,6 +44,7 @@ async fn create(cell: &RepositoryCell) -> PullRecord {
     let CreatePullOutcome::Created(pull) = write::<CreatePull>(
         cell,
         CreatePullInput {
+            metadata: Default::default(),
             draft: false,
             submission_id: *Uuid::now_v7().as_bytes(),
             author: actor(),

@@ -31,6 +31,7 @@ async fn seed(cell: &RepositoryCell) {
         write::<CreateIssue>(
             cell,
             CreateIssueInput {
+                metadata: Default::default(),
                 submission_id: *uuid::Uuid::now_v7().as_bytes(),
                 author: actor(),
                 title: format!("Issue {number}"),

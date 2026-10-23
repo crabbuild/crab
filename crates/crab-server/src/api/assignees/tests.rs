@@ -147,6 +147,7 @@ async fn current_membership_controls_candidates_and_issue_and_pull_assignments()
             repo.id,
             crate::app::mutation_identity().unwrap(),
             CreatePullInput {
+                metadata: Default::default(),
                 submission_id: *uuid::Uuid::now_v7().as_bytes(),
                 author: RepositoryAuthor {
                     issuer: h.provider.issuer.clone(),

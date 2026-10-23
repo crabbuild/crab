@@ -31,6 +31,7 @@ async fn write<M: Mutation>(cell: &RepositoryCell, input: M::Input) -> M::Output
 }
 fn issue(title: &str, body: &str) -> CreateIssueInput {
     CreateIssueInput {
+        metadata: Default::default(),
         submission_id: *Uuid::now_v7().as_bytes(),
         author: actor(),
         title: title.into(),

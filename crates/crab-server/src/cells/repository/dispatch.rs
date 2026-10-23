@@ -36,6 +36,10 @@ pub(in crate::cells) fn dispatch_mutation(
     }
     let result = match id {
         #[cfg(test)]
+        collaboration::creation::tests::ExhaustProgress::ID => {
+            invoke_mutation::<collaboration::creation::tests::ExhaustProgress>(context, input)
+        }
+        #[cfg(test)]
         collaboration::submissions::preparation::tests::Historical::ID => invoke_mutation::<
             collaboration::submissions::preparation::tests::Historical,
         >(context, input),

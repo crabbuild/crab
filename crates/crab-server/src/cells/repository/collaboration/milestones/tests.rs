@@ -66,6 +66,7 @@ async fn assignment_progress_tracks_issue_state_and_duplicate_commands() {
             &cell.target,
             identity(),
             CreateIssueInput {
+                metadata: Default::default(),
                 submission_id: *Uuid::now_v7().as_bytes(),
                 author: actor(),
                 title: "Ship the release".into(),
@@ -370,6 +371,7 @@ async fn assigned_work_pages_follow_reassignment_without_duplicates_or_orphans()
                 &cell.target,
                 identity(),
                 CreateIssueInput {
+                    metadata: Default::default(),
                     submission_id: *Uuid::now_v7().as_bytes(),
                     author: actor(),
                     title: format!("Work {number}"),
@@ -570,6 +572,7 @@ async fn pull_close_reopen_and_merge_completion_update_milestone_progress() {
             &cell.target,
             identity(),
             CreatePullInput {
+                metadata: Default::default(),
                 draft: false,
                 submission_id: *Uuid::now_v7().as_bytes(),
                 author: actor(),

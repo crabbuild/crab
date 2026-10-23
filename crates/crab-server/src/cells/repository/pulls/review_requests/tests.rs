@@ -29,6 +29,7 @@ async fn write<M: Mutation>(cell: &RepositoryCell, input: M::Input) -> M::Output
 }
 async fn seed(cell: &RepositoryCell) {
     let input = CreatePullInput {
+        metadata: Default::default(),
         draft: false,
         submission_id: *Uuid::now_v7().as_bytes(),
         author: author("Alice"),

@@ -55,6 +55,7 @@ async fn author_filters_bind_qualified_accounts_and_rebound_handle_cursors_witho
             repo,
             crate::app::mutation_identity().unwrap(),
             CreateIssueInput {
+                metadata: Default::default(),
                 submission_id: *uuid::Uuid::now_v7().as_bytes(),
                 author: RepositoryAuthor {
                     issuer: format!("{}/other", h.provider.issuer),
@@ -72,6 +73,7 @@ async fn author_filters_bind_qualified_accounts_and_rebound_handle_cursors_witho
             repo,
             crate::app::mutation_identity().unwrap(),
             CreatePullInput {
+                metadata: Default::default(),
                 submission_id: *uuid::Uuid::now_v7().as_bytes(),
                 author: RepositoryAuthor {
                     issuer: h.provider.issuer.clone(),

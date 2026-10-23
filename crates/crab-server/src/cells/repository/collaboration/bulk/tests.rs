@@ -30,6 +30,7 @@ async fn seed(cell: &RepositoryCell) {
     write::<CreateIssue>(
         cell,
         CreateIssueInput {
+            metadata: Default::default(),
             submission_id: *Uuid::now_v7().as_bytes(),
             author: actor(),
             title: "Issue".into(),
@@ -40,6 +41,7 @@ async fn seed(cell: &RepositoryCell) {
     write::<CreatePull>(
         cell,
         CreatePullInput {
+            metadata: Default::default(),
             submission_id: *Uuid::now_v7().as_bytes(),
             author: actor(),
             draft: false,
@@ -384,6 +386,7 @@ async fn maximum_page_selection_edits_large_records_and_bounds_the_next_item() {
         write::<CreateIssue>(
             &cell,
             CreateIssueInput {
+                metadata: Default::default(),
                 submission_id: *Uuid::now_v7().as_bytes(),
                 author: actor(),
                 title: format!("Issue {number}"),

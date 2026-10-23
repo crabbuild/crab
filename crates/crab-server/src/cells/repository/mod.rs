@@ -159,6 +159,7 @@ pub(super) fn issue_submission_digest(input: &CreateIssueInput) -> blake3::Hash 
     hash_text(&mut hasher, &input.author.subject);
     hash_text(&mut hasher, &input.title);
     hash_text(&mut hasher, &input.body);
+    input.metadata.selection.hash(&mut hasher);
     hasher.finalize()
 }
 

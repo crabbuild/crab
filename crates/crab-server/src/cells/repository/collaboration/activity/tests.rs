@@ -30,6 +30,7 @@ async fn write<M: Mutation>(cell: &RepositoryCell, input: M::Input) -> M::Output
 }
 fn issue(title: &str) -> CreateIssueInput {
     CreateIssueInput {
+        metadata: Default::default(),
         submission_id: *Uuid::now_v7().as_bytes(),
         author: actor("Alice"),
         title: title.into(),
@@ -343,6 +344,7 @@ async fn review_threads_replies_and_merge_completion_record_their_actual_targets
     write::<CreatePull>(
         &cell,
         CreatePullInput {
+            metadata: Default::default(),
             draft: false,
             submission_id: *Uuid::now_v7().as_bytes(),
             author: actor("Alice"),

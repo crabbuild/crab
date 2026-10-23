@@ -118,6 +118,7 @@ pub(crate) enum DeleteLabelOutcome {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CreateIssueInput {
+    pub metadata: super::collaboration::creation::Input,
     pub submission_id: [u8; 16],
     pub author: RepositoryAuthor,
     pub title: String,
@@ -126,6 +127,7 @@ pub(crate) struct CreateIssueInput {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum CreateIssueOutcome {
+    MetadataRejected(super::collaboration::creation::Failure),
     Archived,
     Created(Box<IssueRecord>),
     RequestConflict,

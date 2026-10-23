@@ -173,6 +173,7 @@ async fn qualified_commenters_cover_all_sources_survive_rebuild_and_follow_sourc
             write::<CreateIssue>(
                 &cell,
                 CreateIssueInput {
+                    metadata: Default::default(),
                     submission_id: *Uuid::now_v7().as_bytes(),
                     author: owner.clone(),
                     title: format!("Issue {number}"),
@@ -186,6 +187,7 @@ async fn qualified_commenters_cover_all_sources_survive_rebuild_and_follow_sourc
             write::<CreatePull>(
                 &cell,
                 CreatePullInput {
+                    metadata: Default::default(),
                     submission_id: *Uuid::now_v7().as_bytes(),
                     author: owner.clone(),
                     draft: false,
@@ -461,6 +463,7 @@ async fn qualified_commenters_cover_all_sources_survive_rebuild_and_follow_sourc
         write::<CreateIssue>(
             &cell,
             CreateIssueInput {
+                metadata: Default::default(),
                 submission_id: *Uuid::now_v7().as_bytes(),
                 author: owner.clone(),
                 title: "New discussion".into(),

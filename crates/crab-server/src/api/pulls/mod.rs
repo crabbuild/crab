@@ -400,6 +400,8 @@ fn current_branches(
 #[serde(deny_unknown_fields)]
 struct NewPull {
     #[serde(default)]
+    metadata: crate::cells::repository::collaboration::creation::Selection,
+    #[serde(default)]
     draft: bool,
     request_id: String,
     title: String,
@@ -413,7 +415,7 @@ async fn create(
     Extension(principal): Extension<Principal>,
     Path(key): Path<(String, String)>,
     input: std::result::Result<Json<NewPull>, JsonRejection>,
-) -> Result<impl IntoResponse> {
+) -> Result<axum::response::Response> {
     let repo = app::repository(&server, &principal, &key)?;
     let repo = repo.as_ref();
     let Json(input) = input?;
@@ -424,59 +426,33 @@ async fn create(
     if input.base_ref == input.head_ref {
         return Err(Error::Invalid("Base and head branches must differ"));
     }
-    if let Some(pull) = storage::pull_submission(&server, repo, &request_id).await? {
-        // Native submission validation compares the original payload, even when
-        // the current PR body or readiness changed after creation.
-        let pull = storage::create_pull(
-            &server,
-            repo,
-            NewPullRequest {
-                draft: input.draft,
-                author: actor.clone(),
-                request_id,
-                title,
-                body: input.body,
-                base_ref: input.base_ref,
-                head_ref: input.head_ref,
-                base_oid: pull.base_oid,
-                head_oid: pull.head_oid,
-            },
-        )
-        .await?;
+    let metadata =
+        super::discussion_creation::resolve(&server, &principal, repo, input.metadata).await?;
+    let existing = storage::pull_submission(&server, repo, &request_id).await?;
+    let (repository, base_oid, head_oid) = if let Some(pull) = existing {
+        // Recovery keeps the original comparison even after branch movement or
+        // deletion. Git reads enrich the response; they cannot rebind its intent.
         let repository = repo
             .open_current(&server, RepositoryOptions::default(), &server.cancellation)
             .await
             .ok();
-        let current = repository
-            .as_ref()
-            .and_then(|repository| current_branches(repository, &pull));
-        return Ok((
-            StatusCode::CREATED,
-            Json(
-                pull_view(
-                    pull.number,
-                    &actor,
-                    &server,
-                    repo,
-                    &principal,
-                    current.as_ref(),
-                )
-                .await?,
-            ),
-        ));
-    }
-    let repository = repo
-        .open_current(&server, RepositoryOptions::default(), &server.cancellation)
-        .await?;
-    let base_oid = resolve_branch(&repository, &input.base_ref)?;
-    let head_oid = resolve_branch(&repository, &input.head_ref)?;
-    if base_oid == head_oid {
-        return Err(Error::Invalid("Head branch has no commits to compare"));
-    }
-    let pull = storage::create_pull(
+        (repository, pull.base_oid, pull.head_oid)
+    } else {
+        let repository = repo
+            .open_current(&server, RepositoryOptions::default(), &server.cancellation)
+            .await?;
+        let base_oid = resolve_branch(&repository, &input.base_ref)?;
+        let head_oid = resolve_branch(&repository, &input.head_ref)?;
+        if base_oid == head_oid {
+            return Err(Error::Invalid("Head branch has no commits to compare"));
+        }
+        (Some(repository), base_oid, head_oid)
+    };
+    let result = storage::create_pull(
         &server,
         repo,
         NewPullRequest {
+            metadata,
             draft: input.draft,
             author: actor.clone(),
             request_id,
@@ -488,8 +464,16 @@ async fn create(
             head_oid,
         },
     )
-    .await?;
-    let current = current_branches(&repository, &pull);
+    .await;
+    let pull = match result {
+        Err(Error::CreationRejected(reason)) => {
+            return Ok(super::write::rejected(Error::CreationRejected(reason)));
+        }
+        other => other?,
+    };
+    let current = repository
+        .as_ref()
+        .and_then(|repository| current_branches(repository, &pull));
     Ok((
         StatusCode::CREATED,
         Json(
@@ -503,7 +487,8 @@ async fn create(
             )
             .await?,
         ),
-    ))
+    )
+        .into_response())
 }
 
 async fn detail(

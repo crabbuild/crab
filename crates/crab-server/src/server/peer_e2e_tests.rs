@@ -157,6 +157,7 @@ async fn qualify_handoff(
     let cell = first.cells.client.repository(repository).unwrap();
     cell.client.initialize(repository).await.unwrap();
     let input = CreateIssueInput {
+        metadata: Default::default(),
         submission_id: [1; 16],
         author: RepositoryAuthor {
             issuer: "https://identity.test".into(),

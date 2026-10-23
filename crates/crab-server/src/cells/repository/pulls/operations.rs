@@ -21,6 +21,7 @@ impl Mutation for CreatePull {
         }
         lifecycle::ensure_ready(context)?;
         validate_create_pull(&input)?;
+        input.metadata.selection.validate()?;
         let digest = create_pull_digest(&input);
         let existing = context.sql(&SqlBatch { statements: vec![statement(
             "SELECT payload_digest, pull_number FROM repository_pull_submissions WHERE request_id = ?",
@@ -36,6 +37,29 @@ impl Mutation for CreatePull {
                 )?),
             )));
         }
+        use crate::cells::repository::collaboration::{Subject, SubjectKind, creation};
+        let comparison = Some(creation::Comparison {
+            base_oid: input.base_oid.clone(),
+            head_oid: input.head_oid.clone(),
+        });
+        match input.metadata.resolve(
+            context,
+            SubjectKind::Pull,
+            input.submission_id,
+            digest,
+            comparison,
+        )? {
+            creation::Resolution::Ready => {}
+            creation::Resolution::Rejected(reason) => {
+                return Ok(MutationResult::Success(
+                    CreatePullOutcome::MetadataRejected(reason),
+                ));
+            }
+            creation::Resolution::Conflict => {
+                return Ok(MutationResult::Rejected(CreatePullOutcome::RequestConflict));
+            }
+        }
+        let milestone = input.metadata.selection.milestone;
         let sequence = context.sql(&SqlBatch { statements: vec![
             statement("UPDATE repository_sequences SET last = last + 1 WHERE kind = 'pull' AND last < 9007199254740991", vec![]),
             statement("SELECT last FROM repository_sequences WHERE kind = 'pull'", vec![]),
@@ -58,8 +82,8 @@ impl Mutation for CreatePull {
             base_oid: input.base_oid,
             head_ref: input.head_ref,
             head_oid: input.head_oid,
-            label_ids: vec![],
-            assignees: vec![],
+            label_ids: input.metadata.selection.label_ids,
+            assignees: input.metadata.eligible,
             merge_pending: None,
             merge: None,
             review_decisions: vec![],
@@ -83,6 +107,15 @@ impl Mutation for CreatePull {
             number: record.number,
         };
         activity::append(context, target, &record.author, Action::Created)?;
+        creation::assign_milestone(
+            context,
+            Subject {
+                kind: SubjectKind::Pull,
+                number: record.number,
+            },
+            &record.author,
+            milestone,
+        )?;
         Ok(MutationResult::Success(CreatePullOutcome::Created(
             Box::new(record),
         )))
@@ -248,7 +281,7 @@ impl Read for GetPullSubmission {
     const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 16;
     type Input = PullSubmissionKey;
-    type Output = Option<PullRecord>;
+    type Output = Option<crate::cells::repository::collaboration::creation::Comparison>;
 
     fn execute(
         context: &mut Transaction<'_>,
@@ -265,14 +298,28 @@ impl Read for GetPullSubmission {
                 vec![SqlValue::Blob(key.submission_id.to_vec())],
             )],
         })?;
-        result[0]
+        let record = result[0]
             .rows
             .first()
             .map(|row| result_u64_from_row(row, 0))
             .transpose()?
             .map(|number| load_pull_query(context, number))
             .transpose()
-            .map(Option::flatten)
+            .map(Option::flatten)?;
+        if let Some(record) = record {
+            return Ok(Some(
+                crate::cells::repository::collaboration::creation::Comparison {
+                    base_oid: record.base_oid,
+                    head_oid: record.head_oid,
+                },
+            ));
+        }
+        // A rejected creation also keeps its original tips so branch movement
+        // cannot rebind an unknown response to a different comparison.
+        crate::cells::repository::collaboration::creation::rejected_comparison(
+            context,
+            key.submission_id,
+        )
     }
 }
 
@@ -391,5 +438,6 @@ fn create_pull_digest(input: &CreatePullInput) -> blake3::Hash {
     if input.draft {
         hasher.update(b"draft\0");
     }
+    input.metadata.selection.hash(&mut hasher);
     hasher.finalize()
 }

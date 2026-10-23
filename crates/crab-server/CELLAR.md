@@ -807,3 +807,27 @@ Deploy serving peers and embedded UI together: private search inputs carry
 optional captured source context and private rollup inputs carry a source token.
 There is no old-input decoder, canonical review migration, new environment
 option, dependency override or implicit preparation.
+
+## Initial discussion metadata
+
+Issue and PR create requests accept optional `metadata` containing `label_ids`,
+`assignee_ids` and `milestone`. The HTTP owner normalizes IDs and resolves current
+triage/roster authority; the native creation owner validates active targets before
+number allocation. Creation, initial label/assignee snapshots, milestone assignment,
+progress, activity, search projections and successful submission reservations share
+one transaction. New discussions retain version one.
+
+Selection IDs add tagged digest terms; an empty selection adds none. Existing
+successful text-only reservations keep their identity and return current records,
+without reapplying the original metadata. Actor/assignee display names and current
+permission snapshots do not change that identity. Metadata rejections have a
+permanent digest-bound KV decision; the same request cannot execute after later
+permission/target changes. Only that authoritative outcome receives the proven
+rejection header. Other failures retain uncertain client intent.
+
+PR creation comparison reads now return only original base/head tips, including
+those captured by a metadata rejection. Recovery cannot rebind an unknown request
+to moved/deleted branches. Upgrade all peers together for the changed private
+create inputs and read-16 output; mixed private DTOs are unsupported. No DDL,
+search-index format change, explicit preparation or serving compatibility reader
+was added. The existing native grant-cutover and pinned-runtime limitations remain.

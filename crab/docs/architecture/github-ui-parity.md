@@ -1629,3 +1629,78 @@ The final isolated receipt is run `2327dd61-3205-4a7a-a99c-dbcb2097c266`
 The same binary is running in the preserved local preview. Native qualification
 used keyboard activation after screenshot capture; pointer interactions and
 accessibility were covered by the browser suite.
+
+## Initial metadata in discussion creation
+
+Issue and PR create forms now share a shadcn Field/Input/Editor composition and a
+Geist metadata sidebar. Maintainers select labels, stable-ID assignees and an
+open/closed milestone before submission. Searches cover the repository catalogs;
+label descriptions and public assignee handles are searchable. Users without triage
+access cannot select initial metadata through the existing capability read.
+The PR create/draft choice is a split dropdown, and comparison selectors use the
+shared native-select primitive. Mobile places the content before metadata and
+keeps base/head controls together.
+
+`components/discussion/create/` owns the shared form, local metadata draft and
+submission intent. Uncertain responses lock the exact UUID, title/body, selected
+IDs, branch refs and draft mode; retry does not read revised form values. Unmarked
+403 responses cannot release that intent. A proven native metadata rejection
+requires explicit Review inputs and a fresh UUID. This is retained form state,
+not complete cross-navigation/session draft storage; draft restoration and other
+create-form parity requirements remain open.
+
+The native `collaboration/creation/` owner validates before numbering and commits
+initial labels/assignees, the canonical milestone writer, progress, activity and
+search with creation. New discussions remain version one. ID-bound metadata
+rejections cannot become creations after later grants or target creation. Existing
+successful public submissions keep their digest when initial metadata is absent;
+replay returns current records without resetting subsequent assignments. A private
+PR comparison read preserves original tips for both applied and metadata-rejected
+submissions, so branch changes cannot redefine recovery. It returns the smallest
+shape its HTTP caller needs. These private input/read DTOs require coordinated
+peer deployment; canonical schemas and existing records are unchanged.
+
+`features/milestones/choices.tsx` now owns the searchable choice UI shared by create
+and existing-discussion editors. Superseded raw form/input and draft-checkbox styles
+were removed. Legacy select styling excludes the shadcn primitive so its built-in
+chevron padding remains intact. Recovery feedback uses one callout.
+
+GitHub's [issue creation](https://docs.github.com/en/issues/tracking-your-work-with-issues/using-issues/creating-an-issue)
+and [PR creation](https://docs.github.com/en/pull-requests/how-tos/create-pull-requests/creating-a-pull-request)
+are the layout/interaction references. Issue types, Projects, templates, saved
+browser/server drafts and the remaining foundation checklist are still delivery
+work. This slice does not establish complete GitHub parity or resolve the pinned
+Cellar release blocker.
+
+
+Verification on 2026-10-22: 490 native library tests passed (six existing opt-in
+qualifications ignored), all 13 CLI tests, 107 UI unit tests and all 173 browser
+scenarios passed. Strict all-target Clippy, architecture gates, Rust/UI format and
+the frontend/embedded build passed. The macOS debug linker emitted its existing
+large-unwind-section warning; no Rust/Clippy diagnostics remain.
+
+Real RustFS/OIDC upgrade run `27351300-e16d-4e51-93a5-9a200308b443` used the
+pre-feature binary to create plain issue/PR submissions, then changed their
+metadata and upgraded. Both original public submissions replayed without resetting
+those later edits. Final embedded build run
+`6ad210af-2e0e-4226-b4dd-fd13de7ca591` created one new issue and one draft PR
+through the browser with all initial selections. A lost response followed by an
+unmarked 403 retained identical UUID/payload across three attempts; progress was
+four open discussions, without duplicate creation. Process restart preserved
+metadata and activity. Settled desktop/mobile dark screenshots were inspected.
+Final binary SHA-256:
+`8ce1f344b37674433e5a7b78f6f23b038a41d2fa68b85796036c18febf1e3cc8`.
+
+The same binary now serves the local preview. Its first existing-issue read after
+restart returned 503 from the Cellar LTX output durability gate; a subsequent read
+recovered without another restart. The final comparison preserved all 20 public
+resources and all 39 canonical tables per Repository Cell. Only read revisions
+advanced; no profile was enrolled or organization created. This recovery is not
+proof that the pinned runtime release blocker is fixed.
+
+The feature adds about 968 net production source lines. The new native owner
+centralizes both create writers' metadata validation and permanent decisions;
+the shared form, pickers and retry intent replace duplicate create paths. The
+milestone chooser is reused by creation and existing-discussion editing. This is
+new behavior with transaction/recovery coverage, rather than a size-neutral
+reorganization. No dependency, lockfile, canonical schema or index baseline changed.

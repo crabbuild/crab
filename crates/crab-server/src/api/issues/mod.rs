@@ -166,6 +166,8 @@ async fn list(
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NewIssue {
+    #[serde(default)]
+    metadata: crate::cells::repository::collaboration::creation::Selection,
     request_id: String,
     title: String,
     body: String,
@@ -176,12 +178,14 @@ async fn create(
     Extension(principal): Extension<Principal>,
     Path(key): Path<(String, String)>,
     input: std::result::Result<Json<NewIssue>, JsonRejection>,
-) -> Result<impl IntoResponse> {
+) -> Result<Response> {
     let repo = repository(&server, &principal, &key)?;
     let Json(input) = input?;
     let author = actor(&principal)?;
     let title = title(&input.title)?;
     body(&input.body, false)?;
+    let metadata =
+        super::discussion_creation::resolve(&server, &principal, &repo, input.metadata).await?;
     let routed = crate::app::repository_cell(&server, &repo)?;
     let committed = routed
         .client
@@ -189,6 +193,7 @@ async fn create(
             &routed.target,
             crate::app::mutation_identity()?,
             CreateIssueInput {
+                metadata,
                 submission_id: app::submission_id(&input.request_id)?,
                 author: crate::cells::repository::RepositoryAuthor::from(&author),
                 title,
@@ -200,6 +205,9 @@ async fn create(
     let minimum = Some(committed.receipt);
     let output = committed.output;
     let issue = match output {
+        CreateIssueOutcome::MetadataRejected(reason) => {
+            return Ok(super::write::rejected(Error::CreationRejected(reason)));
+        }
         CreateIssueOutcome::Archived => return Err(Error::Archived),
         CreateIssueOutcome::Created(issue) => issue,
         CreateIssueOutcome::RequestConflict => return Err(Error::RequestConflict),
@@ -214,7 +222,7 @@ async fn create(
         event = "application_response_prepared",
         elapsed_us = enrichment_started.elapsed().as_micros(),
     );
-    Ok(response)
+    Ok(response.into_response())
 }
 
 #[derive(Default, Deserialize)]

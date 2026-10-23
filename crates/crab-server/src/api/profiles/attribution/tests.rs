@@ -17,6 +17,7 @@ async fn authors_use_current_public_profiles_without_exposing_private_keys_or_ch
             repo,
             crate::app::mutation_identity().unwrap(),
             CreateIssueInput {
+                metadata: Default::default(),
                 submission_id: *uuid::Uuid::now_v7().as_bytes(),
                 author: RepositoryAuthor {
                     issuer: h.provider.issuer.clone(),
@@ -149,6 +150,7 @@ async fn authors_use_current_public_profiles_without_exposing_private_keys_or_ch
                 repo,
                 crate::app::mutation_identity().unwrap(),
                 CreatePullInput {
+                    metadata: Default::default(),
                     submission_id: *uuid::Uuid::now_v7().as_bytes(),
                     author: RepositoryAuthor {
                         issuer,

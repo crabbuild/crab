@@ -14,6 +14,7 @@ async fn seed(h: &Harness) -> uuid::Uuid {
             &cell.target,
             crate::app::mutation_identity().unwrap(),
             CreatePullInput {
+                metadata: Default::default(),
                 draft: true,
                 submission_id: *submission.as_bytes(),
                 author: RepositoryAuthor {
@@ -248,6 +249,7 @@ async fn merge_recovery_after_archive(published: bool) {
             &cell.target,
             crate::app::mutation_identity().unwrap(),
             CreatePullInput {
+                metadata: Default::default(),
                 draft: false,
                 submission_id: *uuid::Uuid::now_v7().as_bytes(),
                 author: (&actor).into(),

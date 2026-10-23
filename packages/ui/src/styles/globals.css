@@ -39,7 +39,7 @@ button,
 select {
   cursor: pointer;
 }
-select {
+select:not([data-slot="native-select"]) {
   color: var(--foreground);
   background: var(--background);
   border: 1px solid var(--border);
@@ -1496,8 +1496,7 @@ main {
   flex-wrap: wrap;
 }
 .pull-branches code,
-.pull-summary code,
-.compare-picker label {
+.pull-summary code {
   border-radius: var(--radius);
   background: color-mix(in srgb, var(--info) 10%, transparent);
   padding: 2px 6px;
@@ -1508,55 +1507,16 @@ main {
   border-bottom: 1px solid var(--border);
 }
 .compare-picker {
-  display: flex;
+  display: grid;
+  grid-template-columns: repeat(4, max-content);
+  justify-content: start;
   align-items: center;
-  flex-wrap: wrap;
   gap: 12px;
   padding: 16px;
   margin-bottom: 16px;
   background: var(--muted);
 }
-.compare-picker label {
-  display: inline-flex;
-  align-items: center;
-  gap: 5px;
-  color: var(--muted-foreground);
-  font-size: 12px;
-  font-weight: 600;
-}
-.compare-picker select {
-  border: 0;
-  padding: 2px;
-  color: var(--foreground);
-  background: transparent;
-  font-weight: 600;
-}
-.pull-form {
-  padding: 20px;
-  margin: 20px 0 28px;
-}
-.pull-form h3 {
-  margin-top: 0;
-}
-.pull-form > label {
-  display: block;
-  margin: 12px 0 6px;
-  font-weight: 600;
-}
-.pull-form > input {
-  width: 100%;
-  margin-bottom: 16px;
-  padding: 10px 12px;
-  color: var(--foreground);
-  background: var(--background);
-  border: 1px solid var(--border);
-  border-radius: var(--radius);
-  font: inherit;
-}
-.pull-form > input:focus {
-  outline: 2px solid var(--ring);
-  outline-offset: 0;
-}
+
 .pull-title {
   padding-bottom: 20px;
 }
@@ -2051,15 +2011,21 @@ main {
     font-size: 24px;
   }
   .compare-picker {
+    grid-template-columns: minmax(0, 1fr) minmax(0, 1fr);
+    justify-content: stretch;
+  }
+  .compare-picker > svg,
+  .compare-picker > span[aria-hidden] {
+    display: none;
+  }
+  .compare-picker > [data-slot="field"] {
+    width: 100%;
+    flex-direction: column;
     align-items: stretch;
   }
-  .compare-picker label {
+  .compare-picker [data-slot="native-select-wrapper"] {
     width: 100%;
-    justify-content: space-between;
-  }
-  .compare-picker select {
-    min-width: 0;
-    max-width: 70%;
+    max-width: 100%;
   }
   .pull-tabs a {
     flex: 0 0 auto;
@@ -2481,7 +2447,8 @@ main {
   white-space: nowrap;
   box-shadow: inset 0 0 0 1px rgb(0 0 0 / 15%);
 }
-.discussion-detail-layout {
+.discussion-detail-layout,
+.discussion-create-layout {
   display: grid;
   grid-template-columns: minmax(0, 1fr) 260px;
   align-items: start;
@@ -3000,12 +2967,16 @@ main {
   .label-row-edit {
     grid-template-columns: 1fr;
   }
-  .discussion-detail-layout {
+  .discussion-detail-layout,
+  .discussion-create-layout {
     grid-template-columns: 1fr;
     gap: 20px;
   }
   .discussion-metadata {
     grid-row: 1;
+  }
+  .discussion-create-layout > .discussion-metadata {
+    grid-row: auto;
   }
 }
 
@@ -6722,11 +6693,7 @@ main {
 .pull-status-icon.draft {
   color: var(--muted-foreground);
 }
-.pull-form > .pull-draft-option {
-  display: flex;
-  align-items: center;
-  gap: 8px;
-}
+
 .pull-readiness-control {
   padding: 12px 16px;
 }

@@ -20,6 +20,7 @@ impl Mutation for SeedSubjects {
             let outcome = CreateIssue::execute(
                 context,
                 CreateIssueInput {
+                    metadata: Default::default(),
                     submission_id: *Uuid::from_u128(number.into()).as_bytes(),
                     author: RepositoryAuthor {
                         issuer: "https://identity.test".into(),
@@ -204,6 +205,7 @@ async fn explicit_mapping_preserves_records_and_progress_across_native_frames() 
     let retried = write::<CreateIssue>(
         &cell,
         CreateIssueInput {
+            metadata: Default::default(),
             submission_id: *Uuid::from_u128(1).as_bytes(),
             author: RepositoryAuthor {
                 issuer: "https://identity.test".into(),

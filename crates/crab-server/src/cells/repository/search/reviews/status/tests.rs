@@ -34,6 +34,7 @@ async fn pull(cell: &RepositoryCell, number: u64) {
         write::<CreatePull>(
             cell,
             CreatePullInput {
+                metadata: Default::default(),
                 draft: false,
                 submission_id: *Uuid::now_v7().as_bytes(),
                 author: actor("Alice"),
@@ -203,6 +204,7 @@ async fn review_status_counts_follow_current_decisions_and_preserve_mixed_boolea
     write::<CreateIssue>(
         &cell,
         CreateIssueInput {
+            metadata: Default::default(),
             submission_id: *Uuid::now_v7().as_bytes(),
             author: actor("Alice"),
             title: "Unrelated issue".into(),

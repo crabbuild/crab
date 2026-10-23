@@ -18,6 +18,7 @@ async fn seed(h: &Harness) {
             &cell.target,
             crate::app::mutation_identity().unwrap(),
             CreatePullInput {
+                metadata: Default::default(),
                 draft: false,
                 submission_id: *uuid::Uuid::now_v7().as_bytes(),
                 author: RepositoryAuthor {

@@ -23,6 +23,8 @@ pub(crate) const MAX_NUMBER: u64 = 9_007_199_254_740_991;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
+    #[error("Initial discussion metadata was rejected: {0:?}")]
+    CreationRejected(crate::cells::repository::collaboration::creation::Failure),
     #[error("Git references are being indexed. Retry shortly")]
     ReviewIndexPending,
     #[error("Sign in to use account features")]
@@ -426,6 +428,28 @@ impl IntoResponse for Error {
                 "submission_conflict",
                 "This submission ID was already used for different content; check the existing result before submitting again",
             ),
+            Self::CreationRejected(reason) => match reason {
+                crate::cells::repository::collaboration::creation::Failure::Forbidden => (
+                    StatusCode::FORBIDDEN,
+                    "creation_rejected",
+                    "Triage access is required to set initial discussion metadata",
+                ),
+                crate::cells::repository::collaboration::creation::Failure::Labels => (
+                    StatusCode::BAD_REQUEST,
+                    "creation_rejected",
+                    "An initial label is no longer available",
+                ),
+                crate::cells::repository::collaboration::creation::Failure::Assignees => (
+                    StatusCode::BAD_REQUEST,
+                    "creation_rejected",
+                    "An initial assignee is no longer available",
+                ),
+                crate::cells::repository::collaboration::creation::Failure::Milestone => (
+                    StatusCode::BAD_REQUEST,
+                    "creation_rejected",
+                    "The initial milestone is no longer available",
+                ),
+            },
             Self::ReviewIndexPending => (
                 StatusCode::SERVICE_UNAVAILABLE,
                 "review_index_pending",

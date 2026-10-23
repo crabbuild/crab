@@ -1,71 +1,68 @@
 import { repoHref } from "@/lib/repository-route";
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
-
-import { endpoint, navigate, type Repository } from "@/lib/api";
+import { navigate, type Repository } from "@/lib/api";
 import { Link } from "@/components/navigation/link";
-import { useMutation } from "@/components/discussion/mutations";
-
-import { Editor } from "@/components/discussion/editor";
-import { Failure } from "@/components/discussion/failure";
-import { useSubmission } from "@/components/discussion/hooks";
-
-import { Issue } from "./model";
+import { CreationForm } from "@/components/discussion/create/form";
+import {
+  selection,
+  type MetadataDraft,
+} from "@/components/discussion/create/metadata";
+import { useCreateSubmission } from "@/components/discussion/create/submission";
+import type { Issue } from "./model";
 
 export function NewIssue({ repo, csrf }: { repo: Repository; csrf: string }) {
   const [title, setTitle] = useState("");
   const [body, setBody] = useState("");
-  const mutation = useMutation(csrf, repo);
-  const submission = useSubmission();
+  const [metadata, setMetadata] = useState<MetadataDraft>({
+    labels: [],
+    assignees: [],
+    milestone: null,
+  });
+  const creation = useCreateSubmission<Issue>({
+    repo,
+    kind: "issues",
+    csrf,
+    onCreated: (issue) =>
+      navigate(repoHref(repo, { view: "issues", issue: String(issue.number) })),
+  });
   return (
-    <section className="discussion-compose issues-page">
+    <section className="issues-page">
       <Link href={repoHref(repo, { view: "issues" })}>← Back to issues</Link>
-      <h2>New issue</h2>
-      <form
-        onSubmit={async (event) => {
+      <h2 className="mt-4">New issue</h2>
+      <CreationForm
+        repo={repo}
+        title={title}
+        body={body}
+        onTitle={setTitle}
+        onBody={setBody}
+        metadata={metadata}
+        onMetadata={setMetadata}
+        disabled={creation.locked}
+        error={creation.error}
+        recovering={creation.recovering}
+        rejected={creation.rejected}
+        onReview={creation.review}
+        onSubmit={(event) => {
           event.preventDefault();
-          const input = { title, body };
-          const issue = await mutation.run<Issue>(
-            endpoint(repo, "issues"),
-            "POST",
-            { ...input, request_id: submission(input) },
-          );
-          if (issue)
-            navigate(
-              repoHref(repo, { view: "issues", issue: String(issue.number) }),
-            );
+          const input = { title, body, metadata: selection(metadata) };
+          void creation.submit(input);
         }}
       >
-        <label htmlFor="issue-title">Title</label>
-        <input
-          id="issue-title"
-          autoFocus
-          required
-          maxLength={256}
-          value={title}
-          onChange={(event) => setTitle(event.target.value)}
-          disabled={mutation.pending}
-          placeholder="A short, descriptive title"
-        />
-        <Editor
-          id="issue-description"
-          label="Description"
-          value={body}
-          onChange={setBody}
-          disabled={mutation.pending}
-        />
-        <Failure message={mutation.error} />
-        <div className="discussion-actions">
-          <Button
-            type="submit"
-            variant="default"
-            disabled={mutation.pending || !title.trim()}
-          >
-            {mutation.pending ? "Creating issue…" : "Create issue"}
-          </Button>
+        <Button variant="outline" asChild>
           <Link href={repoHref(repo, { view: "issues" })}>Cancel</Link>
-        </div>
-      </form>
+        </Button>
+        <Button
+          type="submit"
+          disabled={creation.pending || creation.rejected || !title.trim()}
+        >
+          {creation.pending
+            ? "Creating issue…"
+            : creation.recovering
+              ? "Retry original submission"
+              : "Create issue"}
+        </Button>
+      </CreationForm>
     </section>
   );
 }

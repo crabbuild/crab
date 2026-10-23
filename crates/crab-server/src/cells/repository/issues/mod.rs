@@ -27,6 +27,7 @@ impl Mutation for CreateIssue {
         validate_author(&input.author)?;
         validate_title(&input.title)?;
         validate_body(&input.body, false)?;
+        input.metadata.selection.validate()?;
         let payload_digest = issue_submission_digest(&input);
         let reservation = context.sql(&SqlBatch {
             statements: vec![statement(
@@ -54,6 +55,27 @@ impl Mutation for CreateIssue {
                 Box::new(issue_from_row(issue)?),
             )));
         }
+        use crate::cells::repository::collaboration::{Subject, SubjectKind, creation};
+        match input.metadata.resolve(
+            context,
+            SubjectKind::Issue,
+            input.submission_id,
+            payload_digest,
+            None,
+        )? {
+            creation::Resolution::Ready => {}
+            creation::Resolution::Rejected(reason) => {
+                return Ok(MutationResult::Success(
+                    CreateIssueOutcome::MetadataRejected(reason),
+                ));
+            }
+            creation::Resolution::Conflict => {
+                return Ok(MutationResult::Rejected(
+                    CreateIssueOutcome::RequestConflict,
+                ));
+            }
+        }
+        let milestone = input.metadata.selection.milestone;
         let now = timestamp(context.now_ms())?;
         let sequence = context.sql(&SqlBatch {
             statements: vec![
@@ -79,8 +101,8 @@ impl Mutation for CreateIssue {
             title: input.title,
             body: input.body,
             state: 0,
-            label_ids: vec![],
-            assignees: vec![],
+            label_ids: input.metadata.selection.label_ids,
+            assignees: input.metadata.eligible,
             version: 1,
             created_at_ms: now,
             updated_at_ms: now,
@@ -102,6 +124,15 @@ impl Mutation for CreateIssue {
             number: record.number,
         };
         activity::append(context, target, &record.author, Action::Created)?;
+        creation::assign_milestone(
+            context,
+            Subject {
+                kind: SubjectKind::Issue,
+                number: record.number,
+            },
+            &record.author,
+            milestone,
+        )?;
         Ok(MutationResult::Success(CreateIssueOutcome::Created(
             Box::new(record),
         )))

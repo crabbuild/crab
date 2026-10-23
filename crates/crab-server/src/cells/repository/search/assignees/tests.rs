@@ -130,6 +130,7 @@ async fn historical_choice_catalog_is_bounded_deduplicated_and_tracks_last_assig
                 &cell.target,
                 crate::app::mutation_identity().unwrap(),
                 CreateIssueInput {
+                    metadata: Default::default(),
                     submission_id: *Uuid::now_v7().as_bytes(),
                     author: actor.clone(),
                     title: format!("Work {number}"),

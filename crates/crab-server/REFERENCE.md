@@ -2577,3 +2577,11 @@ submissions, restart and team name reuse. Desktop and actual mobile dark screens
 were inspected. The local preview preserves all 18 public repository resources
 and 39 canonical tables per repository Cell. These results qualify the standalone
 team slice; they do not complete hierarchy, repository authority or Projects.
+
+Initial issue/PR metadata is owned by `cells/repository/collaboration/creation/`
+and composed by `api/discussion_creation/`. Public create bodies optionally include
+`metadata: {label_ids, assignee_ids, milestone}`. Initial values commit atomically at
+record version one. Applied UUIDs recover current records without resetting later
+assignments; metadata rejections remain terminal and permit explicit input review.
+The private PR submission read returns original comparison tips for both outcomes.
+See `CELLAR.md` for coordinated peer DTO deployment and native storage contracts.

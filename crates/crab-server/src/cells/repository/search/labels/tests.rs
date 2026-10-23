@@ -199,6 +199,7 @@ async fn native_label_choices_search_the_whole_catalog_and_follow_assignments_re
         write::<CreateIssue>(
             &cell,
             CreateIssueInput {
+                metadata: Default::default(),
                 submission_id: *Uuid::now_v7().as_bytes(),
                 author: author(),
                 title: "Issue".into(),
@@ -276,6 +277,7 @@ async fn native_label_choices_search_the_whole_catalog_and_follow_assignments_re
     write::<CreatePull>(
         &cell,
         CreatePullInput {
+            metadata: Default::default(),
             submission_id: *Uuid::now_v7().as_bytes(),
             author: author(),
             draft: false,

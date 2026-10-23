@@ -85,6 +85,10 @@ async function setup(page: Page, initialDraft: boolean) {
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
+    if (path.endsWith("/assignees"))
+      return route.fulfill({
+        json: { items: [], can_manage: canManage && !archived },
+      });
     if (path.endsWith("/conversation"))
       return conversationPage(route, { activity: events, head });
     if (path === "/api/session")
@@ -268,7 +272,10 @@ test("draft creation, reload, readiness and conversion expose truthful merge con
   const state = await setup(page, false);
   await page.goto("/team/project/compare/main...feature");
   await page.getByLabel("Title", { exact: true }).fill("Draft proposal");
-  await page.getByRole("checkbox", { name: "Create as draft" }).check();
+  await page.getByRole("button", { name: "Choose pull request mode" }).click();
+  await page
+    .getByRole("menuitemradio", { name: "Create draft pull request" })
+    .click();
   await page
     .getByRole("button", { name: "Create draft pull request", exact: true })
     .click();

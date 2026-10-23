@@ -471,3 +471,12 @@ existing native assignment contracts and adds no storage/schema/dependency path.
 Explicit Apply remains a UX difference; complete create/detail, Projects and
 Milestones parity remains open. See the
 [metadata editor scope and evidence](github-ui-parity.md#searchable-sidebar-metadata-editors).
+
+Initial metadata now crosses the real issue/PR creation boundary. Labels, actor
+assignments and a milestone commit with creation at version one, including native
+progress/search/activity. A shared shadcn/Geist form provides the selections and
+retains uncertain submission identity. Native metadata rejections are terminal;
+comparison tips remain bound to a rejected PR intent as well as a created PR.
+Complete cross-navigation/session drafts, templates, issue types, Projects and the
+remaining Milestones/review inventory remain open. See
+[initial creation metadata](github-ui-parity.md#initial-metadata-in-discussion-creation).
