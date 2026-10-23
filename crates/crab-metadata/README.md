@@ -155,8 +155,12 @@ Protected keys and authenticated closure traversal are tracked separately.
 Complete checkpoint visibility proofs are authenticated once and shared across
 immutable checkpoint clones. Building a checkpoint retains its validated proof;
 control-only readers keep the visibility body cold.
-Checkpoint footer history projects its bounded suffix from validated ordinals
-without rebuilding the complete visibility index.
+Checkpoint footer history projects its recent suffix from validated ordinals
+without rebuilding the complete visibility index. Hints consume only the bytes
+remaining after required control metadata within the 8 MiB footer bound. Large
+transitions remain complete in authenticated visibility pages; missing hints use
+the existing verified Git traversal. Required metadata that cannot fit returns
+`CheckpointFooterSize` so the publication owner can consolidate physical sources.
 
 Retired unshipped checkpoint formats through 8 are rejected without fallback.
 The six published release tags do not contain this capsule codec.

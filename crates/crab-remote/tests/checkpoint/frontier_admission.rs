@@ -2,6 +2,115 @@ use super::*;
 use object_store::ObjectStoreExt;
 
 #[tokio::test]
+async fn checkpoint_admits_member_heavy_sources_below_the_source_count_limit() {
+    let (layout, _) = empty_fixture().await;
+    let (oid, pack) = blob_pack(b"retained through footer admission");
+    let mut packs = vec![pack];
+    for index in 1_u32..512 {
+        packs.push(blob_pack(&index.to_be_bytes()).1);
+    }
+    // Keep runs below the 32-run compaction trigger while exhausting footer bytes.
+    for index in 0..31 {
+        let root = crab_write::capsule_protocol::open_root(&layout)
+            .await
+            .unwrap();
+        let name = format!("refs/tags/alias-{index}");
+        let transaction = CapsuleTransaction::new(
+            root.record().digest(),
+            vec![CapsuleRefEdit::new(&name, None, Some(oid.clone()), None)],
+        )
+        .unwrap();
+        let visibility = CapsuleVisibilityDelta::new(BTreeMap::from([(
+            name,
+            GitVisibilityEdit::from_replacement_objects(None, oid.clone(), vec![oid.clone()]),
+        )]))
+        .unwrap();
+        let capsule = Capsule::build(
+            &transaction,
+            packs.clone(),
+            vec![CapsuleSection::new(
+                CapsuleSectionKind::VisibilityDelta,
+                visibility.encode().unwrap(),
+            )],
+        )
+        .unwrap();
+        crab_write::capsule_protocol::publish(&layout, root, &transaction, &capsule)
+            .await
+            .unwrap();
+    }
+    let maximum = 64 * LIMIT;
+    let limits = CapsuleReadLimits {
+        max_capsule_bytes: maximum,
+        max_frontier_bytes: maximum,
+    };
+    let root = crab_write::capsule_protocol::open_root(&layout)
+        .await
+        .unwrap();
+    let before =
+        crab_read::capsule_protocol::open_view_from_root_with_metadata(&layout, root, limits)
+            .await
+            .unwrap();
+    assert_eq!(before.capsule_run_sources().len(), 31);
+    assert_eq!(
+        before
+            .capsule_run_sources()
+            .iter()
+            .map(|source| source.members().len())
+            .sum::<usize>(),
+        31 * 512,
+    );
+    assert!(
+        serde_json::to_vec(before.capsule_run_sources())
+            .unwrap()
+            .len()
+            > 8 * 1024 * 1024
+    );
+    let outcome = crab_remote::checkpoint::publish_capsule_checkpoint_from_view(
+        &layout,
+        &before,
+        0,
+        maximum,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert!(outcome.published && outcome.pack_bytes_read > 0);
+    let root = crab_write::capsule_protocol::open_root(&layout)
+        .await
+        .unwrap();
+    let after =
+        crab_read::capsule_protocol::open_view_from_root_with_metadata(&layout, root, limits)
+            .await
+            .unwrap();
+    assert_eq!(after.refs(), before.refs());
+    assert_eq!(
+        after.layered_checkpoint().unwrap().sources()[0],
+        before.capsule_run_sources()[0],
+        "footer admission must retain the older source prefix",
+    );
+    let directory = tempfile::tempdir().unwrap();
+    crab_git::initialize_bare_git_dir(directory.path()).unwrap();
+    // The retained aliases exceed the small fixtures' 8 MiB clone budget.
+    // Keep the same admission used to construct this larger repository.
+    let installed = crab_read::capsule_protocol::install_git_packs_from_store(
+        &after,
+        &layout,
+        directory.path(),
+        maximum,
+        None,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    verify_installed_git_blobs(
+        &after,
+        directory.path(),
+        &installed,
+        &[("alias-0", b"retained through footer admission")],
+    );
+}
+
+#[tokio::test]
 async fn paged_checkpoint_placement_keeps_unrelated_pack_indexes_cold() {
     let (layout, observations) = empty_fixture().await;
     for name in ["first", "second", "third", "fourth"] {

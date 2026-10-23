@@ -34,9 +34,14 @@ root through the same publication owner, avoiding duplicate delta preparation.
 
 `checkpoint` separates metadata-first logical publication from physical pack
 maintenance using the layered format only. Foreground admission checkpoints the
-authenticated source directory; only the hard 64-source limit can force a
-suffix roll-up. When admission requires copying bodies, the compressed-byte
-geometric cut amortizes that work across later checkpoints. Keeping a fixed
+authenticated source directory; the hard 64-source or 8 MiB footer limit can
+force a suffix roll-up. Member-heavy runs can exhaust footer bytes before the
+source-count limit. Every publication path admits the required source metadata
+before its root CAS, retaining physical work accounting across consolidation.
+Footer-byte admission replaces the newest member-heavy run, or the smallest
+two-source suffix, until required metadata fits; larger merges remain background
+work. Source-count admission uses the compressed-byte geometric cut to amortize
+work across later checkpoints. Keeping a fixed
 63-source prefix would repeatedly rewrite the growing tail during continuous
 writes. The existing 512 MiB suffix budget still defers a larger geometric
 merge in favor of the minimum consolidation required for format admission.

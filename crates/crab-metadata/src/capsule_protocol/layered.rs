@@ -190,39 +190,56 @@ impl LayeredVisibilitySnapshot {
         visibility_object_set_digest(&self.objects)
     }
 
-    /// Return the bounded recent transition suffix for control-only fetches.
-    ///
-    /// The complete history remains in this compact proof. Only the recent
-    /// suffix is copied into the checkpoint footer; an older have falls back
-    /// to the complete visibility path rather than weakening correctness.
-    pub fn recent_transitions(
+    fn recent_transitions(
         &self,
+        maximum_bytes: usize,
     ) -> Result<BTreeMap<String, Vec<GitVisibilityCheckpointTransition>>> {
         self.validate()?;
-        // The footer needs only a bounded suffix. Restoring the complete
-        // index here duplicates every historical closure and transition.
-        Ok(self
-            .incremental_history
-            .iter()
-            .map(|(name, history)| {
-                let start = history
-                    .len()
-                    .saturating_sub(MAX_CHECKPOINT_FOOTER_TRANSITIONS_PER_REF);
-                let transitions = history[start..]
-                    .iter()
-                    .map(|transition| GitVisibilityCheckpointTransition {
-                        from_oid: encode_oid(&self.objects[transition.from_ordinal as usize]),
-                        to_oid: encode_oid(&self.objects[transition.to_ordinal as usize]),
-                        objects: transition
-                            .objects
-                            .iter()
-                            .map(|ordinal| encode_oid(&self.objects[*ordinal as usize]))
-                            .collect(),
-                    })
-                    .collect();
-                (name.clone(), transitions)
-            })
-            .collect())
+        // Complete history stays in authenticated pages. Footer hints must fit
+        // after mandatory source metadata, even for a single very large push.
+        let mut result = BTreeMap::new();
+        let mut used = 2_usize;
+        for (name, history) in &self.incremental_history {
+            let name_bytes = serde_json::to_vec(name)
+                .map_err(|source| MetadataError::CapsuleVisibilityRecord { source })?;
+            let overhead = name_bytes.len() + 3 + usize::from(!result.is_empty());
+            let mut remaining = maximum_bytes.saturating_sub(used + overhead);
+            let mut transitions = Vec::new();
+            for transition in history
+                .iter()
+                .rev()
+                .take(MAX_CHECKPOINT_FOOTER_TRANSITIONS_PER_REF)
+            {
+                // Each quoted hexadecimal OID needs at least 42 bytes. Check
+                // before expanding ordinals so a hint cannot allocate past its budget.
+                if transition.objects.len() > remaining / 42 {
+                    break;
+                }
+                let transition = GitVisibilityCheckpointTransition {
+                    from_oid: encode_oid(&self.objects[transition.from_ordinal as usize]),
+                    to_oid: encode_oid(&self.objects[transition.to_ordinal as usize]),
+                    objects: transition
+                        .objects
+                        .iter()
+                        .map(|ordinal| encode_oid(&self.objects[*ordinal as usize]))
+                        .collect(),
+                };
+                let encoded = serde_json::to_vec(&transition)
+                    .map_err(|source| MetadataError::CapsuleVisibilityRecord { source })?;
+                let bytes = encoded.len() + usize::from(!transitions.is_empty());
+                if bytes > remaining {
+                    break;
+                }
+                remaining -= bytes;
+                transitions.push(transition);
+            }
+            if !transitions.is_empty() {
+                used = maximum_bytes - remaining;
+                transitions.reverse();
+                result.insert(name.clone(), transitions);
+            }
+        }
+        Ok(result)
     }
 
     /// Encode the proof as canonical authenticated pages.
@@ -1051,11 +1068,6 @@ impl LayeredCheckpoint {
                 member.validate_sources(&sources)?;
             }
         }
-        let visibility_transitions = visibility
-            .as_ref()
-            .map(LayeredVisibilitySnapshot::recent_transitions)
-            .transpose()?
-            .unwrap_or_default();
         let cold_clone_object_set_digest = visibility
             .as_ref()
             .map(LayeredVisibilitySnapshot::object_set_digest);
@@ -1081,7 +1093,7 @@ impl LayeredCheckpoint {
             encoded_visibility,
             cold_clone_object_set_digest,
             cold_clone_object_count,
-            visibility_transitions,
+            visibility.as_ref(),
         )?;
         if let Some(snapshot) = visibility {
             // Source bindings and canonical encoding were validated above.
@@ -1099,7 +1111,7 @@ impl LayeredCheckpoint {
         visibility: Option<(CapsuleSectionKind, Bytes)>,
         cold_clone_object_set_digest: Option<String>,
         cold_clone_object_count: Option<u64>,
-        visibility_transitions: BTreeMap<String, Vec<GitVisibilityCheckpointTransition>>,
+        visibility_snapshot: Option<&LayeredVisibilitySnapshot>,
     ) -> Result<Self> {
         validate_content_hash(
             covered_root_digest,
@@ -1130,7 +1142,7 @@ impl LayeredCheckpoint {
             })
             .transpose()?;
         let control_offset = 0_u64;
-        let footer = CheckpointFooter {
+        let mut footer = CheckpointFooter {
             version: CHECKPOINT_VERSION,
             covered_generation,
             covered_root_digest: covered_root_digest.to_owned(),
@@ -1139,7 +1151,7 @@ impl LayeredCheckpoint {
             sources,
             cold_clone_object_set_digest,
             cold_clone_object_count,
-            visibility_transitions,
+            visibility_transitions: BTreeMap::new(),
             visibility_pages,
             catalog,
         };
@@ -1147,15 +1159,22 @@ impl LayeredCheckpoint {
         for source in &footer.sources {
             source.validate()?;
         }
-        let footer_bytes = serde_json::to_vec(&footer).map_err(|source| {
+        let mut footer_bytes = serde_json::to_vec(&footer).map_err(|source| {
             MetadataError::Internal(format!(
                 "layered checkpoint footer serialization failed: {source}"
             ))
         })?;
         if footer_bytes.len() > MAX_CHECKPOINT_FOOTER_BYTES {
-            return Err(contract_error(
-                "layered checkpoint footer exceeds its size bound",
-            ));
+            return Err(MetadataError::CheckpointFooterSize {
+                bytes: footer_bytes.len(),
+                maximum: MAX_CHECKPOINT_FOOTER_BYTES,
+            });
+        }
+        if let Some(snapshot) = visibility_snapshot {
+            footer.visibility_transitions = snapshot
+                .recent_transitions(MAX_CHECKPOINT_FOOTER_BYTES - footer_bytes.len() + 2)?;
+            footer_bytes = serde_json::to_vec(&footer)
+                .map_err(|source| MetadataError::CapsuleVisibilityRecord { source })?;
         }
         body.extend_from_slice(&footer_bytes);
         body.extend_from_slice(&(footer_bytes.len() as u64).to_be_bytes());
@@ -2238,8 +2257,65 @@ mod tests {
         }
         let snapshot = LayeredVisibilitySnapshot::from_index(&index, &"3".repeat(64)).unwrap();
         assert_eq!(
-            snapshot.recent_transitions().unwrap(),
+            snapshot
+                .recent_transitions(MAX_CHECKPOINT_FOOTER_BYTES)
+                .unwrap(),
             index.recent_checkpoint_history()
+        );
+        let complete = index.recent_checkpoint_history();
+        for budget in [2, 50, 512, 4096] {
+            let bounded = snapshot.recent_transitions(budget).unwrap();
+            assert!(serde_json::to_vec(&bounded).unwrap().len() <= budget);
+            for (name, history) in bounded {
+                let all = &complete[&name];
+                assert_eq!(history, all[all.len() - history.len()..]);
+            }
+        }
+    }
+
+    #[test]
+    fn large_transition_stays_in_visibility_pages_without_overflowing_footer() {
+        let name = "refs/heads/main";
+        let oid = |value: u32| format!("{value:040x}");
+        let mut index = GitVisibilityIndex::new(
+            1,
+            "1".repeat(64),
+            "2".repeat(64),
+            BTreeMap::from([(name.to_owned(), vec![oid(1)])]),
+        )
+        .unwrap();
+        index
+            .apply_ref_edit(
+                name.to_owned(),
+                &crate::git_visibility::GitVisibilityEdit::from_delta_objects(
+                    Some(oid(1)),
+                    oid(2),
+                    (2..250_000).map(oid).collect(),
+                    Vec::new(),
+                ),
+            )
+            .unwrap();
+        let source = PackLayer::build(&pack())
+            .unwrap()
+            .source_descriptor()
+            .unwrap();
+        let digest = source_catalog_digest(std::slice::from_ref(&source)).unwrap();
+        let snapshot = LayeredVisibilitySnapshot::from_index(&index, &digest).unwrap();
+        let checkpoint = LayeredCheckpoint::build(
+            1,
+            &"3".repeat(64),
+            vec![source],
+            PointerCatalog::new(),
+            Some(snapshot.clone()),
+        )
+        .unwrap();
+        let decoded = LayeredCheckpoint::decode(checkpoint.bytes().clone()).unwrap();
+        assert_eq!(
+            (
+                decoded.visibility_transitions().is_empty(),
+                decoded.visibility_ordinal_snapshot().unwrap(),
+            ),
+            (true, Some(&snapshot)),
         );
     }
 

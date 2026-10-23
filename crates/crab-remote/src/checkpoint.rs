@@ -21,7 +21,7 @@ const LAYERED_MAX_PHYSICAL_SOURCES: usize = 64;
 // One run can expand to hundreds of local packs; bound clone/index work after roll-up.
 const LAYERED_PACK_MEMBER_TARGET: usize = 8;
 // Physical maintenance is bounded independently of logical checkpointing.
-// The format's hard source limit can still require an admission roll-up.
+// The format's source-count and footer-byte bounds can require admission roll-up.
 const LAYERED_SUFFIX_BYTE_BUDGET: u64 = 512 * 1024 * 1024;
 
 /// Publication status and logical pack-body work completed by maintenance.
@@ -298,7 +298,7 @@ pub async fn repack_capsule_repository_from_view(
             .await?;
             let mut member_oids = view.capsule_run_member_oids().clone();
             member_oids.extend(consolidation.member_oids);
-            let committed = publish_layered_sources(
+            publication = publish_layered_sources(
                 layout,
                 view,
                 consolidation.sources,
@@ -312,13 +312,7 @@ pub async fn repack_capsule_repository_from_view(
                 cancel,
             )
             .await?;
-            publication = CheckpointPublication {
-                work: CheckpointOutcome {
-                    published: committed.is_some(),
-                    ..consolidation.work
-                },
-                committed,
-            };
+            publication.work = consolidation.work.combine(publication.work)?;
         } else if logical_due {
             publication = publish_checkpoint(
                 layout,
@@ -432,6 +426,7 @@ pub async fn publish_capsule_checkpoint_with_catalog_root_from_view(
     .work)
 }
 
+#[derive(Clone)]
 enum CatalogWrite {
     New(PointerCatalog),
     Durable(Option<Box<crab_metadata::capsule_protocol::CheckpointCatalog>>),
@@ -510,7 +505,7 @@ async fn publish_checkpoint(
         member_oids.extend(consolidation.member_oids);
         work = consolidation.work;
     }
-    let committed = publish_layered_sources(
+    let mut publication = publish_layered_sources(
         layout,
         view,
         sources,
@@ -520,8 +515,8 @@ async fn publish_checkpoint(
         cancel,
     )
     .await?;
-    work.published = committed.is_some();
-    Ok(CheckpointPublication { work, committed })
+    publication.work = work.combine(publication.work)?;
+    Ok(publication)
 }
 
 fn checkpoint_sources(
@@ -598,7 +593,7 @@ async fn repack_checkpoint_from_view(
         cancel,
     )
     .await?;
-    let committed = publish_layered_sources(
+    let mut publication = publish_layered_sources(
         layout,
         view,
         consolidation.sources,
@@ -608,56 +603,74 @@ async fn repack_checkpoint_from_view(
         cancel,
     )
     .await?;
-    Ok(CheckpointPublication {
-        work: CheckpointOutcome {
-            published: committed.is_some(),
-            ..consolidation.work
-        },
-        committed,
-    })
+    publication.work = consolidation.work.combine(publication.work)?;
+    Ok(publication)
 }
 
 async fn publish_layered_sources(
     layout: &StoreLayout<Store>,
     view: &crab_read::capsule_protocol::CapsuleRepositoryView,
-    sources: Vec<PackSourceDescriptor>,
-    member_oids: BTreeMap<String, Vec<Vec<[u8; 20]>>>,
+    mut sources: Vec<PackSourceDescriptor>,
+    mut member_oids: BTreeMap<String, Vec<Vec<[u8; 20]>>>,
     catalog: CatalogWrite,
     maximum_bytes: u64,
     cancel: &CancellationToken,
-) -> Result<
-    Option<(
-        crab_metadata::capsule_protocol::RootSnapshot,
-        LayeredCheckpoint,
-    )>,
-    CheckpointError,
-> {
-    let catalog_digest = source_catalog_digest(&sources)?;
+) -> Result<CheckpointPublication, CheckpointError> {
     let visibility_index = view.git_visibility_index().await?;
-    let member_admission = layered_member_admission(
-        &visibility_index,
-        &sources,
-        view.layered_checkpoint(),
-        &member_oids,
-    )?;
-    let visibility = LayeredVisibilitySnapshot::from_index_with_member_admission(
-        &visibility_index,
-        &catalog_digest,
-        member_admission,
-    )?;
     let generation = view.root().root().generation();
     let root_digest = view.root().digest();
-    let checkpoint = match catalog {
-        CatalogWrite::New(catalog) => {
-            LayeredCheckpoint::build(generation, root_digest, sources, catalog, Some(visibility))?
+    let mut work = CheckpointOutcome::default();
+    let checkpoint = loop {
+        check_cancelled(cancel)?;
+        let catalog_digest = source_catalog_digest(&sources)?;
+        let member_admission = layered_member_admission(
+            &visibility_index,
+            &sources,
+            view.layered_checkpoint(),
+            &member_oids,
+        )?;
+        let visibility = LayeredVisibilitySnapshot::from_index_with_member_admission(
+            &visibility_index,
+            &catalog_digest,
+            member_admission,
+        )?;
+        let checkpoint = match catalog.clone() {
+            CatalogWrite::New(catalog) => LayeredCheckpoint::build(
+                generation,
+                root_digest,
+                sources.clone(),
+                catalog,
+                Some(visibility),
+            ),
+            CatalogWrite::Durable(catalog) => LayeredCheckpoint::build_with_catalog_root(
+                generation,
+                root_digest,
+                sources.clone(),
+                catalog.map(|catalog| *catalog),
+                Some(visibility),
+            ),
+        };
+        match checkpoint {
+            Ok(checkpoint) => break checkpoint,
+            Err(crab_metadata::error::MetadataError::CheckpointFooterSize { .. })
+                if sources
+                    .iter()
+                    .map(|source| source.members().len())
+                    .sum::<usize>()
+                    > 1 =>
+            {
+                // A few member-heavy runs can exhaust the footer below its source
+                // count limit. Admit the replacement before any root publication.
+                let start = footer_admission_suffix_start(&sources);
+                let consolidation =
+                    consolidate_layered_suffix(layout, view, sources, start, maximum_bytes, cancel)
+                        .await?;
+                sources = consolidation.sources;
+                member_oids.extend(consolidation.member_oids);
+                work = work.combine(consolidation.work)?;
+            }
+            Err(error) => return Err(error.into()),
         }
-        CatalogWrite::Durable(catalog) => LayeredCheckpoint::build_with_catalog_root(
-            generation,
-            root_digest,
-            sources,
-            catalog.map(|catalog| *catalog),
-            Some(visibility),
-        )?,
     };
     if checkpoint.publication_metadata_bytes()? > maximum_bytes && maximum_bytes > 0 {
         return Err(CheckpointError::OutputLimit {
@@ -684,10 +697,27 @@ async fn publish_layered_sources(
         )
         .await
     };
-    match result {
-        Ok(root) => Ok(Some((root, checkpoint))),
-        Err(crab_write::WriteError::CapsuleRootChanged { .. }) => Ok(None),
-        Err(error) => Err(error.into()),
+    let committed = match result {
+        Ok(root) => Some((root, checkpoint)),
+        Err(crab_write::WriteError::CapsuleRootChanged { .. }) => None,
+        Err(error) => return Err(error.into()),
+    };
+    work.published = committed.is_some();
+    Ok(CheckpointPublication { work, committed })
+}
+
+fn footer_admission_suffix_start(sources: &[PackSourceDescriptor]) -> usize {
+    // One run can hold hundreds of packs. Otherwise combine two sources;
+    // each replacement reduces member count, bounding repeated admission work.
+    // Leave larger geometric merges to maintenance so a footer limit does not
+    // block foreground requests on rewriting the entire historical inventory.
+    if sources
+        .last()
+        .is_some_and(|source| source.members().len() > 1)
+    {
+        sources.len().saturating_sub(1)
+    } else {
+        sources.len().saturating_sub(2)
     }
 }
 
