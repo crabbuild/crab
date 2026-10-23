@@ -769,8 +769,9 @@ impl OperationContext {
             .ok_or(Error::InternalInvariant {
                 invariant: "non-empty operation has no locator session",
             })?;
-        reader
-            .read_with_session(session, oid, &self.budget, &self.cancellation)
+        // Bound the reader's nested future layout at its operation boundary so
+        // downstream async callers fit Rust's default type-depth limit.
+        Box::pin(reader.read_with_session(session, oid, &self.budget, &self.cancellation))
             .instrument(self.span.clone())
             .await
     }
