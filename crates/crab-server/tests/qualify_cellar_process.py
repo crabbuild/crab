@@ -6,7 +6,6 @@ workspace volume. This creates only synthetic repositories and credentials.
 """
 
 import argparse
-import http.client
 import json
 import os
 import pathlib
@@ -84,7 +83,7 @@ with open(run / "commands.log", "w") as log:
             try:
                 request("/api/repos")
                 return
-            except (urllib.error.URLError, TimeoutError, http.client.RemoteDisconnected):
+            except (urllib.error.URLError, TimeoutError, ConnectionError):
                 time.sleep(0.25)
         raise RuntimeError("server did not become available")
 
@@ -187,7 +186,7 @@ with open(run / "commands.log", "w") as log:
             try:
                 with urllib.request.urlopen(endpoint + "/health/ready", timeout=1):
                     break
-            except (urllib.error.URLError, TimeoutError, http.client.RemoteDisconnected):
+            except (urllib.error.URLError, TimeoutError, ConnectionError):
                 time.sleep(0.25)
         else:
             raise RuntimeError("RustFS failed readiness")
