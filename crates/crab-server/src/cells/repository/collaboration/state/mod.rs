@@ -1,4 +1,7 @@
-use super::{Subject, SubjectKind};
+use super::{
+    Subject, SubjectKind,
+    submissions::{self, Kind},
+};
 use crate::cells::repository::{self, issues::lifecycle::Reason, *};
 use crate::cells::{
     Error, Result,
@@ -48,23 +51,9 @@ pub(crate) enum Outcome {
 }
 #[derive(Deserialize, Serialize)]
 #[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
-enum Resolution {
+pub(super) enum Resolution {
     Applied { comment: Option<u64> },
     Rejected { reason: Rejection },
-}
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Submission {
-    digest: String,
-    resolution: Resolution,
-}
-
-pub(crate) mod preparation;
-pub(in crate::cells::repository) fn initialize(context: &Transaction<'_>) -> Result<()> {
-    for kind in [SubjectKind::Issue, SubjectKind::Pull] {
-        preparation::initialize(context, kind)?;
-    }
-    Ok(())
 }
 pub(crate) struct ChangeState;
 impl Mutation for ChangeState {
@@ -73,7 +62,6 @@ impl Mutation for ChangeState {
     type Input = Input;
     type Output = Outcome;
     fn execute(context: &mut Transaction<'_>, input: Input) -> Result<MutationResult<Outcome>> {
-        preparation::ensure_ready(context, input.subject.kind)?;
         let digest = blake3::hash(&serde_json::to_vec(&(
             input.subject,
             input.version,
@@ -85,47 +73,42 @@ impl Mutation for ChangeState {
         ))?)
         .to_hex()
         .to_string();
+        let kind = Kind::from(input.subject.kind);
+        let subject = input.subject;
         let key = format!(
-            "collaboration/v1/state-submissions/{}/{}",
-            input.subject.key(),
+            "{}{:016x}/{}",
+            kind.prefix(),
+            subject.number,
             uuid::Uuid::from_bytes(input.submission_id)
         );
-        if let Some(saved) = context.document::<Submission>(&key)? {
-            if saved.digest != digest {
-                return Ok(MutationResult::Rejected(Outcome::RequestConflict));
-            }
-            let outcome = match saved.resolution {
-                Resolution::Applied { comment } => {
-                    Outcome::Applied(load_comment(context, input.subject, comment)?)
+        let resolution = submissions::decide(context, kind, &key, digest, |context| {
+            Ok(match apply(context, input)? {
+                MutationResult::Success(Outcome::Applied(comment)) => {
+                    let comment = comment.map(|comment| match comment {
+                        Comment::Issue(value) => value.number,
+                        Comment::Pull(value) => value.number,
+                    });
+                    MutationResult::Success(Resolution::Applied { comment })
                 }
-                Resolution::Rejected { reason } => Outcome::Rejected(reason),
-            };
-            return Ok(MutationResult::Success(outcome));
-        }
-        // Roll back tentative comments, counters and activity on rejection,
-        // then persist that terminal decision outside the rolled-back scope.
-        let (outcome, resolution) = match context.apply(|context| apply(context, input))? {
-            MutationResult::Success(Outcome::Applied(comment)) => {
-                let number = comment.as_ref().map(|comment| match comment {
-                    Comment::Issue(value) => value.number,
-                    Comment::Pull(value) => value.number,
-                });
-                (
-                    Outcome::Applied(comment),
-                    Resolution::Applied { comment: number },
-                )
+                MutationResult::Rejected(Outcome::Rejected(reason)) => {
+                    MutationResult::Rejected(Resolution::Rejected { reason })
+                }
+                _ => {
+                    return Err(Error::Invalid(
+                        "state decision disagrees with its transaction",
+                    ));
+                }
+            })
+        })?;
+        Ok(match resolution {
+            Some(Resolution::Applied { comment }) => {
+                MutationResult::Success(Outcome::Applied(load_comment(context, subject, comment)?))
             }
-            MutationResult::Rejected(Outcome::Rejected(reason)) => {
-                (Outcome::Rejected(reason), Resolution::Rejected { reason })
+            Some(Resolution::Rejected { reason }) => {
+                MutationResult::Success(Outcome::Rejected(reason))
             }
-            _ => {
-                return Err(Error::Invalid(
-                    "state decision disagrees with its transaction",
-                ));
-            }
-        };
-        context.put_document(&key, &Submission { digest, resolution })?;
-        Ok(MutationResult::Success(outcome))
+            None => MutationResult::Rejected(Outcome::RequestConflict),
+        })
     }
 }
 fn apply(context: &mut Transaction<'_>, input: Input) -> Result<MutationResult<Outcome>> {
@@ -245,7 +228,7 @@ fn apply(context: &mut Transaction<'_>, input: Input) -> Result<MutationResult<O
     }
     Ok(MutationResult::Success(Outcome::Applied(comment)))
 }
-fn load_comment(
+pub(super) fn load_comment(
     context: &mut Transaction<'_>,
     subject: Subject,
     number: Option<u64>,

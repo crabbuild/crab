@@ -1501,3 +1501,64 @@ was added. This closes the combined state-action gap; bulk edits, pin replacemen
 and other submission owners/controllers still require their own audit. Native
 cross-Cell authority cutover, the pinned Cellar release blocker and the wider
 Issues/PR/Projects/Milestones parity inventory remain open.
+
+
+## Shared terminal discussion decisions
+
+The audit reproduced two more failures: a rejected pin UUID executed after
+unarchive, and a rejected bulk UUID executed after its actor gained Triage.
+Bulk HTTP admission also rejected archived requests before native replay, stranding
+an already committed action. These HTTP regressions failed before the changes.
+
+`collaboration/submissions/` now owns one prepared journal and nested rollback
+path for state actions, bulk edits and pins. Feature owners retain their digest,
+key namespace and canonical policy. Applied/rejected outcomes remain terminal;
+identity conflicts leave the original decision intact. Bulk archive admission now
+defers to its native command, preserving current membership, CSRF and repository
+UUID checks. The UI already uses new UUIDs after confirmed bulk/pin rejections;
+its fixtures now enforce permanent rejected identities and unchanged-payload new
+submissions. Uncertain actions still retain their original identities.
+
+Explicit preparation converts historical successful bulk counts and pin versions
+in eight-record frames, preserving keys/digests/results, including pin version
+zero. Existing state format-2 records are unchanged. Source decoding lives only
+in `submissions/preparation/`; ordinary mutations require readiness. Issue state
+preparation also prepares bulk/pins; pull state preparation also prepares bulk.
+The sole private route is now `discussion-submissions/{kind}`. Coordinate private
+peer/CLI updates; rejections predating a feature's ledger cannot be reconstructed.
+No discussion-index rebuild, new SQL DDL or dependency change is required.
+
+Validation: all 484 native library tests passed, with six existing opt-in checks
+ignored; all 13 CLI tests, 164 browser scenarios and 107 UI unit tests passed.
+Forty-four focused collaboration checks cover the shared path, rollback, state
+migration and preservation, bulk metadata/state policy, pin count/version
+conversion, stale frames, corrupt input and interrupted preparation. Strict
+all-target Clippy, architecture gates, Rustfmt, frontend formatting and
+frontend/server builds passed.
+
+Real RustFS/OIDC qualification restored a checksum-verified snapshot from the
+previous backend: ten legacy bulk submissions, eleven legacy pin submissions
+(including version zero) and four current state submissions. Preparation paused
+after eight bulk entries, survived restart, resumed through the CLI and preserved
+all 39 canonical domain tables and public content/history. All 25 submissions
+replayed without another effect. New rejected UUIDs stayed rejected after
+unarchive/restart; new deliberate UUIDs succeeded.
+
+The real browser lost a committed bulk response, recovered while archived and
+showed exactly one issue-closure event. A pin response was also lost; another
+client changed the order before recovery, and the UI read the newer collection.
+Restart/replay preserved that order and one pin event. Desktop and mobile dark
+captures were inspected. Owned qualification services and browsers were closed.
+
+The persistent local preview runs the qualified binary. Its 20 captured public
+resources (now including both pin collections) and all 39 canonical tables per
+repository Cell are unchanged. All four decision ledgers are ready in both
+repositories, including the archived repository. No organization or public profile
+was fabricated; transport receipts retain normal 24-hour expiry.
+
+Production growth is about 140 lines: shared preparation gains the additional
+historical formats while duplicate per-feature journal paths are removed. This
+establishes the contract for state, bulk and pin workflows; other mutation owners,
+full-page intent persistence, native cross-Cell grant fencing and the wider
+GitHub parity roadmap remain unfinished. The pinned Cellar release blocker is
+unchanged.

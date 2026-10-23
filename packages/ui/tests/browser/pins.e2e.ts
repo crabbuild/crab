@@ -43,6 +43,7 @@ async function fixture(page: Page, numbers = [1, 2, 3], canManage = true) {
     writes: [] as Intent[],
   };
   const receipts = new Map<string, number>();
+  const rejected = new Set<string>();
   await page.route(
     (url) => url.pathname === "/api/repos/team/project/issues/pins",
     async (route) => {
@@ -80,8 +81,13 @@ async function fixture(page: Page, numbers = [1, 2, 3], canManage = true) {
       const saved = receipts.get(input.request_id);
       if (saved !== undefined)
         return route.fulfill({ json: { version: saved } });
-      if (model.failure === "conflict" || input.version !== model.version) {
+      if (
+        model.failure === "conflict" ||
+        input.version !== model.version ||
+        rejected.has(input.request_id)
+      ) {
         model.failure = "";
+        rejected.add(input.request_id);
         return route.fulfill({
           status: 409,
           headers: { "X-Crab-Write-Outcome": "rejected" },

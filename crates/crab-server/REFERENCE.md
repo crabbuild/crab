@@ -1735,8 +1735,11 @@ submissions to decision format 2, eight records per restartable frame, preservin
 keys, digests, comment references and canonical history. State writes remain
 unavailable until their kind is prepared. No discussion-index rebuild is needed.
 The private mTLS GET/POST endpoint is
-`/internal/repositories/{owner}/{name}/state-submissions/{issue|pull}`; POST uses
-`{version}` and returns the existing lifecycle preparation status. Drain requests,
+`/internal/repositories/{owner}/{name}/discussion-submissions/{kind}`; POST uses
+`{version}` and returns the existing lifecycle preparation status. Kinds are
+`issue`, `pull`, `bulk` and `pins`; issue preparation also prepares bulk/pins,
+and pull preparation also prepares bulk. Existing state format-2 records remain
+unchanged. Update private CLI clients for the renamed management route. Drain requests,
 update private peers and UI together, and reload browser sessions before resuming
 state actions. Historical failed actions cannot be recovered from absent records.
 See [native state decisions](CELLAR.md#atomic-discussion-state-actions).
@@ -1783,8 +1786,14 @@ membership changes, but always requires current repository read access. The shar
 `X-Crab-Write-Outcome: rejected` marker has the same commit-aware meaning as the
 combined comment/state endpoint. An explicit reload permits a new selection after
 a confirmed conflict. Context and repository-identity errors cannot release a
-retained intent; native submission-identity conflicts also remain unmarked. No new
-schema preparation or index rebuild is required.
+retained intent; native submission-identity conflicts also remain unmarked.
+Confirmed native rejections are permanent for that UUID, including after a role,
+eligibility or archive change. A deliberate revised action uses a fresh UUID.
+Existing repositories must prepare the bulk decision ledger through either
+issue/pull state preparation. Historical successful counts/digests/keys are
+preserved in bounded frames; old failed decisions cannot be reconstructed.
+No discussion-index rebuild is required. HTTP defers archive policy to the native
+command so a committed submission can recover after archive.
 Catalog-owned grants remain the authority; native grant cutover/cross-Cell fencing,
 Projects/type bulk actions and wider GitHub parity remain delivery work.
 
@@ -2005,7 +2014,9 @@ an empty set removes all pins. The native transaction compares the collection
 version and changes the whole set atomically. Pinning leaves issue edit versions
 unchanged. The collection lives in native Repository KV storage, alongside its
 permanent submissions; cards use at most three indexed issue reads and maintained
-comment counters. It needs no schema/index preparation.
+comment counters. Existing repositories must explicitly prepare its decision
+ledger with `cells prepare-issue-state`; historical successful versions, digests
+and keys remain intact. No discussion-index rebuild is needed.
 
 A submission UUID binds its original ordered set, expected version and qualified
 actor. Exact retries recover the original version after reordering, archive or
@@ -2013,7 +2024,8 @@ loss of Write access, provided current Read access remains. They do not restore
 the old collection. Reusing a UUID for another intent returns an unmarked
 submission conflict. Proven native rejections carry `X-Crab-Write-Outcome:
 rejected`, including when archive middleware changes their error presentation.
-Uncertain errors keep the original intent. The UI reloads the current collection
+Those native rejection decisions remain terminal after roles/archive change.
+A deliberate new action uses a fresh UUID; uncertain errors keep the original intent. The UI reloads the current collection
 after success/recovery and records pin/unpin events in each issue conversation;
 pure reorder does not add a timeline event.
 

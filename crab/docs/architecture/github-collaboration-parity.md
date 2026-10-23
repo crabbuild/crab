@@ -451,3 +451,14 @@ under [terminal state decisions](github-ui-parity.md#terminal-close-and-reopen-d
 This establishes that contract for combined close/reopen actions. Bulk/pin and
 other repository submission owners remain in the audit queue; complete parity,
 project authority and native cross-Cell fencing remain delivery work.
+
+
+Bulk and pin actions now join state actions in one prepared native decision
+journal. Confirmed rejections remain terminal across later grants/archive;
+committed bulk actions also recover through archived HTTP admission. Existing
+state format-2 records stay unchanged; explicit preparation converts historical
+successful bulk/pin results without rewriting canonical data. Native/HTTP,
+full browser, real old-data upgrade, restart and lost-response evidence is recorded
+under [shared terminal decisions](github-ui-parity.md#shared-terminal-discussion-decisions).
+Other mutation/intent owners and the remaining authority, Issues/PR, Projects and
+Milestones inventory remain open.

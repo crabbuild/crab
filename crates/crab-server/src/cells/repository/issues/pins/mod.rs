@@ -1,6 +1,9 @@
 use super::super::*;
 use super::lifecycle;
-use crate::cells::repository::collaboration::{Target, activity};
+use crate::cells::repository::collaboration::{
+    Target, activity,
+    submissions::{self, Kind},
+};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 
@@ -116,12 +119,6 @@ pub(crate) enum Outcome {
     Conflict,
     RequestConflict,
 }
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Submission {
-    digest: String,
-    version: u64,
-}
 pub(crate) struct SetPins;
 impl Mutation for SetPins {
     const CLASS: &'static str = crate::cells::repository::CLASS;
@@ -141,80 +138,84 @@ impl Mutation for SetPins {
         .to_hex()
         .to_string();
         let key = format!(
-            "{KEY}/submissions/{}",
+            "{}{}",
+            Kind::Pins.prefix(),
             uuid::Uuid::from_bytes(input.submission_id)
         );
-        // Recover an admitted intent before later versions, roles or archive.
-        // HTTP still requires current read access to its original repository.
-        if let Some(saved) = context.document::<Submission>(&key)? {
-            return Ok(if saved.digest == digest {
-                MutationResult::Success(Outcome::Applied(saved.version))
-            } else {
-                MutationResult::Rejected(Outcome::RequestConflict)
-            });
-        }
-        if input.numbers.len() > MAX_PINS {
-            return Ok(MutationResult::Rejected(Outcome::Limit));
-        }
-        if !valid(&input.numbers) || input.version > MAX_NUMBER {
-            return Ok(MutationResult::Rejected(Outcome::Invalid));
-        }
-        validate_author(&input.actor)?;
-        if settings::archived(context)? {
-            return Ok(MutationResult::Rejected(Outcome::Archived));
-        }
-        if !input.can_write {
-            return Ok(MutationResult::Rejected(Outcome::Forbidden));
-        }
-        let current = load(context)?;
-        if current.version != input.version {
-            return Ok(MutationResult::Rejected(Outcome::Conflict));
-        }
-        for number in &input.numbers {
-            if super::GetIssue::execute(context, *number)?.is_none() {
-                return Ok(MutationResult::Rejected(Outcome::NotFound));
-            }
-        }
-        let changed = current.numbers != input.numbers;
-        let version = if changed {
-            current
-                .version
-                .checked_add(1)
-                .filter(|version| *version <= MAX_NUMBER)
-                .ok_or(crate::cells::Error::Invalid(
-                    "issue pin version is exhausted",
-                ))?
-        } else {
-            current.version
-        };
-        if changed {
-            // Collection order has its own version. Pinning does not overwrite
-            // an issue edit or reserve its source-record version.
-            context.put_document(
-                KEY,
-                &State {
-                    version,
-                    numbers: input.numbers.clone(),
-                },
-            )?;
-            for (numbers, previous, action) in [
-                (&current.numbers, &input.numbers, activity::Action::Unpinned),
-                (&input.numbers, &current.numbers, activity::Action::Pinned),
-            ] {
-                for number in numbers.iter().filter(|number| !previous.contains(number)) {
-                    activity::append(
-                        context,
-                        Target::Issue { number: *number },
-                        &input.actor,
-                        action.clone(),
-                    )?;
-                }
-            }
-            advance_revision(context)?;
-        }
-        context.put_document(&key, &Submission { digest, version })?;
-        Ok(MutationResult::Success(Outcome::Applied(version)))
+        Ok(
+            match submissions::decide(context, Kind::Pins, &key, digest, |context| {
+                apply(context, input)
+            })? {
+                Some(outcome) => MutationResult::Success(outcome),
+                None => MutationResult::Rejected(Outcome::RequestConflict),
+            },
+        )
     }
+}
+fn apply(
+    context: &mut Transaction<'_>,
+    input: Input,
+) -> crate::cells::Result<MutationResult<Outcome>> {
+    if input.numbers.len() > MAX_PINS {
+        return Ok(MutationResult::Rejected(Outcome::Limit));
+    }
+    if !valid(&input.numbers) || input.version > MAX_NUMBER {
+        return Ok(MutationResult::Rejected(Outcome::Invalid));
+    }
+    validate_author(&input.actor)?;
+    if settings::archived(context)? {
+        return Ok(MutationResult::Rejected(Outcome::Archived));
+    }
+    if !input.can_write {
+        return Ok(MutationResult::Rejected(Outcome::Forbidden));
+    }
+    let current = load(context)?;
+    if current.version != input.version {
+        return Ok(MutationResult::Rejected(Outcome::Conflict));
+    }
+    for number in &input.numbers {
+        if super::GetIssue::execute(context, *number)?.is_none() {
+            return Ok(MutationResult::Rejected(Outcome::NotFound));
+        }
+    }
+    let changed = current.numbers != input.numbers;
+    let version = if changed {
+        current
+            .version
+            .checked_add(1)
+            .filter(|version| *version <= MAX_NUMBER)
+            .ok_or(crate::cells::Error::Invalid(
+                "issue pin version is exhausted",
+            ))?
+    } else {
+        current.version
+    };
+    if changed {
+        // Collection order has its own version. Pinning does not overwrite
+        // an issue edit or reserve its source-record version.
+        context.put_document(
+            KEY,
+            &State {
+                version,
+                numbers: input.numbers.clone(),
+            },
+        )?;
+        for (numbers, previous, action) in [
+            (&current.numbers, &input.numbers, activity::Action::Unpinned),
+            (&input.numbers, &current.numbers, activity::Action::Pinned),
+        ] {
+            for number in numbers.iter().filter(|number| !previous.contains(number)) {
+                activity::append(
+                    context,
+                    Target::Issue { number: *number },
+                    &input.actor,
+                    action.clone(),
+                )?;
+            }
+        }
+        advance_revision(context)?;
+    }
+    Ok(MutationResult::Success(Outcome::Applied(version)))
 }
 
 #[cfg(test)]

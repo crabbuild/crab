@@ -30,7 +30,7 @@ pub(super) fn routes() -> Router<Arc<Server>> {
                 .post(prepare::<crate::cells::repository::review_dismissals::PrepareReviewState>),
         )
         .route(
-            "/internal/repositories/{owner}/{name}/state-submissions/{kind}",
+            "/internal/repositories/{owner}/{name}/discussion-submissions/{kind}",
             get(submissions_status).post(prepare_submissions),
         )
         .layer(axum::extract::DefaultBodyLimit::max(1024))
@@ -79,7 +79,7 @@ async fn submissions_status(
     Path((owner, name, kind)): Path<(
         String,
         String,
-        crate::cells::repository::collaboration::SubjectKind,
+        crate::cells::repository::collaboration::submissions::Kind,
     )>,
 ) -> Result<Json<LifecycleStatus>> {
     let repository = server
@@ -89,7 +89,7 @@ async fn submissions_status(
     let cell = app::repository_cell(&server, &repository)?;
     Ok(Json(app::query_output(
         cell.client
-            .query::<crate::cells::repository::collaboration::state::preparation::GetPreparation>(
+            .query::<crate::cells::repository::collaboration::submissions::preparation::GetPreparation>(
                 &cell.target,
                 None,
                 kind,
@@ -102,7 +102,7 @@ async fn prepare_submissions(
     Path((owner, name, kind)): Path<(
         String,
         String,
-        crate::cells::repository::collaboration::SubjectKind,
+        crate::cells::repository::collaboration::submissions::Kind,
     )>,
     Json(input): Json<PrepareLifecycleInput>,
 ) -> Result<Json<LifecycleStatus>> {
@@ -120,10 +120,10 @@ async fn prepare_submissions(
     let cell = app::repository_cell(&server, &repository)?;
     match app::command_output(
         cell.client
-            .command::<crate::cells::repository::collaboration::state::preparation::Prepare>(
+            .command::<crate::cells::repository::collaboration::submissions::preparation::Prepare>(
                 &cell.target,
                 app::mutation_identity()?,
-                crate::cells::repository::collaboration::state::preparation::Input {
+                crate::cells::repository::collaboration::submissions::preparation::Input {
                     kind,
                     version: input.version,
                 },

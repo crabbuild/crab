@@ -644,6 +644,40 @@ continue to represent current PR closure. New issue closures carry their reason.
 Duplicate relationships remain unfinished. Combined comment/state actions are
 implemented by the native collaboration state operation below.
 
+## Permanent discussion decisions
+
+`cells/repository/collaboration/submissions/` owns one native journal path for
+combined state actions, bulk edits and issue pin replacement. Each feature keeps
+its own digest, key namespace and domain policy. Stored decisions retain only the
+digest and minimal applied/rejected result; state actions retain canonical comment
+references. Identity conflicts never replace the original decision. A nested SDK
+scope rolls domain effects back before its rejected decision commits alongside
+the transport receipt. Recovery precedes mutable role/version/archive/eligibility
+checks, subject to current HTTP repository membership.
+
+Existing repositories explicitly run `cells prepare-issue-state` and
+`cells prepare-pull-state`. In addition to lifecycle metadata, these commands
+convert historical successful state, bulk and pin submissions to decision format 2
+in bounded, restartable eight-record frames. Digests, keys and canonical result references
+stay identical; no discussion-index rebuild is required. Ordinary mutations for
+an unprepared kind return unavailable until preparation completes; ordinary reads
+remain available. Historical decoding exists only in `submissions/preparation/`.
+Corrupt input aborts the current frame, including its progress. Rejections
+predating each feature's decision ledger were never permanently recorded and
+cannot be reconstructed.
+Drain requests and update private peers and bundled UI together, reload existing
+browser sessions, then prepare before resuming affected actions. Older transport
+receipts retain their original bytes and 24-hour expiry; they are not rewritten.
+
+Issue preparation covers issue state, bulk and pin ledgers; pull preparation
+covers pull state and the shared bulk ledger. Fresh repositories initialize all
+four kinds ready. Existing state format-2 records need no rewrite. The private
+mTLS GET/POST route is
+`/internal/repositories/{owner}/{name}/discussion-submissions/{kind}`, with `kind`
+`issue`, `pull`, `bulk` or `pins`. POST uses `{version}` and the existing versioned
+preparation status. The previous private `state-submissions` route is removed;
+update private peers and CLI clients together.
+
 ## Atomic discussion state actions
 
 `cells/repository/collaboration/state/` composes canonical comment writers and
@@ -656,19 +690,6 @@ reason. Both decisions recover before later archive/version/role/merge checks;
 a rejected intent cannot become executable after circumstances change. Current
 HTTP repository membership still gates access.
 
-Existing repositories explicitly run `cells prepare-issue-state` and
-`cells prepare-pull-state`. In addition to lifecycle metadata, these commands now
-convert successful submission documents to decision format 2 in bounded,
-restartable eight-record frames. Digests, keys and canonical comment references
-stay identical; no discussion-index rebuild is required. Ordinary state writes
-return unavailable until preparation completes; ordinary reads remain available.
-Historical decoding exists only inside `state/preparation/`. Corrupt input aborts
-the current frame, including its progress. Fresh repositories initialize ready.
-Old rejected actions were never permanently recorded and cannot be reconstructed.
-Drain requests and update private peers and bundled UI together, reload existing
-browser sessions, then prepare before resuming state actions. Older transport
-receipts retain their original bytes and 24-hour expiry; they are not rewritten.
-
 Standalone comment inputs and digests stay unchanged. HTTP marks immutable-payload
 validation and confirmed native domain rejection with
 `X-Crab-Write-Outcome: rejected`. Context errors and submission-identity conflicts
@@ -678,9 +699,8 @@ resolving availability/access. After a confirmed rejection, a deliberate new
 browser action gets a fresh UUID even with unchanged content. Public output
 exposes existing comment DTOs, with final membership checks after enrichment.
 
-This qualification covers combined state actions. Bulk edits, pin replacement,
-and other submission controllers require their own terminal-rejection audit; this
-change does not establish their retry guarantees.
+Other mutation owners and their UI submission controllers remain in the audit;
+this shared journal establishes the contract for these three feature families.
 
 ## Bounded bulk discussion edits
 
@@ -693,13 +713,16 @@ Labels are merged against one active catalog snapshot so retired source IDs cann
 block a later delta. Plain per-item writers and their receipt formats are unchanged.
 
 Permanent `collaboration/v1/bulk-submissions/{uuid}` documents bind the exact targets,
-versions, action and qualified actor. They store a count and digest, not a second
-copy of discussion records. Recovery precedes fresh role/archive/version checks;
+versions, action and qualified actor. They store a terminal count/rejection and
+digest, rather than another copy of discussion records. Recovery precedes fresh role/archive/version checks;
 current HTTP read access still gates every response. Current-roster assignee/name
 snapshots are excluded from intent identity, and fresh additions require a complete
 eligible match. The proven-rejection marker is shared in `api/write.rs`; context,
-repository-identity and submission-identity errors preserve the original intent. No new DDL, preparation, index
-format, dependency, compatibility reader or automatic authority cutover is involved.
+repository-identity and submission-identity errors preserve the original intent.
+Bulk HTTP admission defers archive policy to this native owner so committed
+submissions remain recoverable after archive. Existing repositories explicitly
+prepare the bulk ledger through either issue/pull state preparation. No index
+rebuild, SQL DDL, dependency change or automatic authority cutover is involved.
 
 ### Prepare pull lifecycle metadata
 

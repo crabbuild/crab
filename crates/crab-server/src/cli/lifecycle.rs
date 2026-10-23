@@ -15,18 +15,18 @@ pub(super) async fn prepare(
 ) -> Result<Vec<u8>> {
     let owner = url::form_urlencoded::byte_serialize(owner.as_bytes()).collect::<String>();
     let name = url::form_urlencoded::byte_serialize(name.as_bytes()).collect::<String>();
-    let (state, submissions) = match scope {
-        Scope::Issue => ("issue-state", Some("issue")),
-        Scope::Pull => ("pull-state", Some("pull")),
-        Scope::Review => ("review-state", None),
+    let (state, submissions): (&str, &[&str]) = match scope {
+        Scope::Issue => ("issue-state", &["issue", "bulk", "pins"]),
+        Scope::Pull => ("pull-state", &["pull", "bulk"]),
+        Scope::Review => ("review-state", &[]),
     };
     let path = format!("/internal/repositories/{owner}/{name}/{state}");
-    let body = frames(config, &path).await?;
-    let Some(kind) = submissions else {
-        return Ok(body);
-    };
-    let path = format!("/internal/repositories/{owner}/{name}/state-submissions/{kind}");
-    frames(config, &path).await
+    let mut body = frames(config, &path).await?;
+    for kind in submissions {
+        let path = format!("/internal/repositories/{owner}/{name}/discussion-submissions/{kind}");
+        body = frames(config, &path).await?;
+    }
+    Ok(body)
 }
 async fn frames(config: &Config, path: &str) -> Result<Vec<u8>> {
     let mut body = management_body(config, path).await?;

@@ -1,4 +1,8 @@
-use super::{Subject, SubjectKind, milestones, state::State};
+use super::{
+    Subject, SubjectKind, milestones,
+    state::State,
+    submissions::{self, Kind},
+};
 use crate::cells::{
     Error, Result,
     application::{Mutation, MutationResult, Read, Transaction},
@@ -72,12 +76,6 @@ pub(crate) enum Failure {
 pub(crate) enum Outcome<T> {
     Applied(T),
     Rejected(Failure),
-}
-#[derive(Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-struct Submission {
-    digest: String,
-    count: u16,
 }
 
 fn valid_selection<'a>(items: impl Iterator<Item = &'a Versioned>) -> bool {
@@ -170,45 +168,46 @@ impl Mutation for Edit {
         .to_hex()
         .to_string();
         let key = format!(
-            "collaboration/v1/bulk-submissions/{}",
+            "{}{}",
+            Kind::Bulk.prefix(),
             Uuid::from_bytes(input.submission_id)
         );
-        // A committed bulk edit is recovered before present-day versions, roles
-        // and archive checks. HTTP rechecks current read access to its receipt.
-        if let Some(saved) = context.document::<Submission>(&key)? {
-            return Ok(if saved.digest == digest {
-                MutationResult::Success(Outcome::Applied(saved.count))
-            } else {
-                MutationResult::Rejected(Outcome::Rejected(Failure::RequestConflict))
-            });
-        }
-        if !valid_selection(input.items.iter().map(|selected| &selected.item))
-            || !valid_action(&input.action, &input.items)
-        {
-            return Ok(MutationResult::Rejected(Outcome::Rejected(
-                Failure::Invalid,
-            )));
-        }
-        validate_author(&input.actor)?;
-        if settings::archived(context)? {
-            return Ok(MutationResult::Rejected(Outcome::Rejected(
-                Failure::Archived,
-            )));
-        }
-        if !input.can_triage {
-            return Ok(MutationResult::Rejected(Outcome::Rejected(
-                Failure::Forbidden,
-            )));
-        }
-        if let Some(failure) = apply::apply(context, &input)? {
-            // The shared application savepoint rolls back every earlier
-            // item's record, projection, progress and activity on rejection.
-            return Ok(MutationResult::Rejected(Outcome::Rejected(failure)));
-        }
-        let count = u16::try_from(input.items.len()).map_err(Error::sdk)?;
-        context.put_document(&key, &Submission { digest, count })?;
-        Ok(MutationResult::Success(Outcome::Applied(count)))
+        Ok(
+            match submissions::decide(context, Kind::Bulk, &key, digest, |context| {
+                apply(context, input)
+            })? {
+                Some(outcome) => MutationResult::Success(outcome),
+                None => MutationResult::Rejected(Outcome::Rejected(Failure::RequestConflict)),
+            },
+        )
     }
+}
+fn apply(context: &mut Transaction<'_>, input: Input) -> Result<MutationResult<Outcome<u16>>> {
+    if !valid_selection(input.items.iter().map(|selected| &selected.item))
+        || !valid_action(&input.action, &input.items)
+    {
+        return Ok(MutationResult::Rejected(Outcome::Rejected(
+            Failure::Invalid,
+        )));
+    }
+    validate_author(&input.actor)?;
+    if settings::archived(context)? {
+        return Ok(MutationResult::Rejected(Outcome::Rejected(
+            Failure::Archived,
+        )));
+    }
+    if !input.can_triage {
+        return Ok(MutationResult::Rejected(Outcome::Rejected(
+            Failure::Forbidden,
+        )));
+    }
+    if let Some(failure) = apply::apply(context, &input)? {
+        // The decision scope rolls every earlier item back before the
+        // terminal rejection commits in the enclosing transaction.
+        return Ok(MutationResult::Rejected(Outcome::Rejected(failure)));
+    }
+    let count = u16::try_from(input.items.len()).map_err(Error::sdk)?;
+    Ok(MutationResult::Success(Outcome::Applied(count)))
 }
 
 #[cfg(test)]

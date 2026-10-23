@@ -305,8 +305,12 @@ fn is_local_host(host: Option<&str>) -> bool {
 fn command_checks_archive(path: &str) -> bool {
     // These commands enforce lifecycle transactionally. Merge recovery may
     // finish an admitted Git publication after archive; preflight must not strand it.
-    path.strip_prefix("/api/repos/")
-        .is_some_and(|path| matches!(path.split('/').nth(2), Some("issues" | "labels" | "pulls")))
+    path.strip_prefix("/api/repos/").is_some_and(|path| {
+        matches!(
+            path.split('/').nth(2),
+            Some("issues" | "labels" | "pulls" | "discussions")
+        )
+    })
 }
 
 async fn archived_mutation_response(

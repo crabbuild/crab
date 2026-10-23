@@ -63,6 +63,7 @@ async function fixture(page: Page) {
     canManage: true,
   };
   const saved = new Map<string, number>();
+  const rejected = new Set<string>();
   for (const view of ["issues", "pulls"])
     await page.route(`**/api/repos/team/project/${view}?**`, (route) => {
       const items =
@@ -121,8 +122,12 @@ async function fixture(page: Page) {
         status: 400,
         json: { error: { message: "Repository identity changed" } },
       });
-    if (model.conflict) {
+    if (
+      (model.conflict && !saved.has(input.request_id)) ||
+      rejected.has(input.request_id)
+    ) {
       model.conflict = false;
+      rejected.add(input.request_id);
       return route.fulfill({
         status: 409,
         headers: { "X-Crab-Write-Outcome": "rejected" },
@@ -330,6 +335,17 @@ test("confirmed conflicts preserve selection until explicit reload", async ({
   await page.getByRole("button", { name: "Reload selected items" }).click();
   await expect(issue(page)).not.toBeChecked();
   expect(model.items[0].state).toBe("open");
+  await issue(page).check();
+  await page.getByRole("button", { name: "Mark as", exact: true }).click();
+  await page
+    .getByRole("menuitem", { name: "Closed as not planned", exact: true })
+    .click();
+  await expect(issue(page)).not.toBeChecked();
+  expect(model.items[0].state).toBe("closed");
+  const { request_id: previousId, ...previous } = model.writes[0];
+  const { request_id: nextId, ...next } = model.writes[1];
+  expect(next).toEqual(previous);
+  expect(nextId).not.toBe(previousId);
 });
 
 test("bulk triage stays usable on narrow dark screens and hides for readers", async ({

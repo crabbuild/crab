@@ -17,7 +17,7 @@ pub(in crate::cells) fn dispatch_mutation(
         || id == issues::lifecycle::PrepareIssueLifecycle::ID
         || id == PreparePullLifecycle::ID
         || id == review_dismissals::PrepareReviewState::ID
-        || id == collaboration::state::preparation::Prepare::ID;
+        || id == collaboration::submissions::preparation::Prepare::ID;
     #[cfg(test)]
     let maintenance = maintenance
         || id == assignments::migration::tests::SeedSubjects::ID
@@ -25,6 +25,8 @@ pub(in crate::cells) fn dispatch_mutation(
         || id == rollups::tests::PreviousFormat::ID
         || id == search::reviews::status::tests::PreviousFormat::ID
         || id == collaboration::conversation::tests::Inspect::ID
+        || id == collaboration::submissions::preparation::tests::Historical::ID
+        || id == collaboration::submissions::preparation::tests::Interrupted::ID
         || id == collaboration::state::tests::Historical::ID
         || id == collaboration::state::tests::FailedPreparation::ID
         || id == issues::lifecycle::tests::Historical::ID
@@ -34,6 +36,14 @@ pub(in crate::cells) fn dispatch_mutation(
     }
     let result = match id {
         #[cfg(test)]
+        collaboration::submissions::preparation::tests::Historical::ID => invoke_mutation::<
+            collaboration::submissions::preparation::tests::Historical,
+        >(context, input),
+        #[cfg(test)]
+        collaboration::submissions::preparation::tests::Interrupted::ID => invoke_mutation::<
+            collaboration::submissions::preparation::tests::Interrupted,
+        >(context, input),
+        #[cfg(test)]
         collaboration::state::tests::Historical::ID => {
             invoke_mutation::<collaboration::state::tests::Historical>(context, input)
         }
@@ -41,8 +51,8 @@ pub(in crate::cells) fn dispatch_mutation(
         collaboration::state::tests::FailedPreparation::ID => {
             invoke_mutation::<collaboration::state::tests::FailedPreparation>(context, input)
         }
-        collaboration::state::preparation::Prepare::ID => {
-            invoke_mutation::<collaboration::state::preparation::Prepare>(context, input)
+        collaboration::submissions::preparation::Prepare::ID => {
+            invoke_mutation::<collaboration::submissions::preparation::Prepare>(context, input)
         }
         issues::pins::SetPins::ID => invoke_mutation::<issues::pins::SetPins>(context, input),
         collaboration::bulk::Edit::ID => {
@@ -187,11 +197,15 @@ pub(in crate::cells) fn dispatch_read(
 ) -> crate::cells::Result<serde_json::Value> {
     match id {
         #[cfg(test)]
+        collaboration::submissions::preparation::tests::Inspect::ID => {
+            invoke_read::<collaboration::submissions::preparation::tests::Inspect>(context, input)
+        }
+        #[cfg(test)]
         collaboration::state::tests::Inspect::ID => {
             invoke_read::<collaboration::state::tests::Inspect>(context, input)
         }
-        collaboration::state::preparation::GetPreparation::ID => {
-            invoke_read::<collaboration::state::preparation::GetPreparation>(context, input)
+        collaboration::submissions::preparation::GetPreparation::ID => {
+            invoke_read::<collaboration::submissions::preparation::GetPreparation>(context, input)
         }
         pulls::rollups::GetRollups::ID => invoke_read::<pulls::rollups::GetRollups>(context, input),
         issues::pins::GetPins::ID => invoke_read::<issues::pins::GetPins>(context, input),

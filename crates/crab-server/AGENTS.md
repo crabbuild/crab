@@ -77,12 +77,13 @@ with issue lifecycle metadata; each owner recovers only matching transition even
 Private `cells prepare-pull-state` prepares existing native repositories.
 
 Collaboration documents live in `cells/repository/collaboration/`. `state/`
-owns atomic close/reopen with optional comments and permanent applied/rejected
-submission decisions. Its `preparation/` alone converts historical successful
-documents in bounded frames; existing issue/pull state preparation CLI commands
-also prepare this ledger. Nested SDK scopes roll domain work back before a terminal
-rejection commits; ordinary state serving requires the prepared format. `bulk/`
-owns bounded mixed-kind selection and atomic metadata/state edits.
+owns atomic close/reopen with optional comments; `bulk/` owns bounded mixed-kind
+selection and atomic metadata/state edits. `submissions/` owns their shared
+applied/rejected decision storage with issue pins. Its `preparation/` alone reads
+historical successful documents in bounded frames. Existing issue/pull state
+preparation commands also prepare these ledgers; ordinary mutations require their
+prepared format. Nested SDK scopes discard domain work before a terminal
+rejection commits. State format-2 records remain unchanged by this extraction.
 `api/discussion_bulk/` binds repository UUIDs, resolves current roster eligibility
 and owns the bulk HTTP contract.
 `api/write.rs` owns the shared proven-rejection response marker.

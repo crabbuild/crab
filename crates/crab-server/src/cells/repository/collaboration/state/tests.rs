@@ -6,6 +6,7 @@ use super::super::{
     },
 };
 use super::*;
+use crate::cells::repository::collaboration::submissions::preparation;
 use crate::cells::{RepositoryCell, application::Read};
 use crate::test_support::server as fixtures;
 use uuid::Uuid;
@@ -337,21 +338,24 @@ impl Mutation for Historical {
         context: &mut Transaction<'_>,
         (kind, corrupt): Self::Input,
     ) -> Result<MutationResult<()>> {
-        let rows = context.documents::<Submission>(preparation::prefix(kind), None, 51)?;
+        let rows = context.documents::<serde_json::Value>(Kind::from(kind).prefix(), None, 51)?;
         for (index, (key, saved)) in rows.iter().enumerate() {
-            let Resolution::Applied { comment } = &saved.resolution else {
+            if saved["resolution"]["outcome"] != "applied" {
                 return Err(Error::Invalid(
                     "historical fixture requires applied submissions",
                 ));
-            };
+            }
+            let comment = &saved["resolution"]["comment"];
             let digest = if corrupt && index == rows.len() - 1 {
                 "bad"
             } else {
-                &saved.digest
+                saved["digest"]
+                    .as_str()
+                    .ok_or(Error::Invalid("historical digest is missing"))?
             };
             context.put_document(key, &serde_json::json!({"digest":digest,"comment":comment}))?;
         }
-        context.delete_document(preparation::key(kind))?;
+        context.delete_document(preparation::key(kind.into()))?;
         Ok(MutationResult::Success(()))
     }
 }
@@ -362,7 +366,7 @@ impl Read for Inspect {
     type Input = SubjectKind;
     type Output = Vec<(String, serde_json::Value)>;
     fn execute(context: &mut Transaction<'_>, kind: SubjectKind) -> Result<Self::Output> {
-        context.documents(preparation::prefix(kind), None, 51)
+        context.documents(Kind::from(kind).prefix(), None, 51)
     }
 }
 pub(in crate::cells::repository) struct FailedPreparation;
@@ -424,7 +428,7 @@ async fn state_submission_preparation_is_bounded_atomic_and_preserves_replay_and
         .unwrap();
         write::<Historical>(&cell, (kind, false)).await;
         assert_eq!(
-            read::<preparation::GetPreparation>(&cell, kind).await,
+            read::<preparation::GetPreparation>(&cell, kind.into()).await,
             LifecycleStatus::Outdated
         );
         assert!(matches!(
@@ -443,7 +447,14 @@ async fn state_submission_preparation_is_bounded_atomic_and_preserves_replay_and
             Error::SchemaUnavailable
         ));
         assert!(matches!(
-            write::<preparation::Prepare>(&cell, preparation::Input { kind, version: 0 }).await,
+            write::<preparation::Prepare>(
+                &cell,
+                preparation::Input {
+                    kind: kind.into(),
+                    version: 0
+                }
+            )
+            .await,
             PrepareLifecycleOutcome::Applied(LifecycleStatus::Migrating {
                 version: 1,
                 copied: 8
@@ -455,18 +466,35 @@ async fn state_submission_preparation_is_bounded_atomic_and_preserves_replay_and
                 .command::<FailedPreparation>(
                     &cell.target,
                     crate::app::mutation_identity().unwrap(),
-                    preparation::Input { kind, version: 1 }
+                    preparation::Input {
+                        kind: kind.into(),
+                        version: 1
+                    }
                 )
                 .await
                 .is_err()
         );
         assert_eq!(read::<Inspect>(&cell, kind).await, staged);
         assert!(matches!(
-            write::<preparation::Prepare>(&cell, preparation::Input { kind, version: 0 }).await,
+            write::<preparation::Prepare>(
+                &cell,
+                preparation::Input {
+                    kind: kind.into(),
+                    version: 0
+                }
+            )
+            .await,
             PrepareLifecycleOutcome::Conflict(_)
         ));
         assert!(matches!(
-            write::<preparation::Prepare>(&cell, preparation::Input { kind, version: 1 }).await,
+            write::<preparation::Prepare>(
+                &cell,
+                preparation::Input {
+                    kind: kind.into(),
+                    version: 1
+                }
+            )
+            .await,
             PrepareLifecycleOutcome::Applied(LifecycleStatus::Ready)
         ));
         for command in commands {
@@ -520,7 +548,14 @@ async fn corrupt_historical_submission_rolls_back_its_entire_current_frame() {
     let kind = SubjectKind::Issue;
     write::<Historical>(&cell, (kind, true)).await;
     assert!(matches!(
-        write::<preparation::Prepare>(&cell, preparation::Input { kind, version: 0 }).await,
+        write::<preparation::Prepare>(
+            &cell,
+            preparation::Input {
+                kind: kind.into(),
+                version: 0
+            }
+        )
+        .await,
         PrepareLifecycleOutcome::Applied(LifecycleStatus::Migrating {
             version: 1,
             copied: 8
@@ -532,14 +567,17 @@ async fn corrupt_historical_submission_rolls_back_its_entire_current_frame() {
             .command::<preparation::Prepare>(
                 &cell.target,
                 crate::app::mutation_identity().unwrap(),
-                preparation::Input { kind, version: 1 }
+                preparation::Input {
+                    kind: kind.into(),
+                    version: 1
+                }
             )
             .await
             .is_err()
     );
     assert_eq!(read::<Inspect>(&cell, kind).await, before);
     assert_eq!(
-        read::<preparation::GetPreparation>(&cell, kind).await,
+        read::<preparation::GetPreparation>(&cell, kind.into()).await,
         LifecycleStatus::Migrating {
             version: 1,
             copied: 8

@@ -157,6 +157,7 @@ async fn mixed_state_edits_rollback_on_stale_selection_and_recover_after_archive
     let mut stale = change.clone();
     // The pull changes first, so the later issue conflict must also roll back
     // its lifecycle row with the canonical record and activity.
+    stale.submission_id = *Uuid::now_v7().as_bytes();
     stale.items.reverse();
     stale.items[1].item.version = 2;
     assert!(matches!(
@@ -255,6 +256,11 @@ async fn metadata_deltas_preserve_other_values_and_milestone_versions_fence_chan
         Outcome::Rejected(Failure::InvalidAssignees)
     ));
     assign.eligible = vec![person.clone()];
+    assert!(matches!(
+        write::<Edit>(&cell, assign.clone()).await,
+        Outcome::Rejected(Failure::InvalidAssignees)
+    ));
+    assign.submission_id = *Uuid::now_v7().as_bytes();
     assert_eq!(applied(write::<Edit>(&cell, assign.clone()).await), 2);
     assign.eligible.clear();
     assign.can_triage = false;
@@ -341,6 +347,11 @@ async fn selection_bounds_duplicates_roles_and_overlapping_deltas_reject_without
         Outcome::Rejected(Failure::Forbidden)
     ));
     change.can_triage = true;
+    assert!(matches!(
+        write::<Edit>(&cell, change.clone()).await,
+        Outcome::Rejected(Failure::Forbidden)
+    ));
+    change.submission_id = *Uuid::now_v7().as_bytes();
     change.items.push(change.items[0].clone());
     assert!(matches!(
         write::<Edit>(&cell, change).await,

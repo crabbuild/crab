@@ -172,3 +172,46 @@ async fn pins_use_current_write_grants_limits_versions_and_recover_after_archive
     assert!(!uncertain.headers().contains_key("x-crab-write-outcome"));
     h.close().await;
 }
+
+#[tokio::test]
+async fn proven_rejection_remains_terminal_after_unarchive() {
+    let h = Harness::new(false).await;
+    let alice = h.login().await;
+    for title in ["First", "Second"] {
+        h.write(
+            Method::POST,
+            &format!("{ROOT}/issues"),
+            &alice,
+            json!({"request_id":uuid::Uuid::now_v7(),"title":title,"body":"Body"}),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
+    }
+    let input = json!({"request_id":uuid::Uuid::now_v7(),"version":0,"numbers":[1,2]});
+    let path = format!("{ROOT}/issues/pins");
+    for (version, archived) in [true, false].into_iter().enumerate() {
+        h.write(
+            Method::PUT,
+            &format!("{ROOT}/settings/archive"),
+            &alice,
+            json!({"expected_version":version,"archived":archived,"repository":"team/private"}),
+        )
+        .await
+        .error_for_status()
+        .unwrap();
+        let response = h.write(Method::PUT, &path, &alice, input.clone()).await;
+        assert_eq!(response.status(), StatusCode::FORBIDDEN);
+        assert_eq!(response.headers()["x-crab-write-outcome"], "rejected");
+    }
+    let current = h.json(&path, &alice).await;
+    assert_eq!(current["version"], 0);
+    assert_eq!(current["items"], json!([]));
+    let mut fresh = input;
+    fresh["request_id"] = json!(uuid::Uuid::now_v7());
+    h.write(Method::PUT, &path, &alice, fresh)
+        .await
+        .error_for_status()
+        .unwrap();
+    h.close().await;
+}
