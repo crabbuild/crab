@@ -412,6 +412,13 @@ Loaded source/member positions are checked against checkpoint-owned sources,
 before newer frontier sources are appended. Explicit bulk materialization
 verifies the complete section hash and canonical encoding against captured roots.
 
+Paged control replay batches checkpoint dictionary membership for its captured
+additions before applying transactions. Temporary positive and negative results
+avoid repeatedly fetching the same dictionary pages across a long frontier.
+They describe initial retention only: ref ordering, prior closures, removals,
+new-tip membership and the exact retained-object limit remain checked when each
+control is applied. The captured replay releases these temporary results afterward.
+
 Footer-only checkpoints have control offset zero when both optional catalog and
 visibility sections are absent. The storage reader accepts that canonical range
 while retaining footer-hash, pointer identity, source and size validation.

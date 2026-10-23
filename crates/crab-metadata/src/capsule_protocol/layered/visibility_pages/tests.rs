@@ -99,6 +99,98 @@ async fn fixture(
 }
 
 #[tokio::test]
+async fn paged_control_replay_batches_checkpoint_dictionary_reads() {
+    use crate::capsule_protocol::{
+        Capsule, CapsuleRefEdit, CapsuleRun, CapsuleSection, CapsuleSectionKind,
+        CapsuleTransaction, CapsuleVisibilityDelta, CapturedVisibility, VisibilityReconciliation,
+        order_ref_controls,
+    };
+    use crate::git_visibility::GitVisibilityEdit;
+    let (layout, _, reader, reads) = fixture(400_000, 128 * 1024 * 1024).await;
+    let name = "refs/heads/main";
+    let mut pending = BTreeMap::new();
+    let mut old = format!("{:040x}", 1);
+    for batch in 0_u32..64 {
+        let added = (0..64)
+            .map(|index| format!("{:040x}", ((batch * 64 + index + 1) * 9973) % 400_000 + 1))
+            .collect::<Vec<_>>();
+        let new = added[0].clone();
+        let transaction = CapsuleTransaction::new(
+            &"1".repeat(64),
+            vec![CapsuleRefEdit::new(
+                name,
+                Some(old.clone()),
+                Some(new.clone()),
+                None,
+            )],
+        )
+        .unwrap();
+        let visibility = CapsuleVisibilityDelta::new(BTreeMap::from([(
+            name.to_owned(),
+            GitVisibilityEdit::from_delta_objects(Some(old), new.clone(), added, Vec::new()),
+        )]))
+        .unwrap();
+        let capsule = Capsule::build(
+            &transaction,
+            Vec::new(),
+            vec![CapsuleSection::new(
+                CapsuleSectionKind::VisibilityDelta,
+                visibility.encode().unwrap(),
+            )],
+        )
+        .unwrap();
+        let run = CapsuleRun::leaf(capsule).unwrap();
+        layout
+            .store()
+            .create_strict(&layout.capsule_path(run.hash()), run.bytes().clone())
+            .await
+            .unwrap();
+        let pointer = crate::capsule_protocol::CapsulePointer::new(
+            run.hash(),
+            run.bytes().len() as u64,
+            run.control_offset(),
+            run.control_size(),
+            run.footer_hash(),
+            run.level(),
+            run.transaction_ids(),
+            run.newest_base_root_digest(),
+        )
+        .unwrap();
+        let (_, controls) =
+            crate::capsule_protocol::load_capsule_run_git_control(&layout, &pointer)
+                .await
+                .unwrap();
+        for control in controls {
+            pending.insert(control.transaction_id().to_owned(), control);
+        }
+        old = new;
+    }
+    let initial = CapturedVisibility::from_checkpoint(
+        layout.store().clone(),
+        Arc::new(reader),
+        std::iter::once(name.to_owned()),
+    )
+    .await
+    .unwrap();
+    reads.store(0, Ordering::SeqCst);
+    let ordered = order_ref_controls(
+        &BTreeMap::from([(name.to_owned(), format!("{:040x}", 1))]),
+        &BTreeMap::new(),
+        &mut VisibilityReconciliation::Paged(Box::new(initial)),
+        &BTreeMap::new(),
+        pending,
+    )
+    .await
+    .unwrap();
+    assert_eq!(ordered.len(), 64);
+    assert!(
+        reads.load(Ordering::SeqCst) < 1000,
+        "checkpoint dictionary pages were repeatedly fetched: {}",
+        reads.load(Ordering::SeqCst)
+    );
+}
+
+#[tokio::test]
 async fn paged_member_selection_preserves_order_misses_and_cache_reuse() {
     let (layout, checkpoint, reader, reads) = fixture(50_000, 128 * 1024).await;
     let requested = [object(42), object(50_001), object(99_999), object(42)];

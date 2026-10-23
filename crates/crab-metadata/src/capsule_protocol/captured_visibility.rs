@@ -16,6 +16,16 @@ pub enum VisibilityReconciliation {
 }
 
 impl VisibilityReconciliation {
+    pub(super) async fn prepare_controls<'a>(
+        &mut self,
+        controls: impl Iterator<Item = &'a CapsuleControl>,
+    ) -> Result<()> {
+        if let Self::Paged(index) = self {
+            index.prepare_controls(controls).await?;
+        }
+        Ok(())
+    }
+
     /// Check expected ref values and captured prior-closure availability.
     pub async fn ready(
         &self,
@@ -109,6 +119,7 @@ pub struct CapturedVisibility {
     layers: Vec<Layer>,
     refs: BTreeMap<String, usize>,
     dictionary: BTreeSet<[u8; 20]>,
+    initial_absent: BTreeSet<[u8; 20]>,
     dictionary_roots: Vec<(Arc<CapsuleVisibilityReader>, String, VisibilityEditHeader)>,
     dictionary_count: u64,
 }
@@ -162,6 +173,7 @@ impl CapturedVisibility {
             layers,
             refs,
             dictionary: BTreeSet::new(),
+            initial_absent: BTreeSet::new(),
             dictionary_roots: Vec::new(),
             dictionary_count,
         }
@@ -216,10 +228,64 @@ impl CapturedVisibility {
         Ok(result)
     }
 
+    async fn prepare_controls<'a>(
+        &mut self,
+        controls: impl Iterator<Item = &'a CapsuleControl>,
+    ) -> Result<()> {
+        if !matches!(&self.initial, Initial::Paged(_)) || self.initial.count() == 0 {
+            return Ok(());
+        }
+        let mut added = BTreeSet::new();
+        for control in controls {
+            let Some((reader, headers)) = self.headers(control).await? else {
+                continue;
+            };
+            for (edit, header) in control.transaction().edits().iter().zip(headers) {
+                if header.is_none() {
+                    continue;
+                }
+                added.extend(
+                    reader
+                        .objects(&self.store, edit.ref_name(), VisibilityChange::Added)
+                        .await?,
+                );
+                if added.len() as u64 > MAX_GIT_VISIBILITY_OBJECTS {
+                    return Err(corrupt_path(
+                        "capsule Git visibility",
+                        "visibility object dictionary is too large",
+                    ));
+                }
+            }
+        }
+        // Reconcile all additions against the pinned dictionary in one page walk.
+        // Per-transaction walks thrash bounded caches on large checkpoints.
+        let added = added.into_iter().collect::<Vec<_>>();
+        let present = self.initial.dictionary(&self.store, &added).await?;
+        // Cache only initial retention, never visibility from unapplied controls.
+        for (oid, present) in added.into_iter().zip(present) {
+            if present {
+                self.dictionary.insert(oid);
+            } else {
+                self.initial_absent.insert(oid);
+            }
+        }
+        Ok(())
+    }
+
     async fn dictionary_contains(&self, oids: &[[u8; 20]]) -> Result<Vec<bool>> {
-        let mut result = self.initial.dictionary(&self.store, oids).await?;
-        for (present, oid) in result.iter_mut().zip(oids) {
-            *present |= self.dictionary.contains(oid);
+        let mut result = oids
+            .iter()
+            .map(|oid| self.dictionary.contains(oid))
+            .collect::<Vec<_>>();
+        let (positions, missing): (Vec<_>, Vec<_>) = oids
+            .iter()
+            .enumerate()
+            .filter(|(index, oid)| !result[*index] && !self.initial_absent.contains(*oid))
+            .map(|(index, oid)| (index, *oid))
+            .unzip();
+        let present = self.initial.dictionary(&self.store, &missing).await?;
+        for (index, present) in positions.into_iter().zip(present) {
+            result[index] = present;
         }
         for (reader, name, _) in &self.dictionary_roots {
             let positions = result
@@ -427,6 +493,7 @@ impl CapturedVisibility {
                 let present = self.dictionary_contains(&added).await?;
                 for (object, present) in added.into_iter().zip(present) {
                     if !present {
+                        self.initial_absent.remove(&object);
                         self.dictionary.insert(object);
                         self.dictionary_count += 1;
                     }

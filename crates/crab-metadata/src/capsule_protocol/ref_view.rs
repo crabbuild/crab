@@ -119,6 +119,7 @@ pub async fn order_ref_controls(
     predecessors: &BTreeMap<String, BTreeSet<String>>,
     mut pending: BTreeMap<String, CapsuleControl>,
 ) -> Result<Vec<CapsuleControl>> {
+    visibility.prepare_controls(pending.values()).await?;
     let mut refs = base_refs.clone();
     let mut peeled = base_peeled.clone();
     let tracked = pending.keys().cloned().collect::<BTreeSet<_>>();
