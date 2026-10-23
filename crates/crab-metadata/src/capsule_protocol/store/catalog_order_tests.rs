@@ -264,7 +264,7 @@ async fn checkpoint_replay_base_binds_catalog_precedence() {
     let ordered = order_ref_controls(
         &BTreeMap::new(),
         &BTreeMap::new(),
-        VisibilityReconciliation::Complete(empty.clone()),
+        &mut VisibilityReconciliation::Complete(empty.clone()),
         &BTreeMap::new(),
         controls
             .iter()
@@ -414,7 +414,7 @@ async fn independent_visibility_can_reorder_prior_borrowing_controls() {
         for with_earlier in [false, true] {
             let index = GitVisibilityIndex::new(0, "0".repeat(64), "0".repeat(64), BTreeMap::new())
                 .unwrap();
-            let visibility = if is_paged {
+            let mut visibility = if is_paged {
                 VisibilityReconciliation::Paged(Box::new(
                     crate::capsule_protocol::CapturedVisibility::new(
                         fixture.layout.store().clone(),
@@ -433,7 +433,7 @@ async fn independent_visibility_can_reorder_prior_borrowing_controls() {
             let ordered = order_ref_controls(
                 &BTreeMap::new(),
                 &BTreeMap::new(),
-                visibility,
+                &mut visibility,
                 &BTreeMap::new(),
                 pending,
             )
@@ -549,7 +549,7 @@ async fn deleting_a_visible_producer_can_delay_borrowing_controls() {
     for (is_paged, controls) in [(false, fixture.controls), (true, paged)] {
         let index =
             GitVisibilityIndex::new(0, "0".repeat(64), "0".repeat(64), BTreeMap::new()).unwrap();
-        let visibility = if is_paged {
+        let mut visibility = if is_paged {
             VisibilityReconciliation::Paged(Box::new(
                 crate::capsule_protocol::CapturedVisibility::new(
                     fixture.layout.store().clone(),
@@ -563,7 +563,7 @@ async fn deleting_a_visible_producer_can_delay_borrowing_controls() {
         let ordered = order_ref_controls(
             &BTreeMap::new(),
             &BTreeMap::new(),
-            visibility,
+            &mut visibility,
             &BTreeMap::new(),
             controls,
         )

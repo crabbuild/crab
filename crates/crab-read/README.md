@@ -52,6 +52,10 @@ enumeration are still eager; total bounded opening remains unqualified.
 Selected-ref control reads retain only their bounded in-flight names and return
 `Send` futures for multithreaded callers. They do not fetch capsule payloads.
 
+Complete metadata and full-capsule views retain the visibility proof produced
+by transaction ordering. Checkpoint publication reuses that reconciled proof;
+returned indexes remain independent and bound to the captured Git identity.
+
 Full-capsule and control-only views share borrowed visibility readiness/application
 checks. Canonical transaction decoding guarantees unique ref names; matched-row
 counts reject extra evidence without copying the per-object edit lists.
