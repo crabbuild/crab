@@ -225,12 +225,12 @@ impl PagedGitObjectIndex {
     /// Resolve physical delta-base offsets without reading an entire reverse pack index.
     ///
     /// The caller admits request/output counts and supplies an admitted store for the captured origin.
-    pub async fn oids_at_offsets(
+    pub async fn entries_at_offsets(
         &self,
         store: &Store,
         offsets: &[(MerkleHash, u64)],
         inventory: &HashMap<MerkleHash, GitPackInventoryEntry>,
-    ) -> Result<Vec<Option<[u8; 20]>>> {
+    ) -> Result<Vec<Option<([u8; 20], GitObjectLocator)>>> {
         let mut work = self.work();
         let pack_ids = offsets.iter().map(|(pack, _)| *pack).collect::<Vec<_>>();
         let slots = self
@@ -269,10 +269,22 @@ impl PagedGitObjectIndex {
             {
                 return bad("location escapes captured pack");
             }
-            output.push(Some(oid));
+            output.push(Some((
+                oid,
+                GitObjectLocator {
+                    ordinal: 0,
+                    pack_id: *pack_id,
+                    location,
+                    metadata,
+                },
+            )));
             physical_facts.push(metadata);
         }
-        let oids = output.iter().flatten().copied().collect::<Vec<_>>();
+        let oids = output
+            .iter()
+            .flatten()
+            .map(|(oid, _)| *oid)
+            .collect::<Vec<_>>();
         let primary = self
             .lookup_with_work(store, &oids, inventory, &mut work)
             .await?;

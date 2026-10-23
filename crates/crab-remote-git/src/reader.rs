@@ -137,7 +137,7 @@ struct CoalescedRange {
 struct DeltaReadState {
     max_object_bytes: u64,
     remaining_depth: usize,
-    ancestors: HashSet<gix_hash::ObjectId>,
+    ancestors: HashSet<PackedEntryKey>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -150,8 +150,14 @@ pub struct RemoteGitObjectMetadata {
     pub size: u64,
 }
 
+type PackedEntryKey = (MerkleHash, u64);
+
 #[derive(Debug, Clone)]
 pub(crate) struct RemoteGitPackedEntry {
+    pub(crate) pack_id: MerkleHash,
+    // REF bases resolve only during materialization so raw passthrough does
+    // not fetch indexes for entries it can copy without decoding.
+    pub(crate) base_locator: Option<GitObjectLocator>,
     pub(crate) oid: gix_hash::ObjectId,
     pub(crate) pack_offset: u64,
     pub(crate) header: Header,
@@ -732,47 +738,51 @@ impl RemoteGitReader {
         cancellation: &CancellationToken,
     ) -> Result<RemoteGitObjectMetadata> {
         let mut current = requested;
+        let mut locator = self.locate(session, current, budget, cancellation).await?;
         let mut visited = HashSet::new();
         let mut deltas = Vec::new();
 
         let kind_and_size = loop {
             check_cancelled(cancellation)?;
-            if !visited.insert(current) {
+            if !visited.insert((locator.pack_id, locator.location.pack_offset)) {
                 return Err(Error::Corrupt {
                     stage: CorruptionStage::Delta,
                 });
             }
-            let locator = self.locate(session, current, budget, cancellation).await?;
             let descriptor = self
                 .inspect_packed_entry(current, locator, budget, cancellation)
                 .await?;
             match descriptor {
                 EntryDescriptor::Base { kind, size } => break (kind, size),
-                EntryDescriptor::RefDelta {
-                    base,
+                EntryDescriptor::Delta {
+                    header,
                     base_size,
                     result_size,
-                    ..
                 } => {
                     push_metadata_delta(&mut deltas, base_size, result_size, self.limits)?;
-                    current = base;
-                }
-                EntryDescriptor::OfsDelta {
-                    pack_id,
-                    pack_offset,
-                    base_distance,
-                    base_size,
-                    result_size,
-                    ..
-                } => {
-                    push_metadata_delta(&mut deltas, base_size, result_size, self.limits)?;
-                    let base_offset = Header::verified_base_pack_offset(pack_offset, base_distance)
-                        .ok_or(Error::Corrupt {
-                            stage: CorruptionStage::Delta,
-                        })?;
-                    current = self
-                        .oid_at_pack_offset(pack_id, base_offset, budget, cancellation)
+                    let base = self
+                        .local_delta_base(
+                            locator.pack_id,
+                            locator.location.pack_offset,
+                            header,
+                            budget,
+                            cancellation,
+                        )
                         .await?;
+                    (current, locator) = match base {
+                        Some(base) => base,
+                        None => {
+                            let Header::RefDelta { base_id } = header else {
+                                return Err(Error::Corrupt {
+                                    stage: CorruptionStage::Delta,
+                                });
+                            };
+                            (
+                                base_id,
+                                self.locate(session, base_id, budget, cancellation).await?,
+                            )
+                        }
+                    };
                 }
             }
         };
@@ -1389,8 +1399,11 @@ impl RemoteGitReader {
                 self.limits.max_packed_entry_bytes,
             )?;
             if selected_base_oids
-                .insert((locator.pack_id, locator.location.pack_offset), oid)
-                .is_some_and(|previous| previous != oid)
+                .insert(
+                    (locator.pack_id, locator.location.pack_offset),
+                    (oid, locator),
+                )
+                .is_some_and(|(previous, _)| previous != oid)
             {
                 return Err(Error::Corrupt {
                     stage: CorruptionStage::Locator,
@@ -1462,8 +1475,7 @@ impl RemoteGitReader {
                             stage: CorruptionStage::PackEntry,
                         });
                     }
-                    let base_oid = match parsed.header {
-                        Header::RefDelta { base_id } => Some(base_id),
+                    let local_base = match parsed.header {
                         Header::OfsDelta { base_distance } => {
                             let base_offset = Header::verified_base_pack_offset(
                                 entry.locator.location.pack_offset,
@@ -1472,29 +1484,37 @@ impl RemoteGitReader {
                             .ok_or(Error::Corrupt {
                                 stage: CorruptionStage::Delta,
                             })?;
-                            // Batch locators already authenticate selected base
-                            // offsets. Reopening their indexes after LRU eviction
-                            // adds reads without adding integrity evidence.
-                            Some(
-                                match selected_base_oids.get(&(entry.locator.pack_id, base_offset))
-                                {
-                                    Some(oid) => *oid,
-                                    None => {
-                                        reader
-                                            .oid_at_pack_offset(
-                                                entry.locator.pack_id,
-                                                base_offset,
-                                                budget,
-                                                &caller_cancellation,
-                                            )
-                                            .await?
-                                    }
-                                },
-                            )
+                            // Selected authenticated locations need no index reload.
+                            match selected_base_oids.get(&(entry.locator.pack_id, base_offset)) {
+                                Some(base) => Some(*base),
+                                None => {
+                                    reader
+                                        .local_delta_base(
+                                            entry.locator.pack_id,
+                                            entry.locator.location.pack_offset,
+                                            parsed.header,
+                                            budget,
+                                            &caller_cancellation,
+                                        )
+                                        .await?
+                                }
+                            }
                         }
+                        Header::RefDelta { .. } => None,
                         Header::Commit | Header::Tree | Header::Blob | Header::Tag => None,
                     };
+                    let base_oid = local_base.map(|(oid, _)| oid).or(match parsed.header {
+                        Header::RefDelta { base_id } => Some(base_id),
+                        _ => None,
+                    });
+                    if base_oid == Some(entry.oid) {
+                        return Err(Error::Corrupt {
+                            stage: CorruptionStage::Delta,
+                        });
+                    }
                     entries.push(RemoteGitPackedEntry {
+                        pack_id: entry.locator.pack_id,
+                        base_locator: local_base.map(|(_, locator)| locator),
                         oid: entry.oid,
                         pack_offset: entry.locator.location.pack_offset,
                         header: parsed.header,
@@ -1513,15 +1533,18 @@ impl RemoteGitReader {
         let mut completed = HashMap::with_capacity(requested.len());
         for result in results {
             for entry in result? {
-                completed.insert(entry.oid, entry);
+                completed.insert((entry.pack_id, entry.pack_offset), entry);
             }
         }
-        requested
+        locators
             .iter()
-            .map(|oid| {
-                completed.remove(oid).ok_or(Error::InternalInvariant {
-                    invariant: "batched packed entry read is missing an object",
-                })
+            .map(|locator| {
+                completed
+                    .get(&(locator.pack_id, locator.location.pack_offset))
+                    .cloned()
+                    .ok_or(Error::InternalInvariant {
+                        invariant: "batched packed entry read is missing an object",
+                    })
             })
             .collect()
     }
@@ -1539,29 +1562,37 @@ impl RemoteGitReader {
             return Ok(Vec::new());
         }
         let mut entries = HashMap::with_capacity(initial_entries.len());
+        let mut selected = HashMap::with_capacity(initial_entries.len());
         for entry in initial_entries {
-            if entries.insert(entry.oid, entry).is_some() {
+            let key = (entry.pack_id, entry.pack_offset);
+            if selected.insert(entry.oid, key).is_some() {
                 return Err(Error::InternalInvariant {
                     invariant: "packed entry materializer received duplicate objects",
                 });
             }
-        }
-        for oid in requested {
-            if !entries.contains_key(oid) {
-                return Err(Error::InternalInvariant {
-                    invariant: "packed entry materializer is missing a requested object",
+            if entries.insert(key, entry).is_some() {
+                return Err(Error::Corrupt {
+                    stage: CorruptionStage::Locator,
                 });
             }
         }
+        let requested = requested
+            .iter()
+            .map(|oid| {
+                selected.get(oid).copied().ok_or(Error::InternalInvariant {
+                    invariant: "packed entry materializer is missing a requested object",
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
 
         let mut cached_bases = HashMap::new();
         loop {
             check_cancelled(cancellation)?;
             let mut missing = Vec::new();
             let mut visited = HashMap::new();
-            for oid in requested {
+            for key in &requested {
                 collect_missing_delta_bases(
-                    *oid,
+                    *key,
                     0,
                     &entries,
                     &cached_bases,
@@ -1570,15 +1601,79 @@ impl RemoteGitReader {
                     self.limits.max_delta_depth,
                 )?;
             }
-            missing.sort_unstable();
-            missing.dedup();
+            // Only thin REF_DELTA dependencies use the snapshot's global OID
+            // selection. Local bases retain their exact authenticated locations.
+            let unresolved = entries
+                .iter()
+                .filter(|(key, entry)| {
+                    visited.contains_key(key)
+                        && entry
+                            .base_oid
+                            .is_some_and(|oid| !cached_bases.contains_key(&oid))
+                        && entry.base_locator.is_none()
+                })
+                .map(|(key, entry)| (*key, entry.header))
+                .collect::<Vec<_>>();
+            let pending = !unresolved.is_empty();
+            let mut external = Vec::new();
+            for (key, header) in unresolved {
+                let Header::RefDelta { base_id } = header else {
+                    return Err(Error::Corrupt {
+                        stage: CorruptionStage::Delta,
+                    });
+                };
+                let cache_key =
+                    crate::runtime::ObjectCacheKey::new(&self.identity, self.generation, base_id);
+                if let Some(base) = self
+                    .verified_cached_object(&cache_key, self.limits.max_object_bytes)
+                    .await?
+                {
+                    cached_bases.insert(base_id, base.as_ref().clone());
+                    continue;
+                }
+                match self
+                    .local_delta_base(key.0, key.1, header, budget, cancellation)
+                    .await?
+                {
+                    Some((_, locator)) => {
+                        entries
+                            .get_mut(&key)
+                            .ok_or(Error::InternalInvariant {
+                                invariant: "delta dependency entry disappeared",
+                            })?
+                            .base_locator = Some(locator)
+                    }
+                    None => {
+                        external.push((key, base_id));
+                    }
+                }
+            }
+            for batch in external.chunks(DELTA_PREFETCH_BATCH_SIZE) {
+                let oids = batch.iter().map(|(_, oid)| *oid).collect::<Vec<_>>();
+                let locators = self
+                    .lookup_packed_locators_with_session(session, &oids, budget, cancellation)
+                    .await?;
+                for ((key, _), locator) in batch.iter().zip(locators) {
+                    entries
+                        .get_mut(key)
+                        .ok_or(Error::InternalInvariant {
+                            invariant: "delta dependency entry disappeared",
+                        })?
+                        .base_locator = Some(locator);
+                }
+            }
+            missing.sort_unstable_by_key(|(_, locator)| {
+                (locator.pack_id, locator.location.pack_offset)
+            });
+            missing.dedup_by_key(|(_, locator)| (locator.pack_id, locator.location.pack_offset));
             if missing.is_empty() {
+                if pending {
+                    continue;
+                }
                 break;
             }
-            // Match the point reader's reuse of verified delta bases. Fetching
-            // them again for every batch multiplies origin reads on deep packs.
             let mut uncached = Vec::new();
-            for oid in missing {
+            for (oid, locator) in missing {
                 let key = crate::runtime::ObjectCacheKey::new(&self.identity, self.generation, oid);
                 match self
                     .verified_cached_object(&key, self.limits.max_object_bytes)
@@ -1587,25 +1682,26 @@ impl RemoteGitReader {
                     Some(object) => {
                         cached_bases.insert(oid, object.as_ref().clone());
                     }
-                    None => uncached.push(oid),
+                    None => uncached.push((oid, locator)),
                 }
             }
             for batch in uncached.chunks(DELTA_PREFETCH_BATCH_SIZE) {
+                let oids = batch.iter().map(|(oid, _)| *oid).collect::<Vec<_>>();
+                let locators = batch
+                    .iter()
+                    .map(|(_, locator)| *locator)
+                    .collect::<Vec<_>>();
                 let fetched = self
-                    .read_packed_many_with_session(
-                        session,
-                        batch,
+                    .read_packed_many_with_session_and_locators(
+                        &oids,
+                        &locators,
                         concurrency,
                         budget,
                         cancellation,
                     )
                     .await?;
                 for entry in fetched {
-                    if entries.insert(entry.oid, entry).is_some() {
-                        return Err(Error::InternalInvariant {
-                            invariant: "delta base prefetch returned a duplicate object",
-                        });
-                    }
+                    entries.insert((entry.pack_id, entry.pack_offset), entry);
                 }
             }
         }
@@ -1616,7 +1712,7 @@ impl RemoteGitReader {
             self.limits.max_inflated_entry_bytes,
             self.limits.max_delta_depth,
         );
-        resolver.objects = cached_bases;
+        resolver.bases = cached_bases;
         let mut objects = Vec::with_capacity(requested.len());
         for requested_chunk in requested.chunks(MATERIALIZE_CHUNK_SIZE) {
             check_cancelled(cancellation)?;
@@ -1660,7 +1756,10 @@ impl RemoteGitReader {
         budget: &OperationBudget,
         cancellation: &CancellationToken,
     ) -> Result<GitObject> {
-        if !delta.ancestors.insert(requested) {
+        if !delta
+            .ancestors
+            .insert((locator.pack_id, locator.location.pack_offset))
+        {
             return Err(Error::Corrupt {
                 stage: CorruptionStage::Delta,
             });
@@ -1712,20 +1811,21 @@ impl RemoteGitReader {
                 maximum: 0,
             });
         }
-        let base_oid = match packed.header {
-            Header::RefDelta { base_id } => base_id,
-            Header::OfsDelta { base_distance } => {
-                let base_offset =
-                    Header::verified_base_pack_offset(locator.location.pack_offset, base_distance)
-                        .ok_or(Error::Corrupt {
-                            stage: CorruptionStage::Delta,
-                        })?;
-                self.oid_at_pack_offset(locator.pack_id, base_offset, budget, cancellation)
-                    .await?
-            }
-            Header::Commit | Header::Tree | Header::Blob | Header::Tag => {
-                return Err(Error::InternalInvariant {
-                    invariant: "base pack entry reached delta resolution",
+        let local_base = self
+            .local_delta_base(
+                locator.pack_id,
+                locator.location.pack_offset,
+                packed.header,
+                budget,
+                cancellation,
+            )
+            .await?;
+        let base_oid = match (local_base, packed.header) {
+            (Some((oid, _)), _) => oid,
+            (None, Header::RefDelta { base_id }) => base_id,
+            _ => {
+                return Err(Error::Corrupt {
+                    stage: CorruptionStage::Delta,
                 });
             }
         };
@@ -1742,7 +1842,10 @@ impl RemoteGitReader {
         {
             base
         } else {
-            let base_locator = self.locate(session, base_oid, budget, cancellation).await?;
+            let base_locator = match local_base {
+                Some((_, locator)) => locator,
+                None => self.locate(session, base_oid, budget, cancellation).await?,
+            };
             let base = Box::pin(self.read_from_locator(
                 session,
                 base_oid,
@@ -2061,7 +2164,6 @@ impl RemoteGitReader {
             .await?;
         let max_inflated = self.limits.max_inflated_entry_bytes;
         let pack_offset = locator.location.pack_offset;
-        let pack_id = locator.pack_id;
         let entry = gix_pack::data::Entry::from_bytes(&bytes, pack_offset, 20)
             .map_err(|source| Error::PackEntry { oid, source })?;
         if entry.header.as_kind().is_none() {
@@ -2078,9 +2180,7 @@ impl RemoteGitReader {
         let token = cancellation.clone();
         let descriptor = self
             .runtime
-            .spawn_blocking(move || {
-                inspect_entry(oid, pack_id, pack_offset, bytes, max_inflated, &token)
-            })
+            .spawn_blocking(move || inspect_entry(oid, pack_offset, bytes, max_inflated, &token))
             .await
             .map_err(|source| Error::DecodeTask { source })??;
         drop(decode_permit);
@@ -2131,41 +2231,89 @@ impl RemoteGitReader {
         Ok(bytes)
     }
 
-    async fn oid_at_pack_offset(
+    async fn local_delta_base(
         &self,
         pack_id: MerkleHash,
         pack_offset: u64,
+        header: Header,
         budget: &OperationBudget,
         cancellation: &CancellationToken,
-    ) -> Result<gix_hash::ObjectId> {
-        if let Some(index) = &self.object_index {
+    ) -> Result<Option<(gix_hash::ObjectId, GitObjectLocator)>> {
+        if let (Header::RefDelta { base_id }, Some(locators)) = (header, &self.inline_locators) {
+            let oid: [u8; 20] = base_id
+                .as_bytes()
+                .try_into()
+                .map_err(|_| Error::UnsupportedObjectFormat)?;
+            if let Some(locator) = locators
+                .get(&oid)
+                .filter(|locator| locator.pack_id == pack_id)
+            {
+                return Ok(Some((base_id, *locator)));
+            }
+        }
+        if let (Header::OfsDelta { base_distance }, Some(index)) = (header, &self.object_index) {
+            let base_offset = Header::verified_base_pack_offset(pack_offset, base_distance).ok_or(
+                Error::Corrupt {
+                    stage: CorruptionStage::Delta,
+                },
+            )?;
             let store = self
                 .store
                 .clone()
                 .with_read_admission(budget.read_admission(cancellation.clone()));
-            let offsets = [(pack_id, pack_offset)];
-            let oids = tokio::select! {
+            let offsets = [(pack_id, base_offset)];
+            let entries = tokio::select! {
                 biased;
                 () = cancellation.cancelled() => return Err(Error::Cancelled),
-                result = index.oids_at_offsets(&store, &offsets, &self.inventory) => result?,
+                result = index.entries_at_offsets(&store, &offsets, &self.inventory) => result?,
             };
-            return oids
+            return entries
                 .into_iter()
                 .next()
                 .flatten()
-                .map(gix_hash::ObjectId::from)
+                .map(|(oid, locator)| Some((gix_hash::ObjectId::from(oid), locator)))
                 .ok_or(Error::DeltaBaseNotFound {
                     pack_id,
-                    pack_offset,
+                    pack_offset: base_offset,
                 });
         }
         let index = self.load_pack_index(pack_id, budget, cancellation).await?;
-        index
-            .oid_at_offset(pack_offset)
-            .ok_or(Error::DeltaBaseNotFound {
+        let position = match header {
+            Header::OfsDelta { base_distance } => {
+                let base_offset = Header::verified_base_pack_offset(pack_offset, base_distance)
+                    .ok_or(Error::Corrupt {
+                        stage: CorruptionStage::Delta,
+                    })?;
+                let oid = index
+                    .oid_at_offset(base_offset)
+                    .ok_or(Error::DeltaBaseNotFound {
+                        pack_id,
+                        pack_offset: base_offset,
+                    })?;
+                index
+                    .object_ids
+                    .binary_search(&oid)
+                    .map_err(|_| Error::Corrupt {
+                        stage: CorruptionStage::PackIndex,
+                    })?
+            }
+            Header::RefDelta { base_id } => match index.object_ids.binary_search(&base_id) {
+                Ok(position) => position,
+                Err(_) => return Ok(None),
+            },
+            Header::Commit | Header::Tree | Header::Blob | Header::Tag => return Ok(None),
+        };
+        // OFS_DELTA and in-pack REF_DELTA select a physical representation.
+        // Repeating global OID lookup can select a different delta and invent a cycle.
+        Ok(Some((
+            index.object_ids[position],
+            GitObjectLocator {
+                ordinal: 0,
                 pack_id,
-                pack_offset,
-            })
+                location: index.location_at(position)?,
+                metadata: Default::default(),
+            },
+        )))
     }
 
     async fn load_pack_index(
@@ -3311,22 +3459,21 @@ impl RemoteGitReader {
 }
 
 fn collect_missing_delta_bases(
-    oid: gix_hash::ObjectId,
+    key: PackedEntryKey,
     depth: usize,
-    entries: &HashMap<gix_hash::ObjectId, RemoteGitPackedEntry>,
+    entries: &HashMap<PackedEntryKey, RemoteGitPackedEntry>,
     cached: &HashMap<gix_hash::ObjectId, GitObject>,
-    visited: &mut HashMap<gix_hash::ObjectId, usize>,
-    missing: &mut Vec<gix_hash::ObjectId>,
+    visited: &mut HashMap<PackedEntryKey, usize>,
+    missing: &mut Vec<(gix_hash::ObjectId, GitObjectLocator)>,
     max_delta_depth: usize,
 ) -> Result<()> {
-    if cached.contains_key(&oid) || visited.get(&oid).is_some_and(|known| *known <= depth) {
+    if visited.get(&key).is_some_and(|known| *known <= depth) {
         return Ok(());
     }
-    visited.insert(oid, depth);
-    let Some(entry) = entries.get(&oid) else {
-        missing.push(oid);
-        return Ok(());
-    };
+    visited.insert(key, depth);
+    let entry = entries.get(&key).ok_or(Error::InternalInvariant {
+        invariant: "delta walk is missing a packed entry",
+    })?;
     let Some(base_oid) = entry.base_oid else {
         return Ok(());
     };
@@ -3337,8 +3484,25 @@ fn collect_missing_delta_bases(
             maximum: max_delta_depth as u64,
         });
     }
+    if cached.contains_key(&base_oid) {
+        return Ok(());
+    }
+    // The async prefetch phase resolves reached REF bases before the next walk.
+    let Some(locator) = entry.base_locator else {
+        return Ok(());
+    };
+    let base_key = (locator.pack_id, locator.location.pack_offset);
+    let Some(base_entry) = entries.get(&base_key) else {
+        missing.push((base_oid, locator));
+        return Ok(());
+    };
+    if base_entry.oid != base_oid {
+        return Err(Error::Corrupt {
+            stage: CorruptionStage::Locator,
+        });
+    }
     collect_missing_delta_bases(
-        base_oid,
+        base_key,
         depth.saturating_add(1),
         entries,
         cached,
@@ -3349,9 +3513,12 @@ fn collect_missing_delta_bases(
 }
 
 struct PackedEntryResolver {
-    entries: HashMap<gix_hash::ObjectId, RemoteGitPackedEntry>,
-    objects: HashMap<gix_hash::ObjectId, GitObject>,
-    resolving: HashSet<gix_hash::ObjectId>,
+    entries: HashMap<PackedEntryKey, RemoteGitPackedEntry>,
+    objects: HashMap<PackedEntryKey, GitObject>,
+    // Verified OIDs can satisfy dependencies without bypassing validation
+    // of a requested packed representation that happens to have the same OID.
+    bases: HashMap<gix_hash::ObjectId, GitObject>,
+    resolving: HashSet<PackedEntryKey>,
     max_object_bytes: u64,
     max_inflated_entry_bytes: u64,
     max_delta_depth: usize,
@@ -3359,7 +3526,7 @@ struct PackedEntryResolver {
 
 impl PackedEntryResolver {
     fn new(
-        entries: HashMap<gix_hash::ObjectId, RemoteGitPackedEntry>,
+        entries: HashMap<PackedEntryKey, RemoteGitPackedEntry>,
         max_object_bytes: u64,
         max_inflated_entry_bytes: u64,
         max_delta_depth: usize,
@@ -3367,6 +3534,7 @@ impl PackedEntryResolver {
         Self {
             entries,
             objects: HashMap::new(),
+            bases: HashMap::new(),
             resolving: HashSet::new(),
             max_object_bytes,
             max_inflated_entry_bytes,
@@ -3376,7 +3544,7 @@ impl PackedEntryResolver {
 
     fn resolve_many(
         &mut self,
-        requested: &[gix_hash::ObjectId],
+        requested: &[PackedEntryKey],
         max_inflated_bytes: u64,
         cancellation: &CancellationToken,
     ) -> Result<(Vec<GitObject>, u64)> {
@@ -3400,26 +3568,29 @@ impl PackedEntryResolver {
 
     fn resolve(
         &mut self,
-        oid: gix_hash::ObjectId,
+        key: PackedEntryKey,
         depth: usize,
         inflated_bytes: u64,
         max_inflated_bytes: u64,
         cancellation: &CancellationToken,
     ) -> Result<(GitObject, u64)> {
         check_cancelled(cancellation)?;
-        if let Some(object) = self.objects.get(&oid) {
+        if let Some(object) = self.objects.get(&key) {
             return Ok((object.clone(), 0));
         }
-        if !self.resolving.insert(oid) {
+        if !self.resolving.insert(key) {
             return Err(Error::Corrupt {
                 stage: CorruptionStage::Delta,
             });
         }
         let entry = self
             .entries
-            .get(&oid)
+            .get(&key)
             .cloned()
-            .ok_or(Error::ObjectNotFound { oid })?;
+            .ok_or(Error::InternalInvariant {
+                invariant: "packed resolver is missing an entry",
+            })?;
+        let oid = entry.oid;
         let entry_bytes = entry.decompressed_size;
         ensure_inflated_budget(inflated_bytes, entry_bytes, max_inflated_bytes)?;
         let packed = inflate_entry(
@@ -3449,13 +3620,21 @@ impl PackedEntryResolver {
             let base_oid = entry.base_oid.ok_or(Error::Corrupt {
                 stage: CorruptionStage::Delta,
             })?;
-            let (base, base_bytes) = self.resolve(
-                base_oid,
-                depth.saturating_add(1),
-                inflated_bytes.saturating_add(entry_bytes),
-                max_inflated_bytes,
-                cancellation,
-            )?;
+            let (base, base_bytes) = match self.bases.get(&base_oid) {
+                Some(base) => (base.clone(), 0),
+                None => {
+                    let locator = entry.base_locator.ok_or(Error::Corrupt {
+                        stage: CorruptionStage::Delta,
+                    })?;
+                    self.resolve(
+                        (locator.pack_id, locator.location.pack_offset),
+                        depth.saturating_add(1),
+                        inflated_bytes.saturating_add(entry_bytes),
+                        max_inflated_bytes,
+                        cancellation,
+                    )?
+                }
+            };
             let maximum = usize_limit(self.max_object_bytes, "decoded object bytes")?;
             let instructions = packed.inflated;
             let parsed = delta::parse(&instructions, maximum)
@@ -3491,8 +3670,8 @@ impl PackedEntryResolver {
             }
         };
         ensure_inflated_budget(inflated_bytes, added_bytes, max_inflated_bytes)?;
-        self.resolving.remove(&oid);
-        self.objects.insert(oid, object.clone());
+        self.resolving.remove(&key);
+        self.objects.insert(key, object.clone());
         Ok((object, added_bytes))
     }
 }
@@ -3557,15 +3736,8 @@ enum EntryDescriptor {
         kind: gix_object::Kind,
         size: u64,
     },
-    RefDelta {
-        base: gix_hash::ObjectId,
-        base_size: u64,
-        result_size: u64,
-    },
-    OfsDelta {
-        pack_id: MerkleHash,
-        pack_offset: u64,
-        base_distance: u64,
+    Delta {
+        header: Header,
         base_size: u64,
         result_size: u64,
     },
@@ -3753,7 +3925,6 @@ fn packed_entry_allocation_bytes(
 
 fn inspect_entry(
     oid: gix_hash::ObjectId,
-    pack_id: MerkleHash,
     pack_offset: u64,
     bytes: Bytes,
     max_inflated: u64,
@@ -3783,25 +3954,11 @@ fn inspect_entry(
         .map_err(|error| map_delta_error(error, oid))?;
     let base_size = delta.base_size as u64;
     let result_size = delta.result_size as u64;
-    match packed.header {
-        Header::RefDelta { base_id } => Ok(EntryDescriptor::RefDelta {
-            base: base_id,
-            base_size,
-            result_size,
-        }),
-        Header::OfsDelta { base_distance } => Ok(EntryDescriptor::OfsDelta {
-            pack_id,
-            pack_offset,
-            base_distance,
-            base_size,
-            result_size,
-        }),
-        Header::Commit | Header::Tree | Header::Blob | Header::Tag => {
-            Err(Error::InternalInvariant {
-                invariant: "base pack entry changed kind while inspecting metadata",
-            })
-        }
-    }
+    Ok(EntryDescriptor::Delta {
+        header: packed.header,
+        base_size,
+        result_size,
+    })
 }
 
 fn parse_pack_index(
@@ -4048,6 +4205,10 @@ fn usize_limit(value: u64, limit: &'static str) -> Result<usize> {
 #[cfg(test)]
 #[path = "reader/object_index_tests.rs"]
 mod object_index_tests;
+
+#[cfg(test)]
+#[path = "reader/duplicate_representation_tests.rs"]
+pub(crate) mod duplicate_representation_tests;
 
 #[cfg(test)]
 mod tests {
@@ -5809,8 +5970,19 @@ mod tests {
         let entry = |value: u8, base: Option<u8>| {
             let base_oid = base.map(oid);
             RemoteGitPackedEntry {
+                pack_id: MerkleHash::default(),
+                base_locator: base.map(|base| GitObjectLocator {
+                    ordinal: 0,
+                    pack_id: MerkleHash::default(),
+                    location: GitObjectLocation {
+                        pack_offset: u64::from(base),
+                        entry_len: 1,
+                        crc32: 0,
+                    },
+                    metadata: Default::default(),
+                }),
                 oid: oid(value),
-                pack_offset: 0,
+                pack_offset: u64::from(value),
                 header: base_oid.map_or(Header::Blob, |base_id| Header::RefDelta { base_id }),
                 decompressed_size: 1,
                 header_size: 1,
@@ -5819,13 +5991,13 @@ mod tests {
             }
         };
         let entries = HashMap::from([
-            (oid(1), entry(1, Some(2))),
-            (oid(2), entry(2, Some(3))),
-            (oid(4), entry(4, Some(3))),
+            ((MerkleHash::default(), 1), entry(1, Some(2))),
+            ((MerkleHash::default(), 2), entry(2, Some(3))),
+            ((MerkleHash::default(), 4), entry(4, Some(3))),
         ]);
         let mut visited = HashMap::new();
         let mut missing = Vec::new();
-        for requested in [oid(1), oid(4)] {
+        for requested in [(MerkleHash::default(), 1), (MerkleHash::default(), 4)] {
             collect_missing_delta_bases(
                 requested,
                 0,
@@ -5838,6 +6010,7 @@ mod tests {
             .expect("delta dependency walk");
         }
 
+        let mut missing = missing.into_iter().map(|(oid, _)| oid).collect::<Vec<_>>();
         missing.sort_unstable();
         missing.dedup();
         assert_eq!(missing, [oid(3)]);

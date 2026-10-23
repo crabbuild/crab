@@ -110,10 +110,15 @@ async fn point_lookup_and_delta_offsets_are_bounded_and_preserve_duplicate_posit
         .map(|offset| (entries[0].1.pack_id, offset));
     assert_eq!(
         reader
-            .oids_at_offsets(&store, &offsets, &inventory)
+            .entries_at_offsets(&store, &offsets, &inventory)
             .await
             .unwrap(),
-        vec![Some(oid(9999)), Some(oid(0)), Some(oid(0)), None]
+        vec![
+            Some((oid(9999), entries[9999].1)),
+            Some((oid(0), entries[0].1)),
+            Some((oid(0), entries[0].1)),
+            None
+        ]
     );
     reader
         .verify_complete(&store, &manifest, write.body.len() as u64)
@@ -342,9 +347,17 @@ async fn object_aliases_prefer_full_encodings_and_keep_every_physical_offset() {
         .verify_complete(&store, &manifest, 128 * 1024)
         .await
         .unwrap();
+    let physical = reader
+        .entries_at_offsets(
+            &store,
+            &[(entries[0].1.pack_id, entries[0].1.location.pack_offset)],
+            &inventory,
+        )
+        .await
+        .unwrap();
     assert_eq!(
-        (selected, write.descriptor.offsets.count),
-        (vec![Some(full)], 2)
+        (selected, physical, write.descriptor.offsets.count),
+        (vec![Some(full)], vec![Some(entries[0])], 2)
     );
 }
 
@@ -633,7 +646,7 @@ async fn resigned_pack_binding_cannot_redirect_reads_to_another_pack() {
         (
             reader.lookup(&store, &[oid(10)], &inventory).await.is_err(),
             reader
-                .oids_at_offsets(&store, &[(second_pack.pack_id, 12)], &inventory)
+                .entries_at_offsets(&store, &[(second_pack.pack_id, 12)], &inventory)
                 .await
                 .is_err(),
             reader

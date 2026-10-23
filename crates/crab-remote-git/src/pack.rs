@@ -2929,6 +2929,14 @@ async fn generate_pack_with_operation(
     } else {
         None
     };
+    let mut selected_packs = locator_plan
+        .as_ref()
+        .map(|plan| {
+            plan.iter()
+                .map(|(oid, locator)| (*oid, locator.pack_id))
+                .collect::<HashMap<_, _>>()
+        })
+        .unwrap_or_default();
     for (batch_index, batch) in object_ids.chunks(OBJECT_BATCH_SIZE).enumerate() {
         if cancellation.is_cancelled() {
             return Err(Error::Cancelled);
@@ -2947,26 +2955,43 @@ async fn generate_pack_with_operation(
             }
             None => operation.read_packed_entries(batch).await?,
         };
+        if locator_plan.is_none() {
+            // Earlier conservative batches already emitted their bases;
+            // only the current batch can introduce a new dependency cycle.
+            selected_packs.clear();
+        }
+        for entry in &entries {
+            selected_packs.insert(entry.oid, entry.pack_id);
+        }
+        // Combining representations from different packs can turn two valid
+        // physical chains into an OID cycle. Materialize the displaced edges
+        // before rewriting local deltas into the response's OID namespace.
+        let displaced = entries
+            .iter()
+            .filter(|entry| delta_base_is_displaced(entry, &selected_packs))
+            .map(|entry| entry.oid)
+            .collect::<HashSet<_>>();
         // Selected dense responses preserve REF_DELTA dependencies by object
         // ID. Conservative responses order entries for their historical
         // OFS_DELTA handling. External thin packs rewrite OFS_DELTA entries
         // to REF_DELTA and have a client-proven base closure, so sorting the
         // full batch only adds CPU and memory without changing correctness.
         let entries = if selected_objects.is_none() && !allow_external_bases {
-            order_packed_entries(entries)?
+            order_packed_entries(entries, &displaced)?
         } else {
             entries
         };
         let materialize = entries
             .iter()
             .filter_map(|entry| {
-                let materialize = should_materialize_entry(
-                    entry,
-                    selected_objects,
-                    &emitted,
-                    &thin_bases,
-                    allow_external_bases,
-                );
+                let materialize = displaced.contains(&entry.oid)
+                    || should_materialize_entry(
+                        entry,
+                        selected_objects,
+                        &emitted,
+                        &thin_bases,
+                        allow_external_bases,
+                    );
                 if selected_objects.is_none() {
                     emitted.insert(entry.oid);
                 }
@@ -3046,8 +3071,19 @@ fn should_materialize_entry(
     )
 }
 
+fn delta_base_is_displaced(
+    entry: &crate::reader::RemoteGitPackedEntry,
+    selected_packs: &HashMap<ObjectId, MerkleHash>,
+) -> bool {
+    entry
+        .base_oid
+        .and_then(|base| selected_packs.get(&base))
+        .is_some_and(|pack| *pack != entry.pack_id)
+}
+
 fn order_packed_entries(
     entries: Vec<crate::reader::RemoteGitPackedEntry>,
+    materialized: &HashSet<ObjectId>,
 ) -> Result<Vec<crate::reader::RemoteGitPackedEntry>> {
     let positions = entries
         .iter()
@@ -3062,6 +3098,9 @@ fn order_packed_entries(
     let mut dependencies = vec![0u8; entries.len()];
     let mut dependents = vec![Vec::new(); entries.len()];
     for (position, entry) in entries.iter().enumerate() {
+        if materialized.contains(&entry.oid) {
+            continue;
+        }
         let Some(base) = entry
             .base_oid
             .and_then(|base| positions.get(&base).copied())
@@ -4312,6 +4351,8 @@ mod tests {
         let oid = ObjectId::from([oid; 20]);
         let base_oid = base_oid.map(|base| ObjectId::from([base; 20]));
         crate::reader::RemoteGitPackedEntry {
+            pack_id: MerkleHash::default(),
+            base_locator: None,
             oid,
             pack_offset: 0,
             header: base_oid.map_or(Header::Blob, |base_id| Header::RefDelta { base_id }),
@@ -4330,7 +4371,7 @@ mod tests {
             packed_entry(1, None),
         ];
 
-        let ordered = order_packed_entries(entries).expect("acyclic delta chain");
+        let ordered = order_packed_entries(entries, &HashSet::new()).expect("acyclic delta chain");
 
         assert_eq!(
             ordered
@@ -4667,6 +4708,8 @@ mod tests {
         encoder.write_all(data).expect("compress pack entry");
         bytes.extend(encoder.finish().expect("finish pack entry compression"));
         crate::reader::RemoteGitPackedEntry {
+            pack_id: MerkleHash::default(),
+            base_locator: None,
             oid,
             pack_offset: 12,
             header,
@@ -4677,12 +4720,60 @@ mod tests {
         }
     }
 
+    #[tokio::test]
+    async fn response_packs_preserve_bytes_across_displaced_delta_bases() {
+        for ofs in [true, false] {
+            for selected in [true, false] {
+                let (repository, session, oids) =
+                    crate::reader::duplicate_representation_tests::fixture(ofs).await;
+                session.close().await.unwrap();
+                let cancellation = CancellationToken::new();
+                let operation = repository
+                    .operation(OperationKind::UploadPack, &cancellation)
+                    .await
+                    .unwrap();
+                let selected_oids = oids.into_iter().collect::<HashSet<_>>();
+                let result = generate_pack_with_operation(
+                    &operation,
+                    &oids,
+                    &[],
+                    selected.then_some(&selected_oids),
+                    false,
+                    "test",
+                    &cancellation,
+                )
+                .await;
+                let result = operation.finish(result).await;
+                repository.state.runtime.shutdown().await;
+                let pack = result.unwrap();
+                let workspace = tempfile::tempdir().unwrap();
+                let path = workspace.path().join("response.pack");
+                let index_path = workspace.path().join("response.idx");
+                std::fs::copy(pack.path(), &path).unwrap();
+                let output = std::process::Command::new("git")
+                    .args(["index-pack", "--strict", "-o"])
+                    .arg(&index_path)
+                    .arg(&path)
+                    .output()
+                    .unwrap();
+                assert!(
+                    output.status.success(),
+                    "ofs={ofs}, selected={selected}: {}",
+                    String::from_utf8_lossy(&output.stderr)
+                );
+                let index = gix_pack::index::File::at(&index_path, gix_hash::Kind::Sha1).unwrap();
+                let actual = index.iter().map(|entry| entry.oid).collect::<HashSet<_>>();
+                assert_eq!(actual, selected_oids);
+            }
+        }
+    }
+
     #[test]
     fn pack_entry_dependency_cycles_fail_closed() {
         let entries = vec![packed_entry(1, Some(2)), packed_entry(2, Some(1))];
 
         assert!(matches!(
-            order_packed_entries(entries),
+            order_packed_entries(entries, &HashSet::new()),
             Err(Error::Corrupt {
                 stage: crate::CorruptionStage::Delta
             })

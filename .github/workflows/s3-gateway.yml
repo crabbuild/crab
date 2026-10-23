@@ -61,11 +61,13 @@ jobs:
         with:
           shared-key: s3-gateway-contracts
       - name: Check formatting
-        run: cargo fmt --check -p crab-read -p crab-s3-gateway
+        run: cargo fmt --check -p crab-metadata -p crab-remote-git -p crab-read -p crab-s3-gateway
       - name: Verify shared reads and S3 operations
         env:
           RUST_MIN_STACK: "8388608"
-        run: cargo test --locked --lib -p crab-read -p crab-s3-gateway
+        run: cargo test --locked --lib -p crab-remote-git -p crab-read -p crab-s3-gateway
+      - name: Verify physical object index contracts
+        run: cargo test --locked --lib -p crab-metadata --features remote-index git_object_locator::paged
 
   helm:
     name: Validate Helm chart

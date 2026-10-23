@@ -39,6 +39,13 @@ index misses are definitive. Physical placement never assigns catalog ordinals
 or authorizes ref visibility; ordinary unindexed snapshots retain their existing
 pack-index inspection path until background readiness is published.
 
+Delta reads retain the selected physical representation. OFS bases and in-pack
+REF bases resolve inside their source pack; only external REF bases use global
+OID lookup. Point reads, metadata inspection and batch materialization share
+this rule. Repacking materializes displaced dependencies before combining
+representations, preventing valid source chains from becoming response-pack
+cycles.
+
 Capsule graphs retain an immutable paged reader and captured commit roots;
 membership reads exact ancestor sets rather than allocating a full reachability
 bitmap. A full commit ID matching a verified captured root reuses that visibility
