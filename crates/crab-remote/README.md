@@ -34,8 +34,12 @@ root through the same publication owner, avoiding duplicate delta preparation.
 
 `checkpoint` separates metadata-first logical publication from physical pack
 maintenance using the layered format only. Foreground admission checkpoints the
-authenticated source directory;
-only the hard 64-source limit can force a minimal suffix roll-up.
+authenticated source directory; only the hard 64-source limit can force a
+suffix roll-up. When admission requires copying bodies, the compressed-byte
+geometric cut amortizes that work across later checkpoints. Keeping a fixed
+63-source prefix would repeatedly rewrite the growing tail during continuous
+writes. The existing 512 MiB suffix budget still defers a larger geometric
+merge in favor of the minimum consolidation required for format admission.
 
 Background owners then pin the published checkpoint for geometric repacking without folding
 newer per-ref heads. The shared maintenance pass retains the successful root-CAS

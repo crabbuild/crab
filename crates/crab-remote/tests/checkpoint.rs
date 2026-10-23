@@ -1146,7 +1146,7 @@ async fn cancelled_repack_leaves_the_logical_checkpoint_visible() {
 }
 
 #[tokio::test]
-async fn first_checkpoint_rolls_up_only_the_suffix_required_by_the_source_limit() {
+async fn source_limit_rollup_preserves_geometric_tiers_and_ref_state() {
     let (layout, _) = fixture().await;
     for ordinal in 2..65 {
         publish_blob(&layout, &format!("blob-{ordinal:02}")).await;
@@ -1165,18 +1165,18 @@ async fn first_checkpoint_rolls_up_only_the_suffix_required_by_the_source_limit(
     assert!(outcome.published);
     let after = view(&layout).await;
     let sources = after.layered_checkpoint().unwrap().sources();
-    assert_eq!(sources.len(), 64);
-    assert_eq!(&sources[..63], &before.capsule_run_sources()[..63]);
+    assert_eq!(sources.len(), 2);
+    assert_eq!(sources[0], before.capsule_run_sources()[0]);
     assert_eq!(
         outcome.pack_bytes_read,
-        before.capsule_run_sources()[63..]
+        before.capsule_run_sources()[1..]
             .iter()
             .map(|source| source.compressed_bytes().unwrap())
             .sum::<u64>()
     );
     assert_eq!(
         outcome.pack_bytes_written,
-        sources[63].compressed_bytes().unwrap()
+        sources[1].compressed_bytes().unwrap()
     );
     assert_eq!(after.refs(), before.refs());
     assert_eq!(

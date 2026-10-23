@@ -228,6 +228,10 @@ The cached parent is revalidated while holding the object-store ref lease before
 publishing a commit or returning a prepared no-op or precondition result. It is
 discarded on a tip mismatch, restart, or memory-pressure
 eviction; idle branch state remains reusable below the shared watermark.
+After native checkpointing, an exact-tip control capture refreshes the cached
+transaction position and frontier count. Logical directories and attributes
+remain reusable; physical delta depth and ancestry are discarded because
+consolidation can change their pack representations.
 
 Object storage remains the authority and a cold request reconstructs the same state from
 immutable repository objects.

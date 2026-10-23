@@ -21,7 +21,7 @@ const LAYERED_MAX_PHYSICAL_SOURCES: usize = 64;
 // One run can expand to hundreds of local packs; bound clone/index work after roll-up.
 const LAYERED_PACK_MEMBER_TARGET: usize = 8;
 // Physical maintenance is bounded independently of logical checkpointing.
-// The format's hard source limit can still require a minimal admission roll-up.
+// The format's hard source limit can still require an admission roll-up.
 const LAYERED_SUFFIX_BYTE_BUDGET: u64 = 512 * 1024 * 1024;
 
 /// Publication status and logical pack-body work completed by maintenance.
@@ -487,9 +487,16 @@ async fn publish_checkpoint(
     let mut member_oids = view.capsule_run_member_oids().clone();
     let mut work = CheckpointOutcome::default();
     if sources.len() > LAYERED_MAX_PHYSICAL_SOURCES {
-        // Only the smallest suffix needed for format admission may block this
-        // logical publication; geometric debt belongs to physical maintenance.
-        let selected_start = LAYERED_MAX_PHYSICAL_SOURCES - 1;
+        // Once admission requires copying bodies, preserve their geometric
+        // tiers. A fixed cut leaves a growing tail that every later checkpoint
+        // would rewrite again while foreground writes prevent idle maintenance.
+        let weights = sources
+            .iter()
+            .map(PackSourceDescriptor::compressed_bytes)
+            .collect::<Result<Vec<_>, _>>()?;
+        let selected_start = layered_suffix_start_for_weights(&weights).ok_or_else(|| {
+            layered_admission_error("overflowing source inventory has no admission suffix")
+        })?;
         let consolidation = consolidate_layered_suffix(
             layout,
             view,
@@ -1399,6 +1406,30 @@ mod tests {
         let weights = vec![1; LAYERED_MAX_PHYSICAL_SOURCES + 1];
 
         assert_eq!(layered_suffix_start_for_weights(&weights), Some(1));
+    }
+
+    #[test]
+    fn source_admission_amortizes_repeated_rollups() {
+        let mut weights = Vec::new();
+        let mut admitted = 0_u64;
+        let mut copied = 0_u64;
+        for ordinal in 0..4096 {
+            let weight = 4096 + (ordinal % 7) * 512;
+            weights.push(weight);
+            admitted += weight;
+            if weights.len() <= LAYERED_MAX_PHYSICAL_SOURCES {
+                continue;
+            }
+            let start = layered_suffix_start_for_weights(&weights).unwrap();
+            let replacement = weights.drain(start..).sum::<u64>();
+            copied += replacement;
+            weights.push(replacement);
+        }
+
+        assert!(
+            copied < admitted * 8,
+            "rewrote {copied} of {admitted} bytes"
+        );
     }
 
     #[test]

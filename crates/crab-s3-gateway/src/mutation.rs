@@ -1590,54 +1590,80 @@ async fn prepare_and_upload_batch(
     cancel: &CancellationToken,
 ) -> Result<PreparedBatch> {
     let mut protocol = publication_protocol(repository).await?;
-    if let Some(cached) = request.state.and_then(BranchState::take_latest) {
-        if matches!(&protocol, PublicationProtocol::Capsule(_))
-            && cached
+    let mut cached = request.state.and_then(BranchState::take_latest);
+    if matches!(&protocol, PublicationProtocol::Capsule(_))
+        && cached.as_ref().is_some_and(|cached| {
+            cached
                 .capsule_count
                 .is_some_and(|count| count >= FOREGROUND_CAPSULE_THRESHOLD)
-        {
-            crab_remote::checkpoint::publish_capsule_checkpoint(
-                &repository.layout,
-                FOREGROUND_CAPSULE_THRESHOLD,
-                MAX_CAPSULE_READ_BYTES,
-                cancel,
-            )
-            .await?;
-            repository.read_views.invalidate().await;
-            protocol = publication_protocol(repository).await?;
-        } else {
-            // The ref lease revalidates this optimistic parent before publication;
-            // a competing process forces a cold rebuild against object-store state.
-            match build_batch(
-                None,
-                None,
-                cached.tip,
-                Arc::try_unwrap(cached.manifest).unwrap_or_else(|manifest| (*manifest).clone()),
-                Some(cached.tree),
-                cached.batches_since_checkpoint,
-                mutations,
-            )
-            .await
-            {
-                Ok(batch) => {
-                    return upload_batch(
-                        repository,
-                        batch,
-                        BatchUpload {
-                            branch: request.branch,
-                            expected_transaction: cached.transaction,
-                            protocol,
-                            capsule_count: cached.capsule_count,
-                            requires_revalidation: true,
-                            cancel,
-                            metrics: request.metrics,
-                        },
-                    )
-                    .await;
+        })
+    {
+        crab_remote::checkpoint::publish_capsule_checkpoint(
+            &repository.layout,
+            FOREGROUND_CAPSULE_THRESHOLD,
+            MAX_CAPSULE_READ_BYTES,
+            cancel,
+        )
+        .await?;
+        repository.read_views.invalidate().await;
+        protocol = publication_protocol(repository).await?;
+        cached = match (cached, &protocol) {
+            (Some(mut cached), PublicationProtocol::Capsule(root)) => {
+                let view = crab_read::capsule_protocol::open_view_from_root_with_layered_control(
+                    &repository.layout,
+                    (**root).clone(),
+                    crab_read::capsule_protocol::CapsuleReadLimits {
+                        max_capsule_bytes: MAX_CAPSULE_READ_BYTES,
+                        max_frontier_bytes: MAX_CAPSULE_READ_BYTES,
+                    },
+                )
+                .await?;
+                if view.refs().get(request.branch) == cached.tip.map(|tip| tip.to_string()).as_ref()
+                {
+                    cached.transaction =
+                        view.visible_ref_transactions().get(request.branch).cloned();
+                    cached.capsule_count = Some(view.ref_capsule_count(request.branch));
+                    cached.tree.forget_pack_provenance();
+                    Some(cached)
+                } else {
+                    None
                 }
-                Err(Error::WarmStateMiss) => {}
-                Err(error) => return Err(error),
             }
+            _ => None,
+        };
+    }
+    if let Some(cached) = cached {
+        // The ref lease revalidates this optimistic parent before publication;
+        // a competing process forces a cold rebuild against object-store state.
+        match build_batch(
+            None,
+            None,
+            cached.tip,
+            Arc::try_unwrap(cached.manifest).unwrap_or_else(|manifest| (*manifest).clone()),
+            Some(cached.tree),
+            cached.batches_since_checkpoint,
+            mutations,
+        )
+        .await
+        {
+            Ok(batch) => {
+                return upload_batch(
+                    repository,
+                    batch,
+                    BatchUpload {
+                        branch: request.branch,
+                        expected_transaction: cached.transaction,
+                        protocol,
+                        capsule_count: cached.capsule_count,
+                        requires_revalidation: true,
+                        cancel,
+                        metrics: request.metrics,
+                    },
+                )
+                .await;
+            }
+            Err(Error::WarmStateMiss) => {}
+            Err(error) => return Err(error),
         }
     }
     let (branch_exists, capsule_count, current_view) = match &protocol {
@@ -2478,6 +2504,19 @@ struct WarmTree {
 impl WarmTree {
     fn estimated_bytes(&self) -> usize {
         self.estimated_bytes
+    }
+
+    fn forget_pack_provenance(&mut self) {
+        // A checkpoint preserves logical trees but can select different physical
+        // delta representations. Reuse entries, never the old depth/ancestry.
+        for directory in self.directories.values_mut() {
+            self.estimated_bytes = self
+                .estimated_bytes
+                .saturating_sub(estimated_delta_ancestors_bytes(&directory.delta_ancestors));
+            directory.delta_depth = None;
+            directory.delta_ancestors = Vec::new();
+            directory.generated_in_batch = false;
+        }
     }
 
     fn bind_prepared_pack(&mut self, pack: &crab_git::incoming_pack::PreparedPack) -> Result<()> {
@@ -4119,6 +4158,11 @@ mod tests {
             .await
             .unwrap();
 
+        assert_eq!(
+            runtime.snapshot().await.object_entries,
+            0,
+            "checkpointing an unchanged tip must retain logical write state without rereading Git objects"
+        );
         let after = crab_read::capsule_protocol::open_view(
             &repository.layout,
             crab_read::capsule_protocol::CapsuleReadLimits {
@@ -4144,6 +4188,45 @@ mod tests {
             read(&repository, Arc::clone(&runtime), &cancel, "object").await,
             Bytes::from_static(b"after-checkpoint")
         );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn checkpoint_rejects_warm_state_after_an_external_writer_advances_the_tip() {
+        let (repository, runtime, cancel) = capsule_fixture().await;
+        let coordinator = Coordinator::new(
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            cancel.clone(),
+            Metrics::new().unwrap(),
+        );
+        for index in 0..FOREGROUND_CAPSULE_THRESHOLD {
+            coordinated_put(
+                &coordinator,
+                &repository,
+                &cancel,
+                &format!("objects/item-{index:02}"),
+                b"original",
+            )
+            .await;
+        }
+        let other = Coordinator::new(
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            cancel.clone(),
+            Metrics::new().unwrap(),
+        );
+        coordinated_put(&other, &repository, &cancel, "external", b"other writer").await;
+        coordinated_put(&coordinator, &repository, &cancel, "after", b"new write").await;
+
+        let external = read(&repository, Arc::clone(&runtime), &cancel, "external").await;
+        let after = read(&repository, Arc::clone(&runtime), &cancel, "after").await;
+        assert_eq!(
+            (external.as_ref(), after.as_ref()),
+            (b"other writer".as_slice(), b"new write".as_slice())
+        );
+        other.shutdown().await;
+        coordinator.shutdown().await;
         runtime.shutdown().await;
     }
 
