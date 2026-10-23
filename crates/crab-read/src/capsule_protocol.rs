@@ -1369,6 +1369,9 @@ impl CapsuleRepositoryView {
         if let Some(index) = object_index {
             lookup_sources = lookup_sources.with_object_index(index);
         }
+        if let Some(admission) = &self.checkpoint_visibility {
+            lookup_sources = lookup_sources.with_checkpoint_admission(Arc::clone(admission));
+        }
         if let Some(admission) = preferred_object_admission_by_oid
             && !admission.is_empty()
         {

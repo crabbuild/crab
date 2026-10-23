@@ -2,6 +2,78 @@ use super::*;
 use object_store::ObjectStoreExt;
 
 #[tokio::test]
+async fn paged_checkpoint_placement_keeps_unrelated_pack_indexes_cold() {
+    let (layout, observations) = empty_fixture().await;
+    for name in ["first", "second", "third", "fourth"] {
+        publish_blob(&layout, name).await;
+    }
+    let complete = checkpoint(&layout).await;
+    let checkpoint = complete.layered_checkpoint().unwrap();
+    let visibility = checkpoint.visibility_ordinal_snapshot().unwrap().unwrap();
+    publish_blob(&layout, "frontier").await;
+    let root = crab_write::capsule_protocol::open_root(&layout)
+        .await
+        .unwrap();
+    let captured = crab_read::capsule_protocol::open_git_view_from_root(&layout, root, LIMITS)
+        .await
+        .unwrap();
+    let runtime = Arc::new(
+        crab_remote_git::RemoteGitRuntime::new(
+            crab_remote_git::RuntimeOptions {
+                max_pack_index_cache_entries: 0,
+                ..Default::default()
+            },
+            Arc::new(crab_remote_git::NoopMetrics),
+        )
+        .unwrap(),
+    );
+    let cancel = CancellationToken::new();
+    let repository = captured
+        .git_repository_from_store(
+            layout.clone(),
+            crab_remote_git::RepositoryIdentity::new("memory", "paged-placement", 1).unwrap(),
+            runtime.clone(),
+            crab_remote_git::RepositoryOptions::default(),
+            LIMIT,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    for name in ["first", "second", "third", "fourth"] {
+        let oid = crab_remote::objects::object_id(gix_object::Kind::Blob, name.as_bytes()).unwrap();
+        let position = visibility
+            .objects()
+            .binary_search(&oid.as_bytes().try_into().unwrap())
+            .unwrap();
+        let member = visibility.member_admission().unwrap()[position];
+        let selected = &checkpoint.sources()[usize::from(member.source_index())];
+        let unrelated = checkpoint
+            .sources()
+            .iter()
+            .filter(|source| source.object_hash() != selected.object_hash())
+            .map(|source| layout.capsule_path(source.object_hash()).to_string())
+            .collect::<Vec<_>>();
+        let operation = repository
+            .operation(crab_remote_git::OperationKind::Repository, &cancel)
+            .await
+            .unwrap();
+        observations.2.reset();
+        let result = operation.read_objects(&[oid]).await;
+        let objects = operation.finish(result).await.unwrap();
+        assert_eq!(objects[0].data.as_ref(), name.as_bytes());
+        assert!(
+            observations
+                .2
+                .requests()
+                .iter()
+                .all(|read| !unrelated.contains(&read.location)),
+            "checkpoint member admission must exclude unrelated source indexes"
+        );
+    }
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
 async fn frontier_delta_base_placement_does_not_probe_unrelated_member_indexes() {
     let (layout, observations) = empty_fixture().await;
     publish_blob(&layout, "seed").await;

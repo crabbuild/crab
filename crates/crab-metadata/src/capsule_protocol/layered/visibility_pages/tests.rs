@@ -99,6 +99,34 @@ async fn fixture(
 }
 
 #[tokio::test]
+async fn paged_member_selection_preserves_order_misses_and_cache_reuse() {
+    let (layout, checkpoint, reader, reads) = fixture(50_000, 128 * 1024).await;
+    let requested = [object(42), object(50_001), object(99_999), object(42)];
+    let expected = vec![
+        Some(&checkpoint.sources()[0].members()[0]),
+        Some(&checkpoint.sources()[0].members()[0]),
+        None,
+        Some(&checkpoint.sources()[0].members()[0]),
+    ];
+    assert_eq!(
+        reader
+            .object_members(layout.store(), &requested)
+            .await
+            .unwrap(),
+        expected
+    );
+    let before = reads.load(Ordering::SeqCst);
+    assert_eq!(
+        reader
+            .object_members(layout.store(), &requested)
+            .await
+            .unwrap(),
+        expected
+    );
+    assert_eq!(reads.load(Ordering::SeqCst), before);
+}
+
+#[tokio::test]
 async fn checkpoint_membership_is_bounded_and_retained_objects_do_not_grant_visibility() {
     let (layout, checkpoint, reader, _) = fixture(50_000, 128 * 1024).await;
     assert!(checkpoint.bytes().len() > 2 * 1024 * 1024);
@@ -176,6 +204,12 @@ async fn checkpoint_page_tampering_and_missing_pages_fail_instead_of_membership_
         assert!(
             reader
                 .dictionary_contains(layout.store(), &[object(42)])
+                .await
+                .is_err()
+        );
+        assert!(
+            reader
+                .object_members(layout.store(), &[object(42)])
                 .await
                 .is_err()
         );

@@ -162,6 +162,39 @@ impl LayeredVisibilityReader {
         self.dictionary(store, oids, &mut self.work()).await
     }
 
+    /// Select captured pack members without granting visibility or verifying their contents.
+    pub async fn object_members(
+        &self,
+        store: &Store,
+        oids: &[[u8; 20]],
+    ) -> Result<Vec<Option<&PackMemberDescriptor>>> {
+        let keys = oids.iter().map(|oid| oid.to_vec()).collect::<Vec<_>>();
+        self.rows(
+            store,
+            self.descriptor.objects.as_ref(),
+            Kind::CheckpointObjects,
+            &keys,
+            &mut self.work(),
+        )
+        .await?
+        .into_iter()
+        .map(|value| {
+            let Some(admitted) = value
+                .map(|value| member(&value, self.descriptor.member_admission))
+                .transpose()?
+                .flatten()
+            else {
+                return Ok(None);
+            };
+            admitted.validate_sources(&self.sources)?;
+            Ok(Some(
+                &self.sources[usize::from(admitted.source_index())].members()
+                    [usize::from(admitted.member_index())],
+            ))
+        })
+        .collect()
+    }
+
     /// Inspect one actual ref closure, preserving requested order and absent-ref distinction.
     pub async fn contains_in_ref(
         &self,

@@ -44,7 +44,11 @@ lookup roots while keeping catalog bodies, frontier visibility and run OID
 admission paged. It validates
 authenticated member counts and omits placement-hint dictionaries. CLI reads,
 HTTP browse/projection and S3 gateway reads use this view. Physical lookup uses
-the captured index; unindexed reads retain their existing pack-index path.
+the captured index. Without that index, checkpoint dictionary pages select the
+authenticated pack member before its index is read, keeping unrelated sources
+cold. Frontier and physical delta dependencies retain their existing admission
+paths. Selected indexes and reconstructed object bytes remain independently
+verified under the operation's cancellation and byte budget.
 Maintenance and writers requiring exact admission sets continue using the
 complete metadata entry point. Checkpoint visibility, catalog and source/ref
 enumeration are still eager; total bounded opening remains unqualified.

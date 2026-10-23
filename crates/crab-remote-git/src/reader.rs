@@ -8,6 +8,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 use bytes::Bytes;
 use crab_git::{delta, pack::VerifiedPackIdentity};
+use crab_metadata::capsule_protocol::LayeredVisibilityReader;
 use crab_metadata::git_object_locator::{
     GitObjectLocation, GitObjectLocator, GitObjectLocatorSession, GitObjectLookup,
     GitPackInventoryEntry, PagedGitObjectIndex,
@@ -180,6 +181,7 @@ pub(crate) struct RemoteGitPackedEntry {
 #[derive(Default)]
 pub struct SnapshotLookupSources {
     object_index: Option<Arc<PagedGitObjectIndex>>,
+    checkpoint_admission: Option<Arc<LayeredVisibilityReader>>,
     preferred_pack_indexes: Option<Vec<GitPackInventoryEntry>>,
     preferred_object_admission: Option<Arc<HashMap<[u8; 20], Vec<MerkleHash>>>>,
     inline_locators: Option<Arc<HashMap<[u8; 20], GitObjectLocator>>>,
@@ -187,6 +189,12 @@ pub struct SnapshotLookupSources {
 }
 
 impl SnapshotLookupSources {
+    /// Select checkpoint pack indexes through their authenticated paged member mapping.
+    pub fn with_checkpoint_admission(mut self, admission: Arc<LayeredVisibilityReader>) -> Self {
+        self.checkpoint_admission = Some(admission);
+        self
+    }
+
     /// Use a completely verified captured physical index; misses do not probe pack indexes.
     pub fn with_object_index(mut self, index: PagedGitObjectIndex) -> Self {
         self.object_index = Some(Arc::new(index));
@@ -474,6 +482,7 @@ pub(crate) struct RemoteGitReader {
     object_index: Option<Arc<PagedGitObjectIndex>>,
     preferred_pack_indexes: Option<HashMap<MerkleHash, GitPackInventoryEntry>>,
     preferred_object_admission: Option<Arc<HashMap<[u8; 20], Vec<MerkleHash>>>>,
+    checkpoint_admission: Option<Arc<LayeredVisibilityReader>>,
     inline_locators: Option<Arc<HashMap<[u8; 20], GitObjectLocator>>>,
     pack_sources: HashMap<MerkleHash, RemoteGitPackSource>,
     limits: ReaderLimits,
@@ -558,6 +567,7 @@ impl RemoteGitReader {
             object_index: lookup_sources.object_index,
             preferred_pack_indexes,
             preferred_object_admission: lookup_sources.preferred_object_admission,
+            checkpoint_admission: lookup_sources.checkpoint_admission,
             inline_locators: lookup_sources.inline_locators,
             pack_sources,
             limits,
@@ -843,6 +853,68 @@ impl RemoteGitReader {
                 .any(|lookup| matches!(lookup, GitObjectLookup::Miss))
             {
                 let mut admitted = HashMap::new();
+                if let Some(checkpoint) = &self.checkpoint_admission {
+                    let (positions, missing): (Vec<_>, Vec<_>) = lookups
+                        .iter()
+                        .zip(requested)
+                        .enumerate()
+                        .filter_map(|(position, (lookup, oid))| {
+                            matches!(lookup, GitObjectLookup::Miss).then_some((position, *oid))
+                        })
+                        .unzip();
+                    let store = self
+                        .store
+                        .clone()
+                        .with_read_admission(budget.read_admission(cancellation.clone()));
+                    let members = tokio::select! {
+                        biased;
+                        () = cancellation.cancelled() => return Err(Error::Cancelled),
+                        members = checkpoint.object_members(&store, &missing) => members?,
+                    };
+                    for member in members.iter().flatten() {
+                        let pack_id =
+                            MerkleHash::from_hex(member.pack().blake3()).map_err(|_| {
+                                Error::RepositoryState {
+                                    reason: RepositoryStateError::InvalidContentIdentity,
+                                }
+                            })?;
+                        let pack = GitPackInventoryEntry {
+                            pack_id,
+                            object_count: member.object_count(),
+                            pack_size: member.pack().length(),
+                        };
+                        if self.inventory.get(&pack_id) != Some(&pack) {
+                            return Err(Error::RepositoryState {
+                                reason: RepositoryStateError::InconsistentGeneration,
+                            });
+                        }
+                        admitted.insert(pack_id, pack);
+                    }
+                    // A checkpoint mapping selects an index, not trusted object bytes.
+                    // The normal index, CRC and reconstructed-OID checks still apply.
+                    self.fill_pack_index_misses(
+                        &mut lookups,
+                        requested,
+                        &admitted,
+                        budget,
+                        cancellation,
+                    )
+                    .await?;
+                    if positions.iter().zip(&members).any(|(position, member)| {
+                        member.is_some() && matches!(lookups[*position], GitObjectLookup::Miss)
+                    }) {
+                        return Err(Error::Corrupt {
+                            stage: CorruptionStage::Locator,
+                        });
+                    }
+                    if !lookups
+                        .iter()
+                        .any(|lookup| matches!(lookup, GitObjectLookup::Miss))
+                    {
+                        return Ok(lookups);
+                    }
+                    admitted.clear();
+                }
                 let mut all_missing_admitted = true;
                 if let Some(admission) = &self.preferred_object_admission {
                     for (lookup, oid) in lookups.iter().zip(requested) {

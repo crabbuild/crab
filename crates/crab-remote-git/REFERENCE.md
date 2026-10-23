@@ -149,6 +149,12 @@ preferred inventory membership and source pack sizes. An explicitly empty
 preferred index set remains distinct from an unspecified set. The canonical
 snapshot and catalog-tail constructors retain their existing behavior.
 
+Paged checkpoint member admission selects indexes without loading unrelated
+packs or materializing the whole object dictionary. Each selected member must
+match the pinned inventory; a missing admitted object is corruption. Page reads
+retain operation cancellation and storage-byte admission, and selected indexes,
+entry CRCs and reconstructed OIDs retain their normal verification.
+
 ### Generated response packs
 
 Response packs can be persisted beneath the repository's immutable

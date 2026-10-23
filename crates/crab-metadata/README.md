@@ -405,7 +405,9 @@ release tag contains this layered format; the released v1 protocol is unchanged.
 
 Footer roots bind the visibility section, retained-object count and ordered
 source-catalog digest. `LayeredVisibilityReader` loads only pages needed for
-requested ref membership; dictionary retention never authorizes visibility.
+requested ref membership and physical pack-member selection; dictionary retention
+never authorizes visibility. Member selection preserves request order and misses,
+checks source bounds, and shares the authenticated page cache.
 Loaded source/member positions are checked against checkpoint-owned sources,
 before newer frontier sources are appended. Explicit bulk materialization
 verifies the complete section hash and canonical encoding against captured roots.
