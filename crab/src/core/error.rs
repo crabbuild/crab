@@ -2048,6 +2048,7 @@ impl From<crab_metadata::error::MetadataError> for CrabError {
             | crab_metadata::error::MetadataError::CapsuleContract { .. }
             | crab_metadata::error::MetadataError::PathStateSize { .. }
             | crab_metadata::error::MetadataError::CheckpointSize { .. }
+            | crab_metadata::error::MetadataError::CheckpointFooterSize { .. }
             | crab_metadata::error::MetadataError::BrowseIndexRecord { .. }
             | crab_metadata::error::MetadataError::SourceRetentionRecord { .. }
             | crab_metadata::error::MetadataError::GitObjectIndexRecord { .. }
@@ -4165,28 +4166,33 @@ mod tests {
     #[test]
     fn checkpoint_admission_error_survives_direct_and_read_boundaries() {
         for through_read in [false, true] {
-            let source = crab_metadata::error::MetadataError::CheckpointSize {
-                bytes: 1024,
-                maximum: 512,
-            };
-            let error = if through_read {
-                CrabError::from(crab_read::ReadError::Metadata(source))
-            } else {
-                CrabError::from(source)
-            };
-            let CrabError::Io(error) = error else {
-                panic!("expected typed checkpoint admission error");
-            };
-            let source = error
-                .get_ref()
-                .and_then(|source| source.downcast_ref::<crab_metadata::error::MetadataError>());
-            assert!(matches!(
-                source,
-                Some(crab_metadata::error::MetadataError::CheckpointSize {
+            for source in [
+                crab_metadata::error::MetadataError::CheckpointSize {
                     bytes: 1024,
                     maximum: 512,
-                })
-            ));
+                },
+                crab_metadata::error::MetadataError::CheckpointFooterSize {
+                    bytes: 1024,
+                    maximum: 512,
+                },
+            ] {
+                let expected = (std::mem::discriminant(&source), source.to_string());
+                let error = if through_read {
+                    CrabError::from(crab_read::ReadError::Metadata(source))
+                } else {
+                    CrabError::from(source)
+                };
+                let CrabError::Io(error) = error else {
+                    panic!("expected typed checkpoint admission error");
+                };
+                let source = error.get_ref().and_then(|source| {
+                    source.downcast_ref::<crab_metadata::error::MetadataError>()
+                });
+                assert_eq!(
+                    source.map(|source| (std::mem::discriminant(source), source.to_string())),
+                    Some(expected)
+                );
+            }
         }
     }
 
