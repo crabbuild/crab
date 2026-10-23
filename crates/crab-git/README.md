@@ -196,6 +196,10 @@ eligible object size, falls back to full entries when a base is absent or a
 delta is not smaller, and records pack offsets and entry CRCs during the one
 bounded write.
 
+Delta encoding scans common prefixes and suffixes in blocks and sizes its
+buffer from changed bytes. Reconstruction retains exact Git delta semantics;
+object identities, base identities and pack checksums remain verified.
+
 `prepare_with_external_delta_bases` may instead encode a bounded
 REF delta when the caller supplies the decoded base, its immutable object ID,
 kind, and verified prior depth. Preparation recomputes the base identity and

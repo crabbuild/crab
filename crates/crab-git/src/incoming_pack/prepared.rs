@@ -673,37 +673,65 @@ impl<R: Read> Read for ObjectHashReader<R> {
 }
 
 fn prefix_suffix_delta(base: &[u8], target: &[u8]) -> Result<Option<Vec<u8>>> {
-    let prefix = base
-        .iter()
-        .zip(target)
+    // Most bytes in successive trees are unchanged. Compare whole blocks so
+    // long common edges use slice equality instead of one branch per byte.
+    let prefix_blocks = base
+        .chunks_exact(64)
+        .zip(target.chunks_exact(64))
         .take_while(|(left, right)| left == right)
-        .count();
-    let suffix = base[prefix..]
-        .iter()
-        .rev()
-        .zip(target[prefix..].iter().rev())
+        .count()
+        * 64;
+    let prefix = prefix_blocks
+        + base[prefix_blocks..]
+            .iter()
+            .zip(&target[prefix_blocks..])
+            .take_while(|(left, right)| left == right)
+            .count();
+    let base_tail = &base[prefix..];
+    let target_tail = &target[prefix..];
+    let suffix_blocks = base_tail
+        .rchunks_exact(64)
+        .zip(target_tail.rchunks_exact(64))
         .take_while(|(left, right)| left == right)
-        .count();
+        .count()
+        * 64;
+    let suffix = suffix_blocks
+        + base_tail[..base_tail.len() - suffix_blocks]
+            .iter()
+            .rev()
+            .zip(
+                target_tail[..target_tail.len() - suffix_blocks]
+                    .iter()
+                    .rev(),
+            )
+            .take_while(|(left, right)| left == right)
+            .count();
+    let literal = &target[prefix..target.len() - suffix];
+    let capacity = literal
+        .len()
+        .saturating_add(literal.len().div_ceil(127))
+        .saturating_add(64);
     let mut delta = Vec::new();
     delta
-        .try_reserve_exact(target.len().saturating_add(32))
+        .try_reserve_exact(capacity)
         .map_err(|source| PreparePackError::Allocation {
-            requested: target.len().saturating_add(32),
+            requested: capacity,
             source,
         })?;
     encode_delta_size(base.len(), &mut delta);
     encode_delta_size(target.len(), &mut delta);
     append_delta_copy(0, prefix, &mut delta)?;
-    append_delta_insert(
-        &target[prefix..target.len().saturating_sub(suffix)],
-        &mut delta,
-    );
+    append_delta_insert(literal, &mut delta);
     append_delta_copy(base.len().saturating_sub(suffix), suffix, &mut delta)?;
     if delta.len().saturating_add(16) >= target.len() {
         return Ok(None);
     }
     Ok(Some(delta))
 }
+
+#[cfg(test)]
+#[path = "prepared_tests.rs"]
+mod tests;
 
 fn encode_delta_size(mut value: usize, output: &mut Vec<u8>) {
     loop {
