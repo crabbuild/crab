@@ -47,9 +47,16 @@ export interface RepositoryMember {
   name: string;
   access: "read" | "triage" | "write" | "admin";
 }
+export interface RepositoryGroup {
+  group: string;
+  access: RepositoryMember["access"];
+}
 export interface MembershipState {
   revision: number;
   members: RepositoryMember[];
+  groups: RepositoryGroup[];
+  can_admin: boolean;
+  groups_supported: boolean;
 }
 export interface RepositoryLabel {
   id: number;

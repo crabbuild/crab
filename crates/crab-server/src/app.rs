@@ -625,6 +625,7 @@ pub(crate) async fn membership(
     }
     let mut config = repo.config.clone();
     config.members = snapshot.members;
+    config.groups = snapshot.groups;
     let principal = principal.with_membership(repo.id, &config, issuer);
     if !principal.can_read(repo.id) {
         return Err(Error::NotFound);

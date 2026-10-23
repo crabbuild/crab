@@ -7,9 +7,27 @@ use axum::{
 };
 use openidconnect::{
     AccessToken, JsonWebKeyId, PkceCodeChallenge, PkceCodeVerifier, PrivateSigningKey,
-    core::{CoreEdDsaPrivateSigningKey, CoreIdToken, CoreIdTokenClaims, CoreJwsSigningAlgorithm},
+    core::{
+        CoreEdDsaPrivateSigningKey, CoreGenderClaim, CoreJweContentEncryptionAlgorithm,
+        CoreJwsSigningAlgorithm,
+    },
 };
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
+
+#[derive(Clone, Debug, Deserialize, Serialize)]
+struct ExtraClaims {
+    #[serde(flatten)]
+    values: std::collections::BTreeMap<String, Value>,
+}
+impl openidconnect::AdditionalClaims for ExtraClaims {}
+type ProviderClaims = openidconnect::IdTokenClaims<ExtraClaims, CoreGenderClaim>;
+type ProviderToken = openidconnect::IdToken<
+    ExtraClaims,
+    CoreGenderClaim,
+    CoreJweContentEncryptionAlgorithm,
+    CoreJwsSigningAlgorithm,
+>;
 use std::{
     collections::HashMap,
     sync::{
@@ -30,6 +48,7 @@ pub(crate) struct Provider {
     pub(crate) rotated: AtomicBool,
     pub(crate) confidential: AtomicBool,
     pub(crate) mode: Mutex<String>,
+    pub(crate) claims: Mutex<serde_json::Map<String, Value>>,
     codes: Mutex<HashMap<String, HashMap<String, String>>>,
 }
 
@@ -127,14 +146,18 @@ async fn token(
         "outsider" => claims["sub"] = json!("outsider-id"),
         _ => {}
     }
-    let claims: CoreIdTokenClaims = serde_json::from_value(claims).unwrap();
+    claims
+        .as_object_mut()
+        .unwrap()
+        .extend(provider.claims.lock().await.clone());
+    let claims: ProviderClaims = serde_json::from_value(claims).unwrap();
     let key = if mode == "signature" {
         CoreEdDsaPrivateSigningKey::from_ed25519_pem(KEY_TWO, Some(JsonWebKeyId::new("one".into())))
             .unwrap()
     } else {
         provider.signing_key()
     };
-    let signed = CoreIdToken::new(
+    let signed = ProviderToken::new(
         claims,
         &key,
         CoreJwsSigningAlgorithm::EdDsa,
@@ -193,6 +216,7 @@ pub(crate) async fn start_provider(port: u16) -> (Arc<Provider>, tokio::task::Jo
         rotated: AtomicBool::new(false),
         confidential: AtomicBool::new(false),
         mode: Mutex::new(String::new()),
+        claims: Mutex::new(serde_json::Map::new()),
         codes: Mutex::new(HashMap::new()),
     });
     let app = Router::new()

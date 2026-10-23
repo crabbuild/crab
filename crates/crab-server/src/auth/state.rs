@@ -69,6 +69,7 @@ impl Authentication {
         let state = &self.state;
         let record = StoredSession {
             identity: session.identity.clone(),
+            groups: session.groups.clone(),
             csrf: session.csrf.clone(),
             expires_at: session.expires_at,
             git_tokens: Vec::new(),
@@ -157,6 +158,7 @@ impl Authentication {
         }
         let session = Arc::new(Session {
             identity: record.identity,
+            groups: super::oidc::groups(record.groups).ok()?,
             csrf: record.csrf,
             expires_at: record.expires_at,
             session_key,
@@ -167,6 +169,7 @@ impl Authentication {
             sessions.retain(|_, session| session.active());
             if let Some(cached) = sessions.get(&session_key) {
                 if cached.identity == session.identity
+                    && cached.groups == session.groups
                     && cached.csrf == session.csrf
                     && cached.expires_at == session.expires_at
                 {

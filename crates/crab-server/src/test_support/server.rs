@@ -22,6 +22,7 @@ pub(crate) async fn fixture_with_store(store: Store) -> Arc<Server> {
                 Repository::new(
                     uuid::Uuid::from_bytes([1; 16]),
                     RepositoryConfig {
+                        groups: Vec::new(),
                         owner: "team".into(),
                         name: "repo".into(),
                         bucket: "memory".into(),

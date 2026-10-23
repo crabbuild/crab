@@ -2585,3 +2585,12 @@ record version one. Applied UUIDs recover current records without resetting late
 assignments; metadata rejections remain terminal and permit explicit input review.
 The private PR submission read returns original comparison tips for both outcomes.
 See `CELLAR.md` for coordinated peer DTO deployment and native storage contracts.
+
+
+SSO repository access uses exact signed OIDC group IDs alongside individual
+members. `auth/oidc/` validates claims, `auth/principal/` resolves the current role
+union/token ceiling, and `catalog/` commits complete access-list changes with their
+audit outbox. The Members settings page edits both sources. Group-backed sessions
+have a fifteen-minute ceiling; IdP synchronization and native organization/team
+authority remain separate. See `README.md` for provider setup and `CELLAR.md` for
+fleet deployment, proof and limits.

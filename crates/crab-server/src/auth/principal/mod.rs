@@ -137,11 +137,22 @@ impl Principal {
             if !session.active() || session.identity.issuer != issuer {
                 return None;
             }
-            config
+            let individual = config
                 .members
                 .iter()
                 .find(|member| member.subject == session.identity.subject)
-                .map(|member| std::cmp::min(member.access, ceiling))
+                .map(|member| member.access);
+            let group = config
+                .groups
+                .iter()
+                .filter(|grant| session.groups.binary_search(&grant.group).is_ok())
+                .map(|grant| grant.access)
+                .max();
+            individual
+                .into_iter()
+                .chain(group)
+                .max()
+                .map(|access| std::cmp::min(access, ceiling))
         });
         Self {
             credential: self.credential.clone(),

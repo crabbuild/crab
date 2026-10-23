@@ -69,7 +69,8 @@ async fn case_insensitive_membership_mutations_require_the_captured_repository_u
     let cookie = h.login().await;
     let session = h.json("/api/session", &cookie).await;
     let before = h.json("/api/repos/TEAM/PRIVATE/members", &cookie).await;
-    let input = json!({"expected_revision":before["revision"],"members":before["members"]});
+    let input =
+        json!({"expected_revision":before["revision"],"groups": [], "members":before["members"]});
     let repository = h.server.repositories.values()[0].id;
     for (identity, expected) in [
         (None, StatusCode::NOT_FOUND),
@@ -147,7 +148,7 @@ async fn delayed_catalog_materialization_preserves_http_denial(h: Harness) {
         &h,
         &admin_cookie,
         session["csrf"].as_str().unwrap(),
-        json!({"expected_revision":delayed.version, "members":members}),
+        json!({"expected_revision":delayed.version, "groups": [], "members":members}),
     )
     .await;
     assert_eq!(response.status(), StatusCode::OK);
@@ -227,7 +228,7 @@ async fn membership_cas_audit_and_current_authorization() {
         &h,
         &cookie,
         csrf,
-        json!({"expected_revision":before["revision"], "members":before["members"]}),
+        json!({"expected_revision":before["revision"], "groups": [], "members":before["members"]}),
     )
     .await;
     assert_eq!(no_op.status(), StatusCode::OK);
@@ -237,7 +238,7 @@ async fn membership_cas_audit_and_current_authorization() {
         &h,
         &cookie,
         csrf,
-        json!({"expected_revision":before["revision"], "members":[]}),
+        json!({"expected_revision":before["revision"], "groups": [], "members":[]}),
     )
     .await;
     assert_eq!(final_admin.status(), StatusCode::UNPROCESSABLE_ENTITY);
@@ -247,7 +248,7 @@ async fn membership_cas_audit_and_current_authorization() {
         &h,
         &cookie,
         csrf,
-        json!({"expected_revision":before["revision"], "members":members}),
+        json!({"expected_revision":before["revision"], "groups": [], "members":members}),
     )
     .await;
     assert_eq!(changed.status(), StatusCode::OK);
@@ -261,7 +262,7 @@ async fn membership_cas_audit_and_current_authorization() {
             &h,
             &cookie,
             csrf,
-            json!({"expected_revision":before["revision"], "members":members})
+            json!({"expected_revision":before["revision"], "groups": [], "members":members})
         )
         .await
         .status(),
@@ -289,7 +290,7 @@ async fn membership_cas_audit_and_current_authorization() {
             &h,
             &cookie,
             csrf,
-            json!({"expected_revision":changed["revision"], "members":members})
+            json!({"expected_revision":changed["revision"], "groups": [], "members":members})
         )
         .await
         .status(),
@@ -315,7 +316,8 @@ async fn membership_hides_non_admins_and_enforces_browser_mutation_protection() 
     let cookie = h.login().await;
     let session = h.json("/api/session", &cookie).await;
     let before = h.json("/api/repos/team/private/members", &cookie).await;
-    let body = json!({"expected_revision":before["revision"],"members":before["members"]});
+    let body =
+        json!({"expected_revision":before["revision"],"groups": [], "members":before["members"]});
     for (origin, csrf) in [
         (None, None),
         (
@@ -425,7 +427,7 @@ async fn malformed_membership_is_rejected_and_two_writers_cannot_overwrite_each_
             &h,
             &cookie,
             csrf,
-            json!({"expected_revision":before["revision"],"members":members}),
+            json!({"expected_revision":before["revision"],"groups": [], "members":members}),
         )
         .await;
         assert_eq!(
@@ -445,13 +447,13 @@ async fn malformed_membership_is_rejected_and_two_writers_cannot_overwrite_each_
             &h,
             &cookie,
             csrf,
-            json!({"expected_revision":before["revision"],"members":first})
+            json!({"expected_revision":before["revision"],"groups": [], "members":first})
         ),
         replace(
             &h,
             &cookie,
             csrf,
-            json!({"expected_revision":before["revision"],"members":second})
+            json!({"expected_revision":before["revision"],"groups": [], "members":second})
         )
     );
     let mut statuses = [first.status(), second.status()];
@@ -656,3 +658,5 @@ async fn triage_uses_durable_grants_for_issue_and_pull_management_without_git_wr
 }
 
 mod authorization;
+
+mod groups;

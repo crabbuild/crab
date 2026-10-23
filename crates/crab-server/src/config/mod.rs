@@ -97,6 +97,8 @@ pub struct RepositoryConfig {
     #[serde(default)]
     pub members: Vec<RepositoryMember>,
     #[serde(default)]
+    pub groups: Vec<RepositoryGroup>,
+    #[serde(default)]
     pub protected_branches: Vec<BranchProtection>,
 }
 
@@ -117,6 +119,14 @@ pub struct BranchProtection {
 pub struct RepositoryMember {
     pub subject: String,
     pub name: String,
+    pub access: RepositoryAccess,
+}
+
+/// An exact signed OIDC group identifier's repository permission.
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, serde::Serialize)]
+#[serde(deny_unknown_fields)]
+pub struct RepositoryGroup {
+    pub group: String,
     pub access: RepositoryAccess,
 }
 
@@ -315,6 +325,17 @@ fn validate_cells(cells: &CellsConfig, management_listen: SocketAddr) -> Result<
 }
 
 pub(crate) fn validate_repository(repository: &RepositoryConfig) -> Result<()> {
+    let mut groups = HashSet::new();
+    if repository.groups.len() > 100
+        || repository
+            .groups
+            .iter()
+            .any(|grant| !valid_group(&grant.group) || !groups.insert(&grant.group))
+    {
+        return Err(Error::Config(
+            "repository groups require at most 100 unique exact OIDC group identifiers of at most 512 bytes",
+        ));
+    }
     let mut subjects = HashSet::new();
     let mut member_names = HashSet::new();
     for member in &repository.members {
@@ -372,6 +393,13 @@ pub(crate) fn validate_repository(repository: &RepositoryConfig) -> Result<()> {
         ));
     }
     Ok(())
+}
+
+pub(crate) fn valid_group(group: &str) -> bool {
+    !group.is_empty()
+        && group.len() <= 512
+        && group.trim() == group
+        && !group.chars().any(char::is_control)
 }
 
 pub(crate) fn valid_branch_protections(rules: &[BranchProtection]) -> bool {

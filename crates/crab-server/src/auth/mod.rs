@@ -18,23 +18,15 @@ use axum::{
     response::{IntoResponse, Response},
 };
 use crab_storage::{StorageError, Store};
-use openidconnect::{
-    ClientSecret, EndpointMaybeSet, EndpointNotSet, EndpointSet, Nonce, PkceCodeVerifier,
-    core::CoreClient,
-};
+use openidconnect::{ClientSecret, Nonce, PkceCodeVerifier};
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use tokio::sync::{Mutex, Semaphore};
 use transport::discover;
 
-type Client = CoreClient<
-    EndpointSet,
-    EndpointNotSet,
-    EndpointNotSet,
-    EndpointNotSet,
-    EndpointMaybeSet,
-    EndpointMaybeSet,
->;
+mod oidc;
+use oidc::Client;
+
 type Key = [u8; 32];
 const FLOW_LIFETIME: Duration = Duration::from_secs(600);
 const SESSION_LIFETIME: Duration = Duration::from_secs(8 * 60 * 60);
@@ -117,6 +109,7 @@ pub(crate) struct Identity {
 
 pub(crate) struct Session {
     identity: Identity,
+    groups: Vec<String>,
     csrf: String,
     expires_at: u64,
     session_key: Key,
@@ -176,6 +169,10 @@ struct StoredFlow {
 #[serde(deny_unknown_fields)]
 struct StoredSession {
     identity: Identity,
+    // No group claim is a valid credential. Existing sessions gain no group
+    // authority until a new login verifies that membership with the provider.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    groups: Vec<String>,
     csrf: String,
     expires_at: u64,
     git_tokens: Vec<Key>,
@@ -208,7 +205,7 @@ pub(crate) struct Authentication {
     config: OidcConfig,
     secret: Option<ClientSecret>,
     http: reqwest::Client,
-    client: Option<Client>,
+    client: Option<(Client, bool)>,
     sessions: Mutex<HashMap<Key, Arc<Session>>>,
     git_tokens: Mutex<HashMap<Key, Arc<GitToken>>>,
     state: AuthState,
@@ -272,6 +269,10 @@ impl Authentication {
             admission: Semaphore::new(8),
             logout_admission: Semaphore::new(4),
         })
+    }
+
+    pub(crate) fn is_oidc(&self) -> bool {
+        self.config.provider == AuthProvider::Oidc
     }
 
     pub(crate) fn issuer(&self) -> &str {

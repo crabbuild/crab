@@ -2869,7 +2869,17 @@ test("repository settings manage members with a revisioned CSRF-protected replac
     (url) => url.pathname === "/api/repos/team/project/members",
     (route) => {
       if (route.request().method() === "GET")
-        return route.fulfill({ json: { revision, members } });
+        return route.fulfill({
+          json: {
+            revision,
+            members,
+            groups: [],
+            can_admin: members.some(
+              (m) => m.subject === "alice-id" && m.access === "admin",
+            ),
+            groups_supported: true,
+          },
+        });
 
       expect(route.request().method()).toBe("PUT");
       expect(route.request().headers()["x-csrf-token"]).toBe("membership-csrf");
@@ -2908,7 +2918,17 @@ test("repository settings manage members with a revisioned CSRF-protected replac
       expect(update.expected_revision).toBe(revision);
       revision += 1;
       members = update.members;
-      return route.fulfill({ json: { revision, members } });
+      return route.fulfill({
+        json: {
+          revision,
+          members,
+          groups: [],
+          can_admin: members.some(
+            (m) => m.subject === "alice-id" && m.access === "admin",
+          ),
+          groups_supported: true,
+        },
+      });
     },
   );
 
@@ -2939,15 +2959,16 @@ test("repository settings manage members with a revisioned CSRF-protected replac
   const removal = page.getByRole("region", { name: "Remove member" });
   await expect(removal).toContainText("Remove this member?");
   await removal.getByRole("button", { name: "Remove member" }).click();
-  await page.getByRole("button", { name: "Save members" }).click();
+  await page.getByRole("button", { name: "Save access" }).click();
   expect(updates[0]).toEqual({
     expected_revision: 42,
+    groups: [],
     members: [
       { subject: "alice-id", name: "Alice", access: "admin" },
       { subject: "charlie-id", name: "Charles", access: "triage" },
     ],
   });
-  await expect(page.getByRole("status")).toContainText("Membership updated.");
+  await expect(page.getByRole("status")).toContainText("Access updated.");
   await page.reload();
   await expect(
     page.locator('.member-role[data-access="triage"]'),
@@ -2957,7 +2978,7 @@ test("repository settings manage members with a revisioned CSRF-protected replac
   await form.getByRole("button", { name: "Access" }).click();
   await page.getByRole("menuitemradio", { name: /^Write/ }).click();
   await form.getByRole("button", { name: "Save member" }).click();
-  await page.getByRole("button", { name: "Save members" }).click();
+  await page.getByRole("button", { name: "Save access" }).click();
   await expect(page.locator('.member-role[data-access="write"]')).toContainText(
     "Write",
   );
@@ -2967,7 +2988,7 @@ test("repository settings manage members with a revisioned CSRF-protected replac
   await form.getByLabel("Display name").fill("Charles draft");
   await form.getByRole("button", { name: "Save member" }).click();
   conflictNext = true;
-  await page.getByRole("button", { name: "Save members" }).click();
+  await page.getByRole("button", { name: "Save access" }).click();
   await expect(page.getByRole("alert")).toContainText(
     "Another administrator changed membership.",
   );
@@ -2982,7 +3003,7 @@ test("repository settings manage members with a revisioned CSRF-protected replac
     .getByRole("region", { name: "Remove member" })
     .getByRole("button", { name: "Remove member" })
     .click();
-  await page.getByRole("button", { name: "Save members" }).click();
+  await page.getByRole("button", { name: "Save access" }).click();
   await expect(page.getByRole("alert")).toContainText(
     "At least one administrator is required.",
   );

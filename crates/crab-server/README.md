@@ -358,6 +358,75 @@ makes them outdated. New-side suggestions use the existing exact-head
 `/contents` mutation, so applying one creates the normal Git commit and keeps
 branch/blob conflicts authoritative.
 
+## SSO and repository access
+
+Browser login supports a generic OpenID Connect provider. Configure a dedicated
+client with a tenant/realm-specific issuer, Crab's external root URL and
+`https://YOUR_CRAB_HOST/auth/callback` as the exact redirect URI. For example:
+
+```toml
+[auth]
+provider = "oidc"
+issuer = "https://sso.example.test/realms/company"
+client_id = "crab"
+public_url = "https://crab.example.test/"
+client_secret_file = "/run/secrets/crab/oidc-client-secret"
+state_key_file = "/run/secrets/crab/state-key"
+```
+
+Keep secrets outside the repository. The existing OIDC flow verifies the signing
+key, issuer, audience/authorized party, expiry, nonce and PKCE exchange. Identity
+is the provider's stable subject, qualified by the issuer; an email, display name
+or group label never becomes a user identity.
+
+In **Settings → Members**, keep explicit individual grants and add **SSO group
+access** grants. Map the provider's group IDs or full paths to the signed ID
+token's `groups` array. Matching is exact and case-sensitive. Individual and
+group grants combine using the highest of Read, Triage, Write and Admin. These
+repository grants do not confer organization ownership or team administration.
+The administration UI remains unavailable to repository Git credentials.
+
+Read permits browsing/cloning and normal member discussion participation. Triage
+adds discussion metadata/state management; Write adds code publication and
+writer review/merge actions; Admin adds repository settings and access management.
+Existing branch protections and archive policy still restrict these actions.
+A Git token is limited by both its requested scope and current repository access.
+
+Crab requests `groups` only when discovery advertises that scope, and requests
+its optional ID-token claim. Configure the provider to actually include the claim:
+
+- **Keycloak:** add a Group Membership mapper to the client's effective scopes,
+  name the claim `groups`, and enable **Add to ID token**. Use full group paths
+  when names could collide. See the [provider administration guide](https://www.keycloak.org/docs/latest/server_admin/).
+- **Okta:** configure the application's/custom authorization server's ID-token
+  group claim and an appropriate group filter. See [Okta's group-claim guide](https://developer.okta.com/docs/guides/customize-tokens-groups-claim/).
+- **Microsoft Entra ID:** use the specific tenant's v2 issuer and configure
+  application-relevant group object IDs in the ID token. Entra omits the group
+  list above its token limit; restrict emitted groups to those relevant to Crab.
+  See [Microsoft's claim reference](https://learn.microsoft.com/en-us/entra/identity-platform/id-token-claims-reference).
+
+Missing groups grant no group access. Malformed or oversized membership lists
+fail sign-in; distributed or overage claims grant no group access, and Crab never follows their
+supplied URLs. No automatic member, organization or native-team provisioning is
+performed. Assignee/reviewer candidate lists still use the explicit individual
+repository roster. The deployment currently has one configured identity issuer.
+
+ACL edits apply at the next authorization check, including existing Git tokens.
+IdP membership in an established session is a signed snapshot: sessions carrying
+groups last at most **15 minutes**, bounded further by ID-token expiry. A new
+login refreshes the groups; the existing subject-based back-channel logout can
+revoke sessions and their Git tokens sooner. This does not claim instantaneous
+IdP synchronization or atomic cancellation of already-admitted Cell mutations.
+Keep at least one individual administrator; a group administrator cannot remove
+the last one.
+
+The revision-checked `PUT /api/repos/{owner}/{name}/members` replaces the complete
+access list: `{expected_revision, members, groups}`. Each group is
+`{group, access}`. Omitting `groups` is rejected, preventing an older client from
+silently erasing new grants. The response includes current groups, `can_admin`
+and `groups_supported`. Access changes and their audit outbox commit together.
+The private `repository set-members` command deliberately preserves group grants.
+
 ## Trace issue creation
 
 Use `POST /api/repos/{owner}/{name}/issues` to follow a collaboration request.

@@ -831,3 +831,53 @@ to moved/deleted branches. Upgrade all peers together for the changed private
 create inputs and read-16 output; mixed private DTOs are unsupported. No DDL,
 search-index format change, explicit preparation or serving compatibility reader
 was added. The existing native grant-cutover and pinned-runtime limitations remain.
+
+
+## SSO group access
+
+Repository grants remain catalog-owned. The access list now includes exact OIDC
+`groups` grants in the same record as individual members; the existing CAS and
+immutable audit outbox cover both. Empty groups add no terms to existing membership
+digests. Directory, Organization and Repository Cell schemas are unchanged, and
+there is no group-to-organization membership synchronization or grant cutover.
+
+Verified ID-token groups are bounded and stored only in private durable sessions,
+not public identities or discussion records. Session/Git revocation retains its
+existing marker/parent ordering. Current ACL reads combine individual and group
+roles, preserve admitted repository UUID constraints, and cap token permissions.
+Missing, overage and distributed claims provide no group authority. Sessions with
+groups expire within fifteen minutes or the earlier ID-token expiry.
+
+Upgrade all serving peers before adding group grants or starting group-backed
+sessions: older strict catalog/session readers reject their new fields. Deploy
+the administration UI and API together: a complete access-list replacement
+now requires explicit `groups`, and returns effective `can_admin` plus the group
+capability. This prevents old clients from clearing grants they cannot display.
+Existing sessions without verified groups remain individual-only until a fresh
+SSO login. No Rust dependency/lockfile change or new auth environment/config option
+was introduced. See README's SSO setup and explicit revocation/authority limits.
+
+
+Verification (2026-10-23): 496 native library tests and all 13 CLI tests passed;
+six existing opt-in qualifications remain ignored. UI checks passed all 107 unit
+tests and 174 browser scenarios, including mobile dark access editing, accessibility,
+reload and group-administrator presentation. Strict all-target Clippy, architecture
+gates, Rustfmt, Prettier, frontend/embedded builds and diff checks passed. The
+existing macOS debug linker emitted its large-unwind-section warning.
+
+Real RustFS/OIDC run `ec83c210-b8b2-489e-bdd4-7507c69a210a` verified the advertised
+groups scope, UI access editing, a group-only user creating a native issue,
+non-exposure of private claims, existing Git/LFS credential downgrade, removal
+hiding repository reads, and ACL/session persistence after process restart.
+The final binary is
+`2185152337d98ff547c7401aa0c2ebf0c0a68e6f07bf1bca79dd273788031bc9`.
+Provider-specific cloud tenants were not available; Keycloak/Okta/Entra setup is
+based on their documented OIDC claim contracts and this real protocol fixture.
+
+The existing local preview was stopped when qualification began. Before starting
+the new binary, all 39 canonical tables per Repository Cell were read and hashed;
+after startup those hashes matched, all 20 public resources were available, and
+the access editor was visible. No grants, profiles or organizations were created
+in the preserved preview. Source growth is about 348 production lines for verified
+group claims, shared role resolution, atomic access-list edits and the group editor;
+there is one canonical grant owner and no additional authorization store.

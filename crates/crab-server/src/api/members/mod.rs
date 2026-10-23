@@ -9,13 +9,13 @@ use axum::{
     response::{IntoResponse, Response},
     routing::get,
 };
-use serde::{Deserialize, Serialize};
+use serde::Serialize;
 use serde_json::json;
 
 use crate::{
-    RepositoryMember,
+    RepositoryGroup, RepositoryMember,
     auth::Principal,
-    catalog::{CatalogDocument, CatalogError, CatalogStore, MembershipActor},
+    catalog::{AccessUpdate, CatalogDocument, CatalogError, CatalogStore, MembershipActor},
     server::Server,
 };
 
@@ -29,13 +29,13 @@ pub(crate) fn routes() -> Router<Arc<Server>> {
 struct Output {
     revision: u64,
     members: Vec<RepositoryMember>,
+    groups: Vec<RepositoryGroup>,
+    can_admin: bool,
+    groups_supported: bool,
 }
 
-#[derive(Deserialize)]
-#[serde(deny_unknown_fields)]
-struct Input {
-    expected_revision: u64,
-    members: Vec<RepositoryMember>,
+fn groups_supported(server: &Server) -> bool {
+    server.auth.as_ref().is_none_or(|auth| auth.is_oidc())
 }
 
 fn error(status: StatusCode, code: &'static str, message: &'static str) -> Response {
@@ -147,6 +147,9 @@ async fn list(
         Some(record) => Json(Output {
             revision: document.version,
             members: record.members,
+            groups: record.groups,
+            can_admin: true,
+            groups_supported: groups_supported(&server),
         })
         .into_response(),
         None => error(
@@ -161,7 +164,7 @@ async fn replace(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
     Path((owner, name)): Path<(String, String)>,
-    input: Result<Json<Input>, JsonRejection>,
+    input: Result<Json<AccessUpdate>, JsonRejection>,
 ) -> Response {
     let (catalog, document) = match authorized(&server, &principal, &owner, &name).await {
         Ok(value) => value,
@@ -177,6 +180,13 @@ async fn replace(
             );
         }
     };
+    if !input.groups.is_empty() && !groups_supported(&server) {
+        return error(
+            StatusCode::UNPROCESSABLE_ENTITY,
+            "oidc_required",
+            "SSO group grants require an OpenID Connect provider.",
+        );
+    }
     // Bind the authorization decision to exactly the caller's revision. Otherwise
     // a caller could name a newer revision after losing its administrator grant.
     if input.expected_revision != document.version {
@@ -204,27 +214,43 @@ async fn replace(
         .find(|record| {
             record.owner.eq_ignore_ascii_case(&owner) && record.name.eq_ignore_ascii_case(&name)
         })
-        .map(|record| record.members.clone());
+        .map(|record| (record.members.clone(), record.groups.clone()));
     match catalog
-        .replace_members(
-            &owner,
-            &name,
-            input.expected_revision,
-            input.members,
-            actor,
-            server.auth.is_some(),
-        )
+        .replace_access(&owner, &name, input, actor, server.auth.is_some())
         .await
     {
-        Ok(record) => Json(Output {
-            revision: if old.as_ref() == Some(&record.members) {
-                document.version
-            } else {
-                document.version + 1
-            },
-            members: record.members,
-        })
-        .into_response(),
+        Ok(record) => {
+            let config = match record.runtime_config(catalog.root(), "main") {
+                Ok(config) => config,
+                Err(_) => {
+                    return error(
+                        StatusCode::SERVICE_UNAVAILABLE,
+                        "membership_unavailable",
+                        "Membership is temporarily unavailable.",
+                    );
+                }
+            };
+            let issuer = server
+                .auth
+                .as_ref()
+                .map_or("urn:crab:local", |auth| auth.issuer());
+            let can_admin = principal
+                .with_membership(record.id, &config, issuer)
+                .can_admin(record.id);
+            Json(Output {
+                revision: if old.as_ref() == Some(&(record.members.clone(), record.groups.clone()))
+                {
+                    document.version
+                } else {
+                    document.version + 1
+                },
+                members: record.members,
+                groups: record.groups,
+                can_admin,
+                groups_supported: groups_supported(&server),
+            })
+            .into_response()
+        }
         Err(CatalogError::Conflict) => error(
             StatusCode::CONFLICT,
             "membership_changed",

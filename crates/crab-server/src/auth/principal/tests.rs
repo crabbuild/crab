@@ -4,6 +4,7 @@ use std::sync::atomic::{AtomicBool, Ordering};
 
 fn member_repository(access: RepositoryAccess) -> RepositoryConfig {
     RepositoryConfig {
+        groups: Vec::new(),
         owner: "team".into(),
         name: "private".into(),
         bucket: "bucket".into(),
@@ -21,6 +22,7 @@ fn member_repository(access: RepositoryAccess) -> RepositoryConfig {
 
 fn active_session() -> Arc<Session> {
     Arc::new(Session {
+        groups: Vec::new(),
         identity: Identity {
             issuer: "https://identity.example".into(),
             subject: "alice".into(),
@@ -31,6 +33,46 @@ fn active_session() -> Arc<Session> {
         session_key: [0; 32],
         revoked: AtomicBool::new(false),
     })
+}
+
+#[test]
+fn oidc_groups_union_exact_current_grants_without_exceeding_the_token_scope() {
+    let mut session = active_session();
+    Arc::get_mut(&mut session).unwrap().groups = vec!["/Engineering".into()];
+    let id = Uuid::from_u128(1);
+    let mut config = member_repository(RepositoryAccess::Read);
+    config.groups = vec![crate::RepositoryGroup {
+        group: "/Engineering".into(),
+        access: RepositoryAccess::Admin,
+    }];
+    let browser = Principal::user(session.clone());
+    assert!(
+        browser
+            .with_membership(id, &config, "https://identity.example")
+            .can_admin(id)
+    );
+    let git = Principal::git(Arc::new(GitToken {
+        repository_id: id,
+        session,
+        owner: config.owner.clone(),
+        repository: config.name.clone(),
+        access: RepositoryAccess::Read,
+        revoked: AtomicBool::new(false),
+    }));
+    let scoped = git.with_membership(id, &config, "https://identity.example");
+    assert!(scoped.can_read(id));
+    assert!(!scoped.can_triage(id));
+    config.groups[0].group = "/engineering".into();
+    assert!(
+        !browser
+            .with_membership(id, &config, "https://identity.example")
+            .can_triage(id)
+    );
+    assert!(
+        !browser
+            .with_membership(id, &config, "https://other.example")
+            .can_read(id)
+    );
 }
 
 #[test]

@@ -61,6 +61,7 @@ pub(super) async fn list(
             };
             let mut config = repository.config.clone();
             config.members = record.members.clone();
+            config.groups = record.groups.clone();
             principal.with_membership(repository.id, &config, issuer)
         } else {
             principal.clone()
