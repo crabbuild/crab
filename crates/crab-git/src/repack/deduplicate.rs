@@ -11,16 +11,17 @@ use crate::pack_locator::{PackLocationIter, PackObjectLocation};
 
 pub(super) struct Requirements {
     pub(super) rewrite: bool,
-    pub(super) ref_bases: BTreeSet<gix_hash::ObjectId>,
+    pub(super) external_bases: BTreeSet<gix_hash::ObjectId>,
 }
 
 pub(super) fn requirements(sources: &[RepackSource]) -> Result<Requirements, RepackError> {
     let mut selected = HashMap::new();
-    let mut ref_bases = BTreeSet::new();
+    let mut external_bases = BTreeSet::new();
     for source in sources {
         let locations =
-            PackLocationIter::open(&source.index_path, &source.reverse_index_path, source.size)?
-                .collect::<Result<Vec<_>, _>>()?;
+            PackLocationIter::open(&source.index_path, &source.reverse_index_path, source.size)?;
+        let source_objects = locations.sorted_object_ids().collect::<Vec<_>>();
+        let locations = locations.collect::<Result<Vec<_>, _>>()?;
         for entry in entry_headers(&source.canonical_id, &source.path, &locations)? {
             let (location, header) = entry?;
             let base = match header {
@@ -34,7 +35,11 @@ pub(super) fn requirements(sources: &[RepackSource]) -> Result<Requirements, Rep
                     Some(locations[position].oid)
                 }
                 Header::RefDelta { base_id } => {
-                    ref_bases.insert(base_id);
+                    // Native index-pack resolves local REF bases itself. Fetching
+                    // their historical bodies would defeat compressed maintenance.
+                    if source_objects.binary_search(&base_id).is_err() {
+                        external_bases.insert(base_id);
+                    }
                     Some(base_id)
                 }
                 _ => None,
@@ -61,7 +66,7 @@ pub(super) fn requirements(sources: &[RepackSource]) -> Result<Requirements, Rep
     }
     Ok(Requirements {
         rewrite: resolved != selected.len(),
-        ref_bases,
+        external_bases,
     })
 }
 

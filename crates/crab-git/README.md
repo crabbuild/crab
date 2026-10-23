@@ -65,6 +65,11 @@ keeps the narrower `refs/tags/` scope used for manifest peeling hints. Both
 return commit targets; neither implies support for arbitrary non-commit tag
 targets in the product's push path.
 
+Committed suffix consolidation reuses authenticated pack artifacts directly.
+It retains the generated workspace and streaming identity instead of installing,
+copying and hashing those bodies again. Native thin-pack repair fetches bases
+outside each source pack; in-pack REF bases remain compressed.
+
 ## Usage
 
 ```rust
