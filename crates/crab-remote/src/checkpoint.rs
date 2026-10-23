@@ -760,52 +760,51 @@ async fn consolidate_layered_suffix(
     delta_base_ids.extend(crab_git::repack::selected_pack_ref_delta_base_ids(
         &sources_for_repack,
     )?);
-    let mut delta_bases =
+    let delta_bases =
         read_layered_delta_bases(layout, view, &delta_base_ids, maximum_bytes, cancel).await?;
     let pack_bytes_read = sources_for_repack.iter().try_fold(0_u64, |total, source| {
         total
             .checked_add(source.size)
             .ok_or(CheckpointError::AccountingOverflow)
     })?;
-    let kind_git_dir = workspace.path().join("resolved.git");
     let index_concurrency =
         std::thread::available_parallelism().map_or(1, |parallelism| parallelism.get().min(8));
-    let kind_cancel = cancel.clone();
+    let worker_cancel = cancel.clone();
     let packs = tokio::task::spawn_blocking(move || {
         let replacement = crab_git::repack::consolidate_committed_pack_suffix_with_delta_bases(
             &sources_for_repack,
             &delta_bases,
             index_concurrency,
         )?;
-        let external = replacement
-            .packs()
-            .iter()
-            .flat_map(|pack| pack.external_delta_bases().values().copied())
-            .collect::<BTreeSet<_>>();
-        delta_bases.retain(|base| external.contains(&base.oid));
-        let kind_sources = replacement
-            .packs()
-            .iter()
-            .map(|pack| RepackSource {
-                canonical_id: pack.pack_id.clone(),
-                path: pack.pack_path().to_owned(),
-                index_path: pack.index_path().to_owned(),
-                reverse_index_path: pack.reverse_index_path().to_owned(),
-                size: pack.pack_size,
-                object_count: pack.object_count,
-                verified_identity: None,
-            })
-            .collect::<Vec<_>>();
-        // Query kinds from one repaired replacement, not every original thin
-        // pack. Scratch-only external bases cannot extend its published OID set.
-        initialize_bare_repository(&kind_git_dir)?;
-        crab_git::repack::resolve_pack_delta_bases(&kind_git_dir, &kind_sources, &delta_bases)?;
-        materialize_packs(
-            replacement.packs(),
-            &kind_git_dir,
-            maximum_bytes,
-            &kind_cancel,
-        )
+        let mut kinds = BTreeMap::new();
+        for source in &sources_for_repack {
+            check_cancelled(&worker_cancel)?;
+            let locations = crab_git::pack_locator::PackLocationIter::open(
+                &source.index_path,
+                &source.reverse_index_path,
+                source.size,
+            )
+            .map_err(crab_git::pack::PackError::from)?;
+            let metadata = std::fs::read(source.path.with_extension("kinds"))?;
+            let records =
+                crab_git::pack_locator::decode_pack_kind_metadata_iter(&metadata, locations)
+                    .map_err(crab_git::pack::PackError::from)?;
+            for record in records {
+                let (oid, kind) = record.map_err(crab_git::pack::PackError::from)?;
+                if kinds
+                    .insert(oid, kind)
+                    .is_some_and(|previous| previous != kind)
+                {
+                    return Err(CheckpointError::Repack(
+                        crab_git::repack::RepackError::SourceIntegrity {
+                            pack_id: source.canonical_id.clone(),
+                            reason: format!("authenticated kinds disagree for object {oid}"),
+                        },
+                    ));
+                }
+            }
+        }
+        materialize_packs(replacement.packs(), &kinds, maximum_bytes, &worker_cancel)
     })
     .await??;
     check_cancelled(cancel)?;
@@ -1178,7 +1177,7 @@ fn repack_sources(
 
 fn materialize_packs(
     generated: &[GeometricRepackedPack],
-    git_dir: &Path,
+    kinds: &BTreeMap<gix_hash::ObjectId, gix_object::Kind>,
     maximum: u64,
     cancel: &CancellationToken,
 ) -> Result<Vec<CapsuleGitPack>, CheckpointError> {
@@ -1199,17 +1198,15 @@ fn materialize_packs(
             .iter()
             .map(|location| location.oid)
             .collect::<Vec<_>>();
-        let kinds = crab_git::pack::object_kinds_from_git_dir(git_dir, &object_ids)?;
         let ordered_kinds = object_ids
             .iter()
             .map(|oid| {
-                kinds
-                    .get(oid)
-                    .copied()
-                    .ok_or_else(|| crab_git::pack::PackError::ObjectKindQuery {
-                        path: git_dir.to_owned(),
-                        detail: format!("Git omitted object {oid} from the kind query"),
+                kinds.get(oid).copied().ok_or_else(|| {
+                    CheckpointError::Repack(crab_git::repack::RepackError::SourceIntegrity {
+                        pack_id: generated.pack_id.clone(),
+                        reason: format!("authenticated source kinds omitted object {oid}"),
                     })
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
         let checksum =

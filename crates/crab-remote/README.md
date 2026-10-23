@@ -59,9 +59,10 @@ suffix contains identical pack bytes.
 
 Bases already present in the selected pack inventory remain compressed in
 those bodies. Only outside bases and the additional REF bases required by an
-overlapping-object rewrite are reconstructed from the pinned view. Native Git
-repairs one scratch copy of the completed replacement for kind queries, using
-only its remaining external bases. Those temporary objects never enter the
+overlapping-object rewrite are reconstructed from the pinned view. Replacement
+kind metadata comes from the authenticated source sidecars retained by the
+installer. This avoids reinflating historical objects just to query their kinds;
+conflicting kinds fail publication. Temporary external bases never enter the
 selected or published object universe.
 
 If logical publication loses its CAS, maintenance stops without attempting a

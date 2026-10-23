@@ -1880,6 +1880,11 @@ async fn install_git_pack_payloads(
             if actual_bases != declared_bases {
                 return Err(corrupt_path("capsule Git locator", "external bases disagree with the authenticated descriptor"));
             }
+            if !native_repository {
+                // Maintenance preserves authenticated kinds alongside its raw
+                // packs; querying Git would reinflate historical delta chains.
+                std::fs::write(final_pack.with_extension("kinds"), &locator)?;
+            }
             if native_repository && !external_delta_bases.is_empty() {
                 let source_path = pack_path.as_deref().ok_or_else(|| corrupt_path(
                     "capsule Git pack", "a thin source pack cannot be reused as a native Git pack",
@@ -2445,7 +2450,8 @@ pub async fn install_layered_git_packs_from_store_selected(
 /// The source descriptors are already authenticated by the repository view;
 /// callers use this form when a control-only view deliberately omits capsule
 /// bodies but still needs to materialize a bounded consolidation suffix. Sources
-/// outside these slices are never searched for duplicate pack bodies.
+/// outside these slices are never searched for duplicate pack bodies. Each
+/// installed raw pack includes its authenticated kind sidecar at `.kinds`.
 pub async fn install_layered_git_packs_from_store_sources_selected(
     sources: &[PackSourceDescriptor],
     additional_sources: &[PackSourceDescriptor],
