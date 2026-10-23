@@ -108,7 +108,7 @@ pub struct CapsuleRepositoryView {
     peeled_refs: BTreeMap<String, String>,
     visible_ref_transactions: BTreeMap<String, String>,
     ref_capsule_counts: BTreeMap<String, u32>,
-    ref_frontier_size: BTreeMap<String, (usize, u64)>,
+    ref_frontier_bytes: BTreeMap<String, u64>,
     capsule_run_pointers: Vec<CapsulePointer>,
     capsule_run_sources: Vec<PackSourceDescriptor>,
     // Fetch-only captures omit reconciled logical deltas. Distinguish that
@@ -356,10 +356,10 @@ impl CapsuleRepositoryView {
             .unwrap_or_default()
     }
 
-    /// Return the physical run count and bytes retained by one captured ref frontier.
+    /// Return the physical run bytes retained by one captured ref frontier.
     #[must_use]
-    pub fn ref_frontier_size(&self, ref_name: &str) -> (usize, u64) {
-        self.ref_frontier_size
+    pub fn ref_frontier_bytes(&self, ref_name: &str) -> u64 {
+        self.ref_frontier_bytes
             .get(ref_name)
             .copied()
             .unwrap_or_default()
@@ -4258,7 +4258,7 @@ pub fn compacted_view_from_checkpoint(
         tip_bound_controls: Vec::new(),
         visible_ref_transactions: BTreeMap::new(),
         ref_capsule_counts: BTreeMap::new(),
-        ref_frontier_size: BTreeMap::new(),
+        ref_frontier_bytes: BTreeMap::new(),
         capsule_run_pointers: Vec::new(),
         capsule_run_sources: Vec::new(),
         catalog_sources: Some(Vec::new()),
@@ -4379,15 +4379,12 @@ async fn assemble_view(
     admit_frontier(&pointers, limits)?;
     // Each validated ref contains a unique subset of the admitted global
     // frontier, so its sum cannot overflow the already checked byte total.
-    let ref_frontier_size = ref_frontiers
+    let ref_frontier_bytes = ref_frontiers
         .iter()
         .map(|(name, (_, frontier))| {
             (
                 name.clone(),
-                (
-                    frontier.len(),
-                    frontier.iter().map(CapsulePointer::size).sum(),
-                ),
+                frontier.iter().map(CapsulePointer::size).sum(),
             )
         })
         .collect();
@@ -4575,7 +4572,7 @@ async fn assemble_view(
         peeled_refs,
         visible_ref_transactions,
         ref_capsule_counts,
-        ref_frontier_size,
+        ref_frontier_bytes,
         capsule_run_pointers: pointers,
         capsule_run_sources,
         catalog_sources,
@@ -4607,15 +4604,12 @@ async fn assemble_layered_control_view(
     admit_frontier(&pointers, limits)?;
     // Each validated ref contains a unique subset of the admitted global
     // frontier, so its sum cannot overflow the already checked byte total.
-    let ref_frontier_size = ref_frontiers
+    let ref_frontier_bytes = ref_frontiers
         .iter()
         .map(|(name, (_, frontier))| {
             (
                 name.clone(),
-                (
-                    frontier.len(),
-                    frontier.iter().map(CapsulePointer::size).sum(),
-                ),
+                frontier.iter().map(CapsulePointer::size).sum(),
             )
         })
         .collect();
@@ -4769,7 +4763,7 @@ async fn assemble_layered_control_view(
             peeled_refs: expected_peeled,
             visible_ref_transactions,
             ref_capsule_counts,
-            ref_frontier_size,
+            ref_frontier_bytes,
             capsule_run_pointers: pointers,
             capsule_run_sources,
             catalog_sources,
@@ -4858,7 +4852,7 @@ async fn assemble_layered_control_view(
         peeled_refs,
         visible_ref_transactions,
         ref_capsule_counts,
-        ref_frontier_size,
+        ref_frontier_bytes,
         capsule_run_pointers: pointers,
         capsule_run_sources,
         catalog_sources,

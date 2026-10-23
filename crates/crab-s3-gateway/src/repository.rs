@@ -58,7 +58,7 @@ struct CachedReadView {
 
 #[derive(Clone, Copy, Default)]
 pub(crate) struct CapsuleFrontier {
-    pub runs: usize,
+    pub count: u32,
     pub bytes: u64,
 }
 
@@ -350,8 +350,13 @@ impl ReadViewCache {
                     .refs()
                     .keys()
                     .map(|name| {
-                        let (runs, bytes) = capsule.ref_frontier_size(name);
-                        (name.clone(), CapsuleFrontier { runs, bytes })
+                        (
+                            name.clone(),
+                            CapsuleFrontier {
+                                count: capsule.ref_capsule_count(name),
+                                bytes: capsule.ref_frontier_bytes(name),
+                            },
+                        )
                     })
                     .collect();
                 let remote = capsule

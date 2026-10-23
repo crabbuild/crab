@@ -43,9 +43,10 @@ const MAX_BATCHES_PER_FENCE_BURST: usize = 8;
 const MAX_MUTATION_BATCH_BYTES: usize = 32 * 1024 * 1024;
 const MAX_REPREPARE_ATTEMPTS: usize = 8;
 // The hard frontier ceiling counts run segments, not original transactions.
-// Checkpoint before the next leaf can exceed that ceiling or exhaust the read
-// budget. Native run compaction already bounds original transaction counts.
-const FOREGROUND_CAPSULE_RUNS: usize = crab_metadata::capsule_protocol::MAX_CAPSULE_REF_FRONTIER;
+// Follow the shared writer's bounded roll-up window; independently checkpoint
+// large frontiers before another maximum-sized generated pack can exhaust reads.
+const FOREGROUND_CAPSULE_THRESHOLD: u32 =
+    crab_metadata::capsule_protocol::CAPSULE_REF_ROLLUP_WINDOW as u32;
 const FOREGROUND_CAPSULE_BYTES: u64 = MAX_CAPSULE_READ_BYTES / 2;
 const TREE_PAGE_SIZE: usize = 4_096;
 const CHECKPOINT_PUBLICATION_CONCURRENCY: usize = 4;
@@ -1506,7 +1507,7 @@ async fn apply_with_fences(
         .await;
         lease.release().await;
         match published? {
-            Publish::Committed(transaction, frontier) => {
+            Publish::Committed(transaction, frontier_bytes) => {
                 let checkpoint = prepared.checkpoint;
                 let tip = prepared.tip;
                 if checkpoint && let (Some(checkpoints), Some(commit)) = (request.checkpoints, tip)
@@ -1520,7 +1521,12 @@ async fn apply_with_fences(
                         prepared.attributes,
                         prepared.tree,
                         prepared.batches_since_checkpoint,
-                        frontier,
+                        prepared.capsule_frontier.map(|mut frontier| {
+                            if let Some(bytes) = frontier_bytes {
+                                frontier.bytes = bytes;
+                            }
+                            frontier
+                        }),
                     );
                 }
                 request
@@ -1584,7 +1590,7 @@ struct BuiltBatch {
 }
 
 enum Publish {
-    Committed(String, Option<CapsuleFrontier>),
+    Committed(String, Option<u64>),
     Reprepare,
 }
 
@@ -1620,7 +1626,7 @@ async fn prepare_and_upload_batch(
                 .and_then(|view| view.capsule_frontier(request.branch))
         });
     if frontier.is_some_and(|frontier| {
-        frontier.runs >= FOREGROUND_CAPSULE_RUNS || frontier.bytes >= FOREGROUND_CAPSULE_BYTES
+        frontier.count >= FOREGROUND_CAPSULE_THRESHOLD || frontier.bytes >= FOREGROUND_CAPSULE_BYTES
     }) {
         crab_remote::checkpoint::publish_capsule_checkpoint(
             &repository.layout,
@@ -1649,8 +1655,10 @@ async fn prepare_and_upload_batch(
                 {
                     cached.transaction =
                         view.visible_ref_transactions().get(request.branch).cloned();
-                    let (runs, bytes) = view.ref_frontier_size(request.branch);
-                    cached.capsule_frontier = Some(CapsuleFrontier { runs, bytes });
+                    cached.capsule_frontier = Some(CapsuleFrontier {
+                        count: view.ref_capsule_count(request.branch),
+                        bytes: view.ref_frontier_bytes(request.branch),
+                    });
                     cached.tree.forget_pack_provenance();
                     Some(cached)
                 } else {
@@ -1942,7 +1950,10 @@ async fn upload_batch(
         batches_since_checkpoint,
         checkpoint,
         requires_revalidation,
-        capsule_frontier,
+        capsule_frontier: capsule_frontier.map(|mut frontier| {
+            frontier.count = frontier.count.saturating_add(1);
+            frontier
+        }),
     })
 }
 
@@ -2380,7 +2391,7 @@ async fn publish_prepared(
                         transaction.edits(),
                     )
                     .await?;
-                    publish_capsule_with_frontier(
+                    publish_capsule_with_frontier_bytes(
                         &commit_layout,
                         base,
                         &transaction,
@@ -2393,7 +2404,7 @@ async fn publish_prepared(
             )
             .await
         } else {
-            publish_capsule_with_frontier(
+            publish_capsule_with_frontier_bytes(
                 &repository.layout,
                 base.clone(),
                 &transaction,
@@ -2404,7 +2415,7 @@ async fn publish_prepared(
             .await
         };
         return match published {
-            Ok(frontier) => Ok(Publish::Committed(transaction_id, Some(frontier))),
+            Ok(bytes) => Ok(Publish::Committed(transaction_id, Some(bytes))),
             Err(Error::Write(crab_write::WriteError::RefChanged { .. })) => Ok(Publish::Reprepare),
             Err(error) => Err(error),
         };
@@ -2477,18 +2488,18 @@ async fn publish_prepared(
     Ok(Publish::Committed(committed.transaction_id, None))
 }
 
-async fn publish_capsule_with_frontier(
+async fn publish_capsule_with_frontier_bytes(
     layout: &crab_storage::StoreLayout<crab_storage::Store>,
     base: crab_metadata::capsule_protocol::RootSnapshot,
     transaction: &crab_metadata::capsule_protocol::CapsuleTransaction,
     capsule: &crab_metadata::capsule_protocol::Capsule,
     branch: &str,
     cancel: &CancellationToken,
-) -> Result<CapsuleFrontier> {
+) -> Result<u64> {
     let prepared =
         crab_write::capsule_protocol::prepare_publication(layout, base, transaction, capsule)
             .await?;
-    let (runs, bytes) = prepared.ref_frontier_size(branch)?;
+    let bytes = prepared.ref_frontier_bytes(branch)?;
     if bytes > MAX_CAPSULE_READ_BYTES {
         return Err(crab_read::ReadError::CapsuleReadLimit {
             resource: "ref frontier bytes",
@@ -2500,7 +2511,7 @@ async fn publish_capsule_with_frontier(
     // await its exact outcome even if cancellation arrives during the CAS.
     check_cancelled(cancel)?;
     crab_write::capsule_protocol::publish_prepared(layout, prepared).await?;
-    Ok(CapsuleFrontier { runs, bytes })
+    Ok(bytes)
 }
 
 struct BuiltCommit {
@@ -4171,7 +4182,16 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn many_transactions_keep_native_runs_without_an_eager_checkpoint() {
+    async fn sustained_capsule_mutations_checkpoint_at_the_native_rollup_window() {
+        checkpoint_at_native_rollup_window(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cold_capsule_writer_checkpoints_before_its_first_append() {
+        checkpoint_at_native_rollup_window(true).await;
+    }
+
+    async fn checkpoint_at_native_rollup_window(cold: bool) {
         let (repository, runtime, cancel) = capsule_fixture().await;
         let coordinator = Coordinator::new(
             Arc::clone(&runtime),
@@ -4179,20 +4199,26 @@ mod tests {
             cancel.child_token(),
             Metrics::new().unwrap(),
         );
-        let transactions = crab_metadata::capsule_protocol::CAPSULE_REF_ROLLUP_WINDOW;
-        for index in 0..transactions {
-            let bytes: &'static [u8] = if index % 2 == 0 { b"even" } else { b"odd" };
-            coordinated_put(&coordinator, &repository, &cancel, "object", bytes).await;
+        let path = crab_remote_git::GitPath::new(b"object".to_vec()).unwrap();
+        for index in 0..FOREGROUND_CAPSULE_THRESHOLD {
+            coordinator
+                .apply(
+                    &repository,
+                    "refs/heads/main",
+                    &path,
+                    Change::Put {
+                        bytes: Bytes::from(index.to_string()),
+                        track_lfs: false,
+                        attributes: Box::default(),
+                        condition: PutCondition::None,
+                    },
+                    "user",
+                    &cancel,
+                )
+                .await
+                .unwrap();
         }
-        coordinator.shutdown().await;
-        let cold = Coordinator::new(
-            Arc::clone(&runtime),
-            crab_remote_git::RepositoryOptions::default(),
-            cancel.child_token(),
-            Metrics::new().unwrap(),
-        );
-        coordinated_put(&cold, &repository, &cancel, "object", b"after").await;
-        let view = crab_read::capsule_protocol::open_view(
+        let before = crab_read::capsule_protocol::open_view(
             &repository.layout,
             crab_read::capsule_protocol::CapsuleReadLimits {
                 max_capsule_bytes: MAX_CAPSULE_READ_BYTES,
@@ -4202,140 +4228,76 @@ mod tests {
         .await
         .unwrap();
         assert_eq!(
-            view.ref_capsule_count("refs/heads/main"),
-            transactions as u32 + 1
+            before.ref_capsule_count("refs/heads/main"),
+            FOREGROUND_CAPSULE_THRESHOLD
         );
-        assert!(view.layered_checkpoint().is_none());
-        assert!(view.ref_frontier_size("refs/heads/main").0 < FOREGROUND_CAPSULE_RUNS);
-        assert_eq!(
-            read(&repository, Arc::clone(&runtime), &cancel, "object").await,
-            Bytes::from_static(b"after")
-        );
-        cold.shutdown().await;
-        runtime.shutdown().await;
-    }
 
-    #[tokio::test(flavor = "multi_thread")]
-    async fn cold_capsule_writer_checkpoints_a_full_physical_frontier() {
-        use crab_metadata::capsule_protocol::{
-            CapsulePointer, CapsuleRefHead, capsule_ref_name_key, load_capsule_run,
+        let coordinator = if cold {
+            coordinator.shutdown().await;
+            Coordinator::new(
+                Arc::clone(&runtime),
+                crab_remote_git::RepositoryOptions::default(),
+                cancel.child_token(),
+                Metrics::new().unwrap(),
+            )
+        } else {
+            coordinator
         };
-        let (repository, runtime, cancel) = capsule_fixture().await;
-        let coordinator = Coordinator::new(
-            Arc::clone(&runtime),
-            crab_remote_git::RepositoryOptions::default(),
-            cancel.child_token(),
-            Metrics::new().unwrap(),
-        );
-        for index in 0..FOREGROUND_CAPSULE_RUNS {
-            coordinated_put(
-                &coordinator,
+
+        coordinator
+            .apply(
                 &repository,
+                "refs/heads/main",
+                &path,
+                Change::Put {
+                    bytes: Bytes::from_static(b"after-checkpoint"),
+                    track_lfs: false,
+                    attributes: Box::default(),
+                    condition: PutCondition::None,
+                },
+                "user",
                 &cancel,
-                &format!("object-{index}"),
-                b"before",
             )
-            .await;
-        }
-        coordinator.shutdown().await;
-        let limits = crab_read::capsule_protocol::CapsuleReadLimits {
-            max_capsule_bytes: MAX_CAPSULE_READ_BYTES,
-            max_frontier_bytes: MAX_CAPSULE_READ_BYTES,
-        };
-        let view = crab_read::capsule_protocol::open_view(&repository.layout, limits)
             .await
             .unwrap();
-        let mut leaves = Vec::new();
-        // A valid persisted frontier may retain all 64 leaves. Expand the
-        // authenticated runs without changing transactions, refs, or Git bytes.
-        for pointer in view.capsule_run_pointers() {
-            let run = load_capsule_run(&repository.layout, pointer).await.unwrap();
-            for capsule in run.capsules() {
-                let leaf = crab_write::capsule_protocol::capsule_leaf_run(capsule).unwrap();
-                repository
-                    .store
-                    .put_exact(
-                        &repository.layout.capsule_path(leaf.hash()),
-                        leaf.bytes().clone(),
-                    )
-                    .await
-                    .unwrap();
-                leaves.push(
-                    CapsulePointer::new(
-                        leaf.hash(),
-                        leaf.bytes().len() as u64,
-                        leaf.control_offset(),
-                        leaf.control_size(),
-                        leaf.footer_hash(),
-                        leaf.level(),
-                        leaf.transaction_ids(),
-                        leaf.newest_base_root_digest(),
-                    )
-                    .unwrap(),
-                );
-            }
-        }
-        assert_eq!(leaves.len(), FOREGROUND_CAPSULE_RUNS);
-        let path = repository
-            .layout
-            .capsule_ref_head_path(&capsule_ref_name_key("refs/heads/main"));
-        let (bytes, etag) = repository.store.get_with_etag(&path).await.unwrap();
-        let head = CapsuleRefHead::decode(&bytes).unwrap();
-        let visible = head.visible(&Default::default());
-        let state = visible
-            .successor(
-                visible.oid().map(str::to_owned),
-                visible.peeled_oid().map(str::to_owned),
-                visible.transaction_id().unwrap().to_owned(),
-                leaves,
-            )
-            .unwrap();
-        repository
-            .store
-            .update(&path, head.commit(state).unwrap().encode().unwrap(), etag)
-            .await
-            .unwrap();
-        repository.read_views.invalidate().await;
-        let before = crab_read::capsule_protocol::open_view(&repository.layout, limits)
-            .await
-            .unwrap();
-        let cold = Coordinator::new(
-            Arc::clone(&runtime),
-            crab_remote_git::RepositoryOptions::default(),
-            cancel.child_token(),
-            Metrics::new().unwrap(),
-        );
-        coordinated_put(&cold, &repository, &cancel, "after", b"after").await;
-        let after = crab_read::capsule_protocol::open_view(&repository.layout, limits)
-            .await
-            .unwrap();
-        assert_eq!(
-            after.layered_checkpoint().unwrap().sources(),
-            before.capsule_run_sources()
-        );
-        assert_eq!(after.ref_capsule_count("refs/heads/main"), 1);
-        for index in 0..FOREGROUND_CAPSULE_RUNS {
+
+        if !cold {
             assert_eq!(
-                read(
-                    &repository,
-                    Arc::clone(&runtime),
-                    &cancel,
-                    &format!("object-{index}")
-                )
-                .await,
-                Bytes::from_static(b"before")
+                runtime.snapshot().await.object_entries,
+                0,
+                "checkpointing an unchanged tip must retain logical write state without rereading Git objects"
             );
         }
+        let after = crab_read::capsule_protocol::open_view(
+            &repository.layout,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: MAX_CAPSULE_READ_BYTES,
+                max_frontier_bytes: MAX_CAPSULE_READ_BYTES,
+            },
+        )
+        .await
+        .unwrap();
+        let layered = after.layered_checkpoint().unwrap();
+        assert_eq!(layered.sources(), before.capsule_run_sources());
+        assert_eq!(after.root().root().refs(), before.refs());
         assert_eq!(
-            read(&repository, Arc::clone(&runtime), &cancel, "after").await,
-            Bytes::from_static(b"after")
+            after.root().root().compacted_ref_transactions(),
+            before.visible_ref_transactions()
         );
-        cold.shutdown().await;
+        assert_eq!(after.ref_capsule_count("refs/heads/main"), 1);
+        assert_ne!(
+            after.refs()["refs/heads/main"],
+            before.refs()["refs/heads/main"]
+        );
+        assert_eq!(
+            read(&repository, Arc::clone(&runtime), &cancel, "object").await,
+            Bytes::from_static(b"after-checkpoint")
+        );
         runtime.shutdown().await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn compacted_frontier_bytes_trigger_checkpoint_before_the_run_limit() {
+    async fn compacted_frontier_bytes_trigger_checkpoint_before_the_count_window() {
         let (repository, runtime, cancel) = capsule_fixture().await;
         let coordinator = Coordinator::new(
             Arc::clone(&runtime),
@@ -4369,10 +4331,7 @@ mod tests {
             .iter()
             .map(crab_metadata::capsule_protocol::CapsulePointer::size)
             .sum::<u64>();
-        assert_eq!(
-            before.ref_frontier_size("refs/heads/main").1,
-            physical_bytes
-        );
+        assert_eq!(before.ref_frontier_bytes("refs/heads/main"), physical_bytes);
         let key = format!("{}\0refs/heads/main", repository.config.name);
         let queue = Arc::clone(&coordinator.admission.refs.lock().unwrap()[&key]);
         {
@@ -4419,7 +4378,7 @@ mod tests {
             cancel.clone(),
             Metrics::new().unwrap(),
         );
-        for index in 0..40 {
+        for index in 0..FOREGROUND_CAPSULE_THRESHOLD {
             coordinated_put(
                 &coordinator,
                 &repository,
@@ -4429,19 +4388,6 @@ mod tests {
             )
             .await;
         }
-        let key = format!("{}\0refs/heads/main", repository.config.name);
-        let queue = Arc::clone(&coordinator.admission.refs.lock().unwrap()[&key]);
-        queue
-            .state
-            .cached
-            .lock()
-            .unwrap()
-            .as_mut()
-            .unwrap()
-            .capsule_frontier
-            .as_mut()
-            .unwrap()
-            .bytes = FOREGROUND_CAPSULE_BYTES;
         let other = Coordinator::new(
             Arc::clone(&runtime),
             crab_remote_git::RepositoryOptions::default(),

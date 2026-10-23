@@ -171,8 +171,8 @@ from the pinned view. Planned multipart retries resolve the v2 plan receipt,
 and idle maintenance compacts the capsule frontier through the shared verified
 checkpoint path.
 
-A busy ref checkpoints synchronously when its physical frontier reaches 64 run
-segments or 1 GiB, before admitting the next leaf. The native writer
+A busy ref checkpoints synchronously after the native 500-transaction roll-up
+window, or when its physical run frontier reaches 1 GiB. The native writer
 compacts runs within the unchanged 64-segment/512-transaction-per-run limits;
 those segment counts are distinct from original transaction counts. Publication
 charges the exact prepared frontier bytes and rejects a successor above the
@@ -240,7 +240,7 @@ publishing a commit or returning a prepared no-op or precondition result. It is
 discarded on a tip mismatch, restart, or memory-pressure
 eviction; idle branch state remains reusable below the shared watermark.
 After native checkpointing, an exact-tip control capture refreshes the cached
-transaction position, physical run count, and frontier bytes. Logical directories and attributes
+transaction position, transaction count, and physical frontier bytes. Logical directories and attributes
 remain reusable; physical tree anchors and ancestry are discarded because
 consolidation can change their pack representations.
 
