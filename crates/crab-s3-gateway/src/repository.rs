@@ -23,7 +23,7 @@ const FULL_MAINTENANCE_IDLE_DELAY: Duration = Duration::from_secs(5);
 const CATALOG_MAINTENANCE_EPOCHS: u64 = 64;
 const MAX_CACHED_SNAPSHOTS: usize = 64;
 const MAX_CAPSULE_READ_BYTES: u64 = 2 * 1024 * 1024 * 1024;
-const CAPSULE_CHECKPOINT_THRESHOLD: u32 = 32;
+pub(crate) const CAPSULE_CHECKPOINT_THRESHOLD: u32 = 32;
 
 #[derive(Debug, thiserror::Error)]
 enum MaintenanceError {

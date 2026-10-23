@@ -171,8 +171,11 @@ from the pinned view. Planned multipart retries resolve the v2 plan receipt,
 and idle maintenance compacts the capsule frontier through the shared verified
 checkpoint path.
 
-A busy ref checkpoints synchronously at 56 capsules so it
-cannot reach the hard 64-entry frontier. V1 repositories retain the journal publisher.
+A busy ref starts canonical checkpoint work at 32 capsules while writes continue.
+At 56 capsules it waits for that work before admitting another write, preserving
+the hard 64-entry frontier. One canonical task runs at a time per gateway, with
+independent GC leases, verified publication and shutdown draining. V1 repositories
+retain the journal publisher.
 
 ### Mutation batching and publication
 

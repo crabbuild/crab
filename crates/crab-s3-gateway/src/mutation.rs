@@ -601,6 +601,8 @@ struct CheckpointRefState {
 
 struct CheckpointScheduler {
     refs: std::sync::Mutex<HashMap<String, CheckpointRefState>>,
+    repositories: std::sync::Mutex<HashMap<String, Arc<CapsuleCheckpointTask>>>,
+    capsule_permit: Arc<Semaphore>,
     permits: Arc<Semaphore>,
     cancellation: CancellationToken,
     active: AtomicUsize,
@@ -608,16 +610,77 @@ struct CheckpointScheduler {
     metrics: Metrics,
 }
 
+#[derive(Default)]
+struct CapsuleCheckpointTask {
+    pending: tokio::sync::Mutex<Option<tokio::task::JoinHandle<Result<()>>>>,
+}
+
 impl CheckpointScheduler {
     fn new(cancellation: CancellationToken, metrics: Metrics) -> Self {
         Self {
             refs: std::sync::Mutex::new(HashMap::new()),
+            repositories: std::sync::Mutex::new(HashMap::new()),
+            capsule_permit: Arc::new(Semaphore::new(1)),
             permits: Arc::new(Semaphore::new(CHECKPOINT_PUBLICATION_CONCURRENCY)),
             cancellation,
             active: AtomicUsize::new(0),
             idle: Notify::new(),
             metrics,
         }
+    }
+
+    async fn checkpoint_capsules(&self, repository: &Repository, count: u32) -> Result<bool> {
+        if count < crate::repository::CAPSULE_CHECKPOINT_THRESHOLD {
+            return Ok(false);
+        }
+        let task = {
+            let mut repositories = self
+                .repositories
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            Arc::clone(
+                repositories
+                    .entry(repository.config.name.clone())
+                    .or_default(),
+            )
+        };
+        let mut pending = task.pending.lock().await;
+        check_cancelled(&self.cancellation)?;
+        if pending.is_none() {
+            let repository = repository.clone();
+            let cancel = self.cancellation.clone();
+            let permit = Arc::clone(&self.capsule_permit);
+            *pending = Some(tokio::spawn(async move {
+                let _permit = tokio::select! {
+                    permit = permit.acquire_owned() => permit.map_err(|_| Error::AdmissionState)?,
+                    () = cancel.cancelled() => return Err(Error::Cancelled),
+                };
+                // This task outlives the request's fence burst. Its own GC leases
+                // retain captured packs until the verified root CAS finishes.
+                let fences = GcWriterFences::acquire(&repository, &cancel).await?;
+                let result = crab_remote::checkpoint::publish_capsule_checkpoint(
+                    &repository.layout,
+                    crate::repository::CAPSULE_CHECKPOINT_THRESHOLD,
+                    MAX_CAPSULE_READ_BYTES,
+                    &cancel,
+                )
+                .await;
+                fences.release().await;
+                result.map(|_| ()).map_err(Error::from)
+            }));
+        }
+        let Some(worker) = pending.as_mut() else {
+            return Err(Error::AdmissionState);
+        };
+        if count < FOREGROUND_CAPSULE_THRESHOLD && !worker.is_finished() {
+            return Ok(false);
+        }
+        // Borrow the handle while waiting: cancellation must leave it owned by
+        // the scheduler, so shutdown still joins the task and releases its leases.
+        let result = worker.await;
+        pending.take();
+        result??;
+        Ok(true)
     }
 
     fn schedule(
@@ -758,6 +821,31 @@ impl CheckpointScheduler {
 
     async fn shutdown(&self) {
         self.cancellation.cancel();
+        let repositories = self
+            .repositories
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .values()
+            .cloned()
+            .collect::<Vec<_>>();
+        for repository in repositories {
+            let mut pending = repository.pending.lock().await;
+            if let Some(worker) = pending.as_mut() {
+                match worker.await {
+                    Ok(
+                        Ok(())
+                        | Err(
+                            Error::Cancelled
+                            | Error::Checkpoint(crab_remote::checkpoint::CheckpointError::Cancelled),
+                        ),
+                    ) => {}
+                    result => {
+                        tracing::warn!(?result, "S3 capsule checkpoint failed during shutdown")
+                    }
+                }
+            }
+            pending.take();
+        }
         self.wait_idle().await;
     }
 }
@@ -1591,20 +1679,27 @@ async fn prepare_and_upload_batch(
 ) -> Result<PreparedBatch> {
     let mut protocol = publication_protocol(repository).await?;
     let mut cached = request.state.and_then(BranchState::take_latest);
-    if matches!(&protocol, PublicationProtocol::Capsule(_))
-        && cached.as_ref().is_some_and(|cached| {
-            cached
-                .capsule_count
-                .is_some_and(|count| count >= FOREGROUND_CAPSULE_THRESHOLD)
-        })
+    let checkpointed = if matches!(&protocol, PublicationProtocol::Capsule(_))
+        && let Some(count) = cached.as_ref().and_then(|cached| cached.capsule_count)
     {
-        crab_remote::checkpoint::publish_capsule_checkpoint(
-            &repository.layout,
-            FOREGROUND_CAPSULE_THRESHOLD,
-            MAX_CAPSULE_READ_BYTES,
-            cancel,
-        )
-        .await?;
+        if let Some(checkpoints) = request.checkpoints {
+            checkpoints.checkpoint_capsules(repository, count).await?
+        } else if count >= FOREGROUND_CAPSULE_THRESHOLD {
+            crab_remote::checkpoint::publish_capsule_checkpoint(
+                &repository.layout,
+                FOREGROUND_CAPSULE_THRESHOLD,
+                MAX_CAPSULE_READ_BYTES,
+                cancel,
+            )
+            .await?;
+            true
+        } else {
+            false
+        }
+    } else {
+        false
+    };
+    if checkpointed {
         repository.read_views.invalidate().await;
         protocol = publication_protocol(repository).await?;
         cached = match (cached, &protocol) {
@@ -4105,6 +4200,29 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn shutdown_joins_queued_capsule_checkpoint_work() {
+        let (repository, runtime, cancel) = capsule_fixture().await;
+        let scheduler = CheckpointScheduler::new(cancel, Metrics::new().unwrap());
+        let blocker = Arc::clone(&scheduler.capsule_permit)
+            .acquire_owned()
+            .await
+            .unwrap();
+        assert!(
+            !scheduler
+                .checkpoint_capsules(&repository, crate::repository::CAPSULE_CHECKPOINT_THRESHOLD,)
+                .await
+                .unwrap()
+        );
+        let task = Arc::clone(&scheduler.repositories.lock().unwrap()[&repository.config.name]);
+        tokio::time::timeout(Duration::from_secs(5), scheduler.shutdown())
+            .await
+            .unwrap();
+        assert!(task.pending.lock().await.is_none());
+        drop(blocker);
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn sustained_capsule_mutations_checkpoint_before_the_ref_frontier_limit() {
         let (repository, runtime, cancel) = capsule_fixture().await;
         let coordinator = Coordinator::new(
@@ -4113,6 +4231,12 @@ mod tests {
             cancel.clone(),
             Metrics::new().unwrap(),
         );
+        // Hold maintenance behind another repository. Writes may consume the
+        // bounded remaining frontier, then must wait without acknowledging early.
+        let blocker = Arc::clone(&coordinator.checkpoints.capsule_permit)
+            .acquire_owned()
+            .await
+            .unwrap();
         let path = crab_remote_git::GitPath::new(b"object".to_vec()).unwrap();
         for index in 0..FOREGROUND_CAPSULE_THRESHOLD {
             coordinator
@@ -4146,22 +4270,26 @@ mod tests {
             FOREGROUND_CAPSULE_THRESHOLD
         );
 
-        coordinator
-            .apply(
-                &repository,
-                "refs/heads/main",
-                &path,
-                Change::Put {
-                    bytes: Bytes::from_static(b"after-checkpoint"),
-                    track_lfs: false,
-                    attributes: Box::default(),
-                    condition: PutCondition::None,
-                },
-                "user",
-                &cancel,
-            )
-            .await
-            .unwrap();
+        let mut blocked = Box::pin(coordinator.apply(
+            &repository,
+            "refs/heads/main",
+            &path,
+            Change::Put {
+                bytes: Bytes::from_static(b"after-checkpoint"),
+                track_lfs: false,
+                attributes: Box::default(),
+                condition: PutCondition::None,
+            },
+            "user",
+            &cancel,
+        ));
+        assert!(
+            tokio::time::timeout(Duration::from_millis(100), &mut blocked)
+                .await
+                .is_err()
+        );
+        drop(blocker);
+        blocked.await.unwrap();
 
         assert_eq!(
             runtime.snapshot().await.object_entries,
@@ -4193,6 +4321,7 @@ mod tests {
             read(&repository, Arc::clone(&runtime), &cancel, "object").await,
             Bytes::from_static(b"after-checkpoint")
         );
+        coordinator.shutdown().await;
         runtime.shutdown().await;
     }
 

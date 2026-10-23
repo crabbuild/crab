@@ -621,10 +621,13 @@ generated pack sidecars and exact visibility edit in one capsule, upload S3
 attributes before ref visibility, and commit through the per-ref head CAS.
 Multipart completion uses deterministic v2 intent/receipt recovery. Idle
 gateway and HTTP-server maintenance share the same root-pinned, verified
-complete-pack checkpoint implementation. Warm per-ref state tracks frontier
-length and forces a checkpoint at 56 capsules, retaining headroom below the
-hard 64-entry bound even when the write stream never becomes idle. V1 repositories retain their existing
-manifest/journal write path.
+complete-pack checkpoint implementation. Warm per-ref state starts a canonical
+checkpoint at 32 capsules and waits at 56 if it has not finished, retaining
+headroom below the hard 64-entry bound even during sustained traffic. One
+canonical worker per gateway bounds concurrent metadata work. Each task holds
+its own GC leases and is joined during shutdown; publication retains the exact
+captured root CAS and ref positions while newer writes remain in the frontier.
+V1 repositories retain their existing manifest/journal write path.
 
 GET uses logical content opening for Git, Crab and LFS content. Raw `read_blob`
 is not a substitute. Read symlinks/submodules only according to phase 0; never
