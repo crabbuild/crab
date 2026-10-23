@@ -4722,10 +4722,11 @@ mod tests {
 
     #[tokio::test]
     async fn response_packs_preserve_bytes_across_displaced_delta_bases() {
-        for ofs in [true, false] {
+        for representation in crate::reader::duplicate_representation_tests::Representation::ALL {
             for selected in [true, false] {
                 let (repository, session, oids) =
-                    crate::reader::duplicate_representation_tests::fixture(ofs).await;
+                    crate::reader::duplicate_representation_tests::fixture(representation, true)
+                        .await;
                 session.close().await.unwrap();
                 let cancellation = CancellationToken::new();
                 let operation = repository
@@ -4758,7 +4759,7 @@ mod tests {
                     .unwrap();
                 assert!(
                     output.status.success(),
-                    "ofs={ofs}, selected={selected}: {}",
+                    "representation={representation:?}, selected={selected}: {}",
                     String::from_utf8_lossy(&output.stderr)
                 );
                 let index = gix_pack::index::File::at(&index_path, gix_hash::Kind::Sha1).unwrap();
