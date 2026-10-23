@@ -109,6 +109,11 @@ bounded. Cached blame results remain subject to the current operation's
 logical, traversal, history, blame, and response limits; a warm result cannot
 bypass a stricter caller budget.
 
+Immediate directory pages seek their exact pinned cursor in Git order and
+materialize only the selected children. Entry admission counts returned children
+and cursor/path comparisons, including cache hits; unused page capacity consumes
+neither entry budget nor result allocation. Blob-size reads stay page bounded.
+
 Shared base/index reads recheck their caches after admission: a caller that
 missed before a previous producer finished must reuse its verified result.
 Index-size producers publish their cache entry before retiring the shared task.

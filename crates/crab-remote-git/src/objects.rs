@@ -360,6 +360,23 @@ pub(crate) fn find_tree_entry(
     parent: &GitPath,
     name: &[u8],
 ) -> Result<(Option<TreeEntry>, u64)> {
+    let (index, comparisons) = find_tree_entry_index(entries, name);
+    let entry = index
+        .map(|index| -> Result<TreeEntry> {
+            let entry = &entries[index];
+            Ok(TreeEntry {
+                path: parent.join(&entry.name)?,
+                oid: entry.oid,
+                mode: entry.mode,
+                kind: entry.kind,
+                size: None,
+            })
+        })
+        .transpose()?;
+    Ok((entry, comparisons))
+}
+
+pub(crate) fn find_tree_entry_index(entries: &[RawTreeEntry], name: &[u8]) -> (Option<usize>, u64) {
     let mut comparisons = 0u64;
     for target_is_tree in [false, true] {
         let result = entries.binary_search_by(|entry| {
@@ -374,20 +391,11 @@ pub(crate) fn find_tree_entry(
         if let Ok(index) = result {
             let entry = &entries[index];
             if entry.name.as_ref() == name {
-                return Ok((
-                    Some(TreeEntry {
-                        path: parent.join(&entry.name)?,
-                        oid: entry.oid,
-                        mode: entry.mode,
-                        kind: entry.kind,
-                        size: None,
-                    }),
-                    comparisons,
-                ));
+                return (Some(index), comparisons);
             }
         }
     }
-    Ok((None, comparisons))
+    (None, comparisons)
 }
 
 pub(crate) fn tree_name_cmp(

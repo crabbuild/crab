@@ -2726,6 +2726,89 @@ async fn directory_pages_preserve_git_order_for_shared_file_and_tree_prefixes() 
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn directory_pages_charge_results_and_cursor_work_without_unused_capacity() {
+    let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
+    let cancellation = CancellationToken::new();
+    let operation = fixture
+        .repository
+        .operation(OperationKind::Snapshot, &cancellation)
+        .await
+        .expect("snapshot operation");
+    let result = fixture
+        .repository
+        .snapshot(&Revision::Reference("main".to_owned()), &operation)
+        .await;
+    let snapshot = operation.finish(result).await.expect("snapshot");
+    let expected = git(
+        &[
+            "--git-dir",
+            path(&fixture.source_git_dir),
+            "ls-tree",
+            "--name-only",
+            "-z",
+            &snapshot.commit_oid().to_string(),
+        ],
+        None,
+    )
+    .split(|byte| *byte == 0)
+    .filter(|name| !name.is_empty())
+    .map(<[u8]>::to_vec)
+    .collect::<Vec<_>>();
+    let operation = fixture
+        .repository
+        .operation_with_limits(
+            OperationKind::Tree,
+            &cancellation,
+            OperationLimits {
+                max_entries: expected.len() as u64 + 128,
+                ..Default::default()
+            },
+        )
+        .await
+        .expect("bounded operation");
+    let result = async {
+        let mut cursor = None;
+        let mut names = Vec::new();
+        loop {
+            let page = snapshot
+                .list_directory(
+                    &GitPath::root(),
+                    &PageRequest::new(1_024, cursor)?,
+                    &operation,
+                )
+                .await?;
+            names.extend(
+                page.items
+                    .iter()
+                    .map(|entry| entry.path.file_name().expect("child name").to_vec()),
+            );
+            cursor = page.next;
+            if cursor.is_none() {
+                break;
+            }
+        }
+        assert_eq!(names, expected);
+        assert!(matches!(
+            snapshot
+                .list_directory(
+                    &GitPath::root(),
+                    &PageRequest::new(1_024, None)?,
+                    &operation,
+                )
+                .await,
+            Err(Error::LimitExceeded {
+                limit: "entries",
+                ..
+            })
+        ));
+        Ok(())
+    }
+    .await;
+    operation.finish(result).await.expect("finish operation");
+    fixture.runtime.shutdown().await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn directory_cursor_binds_raw_path_tree_commit_and_page_shape() {
     let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
     let cancellation = CancellationToken::new();
