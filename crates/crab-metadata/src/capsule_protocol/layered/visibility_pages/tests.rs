@@ -145,7 +145,7 @@ async fn warm_checkpoint_membership_rereads_no_origin_pages() {
 async fn bulk_checkpoint_visibility_matches_the_captured_complete_proof() {
     let (layout, checkpoint, reader, _) = fixture(1000, 128 * 1024 * 1024).await;
     assert_eq!(
-        *reader.materialize(layout.store()).await.unwrap(),
+        reader.materialize(layout.store()).await.unwrap().as_ref(),
         checkpoint.visibility_ordinal_snapshot().unwrap().unwrap()
     );
 }
@@ -180,4 +180,15 @@ async fn checkpoint_page_tampering_and_missing_pages_fail_instead_of_membership_
                 .is_err()
         );
     }
+}
+
+#[tokio::test]
+async fn checkpoint_clones_share_the_verified_complete_visibility_proof() {
+    let (_, checkpoint, _, _) = fixture(1000, 128 * 1024 * 1024).await;
+    let checkpoint = LayeredCheckpoint::decode(checkpoint.bytes().clone()).unwrap();
+    let cloned = checkpoint.clone();
+    assert!(std::ptr::eq(
+        checkpoint.visibility_ordinal_snapshot().unwrap().unwrap(),
+        cloned.visibility_ordinal_snapshot().unwrap().unwrap(),
+    ));
 }

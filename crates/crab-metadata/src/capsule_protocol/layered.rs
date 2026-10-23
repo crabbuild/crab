@@ -1,4 +1,5 @@
 use std::collections::{BTreeMap, BTreeSet};
+use std::sync::{Arc, OnceLock};
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -964,12 +965,13 @@ pub struct LayeredCheckpoint {
     control_offset: u64,
     control_only: bool,
     catalog_objects: BTreeMap<[u8; 32], Bytes>,
+    visibility: Arc<OnceLock<LayeredVisibilitySnapshot>>,
 }
 
 impl PartialEq for LayeredCheckpoint {
     fn eq(&self, other: &Self) -> bool {
-        // Pending catalog objects are runtime state. The footer already
-        // commits to their exact identity, independently of cache residency.
+        // Decoded proofs and pending catalog objects are runtime state. The
+        // footer commits to their identities independently of cache residency.
         self.bytes == other.bytes
             && self.hash == other.hash
             && self.footer_hash == other.footer_hash
@@ -1047,23 +1049,29 @@ impl LayeredCheckpoint {
                     .map_err(|_| contract_error("layered visibility object count overflows"))
             })
             .transpose()?;
-        let visibility = match visibility {
+        let encoded_visibility = match &visibility {
             Some(value) => Some((
                 CapsuleSectionKind::VisibilityOrdinalSnapshot,
                 value.encode()?,
             )),
             None => None,
         };
-        Self::build_inner(
+        let checkpoint = Self::build_inner(
             covered_generation,
             covered_root_digest,
             sources,
             catalog,
-            visibility,
+            encoded_visibility,
             cold_clone_object_set_digest,
             cold_clone_object_count,
             visibility_transitions,
-        )
+        )?;
+        if let Some(snapshot) = visibility {
+            // Source bindings and canonical encoding were validated above.
+            // Reuse that proof rather than decoding our freshly encoded pages.
+            checkpoint.visibility.get_or_init(|| snapshot);
+        }
+        Ok(checkpoint)
     }
 
     fn build_inner(
@@ -1162,6 +1170,7 @@ impl LayeredCheckpoint {
             control_offset,
             control_only: false,
             catalog_objects: BTreeMap::new(),
+            visibility: Arc::new(OnceLock::new()),
         })
     }
 
@@ -1226,6 +1235,7 @@ impl LayeredCheckpoint {
             control_offset: footer_start,
             control_only: true,
             catalog_objects: BTreeMap::new(),
+            visibility: Arc::new(OnceLock::new()),
         })
     }
 
@@ -1386,8 +1396,11 @@ impl LayeredCheckpoint {
         &self.footer.visibility_transitions
     }
 
-    /// Decode the compact ordinal proof and validate its checkpoint source bindings.
-    pub fn visibility_ordinal_snapshot(&self) -> Result<Option<LayeredVisibilitySnapshot>> {
+    /// Return the verified ordinal proof shared by immutable checkpoint clones.
+    pub fn visibility_ordinal_snapshot(&self) -> Result<Option<&LayeredVisibilitySnapshot>> {
+        if let Some(snapshot) = self.visibility.get() {
+            return Ok(Some(snapshot));
+        }
         let Some(section) = self.section(CapsuleSectionKind::VisibilityOrdinalSnapshot)? else {
             return Ok(None);
         };
@@ -1402,7 +1415,7 @@ impl LayeredCheckpoint {
         for member in snapshot.member_admission().unwrap_or_default() {
             member.validate_sources(self.sources())?;
         }
-        Ok(Some(snapshot))
+        Ok(Some(self.visibility.get_or_init(|| snapshot)))
     }
 
     /// Decode visibility bound to this source inventory and the caller's Git identity.
@@ -1453,7 +1466,7 @@ impl LayeredCheckpoint {
         self.bytes
             .get(start..end)
             .filter(|bytes| blake3::hash(bytes).to_hex().as_str() == section.blake3)
-            .map(Bytes::copy_from_slice)
+            .map(|_| self.bytes.slice(start..end))
             .ok_or_else(|| corrupt("layered checkpoint control section hash does not match"))
             .map(Some)
     }

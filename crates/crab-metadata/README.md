@@ -152,6 +152,10 @@ xorb metadata, rather than a complete file map or a scan of every file per shard
 GC traverses catalog pages from current, historical and retained browse roots.
 Protected keys and authenticated closure traversal are tracked separately.
 
+Complete checkpoint visibility proofs are authenticated once and shared across
+immutable checkpoint clones. Building a checkpoint retains its validated proof;
+control-only readers keep the visibility body cold.
+
 Retired unshipped checkpoint formats through 8 are rejected without fallback.
 The six published release tags do not contain this capsule codec.
 This format is under qualification; earlier format-7/8 runtime receipts do not
