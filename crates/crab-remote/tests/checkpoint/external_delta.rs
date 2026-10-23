@@ -350,6 +350,57 @@ async fn native_install_rejects_missing_or_cyclic_bases_before_installing_any_pa
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn suffix_internal_delta_bases_are_not_reconstructed_from_origin() {
+    let (layout, observations) = empty_fixture().await;
+    let stable = (0..32768_u32)
+        .flat_map(|ordinal| *blake3::hash(&ordinal.to_le_bytes()).as_bytes())
+        .collect::<Vec<_>>();
+    let base = vec![b'a'; 1024 * 1024];
+    let mut first = base.clone();
+    first[..256 * 1024].copy_from_slice(&stable[..256 * 1024]);
+    let mut second = first.clone();
+    second[256 * 1024..512 * 1024].copy_from_slice(&stable[256 * 1024..512 * 1024]);
+    publish_blobs(&layout, &[("stable", &stable)]).await;
+    publish_blobs(&layout, &[("base", &base)]).await;
+    publish_dependent_blob(&layout, "first", &base, &first).await;
+    publish_dependent_blob(&layout, "second", &first, &second).await;
+    let before = checkpoint(&layout).await;
+    observations.0.lock().unwrap().clear();
+
+    let outcome = crab_remote::checkpoint::repack_capsule_checkpoint_from_root(
+        &layout,
+        before.root_snapshot().clone(),
+        LIMIT,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let read_bytes = observations
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|request| request.bytes_read)
+        .sum::<u64>();
+    assert!(
+        read_bytes <= outcome.pack_bytes_read + 64 * 1024,
+        "read {read_bytes} bytes for {outcome:?}; selected bodies already contain their bases"
+    );
+    let after = view(&layout).await;
+    verify_git_blobs(
+        &layout,
+        &after,
+        &[
+            ("stable", &stable),
+            ("base", &base),
+            ("first", &first),
+            ("second", &second),
+        ],
+    )
+    .await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn external_base_repack_verifies_bytes_and_fails_closed_on_corruption_or_cancellation() {
     for scenario in ["valid", "corrupt-base", "cancel-base"] {
         let (layout, observations) = empty_fixture().await;

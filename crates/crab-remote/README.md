@@ -57,11 +57,12 @@ history. Suffix installation is restricted to selected physical sources, and
 stable-prefix descriptors and member positions remain unchanged even when the
 suffix contains identical pack bytes.
 
-Verified external delta bases are installed
-only in private scratch object databases, where native Git repairs source copies
-before metadata queries. Loose bases alone do not make raw thin packs readable
-by Git. Those copies and bases are not added to the selected or replacement
-object universe.
+Bases already present in the selected pack inventory remain compressed in
+those bodies. Only outside bases and the additional REF bases required by an
+overlapping-object rewrite are reconstructed from the pinned view. Native Git
+repairs one scratch copy of the completed replacement for kind queries, using
+only its remaining external bases. Those temporary objects never enter the
+selected or published object universe.
 
 If logical publication loses its CAS, maintenance stops without attempting a
 physical rewrite of that known-stale root. Already-completed logical work stays

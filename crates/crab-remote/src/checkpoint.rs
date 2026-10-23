@@ -720,7 +720,7 @@ async fn consolidate_layered_suffix(
             },
         ));
     }
-    let delta_base_ids = sources[selected_start..]
+    let mut delta_base_ids = sources[selected_start..]
         .iter()
         .flat_map(|source| source.members())
         .flat_map(|member| member.external_delta_bases())
@@ -733,8 +733,6 @@ async fn consolidate_layered_suffix(
             })
         })
         .collect::<Result<BTreeSet<_>, _>>()?;
-    let delta_bases =
-        read_layered_delta_bases(layout, view, &delta_base_ids, maximum_bytes, cancel).await?;
     check_cancelled(cancel)?;
     let workspace = tempfile::tempdir()?;
     let git_dir = workspace.path().join("repository.git");
@@ -756,41 +754,61 @@ async fn consolidate_layered_suffix(
         )
         .await?;
     check_cancelled(cancel)?;
-    let sources_for_repack = repack_sources(installed)?;
+    let sources_for_repack = repack_sources(installed, &mut delta_base_ids)?;
+    // Internal bases move with the selected bodies. Only overlapping object
+    // sets need additional materialized bases for native Git's rewrite path.
+    delta_base_ids.extend(crab_git::repack::selected_pack_ref_delta_base_ids(
+        &sources_for_repack,
+    )?);
+    let mut delta_bases =
+        read_layered_delta_bases(layout, view, &delta_base_ids, maximum_bytes, cancel).await?;
     let pack_bytes_read = sources_for_repack.iter().try_fold(0_u64, |total, source| {
         total
             .checked_add(source.size)
             .ok_or(CheckpointError::AccountingOverflow)
     })?;
-    let delta_bases_for_repack = delta_bases;
-    let mut kind_git_dir = git_dir.clone();
-    if !delta_bases_for_repack.is_empty() {
-        kind_git_dir = workspace.path().join("resolved.git");
-    }
+    let kind_git_dir = workspace.path().join("resolved.git");
     let index_concurrency =
         std::thread::available_parallelism().map_or(1, |parallelism| parallelism.get().min(8));
-    let (replacement, kind_git_dir) = tokio::task::spawn_blocking(move || {
-        // Native Git requires self-contained on-disk packs even for kind queries.
-        // Repair only a scratch copy; temporary bases must not enter the selected
-        // inventory or the byte-preserving replacement's object universe.
-        if !delta_bases_for_repack.is_empty() {
-            initialize_bare_repository(&kind_git_dir)?;
-            crab_git::repack::resolve_pack_delta_bases(
-                &kind_git_dir,
-                &sources_for_repack,
-                &delta_bases_for_repack,
-            )?;
-        }
+    let kind_cancel = cancel.clone();
+    let packs = tokio::task::spawn_blocking(move || {
         let replacement = crab_git::repack::consolidate_committed_pack_suffix_with_delta_bases(
             &sources_for_repack,
-            &delta_bases_for_repack,
+            &delta_bases,
             index_concurrency,
         )?;
-        Ok::<_, CheckpointError>((replacement, kind_git_dir))
+        let external = replacement
+            .packs()
+            .iter()
+            .flat_map(|pack| pack.external_delta_bases().values().copied())
+            .collect::<BTreeSet<_>>();
+        delta_bases.retain(|base| external.contains(&base.oid));
+        let kind_sources = replacement
+            .packs()
+            .iter()
+            .map(|pack| RepackSource {
+                canonical_id: pack.pack_id.clone(),
+                path: pack.pack_path().to_owned(),
+                index_path: pack.index_path().to_owned(),
+                reverse_index_path: pack.reverse_index_path().to_owned(),
+                size: pack.pack_size,
+                object_count: pack.object_count,
+                verified_identity: None,
+            })
+            .collect::<Vec<_>>();
+        // Query kinds from one repaired replacement, not every original thin
+        // pack. Scratch-only external bases cannot extend its published OID set.
+        initialize_bare_repository(&kind_git_dir)?;
+        crab_git::repack::resolve_pack_delta_bases(&kind_git_dir, &kind_sources, &delta_bases)?;
+        materialize_packs(
+            replacement.packs(),
+            &kind_git_dir,
+            maximum_bytes,
+            &kind_cancel,
+        )
     })
     .await??;
     check_cancelled(cancel)?;
-    let packs = materialize_packs(replacement.packs(), &kind_git_dir, maximum_bytes, cancel)?;
     if packs.is_empty() {
         return Err(CheckpointError::Repack(
             crab_git::repack::RepackError::SourceIntegrity {
@@ -1109,7 +1127,10 @@ fn layered_suffix_start_for_weights(weights: &[u64]) -> Option<usize> {
     Some(start)
 }
 
-fn repack_sources(installed: Vec<PathBuf>) -> Result<Vec<RepackSource>, CheckpointError> {
+fn repack_sources(
+    installed: Vec<PathBuf>,
+    external_bases: &mut BTreeSet<gix_hash::ObjectId>,
+) -> Result<Vec<RepackSource>, CheckpointError> {
     let mut unique = BTreeSet::new();
     let mut sources = Vec::new();
     for path in installed {
@@ -1136,6 +1157,9 @@ fn repack_sources(installed: Vec<PathBuf>) -> Result<Vec<RepackSource>, Checkpoi
             .as_bytes()
             .try_into()
             .map_err(|_| CheckpointError::InvalidPackPath { path: path.clone() })?;
+        for oid in locations.sorted_object_ids() {
+            external_bases.remove(&oid);
+        }
         sources.push(RepackSource {
             canonical_id,
             path,
