@@ -419,9 +419,10 @@ publication rechecks that absence under its ref lease. To bound normal cold
 attribute replay, the first cold publication and every 64 later publication
 batches replace one full, commit-identified manifest checkpoint in a bounded
 per-branch object-store slot. The final commit delta records that slot. Under the
-same ref lease, the gateway revalidates the parent, publishes the final journal
-transaction, and then attempts to replace the slot before acknowledging the
-batch. Only the journal winner writes the checkpoint. A crash or checkpoint-write failure leaves
+same ref lease, the gateway revalidates the parent and publishes the final
+transaction. Only the winner schedules a coalesced background checkpoint; the
+slot replacement checks commit lineage and uses ETag CAS. Acknowledgement does
+not wait for that derived checkpoint. A crash or checkpoint-write failure leaves
 a missing or stale slot, so readers replay immutable deltas. A superseded slot has
 the same fallback; malformed checkpoint content fails closed. A manifest
 above the existing 32 MiB manifest bound skips checkpointing without failing the
@@ -433,7 +434,9 @@ that the branch began empty and every commit came from the gateway, the
 checkpoint also forms a sorted S3 namespace index. `ListObjects` binds it to the
 current journal-projected ref and pages it without opening the Git catalog. Any
 missing delta, legacy checkpoint, or Git-authored ancestor removes that proof and
-requires canonical Git-tree listing. Once a batch is drained, its worker is
+requires canonical Git-tree listing. A pinned warm manifest already known to be
+partial selects that listing without first replaying remote attribute history.
+Once a batch is drained, its worker is
 owned by the gateway rather than the HTTP request that won local admission, so
 one disconnected caller cannot cancel the remaining accepted mutations.
 Each batch advances the local publication epoch, including batches that reuse

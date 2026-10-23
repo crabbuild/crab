@@ -298,6 +298,9 @@ without opening SlateDB or walking Git trees.
 A missing delta, legacy checkpoint,
 or Git-authored ancestor keeps canonical Git tree listing, so the accelerator
 cannot hide Git-written objects.
+An exact-tip warm manifest that is already known to be partial selects Git
+listing immediately, without replaying attribute history merely to rediscover
+that the namespace index is incomplete.
 
 SlateDB is not required by this write path; its
 object catalog remains

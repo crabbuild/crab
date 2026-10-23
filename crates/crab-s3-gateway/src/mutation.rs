@@ -306,10 +306,11 @@ impl Coordinator {
         branch: &str,
         tip: ObjectId,
     ) -> crate::Result<Option<Arc<attributes::Manifest>>> {
-        if let Some(manifest) = self.manifest(&repository.config.name, branch, tip)
-            && manifest.is_complete()
-        {
-            return Ok(Some(manifest));
+        if let Some(manifest) = self.manifest(&repository.config.name, branch, tip) {
+            // A mixed Git/S3 namespace still needs canonical tree listing.
+            // Its pinned warm manifest already proves this; replaying history
+            // cannot make it complete and can stall the first listing page.
+            return Ok(manifest.is_complete().then_some(manifest));
         }
         if let Some(manifest) =
             self.admission
@@ -4017,6 +4018,54 @@ mod tests {
         CancellationToken,
     ) {
         fixture_with_protocol(false).await
+    }
+
+    #[tokio::test]
+    async fn known_partial_namespace_does_not_replay_history_before_git_listing() {
+        let (repository, runtime, cancel) = capsule_fixture().await;
+        let coordinator = Coordinator::new(
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            cancel.clone(),
+            Metrics::new().unwrap(),
+        );
+        let tip = ObjectId::from([1; 20]);
+        let queued = coordinator
+            .admission
+            .enqueue(
+                &repository.config.name,
+                "refs/heads/main",
+                mutation(b"object", None),
+            )
+            .unwrap();
+        queued.queue.state.store(
+            Some(tip),
+            None,
+            attributes::Manifest::default(),
+            WarmTree::default(),
+            0,
+            None,
+        );
+        // A cached partial namespace already proves that Git listing is needed.
+        // Unreadable remote history must not delay that decision.
+        repository
+            .store
+            .put_exact(
+                &repository
+                    .layout
+                    .repo_path(&format!("s3/attributes/{tip}.json")),
+                Bytes::from_static(b"unreadable history"),
+            )
+            .await
+            .unwrap();
+        let result = coordinator
+            .complete_manifest(&repository, "refs/heads/main", tip)
+            .await;
+        drop(queued);
+        coordinator.shutdown().await;
+        runtime.shutdown().await;
+
+        assert!(result.unwrap().is_none());
     }
 
     pub(super) async fn capsule_fixture() -> (
