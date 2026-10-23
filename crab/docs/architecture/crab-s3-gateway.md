@@ -621,8 +621,8 @@ generated pack sidecars and exact visibility edit in one capsule, upload S3
 attributes before ref visibility, and commit through the per-ref head CAS.
 Multipart completion uses deterministic v2 intent/receipt recovery. Idle
 gateway and HTTP-server maintenance share the same root-pinned, verified
-complete-pack checkpoint implementation. Warm per-ref state checkpoints after
-the native 500-transaction roll-up window or at 1 GiB of physical frontier runs.
+complete-pack checkpoint implementation. Warm and cold per-ref state checkpoints
+at 64 physical run segments or 1 GiB, before admitting another leaf.
 The shared writer compacts those runs within the unchanged 64-segment and
 512-transaction-per-run ceilings; original transactions are not run segments.
 The gateway charges exact prepared successor bytes after publication and rejects

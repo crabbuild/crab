@@ -27,8 +27,8 @@ Callers with cancellation-sensitive immutable preparation can use
 them. Publication must be awaited through outcome resolution, even if renewal
 fails after that boundary.
 
-`PreparedCapsulePublication::ref_frontier_bytes` reports the exact physical run
-bytes in a prepared ref successor, after native compaction. Product callers can
+`PreparedCapsulePublication::ref_frontier_size` reports the exact physical run
+count and bytes in a prepared ref successor, after native compaction. Product callers can
 enforce their read budget before publication without estimating append sizes.
 
 A single-ref push commits by conditionally replacing only that ref head.

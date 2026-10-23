@@ -198,8 +198,8 @@ pub struct PreparedCapsulePublication {
 }
 
 impl PreparedCapsulePublication {
-    /// Return the physical frontier bytes retained by one prepared ref successor.
-    pub fn ref_frontier_bytes(&self, ref_name: &str) -> Result<u64> {
+    /// Return the physical run count and bytes retained by one prepared ref successor.
+    pub fn ref_frontier_size(&self, ref_name: &str) -> Result<(usize, u64)> {
         let state = self
             .refs
             .iter()
@@ -209,11 +209,12 @@ impl PreparedCapsulePublication {
             })?
             .candidate
             .visible(&std::collections::BTreeSet::new());
-        state.frontier().iter().try_fold(0u64, |total, pointer| {
+        let bytes = state.frontier().iter().try_fold(0u64, |total, pointer| {
             total.checked_add(pointer.size()).ok_or_else(|| {
                 WriteError::Internal("prepared ref frontier byte count overflowed".to_owned())
             })
-        })
+        })?;
+        Ok((state.frontier().len(), bytes))
     }
 
     /// Return the exact coordinator payload that authorizes this publication.
