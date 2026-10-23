@@ -206,7 +206,9 @@ as synthetic wire input.
 Caller-proven predecessor relationships delta-compress
 successive generated tree versions inside a batch. Across packs, warm state
 retains a verified full-tree anchor by immutable Git object ID, so successive
-batches do not extend the previous batch's delta chain. Anchor bytes count
+batches do not extend the previous batch's delta chain. After 64 reused batches,
+the next generated tree refreshes the full anchor; otherwise each append would
+retransmit all entries added since an increasingly stale base. Anchor bytes count
 toward the warm-state budget. A cold process, a missing anchor, depth eight
 within a batch, or a target that is already an ancestor of the proposed base
 emits a new full base. The checksummed kind sidecar records

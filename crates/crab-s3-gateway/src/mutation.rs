@@ -51,6 +51,7 @@ const FOREGROUND_CAPSULE_BYTES: u64 = MAX_CAPSULE_READ_BYTES / 2;
 const TREE_PAGE_SIZE: usize = 4_096;
 const CHECKPOINT_PUBLICATION_CONCURRENCY: usize = 4;
 const GENERATED_TREE_DELTA_DEPTH: u32 = 8;
+const GENERATED_TREE_ANCHOR_REUSE_BATCHES: u32 = 64;
 const MAX_GENERATED_TREE_DELTA_BYTES: usize = 32 * 1024 * 1024;
 const MAX_CAPSULE_READ_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
@@ -2558,6 +2559,7 @@ struct DirectoryState {
 struct TreeDeltaAnchor {
     oid: ObjectId,
     bytes: Vec<u8>,
+    reused_batches: u32,
 }
 
 struct GeneratedAttributeBlob {
@@ -2608,9 +2610,15 @@ impl WarmTree {
                 // Reuse a verified full entry across batches; chaining each new
                 // tip forces repeated full copies of growing directories.
                 let bytes = encode_tree(&directory.entries);
-                directory.delta_anchor = (bytes.len() <= MAX_GENERATED_TREE_DELTA_BYTES)
-                    .then_some(TreeDeltaAnchor { oid, bytes });
+                directory.delta_anchor =
+                    (bytes.len() <= MAX_GENERATED_TREE_DELTA_BYTES).then_some(TreeDeltaAnchor {
+                        oid,
+                        bytes,
+                        reused_batches: 0,
+                    });
                 directory.delta_ancestors = Vec::new();
+            } else if let Some(anchor) = &mut directory.delta_anchor {
+                anchor.reused_batches = anchor.reused_batches.saturating_add(1);
             }
             directory.generated_in_batch = false;
             self.estimated_bytes = self
@@ -3438,8 +3446,11 @@ fn encode_tree_with_edits(
             .filter(|_| !old.delta_ancestors.contains(&oid))
             .map(|base| (base, None))
     } else {
+        // An indefinitely reused full base retransmits every later addition.
+        // Renew it periodically while keeping cross-pack delta depth at one.
         old.delta_anchor
             .as_ref()
+            .filter(|anchor| anchor.reused_batches < GENERATED_TREE_ANCHOR_REUSE_BATCHES)
             .map(|anchor| (anchor.oid, Some(anchor.bytes.clone())))
     };
     if let Some((base, external)) = candidate
@@ -3734,7 +3745,7 @@ mod tests {
     }
 
     #[test]
-    fn warm_tree_reuses_a_verified_full_anchor_until_provenance_is_forgotten() {
+    fn warm_tree_reuses_full_anchors_and_forgets_repacked_provenance() {
         let original = vec![tree::Entry {
             mode: tree::EntryKind::Blob.into(),
             filename: BString::from("existing"),
@@ -3757,6 +3768,7 @@ mod tests {
             delta_anchor: Some(TreeDeltaAnchor {
                 oid: old_oid,
                 bytes: encode_tree(&original),
+                reused_batches: 0,
             }),
             delta_ancestors: Vec::new(),
             generated_in_batch: false,
@@ -4078,7 +4090,7 @@ mod tests {
         repository: &Repository,
         cancel: &CancellationToken,
         path: &str,
-        body: &'static [u8],
+        body: &[u8],
     ) {
         coordinator
             .apply(
@@ -4086,7 +4098,7 @@ mod tests {
                 "refs/heads/main",
                 &crab_remote_git::GitPath::new(path.as_bytes().to_vec()).unwrap(),
                 Change::Put {
-                    bytes: Bytes::from_static(body),
+                    bytes: Bytes::copy_from_slice(body),
                     track_lfs: false,
                     attributes: Box::new(attributes::PutAttributes::default()),
                     condition: PutCondition::None,
@@ -4603,6 +4615,53 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn growing_directory_does_not_accumulate_stale_delta_payloads() {
+        let (repository, runtime, cancel) = capsule_fixture().await;
+        let metrics = Metrics::new().unwrap();
+        let admission = crate::admission::Admission::new(8, cancel.clone(), metrics.clone());
+        let coordinator = Coordinator::new(
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            cancel.clone(),
+            metrics.clone(),
+        );
+        let mut windows = Vec::new();
+        let mut previous = 0;
+        for index in 0_u32..256 {
+            let body = blake3::hash(&index.to_le_bytes());
+            coordinated_put(
+                &coordinator,
+                &repository,
+                &cancel,
+                &format!("objects/item-{index:06}"),
+                body.as_bytes(),
+            )
+            .await;
+            if (index + 1) % 64 == 0 {
+                let packed: u64 = metrics
+                    .render(&admission)
+                    .lines()
+                    .find_map(|line| {
+                        line.strip_prefix("crab_s3_gateway_mutation_generated_pack_bytes_total ")
+                    })
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                windows.push(packed - previous);
+                previous = packed;
+            }
+        }
+        // Equal append cohorts must not keep retransmitting every entry added
+        // since the first full tree. Measure real generated pack bytes.
+        assert!(
+            windows[3] <= windows[1] * 3 / 2,
+            "generated pack bytes by cohort: {windows:?}"
+        );
+        coordinator.shutdown().await;
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn growing_directory_keeps_cross_batch_delta_reads_shallow() {
         let (repository, runtime, cancel) = fixture().await;
         let coordinator = Coordinator::new(
@@ -4611,7 +4670,7 @@ mod tests {
             cancel.clone(),
             Metrics::new().unwrap(),
         );
-        for index in 0..32 {
+        for index in 0..192 {
             let body = if index % 2 == 0 {
                 b"even".as_slice()
             } else {
@@ -4621,7 +4680,7 @@ mod tests {
                 &coordinator,
                 &repository,
                 &cancel,
-                &format!("objects/item-{index:02}"),
+                &format!("objects/item-{index:06}"),
                 body,
             )
             .await;
@@ -4645,8 +4704,8 @@ mod tests {
             .await
             .unwrap();
         let snapshot = view.snapshot("refs/heads/main", &operation).await.unwrap();
-        for index in 0..32 {
-            let path = crab_remote_git::GitPath::new(format!("objects/item-{index:02}")).unwrap();
+        for index in 0..192 {
+            let path = crab_remote_git::GitPath::new(format!("objects/item-{index:06}")).unwrap();
             let blob = snapshot.read_blob(&path, &operation).await.unwrap();
             assert_eq!(blob.bytes, if index % 2 == 0 { "even" } else { "odd" });
         }
