@@ -2717,3 +2717,60 @@ and retain immutable-object grace even with force. Missing or corrupt current
 pages abort before deletion. Admitted delete responses drain before either
 lease releases; failed repository admission still releases the global lease.
 Default shared-global hints remain owned by bucket maintenance.
+
+
+## Release-mode mixed payload qualification
+
+`crab/scripts/e2e/run_large_file_edits_rustfs.py` accepts `--distinct-files`,
+`--lfs-mib`, `--versions`, `--lifecycle` and `--timeout` for mixed repositories.
+Use a default-feature release binary and a fresh dedicated RustFS bucket.
+Distinct entropy files exercise unique payload storage; ordinary code and text
+remain Git blobs, while `asset.lfs` uses real Git LFS staging and transfer.
+Both ingestion orders alternate native `crab add` and Git CLEAN ingestion.
+Publication uses native `crab push` in either order.
+
+Lifecycle mode repeats cold historical byte checks after checkpoint publication,
+Xet shard compaction, repository GC respecting reader grace, and historical
+restore preview/apply. Its retained reader captures authenticated catalog roots
+through the shared read runtime, then waits between storage requests. Another
+clone compacts Xet shards and publishes a replacement checkpoint. Qualification
+requires a new shard object, a changed root, unchanged Git refs, and repository
+GC before the captured reader resumes. The old catalog must still support cold
+reconstruction with full-file hash verification and no root recapture. The
+lookup is closed before the helper exits. Storage's 300-second request deadline
+is unchanged.
+
+Build the `qualify_retained_reader` release example beside the Crab release
+binary and pass it with `--retained-reader-bin` when using `--lifecycle`. Use a
+Cargo target directory unique to the checkout on the mounted workspace volume.
+Example builds include dev-dependency features. Build the CLI separately with
+its default features and keep its binary fingerprint separate from the helper.
+The helper uses the existing `SharedFileIndexLookup` and `ReadRuntimeBuilder`;
+it adds no production test hook or alternative reconstruction path.
+
+For a small smoke, use `--file-mib 64 --lfs-mib 8 --code-files 32 --versions 2
+--distinct-files --lifecycle` and provide the release CLI, helper, a new run ID,
+a mounted-workspace root, a fresh bucket and the RustFS endpoint. The full
+10 GiB workload uses `--file-mib 10240 --lfs-mib 256 --code-files 5000
+--versions 4` in each ingestion order. Larger nominal decimal payload sizes use:
+
+| Payload | MiB per Xet file | LFS MiB | Versions |
+| --- | ---: | ---: | ---: |
+| 50 GB | 23096 | 1490 | 2 |
+| 100 GB | 46193 | 2980 | 2 |
+| 200 GB | 92387 | 5960 | 2 |
+
+The table rounds total payload down to whole MiB, assigns 1/32 to LFS, and
+splits the remainder between two Xet files. Use `--distinct-files` for these
+sizes and increase `--timeout` for long commands. Each invocation checks its
+capacity before generating inputs and records exact sizes, hashes, CPU/RSS
+and transport counts.
+
+The source repository and caches are removed before independent reconstruction.
+Each historical version verifies both Xet files, its LFS bytes and every small
+code/text file. Lifecycle mode previews and applies both the oldest and newest
+retained checkpoints, checks preview immutability and new restore epochs, then
+repeats history verification from a new independent clone. Strict Git fsck and
+remote integrity checks without repairs finish the run. A workload is qualified
+only after its source/binary-bound receipts pass; planned sizes are not completed
+evidence.
