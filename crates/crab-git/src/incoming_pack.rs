@@ -86,7 +86,7 @@ pub enum IncomingPackError {
     Allocation(#[from] std::collections::TryReserveError),
 }
 
-/// Verified object identity and its private spool location.
+/// Verified object identity, kind, and decoded size.
 #[derive(Clone, Debug)]
 pub struct IncomingObject {
     pub oid: ObjectId,
@@ -95,7 +95,7 @@ pub struct IncomingObject {
     offset: u64,
 }
 
-/// Verified pack objects retained in a private directory until this value is dropped.
+/// Verified objects retained in owned buffers or private scratch until dropped.
 ///
 /// Pack integrity and delta identities are verified. Use [`crate::receive_plan`]
 /// for object syntax, graph connectivity and exact ref checks before publication;
@@ -104,6 +104,7 @@ pub struct IncomingPack {
     directory: ScratchDirectory,
     objects: BTreeMap<ObjectId, IncomingObject>,
     received_objects: u32,
+    generated: Option<BTreeMap<ObjectId, Box<[u8]>>>,
 }
 
 impl IncomingPack {
@@ -113,15 +114,16 @@ impl IncomingPack {
             directory: space.directory(space.path(), "crab-empty-")?,
             objects: BTreeMap::new(),
             received_objects: 0,
+            generated: None,
         })
     }
 
-    /// Spool trusted generated objects directly for canonical pack preparation.
+    /// Retain trusted generated objects for canonical pack preparation.
     ///
     /// Object identities, count, individual size, aggregate decoded bytes, and
-    /// cancellation are checked while writing the private spool. The caller must
-    /// still call [`IncomingPack::prepare`] to enforce the encoded-pack limit and
-    /// build checksummed standard index sidecars. This path is for objects
+    /// cancellation are checked before retaining the caller's owned buffers.
+    /// The caller must still call [`IncomingPack::prepare`] to enforce the encoded
+    /// pack limit and build checksummed standard index sidecars. This path is for objects
     /// constructed by the caller, not untrusted Git pack input.
     pub fn from_generated_objects<C>(
         objects: impl IntoIterator<Item = (Kind, Vec<u8>)>,
@@ -134,7 +136,7 @@ impl IncomingPack {
     {
         let space = ScratchSpace::new(directory, limits);
         let directory = space.directory(space.path(), "crab-generated-")?;
-        let mut decoded = directory.create("objects")?;
+        let mut generated = BTreeMap::new();
         let mut stored = BTreeMap::new();
         let mut decoded_bytes = 0_u64;
         for (kind, data) in objects {
@@ -149,12 +151,11 @@ impl IncomingPack {
             if stored.len() >= limits.max_objects as usize {
                 return Err(IncomingPackError::Limit("object count"));
             }
+            let offset = decoded_bytes;
             decoded_bytes = decoded_bytes
                 .checked_add(data.len() as u64)
                 .filter(|bytes| *bytes <= limits.max_inflated_bytes)
                 .ok_or(IncomingPackError::Limit("inflated bytes"))?;
-            let offset = decoded.stream_position()?;
-            decoded.write_all(&data)?;
             stored.insert(
                 oid,
                 IncomingObject {
@@ -164,14 +165,15 @@ impl IncomingPack {
                     offset,
                 },
             );
+            generated.insert(oid, data.into_boxed_slice());
         }
-        decoded.flush()?;
         let received_objects =
             u32::try_from(stored.len()).map_err(|_| IncomingPackError::Limit("object count"))?;
         Ok(Self {
             directory,
             objects: stored,
             received_objects,
+            generated: Some(generated),
         })
     }
 
@@ -195,10 +197,18 @@ impl IncomingPack {
         self.objects
             .get(oid)
             .map(|object| {
-                let mut file = File::open(self.directory.path().join("objects"))?;
+                let data = if let Some(generated) = &self.generated {
+                    generated
+                        .get(oid)
+                        .ok_or(IncomingPackError::Invalid("generated object missing"))?
+                        .to_vec()
+                } else {
+                    let mut file = File::open(self.directory.path().join("objects"))?;
+                    read_region(&mut file, object.offset, object.size)?
+                };
                 Ok(BaseObject {
                     kind: object.kind,
-                    data: read_region(&mut file, object.offset, object.size)?,
+                    data,
                 })
             })
             .transpose()
@@ -425,6 +435,7 @@ where
         directory,
         objects: state.objects,
         received_objects: count,
+        generated: None,
     })
 }
 

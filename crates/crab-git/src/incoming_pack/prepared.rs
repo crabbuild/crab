@@ -1,4 +1,4 @@
-//! Pack artifacts derived from verified quarantine spools and explicit bases.
+//! Pack artifacts derived from bounded decoded objects and explicit bases.
 
 use std::{
     borrow::Cow,
@@ -395,8 +395,10 @@ impl IncomingPack {
             .map_err(|_| PreparePackError::Mismatch("object count"))?;
         header.extend_from_slice(&count.to_be_bytes());
         write_chunk(&mut out, &mut checksum, &mut size, max_body, &header)?;
-        let mut decoded = File::open(self.directory.path().join("objects"))?;
-        let mut buffer = [0; 64 * 1024];
+        let mut decoded = match &self.generated {
+            Some(objects) => DecodedObjects::Generated(objects),
+            None => DecodedObjects::Spool(File::open(self.directory.path().join("objects"))?),
+        };
         let mut written = HashMap::<ObjectId, (u64, u32)>::with_capacity(self.objects.len());
         let mut index_entries = Vec::with_capacity(self.objects.len());
         let mut external_delta_count = 0_u32;
@@ -450,12 +452,19 @@ impl IncomingPack {
                 max_body,
                 &header,
             )?;
+            // Tree object IDs compress poorly. Favor bounded encoding latency
+            // for growing directories; blob compression retains its size policy.
+            let compression = if object.kind == gix_object::Kind::Tree {
+                Compression::fast()
+            } else {
+                Compression::default()
+            };
             match delta {
                 Some(delta) => {
                     write_compressed(
                         Cursor::new(delta.bytes),
+                        compression,
                         cancelled,
-                        &mut buffer,
                         &mut out,
                         &mut checksum,
                         &mut entry_crc,
@@ -464,23 +473,19 @@ impl IncomingPack {
                     )?;
                 }
                 None => {
-                    decoded.seek(SeekFrom::Start(object.offset))?;
-                    let source = ObjectHashReader::new(
-                        (&mut decoded).take(object.size as u64),
-                        object.kind,
-                        object.size,
-                    );
+                    let source =
+                        ObjectHashReader::new(decoded.reader(object)?, object.kind, object.size);
                     let source = write_compressed(
                         source,
+                        compression,
                         cancelled,
-                        &mut buffer,
                         &mut out,
                         &mut checksum,
                         &mut entry_crc,
                         &mut size,
                         max_body,
                     )?;
-                    if source.inner.limit() != 0 {
+                    if source.inner.remaining() != 0 {
                         return Err(PreparePackError::Mismatch("truncated object spool"));
                     }
                     if source.object_id() != object.oid {
@@ -510,6 +515,59 @@ impl IncomingPack {
             external_delta_bases: written_external_delta_bases,
         })
     }
+}
+
+enum DecodedObjects<'a> {
+    Spool(File),
+    Generated(&'a BTreeMap<ObjectId, Box<[u8]>>),
+}
+
+impl DecodedObjects<'_> {
+    fn reader(&mut self, object: &super::IncomingObject) -> Result<ObjectReader<'_>> {
+        match self {
+            Self::Spool(file) => {
+                file.seek(SeekFrom::Start(object.offset))?;
+                Ok(ObjectReader::Spool(file.take(object.size as u64)))
+            }
+            Self::Generated(objects) => {
+                Ok(ObjectReader::Generated(generated_bytes(objects, object)?))
+            }
+        }
+    }
+}
+
+enum ObjectReader<'a> {
+    Spool(io::Take<&'a mut File>),
+    Generated(&'a [u8]),
+}
+
+impl ObjectReader<'_> {
+    fn remaining(&self) -> u64 {
+        match self {
+            Self::Spool(reader) => reader.limit(),
+            Self::Generated(bytes) => bytes.len() as u64,
+        }
+    }
+}
+
+impl Read for ObjectReader<'_> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Self::Spool(reader) => reader.read(buffer),
+            Self::Generated(bytes) => bytes.read(buffer),
+        }
+    }
+}
+
+fn generated_bytes<'a>(
+    objects: &'a BTreeMap<ObjectId, Box<[u8]>>,
+    object: &super::IncomingObject,
+) -> Result<&'a [u8]> {
+    objects
+        .get(&object.oid)
+        .filter(|bytes| bytes.len() == object.size)
+        .map(AsRef::as_ref)
+        .ok_or(PreparePackError::Mismatch("generated object size"))
 }
 
 #[derive(Clone, Copy)]
@@ -571,7 +629,7 @@ fn ordered_objects(
 }
 
 fn prepare_delta(
-    decoded: &mut File,
+    decoded: &mut DecodedObjects<'_>,
     object: &super::IncomingObject,
     delta_bases: &BTreeMap<ObjectId, ObjectId>,
     external_delta_bases: &BTreeMap<ObjectId, ExternalDeltaBase>,
@@ -597,7 +655,7 @@ fn prepare_delta(
             return Ok(None);
         }
         (
-            Cow::Owned(read_object_bytes(decoded, base)?),
+            read_object_bytes(decoded, base)?,
             PreparedDeltaBase::Offset(base_offset),
             base_depth,
         )
@@ -630,17 +688,29 @@ fn prepare_delta(
     }))
 }
 
-fn read_object_bytes(decoded: &mut File, object: &super::IncomingObject) -> Result<Vec<u8>> {
-    let mut bytes = Vec::new();
-    bytes
-        .try_reserve_exact(object.size)
-        .map_err(|source| PreparePackError::Allocation {
-            requested: object.size,
-            source,
-        })?;
-    bytes.resize(object.size, 0);
-    decoded.seek(SeekFrom::Start(object.offset))?;
-    decoded.read_exact(&mut bytes)?;
+fn read_object_bytes<'a>(
+    decoded: &mut DecodedObjects<'a>,
+    object: &super::IncomingObject,
+) -> Result<Cow<'a, [u8]>> {
+    // Generated inputs already own their bounded decoded bytes. Borrow them for
+    // delta construction; untrusted quarantines keep their file-backed bounds.
+    // Both sources still undergo the same identity check before encoding.
+    let bytes = match decoded {
+        DecodedObjects::Generated(objects) => Cow::Borrowed(generated_bytes(objects, object)?),
+        DecodedObjects::Spool(file) => {
+            let mut bytes = Vec::new();
+            bytes.try_reserve_exact(object.size).map_err(|source| {
+                PreparePackError::Allocation {
+                    requested: object.size,
+                    source,
+                }
+            })?;
+            bytes.resize(object.size, 0);
+            file.seek(SeekFrom::Start(object.offset))?;
+            file.read_exact(&mut bytes)?;
+            Cow::Owned(bytes)
+        }
+    };
     if object_id(object.kind, &bytes) != object.oid {
         return Err(PreparePackError::Mismatch("indexed object identities"));
     }
@@ -789,8 +859,8 @@ fn append_delta_copy(mut offset: usize, mut size: usize, output: &mut Vec<u8>) -
 
 fn write_compressed<R: Read>(
     source: R,
+    compression: Compression,
     cancelled: &AtomicBool,
-    buffer: &mut [u8],
     out: &mut impl Write,
     checksum: &mut Sha1,
     entry_crc: &mut crc32fast::Hasher,
@@ -802,11 +872,12 @@ fn write_compressed<R: Read>(
             inner: source,
             should_interrupt: cancelled,
         },
-        Compression::default(),
+        compression,
     );
+    let mut buffer = [0; 64 * 1024];
     loop {
         check(cancelled)?;
-        let count = encoder.read(buffer)?;
+        let count = encoder.read(&mut buffer)?;
         if count == 0 {
             break;
         }

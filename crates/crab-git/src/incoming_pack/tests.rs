@@ -121,7 +121,7 @@ fn prepared_sidecars_share_quarantine_admission_and_failed_growth_releases_only_
 }
 
 #[test]
-fn generated_objects_spool_once_with_identity_and_resource_bounds() {
+fn generated_objects_retain_owned_bytes_with_identity_and_resource_bounds() {
     let temp = tempfile::tempdir().unwrap();
     let generated = IncomingPack::from_generated_objects(
         [
@@ -130,12 +130,17 @@ fn generated_objects_spool_once_with_identity_and_resource_bounds() {
             (Kind::Blob, b"first".to_vec()),
         ],
         temp.path(),
-        limits(),
+        ReceiveLimits {
+            max_objects: 2,
+            max_inflated_bytes: 11,
+            ..limits()
+        },
         || false,
     )
     .unwrap();
 
     assert_eq!(generated.received_objects(), 2);
+    assert_eq!(generated.directory.path().read_dir().unwrap().count(), 0);
     assert_eq!(
         generated
             .read_object(&object_id(Kind::Blob, b"second"))
@@ -162,6 +167,145 @@ fn generated_objects_spool_once_with_identity_and_resource_bounds() {
         ),
         Err(IncomingPackError::Cancelled)
     ));
+    for (bound, expected) in [
+        (
+            ReceiveLimits {
+                max_objects: 1,
+                ..limits()
+            },
+            "object count",
+        ),
+        (
+            ReceiveLimits {
+                max_inflated_bytes: 10,
+                ..limits()
+            },
+            "inflated bytes",
+        ),
+    ] {
+        assert!(matches!(
+            IncomingPack::from_generated_objects(
+                [(Kind::Blob, b"first".to_vec()), (Kind::Blob, b"second".to_vec())],
+                temp.path(),
+                bound,
+                || false,
+            ),
+            Err(IncomingPackError::Limit(actual)) if actual == expected
+        ));
+    }
+    drop(generated);
+    assert_eq!(temp.path().read_dir().unwrap().count(), 0);
+}
+
+#[test]
+fn generated_and_quarantined_objects_produce_identical_artifacts() {
+    use std::sync::atomic::AtomicBool;
+
+    let temp = tempfile::tempdir().unwrap();
+    let mut tree = b"100644 empty\0".to_vec();
+    tree.extend_from_slice(object_id(Kind::Blob, b"").as_bytes());
+    let objects = [
+        (Kind::Blob, Vec::new()),
+        (Kind::Blob, vec![b'x'; 128 * 1024]),
+        (Kind::Tree, tree),
+    ];
+    let generated =
+        IncomingPack::from_generated_objects(objects.clone(), temp.path(), limits(), || false)
+            .unwrap();
+    let quarantined = quarantine(
+        Cursor::new(pack(&objects.map(|(kind, data)| {
+            let header = match kind {
+                Kind::Tree => Header::Tree,
+                Kind::Blob => Header::Blob,
+                _ => unreachable!(),
+            };
+            (header, data)
+        }))),
+        &ScratchSpace::new(temp.path(), limits()),
+        limits(),
+        || false,
+        no_base,
+    )
+    .unwrap();
+    let cancelled = AtomicBool::new(false);
+    let generated_pack = generated
+        .prepare(temp.path(), limits().max_pack_bytes, &cancelled)
+        .unwrap()
+        .unwrap();
+    let quarantined_pack = quarantined
+        .prepare(temp.path(), limits().max_pack_bytes, &cancelled)
+        .unwrap()
+        .unwrap();
+    for (generated, quarantined) in [
+        (generated_pack.pack_path(), quarantined_pack.pack_path()),
+        (generated_pack.index_path(), quarantined_pack.index_path()),
+        (
+            generated_pack.reverse_path(),
+            quarantined_pack.reverse_path(),
+        ),
+        (generated_pack.kinds_path(), quarantined_pack.kinds_path()),
+    ] {
+        assert_eq!(
+            std::fs::read(generated).unwrap(),
+            std::fs::read(quarantined).unwrap()
+        );
+    }
+    verify_prepared_artifacts_with_native_git(&generated, &generated_pack, temp.path());
+}
+
+#[test]
+fn generated_corruption_fails_full_and_delta_preparation_without_retaining_output() {
+    use std::sync::atomic::AtomicBool;
+
+    for (delta, corrupt_base, truncate) in [
+        (false, false, false),
+        (true, false, false),
+        (true, true, false),
+        (false, false, true),
+    ] {
+        let temp = tempfile::tempdir().unwrap();
+        let base = vec![b'x'; 4096];
+        let mut target = base.clone();
+        target[2000] = b'y';
+        let base_oid = object_id(Kind::Blob, &base);
+        let target_oid = object_id(Kind::Blob, &target);
+        let mut generated = IncomingPack::from_generated_objects(
+            [(Kind::Blob, base), (Kind::Blob, target)],
+            temp.path(),
+            limits(),
+            || false,
+        )
+        .unwrap();
+        let corrupt_oid = if corrupt_base { base_oid } else { target_oid };
+        let bytes = generated
+            .generated
+            .as_mut()
+            .unwrap()
+            .get_mut(&corrupt_oid)
+            .unwrap();
+        if truncate {
+            *bytes = bytes[..bytes.len() - 1].into();
+        } else {
+            bytes[0] ^= 1;
+        }
+        let bases = if delta {
+            BTreeMap::from([(target_oid, base_oid)])
+        } else {
+            BTreeMap::new()
+        };
+        assert!(matches!(
+            generated.prepare_with_delta_bases(
+                temp.path(),
+                limits().max_pack_bytes,
+                &AtomicBool::new(false),
+                &bases,
+                8,
+                limits().max_object_bytes
+            ),
+            Err(PreparePackError::Mismatch(_))
+        ));
+        assert_eq!(temp.path().read_dir().unwrap().count(), 1);
+    }
 }
 
 #[test]

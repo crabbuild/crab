@@ -186,9 +186,16 @@ inject their shared disk policy; standalone and generated inputs use their
 finite `ReceiveLimits` without importing host-specific dependencies.
 
 `IncomingPack::from_generated_objects` gives trusted in-process Git object
-builders the same bounded identity spool without first compressing and then
-inflating an artificial wire pack. `prepare` remains mandatory and produces the
-same independently readable canonical pack and checksummed standard sidecars.
+builders bounded ownership of their existing decoded buffers. It checks count,
+individual size, aggregate decoded bytes, and cancellation without writing and
+rereading an object spool. Preparation borrows these bytes for deltas and streams
+full entries through the same identity checks as quarantined input. `prepare`
+remains mandatory and produces the same independently readable canonical pack
+and checksummed standard sidecars. Untrusted network packs retain their bounded
+file-backed quarantine.
+Canonical preparation uses fast zlib compression for trees, whose object IDs
+compress poorly, while other kinds retain default compression. Full entries and
+OFS/REF deltas retain the same Git format, identity checks, and output byte limits.
 
 `prepare_with_delta_bases` additionally accepts caller-proven generated-object
 relationships. It writes only self-contained OFS deltas, caps chain depth and
