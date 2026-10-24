@@ -20,6 +20,75 @@ fn install_failing_checkout_hook(repository: &std::path::Path) {
     }
 }
 
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg(unix)]
+async fn close_drains_pipes_after_the_selected_git_parent_exits() {
+    use std::future::IntoFuture as _;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let scratch = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let git = git_path();
+    let wrapper = scratch.path().join("selected-git");
+    let executable = git.to_str().unwrap().replace('\'', "'\\''");
+    std::fs::write(
+        &wrapper,
+        format!("#!/bin/sh\nif [ \"$1\" = status ]; then\n  sleep 120 &\n  printf '%s %s' \"$$\" \"$!\" > \"$0.started\"\n  exit 0\nfi\nexec '{executable}' \"$@\"\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let tools =
+        crab_sdk::local::Tools::new(&wrapper, local_support::fake_crab(scratch.path())).unwrap();
+    let sdk = crab_sdk::Client::builder()
+        .direct_store(crab_sdk::storage::DirectStoreOptions::filesystem(store.path()).unwrap())
+        .local(crab_sdk::local::Options::new(tools))
+        .build()
+        .unwrap();
+    let checkout = scratch.path().join("checkout");
+    std::fs::create_dir(&checkout).unwrap();
+    run(&git, &checkout, &["init", "--initial-branch=main"]);
+    let repository = sdk
+        .open(crab_sdk::OpenOptions::local(&checkout))
+        .await
+        .unwrap();
+    let mut status = Box::pin(repository.local().unwrap().status().into_future());
+    let started = wrapper.with_file_name("selected-git.started");
+    let pids = tokio::select! {
+        result = &mut status => panic!("status completed before close: {result:?}"),
+        pids = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !started.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            let pids = std::fs::read_to_string(started).unwrap();
+            let parent = pids.split_whitespace().next().unwrap();
+            while tokio::process::Command::new("/bin/kill")
+                .args(["-0", parent])
+                .output()
+                .await
+                .unwrap()
+                .status
+                .success()
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            pids
+        }) => pids.unwrap(),
+    };
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(3), sdk.close()).await;
+    if closed.is_err() {
+        // Reclaim only recorded fixture processes if shutdown regresses; their
+        // inherited pipes would otherwise keep the SDK worker alive.
+        for pid in pids.split_whitespace() {
+            let _ = std::process::Command::new("/bin/kill")
+                .args(["-KILL", pid])
+                .output();
+        }
+        let _ = sdk.close().await;
+    }
+    let status = status.await;
+    assert!(matches!(closed, Ok(Ok(()))) && status.unwrap_err().kind() == ErrorKind::Cancelled);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn dry_run_creates_no_remote_objects() {
     let scratch = tempfile::tempdir().unwrap();

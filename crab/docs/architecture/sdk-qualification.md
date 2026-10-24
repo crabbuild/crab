@@ -344,7 +344,7 @@ of admission already consumed during capture (`sdk-reused-xorb-contracts.log`).
 These debug results establish correctness on isolated S3-compatible storage;
 new-head CI, Windows runtime and credentialed cloud qualification remain required.
 
-Final focused checks pass: 64 SDK library tests (one explicitly ignored),
+At `49563dc15d7`, focused checks pass: 64 SDK library tests (one explicitly ignored),
 42 local/HTTP tests (the separately exercised live HTTP case is ignored by the
 ordinary command), seven local-tool tests and four compatible-executable tests.
 Strict SDK/remote all-target lint, minimal remote/content compilation, all ten
@@ -354,6 +354,16 @@ The `74fb25fbee2` architecture job separately rejects the new production
 `crab-remote` → `crab-lfs` edge: verified native publication uses the existing
 LFS upload owner, while the architecture allowlist omits that edge. Updating
 that baseline requires explicit approval under `AGENTS.md`; it remains unchanged.
+
+A further shutdown regression reproduces cancellation hanging after the tool
+parent exits while a descendant retains its pipes. Tool completion now keeps
+cancellation active through communication draining, then stops the same owned
+tree before returning. The regression covers both a waiting and an exited
+parent; a public SDK test also proves `Client::close` drains a pending local
+status operation after the selected Git wrapper exits. All seven tool tests,
+11 local-edit tests and lifecycle tests pass, alongside strict SDK/remote lint
+and an all-feature SDK build (`sdk-exited-parent-*.log`). The CLI's separate
+runner already observes cancellation while its pipe workers drain.
 
 The gateway write-soak failure is also present at the unchanged `crab-v2` base
 `33f8e6c360d`: [run 40087756593](https://github.com/crabbuild/crab/actions/runs/40087756593)

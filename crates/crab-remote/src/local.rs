@@ -543,39 +543,40 @@ impl LocalTools {
             }
             None => None,
         };
-        let status = tokio::select! {
-            biased;
-            () = cancel.cancelled() => {
-                // Descendants can retain the diagnostic pipes after the direct
-                // child is killed. Stop the owned tree before joining readers.
-                child.start_kill().map_err(LocalError::Kill)?;
-                child.wait().await.map_err(LocalError::Wait)?;
-                None
-            }
-            result = child.wait() => Some(result.map_err(LocalError::Wait)?),
-        };
-        if status.is_none() {
+        let output = async move {
             if let Some(stdin) = stdin {
-                let _ = stdin.await;
+                stdin.await.map_err(LocalError::WriterTask)??;
             }
-            if let Some(stdout) = stdout {
-                let _ = stdout.await;
-            }
-            let _ = stderr.await;
-            return Err(LocalError::Cancelled);
-        }
-        let status = status.ok_or(LocalError::Cancelled)?;
-        if let Some(stdin) = stdin {
-            stdin.await.map_err(LocalError::WriterTask)??;
-        }
-        let stdout = match stdout {
-            Some(stdout) => stdout.await.map_err(LocalError::ReaderTask)??,
-            None => BoundedBytes {
-                bytes: Vec::new(),
-                overflow: false,
-            },
+            let stdout = match stdout {
+                Some(stdout) => stdout.await.map_err(LocalError::ReaderTask)??,
+                None => BoundedBytes {
+                    bytes: Vec::new(),
+                    overflow: false,
+                },
+            };
+            let stderr = stderr.await.map_err(LocalError::ReaderTask)??;
+            Ok::<_, LocalError>((stdout, stderr))
         };
-        let stderr = stderr.await.map_err(LocalError::ReaderTask)??;
+        tokio::pin!(output);
+        // The parent can exit before descendants release its pipes. Keep
+        // cancellation admitted until all communication has drained, so close
+        // can stop the owned tree even after the parent's status is available.
+        let completed = tokio::select! {
+            biased;
+            () = cancel.cancelled() => None,
+            result = async {
+                let status = child.wait().await.map_err(LocalError::Wait)?;
+                let (stdout, stderr) = output.as_mut().await?;
+                Ok::<_, LocalError>((status, stdout, stderr))
+            } => Some(result),
+        };
+        let Some(completed) = completed else {
+            child.start_kill().map_err(LocalError::Kill)?;
+            child.wait().await.map_err(LocalError::Wait)?;
+            let _ = output.await;
+            return Err(LocalError::Cancelled);
+        };
+        let (status, stdout, stderr) = completed?;
         if stdout.overflow || stderr.overflow {
             return Err(LocalError::OutputLimit);
         }
@@ -968,47 +969,74 @@ mod tests {
         assert_eq!(values[3], ("filter.crab.required", "true".to_owned()));
     }
 
-    #[tokio::test]
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[cfg(unix)]
     async fn cancellation_drains_descendants_holding_output_pipes() {
         use std::os::unix::fs::PermissionsExt as _;
-        let directory = tempfile::tempdir().unwrap();
-        let crab = directory.path().join("owned-command");
-        std::fs::write(
-            &crab,
-            "#!/bin/sh\nsleep 120 &\nprintf '%s' \"$!\" > child.pid\nwait\n",
-        )
-        .unwrap();
-        std::fs::set_permissions(&crab, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let tools = LocalTools::new(&git_path(), &crab).unwrap();
-        let cancel = CancellationToken::new();
-        let child_cancel = cancel.clone();
-        let root = directory.path().to_owned();
-        let mut task = tokio::spawn(async move {
-            tools
-                .run_crab(Some(&root), std::iter::empty::<&str>(), true, &child_cancel)
-                .await
-        });
-        let pid_file = directory.path().join("child.pid");
-        tokio::time::timeout(std::time::Duration::from_secs(10), async {
-            while !pid_file.exists() {
-                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+        for parent_waits in [true, false] {
+            let directory = tempfile::tempdir().unwrap();
+            let crab = directory.path().join("owned-command");
+            std::fs::write(
+                &crab,
+                format!(
+                    "#!/bin/sh\nsleep 120 &\nprintf '%s %s' \"$$\" \"$!\" > child.pid\n{}\n",
+                    if parent_waits { "wait" } else { "exit 0" }
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&crab, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let tools = LocalTools::new(&git_path(), &crab).unwrap();
+            let cancel = CancellationToken::new();
+            let child_cancel = cancel.clone();
+            let root = directory.path().to_owned();
+            let mut task = tokio::spawn(async move {
+                tools
+                    .run_crab(Some(&root), std::iter::empty::<&str>(), true, &child_cancel)
+                    .await
+            });
+            let pid_file = directory.path().join("child.pid");
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                while !pid_file.exists() {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let pids = std::fs::read_to_string(pid_file).unwrap();
+            let pids = pids.split_whitespace().collect::<Vec<_>>();
+            let parent_exited = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                if parent_waits {
+                    return;
+                }
+                while tokio::process::Command::new("/bin/kill")
+                    .args(["-0", pids[0]])
+                    .output()
+                    .await
+                    .unwrap()
+                    .status
+                    .success()
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await;
+            cancel.cancel();
+            let result = tokio::time::timeout(std::time::Duration::from_secs(3), &mut task).await;
+            if result.is_err() {
+                // Reclaim only this fixture's known descendant if the regression
+                // returns to killing the parent while leaving its pipes open.
+                for pid in pids {
+                    let _ = std::process::Command::new("/bin/kill")
+                        .args(["-KILL", pid])
+                        .output();
+                }
+                let _ = task.await;
             }
-        })
-        .await
-        .unwrap();
-        let pid = std::fs::read_to_string(pid_file).unwrap();
-        cancel.cancel();
-        let result = tokio::time::timeout(std::time::Duration::from_secs(3), &mut task).await;
-        if result.is_err() {
-            // Reclaim only this fixture's known descendant if the regression
-            // returns to killing the parent while leaving its pipes open.
-            let _ = std::process::Command::new("/bin/kill")
-                .args(["-KILL", pid.trim()])
-                .output();
-            let _ = task.await;
+            assert!(
+                parent_exited.is_ok() && matches!(result, Ok(Ok(Err(LocalError::Cancelled)))),
+                "parent_waits={parent_waits}"
+            );
         }
-        assert!(matches!(result, Ok(Ok(Err(LocalError::Cancelled)))));
     }
 
     #[tokio::test]
