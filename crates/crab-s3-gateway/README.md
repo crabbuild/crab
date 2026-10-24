@@ -371,6 +371,8 @@ canonical compatibility reference; this README is only an overview.
 ## Large objects, range reads, and deduplication
 
 Large uploads use bounded temporary spools and Crab's verified LFS path.
+Each content spool owns one temporary file, avoiding per-upload directory
+creation and recursive cleanup; scratch accounting follows the file's lifetime.
 `git_blob_max_bytes` is configured per repository, defaults to 1 MiB, and
 accepts values through 64 MiB. Objects at or below that limit remain ordinary
 Git blobs; larger PUTs and copies use LFS. Literal upload bytes that parse as a
