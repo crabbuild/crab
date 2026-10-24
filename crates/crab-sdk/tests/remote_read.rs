@@ -4,17 +4,8 @@ pub mod support;
 
 use std::sync::Arc;
 
-use crab_metadata::git_object_locator::{
-    GitLocatorCoverage, GitObjectLocatorWriter, GitPackLocatorRecord,
-};
-use crab_metadata::manifest_store::{create_manifest, upload_segmented_bulk};
-use crab_metadata::manifests::{
-    BulkData, Manifest, PackManifestEntry, compact_pack_index, compact_shard_index,
-};
-use crab_sdk::storage::DirectStoreOptions;
-use crab_sdk::{Client, ErrorKind, RepositoryLocator};
-use crab_storage::{Store, StoreLayout};
-use crab_xet::hash::MerkleHash;
+use crab_sdk::ErrorKind;
+use crab_storage::Store;
 use futures_util::TryStreamExt as _;
 use object_store::ObjectStoreExt as _;
 
@@ -51,109 +42,35 @@ fn sha256_rejected_before_mutation() {
     assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), before);
 }
 
-async fn publish_indexing_fixture(root: &std::path::Path, coverage: Option<u64>) -> Store {
-    let backend = Arc::new(object_store::local::LocalFileSystem::new_with_prefix(root).unwrap());
-    let store = Store::new(backend.clone());
-    let layout = StoreLayout::new(store.clone(), "repository".to_owned());
-    let pack_id = crab_xet::hash::compute_data_hash(b"pending pack");
-    let tip = "1111111111111111111111111111111111111111";
-    let pack = PackManifestEntry {
-        pack_id: pack_id.to_string(),
-        content_hash: pack_id.to_string(),
-        size: 128,
-        object_count: 1,
-        ref_tips: vec![tip.to_owned()],
-    };
-    let (pack_index_hash, _, pack_index) = compact_pack_index(1, &[pack]).unwrap();
-    let (shard_index_hash, _, shard_index) = compact_shard_index(1, &[]).unwrap();
-    upload_segmented_bulk(
-        &store,
-        &layout,
-        &BulkData {
-            pack_index,
-            shard_index,
-        },
-    )
-    .await
-    .unwrap();
-    let mut manifest = Manifest::default_for_repo("refs/heads/main");
-    manifest.generation = 2;
-    manifest
-        .refs
-        .insert("refs/heads/main".to_owned(), tip.to_owned());
-    manifest.pack_index_hash = pack_index_hash;
-    manifest.shard_index_hash = shard_index_hash;
-    manifest.seal_git_validation();
-    create_manifest(&store, &layout, &manifest).await.unwrap();
-    if let Some(generation) = coverage {
-        let hash = MerkleHash::from_hex(&manifest.pack_index_hash).unwrap();
-        let mut writer = GitObjectLocatorWriter::open(backend, "repository")
-            .await
-            .unwrap();
-        writer
-            .bind_packs(&[GitPackLocatorRecord {
-                pack_id,
-                committed_generation: 1,
-                pack_index_hash: hash,
-                object_count: 1,
-                pack_size: 128,
-            }])
-            .await
-            .unwrap();
-        writer
-            .set_coverage(GitLocatorCoverage {
-                generation,
-                pack_index_hash: hash,
-            })
-            .await
-            .unwrap();
-        writer.close().await.unwrap();
-    }
-    store
-}
-
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn read_only_open_never_repairs() {
-    for coverage in [None, Some(1)] {
-        let directory = tempfile::tempdir().unwrap();
-        let store = publish_indexing_fixture(directory.path(), coverage).await;
-        // Catalog readiness must fail before fetching pack data or starting a
-        // repair writer. No pack object is needed to diagnose this boundary.
-        let before = stored_bytes(&store).await;
-        let client = Client::builder()
-            .direct_store(DirectStoreOptions::filesystem(directory.path()).unwrap())
-            .build()
-            .unwrap();
-        let error = client
-            .open(crab_sdk::OpenOptions::remote(
-                RepositoryLocator::new("repository").unwrap(),
-            ))
-            .await
-            .err()
-            .unwrap();
-        client.close().await.unwrap();
-        assert_eq!(
-            (error.kind(), stored_bytes(&store).await),
-            (ErrorKind::Indexing, before),
-            "catalog coverage: {coverage:?}"
-        );
-    }
+    let fixture = support::read_fixture::ReadFixture::new().await;
+    let storage = fixture.directory.path().join("storage");
+    let store = Store::new(Arc::new(
+        object_store::local::LocalFileSystem::new_with_prefix(&storage).unwrap(),
+    ));
+    let before = stored_bytes(&store).await;
+    let repository = fixture
+        .repository
+        .remote()
+        .unwrap()
+        .refresh()
+        .await
+        .unwrap();
+    repository
+        .remote()
+        .unwrap()
+        .snapshot(crab_sdk::Revision::branch("main").unwrap())
+        .await
+        .unwrap();
+    fixture.client.close().await.unwrap();
+    assert_eq!(stored_bytes(&store).await, before);
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn locator_acquisition_obeys_operation_limits() {
-    let directory = tempfile::tempdir().unwrap();
-    publish_indexing_fixture(directory.path(), Some(2)).await;
-    let client = Client::builder()
-        .direct_store(DirectStoreOptions::filesystem(directory.path()).unwrap())
-        .build()
-        .unwrap();
-    let repository = client
-        .open(crab_sdk::OpenOptions::remote(
-            RepositoryLocator::new("repository").unwrap(),
-        ))
-        .await
-        .unwrap();
+async fn snapshot_reads_obey_operation_limits() {
+    let fixture = support::read_fixture::ReadFixture::new().await;
+    let client = &fixture.client;
     for limits in [
         crab_sdk::operation::ReadLimits {
             max_storage_requests: 1,
@@ -169,29 +86,16 @@ async fn locator_acquisition_obeys_operation_limits() {
             .unwrap()
             .with_timeout(std::time::Duration::from_secs(1))
             .unwrap();
-        let error = repository
-            .remote()
-            .unwrap()
-            .snapshot(crab_sdk::Revision::branch("main").unwrap())
-            .with_options(options)
+        let error = fixture
+            .snapshot
+            .read_blob(fixture.path.clone())
+            .with_options(crab_sdk::operation::ReadOptions::default().with_operation(options))
             .await
             .err()
             .unwrap();
         assert_eq!(error.kind(), crab_sdk::ErrorKind::LimitExceeded);
     }
     client.close().await.unwrap();
-}
-
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-#[ignore = "publishes fixtures under an existing dedicated CRAB_SDK_INDEXING_FIXTURE_DIR"]
-async fn publish_indexing_qualification_fixtures() {
-    let root = std::path::PathBuf::from(std::env::var_os("CRAB_SDK_INDEXING_FIXTURE_DIR").unwrap());
-    assert!(root.is_absolute() && root.is_dir());
-    for (name, coverage) in [("absent", None), ("stale", Some(1))] {
-        let directory = root.join(name);
-        std::fs::create_dir(&directory).unwrap();
-        publish_indexing_fixture(&directory, coverage).await;
-    }
 }
 
 #[tokio::test]
@@ -322,4 +226,100 @@ async fn lfs_extensions_never_deliver_untransformed_hydrated_bytes() {
     assert_eq!(error.kind(), ErrorKind::UnsupportedCapability);
     archive.close().await.unwrap();
     fixture.client.close().await.unwrap();
+}
+
+#[cfg(feature = "write")]
+#[tokio::test(flavor = "multi_thread")]
+async fn indexed_reads_outlive_the_opening_admission() {
+    let fixture = support::read_fixture::ReadFixture::new().await;
+    let layout = crab_storage::StoreLayout::new(fixture.store.clone(), "repository".to_owned());
+    let runtime = Arc::new(crab_remote_git::RemoteGitRuntime::default());
+    let ready = crab_remote::browse_indexes::ensure(
+        &layout,
+        &crab_remote_git::RepositoryIdentity::new("fixture", "repository", 1).unwrap(),
+        runtime.clone(),
+        Default::default(),
+        16 * 1024 * 1024,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    assert!(ready.object_index_hash().is_some() && !ready.commit_graph_hash().is_empty());
+    // Service callers can reuse a captured view after its request completes.
+    // A new opening must use its own admission, not a retired capture token.
+    let cancellation = tokio_util::sync::CancellationToken::new();
+    let admitted = crab_storage::StoreLayout::new(
+        layout.store().clone().with_read_admission(
+            runtime
+                .read_admission(Default::default(), cancellation.clone())
+                .unwrap(),
+        ),
+        layout.repo_prefix().to_owned(),
+    );
+    let root = crab_metadata::capsule_protocol::load_root(&admitted)
+        .await
+        .unwrap();
+    let view = crab_read::capsule_protocol::open_git_view_from_root(
+        &admitted,
+        root,
+        crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: 16 * 1024 * 1024,
+            max_frontier_bytes: 16 * 1024 * 1024,
+        },
+    )
+    .await
+    .unwrap()
+    .with_browse_indexes(Some(ready.clone()));
+    cancellation.cancel();
+    view.git_repository_from_store(
+        layout.clone(),
+        crab_remote_git::RepositoryIdentity::new("fixture", "repository", 1).unwrap(),
+        runtime.clone(),
+        Default::default(),
+        16 * 1024 * 1024,
+        &tokio_util::sync::CancellationToken::new(),
+        None,
+    )
+    .await
+    .unwrap();
+    runtime.shutdown().await;
+    support::copy_published_objects(
+        &fixture.store,
+        &fixture.directory.path().join("storage"),
+        None,
+        &mut Default::default(),
+    )
+    .await;
+    let repository = fixture
+        .repository
+        .remote()
+        .unwrap()
+        .refresh()
+        .await
+        .unwrap();
+    let snapshot = repository
+        .remote()
+        .unwrap()
+        .snapshot(crab_sdk::Revision::branch("main").unwrap())
+        .await
+        .unwrap();
+    let bytes = snapshot.read_blob(fixture.path.clone()).await.unwrap();
+    let descriptor =
+        layout.bulk_manifest_path("git-object-index", ready.object_index_hash().unwrap());
+    std::fs::write(
+        fixture
+            .directory
+            .path()
+            .join("storage")
+            .join(descriptor.as_ref()),
+        b"corrupt current descriptor",
+    )
+    .unwrap();
+    let error = repository.remote().unwrap().refresh().await.err().unwrap();
+    fixture.client.close().await.unwrap();
+    assert_eq!(
+        (bytes, error.kind()),
+        (fixture.original, ErrorKind::Corruption)
+    );
 }

@@ -862,13 +862,13 @@ impl SharedFileIndexLookup {
     #[must_use]
     pub fn for_pointer_catalog(
         router: crab_storage::StoreLayout<crab_storage::Store>,
-        lookup: crate::capsule_protocol::PointerCatalogLookup,
+        lookup: impl Into<Arc<crate::capsule_protocol::PointerCatalogLookup>>,
     ) -> Self {
         Self {
             inner: Arc::new(SharedFileIndexLookupInner {
                 source: LookupSource::Catalog {
                     router,
-                    lookup: Arc::new(lookup),
+                    lookup: lookup.into(),
                 },
                 session: tokio::sync::RwLock::new(tokio::sync::OnceCell::new()),
                 closed: AtomicBool::new(false),

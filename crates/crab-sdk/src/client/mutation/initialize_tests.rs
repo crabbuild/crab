@@ -135,14 +135,14 @@ async fn initialization_preserves_incompatible_prefixes() {
 }
 
 #[tokio::test]
-async fn initialization_adopts_an_interrupted_descriptor_create() {
+async fn initialization_adopts_a_native_root_from_an_independent_writer() {
     let client = memory_client();
     let locator = RepositoryLocator::new("repository").unwrap();
     let layout = crab_storage::StoreLayout::new(
         client.0.store.clone(),
         locator.direct_prefix().unwrap().to_owned(),
     );
-    crab_metadata::layout_descriptor::ensure_canonical_layout(&client.0.store, &layout)
+    crab_write::capsule_protocol::initialize(&layout, &"a".repeat(64), "refs/heads/main")
         .await
         .unwrap();
     client

@@ -345,3 +345,99 @@ async fn cli_and_sdk_share_staging() {
     );
     sdk.close().await.unwrap();
 }
+
+#[cfg(unix)]
+#[test]
+fn explicit_credentials_are_scoped_to_all_local_children() {
+    for endpoint in ["", "http://127.0.0.1:1"] {
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "scoped_credentials_child"])
+            .env("CRAB_SDK_SCOPE_CHILD", "1")
+            .env("CRAB_SDK_SCOPE_ENDPOINT", endpoint)
+            .env("AWS_ACCESS_KEY_ID", "ambient-key")
+            .env("AWS_SECRET_ACCESS_KEY", "ambient-secret")
+            .env("AWS_SESSION_TOKEN", "ambient-session")
+            .env("AWS_ENDPOINT_URL", "http://ambient.invalid")
+            .env("AWS_ENDPOINT_URL_S3", "http://ambient.invalid")
+            .env("AWS_ALLOW_HTTP", "false")
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn scoped_credentials_child() {
+    use std::os::unix::fs::PermissionsExt as _;
+    if std::env::var("CRAB_SDK_SCOPE_CHILD").as_deref() != Ok("1") {
+        return;
+    }
+    let scratch = tempfile::tempdir().unwrap();
+    let repository = scratch.path().join("checkout");
+    std::fs::create_dir(&repository).unwrap();
+    let git = git_path();
+    run(&git, &repository, &["init", "-b", "main"]);
+    commit(&git, &repository, "file.txt", "initial");
+    let endpoint = std::env::var("CRAB_SDK_SCOPE_ENDPOINT").unwrap();
+    let check = "[ \"$AWS_ACCESS_KEY_ID\" = sdk-key ] && [ \"$AWS_SECRET_ACCESS_KEY\" = sdk-secret ] && [ -z \"${AWS_SESSION_TOKEN+x}\" ] && [ \"${AWS_ENDPOINT_URL-}\" = \"$CRAB_SDK_SCOPE_ENDPOINT\" ] && [ \"${AWS_ENDPOINT_URL_S3-}\" = \"$CRAB_SDK_SCOPE_ENDPOINT\" ] || exit 93\n";
+    let git_wrapper = scratch.path().join("git-observer");
+    let real_git = git.to_str().unwrap().replace('\'', "'\\''");
+    std::fs::write(
+        &git_wrapper,
+        format!("#!/bin/sh\n{check}exec '{real_git}' \"$@\"\n"),
+    )
+    .unwrap();
+    let crab = scratch.path().join("crab-observer");
+    std::fs::write(
+        &crab,
+        format!(
+            "#!/bin/sh\n{check}if [ \"$1\" = sdk-capabilities ]; then printf '%s\\n' '{}'; fi\n",
+            crab_remote::local::CURRENT_CAPABILITIES_JSON
+        ),
+    )
+    .unwrap();
+    for path in [&git_wrapper, &crab] {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut s3 =
+        crab_sdk::storage::S3Options::new("bucket", "us-east-1", "sdk-key", "sdk-secret").unwrap();
+    if !endpoint.is_empty() {
+        s3 = s3.with_endpoint(&endpoint);
+    }
+    let sdk = crab_sdk::Client::builder()
+        .direct_store(crab_sdk::storage::DirectStoreOptions::s3(s3))
+        .local(crab_sdk::local::Options::new(
+            crab_sdk::local::Tools::new(&git_wrapper, &crab).unwrap(),
+        ))
+        .build()
+        .unwrap();
+    let handle = sdk
+        .open(crab_sdk::OpenOptions::local(&repository))
+        .await
+        .unwrap();
+    let local = handle.local().unwrap();
+    local.hydrate(vec!["file.txt".into()]).await.unwrap();
+    local.dehydrate(vec!["file.txt".into()]).await.unwrap();
+    local
+        .prefetch_content(vec!["file.txt".into()])
+        .await
+        .unwrap();
+    local
+        .checkout("main", CheckoutOptions::default())
+        .await
+        .unwrap();
+    sdk.close().await.unwrap();
+    assert_eq!(
+        std::env::var("AWS_SESSION_TOKEN").unwrap(),
+        "ambient-session"
+    );
+    assert_eq!(
+        std::env::var("AWS_ENDPOINT_URL").unwrap(),
+        "http://ambient.invalid"
+    );
+}

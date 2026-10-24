@@ -1,23 +1,13 @@
 use std::sync::Arc;
 
 use bytes::Bytes;
-use crab_metadata::git_object_locator::{
-    GitLocatorCoverage, GitObjectLocation, GitObjectLocatorEntry, GitPackLocatorRecord,
-};
-use crab_metadata::manifest_store::{
-    create_manifest, read_manifest, upload_segmented_bulk, write_manifest_cas,
-};
-use crab_metadata::manifests::{
-    BulkData, Manifest, PackManifestEntry, compact_pack_index, compact_shard_index,
-};
 use crab_sdk::remote::Snapshot;
 use crab_sdk::storage::DirectStoreOptions;
 use crab_sdk::{Client, GitPath, Repository, RepositoryLocator, Revision};
 use crab_storage::{Store, StoreLayout};
-use crab_xet::hash::MerkleHash;
 use sha2::Digest as _;
 
-use super::{copy_published_objects, git, publish_catalog};
+use super::{capsule_fixture::CapsuleFixture, copy_published_objects, git};
 
 pub struct ReadFixture {
     pub directory: tempfile::TempDir,
@@ -29,10 +19,7 @@ pub struct ReadFixture {
     pub updated: Bytes,
     pub pointer: Bytes,
     pub store: Store,
-    manifest: Manifest,
-    coverage: GitLocatorCoverage,
-    record: GitPackLocatorRecord,
-    entries: Vec<GitObjectLocatorEntry>,
+    native: CapsuleFixture,
     second: String,
 }
 
@@ -105,45 +92,18 @@ impl ReadFixture {
             ],
         );
         let pack = directory.path().join(format!("fixture-{hash}.pack"));
-        let index = pack.with_extension("idx");
-        let reverse = pack.with_extension("rev");
-        crab_git::write_pack_reverse_index(&index, &reverse).unwrap();
-        let pack_bytes = std::fs::read(&pack).unwrap();
-        let pack_size = pack_bytes.len() as u64;
-        let pack_id = MerkleHash::from_hex(blake3::hash(&pack_bytes).to_hex().as_str()).unwrap();
-        let entries = crab_git::PackLocationIter::open(&index, &reverse, pack_size)
-            .unwrap()
-            .map(|entry| {
-                let entry = entry.unwrap();
-                GitObjectLocatorEntry {
-                    oid: entry.oid.as_bytes().try_into().unwrap(),
-                    location: GitObjectLocation {
-                        pack_offset: entry.pack_offset,
-                        entry_len: entry.entry_len,
-                        crc32: entry.crc32,
-                    },
-                    metadata: Default::default(),
-                }
-            })
-            .collect::<Vec<_>>();
         let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
         let layout = StoreLayout::new(store.clone(), "repository".to_owned());
-        crab_metadata::layout_descriptor::ensure_canonical_layout(&store, &layout)
-            .await
-            .unwrap();
-        for (path, bytes) in [
-            (layout.pack_path(&pack_id), pack_bytes),
-            (
-                layout.pack_index_path(&pack_id),
-                std::fs::read(index).unwrap(),
-            ),
-            (
-                layout.pack_reverse_index_path(&pack_id),
-                std::fs::read(reverse).unwrap(),
-            ),
-        ] {
-            store.put(&path, Bytes::from(bytes)).await.unwrap();
-        }
+        let mut native = CapsuleFixture::new(layout, &source, &pack, &commits).await;
+        native
+            .publish(
+                std::collections::BTreeMap::from([(
+                    "refs/heads/main".to_owned(),
+                    commits[0].clone(),
+                )]),
+                Default::default(),
+            )
+            .await;
         #[cfg(feature = "content")]
         store
             .put(
@@ -152,49 +112,6 @@ impl ReadFixture {
             )
             .await
             .unwrap();
-        let (pack_index_hash, _, pack_index) = compact_pack_index(
-            1,
-            &[PackManifestEntry {
-                pack_id: pack_id.to_string(),
-                content_hash: pack_id.to_string(),
-                size: pack_size,
-                object_count: entries.len() as u64,
-                ref_tips: commits.clone(),
-            }],
-        )
-        .unwrap();
-        let (shard_index_hash, _, shard_index) = compact_shard_index(1, &[]).unwrap();
-        upload_segmented_bulk(
-            &store,
-            &layout,
-            &BulkData {
-                pack_index,
-                shard_index,
-            },
-        )
-        .await
-        .unwrap();
-        let mut manifest = Manifest::default_for_repo("refs/heads/main");
-        manifest.generation = 1;
-        manifest
-            .refs
-            .insert("refs/heads/main".into(), commits[0].clone());
-        manifest.pack_index_hash = pack_index_hash;
-        manifest.shard_index_hash = shard_index_hash;
-        manifest.seal_git_validation();
-        create_manifest(&store, &layout, &manifest).await.unwrap();
-        let coverage = GitLocatorCoverage {
-            generation: 1,
-            pack_index_hash: MerkleHash::from_hex(&manifest.pack_index_hash).unwrap(),
-        };
-        let record = GitPackLocatorRecord {
-            pack_id,
-            committed_generation: 1,
-            pack_index_hash: coverage.pack_index_hash,
-            object_count: entries.len() as u64,
-            pack_size,
-        };
-        publish_catalog(&store, coverage, record, &entries).await;
         copy_published_objects(&store, &storage, None, &mut Default::default()).await;
         std::fs::remove_dir_all(source).unwrap();
         std::fs::remove_file(pack).unwrap();
@@ -225,27 +142,21 @@ impl ReadFixture {
             updated,
             pointer,
             store,
-            manifest,
-            coverage,
-            record,
-            entries,
+            native,
             second: commits[1].clone(),
         }
     }
 
     pub async fn advance(&mut self) -> Repository {
-        let layout = StoreLayout::new(self.store.clone(), "repository".to_owned());
-        let (_, etag) = read_manifest(&self.store, &layout).await.unwrap();
-        self.manifest.generation += 1;
-        self.manifest
-            .refs
-            .insert("refs/heads/main".into(), self.second.clone());
-        self.manifest.seal_git_validation();
-        write_manifest_cas(&self.store, &layout, &self.manifest, &etag)
-            .await
-            .unwrap();
-        self.coverage.generation = self.manifest.generation;
-        publish_catalog(&self.store, self.coverage, self.record, &self.entries).await;
+        self.native
+            .publish(
+                std::collections::BTreeMap::from([(
+                    "refs/heads/main".to_owned(),
+                    self.second.clone(),
+                )]),
+                Default::default(),
+            )
+            .await;
         copy_published_objects(
             &self.store,
             &self.directory.path().join("storage"),

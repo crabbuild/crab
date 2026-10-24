@@ -404,6 +404,82 @@ impl DirectStoreOptions {
     }
 
     #[cfg(feature = "local")]
+    pub(crate) fn scoped_local_environment(&self) -> Result<Vec<(OsString, Option<OsString>)>> {
+        // Explicit credentials must not inherit a session, credential file or
+        // endpoint from the parent. Ambient profiles intentionally keep their chain.
+        let removed: &[&str] = match &self.target {
+            DirectTarget::S3(_) => &[
+                "AWS_ACCESS_KEY_ID",
+                "AWS_SECRET_ACCESS_KEY",
+                "AWS_SESSION_TOKEN",
+                "AWS_REGION",
+                "AWS_DEFAULT_REGION",
+                "AWS_ENDPOINT_URL",
+                "AWS_ENDPOINT_URL_S3",
+                "AWS_ALLOW_HTTP",
+                "AWS_SKIP_SIGNATURE",
+                "AWS_PROFILE",
+                "AWS_DEFAULT_PROFILE",
+                "AWS_CONFIG_FILE",
+                "AWS_SHARED_CREDENTIALS_FILE",
+                "AWS_WEB_IDENTITY_TOKEN_FILE",
+                "AWS_ROLE_ARN",
+                "AWS_CONTAINER_CREDENTIALS_RELATIVE_URI",
+                "AWS_CONTAINER_CREDENTIALS_FULL_URI",
+                "AWS_S3_ENDPOINT",
+                "AWS_ENDPOINT",
+                "ENDPOINT_URL",
+                "ENDPOINT",
+                "AWS_VIRTUAL_HOSTED_STYLE_REQUEST",
+                "VIRTUAL_HOSTED_STYLE_REQUEST",
+            ],
+            DirectTarget::Gcs(_) => &[
+                "GOOGLE_BEARER_TOKEN",
+                "GOOGLE_APPLICATION_CREDENTIALS",
+                "GOOGLE_SERVICE_ACCOUNT",
+                "GOOGLE_SERVICE_ACCOUNT_PATH",
+                "GOOGLE_SERVICE_ACCOUNT_KEY",
+                "GOOGLE_BASE_URL",
+                "GOOGLE_SKIP_SIGNATURE",
+            ],
+            DirectTarget::Azure(_) => &[
+                "AZURE_STORAGE_TOKEN",
+                "AZURE_STORAGE_SAS_KEY",
+                "AZURE_STORAGE_ACCESS_KEY",
+                "AZURE_STORAGE_ACCOUNT_KEY",
+                "AZURE_STORAGE_SAS_TOKEN",
+                "AZURE_STORAGE_ACCOUNT_NAME",
+                "AZURE_STORAGE_ENDPOINT",
+                "AZURE_STORAGE_USE_EMULATOR",
+                "AZURE_STORAGE_CLIENT_ID",
+                "AZURE_STORAGE_CLIENT_SECRET",
+                "AZURE_STORAGE_TENANT_ID",
+                "AZURE_CLIENT_ID",
+                "AZURE_CLIENT_SECRET",
+                "AZURE_TENANT_ID",
+                "AZURE_AUTHORITY_ID",
+                "AZURE_AUTHORITY_HOST",
+                "AZURE_STORAGE_AUTHORITY_HOST",
+                "AZURE_FEDERATED_TOKEN_FILE",
+                "AZURE_USE_AZURE_CLI",
+                "AZURE_ENDPOINT",
+                "AZURE_USE_FABRIC_ENDPOINT",
+            ],
+            _ => &[],
+        };
+        let mut environment = removed
+            .iter()
+            .map(|key| (OsString::from(key), None))
+            .collect::<Vec<_>>();
+        environment.extend(
+            self.local_environment()?
+                .into_iter()
+                .map(|(key, value)| (key, Some(value))),
+        );
+        Ok(environment)
+    }
+
+    #[cfg(feature = "local")]
     pub(crate) fn locator_from_remote(&self, remote: &str) -> Result<crate::RepositoryLocator> {
         if matches!(self.target, DirectTarget::Filesystem(_)) {
             let prefix = remote.strip_prefix("crab-sdk:").ok_or_else(|| {

@@ -39,16 +39,14 @@ impl GitHttpServer {
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
         let thread = std::thread::spawn(move || {
-            let mut offline = false;
             while !worker_stop.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((stream, _)) if worker_stop.load(Ordering::Acquire) => {
                         drop(stream);
                         break;
                     }
-                    Ok((stream, _)) if offline => drop(stream),
                     Ok((stream, _)) => {
-                        offline = serve_request(stream, &project_root, &git, lose_receive_ack);
+                        serve_request(stream, &project_root, &git, lose_receive_ack);
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(Duration::from_millis(5));
@@ -79,12 +77,7 @@ impl Drop for GitHttpServer {
     }
 }
 
-fn serve_request(
-    mut stream: TcpStream,
-    project_root: &Path,
-    git: &Path,
-    lose_receive_ack: bool,
-) -> bool {
+fn serve_request(mut stream: TcpStream, project_root: &Path, git: &Path, lose_receive_ack: bool) {
     // macOS inherits O_NONBLOCK from the listener on accepted sockets. The
     // request parser is deliberately blocking, so normalize both platforms.
     stream.set_nonblocking(false).unwrap();
@@ -123,7 +116,7 @@ fn serve_request(
             &[],
             &output.stderr,
         );
-        return false;
+        return;
     }
     let (header_bytes, response_body) = split_headers(&output.stdout);
     let header_text = std::str::from_utf8(header_bytes).unwrap();
@@ -141,7 +134,6 @@ fn serve_request(
     if !lose_ack {
         write_response(&mut stream, &status, &response_headers, response_body);
     }
-    lose_ack
 }
 
 fn read_request(
@@ -485,7 +477,7 @@ async fn server_force_rejection_is_typed() {
 async fn lost_acknowledgement_is_indeterminate() {
     let _serial = HTTP_TESTS.lock().await;
     let fixture = tempfile::tempdir().unwrap();
-    let (remote, _first) = seeded_remote(fixture.path(), false);
+    let (remote, first) = seeded_remote(fixture.path(), false);
     let server = GitHttpServer::start_with_lost_ack(fixture.path().to_owned(), git_path(), true);
     let store = tempfile::tempdir().unwrap();
     let sdk = client(store.path(), fixture.path());
@@ -512,7 +504,13 @@ async fn lost_acknowledgement_is_indeterminate() {
         .execute()
         .await
         .unwrap();
-    assert!(matches!(outcome, LocalPushOutcome::Indeterminate { .. }));
+    let LocalPushOutcome::Indeterminate { recovery } = outcome else {
+        panic!("lost acknowledgement must remain indeterminate: {outcome:?}");
+    };
+    assert!(matches!(
+        sdk.reconcile_local_push(recovery.clone()).await.unwrap(),
+        LocalPushOutcome::Indeterminate { .. }
+    ));
     assert_eq!(
         run(
             &git_path(),
@@ -525,6 +523,37 @@ async fn lost_acknowledgement_is_indeterminate() {
             ],
         ),
         target
+    );
+    // An ABA back to the prepared value must not make resume replay the push.
+    run(
+        &git_path(),
+        fixture.path(),
+        &[
+            "--git-dir",
+            remote.to_str().unwrap(),
+            "update-ref",
+            "refs/heads/main",
+            &first,
+        ],
+    );
+    assert!(matches!(
+        sdk.resume_local_push(recovery, fixture.path().join("recovery"))
+            .await
+            .unwrap(),
+        LocalPushOutcome::Indeterminate { .. }
+    ));
+    assert_eq!(
+        run(
+            &git_path(),
+            fixture.path(),
+            &[
+                "--git-dir",
+                remote.to_str().unwrap(),
+                "rev-parse",
+                "refs/heads/main"
+            ]
+        ),
+        first
     );
     sdk.close().await.unwrap();
 }

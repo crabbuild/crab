@@ -8,6 +8,96 @@ execution or backend qualification. The chronological implementation evidence
 below records intermediate states; current-head CI artifacts supersede those
 states for release decisions.
 
+## Native capsule migration, 2026-10-24
+
+The current SDK worktree starts from `33f8e6c360d` on `origin/crab-v2`.
+The earlier audit at `d0e8ee12f81e` reproduced a valid v2-only repository failing
+to open, dual metadata selecting legacy refs, a corrupt native root being ignored,
+a selected local remote fetching another repository, and explicit credentials
+not reaching child tools. Those are historical failures, not current behavior.
+
+The SDK now captures only `v2/root` through the shared capsule reader. It pins
+native Git visibility, pointer catalogs and matching optional browse indexes;
+legacy-only repositories fail and corrupt native authority is never bypassed.
+Initialization, local pack transfer, file/ref publication and durable recovery
+use native capsule owners. Remote tokens use version 5, local push tokens use
+version 4, and the executable storage handshake requires version 2. Existing
+pointer syntax and independent local-workflow/API schemas keep their own versions.
+
+| Surface | Entry point and shared owner | Current proof |
+| --- | --- | --- |
+| Read-only authority and budgets | `ClientState::capture_repository` → `crab-read::capsule_protocol` → `crab-remote-git` | Five authority regressions; aggregate capture/index budgets; a cached indexed view survives cancellation of its original capture |
+| Git browse and file content | `RemoteRepository` / `RemoteSnapshot` → native visibility and pointer lookup → verified Git/LFS/Xet readers | Independent native fixtures; source checkout removed; ordinary/LFS/Xet complete and range reads, raw pointers, archive output, corruption and pinned snapshots |
+| Init and direct writes | `initialize_remote`, `prepare_commit`, `prepare_ref_update` → shared native preparation/publication | Init tests, streamed file edits, atomic ref changes, expected-value rejection, byte/request limits and post-commit readiness |
+| Recovery after restart | SDK token → `read_capsule_plan_receipt` → matching immutable committed activation | Read-only inventory proof; live restart without Git after checkpoint and removal of the mutable coordinator |
+| Local workflows | clone/fetch/pull/push → native pack installer, local lease and scoped tools | Real Git plus compatible Crab against isolated RustFS; selected/changed remotes, shallow/deepen/unshallow, tags/prune, linked worktrees, conflict continuation/abort and 1 GiB staged content round trip |
+| Local push outcomes | prepared handle → Git acknowledgement or native receipt | Fresh push URLs, unchanged native pushes without writes, dry-run recovery without writes, lost Git replies remain indeterminate, saved Git tokens do not replay after ABA, token trust cannot exceed client policy |
+| Protected staging | SDK → `CapsuleArtifacts::stage_protected_plan` → protected service promotion | Shared regression stages a schema-3 native plan without exposing refs; live service qualification remains pending |
+| Provider selection | `DirectStoreOptions` → locked `object_store` 0.14.1 and child environment | Explicit S3 credentials/endpoint live proof; conflicting parent environment isolation; Azure request-level and GCS configuration proof |
+
+The isolated S3-compatible service uses disposable test credentials and its own
+bucket/data directory. It is not a credentialed AWS run against an existing user
+repository. The live read test validates ordinary, LFS and Xet bytes and ranges;
+the three live local workflows include the 1 GiB stage → commit → push → independent
+eager clone → dehydrate/hydrate cycle. The native recovery test checkpoints the
+repository and removes the retired mutable coordinator before a fresh process
+reconciles from immutable evidence. No bucket-wide GC was run.
+
+Local evidence under this worktree's external qualification directory includes
+`sdk-native-all-tests.log` (138 passing, 20 explicitly ignored),
+`sdk-native-clippy.log`, `sdk-native-remote-only-tests.log`,
+`sdk-native-feature-graph.json` (10 profiles), `sdk-native-python-tests.log`,
+`sdk-native-inventory.log` (48 discoverable capability cells),
+`sdk-native-architecture.log`,
+`sdk-native-shared-publication.log`, `sdk-native-live-content.log`,
+`sdk-native-live-refs.log` and `sdk-native-live-local-round-trip.log` and `sdk-native-live-local-selection-final.log`. The SDK workflow now
+runs for PRs to `crab-v2` and exercises native publication, receipt and budget
+owners alongside existing sibling checks. Local logs are not hosted CI artifacts;
+new-head CI, packaging and cross-platform jobs must still complete.
+
+The dependency boundary is deliberate: metadata-only consumers enable
+`crab-read` without hydration; content/write consumers enable verified hydration
+explicitly. Existing CLI, server, gateway and VFS consumers retain hydration.
+The optional opening admission charges constructor reads while retained object
+readers use the plain origin, preventing expired request budgets from poisoning
+later reads. Sibling gateway/auth-server compilation and shared reader tests
+cover the changed factory argument. Filesystem storage remains read-capable but
+cannot execute conditional publication, as required by the provider contract.
+Git's documented porcelain rejection status proves failure; its distinct remote
+failure status includes missing acknowledgements and cannot establish history.
+
+Remaining qualification and improvement work:
+
+- Public capability limits still apply: SHA-256 repositories, recursive
+  submodules, sparse/partial-clone mutations, linked-worktree creation and LFS
+  custom extensions are unsupported. Existing linked worktrees can be opened.
+  Remote file edits create Git blobs or native Crab content; there is no dedicated
+  new-LFS-object upload API. Managed protected ref deletion is also unsupported.
+- GCS, Azure and managed service remain preview until dedicated live fixtures
+  prove writes, authorization expiry/revocation, placement changes and lost
+  finalize responses. Local mocks and compilation are not that evidence.
+- AWS service behavior, new-head CI, package-consumer and Linux/Windows proof
+  remain separate gates. The website link checker additionally requires a
+  production Next.js build; the local link check stopped at that missing build.
+- Release-build cold/warm benchmarks must establish throughput, latency and peak
+  memory relative to the shared reader. Debug functional runs establish no
+  production performance percentage or latency claim.
+- Native recovery artifacts and receipts under `v2/plans/` currently have no GC
+  retention policy. Define safe expiry without removing unresolved attempts or
+  promised historical evidence before adding collection.
+- Shared upload preparation compares the entire captured ref map and generation.
+  Unrelated ref churn can therefore reject safe selected-ref work. Narrowing that
+  check needs complete dependency/visibility proof and concurrent-writer tests.
+- Git transports lack durable SDK attempt receipts. Saved tokens remain
+  indeterminate through resume/reconcile; a server receipt contract is needed
+  for historical attribution or safe automatic restart execution.
+
+The migration adds shared ownership for native capture admission, read-only plan
+proof and protected staging rather than a second SDK protocol implementation.
+Additional source lines pay for those boundaries, credential isolation and
+read-only local validation; legacy SDK read/publication paths and standalone
+legacy pack-transfer logic are removed.
+
 ## PR 160 CI failure diagnosis
 
 The SDK branch is rebased onto `f63e03fab05`. Conflict resolution retains main's

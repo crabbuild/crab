@@ -66,7 +66,8 @@ pub async fn ensure(
                     options,
                     max_bytes,
                     cancel,
-                )
+None,
+)
                 .await?;
             let mut indexes = crab_write::generation::browse::build_graph(
                 layout,
@@ -120,7 +121,9 @@ pub async fn ensure(
             // Bind the just-verified physical pages to this same view before path
             // construction. Reopening a fresh root could mix index and ref identities.
             view = view.with_browse_indexes(Some(indexes.clone()));
-            let repository = view.git_repository_from_store(layout.clone(), identity.clone(), runtime, options, max_bytes, cancel)
+            let repository = view.git_repository_from_store(layout.clone(), identity.clone(), runtime, options, max_bytes, cancel,
+None,
+)
                 .await?;
             let complete = crab_write::generation::browse::build_path_state(
                 layout,

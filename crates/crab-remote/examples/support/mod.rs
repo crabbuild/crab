@@ -242,6 +242,7 @@ pub async fn open_repository(
             options,
             2 * 1024 * 1024 * 1024,
             cancel,
+            None,
         )
         .await?)
 }

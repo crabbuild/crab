@@ -4,6 +4,8 @@ use tokio::io::AsyncRead;
 
 use crate::{EntryMode, Error, ErrorKind, GitPath, ObjectId, RepositoryLocator, Result};
 
+const RECOVERY_TOKEN_VERSION: u32 = 5;
+
 const MAX_TOKEN_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_REF_UPDATES: usize = 1024;
 pub(crate) const MAX_GIT_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
@@ -703,12 +705,16 @@ impl RecoveryToken {
             commit: commit.map(|oid| oid.to_string()),
         };
         request.validate(&backend)?;
-        let digest = crab_metadata::receipts::publication_request_digest(&(&backend, &request))
-            .map_err(metadata_error)?;
+        let digest = crab_metadata::receipts::publication_request_digest(&(
+            RECOVERY_TOKEN_VERSION,
+            &backend,
+            &request,
+        ))
+        .map_err(metadata_error)?;
         let nonce = *uuid::Uuid::now_v7().as_bytes();
         let plan = crab_metadata::receipts::publication_plan_id(&digest, &nonce);
         let token = Self(TokenBinding {
-            version: 4,
+            version: RECOVERY_TOKEN_VERSION,
             backend,
             operation_nonce: nonce,
             request,
@@ -748,12 +754,16 @@ impl RecoveryToken {
             commit: commit.map(|oid| oid.to_string()),
         };
         request.validate(&backend)?;
-        let digest = crab_metadata::receipts::publication_request_digest(&(&backend, &request))
-            .map_err(metadata_error)?;
+        let digest = crab_metadata::receipts::publication_request_digest(&(
+            RECOVERY_TOKEN_VERSION,
+            &backend,
+            &request,
+        ))
+        .map_err(metadata_error)?;
         let nonce = *uuid::Uuid::now_v7().as_bytes();
         let plan = crab_metadata::receipts::publication_plan_id(&digest, &nonce);
         let token = Self(TokenBinding {
-            version: 4,
+            version: RECOVERY_TOKEN_VERSION,
             backend,
             operation_nonce: nonce,
             request,
@@ -781,7 +791,7 @@ impl RecoveryToken {
         let binding: TokenBinding = serde_json::from_str(json).map_err(|source| {
             Error::with_source(ErrorKind::InvalidInput, "invalid recovery token", source)
         })?;
-        if binding.version != 4 {
+        if binding.version != RECOVERY_TOKEN_VERSION {
             return Err(Error::new(
                 ErrorKind::UnsupportedCapability,
                 "unsupported recovery token version or backend",
@@ -795,6 +805,7 @@ impl RecoveryToken {
         }
         binding.request.validate(&binding.backend)?;
         let digest = crab_metadata::receipts::publication_request_digest(&(
+            RECOVERY_TOKEN_VERSION,
             &binding.backend,
             &binding.request,
         ))
@@ -881,7 +892,7 @@ impl CommitReceipt {
     pub fn recovery_token(&self) -> &RecoveryToken {
         &self.recovery
     }
-    /// Return the immutable direct journal transaction or managed push identity.
+    /// Return the immutable native activation or managed push identity.
     #[must_use]
     pub fn transaction_id(&self) -> &str {
         &self.transaction_id
@@ -1011,6 +1022,30 @@ mod tests {
             None,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn recovery_rejects_legacy_protocol_tokens_even_after_version_relabeling() {
+        let token = token();
+        let mut binding: serde_json::Value =
+            serde_json::from_str(&token.to_json().unwrap()).unwrap();
+        binding["version"] = 4.into();
+        assert!(RecoveryToken::from_json(&binding.to_string()).is_err());
+        binding["version"] = RECOVERY_TOKEN_VERSION.into();
+        let old_digest = crab_metadata::receipts::publication_request_digest(&(
+            &token.0.backend,
+            &token.0.request,
+        ))
+        .unwrap();
+        binding["request_digest"] = serde_json::to_value(old_digest).unwrap();
+        binding["plan_id"] = blake3::Hash::from(crab_metadata::receipts::publication_plan_id(
+            &old_digest,
+            &token.0.operation_nonce,
+        ))
+        .to_hex()
+        .to_string()
+        .into();
+        assert!(RecoveryToken::from_json(&binding.to_string()).is_err());
     }
 
     #[test]

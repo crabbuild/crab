@@ -54,9 +54,15 @@ impl ClientBuilder {
             git: Arc::new(git),
             direct_store_configured,
             #[cfg(feature = "local")]
-            local_store,
+            local_tools: self
+                .local_tools
+                .map(|tools| match local_store.as_ref() {
+                    Some(store) => tools.with_store(store),
+                    None => Ok(tools),
+                })
+                .transpose()?,
             #[cfg(feature = "local")]
-            local_tools: self.local_tools,
+            local_store,
             #[cfg(feature = "local")]
             local_execution_policy: self.local_execution_policy,
             #[cfg(feature = "managed")]
@@ -91,7 +97,95 @@ pub(crate) struct ResolvedRepository {
     pub(crate) managed: bool,
 }
 
+pub(crate) struct CapturedRepository {
+    pub(crate) repository: RemoteGitRepository,
+    pub(crate) resolved: ResolvedRepository,
+    pub(crate) capsule: crab_read::capsule_protocol::CapsuleRepositoryView,
+}
+
 impl ClientState {
+    pub(crate) async fn capture_repository(
+        &self,
+        locator: &RepositoryLocator,
+        options: &OperationOptions,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<CapturedRepository> {
+        let resolved = self.resolve_repository(locator, cancel).await?;
+        let layout = StoreLayout::new(resolved.store.clone(), resolved.prefix.clone());
+        let identity = RepositoryIdentity::new(
+            resolved.namespace.clone(),
+            resolved.prefix.clone(),
+            resolved.placement,
+        )
+        .map_err(remote_error)?;
+        let limits = options.owner_limits();
+        let admission = self
+            .git
+            .read_admission(limits, cancel.clone())
+            .map_err(remote_error)?;
+        let captured_layout = StoreLayout::new(
+            resolved
+                .store
+                .clone()
+                .with_read_admission(admission.clone()),
+            resolved.prefix.clone(),
+        );
+        let capture = async {
+            let root = crab_metadata::capsule_protocol::load_root(&captured_layout).await?;
+            let view = crab_read::capsule_protocol::open_git_view_from_root(
+                &captured_layout,
+                root,
+                crab_read::capsule_protocol::CapsuleReadLimits {
+                    max_capsule_bytes: limits.max_fetched_bytes,
+                    max_frontier_bytes: limits.max_fetched_bytes,
+                },
+            );
+            let indexes = async {
+                crab_metadata::capsule_protocol::load_browse_indexes(&captured_layout)
+                    .await
+                    .map_err(crab_read::ReadError::from)
+            };
+            let (view, indexes) = tokio::try_join!(view, indexes)?;
+            Ok::<_, crab_read::ReadError>(view.with_browse_indexes(indexes))
+        };
+        let capsule = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(Error::new(ErrorKind::Cancelled, "repository opening cancelled")),
+            result = capture => result.map_err(crate::remote_error::read_error)?,
+        };
+        let owner = capsule
+            .git_repository_from_store(
+                layout,
+                identity,
+                self.git.clone(),
+                RepositoryOptions::new(Default::default(), limits).map_err(remote_error)?,
+                limits.max_fetched_bytes,
+                cancel,
+                Some(admission),
+            )
+            .await
+            .map_err(crate::remote_error::read_error)?;
+        Ok(CapturedRepository {
+            repository: owner,
+            resolved,
+            capsule,
+        })
+    }
+
+    #[cfg(feature = "local")]
+    pub(crate) fn admitted_store(
+        &self,
+        store: &Store,
+        options: &OperationOptions,
+        cancel: &tokio_util::sync::CancellationToken,
+    ) -> Result<Store> {
+        Ok(store.clone().with_read_admission(
+            self.git
+                .read_admission(options.owner_limits(), cancel.clone())
+                .map_err(remote_error)?,
+        ))
+    }
+
     pub(crate) async fn resolve_repository(
         &self,
         locator: &crate::RepositoryLocator,
@@ -172,7 +266,7 @@ pub(crate) fn memory_local_client(local_tools: crate::LocalTools) -> Client {
         operations: Operations::default(),
         git: Arc::new(RemoteGitRuntime::default()),
         direct_store_configured: true,
-        local_store: None,
+        local_store: Some(crate::DirectStoreOptions::s3_from_env("bucket").unwrap()),
         local_tools: Some(local_tools),
         local_execution_policy: crate::LocalExecutionPolicy::Untrusted,
         #[cfg(feature = "managed")]
@@ -220,32 +314,22 @@ impl Client {
         locator: RepositoryLocator,
         options: OperationOptions,
     ) -> Result<RemoteRepository> {
+        let options = options.with_owner_deadline()?;
+        #[cfg(feature = "content")]
+        let maximum_catalog_bytes = options.read_limits().max_fetched_bytes;
         let state = self.0.clone();
         let worker_locator = locator.clone();
-        let (owner, resolved) = self
+        let CapturedRepository {
+            repository: owner,
+            resolved,
+            capsule,
+        } = self
             .0
             .operations
             .run(options.clone(), move |cancel| async move {
-                let resolved = state.resolve_repository(&worker_locator, &cancel).await?;
-                let layout = StoreLayout::new(resolved.store.clone(), resolved.prefix.clone());
-                let identity = RepositoryIdentity::new(
-                    resolved.namespace.clone(),
-                    resolved.prefix.clone(),
-                    resolved.placement,
-                )
-                .map_err(remote_error)?;
-                let owner = RemoteGitRepository::open(
-                    resolved.store.clone(),
-                    layout,
-                    identity,
-                    state.git.clone(),
-                    RepositoryOptions::new(Default::default(), options.owner_limits())
-                        .map_err(remote_error)?,
-                    &cancel,
-                )
-                .await
-                .map_err(remote_error)?;
-                Ok((owner, resolved))
+                state
+                    .capture_repository(&worker_locator, &options, &cancel)
+                    .await
             })
             .await?;
         #[cfg(feature = "content")]
@@ -253,9 +337,15 @@ impl Client {
             self.0.cache.clone(),
             StoreLayout::new(resolved.store.clone(), resolved.prefix.clone()),
             &resolved.namespace,
-            owner.shard_index_hash().to_owned(),
-            owner.generation(),
+            capsule
+                .pointer_catalog_lookup(
+                    &StoreLayout::new(resolved.store.clone(), resolved.prefix.clone()),
+                    maximum_catalog_bytes,
+                )
+                .map_err(crate::remote_error::read_error)?,
         ));
+        #[cfg(not(feature = "content"))]
+        let _ = capsule;
         Ok(RemoteRepository {
             client: self.clone(),
             locator,

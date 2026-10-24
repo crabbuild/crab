@@ -8,6 +8,10 @@ repository.workspace = true
 rust-version.workspace = true
 description = "Read and hydration orchestration for Crab repositories."
 
+[features]
+default = ["hydration"]
+hydration = ["dep:crab-cache", "dep:crab-cache-store", "dep:crab-diff", "dep:crab-lfs", "dep:globset", "dep:gix-packetline", "dep:gix-ignore", "dep:xet-client", "dep:xet-data", "dep:xet-runtime", "crab-metadata/file-index-reader"]
+
 [lib]
 name = "crab_read"
 path = "src/lib.rs"
@@ -17,21 +21,21 @@ async-trait = { workspace = true }
 blake3 = { workspace = true }
 bstr = { version = "1", default-features = false, features = ["std"] }
 bytes = { workspace = true }
-crab-cache = { workspace = true, features = ["local-cache", "xet-chunk-cache"] }
-crab-cache-store = { workspace = true }
-crab-diff = { workspace = true }
+crab-cache = { workspace = true, optional = true, features = ["local-cache", "xet-chunk-cache"] }
+crab-cache-store = { workspace = true, optional = true }
+crab-diff = { workspace = true, optional = true }
 crab-git = { workspace = true }
-crab-lfs = { workspace = true }
-crab-metadata = { workspace = true, features = ["storage", "file-index-reader"] }
+crab-lfs = { workspace = true, optional = true }
+crab-metadata = { workspace = true, features = ["storage"] }
 crab-remote-git = { workspace = true }
 crab-storage = { workspace = true }
 crab-types = { workspace = true }
 crab-xet = { workspace = true }
 futures-util = { workspace = true }
-globset = { workspace = true }
-gix-packetline = { workspace = true }
+globset = { workspace = true, optional = true }
+gix-packetline = { workspace = true, optional = true }
 gix-hash = { workspace = true, features = ["sha1"] }
-gix-ignore = { workspace = true }
+gix-ignore = { workspace = true, optional = true }
 gix-object = { workspace = true }
 object_store = { workspace = true }
 tempfile = { workspace = true }
@@ -39,9 +43,9 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["rt", "sync", "io-util"] }
 tokio-util = { workspace = true, features = ["rt"] }
 tracing = { workspace = true }
-xet-client = { workspace = true }
-xet-data = { workspace = true }
-xet-runtime = { workspace = true }
+xet-client = { workspace = true, optional = true }
+xet-data = { workspace = true, optional = true }
+xet-runtime = { workspace = true, optional = true }
 
 [dev-dependencies]
 slatedb = { version = "=0.15.0", features = ["wal_disable", "zstd"] }

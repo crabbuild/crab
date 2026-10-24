@@ -2046,6 +2046,7 @@ impl From<crab_metadata::error::MetadataError> for CrabError {
             error @ (crab_metadata::error::MetadataError::FileLookupAdmission { .. }
             | crab_metadata::error::MetadataError::FileLookupWorker { .. }
             | crab_metadata::error::MetadataError::CapsuleContract { .. }
+            | crab_metadata::error::MetadataError::CapsulePlanSize { .. }
             | crab_metadata::error::MetadataError::PathStateSize { .. }
             | crab_metadata::error::MetadataError::CheckpointSize { .. }
             | crab_metadata::error::MetadataError::CheckpointFooterSize { .. }

@@ -12,7 +12,11 @@ containing credentials.
 
 `remote::write::RecoveryToken::to_json` and
 `local::PushRecoveryToken::to_json` produce bounded, versioned documents.
-Decode untrusted input with the corresponding `from_json` constructor.
+Decode untrusted input with the corresponding `from_json` constructor. Native
+remote recovery tokens use version 5 and bind the protocol version into their
+request digest. Legacy repository tokens are rejected, including tokens with a
+changed version field. Local push tokens use version 4 and bind Git push URLs;
+previous local push tokens must be prepared again.
 
 ## Reconcile before replay
 
@@ -28,6 +32,13 @@ unattempted direct remote plan can resume through
 `Client::resume_remote(token, scratch)`. An eligible local push can resume
 through `Client::resume_local_push(token, scratch)`. A plan with unresolved
 attempt evidence is never replayed automatically.
+
+Git HTTP and SSH push tokens have no durable server receipt. Both recovery
+operations return an indeterminate outcome without replay, even when current
+refs match the requested targets. Execute the original prepared handle for a
+fresh Git attempt. Unchanged native capsule pushes validate the current source,
+placement and refs and report the already satisfied destinations without writes.
+A token cannot grant trusted local execution beyond the client's policy.
 
 An opened remote interface also provides `remote.reconcile(token)`, which
 checks that the token belongs to that opened repository.

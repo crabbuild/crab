@@ -250,6 +250,7 @@ async fn prepare_update(
             crab_remote_git::RepositoryOptions::default(),
             LIMIT,
             &cancel,
+            None,
         )
         .await
         .unwrap();
@@ -649,3 +650,65 @@ mod ref_visibility;
 
 #[path = "capsule_preparation/cancellation.rs"]
 mod cancellation;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn protected_preparation_stages_a_native_capsule_without_publishing_refs() {
+    let (directory, content) = content_fixture().await;
+    source_commit(directory.path(), &content);
+    let (layout, _) = layout().await;
+    let (prepared, view, runtime, leases) = prepare(&layout, directory.path(), Some(content)).await;
+    let upload_prefix = format!("{}/staging/{}", layout.repo_prefix(), "7".repeat(32));
+    let staged_layout = crab_storage::StoreLayout::new(
+        layout
+            .store()
+            .clone()
+            .with_staging_writes(upload_prefix.clone()),
+        layout.repo_prefix().to_owned(),
+    );
+    let prepared = prepared.with_staging_layout(staged_layout).unwrap();
+    let target = String::from_utf8(git(directory.path(), &["rev-parse", "HEAD"]))
+        .unwrap()
+        .trim()
+        .to_owned();
+    let updates = vec![crab_auth::PushRefUpdate {
+        ref_name: "refs/heads/main".to_owned(),
+        old_oid: None,
+        new_oid: target,
+    }];
+    let plan = prepared
+        .upload_capsule(&view, proof_limits(), &CancellationToken::new())
+        .await
+        .unwrap()
+        .stage_protected_plan(
+            &"7".repeat(32),
+            &upload_prefix,
+            updates.clone(),
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    let run_key = layout.capsule_path(&plan.run_hash).to_string();
+    let staged = plan
+        .staged_objects
+        .iter()
+        .find(|object| object.canonical_key == run_key)
+        .unwrap();
+    let (bytes, _) = layout
+        .store()
+        .get_with_etag(&object_store::path::Path::from(staged.staged_key.clone()))
+        .await
+        .unwrap();
+    let run = crab_metadata::capsule_protocol::CapsuleRun::decode(bytes).unwrap();
+    let root = crab_metadata::capsule_protocol::load_root(&layout)
+        .await
+        .unwrap();
+    leases.release().await;
+    runtime.shutdown().await;
+    assert!(
+        plan.schema_version == crab_remote::protected::PROTECTED_CAPSULE_PUSH_PLAN_SCHEMA_VERSION
+            && plan.base_root_digest == view.root().digest()
+            && plan.ref_updates == updates
+            && run.transaction_ids() == [plan.transaction_id]
+            && root.record().root().refs().is_empty()
+    );
+}

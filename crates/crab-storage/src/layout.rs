@@ -328,6 +328,32 @@ impl<S> StoreLayout<S> {
         self.repo_path(&format!("v2/plans/{plan_id}/terminal.json"))
     }
 
+    /// Durable normalized pack for one native capsule plan.
+    #[must_use]
+    pub fn capsule_plan_recovery_pack_path(&self, plan_id: &str) -> ObjectPath {
+        self.repo_path(&format!("v2/plans/{plan_id}/recovery/pack"))
+    }
+
+    /// Durable recovery xorb owned by one native capsule plan.
+    #[must_use]
+    pub fn capsule_plan_recovery_xorb_path(
+        &self,
+        plan_id: &str,
+        hash: &(impl Display + ?Sized),
+    ) -> ObjectPath {
+        self.repo_path(&format!("v2/plans/{plan_id}/recovery/xorbs/{hash}"))
+    }
+
+    /// Durable recovery shard owned by one native capsule plan.
+    #[must_use]
+    pub fn capsule_plan_recovery_shard_path(
+        &self,
+        plan_id: &str,
+        hash: &(impl Display + ?Sized),
+    ) -> ObjectPath {
+        self.repo_path(&format!("v2/plans/{plan_id}/recovery/shards/{hash}"))
+    }
+
     /// Path to the fresh-clone replica discovery document.
     #[must_use]
     pub fn replica_discovery_path(&self) -> ObjectPath {

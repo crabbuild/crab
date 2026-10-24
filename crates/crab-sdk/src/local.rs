@@ -46,6 +46,12 @@ impl LocalTools {
                 .map_err(local_error)?,
         })
     }
+    pub(crate) fn with_store(mut self, store: &crate::DirectStoreOptions) -> Result<Self> {
+        self.owner = self
+            .owner
+            .with_environment(store.scoped_local_environment()?);
+        Ok(self)
+    }
 }
 
 /// Validated local tool versions and executable capabilities.
@@ -231,7 +237,6 @@ pub struct LocalRepository {
     root: PathBuf,
     git_dir: PathBuf,
     common_dir: PathBuf,
-    locator: Option<RepositoryLocator>,
 }
 
 /// An immutable local commit selection that requires no remote access.
@@ -354,12 +359,12 @@ impl LocalRepository {
         options: FetchOptions,
         operation: OperationOptions,
     ) -> Result<FetchOutcome> {
-        let locator = self.locator.clone();
         let tools = self.tools()?.clone();
         let root = self.root.clone();
         let git_dir = self.git_dir.clone();
         let common_dir = self.common_dir.clone();
         let state = self.client.0.clone();
+        let read_options = operation.clone();
         self.client
             .0
             .operations
@@ -370,12 +375,12 @@ impl LocalRepository {
                 ensure_supported_mutation(&tools.owner, &root, &cancel).await?;
                 fetch::fetch_locked(
                     &state,
-                    locator,
                     &tools.owner,
                     &root,
                     &git_dir,
                     &common_dir,
                     &options,
+                    &read_options,
                     &cancel,
                 )
                 .await
@@ -469,7 +474,7 @@ impl Client {
             .operations
             .run(options, move |cancel| async move {
                 tools.owner.handshake(&cancel).await.map_err(local_error)?;
-                discover_local(client, &tools.owner, &path, None, &cancel).await
+                discover_local(client, &tools.owner, &path, &cancel).await
             })
             .await
     }
@@ -500,6 +505,7 @@ impl Client {
                 "local tools are required for local operations",
             )
         })?;
+        let read_options = operation.clone();
         let state = self.0.clone();
         let client = self.clone();
         let trusted = self.0.local_execution_policy.is_trusted();
@@ -552,7 +558,7 @@ impl Client {
                                 source,
                             )
                         })?;
-                    return discover_local(client, &tools.owner, &destination, None, &cancel).await;
+                    return discover_local(client, &tools.owner, &destination, &cancel).await;
                 }
                 let resolved = state.resolve_repository(&locator, &cancel).await?;
                 let (remote, environment, managed_token_cache) = if resolved.managed {
@@ -630,13 +636,13 @@ impl Client {
                     .map_err(local_error)?;
                 let git_dir = staged.join(".git");
                 let layout = crab_storage::StoreLayout::new(
-                    resolved.store.clone(),
+                    state.admitted_store(&resolved.store, &read_options, &cancel)?,
                     resolved.prefix.clone(),
                 );
                 let snapshot = crab_remote::transfer::fetch_snapshot(
-                    &resolved.store,
                     &layout,
-                    &git_dir.join("objects").join("pack"),
+                    &git_dir,
+                    read_options.owner_limits().max_fetched_bytes,
                     &cancel,
                 )
                 .await
@@ -704,7 +710,7 @@ impl Client {
                             source,
                         )
                     })?;
-                discover_local(client, &tools.owner, &destination, Some(locator), &cancel).await
+                discover_local(client, &tools.owner, &destination, &cancel).await
             })
             .await
     }
@@ -769,7 +775,6 @@ async fn discover_local(
     client: Client,
     tools: &crab_remote::local::LocalTools,
     path: &Path,
-    locator: Option<RepositoryLocator>,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<LocalRepository> {
     let root = git_path(tools, path, "--show-toplevel", cancel).await?;
@@ -802,16 +807,11 @@ async fn discover_local(
     }
     fetch::validate_fetch_intent_on_open(tools, &root, &git_dir, cancel).await?;
     edit::validate_integration_intent_on_open(&git_dir).await?;
-    let locator = match locator {
-        Some(locator) => Some(locator),
-        None => discover_locator(&client, tools, &root, cancel).await?,
-    };
     Ok(LocalRepository {
         client,
         root,
         git_dir,
         common_dir,
-        locator,
     })
 }
 
@@ -887,19 +887,23 @@ pub(super) async fn ensure_supported_mutation(
 }
 
 async fn discover_locator(
-    client: &Client,
+    state: &crate::client::ClientState,
     tools: &crab_remote::local::LocalTools,
     root: &Path,
+    name: &str,
+    push: bool,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<Option<RepositoryLocator>> {
-    let output = match tools
-        .run_git(Some(root), ["remote", "get-url", "origin"], false, cancel)
-        .await
-    {
-        Ok(output) => output,
-        Err(crab_remote::local::LocalError::Exit(_)) => return Ok(None),
-        Err(error) => return Err(local_error(error)),
+    validate_remote_name(name)?;
+    let args = if push {
+        vec!["remote", "get-url", "--push", "--all", name]
+    } else {
+        vec!["remote", "get-url", name]
     };
+    let output = tools
+        .run_git(Some(root), args, false, cancel)
+        .await
+        .map_err(local_error)?;
     let remote = std::str::from_utf8(&output.stdout)
         .map_err(|source| {
             Error::with_source(
@@ -909,8 +913,14 @@ async fn discover_locator(
             )
         })?
         .trim();
+    if remote.lines().count() != 1 {
+        return Err(Error::new(
+            ErrorKind::UnsupportedCapability,
+            "atomic local transfer requires one remote URL",
+        ));
+    }
     #[cfg(feature = "managed")]
-    if let Some(managed) = client.0.managed.as_ref() {
+    if let Some(managed) = state.managed.as_ref() {
         match managed.resolver.classify(remote) {
             Ok(crab_git::RepositoryLocator::Managed(repository)) => {
                 return Ok(Some(RepositoryLocator::from_managed_owner(repository)));
@@ -919,7 +929,7 @@ async fn discover_locator(
             Err(source) => return Err(crate::managed_impl::managed_repository_error(source)),
         }
     }
-    let Some(store) = client.0.local_store.as_ref() else {
+    let Some(store) = state.local_store.as_ref() else {
         return Ok(None);
     };
     match store.locator_from_remote(remote) {
@@ -1230,17 +1240,15 @@ fn local_error(source: crab_remote::local::LocalError) -> Error {
 }
 
 fn transfer_error(source: crab_remote::transfer::Error) -> Error {
-    let kind = match source {
-        crab_remote::transfer::Error::Cancelled => ErrorKind::Cancelled,
-        crab_remote::transfer::Error::Metadata(_) | crab_remote::transfer::Error::Pack(_) => {
-            ErrorKind::Corruption
+    match source {
+        crab_remote::transfer::Error::Read(source) => crate::remote_error::read_error(source),
+        crab_remote::transfer::Error::Metadata(source) => Error::with_source(
+            crate::remote_error::metadata_kind(&source),
+            "direct repository transfer failed",
+            source,
+        ),
+        crab_remote::transfer::Error::Cancelled => {
+            Error::new(ErrorKind::Cancelled, "direct repository transfer cancelled")
         }
-        crab_remote::transfer::Error::Storage(ref error) => {
-            crate::remote_error::storage_kind(error)
-        }
-        crab_remote::transfer::Error::Scratch(_) | crab_remote::transfer::Error::Installer(_) => {
-            ErrorKind::Io
-        }
-    };
-    Error::with_source(kind, "direct repository transfer failed", source)
+    }
 }

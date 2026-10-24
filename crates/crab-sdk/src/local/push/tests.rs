@@ -24,8 +24,36 @@ fn git(root: &std::path::Path, args: &[&str]) -> String {
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
+#[test]
+fn local_push_tokens_require_the_native_push_url_binding_version() {
+    let binding = LocalPushBinding {
+        version: LOCAL_PUSH_TOKEN_VERSION,
+        remote: "origin".to_owned(),
+        updates: vec![LocalPushUpdate {
+            source: Some("refs/heads/main".to_owned()),
+            destination: "refs/heads/main".to_owned(),
+            expected: None,
+            target: Some("1".repeat(40)),
+        }],
+        dry_run: false,
+        policy: WritePolicy::FastForward,
+        trusted_execution: false,
+        backend: LocalPushBackend::Git {
+            repository: "/fixture".to_owned(),
+            remote_url_hash: "a".repeat(64),
+        },
+    };
+    let mut json = serde_json::to_value(binding).unwrap();
+    let current = LocalPushRecoveryToken::from_json(&json.to_string()).is_ok();
+    json["version"] = 3.into();
+    assert!(
+        current
+            && matches!(LocalPushRecoveryToken::from_json(&json.to_string()), Err(error) if error.kind() == ErrorKind::UnsupportedCapability)
+    );
+}
+
 #[tokio::test(flavor = "multi_thread")]
-async fn git_transport_push_resumes_with_exact_remote_lease() {
+async fn git_transport_acknowledges_fresh_push_without_replaying_saved_tokens() {
     let fixture = tempfile::tempdir().unwrap();
     git(fixture.path(), &["init", "--bare", "remote.git"]);
     let checkout = fixture.path().join("checkout");
@@ -36,9 +64,21 @@ async fn git_transport_push_resumes_with_exact_remote_lease() {
     git(&checkout, &["commit", "-m", "transport"]);
     let target = git(&checkout, &["rev-parse", "HEAD"]);
     let remote = fixture.path().join("remote.git");
+    git(fixture.path(), &["init", "--bare", "fetch.git"]);
+    let fetch_url = fixture.path().join("fetch.git");
     git(
         &checkout,
-        &["remote", "add", "origin", remote.to_str().unwrap()],
+        &["remote", "add", "origin", fetch_url.to_str().unwrap()],
+    );
+    git(
+        &checkout,
+        &[
+            "remote",
+            "set-url",
+            "--push",
+            "origin",
+            remote.to_str().unwrap(),
+        ],
     );
     git(&checkout, &["config", "branch.main.remote", "origin"]);
     git(
@@ -55,7 +95,6 @@ async fn git_transport_push_resumes_with_exact_remote_lease() {
         root: root.clone(),
         git_dir: root.join(".git").canonicalize().unwrap(),
         common_dir: root.join(".git").canonicalize().unwrap(),
-        locator: None,
     };
     let prepared = repository
         .prepare_push(PushOptions::current_branch())
@@ -63,16 +102,30 @@ async fn git_transport_push_resumes_with_exact_remote_lease() {
         .unwrap();
     let recovery =
         LocalPushRecoveryToken::from_json(&prepared.recovery_token().to_json().unwrap()).unwrap();
-    drop(prepared);
-
-    let result = client
+    let unresolved = client
         .resume_push(
-            recovery,
+            recovery.clone(),
             fixture.path().join("unused-scratch"),
             OperationOptions::default(),
         )
         .await
         .unwrap();
+    assert!(matches!(unresolved, LocalPushOutcome::Indeterminate { .. }));
+    assert!(
+        git(
+            fixture.path(),
+            &["--git-dir", remote.to_str().unwrap(), "for-each-ref"]
+        )
+        .is_empty()
+    );
+    let mut forged = recovery.clone();
+    forged.0.trusted_execution = true;
+    let error = git::execute(&client, forged, OperationOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(error.kind(), ErrorKind::Authorization);
+
+    let result = prepared.execute().await.unwrap();
     assert!(matches!(
         result,
         LocalPushOutcome::TransportCommitted { .. }
@@ -89,6 +142,21 @@ async fn git_transport_push_resumes_with_exact_remote_lease() {
         ),
         target
     );
+    assert!(matches!(
+        client
+            .reconcile_push(recovery, OperationOptions::default())
+            .await
+            .unwrap(),
+        LocalPushOutcome::Indeterminate { .. }
+    ));
+    let unchanged = repository
+        .prepare_push(PushOptions::current_branch())
+        .await
+        .unwrap();
+    assert!(matches!(
+        unchanged.execute().await.unwrap(),
+        LocalPushOutcome::TransportCommitted { .. }
+    ));
     client.close().await.unwrap();
 }
 
@@ -113,6 +181,10 @@ async fn direct_push_publishes_generated_pack_without_remote_helper() {
     };
     let tools = crate::LocalTools::new(&git_path, &git_path).unwrap();
     let client = crate::client::memory_local_client(tools);
+    git(
+        checkout.path(),
+        &["remote", "add", "origin", "crab://bucket/repository"],
+    );
     let locator = crate::RepositoryLocator::new("repository").unwrap();
     client
         .initialize_remote(locator.clone(), "refs/heads/main")
@@ -124,7 +196,6 @@ async fn direct_push_publishes_generated_pack_without_remote_helper() {
         root: root.clone(),
         git_dir: root.join(".git").canonicalize().unwrap(),
         common_dir: root.join(".git").canonicalize().unwrap(),
-        locator: Some(locator.clone()),
     };
 
     let prepared = repository
@@ -170,6 +241,108 @@ async fn direct_push_publishes_generated_pack_without_remote_helper() {
             .to_string(),
         target
     );
+    let before = client
+        .0
+        .store
+        .list_prefix(&object_store::path::Path::from("repository/"))
+        .await
+        .unwrap();
+    let dry = repository
+        .prepare_push(
+            PushOptions::current_branch()
+                .with_refspecs(vec![
+                    PushRefspec::update("refs/heads/main", "refs/tags/dry-run").unwrap(),
+                ])
+                .unwrap()
+                .dry_run(true),
+        )
+        .await
+        .unwrap();
+    let dry_token =
+        LocalPushRecoveryToken::from_json(&dry.recovery_token().to_json().unwrap()).unwrap();
+    assert!(matches!(
+        dry.execute().await.unwrap(),
+        LocalPushOutcome::DryRun { .. }
+    ));
+    assert!(matches!(
+        client
+            .resume_push(
+                dry_token.clone(),
+                checkout.path().to_owned(),
+                OperationOptions::default()
+            )
+            .await
+            .unwrap(),
+        LocalPushOutcome::DryRun { .. }
+    ));
+    assert!(matches!(
+        client
+            .reconcile_push(dry_token, OperationOptions::default())
+            .await
+            .unwrap(),
+        LocalPushOutcome::DryRun { .. }
+    ));
+    let options = PushOptions::default()
+        .with_destination("refs/heads/main")
+        .unwrap();
+    let unchanged = repository.prepare_push(options).await.unwrap();
+    let token =
+        LocalPushRecoveryToken::from_json(&unchanged.recovery_token().to_json().unwrap()).unwrap();
+    assert!(matches!(
+        unchanged.execute().await.unwrap(),
+        LocalPushOutcome::TransportCommitted { .. }
+    ));
+    assert!(matches!(
+        client
+            .resume_push(
+                token.clone(),
+                checkout.path().to_owned(),
+                OperationOptions::default()
+            )
+            .await
+            .unwrap(),
+        LocalPushOutcome::TransportCommitted { .. }
+    ));
+    assert!(matches!(
+        client
+            .reconcile_push(token.clone(), OperationOptions::default())
+            .await
+            .unwrap(),
+        LocalPushOutcome::TransportCommitted { .. }
+    ));
+    let after = client
+        .0
+        .store
+        .list_prefix(&object_store::path::Path::from("repository/"))
+        .await
+        .unwrap();
+    assert_eq!(
+        before, after,
+        "unchanged pushes must not write remote state"
+    );
+    std::fs::write(checkout.path().join("file.txt"), b"later local edit\n").unwrap();
+    git(checkout.path(), &["add", "file.txt"]);
+    git(checkout.path(), &["commit", "-m", "later"]);
+    let stale = client
+        .reconcile_push(token.clone(), OperationOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(stale.kind(), ErrorKind::Conflict);
+    let mut read_only = token;
+    read_only.0.dry_run = true;
+    read_only.0.updates[0].target = Some(git(checkout.path(), &["rev-parse", "HEAD"]));
+    assert!(matches!(
+        client
+            .resume_push(
+                read_only,
+                checkout.path().to_owned(),
+                OperationOptions::default()
+            )
+            .await
+            .unwrap(),
+        LocalPushOutcome::DryRun { .. }
+    ));
+
     client.close().await.unwrap();
 }
 
@@ -219,6 +392,10 @@ async fn direct_push_publishes_staged_pointer_dependencies_first() {
         tools,
         crate::ContentCache::new(cache.path(), 4 * 1024 * 1024).unwrap(),
     );
+    git(
+        checkout.path(),
+        &["remote", "add", "origin", "crab://bucket/repository"],
+    );
     let locator = crate::RepositoryLocator::new("repository").unwrap();
     client
         .initialize_remote(locator.clone(), "refs/heads/main")
@@ -230,7 +407,6 @@ async fn direct_push_publishes_staged_pointer_dependencies_first() {
         root: root.clone(),
         git_dir: root.join(".git").canonicalize().unwrap(),
         common_dir: root.join(".git").canonicalize().unwrap(),
-        locator: Some(locator.clone()),
     };
 
     let prepared = repository

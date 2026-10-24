@@ -566,6 +566,36 @@ async fn fetch_checkout_and_pull_round_trip() {
     assert!(matches!(pulled, PullOutcome::Updated { head, .. } if head == fifth));
     assert_eq!(git_output(&["rev-parse", "HEAD"]), fifth.to_string());
 
+    let before_unchanged = stored_objects(&locator).await;
+    let unchanged = local
+        .prepare_push(
+            PushOptions::current_branch()
+                .with_remote("upstream")
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let token = crab_sdk::local::PushRecoveryToken::from_json(
+        &unchanged.recovery_token().to_json().unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        unchanged.execute().await.unwrap(),
+        LocalPushOutcome::TransportCommitted { .. }
+    ));
+    assert!(matches!(
+        client
+            .resume_local_push(token.clone(), scratch.path().join("resume"))
+            .await
+            .unwrap(),
+        LocalPushOutcome::TransportCommitted { .. }
+    ));
+    assert!(matches!(
+        client.reconcile_local_push(token).await.unwrap(),
+        LocalPushOutcome::TransportCommitted { .. }
+    ));
+    assert_eq!(stored_objects(&locator).await, before_unchanged);
+
     let linked = scratch.path().join("linked");
     let linked_text = linked.to_str().unwrap();
     git_output(&["worktree", "add", "-b", "linked", linked_text]);

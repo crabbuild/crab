@@ -5,6 +5,15 @@ turns a Git/Xet pointer into verified bytes by combining manifest metadata,
 replica selection, cache-aware storage, shard coverage checks, and Xet file
 reconstruction.
 
+## Feature boundaries
+
+The default `hydration` feature supplies verified content reconstruction,
+cache integration, dependency proofs, and fetch orchestration. Workspace
+consumers select it explicitly. Without default features, the crate exposes
+capsule metadata capture and Git repository views without the hydration/cache
+stack. The SDK's `remote` feature uses that metadata-only path; its `content`
+and `write` features enable hydration.
+
 ## Why it exists
 
 Several product surfaces need the same read guarantees: fetch, hydrate, path

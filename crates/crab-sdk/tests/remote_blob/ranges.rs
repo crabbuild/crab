@@ -175,14 +175,20 @@ pub(super) async fn verify_hydration_limit(
             .unwrap(),
         expected
     );
-    let error = match snapshot.open_file(path).with_options(options.clone()).await {
+    let error = match snapshot
+        .open_file(path.clone())
+        .with_options(options.clone())
+        .await
+    {
         Err(error) => error,
         Ok(mut stream) => {
             let error = loop {
                 match stream.next().await {
                     Err(error) => break error,
                     Ok(Some(_)) => continue,
-                    Ok(None) => panic!("hydration escaped its origin budget"),
+                    Ok(None) => panic!(
+                        "hydration escaped its origin budget: path={path:?}, bytes={bytes}, admitted_floor={lower}"
+                    ),
                 }
             };
             stream.close().await.unwrap();

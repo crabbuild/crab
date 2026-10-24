@@ -45,6 +45,8 @@ pub enum Error {
     Content(String),
     #[error("prepared content is corrupt")]
     ContentFormat(#[source] crab_xet::error::XetError),
+    #[error("protected publication plan encoding failed")]
+    Serialization(#[source] serde_json::Error),
     #[error("incoming pack rejected")]
     Pack(#[from] incoming_pack::IncomingPackError),
     #[error("incoming graph rejected")]
@@ -624,7 +626,7 @@ impl Prepared {
         Ok(self)
     }
 
-    /// Stage the normalized pack under one durable journal recovery root.
+    /// Stage the normalized pack under one durable native capsule recovery root.
     ///
     /// This creates no ref, journal, visibility, or manifest entry. It makes a
     /// prepared mutation recoverable after its private scratch files disappear.
@@ -645,7 +647,7 @@ impl Prepared {
                 self.layout
                     .store()
                     .put_multipart_file_retry(
-                        &self.layout.ref_journal_recovery_xorb_path(
+                        &self.layout.capsule_plan_recovery_xorb_path(
                             plan_id,
                             &crab_xet::hash::MerkleHash::from(xorb.protocol_hash),
                         ),
@@ -662,7 +664,7 @@ impl Prepared {
                 self.layout
                     .store()
                     .put_multipart_file_retry(
-                        &self.layout.ref_journal_recovery_shard_path(
+                        &self.layout.capsule_plan_recovery_shard_path(
                             plan_id,
                             &crab_xet::hash::MerkleHash::from(shard.protocol_hash),
                         ),
@@ -685,7 +687,7 @@ impl Prepared {
         self.layout
             .store()
             .put_multipart_file_retry(
-                &self.layout.ref_journal_recovery_pack_path(plan_id),
+                &self.layout.capsule_plan_recovery_pack_path(plan_id),
                 pack.pack_path(),
                 binding.size(),
                 *pack.content_hash().as_bytes(),

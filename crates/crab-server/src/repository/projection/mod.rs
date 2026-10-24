@@ -53,6 +53,7 @@ pub(crate) async fn reconcile(
             options,
             2 * 1024 * 1024 * 1024,
             cancellation,
+            None,
         )
         .await?;
     let cell = client.repository(context.repository_id)?;

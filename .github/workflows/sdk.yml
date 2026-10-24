@@ -2,7 +2,7 @@ name: Rust SDK
 
 on:
   push:
-    branches: [main]
+    branches: [main, crab-v2]
     paths:
       - ".github/workflows/sdk.yml"
       - "Cargo.lock"
@@ -20,7 +20,7 @@ on:
       - "crates/crab-*/**"
       - "packages/web/content/docs/sdk/**"
   pull_request:
-    branches: [main]
+    branches: [main, crab-v2]
     paths:
       - ".github/workflows/sdk.yml"
       - "Cargo.lock"
@@ -191,7 +191,9 @@ jobs:
           npm run build --prefix packages/ui
       - name: Qualify shared publication owners
         run: |
-          cargo "+${SDK_MSRV}" test -p crab-remote --locked --all-features --test publication
+          cargo "+${SDK_MSRV}" test -p crab-remote --locked --all-features --test publication --test capsule_preparation
+          cargo "+${SDK_MSRV}" test -p crab-metadata --locked capsule_protocol::plan::tests
+          cargo "+${SDK_MSRV}" test -p crab-remote-git --locked budget::tests
           cargo "+${SDK_MSRV}" test -p crab-metadata --locked plan_receipt::tests
           cargo "+${SDK_MSRV}" test -p crab-metadata --locked --test plan_receipt_recovery
           cargo "+${SDK_MSRV}" test -p crab-write --locked --test journal --test generation --test catalog

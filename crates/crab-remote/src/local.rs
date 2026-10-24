@@ -15,7 +15,7 @@ pub const CAPABILITIES_SCHEMA_VERSION: u32 = 1;
 
 /// Minimum compatible local-workflow protocol implemented by this crate.
 pub const LOCAL_WORKFLOW_PROTOCOL_VERSION: u32 = 1;
-pub const STORAGE_FORMAT_VERSION: u32 = 1;
+pub const STORAGE_FORMAT_VERSION: u32 = 2;
 pub const STAGING_FORMAT_VERSION: u32 = 1;
 
 /// Process-local bridge to the canonical durable publication-plan owner.
@@ -27,7 +27,7 @@ pub const CURRENT_CAPABILITIES_JSON: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     "\",\"product_build\":\"crab-remote/",
     env!("CARGO_PKG_VERSION"),
-    "\",\"local_workflow_protocol\":1,\"storage_format_version\":1,\"staging_format_version\":1,\"operations\":[\"clone\",\"fetch-content\",\"stage\",\"hydrate\",\"dehydrate\",\"filter-process\",\"remote-helper\"]}"
+    "\",\"local_workflow_protocol\":1,\"storage_format_version\":2,\"staging_format_version\":1,\"operations\":[\"clone\",\"fetch-content\",\"stage\",\"hydrate\",\"dehydrate\",\"filter-process\",\"remote-helper\"]}"
 );
 
 /// Capabilities advertised by a Crab executable to a local SDK client.
@@ -141,6 +141,7 @@ pub const MAX_TOOL_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 #[derive(Clone)]
 pub struct LocalTools {
     inner: Arc<ToolEnvironment>,
+    environment: Arc<Vec<(OsString, Option<OsString>)>>,
 }
 
 struct ToolEnvironment {
@@ -167,7 +168,20 @@ impl LocalTools {
                 directory,
                 hooks,
             }),
+            environment: Arc::new(Vec::new()),
         })
+    }
+
+    /// Scope environment overrides and removals to every invocation of these tools.
+    ///
+    /// Child filters and helpers inherit the same selection. The process-global
+    /// environment and sibling tool instances remain untouched.
+    #[must_use]
+    pub fn with_environment(&self, environment: Vec<(OsString, Option<OsString>)>) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            environment: Arc::new(environment),
+        }
     }
 
     /// Return the selected Git executable.
@@ -468,6 +482,16 @@ impl LocalTools {
             .kill_on_drop(true);
         if let Some(current_dir) = current_dir {
             command.current_dir(current_dir);
+        }
+        for (key, value) in self.environment.iter() {
+            match value {
+                Some(value) => {
+                    command.env(key, value);
+                }
+                None => {
+                    command.env_remove(key);
+                }
+            }
         }
         command.envs(env);
         let path = process_path(self.inner.directory.path());

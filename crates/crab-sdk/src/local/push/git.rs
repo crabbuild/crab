@@ -22,10 +22,10 @@ pub(super) async fn validate(
         .0
         .operations
         .run(options, move |cancel| async move {
-            let root = validate_git_binding(&tools.owner, &recovery, &cancel).await?;
+            let root = local_binding(&tools.owner, &recovery, &cancel).await?;
             validate_local_targets(&tools.owner, &root, &recovery.0.updates, &cancel).await?;
             let advertised = remote_refs(&tools.owner, &root, &recovery.0.remote, &cancel).await?;
-            if !refs_match(&advertised, &recovery.0.updates, RefState::Expected) {
+            if !expected_refs_match(&advertised, &recovery.0.updates) {
                 return Err(Error::new(
                     ErrorKind::Conflict,
                     "remote refs changed after push preparation",
@@ -36,33 +36,17 @@ pub(super) async fn validate(
         .await
 }
 
-pub(super) async fn validate_local_only(
-    client: &Client,
-    recovery: LocalPushRecoveryToken,
-    options: OperationOptions,
-) -> Result<()> {
-    let tools = client.0.local_tools.clone().ok_or_else(|| {
-        Error::new(
-            ErrorKind::InvalidInput,
-            "local tools are required for push validation",
-        )
-    })?;
-    client
-        .0
-        .operations
-        .run(options, move |cancel| async move {
-            let root = validate_git_binding(&tools.owner, &recovery, &cancel).await?;
-            validate_local_targets(&tools.owner, &root, &recovery.0.updates, &cancel).await
-        })
-        .await
-}
-
 pub(super) async fn execute(
     client: &Client,
     recovery: LocalPushRecoveryToken,
-    dry_run: bool,
     options: OperationOptions,
 ) -> Result<LocalPushOutcome> {
+    if recovery.0.trusted_execution && !client.0.local_execution_policy.is_trusted() {
+        return Err(Error::new(
+            ErrorKind::Authorization,
+            "prepared Git push requires explicitly trusted local execution",
+        ));
+    }
     let tools = client.0.local_tools.clone().ok_or_else(|| {
         Error::new(
             ErrorKind::InvalidInput,
@@ -72,8 +56,8 @@ pub(super) async fn execute(
     client
         .0
         .operations
-        .run(options, move |cancel| async move {
-            let root = validate_git_binding(&tools.owner, &recovery, &cancel).await?;
+        .run_mutation(options, move |cancel| async move {
+            let root = local_binding(&tools.owner, &recovery, &cancel).await?;
             let common =
                 super::super::git_path(&tools.owner, &root, "--git-common-dir", &cancel).await?;
             let _lease = crab_remote::local::acquire_repository_lease(&common, &cancel)
@@ -81,46 +65,40 @@ pub(super) async fn execute(
                 .map_err(local_error)?;
             validate_local_targets(&tools.owner, &root, &recovery.0.updates, &cancel).await?;
             let advertised = remote_refs(&tools.owner, &root, &recovery.0.remote, &cancel).await?;
-            if !refs_match(&advertised, &recovery.0.updates, RefState::Expected) {
+            if !expected_refs_match(&advertised, &recovery.0.updates) {
                 return Err(Error::new(
                     ErrorKind::Conflict,
                     "remote refs changed after push preparation",
                 ));
             }
-            let args = git_push_arguments(&recovery, dry_run);
+            let args = git_push_arguments(&recovery);
             match tools
                 .owner
-                .run_git(Some(&root), args, recovery.0.trusted_execution, &cancel)
+                .run_git_with_env(
+                    Some(&root),
+                    args,
+                    [("LC_ALL", "C")],
+                    recovery.0.trusted_execution,
+                    &cancel,
+                )
                 .await
             {
-                Ok(_) => Ok(LocalPushOutcome::TransportCommitted {
-                    destinations: destinations(&recovery),
-                }),
-                Err(crab_remote::local::LocalError::Cancelled) => {
-                    Err(Error::new(ErrorKind::Cancelled, "local Git push cancelled"))
-                }
-                Err(crab_remote::local::LocalError::Spawn { source, .. }) => Err(
+                Ok(_) => Ok(satisfied(&recovery)),
+                Err(source @ crab_remote::local::LocalError::Spawn { .. }) => Err(
                     Error::with_source(ErrorKind::Io, "cannot start local Git push", source),
                 ),
-                Err(source) => {
-                    let refreshed =
-                        remote_refs(&tools.owner, &root, &recovery.0.remote, &cancel).await;
-                    match refreshed {
-                        Ok(refs) if refs_match(&refs, &recovery.0.updates, RefState::Target) => {
-                            Ok(LocalPushOutcome::TransportCommitted {
-                                destinations: destinations(&recovery),
-                            })
-                        }
-                        Ok(refs) if refs_match(&refs, &recovery.0.updates, RefState::Expected) => {
-                            Err(Error::with_source(
-                                ErrorKind::Conflict,
-                                "Git transport rejected the prepared push",
-                                source,
-                            ))
-                        }
-                        _ => Ok(LocalPushOutcome::Indeterminate { recovery }),
-                    }
+                Err(crab_remote::local::LocalError::Exit(output))
+                    if rejected(&output.stdout, &recovery.0.updates) =>
+                {
+                    Err(Error::with_source(
+                        ErrorKind::Conflict,
+                        "Git transport rejected the prepared push",
+                        crab_remote::local::LocalError::Exit(output),
+                    ))
                 }
+                // After invocation, cancellation and transport errors can hide a
+                // successful receive-pack. Current refs cannot attribute history.
+                Err(_) => Ok(LocalPushOutcome::Indeterminate { recovery }),
             }
         })
         .await
@@ -141,31 +119,41 @@ pub(super) async fn reconcile(
         .0
         .operations
         .run(options, move |cancel| async move {
-            let root = validate_git_binding(&tools.owner, &recovery, &cancel).await?;
-            let advertised = remote_refs(&tools.owner, &root, &recovery.0.remote, &cancel).await?;
-            if refs_match(&advertised, &recovery.0.updates, RefState::Target) {
-                return Ok(LocalPushOutcome::TransportCommitted {
-                    destinations: destinations(&recovery),
-                });
-            }
-            if refs_match(&advertised, &recovery.0.updates, RefState::Expected) {
-                return Err(Error::new(
-                    ErrorKind::Conflict,
-                    "prepared Git transport push was not committed",
-                ));
-            }
+            local_binding(&tools.owner, &recovery, &cancel).await?;
+            // Git has no durable attempt receipt. A saved token cannot distinguish
+            // unattempted work from a lost acknowledgement, so it cannot replay.
             Ok(LocalPushOutcome::Indeterminate { recovery })
         })
         .await
 }
 
-#[derive(Clone, Copy)]
-enum RefState {
-    Expected,
-    Target,
+// git-push(1) porcelain distinguishes definite rejection from "remote failure",
+// which explicitly includes lost replies. Require proof for every selected ref.
+fn rejected(stdout: &[u8], updates: &[LocalPushUpdate]) -> bool {
+    let Ok(text) = std::str::from_utf8(stdout) else {
+        return false;
+    };
+    let mut rejected = std::collections::BTreeSet::new();
+    for line in text.lines() {
+        let mut fields = line.split('\t');
+        let (Some("!"), Some(refspec), Some(summary), None) =
+            (fields.next(), fields.next(), fields.next(), fields.next())
+        else {
+            continue;
+        };
+        let Some((_, destination)) = refspec.split_once(':') else {
+            continue;
+        };
+        if summary.starts_with("[rejected]") || summary.starts_with("[remote rejected]") {
+            rejected.insert(destination);
+        }
+    }
+    updates
+        .iter()
+        .all(|update| rejected.contains(update.destination.as_str()))
 }
 
-async fn validate_git_binding(
+pub(super) async fn local_binding(
     tools: &crab_remote::local::LocalTools,
     recovery: &LocalPushRecoveryToken,
     cancel: &tokio_util::sync::CancellationToken,
@@ -175,9 +163,10 @@ async fn validate_git_binding(
             repository,
             remote_url_hash,
         }
-        | LocalPushBackend::LocalOnly {
+        | LocalPushBackend::NativeValidation {
             repository,
             remote_url_hash,
+            ..
         } => (repository, remote_url_hash),
         LocalPushBackend::Crab { .. } => {
             return Err(Error::new(
@@ -190,7 +179,7 @@ async fn validate_git_binding(
     let current = git_line(
         tools,
         &root,
-        ["remote", "get-url", &recovery.0.remote],
+        ["remote", "get-url", "--push", "--all", &recovery.0.remote],
         cancel,
     )
     .await?;
@@ -203,7 +192,7 @@ async fn validate_git_binding(
     Ok(root)
 }
 
-async fn validate_local_targets(
+pub(super) async fn validate_local_targets(
     tools: &crab_remote::local::LocalTools,
     root: &Path,
     updates: &[LocalPushUpdate],
@@ -230,8 +219,20 @@ pub(super) async fn remote_refs(
     remote: &str,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<std::collections::BTreeMap<String, String>> {
+    let url = git_line(
+        tools,
+        root,
+        ["remote", "get-url", "--push", "--all", remote],
+        cancel,
+    )
+    .await?;
     let output = tools
-        .run_git(Some(root), ["ls-remote", "--refs", remote], false, cancel)
+        .run_git(
+            Some(root),
+            ["ls-remote", "--refs", "--", url.as_str()],
+            false,
+            cancel,
+        )
         .await
         .map_err(local_error)?;
     let text = std::str::from_utf8(&output.stdout).map_err(|source| {
@@ -264,29 +265,21 @@ pub(super) async fn remote_refs(
     Ok(refs)
 }
 
-fn refs_match(
+fn expected_refs_match(
     refs: &std::collections::BTreeMap<String, String>,
     updates: &[LocalPushUpdate],
-    state: RefState,
 ) -> bool {
-    updates.iter().all(|update| {
-        let expected = match state {
-            RefState::Expected => update.expected.as_ref(),
-            RefState::Target => update.target.as_ref(),
-        };
-        refs.get(&update.destination) == expected
-    })
+    updates
+        .iter()
+        .all(|update| refs.get(&update.destination) == update.expected.as_ref())
 }
 
-fn git_push_arguments(recovery: &LocalPushRecoveryToken, dry_run: bool) -> Vec<OsString> {
+fn git_push_arguments(recovery: &LocalPushRecoveryToken) -> Vec<OsString> {
     let mut args = vec![
         OsString::from("push"),
         OsString::from("--porcelain"),
         OsString::from("--atomic"),
     ];
-    if dry_run {
-        args.push(OsString::from("--dry-run"));
-    }
     for update in &recovery.0.updates {
         let expected = update.expected.as_deref().unwrap_or_default();
         args.push(OsString::from(format!(
@@ -304,11 +297,62 @@ fn git_push_arguments(recovery: &LocalPushRecoveryToken, dry_run: bool) -> Vec<O
     args
 }
 
-fn destinations(recovery: &LocalPushRecoveryToken) -> Vec<String> {
-    recovery
-        .0
-        .updates
-        .iter()
-        .map(|update| update.destination.clone())
-        .collect()
+pub(super) fn satisfied(recovery: &LocalPushRecoveryToken) -> LocalPushOutcome {
+    LocalPushOutcome::TransportCommitted {
+        destinations: recovery
+            .0
+            .updates
+            .iter()
+            .map(|update| update.destination.clone())
+            .collect(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn only_complete_explicit_porcelain_rejections_prove_failure() {
+        let updates = ["refs/heads/main", "refs/tags/release"].map(|destination| LocalPushUpdate {
+            source: None,
+            destination: destination.to_owned(),
+            expected: None,
+            target: None,
+        });
+        for (statuses, expected) in [
+            (
+                [
+                    "[remote rejected] (hook declined)",
+                    "[rejected] (stale info)",
+                ],
+                true,
+            ),
+            (
+                [
+                    "[remote failure] (remote failed to report status)",
+                    "[rejected] (stale info)",
+                ],
+                false,
+            ),
+            (
+                ["[remote rejected] (hook declined)", "[remote failure]"],
+                false,
+            ),
+        ] {
+            let stdout = format!(
+                "!\t:refs/heads/main\t{}\n!\t:refs/tags/release\t{}\n",
+                statuses[0], statuses[1]
+            );
+            assert_eq!(
+                rejected(stdout.as_bytes(), &updates),
+                expected,
+                "{statuses:?}"
+            );
+        }
+        assert!(!rejected(
+            b"!\t:refs/heads/main\t[remote rejected] (hook declined)\n",
+            &updates
+        ));
+    }
 }

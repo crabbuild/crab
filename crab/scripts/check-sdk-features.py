@@ -18,7 +18,7 @@ PROFILES = {
     "managed-write": ("managed", "write"),
     "local-managed": ("local", "managed"),
 }
-HYDRATION = {"crab-read", "crab-lfs", "crab-cache", "crab-cache-store", "xet-data", "xet-client"}
+HYDRATION = { "crab-lfs", "crab-cache", "crab-cache-store", "xet-data", "xet-client"}
 
 
 def violations(profile, features, packages):
@@ -29,7 +29,7 @@ def violations(profile, features, packages):
         forbidden |= packages & {"tokio", "tokio-util", "object_store"}
         forbidden |= {name for name in packages if name.startswith("crab-") and name != "crab-sdk"}
     else:
-        required |= {"crab-remote-git", "crab-storage"}
+        required |= {"crab-remote-git", "crab-storage", "crab-read"}
         if "content" not in features and "write" not in features and "local" not in features:
             forbidden |= packages & HYDRATION
         else:

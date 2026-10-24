@@ -462,6 +462,7 @@ async fn compacted_frontier_uses_resident_indexes_and_verifies_payloads() {
             crab_remote_git::RepositoryOptions::default(),
             LIMIT,
             &cancel,
+            None,
         )
         .await
         .unwrap();
@@ -512,6 +513,7 @@ async fn compacted_frontier_uses_resident_indexes_and_verifies_payloads() {
                 crab_remote_git::RepositoryOptions::default(),
                 LIMIT,
                 &cancel,
+                None,
             )
             .await;
         if scenario == "corrupt-index" {
@@ -1260,6 +1262,7 @@ async fn compacted_repeated_packs_preserve_member_positions_and_ref_state() {
             crab_remote_git::RepositoryOptions::default(),
             LIMIT,
             &cancel,
+            None,
         )
         .await
         .unwrap();
@@ -1533,6 +1536,7 @@ async fn uncheckpointed_reader_retains_origin_placement_and_exact_blob_bytes() {
             crab_remote_git::RepositoryOptions::default(),
             LIMIT,
             &cancel,
+            None,
         )
         .await
         .unwrap();
@@ -1569,6 +1573,7 @@ async fn uncheckpointed_reader_preserves_pack_byte_admission_before_origin_reads
             crab_remote_git::RepositoryOptions::default(),
             maximum,
             &CancellationToken::new(),
+            None,
         )
         .await;
     runtime.shutdown().await;
@@ -1592,6 +1597,7 @@ async fn capsule_git_snapshot_invalidates_a_reader_when_only_ref_positions_chang
             crab_remote_git::RepositoryOptions::default(),
             LIMIT,
             &CancellationToken::new(),
+            None,
         )
         .await
         .unwrap();
@@ -1741,6 +1747,7 @@ async fn capsule_git_snapshot_deduplicates_shared_packs_across_full_and_control_
                     crab_remote_git::RepositoryOptions::default(),
                     LIMIT,
                     &CancellationToken::new(),
+                    None,
                 )
                 .await
                 .unwrap();
@@ -1941,7 +1948,8 @@ async fn maintenance_rebuilds_retired_advertised_indexes_before_opening_derived_
                     runtime.clone(),
                     crab_remote_git::RepositoryOptions::default(),
                     LIMIT,
-                    &cancel
+                    &cancel,
+                    None,
                 )
                 .await
                 .is_err()

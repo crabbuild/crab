@@ -5,6 +5,20 @@ use std::sync::Arc;
 use crab_sdk::storage::DirectStoreOptions;
 use crab_sdk::{Client, ErrorKind, RepositoryLocator, RepositoryMode, Revision};
 
+async fn publish_native_root(layout: &crab_storage::StoreLayout<crab_storage::Store>) {
+    let root = crab_metadata::capsule_protocol::RepositoryRoot::initial(
+        &"a".repeat(64),
+        "refs/heads/main",
+    )
+    .unwrap();
+    crab_metadata::capsule_protocol::create_root(
+        layout,
+        crab_metadata::capsule_protocol::RootRecord::encode(root).unwrap(),
+    )
+    .await
+    .unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn public_client_opens_empty_repository_and_closes_admission_for_all_handles() {
     let directory = tempfile::tempdir().unwrap();
@@ -12,10 +26,7 @@ async fn public_client_opens_empty_repository_and_closes_admission_for_all_handl
         object_store::local::LocalFileSystem::new_with_prefix(directory.path()).unwrap(),
     ));
     let layout = crab_storage::StoreLayout::new(store.clone(), "repository".to_owned());
-    let manifest = crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main");
-    crab_metadata::manifest_store::create_manifest(&store, &layout, &manifest)
-        .await
-        .unwrap();
+    publish_native_root(&layout).await;
     let client = Client::builder()
         .direct_store(DirectStoreOptions::filesystem(directory.path()).unwrap())
         .build()
@@ -131,19 +142,13 @@ fn explicit_store_and_repository_paths_reject_ambiguous_inputs() {
 }
 
 #[tokio::test]
-async fn repository_open_charges_listing_and_manifest_reads() {
+async fn repository_open_charges_capsule_capture_reads() {
     let directory = tempfile::tempdir().unwrap();
     let store = crab_storage::Store::new(Arc::new(
         object_store::local::LocalFileSystem::new_with_prefix(directory.path()).unwrap(),
     ));
     let layout = crab_storage::StoreLayout::new(store.clone(), "repository".to_owned());
-    crab_metadata::manifest_store::create_manifest(
-        &store,
-        &layout,
-        &crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main"),
-    )
-    .await
-    .unwrap();
+    publish_native_root(&layout).await;
     for limits in [
         crab_sdk::operation::ReadLimits {
             max_storage_requests: 1,

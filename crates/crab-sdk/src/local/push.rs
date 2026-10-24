@@ -11,7 +11,7 @@ use crate::{
     Readiness, RecoveryToken, RefBatch, RefUpdate, Result, WritePolicy,
 };
 
-const LOCAL_PUSH_TOKEN_VERSION: u32 = 3;
+const LOCAL_PUSH_TOKEN_VERSION: u32 = 4;
 const MAX_LOCAL_PUSH_TOKEN_BYTES: usize = 1024 * 1024;
 
 /// Atomic direct-push selection and recovery policy.
@@ -144,9 +144,10 @@ enum LocalPushBackend {
     Crab {
         remote_recovery: String,
     },
-    LocalOnly {
+    NativeValidation {
         repository: String,
         remote_url_hash: String,
+        placement: [u8; 32],
     },
     Git {
         repository: String,
@@ -221,9 +222,10 @@ impl LocalPushRecoveryToken {
             LocalPushBackend::Crab { remote_recovery } => {
                 RecoveryToken::from_json(remote_recovery)?;
             }
-            LocalPushBackend::LocalOnly {
+            LocalPushBackend::NativeValidation {
                 repository,
                 remote_url_hash,
+                ..
             }
             | LocalPushBackend::Git {
                 repository,
@@ -248,7 +250,7 @@ impl LocalPushRecoveryToken {
             LocalPushBackend::Crab { remote_recovery } => {
                 RecoveryToken::from_json(remote_recovery).map(Some)
             }
-            LocalPushBackend::LocalOnly { .. } | LocalPushBackend::Git { .. } => Ok(None),
+            LocalPushBackend::NativeValidation { .. } | LocalPushBackend::Git { .. } => Ok(None),
         }
     }
 }
@@ -274,16 +276,13 @@ impl PreparedPush {
 
     async fn execute_with_options(self, options: OperationOptions) -> Result<LocalPushOutcome> {
         let recovery = self.recovery;
-        if recovery.0.dry_run {
-            validate_push(&self.client, &recovery, options).await?;
-            return Ok(LocalPushOutcome::DryRun {
-                destinations: recovery
-                    .0
-                    .updates
-                    .iter()
-                    .map(|update| update.destination.clone())
-                    .collect(),
-            });
+        if recovery.0.dry_run
+            || matches!(
+                recovery.0.backend,
+                LocalPushBackend::NativeValidation { .. }
+            )
+        {
+            return observe_push(&self.client, recovery, options).await;
         }
         match recovery.remote_recovery()? {
             Some(_) => {
@@ -295,7 +294,7 @@ impl PreparedPush {
                 })?;
                 outcome(mutation.execute().with_options(options).await?, recovery)
             }
-            None => git::execute(&self.client, recovery, false, options).await,
+            None => git::execute(&self.client, recovery, options).await,
         }
     }
 }
@@ -311,6 +310,7 @@ pub enum LocalPushOutcome {
     DryRun {
         destinations: Vec<String>,
     },
+    /// Git acknowledged the push, or a fresh native read found every target up to date.
     TransportCommitted {
         destinations: Vec<String>,
     },
@@ -335,7 +335,6 @@ impl LocalRepository {
         options: PushOptions,
         operation: OperationOptions,
     ) -> Result<PreparedPush> {
-        let locator = self.locator.clone();
         let tools = self.tools()?.clone();
         let root = self.root.clone();
         let common = self.common_dir.clone();
@@ -380,24 +379,36 @@ impl LocalRepository {
                 } else {
                     options.refspecs
                 };
+                let locator = super::discover_locator(
+                    &state,
+                    &tools.owner,
+                    &root,
+                    &options.remote,
+                    true,
+                    &cancel,
+                )
+                .await?;
                 let crab = locator
                     .as_ref()
                     .filter(|locator| locator.http_url().is_none());
-                let advertised = if let Some(locator) = crab {
-                    let resolved = state.resolve_repository(locator, &cancel).await?;
-                    let layout = crab_storage::StoreLayout::new(
-                        resolved.store.clone(),
-                        resolved.prefix,
-                    );
-                    tokio::select! {
-                        biased;
-                        () = cancel.cancelled() => return Err(Error::new(ErrorKind::Cancelled, "local push preparation cancelled")),
-                        result = crab_metadata::manifest_store::read_repository_snapshot(&resolved.store, &layout) => {
-                            result.map_err(metadata_error)?.journal.refs
-                        }
-                    }
+                let (advertised, placement) = if let Some(locator) = crab {
+                    let capture = state
+                        .capture_repository(locator, &mutation_options, &cancel)
+                        .await?;
+                    (
+                        capture.capsule.refs().clone(),
+                        Some(*capture.resolved.store.target_identity().ok_or_else(|| {
+                            Error::new(
+                                ErrorKind::Corruption,
+                                "native push has no placement identity",
+                            )
+                        })?),
+                    )
                 } else {
-                    git::remote_refs(&tools.owner, &root, &options.remote, &cancel).await?
+                    (
+                        git::remote_refs(&tools.owner, &root, &options.remote, &cancel).await?,
+                        None,
+                    )
                 };
                 let mut edits = Vec::with_capacity(refspecs.len());
                 let mut local_updates = Vec::with_capacity(refspecs.len());
@@ -418,46 +429,50 @@ impl LocalRepository {
                         )?),
                         None => None,
                     };
-                    let edit = match (expected, target) {
-                        (Some(expected), Some(target)) => {
-                            if matches!(options.policy, WritePolicy::FastForward) {
-                                if refspec.destination.starts_with("refs/heads/") {
-                                    tools
-                                        .owner
-                                        .run_git(
-                                            Some(&root),
-                                            [
-                                                "merge-base",
-                                                "--is-ancestor",
-                                                &expected.to_string(),
-                                                &target.to_string(),
-                                            ],
-                                            false,
-                                            &cancel,
-                                        )
-                                        .await
-                                        .map_err(local_error)?;
-                                } else if expected != target {
-                                    return Err(Error::new(
-                                        ErrorKind::Conflict,
-                                        "tag replacement requires force with lease",
-                                    ));
+                    if target.is_none() || expected != target {
+                        let edit = match (expected, target) {
+                            (Some(expected), Some(target)) => {
+                                if matches!(options.policy, WritePolicy::FastForward) {
+                                    if refspec.destination.starts_with("refs/heads/") {
+                                        tools
+                                            .owner
+                                            .run_git(
+                                                Some(&root),
+                                                [
+                                                    "merge-base",
+                                                    "--is-ancestor",
+                                                    &expected.to_string(),
+                                                    &target.to_string(),
+                                                ],
+                                                false,
+                                                &cancel,
+                                            )
+                                            .await
+                                            .map_err(local_error)?;
+                                    } else if expected != target {
+                                        return Err(Error::new(
+                                            ErrorKind::Conflict,
+                                            "tag replacement requires force with lease",
+                                        ));
+                                    }
                                 }
+                                RefUpdate::update(&refspec.destination, expected, target)?
                             }
-                            RefUpdate::update(&refspec.destination, expected, target)?
-                        }
-                        (None, Some(target)) => RefUpdate::create(&refspec.destination, target)?,
-                        (Some(expected), None) => {
-                            RefUpdate::delete(&refspec.destination, expected)?
-                        }
-                        (None, None) => {
-                            return Err(Error::new(
-                                ErrorKind::NotFound,
-                                "cannot delete a missing remote ref",
-                            ));
-                        }
-                    };
-                    edits.push(edit);
+                            (None, Some(target)) => {
+                                RefUpdate::create(&refspec.destination, target)?
+                            }
+                            (Some(expected), None) => {
+                                RefUpdate::delete(&refspec.destination, expected)?
+                            }
+                            (None, None) => {
+                                return Err(Error::new(
+                                    ErrorKind::NotFound,
+                                    "cannot delete a missing remote ref",
+                                ));
+                            }
+                        };
+                        edits.push(edit);
+                    }
                     local_updates.push(LocalPushUpdate {
                         source: refspec.source,
                         destination: refspec.destination,
@@ -465,17 +480,12 @@ impl LocalRepository {
                         target: target.map(|target| target.to_string()),
                     });
                 }
-                if crab.is_none() {
-                    let repository = root.to_str().ok_or_else(|| {
-                        Error::new(
-                            ErrorKind::UnsupportedCapability,
-                            "Git transport recovery requires a Unicode repository path",
-                        )
-                    })?;
-                    let remote_url = git_line(
+                if crab.is_none() || edits.is_empty() {
+                    let backend = bind_local_backend(
                         &tools.owner,
                         &root,
-                        ["remote", "get-url", &options.remote],
+                        &options.remote,
+                        placement,
                         &cancel,
                     )
                     .await?;
@@ -486,10 +496,7 @@ impl LocalRepository {
                         dry_run: options.dry_run,
                         policy: options.policy,
                         trusted_execution: trusted,
-                        backend: LocalPushBackend::Git {
-                            repository: repository.to_owned(),
-                            remote_url_hash: blake3::hash(remote_url.as_bytes()).to_hex().to_string(),
-                        },
+                        backend,
                     });
                     validate_token_size(&recovery)?;
                     return Ok(PreparedPush {
@@ -544,26 +551,11 @@ impl LocalRepository {
                     Some(mutation) => LocalPushBackend::Crab {
                         remote_recovery: mutation.recovery_token().to_json()?,
                     },
+                    // Managed dry-run validates the prepared pack without reserving
+                    // a service session. Retain only its read-only selection binding.
                     None => {
-                        let repository = root.to_str().ok_or_else(|| {
-                            Error::new(
-                                ErrorKind::UnsupportedCapability,
-                                "local push recovery requires a Unicode repository path",
-                            )
-                        })?;
-                        let remote_url = git_line(
-                            &tools.owner,
-                            &root,
-                            ["remote", "get-url", &options.remote],
-                            &cancel,
-                        )
-                        .await?;
-                        LocalPushBackend::LocalOnly {
-                            repository: repository.to_owned(),
-                            remote_url_hash: blake3::hash(remote_url.as_bytes())
-                                .to_hex()
-                                .to_string(),
-                        }
+                        bind_local_backend(&tools.owner, &root, &options.remote, placement, &cancel)
+                            .await?
                     }
                 };
                 let recovery = LocalPushRecoveryToken(LocalPushBinding {
@@ -594,12 +586,15 @@ impl Client {
         scratch: std::path::PathBuf,
         options: OperationOptions,
     ) -> Result<LocalPushOutcome> {
+        if recovery.0.dry_run {
+            return observe_push(self, recovery, options).await;
+        }
         match recovery.remote_recovery()? {
             Some(remote) => {
                 let mutation = self.resume_mutation(remote, scratch, options).await?;
                 outcome(mutation, recovery)
             }
-            None => git::execute(self, recovery, false, options).await,
+            None => observe_push(self, recovery, options).await,
         }
     }
 
@@ -609,14 +604,148 @@ impl Client {
         recovery: LocalPushRecoveryToken,
         options: OperationOptions,
     ) -> Result<LocalPushOutcome> {
+        if recovery.0.dry_run {
+            return observe_push(self, recovery, options).await;
+        }
         match recovery.remote_recovery()? {
             Some(remote) => {
                 let mutation = self.reconcile(remote, options).await?;
                 outcome(mutation, recovery)
             }
-            None => git::reconcile(self, recovery, options).await,
+            None => observe_push(self, recovery, options).await,
         }
     }
+}
+
+async fn bind_local_backend(
+    tools: &crab_remote::local::LocalTools,
+    root: &std::path::Path,
+    remote: &str,
+    placement: Option<[u8; 32]>,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<LocalPushBackend> {
+    let repository = root
+        .to_str()
+        .ok_or_else(|| {
+            Error::new(
+                ErrorKind::UnsupportedCapability,
+                "local push recovery requires a Unicode repository path",
+            )
+        })?
+        .to_owned();
+    let remote_url = git_line(
+        tools,
+        root,
+        ["remote", "get-url", "--push", "--all", remote],
+        cancel,
+    )
+    .await?;
+    let remote_url_hash = blake3::hash(remote_url.as_bytes()).to_hex().to_string();
+    Ok(match placement {
+        Some(placement) => LocalPushBackend::NativeValidation {
+            repository,
+            remote_url_hash,
+            placement,
+        },
+        None => LocalPushBackend::Git {
+            repository,
+            remote_url_hash,
+        },
+    })
+}
+
+async fn observe_push(
+    client: &Client,
+    recovery: LocalPushRecoveryToken,
+    options: OperationOptions,
+) -> Result<LocalPushOutcome> {
+    if recovery.0.dry_run {
+        validate_push(client, &recovery, options).await?;
+        return Ok(LocalPushOutcome::DryRun {
+            destinations: recovery
+                .0
+                .updates
+                .iter()
+                .map(|update| update.destination.clone())
+                .collect(),
+        });
+    }
+    if matches!(
+        recovery.0.backend,
+        LocalPushBackend::NativeValidation { .. }
+    ) {
+        validate_native_selection(client, recovery.clone(), options).await?;
+        return Ok(git::satisfied(&recovery));
+    }
+    git::reconcile(client, recovery, options).await
+}
+
+async fn validate_native_selection(
+    client: &Client,
+    recovery: LocalPushRecoveryToken,
+    options: OperationOptions,
+) -> Result<()> {
+    let LocalPushBackend::NativeValidation { placement, .. } = recovery.0.backend else {
+        return Err(Error::new(
+            ErrorKind::InvalidInput,
+            "native validation requires its placement binding",
+        ));
+    };
+    let state = client.0.clone();
+    let tools = state.local_tools.clone().ok_or_else(|| {
+        Error::new(
+            ErrorKind::InvalidInput,
+            "local tools are required for push validation",
+        )
+    })?;
+    let read_options = options.clone();
+    client
+        .0
+        .operations
+        .run(options, move |cancel| async move {
+            let root = git::local_binding(&tools.owner, &recovery, &cancel).await?;
+            let common = super::git_path(&tools.owner, &root, "--git-common-dir", &cancel).await?;
+            let _lease = crab_remote::local::acquire_repository_lease(&common, &cancel)
+                .await
+                .map_err(local_error)?;
+            git::validate_local_targets(&tools.owner, &root, &recovery.0.updates, &cancel).await?;
+            let locator = super::discover_locator(
+                &state,
+                &tools.owner,
+                &root,
+                &recovery.0.remote,
+                true,
+                &cancel,
+            )
+            .await?
+            .ok_or_else(|| {
+                Error::new(ErrorKind::Conflict, "native push remote changed transport")
+            })?;
+            let captured = state
+                .capture_repository(&locator, &read_options, &cancel)
+                .await?;
+            if captured.resolved.store.target_identity() != Some(&placement) {
+                return Err(Error::new(
+                    ErrorKind::Conflict,
+                    "native push placement changed",
+                ));
+            }
+            for update in &recovery.0.updates {
+                let selected = if recovery.0.dry_run {
+                    &update.expected
+                } else {
+                    &update.target
+                };
+                if captured.capsule.refs().get(&update.destination) != selected.as_ref() {
+                    return Err(Error::new(
+                        ErrorKind::Conflict,
+                        "native remote ref changed after read-only preparation",
+                    ));
+                }
+            }
+            Ok(())
+        })
+        .await
 }
 
 fn validate_token_size(recovery: &LocalPushRecoveryToken) -> Result<()> {
@@ -637,17 +766,18 @@ async fn validate_push(
     match &recovery.0.backend {
         LocalPushBackend::Crab { remote_recovery } => {
             let remote = RecoveryToken::from_json(remote_recovery)?;
-            let store = client.0.store.clone();
+            let state = client.0.clone();
+            let read_options = options.clone();
             client
                 .0
                 .operations
                 .run(options, move |cancel| async move {
-                    validate_direct_remote_snapshot(&store, &remote, &cancel).await
+                    validate_direct_remote_snapshot(&state, &remote, &read_options, &cancel).await
                 })
                 .await
         }
-        LocalPushBackend::LocalOnly { .. } => {
-            git::validate_local_only(client, recovery.clone(), options).await
+        LocalPushBackend::NativeValidation { .. } => {
+            validate_native_selection(client, recovery.clone(), options).await
         }
         LocalPushBackend::Git { .. } => git::validate(client, recovery.clone(), options).await,
     }
@@ -765,21 +895,18 @@ async fn upstream_destination(
 }
 
 async fn validate_direct_remote_snapshot(
-    store: &crab_storage::Store,
+    state: &crate::client::ClientState,
     recovery: &RecoveryToken,
+    options: &OperationOptions,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     let locator = recovery.locator()?;
-    let layout = crab_storage::StoreLayout::new(store.clone(), locator.direct_prefix()?.to_owned());
-    let current = tokio::select! {
-        biased;
-        () = cancel.cancelled() => {
-            return Err(Error::new(ErrorKind::Cancelled, "local push dry-run cancelled"));
-        }
-        result = crab_metadata::manifest_store::read_repository_snapshot(store, &layout) => {
-            result.map_err(metadata_error)?.journal.refs
-        }
-    };
+    let current = state
+        .capture_repository(&locator, options, cancel)
+        .await?
+        .capsule
+        .refs()
+        .clone();
     for update in recovery.ref_batch().edits() {
         let actual = current
             .get(update.name())
@@ -833,14 +960,6 @@ fn validate_source(source: &str) -> Result<()> {
     } else {
         validate_destination(source)
     }
-}
-
-fn metadata_error(source: crab_metadata::error::MetadataError) -> Error {
-    Error::with_source(
-        crate::remote_error::metadata_kind(&source),
-        "cannot read direct remote refs",
-        source,
-    )
 }
 
 #[cfg(all(test, unix))]

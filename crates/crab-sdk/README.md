@@ -56,6 +56,21 @@ crab-sdk = { git = "https://github.com/crabbuild/crab", rev = "<COMMIT>", defaul
 crab-sdk = { git = "https://github.com/crabbuild/crab", rev = "<COMMIT>", default-features = false, features = ["local", "managed"] }
 ```
 
+## Repository protocol
+
+The SDK targets native crab-v2 capsule repositories. A verified `v2/root`
+is the sole repository authority. Legacy v1 manifests are never used as an
+alternate authority, including when native metadata is corrupt. V1-only
+repositories require an explicit migration outside normal SDK opening; SDK
+initialization creates or adopts a native capsule root without converting an
+existing prefix. Matching native browse indexes accelerate reads when available;
+opening never repairs them or ignores corruption in a current descriptor.
+
+Remote recovery tokens use version 5; local push tokens use version 4. Tokens
+from the previous SDK protocol must be prepared again. Git LFS and Crab pointer
+file formats retain their existing version markers; those do not select the
+repository storage protocol.
+
 ## Remote repositories
 
 Direct remote access talks to S3, GCS, or Azure object storage and does not
@@ -206,8 +221,12 @@ response. Persist their family-specific recovery tokens and recover with:
 - `Client::resume_remote` or `Client::reconcile_remote`
 - `Client::resume_local_push` or `Client::reconcile_local_push`
 
-The SDK never infers an indeterminate result from current refs and never
-replays a mutation implicitly.
+Native capsule recovery reads durable plan evidence and never infers historical
+success from current refs. Git transport tokens cannot prove whether execution
+was attempted: resume and reconciliation remain indeterminate and never replay.
+Execute the original prepared Git handle for a fresh attempt. Unchanged native
+pushes revalidate their source, placement and current remote refs without writing.
+A saved token cannot enable trusted execution on an untrusted client.
 
 ## Errors and shutdown
 
