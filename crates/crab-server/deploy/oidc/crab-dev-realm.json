@@ -1,0 +1,87 @@
+{
+  "realm": "crab-dev",
+  "enabled": true,
+  "sslRequired": "none",
+  "registrationAllowed": false,
+  "accessTokenLifespan": 900,
+  "groups": [{ "name": "crab-writers" }, { "name": "crab-readers" }],
+  "clients": [
+    {
+      "clientId": "crab-browser",
+      "protocol": "openid-connect",
+      "enabled": true,
+      "publicClient": true,
+      "standardFlowEnabled": true,
+      "implicitFlowEnabled": false,
+      "directAccessGrantsEnabled": false,
+      "redirectUris": [
+        "http://127.0.0.1:5175/auth/callback",
+        "http://127.0.0.1:8788/auth/callback"
+      ],
+      "attributes": { "pkce.code.challenge.method": "S256" },
+      "defaultClientScopes": ["profile", "email"],
+      "protocolMappers": [
+        {
+          "name": "Crab groups",
+          "protocol": "openid-connect",
+          "protocolMapper": "oidc-group-membership-mapper",
+          "config": {
+            "claim.name": "groups",
+            "full.path": "true",
+            "id.token.claim": "true",
+            "access.token.claim": "false",
+            "userinfo.token.claim": "false"
+          }
+        }
+      ]
+    }
+  ],
+  "users": [
+    {
+      "id": "a11ce000-0000-4000-8000-000000000001",
+      "username": "alice",
+      "email": "alice@example.test",
+      "firstName": "Alice",
+      "lastName": "Developer",
+      "enabled": true,
+      "credentials": [
+        { "type": "password", "value": "crab-local", "temporary": false }
+      ]
+    },
+    {
+      "id": "b0b00000-0000-4000-8000-000000000002",
+      "username": "bob",
+      "email": "bob@example.test",
+      "firstName": "Bob",
+      "lastName": "Developer",
+      "enabled": true,
+      "groups": ["/crab-writers"],
+      "credentials": [
+        { "type": "password", "value": "crab-local", "temporary": false }
+      ]
+    },
+    {
+      "id": "c0000000-0000-4000-8000-000000000003",
+      "username": "reader",
+      "email": "reader@example.test",
+      "firstName": "Read",
+      "lastName": "Only",
+      "enabled": true,
+      "groups": ["/crab-readers"],
+      "credentials": [
+        { "type": "password", "value": "crab-local", "temporary": false }
+      ]
+    },
+    {
+      "id": "d0000000-0000-4000-8000-000000000004",
+      "username": "outsider",
+      "email": "outsider@example.test",
+      "firstName": "Unaffiliated",
+      "lastName": "User",
+      "enabled": true,
+      "credentials": [
+        { "type": "password", "value": "crab-local", "temporary": false }
+      ]
+    }
+  ]
+}
