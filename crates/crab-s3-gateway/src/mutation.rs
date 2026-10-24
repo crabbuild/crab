@@ -15,7 +15,7 @@ use gix_hash::ObjectId;
 use gix_object::{Kind, bstr::BString, tree};
 use md5::Digest as _;
 use tokio::sync::{Notify, Semaphore, oneshot};
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
     attributes,
@@ -189,6 +189,7 @@ pub(crate) struct Coordinator {
     options: crab_remote_git::RepositoryOptions,
     admission: WriteAdmission,
     checkpoints: Arc<CheckpointScheduler>,
+    tasks: TaskTracker,
     metrics: Metrics,
 }
 
@@ -196,6 +197,7 @@ struct BatchContext {
     runtime: Arc<crab_remote_git::RemoteGitRuntime>,
     options: crab_remote_git::RepositoryOptions,
     checkpoints: Arc<CheckpointScheduler>,
+    tasks: TaskTracker,
     metrics: Metrics,
 }
 
@@ -211,11 +213,17 @@ impl Coordinator {
             options,
             admission: WriteAdmission::default(),
             checkpoints: Arc::new(CheckpointScheduler::new(cancellation, metrics.clone())),
+            tasks: TaskTracker::new(),
             metrics,
         }
     }
 
     pub(crate) async fn shutdown(&self) {
+        self.checkpoints.cancellation.cancel();
+        self.tasks.close();
+        // Workers register maintenance before exiting. Drain that ownership
+        // chain before the read runtime or Tokio can close catalog handles.
+        self.tasks.wait().await;
         self.checkpoints.shutdown().await;
     }
 
@@ -228,6 +236,10 @@ impl Coordinator {
         principal: &str,
         cancel: &CancellationToken,
     ) -> Result<Outcome> {
+        // Register before checking shutdown, so a request that can spawn a
+        // worker cannot race the tracker's final empty observation.
+        let _request = self.tasks.token();
+        check_cancelled(&self.checkpoints.cancellation)?;
         async {
             let mutation = Mutation {
                 path: path.clone(),
@@ -244,6 +256,7 @@ impl Coordinator {
                         break result.map_err(|_| Error::AdmissionState)?;
                     }
                     () = cancel.cancelled() => break Err(Error::Cancelled),
+                    () = self.checkpoints.cancellation.cancelled() => break Err(Error::Cancelled),
                     () = tokio::time::sleep_until(deadline) => break Err(Error::AdmissionTimeout),
                     permit = Arc::clone(&queued.queue.gate).acquire_owned() => {
                         permit.map_err(|_| Error::AdmissionState)?
@@ -258,6 +271,7 @@ impl Coordinator {
                 }
                 tokio::select! {
                     () = cancel.cancelled() => break Err(Error::Cancelled),
+                    () = self.checkpoints.cancellation.cancelled() => break Err(Error::Cancelled),
                     () = tokio::time::sleep_until(deadline) => break Err(Error::AdmissionTimeout),
                     () = tokio::time::sleep(BATCH_COLLECTION_DELAY) => {}
                 }
@@ -273,15 +287,16 @@ impl Coordinator {
                     options: self.options,
                     metrics: self.metrics.clone(),
                     checkpoints: Arc::clone(&self.checkpoints),
+                    tasks: self.tasks.clone(),
                 };
                 let branch = branch.to_owned();
                 let queue = Arc::clone(&queued.queue);
                 // Renewal loss stops this admitted worker, not the service or
                 // sibling queues. Server shutdown still cancels every child.
-                let worker_cancel = cancel.child_token();
+                let worker_cancel = self.checkpoints.cancellation.child_token();
                 // A drained batch owns every accepted mutation. Detaching it
                 // prevents one disconnected HTTP caller from cancelling peers.
-                tokio::spawn(async move {
+                self.tasks.spawn(async move {
                     Self::apply_batch(&repository, context, &branch, &queue, batch, &worker_cancel)
                         .await;
                     drop(permit);
@@ -420,6 +435,7 @@ impl Coordinator {
             repository,
             cancel,
             repository.maintenance.current_epoch(),
+            &context.tasks,
         );
         if let Some((epoch, maintenance_cancel)) = idle_maintenance {
             crate::repository::schedule_readability(
@@ -428,6 +444,7 @@ impl Coordinator {
                 context.options,
                 maintenance_cancel,
                 epoch,
+                &context.tasks,
             );
         }
     }
@@ -4757,7 +4774,12 @@ mod tests {
         .unwrap();
         assert_eq!(before.journal.transactions.len(), 1);
 
-        crate::repository::schedule_catalog_maintenance(&repository, &cancel, 64);
+        crate::repository::schedule_catalog_maintenance(
+            &repository,
+            &cancel,
+            64,
+            &coordinator.tasks,
+        );
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let snapshot = crab_metadata::manifest_store::read_repository_snapshot(
@@ -4797,6 +4819,7 @@ mod tests {
             read(&repository, Arc::clone(&runtime), &cancel, "object").await,
             Bytes::from_static(b"value")
         );
+        coordinator.shutdown().await;
         runtime.shutdown().await;
     }
 
@@ -6218,6 +6241,7 @@ mod tests {
                 runtime: Arc::clone(&runtime),
                 options: crab_remote_git::RepositoryOptions::default(),
                 checkpoints: Arc::clone(&coordinator.checkpoints),
+                tasks: coordinator.tasks.clone(),
                 metrics: metrics.clone(),
             },
             "refs/heads/main",

@@ -14,7 +14,7 @@ use crab_remote_git::{
 };
 use crab_storage::{Store, StoreLayout};
 use tokio::sync::{Mutex, OnceCell, RwLock};
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::gateway::Repository;
 
@@ -248,15 +248,16 @@ pub(crate) fn schedule_catalog_maintenance(
     repository: &Repository,
     cancel: &CancellationToken,
     epoch: u64,
+    tasks: &TaskTracker,
 ) {
-    if !repository.maintenance.claim_catalog_maintenance(epoch) {
+    if cancel.is_cancelled() || !repository.maintenance.claim_catalog_maintenance(epoch) {
         return;
     }
     let store = repository.store.clone();
     let layout = repository.layout.clone();
     let maintenance = Arc::clone(&repository.maintenance);
     let cancel = cancel.child_token();
-    tokio::spawn(async move {
+    tasks.spawn(async move {
         match is_capsule_repository(&layout).await {
             Ok(true) => {
                 maintenance.finish_catalog_maintenance();
@@ -485,12 +486,13 @@ pub(crate) fn schedule_readability(
     options: RepositoryOptions,
     cancel: CancellationToken,
     epoch: u64,
+    tasks: &TaskTracker,
 ) {
     let store = repository.store.clone();
     let layout = repository.layout.clone();
     let identity = repository.identity.clone();
     let maintenance = Arc::clone(&repository.maintenance);
-    tokio::spawn(async move {
+    tasks.spawn(async move {
         let mut epoch = epoch;
         if !wait_for_idle(&maintenance, &cancel, epoch).await || !maintenance.start(epoch) {
             return;

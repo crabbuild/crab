@@ -235,3 +235,108 @@ async fn attribute_upload_failure_cannot_publish_and_retry_recovers() {
     assert!(refs_after_failure.is_empty());
     assert_eq!(bytes, b"retried".as_slice());
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+async fn shutdown_drains_admitted_upload_and_releases_its_lease() {
+    let (repository, runtime, cancel) = capsule_fixture().await;
+    let backend = Arc::new(ControlledUploadStore {
+        inner: Arc::clone(repository.store.inner()),
+        upload_prefix: format!("{}/v2/capsules/", repository.layout.repo_prefix()),
+        lock_path: Path::from(
+            crab_coordination::push_lock::push_lock_path(
+                repository.layout.repo_prefix(),
+                "refs/heads/main",
+            )
+            .unwrap(),
+        ),
+        pause_next: AtomicBool::new(true),
+        fail_next: AtomicBool::new(false),
+        waiting: AtomicBool::new(false),
+        paused: Notify::new(),
+        resume: Notify::new(),
+        renewal_failed: Notify::new(),
+    });
+    let repository = Arc::new(
+        Repository::new(
+            repository.config.clone(),
+            crab_storage::Store::new(backend.clone()),
+        )
+        .unwrap(),
+    );
+    let coordinator = Arc::new(Coordinator::new(
+        Arc::clone(&runtime),
+        crab_remote_git::RepositoryOptions::default(),
+        cancel.clone(),
+        Metrics::new().unwrap(),
+    ));
+    let pending = {
+        let repository = Arc::clone(&repository);
+        let coordinator = Arc::clone(&coordinator);
+        let cancel = cancel.clone();
+        tokio::spawn(async move {
+            coordinator
+                .apply(
+                    &repository,
+                    "refs/heads/main",
+                    &crab_remote_git::GitPath::new("interrupted").unwrap(),
+                    Change::Put {
+                        bytes: Bytes::from_static(b"uncommitted"),
+                        track_lfs: false,
+                        attributes: Box::default(),
+                        condition: PutCondition::None,
+                    },
+                    "user",
+                    &cancel,
+                )
+                .await
+        })
+    };
+    tokio::time::timeout(Duration::from_secs(5), backend.paused.notified())
+        .await
+        .unwrap();
+    let shutdown = coordinator.shutdown();
+    tokio::pin!(shutdown);
+    let returned_before_upload = tokio::time::timeout(Duration::from_millis(100), &mut shutdown)
+        .await
+        .is_ok();
+    backend.resume.notify_one();
+    if !returned_before_upload {
+        tokio::time::timeout(Duration::from_secs(5), shutdown)
+            .await
+            .unwrap();
+    }
+    let result = pending.await.unwrap();
+    let lease_released = !PushLock::ref_lease_is_claimed(
+        &backend.inner,
+        repository.layout.repo_prefix(),
+        "refs/heads/main",
+    )
+    .await
+    .unwrap();
+    // Complete cleanup even when the regression returns early, so the failed
+    // assertion cannot strand a storage future during Tokio runtime teardown.
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while PushLock::ref_lease_is_claimed(
+            &backend.inner,
+            repository.layout.repo_prefix(),
+            "refs/heads/main",
+        )
+        .await
+        .unwrap()
+        {
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+    })
+    .await
+    .unwrap();
+    runtime.shutdown().await;
+    assert!(
+        !returned_before_upload,
+        "shutdown abandoned an admitted upload"
+    );
+    assert!(result.is_err());
+    assert!(
+        lease_released,
+        "shutdown returned before releasing the ref lease"
+    );
+}

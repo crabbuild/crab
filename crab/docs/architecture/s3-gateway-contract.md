@@ -395,8 +395,8 @@ Each process collects compatible same-branch mutations for at most 10 ms and
 drains at most 32 requests or 32 MiB of Git mutation payload per batch. A single
 larger mutation proceeds alone. The batch evaluates conditions in FIFO order,
 builds one commit per successful state change, uploads one deduplicated Git pack,
-routing trusted generated objects directly through one bounded decoded spool and
-canonical pack preparation rather than an artificial pack inflate cycle. It
+routing trusted generated objects through bounded owned decoded buffers and
+canonical verified pack preparation without a decoded scratch round trip. It
 advances the ref from the original parent to the final commit with one active
 journal marker. Failed conditions publish no commit. Multipart completion always
 runs alone because its durable plan receipt owns an independent exactly-once
@@ -404,6 +404,8 @@ outcome. A competing process is serialized by the object-store ref lease; the
 losing bounded batch is rebuilt against the winning tip.
 Immutable attribute persistence overlaps pack preparation; publication requires
 both to succeed, and both drain before writer fences are released on failure.
+Shutdown stops mutation admission and drains workers, follow-up catalog and
+readability maintenance, and attribute checkpoints before closing the read runtime.
 Warm directory edits reuse canonical encoded ranges with entry offsets charged
 to the warm-state budget. Full tree hashing and pack verification still apply.
 Cold reconstruction uses independent read-operation budgets for each mutation
