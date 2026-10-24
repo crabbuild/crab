@@ -2157,43 +2157,7 @@ async fn upload_built_batch(
         .fold(0_usize, |total, (_, bytes)| {
             total.saturating_add(bytes.len())
         });
-    let prepared = prepare_pack(objects, delta_bases, external_delta_bases, cancel).await;
-    if matches!(
-        &prepared,
-        Err(Error::Io(_)
-            | Error::Pack(crab_git::incoming_pack::IncomingPackError::Io(_))
-            | Error::Prepare(crab_git::incoming_pack::PreparePackError::Io(_)))
-    ) {
-        scratch.record_failure(ScratchFailure::Write);
-    }
-    let (pack_owner, pack) = prepared?;
-    metrics.record_generated_pack(
-        generated_object_bytes,
-        generated_tree_bytes,
-        pack.size(),
-        external_delta_bytes,
-        pack.external_delta_count(),
-    );
-    tree.bind_prepared_pack(&pack)?;
-    // The prepared files are now reflected by statvfs. Release their
-    // conservative pre-write claim while ownership metrics remain live.
-    drop(capacity);
-    check_cancelled(cancel)?;
-    let pack_id = pack.content_hash().to_hex().to_string();
-    let evidence = match parent {
-        Some(parent) => git_visibility::GitVisibilityEdit::from_delta_objects(
-            Some(parent.to_string()),
-            final_commit.to_string(),
-            visible_objects,
-            vec![],
-        ),
-        None => git_visibility::GitVisibilityEdit::from_replacement_objects(
-            None,
-            final_commit.to_string(),
-            visible_objects,
-        ),
-    };
-    let upload_attributes = || async {
+    let upload_attributes = async {
         futures_util::future::try_join_all(attribute_deltas.into_iter().map(
             |(commit, parent, changes, checkpoint, checkpoint_slot)| {
                 attributes::save_delta(
@@ -2210,121 +2174,163 @@ async fn upload_built_batch(
         .map(|_| ())
         .map_err(Error::from)
     };
-    let artifacts = match protocol {
-        PublicationProtocol::Legacy => {
-            let pack_upload = async {
-                let path = repository.layout.pack_path(&pack_id);
-                if pack.size() <= GENERATED_PACK_SINGLE_PUT_MAX_BYTES {
-                    check_cancelled(cancel)?;
-                    repository
-                        .store
-                        .put_exact(&path, tokio::fs::read(pack.pack_path()).await?.into())
-                        .await?;
-                } else {
-                    repository
-                        .store
-                        .put_multipart_file_retry(
-                            &path,
-                            pack.pack_path(),
-                            pack.size(),
-                            *pack.content_hash().as_bytes(),
-                            GENERATED_PACK_SINGLE_PUT_MAX_BYTES as usize,
-                            cancel,
-                            None,
-                        )
-                        .await?;
-                }
-                Ok::<(), Error>(())
-            };
-            let sidecar_upload = |source: &std::path::Path, target| {
-                let source = source.to_owned();
-                async move {
-                    check_cancelled(cancel)?;
-                    repository
-                        .store
-                        .put_exact(&target, tokio::fs::read(source).await?.into())
-                        .await?;
+    let upload_pack = async {
+        let prepared = prepare_pack(objects, delta_bases, external_delta_bases, cancel).await;
+        if matches!(
+            &prepared,
+            Err(Error::Io(_)
+                | Error::Pack(crab_git::incoming_pack::IncomingPackError::Io(_))
+                | Error::Prepare(crab_git::incoming_pack::PreparePackError::Io(_)))
+        ) {
+            scratch.record_failure(ScratchFailure::Write);
+        }
+        let (pack_owner, pack) = prepared?;
+        metrics.record_generated_pack(
+            generated_object_bytes,
+            generated_tree_bytes,
+            pack.size(),
+            external_delta_bytes,
+            pack.external_delta_count(),
+        );
+        tree.bind_prepared_pack(&pack)?;
+        // The prepared files are now reflected by statvfs. Release their
+        // conservative pre-write claim while ownership metrics remain live.
+        drop(capacity);
+        check_cancelled(cancel)?;
+        let pack_id = pack.content_hash().to_hex().to_string();
+        let evidence = match parent {
+            Some(parent) => git_visibility::GitVisibilityEdit::from_delta_objects(
+                Some(parent.to_string()),
+                final_commit.to_string(),
+                visible_objects,
+                vec![],
+            ),
+            None => git_visibility::GitVisibilityEdit::from_replacement_objects(
+                None,
+                final_commit.to_string(),
+                visible_objects,
+            ),
+        };
+        let artifacts = match protocol {
+            PublicationProtocol::Legacy => {
+                let pack_upload = async {
+                    let path = repository.layout.pack_path(&pack_id);
+                    if pack.size() <= GENERATED_PACK_SINGLE_PUT_MAX_BYTES {
+                        check_cancelled(cancel)?;
+                        repository
+                            .store
+                            .put_exact(&path, tokio::fs::read(pack.pack_path()).await?.into())
+                            .await?;
+                    } else {
+                        repository
+                            .store
+                            .put_multipart_file_retry(
+                                &path,
+                                pack.pack_path(),
+                                pack.size(),
+                                *pack.content_hash().as_bytes(),
+                                GENERATED_PACK_SINGLE_PUT_MAX_BYTES as usize,
+                                cancel,
+                                None,
+                            )
+                            .await?;
+                    }
                     Ok::<(), Error>(())
+                };
+                let sidecar_upload = |source: &std::path::Path, target| {
+                    let source = source.to_owned();
+                    async move {
+                        check_cancelled(cancel)?;
+                        repository
+                            .store
+                            .put_exact(&target, tokio::fs::read(source).await?.into())
+                            .await?;
+                        Ok::<(), Error>(())
+                    }
+                };
+                let evidence_upload = async {
+                    git_visibility::upload_edit(&repository.store, &repository.layout, &evidence)
+                        .await
+                        .map_err(Error::from)
+                };
+                let (_, _, _, _, evidence_hash) = tokio::try_join!(
+                    pack_upload,
+                    sidecar_upload(
+                        pack.index_path(),
+                        repository.layout.pack_index_path(&pack_id)
+                    ),
+                    sidecar_upload(
+                        pack.reverse_path(),
+                        repository.layout.pack_reverse_index_path(&pack_id)
+                    ),
+                    sidecar_upload(
+                        pack.kinds_path(),
+                        repository.layout.pack_kind_metadata_path(&pack_id)
+                    ),
+                    evidence_upload,
+                )?;
+                UploadedArtifacts::Legacy {
+                    pack: PackManifestEntry {
+                        pack_id: pack_id.clone(),
+                        content_hash: pack_id,
+                        size: pack.size(),
+                        object_count: pack.object_count().into(),
+                        ref_tips: vec![final_commit.to_string()],
+                    },
+                    evidence_hash,
                 }
-            };
-            let evidence_upload = async {
-                git_visibility::upload_edit(&repository.store, &repository.layout, &evidence)
-                    .await
-                    .map_err(Error::from)
-            };
-            let (_, _, _, _, evidence_hash, _) = tokio::try_join!(
-                pack_upload,
-                sidecar_upload(
-                    pack.index_path(),
-                    repository.layout.pack_index_path(&pack_id)
-                ),
-                sidecar_upload(
-                    pack.reverse_path(),
-                    repository.layout.pack_reverse_index_path(&pack_id)
-                ),
-                sidecar_upload(
-                    pack.kinds_path(),
-                    repository.layout.pack_kind_metadata_path(&pack_id)
-                ),
-                evidence_upload,
-                upload_attributes(),
-            )?;
-            UploadedArtifacts::Legacy {
-                pack: PackManifestEntry {
-                    pack_id: pack_id.clone(),
-                    content_hash: pack_id,
-                    size: pack.size(),
-                    object_count: pack.object_count().into(),
-                    ref_tips: vec![final_commit.to_string()],
-                },
-                evidence_hash,
             }
-        }
-        PublicationProtocol::Capsule(base) => {
-            let read = |path: &std::path::Path| {
-                let path = path.to_owned();
-                async move { tokio::fs::read(path).await.map_err(Error::from) }
-            };
-            let (pack_bytes, index, reverse_index, locator, _) = tokio::try_join!(
-                read(pack.pack_path()),
-                read(pack.index_path()),
-                read(pack.reverse_path()),
-                read(pack.kinds_path()),
-                upload_attributes(),
-            )?;
-            // Match native Git publication: readers and checkpoints resolve
-            // declared cross-pack bases from the pinned repository view.
-            let external_delta_bases = pack
-                .external_delta_bases()
-                .iter()
-                .map(ToString::to_string)
-                .collect();
-            UploadedArtifacts::Capsule(Box::new(CapsuleMutationArtifacts {
-                base: *base,
-                pack:
-                    crab_metadata::capsule_protocol::CapsuleGitPack::new_with_external_delta_bases(
-                        Bytes::from(pack_bytes),
-                        Bytes::from(index),
-                        Bytes::from(reverse_index),
-                        Bytes::from(locator),
-                        pack.git_sha1().to_string(),
-                        u64::from(pack.object_count()),
-                        external_delta_bases,
-                    )?,
-                visibility: evidence,
-            }))
-        }
+            PublicationProtocol::Capsule(base) => {
+                let read = |path: &std::path::Path| {
+                    let path = path.to_owned();
+                    async move { tokio::fs::read(path).await.map_err(Error::from) }
+                };
+                let (pack_bytes, index, reverse_index, locator) = tokio::try_join!(
+                    read(pack.pack_path()),
+                    read(pack.index_path()),
+                    read(pack.reverse_path()),
+                    read(pack.kinds_path()),
+                )?;
+                // Match native Git publication: readers and checkpoints resolve
+                // declared cross-pack bases from the pinned repository view.
+                let external_delta_bases = pack
+                    .external_delta_bases()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect();
+                UploadedArtifacts::Capsule(Box::new(CapsuleMutationArtifacts {
+                    base: *base,
+                    pack:
+                        crab_metadata::capsule_protocol::CapsuleGitPack::new_with_external_delta_bases(
+                            Bytes::from(pack_bytes),
+                            Bytes::from(index),
+                            Bytes::from(reverse_index),
+                            Bytes::from(locator),
+                            pack.git_sha1().to_string(),
+                            u64::from(pack.object_count()),
+                            external_delta_bases,
+                        )?,
+                    visibility: evidence,
+                }))
+            }
+        };
+        check_cancelled(cancel)?;
+        let uploaded = UploadedMutation {
+            parent,
+            expected_transaction,
+            commit: final_commit,
+            artifacts,
+        };
+        drop(pack);
+        drop(pack_owner);
+        drop(scratch);
+        Ok::<_, Error>(uploaded)
     };
-    check_cancelled(cancel)?;
-    let uploaded = UploadedMutation {
-        parent,
-        expected_transaction,
-        commit: final_commit,
-        artifacts,
-    };
-    drop(pack);
-    drop(pack_owner);
-    drop(scratch);
+    // Drain both branches even on failure: dropping the pack future would leave
+    // its blocking worker writing scratch after the GC fences were released.
+    let (uploaded, attributes) = tokio::join!(upload_pack, upload_attributes);
+    let uploaded = uploaded?;
+    attributes?;
     Ok(uploaded)
 }
 
@@ -2566,6 +2572,7 @@ struct DirectoryEdit {
     path: Vec<u8>,
     oid: Option<ObjectId>,
     entries: Vec<TreeEntryEdit>,
+    encoding: Option<TreeEncoding>,
     generated: bool,
     delta_ancestors: Vec<ObjectId>,
 }
@@ -2573,9 +2580,54 @@ struct DirectoryEdit {
 struct DirectoryState {
     oid: Option<ObjectId>,
     entries: Vec<tree::Entry>,
+    encoding: TreeEncoding,
     delta_anchor: Option<TreeDeltaAnchor>,
     delta_ancestors: Vec<ObjectId>,
     generated_in_batch: bool,
+}
+
+struct TreeEncoding {
+    bytes: Vec<u8>,
+    offsets: Vec<usize>,
+}
+
+impl TreeEncoding {
+    fn new(entries: &[tree::Entry]) -> Self {
+        let mut encoded = Self {
+            bytes: Vec::new(),
+            offsets: Vec::with_capacity(entries.len() + 1),
+        };
+        for entry in entries {
+            encoded.push(entry);
+        }
+        encoded.offsets.push(encoded.bytes.len());
+        encoded
+    }
+
+    fn push(&mut self, entry: &tree::Entry) {
+        self.offsets.push(self.bytes.len());
+        append_tree_entry(&mut self.bytes, entry);
+    }
+
+    fn extend(&mut self, original: &Self, range: std::ops::Range<usize>) {
+        let start = original.offsets[range.start];
+        let end = original.offsets[range.end];
+        let offset = self.bytes.len();
+        self.offsets.extend(
+            original.offsets[range]
+                .iter()
+                .map(|position| offset + position - start),
+        );
+        self.bytes.extend_from_slice(&original.bytes[start..end]);
+    }
+
+    fn estimated_bytes(&self) -> usize {
+        self.bytes.capacity().saturating_add(
+            self.offsets
+                .capacity()
+                .saturating_mul(std::mem::size_of::<usize>()),
+        )
+    }
 }
 
 struct TreeDeltaAnchor {
@@ -2631,7 +2683,7 @@ impl WarmTree {
             if depth == 0 {
                 // Reuse a verified full entry across batches; chaining each new
                 // tip forces repeated full copies of growing directories.
-                let bytes = encode_tree(&directory.entries);
+                let bytes = directory.encoding.bytes.clone();
                 directory.delta_anchor =
                     (bytes.len() <= MAX_GENERATED_TREE_DELTA_BYTES).then_some(TreeDeltaAnchor {
                         oid,
@@ -2716,6 +2768,7 @@ impl MutableTree {
                 };
                 let state = DirectoryState {
                     oid: directory_oid,
+                    encoding: TreeEncoding::new(&entries),
                     entries,
                     delta_anchor: None,
                     delta_ancestors: Vec::new(),
@@ -2782,6 +2835,17 @@ impl MutableTree {
                 }
             }
             state.oid = edit.oid;
+            self.estimated_bytes = self
+                .estimated_bytes
+                .saturating_sub(state.encoding.estimated_bytes());
+            if let Some(encoding) = edit.encoding {
+                state.encoding = encoding;
+            } else if edit.oid.is_none() {
+                state.encoding = TreeEncoding::new(&[]);
+            }
+            self.estimated_bytes = self
+                .estimated_bytes
+                .saturating_add(state.encoding.estimated_bytes());
             let previous_provenance = estimated_tree_provenance_bytes(state);
             if edit.oid.is_none() {
                 state.delta_anchor = None;
@@ -2857,6 +2921,7 @@ fn estimated_directory_bytes(path: &[u8], directory: &DirectoryState) -> usize {
         .fold(path.len(), |total, entry| {
             total.saturating_add(estimated_tree_entry_bytes(entry))
         })
+        .saturating_add(directory.encoding.estimated_bytes())
         .saturating_add(estimated_tree_provenance_bytes(directory))
 }
 
@@ -3073,24 +3138,20 @@ async fn build_commit(
             .ok_or_else(|| std::io::Error::other("mutation directory state disappeared"))?;
         let changed = tree_entries_changed(&state.entries, &entries);
         let empty = tree_entry_count_after_edits(&state.entries, &entries) == 0;
-        let (oid, delta_ancestors) = if !changed {
-            (state.oid, Vec::new())
+        let (oid, delta_ancestors, encoding) = if !changed {
+            (state.oid, Vec::new(), None)
         } else if depth > 0 && empty {
-            (None, Vec::new())
+            (None, Vec::new(), None)
         } else {
-            let encoded = encode_tree_with_edits(
-                state,
-                &state.entries,
-                &entries,
-                &mut objects,
-                &mut tree_delta_bases,
-            )?;
-            (Some(encoded.0), encoded.1)
+            let encoded =
+                encode_tree_with_edits(state, &entries, &mut objects, &mut tree_delta_bases)?;
+            (Some(encoded.0), encoded.1, Some(encoded.2))
         };
         directory_edits.push(DirectoryEdit {
             path: paths[depth].clone(),
             oid,
             entries,
+            encoding,
             generated: changed && !(depth > 0 && empty),
             delta_ancestors,
         });
@@ -3443,40 +3504,56 @@ fn generated_attribute_update(
 
 fn encode_tree_with_edits(
     old: &DirectoryState,
-    entries: &[tree::Entry],
     edits: &[TreeEntryEdit],
     objects: &mut Vec<GeneratedObject>,
     delta_bases: &mut Vec<TreeDeltaBase>,
-) -> Result<(ObjectId, Vec<ObjectId>)> {
-    let mut replacements = edits
+) -> Result<(ObjectId, Vec<ObjectId>, TreeEncoding)> {
+    let mut changes = BTreeMap::<usize, (bool, Vec<&tree::Entry>)>::new();
+    for edit in edits {
+        if let Some(index) = entry_index(&old.entries, &edit.name) {
+            changes.entry(index).or_default().0 = true;
+        }
+        if let Some(replacement) = &edit.replacement {
+            let index = old
+                .entries
+                .binary_search(replacement)
+                .unwrap_or_else(|index| index);
+            changes.entry(index).or_default().1.push(replacement);
+        }
+    }
+    let added_bytes = edits
         .iter()
         .filter_map(|edit| edit.replacement.as_ref())
-        .collect::<Vec<_>>();
-    replacements.sort_unstable();
-    let mut existing = entries
-        .iter()
-        .filter(|entry| {
-            let filename: &[u8] = entry.filename.as_ref();
-            !edits.iter().any(|edit| edit.name == filename)
+        .map(|entry| {
+            entry.mode.as_bytes(&mut [0; 6]).len()
+                + entry.filename.len()
+                + entry.oid.as_bytes().len()
+                + 2
         })
-        .peekable();
-    let mut replacements = replacements.into_iter().peekable();
-    let mut bytes = Vec::new();
-    loop {
-        let entry = match (existing.peek(), replacements.peek()) {
-            (Some(existing), Some(replacement)) if replacement < existing => replacements.next(),
-            (Some(_), Some(_)) | (Some(_), None) => existing.next(),
-            (None, Some(_)) => replacements.next(),
-            (None, None) => break,
-        };
-        let entry = entry.ok_or_else(|| std::io::Error::other("tree merge lost an entry"))?;
-        append_tree_entry(&mut bytes, entry);
+        .sum::<usize>();
+    let mut encoding = TreeEncoding {
+        bytes: Vec::with_capacity(old.encoding.bytes.len() + added_bytes),
+        offsets: Vec::with_capacity(old.entries.len() + edits.len() + 1),
+    };
+    // Preserve canonical unchanged byte ranges instead of serializing every
+    // sibling for each path-local edit. Offsets move with the same committed
+    // entry edits; the complete resulting object is still hashed and verified.
+    let mut cursor = 0;
+    for (index, (remove, mut replacements)) in changes {
+        encoding.extend(&old.encoding, cursor..index);
+        replacements.sort_unstable();
+        for replacement in replacements {
+            encoding.push(replacement);
+        }
+        cursor = index + usize::from(remove);
     }
-    let oid = object_id(Kind::Tree, &bytes)?;
+    encoding.extend(&old.encoding, cursor..old.entries.len());
+    encoding.offsets.push(encoding.bytes.len());
+    let oid = object_id(Kind::Tree, &encoding.bytes)?;
     objects.push(GeneratedObject {
         oid,
         kind: Kind::Tree,
-        bytes,
+        bytes: encoding.bytes.clone(),
     });
     let mut delta_ancestors = Vec::new();
     let candidate = if old.generated_in_batch {
@@ -3504,15 +3581,12 @@ fn encode_tree_with_edits(
             external,
         });
     }
-    Ok((oid, delta_ancestors))
+    Ok((oid, delta_ancestors, encoding))
 }
 
+#[cfg(test)]
 fn encode_tree(entries: &[tree::Entry]) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    for entry in entries {
-        append_tree_entry(&mut bytes, entry);
-    }
-    bytes
+    TreeEncoding::new(entries).bytes
 }
 
 fn append_tree_entry(bytes: &mut Vec<u8>, entry: &tree::Entry) {
@@ -3678,15 +3752,15 @@ mod tests {
         let mut objects = Vec::new();
         let mut delta_bases = Vec::new();
 
-        let (oid, ancestors) = encode_tree_with_edits(
+        let (oid, ancestors, _) = encode_tree_with_edits(
             &DirectoryState {
                 oid: None,
                 entries: entries.clone(),
+                encoding: TreeEncoding::new(&entries),
                 delta_anchor: None,
                 delta_ancestors: Vec::new(),
                 generated_in_batch: false,
             },
-            &entries,
             &[],
             &mut objects,
             &mut delta_bases,
@@ -3761,15 +3835,15 @@ mod tests {
         let mut objects = Vec::new();
         let mut delta_bases = Vec::new();
 
-        let (oid, ancestors) = encode_tree_with_edits(
+        let (oid, ancestors, _) = encode_tree_with_edits(
             &DirectoryState {
                 oid: Some(ObjectId::from([9; 20])),
                 entries: original.clone(),
+                encoding: TreeEncoding::new(&original),
                 delta_anchor: None,
                 delta_ancestors: Vec::new(),
                 generated_in_batch: true,
             },
-            &original,
             &edits,
             &mut objects,
             &mut delta_bases,
@@ -3795,6 +3869,95 @@ mod tests {
     }
 
     #[test]
+    fn cached_tree_edits_preserve_canonical_order_and_memory_accounting() {
+        use tree::EntryKind::{Blob, BlobExecutable, Commit, Link, Tree};
+
+        let cases = [
+            vec![("name", Some(Tree)), ("name.", Some(Blob))],
+            vec![("name0", Some(Link)), ("z", Some(Commit))],
+            vec![("name", Some(BlobExecutable)), ("a", Some(Blob))],
+            vec![("name", Some(Tree)), ("name!", Some(Link))],
+            vec![("name0", None), ("missing", None)],
+            vec![("name.", None), ("name!", None)],
+            vec![("a", None), ("z", None)],
+            vec![("name", None)],
+            vec![("recreated", Some(Blob))],
+        ];
+        let state = DirectoryState {
+            oid: None,
+            entries: Vec::new(),
+            encoding: TreeEncoding::new(&[]),
+            delta_anchor: None,
+            delta_ancestors: Vec::new(),
+            generated_in_batch: false,
+        };
+        let mut tree_state = MutableTree::new(
+            None,
+            Some(WarmTree {
+                estimated_bytes: estimated_directory_bytes(&[], &state),
+                directories: HashMap::from([(Vec::new(), state)]),
+                ..Default::default()
+            }),
+        );
+        let mut expected_entries = Vec::<tree::Entry>::new();
+        for (round, changes) in cases.into_iter().enumerate() {
+            let edits = changes
+                .into_iter()
+                .map(|(name, kind)| TreeEntryEdit {
+                    name: name.as_bytes().to_vec(),
+                    replacement: kind.map(|kind| tree::Entry {
+                        mode: kind.into(),
+                        filename: name.into(),
+                        oid: ObjectId::from([round as u8; 20]),
+                    }),
+                })
+                .collect::<Vec<_>>();
+            for edit in &edits {
+                expected_entries.retain(|entry| entry.filename.as_slice() != edit.name);
+                if let Some(replacement) = &edit.replacement {
+                    expected_entries.push(replacement.clone());
+                }
+            }
+            expected_entries.sort();
+            let mut expected = Vec::new();
+            gix_object::Tree {
+                entries: expected_entries.clone(),
+            }
+            .write_to(&mut expected)
+            .unwrap();
+            let mut objects = Vec::new();
+            let (oid, delta_ancestors, encoding) = encode_tree_with_edits(
+                &tree_state.directories[&Vec::new()],
+                &edits,
+                &mut objects,
+                &mut Vec::new(),
+            )
+            .unwrap();
+            assert_eq!(objects[0].bytes, expected, "round {round}");
+            tree_state
+                .commit(
+                    vec![DirectoryEdit {
+                        path: Vec::new(),
+                        oid: Some(oid),
+                        entries: edits,
+                        encoding: Some(encoding),
+                        generated: true,
+                        delta_ancestors,
+                    }],
+                    None,
+                )
+                .unwrap();
+            let state = &tree_state.directories[&Vec::new()];
+            assert_eq!(state.entries, expected_entries, "round {round}");
+            assert_eq!(
+                tree_state.estimated_bytes,
+                estimated_directory_bytes(&[], state),
+                "round {round}"
+            );
+        }
+    }
+
+    #[test]
     fn warm_tree_reuses_full_anchors_and_forgets_repacked_provenance() {
         let original = vec![tree::Entry {
             mode: tree::EntryKind::Blob.into(),
@@ -3815,6 +3978,7 @@ mod tests {
         let state = DirectoryState {
             oid: Some(ObjectId::from([9; 20])),
             entries: original.clone(),
+            encoding: TreeEncoding::new(&original),
             delta_anchor: Some(TreeDeltaAnchor {
                 oid: old_oid,
                 bytes: encode_tree(&original),
@@ -3824,9 +3988,8 @@ mod tests {
             generated_in_batch: false,
         };
 
-        let (target, ancestors) = encode_tree_with_edits(
+        let (target, ancestors, _) = encode_tree_with_edits(
             &state,
-            &original,
             std::slice::from_ref(&edit),
             &mut objects,
             &mut bases,
@@ -3853,14 +4016,8 @@ mod tests {
         assert_eq!(warm.estimated_bytes(), estimated_bytes - provenance_bytes);
         let mut objects = Vec::new();
         let mut bases = Vec::new();
-        encode_tree_with_edits(
-            &warm.directories[&path],
-            &original,
-            &[edit],
-            &mut objects,
-            &mut bases,
-        )
-        .unwrap();
+        encode_tree_with_edits(&warm.directories[&path], &[edit], &mut objects, &mut bases)
+            .unwrap();
         assert!(bases.is_empty());
     }
 
@@ -3876,6 +4033,7 @@ mod tests {
         let state = DirectoryState {
             oid: Some(base_oid),
             entries: Vec::new(),
+            encoding: TreeEncoding::new(&[]),
             delta_anchor: None,
             delta_ancestors: vec![target_oid],
             generated_in_batch: true,
@@ -3887,8 +4045,8 @@ mod tests {
         let mut objects = Vec::new();
         let mut bases = Vec::new();
 
-        let (oid, ancestors) =
-            encode_tree_with_edits(&state, &[], &[edit], &mut objects, &mut bases).unwrap();
+        let (oid, ancestors, _) =
+            encode_tree_with_edits(&state, &[edit], &mut objects, &mut bases).unwrap();
 
         assert_eq!(oid, target_oid);
         assert!(ancestors.is_empty());

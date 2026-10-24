@@ -206,6 +206,14 @@ round trips without allowing a busy branch to exclude GC indefinitely.
 Trusted generated objects enter one bounded decoded spool before
 canonical pack and sidecar preparation; they are not compressed and reinflated
 as synthetic wire input.
+Immutable attribute uploads run concurrently with pack preparation. Publication
+waits for both branches to succeed; failures drain both branches before releasing
+the writer fences and scratch ownership.
+
+Warm directories retain canonical encoded bytes and entry offsets. Path edits
+copy unchanged byte ranges and encode only changed entries, while complete tree
+identities and prepared pack contents remain independently verified. The encoded
+bytes and offsets count toward the existing warm-state memory limit.
 
 Caller-proven predecessor relationships delta-compress
 successive generated tree versions inside a batch. Across packs, warm state

@@ -402,6 +402,10 @@ journal marker. Failed conditions publish no commit. Multipart completion always
 runs alone because its durable plan receipt owns an independent exactly-once
 outcome. A competing process is serialized by the object-store ref lease; the
 losing bounded batch is rebuilt against the winning tip.
+Immutable attribute persistence overlaps pack preparation; publication requires
+both to succeed, and both drain before writer fences are released on failure.
+Warm directory edits reuse canonical encoded ranges with entry offsets charged
+to the warm-state budget. Full tree hashing and pack verification still apply.
 Cold reconstruction uses independent read-operation budgets for each mutation
 against the same pinned view. Batching does not combine unrelated requests'
 allowances; an over-budget mutation returns `SlowDown` without consuming a
