@@ -354,6 +354,12 @@ impl<S> StoreLayout<S> {
         self.repo_path(&format!("v2/plans/{plan_id}/recovery/shards/{hash}"))
     }
 
+    /// Durable recovery LFS payload owned by one native capsule plan.
+    #[must_use]
+    pub fn capsule_plan_recovery_lfs_path(&self, plan_id: &str, oid: &str) -> ObjectPath {
+        self.repo_path(&format!("v2/plans/{plan_id}/recovery/lfs/{oid}"))
+    }
+
     /// Path to the fresh-clone replica discovery document.
     #[must_use]
     pub fn replica_discovery_path(&self) -> ObjectPath {

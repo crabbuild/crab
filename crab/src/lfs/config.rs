@@ -63,11 +63,7 @@ impl LfsConfig {
     /// Resolve the local LFS storage root against the common Git directory.
     #[must_use]
     pub fn storage_dir(&self, common_git_dir: &Path) -> PathBuf {
-        match self.lfs_dir.as_ref() {
-            Some(path) if path.is_absolute() => path.clone(),
-            Some(path) => common_git_dir.join(path),
-            None => common_git_dir.join("lfs"),
-        }
+        crab_lfs::local::storage_dir(common_git_dir, self.lfs_dir.as_deref())
     }
 
     /// Resolve the configured local LFS storage directory for a repository.
@@ -152,11 +148,12 @@ impl LfsConfig {
         if let Some(v) = values.get("skipdownloaderrors") {
             self.skip_download_errors = parse_bool(v, "lfs.skipdownloaderrors", origin)?;
         }
-        if let Some(v) = values.get("lfsdir") {
-            self.lfs_dir = Some(PathBuf::from(v));
-        }
-        if let Some(v) = values.get("storage") {
-            self.lfs_dir = Some(PathBuf::from(v));
+        if let Some(path) = crab_lfs::local::storage_override(
+            values.get("storage").map(String::as_str),
+            values.get("lfsdir").map(String::as_str),
+            None,
+        ) {
+            self.lfs_dir = Some(path);
         }
         if let Some(v) = values.get("transfer.maxbandwidth") {
             self.transfer_max_bandwidth = parse_u64(v, "lfs.transfer.maxbandwidth", origin)?;
@@ -214,7 +211,7 @@ impl LfsConfig {
             }
         }
         if let Ok(v) = std::env::var("GIT_LFS_DIR") {
-            self.lfs_dir = Some(PathBuf::from(v));
+            self.lfs_dir = crab_lfs::local::storage_override(None, None, Some(&v));
         }
         if let Ok(v) = std::env::var("GIT_LFS_TRANSFER_MAX_BANDWIDTH")
             && let Some(n) = parse_env_u64("GIT_LFS_TRANSFER_MAX_BANDWIDTH", &v)

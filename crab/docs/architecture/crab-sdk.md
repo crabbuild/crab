@@ -368,13 +368,13 @@ policy/validation rejection rejects the whole batch.
 Direct requests bind the protocol token version, repository placement, ordered ref
 edits, expected OIDs, content identities and write policy into a canonical request
 digest. A fresh UUIDv7 nonce makes the plan ID unique. Native SDK recovery tokens
-use version 5; v1 tokens, including relabeled tokens carrying old digests, are
+use version 6; v1 tokens, including relabeled tokens carrying old digests, are
 rejected. Existing pointer-file formats and managed HTTP API schema versions are
 separate contracts and do not select the repository storage protocol.
 
 The SDK acquires a renewable plan lease before its ref leases and GC fences.
 Native attempts and terminal receipts live under `v2/plans/<id>/`; normalized
-recovery packs, shards and xorbs live under that plan's `recovery/` prefix. An
+recovery packs, shards, xorbs and LFS payloads live under that plan's `recovery/` prefix. An
 unresolved prior attempt blocks replay. Native GC currently enumerates capsule,
 checkpoint, catalog, history and derived-index roots; it does not sweep the plan
 prefix. Reclamation of unattempted recovery artifacts needs a separate retention

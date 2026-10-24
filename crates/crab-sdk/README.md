@@ -66,7 +66,7 @@ initialization creates or adopts a native capsule root without converting an
 existing prefix. Matching native browse indexes accelerate reads when available;
 opening never repairs them or ignores corruption in a current descriptor.
 
-Remote recovery tokens use version 5; local push tokens use version 4. Tokens
+Remote recovery tokens use version 6; local push tokens use version 4. Tokens
 from the previous SDK protocol must be prepared again. Git LFS and Crab pointer
 file formats retain their existing version markers; those do not select the
 repository storage protocol.
@@ -165,6 +165,11 @@ content fails the clone. Lazy clones retain both pointer formats. Direct and
 managed clones keep their content location in private local settings when no
 committed project configuration exists. HTTP content clones need the committed
 direct-storage URL and matching bucket credentials.
+Local stage/commit/push also publishes newly staged LFS payloads. Preparation
+freezes verified bytes and binds them into the recovery token; resume can use
+durable native recovery objects after the local LFS cache is removed. Dry-run
+creates no remote objects. Protected publication keeps payloads staged until
+the service verifies and promotes the complete dependency set.
 
 ## Managed repositories
 

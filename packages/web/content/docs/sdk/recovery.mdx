@@ -13,10 +13,13 @@ containing credentials.
 `remote::write::RecoveryToken::to_json` and
 `local::PushRecoveryToken::to_json` produce bounded, versioned documents.
 Decode untrusted input with the corresponding `from_json` constructor. Native
-remote recovery tokens use version 5 and bind the protocol version into their
+remote recovery tokens use version 6 and bind the protocol version into their
 request digest. Legacy repository tokens are rejected, including tokens with a
 changed version field. Local push tokens use version 4 and bind Git push URLs;
 previous local push tokens must be prepared again.
+Version 6 also binds prepared LFS payload identities, sizes and recovery-body
+digests. A saved native local push can resume after its local LFS cache is
+removed. Reprepare remote tokens from earlier native SDK builds.
 
 ## Reconcile before replay
 

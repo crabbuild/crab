@@ -32,6 +32,14 @@ verified bytes through crab-storage
 CLI transfer path verify immutable objects while keeping file-sized payloads
 out of memory.
 
+`local` shares local payload paths and storage-key precedence with CLI and SDK
+callers. Its preparation snapshots verify SHA-256 and exact size while copying
+into caller-owned scratch, then return the Blake3 digest for durable recovery.
+Streaming uploads use the storage facade for multipart start and completion;
+protected writes stay under their staging prefix and enter the verified object
+inventory only after successful completion. Empty payloads use an ordinary
+verified object write because S3 requires parts for multipart completion.
+
 Uploads and explicit `verify_size` record a validator-bound
 receipt when the provider exposes an ETag or version, allowing later presence
 checks to avoid re-reading the object body. `get_stream` never writes receipts.

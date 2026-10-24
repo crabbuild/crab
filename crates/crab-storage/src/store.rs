@@ -1794,6 +1794,26 @@ impl Store {
         .await
     }
 
+    /// Complete an upload begun by this store and record verified staging bytes.
+    ///
+    /// The caller must supply the size and Blake3 digest of the exact ordered
+    /// parts. Failed completion retains the shared abort/error boundary and
+    /// cannot add an object to the protected publication inventory.
+    pub async fn complete_multipart_upload(
+        &self,
+        upload: &mut dyn MultipartUpload,
+        path: &Path,
+        size: u64,
+        hash: &[u8; 32],
+    ) -> Result<object_store::PutResult> {
+        let (write_path, _, record) = self.exact_write_target(path);
+        let result = crate::multipart::complete_upload_with_result(upload, &write_path).await?;
+        if record {
+            self.record_staged_write(path, &write_path, hash, size);
+        }
+        Ok(result)
+    }
+
     /// Deletes every object under `prefix` and returns the number removed.
     ///
     /// Missing objects are ignored so concurrent or repeated cleanup stays

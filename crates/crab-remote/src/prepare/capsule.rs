@@ -66,11 +66,30 @@ impl Prepared {
                     .collect::<std::collections::BTreeSet<_>>()
             })
             .unwrap_or_default();
-        crab_read::dependency_proof::verify_capsule_dependencies_except_crab(
+        // LFS bytes must exist before the shared closure proof. Protected stores
+        // retain these writes in the same staged-object inventory as the capsule.
+        self.upload_lfs(cancel).await?;
+        // Direct publication proves freshly uploaded LFS bytes at the origin.
+        // Staged bytes remain hidden; the protected service repeats full proof
+        // during promotion before it can make refs visible.
+        let prepared_lfs = self
+            .content
+            .as_ref()
+            .filter(|_| self.layout.store().staging_write_prefix().is_some())
+            .map(|content| {
+                content
+                    .lfs
+                    .iter()
+                    .map(|object| object.protocol_hash)
+                    .collect::<std::collections::BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        crab_read::dependency_proof::verify_capsule_dependencies_except_prepared(
             &self.layout,
             &base_catalog,
             self.plan.pointers(),
             &prepared_files,
+            &prepared_lfs,
             limits,
             cancel,
         )

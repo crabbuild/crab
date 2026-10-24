@@ -575,12 +575,14 @@ impl LocalTools {
         Ok(output)
     }
 
+    // Crab's LFS filter can launch configured extension commands. Apply the
+    // same execution policy to those child commands as to Git drivers.
     async fn untrusted_git_config(
         &self,
         current_dir: Option<&Path>,
         cancel: &CancellationToken,
     ) -> Result<Vec<(OsString, OsString)>, LocalError> {
-        const EXECUTABLE_CONFIG: &str = "^(core\\.fsmonitor|diff\\..*\\.(command|textconv)|filter\\..*\\.(clean|smudge|process)|merge\\..*\\.driver)$";
+        const EXECUTABLE_CONFIG: &str = "^(core\\.fsmonitor|diff\\..*\\.(command|textconv)|filter\\..*\\.(clean|smudge|process)|merge\\..*\\.driver|lfs\\.extension\\..*\\.(clean|smudge))$";
         let Some(current_dir) = current_dir else {
             return Ok(Vec::new());
         };
@@ -964,6 +966,25 @@ mod tests {
         .unwrap();
         std::fs::write(root.path().join("first.txt"), "first\n").unwrap();
         std::fs::write(root.path().join("first.bin"), "first\n").unwrap();
+        tools
+            .run_git(
+                Some(root.path()),
+                ["config", "lfs.extension.fixture.clean", "untrusted-program"],
+                true,
+                &cancel,
+            )
+            .await
+            .unwrap();
+        let disabled = tools
+            .run_crab(
+                Some(root.path()),
+                ["config", "--get", "lfs.extension.fixture.clean"],
+                false,
+                &cancel,
+            )
+            .await
+            .unwrap();
+        assert_eq!(disabled.stdout, b"\n");
 
         tools
             .run_git(
@@ -985,5 +1006,15 @@ mod tests {
             std::fs::read(root.path().join("driver-ran")).unwrap(),
             b"executed"
         );
+        let enabled = tools
+            .run_crab(
+                Some(root.path()),
+                ["config", "--get", "lfs.extension.fixture.clean"],
+                true,
+                &cancel,
+            )
+            .await
+            .unwrap();
+        assert_eq!(enabled.stdout, b"untrusted-program\n");
     }
 }

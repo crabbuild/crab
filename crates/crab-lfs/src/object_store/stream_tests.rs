@@ -5,6 +5,7 @@ use std::sync::{
 
 use async_trait::async_trait;
 use futures_util::{TryStreamExt, stream::BoxStream};
+use object_store::ObjectStoreExt as _;
 use object_store::{
     CopyOptions, GetOptions, GetResult, GetResultPayload, ListResult, MultipartUpload, ObjectStore,
     PutMultipartOptions, PutOptions, PutResult, memory::InMemory,

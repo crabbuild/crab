@@ -634,6 +634,7 @@ impl Client {
                     .configure_filters(&staged, &cancel)
                     .await
                     .map_err(local_error)?;
+                ensure_supported_mutation(&tools.owner, &staged, &cancel).await?;
                 let git_dir = staged.join(".git");
                 let layout = crab_storage::StoreLayout::new(
                     state.admitted_store(&resolved.store, &read_options, &cancel)?,
@@ -757,6 +758,7 @@ async fn clone_http_repository(
         .configure_filters(staged, cancel)
         .await
         .map_err(local_error)?;
+    ensure_supported_mutation(tools, staged, cancel).await?;
     let hydration =
         prepare_clone_hydration(tools, staged, Some("HEAD"), options.lazy, cancel).await?;
     configure_clone(staged, hydration.lazy(), None, None).await?;
@@ -860,7 +862,7 @@ pub(super) async fn ensure_supported_mutation(
             [
                 "config",
                 "--get-regexp",
-                "^(extensions\\.partialclone|remote\\..*\\.promisor|core\\.sparsecheckout|core\\.sparsecheckoutcone)$",
+                "^(extensions\\.partialclone|remote\\..*\\.promisor|core\\.sparsecheckout|core\\.sparsecheckoutcone|lfs\\.extension\\..*)$",
             ],
             false,
             cancel,
@@ -878,6 +880,12 @@ pub(super) async fn ensure_supported_mutation(
             continue;
         };
         let key = &line[..separator];
+        if key.starts_with(b"lfs.extension.") {
+            return Err(Error::new(
+                ErrorKind::UnsupportedCapability,
+                "LFS extensions are not supported by local SDK mutations",
+            ));
+        }
         let value = line[separator..]
             .iter()
             .copied()

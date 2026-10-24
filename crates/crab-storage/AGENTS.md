@@ -40,6 +40,10 @@ dependency source before asserting provider behavior.
 
 - Non-resumable multipart completion uses `crab_storage::multipart::complete_upload`: abort on failure, preserve the completion error, and await cleanup before retry. Durable journal sessions retain their separate recovery protocol.
   Source: `crates/crab-storage/src/multipart.rs`.
+- Stream producers pair `Store::create_multipart_upload` with
+  `Store::complete_multipart_upload` when their verified bytes must enter a
+  protected staging inventory. Supply the digest and length of the exact parts;
+  failed completion must not record a staged object.
 
 - Preserve throttling's optional provider source through product conversions;
   local admission errors use no source. Retry classification uses the hint,

@@ -19,6 +19,8 @@ on:
       - "crab/src/git/push_native.rs"
       - "crab/src/git/filter_process.rs"
       - "crab/src/git/prefetch.rs"
+      - "crab/src/cmd/hydrate.rs"
+      - "crab/src/lfs/**"
       - "crates/crab-*/**"
       - "packages/web/content/docs/sdk/**"
   pull_request:
@@ -39,6 +41,8 @@ on:
       - "crab/src/git/push_native.rs"
       - "crab/src/git/filter_process.rs"
       - "crab/src/git/prefetch.rs"
+      - "crab/src/cmd/hydrate.rs"
+      - "crab/src/lfs/**"
       - "crates/crab-*/**"
       - "packages/web/content/docs/sdk/**"
   schedule:
@@ -112,7 +116,7 @@ jobs:
 
       - name: Deny SDK and publication lints
         run: >-
-          cargo "+${SDK_MSRV}" clippy -p crab-sdk -p crab-remote
+          cargo "+${SDK_MSRV}" clippy -p crab-sdk -p crab-remote -p crab-lfs
           --locked --all-targets --all-features -- -D warnings
 
       - name: Deny rustdoc warnings
@@ -195,6 +199,7 @@ jobs:
           npm run build --prefix packages/ui
       - name: Qualify shared publication owners
         run: |
+          cargo "+${SDK_MSRV}" test -p crab-lfs --locked --lib
           cargo "+${SDK_MSRV}" test -p crab-remote --locked --all-features --test publication --test capsule_preparation
           cargo "+${SDK_MSRV}" test -p crab-metadata --locked capsule_protocol::plan::tests
           cargo "+${SDK_MSRV}" test -p crab-auth-server --locked --lib
@@ -216,6 +221,7 @@ jobs:
           cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport cmd::hydrate::tests::
           cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport git::filter_process::tests::
           cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport git::prefetch::tests::
+          cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport lfs::config::tests::
           cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport git::push_native::tests::unresolved_plan_blocks_replay_before_ref_admission -- --exact
           cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport git::push::tests::next_writer_repairs_publication_cancelled_at_active_marker -- --exact
           cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport cmd::push::tests::uncertain_commit_does_not_enter_automatic_transient_retry -- --exact

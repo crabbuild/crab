@@ -12,6 +12,36 @@ pub(super) async fn prepare(
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<Option<crab_remote::prepare::PreparedContent>> {
     let pointers = discover_push_pointers(tools, root, advertised, updates, cancel).await?;
+    let lfs = prepare_lfs(
+        tools,
+        root,
+        common,
+        &pointers.lfs,
+        scratch,
+        max_bytes,
+        cancel,
+    )
+    .await?;
+    let content = prepare_xet(pointers.crab, common, scratch, max_bytes, cancel).await?;
+    match (content, lfs.is_empty()) {
+        (content, true) => Ok(content),
+        (Some(content), false) => content
+            .with_lfs(lfs, max_bytes)
+            .map(Some)
+            .map_err(preparation_error),
+        (None, false) => crab_remote::prepare::PreparedContent::from_lfs(lfs, max_bytes)
+            .map(Some)
+            .map_err(preparation_error),
+    }
+}
+
+async fn prepare_xet(
+    pointers: std::collections::BTreeMap<[u8; 32], crab_types::pointer::Pointer>,
+    common: &std::path::Path,
+    scratch: &std::path::Path,
+    max_bytes: u64,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<Option<crab_remote::prepare::PreparedContent>> {
     if pointers.is_empty() {
         return Ok(None);
     }
@@ -168,19 +198,25 @@ pub(super) async fn prepare(
     Ok(Some(content))
 }
 
+#[derive(Default)]
+struct PushPointers {
+    crab: std::collections::BTreeMap<[u8; 32], crab_types::pointer::Pointer>,
+    lfs: std::collections::BTreeMap<[u8; 32], crab_git::LfsPointer>,
+}
+
 async fn discover_push_pointers(
     tools: &crab_remote::local::LocalTools,
     root: &std::path::Path,
     advertised: &std::collections::BTreeMap<String, String>,
     updates: &[LocalPushUpdate],
     cancel: &tokio_util::sync::CancellationToken,
-) -> Result<std::collections::BTreeMap<[u8; 32], crab_types::pointer::Pointer>> {
+) -> Result<PushPointers> {
     let targets = updates
         .iter()
         .filter_map(|update| update.target.as_deref())
         .collect::<std::collections::BTreeSet<_>>();
     if targets.is_empty() {
-        return Ok(std::collections::BTreeMap::new());
+        return Ok(PushPointers::default());
     }
     let objects = tools
         .run_git_with_input(
@@ -197,7 +233,7 @@ async fn discover_push_pointers(
         )
         .await
         .map_err(local_error)?;
-    let mut pointers = std::collections::BTreeMap::new();
+    let mut pointers = PushPointers::default();
     for line in objects.stdout.split(|byte| *byte == b'\n') {
         if line.is_empty() {
             continue;
@@ -223,7 +259,9 @@ async fn discover_push_pointers(
             .map_err(|source| {
                 Error::with_source(ErrorKind::Corruption, "Git blob size is invalid", source)
             })?;
-        if size > crab_types::pointer::MAX_POINTER_SIZE {
+        if size
+            > crab_types::pointer::MAX_POINTER_SIZE.max(crab_git::lfs_pointer::MAX_LFS_POINTER_SIZE)
+        {
             continue;
         }
         let body = tools
@@ -231,10 +269,22 @@ async fn discover_push_pointers(
             .await
             .map_err(local_error)?
             .stdout;
-        let Ok(pointer) = crab_types::pointer::Pointer::parse(&body) else {
-            continue;
+        let pointer = match crab_git::classify(&body) {
+            crab_git::pointer_detect::PointerKind::Lfs(pointer) => {
+                if let Some(existing) = pointers.lfs.insert(pointer.oid, pointer.clone())
+                    && existing != pointer
+                {
+                    return Err(Error::new(
+                        ErrorKind::Corruption,
+                        "one LFS identity has inconsistent pointer metadata",
+                    ));
+                }
+                continue;
+            }
+            crab_git::pointer_detect::PointerKind::Crab(pointer) => pointer,
+            crab_git::pointer_detect::PointerKind::NotAPointer => continue,
         };
-        if let Some(existing) = pointers.insert(pointer.file_hash, pointer.clone())
+        if let Some(existing) = pointers.crab.insert(pointer.file_hash, pointer.clone())
             && existing != pointer
         {
             return Err(Error::new(
@@ -244,6 +294,111 @@ async fn discover_push_pointers(
         }
     }
     Ok(pointers)
+}
+
+async fn prepare_lfs(
+    tools: &crab_remote::local::LocalTools,
+    root: &std::path::Path,
+    common: &std::path::Path,
+    pointers: &std::collections::BTreeMap<[u8; 32], crab_git::LfsPointer>,
+    scratch: &std::path::Path,
+    max_bytes: u64,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<Vec<crab_remote::prepare::ContentArtifact>> {
+    if pointers.is_empty() {
+        return Ok(Vec::new());
+    }
+    let mut values = Vec::new();
+    for key in ["lfs.storage", "lfs.lfsdir"] {
+        let value = match tools
+            .run_git(
+                Some(root),
+                ["config", "--includes", "--null", "--get", key],
+                false,
+                cancel,
+            )
+            .await
+        {
+            Ok(output) => Some(
+                String::from_utf8(output.stdout)
+                    .map_err(|source| {
+                        Error::with_source(
+                            ErrorKind::Corruption,
+                            "LFS storage setting is not UTF-8",
+                            source,
+                        )
+                    })?
+                    .strip_suffix('\0')
+                    .ok_or_else(|| {
+                        Error::new(ErrorKind::Corruption, "Git LFS setting has invalid framing")
+                    })?
+                    .to_owned(),
+            ),
+            Err(crab_remote::local::LocalError::Exit(output))
+                if output.status.code() == Some(1) =>
+            {
+                None
+            }
+            Err(source) => return Err(local_error(source)),
+        };
+        values.push(value);
+    }
+    let environment = std::env::var("GIT_LFS_DIR").ok();
+    let configured = crab_lfs::local::storage_override(
+        values[0].as_deref(),
+        values[1].as_deref(),
+        environment.as_deref(),
+    );
+    let storage = crab_lfs::local::storage_dir(common, configured.as_deref());
+    let mut bytes = 0u64;
+    let mut objects = Vec::new();
+    for pointer in pointers.values() {
+        let source = crab_lfs::local::object_path(&storage, &pointer.oid);
+        match tokio::fs::metadata(&source).await {
+            Ok(_) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+            Err(source) => {
+                return Err(Error::with_source(
+                    ErrorKind::Io,
+                    "cannot inspect local LFS payload",
+                    source,
+                ));
+            }
+        }
+        bytes = bytes
+            .checked_add(pointer.size)
+            .filter(|bytes| *bytes <= max_bytes)
+            .ok_or_else(|| {
+                Error::new(
+                    ErrorKind::LimitExceeded,
+                    "prepared LFS payload exceeds byte limit",
+                )
+            })?;
+        let oid = crab_git::lfs_pointer::hex_encode(&pointer.oid);
+        let destination = scratch.join(format!("lfs-{oid}"));
+        let digest =
+            crab_lfs::local::snapshot(&source, &destination, &pointer.oid, pointer.size, cancel)
+                .await
+                .map_err(|source| {
+                    let kind = match source {
+                        crab_lfs::local::SnapshotError::Cancelled => ErrorKind::Cancelled,
+                        crab_lfs::local::SnapshotError::Corrupt(_) => ErrorKind::Corruption,
+                        crab_lfs::local::SnapshotError::Io(_) => ErrorKind::Io,
+                    };
+                    Error::with_source(kind, "cannot prepare local LFS payload", source)
+                })?;
+        objects.push(crab_remote::prepare::ContentArtifact::new(
+            pointer.oid,
+            digest,
+            pointer.size,
+            destination,
+        ));
+    }
+    Ok(objects)
+}
+
+fn preparation_error(source: crab_remote::prepare::Error) -> Error {
+    crate::client::mutation::Failure::from(source).into()
 }
 
 fn staging_error(source: crab_staging::StagingError) -> Error {

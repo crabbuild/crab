@@ -1,3 +1,4 @@
+use std::error::Error as _;
 use std::panic::AssertUnwindSafe;
 use std::path::{Path, PathBuf};
 
@@ -359,7 +360,7 @@ async fn hydrated_clone(
     for (path, body) in removed {
         store.put(&path, body).await.unwrap();
     }
-    let lazy = lazy.unwrap();
+    let lazy = lazy.unwrap_or_else(|error| panic!("lazy native HTTP clone: {}", failure(&error)));
     let raw = sdk
         .open(OpenOptions::remote(
             RepositoryLocator::new(&prefix).unwrap(),
@@ -449,5 +450,104 @@ async fn hydrated_clone(
     assert!(std::fs::read(checkout.join("b.lfs")).unwrap() == lfs_bytes);
     assert!(!checkout.join("crab.toml").exists());
     assert!(cloned.local().unwrap().status().await.unwrap().is_clean());
+    let mut updated_lfs = lfs_bytes;
+    updated_lfs.extend_from_slice(b"local LFS update\n");
+    // Exercise multiple real multipart parts in preparation, upload and recovery.
+    updated_lfs.resize(16 * 1024 * 1024, 0x6b);
+    run(
+        git,
+        &checkout,
+        &["config", "lfs.storage", "cache directory's payloads"],
+    );
+    std::fs::write(checkout.join("b.lfs"), &updated_lfs).unwrap();
+    let local = cloned.local().unwrap();
+    run(
+        git,
+        &checkout,
+        &[
+            "config",
+            "lfs.extension.fixture.clean",
+            "/usr/bin/touch extension-ran",
+        ],
+    );
+    let rejected = local.stage(vec!["b.lfs".into()]).await.unwrap_err();
+    assert_eq!(rejected.kind(), ErrorKind::UnsupportedCapability);
+    assert!(!checkout.join("extension-ran").exists());
+    run(
+        git,
+        &checkout,
+        &["config", "--remove-section", "lfs.extension.fixture"],
+    );
+    local.stage(vec!["b.lfs".into()]).await.unwrap();
+    let identity =
+        CommitIdentity::new("SDK qualification", "sdk@example.invalid", 1_700_000_000, 0).unwrap();
+    local
+        .commit(
+            CommitOptions::new(identity.clone(), identity, b"local LFS update\n".to_vec()).unwrap(),
+        )
+        .await
+        .unwrap();
+    let before = store
+        .inner()
+        .list(None)
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    let dry_run = local
+        .prepare_push(PushOptions::current_branch().dry_run(true))
+        .await
+        .unwrap()
+        .execute()
+        .await
+        .unwrap();
+    assert!(matches!(dry_run, PushOutcome::DryRun { .. }));
+    let after = store
+        .inner()
+        .list(None)
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    assert_eq!(before, after, "LFS dry-run must create no remote objects");
+    let prepared = local
+        .prepare_push(PushOptions::current_branch())
+        .await
+        .unwrap();
+    let token = prepared.recovery_token().to_json().unwrap();
+    drop(prepared);
+    let updated_oid = sha2::Sha256::digest(&updated_lfs).into();
+    let storage = checkout.join(".git/cache directory's payloads");
+    std::fs::remove_file(crab_lfs::local::object_path(&storage, &updated_oid)).unwrap();
+    assert!(matches!(
+        sdk.resume_local_push(
+            crab_sdk::local::PushRecoveryToken::from_json(&token).unwrap(),
+            scratch.to_owned()
+        )
+        .await
+        .unwrap(),
+        PushOutcome::Committed { .. }
+    ));
+    let verified = scratch.join("local-lfs-independent");
+    sdk.clone_local(
+        RepositoryLocator::new(&prefix).unwrap(),
+        &verified,
+        CloneOptions::default()
+            .with_branch("without-project-config")
+            .unwrap()
+            .eager(),
+    )
+    .await
+    .unwrap();
+    assert!(std::fs::read(verified.join("b.lfs")).unwrap() == updated_lfs);
     target
+}
+
+fn failure(error: &crab_sdk::Error) -> String {
+    let mut message = error.to_string();
+    let mut source = error.source();
+    while let Some(error) = source {
+        message.push_str(": ");
+        message.push_str(&error.to_string());
+        source = error.source();
+    }
+    message
 }

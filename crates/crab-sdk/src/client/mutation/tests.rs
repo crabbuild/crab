@@ -198,6 +198,7 @@ pub(super) fn memory_client() -> Client {
 #[test]
 fn recovery_downloads_are_admitted_as_one_aggregate_budget() {
     let content = crate::mutation::ContentBinding {
+        lfs: Vec::new(),
         xorbs: vec![crate::mutation::ContentArtifactBinding {
             protocol_hash: [1; 32],
             body_hash: [2; 32],
@@ -227,6 +228,47 @@ fn recovery_downloads_are_admitted_as_one_aggregate_budget() {
     let error = validate_recovery_budget(&input, Some(&content), limits).unwrap_err();
 
     assert_eq!(error.kind(), ErrorKind::LimitExceeded);
+}
+
+#[test]
+fn recovery_lfs_payloads_share_entry_request_and_byte_budgets() {
+    let content = crate::mutation::ContentBinding {
+        xorbs: Vec::new(),
+        shards: Vec::new(),
+        files: Vec::new(),
+        lfs: [6, 5]
+            .into_iter()
+            .enumerate()
+            .map(|(index, size)| crate::mutation::ContentArtifactBinding {
+                protocol_hash: [index as u8; 32],
+                body_hash: [3; 32],
+                size,
+            })
+            .collect(),
+    };
+    let input = PackInput::Staged {
+        pack_id: "a".repeat(64),
+        plan_id: "b".repeat(64),
+        size: 2,
+    };
+    for limits in [
+        crate::ReadLimits {
+            max_fetched_bytes: 12,
+            ..Default::default()
+        },
+        crate::ReadLimits {
+            max_storage_requests: 2,
+            ..Default::default()
+        },
+        crate::ReadLimits {
+            max_entries: 1,
+            ..Default::default()
+        },
+    ] {
+        assert!(
+            matches!(validate_recovery_budget(&input, Some(&content), limits), Err(error) if error.kind() == ErrorKind::LimitExceeded)
+        );
+    }
 }
 
 #[tokio::test]

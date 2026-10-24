@@ -651,6 +651,9 @@ mod ref_visibility;
 #[path = "capsule_preparation/cancellation.rs"]
 mod cancellation;
 
+#[path = "capsule_preparation/lfs.rs"]
+mod lfs;
+
 #[tokio::test(flavor = "multi_thread")]
 async fn protected_preparation_stages_a_native_capsule_without_publishing_refs() {
     let (directory, content) = content_fixture().await;

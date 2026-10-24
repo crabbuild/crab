@@ -1,7 +1,7 @@
 use crate::{Error, ErrorKind};
 
 #[derive(Debug, thiserror::Error)]
-pub(super) enum Failure {
+pub(crate) enum Failure {
     #[error("SDK publication failed")]
     Sdk(#[from] Error),
     #[error("publication admission failed")]

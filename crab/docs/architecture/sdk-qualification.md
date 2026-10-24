@@ -20,7 +20,7 @@ The SDK now captures only `v2/root` through the shared capsule reader. It pins
 native Git visibility, pointer catalogs and matching optional browse indexes;
 legacy-only repositories fail and corrupt native authority is never bypassed.
 Initialization, local pack transfer, file/ref publication and durable recovery
-use native capsule owners. Remote tokens use version 5, local push tokens use
+use native capsule owners. Remote tokens use version 6, local push tokens use
 version 4, and the executable storage handshake requires version 2. Existing
 pointer syntax and independent local-workflow/API schemas keep their own versions.
 
@@ -232,6 +232,38 @@ SDK tests (41), filter tests (58), queue tests (5), command hydration tests (88)
 untrusted-driver checks and strict SDK/remote all-target Clippy pass locally
 (`sdk-native-http-content-*.log`, `sdk-delayed-smudge-{before,after}.log`).
 New-head hosted and cross-platform checks remain required for these follow-ups.
+
+New local LFS publication required another correction. The staged pointer and
+payload were valid, but native SDK push did not upload the local LFS object and
+returned `NotFound`. Preparation now freezes exact SHA-256/size-verified payloads,
+binds their body digests into version-6 recovery tokens and checkpoints them
+under the native plan. Resume reloads those bounded artifacts; dry-run does not
+write remote objects. Git blob discovery uses the shared pointer classifier,
+so ordinary empty Git blobs cannot become LFS dependencies.
+
+The real RustFS regression passes stage/commit, unchanged remote inventory on
+dry-run, token resume after deleting the local payload cache, and independent
+eager-clone byte verification. The 16 MiB payload crosses multipart part
+boundaries and uses a configured LFS cache path.
+Shared tests cover corrupted snapshots, zero-size imported pointers, durable
+recovery and protected staging. Streamed LFS uploads now begin and complete
+through the storage facade; the raw origin handle bypassed protected routing and
+inventory. Multipart completion records the verified body digest and length.
+Verification receipts are rebuilt for canonical objects after promotion and
+are not staged as unreachable cache objects. The protected service regression
+also verifies, commits and retries a mixed Git/Xet/LFS capsule and reads exact
+published payload bytes. These local owner tests do not replace a real managed
+service fixture.
+
+At `baace3e5caf`, six non-opt-in SDK jobs pass. Windows fails the new eager
+fixture because an ordinary Git-only checkout tries to initialize remote storage
+before selecting any pointers. The same failure reproduces locally against an
+unreachable endpoint. Hydration now validates configuration first and defers
+provider/auth setup until verified local recovery leaves content to fetch;
+all 89 command hydration regressions pass. The native HTTP Linux fixture also
+fails its lazy-clone operation; the retained SDK error omitted its source chain.
+That test now retains the diagnostic chain. New-head CI remains required for
+both fixes and for cross-platform LFS publication qualification.
 
 The gateway write-soak failure is also present at the unchanged `crab-v2` base
 `33f8e6c360d`: [run 40087756593](https://github.com/crabbuild/crab/actions/runs/40087756593)

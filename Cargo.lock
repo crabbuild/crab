@@ -2538,6 +2538,7 @@ dependencies = [
  "crab-cache-store",
  "crab-coordination",
  "crab-git",
+ "crab-lfs",
  "crab-metadata",
  "crab-read",
  "crab-remote-git",

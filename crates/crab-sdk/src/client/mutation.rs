@@ -18,7 +18,7 @@ use crate::{
 mod commit;
 mod failure;
 pub(crate) mod native_content;
-use failure::Failure;
+pub(crate) use failure::Failure;
 
 #[cfg(test)]
 mod tests;
@@ -847,25 +847,50 @@ async fn prepare_batch(
                 path,
             ));
         }
-        let prepared_content = crab_remote::prepare::PreparedContent::new(
-            xorb_artifacts,
-            shard_artifacts,
-            content
-                .files
-                .iter()
-                .map(|file| {
-                    crab_remote::prepare::ContentFile::new(
-                        file.file_hash,
-                        file.size,
-                        file.shard_hash,
-                    )
-                })
-                .collect(),
-            bounds.max_fetched_bytes,
-            cancel,
-        )
-        .await
-        .map_err(Failure::from)?;
+        let mut lfs_artifacts = Vec::with_capacity(content.lfs.len());
+        for artifact in &content.lfs {
+            let oid = crab_git::lfs_pointer::hex_encode(&artifact.protocol_hash);
+            let path = directory.path().join(format!("recovery-lfs-{oid}"));
+            let remote = layout.capsule_plan_recovery_lfs_path(plan_id, &oid);
+            recover_artifact(client, &remote, &path, artifact.size, cancel).await?;
+            lfs_artifacts.push(crab_remote::prepare::ContentArtifact::new(
+                artifact.protocol_hash,
+                artifact.body_hash,
+                artifact.size,
+                path,
+            ));
+        }
+        let prepared_content = if content.files.is_empty() {
+            crab_remote::prepare::PreparedContent::from_lfs(lfs_artifacts, bounds.max_fetched_bytes)
+                .map_err(Failure::from)?
+        } else {
+            let prepared_content = crab_remote::prepare::PreparedContent::new(
+                xorb_artifacts,
+                shard_artifacts,
+                content
+                    .files
+                    .iter()
+                    .map(|file| {
+                        crab_remote::prepare::ContentFile::new(
+                            file.file_hash,
+                            file.size,
+                            file.shard_hash,
+                        )
+                    })
+                    .collect(),
+                bounds.max_fetched_bytes,
+                cancel,
+            )
+            .await
+            .map_err(Failure::from)?;
+            if lfs_artifacts.is_empty() {
+                prepared_content
+            } else {
+                prepared_content
+                    .with_lfs(lfs_artifacts, bounds.max_fetched_bytes)
+                    .map_err(Failure::from)?
+            }
+        };
         prepared = prepared
             .attach_content(prepared_content)
             .map_err(Failure::from)?;
@@ -889,6 +914,7 @@ fn validate_recovery_budget(
             .xorbs
             .len()
             .checked_add(content.shards.len())
+            .and_then(|count| count.checked_add(content.lfs.len()))
             .ok_or_else(|| {
                 Error::new(ErrorKind::LimitExceeded, "recovery artifact count overflow")
             })?;
@@ -897,15 +923,25 @@ fn validate_recovery_budget(
             .ok_or_else(|| {
                 Error::new(ErrorKind::LimitExceeded, "recovery request count overflow")
             })?;
+        let entries = content
+            .files
+            .len()
+            .checked_add(content.lfs.len())
+            .ok_or_else(|| Error::new(ErrorKind::LimitExceeded, "recovery entry count overflow"))?;
         if u64::try_from(artifact_count).unwrap_or(u64::MAX) > bounds.max_logical_objects
-            || u64::try_from(content.files.len()).unwrap_or(u64::MAX) > bounds.max_entries
+            || u64::try_from(entries).unwrap_or(u64::MAX) > bounds.max_entries
         {
             return Err(Error::new(
                 ErrorKind::LimitExceeded,
                 "recovery content count exceeds operation limits",
             ));
         }
-        for artifact in content.xorbs.iter().chain(&content.shards) {
+        for artifact in content
+            .xorbs
+            .iter()
+            .chain(&content.shards)
+            .chain(&content.lfs)
+        {
             fetched_bytes = fetched_bytes.checked_add(artifact.size).ok_or_else(|| {
                 Error::new(ErrorKind::LimitExceeded, "recovery byte count overflow")
             })?;
