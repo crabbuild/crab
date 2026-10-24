@@ -1,17 +1,21 @@
 use std::{
-    collections::BTreeMap,
-    io::{Read as _, Write as _},
+    collections::{BTreeMap, HashMap},
+    io::{BufWriter, Read as _, Write as _},
     ops::Bound::{Excluded, Included, Unbounded},
     str::FromStr as _,
+    sync::Arc,
 };
 
 use bytes::Bytes;
+use crab_storage::{Store, StoreLayout};
 use flate2::{Compression, read::GzDecoder, write::GzEncoder};
 use gix_hash::ObjectId;
 use serde::{Deserialize, Serialize};
+use tokio::sync::Mutex;
 
 use crate::gateway::Repository;
 
+const MAX_CACHED_COMMITS: usize = 16;
 const VERSION: u32 = 2;
 const LEGACY_VERSION: u32 = 1;
 const MAX_MANIFEST_BYTES: u64 = 32 * 1024 * 1024;
@@ -390,45 +394,163 @@ fn estimated_object_bytes(path: &str, attributes: &ObjectAttributes) -> usize {
         .saturating_add(serde_json::to_vec(attributes).map_or(usize::MAX, |bytes| bytes.len()))
 }
 
-pub(crate) async fn load(repository: &Repository, commit: ObjectId) -> crate::Result<Manifest> {
-    let mut current = Some(commit);
-    let mut depth = 0;
-    let mut changes = BTreeMap::new();
-    let mut manifest = Manifest::default();
-    while let Some(commit) = current {
-        if depth >= MAX_DELTA_DEPTH {
+// Attribute deltas precede Git visibility and are immutable by commit. Share
+// their lazy replay across paths so cold keys do not repeat the same history.
+pub(crate) struct Cache {
+    layout: StoreLayout<Store>,
+    commits: Mutex<HashMap<ObjectId, Arc<Mutex<ReadState>>>>,
+}
+
+struct ReadState {
+    current: Option<ObjectId>,
+    depth: usize,
+    checkpoint: Option<ObjectId>,
+    changes: BTreeMap<String, Option<ObjectAttributes>>,
+    manifest: Option<Arc<Manifest>>,
+}
+
+impl Cache {
+    pub(crate) fn new(layout: StoreLayout<Store>) -> Self {
+        Self {
+            layout,
+            commits: Mutex::new(HashMap::new()),
+        }
+    }
+
+    async fn state(&self, commit: ObjectId) -> Arc<Mutex<ReadState>> {
+        let mut commits = self.commits.lock().await;
+        if commits.len() >= MAX_CACHED_COMMITS && !commits.contains_key(&commit) {
+            commits.clear();
+        }
+        Arc::clone(commits.entry(commit).or_insert_with(|| {
+            Arc::new(Mutex::new(ReadState {
+                current: Some(commit),
+                depth: 0,
+                checkpoint: None,
+                changes: BTreeMap::new(),
+                manifest: None,
+            }))
+        }))
+    }
+
+    pub(crate) async fn load(&self, commit: ObjectId) -> crate::Result<Arc<Manifest>> {
+        let state = self.state(commit).await;
+        let mut state = state.lock().await;
+        loop {
+            if let Some(manifest) = &state.manifest {
+                return Ok(Arc::clone(manifest));
+            }
+            state.advance(&self.layout).await?;
+        }
+    }
+
+    pub(crate) async fn object(
+        &self,
+        commit: ObjectId,
+        path: &str,
+        oid: ObjectId,
+    ) -> crate::Result<Option<ObjectAttributes>> {
+        let state = self.state(commit).await;
+        let mut state = state.lock().await;
+        loop {
+            if let Some(attributes) = state.object(path, oid) {
+                return Ok(attributes.cloned());
+            }
+            state.advance(&self.layout).await?;
+        }
+    }
+
+    pub(crate) async fn objects(
+        &self,
+        commit: ObjectId,
+        objects: &[(String, ObjectId)],
+    ) -> crate::Result<BTreeMap<String, ListingAttributes>> {
+        let state = self.state(commit).await;
+        let mut state = state.lock().await;
+        while objects
+            .iter()
+            .any(|(path, oid)| state.object(path, *oid).is_none())
+        {
+            state.advance(&self.layout).await?;
+        }
+        Ok(objects
+            .iter()
+            .filter_map(|(path, oid)| {
+                state
+                    .object(path, *oid)
+                    .flatten()
+                    .map(|attributes| (path.clone(), attributes.into()))
+            })
+            .collect())
+    }
+}
+
+impl ReadState {
+    fn object(&self, path: &str, oid: ObjectId) -> Option<Option<&ObjectAttributes>> {
+        if let Some(manifest) = &self.manifest {
+            return Some(manifest.object(path, oid));
+        }
+        self.changes.get(path).map(|attributes| {
+            attributes
+                .as_ref()
+                .filter(|attributes| attributes.blob_oid == oid.to_string())
+        })
+    }
+
+    async fn advance(&mut self, layout: &StoreLayout<Store>) -> crate::Result<()> {
+        let Some(commit) = self.current else {
+            return Ok(());
+        };
+        if self.depth >= MAX_DELTA_DEPTH {
             return Err(crate::Error::Config("S3 attribute delta chain is too deep"));
         }
-        depth += 1;
-        match load_stored(repository, commit).await? {
-            None => break,
+        match load_stored(layout, commit).await? {
+            None => {
+                let manifest = Manifest {
+                    checkpoint: self.checkpoint,
+                    ..Default::default()
+                };
+                self.finish(manifest);
+            }
             Some(Stored::Legacy(legacy)) => {
-                manifest = Manifest::from_objects(legacy.objects, false);
-                break;
+                self.finish(Manifest::from_objects(legacy.objects, false))
             }
             Some(Stored::Delta(delta)) => {
-                if delta.checkpoint && manifest.checkpoint.is_none() {
-                    manifest.checkpoint = Some(commit);
-                }
                 if delta.checkpoint
-                    && let Some(checkpoint) =
-                        load_checkpoint(repository, commit, delta.checkpoint_slot.as_deref())
-                            .await?
+                    && let Some(mut manifest) =
+                        load_checkpoint(layout, commit, delta.checkpoint_slot.as_deref()).await?
                 {
-                    manifest = checkpoint;
                     manifest.checkpoint = Some(commit);
-                    break;
+                    self.finish(manifest);
+                    return Ok(());
                 }
-                current = parse_parent(delta.parent.as_deref())?;
-                retain_newest_changes(&mut changes, delta.changes);
+                let parent = parse_parent(delta.parent.as_deref())?;
+                // Advance only after every fallible read and parse. Cancellation
+                // must leave this commit retryable without losing tombstones.
+                if delta.checkpoint && self.checkpoint.is_none() {
+                    self.checkpoint = Some(commit);
+                }
+                retain_newest_changes(&mut self.changes, delta.changes);
+                self.current = parent;
+                self.depth += 1;
+                if parent.is_none() {
+                    let manifest = Manifest {
+                        complete: true,
+                        checkpoint: self.checkpoint,
+                        ..Default::default()
+                    };
+                    self.finish(manifest);
+                }
             }
         }
+        Ok(())
     }
-    if current.is_none() {
-        manifest.complete = true;
+
+    fn finish(&mut self, mut manifest: Manifest) {
+        manifest.apply(std::mem::take(&mut self.changes));
+        self.manifest = Some(Arc::new(manifest));
+        self.current = None;
     }
-    manifest.apply(changes);
-    Ok(manifest)
 }
 
 fn retain_newest_changes(
@@ -438,106 +560,6 @@ fn retain_newest_changes(
     for (path, attributes) in changes {
         selected.entry(path).or_insert(attributes);
     }
-}
-
-pub(crate) async fn load_object(
-    repository: &Repository,
-    commit: ObjectId,
-    path: &str,
-    oid: ObjectId,
-) -> crate::Result<Option<ObjectAttributes>> {
-    let mut current = Some(commit);
-    for _ in 0..MAX_DELTA_DEPTH {
-        let Some(commit) = current else {
-            return Ok(None);
-        };
-        match load_stored(repository, commit).await? {
-            None => return Ok(None),
-            Some(Stored::Legacy(legacy)) => {
-                return Ok(legacy
-                    .objects
-                    .get(path)
-                    .filter(|attributes| attributes.blob_oid == oid.to_string())
-                    .cloned());
-            }
-            Some(Stored::Delta(delta)) => {
-                if delta.checkpoint
-                    && let Some(checkpoint) =
-                        load_checkpoint(repository, commit, delta.checkpoint_slot.as_deref())
-                            .await?
-                {
-                    return Ok(checkpoint.object(path, oid).cloned());
-                }
-                if let Some(attributes) = delta.changes.get(path) {
-                    return Ok(attributes
-                        .as_ref()
-                        .filter(|attributes| attributes.blob_oid == oid.to_string())
-                        .cloned());
-                }
-                current = parse_parent(delta.parent.as_deref())?;
-            }
-        }
-    }
-    Err(crate::Error::Config("S3 attribute delta chain is too deep"))
-}
-
-pub(crate) async fn load_objects(
-    repository: &Repository,
-    commit: ObjectId,
-    objects: &[(String, ObjectId)],
-) -> crate::Result<BTreeMap<String, ListingAttributes>> {
-    let mut unresolved = objects.iter().cloned().collect::<BTreeMap<_, _>>();
-    let mut resolved = BTreeMap::new();
-    let mut current = Some(commit);
-    for _ in 0..MAX_DELTA_DEPTH {
-        if unresolved.is_empty() {
-            return Ok(resolved);
-        }
-        let Some(commit) = current else {
-            return Ok(resolved);
-        };
-        match load_stored(repository, commit).await? {
-            None => return Ok(resolved),
-            Some(Stored::Legacy(legacy)) => {
-                for (path, oid) in unresolved {
-                    if let Some(attributes) = legacy
-                        .objects
-                        .get(&path)
-                        .filter(|attributes| attributes.blob_oid == oid.to_string())
-                    {
-                        resolved.insert(path, attributes.into());
-                    }
-                }
-                return Ok(resolved);
-            }
-            Some(Stored::Delta(delta)) => {
-                for (path, attributes) in delta.changes {
-                    let Some(oid) = unresolved.remove(&path) else {
-                        continue;
-                    };
-                    if let Some(attributes) =
-                        attributes.filter(|attributes| attributes.blob_oid == oid.to_string())
-                    {
-                        resolved.insert(path, (&attributes).into());
-                    }
-                }
-                if delta.checkpoint
-                    && let Some(manifest) =
-                        load_checkpoint(repository, commit, delta.checkpoint_slot.as_deref())
-                            .await?
-                {
-                    for (path, oid) in unresolved {
-                        if let Some(attributes) = manifest.object(&path, oid) {
-                            resolved.insert(path, attributes.into());
-                        }
-                    }
-                    return Ok(resolved);
-                }
-                current = parse_parent(delta.parent.as_deref())?;
-            }
-        }
-    }
-    Err(crate::Error::Config("S3 attribute delta chain is too deep"))
 }
 
 pub(crate) async fn save_delta(
@@ -578,17 +600,22 @@ pub(crate) fn prepare_checkpoint(
         return Ok(None);
     }
     let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
-    serde_json::to_writer(
-        &mut encoder,
-        &CheckpointPayload {
-            version: VERSION,
-            commit: commit.to_string(),
-            complete: manifest.complete,
-            objects: &manifest.objects,
-        },
-    )
-    .map_err(|source| crate::Error::Attributes { source })?;
-    encoder.flush()?;
+    {
+        // JSON emits many tiny fields. Buffer them before gzip so compressor
+        // setup and output-buffer clearing do not repeat for each field.
+        let mut buffered = BufWriter::with_capacity(64 * 1024, &mut encoder);
+        serde_json::to_writer(
+            &mut buffered,
+            &CheckpointPayload {
+                version: VERSION,
+                commit: commit.to_string(),
+                complete: manifest.complete,
+                objects: &manifest.objects,
+            },
+        )
+        .map_err(|source| crate::Error::Attributes { source })?;
+        buffered.flush()?;
+    }
     let bytes = encoder.finish()?;
     if bytes.len() as u64 > MAX_MANIFEST_BYTES {
         return Ok(None);
@@ -614,7 +641,7 @@ pub(crate) async fn publish_checkpoint(
     repository: &Repository,
     checkpoint: &PreparedCheckpoint,
 ) -> crate::Result<bool> {
-    let path = checkpoint_slot_path(repository, &checkpoint.slot)?;
+    let path = checkpoint_slot_path(&repository.layout, &checkpoint.slot)?;
     for _ in 0..MAX_CHECKPOINT_PUBLISH_ATTEMPTS {
         let existing = repository
             .store
@@ -758,7 +785,7 @@ async fn delta_chain_reaches(
         if commit == target {
             return Ok(true);
         }
-        current = match load_stored(repository, commit).await? {
+        current = match load_stored(&repository.layout, commit).await? {
             Some(Stored::Delta(delta)) => parse_parent(delta.parent.as_deref())?,
             Some(Stored::Legacy(_)) | None => None,
         };
@@ -767,16 +794,16 @@ async fn delta_chain_reaches(
 }
 
 async fn load_checkpoint(
-    repository: &Repository,
+    layout: &StoreLayout<Store>,
     commit: ObjectId,
     slot: Option<&str>,
 ) -> crate::Result<Option<Manifest>> {
     let path = match slot {
-        Some(slot) => checkpoint_slot_path(repository, slot)?,
-        None => legacy_checkpoint_path(repository, commit),
+        Some(slot) => checkpoint_slot_path(layout, slot)?,
+        None => legacy_checkpoint_path(layout, commit),
     };
-    let bytes = match repository
-        .store
+    let bytes = match layout
+        .store()
         .get_with_etag_bounded(&path, MAX_MANIFEST_BYTES)
         .await
     {
@@ -810,7 +837,7 @@ async fn load_checkpoint(
 }
 
 fn checkpoint_slot_path(
-    repository: &Repository,
+    layout: &StoreLayout<Store>,
     slot: &str,
 ) -> crate::Result<object_store::path::Path> {
     if slot.len() != blake3::OUT_LEN * 2
@@ -822,15 +849,14 @@ fn checkpoint_slot_path(
             "S3 attribute checkpoint slot is corrupt",
         ));
     }
-    Ok(repository
-        .layout
-        .repo_path(&format!("s3/attribute-checkpoints/branches/{slot}.json")))
+    Ok(layout.repo_path(&format!("s3/attribute-checkpoints/branches/{slot}.json")))
 }
 
-fn legacy_checkpoint_path(repository: &Repository, commit: ObjectId) -> object_store::path::Path {
-    repository
-        .layout
-        .repo_path(&format!("s3/attribute-checkpoints/{commit}.json"))
+fn legacy_checkpoint_path(
+    layout: &StoreLayout<Store>,
+    commit: ObjectId,
+) -> object_store::path::Path {
+    layout.repo_path(&format!("s3/attribute-checkpoints/{commit}.json"))
 }
 
 enum Stored {
@@ -838,12 +864,13 @@ enum Stored {
     Delta(Delta),
 }
 
-async fn load_stored(repository: &Repository, commit: ObjectId) -> crate::Result<Option<Stored>> {
-    let path = repository
-        .layout
-        .repo_path(&format!("s3/attributes/{commit}.json"));
-    let bytes = match repository
-        .store
+async fn load_stored(
+    layout: &StoreLayout<Store>,
+    commit: ObjectId,
+) -> crate::Result<Option<Stored>> {
+    let path = layout.repo_path(&format!("s3/attributes/{commit}.json"));
+    let bytes = match layout
+        .store()
         .get_with_etag_bounded(&path, MAX_MANIFEST_BYTES)
         .await
     {
@@ -1029,6 +1056,31 @@ mod tests {
         manifest.update("known".to_owned(), Some(attributes("known")));
 
         assert!(manifest.complete_listing("", None, None, 1000).is_none());
+    }
+
+    #[test]
+    fn checkpoint_round_trips_a_large_namespace() {
+        let mut manifest = Manifest::empty_complete();
+        for index in 0..4096 {
+            let path = format!("namespace/object-{index:08}");
+            manifest.update(path.clone(), Some(attributes(&path)));
+        }
+        let commit = ObjectId::empty_tree(gix_hash::Kind::Sha1);
+        let payload = CheckpointPayload {
+            version: VERSION,
+            commit: commit.to_string(),
+            complete: true,
+            objects: &manifest.objects,
+        };
+        let expected = serde_json::to_vec(&payload).unwrap();
+        let checkpoint = prepare_checkpoint("refs/heads/main", commit, &manifest)
+            .unwrap()
+            .unwrap();
+        let mut actual = Vec::new();
+        GzDecoder::new(checkpoint.bytes.as_ref())
+            .read_to_end(&mut actual)
+            .unwrap();
+        assert_eq!(actual, expected);
     }
 
     #[test]

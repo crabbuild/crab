@@ -6,6 +6,9 @@ pub type Result<T> = std::result::Result<T, MetadataError>;
 /// Errors raised by metadata schema and local index helpers.
 #[derive(thiserror::Error, Debug)]
 pub enum MetadataError {
+    /// Required checkpoint control metadata exceeds the format's footer bound.
+    #[error("checkpoint footer uses {bytes} encoded bytes, exceeding its {maximum}-byte limit")]
+    CheckpointFooterSize { bytes: usize, maximum: usize },
     /// Checkpoint metadata and its catalog exceed the caller's aggregate read budget.
     #[error("checkpoint metadata uses {bytes} encoded bytes, exceeding its {maximum}-byte limit")]
     CheckpointSize { bytes: u64, maximum: u64 },

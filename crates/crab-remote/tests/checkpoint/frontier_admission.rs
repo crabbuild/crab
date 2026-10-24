@@ -2,6 +2,187 @@ use super::*;
 use object_store::ObjectStoreExt;
 
 #[tokio::test]
+async fn checkpoint_admits_member_heavy_sources_below_the_source_count_limit() {
+    let (layout, _) = empty_fixture().await;
+    let (oid, pack) = blob_pack(b"retained through footer admission");
+    let mut packs = vec![pack];
+    for index in 1_u32..512 {
+        packs.push(blob_pack(&index.to_be_bytes()).1);
+    }
+    // Keep runs below the 32-run compaction trigger while exhausting footer bytes.
+    for index in 0..31 {
+        let root = crab_write::capsule_protocol::open_root(&layout)
+            .await
+            .unwrap();
+        let name = format!("refs/tags/alias-{index}");
+        let transaction = CapsuleTransaction::new(
+            root.record().digest(),
+            vec![CapsuleRefEdit::new(&name, None, Some(oid.clone()), None)],
+        )
+        .unwrap();
+        let visibility = CapsuleVisibilityDelta::new(BTreeMap::from([(
+            name,
+            GitVisibilityEdit::from_replacement_objects(None, oid.clone(), vec![oid.clone()]),
+        )]))
+        .unwrap();
+        let capsule = Capsule::build(
+            &transaction,
+            packs.clone(),
+            vec![CapsuleSection::new(
+                CapsuleSectionKind::VisibilityDelta,
+                visibility.encode().unwrap(),
+            )],
+        )
+        .unwrap();
+        crab_write::capsule_protocol::publish(&layout, root, &transaction, &capsule)
+            .await
+            .unwrap();
+    }
+    let maximum = 64 * LIMIT;
+    let limits = CapsuleReadLimits {
+        max_capsule_bytes: maximum,
+        max_frontier_bytes: maximum,
+    };
+    let root = crab_write::capsule_protocol::open_root(&layout)
+        .await
+        .unwrap();
+    let before =
+        crab_read::capsule_protocol::open_view_from_root_with_metadata(&layout, root, limits)
+            .await
+            .unwrap();
+    assert_eq!(before.capsule_run_sources().len(), 31);
+    assert_eq!(
+        before
+            .capsule_run_sources()
+            .iter()
+            .map(|source| source.members().len())
+            .sum::<usize>(),
+        31 * 512,
+    );
+    assert!(
+        serde_json::to_vec(before.capsule_run_sources())
+            .unwrap()
+            .len()
+            > 8 * 1024 * 1024
+    );
+    let outcome = crab_remote::checkpoint::publish_capsule_checkpoint_from_view(
+        &layout,
+        &before,
+        0,
+        maximum,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert!(outcome.published && outcome.pack_bytes_read > 0);
+    let root = crab_write::capsule_protocol::open_root(&layout)
+        .await
+        .unwrap();
+    let after =
+        crab_read::capsule_protocol::open_view_from_root_with_metadata(&layout, root, limits)
+            .await
+            .unwrap();
+    assert_eq!(after.refs(), before.refs());
+    assert_eq!(
+        after.layered_checkpoint().unwrap().sources()[0],
+        before.capsule_run_sources()[0],
+        "footer admission must retain the older source prefix",
+    );
+    let directory = tempfile::tempdir().unwrap();
+    crab_git::initialize_bare_git_dir(directory.path()).unwrap();
+    // The retained aliases exceed the small fixtures' 8 MiB clone budget.
+    // Keep the same admission used to construct this larger repository.
+    let installed = crab_read::capsule_protocol::install_git_packs_from_store(
+        &after,
+        &layout,
+        directory.path(),
+        maximum,
+        None,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    verify_installed_git_blobs(
+        &after,
+        directory.path(),
+        &installed,
+        &[("alias-0", b"retained through footer admission")],
+    );
+}
+
+#[tokio::test]
+async fn paged_checkpoint_placement_keeps_unrelated_pack_indexes_cold() {
+    let (layout, observations) = empty_fixture().await;
+    for name in ["first", "second", "third", "fourth"] {
+        publish_blob(&layout, name).await;
+    }
+    let complete = checkpoint(&layout).await;
+    let checkpoint = complete.layered_checkpoint().unwrap();
+    let visibility = checkpoint.visibility_ordinal_snapshot().unwrap().unwrap();
+    publish_blob(&layout, "frontier").await;
+    let root = crab_write::capsule_protocol::open_root(&layout)
+        .await
+        .unwrap();
+    let captured = crab_read::capsule_protocol::open_git_view_from_root(&layout, root, LIMITS)
+        .await
+        .unwrap();
+    let runtime = Arc::new(
+        crab_remote_git::RemoteGitRuntime::new(
+            crab_remote_git::RuntimeOptions {
+                max_pack_index_cache_entries: 0,
+                ..Default::default()
+            },
+            Arc::new(crab_remote_git::NoopMetrics),
+        )
+        .unwrap(),
+    );
+    let cancel = CancellationToken::new();
+    let repository = captured
+        .git_repository_from_store(
+            layout.clone(),
+            crab_remote_git::RepositoryIdentity::new("memory", "paged-placement", 1).unwrap(),
+            runtime.clone(),
+            crab_remote_git::RepositoryOptions::default(),
+            LIMIT,
+            &cancel,
+        )
+        .await
+        .unwrap();
+    for name in ["first", "second", "third", "fourth"] {
+        let oid = crab_remote::objects::object_id(gix_object::Kind::Blob, name.as_bytes()).unwrap();
+        let position = visibility
+            .objects()
+            .binary_search(&oid.as_bytes().try_into().unwrap())
+            .unwrap();
+        let member = visibility.member_admission().unwrap()[position];
+        let selected = &checkpoint.sources()[usize::from(member.source_index())];
+        let unrelated = checkpoint
+            .sources()
+            .iter()
+            .filter(|source| source.object_hash() != selected.object_hash())
+            .map(|source| layout.capsule_path(source.object_hash()).to_string())
+            .collect::<Vec<_>>();
+        let operation = repository
+            .operation(crab_remote_git::OperationKind::Repository, &cancel)
+            .await
+            .unwrap();
+        observations.2.reset();
+        let result = operation.read_objects(&[oid]).await;
+        let objects = operation.finish(result).await.unwrap();
+        assert_eq!(objects[0].data.as_ref(), name.as_bytes());
+        assert!(
+            observations
+                .2
+                .requests()
+                .iter()
+                .all(|read| !unrelated.contains(&read.location)),
+            "checkpoint member admission must exclude unrelated source indexes"
+        );
+    }
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
 async fn frontier_delta_base_placement_does_not_probe_unrelated_member_indexes() {
     let (layout, observations) = empty_fixture().await;
     publish_blob(&layout, "seed").await;

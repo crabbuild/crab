@@ -109,6 +109,11 @@ bounded. Cached blame results remain subject to the current operation's
 logical, traversal, history, blame, and response limits; a warm result cannot
 bypass a stricter caller budget.
 
+Immediate directory pages seek their exact pinned cursor in Git order and
+materialize only the selected children. Entry admission counts returned children
+and cursor/path comparisons, including cache hits; unused page capacity consumes
+neither entry budget nor result allocation. Blob-size reads stay page bounded.
+
 Shared base/index reads recheck their caches after admission: a caller that
 missed before a previous producer finished must reuse its verified result.
 Index-size producers publish their cache entry before retiring the shared task.
@@ -143,6 +148,12 @@ this path. The caller authenticates them against its snapshot; opening validates
 preferred inventory membership and source pack sizes. An explicitly empty
 preferred index set remains distinct from an unspecified set. The canonical
 snapshot and catalog-tail constructors retain their existing behavior.
+
+Paged checkpoint member admission selects indexes without loading unrelated
+packs or materializing the whole object dictionary. Each selected member must
+match the pinned inventory; a missing admitted object is corruption. Page reads
+retain operation cancellation and storage-byte admission, and selected indexes,
+entry CRCs and reconstructed OIDs retain their normal verification.
 
 ### Generated response packs
 

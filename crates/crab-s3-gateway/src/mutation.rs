@@ -9,20 +9,20 @@ use std::{
 
 use bytes::Bytes;
 use crab_coordination::{GcFenceHeartbeat, GcFenceLease, PushLock};
+use crab_git::incoming_pack::GeneratedObject;
 use crab_metadata::{git_visibility, manifests::PackManifestEntry, ref_journal::RefJournalEdit};
-#[cfg(test)]
-use crab_remote_git::RemoteGitRepository;
-use crab_remote_git::{EntryMode, OperationKind};
+use crab_remote_git::{EntryMode, OperationKind, RemoteGitRepository};
 use gix_hash::ObjectId;
 use gix_object::{Kind, bstr::BString, tree};
 use md5::Digest as _;
 use tokio::sync::{Notify, Semaphore, oneshot};
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::{
     attributes,
     gateway::Repository,
     metrics::{Metrics, ScratchFailure, ScratchPurpose},
+    repository::CapsuleFrontier,
 };
 
 const LOCK_TTL: Duration = Duration::from_secs(300);
@@ -41,10 +41,16 @@ const MAX_MUTATIONS_PER_BATCH: usize = 32;
 const MAX_BATCHES_PER_FENCE_BURST: usize = 8;
 const MAX_MUTATION_BATCH_BYTES: usize = 32 * 1024 * 1024;
 const MAX_REPREPARE_ATTEMPTS: usize = 8;
-const FOREGROUND_CAPSULE_THRESHOLD: u32 = 56;
+// The hard frontier ceiling counts run segments, not original transactions.
+// Follow the shared writer's bounded roll-up window; independently checkpoint
+// large frontiers before another maximum-sized generated pack can exhaust reads.
+const FOREGROUND_CAPSULE_THRESHOLD: u32 =
+    crab_metadata::capsule_protocol::CAPSULE_REF_ROLLUP_WINDOW as u32;
+const FOREGROUND_CAPSULE_BYTES: u64 = MAX_CAPSULE_READ_BYTES / 2;
 const TREE_PAGE_SIZE: usize = 4_096;
 const CHECKPOINT_PUBLICATION_CONCURRENCY: usize = 4;
 const GENERATED_TREE_DELTA_DEPTH: u32 = 8;
+const GENERATED_TREE_ANCHOR_REUSE_BATCHES: u32 = 64;
 const MAX_GENERATED_TREE_DELTA_BYTES: usize = 32 * 1024 * 1024;
 const MAX_CAPSULE_READ_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 
@@ -184,6 +190,7 @@ pub(crate) struct Coordinator {
     options: crab_remote_git::RepositoryOptions,
     admission: WriteAdmission,
     checkpoints: Arc<CheckpointScheduler>,
+    tasks: TaskTracker,
     metrics: Metrics,
 }
 
@@ -191,6 +198,7 @@ struct BatchContext {
     runtime: Arc<crab_remote_git::RemoteGitRuntime>,
     options: crab_remote_git::RepositoryOptions,
     checkpoints: Arc<CheckpointScheduler>,
+    tasks: TaskTracker,
     metrics: Metrics,
 }
 
@@ -206,11 +214,17 @@ impl Coordinator {
             options,
             admission: WriteAdmission::default(),
             checkpoints: Arc::new(CheckpointScheduler::new(cancellation, metrics.clone())),
+            tasks: TaskTracker::new(),
             metrics,
         }
     }
 
     pub(crate) async fn shutdown(&self) {
+        self.checkpoints.cancellation.cancel();
+        self.tasks.close();
+        // Workers register maintenance before exiting. Drain that ownership
+        // chain before the read runtime or Tokio can close catalog handles.
+        self.tasks.wait().await;
         self.checkpoints.shutdown().await;
     }
 
@@ -223,6 +237,10 @@ impl Coordinator {
         principal: &str,
         cancel: &CancellationToken,
     ) -> Result<Outcome> {
+        // Register before checking shutdown, so a request that can spawn a
+        // worker cannot race the tracker's final empty observation.
+        let _request = self.tasks.token();
+        check_cancelled(&self.checkpoints.cancellation)?;
         async {
             let mutation = Mutation {
                 path: path.clone(),
@@ -239,6 +257,7 @@ impl Coordinator {
                         break result.map_err(|_| Error::AdmissionState)?;
                     }
                     () = cancel.cancelled() => break Err(Error::Cancelled),
+                    () = self.checkpoints.cancellation.cancelled() => break Err(Error::Cancelled),
                     () = tokio::time::sleep_until(deadline) => break Err(Error::AdmissionTimeout),
                     permit = Arc::clone(&queued.queue.gate).acquire_owned() => {
                         permit.map_err(|_| Error::AdmissionState)?
@@ -253,6 +272,7 @@ impl Coordinator {
                 }
                 tokio::select! {
                     () = cancel.cancelled() => break Err(Error::Cancelled),
+                    () = self.checkpoints.cancellation.cancelled() => break Err(Error::Cancelled),
                     () = tokio::time::sleep_until(deadline) => break Err(Error::AdmissionTimeout),
                     () = tokio::time::sleep(BATCH_COLLECTION_DELAY) => {}
                 }
@@ -268,13 +288,16 @@ impl Coordinator {
                     options: self.options,
                     metrics: self.metrics.clone(),
                     checkpoints: Arc::clone(&self.checkpoints),
+                    tasks: self.tasks.clone(),
                 };
                 let branch = branch.to_owned();
                 let queue = Arc::clone(&queued.queue);
-                let worker_cancel = cancel.clone();
+                // Renewal loss stops this admitted worker, not the service or
+                // sibling queues. Server shutdown still cancels every child.
+                let worker_cancel = self.checkpoints.cancellation.child_token();
                 // A drained batch owns every accepted mutation. Detaching it
                 // prevents one disconnected HTTP caller from cancelling peers.
-                tokio::spawn(async move {
+                self.tasks.spawn(async move {
                     Self::apply_batch(&repository, context, &branch, &queue, batch, &worker_cancel)
                         .await;
                     drop(permit);
@@ -299,10 +322,11 @@ impl Coordinator {
         branch: &str,
         tip: ObjectId,
     ) -> crate::Result<Option<Arc<attributes::Manifest>>> {
-        if let Some(manifest) = self.manifest(&repository.config.name, branch, tip)
-            && manifest.is_complete()
-        {
-            return Ok(Some(manifest));
+        if let Some(manifest) = self.manifest(&repository.config.name, branch, tip) {
+            // A mixed Git/S3 namespace still needs canonical tree listing.
+            // Its pinned warm manifest already proves this; replaying history
+            // cannot make it complete and can stall the first listing page.
+            return Ok(manifest.is_complete().then_some(manifest));
         }
         if let Some(manifest) =
             self.admission
@@ -310,11 +334,10 @@ impl Coordinator {
         {
             return Ok(Some(manifest));
         }
-        let manifest = attributes::load(repository, tip).await?;
+        let manifest = repository.attributes.load(tip).await?;
         if !manifest.is_complete() {
             return Ok(None);
         }
-        let manifest = Arc::new(manifest);
         self.admission.store_complete_manifest(
             &repository.config.name,
             branch,
@@ -378,6 +401,10 @@ impl Coordinator {
                                 break;
                             }
                         };
+                        // Retaining GC fences still adds one pack per batch.
+                        // Count each batch so catalog refresh cannot lag by the
+                        // burst length and exhaust foreground read budgets.
+                        repository.maintenance.record_batch();
                         if batch
                             .first()
                             .is_some_and(|pending| pending.mutation.is_planned())
@@ -409,6 +436,7 @@ impl Coordinator {
             repository,
             cancel,
             repository.maintenance.current_epoch(),
+            &context.tasks,
         );
         if let Some((epoch, maintenance_cancel)) = idle_maintenance {
             crate::repository::schedule_readability(
@@ -417,6 +445,7 @@ impl Coordinator {
                 context.options,
                 maintenance_cancel,
                 epoch,
+                &context.tasks,
             );
         }
     }
@@ -576,7 +605,7 @@ struct CachedBranchState {
     tree: WarmTree,
     bytes: usize,
     batches_since_checkpoint: usize,
-    capsule_count: Option<u32>,
+    capsule_frontier: Option<CapsuleFrontier>,
 }
 
 struct BranchState {
@@ -791,7 +820,7 @@ impl BranchState {
         manifest: attributes::Manifest,
         tree: WarmTree,
         batches_since_checkpoint: usize,
-        capsule_count: Option<u32>,
+        capsule_frontier: Option<CapsuleFrontier>,
     ) {
         self.clear();
         let bytes = manifest
@@ -814,7 +843,7 @@ impl BranchState {
             tree,
             bytes,
             batches_since_checkpoint,
-            capsule_count,
+            capsule_frontier,
         };
         *self
             .cached
@@ -1476,7 +1505,7 @@ async fn apply_with_fences(
                     prepared.attributes,
                     prepared.tree,
                     prepared.batches_since_checkpoint,
-                    prepared.capsule_count,
+                    prepared.capsule_frontier,
                 );
             }
             request
@@ -1496,7 +1525,7 @@ async fn apply_with_fences(
         .await;
         lease.release().await;
         match published? {
-            Publish::Committed(transaction) => {
+            Publish::Committed(transaction, frontier_bytes) => {
                 let checkpoint = prepared.checkpoint;
                 let tip = prepared.tip;
                 if checkpoint && let (Some(checkpoints), Some(commit)) = (request.checkpoints, tip)
@@ -1510,7 +1539,12 @@ async fn apply_with_fences(
                         prepared.attributes,
                         prepared.tree,
                         prepared.batches_since_checkpoint,
-                        prepared.capsule_count,
+                        prepared.capsule_frontier.map(|mut frontier| {
+                            if let Some(bytes) = frontier_bytes {
+                                frontier.bytes = bytes;
+                            }
+                            frontier
+                        }),
                     );
                 }
                 request
@@ -1560,7 +1594,7 @@ struct PreparedBatch {
     batches_since_checkpoint: usize,
     checkpoint: bool,
     requires_revalidation: bool,
-    capsule_count: Option<u32>,
+    capsule_frontier: Option<CapsuleFrontier>,
 }
 
 struct BuiltBatch {
@@ -1574,7 +1608,7 @@ struct BuiltBatch {
 }
 
 enum Publish {
-    Committed(String),
+    Committed(String, Option<u64>),
     Reprepare,
 }
 
@@ -1587,57 +1621,106 @@ async fn prepare_and_upload_batch(
     cancel: &CancellationToken,
 ) -> Result<PreparedBatch> {
     let mut protocol = publication_protocol(repository).await?;
-    if let Some(cached) = request.state.and_then(BranchState::take_latest) {
-        if matches!(&protocol, PublicationProtocol::Capsule(_))
-            && cached
-                .capsule_count
-                .is_some_and(|count| count >= FOREGROUND_CAPSULE_THRESHOLD)
-        {
-            crab_remote::checkpoint::publish_capsule_checkpoint(
-                &repository.layout,
-                FOREGROUND_CAPSULE_THRESHOLD,
-                MAX_CAPSULE_READ_BYTES,
-                cancel,
+    let mut cached = request.state.and_then(BranchState::take_latest);
+    let mut current_view =
+        if cached.is_none() && matches!(&protocol, PublicationProtocol::Capsule(_)) {
+            Some(
+                repository
+                    .read_views
+                    .current(repository, Arc::clone(&runtime), options, cancel)
+                    .await?,
             )
-            .await?;
-            repository.read_views.invalidate().await;
-            protocol = publication_protocol(repository).await?;
         } else {
-            // The ref lease revalidates this optimistic parent before publication;
-            // a competing process forces a cold rebuild against object-store state.
-            match build_batch(
-                None,
-                None,
-                cached.tip,
-                Arc::try_unwrap(cached.manifest).unwrap_or_else(|manifest| (*manifest).clone()),
-                Some(cached.tree),
-                cached.batches_since_checkpoint,
-                mutations,
-            )
-            .await
-            {
-                Ok(batch) => {
-                    return upload_batch(
-                        repository,
-                        batch,
-                        BatchUpload {
-                            branch: request.branch,
-                            expected_transaction: cached.transaction,
-                            protocol,
-                            capsule_count: cached.capsule_count,
-                            requires_revalidation: true,
-                            cancel,
-                            metrics: request.metrics,
-                        },
-                    )
-                    .await;
+            None
+        };
+    // Restarted and evicted writers must admit the same frontier as warm ones;
+    // otherwise their first large upload can exceed the read budget.
+    let frontier = cached
+        .as_ref()
+        .and_then(|cached| cached.capsule_frontier)
+        .or_else(|| {
+            current_view
+                .as_ref()
+                .and_then(|view| view.capsule_frontier(request.branch))
+        });
+    if frontier.is_some_and(|frontier| {
+        frontier.count >= FOREGROUND_CAPSULE_THRESHOLD || frontier.bytes >= FOREGROUND_CAPSULE_BYTES
+    }) {
+        crab_remote::checkpoint::publish_capsule_checkpoint(
+            &repository.layout,
+            // Admission is due by count or bytes. Recheck only that some
+            // frontier remains after another writer's concurrent checkpoint.
+            1,
+            MAX_CAPSULE_READ_BYTES,
+            cancel,
+        )
+        .await?;
+        repository.read_views.invalidate().await;
+        current_view = None;
+        protocol = publication_protocol(repository).await?;
+        cached = match (cached, &protocol) {
+            (Some(mut cached), PublicationProtocol::Capsule(root)) => {
+                let view = crab_read::capsule_protocol::open_view_from_root_with_layered_control(
+                    &repository.layout,
+                    (**root).clone(),
+                    crab_read::capsule_protocol::CapsuleReadLimits {
+                        max_capsule_bytes: MAX_CAPSULE_READ_BYTES,
+                        max_frontier_bytes: MAX_CAPSULE_READ_BYTES,
+                    },
+                )
+                .await?;
+                if view.refs().get(request.branch) == cached.tip.map(|tip| tip.to_string()).as_ref()
+                {
+                    cached.transaction =
+                        view.visible_ref_transactions().get(request.branch).cloned();
+                    cached.capsule_frontier = Some(CapsuleFrontier {
+                        count: view.ref_capsule_count(request.branch),
+                        bytes: view.ref_frontier_bytes(request.branch),
+                    });
+                    cached.tree.forget_pack_provenance();
+                    Some(cached)
+                } else {
+                    None
                 }
-                Err(Error::WarmStateMiss) => {}
-                Err(error) => return Err(error),
             }
+            _ => None,
+        };
+    }
+    if let Some(cached) = cached {
+        // The ref lease revalidates this optimistic parent before publication;
+        // a competing process forces a cold rebuild against object-store state.
+        match build_batch(
+            None,
+            None,
+            cached.tip,
+            Arc::try_unwrap(cached.manifest).unwrap_or_else(|manifest| (*manifest).clone()),
+            Some(cached.tree),
+            cached.batches_since_checkpoint,
+            mutations,
+        )
+        .await
+        {
+            Ok(batch) => {
+                return upload_batch(
+                    repository,
+                    batch,
+                    BatchUpload {
+                        branch: request.branch,
+                        expected_transaction: cached.transaction,
+                        protocol,
+                        capsule_frontier: cached.capsule_frontier,
+                        requires_revalidation: true,
+                        cancel,
+                        metrics: request.metrics,
+                    },
+                )
+                .await;
+            }
+            Err(Error::WarmStateMiss) => {}
+            Err(error) => return Err(error),
         }
     }
-    let (branch_exists, capsule_count, current_view) = match &protocol {
+    let (branch_exists, capsule_frontier, current_view) = match &protocol {
         PublicationProtocol::Legacy => (
             crab_metadata::manifest_store::read_repository_snapshot(
                 &repository.store,
@@ -1651,13 +1734,18 @@ async fn prepare_and_upload_batch(
             None,
         ),
         PublicationProtocol::Capsule(_) => {
-            let view = repository
-                .read_views
-                .current(repository, Arc::clone(&runtime), options, cancel)
-                .await?;
+            let view = match current_view {
+                Some(view) => view,
+                None => {
+                    repository
+                        .read_views
+                        .current(repository, Arc::clone(&runtime), options, cancel)
+                        .await?
+                }
+            };
             (
                 view.remote().refs().find(request.branch).is_some(),
-                view.capsule_ref_count(request.branch),
+                view.capsule_frontier(request.branch),
                 Some(view),
             )
         }
@@ -1683,7 +1771,7 @@ async fn prepare_and_upload_batch(
                 branch: request.branch,
                 expected_transaction: None,
                 protocol,
-                capsule_count,
+                capsule_frontier,
                 requires_revalidation: false,
                 cancel,
                 metrics: request.metrics,
@@ -1705,35 +1793,34 @@ async fn prepare_and_upload_batch(
         .refs()
         .find(request.branch)
         .map(|reference| reference.target);
-    let operation = view
-        .remote()
-        .operation(OperationKind::Repository, cancel)
-        .await?;
-    let batch = async {
-        let snapshot = match original_parent {
-            Some(parent) => Some(view.snapshot(&parent.to_string(), &operation).await?),
-            None => None,
-        };
-        let manifest = match original_parent {
-            Some(parent) => (*view.attributes(repository, parent).await?).clone(),
-            None => attributes::Manifest::default(),
-        };
-        build_batch(
-            snapshot,
-            Some(&operation),
-            original_parent,
-            manifest,
-            None,
-            ATTRIBUTE_CHECKPOINT_BATCHES,
-            mutations,
-        )
-        .await
-    }
-    .await;
-    let batch = match operation.finish(Ok(())).await {
-        Ok(()) => batch?,
-        Err(error) => return Err(error.into()),
+    let snapshot = match original_parent {
+        Some(parent) => {
+            let operation = view
+                .remote()
+                .operation(OperationKind::Repository, cancel)
+                .await?;
+            let snapshot = view
+                .remote()
+                .snapshot(&crab_remote_git::Revision::Commit(parent), &operation)
+                .await;
+            Some(operation.finish(snapshot).await?)
+        }
+        None => None,
     };
+    let manifest = match original_parent {
+        Some(parent) => (*repository.attributes.load(parent).await?).clone(),
+        None => attributes::Manifest::default(),
+    };
+    let batch = build_batch(
+        snapshot,
+        Some((view.remote(), cancel)),
+        original_parent,
+        manifest,
+        None,
+        ATTRIBUTE_CHECKPOINT_BATCHES,
+        mutations,
+    )
+    .await?;
     upload_batch(
         repository,
         batch,
@@ -1741,7 +1828,7 @@ async fn prepare_and_upload_batch(
             branch: request.branch,
             expected_transaction: None,
             protocol,
-            capsule_count,
+            capsule_frontier,
             requires_revalidation: false,
             cancel,
             metrics: request.metrics,
@@ -1752,7 +1839,7 @@ async fn prepare_and_upload_batch(
 
 async fn build_batch(
     snapshot: Option<crab_remote_git::RemoteGitSnapshot>,
-    operation: Option<&crab_remote_git::OperationContext>,
+    reads: Option<(&RemoteGitRepository, &CancellationToken)>,
     original_parent: Option<ObjectId>,
     mut manifest: attributes::Manifest,
     warm_tree: Option<WarmTree>,
@@ -1764,17 +1851,37 @@ async fn build_batch(
     let mut outcomes = Vec::with_capacity(mutations.len());
     let mut commits = Vec::with_capacity(mutations.len());
     for mutation in mutations {
-        match build_commit(
+        // Batching must not charge independent requests to one read budget.
+        // Every context still belongs to the same immutable repository view.
+        let operation = match reads {
+            Some((repository, cancel)) => Some(
+                repository
+                    .operation(OperationKind::Repository, cancel)
+                    .await?,
+            ),
+            None => None,
+        };
+        let result = build_commit(
             &mut tree_state,
-            operation,
+            operation.as_ref(),
             parent,
             &mutation.path,
             mutation.change.clone(),
             &mutation.principal,
             &mut manifest,
         )
-        .await
-        {
+        .await;
+        let result = match (operation, result) {
+            (Some(operation), Err(Error::Remote(error))) => {
+                operation.finish(Err(error)).await.map_err(Error::from)
+            }
+            // Read failures precede tree edits. A close or deadline failure
+            // after construction must abort the batch so unpublished edits
+            // cannot leak into another request's commit.
+            (Some(operation), result) => operation.finish(Ok(result)).await?,
+            (None, result) => result,
+        };
+        match result {
             Ok(Build::Noop(outcome)) => outcomes.push(Ok(outcome)),
             Ok(Build::Commit(mut built)) => {
                 built.parent = parent;
@@ -1825,7 +1932,7 @@ async fn upload_batch(
         branch,
         expected_transaction,
         protocol,
-        capsule_count,
+        capsule_frontier,
         requires_revalidation,
         cancel,
         metrics,
@@ -1851,7 +1958,7 @@ async fn upload_batch(
             batches_since_checkpoint,
             checkpoint: false,
             requires_revalidation,
-            capsule_count,
+            capsule_frontier,
         });
     };
     let commit_count = commits.len();
@@ -1880,7 +1987,10 @@ async fn upload_batch(
         batches_since_checkpoint,
         checkpoint,
         requires_revalidation,
-        capsule_count: capsule_count.map(|count| count.saturating_add(1)),
+        capsule_frontier: capsule_frontier.map(|mut frontier| {
+            frontier.count = frontier.count.saturating_add(1);
+            frontier
+        }),
     })
 }
 
@@ -1942,7 +2052,7 @@ struct BatchUpload<'a> {
     branch: &'a str,
     expected_transaction: Option<String>,
     protocol: PublicationProtocol,
-    capsule_count: Option<u32>,
+    capsule_frontier: Option<CapsuleFrontier>,
     requires_revalidation: bool,
     cancel: &'a CancellationToken,
     metrics: &'a Metrics,
@@ -1972,7 +2082,7 @@ async fn upload_built_batch(
         metrics,
     } = upload;
     let mut objects = Vec::new();
-    let mut seen = HashMap::new();
+    let mut seen = HashSet::new();
     let mut repeated_objects = HashSet::new();
     let mut delta_candidates = BTreeMap::<ObjectId, Vec<TreeDeltaBase>>::new();
     let final_commit = commits
@@ -2002,21 +2112,17 @@ async fn upload_built_batch(
                 .or_default()
                 .push(candidate);
         }
-        for (kind, bytes) in built.objects {
-            let oid = object_id(kind, &bytes)?;
-            if seen.insert(oid, ()).is_none() {
-                objects.push((kind, bytes));
+        for object in built.objects {
+            if seen.insert(object.oid()) {
+                objects.push(object);
             } else {
-                repeated_objects.insert(oid);
+                repeated_objects.insert(object.oid());
             }
         }
     }
     let mut delta_bases = BTreeMap::new();
     let mut external_delta_bases = BTreeMap::new();
     let mut external_delta_bytes = 0usize;
-    // V2 checkpoint source validation uses generic Git and requires standalone packs.
-    // The v1 remote reader can retain its explicit cross-pack base contract.
-    let allow_external_delta_bases = matches!(&protocol, PublicationProtocol::Legacy);
     for (object, candidates) in delta_candidates {
         // One packed representation must match the final warm lineage. A tree
         // revisited within this batch is therefore emitted as a full entry.
@@ -2025,20 +2131,16 @@ async fn upload_built_batch(
         }
         let candidate = candidates
             .into_iter()
-            .filter(|candidate| {
-                seen.contains_key(&candidate.base)
-                    || (allow_external_delta_bases && candidate.external.is_some())
-            })
-            .min_by_key(|candidate| (!seen.contains_key(&candidate.base), candidate.base));
+            .filter(|candidate| seen.contains(&candidate.base) || candidate.external.is_some())
+            .min_by_key(|candidate| (!seen.contains(&candidate.base), candidate.base));
         let Some(candidate) = candidate else {
             continue;
         };
-        if !seen.contains_key(&candidate.base) {
+        if !seen.contains(&candidate.base) {
             let external = candidate.external.ok_or_else(|| {
                 std::io::Error::other("external tree delta base bytes disappeared")
             })?;
-            let Some(next_external_bytes) = external_delta_bytes.checked_add(external.bytes.len())
-            else {
+            let Some(next_external_bytes) = external_delta_bytes.checked_add(external.len()) else {
                 continue;
             };
             if next_external_bytes > MAX_GENERATED_PACK_BYTES as usize {
@@ -2050,8 +2152,8 @@ async fn upload_built_batch(
                 crab_git::incoming_pack::ExternalDeltaBase::new(
                     candidate.base,
                     Kind::Tree,
-                    external.bytes,
-                    external.depth,
+                    external,
+                    0,
                 ),
             );
         }
@@ -2061,56 +2163,19 @@ async fn upload_built_batch(
     let capacity = metrics.reserve_scratch(scratch_bytes)?;
     let mut scratch = metrics.start_scratch(ScratchPurpose::GitPack);
     scratch.reserve(scratch_bytes);
-    let visible_objects = objects
-        .iter()
-        .map(|(kind, bytes)| object_id(*kind, bytes).map(|oid| oid.to_string()))
-        .collect::<std::result::Result<Vec<_>, _>>()?;
-    let generated_object_bytes = objects.iter().fold(0_usize, |total, (_, bytes)| {
-        total.saturating_add(bytes.len())
+    // Tree construction already hashed these bytes. Pack preparation still
+    // independently verifies identities before this inventory is published.
+    let visible_objects = seen.iter().map(ToString::to_string).collect();
+    let generated_object_bytes = objects.iter().fold(0_usize, |total, object| {
+        total.saturating_add(object.data().len())
     });
     let generated_tree_bytes = objects
         .iter()
-        .filter(|(kind, _)| *kind == Kind::Tree)
-        .fold(0_usize, |total, (_, bytes)| {
-            total.saturating_add(bytes.len())
+        .filter(|object| object.kind() == Kind::Tree)
+        .fold(0_usize, |total, object| {
+            total.saturating_add(object.data().len())
         });
-    let prepared = prepare_pack(objects, delta_bases, external_delta_bases, cancel).await;
-    if matches!(
-        &prepared,
-        Err(Error::Io(_)
-            | Error::Pack(crab_git::incoming_pack::IncomingPackError::Io(_))
-            | Error::Prepare(crab_git::incoming_pack::PreparePackError::Io(_)))
-    ) {
-        scratch.record_failure(ScratchFailure::Write);
-    }
-    let (pack_owner, pack) = prepared?;
-    metrics.record_generated_pack(
-        generated_object_bytes,
-        generated_tree_bytes,
-        pack.size(),
-        external_delta_bytes,
-        pack.external_delta_count(),
-    );
-    tree.bind_prepared_pack(&pack)?;
-    // The prepared files are now reflected by statvfs. Release their
-    // conservative pre-write claim while ownership metrics remain live.
-    drop(capacity);
-    check_cancelled(cancel)?;
-    let pack_id = pack.content_hash().to_hex().to_string();
-    let evidence = match parent {
-        Some(parent) => git_visibility::GitVisibilityEdit::from_delta_objects(
-            Some(parent.to_string()),
-            final_commit.to_string(),
-            visible_objects,
-            vec![],
-        ),
-        None => git_visibility::GitVisibilityEdit::from_replacement_objects(
-            None,
-            final_commit.to_string(),
-            visible_objects,
-        ),
-    };
-    let upload_attributes = || async {
+    let upload_attributes = async {
         futures_util::future::try_join_all(attribute_deltas.into_iter().map(
             |(commit, parent, changes, checkpoint, checkpoint_slot)| {
                 attributes::save_delta(
@@ -2127,118 +2192,169 @@ async fn upload_built_batch(
         .map(|_| ())
         .map_err(Error::from)
     };
-    let artifacts = match protocol {
-        PublicationProtocol::Legacy => {
-            let pack_upload = async {
-                let path = repository.layout.pack_path(&pack_id);
-                if pack.size() <= GENERATED_PACK_SINGLE_PUT_MAX_BYTES {
-                    check_cancelled(cancel)?;
-                    repository
-                        .store
-                        .put_exact(&path, tokio::fs::read(pack.pack_path()).await?.into())
-                        .await?;
-                } else {
-                    repository
-                        .store
-                        .put_multipart_file_retry(
-                            &path,
-                            pack.pack_path(),
-                            pack.size(),
-                            *pack.content_hash().as_bytes(),
-                            GENERATED_PACK_SINGLE_PUT_MAX_BYTES as usize,
-                            cancel,
-                            None,
-                        )
-                        .await?;
-                }
-                Ok::<(), Error>(())
-            };
-            let sidecar_upload = |source: &std::path::Path, target| {
-                let source = source.to_owned();
-                async move {
-                    check_cancelled(cancel)?;
-                    repository
-                        .store
-                        .put_exact(&target, tokio::fs::read(source).await?.into())
-                        .await?;
+    let upload_pack = async {
+        let prepared = prepare_pack(objects, delta_bases, external_delta_bases, cancel).await;
+        if matches!(
+            &prepared,
+            Err(Error::Io(_)
+                | Error::Pack(crab_git::incoming_pack::IncomingPackError::Io(_))
+                | Error::Prepare(crab_git::incoming_pack::PreparePackError::Io(_)))
+        ) {
+            scratch.record_failure(ScratchFailure::Write);
+        }
+        let (pack_owner, pack) = prepared?;
+        metrics.record_generated_pack(
+            generated_object_bytes,
+            generated_tree_bytes,
+            pack.size(),
+            external_delta_bytes,
+            pack.external_delta_count(),
+        );
+        tree.bind_prepared_pack(&pack)?;
+        // The prepared files are now reflected by statvfs. Release their
+        // conservative pre-write claim while ownership metrics remain live.
+        drop(capacity);
+        check_cancelled(cancel)?;
+        let pack_id = pack.content_hash().to_hex().to_string();
+        let evidence = match parent {
+            Some(parent) => git_visibility::GitVisibilityEdit::from_delta_objects(
+                Some(parent.to_string()),
+                final_commit.to_string(),
+                visible_objects,
+                vec![],
+            ),
+            None => git_visibility::GitVisibilityEdit::from_replacement_objects(
+                None,
+                final_commit.to_string(),
+                visible_objects,
+            ),
+        };
+        let artifacts = match protocol {
+            PublicationProtocol::Legacy => {
+                let pack_upload = async {
+                    let path = repository.layout.pack_path(&pack_id);
+                    if pack.size() <= GENERATED_PACK_SINGLE_PUT_MAX_BYTES {
+                        check_cancelled(cancel)?;
+                        repository
+                            .store
+                            .put_exact(&path, tokio::fs::read(pack.pack_path()).await?.into())
+                            .await?;
+                    } else {
+                        repository
+                            .store
+                            .put_multipart_file_retry(
+                                &path,
+                                pack.pack_path(),
+                                pack.size(),
+                                *pack.content_hash().as_bytes(),
+                                GENERATED_PACK_SINGLE_PUT_MAX_BYTES as usize,
+                                cancel,
+                                None,
+                            )
+                            .await?;
+                    }
                     Ok::<(), Error>(())
+                };
+                let sidecar_upload = |source: &std::path::Path, target| {
+                    let source = source.to_owned();
+                    async move {
+                        check_cancelled(cancel)?;
+                        repository
+                            .store
+                            .put_exact(&target, tokio::fs::read(source).await?.into())
+                            .await?;
+                        Ok::<(), Error>(())
+                    }
+                };
+                let evidence_upload = async {
+                    git_visibility::upload_edit(&repository.store, &repository.layout, &evidence)
+                        .await
+                        .map_err(Error::from)
+                };
+                let (_, _, _, _, evidence_hash) = tokio::try_join!(
+                    pack_upload,
+                    sidecar_upload(
+                        pack.index_path(),
+                        repository.layout.pack_index_path(&pack_id)
+                    ),
+                    sidecar_upload(
+                        pack.reverse_path(),
+                        repository.layout.pack_reverse_index_path(&pack_id)
+                    ),
+                    sidecar_upload(
+                        pack.kinds_path(),
+                        repository.layout.pack_kind_metadata_path(&pack_id)
+                    ),
+                    evidence_upload,
+                )?;
+                UploadedArtifacts::Legacy {
+                    pack: PackManifestEntry {
+                        pack_id: pack_id.clone(),
+                        content_hash: pack_id,
+                        size: pack.size(),
+                        object_count: pack.object_count().into(),
+                        ref_tips: vec![final_commit.to_string()],
+                    },
+                    evidence_hash,
                 }
-            };
-            let evidence_upload = async {
-                git_visibility::upload_edit(&repository.store, &repository.layout, &evidence)
-                    .await
-                    .map_err(Error::from)
-            };
-            let (_, _, _, _, evidence_hash, _) = tokio::try_join!(
-                pack_upload,
-                sidecar_upload(
-                    pack.index_path(),
-                    repository.layout.pack_index_path(&pack_id)
-                ),
-                sidecar_upload(
-                    pack.reverse_path(),
-                    repository.layout.pack_reverse_index_path(&pack_id)
-                ),
-                sidecar_upload(
-                    pack.kinds_path(),
-                    repository.layout.pack_kind_metadata_path(&pack_id)
-                ),
-                evidence_upload,
-                upload_attributes(),
-            )?;
-            UploadedArtifacts::Legacy {
-                pack: PackManifestEntry {
-                    pack_id: pack_id.clone(),
-                    content_hash: pack_id,
-                    size: pack.size(),
-                    object_count: pack.object_count().into(),
-                    ref_tips: vec![final_commit.to_string()],
-                },
-                evidence_hash,
             }
-        }
-        PublicationProtocol::Capsule(base) => {
-            let read = |path: &std::path::Path| {
-                let path = path.to_owned();
-                async move { tokio::fs::read(path).await.map_err(Error::from) }
-            };
-            let (pack_bytes, index, reverse_index, locator, _) = tokio::try_join!(
-                read(pack.pack_path()),
-                read(pack.index_path()),
-                read(pack.reverse_path()),
-                read(pack.kinds_path()),
-                upload_attributes(),
-            )?;
-            UploadedArtifacts::Capsule(Box::new(CapsuleMutationArtifacts {
-                base: *base,
-                pack: crab_metadata::capsule_protocol::CapsuleGitPack::new(
-                    Bytes::from(pack_bytes),
-                    Bytes::from(index),
-                    Bytes::from(reverse_index),
-                    Bytes::from(locator),
-                    pack.git_sha1().to_string(),
-                    u64::from(pack.object_count()),
-                )?,
-                visibility: evidence,
-            }))
-        }
+            PublicationProtocol::Capsule(base) => {
+                let read = |path: &std::path::Path| {
+                    let path = path.to_owned();
+                    async move { tokio::fs::read(path).await.map_err(Error::from) }
+                };
+                let (pack_bytes, index, reverse_index, locator) = tokio::try_join!(
+                    read(pack.pack_path()),
+                    read(pack.index_path()),
+                    read(pack.reverse_path()),
+                    read(pack.kinds_path()),
+                )?;
+                // Match native Git publication: readers and checkpoints resolve
+                // declared cross-pack bases from the pinned repository view.
+                let external_delta_bases = pack
+                    .external_delta_bases()
+                    .iter()
+                    .map(ToString::to_string)
+                    .collect();
+                UploadedArtifacts::Capsule(Box::new(CapsuleMutationArtifacts {
+                    base: *base,
+                    pack:
+                        crab_metadata::capsule_protocol::CapsuleGitPack::new_with_external_delta_bases(
+                            Bytes::from(pack_bytes),
+                            Bytes::from(index),
+                            Bytes::from(reverse_index),
+                            Bytes::from(locator),
+                            pack.git_sha1().to_string(),
+                            u64::from(pack.object_count()),
+                            external_delta_bases,
+                        )?,
+                    visibility: evidence,
+                }))
+            }
+        };
+        check_cancelled(cancel)?;
+        let uploaded = UploadedMutation {
+            parent,
+            expected_transaction,
+            commit: final_commit,
+            artifacts,
+        };
+        drop(pack);
+        drop(pack_owner);
+        drop(scratch);
+        Ok::<_, Error>(uploaded)
     };
-    check_cancelled(cancel)?;
-    let uploaded = UploadedMutation {
-        parent,
-        expected_transaction,
-        commit: final_commit,
-        artifacts,
-    };
-    drop(pack);
-    drop(pack_owner);
-    drop(scratch);
+    // Drain both branches even on failure: dropping the pack future would leave
+    // its blocking worker writing scratch after the GC fences were released.
+    let (uploaded, attributes) = tokio::join!(upload_pack, upload_attributes);
+    let uploaded = uploaded?;
+    attributes?;
     Ok(uploaded)
 }
 
-fn pack_scratch_reservation(objects: &[(Kind, Vec<u8>)]) -> u64 {
-    let bytes = objects.iter().fold(0_u64, |total, (_, object)| {
-        total.saturating_add(object.len() as u64)
+fn pack_scratch_reservation(objects: &[GeneratedObject]) -> u64 {
+    let bytes = objects.iter().fold(0_u64, |total, object| {
+        total.saturating_add(object.data().len() as u64)
     });
     let sidecars = (objects.len() as u64).saturating_mul(64);
     // Direct generated-pack preparation retains one decoded spool and one
@@ -2308,7 +2424,7 @@ async fn publish_prepared(
                 cancel,
                 move |scoped| async move {
                     if scoped.is_cancelled() {
-                        return Err(crab_write::WriteError::Cancelled);
+                        return Err(Error::Cancelled);
                     }
                     crab_write::capsule_protocol::validate_ref_namespace(
                         &commit_layout,
@@ -2316,29 +2432,33 @@ async fn publish_prepared(
                         transaction.edits(),
                     )
                     .await?;
-                    crab_write::capsule_protocol::publish(
+                    publish_capsule_with_frontier_bytes(
                         &commit_layout,
                         base,
                         &transaction,
                         &capsule,
+                        branch,
+                        &scoped,
                     )
                     .await
                 },
             )
             .await
         } else {
-            crab_write::capsule_protocol::publish(
+            publish_capsule_with_frontier_bytes(
                 &repository.layout,
                 base.clone(),
                 &transaction,
                 &capsule,
+                branch,
+                cancel,
             )
             .await
         };
         return match published {
-            Ok(_) => Ok(Publish::Committed(transaction_id)),
-            Err(crab_write::WriteError::RefChanged { .. }) => Ok(Publish::Reprepare),
-            Err(error) => Err(error.into()),
+            Ok(bytes) => Ok(Publish::Committed(transaction_id, Some(bytes))),
+            Err(Error::Write(crab_write::WriteError::RefChanged { .. })) => Ok(Publish::Reprepare),
+            Err(error) => Err(error),
         };
     }
     let UploadedArtifacts::Legacy {
@@ -2406,14 +2526,40 @@ async fn publish_prepared(
         Err(crab_write::WriteError::RefChanged { .. }) => return Ok(Publish::Reprepare),
         Err(error) => return Err(error.into()),
     };
-    Ok(Publish::Committed(committed.transaction_id))
+    Ok(Publish::Committed(committed.transaction_id, None))
+}
+
+async fn publish_capsule_with_frontier_bytes(
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    base: crab_metadata::capsule_protocol::RootSnapshot,
+    transaction: &crab_metadata::capsule_protocol::CapsuleTransaction,
+    capsule: &crab_metadata::capsule_protocol::Capsule,
+    branch: &str,
+    cancel: &CancellationToken,
+) -> Result<u64> {
+    let prepared =
+        crab_write::capsule_protocol::prepare_publication(layout, base, transaction, capsule)
+            .await?;
+    let bytes = prepared.ref_frontier_bytes(branch)?;
+    if bytes > MAX_CAPSULE_READ_BYTES {
+        return Err(crab_read::ReadError::CapsuleReadLimit {
+            resource: "ref frontier bytes",
+            maximum: MAX_CAPSULE_READ_BYTES,
+        }
+        .into());
+    }
+    // Immutable preparation can outlive lease renewal. Once publication starts,
+    // await its exact outcome even if cancellation arrives during the CAS.
+    check_cancelled(cancel)?;
+    crab_write::capsule_protocol::publish_prepared(layout, prepared).await?;
+    Ok(bytes)
 }
 
 struct BuiltCommit {
     parent: Option<ObjectId>,
     commit: ObjectId,
     etag: Option<String>,
-    objects: Vec<(Kind, Vec<u8>)>,
+    objects: Vec<GeneratedObject>,
     tree_delta_bases: Vec<TreeDeltaBase>,
     attribute_changes: std::collections::BTreeMap<String, Option<attributes::ObjectAttributes>>,
 }
@@ -2421,12 +2567,7 @@ struct BuiltCommit {
 struct TreeDeltaBase {
     object: ObjectId,
     base: ObjectId,
-    external: Option<ExternalTreeDeltaBase>,
-}
-
-struct ExternalTreeDeltaBase {
-    bytes: Vec<u8>,
-    depth: u32,
+    external: Option<Vec<u8>>,
 }
 
 enum Build {
@@ -2443,17 +2584,68 @@ struct DirectoryEdit {
     path: Vec<u8>,
     oid: Option<ObjectId>,
     entries: Vec<TreeEntryEdit>,
+    encoding: Option<TreeEncoding>,
     generated: bool,
     delta_ancestors: Vec<ObjectId>,
 }
 
-#[derive(Clone)]
 struct DirectoryState {
     oid: Option<ObjectId>,
     entries: Vec<tree::Entry>,
-    delta_depth: Option<u32>,
+    encoding: TreeEncoding,
+    delta_anchor: Option<TreeDeltaAnchor>,
     delta_ancestors: Vec<ObjectId>,
     generated_in_batch: bool,
+}
+
+struct TreeEncoding {
+    bytes: Vec<u8>,
+    offsets: Vec<usize>,
+}
+
+impl TreeEncoding {
+    fn new(entries: &[tree::Entry]) -> Self {
+        let mut encoded = Self {
+            bytes: Vec::new(),
+            offsets: Vec::with_capacity(entries.len() + 1),
+        };
+        for entry in entries {
+            encoded.push(entry);
+        }
+        encoded.offsets.push(encoded.bytes.len());
+        encoded
+    }
+
+    fn push(&mut self, entry: &tree::Entry) {
+        self.offsets.push(self.bytes.len());
+        append_tree_entry(&mut self.bytes, entry);
+    }
+
+    fn extend(&mut self, original: &Self, range: std::ops::Range<usize>) {
+        let start = original.offsets[range.start];
+        let end = original.offsets[range.end];
+        let offset = self.bytes.len();
+        self.offsets.extend(
+            original.offsets[range]
+                .iter()
+                .map(|position| offset + position - start),
+        );
+        self.bytes.extend_from_slice(&original.bytes[start..end]);
+    }
+
+    fn estimated_bytes(&self) -> usize {
+        self.bytes.capacity().saturating_add(
+            self.offsets
+                .capacity()
+                .saturating_mul(std::mem::size_of::<usize>()),
+        )
+    }
+}
+
+struct TreeDeltaAnchor {
+    oid: ObjectId,
+    bytes: Vec<u8>,
+    reused_batches: u32,
 }
 
 struct GeneratedAttributeBlob {
@@ -2474,6 +2666,19 @@ impl WarmTree {
         self.estimated_bytes
     }
 
+    fn forget_pack_provenance(&mut self) {
+        // A checkpoint preserves logical trees but can select different physical
+        // delta representations. Reuse entries, never the old anchors/ancestry.
+        for directory in self.directories.values_mut() {
+            self.estimated_bytes = self
+                .estimated_bytes
+                .saturating_sub(estimated_tree_provenance_bytes(directory));
+            directory.delta_anchor = None;
+            directory.delta_ancestors = Vec::new();
+            directory.generated_in_batch = false;
+        }
+    }
+
     fn bind_prepared_pack(&mut self, pack: &crab_git::incoming_pack::PreparedPack) -> Result<()> {
         for directory in self
             .directories
@@ -2486,11 +2691,26 @@ impl WarmTree {
             let depth = pack.delta_depth(&oid).ok_or_else(|| {
                 std::io::Error::other("generated directory is absent from prepared pack")
             })?;
-            directory.delta_depth = Some(depth);
+            let previous_provenance = estimated_tree_provenance_bytes(directory);
             if depth == 0 {
-                directory.delta_ancestors.clear();
+                // Reuse a verified full entry across batches; chaining each new
+                // tip forces repeated full copies of growing directories.
+                let bytes = directory.encoding.bytes.clone();
+                directory.delta_anchor =
+                    (bytes.len() <= MAX_GENERATED_TREE_DELTA_BYTES).then_some(TreeDeltaAnchor {
+                        oid,
+                        bytes,
+                        reused_batches: 0,
+                    });
+                directory.delta_ancestors = Vec::new();
+            } else if let Some(anchor) = &mut directory.delta_anchor {
+                anchor.reused_batches = anchor.reused_batches.saturating_add(1);
             }
             directory.generated_in_batch = false;
+            self.estimated_bytes = self
+                .estimated_bytes
+                .saturating_sub(previous_provenance)
+                .saturating_add(estimated_tree_provenance_bytes(directory));
         }
         Ok(())
     }
@@ -2560,8 +2780,9 @@ impl MutableTree {
                 };
                 let state = DirectoryState {
                     oid: directory_oid,
+                    encoding: TreeEncoding::new(&entries),
                     entries,
-                    delta_depth: None,
+                    delta_anchor: None,
                     delta_ancestors: Vec::new(),
                     generated_in_batch: false,
                 };
@@ -2626,20 +2847,30 @@ impl MutableTree {
                 }
             }
             state.oid = edit.oid;
-            let previous_ancestors = estimated_delta_ancestors_bytes(&state.delta_ancestors);
+            self.estimated_bytes = self
+                .estimated_bytes
+                .saturating_sub(state.encoding.estimated_bytes());
+            if let Some(encoding) = edit.encoding {
+                state.encoding = encoding;
+            } else if edit.oid.is_none() {
+                state.encoding = TreeEncoding::new(&[]);
+            }
+            self.estimated_bytes = self
+                .estimated_bytes
+                .saturating_add(state.encoding.estimated_bytes());
+            let previous_provenance = estimated_tree_provenance_bytes(state);
             if edit.oid.is_none() {
-                state.delta_depth = None;
-                state.delta_ancestors.clear();
+                state.delta_anchor = None;
+                state.delta_ancestors = Vec::new();
                 state.generated_in_batch = false;
             } else if edit.generated {
-                state.delta_depth = None;
                 state.delta_ancestors = edit.delta_ancestors;
                 state.generated_in_batch = true;
             }
             self.estimated_bytes = self
                 .estimated_bytes
-                .saturating_sub(previous_ancestors)
-                .saturating_add(estimated_delta_ancestors_bytes(&state.delta_ancestors));
+                .saturating_sub(previous_provenance)
+                .saturating_add(estimated_tree_provenance_bytes(state));
             if edit.path.is_empty() {
                 self.root_oid = edit.oid;
             }
@@ -2702,13 +2933,18 @@ fn estimated_directory_bytes(path: &[u8], directory: &DirectoryState) -> usize {
         .fold(path.len(), |total, entry| {
             total.saturating_add(estimated_tree_entry_bytes(entry))
         })
-        .saturating_add(estimated_delta_ancestors_bytes(&directory.delta_ancestors))
+        .saturating_add(directory.encoding.estimated_bytes())
+        .saturating_add(estimated_tree_provenance_bytes(directory))
 }
 
-fn estimated_delta_ancestors_bytes(ancestors: &Vec<ObjectId>) -> usize {
-    ancestors
+fn estimated_tree_provenance_bytes(directory: &DirectoryState) -> usize {
+    directory
+        .delta_ancestors
         .capacity()
         .saturating_mul(std::mem::size_of::<ObjectId>())
+        .saturating_add(directory.delta_anchor.as_ref().map_or(0, |anchor| {
+            std::mem::size_of::<TreeDeltaAnchor>().saturating_add(anchor.bytes.capacity())
+        }))
 }
 
 fn estimated_tree_entry_bytes(entry: &tree::Entry) -> usize {
@@ -2788,7 +3024,8 @@ async fn build_commit(
             attributes,
             condition: _,
         } => {
-            let oid = object_id(Kind::Blob, &bytes)?;
+            let object = GeneratedObject::new(Kind::Blob, bytes.clone())?;
+            let oid = object.oid();
             let digest = md5::Md5::digest(&bytes);
             let logical_size = attributes.logical_size.unwrap_or(bytes.len() as u64);
             let etag = attributes
@@ -2811,10 +3048,7 @@ async fn build_commit(
                     oid,
                 }),
             });
-            let changed = old
-                .filter(|(old_oid, _)| *old_oid == oid)
-                .map(|_| None)
-                .unwrap_or_else(|| Some(bytes.to_vec()));
+            let changed = (!old.is_some_and(|(old_oid, _)| old_oid == oid)).then_some(object);
             (Some(etag), changed, Some((oid, attributes, logical_size)))
         }
         Change::Attributes {
@@ -2854,8 +3088,8 @@ async fn build_commit(
     let mut objects = Vec::new();
     let mut tree_delta_bases = Vec::new();
     let mut attribute_changes = std::collections::BTreeMap::new();
-    if let Some(bytes) = changed {
-        objects.push((Kind::Blob, bytes));
+    if let Some(object) = changed {
+        objects.push(object);
     }
     if let Some(attributes) = lfs_attributes {
         let attributes_path = push_component(&directory_path, b".gitattributes")?;
@@ -2863,9 +3097,9 @@ async fn build_commit(
             .map_err(|_| std::io::Error::other("S3 attribute path is not UTF-8"))?
             .to_owned();
         let generated_attributes = attributes::ObjectAttributes::new(
-            attributes.oid,
-            crate::gateway::md5_hex(&attributes.bytes),
-            attributes.bytes.len() as u64,
+            attributes.object.oid(),
+            crate::gateway::md5_hex(attributes.object.data()),
+            attributes.object.data().len() as u64,
             seconds,
             attributes::PutAttributes::default(),
         );
@@ -2874,11 +3108,11 @@ async fn build_commit(
             replacement: Some(tree::Entry {
                 mode: attributes.mode,
                 filename: BString::from(b".gitattributes".to_vec()),
-                oid: attributes.oid,
+                oid: attributes.object.oid(),
             }),
         });
         attribute_changes.insert(attributes_path, Some(generated_attributes));
-        objects.push((Kind::Blob, attributes.bytes));
+        objects.push(attributes.object);
     }
     let object_attributes = pending_attributes.map(|(oid, pending, size)| {
         attributes::ObjectAttributes::new(
@@ -2895,7 +3129,7 @@ async fn build_commit(
     let attribute_digest = blake3::hash(&attribute_identity).to_hex();
 
     let generated_attributes =
-        generated_attribute_update(tree_state, leaf_path, leaf_entries, &leaf_edits, &objects)?;
+        generated_attribute_update(tree_state, leaf_path, leaf_entries, &leaf_edits, &objects);
     let mut directory_edits = Vec::with_capacity(paths.len());
     let mut tree_oid = None;
     let mut entries = leaf_edits;
@@ -2906,24 +3140,20 @@ async fn build_commit(
             .ok_or_else(|| std::io::Error::other("mutation directory state disappeared"))?;
         let changed = tree_entries_changed(&state.entries, &entries);
         let empty = tree_entry_count_after_edits(&state.entries, &entries) == 0;
-        let (oid, delta_ancestors) = if !changed {
-            (state.oid, Vec::new())
+        let (oid, delta_ancestors, encoding) = if !changed {
+            (state.oid, Vec::new(), None)
         } else if depth > 0 && empty {
-            (None, Vec::new())
+            (None, Vec::new(), None)
         } else {
-            let encoded = encode_tree_with_edits(
-                state,
-                &state.entries,
-                &entries,
-                &mut objects,
-                &mut tree_delta_bases,
-            )?;
-            (Some(encoded.0), encoded.1)
+            let encoded =
+                encode_tree_with_edits(state, &entries, &mut objects, &mut tree_delta_bases)?;
+            (Some(encoded.0), encoded.1, Some(encoded.2))
         };
         directory_edits.push(DirectoryEdit {
             path: paths[depth].clone(),
             oid,
             entries,
+            encoding,
             generated: changed && !(depth > 0 && empty),
             delta_ancestors,
         });
@@ -2943,8 +3173,9 @@ async fn build_commit(
     }
     let tree = tree_oid.ok_or_else(|| std::io::Error::other("root tree was not encoded"))?;
     let commit_bytes = commit_bytes(tree, parent, principal, seconds, attribute_digest.as_str());
-    let commit = object_id(Kind::Commit, &commit_bytes)?;
-    objects.push((Kind::Commit, commit_bytes));
+    let object = GeneratedObject::new(Kind::Commit, commit_bytes)?;
+    let commit = object.oid();
+    objects.push(object);
     tree_state.commit(directory_edits, generated_attributes)?;
     for (path, attributes) in &attribute_changes {
         manifest.update(path.clone(), attributes.clone());
@@ -3031,9 +3262,8 @@ fn object_condition_matches(
 }
 
 struct LfsAttributesChange {
-    oid: ObjectId,
+    object: GeneratedObject,
     mode: gix_object::tree::EntryMode,
-    bytes: Vec<u8>,
 }
 
 async fn prepare_lfs_attributes(
@@ -3074,11 +3304,11 @@ async fn prepare_lfs_attributes(
     }
     bytes.extend_from_slice(line.as_bytes());
     bytes.push(b'\n');
-    let oid = object_id(Kind::Blob, &bytes)?;
-    if old_oid == Some(oid) {
+    let object = GeneratedObject::new(Kind::Blob, bytes)?;
+    if old_oid == Some(object.oid()) {
         return Ok(None);
     }
-    Ok(Some(LfsAttributesChange { oid, mode, bytes }))
+    Ok(Some(LfsAttributesChange { object, mode }))
 }
 
 fn lfs_attributes_line(filename: &[u8]) -> String {
@@ -3246,97 +3476,112 @@ fn generated_attribute_update(
     path: &[u8],
     entries: &[tree::Entry],
     edits: &[TreeEntryEdit],
-    objects: &[(Kind, Vec<u8>)],
-) -> Result<Option<(Vec<u8>, Option<GeneratedAttributeBlob>)>> {
+    objects: &[GeneratedObject],
+) -> Option<(Vec<u8>, Option<GeneratedAttributeBlob>)> {
     let current = tree_state.generated_attribute_blobs.get(path);
     let Some(attributes) = tree_entry_after_edits(entries, edits, b".gitattributes") else {
-        return Ok(current.is_some().then(|| (path.to_vec(), None)));
+        return current.is_some().then(|| (path.to_vec(), None));
     };
-    for (kind, bytes) in objects {
-        if *kind == Kind::Blob && object_id(*kind, bytes)? == attributes.oid {
-            return Ok(Some((
+    for object in objects {
+        if object.kind() == Kind::Blob && object.oid() == attributes.oid {
+            return Some((
                 path.to_vec(),
                 Some(GeneratedAttributeBlob {
                     oid: attributes.oid,
-                    bytes: bytes.clone(),
+                    bytes: object.data().to_vec(),
                 }),
-            )));
+            ));
         }
     }
-    Ok(match current {
+    match current {
         Some(current) if current.oid == attributes.oid => None,
         Some(_) => Some((path.to_vec(), None)),
         None => None,
-    })
+    }
 }
 
 fn encode_tree_with_edits(
     old: &DirectoryState,
-    entries: &[tree::Entry],
     edits: &[TreeEntryEdit],
-    objects: &mut Vec<(Kind, Vec<u8>)>,
+    objects: &mut Vec<GeneratedObject>,
     delta_bases: &mut Vec<TreeDeltaBase>,
-) -> Result<(ObjectId, Vec<ObjectId>)> {
-    let mut replacements = edits
-        .iter()
-        .filter_map(|edit| edit.replacement.as_ref())
-        .collect::<Vec<_>>();
-    replacements.sort_unstable();
-    let mut existing = entries
-        .iter()
-        .filter(|entry| {
-            let filename: &[u8] = entry.filename.as_ref();
-            !edits.iter().any(|edit| edit.name == filename)
-        })
-        .peekable();
-    let mut replacements = replacements.into_iter().peekable();
-    let mut bytes = Vec::new();
-    loop {
-        let entry = match (existing.peek(), replacements.peek()) {
-            (Some(existing), Some(replacement)) if replacement < existing => replacements.next(),
-            (Some(_), Some(_)) | (Some(_), None) => existing.next(),
-            (None, Some(_)) => replacements.next(),
-            (None, None) => break,
-        };
-        let entry = entry.ok_or_else(|| std::io::Error::other("tree merge lost an entry"))?;
-        append_tree_entry(&mut bytes, entry);
-    }
-    let oid = object_id(Kind::Tree, &bytes)?;
-    objects.push((Kind::Tree, bytes));
-    let mut delta_ancestors = Vec::new();
-    if let Some(base) = old.oid {
-        let external = if old.generated_in_batch {
-            None
-        } else {
-            old.delta_depth
-                .filter(|depth| *depth < GENERATED_TREE_DELTA_DEPTH)
-                .map(|depth| ExternalTreeDeltaBase {
-                    bytes: encode_tree(entries),
-                    depth,
-                })
-        };
-        if oid != base
-            && !old.delta_ancestors.contains(&oid)
-            && (old.generated_in_batch || external.is_some())
-        {
-            delta_ancestors.clone_from(&old.delta_ancestors);
-            delta_ancestors.push(base);
-            delta_bases.push(TreeDeltaBase {
-                object: oid,
-                base,
-                external,
-            });
+) -> Result<(ObjectId, Vec<ObjectId>, TreeEncoding)> {
+    let mut changes = BTreeMap::<usize, (bool, Vec<&tree::Entry>)>::new();
+    for edit in edits {
+        if let Some(index) = entry_index(&old.entries, &edit.name) {
+            changes.entry(index).or_default().0 = true;
+        }
+        if let Some(replacement) = &edit.replacement {
+            let index = old
+                .entries
+                .binary_search(replacement)
+                .unwrap_or_else(|index| index);
+            changes.entry(index).or_default().1.push(replacement);
         }
     }
-    Ok((oid, delta_ancestors))
+    let added_bytes = edits
+        .iter()
+        .filter_map(|edit| edit.replacement.as_ref())
+        .map(|entry| {
+            entry.mode.as_bytes(&mut [0; 6]).len()
+                + entry.filename.len()
+                + entry.oid.as_bytes().len()
+                + 2
+        })
+        .sum::<usize>();
+    let mut encoding = TreeEncoding {
+        bytes: Vec::with_capacity(old.encoding.bytes.len() + added_bytes),
+        offsets: Vec::with_capacity(old.entries.len() + edits.len() + 1),
+    };
+    // Preserve canonical unchanged byte ranges instead of serializing every
+    // sibling for each path-local edit. Offsets move with the same committed
+    // entry edits; the complete resulting object is still hashed and verified.
+    let mut cursor = 0;
+    for (index, (remove, mut replacements)) in changes {
+        encoding.extend(&old.encoding, cursor..index);
+        replacements.sort_unstable();
+        for replacement in replacements {
+            encoding.push(replacement);
+        }
+        cursor = index + usize::from(remove);
+    }
+    encoding.extend(&old.encoding, cursor..old.entries.len());
+    encoding.offsets.push(encoding.bytes.len());
+    let object = GeneratedObject::new(Kind::Tree, encoding.bytes.clone())?;
+    let oid = object.oid();
+    objects.push(object);
+    let mut delta_ancestors = Vec::new();
+    let candidate = if old.generated_in_batch {
+        old.oid
+            .filter(|_| !old.delta_ancestors.contains(&oid))
+            .map(|base| (base, None))
+    } else {
+        // An indefinitely reused full base retransmits every later addition.
+        // Renew it periodically while keeping cross-pack delta depth at one.
+        old.delta_anchor
+            .as_ref()
+            .filter(|anchor| anchor.reused_batches < GENERATED_TREE_ANCHOR_REUSE_BATCHES)
+            .map(|anchor| (anchor.oid, Some(anchor.bytes.clone())))
+    };
+    if let Some((base, external)) = candidate
+        && oid != base
+    {
+        if old.generated_in_batch {
+            delta_ancestors.clone_from(&old.delta_ancestors);
+        }
+        delta_ancestors.push(base);
+        delta_bases.push(TreeDeltaBase {
+            object: oid,
+            base,
+            external,
+        });
+    }
+    Ok((oid, delta_ancestors, encoding))
 }
 
+#[cfg(test)]
 fn encode_tree(entries: &[tree::Entry]) -> Vec<u8> {
-    let mut bytes = Vec::new();
-    for entry in entries {
-        append_tree_entry(&mut bytes, entry);
-    }
-    bytes
+    TreeEncoding::new(entries).bytes
 }
 
 fn append_tree_entry(bytes: &mut Vec<u8>, entry: &tree::Entry) {
@@ -3375,12 +3620,13 @@ fn commit_bytes(
     .into_bytes()
 }
 
+#[cfg(test)]
 fn object_id(kind: Kind, bytes: &[u8]) -> std::result::Result<ObjectId, gix_hash::hasher::Error> {
     gix_object::compute_hash(gix_hash::Kind::Sha1, kind, bytes)
 }
 
 async fn prepare_pack(
-    objects: Vec<(Kind, Vec<u8>)>,
+    objects: Vec<GeneratedObject>,
     delta_bases: BTreeMap<ObjectId, ObjectId>,
     external_delta_bases: BTreeMap<ObjectId, crab_git::incoming_pack::ExternalDeltaBase>,
     cancel: &CancellationToken,
@@ -3395,7 +3641,7 @@ async fn prepare_pack(
     let worker_flag = Arc::clone(&cancelled);
     let result = tokio::task::spawn_blocking(move || {
         let owner = tempfile::tempdir()?;
-        let incoming = crab_git::incoming_pack::IncomingPack::from_generated_objects(
+        let incoming = crab_git::incoming_pack::IncomingPack::from_verified_objects(
             objects,
             owner.path(),
             crab_git::incoming_pack::ReceiveLimits {
@@ -3438,6 +3684,9 @@ fn check_cancelled(cancel: &CancellationToken) -> Result<()> {
 }
 
 #[cfg(test)]
+mod lease_failure_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::{RepositoryAccess, RepositoryConfig};
@@ -3464,8 +3713,8 @@ mod tests {
     #[test]
     fn generated_pack_reservation_covers_peak_temporary_copies() {
         let objects = vec![
-            (Kind::Blob, vec![0; 64 * 1024]),
-            (Kind::Tree, vec![0; 1024]),
+            GeneratedObject::new(Kind::Blob, vec![0; 64 * 1024]).unwrap(),
+            GeneratedObject::new(Kind::Tree, vec![0; 1024]).unwrap(),
         ];
         let bytes = 64 * 1024 + 1024;
 
@@ -3499,15 +3748,15 @@ mod tests {
         let mut objects = Vec::new();
         let mut delta_bases = Vec::new();
 
-        let (oid, ancestors) = encode_tree_with_edits(
+        let (oid, ancestors, _) = encode_tree_with_edits(
             &DirectoryState {
                 oid: None,
                 entries: entries.clone(),
-                delta_depth: None,
+                encoding: TreeEncoding::new(&entries),
+                delta_anchor: None,
                 delta_ancestors: Vec::new(),
                 generated_in_batch: false,
             },
-            &entries,
             &[],
             &mut objects,
             &mut delta_bases,
@@ -3516,7 +3765,13 @@ mod tests {
 
         assert_eq!(oid, object_id(Kind::Tree, &expected).unwrap());
         assert!(ancestors.is_empty());
-        assert_eq!(objects, vec![(Kind::Tree, expected)]);
+        assert_eq!(
+            objects
+                .into_iter()
+                .map(|object| (object.oid(), object.kind(), object.data().to_vec()))
+                .collect::<Vec<_>>(),
+            vec![(oid, Kind::Tree, expected)]
+        );
         assert!(delta_bases.is_empty());
     }
 
@@ -3576,15 +3831,15 @@ mod tests {
         let mut objects = Vec::new();
         let mut delta_bases = Vec::new();
 
-        let (oid, ancestors) = encode_tree_with_edits(
+        let (oid, ancestors, _) = encode_tree_with_edits(
             &DirectoryState {
                 oid: Some(ObjectId::from([9; 20])),
                 entries: original.clone(),
-                delta_depth: Some(0),
+                encoding: TreeEncoding::new(&original),
+                delta_anchor: None,
                 delta_ancestors: Vec::new(),
                 generated_in_batch: true,
             },
-            &original,
             &edits,
             &mut objects,
             &mut delta_bases,
@@ -3594,7 +3849,13 @@ mod tests {
         assert_eq!(tree_entry_count_after_edits(&original, &edits), 3);
         assert!(tree_entries_changed(&original, &edits));
         assert_eq!(oid, object_id(Kind::Tree, &expected).unwrap());
-        assert_eq!(objects, vec![(Kind::Tree, expected)]);
+        assert_eq!(
+            objects
+                .into_iter()
+                .map(|object| (object.oid(), object.kind(), object.data().to_vec()))
+                .collect::<Vec<_>>(),
+            vec![(oid, Kind::Tree, expected)]
+        );
         assert_eq!(delta_bases.len(), 1);
         assert_eq!(delta_bases[0].object, oid);
         assert_eq!(delta_bases[0].base, ObjectId::from([9; 20]));
@@ -3604,7 +3865,96 @@ mod tests {
     }
 
     #[test]
-    fn warm_tree_delta_base_is_external_and_resets_at_the_depth_limit() {
+    fn cached_tree_edits_preserve_canonical_order_and_memory_accounting() {
+        use tree::EntryKind::{Blob, BlobExecutable, Commit, Link, Tree};
+
+        let cases = [
+            vec![("name", Some(Tree)), ("name.", Some(Blob))],
+            vec![("name0", Some(Link)), ("z", Some(Commit))],
+            vec![("name", Some(BlobExecutable)), ("a", Some(Blob))],
+            vec![("name", Some(Tree)), ("name!", Some(Link))],
+            vec![("name0", None), ("missing", None)],
+            vec![("name.", None), ("name!", None)],
+            vec![("a", None), ("z", None)],
+            vec![("name", None)],
+            vec![("recreated", Some(Blob))],
+        ];
+        let state = DirectoryState {
+            oid: None,
+            entries: Vec::new(),
+            encoding: TreeEncoding::new(&[]),
+            delta_anchor: None,
+            delta_ancestors: Vec::new(),
+            generated_in_batch: false,
+        };
+        let mut tree_state = MutableTree::new(
+            None,
+            Some(WarmTree {
+                estimated_bytes: estimated_directory_bytes(&[], &state),
+                directories: HashMap::from([(Vec::new(), state)]),
+                ..Default::default()
+            }),
+        );
+        let mut expected_entries = Vec::<tree::Entry>::new();
+        for (round, changes) in cases.into_iter().enumerate() {
+            let edits = changes
+                .into_iter()
+                .map(|(name, kind)| TreeEntryEdit {
+                    name: name.as_bytes().to_vec(),
+                    replacement: kind.map(|kind| tree::Entry {
+                        mode: kind.into(),
+                        filename: name.into(),
+                        oid: ObjectId::from([round as u8; 20]),
+                    }),
+                })
+                .collect::<Vec<_>>();
+            for edit in &edits {
+                expected_entries.retain(|entry| entry.filename.as_slice() != edit.name);
+                if let Some(replacement) = &edit.replacement {
+                    expected_entries.push(replacement.clone());
+                }
+            }
+            expected_entries.sort();
+            let mut expected = Vec::new();
+            gix_object::Tree {
+                entries: expected_entries.clone(),
+            }
+            .write_to(&mut expected)
+            .unwrap();
+            let mut objects = Vec::new();
+            let (oid, delta_ancestors, encoding) = encode_tree_with_edits(
+                &tree_state.directories[&Vec::new()],
+                &edits,
+                &mut objects,
+                &mut Vec::new(),
+            )
+            .unwrap();
+            assert_eq!(objects[0].data(), expected, "round {round}");
+            tree_state
+                .commit(
+                    vec![DirectoryEdit {
+                        path: Vec::new(),
+                        oid: Some(oid),
+                        entries: edits,
+                        encoding: Some(encoding),
+                        generated: true,
+                        delta_ancestors,
+                    }],
+                    None,
+                )
+                .unwrap();
+            let state = &tree_state.directories[&Vec::new()];
+            assert_eq!(state.entries, expected_entries, "round {round}");
+            assert_eq!(
+                tree_state.estimated_bytes,
+                estimated_directory_bytes(&[], state),
+                "round {round}"
+            );
+        }
+    }
+
+    #[test]
+    fn warm_tree_reuses_full_anchors_and_forgets_repacked_provenance() {
         let original = vec![tree::Entry {
             mode: tree::EntryKind::Blob.into(),
             filename: BString::from("existing"),
@@ -3622,16 +3972,20 @@ mod tests {
         let mut objects = Vec::new();
         let mut bases = Vec::new();
         let state = DirectoryState {
-            oid: Some(old_oid),
+            oid: Some(ObjectId::from([9; 20])),
             entries: original.clone(),
-            delta_depth: Some(0),
+            encoding: TreeEncoding::new(&original),
+            delta_anchor: Some(TreeDeltaAnchor {
+                oid: old_oid,
+                bytes: encode_tree(&original),
+                reused_batches: 0,
+            }),
             delta_ancestors: Vec::new(),
             generated_in_batch: false,
         };
 
-        let (target, ancestors) = encode_tree_with_edits(
+        let (target, ancestors, _) = encode_tree_with_edits(
             &state,
-            &original,
             std::slice::from_ref(&edit),
             &mut objects,
             &mut bases,
@@ -3642,36 +3996,24 @@ mod tests {
         assert_eq!(bases[0].object, target);
         assert_eq!(bases[0].base, old_oid);
         let external = bases[0].external.as_ref().unwrap();
-        assert_eq!(external.bytes, encode_tree(&original));
-        assert_eq!(external.depth, 0);
+        assert_eq!(*external, encode_tree(&original));
         assert_eq!(ancestors, vec![old_oid]);
 
+        let path = b"directory".to_vec();
+        let estimated_bytes = estimated_directory_bytes(&path, &state);
+        let provenance_bytes = estimated_tree_provenance_bytes(&state);
+        let mut warm = WarmTree {
+            directories: HashMap::from([(path.clone(), state)]),
+            estimated_bytes,
+            ..Default::default()
+        };
+        assert!(provenance_bytes >= encode_tree(&original).len());
+        warm.forget_pack_provenance();
+        assert_eq!(warm.estimated_bytes(), estimated_bytes - provenance_bytes);
         let mut objects = Vec::new();
         let mut bases = Vec::new();
-        encode_tree_with_edits(
-            &DirectoryState {
-                delta_depth: Some(GENERATED_TREE_DELTA_DEPTH),
-                ..state.clone()
-            },
-            &original,
-            std::slice::from_ref(&edit),
-            &mut objects,
-            &mut bases,
-        )
-        .unwrap();
-        assert!(bases.is_empty());
-
-        encode_tree_with_edits(
-            &DirectoryState {
-                delta_depth: None,
-                ..state
-            },
-            &original,
-            &[edit],
-            &mut objects,
-            &mut bases,
-        )
-        .unwrap();
+        encode_tree_with_edits(&warm.directories[&path], &[edit], &mut objects, &mut bases)
+            .unwrap();
         assert!(bases.is_empty());
     }
 
@@ -3687,9 +4029,10 @@ mod tests {
         let state = DirectoryState {
             oid: Some(base_oid),
             entries: Vec::new(),
-            delta_depth: Some(1),
+            encoding: TreeEncoding::new(&[]),
+            delta_anchor: None,
             delta_ancestors: vec![target_oid],
-            generated_in_batch: false,
+            generated_in_batch: true,
         };
         let edit = TreeEntryEdit {
             name: b"existing".to_vec(),
@@ -3698,8 +4041,8 @@ mod tests {
         let mut objects = Vec::new();
         let mut bases = Vec::new();
 
-        let (oid, ancestors) =
-            encode_tree_with_edits(&state, &[], &[edit], &mut objects, &mut bases).unwrap();
+        let (oid, ancestors, _) =
+            encode_tree_with_edits(&state, &[edit], &mut objects, &mut bases).unwrap();
 
         assert_eq!(oid, target_oid);
         assert!(ancestors.is_empty());
@@ -3792,7 +4135,7 @@ mod tests {
             Arc::try_unwrap(state.manifest).unwrap(),
             state.tree,
             0,
-            state.capsule_count,
+            state.capsule_frontier,
         );
         assert!(cache.take(None).is_none());
     }
@@ -3831,7 +4174,55 @@ mod tests {
         fixture_with_protocol(false).await
     }
 
-    async fn capsule_fixture() -> (
+    #[tokio::test]
+    async fn known_partial_namespace_does_not_replay_history_before_git_listing() {
+        let (repository, runtime, cancel) = capsule_fixture().await;
+        let coordinator = Coordinator::new(
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            cancel.clone(),
+            Metrics::new().unwrap(),
+        );
+        let tip = ObjectId::from([1; 20]);
+        let queued = coordinator
+            .admission
+            .enqueue(
+                &repository.config.name,
+                "refs/heads/main",
+                mutation(b"object", None),
+            )
+            .unwrap();
+        queued.queue.state.store(
+            Some(tip),
+            None,
+            attributes::Manifest::default(),
+            WarmTree::default(),
+            0,
+            None,
+        );
+        // A cached partial namespace already proves that Git listing is needed.
+        // Unreadable remote history must not delay that decision.
+        repository
+            .store
+            .put_exact(
+                &repository
+                    .layout
+                    .repo_path(&format!("s3/attributes/{tip}.json")),
+                Bytes::from_static(b"unreadable history"),
+            )
+            .await
+            .unwrap();
+        let result = coordinator
+            .complete_manifest(&repository, "refs/heads/main", tip)
+            .await;
+        drop(queued);
+        coordinator.shutdown().await;
+        runtime.shutdown().await;
+
+        assert!(result.unwrap().is_none());
+    }
+
+    pub(super) async fn capsule_fixture() -> (
         Repository,
         Arc<crab_remote_git::RemoteGitRuntime>,
         CancellationToken,
@@ -3889,7 +4280,7 @@ mod tests {
         )
     }
 
-    async fn read(
+    pub(super) async fn read(
         repository: &Repository,
         runtime: Arc<crab_remote_git::RemoteGitRuntime>,
         cancel: &CancellationToken,
@@ -3946,12 +4337,12 @@ mod tests {
             .target
     }
 
-    async fn coordinated_put(
+    pub(super) async fn coordinated_put(
         coordinator: &Coordinator,
         repository: &Repository,
         cancel: &CancellationToken,
         path: &str,
-        body: &'static [u8],
+        body: &[u8],
     ) {
         coordinator
             .apply(
@@ -3959,7 +4350,7 @@ mod tests {
                 "refs/heads/main",
                 &crab_remote_git::GitPath::new(path.as_bytes().to_vec()).unwrap(),
                 Change::Put {
-                    bytes: Bytes::from_static(body),
+                    bytes: Bytes::copy_from_slice(body),
                     track_lfs: false,
                     attributes: Box::new(attributes::PutAttributes::default()),
                     condition: PutCondition::None,
@@ -4055,12 +4446,21 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn sustained_capsule_mutations_checkpoint_before_the_ref_frontier_limit() {
+    async fn sustained_capsule_mutations_checkpoint_at_the_native_rollup_window() {
+        checkpoint_at_native_rollup_window(false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cold_capsule_writer_checkpoints_before_its_first_append() {
+        checkpoint_at_native_rollup_window(true).await;
+    }
+
+    async fn checkpoint_at_native_rollup_window(cold: bool) {
         let (repository, runtime, cancel) = capsule_fixture().await;
         let coordinator = Coordinator::new(
             Arc::clone(&runtime),
             crab_remote_git::RepositoryOptions::default(),
-            cancel.clone(),
+            cancel.child_token(),
             Metrics::new().unwrap(),
         );
         let path = crab_remote_git::GitPath::new(b"object".to_vec()).unwrap();
@@ -4096,6 +4496,18 @@ mod tests {
             FOREGROUND_CAPSULE_THRESHOLD
         );
 
+        let coordinator = if cold {
+            coordinator.shutdown().await;
+            Coordinator::new(
+                Arc::clone(&runtime),
+                crab_remote_git::RepositoryOptions::default(),
+                cancel.child_token(),
+                Metrics::new().unwrap(),
+            )
+        } else {
+            coordinator
+        };
+
         coordinator
             .apply(
                 &repository,
@@ -4113,6 +4525,13 @@ mod tests {
             .await
             .unwrap();
 
+        if !cold {
+            assert_eq!(
+                runtime.snapshot().await.object_entries,
+                0,
+                "checkpointing an unchanged tip must retain logical write state without rereading Git objects"
+            );
+        }
         let after = crab_read::capsule_protocol::open_view(
             &repository.layout,
             crab_read::capsule_protocol::CapsuleReadLimits {
@@ -4141,6 +4560,181 @@ mod tests {
         runtime.shutdown().await;
     }
 
+    #[tokio::test(flavor = "multi_thread")]
+    async fn compacted_frontier_bytes_trigger_checkpoint_before_the_count_window() {
+        let (repository, runtime, cancel) = capsule_fixture().await;
+        let coordinator = Coordinator::new(
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            cancel.clone(),
+            Metrics::new().unwrap(),
+        );
+        for index in 0..40 {
+            coordinated_put(
+                &coordinator,
+                &repository,
+                &cancel,
+                &format!("object-{index}"),
+                b"before",
+            )
+            .await;
+        }
+        let before = crab_read::capsule_protocol::open_view(
+            &repository.layout,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: MAX_CAPSULE_READ_BYTES,
+                max_frontier_bytes: MAX_CAPSULE_READ_BYTES,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(before.layered_checkpoint().is_none());
+        assert!(before.capsule_run_pointers().len() < 40);
+        let physical_bytes = before
+            .capsule_run_pointers()
+            .iter()
+            .map(crab_metadata::capsule_protocol::CapsulePointer::size)
+            .sum::<u64>();
+        assert_eq!(before.ref_frontier_bytes("refs/heads/main"), physical_bytes);
+        let key = format!("{}\0refs/heads/main", repository.config.name);
+        let queue = Arc::clone(&coordinator.admission.refs.lock().unwrap()[&key]);
+        {
+            let mut cached = queue.state.cached.lock().unwrap();
+            let frontier = cached.as_mut().unwrap().capsule_frontier.as_mut().unwrap();
+            assert_eq!(frontier.bytes, physical_bytes);
+            // Simulate admission pressure without allocating a gigabyte. The
+            // actual checkpoint still publishes and verifies these real runs.
+            frontier.bytes = FOREGROUND_CAPSULE_BYTES;
+        }
+        coordinated_put(&coordinator, &repository, &cancel, "after", b"after").await;
+        let after = crab_read::capsule_protocol::open_view(
+            &repository.layout,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: MAX_CAPSULE_READ_BYTES,
+                max_frontier_bytes: MAX_CAPSULE_READ_BYTES,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            after.layered_checkpoint().unwrap().sources(),
+            before.capsule_run_sources()
+        );
+        assert_eq!(after.ref_capsule_count("refs/heads/main"), 1);
+        assert_eq!(
+            read(&repository, Arc::clone(&runtime), &cancel, "object-0").await,
+            Bytes::from_static(b"before")
+        );
+        assert_eq!(
+            read(&repository, Arc::clone(&runtime), &cancel, "after").await,
+            Bytes::from_static(b"after")
+        );
+        coordinator.shutdown().await;
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn checkpoint_rejects_warm_state_after_an_external_writer_advances_the_tip() {
+        let (repository, runtime, cancel) = capsule_fixture().await;
+        let coordinator = Coordinator::new(
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            cancel.clone(),
+            Metrics::new().unwrap(),
+        );
+        for index in 0..FOREGROUND_CAPSULE_THRESHOLD {
+            coordinated_put(
+                &coordinator,
+                &repository,
+                &cancel,
+                &format!("objects/item-{index:02}"),
+                b"original",
+            )
+            .await;
+        }
+        let other = Coordinator::new(
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            cancel.clone(),
+            Metrics::new().unwrap(),
+        );
+        coordinated_put(&other, &repository, &cancel, "external", b"other writer").await;
+        coordinated_put(&coordinator, &repository, &cancel, "after", b"new write").await;
+
+        let external = read(&repository, Arc::clone(&runtime), &cancel, "external").await;
+        let after = read(&repository, Arc::clone(&runtime), &cancel, "after").await;
+        assert_eq!(
+            (external.as_ref(), after.as_ref()),
+            (b"other writer".as_slice(), b"new write".as_slice())
+        );
+        other.shutdown().await;
+        coordinator.shutdown().await;
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn capsule_warm_tree_deltas_survive_checkpoint_and_cold_reads() {
+        let (repository, runtime, cancel) = capsule_fixture().await;
+        let coordinator = Coordinator::new(
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            cancel.clone(),
+            Metrics::new().unwrap(),
+        );
+        for index in 0..16 {
+            coordinated_put(
+                &coordinator,
+                &repository,
+                &cancel,
+                &format!("objects/item-{index:02}"),
+                b"value",
+            )
+            .await;
+        }
+        let view = crab_read::capsule_protocol::open_view(
+            &repository.layout,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: MAX_CAPSULE_READ_BYTES,
+                max_frontier_bytes: MAX_CAPSULE_READ_BYTES,
+            },
+        )
+        .await
+        .unwrap();
+        assert!(
+            view.capsules()
+                .iter()
+                .flat_map(|capsule| capsule.git_packs())
+                .any(|pack| !pack.external_delta_bases().is_empty()),
+            "native warm writes repeat whole directory trees instead of declared cross-pack deltas"
+        );
+        let repacked = crab_remote::checkpoint::repack_capsule_repository_from_view(
+            &repository.layout,
+            &view,
+            MAX_CAPSULE_READ_BYTES,
+            &cancel,
+        )
+        .await
+        .unwrap();
+        assert!(repacked.work.published && repacked.work.pack_bytes_written > 0);
+        let reader = Repository::new(repository.config.clone(), repository.store.clone()).unwrap();
+        let cold_runtime = Arc::new(crab_remote_git::RemoteGitRuntime::default());
+        for index in 0..16 {
+            assert_eq!(
+                read(
+                    &reader,
+                    Arc::clone(&cold_runtime),
+                    &cancel,
+                    &format!("objects/item-{index:02}")
+                )
+                .await,
+                b"value".as_slice()
+            );
+        }
+        cold_runtime.shutdown().await;
+        coordinator.shutdown().await;
+        runtime.shutdown().await;
+    }
+
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn sustained_write_maintenance_bounds_the_journal_and_advances_catalog() {
         let (repository, runtime, cancel) = fixture().await;
@@ -4159,7 +4753,12 @@ mod tests {
         .unwrap();
         assert_eq!(before.journal.transactions.len(), 1);
 
-        crate::repository::schedule_catalog_maintenance(&repository, &cancel, 64);
+        crate::repository::schedule_catalog_maintenance(
+            &repository,
+            &cancel,
+            64,
+            &coordinator.tasks,
+        );
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
                 let snapshot = crab_metadata::manifest_store::read_repository_snapshot(
@@ -4199,6 +4798,7 @@ mod tests {
             read(&repository, Arc::clone(&runtime), &cancel, "object").await,
             Bytes::from_static(b"value")
         );
+        coordinator.shutdown().await;
         runtime.shutdown().await;
     }
 
@@ -4269,6 +4869,106 @@ mod tests {
             .await
             .unwrap();
         manifest_lock.release().await.unwrap();
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn growing_directory_does_not_accumulate_stale_delta_payloads() {
+        let (repository, runtime, cancel) = capsule_fixture().await;
+        let metrics = Metrics::new().unwrap();
+        let admission = crate::admission::Admission::new(8, cancel.clone(), metrics.clone());
+        let coordinator = Coordinator::new(
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            cancel.clone(),
+            metrics.clone(),
+        );
+        let mut windows = Vec::new();
+        let mut previous = 0;
+        for index in 0_u32..256 {
+            let body = blake3::hash(&index.to_le_bytes());
+            coordinated_put(
+                &coordinator,
+                &repository,
+                &cancel,
+                &format!("objects/item-{index:06}"),
+                body.as_bytes(),
+            )
+            .await;
+            if (index + 1) % 64 == 0 {
+                let packed: u64 = metrics
+                    .render(&admission)
+                    .lines()
+                    .find_map(|line| {
+                        line.strip_prefix("crab_s3_gateway_mutation_generated_pack_bytes_total ")
+                    })
+                    .unwrap()
+                    .parse()
+                    .unwrap();
+                windows.push(packed - previous);
+                previous = packed;
+            }
+        }
+        // Equal append cohorts must not keep retransmitting every entry added
+        // since the first full tree. Measure real generated pack bytes.
+        assert!(
+            windows[3] <= windows[1] * 3 / 2,
+            "generated pack bytes by cohort: {windows:?}"
+        );
+        coordinator.shutdown().await;
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn growing_directory_keeps_cross_batch_delta_reads_shallow() {
+        let (repository, runtime, cancel) = fixture().await;
+        let coordinator = Coordinator::new(
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            cancel.clone(),
+            Metrics::new().unwrap(),
+        );
+        for index in 0..192 {
+            let body = if index % 2 == 0 {
+                b"even".as_slice()
+            } else {
+                b"odd".as_slice()
+            };
+            coordinated_put(
+                &coordinator,
+                &repository,
+                &cancel,
+                &format!("objects/item-{index:06}"),
+                body,
+            )
+            .await;
+        }
+        let options = crab_remote_git::RepositoryOptions::new(
+            crab_remote_git::ObjectLimits {
+                max_delta_depth: 1,
+                ..Default::default()
+            },
+            crab_remote_git::OperationLimits::default(),
+        )
+        .unwrap();
+        let cold = crate::repository::ReadViewCache::new();
+        let view = cold
+            .current(&repository, Arc::clone(&runtime), options, &cancel)
+            .await
+            .unwrap();
+        let operation = view
+            .remote()
+            .operation(OperationKind::Repository, &cancel)
+            .await
+            .unwrap();
+        let snapshot = view.snapshot("refs/heads/main", &operation).await.unwrap();
+        for index in 0..192 {
+            let path = crab_remote_git::GitPath::new(format!("objects/item-{index:06}")).unwrap();
+            let blob = snapshot.read_blob(&path, &operation).await.unwrap();
+            assert_eq!(blob.bytes, if index % 2 == 0 { "even" } else { "odd" });
+        }
+        operation.finish(Ok(())).await.unwrap();
+        coordinator.shutdown().await;
         runtime.shutdown().await;
     }
 
@@ -4564,7 +5264,7 @@ mod tests {
             )
         );
         let commit = tip(&repository, Arc::clone(&runtime), &cancel).await;
-        let manifest = attributes::load(&repository, commit).await.unwrap();
+        let manifest = repository.attributes.load(commit).await.unwrap();
         let attributes_oid = object_id(Kind::Blob, &stored_attributes).unwrap();
         let attributes_etag = crate::gateway::md5_hex(&stored_attributes);
         assert!(manifest.is_complete());
@@ -5033,6 +5733,106 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn cold_write_batch_preserves_each_requests_read_budget() {
+        for (batch_size, max_entries, directories) in [
+            (1, 128, [0, 1, 2, 3]),
+            (4, 128, [0, 1, 2, 3]),
+            (4, 32, [0, 4, 2, 5]),
+        ] {
+            let (repository, runtime, cancel) = capsule_fixture().await;
+            let metrics = Metrics::new().unwrap();
+            let mutation = |directory, entry| Mutation {
+                path: crab_remote_git::GitPath::new(format!(
+                    "directory-{directory}/entry-{entry:03}"
+                ))
+                .unwrap(),
+                change: Change::Put {
+                    bytes: Bytes::from_static(b"value"),
+                    track_lfs: false,
+                    attributes: Box::new(attributes::PutAttributes::default()),
+                    condition: PutCondition::None,
+                },
+                principal: "user".to_owned(),
+            };
+            let setup = (0..4)
+                .flat_map(|directory| (0..32).map(move |entry| mutation(directory, entry)))
+                .collect();
+            let request = || ApplyRequest {
+                branch: "refs/heads/main",
+                plan_id: None,
+                metrics: &metrics,
+                state: None,
+                checkpoints: None,
+            };
+            let seeded = apply_batch_admitted(
+                &repository,
+                Arc::clone(&runtime),
+                crab_remote_git::RepositoryOptions::default(),
+                setup,
+                request(),
+                &cancel,
+            )
+            .await
+            .unwrap();
+            assert!(seeded.iter().all(Result::is_ok), "seed: {seeded:?}");
+            let options = crab_remote_git::RepositoryOptions::new(
+                Default::default(),
+                crab_remote_git::OperationLimits {
+                    max_entries,
+                    ..Default::default()
+                },
+            )
+            .unwrap();
+            let mut results = Vec::new();
+            for directories in directories.chunks(batch_size) {
+                results.extend(
+                    apply_batch_admitted(
+                        &repository,
+                        Arc::clone(&runtime),
+                        options,
+                        directories
+                            .iter()
+                            .map(|directory| mutation(*directory, 32))
+                            .collect(),
+                        request(),
+                        &cancel,
+                    )
+                    .await
+                    .unwrap(),
+                );
+            }
+            let tip = tip(&repository, Arc::clone(&runtime), &cancel).await;
+            let manifest = repository.attributes.load(tip).await.unwrap();
+            let oid = object_id(Kind::Blob, b"value").unwrap();
+            let published = directories.map(|directory| {
+                manifest
+                    .object(&format!("directory-{directory}/entry-032"), oid)
+                    .is_some()
+            });
+            let admitted = directories.map(|directory| max_entries == 128 || directory >= 4);
+            runtime.shutdown().await;
+            assert!(
+                results.iter().zip(admitted).all(|(result, admitted)| {
+                    if admitted {
+                        result.is_ok()
+                    } else {
+                        matches!(
+                            result,
+                            Err(Error::Remote(crab_remote_git::Error::LimitExceeded {
+                                limit: "entries",
+                                maximum: 32,
+                                ..
+                            }))
+                        )
+                    }
+                }),
+                "batch size {batch_size}, limit {max_entries}: {results:?}"
+            );
+            assert_eq!(published, admitted);
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn batch_conditions_observe_prior_successes_in_fifo_order() {
         let (repository, runtime, cancel) = fixture().await;
         let path = crab_remote_git::GitPath::new(b"manifest".to_vec()).unwrap();
@@ -5420,6 +6220,7 @@ mod tests {
                 runtime: Arc::clone(&runtime),
                 options: crab_remote_git::RepositoryOptions::default(),
                 checkpoints: Arc::clone(&coordinator.checkpoints),
+                tasks: coordinator.tasks.clone(),
                 metrics: metrics.clone(),
             },
             "refs/heads/main",
@@ -5439,7 +6240,13 @@ mod tests {
         .await
         .unwrap()
         .journal;
-        assert_eq!(journal.transactions.len(), 2);
+        assert_eq!(
+            (
+                journal.transactions.len(),
+                repository.maintenance.current_epoch()
+            ),
+            (2, 2)
+        );
         assert_eq!(journal.packs.len(), 2);
 
         let view = repository
@@ -5777,7 +6584,7 @@ mod tests {
             .unwrap();
         first.checkpoints.wait_idle().await;
         let first_commit = tip(&repository, Arc::clone(&runtime), &cancel).await;
-        let first_manifest = attributes::load(&repository, first_commit).await.unwrap();
+        let first_manifest = repository.attributes.load(first_commit).await.unwrap();
         let stale =
             attributes::prepare_checkpoint("refs/heads/main", first_commit, &first_manifest)
                 .unwrap()
@@ -5824,7 +6631,7 @@ mod tests {
         ));
         repository.store.head(&checkpoint).await.unwrap();
 
-        let manifest = attributes::load(&repository, commit).await.unwrap();
+        let manifest = repository.attributes.load(commit).await.unwrap();
         let current = attributes::prepare_checkpoint("refs/heads/main", commit, &manifest)
             .unwrap()
             .unwrap();
@@ -5833,7 +6640,12 @@ mod tests {
             .put_overwrite(&checkpoint, stale.bytes())
             .await
             .unwrap();
-        let fallback = attributes::load(&repository, commit).await.unwrap();
+        // A new reader proves physical checkpoint fallback rather than reusing
+        // the immutable logical manifest already cached for this commit.
+        let fallback = attributes::Cache::new(repository.layout.clone())
+            .load(commit)
+            .await
+            .unwrap();
         for path in ["first.txt", "second.txt"] {
             let oid = object_id(Kind::Blob, path.as_bytes()).unwrap();
             assert!(fallback.object(path, oid).is_some());
@@ -5855,7 +6667,10 @@ mod tests {
             .repo_path(&format!("s3/attributes/{parent}.json"));
         repository.store.delete(&parent_delta).await.unwrap();
 
-        let manifest = attributes::load(&repository, commit).await.unwrap();
+        let manifest = attributes::Cache::new(repository.layout.clone())
+            .load(commit)
+            .await
+            .unwrap();
         for path in ["first.txt", "second.txt"] {
             let oid = object_id(Kind::Blob, path.as_bytes()).unwrap();
             assert!(manifest.object(path, oid).is_some());

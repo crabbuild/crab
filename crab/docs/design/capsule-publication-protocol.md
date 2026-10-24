@@ -457,8 +457,11 @@ Logical checkpointing preserves existing source descriptors and admits newly
 stable capsule-run descriptors without copying Git bodies. Physical maintenance
 selects a weighted geometric or member-heavy suffix, publishes verified
 replacement layers, and leaves the stable prefix unchanged. Only exceeding
-the hard 64-source format bound makes minimum admission consolidation a
-logical-publication prerequisite. Neither ordinary checkpointing nor repack
+the hard 64-source format bound makes admission consolidation a
+logical-publication prerequisite. That forced work uses the compressed-byte
+geometric cut within its 512 MiB budget, so continuous writes do not repeatedly
+rewrite an ever-growing tail behind a fixed prefix. Above the budget, only the
+minimum admission suffix is consolidated. Neither ordinary checkpointing nor repack
 implicitly rewrites the complete repository.
 
 The source-local locator binds Git IDs to authenticated member ranges, entry

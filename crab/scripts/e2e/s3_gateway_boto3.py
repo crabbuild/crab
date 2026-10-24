@@ -178,8 +178,148 @@ def _qualify_large_object(
             client.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id)
 
 
+def _qualify_literal_bytes(client, bucket: str, key: str, copy_key: str) -> None:
+    pointer_hash = "01" * 32
+    bodies = [
+        b"",
+        b"ordinary Git blob\n",
+        (
+            "version https://git-lfs.github.com/spec/v1\n"
+            f"oid sha256:{pointer_hash}\nsize 512\n"
+        ).encode(),
+        (
+            "version https://crab.build/spec/v1\n"
+            f"file-hash {pointer_hash}\nsize 512\n"
+        ).encode(),
+    ]
+    for body in bodies:
+        client.put_object(Bucket=bucket, Key=key, Body=body)
+        head = client.head_object(Bucket=bucket, Key=key)
+        if head["ContentLength"] != len(body):
+            raise RuntimeError("literal-byte HEAD returned the wrong size")
+        for selected_key in [key, copy_key]:
+            if selected_key == copy_key:
+                client.copy_object(
+                    Bucket=bucket, Key=copy_key, CopySource={"Bucket": bucket, "Key": key}
+                )
+            response = client.get_object(Bucket=bucket, Key=selected_key)
+            with response["Body"] as stream:
+                if stream.read() != body:
+                    raise RuntimeError("literal-byte PUT/COPY did not round trip")
+            if body:
+                response = client.get_object(
+                    Bucket=bucket, Key=selected_key, Range="bytes=1-7"
+                )
+                with response["Body"] as stream:
+                    if stream.read() != body[1:8]:
+                        raise RuntimeError("literal-byte range did not round trip")
+
+    upload_id = client.create_multipart_upload(Bucket=bucket, Key=key)["UploadId"]
+    completed = False
+    try:
+        part = client.upload_part(
+            Bucket=bucket, Key=key, UploadId=upload_id, PartNumber=1, Body=bodies[-1]
+        )
+        client.complete_multipart_upload(
+            Bucket=bucket,
+            Key=key,
+            UploadId=upload_id,
+            MultipartUpload={"Parts": [{"PartNumber": 1, "ETag": part["ETag"]}]},
+        )
+        completed = True
+        response = client.get_object(Bucket=bucket, Key=key)
+        with response["Body"] as stream:
+            if stream.read() != bodies[-1]:
+                raise RuntimeError("literal-byte multipart content did not round trip")
+    finally:
+        if not completed:
+            client.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id)
+
+
+def _qualify_xet_content(
+    client, bucket: str, source_key: str, fixture: Path, key: str, copy_key: str
+) -> dict[str, object]:
+    size, digest = _digest_file(fixture)
+    if size < 128:
+        raise ValueError("Xet fixture must contain at least 128 bytes")
+    head = client.head_object(Bucket=bucket, Key=source_key)
+    if head["ContentLength"] != size:
+        raise RuntimeError("Xet HEAD did not project the logical size")
+
+    def verify_full(selected_key: str) -> None:
+        response = client.get_object(Bucket=bucket, Key=selected_key)
+        actual = hashlib.sha256()
+        received = 0
+        with response["Body"] as stream:
+            for block in iter(lambda: stream.read(1024 * 1024), b""):
+                actual.update(block)
+                received += len(block)
+        if received != size or actual.hexdigest() != digest:
+            raise RuntimeError("Xet full GET or COPY was not byte exact")
+
+    verify_full(source_key)
+    _expect_error(
+        "Xet conditional GET",
+        lambda: client.get_object(Bucket=bucket, Key=source_key, IfNoneMatch=head["ETag"]),
+        "304",
+    )
+    ranges = [
+        ("bytes=17-96", 17, 97),
+        (f"bytes={size - 97}-", size - 97, size),
+        ("bytes=-97", size - 97, size),
+    ]
+    for selected_range, start, end in ranges:
+        response = client.get_object(
+            Bucket=bucket, Key=source_key, Range=selected_range, IfMatch=head["ETag"]
+        )
+        with fixture.open("rb") as source, response["Body"] as stream:
+            source.seek(start)
+            if stream.read() != source.read(end - start):
+                raise RuntimeError("Xet byte-range GET was not byte exact")
+        if response.get("ContentRange") != f"bytes {start}-{end - 1}/{size}":
+            raise RuntimeError("Xet byte-range GET returned incorrect framing")
+
+    client.copy_object(
+        Bucket=bucket, Key=copy_key, CopySource={"Bucket": bucket, "Key": source_key}
+    )
+    verify_full(copy_key)
+    upload_id = client.create_multipart_upload(Bucket=bucket, Key=key)["UploadId"]
+    completed = False
+    try:
+        start, end = 17, min(size, 5 * 1024 * 1024 + 17)
+        part = client.upload_part_copy(
+            Bucket=bucket,
+            Key=key,
+            UploadId=upload_id,
+            PartNumber=1,
+            CopySource={"Bucket": bucket, "Key": source_key},
+            CopySourceRange=f"bytes={start}-{end - 1}",
+        )["CopyPartResult"]
+        client.complete_multipart_upload(
+            Bucket=bucket,
+            Key=key,
+            UploadId=upload_id,
+            MultipartUpload={"Parts": [{"PartNumber": 1, "ETag": part["ETag"]}]},
+        )
+        completed = True
+        response = client.get_object(Bucket=bucket, Key=key)
+        with fixture.open("rb") as source, response["Body"] as stream:
+            source.seek(start)
+            if stream.read() != source.read(end - start):
+                raise RuntimeError("Xet multipart range copy was not byte exact")
+    finally:
+        if not completed:
+            client.abort_multipart_upload(Bucket=bucket, Key=key, UploadId=upload_id)
+    return {"bytes": size, "sha256": digest, "full_and_ranges_exact": True, "copies_exact": True}
+
+
 def run(
-    client, bucket: str, prefix: str, large_object_bytes: int = 0
+    client,
+    bucket: str,
+    prefix: str,
+    large_object_bytes: int = 0,
+    xet_fixture: Path | None = None,
+    xet_key: str = "main/qualification/xet-large.bin",
 ) -> dict[str, object]:
     token = secrets.token_hex(8)
     root = f"{prefix}/{token}"
@@ -206,6 +346,15 @@ def run(
     checks: dict[str, bool] = {}
 
     try:
+        _qualify_literal_bytes(client, bucket, conditional_key, copy_key)
+        xet = None
+        if xet_fixture is not None:
+            xet = _qualify_xet_content(
+                client, bucket, xet_key, xet_fixture, conditional_key, copy_key
+            )
+            checks["xet_reads_and_copy"] = True
+        client.delete_object(Bucket=bucket, Key=copy_key)
+        checks["literal_bytes"] = True
         put = client.put_object(
             Bucket=bucket,
             Key=object_key,
@@ -411,10 +560,12 @@ def run(
             delete_key,
         }:
             raise RuntimeError("Boto3 conditional DeleteObjects omitted successful deletes")
-        client.delete_objects(
+        deleted = client.delete_objects(
             Bucket=bucket,
             Delete={"Objects": [{"Key": object_key}, {"Key": copy_key}]},
         )
+        if deleted.get("Errors"):
+            raise RuntimeError("Boto3 DeleteObjects reported failed entries")
         checks["multi_delete"] = True
         checks["multi_delete_conditions"] = True
         large_object = None
@@ -436,6 +587,7 @@ def run(
             "multipart_bytes": len(b"".join(multipart_parts)),
             "multipart_parts": len(multipart_parts),
             "large_object": large_object,
+            "xet_object": xet,
         }
     finally:
         if upload_id is not None and not completed:
@@ -448,11 +600,17 @@ def run(
         for key in keys:
             try:
                 client.head_object(Bucket=bucket, Key=key)
-            except ClientError:
+            except ClientError as error:
+                if error.response.get("ResponseMetadata", {}).get("HTTPStatusCode") != 404:
+                    raise
                 continue
             remaining.append({"Key": key})
         if remaining:
-            client.delete_objects(Bucket=bucket, Delete={"Objects": remaining, "Quiet": True})
+            deleted = client.delete_objects(
+                Bucket=bucket, Delete={"Objects": remaining, "Quiet": True}
+            )
+            if deleted.get("Errors"):
+                raise RuntimeError("Boto3 cleanup reported failed deletions")
 
 
 def main() -> int:
@@ -468,6 +626,8 @@ def main() -> int:
         help="run the sequential LFS-path multipart qualification at this size",
     )
     parser.add_argument("--report", type=Path)
+    parser.add_argument("--xet-fixture", type=Path, help="local source of an SDK-published Xet object")
+    parser.add_argument("--xet-key", default="main/qualification/xet-large.bin")
     args = parser.parse_args()
     prefix = args.prefix.strip("/")
     if not prefix or any(value in prefix for value in "?#"):
@@ -492,7 +652,9 @@ def main() -> int:
     try:
         if args.large_object_bytes < 0:
             parser.error("--large-object-bytes must not be negative")
-        report = run(client, args.bucket, prefix, args.large_object_bytes)
+        report = run(
+            client, args.bucket, prefix, args.large_object_bytes, args.xet_fixture, args.xet_key
+        )
     except (ClientError, OSError, RuntimeError, ValueError) as error:
         print(f"error: Boto3 qualification failed: {error}")
         return 1

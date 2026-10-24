@@ -111,14 +111,15 @@ pub fn materialize_visible_ref_heads(
     })
 }
 
-/// Order selected controls by captured ref predecessors and visibility readiness.
+/// Order selected controls and advance the caller-owned captured visibility proof.
 pub async fn order_ref_controls(
     base_refs: &BTreeMap<String, String>,
     base_peeled: &BTreeMap<String, String>,
-    mut visibility: VisibilityReconciliation,
+    visibility: &mut VisibilityReconciliation,
     predecessors: &BTreeMap<String, BTreeSet<String>>,
     mut pending: BTreeMap<String, CapsuleControl>,
 ) -> Result<Vec<CapsuleControl>> {
+    visibility.prepare_controls(pending.values()).await?;
     let mut refs = base_refs.clone();
     let mut peeled = base_peeled.clone();
     let tracked = pending.keys().cloned().collect::<BTreeSet<_>>();

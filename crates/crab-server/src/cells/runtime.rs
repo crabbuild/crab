@@ -105,10 +105,15 @@ pub(crate) async fn start(
         stream_http,
         max_resident,
         bucket,
+        application::compiled()?,
     )
     .await
 }
 
+#[expect(
+    clippy::too_many_arguments,
+    reason = "native node composition receives independently owned runtime services and application"
+)]
 pub(crate) async fn start_with_bucket(
     config: &Config,
     public_address: SocketAddr,
@@ -118,6 +123,7 @@ pub(crate) async fn start_with_bucket(
     stream_http: reqwest::Client,
     max_resident: usize,
     bucket: Bucket,
+    application: Arc<dyn cellar::sdk::Application>,
 ) -> Result<RunningCells> {
     let bootstrap = cellar::sdk::ExecutionDomain::new(tokio::runtime::Handle::current());
     let key = bootstrap
@@ -208,8 +214,8 @@ pub(crate) async fn start_with_bucket(
         metrics: None,
     };
     let applications = CompiledApplications::default()
-        .register(application::SCRIPT, application::VERSION, || {
-            Ok(application::compiled()?)
+        .register(application::SCRIPT, application::VERSION, move || {
+            Ok(application.clone())
         })
         .map_err(Error::sdk)?;
     let (node, ingress) = Node::start_external(node_config, services, graph(), applications)
@@ -270,6 +276,15 @@ pub(crate) async fn test_node(
     directory: &std::path::Path,
     public_address: SocketAddr,
 ) -> RunningCells {
+    test_node_with_application(directory, public_address, application::compiled().unwrap()).await
+}
+
+#[cfg(test)]
+pub(crate) async fn test_node_with_application(
+    directory: &std::path::Path,
+    public_address: SocketAddr,
+    application: Arc<dyn cellar::sdk::Application>,
+) -> RunningCells {
     let internal = TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = internal.local_addr().unwrap();
     let config = Config {
@@ -303,6 +318,7 @@ pub(crate) async fn test_node(
         http,
         32,
         bucket,
+        application,
     )
     .await
     .unwrap()

@@ -21,7 +21,7 @@ const LAYERED_MAX_PHYSICAL_SOURCES: usize = 64;
 // One run can expand to hundreds of local packs; bound clone/index work after roll-up.
 const LAYERED_PACK_MEMBER_TARGET: usize = 8;
 // Physical maintenance is bounded independently of logical checkpointing.
-// The format's hard source limit can still require a minimal admission roll-up.
+// The format's source-count and footer-byte bounds can require admission roll-up.
 const LAYERED_SUFFIX_BYTE_BUDGET: u64 = 512 * 1024 * 1024;
 
 /// Publication status and logical pack-body work completed by maintenance.
@@ -298,7 +298,7 @@ pub async fn repack_capsule_repository_from_view(
             .await?;
             let mut member_oids = view.capsule_run_member_oids().clone();
             member_oids.extend(consolidation.member_oids);
-            let committed = publish_layered_sources(
+            publication = publish_layered_sources(
                 layout,
                 view,
                 consolidation.sources,
@@ -312,13 +312,7 @@ pub async fn repack_capsule_repository_from_view(
                 cancel,
             )
             .await?;
-            publication = CheckpointPublication {
-                work: CheckpointOutcome {
-                    published: committed.is_some(),
-                    ..consolidation.work
-                },
-                committed,
-            };
+            publication.work = consolidation.work.combine(publication.work)?;
         } else if logical_due {
             publication = publish_checkpoint(
                 layout,
@@ -432,6 +426,7 @@ pub async fn publish_capsule_checkpoint_with_catalog_root_from_view(
     .work)
 }
 
+#[derive(Clone)]
 enum CatalogWrite {
     New(PointerCatalog),
     Durable(Option<Box<crab_metadata::capsule_protocol::CheckpointCatalog>>),
@@ -487,9 +482,16 @@ async fn publish_checkpoint(
     let mut member_oids = view.capsule_run_member_oids().clone();
     let mut work = CheckpointOutcome::default();
     if sources.len() > LAYERED_MAX_PHYSICAL_SOURCES {
-        // Only the smallest suffix needed for format admission may block this
-        // logical publication; geometric debt belongs to physical maintenance.
-        let selected_start = LAYERED_MAX_PHYSICAL_SOURCES - 1;
+        // Once admission requires copying bodies, preserve their geometric
+        // tiers. A fixed cut leaves a growing tail that every later checkpoint
+        // would rewrite again while foreground writes prevent idle maintenance.
+        let weights = sources
+            .iter()
+            .map(PackSourceDescriptor::compressed_bytes)
+            .collect::<Result<Vec<_>, _>>()?;
+        let selected_start = layered_suffix_start_for_weights(&weights).ok_or_else(|| {
+            layered_admission_error("overflowing source inventory has no admission suffix")
+        })?;
         let consolidation = consolidate_layered_suffix(
             layout,
             view,
@@ -503,7 +505,7 @@ async fn publish_checkpoint(
         member_oids.extend(consolidation.member_oids);
         work = consolidation.work;
     }
-    let committed = publish_layered_sources(
+    let mut publication = publish_layered_sources(
         layout,
         view,
         sources,
@@ -513,8 +515,8 @@ async fn publish_checkpoint(
         cancel,
     )
     .await?;
-    work.published = committed.is_some();
-    Ok(CheckpointPublication { work, committed })
+    publication.work = work.combine(publication.work)?;
+    Ok(publication)
 }
 
 fn checkpoint_sources(
@@ -591,7 +593,7 @@ async fn repack_checkpoint_from_view(
         cancel,
     )
     .await?;
-    let committed = publish_layered_sources(
+    let mut publication = publish_layered_sources(
         layout,
         view,
         consolidation.sources,
@@ -601,56 +603,74 @@ async fn repack_checkpoint_from_view(
         cancel,
     )
     .await?;
-    Ok(CheckpointPublication {
-        work: CheckpointOutcome {
-            published: committed.is_some(),
-            ..consolidation.work
-        },
-        committed,
-    })
+    publication.work = consolidation.work.combine(publication.work)?;
+    Ok(publication)
 }
 
 async fn publish_layered_sources(
     layout: &StoreLayout<Store>,
     view: &crab_read::capsule_protocol::CapsuleRepositoryView,
-    sources: Vec<PackSourceDescriptor>,
-    member_oids: BTreeMap<String, Vec<Vec<[u8; 20]>>>,
+    mut sources: Vec<PackSourceDescriptor>,
+    mut member_oids: BTreeMap<String, Vec<Vec<[u8; 20]>>>,
     catalog: CatalogWrite,
     maximum_bytes: u64,
     cancel: &CancellationToken,
-) -> Result<
-    Option<(
-        crab_metadata::capsule_protocol::RootSnapshot,
-        LayeredCheckpoint,
-    )>,
-    CheckpointError,
-> {
-    let catalog_digest = source_catalog_digest(&sources)?;
+) -> Result<CheckpointPublication, CheckpointError> {
     let visibility_index = view.git_visibility_index().await?;
-    let member_admission = layered_member_admission(
-        &visibility_index,
-        &sources,
-        view.layered_checkpoint(),
-        &member_oids,
-    )?;
-    let visibility = LayeredVisibilitySnapshot::from_index_with_member_admission(
-        &visibility_index,
-        &catalog_digest,
-        member_admission,
-    )?;
     let generation = view.root().root().generation();
     let root_digest = view.root().digest();
-    let checkpoint = match catalog {
-        CatalogWrite::New(catalog) => {
-            LayeredCheckpoint::build(generation, root_digest, sources, catalog, Some(visibility))?
+    let mut work = CheckpointOutcome::default();
+    let checkpoint = loop {
+        check_cancelled(cancel)?;
+        let catalog_digest = source_catalog_digest(&sources)?;
+        let member_admission = layered_member_admission(
+            &visibility_index,
+            &sources,
+            view.layered_checkpoint(),
+            &member_oids,
+        )?;
+        let visibility = LayeredVisibilitySnapshot::from_index_with_member_admission(
+            &visibility_index,
+            &catalog_digest,
+            member_admission,
+        )?;
+        let checkpoint = match catalog.clone() {
+            CatalogWrite::New(catalog) => LayeredCheckpoint::build(
+                generation,
+                root_digest,
+                sources.clone(),
+                catalog,
+                Some(visibility),
+            ),
+            CatalogWrite::Durable(catalog) => LayeredCheckpoint::build_with_catalog_root(
+                generation,
+                root_digest,
+                sources.clone(),
+                catalog.map(|catalog| *catalog),
+                Some(visibility),
+            ),
+        };
+        match checkpoint {
+            Ok(checkpoint) => break checkpoint,
+            Err(crab_metadata::error::MetadataError::CheckpointFooterSize { .. })
+                if sources
+                    .iter()
+                    .map(|source| source.members().len())
+                    .sum::<usize>()
+                    > 1 =>
+            {
+                // A few member-heavy runs can exhaust the footer below its source
+                // count limit. Admit the replacement before any root publication.
+                let start = footer_admission_suffix_start(&sources);
+                let consolidation =
+                    consolidate_layered_suffix(layout, view, sources, start, maximum_bytes, cancel)
+                        .await?;
+                sources = consolidation.sources;
+                member_oids.extend(consolidation.member_oids);
+                work = work.combine(consolidation.work)?;
+            }
+            Err(error) => return Err(error.into()),
         }
-        CatalogWrite::Durable(catalog) => LayeredCheckpoint::build_with_catalog_root(
-            generation,
-            root_digest,
-            sources,
-            catalog.map(|catalog| *catalog),
-            Some(visibility),
-        )?,
     };
     if checkpoint.publication_metadata_bytes()? > maximum_bytes && maximum_bytes > 0 {
         return Err(CheckpointError::OutputLimit {
@@ -677,10 +697,27 @@ async fn publish_layered_sources(
         )
         .await
     };
-    match result {
-        Ok(root) => Ok(Some((root, checkpoint))),
-        Err(crab_write::WriteError::CapsuleRootChanged { .. }) => Ok(None),
-        Err(error) => Err(error.into()),
+    let committed = match result {
+        Ok(root) => Some((root, checkpoint)),
+        Err(crab_write::WriteError::CapsuleRootChanged { .. }) => None,
+        Err(error) => return Err(error.into()),
+    };
+    work.published = committed.is_some();
+    Ok(CheckpointPublication { work, committed })
+}
+
+fn footer_admission_suffix_start(sources: &[PackSourceDescriptor]) -> usize {
+    // One run can hold hundreds of packs. Otherwise combine two sources;
+    // each replacement reduces member count, bounding repeated admission work.
+    // Leave larger geometric merges to maintenance so a footer limit does not
+    // block foreground requests on rewriting the entire historical inventory.
+    if sources
+        .last()
+        .is_some_and(|source| source.members().len() > 1)
+    {
+        sources.len().saturating_sub(1)
+    } else {
+        sources.len().saturating_sub(2)
     }
 }
 
@@ -713,7 +750,7 @@ async fn consolidate_layered_suffix(
             },
         ));
     }
-    let delta_base_ids = sources[selected_start..]
+    let mut delta_base_ids = sources[selected_start..]
         .iter()
         .flat_map(|source| source.members())
         .flat_map(|member| member.external_delta_bases())
@@ -726,8 +763,6 @@ async fn consolidate_layered_suffix(
             })
         })
         .collect::<Result<BTreeSet<_>, _>>()?;
-    let delta_bases =
-        read_layered_delta_bases(layout, view, &delta_base_ids, maximum_bytes, cancel).await?;
     check_cancelled(cancel)?;
     let workspace = tempfile::tempdir()?;
     let git_dir = workspace.path().join("repository.git");
@@ -749,41 +784,60 @@ async fn consolidate_layered_suffix(
         )
         .await?;
     check_cancelled(cancel)?;
-    let sources_for_repack = repack_sources(installed)?;
+    let sources_for_repack = repack_sources(installed, &mut delta_base_ids)?;
+    // Internal bases usually move with the selected bodies. Overlapping OIDs
+    // or cyclic aliases still need verified anchors for native Git's rewrite.
+    delta_base_ids.extend(crab_git::repack::selected_pack_ref_delta_base_ids(
+        &sources_for_repack,
+    )?);
+    let delta_bases =
+        read_layered_delta_bases(layout, view, &delta_base_ids, maximum_bytes, cancel).await?;
     let pack_bytes_read = sources_for_repack.iter().try_fold(0_u64, |total, source| {
         total
             .checked_add(source.size)
             .ok_or(CheckpointError::AccountingOverflow)
     })?;
-    let delta_bases_for_repack = delta_bases;
-    let mut kind_git_dir = git_dir.clone();
-    if !delta_bases_for_repack.is_empty() {
-        kind_git_dir = workspace.path().join("resolved.git");
-    }
     let index_concurrency =
         std::thread::available_parallelism().map_or(1, |parallelism| parallelism.get().min(8));
-    let (replacement, kind_git_dir) = tokio::task::spawn_blocking(move || {
-        // Native Git requires self-contained on-disk packs even for kind queries.
-        // Repair only a scratch copy; temporary bases must not enter the selected
-        // inventory or the byte-preserving replacement's object universe.
-        if !delta_bases_for_repack.is_empty() {
-            initialize_bare_repository(&kind_git_dir)?;
-            crab_git::repack::resolve_pack_delta_bases(
-                &kind_git_dir,
-                &sources_for_repack,
-                &delta_bases_for_repack,
-            )?;
-        }
+    let worker_cancel = cancel.clone();
+    let packs = tokio::task::spawn_blocking(move || {
         let replacement = crab_git::repack::consolidate_committed_pack_suffix_with_delta_bases(
             &sources_for_repack,
-            &delta_bases_for_repack,
+            &delta_bases,
             index_concurrency,
         )?;
-        Ok::<_, CheckpointError>((replacement, kind_git_dir))
+        let mut kinds = BTreeMap::new();
+        for source in &sources_for_repack {
+            check_cancelled(&worker_cancel)?;
+            let locations = crab_git::pack_locator::PackLocationIter::open(
+                &source.index_path,
+                &source.reverse_index_path,
+                source.size,
+            )
+            .map_err(crab_git::pack::PackError::from)?;
+            let metadata = std::fs::read(source.path.with_extension("kinds"))?;
+            let records =
+                crab_git::pack_locator::decode_pack_kind_metadata_iter(&metadata, locations)
+                    .map_err(crab_git::pack::PackError::from)?;
+            for record in records {
+                let (oid, kind) = record.map_err(crab_git::pack::PackError::from)?;
+                if kinds
+                    .insert(oid, kind)
+                    .is_some_and(|previous| previous != kind)
+                {
+                    return Err(CheckpointError::Repack(
+                        crab_git::repack::RepackError::SourceIntegrity {
+                            pack_id: source.canonical_id.clone(),
+                            reason: format!("authenticated kinds disagree for object {oid}"),
+                        },
+                    ));
+                }
+            }
+        }
+        materialize_packs(replacement.packs(), &kinds, maximum_bytes, &worker_cancel)
     })
     .await??;
     check_cancelled(cancel)?;
-    let packs = materialize_packs(replacement.packs(), &kind_git_dir, maximum_bytes, cancel)?;
     if packs.is_empty() {
         return Err(CheckpointError::Repack(
             crab_git::repack::RepackError::SourceIntegrity {
@@ -1102,7 +1156,10 @@ fn layered_suffix_start_for_weights(weights: &[u64]) -> Option<usize> {
     Some(start)
 }
 
-fn repack_sources(installed: Vec<PathBuf>) -> Result<Vec<RepackSource>, CheckpointError> {
+fn repack_sources(
+    installed: Vec<PathBuf>,
+    external_bases: &mut BTreeSet<gix_hash::ObjectId>,
+) -> Result<Vec<RepackSource>, CheckpointError> {
     let mut unique = BTreeSet::new();
     let mut sources = Vec::new();
     for path in installed {
@@ -1129,6 +1186,9 @@ fn repack_sources(installed: Vec<PathBuf>) -> Result<Vec<RepackSource>, Checkpoi
             .as_bytes()
             .try_into()
             .map_err(|_| CheckpointError::InvalidPackPath { path: path.clone() })?;
+        for oid in locations.sorted_object_ids() {
+            external_bases.remove(&oid);
+        }
         sources.push(RepackSource {
             canonical_id,
             path,
@@ -1147,7 +1207,7 @@ fn repack_sources(installed: Vec<PathBuf>) -> Result<Vec<RepackSource>, Checkpoi
 
 fn materialize_packs(
     generated: &[GeometricRepackedPack],
-    git_dir: &Path,
+    kinds: &BTreeMap<gix_hash::ObjectId, gix_object::Kind>,
     maximum: u64,
     cancel: &CancellationToken,
 ) -> Result<Vec<CapsuleGitPack>, CheckpointError> {
@@ -1168,17 +1228,15 @@ fn materialize_packs(
             .iter()
             .map(|location| location.oid)
             .collect::<Vec<_>>();
-        let kinds = crab_git::pack::object_kinds_from_git_dir(git_dir, &object_ids)?;
         let ordered_kinds = object_ids
             .iter()
             .map(|oid| {
-                kinds
-                    .get(oid)
-                    .copied()
-                    .ok_or_else(|| crab_git::pack::PackError::ObjectKindQuery {
-                        path: git_dir.to_owned(),
-                        detail: format!("Git omitted object {oid} from the kind query"),
+                kinds.get(oid).copied().ok_or_else(|| {
+                    CheckpointError::Repack(crab_git::repack::RepackError::SourceIntegrity {
+                        pack_id: generated.pack_id.clone(),
+                        reason: format!("authenticated source kinds omitted object {oid}"),
                     })
+                })
             })
             .collect::<Result<Vec<_>, _>>()?;
         let checksum =
@@ -1399,6 +1457,30 @@ mod tests {
         let weights = vec![1; LAYERED_MAX_PHYSICAL_SOURCES + 1];
 
         assert_eq!(layered_suffix_start_for_weights(&weights), Some(1));
+    }
+
+    #[test]
+    fn source_admission_amortizes_repeated_rollups() {
+        let mut weights = Vec::new();
+        let mut admitted = 0_u64;
+        let mut copied = 0_u64;
+        for ordinal in 0..4096 {
+            let weight = 4096 + (ordinal % 7) * 512;
+            weights.push(weight);
+            admitted += weight;
+            if weights.len() <= LAYERED_MAX_PHYSICAL_SOURCES {
+                continue;
+            }
+            let start = layered_suffix_start_for_weights(&weights).unwrap();
+            let replacement = weights.drain(start..).sum::<u64>();
+            copied += replacement;
+            weights.push(replacement);
+        }
+
+        assert!(
+            copied < admitted * 8,
+            "rewrote {copied} of {admitted} bytes"
+        );
     }
 
     #[test]

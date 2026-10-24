@@ -572,6 +572,32 @@ fn consolidate_pack_suffix_with_options(
             });
         }
     }
+    if matches!(validation, ConsolidationValidation::Committed) {
+        let object_ids = source_pack_inventory_object_ids(sources)?;
+        if !object_ids.windows(2).any(|pair| pair[0] == pair[1]) {
+            for source in sources {
+                let verification = source.verified_identity.map_or(
+                    crate::pack::PackInstallVerification::Unverified,
+                    crate::pack::PackInstallVerification::Body,
+                );
+                crate::pack::verify_pack_file_artifacts(
+                    &source.path,
+                    &source.index_path,
+                    &source.reverse_index_path,
+                    &source.canonical_id,
+                    source.size,
+                    source.object_count,
+                    verification,
+                )?;
+            }
+            // Object admission is already committed. Revalidate the same body
+            // and sidecar contracts without installing another scratch Git DB.
+            if !deduplicate::requirements(sources)?.rewrite {
+                return concatenate_verified_sources(sources, &object_ids, delta_bases);
+            }
+        }
+    }
+
     let workspace =
         tempfile::tempdir().map_err(|source| io_error("create repack workspace", source))?;
     let source_git = workspace.path().join("source.git");
@@ -609,8 +635,11 @@ fn consolidate_pack_suffix_with_options(
     source_oids.sort_unstable();
     // Response callers already attempted structural concatenation before
     // choosing this path; do not repeat that failed strategy.
+    // Even disjoint OID sets can refer cyclically to older representations
+    // outside this suffix. Such aliases need verified anchors and a rewrite.
     let source_objects_are_disjoint = !matches!(validation, ConsolidationValidation::Response)
-        && !source_oids.windows(2).any(|pair| pair[0] == pair[1]);
+        && !source_oids.windows(2).any(|pair| pair[0] == pair[1])
+        && !deduplicate::requirements(sources)?.rewrite;
     source_oids.dedup();
     let expected_oids = source_oids
         .into_iter()
@@ -623,41 +652,7 @@ fn consolidate_pack_suffix_with_options(
     // verification above plus the rebuilt index and exact OID comparison prove
     // the replacement object universe without reinflating every growing tree.
     if source_objects_are_disjoint {
-        let concatenated = concatenate_complete_pack_inventory_inner(sources, false)?;
-        let pack_path = pack_dir.join("pack-crab-rollup-concatenated.pack");
-        std::fs::copy(concatenated.pack_path(), &pack_path)
-            .map_err(|source| io_error(format!("copy {}", pack_path.display()), source))?;
-        let index_path = pack_path.with_extension("idx");
-        let index_started = Instant::now();
-        let pack_checksum = gix_hash::ObjectId::from_hex(concatenated.git_sha1.as_bytes())
-            .map_err(|error| RepackError::SourceIntegrity {
-                pack_id: concatenated.pack_id.clone(),
-                reason: format!("concatenated pack has an invalid SHA-1 checksum: {error}"),
-            })?;
-        write_concatenated_pack_index(sources, &index_path, pack_checksum)?;
-        tracing::debug!(
-            source_pack_count = sources.len(),
-            elapsed_ms = index_started.elapsed().as_millis() as u64,
-            "concatenated disjoint Git packs"
-        );
-        let mut generated = verified_generated_pack(
-            pack_path,
-            GeneratedPackValidation::Structural,
-            Some(&expected_oids),
-            None,
-        )?;
-        if !delta_bases.is_empty() {
-            generated.external_delta_bases = generated_external_delta_bases(
-                generated.pack_path(),
-                generated.index_path(),
-                generated.reverse_index_path(),
-                generated.pack_size,
-            )?;
-        }
-        return Ok(GeometricRepackedRepository {
-            _workspace: workspace,
-            packs: vec![generated],
-        });
+        return concatenate_verified_sources(sources, &expected_oids, delta_bases);
     }
 
     let pack_generation_started = Instant::now();
@@ -736,6 +731,53 @@ fn consolidate_pack_suffix_with_options(
     }
     Ok(GeometricRepackedRepository {
         _workspace: workspace,
+        packs: vec![generated],
+    })
+}
+
+fn concatenate_verified_sources(
+    sources: &[RepackSource],
+    expected_oids: &[gix_hash::ObjectId],
+    delta_bases: &[RepackDeltaBase],
+) -> Result<GeometricRepackedRepository, RepackError> {
+    let concatenated = concatenate_complete_pack_inventory_inner(sources, false)?;
+    let checksum =
+        gix_hash::ObjectId::from_hex(concatenated.git_sha1.as_bytes()).map_err(|error| {
+            RepackError::SourceIntegrity {
+                pack_id: concatenated.pack_id.clone(),
+                reason: format!("concatenated pack has an invalid SHA-1 checksum: {error}"),
+            }
+        })?;
+    let identity = VerifiedPackIdentity {
+        git_sha1: checksum
+            .as_bytes()
+            .try_into()
+            .map_err(|_| RepackError::SourceIntegrity {
+                pack_id: concatenated.pack_id.clone(),
+                reason: "concatenated pack checksum is not SHA-1".to_owned(),
+            })?,
+        content_hash: concatenated.pack_hash,
+    };
+    let index_path = concatenated.pack_path.with_extension("idx");
+    write_concatenated_pack_index(sources, &index_path, checksum)?;
+    // The writer just hashed and flushed this private output. Transfer its
+    // workspace directly instead of copying and rehashing the complete body.
+    let mut generated = verified_generated_pack(
+        concatenated.pack_path,
+        GeneratedPackValidation::Structural,
+        Some(expected_oids),
+        Some(identity),
+    )?;
+    if !delta_bases.is_empty() {
+        generated.external_delta_bases = generated_external_delta_bases(
+            generated.pack_path(),
+            generated.index_path(),
+            generated.reverse_index_path(),
+            generated.pack_size,
+        )?;
+    }
+    Ok(GeometricRepackedRepository {
+        _workspace: concatenated._workspace,
         packs: vec![generated],
     })
 }
@@ -1173,44 +1215,20 @@ fn source_pack_inventory_object_ids(
 
 /// Return REF_DELTA bases needed by native selected-pack consolidation.
 ///
-/// Disjoint complete packs use Crab's byte-preserving concatenation path and
-/// therefore need no materialized bases. When duplicate OIDs require native
-/// Git to rewrite the selected object set, this scans only entry headers. All
-/// bases are returned so thin-pack repair is independent of pack order.
+/// Acyclic disjoint packs retain their compressed entries. Duplicate OIDs or
+/// cyclic selected aliases require native rewriting with verified anchors.
+/// Indexed header ranges avoid inflating historical objects during inspection;
+/// returned bases make thin-pack repair independent of source order. Source
+/// bodies must already match their committed identities.
 pub fn selected_pack_ref_delta_base_ids(
     sources: &[RepackSource],
 ) -> Result<Vec<gix_hash::ObjectId>, RepackError> {
     let inventory = source_pack_inventory_object_ids(sources)?;
-    if !inventory.windows(2).any(|pair| pair[0] == pair[1]) {
+    let requirements = deduplicate::requirements(sources)?;
+    if !requirements.rewrite && !inventory.windows(2).any(|pair| pair[0] == pair[1]) {
         return Ok(Vec::new());
     }
-    let mut bases = BTreeSet::new();
-    for source in sources {
-        let reader = BufReader::new(
-            File::open(&source.path)
-                .map_err(|error| io_error(format!("open {}", source.path.display()), error))?,
-        );
-        let entries = gix_pack::data::input::BytesToEntriesIter::new_from_header(
-            reader,
-            gix_pack::data::input::Mode::Verify,
-            gix_pack::data::input::EntryDataMode::Ignore,
-            gix_hash::Kind::Sha1,
-        )
-        .map_err(|error| RepackError::SourceIntegrity {
-            pack_id: source.canonical_id.clone(),
-            reason: format!("cannot scan pack entry headers: {error}"),
-        })?;
-        for entry in entries {
-            let entry = entry.map_err(|error| RepackError::SourceIntegrity {
-                pack_id: source.canonical_id.clone(),
-                reason: format!("cannot scan pack entry: {error}"),
-            })?;
-            if let gix_pack::data::entry::Header::RefDelta { base_id } = entry.header {
-                bases.insert(base_id);
-            }
-        }
-    }
-    Ok(bases.into_iter().collect())
+    Ok(requirements.external_bases.into_iter().collect())
 }
 
 /// Repair selected packs against verified bases in a private Git repository.
@@ -1632,58 +1650,33 @@ fn generated_external_delta_bases(
     reverse_index_path: &Path,
     pack_size: u64,
 ) -> Result<BTreeMap<gix_hash::ObjectId, gix_hash::ObjectId>, RepackError> {
-    let locations = PackLocationIter::open(index_path, reverse_index_path, pack_size)?;
-    let mut object_ids_by_offset = BTreeMap::new();
-    for location in locations {
-        let location = location?;
-        object_ids_by_offset.insert(location.pack_offset, location.oid);
-    }
-    let object_ids = object_ids_by_offset
-        .values()
-        .copied()
+    let locations = PackLocationIter::open(index_path, reverse_index_path, pack_size)?
+        .collect::<Result<Vec<_>, _>>()?;
+    let object_ids = locations
+        .iter()
+        .map(|location| location.oid)
         .collect::<BTreeSet<_>>();
-    let file = File::open(pack_path)
-        .map_err(|source| io_error(format!("open {}", pack_path.display()), source))?;
-    let entries = gix_pack::data::input::BytesToEntriesIter::new_from_header(
-        BufReader::new(file),
-        gix_pack::data::input::Mode::AsIs,
-        gix_pack::data::input::EntryDataMode::Ignore,
-        gix_hash::Kind::Sha1,
-    )
-    .map_err(|error| RepackError::SourceIntegrity {
-        pack_id: pack_path.display().to_string(),
-        reason: format!("cannot scan generated pack entry headers: {error}"),
-    })?;
+    let pack_id = pack_path.display().to_string();
     let mut external = BTreeMap::new();
-    for entry in entries {
-        let entry = entry.map_err(|error| RepackError::SourceIntegrity {
-            pack_id: pack_path.display().to_string(),
-            reason: format!("cannot scan generated pack entry: {error}"),
-        })?;
-        let gix_pack::data::entry::Header::RefDelta { base_id } = entry.header else {
+    for entry in deduplicate::entry_headers(&pack_id, pack_path, &locations)? {
+        let (location, header) = entry?;
+        let gix_pack::data::entry::Header::RefDelta { base_id } = header else {
             continue;
         };
-        // Bases indexed by this pack are internal and need no source closure;
-        // only absent identities must remain reachable from an earlier layer.
+        // Internal identities are supplied by this pack; only absent bases
+        // remain dependencies of the earlier authenticated source inventory.
         if object_ids.contains(&base_id) {
             continue;
         }
-        let target = object_ids_by_offset
-            .get(&entry.pack_offset)
-            .copied()
-            .ok_or_else(|| RepackError::SourceIntegrity {
-                pack_id: pack_path.display().to_string(),
-                reason: format!(
-                    "generated REF_DELTA entry at offset {} is absent from its index",
-                    entry.pack_offset
-                ),
-            })?;
-        if let Some(previous) = external.insert(target, base_id)
+        if let Some(previous) = external.insert(location.oid, base_id)
             && previous != base_id
         {
             return Err(RepackError::SourceIntegrity {
-                pack_id: pack_path.display().to_string(),
-                reason: format!("generated object {target} has conflicting REF_DELTA bases"),
+                pack_id: pack_id.clone(),
+                reason: format!(
+                    "generated object {} has conflicting REF_DELTA bases",
+                    location.oid
+                ),
             });
         }
     }
@@ -2291,6 +2284,75 @@ mod tests {
                 .iter()
                 .all(|argv| !argv.iter().any(|arg| arg == "--stdin-packs")),
             "an exact suffix union must not trigger Git's revision/tree hint walk: {commands:?}"
+        );
+    }
+
+    #[test]
+    fn local_reference_bases_do_not_require_origin_reconstruction() {
+        let root = tempfile::tempdir().unwrap();
+        let repository = root.path().join("source.git");
+        initialize_bare_repository(&repository).unwrap();
+        let repository_arg = repository.to_str().unwrap();
+        let base = vec![b'a'; 64 * 1024];
+        let mut target = base.clone();
+        target[1024] = b'b';
+        let oids = [&base, &target, &b"another object".to_vec()].map(|bytes| {
+            String::from_utf8(git_with_stdin(
+                &["--git-dir", repository_arg, "hash-object", "-w", "--stdin"],
+                bytes,
+            ))
+            .unwrap()
+            .trim()
+            .to_owned()
+        });
+        let sources = [
+            [oids[0].clone(), oids[1].clone()],
+            [oids[0].clone(), oids[2].clone()],
+        ]
+        .into_iter()
+        .enumerate()
+        .map(|(ordinal, selected)| {
+            let prefix = root.path().join(format!("source-{ordinal}"));
+            let checksum = String::from_utf8(git_with_stdin(
+                &[
+                    "--git-dir",
+                    repository_arg,
+                    "pack-objects",
+                    "--no-delta-base-offset",
+                    prefix.to_str().unwrap(),
+                ],
+                (selected.join("\n") + "\n").as_bytes(),
+            ))
+            .unwrap();
+            source_descriptor(PathBuf::from(format!(
+                "{}-{}.pack",
+                prefix.display(),
+                checksum.trim()
+            )))
+            .unwrap()
+        })
+        .collect::<Vec<_>>();
+        let locations = PackLocationIter::open(
+            &sources[0].index_path,
+            &sources[0].reverse_index_path,
+            sources[0].size,
+        )
+        .unwrap()
+        .collect::<Result<Vec<_>, _>>()
+        .unwrap();
+        assert!(
+            deduplicate::entry_headers(&sources[0].canonical_id, &sources[0].path, &locations)
+                .unwrap()
+                .any(|entry| matches!(
+                    entry.unwrap().1,
+                    gix_pack::data::entry::Header::RefDelta { .. }
+                )),
+            "fixture must contain an in-pack REF_DELTA"
+        );
+        assert!(
+            selected_pack_ref_delta_base_ids(&sources)
+                .unwrap()
+                .is_empty()
         );
     }
 

@@ -96,6 +96,9 @@ pub struct CapsuleRepositoryView {
     browse_indexes: Option<crab_metadata::capsule_protocol::BrowseIndexes>,
     checkpoint: Option<LayeredCheckpoint>,
     checkpoint_visibility: Option<Arc<crab_metadata::capsule_protocol::LayeredVisibilityReader>>,
+    // Complete opening already reconciles every transaction. Keep that immutable
+    // result so maintenance does not replay the entire history a second time.
+    reconciled_visibility: Option<Arc<crab_metadata::git_visibility::GitVisibilityIndex>>,
     capsules: Vec<Capsule>,
     capsule_controls: Vec<CapsuleControl>,
     tip_bound_transitions: CapsuleTipBoundTransitions,
@@ -105,6 +108,7 @@ pub struct CapsuleRepositoryView {
     peeled_refs: BTreeMap<String, String>,
     visible_ref_transactions: BTreeMap<String, String>,
     ref_capsule_counts: BTreeMap<String, u32>,
+    ref_frontier_bytes: BTreeMap<String, u64>,
     capsule_run_pointers: Vec<CapsulePointer>,
     capsule_run_sources: Vec<PackSourceDescriptor>,
     // Fetch-only captures omit reconciled logical deltas. Distinguish that
@@ -347,6 +351,15 @@ impl CapsuleRepositoryView {
     #[must_use]
     pub fn ref_capsule_count(&self, ref_name: &str) -> u32 {
         self.ref_capsule_counts
+            .get(ref_name)
+            .copied()
+            .unwrap_or_default()
+    }
+
+    /// Return the physical run bytes retained by one captured ref frontier.
+    #[must_use]
+    pub fn ref_frontier_bytes(&self, ref_name: &str) -> u64 {
+        self.ref_frontier_bytes
             .get(ref_name)
             .copied()
             .unwrap_or_default()
@@ -1356,6 +1369,9 @@ impl CapsuleRepositoryView {
         if let Some(index) = object_index {
             lookup_sources = lookup_sources.with_object_index(index);
         }
+        if let Some(admission) = &self.checkpoint_visibility {
+            lookup_sources = lookup_sources.with_checkpoint_admission(Arc::clone(admission));
+        }
         if let Some(admission) = preferred_object_admission_by_oid
             && !admission.is_empty()
         {
@@ -1378,8 +1394,13 @@ impl CapsuleRepositoryView {
     pub async fn git_visibility_index(
         &self,
     ) -> Result<crab_metadata::git_visibility::GitVisibilityIndex> {
-        let mut index = match (&self.checkpoint_visibility, &self.metadata_layout) {
-            (Some(reader), Some(layout)) => {
+        let mut index = match (
+            &self.reconciled_visibility,
+            &self.checkpoint_visibility,
+            &self.metadata_layout,
+        ) {
+            (Some(index), _, _) => (**index).clone(),
+            (None, Some(reader), Some(layout)) => {
                 let snapshot = reader.materialize(layout.store()).await?;
                 snapshot.to_index(
                     0,
@@ -1391,29 +1412,30 @@ impl CapsuleRepositoryView {
             _ => visibility_index_for_checkpoint(self.checkpoint.as_ref())?,
         };
 
-        for capsule in &self.capsules {
-            apply_capsule_visibility_index(capsule, &mut index)?;
-        }
-        for capsule in &self.capsule_controls {
-            let complete = match &self.metadata_layout {
-                Some(layout) => capsule.materialize_visibility(layout.store()).await?,
-                None => capsule.clone(),
-            };
-            apply_capsule_control_visibility_index(&complete, &mut index)?;
+        if self.reconciled_visibility.is_none() {
+            for capsule in &self.capsules {
+                apply_capsule_visibility_index(capsule, &mut index)?;
+            }
+            for capsule in &self.capsule_controls {
+                let complete = match &self.metadata_layout {
+                    Some(layout) => capsule.materialize_visibility(layout.store()).await?,
+                    None => capsule.clone(),
+                };
+                apply_capsule_control_visibility_index(&complete, &mut index)?;
+            }
         }
 
         let packs = self.git_pack_manifest_entries()?;
         let manifest = self.git_manifest(&packs)?;
-        let refs = index.ref_closures();
-        if refs.keys().ne(manifest.refs.keys())
-            || manifest.refs.iter().any(|(name, tip)| {
-                refs.get(name)
-                    .is_none_or(|objects| objects.binary_search(tip).is_err())
-            })
-            || manifest.peeled_refs.iter().any(|(name, peeled)| {
-                refs.get(name)
-                    .is_none_or(|objects| objects.binary_search(peeled).is_err())
-            })
+        if index.ref_count() != manifest.refs.len()
+            || manifest
+                .refs
+                .iter()
+                .any(|(name, tip)| !index.contains_hex_in_ref(name, tip))
+            || manifest
+                .peeled_refs
+                .iter()
+                .any(|(name, peeled)| !index.contains_hex_in_ref(name, peeled))
         {
             return Err(corrupt_path(
                 "capsule Git visibility",
@@ -1879,6 +1901,11 @@ async fn install_git_pack_payloads(
             let actual_bases = metadata.into_iter().filter_map(|(_, base)| base.map(|oid| oid.to_string())).collect::<BTreeSet<_>>();
             if actual_bases != declared_bases {
                 return Err(corrupt_path("capsule Git locator", "external bases disagree with the authenticated descriptor"));
+            }
+            if !native_repository {
+                // Maintenance preserves authenticated kinds alongside its raw
+                // packs; querying Git would reinflate historical delta chains.
+                std::fs::write(final_pack.with_extension("kinds"), &locator)?;
             }
             if native_repository && !external_delta_bases.is_empty() {
                 let source_path = pack_path.as_deref().ok_or_else(|| corrupt_path(
@@ -2445,7 +2472,8 @@ pub async fn install_layered_git_packs_from_store_selected(
 /// The source descriptors are already authenticated by the repository view;
 /// callers use this form when a control-only view deliberately omits capsule
 /// bodies but still needs to materialize a bounded consolidation suffix. Sources
-/// outside these slices are never searched for duplicate pack bodies.
+/// outside these slices are never searched for duplicate pack bodies. Each
+/// installed raw pack includes its authenticated kind sidecar at `.kinds`.
 pub async fn install_layered_git_packs_from_store_sources_selected(
     sources: &[PackSourceDescriptor],
     additional_sources: &[PackSourceDescriptor],
@@ -4212,7 +4240,7 @@ pub fn compacted_view_from_checkpoint(
             maximum: limits.max_capsule_bytes,
         });
     }
-    visibility_index_for_checkpoint(Some(&checkpoint))?;
+    let visibility = visibility_index_for_checkpoint(Some(&checkpoint))?;
     let mut tip_bound_transitions = BTreeMap::new();
     append_checkpoint_tip_bound_transitions(
         &mut tip_bound_transitions,
@@ -4225,6 +4253,7 @@ pub fn compacted_view_from_checkpoint(
         browse_indexes: None,
         checkpoint: Some(checkpoint),
         checkpoint_visibility: None,
+        reconciled_visibility: Some(Arc::new(visibility)),
         capsules: Vec::new(),
         capsule_controls: Vec::new(),
         tip_bound_transitions,
@@ -4232,6 +4261,7 @@ pub fn compacted_view_from_checkpoint(
         tip_bound_controls: Vec::new(),
         visible_ref_transactions: BTreeMap::new(),
         ref_capsule_counts: BTreeMap::new(),
+        ref_frontier_bytes: BTreeMap::new(),
         capsule_run_pointers: Vec::new(),
         capsule_run_sources: Vec::new(),
         catalog_sources: Some(Vec::new()),
@@ -4350,6 +4380,17 @@ async fn assemble_view(
     let ref_frontiers = visible.frontiers;
     let pointers = visible.pointers;
     admit_frontier(&pointers, limits)?;
+    // Each validated ref contains a unique subset of the admitted global
+    // frontier, so its sum cannot overflow the already checked byte total.
+    let ref_frontier_bytes = ref_frontiers
+        .iter()
+        .map(|(name, (_, frontier))| {
+            (
+                name.clone(),
+                frontier.iter().map(CapsulePointer::size).sum(),
+            )
+        })
+        .collect();
     let checkpoint = async {
         match snapshot.record().root().checkpoint() {
             Some(pointer) => load_layered_checkpoint(router, pointer, limits)
@@ -4504,7 +4545,7 @@ async fn assemble_view(
     let ordered = order_ref_capsules(
         snapshot.record().root().refs(),
         snapshot.record().root().peeled_refs(),
-        visibility_index,
+        &mut visibility_index,
         &transaction_predecessors,
         journal_capsules,
     )?;
@@ -4524,6 +4565,7 @@ async fn assemble_view(
         browse_indexes: None,
         checkpoint,
         checkpoint_visibility: None,
+        reconciled_visibility: Some(Arc::new(visibility_index)),
         capsules: root_capsules,
         capsule_controls: Vec::new(),
         tip_bound_transitions,
@@ -4533,6 +4575,7 @@ async fn assemble_view(
         peeled_refs,
         visible_ref_transactions,
         ref_capsule_counts,
+        ref_frontier_bytes,
         capsule_run_pointers: pointers,
         capsule_run_sources,
         catalog_sources,
@@ -4562,6 +4605,17 @@ async fn assemble_layered_control_view(
     let ref_frontiers = visible.frontiers;
     let pointers = visible.pointers;
     admit_frontier(&pointers, limits)?;
+    // Each validated ref contains a unique subset of the admitted global
+    // frontier, so its sum cannot overflow the already checked byte total.
+    let ref_frontier_bytes = ref_frontiers
+        .iter()
+        .map(|(name, (_, frontier))| {
+            (
+                name.clone(),
+                frontier.iter().map(CapsulePointer::size).sum(),
+            )
+        })
+        .collect();
     let checkpoint = match snapshot.record().root().checkpoint() {
         Some(pointer) => {
             let checkpoint = if !matches!(read, ControlRead::Complete) {
@@ -4702,6 +4756,7 @@ async fn assemble_layered_control_view(
             browse_indexes: None,
             checkpoint,
             checkpoint_visibility: None,
+            reconciled_visibility: None,
             capsules: Vec::new(),
             capsule_controls: Vec::new(),
             tip_bound_transitions,
@@ -4711,6 +4766,7 @@ async fn assemble_layered_control_view(
             peeled_refs: expected_peeled,
             visible_ref_transactions,
             ref_capsule_counts,
+            ref_frontier_bytes,
             capsule_run_pointers: pointers,
             capsule_run_sources,
             catalog_sources,
@@ -4761,7 +4817,7 @@ async fn assemble_layered_control_view(
     let ordered = order_ref_controls(
         snapshot.record().root().refs(),
         snapshot.record().root().peeled_refs(),
-        visibility,
+        &mut visibility,
         &transaction_predecessors,
         journal_capsules,
     )
@@ -4782,6 +4838,10 @@ async fn assemble_layered_control_view(
         browse_indexes: None,
         checkpoint,
         checkpoint_visibility,
+        reconciled_visibility: match visibility {
+            VisibilityReconciliation::Complete(index) => Some(Arc::new(index)),
+            VisibilityReconciliation::Paged(_) => None,
+        },
         capsules: Vec::new(),
         capsule_controls: root_capsules,
         tip_bound_transitions,
@@ -4795,6 +4855,7 @@ async fn assemble_layered_control_view(
         peeled_refs,
         visible_ref_transactions,
         ref_capsule_counts,
+        ref_frontier_bytes,
         capsule_run_pointers: pointers,
         capsule_run_sources,
         catalog_sources,
@@ -4967,7 +5028,7 @@ async fn load_selected_ref_heads(
 fn order_ref_capsules(
     base_refs: &BTreeMap<String, String>,
     base_peeled: &BTreeMap<String, String>,
-    mut visibility: crab_metadata::git_visibility::GitVisibilityIndex,
+    visibility: &mut crab_metadata::git_visibility::GitVisibilityIndex,
     predecessors: &BTreeMap<String, BTreeSet<String>>,
     mut pending: BTreeMap<String, Capsule>,
 ) -> Result<Vec<Capsule>> {
@@ -4993,7 +5054,7 @@ fn order_ref_capsules(
                 {
                     return None;
                 }
-                match capsule_is_ready(capsule, &refs, &visibility) {
+                match capsule_is_ready(capsule, &refs, visibility) {
                     Ok(true) => Some(Ok(id.clone())),
                     Ok(false) => None,
                     Err(error) => Some(Err(error)),
@@ -5010,7 +5071,7 @@ fn order_ref_capsules(
             .remove(&ready)
             .ok_or_else(|| ReadError::internal("ready capsule disappeared"))?;
         apply_capsule_refs(&capsule, &mut refs, &mut peeled)?;
-        reconcile_capsule_visibility(&capsule, &mut visibility)?;
+        reconcile_capsule_visibility(&capsule, visibility)?;
         applied.insert(capsule.transaction_id().to_owned());
         ordered.push(capsule);
     }
@@ -6024,6 +6085,29 @@ mod tests {
                 .iter()
                 .any(|read| read.operation == StorageOperation::Range)
         );
+    }
+
+    #[tokio::test]
+    async fn reconciled_visibility_remains_pinned_and_returns_independent_indexes() {
+        let inner = Arc::new(InMemory::new());
+        seed_prepared_multi_ref(inner.clone(), true, true).await;
+        let router = StoreLayout::new(Store::new(inner), "repositories/test".into());
+        let root = load_root(&router).await.unwrap();
+        for metadata_only in [false, true] {
+            let view = if metadata_only {
+                open_view_from_root_with_metadata(&router, root.clone(), TEST_LIMITS).await
+            } else {
+                open_view_from_root_with_control(&router, root.clone(), TEST_LIMITS).await
+            }
+            .unwrap();
+            let expected = view.git_visibility_index().await.unwrap();
+            let clone = view.clone();
+            let mut edited = view.git_visibility_index().await.unwrap();
+            for name in view.refs().keys() {
+                edited.remove_ref(name);
+            }
+            assert_eq!(clone.git_visibility_index().await.unwrap(), expected);
+        }
     }
 
     #[tokio::test]
@@ -7286,7 +7370,7 @@ mod tests {
         let ordered = order_ref_capsules(
             &BTreeMap::from([("refs/heads/main".to_owned(), old_tip.clone())]),
             &BTreeMap::new(),
-            visibility_index(BTreeMap::from([(
+            &mut visibility_index(BTreeMap::from([(
                 "refs/heads/main".to_owned(),
                 vec![old_tip],
             )])),
@@ -7374,7 +7458,7 @@ mod tests {
         let ordered = order_ref_capsules(
             &BTreeMap::from([("refs/heads/transient".to_owned(), tip.clone())]),
             &BTreeMap::new(),
-            visibility_index(BTreeMap::from([(
+            &mut visibility_index(BTreeMap::from([(
                 "refs/heads/transient".to_owned(),
                 vec![tip],
             )])),
@@ -7437,7 +7521,7 @@ mod tests {
         let ordered = order_ref_capsules(
             &BTreeMap::new(),
             &BTreeMap::new(),
-            visibility_index(BTreeMap::new()),
+            &mut visibility_index(BTreeMap::new()),
             &predecessors,
             pending,
         )

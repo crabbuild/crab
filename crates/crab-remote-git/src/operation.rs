@@ -769,10 +769,11 @@ impl OperationContext {
             .ok_or(Error::InternalInvariant {
                 invariant: "non-empty operation has no locator session",
             })?;
-        reader
-            .read_with_session(session, oid, &self.budget, &self.cancellation)
-            .instrument(self.span.clone())
-            .await
+        // Bound the reader's nested future layout at its operation boundary so
+        // downstream async callers fit Rust's default type-depth limit.
+        let read: futures_util::future::BoxFuture<'_, Result<GitObject>> =
+            Box::pin(reader.read_with_session(session, oid, &self.budget, &self.cancellation));
+        read.instrument(self.span.clone()).await
     }
 
     pub(crate) async fn read_commit(&self, oid: gix_hash::ObjectId) -> Result<Commit> {

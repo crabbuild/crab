@@ -2,6 +2,8 @@ use metrics::{Counter, Gauge, KeyName, Recorder, Unit};
 
 use super::{METADATA, describe_counter, describe_gauge, key};
 
+// Qualification and monitoring retain the zero-valued Xet series to prove
+// reconstruction stays off scratch; only content spools and packs allocate files.
 const PURPOSES: [&str; 3] = ["content_spool", "xet_reconstruction", "git_pack"];
 const FAILURES: [&str; 4] = ["create", "write", "flush", "read"];
 
@@ -19,8 +21,7 @@ struct PurposeMetrics {
 #[derive(Clone, Copy)]
 pub(crate) enum ScratchPurpose {
     ContentSpool,
-    XetReconstruction,
-    GitPack,
+    GitPack = 2,
 }
 
 #[derive(Clone, Copy)]

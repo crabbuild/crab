@@ -1,6 +1,101 @@
 use super::{application::MutationIdentity, repository::*, *};
 use cellar::sdk::{NodeOutcome, ShutdownMode};
+use std::sync::{
+    Arc,
+    atomic::{AtomicUsize, Ordering},
+};
 use uuid::Uuid;
+
+fn lose_responses(remaining: Arc<AtomicUsize>) -> Arc<dyn cellar::sdk::Application> {
+    let application = application::compiled().unwrap();
+    let cells = application.clone();
+    let mut registry = cellar::sdk::Registry::new(move |context, invocation| {
+        let application = application.clone();
+        let remaining = remaining.clone();
+        Box::pin(async move {
+            // Lose the reply after the actual Cell and its output durability gate
+            // succeed. A retry must recover the receipt, not apply another write.
+            let output = application.invoke(context.clone(), invocation).await?;
+            if remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                    value.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Ok(cellar::sdk::Output::Http(
+                    cellar::sdk::http::Response::new(503, "response lost", vec![])
+                        .into_http(&context)?,
+                ));
+            }
+            Ok(output)
+        })
+    });
+    for class in [repository::CLASS, directory::CLASS, organization::CLASS] {
+        let cells = cells.clone();
+        registry = registry
+            .cell(class, move |context, identity| {
+                cells.create_cell(context, identity)
+            })
+            .unwrap();
+    }
+    Arc::new(registry)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn lost_mutation_response_replays_the_durable_receipt_once() {
+    for lost in [1, 3] {
+        let local = tempfile::TempDir::new().unwrap();
+        let public = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let remaining = Arc::new(AtomicUsize::new(0));
+        let started = runtime::test_node_with_application(
+            local.path(),
+            public.local_addr().unwrap(),
+            lose_responses(remaining.clone()),
+        )
+        .await;
+        let repository = Uuid::now_v7();
+        started.client.initialize(repository).await.unwrap();
+        let request = identity();
+        remaining.store(lost, Ordering::SeqCst);
+        let result = started
+            .client
+            .command::<CreateIssue>(&repository, request, issue())
+            .await;
+        if lost == 1 {
+            assert!(result.is_ok(), "lost reply was not recovered: {result:?}");
+        } else {
+            assert!(matches!(&result, Err(Error::Pending { .. })), "{result:?}");
+            assert_eq!(
+                remaining.load(Ordering::SeqCst),
+                1,
+                "retry must stop after two attempts"
+            );
+        }
+        remaining.store(0, Ordering::SeqCst);
+        let replayed = started
+            .client
+            .command::<CreateIssue>(&repository, request, issue())
+            .await
+            .unwrap();
+        if let Ok(created) = result {
+            assert_eq!(created, replayed);
+        }
+        assert_eq!(replayed.receipt.revision, 1);
+        assert!(
+            matches!(replayed.output, CreateIssueOutcome::Created(ref record) if record.number == 1)
+        );
+        assert!(
+            started
+                .client
+                .query::<GetIssue>(&repository, Some(replayed.receipt), 2)
+                .await
+                .unwrap()
+                .output
+                .is_none()
+        );
+        stop(started.node).await;
+    }
+}
 
 fn identity() -> MutationIdentity {
     let now = unix_now_ms().unwrap();

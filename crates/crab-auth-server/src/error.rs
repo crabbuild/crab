@@ -156,6 +156,7 @@ impl From<crab_metadata::error::MetadataError> for AuthServerError {
             error @ (crab_metadata::error::MetadataError::FileLookupAdmission { .. }
             | crab_metadata::error::MetadataError::FileLookupWorker { .. }
             | crab_metadata::error::MetadataError::CheckpointSize { .. }
+            | crab_metadata::error::MetadataError::CheckpointFooterSize { .. }
             | crab_metadata::error::MetadataError::FileLookupLimit { .. }
             | crab_metadata::error::MetadataError::PlanAlreadyAttempted { .. }
             | crab_metadata::error::MetadataError::RefJournalCommitUncertain { .. }) => {
@@ -227,6 +228,7 @@ impl From<crab_read::ReadError> for AuthServerError {
                 source @ (crab_metadata::error::MetadataError::FileLookupAdmission { .. }
                 | crab_metadata::error::MetadataError::FileLookupWorker { .. }
                 | crab_metadata::error::MetadataError::CheckpointSize { .. }
+                | crab_metadata::error::MetadataError::CheckpointFooterSize { .. }
                 | crab_metadata::error::MetadataError::FileLookupLimit { .. }
                 | crab_metadata::error::MetadataError::RefJournalCommitUncertain { .. }),
             ) => Self::from(source),
@@ -376,28 +378,33 @@ mod tests {
     #[test]
     fn checkpoint_admission_error_survives_direct_and_read_boundaries() {
         for through_read in [false, true] {
-            let source = crab_metadata::error::MetadataError::CheckpointSize {
-                bytes: 1024,
-                maximum: 512,
-            };
-            let error = if through_read {
-                AuthServerError::from(crab_read::ReadError::Metadata(source))
-            } else {
-                AuthServerError::from(source)
-            };
-            let AuthServerError::Io(error) = error else {
-                panic!("expected typed checkpoint admission error");
-            };
-            let source = error
-                .get_ref()
-                .and_then(|source| source.downcast_ref::<crab_metadata::error::MetadataError>());
-            assert!(matches!(
-                source,
-                Some(crab_metadata::error::MetadataError::CheckpointSize {
+            for source in [
+                crab_metadata::error::MetadataError::CheckpointSize {
                     bytes: 1024,
                     maximum: 512,
-                })
-            ));
+                },
+                crab_metadata::error::MetadataError::CheckpointFooterSize {
+                    bytes: 1024,
+                    maximum: 512,
+                },
+            ] {
+                let expected = (std::mem::discriminant(&source), source.to_string());
+                let error = if through_read {
+                    AuthServerError::from(crab_read::ReadError::Metadata(source))
+                } else {
+                    AuthServerError::from(source)
+                };
+                let AuthServerError::Io(error) = error else {
+                    panic!("expected typed checkpoint admission error");
+                };
+                let source = error.get_ref().and_then(|source| {
+                    source.downcast_ref::<crab_metadata::error::MetadataError>()
+                });
+                assert_eq!(
+                    source.map(|source| (std::mem::discriminant(source), source.to_string())),
+                    Some(expected)
+                );
+            }
         }
     }
 

@@ -210,6 +210,11 @@ multi-value write/delete validators are rejected.
 
 ## Listings and continuation
 
+Listings use the same ref namespace as object reads, including reachable complete
+commit IDs. The complete-attribute namespace index captures native v2 ref heads
+when a v2 root exists; only repositories without that root consult the legacy
+manifest/journal. Corrupt native authority fails closed.
+
 Keys are ordered by their complete UTF-8 byte representation, including the
 encoded ref prefix. `delimiter=/` groups each subtree once and counts a common
 prefix against `MaxKeys`. Each page seeks from its prefix and exclusive marker
@@ -361,7 +366,7 @@ multipart form uploads remain on their streaming path. Response streams use the
 same 60-second per-frame idle bound, releasing read admission and dropping the
 underlying provider or Xet stream on timeout; this is not a total-transfer
 deadline, so large downloads may continue while bytes keep arriving. Content
-spools, Xet range reconstruction, and generated Git packs share one atomic
+spools and generated Git packs share one atomic
 process-local gate. It retains 10% of
 visible capacity outside reservations, bounded to a 64 MiB minimum and 1 GiB
 maximum. A failed capacity probe fails closed, and reservation pressure returns
@@ -376,22 +381,37 @@ is the canonical LFS pointer and the S3 attribute record retains the logical
 size and ETag. That same Git
 commit appends an exact tracking rule to the nearest `.gitattributes`,
 preserving any existing rules, so ordinary Git/LFS checkout interprets the
-pointer consistently. GET streams LFS content directly. A Crab/Xet GET streams
+pointer consistently. Literal S3 uploads that themselves parse as Crab or LFS
+pointers use this LFS path even below the Git blob limit, preserving the uploaded
+text without recursively interpreting it. PUT, COPY, and multipart completion
+use the same rule. GET streams LFS content directly. A Crab/Xet GET streams
 verified reconstruction through a single bounded backpressure slot and cancels
-reconstruction when the response is dropped; a complete GET withholds its
-terminal chunk until the whole-file hash and declared size verify. Successful
+reconstruction when the response is dropped. Every Xet stream withholds its
+terminal chunk until EOF and the declared response size verify; complete reads
+also verify the whole-file hash. Multipart range copies feed this verified stream
+directly into one upload spool without separate reconstruction scratch. Successful
 writes are returned only after their committed outcome is durable and read-ready.
 Each process collects compatible same-branch mutations for at most 10 ms and
 drains at most 32 requests or 32 MiB of Git mutation payload per batch. A single
 larger mutation proceeds alone. The batch evaluates conditions in FIFO order,
 builds one commit per successful state change, uploads one deduplicated Git pack,
-routing trusted generated objects directly through one bounded decoded spool and
-canonical pack preparation rather than an artificial pack inflate cycle. It
+routing trusted generated objects through bounded owned decoded buffers and
+canonical verified pack preparation without a decoded scratch round trip. It
 advances the ref from the original parent to the final commit with one active
 journal marker. Failed conditions publish no commit. Multipart completion always
 runs alone because its durable plan receipt owns an independent exactly-once
 outcome. A competing process is serialized by the object-store ref lease; the
 losing bounded batch is rebuilt against the winning tip.
+Immutable attribute persistence overlaps pack preparation; publication requires
+both to succeed, and both drain before writer fences are released on failure.
+Shutdown stops mutation admission and drains workers, follow-up catalog and
+readability maintenance, and attribute checkpoints before closing the read runtime.
+Warm directory edits reuse canonical encoded ranges with entry offsets charged
+to the warm-state budget. Full tree hashing and pack verification still apply.
+Cold reconstruction uses independent read-operation budgets for each mutation
+against the same pinned view. Batching does not combine unrelated requests'
+allowances; an over-budget mutation returns `SlowDown` without consuming a
+neighbor's budget.
 The process retains at most 256 warm branch queues and may reuse materialized
 Git directory state and the S3 attribute manifest optimistically. The owner
 revalidates the cached parent while holding the object-store ref lease before
@@ -405,9 +425,10 @@ publication rechecks that absence under its ref lease. To bound normal cold
 attribute replay, the first cold publication and every 64 later publication
 batches replace one full, commit-identified manifest checkpoint in a bounded
 per-branch object-store slot. The final commit delta records that slot. Under the
-same ref lease, the gateway revalidates the parent, publishes the final journal
-transaction, and then attempts to replace the slot before acknowledging the
-batch. Only the journal winner writes the checkpoint. A crash or checkpoint-write failure leaves
+same ref lease, the gateway revalidates the parent and publishes the final
+transaction. Only the winner schedules a coalesced background checkpoint; the
+slot replacement checks commit lineage and uses ETag CAS. Acknowledgement does
+not wait for that derived checkpoint. A crash or checkpoint-write failure leaves
 a missing or stale slot, so readers replay immutable deltas. A superseded slot has
 the same fallback; malformed checkpoint content fails closed. A manifest
 above the existing 32 MiB manifest bound skips checkpointing without failing the
@@ -419,10 +440,13 @@ that the branch began empty and every commit came from the gateway, the
 checkpoint also forms a sorted S3 namespace index. `ListObjects` binds it to the
 current journal-projected ref and pages it without opening the Git catalog. Any
 missing delta, legacy checkpoint, or Git-authored ancestor removes that proof and
-requires canonical Git-tree listing. Once a batch is drained, its worker is
+requires canonical Git-tree listing. A pinned warm manifest already known to be
+partial selects that listing without first replaying remote attribute history.
+Once a batch is drained, its worker is
 owned by the gateway rather than the HTTP request that won local admission, so
 one disconnected caller cannot cancel the remaining accepted mutations.
-Every 64 local publication epochs, one coalesced background worker folds active
+Each batch advances the local publication epoch, including batches that reuse
+one worker's GC fences. Every 64 epochs, one coalesced background worker folds active
 ref-journal transactions into the object-store manifest and advances exact-object
 catalog coverage under the generation-owner and GC-writer fences, even when writes
 remain continuous. Read views bind the newest catalog whose immutable pack

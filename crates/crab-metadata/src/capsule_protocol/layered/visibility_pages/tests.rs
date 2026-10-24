@@ -99,6 +99,126 @@ async fn fixture(
 }
 
 #[tokio::test]
+async fn paged_control_replay_batches_checkpoint_dictionary_reads() {
+    use crate::capsule_protocol::{
+        Capsule, CapsuleRefEdit, CapsuleRun, CapsuleSection, CapsuleSectionKind,
+        CapsuleTransaction, CapsuleVisibilityDelta, CapturedVisibility, VisibilityReconciliation,
+        order_ref_controls,
+    };
+    use crate::git_visibility::GitVisibilityEdit;
+    let (layout, _, reader, reads) = fixture(400_000, 128 * 1024 * 1024).await;
+    let name = "refs/heads/main";
+    let mut pending = BTreeMap::new();
+    let mut old = format!("{:040x}", 1);
+    for batch in 0_u32..64 {
+        let added = (0..64)
+            .map(|index| format!("{:040x}", ((batch * 64 + index + 1) * 9973) % 400_000 + 1))
+            .collect::<Vec<_>>();
+        let new = added[0].clone();
+        let transaction = CapsuleTransaction::new(
+            &"1".repeat(64),
+            vec![CapsuleRefEdit::new(
+                name,
+                Some(old.clone()),
+                Some(new.clone()),
+                None,
+            )],
+        )
+        .unwrap();
+        let visibility = CapsuleVisibilityDelta::new(BTreeMap::from([(
+            name.to_owned(),
+            GitVisibilityEdit::from_delta_objects(Some(old), new.clone(), added, Vec::new()),
+        )]))
+        .unwrap();
+        let capsule = Capsule::build(
+            &transaction,
+            Vec::new(),
+            vec![CapsuleSection::new(
+                CapsuleSectionKind::VisibilityDelta,
+                visibility.encode().unwrap(),
+            )],
+        )
+        .unwrap();
+        let run = CapsuleRun::leaf(capsule).unwrap();
+        layout
+            .store()
+            .create_strict(&layout.capsule_path(run.hash()), run.bytes().clone())
+            .await
+            .unwrap();
+        let pointer = crate::capsule_protocol::CapsulePointer::new(
+            run.hash(),
+            run.bytes().len() as u64,
+            run.control_offset(),
+            run.control_size(),
+            run.footer_hash(),
+            run.level(),
+            run.transaction_ids(),
+            run.newest_base_root_digest(),
+        )
+        .unwrap();
+        let (_, controls) =
+            crate::capsule_protocol::load_capsule_run_git_control(&layout, &pointer)
+                .await
+                .unwrap();
+        for control in controls {
+            pending.insert(control.transaction_id().to_owned(), control);
+        }
+        old = new;
+    }
+    let initial = CapturedVisibility::from_checkpoint(
+        layout.store().clone(),
+        Arc::new(reader),
+        std::iter::once(name.to_owned()),
+    )
+    .await
+    .unwrap();
+    reads.store(0, Ordering::SeqCst);
+    let ordered = order_ref_controls(
+        &BTreeMap::from([(name.to_owned(), format!("{:040x}", 1))]),
+        &BTreeMap::new(),
+        &mut VisibilityReconciliation::Paged(Box::new(initial)),
+        &BTreeMap::new(),
+        pending,
+    )
+    .await
+    .unwrap();
+    assert_eq!(ordered.len(), 64);
+    assert!(
+        reads.load(Ordering::SeqCst) < 1000,
+        "checkpoint dictionary pages were repeatedly fetched: {}",
+        reads.load(Ordering::SeqCst)
+    );
+}
+
+#[tokio::test]
+async fn paged_member_selection_preserves_order_misses_and_cache_reuse() {
+    let (layout, checkpoint, reader, reads) = fixture(50_000, 128 * 1024).await;
+    let requested = [object(42), object(50_001), object(99_999), object(42)];
+    let expected = vec![
+        Some(&checkpoint.sources()[0].members()[0]),
+        Some(&checkpoint.sources()[0].members()[0]),
+        None,
+        Some(&checkpoint.sources()[0].members()[0]),
+    ];
+    assert_eq!(
+        reader
+            .object_members(layout.store(), &requested)
+            .await
+            .unwrap(),
+        expected
+    );
+    let before = reads.load(Ordering::SeqCst);
+    assert_eq!(
+        reader
+            .object_members(layout.store(), &requested)
+            .await
+            .unwrap(),
+        expected
+    );
+    assert_eq!(reads.load(Ordering::SeqCst), before);
+}
+
+#[tokio::test]
 async fn checkpoint_membership_is_bounded_and_retained_objects_do_not_grant_visibility() {
     let (layout, checkpoint, reader, _) = fixture(50_000, 128 * 1024).await;
     assert!(checkpoint.bytes().len() > 2 * 1024 * 1024);
@@ -145,7 +265,7 @@ async fn warm_checkpoint_membership_rereads_no_origin_pages() {
 async fn bulk_checkpoint_visibility_matches_the_captured_complete_proof() {
     let (layout, checkpoint, reader, _) = fixture(1000, 128 * 1024 * 1024).await;
     assert_eq!(
-        *reader.materialize(layout.store()).await.unwrap(),
+        reader.materialize(layout.store()).await.unwrap().as_ref(),
         checkpoint.visibility_ordinal_snapshot().unwrap().unwrap()
     );
 }
@@ -179,5 +299,22 @@ async fn checkpoint_page_tampering_and_missing_pages_fail_instead_of_membership_
                 .await
                 .is_err()
         );
+        assert!(
+            reader
+                .object_members(layout.store(), &[object(42)])
+                .await
+                .is_err()
+        );
     }
+}
+
+#[tokio::test]
+async fn checkpoint_clones_share_the_verified_complete_visibility_proof() {
+    let (_, checkpoint, _, _) = fixture(1000, 128 * 1024 * 1024).await;
+    let checkpoint = LayeredCheckpoint::decode(checkpoint.bytes().clone()).unwrap();
+    let cloned = checkpoint.clone();
+    assert!(std::ptr::eq(
+        checkpoint.visibility_ordinal_snapshot().unwrap().unwrap(),
+        cloned.visibility_ordinal_snapshot().unwrap().unwrap(),
+    ));
 }

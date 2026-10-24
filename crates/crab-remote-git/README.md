@@ -32,12 +32,24 @@ base indexes even when its generation is unchanged. Snapshots without indexes
 make no additional index requests. Publication of capsule-bound browse indexes
 is a separate maintenance responsibility, not part of opening or pushing.
 
-Captured physical indexes resolve both OIDs and offset-delta bases through
-authenticated pages. Snapshot opening checks their state, origin and prefixes;
+Captured physical indexes resolve OIDs and both offset and reference delta
+bases through authenticated pages. Reference membership searches stay within
+the source pack's pages. Snapshot opening checks their state, origin and prefixes;
 queries retain storage admission, encoded-work limits and cancellation. Complete
 index misses are definitive. Physical placement never assigns catalog ordinals
 or authorizes ref visibility; ordinary unindexed snapshots retain their existing
 pack-index inspection path until background readiness is published.
+
+Delta reads retain the selected physical representation. OFS bases and in-pack
+REF bases resolve inside their source pack. External REF lookup starts with
+the snapshot's preferred representation. If that physical walk cycles or exceeds
+the depth bound, a bounded graph search selects an acyclic path through admitted
+aliases without changing the requested entry. Point reads, metadata inspection
+and batch materialization share this plan; CRC, hash and byte-admission failures
+remain terminal. Captured offset pages retain every physical alias, including
+page-only snapshots without pack sidecars. Repacking materializes displaced
+dependencies before combining representations, preventing valid source chains
+from becoming response-pack cycles.
 
 Capsule graphs retain an immutable paged reader and captured commit roots;
 membership reads exact ancestor sets rather than allocating a full reachability

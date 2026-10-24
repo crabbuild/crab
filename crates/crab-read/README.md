@@ -44,13 +44,21 @@ lookup roots while keeping catalog bodies, frontier visibility and run OID
 admission paged. It validates
 authenticated member counts and omits placement-hint dictionaries. CLI reads,
 HTTP browse/projection and S3 gateway reads use this view. Physical lookup uses
-the captured index; unindexed reads retain their existing pack-index path.
+the captured index. Without that index, checkpoint dictionary pages select the
+authenticated pack member before its index is read, keeping unrelated sources
+cold. Frontier and physical delta dependencies retain their existing admission
+paths. Selected indexes and reconstructed object bytes remain independently
+verified under the operation's cancellation and byte budget.
 Maintenance and writers requiring exact admission sets continue using the
 complete metadata entry point. Checkpoint visibility, catalog and source/ref
 enumeration are still eager; total bounded opening remains unqualified.
 
 Selected-ref control reads retain only their bounded in-flight names and return
 `Send` futures for multithreaded callers. They do not fetch capsule payloads.
+
+Complete metadata and full-capsule views retain the visibility proof produced
+by transaction ordering. Checkpoint publication reuses that reconciled proof;
+returned indexes remain independent and bound to the captured Git identity.
 
 Full-capsule and control-only views share borrowed visibility readiness/application
 checks. Canonical transaction decoding guarantees unique ref names; matched-row
@@ -90,6 +98,8 @@ origin-backed packs with verified candidate capsules. Candidates participate
 in the same pack intake limit and external-delta ordering, so protected receive
 can use a paged view without materializing its catalog. The caller binds each
 candidate to the captured root; installation does not grant visibility.
+Maintenance installation retains each authenticated `.kinds` sidecar beside its
+raw pack so checkpointing can preserve kinds without decoding historical bodies.
 
 The existing candidate-free installer delegates to this implementation and
 retains its cold-clone proof and cache behavior.

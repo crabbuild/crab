@@ -1,7 +1,4 @@
-use std::{
-    path::{Path, PathBuf},
-    time::Duration,
-};
+use std::{path::Path, time::Duration};
 
 use bytes::Bytes;
 use futures_util::StreamExt as _;
@@ -117,9 +114,8 @@ impl Digester {
 }
 
 pub(crate) struct Spool {
-    _directory: tempfile::TempDir,
-    path: PathBuf,
-    // Accounting follows the temporary directory across writer-to-spool ownership.
+    path: tempfile::TempPath,
+    // Accounting follows the temporary file across writer-to-spool ownership.
     // Dropping either side releases both the file and its metric charge.
     scratch: ScratchUsage,
     pub(crate) size: u64,
@@ -143,9 +139,8 @@ impl Spool {
 }
 
 pub(crate) struct SpoolWriter {
-    directory: tempfile::TempDir,
-    path: PathBuf,
     file: BufWriter<tokio::fs::File>,
+    path: tempfile::TempPath,
     digester: Digester,
     reservation: ScratchReservation,
     scratch: ScratchUsage,
@@ -155,17 +150,19 @@ impl SpoolWriter {
     pub(crate) async fn new(metrics: &Metrics, expected_bytes: Option<u64>) -> Result<Self, Error> {
         let reservation = metrics.reserve_scratch(expected_bytes.unwrap_or(0))?;
         let scratch = metrics.start_scratch(ScratchPurpose::ContentSpool);
-        let directory = tempfile::tempdir().inspect_err(|_| {
-            scratch.record_failure(ScratchFailure::Create);
-        })?;
-        let path = directory.path().join("content");
-        let file = tokio::fs::File::create(&path).await.inspect_err(|_| {
-            scratch.record_failure(ScratchFailure::Create);
-        })?;
+        // A spool has one file. Owning its path avoids a directory creation and
+        // recursive removal on every upload while retaining cancellation cleanup.
+        let (file, path) = tokio::task::spawn_blocking(tempfile::NamedTempFile::new)
+            .await
+            .map_err(std::io::Error::other)
+            .and_then(|result| result)
+            .inspect_err(|_| {
+                scratch.record_failure(ScratchFailure::Create);
+            })?
+            .into_parts();
         Ok(Self {
-            directory,
             path,
-            file: BufWriter::new(file),
+            file: BufWriter::new(tokio::fs::File::from_std(file)),
             digester: Digester::new(),
             reservation,
             scratch,
@@ -198,7 +195,6 @@ impl SpoolWriter {
         drop(self.file);
         let (size, digests) = self.digester.finish()?;
         Ok(Spool {
-            _directory: self.directory,
             path: self.path,
             scratch: self.scratch,
             size,
@@ -330,6 +326,25 @@ mod tests {
             writer.write(b"too large", 8).await,
             Err(Error::TooLarge)
         ));
+    }
+
+    #[tokio::test]
+    async fn completed_and_abandoned_spools_remove_their_files() {
+        let metrics = Metrics::new().unwrap();
+        for (finish, size) in [(false, 16), (true, 16), (false, 16384), (true, 16384)] {
+            let bytes = vec![b'x'; size];
+            let mut writer = SpoolWriter::new(&metrics, Some(size as u64)).await.unwrap();
+            let path = writer.path.to_path_buf();
+            writer.write(&bytes, size as u64).await.unwrap();
+            if finish {
+                let spool = writer.finish().await.unwrap();
+                assert_eq!(spool.bytes().await.unwrap(), bytes);
+                drop(spool);
+            } else {
+                drop(writer);
+            }
+            assert!(!path.exists());
+        }
     }
 
     #[tokio::test]

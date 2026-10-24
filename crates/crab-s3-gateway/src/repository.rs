@@ -13,9 +13,8 @@ use crab_remote_git::{
     Revision,
 };
 use crab_storage::{Store, StoreLayout};
-use gix_hash::ObjectId;
 use tokio::sync::{Mutex, OnceCell, RwLock};
-use tokio_util::sync::CancellationToken;
+use tokio_util::{sync::CancellationToken, task::TaskTracker};
 
 use crate::gateway::Repository;
 
@@ -23,8 +22,6 @@ const MAINTENANCE_TTL: Duration = Duration::from_secs(60);
 const FULL_MAINTENANCE_IDLE_DELAY: Duration = Duration::from_secs(5);
 const CATALOG_MAINTENANCE_EPOCHS: u64 = 64;
 const MAX_CACHED_SNAPSHOTS: usize = 64;
-const MAX_CACHED_MANIFESTS: usize = 16;
-const MAX_CACHED_OBJECT_ATTRIBUTES: usize = 256;
 const MAX_CAPSULE_READ_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const CAPSULE_CHECKPOINT_THRESHOLD: u32 = 32;
 
@@ -59,17 +56,18 @@ struct CachedReadView {
     view: Arc<ReadView>,
 }
 
-type ObjectAttributeKey = (ObjectId, String, ObjectId);
-type ObjectAttributeCell = Arc<OnceCell<Option<crate::attributes::ObjectAttributes>>>;
+#[derive(Clone, Copy, Default)]
+pub(crate) struct CapsuleFrontier {
+    pub count: u32,
+    pub bytes: u64,
+}
 
 /// Generation- and journal-keyed immutable repository state shared by requests.
 pub(crate) struct ReadView {
     key: ReadViewKey,
     remote: RemoteGitRepository,
-    capsule_ref_counts: Option<HashMap<String, u32>>,
+    capsule_frontiers: Option<HashMap<String, CapsuleFrontier>>,
     snapshots: Mutex<HashMap<String, Arc<OnceCell<RemoteGitSnapshot>>>>,
-    manifests: Mutex<HashMap<ObjectId, Arc<OnceCell<Arc<crate::attributes::Manifest>>>>>,
-    objects: Mutex<HashMap<ObjectAttributeKey, ObjectAttributeCell>>,
 }
 
 impl ReadView {
@@ -77,8 +75,8 @@ impl ReadView {
         &self.remote
     }
 
-    pub(crate) fn capsule_ref_count(&self, ref_name: &str) -> Option<u32> {
-        self.capsule_ref_counts
+    pub(crate) fn capsule_frontier(&self, ref_name: &str) -> Option<CapsuleFrontier> {
+        self.capsule_frontiers
             .as_ref()
             .map(|counts| counts.get(ref_name).copied().unwrap_or_default())
     }
@@ -100,41 +98,6 @@ impl ReadView {
         })
         .await
         .cloned()
-    }
-
-    pub(crate) async fn attributes(
-        &self,
-        repository: &Repository,
-        commit: ObjectId,
-    ) -> crate::Result<Arc<crate::attributes::Manifest>> {
-        let cell = {
-            let mut manifests = self.manifests.lock().await;
-            bounded_cell(&mut manifests, commit, MAX_CACHED_MANIFESTS)
-        };
-        cell.get_or_try_init(|| async {
-            crate::attributes::load(repository, commit)
-                .await
-                .map(Arc::new)
-        })
-        .await
-        .cloned()
-    }
-
-    pub(crate) async fn object_attributes(
-        &self,
-        repository: &Repository,
-        commit: ObjectId,
-        path: &str,
-        oid: ObjectId,
-    ) -> crate::Result<Option<crate::attributes::ObjectAttributes>> {
-        let key = (commit, path.to_owned(), oid);
-        let cell = {
-            let mut objects = self.objects.lock().await;
-            bounded_cell(&mut objects, key, MAX_CACHED_OBJECT_ATTRIBUTES)
-        };
-        cell.get_or_try_init(|| crate::attributes::load_object(repository, commit, path, oid))
-            .await
-            .cloned()
     }
 }
 
@@ -191,9 +154,13 @@ impl WriteMaintenance {
     }
 
     pub(crate) fn begin(&self) {
-        self.epoch.fetch_add(1, Ordering::AcqRel);
+        self.record_batch();
         self.active.fetch_add(1, Ordering::AcqRel);
         self.state().scheduled.cancel();
+    }
+
+    pub(crate) fn record_batch(&self) {
+        self.epoch.fetch_add(1, Ordering::AcqRel);
     }
 
     pub(crate) fn finish(&self, parent: &CancellationToken) -> Option<(u64, CancellationToken)> {
@@ -281,15 +248,16 @@ pub(crate) fn schedule_catalog_maintenance(
     repository: &Repository,
     cancel: &CancellationToken,
     epoch: u64,
+    tasks: &TaskTracker,
 ) {
-    if !repository.maintenance.claim_catalog_maintenance(epoch) {
+    if cancel.is_cancelled() || !repository.maintenance.claim_catalog_maintenance(epoch) {
         return;
     }
     let store = repository.store.clone();
     let layout = repository.layout.clone();
     let maintenance = Arc::clone(&repository.maintenance);
     let cancel = cancel.child_token();
-    tokio::spawn(async move {
+    tasks.spawn(async move {
         match is_capsule_repository(&layout).await {
             Ok(true) => {
                 maintenance.finish_catalog_maintenance();
@@ -338,8 +306,34 @@ impl ReadViewCache {
         if let Some(view) = self.observed_since(requested_at).await {
             return Ok(view);
         }
+        // Coalesce only requests that began before this observation started.
+        // A write can finish while immutable metadata is being assembled.
+        let observed_at = tokio::time::Instant::now();
         match crab_metadata::capsule_protocol::load_root(&repository.layout).await {
             Ok(root) => {
+                let cached = self
+                    .cached
+                    .read()
+                    .await
+                    .as_ref()
+                    .map(|cached| Arc::clone(&cached.view));
+                if let Some(view) = cached {
+                    let activity = crab_read::capsule_protocol::read_activity_from_root(
+                        &repository.layout,
+                        &root,
+                    )
+                    .await?;
+                    // The owner fingerprint covers the root and every visible
+                    // ref transaction. Recheck it on every request; a TTL would
+                    // hide another gateway's acknowledged publication.
+                    if view.key.snapshot_digest == activity.state_digest() {
+                        *self.cached.write().await = Some(CachedReadView {
+                            observed_at,
+                            view: Arc::clone(&view),
+                        });
+                        return Ok(view);
+                    }
+                }
                 let capsule = crab_read::capsule_protocol::open_git_view_from_root(
                     &repository.layout,
                     root,
@@ -349,46 +343,39 @@ impl ReadViewCache {
                     },
                 )
                 .await?;
-                let observed_at = tokio::time::Instant::now();
                 let key = ReadViewKey {
                     generation: capsule.root().root().generation(),
                     snapshot_digest: capsule.state_digest(),
                 };
-                let existing = self
-                    .cached
-                    .read()
-                    .await
-                    .as_ref()
-                    .filter(|cached| cached.view.key == key)
-                    .map(|cached| Arc::clone(&cached.view));
-                let view = match existing {
-                    Some(view) => view,
-                    None => {
-                        let capsule_ref_counts = capsule
-                            .refs()
-                            .keys()
-                            .map(|name| (name.clone(), capsule.ref_capsule_count(name)))
-                            .collect();
-                        let remote = capsule
-                            .git_repository_from_store(
-                                repository.layout.clone(),
-                                repository.identity.clone(),
-                                runtime,
-                                options,
-                                MAX_CAPSULE_READ_BYTES,
-                                cancel,
-                            )
-                            .await?;
-                        Arc::new(ReadView {
-                            key,
-                            remote,
-                            capsule_ref_counts: Some(capsule_ref_counts),
-                            snapshots: Mutex::new(HashMap::new()),
-                            manifests: Mutex::new(HashMap::new()),
-                            objects: Mutex::new(HashMap::new()),
-                        })
-                    }
-                };
+                let capsule_frontiers = capsule
+                    .refs()
+                    .keys()
+                    .map(|name| {
+                        (
+                            name.clone(),
+                            CapsuleFrontier {
+                                count: capsule.ref_capsule_count(name),
+                                bytes: capsule.ref_frontier_bytes(name),
+                            },
+                        )
+                    })
+                    .collect();
+                let remote = capsule
+                    .git_repository_from_store(
+                        repository.layout.clone(),
+                        repository.identity.clone(),
+                        runtime,
+                        options,
+                        MAX_CAPSULE_READ_BYTES,
+                        cancel,
+                    )
+                    .await?;
+                let view = Arc::new(ReadView {
+                    key,
+                    remote,
+                    capsule_frontiers: Some(capsule_frontiers),
+                    snapshots: Mutex::new(HashMap::new()),
+                });
                 *self.cached.write().await = Some(CachedReadView {
                     observed_at,
                     view: Arc::clone(&view),
@@ -405,7 +392,6 @@ impl ReadViewCache {
             &repository.layout,
         )
         .await?;
-        let observed_at = tokio::time::Instant::now();
         let mut key = ReadViewKey {
             generation: snapshot.manifest.generation,
             snapshot_digest: snapshot.digest()?,
@@ -468,10 +454,8 @@ impl ReadViewCache {
                 Arc::new(ReadView {
                     key,
                     remote,
-                    capsule_ref_counts: None,
+                    capsule_frontiers: None,
                     snapshots: Mutex::new(HashMap::new()),
-                    manifests: Mutex::new(HashMap::new()),
-                    objects: Mutex::new(HashMap::new()),
                 })
             }
         };
@@ -502,12 +486,13 @@ pub(crate) fn schedule_readability(
     options: RepositoryOptions,
     cancel: CancellationToken,
     epoch: u64,
+    tasks: &TaskTracker,
 ) {
     let store = repository.store.clone();
     let layout = repository.layout.clone();
     let identity = repository.identity.clone();
     let maintenance = Arc::clone(&repository.maintenance);
-    tokio::spawn(async move {
+    tasks.spawn(async move {
         let mut epoch = epoch;
         if !wait_for_idle(&maintenance, &cancel, epoch).await || !maintenance.start(epoch) {
             return;
@@ -606,6 +591,185 @@ mod tests {
             multipart_staging_bytes_per_upload: 50_000_000_000_000,
             multipart_upload_ttl_seconds: 604_800,
         }
+    }
+
+    #[tokio::test]
+    async fn attribute_history_is_shared_across_paths_pages_and_full_reads() {
+        use crab_storage::{StorageObservation, StorageObserver, StorageOperation};
+        use std::collections::BTreeMap;
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        #[derive(Default)]
+        struct Gets(AtomicUsize);
+        impl StorageObserver for Gets {
+            fn started(&self, _: StorageOperation) {}
+            fn finished(&self, observation: StorageObservation) {
+                if observation.operation == StorageOperation::Get {
+                    self.0.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        }
+        let gets = Arc::new(Gets::default());
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()))
+            .with_storage_observer(gets.clone());
+        let repository = Repository::new(repository_config("shared-attributes"), store).unwrap();
+        let oid = gix_hash::ObjectId::empty_blob(gix_hash::Kind::Sha1);
+        let value = crate::attributes::ObjectAttributes::new(
+            oid,
+            "value".to_owned(),
+            0,
+            0,
+            Default::default(),
+        );
+        for index in 1_u8..=64 {
+            let changes = if index == 1 {
+                BTreeMap::from([
+                    ("alpha".to_owned(), Some(value.clone())),
+                    ("beta".to_owned(), Some(value.clone())),
+                ])
+            } else {
+                BTreeMap::from([(format!("path-{index}"), Some(value.clone()))])
+            };
+            crate::attributes::save_delta(
+                &repository,
+                gix_hash::ObjectId::from([index; 20]),
+                (index > 1).then(|| gix_hash::ObjectId::from([index - 1; 20])),
+                changes,
+                false,
+                None,
+            )
+            .await
+            .unwrap();
+        }
+        let commit = gix_hash::ObjectId::from([64; 20]);
+        repository
+            .attributes
+            .object(commit, "path-64", oid)
+            .await
+            .unwrap();
+        let recent_reads = gets.0.load(Ordering::Relaxed);
+        let alpha = repository
+            .attributes
+            .object(commit, "alpha", oid)
+            .await
+            .unwrap();
+        gets.0.store(0, Ordering::Relaxed);
+        let beta = repository
+            .attributes
+            .object(commit, "beta", oid)
+            .await
+            .unwrap();
+        let page = repository
+            .attributes
+            .objects(
+                commit,
+                &[("alpha".to_owned(), oid), ("beta".to_owned(), oid)],
+            )
+            .await
+            .unwrap();
+        let manifest = repository.attributes.load(commit).await.unwrap();
+        assert_eq!(
+            (
+                recent_reads,
+                gets.0.load(Ordering::Relaxed),
+                alpha.map(|v| v.etag),
+                beta.map(|v| v.etag),
+                page.len(),
+                manifest.is_complete()
+            ),
+            (
+                1,
+                0,
+                Some("value".to_owned()),
+                Some("value".to_owned()),
+                2,
+                true
+            )
+        );
+    }
+
+    #[tokio::test]
+    async fn shared_attribute_progress_preserves_tombstones_oid_binding_and_history() {
+        use std::collections::BTreeMap;
+        let repository = Repository::new(
+            repository_config("attribute-identity"),
+            Store::new(Arc::new(object_store::memory::InMemory::new())),
+        )
+        .unwrap();
+        let old = gix_hash::ObjectId::from([7; 20]);
+        let new = gix_hash::ObjectId::from([8; 20]);
+        let value = |oid, etag: &str| {
+            crate::attributes::ObjectAttributes::new(oid, etag.to_owned(), 0, 0, Default::default())
+        };
+        let base = gix_hash::ObjectId::from([1; 20]);
+        let tip = gix_hash::ObjectId::from([2; 20]);
+        crate::attributes::save_delta(
+            &repository,
+            base,
+            None,
+            BTreeMap::from([
+                ("deleted".to_owned(), Some(value(old, "old"))),
+                ("changed".to_owned(), Some(value(old, "old"))),
+                ("untouched".to_owned(), Some(value(old, "old"))),
+            ]),
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        crate::attributes::save_delta(
+            &repository,
+            tip,
+            Some(base),
+            BTreeMap::from([
+                ("deleted".to_owned(), None),
+                ("changed".to_owned(), Some(value(new, "new"))),
+            ]),
+            false,
+            None,
+        )
+        .await
+        .unwrap();
+        let deleted = repository
+            .attributes
+            .object(tip, "deleted", old)
+            .await
+            .unwrap();
+        let stale = repository
+            .attributes
+            .object(tip, "changed", old)
+            .await
+            .unwrap();
+        let untouched = repository
+            .attributes
+            .object(tip, "untouched", old)
+            .await
+            .unwrap();
+        let changed = repository
+            .attributes
+            .object(tip, "changed", new)
+            .await
+            .unwrap();
+        let historical = repository
+            .attributes
+            .object(base, "deleted", old)
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                deleted.map(|v| v.etag),
+                stale.map(|v| v.etag),
+                untouched.map(|v| v.etag),
+                changed.map(|v| v.etag),
+                historical.map(|v| v.etag)
+            ),
+            (
+                None,
+                None,
+                Some("old".to_owned()),
+                Some("new".to_owned()),
+                Some("old".to_owned())
+            )
+        );
     }
 
     #[test]
@@ -730,6 +894,148 @@ mod tests {
             store.head(&layout.manifest_path()).await,
             Err(crab_storage::StorageError::NotFound { .. })
         ));
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+    async fn unchanged_capsule_views_reuse_payloads_and_observe_external_writes() {
+        #[derive(Default)]
+        struct RangeReads {
+            count: AtomicUsize,
+            pause: StdMutex<Option<Box<dyn FnOnce() + Send>>>,
+        }
+        impl crab_storage::StorageObserver for RangeReads {
+            fn started(&self, operation: crab_storage::StorageOperation) {
+                if operation == crab_storage::StorageOperation::Range {
+                    self.count.fetch_add(1, Ordering::Relaxed);
+                    let pause = self.pause.lock().unwrap().take();
+                    if let Some(pause) = pause {
+                        pause();
+                    }
+                }
+            }
+            fn finished(&self, _: crab_storage::StorageObservation) {}
+        }
+        let reads = Arc::new(RangeReads::default());
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()))
+            .with_storage_observer(reads.clone());
+        let config = repository_config("capsule-view-reuse");
+        let writer = Repository::new(config.clone(), store.clone()).unwrap();
+        let reader = Repository::new(config, store).unwrap();
+        crab_write::capsule_protocol::initialize(
+            &writer.layout,
+            &"a".repeat(64),
+            "refs/heads/main",
+        )
+        .await
+        .unwrap();
+        let runtime = Arc::new(RemoteGitRuntime::default());
+        let cancel = CancellationToken::new();
+        let options = RepositoryOptions::default();
+        let coordinator = crate::mutation::Coordinator::new(
+            Arc::clone(&runtime),
+            options,
+            cancel.clone(),
+            crate::metrics::Metrics::new().unwrap(),
+        );
+        let path = crab_remote_git::GitPath::new(b"file".to_vec()).unwrap();
+        let publish = |bytes| {
+            coordinator.apply(
+                &writer,
+                "refs/heads/main",
+                &path,
+                crate::mutation::Change::Put {
+                    bytes: bytes::Bytes::from_static(bytes),
+                    track_lfs: false,
+                    attributes: Box::default(),
+                    condition: crate::mutation::PutCondition::None,
+                },
+                "user",
+                &cancel,
+            )
+        };
+        for bytes in [b"first".as_slice(), b"second".as_slice()] {
+            publish(bytes).await.unwrap();
+            let current = reader
+                .read_views
+                .current(&reader, Arc::clone(&runtime), options, &cancel)
+                .await
+                .unwrap();
+            reads.count.store(0, Ordering::Relaxed);
+            let repeated = reader
+                .read_views
+                .current(&reader, Arc::clone(&runtime), options, &cancel)
+                .await
+                .unwrap();
+            assert!(Arc::ptr_eq(&current, &repeated));
+            assert_eq!(
+                reads.count.load(Ordering::Relaxed),
+                0,
+                "unchanged views reread immutable capsule payloads"
+            );
+            let operation = current
+                .remote()
+                .operation(crab_remote_git::OperationKind::Repository, &cancel)
+                .await
+                .unwrap();
+            let snapshot = current.snapshot("main", &operation).await.unwrap();
+            let actual = snapshot.read_blob(&path, &operation).await.unwrap();
+            operation.finish(Ok(())).await.unwrap();
+            assert_eq!(actual.bytes, bytes);
+        }
+
+        let reader = Arc::new(reader);
+        reader.read_views.invalidate().await;
+        let (paused, entered) = tokio::sync::oneshot::channel();
+        let release = Arc::new(std::sync::Barrier::new(2));
+        let resumed = Arc::clone(&release);
+        *reads.pause.lock().unwrap() = Some(Box::new(move || {
+            paused.send(()).unwrap();
+            resumed.wait();
+        }));
+        let earlier = {
+            let reader = Arc::clone(&reader);
+            let runtime = Arc::clone(&runtime);
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                reader
+                    .read_views
+                    .current(&reader, runtime, options, &cancel)
+                    .await
+            })
+        };
+        entered.await.unwrap();
+        publish(b"third").await.unwrap();
+        let (queued, waiting) = tokio::sync::oneshot::channel();
+        let later = {
+            let reader = Arc::clone(&reader);
+            let runtime = Arc::clone(&runtime);
+            let cancel = cancel.clone();
+            tokio::spawn(async move {
+                let future = reader
+                    .read_views
+                    .current(&reader, runtime, options, &cancel);
+                tokio::pin!(future);
+                assert!(futures_util::poll!(future.as_mut()).is_pending());
+                queued.send(()).unwrap();
+                future.await
+            })
+        };
+        waiting.await.unwrap();
+        release.wait();
+        earlier.await.unwrap().unwrap();
+        let current = later.await.unwrap().unwrap();
+        let operation = current
+            .remote()
+            .operation(crab_remote_git::OperationKind::Repository, &cancel)
+            .await
+            .unwrap();
+        let snapshot = current.snapshot("main", &operation).await.unwrap();
+        let actual = snapshot.read_blob(&path, &operation).await.unwrap();
+        operation.finish(Ok(())).await.unwrap();
+        assert_eq!(actual.bytes, b"third".as_slice());
+        cancel.cancel();
+        coordinator.shutdown().await;
         runtime.shutdown().await;
     }
 

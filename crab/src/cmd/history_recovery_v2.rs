@@ -720,7 +720,7 @@ async fn restore_history(
                 fenced.record().digest(),
                 verified.checkpoint.sources().to_vec(),
                 restored_catalog,
-                verified.checkpoint.visibility_ordinal_snapshot()?,
+                verified.checkpoint.visibility_ordinal_snapshot()?.cloned(),
             )?;
             check_cancelled(cancel)?;
             crab_write::capsule_protocol::restore_checkpoint(

@@ -414,6 +414,18 @@ impl Capsule {
         &self.bytes
     }
 
+    pub(super) fn relocate(mut self, bytes: Bytes) -> Result<Self> {
+        // Compaction copies verified capsules into one new allocation. Exact
+        // equality preserves their proof without decoding or retaining old runs.
+        if bytes != self.bytes {
+            return Err(corrupt(
+                "relocated capsule bytes differ from the verified capsule",
+            ));
+        }
+        self.bytes = bytes;
+        Ok(self)
+    }
+
     /// Return the capsule's BLAKE3 object identity.
     #[must_use]
     pub fn hash(&self) -> &str {
@@ -776,6 +788,31 @@ mod tests {
         let error = Capsule::decode(Bytes::from(bytes)).expect_err("corruption must fail");
 
         assert!(matches!(error, MetadataError::CorruptObject { .. }));
+    }
+
+    #[test]
+    fn relocation_requires_identical_complete_capsule_bytes() {
+        let capsule = Capsule::build(&transaction(), vec![git_pack()], Vec::new()).unwrap();
+        let copied = Bytes::from(capsule.bytes().to_vec());
+        assert_eq!(capsule.clone().relocate(copied).unwrap(), capsule);
+        for offset in [
+            0,
+            capsule.sections()[1].offset() as usize,
+            capsule.bytes().len() - 1,
+        ] {
+            let mut changed = capsule.bytes().to_vec();
+            changed[offset] ^= 1;
+            assert!(
+                capsule.clone().relocate(changed.into()).is_err(),
+                "offset {offset}"
+            );
+        }
+        assert!(
+            capsule
+                .clone()
+                .relocate(capsule.bytes().slice(1..))
+                .is_err()
+        );
     }
 
     #[test]

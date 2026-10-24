@@ -9,7 +9,7 @@ use crab_xet::hash::MerkleHash;
 use gix_hash::ObjectId;
 
 use crate::commit_graph::CommitGraphIndex;
-use crate::objects::parse_blob;
+use crate::objects::{find_tree_entry_index, materialize_tree, parse_blob};
 use crate::state::RepositoryState;
 use crate::{
     ArchiveEntry, ArchiveStream, Blame, BlameRange, BlameUnsupportedReason, Blob, BlobMetadata,
@@ -1212,8 +1212,9 @@ impl RemoteGitSnapshot {
                 actual: directory.kind,
             });
         }
-        let entries = operation.read_tree(directory.oid, path).await?;
-        let mut after = match page.after() {
+        operation.charge(BudgetDimension::LogicalObjects, 1).await?;
+        let entries = operation.read_raw_tree(directory.oid).await?;
+        let start = match page.after() {
             Some(cursor) => {
                 let decoded = cursor.decode_directory()?;
                 let expected_limit =
@@ -1229,47 +1230,27 @@ impl RemoteGitSnapshot {
                         reason: crate::CursorError::ContextMismatch,
                     });
                 }
-                Some(decoded.last_name)
+                // Git orders directories with a trailing slash. Seek the exact
+                // pinned name in that order instead of rescanning previous pages.
+                let (index, comparisons) = find_tree_entry_index(&entries, decoded.last_name);
+                operation
+                    .charge(BudgetDimension::Entries, comparisons)
+                    .await?;
+                index.ok_or(Error::InvalidCursor {
+                    reason: crate::CursorError::ContextMismatch,
+                })? + 1
             }
-            None => None,
+            None => 0,
         };
+        let end = start.saturating_add(page.limit()).min(entries.len());
+        // Charge and allocate only the selected entries. Charging unused page
+        // capacity rejects valid multi-directory mutations at page boundaries.
         operation
-            .charge(BudgetDimension::Entries, page.limit() as u64)
+            .charge(BudgetDimension::Entries, (end - start) as u64)
             .await?;
-        let mut items = Vec::new();
-        items
-            .try_reserve_exact(page.limit())
-            .map_err(|source| Error::Allocation {
-                requested: page
-                    .limit()
-                    .saturating_mul(std::mem::size_of::<TreeEntry>()),
-                source,
-            })?;
-        let mut has_more = false;
-        for (position, entry) in entries.into_iter().enumerate() {
-            if position % 256 == 0 {
-                operation.ensure_active()?;
-            }
-            // The cursor pins this exact tree. Resume after its named entry:
-            // Git sorts directories with a trailing slash, so plain name
-            // comparisons can skip directories or repeat neighboring files.
-            if let Some(name) = after {
-                if entry.path.file_name() == Some(name) {
-                    after = None;
-                }
-                continue;
-            }
-            if items.len() == page.limit() {
-                has_more = true;
-                break;
-            }
-            items.push(entry);
-        }
-        if after.is_some() {
-            return Err(Error::InvalidCursor {
-                reason: crate::CursorError::ContextMismatch,
-            });
-        }
+        operation.ensure_active()?;
+        let mut items = materialize_tree(&entries[start..end], path)?;
+        operation.ensure_active()?;
         if metadata == DirectoryMetadata::BlobSizes {
             let positions_and_oids = items
                 .iter()
@@ -1288,7 +1269,7 @@ impl RemoteGitSnapshot {
                 items[position].size = Some(blob.metadata.git_size);
             }
         }
-        let next = if has_more {
+        let next = if end < entries.len() {
             items
                 .last()
                 .and_then(|entry| entry.path.file_name())

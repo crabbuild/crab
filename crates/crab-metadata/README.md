@@ -43,6 +43,11 @@ heads and immutable capsule runs. Complete capsule reads share storage's bounded
 immutable transfer policy, including concurrent ranges for large seed capsules.
 Full decoding still materializes the body and validates every pointer commitment.
 
+Run construction reuses verified immutable capsule descriptors. Compaction checks
+byte-for-byte equality when moving capsules into its new buffer, releases the old
+buffers, and hashes the completed run once. Downloaded runs still pass full capsule,
+section, pooled index, catalog, and admission verification; the wire format is unchanged.
+
 `capsule_protocol::CapsuleChunkIndex` reads paged global advisory chunk heads
 and exact placement IDs without opening the released manifest receipt database.
 `write_capsule_chunk_candidates` conditionally publishes verified immutable pages
@@ -151,6 +156,16 @@ xorb metadata, rather than a complete file map or a scan of every file per shard
 
 GC traverses catalog pages from current, historical and retained browse roots.
 Protected keys and authenticated closure traversal are tracked separately.
+
+Complete checkpoint visibility proofs are authenticated once and shared across
+immutable checkpoint clones. Building a checkpoint retains its validated proof;
+control-only readers keep the visibility body cold.
+Checkpoint footer history projects its recent suffix from validated ordinals
+without rebuilding the complete visibility index. Hints consume only the bytes
+remaining after required control metadata within the 8 MiB footer bound. Large
+transitions remain complete in authenticated visibility pages; missing hints use
+the existing verified Git traversal. Required metadata that cannot fit returns
+`CheckpointFooterSize` so the publication owner can consolidate physical sources.
 
 Retired unshipped checkpoint formats through 8 are rejected without fallback.
 The six published release tags do not contain this capsule codec.
@@ -399,10 +414,19 @@ release tag contains this layered format; the released v1 protocol is unchanged.
 
 Footer roots bind the visibility section, retained-object count and ordered
 source-catalog digest. `LayeredVisibilityReader` loads only pages needed for
-requested ref membership; dictionary retention never authorizes visibility.
+requested ref membership and physical pack-member selection; dictionary retention
+never authorizes visibility. Member selection preserves request order and misses,
+checks source bounds, and shares the authenticated page cache.
 Loaded source/member positions are checked against checkpoint-owned sources,
 before newer frontier sources are appended. Explicit bulk materialization
 verifies the complete section hash and canonical encoding against captured roots.
+
+Paged control replay batches checkpoint dictionary membership for its captured
+additions before applying transactions. Temporary positive and negative results
+avoid repeatedly fetching the same dictionary pages across a long frontier.
+They describe initial retention only: ref ordering, prior closures, removals,
+new-tip membership and the exact retained-object limit remain checked when each
+control is applied. The captured replay releases these temporary results afterward.
 
 Footer-only checkpoints have control offset zero when both optional catalog and
 visibility sections are absent. The storage reader accepts that canonical range

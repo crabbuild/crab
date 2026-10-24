@@ -453,9 +453,9 @@ fn metrics_response(body: String) -> Response<Full<Bytes>> {
 pub async fn initialize(config: Config) -> Result<()> {
     config.validate()?;
     let gateway = Gateway::new(config, CancellationToken::new())?;
-    gateway.initialize_repositories().await?;
+    let result = gateway.initialize_repositories().await;
     gateway.shutdown().await;
-    Ok(())
+    result
 }
 
 async fn shutdown_signal() {

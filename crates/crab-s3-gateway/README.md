@@ -159,15 +159,26 @@ commit for a consistent view.
 A present capsule-protocol root is the exclusive
 read authority; corrupt v2 state fails closed and never falls back to a legacy
 manifest. Repositories without a v2 root retain the v1 read path.
+Each native read rechecks the root and visible ref transactions before reusing
+its validated immutable view. Stable reads avoid downloading capsule payloads
+again; external ref updates remain visible without a freshness TTL.
 
 S3 mutations of v2 repositories publish the generated Git pack, all four pack components,
 and exact visibility delta as one immutable capsule before the independently
-mutable ref-head CAS. Planned multipart retries resolve the v2 plan receipt,
+mutable ref-head CAS. Generated packs declare bounded cross-pack tree delta bases,
+matching native Git publication; shared readers and checkpoints resolve those bases
+from the pinned view. Planned multipart retries resolve the v2 plan receipt,
 and idle maintenance compacts the capsule frontier through the shared verified
 checkpoint path.
 
-A busy ref checkpoints synchronously at 56 capsules so it
-cannot reach the hard 64-entry frontier. V1 repositories retain the journal publisher.
+A busy ref checkpoints synchronously after the native 500-transaction roll-up
+window, or when its physical run frontier reaches 1 GiB. The native writer
+compacts runs within the unchanged 64-segment/512-transaction-per-run limits;
+those segment counts are distinct from original transaction counts. Publication
+charges the exact prepared frontier bytes and rejects a successor above the
+2 GiB read budget before its ref CAS. Cold captures after restart or cache eviction
+use the same checkpoint admission as warm branches. V1 repositories retain the
+journal publisher.
 
 ### Mutation batching and publication
 
@@ -178,6 +189,10 @@ Compatible same-branch
 requests wait up to 10 ms for a bounded batch of at most 32 requests or 32 MiB
 of Git payload. Their conditions are evaluated in FIFO order, their commits form
 one parent chain, and their Git objects share one pack and publication.
+Cold preparation pins one repository view and gives each mutation its own
+read-operation budget. An over-budget request returns `SlowDown` without spending
+its neighbors' allowances; failed reads publish no commit. Locator close or
+deadline failures after tree construction abort the batch before publication.
 
 One ref worker may retain the global and repository GC-writer
 fences for at most eight consecutive ordinary batches. Every batch still owns
@@ -188,15 +203,33 @@ round trips without allowing a busy branch to exclude GC indefinitely.
 
 ### Generated packs
 
-Trusted generated objects enter one bounded decoded spool before
-canonical pack and sidecar preparation; they are not compressed and reinflated
-as synthetic wire input.
+Trusted generated objects retain their bounded, already-owned decoded buffers
+through canonical pack and sidecar preparation. Preparation independently checks
+object identities without writing and rereading a decoded scratch copy. Untrusted
+wire packs retain the shared quarantine spool and verification path.
+The canonical writer uses fast zlib compression for trees to reduce growing
+directory latency; blobs retain default compression and all output limits apply.
+Immutable attribute uploads run concurrently with pack preparation. Publication
+waits for both branches to succeed; failures drain both branches before releasing
+the writer fences and scratch ownership.
+Shutdown cancels admission and drains admitted mutation workers, their catalog
+and readability maintenance, and attribute checkpoints before closing the read
+runtime. Acknowledging a batch does not transfer its cleanup to runtime teardown.
+
+Warm directories retain canonical encoded bytes and entry offsets. Path edits
+copy unchanged byte ranges and encode only changed entries, while complete tree
+identities and prepared pack contents remain independently verified. The encoded
+bytes and offsets count toward the existing warm-state memory limit.
 
 Caller-proven predecessor relationships delta-compress
-successive generated tree versions inside a batch and, while warm state retains
-a verified prior depth, across packs by immutable Git object ID. A cold process,
-an unknown base depth, depth eight, or a target that is already an ancestor of
-the proposed base emits a new full base. The checksummed kind sidecar records
+successive generated tree versions inside a batch. Across packs, warm state
+retains a verified full-tree anchor by immutable Git object ID, so successive
+batches do not extend the previous batch's delta chain. After 64 reused batches,
+the next generated tree refreshes the full anchor; otherwise each append would
+retransmit all entries added since an increasingly stale base. Anchor bytes count
+toward the warm-state budget. A cold process, a missing anchor, depth eight
+within a batch, or a target that is already an ancestor of the proposed base
+emits a new full base. The checksummed kind sidecar records
 each external base so catalog and fallback readers select an acyclic physical
 representation when the same Git object exists in more than one pack.
 
@@ -212,6 +245,9 @@ alone so its durable exactly-once receipt cannot be coupled to another request.
 
 Once drained, a gateway-owned worker retains the batch even if an originating
 HTTP connection closes; one disconnected client cannot cancel peer mutations.
+Ref/GC renewal failure cancels only the owning write worker. Later requests and
+other queues remain usable after backend recovery; service shutdown still cancels
+every worker.
 Multi-delete retains one result and commit per successful entry; grouping never
 makes the whole request atomic.
 
@@ -223,6 +259,10 @@ The cached parent is revalidated while holding the object-store ref lease before
 publishing a commit or returning a prepared no-op or precondition result. It is
 discarded on a tip mismatch, restart, or memory-pressure
 eviction; idle branch state remains reusable below the shared watermark.
+After native checkpointing, an exact-tip control capture refreshes the cached
+transaction position, transaction count, and physical frontier bytes. Logical directories and attributes
+remain reusable; physical tree anchors and ancestry are discarded because
+consolidation can change their pack representations.
 
 Object storage remains the authority and a cold request reconstructs the same state from
 immutable repository objects.
@@ -248,7 +288,9 @@ delayed, failed, or superseded slot
 falls back to the immutable delta chain.
 
 Checkpoint markers remain optional in
-the existing version-2 delta format. Eligible checkpoints are gzip encoded and
+the existing version-2 delta format. Checkpoint serialization uses a bounded
+64 KiB buffer before compression to avoid per-field compressor work.
+Eligible checkpoints are gzip encoded and
 retain the existing 32 MiB stored-object bound; readers also accept earlier
 plain JSON checkpoints.
 
@@ -270,6 +312,9 @@ without opening SlateDB or walking Git trees.
 A missing delta, legacy checkpoint,
 or Git-authored ancestor keeps canonical Git tree listing, so the accelerator
 cannot hide Git-written objects.
+An exact-tip warm manifest that is already known to be partial selects Git
+listing immediately, without replaying attribute history merely to rediscover
+that the namespace index is incomplete.
 
 SlateDB is not required by this write path; its
 object catalog remains
@@ -281,6 +326,8 @@ object-store manifest and advances catalog coverage for that generation under
 the generation-owner and GC-writer fences. It yields after that bounded pass;
 newer transactions remain authoritative and become eligible after another 64
 epochs instead of triggering an immediate catch-up loop.
+Each batch within a retained GC-fence burst advances that cadence separately,
+so fence reuse cannot multiply the unindexed pack tail by eight.
 
 Read views use the newest catalog whose immutable pack inventory is a
 proven subset of their snapshot, then inspect only the remaining pack tail. This
@@ -324,9 +371,14 @@ canonical compatibility reference; this README is only an overview.
 ## Large objects, range reads, and deduplication
 
 Large uploads use bounded temporary spools and Crab's verified LFS path.
+Each content spool owns one temporary file, avoiding per-upload directory
+creation and recursive cleanup; scratch accounting follows the file's lifetime.
 `git_blob_max_bytes` is configured per repository, defaults to 1 MiB, and
 accepts values through 64 MiB. Objects at or below that limit remain ordinary
-Git blobs; larger PUTs and copies use LFS.
+Git blobs; larger PUTs and copies use LFS. Literal upload bytes that parse as a
+Crab or LFS pointer also use LFS, so downloading a pointer-text file returns its
+original text rather than the referenced content. PUT, COPY, and multipart
+completion share this representation rule.
 
 Multipart completion does not
 assemble objects above the configured limit into a second full-size local file;
@@ -338,6 +390,14 @@ Objects already represented by Crab/Xet keep their deduplication. A byte-range
 GET reconstructs only overlapping Xet chunks and streams the selected bytes
 through bounded backpressure. It does not hydrate the complete logical file or
 create response-sized scratch. Complete GETs retain whole-file verification.
+Every Xet response withholds its final chunk until reconstruction reaches
+successful EOF, including range responses. Multipart range copies use the same
+verified stream directly into their upload spool, avoiding a second on-disk copy.
+
+GET, HEAD, and listing share lazy attribute replay for each immutable commit.
+A lookup stops at the newest delta that answers its path; other paths reuse
+inspected changes and checkpoints. Blob-ID checks prevent a Git edit from
+inheriting metadata for older content.
 
 The process uses a required local read cache shared by its configured
 repositories. Put the cache on a private, capacity-limited volume separate from
@@ -431,8 +491,11 @@ Additional replicas improve availability and scale independent repositories and
 branches, but they cannot make concurrent writes to the same ref commit in
 parallel.
 
-Generated packs use bounded tree deltas across warm batches, avoiding
-a repeated full broad-directory tree in every pack. REF_DELTA bases are immutable
+Generated objects carry collision-checked identities with immutable owned bytes
+from tree construction through batch deduplication and visibility evidence;
+pack preparation independently verifies
+the bytes before publication. Generated packs use bounded tree deltas across
+warm batches, avoiding a repeated full broad-directory tree in every pack. REF_DELTA bases are immutable
 Git object IDs retained by the repository object inventory; readers resolve them
 across packs, repack preserves the complete object universe, and client fetch
 materializes required bases. The depth-eight and cold-start full entries bound
@@ -448,6 +511,9 @@ fanout across branches, then merge through ordinary Git policy.
 
 ## Initialize and run
 
+Native Git must be available on `PATH` for capsule checkpoint and repack work.
+The packaged image includes this runtime dependency.
+
 Build from the repository root. Keep Cargo artifacts on the mounted workspace
 volume:
 
@@ -461,9 +527,10 @@ CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-s3-gateway \
   --config /etc/crab/s3-gateway.toml
 ```
 
-`--initialize` creates missing canonical Crab metadata only for empty configured
-prefixes, then exits. It is idempotent. Normal serving never initializes,
-migrates, or converts repository storage.
+`--initialize` creates native v2 capsule roots only for empty configured
+prefixes, then exits. Existing v2 roots are adopted without changes. Nonempty
+prefixes without a v2 root are rejected; serve existing v1 repositories
+directly. Normal serving never initializes, migrates, or converts storage.
 
 SIGTERM and SIGINT trigger graceful connection draining.
 

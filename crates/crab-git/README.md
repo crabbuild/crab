@@ -65,6 +65,11 @@ keeps the narrower `refs/tags/` scope used for manifest peeling hints. Both
 return commit targets; neither implies support for arbitrary non-commit tag
 targets in the product's push path.
 
+Committed suffix consolidation reuses authenticated pack artifacts directly.
+It retains the generated workspace and streaming identity instead of installing,
+copying and hashing those bodies again. Native thin-pack repair fetches bases
+outside each source pack; in-pack REF bases remain compressed.
+
 ## Usage
 
 ```rust
@@ -180,16 +185,30 @@ retains admission on refusal and releases bytes after directory cleanup. Hosts
 inject their shared disk policy; standalone and generated inputs use their
 finite `ReceiveLimits` without importing host-specific dependencies.
 
-`IncomingPack::from_generated_objects` gives trusted in-process Git object
-builders the same bounded identity spool without first compressing and then
-inflating an artificial wire pack. `prepare` remains mandatory and produces the
-same independently readable canonical pack and checksummed standard sidecars.
+`GeneratedObject` binds owned bytes to a collision-checked Git identity and
+exposes only immutable access. `IncomingPack::from_verified_objects` takes
+these objects without recomputing their identities. The published tuple-based
+`from_generated_objects` entry point computes identities before using the same
+bounded collector. Both check count,
+individual size, aggregate decoded bytes, and cancellation without writing and
+rereading an object spool. Preparation borrows these bytes for deltas and streams
+full entries through the same identity checks as quarantined input. `prepare`
+remains mandatory and produces the same independently readable canonical pack
+and checksummed standard sidecars. Untrusted network packs retain their bounded
+file-backed quarantine.
+Canonical preparation uses fast zlib compression for trees, whose object IDs
+compress poorly, while other kinds retain default compression. Full entries and
+OFS/REF deltas retain the same Git format, identity checks, and output byte limits.
 
 `prepare_with_delta_bases` additionally accepts caller-proven generated-object
 relationships. It writes only self-contained OFS deltas, caps chain depth and
 eligible object size, falls back to full entries when a base is absent or a
 delta is not smaller, and records pack offsets and entry CRCs during the one
 bounded write.
+
+Delta encoding scans common prefixes and suffixes in blocks and sizes its
+buffer from changed bytes. Reconstruction retains exact Git delta semantics;
+object identities, base identities and pack checksums remain verified.
 
 `prepare_with_external_delta_bases` may instead encode a bounded
 REF delta when the caller supplies the decoded base, its immutable object ID,

@@ -221,7 +221,7 @@ const MAX_VISIBILITY_HISTORY_TRANSITIONS_PER_REF: usize = 1_000_000;
 // A checkpoint footer must bridge the largest scheduled incremental-fetch
 // interval without retaining the unbounded history body. Keep this separate
 // from the small direct-transition cache used by the hot in-memory planner.
-const MAX_CHECKPOINT_FOOTER_TRANSITIONS_PER_REF: usize = 512;
+pub(crate) const MAX_CHECKPOINT_FOOTER_TRANSITIONS_PER_REF: usize = 512;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 struct GitVisibilityTransition {

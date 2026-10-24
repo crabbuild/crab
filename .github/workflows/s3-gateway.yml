@@ -46,6 +46,33 @@ env:
   GATEWAY_SESSION_TOKEN: gateway-session-qualification-token
 
 jobs:
+  contracts:
+    name: Verify gateway and read contracts
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
+      - uses: dtolnay/rust-toolchain@2c7215f132e9ebf062739d9130488b56d53c060c # master
+        with:
+          toolchain: stable
+      - name: Place build artifacts outside the checkout
+        run: echo "CARGO_TARGET_DIR=${RUNNER_TEMP}/crab-s3-gateway-contracts-target" >> "${GITHUB_ENV}"
+      - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+        with:
+          shared-key: s3-gateway-contracts
+      - name: Check formatting
+        run: cargo fmt --check -p crab-metadata -p crab-remote -p crab-remote-git -p crab-read -p crab-s3-gateway
+      - name: Verify shared reads and S3 operations
+        env:
+          RUST_MIN_STACK: "8388608"
+        run: cargo test --locked --lib -p crab-remote -p crab-remote-git -p crab-read -p crab-s3-gateway
+      - name: Verify capsule checkpoint publication
+        env:
+          RUST_MIN_STACK: "8388608"
+        run: cargo test --locked -p crab-remote --features publication --test checkpoint
+      - name: Verify physical object index contracts
+        run: cargo test --locked --lib -p crab-metadata --features remote-index git_object_locator::paged
+
   helm:
     name: Validate Helm chart
     runs-on: ubuntu-latest
@@ -291,6 +318,7 @@ jobs:
           CARGO_TARGET_DIR: ${{ runner.temp }}/crab-s3-gateway-publisher-target
         with:
           shared-key: s3-gateway-xet-publisher
+          cache-on-failure: true
 
       - name: Build minimal Crab fixture publisher
         env:
@@ -318,6 +346,7 @@ jobs:
           docker image inspect crab-s3-gateway:test --format '{{json .Config.Healthcheck.Test}}' | grep -F -- '"--healthcheck"'
           test "$(docker run --rm --entrypoint /usr/bin/id crab-s3-gateway:test -u)" = "10001"
           test "$(docker run --rm --entrypoint /usr/bin/id crab-s3-gateway:test -g)" = "10001"
+          docker run --rm --entrypoint /usr/bin/git crab-s3-gateway:test --version
           docker run --rm crab-s3-gateway:test --help | grep -F -- "--healthcheck"
           docker run --rm crab-s3-gateway:test --help | grep -F -- "--readiness-check"
 
@@ -455,6 +484,8 @@ jobs:
           docker stop --time 35 crab-s3-gateway-unready >/dev/null
           docker rm crab-s3-gateway-unready >/dev/null
 
+          sed 's|prefix = "repositories/qualification"|prefix = "repositories/native-qualification"|' \
+            "${config_root}/gateway.toml" > "${config_root}/initialize.toml"
           docker run --rm \
             --network crab-s3-gateway-qualification \
             --read-only \
@@ -466,7 +497,7 @@ jobs:
             --env AWS_ENDPOINT_URL_S3=http://crab-s3-gateway-rustfs:9000 \
             --env AWS_ALLOW_HTTP=true \
             --env AWS_VIRTUAL_HOSTED_STYLE_REQUEST=false \
-            --volume "${config_root}/gateway.toml:/etc/crab/s3-gateway.toml:ro" \
+            --volume "${config_root}/initialize.toml:/etc/crab/s3-gateway.toml:ro" \
             --volume "${config_root}/gateway-secret:/run/secrets/crab-s3-secret:ro" \
             --volume "${config_root}/gateway-session-secret:/run/secrets/crab-s3-session-secret:ro" \
             --volume "${config_root}/gateway-session-token:/run/secrets/crab-s3-session-token:ro" \
@@ -525,6 +556,48 @@ jobs:
             --bucket crab-s3-gateway-qualification --prefix .crab/xorbs/ \
             --query 'length(Contents)' --output text > "${xet_root}/xorb-count"
           test "$(cat "${xet_root}/xorb-count")" -gt 0
+
+          native_root="${RUNNER_TEMP}/crab-s3-gateway-native"
+          publisher_bin="${RUNNER_TEMP}/crab-s3-gateway-publisher-target/release"
+          install -d "${native_root}/source"
+          cp "${source_root}/qualification/xet-large.bin" "${native_root}/source/xet.bin"
+          cp "${source_root}/qualification/xet-large.bin" "${native_root}/source/lfs.dat"
+          printf 'native capsule Git fixture\n' > "${native_root}/source/ordinary.txt"
+          ln -sf crab "${publisher_bin}/git-remote-crab"
+          export PATH="${publisher_bin}:${PATH}"
+          echo "${publisher_bin}" >> "${GITHUB_PATH}"
+          (
+            cd "${native_root}/source"
+            git init --initial-branch main
+            git config user.name 'Gateway qualification'
+            git config user.email 'qualification@example.invalid'
+            crab init crab://crab-s3-gateway-qualification/repositories/native-qualification
+            crab track '*.bin'
+            crab add xet.bin
+            crab lfs install --local
+            crab lfs track '*.dat'
+            git add .gitattributes ordinary.txt lfs.dat
+            git -c core.hooksPath=/dev/null commit -m 'add native gateway fixtures'
+            git show HEAD:xet.bin | grep -Fx 'version https://crab.build/spec/v1'
+            git show HEAD:lfs.dat | grep -Fx 'version https://git-lfs.github.com/spec/v1'
+            crab lfs push origin main
+            crab push crab://crab-s3-gateway-qualification/repositories/native-qualification main
+          )
+          aws s3api head-object --bucket crab-s3-gateway-qualification \
+            --key repositories/native-qualification/v2/root >/dev/null
+          cat >> "${config_root}/gateway.toml" <<'TOML'
+
+          [[repositories]]
+          name = "gateway-native-repository"
+          provider = "s3"
+          bucket = "crab-s3-gateway-qualification"
+          prefix = "repositories/native-qualification"
+          default_branch = "main"
+
+          [[repositories.members]]
+          principal = "service-account:qualification"
+          access = "write"
+          TOML
 
       - name: Start constrained gateway
         id: gateway
@@ -1143,8 +1216,49 @@ jobs:
           S3_GATEWAY_BOTO3_SECRET_KEY="${GATEWAY_SECRET_KEY}" \
           python3 crab/scripts/e2e/s3_gateway_boto3.py \
             --endpoint "${endpoint}" --bucket "${bucket}" \
+            --xet-fixture "${xet_root}/source/qualification/xet-large.bin" \
             --large-object-bytes $((512 * 1024 * 1024)) \
             --report "${RUNNER_TEMP}/crab-s3-gateway-evidence/boto3-proof.json"
+
+          native_root="${RUNNER_TEMP}/crab-s3-gateway-native"
+          aws --endpoint-url "${endpoint}" s3api get-object \
+            --bucket gateway-native-repository --key main/lfs.dat \
+            "${native_root}/s3-lfs-read.bin" >/dev/null
+          cmp "${native_root}/s3-lfs-read.bin" "${native_root}/source/lfs.dat"
+          S3_GATEWAY_BOTO3_ACCESS_KEY="${GATEWAY_ACCESS_KEY}" \
+          S3_GATEWAY_BOTO3_SECRET_KEY="${GATEWAY_SECRET_KEY}" \
+          python3 crab/scripts/e2e/s3_gateway_boto3.py \
+            --endpoint "${endpoint}" --bucket gateway-native-repository \
+            --xet-fixture "${native_root}/source/xet.bin" --xet-key main/xet.bin \
+            --report "${RUNNER_TEMP}/crab-s3-gateway-evidence/boto3-native-proof.json"
+          aws --endpoint-url "${endpoint}" s3api put-object \
+            --bucket gateway-native-repository --key main/s3-visible.txt \
+            --body "${native_root}/source/ordinary.txt" >/dev/null
+          aws --endpoint-url "${endpoint}" s3api put-object \
+            --bucket gateway-native-repository --key main/s3-large.bin \
+            --body "${native_root}/source/xet.bin" >/dev/null
+          (
+            export AWS_ACCESS_KEY_ID="${RUSTFS_ACCESS_KEY}"
+            export AWS_SECRET_ACCESS_KEY="${RUSTFS_SECRET_KEY}"
+            unset AWS_SESSION_TOKEN
+            export AWS_ENDPOINT_URL_S3=http://127.0.0.1:19000
+            export AWS_ALLOW_HTTP=true
+            export AWS_VIRTUAL_HOSTED_STYLE_REQUEST=false
+            export CRAB_CACHE_DIR="${native_root}/reader-cache"
+            # The helper's local cursor belongs to the fixture, not this checkout.
+            cd "${native_root}"
+            crab clone --lazy \
+              crab://crab-s3-gateway-qualification/repositories/native-qualification \
+              "${native_root}/clone"
+            cd "${native_root}/clone"
+            crab hydrate xet.bin
+            crab lfs pull
+            cmp ordinary.txt "${native_root}/source/ordinary.txt"
+            cmp s3-visible.txt "${native_root}/source/ordinary.txt"
+            cmp xet.bin "${native_root}/source/xet.bin"
+            cmp lfs.dat "${native_root}/source/lfs.dat"
+            cmp s3-large.bin "${native_root}/source/xet.bin"
+          )
 
           oversized_key=main/qualification/scratch-capacity.bin
           truncate --size 500M "${qualification_root}/oversized.bin"
@@ -1290,9 +1404,69 @@ jobs:
         run: |
           python3 -B crab/scripts/e2e/s3_gateway_ecosystem.py \
             --endpoint http://127.0.0.1:18080 \
-            --bucket gateway-repository \
+            --bucket gateway-native-repository \
             --work-dir "${RUNNER_TEMP}/crab-s3-gateway-ecosystem" \
             --report "${RUNNER_TEMP}/crab-s3-gateway-evidence/ecosystem-proof.json"
+
+      - name: Qualify sustained native repository writes
+        id: native_soak
+        continue-on-error: true
+        env:
+          S3_GATEWAY_WORKLOAD_ACCESS_KEY: ${{ env.GATEWAY_ACCESS_KEY }}
+          S3_GATEWAY_WORKLOAD_SECRET_KEY: ${{ env.GATEWAY_SECRET_KEY }}
+        run: |
+          python3 -B crab/scripts/e2e/s3_gateway_workload.py \
+            --gateway-endpoint http://127.0.0.1:18080 \
+            --gateway-bucket gateway-native-repository \
+            --duration-seconds 300 --window-seconds 30 --writers 16 \
+            --report "${RUNNER_TEMP}/crab-s3-gateway-evidence/native-soak-proof.json"
+
+      - name: Capture native write diagnostics
+        if: ${{ !cancelled() && (steps.native_soak.outcome == 'success' || steps.native_soak.outcome == 'failure') }}
+        run: |
+          curl --fail --silent --show-error http://127.0.0.1:18081/metrics \
+            > "${RUNNER_TEMP}/crab-s3-gateway-evidence/native-metrics.prom"
+          python3 - "${RUNNER_TEMP}/crab-s3-gateway-evidence/native-service-errors.txt" <<'PY'
+          from collections import deque
+          from pathlib import Path
+          import json
+          import re
+          import subprocess
+          import sys
+
+          # Keep bounded failure evidence before crash recovery restarts the service.
+          process = subprocess.Popen(
+              ["docker", "logs", "--since", "7m", "crab-s3-gateway"],
+              stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
+          )
+          selected = deque(maxlen=100)
+          phases = deque(maxlen=30000)
+          phase_count = 0
+          for line in process.stdout:
+              line = re.sub(r"\x1b\[[0-9;]*m", "", line)
+              if re.search(r"\b(?:ERROR|WARN)\b", line):
+                  selected.append(line[:4096])
+              if "Git preparation phase completed" in line:
+                  phase = re.search(r'\bphase="(encode|sidecars|content_hash)"', line)
+                  elapsed = re.search(r'\belapsed_ms=([0-9.eE+-]+)', line)
+                  if phase and elapsed:
+                      # Persist only fixed phase names and numeric measurements.
+                      row = {"phase": phase[1], "elapsed_ms": float(elapsed[1])}
+                      for field in ("objects", "bytes"):
+                          value = re.search(rf'\b{field}=([0-9]+)', line)
+                          if value:
+                              row[field] = int(value[1])
+                      phases.append(row)
+                      phase_count += 1
+          if process.wait() != 0:
+              raise SystemExit("could not capture native service diagnostics")
+          Path(sys.argv[1]).write_text("".join(selected), encoding="utf-8")
+          Path(sys.argv[1]).with_name("native-preparation-phases.json").write_text(
+              json.dumps({"observed": phase_count, "retained": list(phases)}, indent=2) + "\n",
+              encoding="utf-8",
+          )
+          print("".join(selected), end="")
+          PY
 
       - name: Qualify sustained signed writes
         id: soak
@@ -1560,10 +1734,10 @@ jobs:
           CRAB_S3_GATEWAY_IMAGE: crab-s3-gateway:test
           CRAB_S3_GATEWAY_SECRET_FILE: ${{ runner.temp }}/crab-s3-gateway/gateway-secret
         run: |
-          docker logs crab-s3-gateway 2>&1 || true
-          docker logs crab-s3-gateway-rustfs 2>&1 || true
+          docker logs --tail 200 crab-s3-gateway 2>&1 || true
+          docker logs --tail 200 crab-s3-gateway-rustfs 2>&1 || true
           docker compose -f crates/crab-s3-gateway/deploy/compose.yaml \
-            logs --no-color gateway gateway-standby rustfs 2>&1 || true
+            logs --no-color --tail 200 gateway gateway-standby rustfs 2>&1 || true
 
       - name: Clean up services
         if: always()
@@ -1595,6 +1769,7 @@ jobs:
         run: |
           set -euo pipefail
           report_root="${RUNNER_TEMP}/crab-s3-gateway-evidence"
+          git status --short --untracked-files=all
           qualification_root="${RUNNER_TEMP}/crab-s3-gateway-client"
           gateway_image_id="$(docker image inspect crab-s3-gateway:test \
             --format '{{.Id}}' 2>/dev/null || printf unavailable)"
@@ -1666,6 +1841,8 @@ jobs:
             --source-sha "${GITHUB_SHA}" \
             --run-id "${GITHUB_RUN_ID}" \
             --run-attempt "${GITHUB_RUN_ATTEMPT}"
+          jq -e '.status == "passed" and .comparison.integrity_passed and .comparison.performance_passed' \
+            "${RUNNER_TEMP}/crab-s3-gateway-evidence/native-soak-proof.json" >/dev/null
           boto3_report="${RUNNER_TEMP}/crab-s3-gateway-evidence/boto3-proof.json"
           if grep -Fq \
             -e "${RUSTFS_ACCESS_KEY}" \
@@ -1790,6 +1967,11 @@ jobs:
           path: |
             ${{ runner.temp }}/crab-s3-gateway-evidence/report.json
             ${{ runner.temp }}/crab-s3-gateway-evidence/boto3-proof.json
+            ${{ runner.temp }}/crab-s3-gateway-evidence/boto3-native-proof.json
+            ${{ runner.temp }}/crab-s3-gateway-evidence/native-soak-proof.json
+            ${{ runner.temp }}/crab-s3-gateway-evidence/native-metrics.prom
+            ${{ runner.temp }}/crab-s3-gateway-evidence/native-service-errors.txt
+            ${{ runner.temp }}/crab-s3-gateway-evidence/native-preparation-phases.json
             ${{ runner.temp }}/crab-s3-gateway-evidence/ecosystem-proof.json
             ${{ runner.temp }}/crab-s3-gateway-evidence/soak-proof.json
             ${{ runner.temp }}/crab-s3-gateway-evidence/owner-proof.json

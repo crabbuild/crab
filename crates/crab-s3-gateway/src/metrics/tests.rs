@@ -491,13 +491,13 @@ fn scratch_usage_remains_accounted_until_its_owner_drops() {
 #[test]
 fn scratch_failures_use_only_bounded_purpose_and_operation_labels() {
     let (admission, metrics) = setup();
-    let usage = metrics.start_scratch(ScratchPurpose::XetReconstruction);
+    let usage = metrics.start_scratch(ScratchPurpose::GitPack);
     usage.record_failure(ScratchFailure::Read);
     drop(usage);
 
     let body = metrics.render(&admission);
     assert!(body.contains(
-        "crab_s3_gateway_scratch_io_failures_total{purpose=\"xet_reconstruction\",operation=\"read\"} 1"
+        "crab_s3_gateway_scratch_io_failures_total{purpose=\"git_pack\",operation=\"read\"} 1"
     ));
     assert!(!body.contains("path="));
 }

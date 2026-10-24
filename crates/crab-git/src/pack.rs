@@ -683,14 +683,13 @@ pub fn install_pack_files_from_paths_with_verified_sidecars(
 
 // Skipping sidecar validation requires the matching immutable body's identity;
 // keep that proof attached instead of admitting independent flags.
-enum PackInstallVerification {
+pub(crate) enum PackInstallVerification {
     Unverified,
     Body(VerifiedPackIdentity),
     BodyAndSidecars(VerifiedPackIdentity),
 }
 
-fn install_pack_files_from_paths_impl(
-    pack_dir: &Path,
+pub(crate) fn verify_pack_file_artifacts(
     pack_tmp_path: &Path,
     index_tmp_path: &Path,
     reverse_index_tmp_path: &Path,
@@ -698,7 +697,7 @@ fn install_pack_files_from_paths_impl(
     max_input_size: u64,
     expected_object_count: u64,
     verification: PackInstallVerification,
-) -> Result<InstalledPack> {
+) -> Result<String> {
     let pack_size = std::fs::metadata(pack_tmp_path)
         .map_err(|source| io_error(format!("metadata {}", pack_tmp_path.display()), source))?
         .len();
@@ -805,6 +804,28 @@ fn install_pack_files_from_paths_impl(
         });
     }
 
+    Ok(git_sha1)
+}
+
+fn install_pack_files_from_paths_impl(
+    pack_dir: &Path,
+    pack_tmp_path: &Path,
+    index_tmp_path: &Path,
+    reverse_index_tmp_path: &Path,
+    canonical_name: &str,
+    max_input_size: u64,
+    expected_object_count: u64,
+    verification: PackInstallVerification,
+) -> Result<InstalledPack> {
+    let git_sha1 = verify_pack_file_artifacts(
+        pack_tmp_path,
+        index_tmp_path,
+        reverse_index_tmp_path,
+        canonical_name,
+        max_input_size,
+        expected_object_count,
+        verification,
+    )?;
     std::fs::create_dir_all(pack_dir)
         .map_err(|source| io_error(format!("create {}", pack_dir.display()), source))?;
     let final_pack = pack_dir.join(format!("pack-{canonical_name}.pack"));

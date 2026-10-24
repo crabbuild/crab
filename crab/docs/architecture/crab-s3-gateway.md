@@ -296,6 +296,10 @@ Phase-owned artifacts:
   The pinned Boto3 client also uploads a deterministic 512 MiB object as eight
   sequential 64 MiB parts, verifies a complete GET, and verifies a range that
   crosses a persisted part boundary against the source digest.
+  A separate gateway-initialized v2 repository, adopted by the CLI, exercises
+  ordinary, LFS, and Xet objects through signed clients, then clones and hydrates the
+  S3-authored files. Its five-minute, 16-writer soak requires exact paginated
+  acknowledgement recovery and the existing terminal throughput/latency gates.
   A forced process exit then leaves one live session, one synthetically frozen
   completion, and one eligible missing-session orphan on the same durable
   backend. The replacement process must reclaim the orphan within two completed
@@ -606,6 +610,8 @@ remain keyed by compacted generation and the validated committed-journal digest.
 Concurrent refreshes and branch-tip
 snapshot resolution use singleflight cells; Git trees reuse the generation-bound
 remote-read cache, and attributes are cached per immutable commit. The gateway
+shares GET and HEAD object-attribute cells keyed by commit, path, and blob OID,
+so an attributed GET need not replay unrelated attribute history. The gateway
 invalidates its mutable-ref view after publication. HEAD and attributed LIST
 resolve size and ETag from committed attributes without opening blob payloads.
 Committed journal packs and authenticated v2 capsule packs remain readable
@@ -615,10 +621,14 @@ generated pack sidecars and exact visibility edit in one capsule, upload S3
 attributes before ref visibility, and commit through the per-ref head CAS.
 Multipart completion uses deterministic v2 intent/receipt recovery. Idle
 gateway and HTTP-server maintenance share the same root-pinned, verified
-complete-pack checkpoint implementation. Warm per-ref state tracks frontier
-length and forces a checkpoint at 56 capsules, retaining headroom below the
-hard 64-entry bound even when the write stream never becomes idle. V1 repositories retain their existing
-manifest/journal write path.
+complete-pack checkpoint implementation. Warm per-ref state checkpoints after
+the native 500-transaction roll-up window or at 1 GiB of physical frontier runs.
+The shared writer compacts those runs within the unchanged 64-segment and
+512-transaction-per-run ceilings; original transactions are not run segments.
+The gateway charges exact prepared successor bytes after publication and rejects
+a successor above its 2 GiB read budget before the ref CAS. This bounds continuously
+active frontiers without rebuilding full-history checkpoints every few dozen
+transactions. V1 repositories retain their existing manifest/journal write path.
 
 GET uses logical content opening for Git, Crab and LFS content. Raw `read_blob`
 is not a substitute. Read symlinks/submodules only according to phase 0; never
@@ -632,9 +642,10 @@ ranges; the cache may fetch and retain a complete verified xorb when the
 selected chunks cover most of it. The selected bytes stream through one bounded
 backpressure slot, so the gateway does not hydrate the complete logical file,
 retain the requested range in memory, or reserve scratch proportional to the
-response. Dropping the response cancels reconstruction. A complete GET continues
-through the same bounded reconstruction stream; its terminal chunk is withheld
-until the pointer hash and declared size are verified before successful EOF.
+response. Copy-source ranges stream directly into their upload spool without
+another reconstructed temporary file. Dropping the response cancels
+reconstruction. Every Xet stream withholds its terminal chunk until exact length
+and successful EOF are proven; a complete GET also verifies the pointer hash.
 
 ### 3.2 Headers, conditions and ranges
 
@@ -654,6 +665,11 @@ S3 checksum/range contract. Bound stream buffers and release the stream owner on
 EOF, disconnect, timeout and backend failure.
 
 ### 3.3 Listing projection and pagination
+
+Listing acceleration captures native ref heads under a v2 root and the journal
+under a legacy layout. It never requires a legacy manifest for a native
+repository. Reachable complete commit IDs use the canonical immutable Git
+listing path rather than being mistaken for missing branch names.
 
 ```mermaid
 flowchart LR
@@ -856,7 +872,8 @@ derived catalog work releases its fences and yields to S3 mutation traffic. The
 gateway schedules maintenance again after the local write burst is idle and
 prevents overlapping maintenance waves from advancing ahead of visibility proof
 publication. Sustained traffic additionally claims one catalog-maintenance pass
-every 64 local publication epochs. The elected worker compacts one captured
+every 64 local publication epochs, counting every batch within a retained-fence
+burst separately. The elected worker compacts one captured
 durable journal wave, advances exact-object catalog coverage for that generation
 even when newer transactions exist, and then yields under the generation-owner
 and GC-writer fences. It neither chases the moving journal for additional waves

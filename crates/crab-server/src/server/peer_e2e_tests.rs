@@ -67,6 +67,7 @@ impl Host {
             transport.stream_http.clone(),
             16,
             bucket,
+            crate::cells::application::compiled().unwrap(),
         )
         .await
         .unwrap();

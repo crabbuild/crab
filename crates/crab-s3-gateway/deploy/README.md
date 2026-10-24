@@ -8,6 +8,10 @@ persistent gateway caches, and a persistent RustFS data volume. The caches are
 disposable and survive gateway-container replacement; they are never
 authoritative repository state.
 
+The image includes native Git. Capsule checkpoint admission and physical
+maintenance invoke Git against private scratch repositories; omitting Git
+causes sustained v2 writes to fail when the frontier needs maintenance.
+
 The checked ECS Fargate deployment profile is in [`ecs/`](ecs/), with the
 CloudFormation template, parameter example, static lint contract, and live-
 qualification boundary documented in [`ecs/README.md`](ecs/README.md).
@@ -124,6 +128,21 @@ eight sequential 64 MiB parts, reads the complete object back, and reads a
 range crossing a persisted part boundary. Both reads are compared with the
 local SHA-256 fixture, and upload/full-read/range-read timings are retained
 without credentials or object names.
+Its byte-round-trip checks also cover empty and ordinary Git blobs, literal
+Crab/LFS pointer text, COPY, and small multipart completion. Given
+`--xet-fixture <local-source>`, it additionally verifies full, closed, open, and
+suffix Xet reads, conditions, full COPY, and multipart range copy against the
+SDK-published source selected by `--xet-key`. The packaged-image job supplies
+that source alongside the large LFS fixture.
+It separately initializes a native capsule-protocol repository through the
+gateway, adopts and publishes it through the CLI, repeats Boto3's byte and
+listing checks against that logical bucket, and retains `boto3-native-proof.json`.
+The native write soak also retains metrics and the last 100 warning/error records
+before process-restart qualification, so checkpoint failures remain diagnosable.
+S3-authored ordinary and LFS
+objects must then appear through a native Git clone; CLI Xet hydration and LFS
+pull must reproduce the source bytes. This keeps native-protocol qualification
+independent of the SDK fixture's legacy layout.
 The same packaged-image job runs an identity-free ecosystem matrix against the
 gateway: AWS CLI and Boto3 (including SigV4 presigning), DuckDB CLI and Python,
 LanceDB, Spark S3A, PyArrow, Pandas, Polars, fsspec/s3fs, Dask, MinIO,

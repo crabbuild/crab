@@ -34,8 +34,17 @@ root through the same publication owner, avoiding duplicate delta preparation.
 
 `checkpoint` separates metadata-first logical publication from physical pack
 maintenance using the layered format only. Foreground admission checkpoints the
-authenticated source directory;
-only the hard 64-source limit can force a minimal suffix roll-up.
+authenticated source directory; the hard 64-source or 8 MiB footer limit can
+force a suffix roll-up. Member-heavy runs can exhaust footer bytes before the
+source-count limit. Every publication path admits the required source metadata
+before its root CAS, retaining physical work accounting across consolidation.
+Footer-byte admission replaces the newest member-heavy run, or the smallest
+two-source suffix, until required metadata fits; larger merges remain background
+work. Source-count admission uses the compressed-byte geometric cut to amortize
+work across later checkpoints. Keeping a fixed
+63-source prefix would repeatedly rewrite the growing tail during continuous
+writes. The existing 512 MiB suffix budget still defers a larger geometric
+merge in favor of the minimum consolidation required for format admission.
 
 Background owners then pin the published checkpoint for geometric repacking without folding
 newer per-ref heads. The shared maintenance pass retains the successful root-CAS
@@ -53,11 +62,13 @@ history. Suffix installation is restricted to selected physical sources, and
 stable-prefix descriptors and member positions remain unchanged even when the
 suffix contains identical pack bytes.
 
-Verified external delta bases are installed
-only in private scratch object databases, where native Git repairs source copies
-before metadata queries. Loose bases alone do not make raw thin packs readable
-by Git. Those copies and bases are not added to the selected or replacement
-object universe.
+Bases already present in the selected pack inventory remain compressed in
+those bodies. Only outside bases and the additional REF bases required by an
+overlapping or cyclic alias rewrite are reconstructed from the pinned view. Replacement
+kind metadata comes from the authenticated source sidecars retained by the
+installer. This avoids reinflating historical objects just to query their kinds;
+conflicting kinds fail publication. Temporary external bases never enter the
+selected or published object universe.
 
 If logical publication loses its CAS, maintenance stops without attempting a
 physical rewrite of that known-stale root. Already-completed logical work stays

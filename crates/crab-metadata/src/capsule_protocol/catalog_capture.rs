@@ -160,7 +160,7 @@ async fn capture(layout: &StoreLayout<Store>, snapshot: &RootSnapshot) -> Result
     let ordered = order_ref_controls(
         root.refs(),
         root.peeled_refs(),
-        visibility,
+        &mut visibility,
         &selected.predecessors,
         pending,
     )
