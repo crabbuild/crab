@@ -177,6 +177,8 @@ impl CapsuleArtifacts {
                 self.edits.clone(),
             )?,
         };
+        let transaction_id = transaction.id()?;
+        let started = Instant::now();
         let mut sections = std::mem::take(&mut self.sections);
         if !self.pointer_delta.is_empty() {
             sections.insert(
@@ -195,6 +197,13 @@ impl CapsuleArtifacts {
             crab_metadata::capsule_protocol::Capsule::build(&encoding_transaction, packs, sections)
         })
         .await??;
+        tracing::info!(
+            phase = "capsule_encode",
+            %transaction_id,
+            bytes = capsule.bytes().len(),
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "Git receive phase completed"
+        );
         Ok((transaction, capsule))
     }
 
