@@ -1,3 +1,4 @@
+pub(crate) mod organizations;
 use crate::{
     RepositoryConfig,
     auth::Authentication,
@@ -27,6 +28,26 @@ pub(crate) struct Harness {
 }
 
 impl Harness {
+    pub(crate) async fn initialize_directory(&self) {
+        self.server
+            .cells()
+            .unwrap()
+            .initialize(crate::cells::Address::Directory)
+            .await
+            .unwrap();
+    }
+
+    pub(crate) async fn assignee_id(&self, cookie: &str, name: &str) -> Value {
+        let catalog = self.json("/api/repos/team/private/assignees", cookie).await;
+        catalog["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .find(|item| item["name"] == name)
+            .unwrap()["id"]
+            .clone()
+    }
+
     pub(crate) async fn write(
         &self,
         method: reqwest::Method,
@@ -35,18 +56,29 @@ impl Harness {
         body: Value,
     ) -> reqwest::Response {
         let session = self.json("/api/session", cookie).await;
-        self.http
+        let mut request = self
+            .http
             .request(method, format!("{}{path}", self.origin))
             .header(header::COOKIE, cookie)
             .header(header::ORIGIN, &self.origin)
-            .header("x-csrf-token", session["csrf"].as_str().unwrap())
-            .json(&body)
-            .send()
-            .await
-            .unwrap()
+            .header("x-csrf-token", session["csrf"].as_str().unwrap());
+        if let Some(repository) = self
+            .server
+            .repositories
+            .get(&("team".into(), "private".into()))
+        {
+            request = request.header("x-crab-repository-id", repository.id.to_string());
+        }
+        request.json(&body).send().await.unwrap()
     }
 
     pub(crate) async fn new(confidential: bool) -> Self {
+        let harness = Self::new_unprepared(confidential).await;
+        harness.initialize_directory().await;
+        harness
+    }
+
+    pub(crate) async fn new_unprepared(confidential: bool) -> Self {
         Self::new_with_auth(confidential, false).await
     }
 
@@ -166,7 +198,7 @@ impl Harness {
                     4,
                 ),
             );
-            server.repository_cells = Some(cells.client.clone());
+            server.cells = Some(cells.client.clone());
             server.cell_test_runtime = Some(cells);
             server.cursor_key = [7; 32];
             server.auth = Some(auth);

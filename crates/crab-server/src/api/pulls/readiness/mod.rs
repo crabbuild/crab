@@ -59,7 +59,7 @@ async fn set(
                     version,
                     state,
                     actor: (&actor).into(),
-                    can_manage: principal.can_write(&repo.config),
+                    can_manage: principal.can_write(repo.id),
                 },
             )
             .await,
@@ -90,11 +90,11 @@ async fn set(
         .and_then(|repository| current_branches(repository, &pull));
     Ok(Json(
         pull_view(
-            &pull,
+            pull.number,
             &actor,
             &server,
             &repo,
-            principal.can_write(&repo.config),
+            &principal,
             current.as_ref(),
         )
         .await?,

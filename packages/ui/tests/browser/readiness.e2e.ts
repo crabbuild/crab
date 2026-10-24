@@ -1,5 +1,7 @@
+import { emptyPullRollup } from "./fixtures";
+import { conversationPage } from "./conversation";
 import { expect, test, type Page } from "@playwright/test";
-import { emptyReactions, emptyReviewRequests } from "./fixtures";
+import { emptyReactions, emptyReviewers } from "./fixtures";
 import {
   expectNoAccessibilityViolations,
   selectDarkTheme,
@@ -28,8 +30,10 @@ async function setup(page: Page, initialDraft: boolean) {
     draft,
     version,
     state: merged ? "merged" : "open",
-    author: "Alice",
+    author: { name: "Alice", profile: null },
     created_at: 1700000000000,
+    closed_at: merged ? 1700000060000 : null,
+    merged_at: merged ? 1700000060000 : null,
     updated_at: 1700000000000,
     base_ref: "refs/heads/main",
     head_ref: "refs/heads/feature",
@@ -48,7 +52,7 @@ async function setup(page: Page, initialDraft: boolean) {
     branches_available: true,
     merge: merged
       ? {
-          author: "Alice",
+          author: { name: "Alice", profile: null },
           method: "fast_forward",
           commit_oid: head,
           message: "",
@@ -58,7 +62,7 @@ async function setup(page: Page, initialDraft: boolean) {
     merge_pending: pending
       ? {
           request_id: "recorded-merge",
-          author: "Alice",
+          author: { name: "Alice", profile: null },
           method: "fast_forward",
           pull_version: version,
           base_oid: base,
@@ -81,6 +85,12 @@ async function setup(page: Page, initialDraft: boolean) {
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
+    if (path.endsWith("/assignees"))
+      return route.fulfill({
+        json: { items: [], can_manage: canManage && !archived },
+      });
+    if (path.endsWith("/conversation"))
+      return conversationPage(route, { activity: events, head });
     if (path === "/api/session")
       return route.fulfill({
         json: {
@@ -95,6 +105,7 @@ async function setup(page: Page, initialDraft: boolean) {
         json: {
           repositories: [
             {
+              id: "00000000-0000-4000-8000-000000000099",
               owner: "team",
               name: "project",
               description: "",
@@ -165,7 +176,7 @@ async function setup(page: Page, initialDraft: boolean) {
         number: version,
         target: { kind: "pull", number: 1 },
         title,
-        actor: "Alice",
+        actor: { name: "Alice", profile: null },
         action: { kind: draft ? "drafted" : "ready_for_review" },
         created_at: 1700000000000,
       });
@@ -185,15 +196,39 @@ async function setup(page: Page, initialDraft: boolean) {
         version = 1;
         return route.fulfill({ status: 201, json: pull() });
       }
-      return route.fulfill({ json: { items: [pull()], next: null } });
+      return route.fulfill({
+        json: {
+          items: [
+            {
+              ...pull(),
+              kind: "pull",
+              rollup: emptyPullRollup(),
+              comment_count: 0,
+              reaction_count: 0,
+            },
+          ],
+          next: null,
+          counts: { open: 1, closed: 0, merged: 0 },
+          authored_by_me: false,
+          assigned_to_me: false,
+          review_requested_from_me: false,
+          matching: 1,
+          navigation: {
+            kind: "state",
+            selected: "open",
+            open: "is:open",
+            closed: "is:closed",
+          },
+        },
+      });
     }
     if (path.endsWith("/pulls/1")) return route.fulfill({ json: pull() });
     if (path.endsWith("/comments") || path.endsWith("/reviews"))
       return route.fulfill({ json: { items: [], next: null } });
     if (path.endsWith("/activity"))
       return route.fulfill({ json: { items: events, next: null } });
-    if (path.endsWith("/review-requests"))
-      return route.fulfill({ json: emptyReviewRequests() });
+    if (path.endsWith("/reviewers"))
+      return route.fulfill({ json: emptyReviewers() });
     if (path.endsWith("/links"))
       return route.fulfill({
         json: { items: [], next: null, can_manage: false },
@@ -237,7 +272,10 @@ test("draft creation, reload, readiness and conversion expose truthful merge con
   const state = await setup(page, false);
   await page.goto("/team/project/compare/main...feature");
   await page.getByLabel("Title", { exact: true }).fill("Draft proposal");
-  await page.getByRole("checkbox", { name: "Create as draft" }).check();
+  await page.getByRole("button", { name: "Choose pull request mode" }).click();
+  await page
+    .getByRole("menuitemradio", { name: "Create draft pull request" })
+    .click();
   await page
     .getByRole("button", { name: "Create draft pull request", exact: true })
     .click();
@@ -266,7 +304,7 @@ test("draft creation, reload, readiness and conversion expose truthful merge con
     page.getByRole("button", { name: "Merge pull request", exact: true }),
   ).toBeVisible();
   await expect(
-    page.getByRole("region", { name: "Activity", exact: true }),
+    page.getByRole("region", { name: "Conversation history", exact: true }),
   ).toContainText("marked ready for review");
   await page
     .getByRole("button", { name: "Convert to draft", exact: true })

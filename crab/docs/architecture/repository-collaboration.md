@@ -223,7 +223,7 @@ fulfilled with the submitted review number. Re-requesting a cancelled or fulfill
 reviewer starts another request; cancellation retains the record. Pages use
 bounded, exclusive opaque identity cursors.
 
-Authors or repository writers request and cancel reviews on open PRs. The author
+Authors or members with Triage access request and cancel reviews on open PRs. The author
 cannot be selected as a reviewer. The HTTP boundary resolves durable catalog
 membership for participant selection and current caller access, so background
 catalog materialization cannot re-offer a removed member. Renamed members keep

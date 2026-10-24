@@ -8,17 +8,13 @@ const ROOT: &str = "/api/repos/team/private/pulls/1";
 async fn seed(h: &Harness) -> uuid::Uuid {
     let submission = uuid::Uuid::now_v7();
     let repository = h.server.repositories.values()[0].id;
-    let cell = h
-        .server
-        .repository_cells()
-        .unwrap()
-        .repository(repository)
-        .unwrap();
+    let cell = h.server.cells().unwrap().repository(repository).unwrap();
     cell.client
         .command::<CreatePull>(
             &cell.target,
             crate::app::mutation_identity().unwrap(),
             CreatePullInput {
+                metadata: Default::default(),
                 draft: true,
                 submission_id: *submission.as_bytes(),
                 author: RepositoryAuthor {
@@ -196,6 +192,12 @@ async fn merge_recovery_after_archive(published: bool) {
     use std::sync::Arc;
     use tokio_util::sync::CancellationToken;
     let server = fixtures::fixture().await;
+    server
+        .cells()
+        .unwrap()
+        .initialize(crate::cells::Address::Directory)
+        .await
+        .unwrap();
     let entry = server.repositories.values()[0].clone();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -208,7 +210,17 @@ async fn merge_recovery_after_archive(published: bool) {
             .await
             .unwrap()
     });
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .default_headers(reqwest::header::HeaderMap::from_iter([(
+            reqwest::header::HeaderName::from_static("x-crab-repository-id"),
+            server.repositories.values()[0]
+                .id
+                .to_string()
+                .parse()
+                .unwrap(),
+        )]))
+        .build()
+        .unwrap();
     let origin = format!("http://{address}");
     let source = tempfile::tempdir().unwrap();
     let path = source.path();
@@ -228,12 +240,8 @@ async fn merge_recovery_after_archive(published: bool) {
     git::success(path, &["commit", "-am", "feature"]).await;
     let head_oid = git::success(path, &["rev-parse", "HEAD"]).await;
     git::success(path, &["push", &git_url, "feature"]).await;
-    let cell = server
-        .repository_cells()
-        .unwrap()
-        .repository(entry.id)
-        .unwrap();
-    let principal = crate::auth::Principal::Local;
+    let cell = server.cells().unwrap().repository(entry.id).unwrap();
+    let principal = crate::auth::Principal::local();
     let actor = crate::app::actor(&principal).unwrap();
     let created = cell
         .client
@@ -241,6 +249,7 @@ async fn merge_recovery_after_archive(published: bool) {
             &cell.target,
             crate::app::mutation_identity().unwrap(),
             CreatePullInput {
+                metadata: Default::default(),
                 draft: false,
                 submission_id: *uuid::Uuid::now_v7().as_bytes(),
                 author: (&actor).into(),

@@ -42,27 +42,27 @@ impl Authentication {
             .and_then(|value| value.to_str().ok())
             .filter(|value| value.len() <= 1024)
         else {
-            return Principal::Anonymous;
+            return Principal::anonymous();
         };
         let Some((scheme, encoded)) = header.split_once(' ') else {
-            return Principal::Anonymous;
+            return Principal::anonymous();
         };
         if !scheme.eq_ignore_ascii_case("Basic") {
-            return Principal::Anonymous;
+            return Principal::anonymous();
         }
         let Ok(decoded) = STANDARD.decode(encoded) else {
-            return Principal::Anonymous;
+            return Principal::anonymous();
         };
         let Some(token) = std::str::from_utf8(&decoded)
             .ok()
             .and_then(|value| value.strip_prefix("crab:"))
         else {
-            return Principal::Anonymous;
+            return Principal::anonymous();
         };
         self.load_git_token(key(token))
             .await
-            .map(Principal::Git)
-            .unwrap_or(Principal::Anonymous)
+            .map(Principal::git)
+            .unwrap_or(Principal::anonymous())
     }
 
     pub(super) async fn load_git_token(&self, token_key: Key) -> Option<Arc<GitToken>> {
@@ -74,6 +74,9 @@ impl Authentication {
             .ok()?
             .0;
         let record: StoredGitToken = serde_json::from_slice(&body).ok()?;
+        if record.format != 2 || record.repository_id.is_nil() {
+            return None;
+        }
         if record.expires_at <= now_epoch().ok()? {
             let _ = state
                 .store
@@ -89,6 +92,7 @@ impl Authentication {
             return None;
         };
         let token = Arc::new(GitToken {
+            repository_id: record.repository_id,
             session,
             owner: record.owner,
             repository: record.repository,
@@ -102,6 +106,7 @@ impl Authentication {
         tokens.retain(|_, token| token.active());
         if let Some(cached) = tokens.get(&token_key) {
             if Arc::ptr_eq(&cached.session, &token.session)
+                && cached.repository_id == token.repository_id
                 && cached.owner == token.owner
                 && cached.repository == token.repository
                 && cached.access == token.access
@@ -123,6 +128,8 @@ impl Authentication {
     ) -> Result<(), AuthError> {
         let state = &self.state;
         let record = StoredGitToken {
+            format: 2,
+            repository_id: token.repository_id,
             session_key: token.session.session_key,
             owner: token.owner.clone(),
             repository: token.repository.clone(),
@@ -253,23 +260,33 @@ pub(crate) async fn issue_git_token(
     let repository = server
         .repositories
         .get(&(request.owner.clone(), request.repository.clone()))
-        .filter(|repo| match request.access {
-            GitTokenAccess::Read => principal.can_read(&repo.config),
-            GitTokenAccess::Write => principal.can_write(&repo.config),
-        })
         .ok_or(AuthError::Forbidden)?;
-    let Principal::User(session) = principal else {
+    let Some(session) = principal.user_session() else {
         return Err(AuthError::Invalid);
     };
     if !session.active() {
         return Err(AuthError::Invalid);
+    }
+    let current = crate::app::membership(&server, &principal, &repository)
+        .await
+        .map_err(|error| match error {
+            crate::app::Error::NotFound => AuthError::Forbidden,
+            error => AuthError::Authority(Box::new(error)),
+        })?;
+    let allowed = match request.access {
+        GitTokenAccess::Read => current.principal.can_read(repository.id),
+        GitTokenAccess::Write => current.principal.can_write(repository.id),
+    };
+    if !allowed {
+        return Err(AuthError::Forbidden);
     }
     let token = format!("crab_git_{}", CsrfToken::new_random_len(32).secret());
     let expires_in = session.expires_at.saturating_sub(now_epoch()?);
     auth.store_git_token(
         key(&token),
         Arc::new(GitToken {
-            session,
+            repository_id: repository.id,
+            session: Arc::clone(session),
             owner: repository.config.owner.clone(),
             repository: repository.config.name.clone(),
             access: match request.access {
@@ -291,10 +308,10 @@ pub(crate) async fn revoke_git_tokens(
     Extension(principal): Extension<Principal>,
 ) -> Result<StatusCode, AuthError> {
     let auth = server.auth.as_ref().ok_or(AuthError::Invalid)?;
-    let Principal::User(session) = principal else {
+    let Some(session) = principal.user_session() else {
         return Err(AuthError::Invalid);
     };
-    auth.remove_git_tokens(&session).await?;
+    auth.remove_git_tokens(session).await?;
     Ok(StatusCode::NO_CONTENT)
 }
 

@@ -30,6 +30,12 @@ async fn json_request(
 #[tokio::test(flavor = "multi_thread")]
 async fn pull_requests_follow_live_branches_and_persist_discussion_state() {
     let server = fixtures::fixture().await;
+    server
+        .cells()
+        .unwrap()
+        .initialize(crate::cells::Address::Directory)
+        .await
+        .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let stop = CancellationToken::new();
@@ -67,7 +73,17 @@ async fn pull_requests_follow_live_branches_and_persist_discussion_state() {
     let first_head = git::success(path, &["rev-parse", "HEAD"]).await;
     git::success(path, &["push", &git_url, "feature"]).await;
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .default_headers(reqwest::header::HeaderMap::from_iter([(
+            reqwest::header::HeaderName::from_static("x-crab-repository-id"),
+            server.repositories.values()[0]
+                .id
+                .to_string()
+                .parse()
+                .unwrap(),
+        )]))
+        .build()
+        .unwrap();
     let root = format!("http://127.0.0.1:{port}/api/repos/team/repo/pulls");
     let input = json!({
         "request_id":"00000000-0000-4000-8000-000000000001",
@@ -165,9 +181,25 @@ async fn pull_requests_follow_live_branches_and_persist_discussion_state() {
     let review = json!({
         "request_id":"00000000-0000-4000-8000-000000000003",
         "body":"I left notes without deciding on my own change.",
-        "state":"commented"
+        "state":"commented", "commit_oid":first_head
     });
     let review_url = format!("{pull_url}/reviews");
+    for (commit, expected) in [
+        (None, StatusCode::UNPROCESSABLE_ENTITY),
+        (Some("0".repeat(40)), StatusCode::BAD_REQUEST),
+        (Some("A".repeat(40)), StatusCode::BAD_REQUEST),
+        (Some("g".repeat(40)), StatusCode::BAD_REQUEST),
+        (Some("a".repeat(39)), StatusCode::BAD_REQUEST),
+    ] {
+        let mut invalid = review.clone();
+        if let Some(commit) = commit {
+            invalid["commit_oid"] = json!(commit);
+        } else {
+            invalid.as_object_mut().unwrap().remove("commit_oid");
+        }
+        let response = json_request(&client, reqwest::Method::POST, &review_url, invalid).await;
+        assert_eq!(response.0, expected);
+    }
     let created_review =
         json_request(&client, reqwest::Method::POST, &review_url, review.clone()).await;
     assert_eq!(created_review.0, StatusCode::CREATED);
@@ -181,7 +213,7 @@ async fn pull_requests_follow_live_branches_and_persist_discussion_state() {
             json!({
                 "request_id":"00000000-0000-4000-8000-000000000004",
                 "body":"Self approval is forbidden.",
-                "state":"approved"
+                "state":"approved", "commit_oid":first_head
             }),
         )
         .await
@@ -211,6 +243,7 @@ async fn pull_requests_follow_live_branches_and_persist_discussion_state() {
     .unwrap();
     assert_eq!(reviews["items"][0]["commit_oid"], first_head);
     assert_eq!(reviews["items"][0]["current"], false);
+    assert_eq!(reviews["head_oid"], second_head);
 
     assert_eq!(
         json_request(
@@ -232,13 +265,15 @@ async fn pull_requests_follow_live_branches_and_persist_discussion_state() {
     .await;
     assert_eq!(closed.0, StatusCode::OK);
     assert_eq!(closed.1["state"], "closed");
+    assert_eq!(closed.1["closed_at"], closed.1["updated_at"]);
+    assert_eq!(closed.1["merged_at"], Value::Null);
     let recovered_review = json_request(&client, reqwest::Method::POST, &review_url, review).await;
     assert_eq!(recovered_review.0, StatusCode::CREATED);
     assert_eq!(recovered_review.1["number"], 1);
     assert_eq!(recovered_review.1["current"], false);
     let closed_list: Value = serde_json::from_slice(
         &client
-            .get(format!("{root}?state=closed"))
+            .get(format!("{root}?q=is:closed"))
             .send()
             .await
             .unwrap()
@@ -248,9 +283,10 @@ async fn pull_requests_follow_live_branches_and_persist_discussion_state() {
     )
     .unwrap();
     assert_eq!(closed_list["items"][0]["number"], 1);
+    assert_eq!(closed_list["items"][0]["closed_at"], closed.1["closed_at"]);
     let searched: Value = serde_json::from_slice(
         &client
-            .get(format!("{root}?state=closed&q=PLEASE%20REVIEW"))
+            .get(format!("{root}?q=is:closed%20PLEASE%20REVIEW"))
             .send()
             .await
             .unwrap()
@@ -260,6 +296,28 @@ async fn pull_requests_follow_live_branches_and_persist_discussion_state() {
     )
     .unwrap();
     assert_eq!(searched["items"][0]["number"], 1);
+    for (query, expected) in [
+        (
+            "is:closed (readme OR missing) AND \"Please review\" no:label",
+            1,
+        ),
+        ("is:pr is:closed -is:merged draft:false", 1),
+        ("is:closed (is:issue OR draft:true)", 0),
+    ] {
+        let response = client
+            .get(&root)
+            .query(&[("q", query)])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let response: Value = response.json().await.unwrap();
+        assert_eq!(
+            response["items"].as_array().unwrap().len(),
+            expected,
+            "{query}"
+        );
+    }
 
     git::success(path, &["checkout", "main"]).await;
     git::success(path, &["push", &git_url, ":refs/heads/feature"]).await;
@@ -317,6 +375,7 @@ async fn pull_creation_rejects_invalid_branch_pairs_before_writing_app_state() {
                     .method("POST")
                     .uri("/api/repos/team/repo/pulls")
                     .header("host", "localhost:8788")
+                    .header("x-crab-repository-id", repo.id.to_string())
                     .header("content-type", "application/json")
                     .body(axum::body::Body::from(
                         json!({
@@ -348,6 +407,12 @@ async fn pull_creation_rejects_invalid_branch_pairs_before_writing_app_state() {
 #[tokio::test(flavor = "multi_thread")]
 async fn pull_request_merge_methods_use_canonical_ref_publication() {
     let mut server = fixtures::fixture().await;
+    server
+        .cells()
+        .unwrap()
+        .initialize(crate::cells::Address::Directory)
+        .await
+        .unwrap();
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let port = listener.local_addr().unwrap().port();
     let mutable = Arc::get_mut(&mut server).unwrap();
@@ -431,7 +496,17 @@ async fn pull_request_merge_methods_use_canonical_ref_publication() {
         "main"
     );
 
-    let client = reqwest::Client::new();
+    let client = reqwest::Client::builder()
+        .default_headers(reqwest::header::HeaderMap::from_iter([(
+            reqwest::header::HeaderName::from_static("x-crab-repository-id"),
+            server.repositories.values()[0]
+                .id
+                .to_string()
+                .parse()
+                .unwrap(),
+        )]))
+        .build()
+        .unwrap();
     let root = format!("http://127.0.0.1:{port}/api/repos/team/repo/pulls");
     let created = json_request(
         &client,
@@ -506,6 +581,8 @@ async fn pull_request_merge_methods_use_canonical_ref_publication() {
     .await;
     assert_eq!(merged.0, StatusCode::OK);
     assert_eq!(merged.1["state"], "merged");
+    assert_eq!(merged.1["closed_at"], merged.1["updated_at"]);
+    assert_eq!(merged.1["merged_at"], merged.1["closed_at"]);
     assert_eq!(merged.1["base_oid"], base);
     assert_eq!(merged.1["head_oid"], head);
     assert_eq!(merged.1["merge"]["commit_oid"], head);
@@ -594,6 +671,19 @@ async fn pull_request_merge_methods_use_canonical_ref_publication() {
     )
     .await;
     assert_eq!(second.0, StatusCode::CREATED);
+    let review = json_request(
+        &client,
+        reqwest::Method::POST,
+        &format!("{root}/2/reviews"),
+        json!({
+            "request_id":uuid::Uuid::now_v7(),
+            "body":"Reviewed source head",
+            "state":"commented",
+            "commit_oid":conflict_head
+        }),
+    )
+    .await;
+    assert_eq!(review.0, StatusCode::CREATED);
     let merge_commit = json_request(
         &client,
         reqwest::Method::POST,
@@ -610,6 +700,43 @@ async fn pull_request_merge_methods_use_canonical_ref_publication() {
     .await;
     assert_eq!(merge_commit.0, StatusCode::OK, "{}", merge_commit.1);
     assert_eq!(merge_commit.1["merge"]["method"], "merge_commit");
+    let reviews: Value = client
+        .get(format!("{root}/2/reviews"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(reviews["head_oid"], conflict_head);
+    assert_eq!(reviews["items"][0]["commit_oid"], conflict_head);
+    assert_eq!(reviews["items"][0]["current"], true);
+    let participants: Value = client
+        .get(format!("{root}/2/reviewers"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(participants["items"][0]["review"]["current"], true);
+    assert_eq!(participants["head_oid"], conflict_head);
+    let conversation: Value = client
+        .get(format!("{root}/2/conversation?focus=review:1"))
+        .send()
+        .await
+        .unwrap()
+        .error_for_status()
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    assert_eq!(conversation["head_oid"], conflict_head);
+    assert_eq!(conversation["items"][0]["value"]["current"], true);
     assert_eq!(
         merge_commit.1["merge"]["message"],
         "Merge the diverged change"

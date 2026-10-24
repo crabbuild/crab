@@ -112,7 +112,7 @@ pub(crate) struct PullRecord {
     pub head_ref: String,
     pub head_oid: String,
     pub label_ids: Vec<u64>,
-    pub assignee_subjects: Vec<String>,
+    pub assignees: Vec<super::assignments::Assignee>,
     pub merge_pending: Option<PullMerge>,
     pub merge: Option<PullMerge>,
     pub review_decisions: Vec<PullReviewDecision>,
@@ -132,16 +132,19 @@ pub(crate) struct PullSummary {
     pub base_ref: String,
     pub head_ref: String,
     pub label_ids: Vec<u64>,
-    pub assignee_subjects: Vec<String>,
+    pub assignees: Vec<super::assignments::Assignee>,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
+    pub version: u64,
+    pub closed_at_ms: Option<u64>,
+    pub merged_at_ms: Option<u64>,
+    pub comment_count: u64,
+    pub reaction_count: u64,
 }
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
-pub(crate) struct PullPage {
-    pub items: Vec<PullSummary>,
-    pub next: Option<u64>,
+impl super::search::index::Labelled for PullSummary {
+    fn label_ids(&self) -> &[u64] {
+        &self.label_ids
+    }
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -186,15 +189,6 @@ pub(crate) struct PullSubmissionKey {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
-pub(crate) struct PullListInput {
-    pub before: Option<u64>,
-    pub limit: u8,
-    pub state: u8,
-    pub query: Option<String>,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
-#[serde(deny_unknown_fields)]
 pub(crate) struct PullChildListInput {
     pub pull: u64,
     pub before: Option<u64>,
@@ -218,6 +212,7 @@ pub(crate) struct PullReviewPage {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct CreatePullInput {
+    pub metadata: super::collaboration::creation::Input,
     #[serde(default)]
     pub draft: bool,
     pub submission_id: [u8; 16],
@@ -232,6 +227,7 @@ pub(crate) struct CreatePullInput {
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 pub(crate) enum CreatePullOutcome {
+    MetadataRejected(super::collaboration::creation::Failure),
     Archived,
     Created(Box<PullRecord>),
     RequestConflict,
@@ -242,13 +238,13 @@ pub(crate) enum CreatePullOutcome {
 pub(crate) struct UpdatePullInput {
     pub number: u64,
     pub actor: RepositoryAuthor,
-    pub can_manage: bool,
+    pub can_triage: bool,
     pub version: u64,
     pub title: Option<String>,
     pub body: Option<String>,
     pub state: Option<PullState>,
     pub label_ids: Option<Vec<u64>>,
-    pub assignee_subjects: Option<Vec<String>>,
+    pub assignees: Option<Vec<super::assignments::Assignee>>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -382,10 +378,18 @@ pub(crate) enum TransitionPullMergeOutcome {
 mod operations;
 pub(crate) use operations::{CreatePull, GetPull, GetPullSubmission, ListPulls, UpdatePull};
 
-mod comments;
+pub(in crate::cells::repository) mod comments;
 pub(crate) use comments::{CreatePullComment, GetPullComment, ListPullComments, UpdatePullComment};
 
+pub(in crate::cells::repository) mod lifecycle;
+pub(crate) mod reviewers;
+pub(crate) mod rollups;
+pub(crate) use lifecycle::{
+    GetPullDetail, GetPullLifecycleStatus, PreparePullLifecycle, PullLifecycle,
+};
+
 mod reviews;
+pub(crate) use reviews::dismissals as review_dismissals;
 pub(crate) use reviews::{
     CreatePullReview, GetPullReview, GetPullReviewSubmission, ListPullReviews, UpdatePullReview,
 };
@@ -410,7 +414,26 @@ mod tests;
 
 pub(crate) mod review_requests;
 
-mod readiness;
+pub(in crate::cells::repository) mod readiness;
 pub(crate) use readiness::{
     PullReadiness, SetPullReadiness, SetPullReadinessInput, SetPullReadinessOutcome,
 };
+
+pub(in crate::cells::repository) fn review_source(
+    context: &Transaction<'_>,
+    pull: u64,
+) -> crate::cells::Result<(String, String, Option<String>)> {
+    let rows = context.query(
+        "SELECT base_ref, head_ref, completed_merge FROM repository_pulls WHERE number=?",
+        &[integer(pull)?],
+    )?;
+    let row = rows.rows.first().ok_or(crate::cells::Error::Invalid(
+        "pull review source is missing",
+    ))?;
+    let merged: Option<PullMerge> = storage::decode_optional_record(&row[2])?;
+    Ok((
+        result_text(row, 0)?,
+        result_text(row, 1)?,
+        merged.map(|value| value.head_oid),
+    ))
+}

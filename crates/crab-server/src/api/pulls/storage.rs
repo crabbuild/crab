@@ -7,13 +7,13 @@ use crate::{
     cells::repository::{
         CreatePull, CreatePullComment, CreatePullCommentInput, CreatePullCommentOutcome,
         CreatePullInput, CreatePullOutcome, CreatePullReview, CreatePullReviewInput,
-        CreatePullReviewOutcome, GetPull, GetPullComment, GetPullMergeSubmission, GetPullReview,
-        GetPullReviewSubmission, GetPullSubmission, ListPullComments, ListPullReviews, ListPulls,
-        PullChildKey, PullChildListInput, PullListInput, PullMergeTransition, PullRecord,
-        PullSubmissionKey, ReservePullMerge, ReservePullMergeInput, ReservePullMergeOutcome,
-        TransitionPullMerge, TransitionPullMergeInput, TransitionPullMergeOutcome, UpdatePull,
-        UpdatePullComment, UpdatePullCommentInput, UpdatePullCommentOutcome, UpdatePullInput,
-        UpdatePullOutcome, UpdatePullReview, UpdatePullReviewInput, UpdatePullReviewOutcome,
+        CreatePullReviewOutcome, GetPull, GetPullComment, GetPullMergeSubmission,
+        GetPullReviewSubmission, GetPullSubmission, ListPullComments, PullChildKey,
+        PullChildListInput, PullMergeTransition, PullRecord, PullSubmissionKey, ReservePullMerge,
+        ReservePullMergeInput, ReservePullMergeOutcome, TransitionPullMerge,
+        TransitionPullMergeInput, TransitionPullMergeOutcome, UpdatePull, UpdatePullComment,
+        UpdatePullCommentInput, UpdatePullCommentOutcome, UpdatePullInput, UpdatePullOutcome,
+        UpdatePullReview, UpdatePullReviewInput, UpdatePullReviewOutcome,
     },
     repository::Repository,
     server::Server,
@@ -59,7 +59,7 @@ pub(super) struct PullRequest {
     pub head_ref: String,
     pub head_oid: String,
     pub label_ids: Vec<u64>,
-    pub assignee_subjects: Vec<String>,
+    pub assignees: Vec<crate::cells::repository::assignments::Assignee>,
     pub merge_pending: Option<PullMerge>,
     pub merge: Option<PullMerge>,
     pub review_decisions: Vec<PullReviewDecision>,
@@ -68,46 +68,19 @@ pub(super) struct PullRequest {
     pub updated_at: u64,
 }
 
-#[derive(Clone, Debug)]
-pub(super) struct PullSummary {
-    pub draft: bool,
-    pub number: u64,
-    pub author: Identity,
-    pub title: String,
-    pub state: PullState,
-    pub base_ref: String,
-    pub head_ref: String,
-    pub label_ids: Vec<u64>,
-    pub assignee_subjects: Vec<String>,
-    pub created_at: u64,
-    pub updated_at: u64,
-}
-
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
-pub(super) struct PullComment {
+pub(in crate::api) struct PullComment {
     pub number: u64,
     pub author: Identity,
     pub body: String,
-    pub version: u64,
-    pub created_at: u64,
-    pub updated_at: u64,
-}
-
-#[derive(Clone, Debug, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub(super) struct PullReview {
-    pub number: u64,
-    pub author: Identity,
-    pub body: String,
-    pub state: ReviewState,
-    pub commit_oid: String,
     pub version: u64,
     pub created_at: u64,
     pub updated_at: u64,
 }
 
 pub(super) struct NewPullRequest {
+    pub metadata: crate::cells::repository::collaboration::creation::Input,
     pub draft: bool,
     pub author: Identity,
     pub request_id: String,
@@ -121,13 +94,13 @@ pub(super) struct NewPullRequest {
 
 pub(super) struct PullEdit {
     pub actor: Identity,
-    pub can_manage: bool,
+    pub can_triage: bool,
     pub version: u64,
     pub title: Option<String>,
     pub body: Option<String>,
     pub state: Option<PullState>,
     pub label_ids: Option<Vec<u64>>,
-    pub assignee_subjects: Option<Vec<String>>,
+    pub assignees: Option<Vec<crate::cells::repository::assignments::Assignee>>,
 }
 
 pub(super) struct NewPullReview {
@@ -146,6 +119,28 @@ pub(super) struct NewPullMerge {
     pub base_oid: String,
     pub head_oid: String,
     pub message: String,
+}
+
+pub(super) struct PullDetail {
+    pub pull: PullRequest,
+    pub lifecycle: crate::cells::repository::PullLifecycle,
+}
+pub(super) async fn detail(
+    server: &Server,
+    repo: &Repository,
+    number: u64,
+) -> Result<Option<PullDetail>> {
+    let routed = crate::app::repository_cell(server, repo)?;
+    let detail = crate::app::query_output(
+        routed
+            .client
+            .query::<crate::cells::repository::GetPullDetail>(&routed.target, None, number)
+            .await,
+    )?;
+    Ok(detail.map(|value| PullDetail {
+        pull: from_pull(value.pull),
+        lifecycle: value.lifecycle,
+    }))
 }
 
 pub(super) async fn pull(
@@ -167,7 +162,7 @@ pub(super) async fn pull_submission(
     server: &Server,
     repo: &Repository,
     request_id: &str,
-) -> Result<Option<PullRequest>> {
+) -> Result<Option<crate::cells::repository::collaboration::creation::Comparison>> {
     let routed = crate::app::repository_cell(server, repo)?;
     crate::app::query_output(
         routed
@@ -182,52 +177,6 @@ pub(super) async fn pull_submission(
             )
             .await,
     )
-    .map(|pull| pull.map(from_pull))
-}
-
-pub(super) async fn list_pulls(
-    server: &Server,
-    repo: &Repository,
-    before: Option<u64>,
-    limit: u8,
-    state: u8,
-    query: Option<String>,
-) -> Result<(Vec<PullSummary>, Option<u64>)> {
-    let routed = crate::app::repository_cell(server, repo)?;
-    let page = crate::app::query_output(
-        routed
-            .client
-            .query::<ListPulls>(
-                &routed.target,
-                None,
-                PullListInput {
-                    before,
-                    limit,
-                    state,
-                    query,
-                },
-            )
-            .await,
-    )?;
-    Ok((
-        page.items
-            .into_iter()
-            .map(|item| PullSummary {
-                draft: item.draft,
-                number: item.number,
-                author: from_author(item.author),
-                title: item.title,
-                state: item.state,
-                base_ref: item.base_ref,
-                head_ref: item.head_ref,
-                label_ids: item.label_ids,
-                assignee_subjects: item.assignee_subjects,
-                created_at: item.created_at_ms,
-                updated_at: item.updated_at_ms,
-            })
-            .collect(),
-        page.next,
-    ))
 }
 
 pub(super) async fn create_pull(
@@ -243,6 +192,7 @@ pub(super) async fn create_pull(
                 &routed.target,
                 crate::app::mutation_identity()?,
                 CreatePullInput {
+                    metadata: input.metadata,
                     draft: input.draft,
                     submission_id: submission_id(&input.request_id)?,
                     author: crate::cells::repository::RepositoryAuthor::from(&input.author),
@@ -256,6 +206,7 @@ pub(super) async fn create_pull(
             )
             .await,
     )? {
+        CreatePullOutcome::MetadataRejected(reason) => Err(Error::CreationRejected(reason)),
         CreatePullOutcome::Archived => Err(Error::Archived),
         CreatePullOutcome::Created(pull) => Ok(from_pull(*pull)),
         CreatePullOutcome::RequestConflict => Err(Error::RequestConflict),
@@ -278,13 +229,13 @@ pub(super) async fn update_pull(
                 UpdatePullInput {
                     number,
                     actor: crate::cells::repository::RepositoryAuthor::from(&input.actor),
-                    can_manage: input.can_manage,
+                    can_triage: input.can_triage,
                     version: input.version,
                     title: input.title,
                     body: input.body,
                     state: input.state,
                     label_ids: input.label_ids,
-                    assignee_subjects: input.assignee_subjects,
+                    assignees: input.assignees,
                 },
             )
             .await,
@@ -420,12 +371,17 @@ pub(super) async fn reviews(
     pull: u64,
     before: Option<u64>,
     limit: u8,
-) -> Result<Option<(Vec<PullReview>, Option<u64>)>> {
+) -> Result<
+    Option<(
+        Vec<crate::cells::repository::review_dismissals::Detail>,
+        Option<u64>,
+    )>,
+> {
     let routed = crate::app::repository_cell(server, repo)?;
     let page = crate::app::query_output(
         routed
             .client
-            .query::<ListPullReviews>(
+            .query::<crate::cells::repository::review_dismissals::ListReviewDetails>(
                 &routed.target,
                 None,
                 PullChildListInput {
@@ -436,7 +392,7 @@ pub(super) async fn reviews(
             )
             .await,
     )?;
-    Ok(page.map(|page| (page.items.into_iter().map(from_review).collect(), page.next)))
+    Ok(page.map(|page| (page.items, page.next)))
 }
 
 pub(super) async fn review(
@@ -444,15 +400,18 @@ pub(super) async fn review(
     repo: &Repository,
     pull: u64,
     number: u64,
-) -> Result<Option<PullReview>> {
+) -> Result<Option<crate::cells::repository::review_dismissals::Detail>> {
     let routed = crate::app::repository_cell(server, repo)?;
     crate::app::query_output(
         routed
             .client
-            .query::<GetPullReview>(&routed.target, None, PullChildKey { pull, number })
+            .query::<crate::cells::repository::review_dismissals::GetReviewDetail>(
+                &routed.target,
+                None,
+                PullChildKey { pull, number },
+            )
             .await,
     )
-    .map(|value| value.map(from_review))
 }
 
 pub(super) async fn review_submission(
@@ -460,7 +419,7 @@ pub(super) async fn review_submission(
     repo: &Repository,
     pull: u64,
     request_id: &str,
-) -> Result<Option<PullReview>> {
+) -> Result<Option<crate::cells::repository::PullReviewRecord>> {
     let routed = crate::app::repository_cell(server, repo)?;
     crate::app::query_output(
         routed
@@ -475,7 +434,6 @@ pub(super) async fn review_submission(
             )
             .await,
     )
-    .map(|value| value.map(from_review))
 }
 
 pub(super) async fn create_review(
@@ -483,7 +441,7 @@ pub(super) async fn create_review(
     repo: &Repository,
     pull: u64,
     input: NewPullReview,
-) -> Result<PullReview> {
+) -> Result<crate::cells::repository::PullReviewRecord> {
     let routed = crate::app::repository_cell(server, repo)?;
     match crate::app::command_output(
         routed
@@ -503,7 +461,7 @@ pub(super) async fn create_review(
             .await,
     )? {
         CreatePullReviewOutcome::Archived => Err(Error::Archived),
-        CreatePullReviewOutcome::Created(review) => Ok(from_review(review)),
+        CreatePullReviewOutcome::Created(review) => Ok(review),
         CreatePullReviewOutcome::PullNotFound => Err(Error::NotFound),
         CreatePullReviewOutcome::PullClosed => {
             Err(Error::Invalid("Closed pull requests cannot be reviewed"))
@@ -525,7 +483,7 @@ pub(super) async fn update_review(
     actor: Identity,
     version: u64,
     body: String,
-) -> Result<PullReview> {
+) -> Result<crate::cells::repository::PullReviewRecord> {
     let routed = crate::app::repository_cell(server, repo)?;
     match crate::app::command_output(
         routed
@@ -543,7 +501,7 @@ pub(super) async fn update_review(
             .await,
     )? {
         UpdatePullReviewOutcome::Archived => Err(Error::Archived),
-        UpdatePullReviewOutcome::Updated(review) => Ok(from_review(review)),
+        UpdatePullReviewOutcome::Updated(review) => Ok(review),
         UpdatePullReviewOutcome::NotFound => Err(Error::NotFound),
         UpdatePullReviewOutcome::Forbidden => Err(Error::Forbidden),
         UpdatePullReviewOutcome::Conflict => Err(Error::Conflict),
@@ -735,7 +693,7 @@ pub(super) fn from_pull(value: PullRecord) -> PullRequest {
         head_ref: value.head_ref,
         head_oid: value.head_oid,
         label_ids: value.label_ids,
-        assignee_subjects: value.assignee_subjects,
+        assignees: value.assignees,
         merge_pending: value.merge_pending.map(from_merge),
         merge: value.merge.map(from_merge),
         review_decisions: value
@@ -753,23 +711,13 @@ pub(super) fn from_pull(value: PullRecord) -> PullRequest {
         updated_at: value.updated_at_ms,
     }
 }
-fn from_comment(value: crate::cells::repository::PullCommentRecord) -> PullComment {
+pub(in crate::api) fn from_comment(
+    value: crate::cells::repository::PullCommentRecord,
+) -> PullComment {
     PullComment {
         number: value.number,
         author: from_author(value.author),
         body: value.body,
-        version: value.version,
-        created_at: value.created_at_ms,
-        updated_at: value.updated_at_ms,
-    }
-}
-fn from_review(value: crate::cells::repository::PullReviewRecord) -> PullReview {
-    PullReview {
-        number: value.number,
-        author: from_author(value.author),
-        body: value.body,
-        state: value.state,
-        commit_oid: value.commit_oid,
         version: value.version,
         created_at: value.created_at_ms,
         updated_at: value.updated_at_ms,

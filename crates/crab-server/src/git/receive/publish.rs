@@ -190,7 +190,8 @@ pub(crate) async fn publish_default_branch(
     cancel: &CancellationToken,
 ) -> Result<()> {
     let entry = server.repositories.get(key).ok_or(ReceiveError::NotFound)?;
-    if !principal.can_admin(&entry.config) {
+    let current = crate::app::membership(server, principal, &entry).await?;
+    if !current.principal.can_admin(entry.id) {
         return Err(ReceiveError::Forbidden);
     }
     let leased_entry = Arc::clone(&entry);
@@ -215,7 +216,8 @@ pub(crate) async fn publish_default_branch(
                 if view.head() == branch {
                     return Ok(());
                 }
-                if !principal.can_admin(&entry.config) {
+                let current = crate::app::membership(server, principal, &entry).await?;
+                if !current.principal.can_admin(entry.id) {
                     return Err(ReceiveError::Forbidden);
                 }
                 match crab_write::capsule_protocol::retarget_head(
@@ -294,7 +296,8 @@ async fn run_request(
     cancel: &CancellationToken,
 ) -> Result<Vec<u8>> {
     let entry = server.repositories.get(key).ok_or(ReceiveError::NotFound)?;
-    if !principal.can_write(&entry.config) {
+    let current = crate::app::membership(server, principal, &entry).await?;
+    if !current.principal.can_write(entry.id) {
         return Err(ReceiveError::Forbidden);
     }
     let names: Vec<_> = request
@@ -398,7 +401,8 @@ async fn publish_attempt(
     cancel: &CancellationToken,
 ) -> Result<Vec<u8>> {
     check_cancelled(cancel)?;
-    if !principal.can_write(&entry.config) {
+    let current = crate::app::membership(server, principal, entry).await?;
+    if !current.principal.can_write(entry.id) {
         return Err(ReceiveError::Forbidden);
     }
     let defer_readiness = input.defer_readiness;
@@ -692,7 +696,10 @@ async fn commit_prepared(
     cancel: &CancellationToken,
 ) -> Result<crab_remote::prepare::CapsuleCommitOutcome> {
     check_cancelled(cancel)?;
-    if !principal.can_write(&entry.config) {
+    // Pack preparation can outlive a grant. Revalidate while the ref lease is
+    // held so a permission downgrade cannot use an earlier request snapshot.
+    let current = crate::app::membership(server, principal, entry).await?;
+    if !current.principal.can_write(entry.id) {
         return Err(ReceiveError::Forbidden);
     }
     principal.identity().ok_or(ReceiveError::Forbidden)?;

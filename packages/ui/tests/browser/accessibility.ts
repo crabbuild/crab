@@ -2,11 +2,11 @@ import AxeBuilder from "@axe-core/playwright";
 import { expect, type Page } from "@playwright/test";
 
 export async function expectNoAccessibilityViolations(page: Page) {
-  // TooltipV2 opens on hover and fades in. Move the pointer away and wait
-  // for the popover to close so axe never samples a half-transparent overlay.
+  // Radix retains closing tooltips until their exit animation ends. Move the
+  // pointer away and await removal so axe audits the settled page contrast.
   await page.mouse.move(0, 0);
   await expect(
-    page.locator('[data-component="Tooltip"][popover]:popover-open'),
+    page.locator('[data-slot="tooltip-content"][data-state="closed"]'),
   ).toHaveCount(0);
   const result = await new AxeBuilder({ page })
     .withTags([

@@ -2,12 +2,18 @@
 
 use serde::{Deserialize, Serialize};
 
-use super::{RepositoryTransaction, SqlBatch, SqlValue, integer, statement, validate_number};
+use super::{SqlBatch, SqlValue, Transaction, integer, statement, validate_number};
 
 pub(crate) mod activity;
+pub(crate) mod bulk;
+pub(crate) mod conversation;
+pub(crate) mod creation;
+pub(crate) mod lifecycle;
 pub(crate) mod links;
 pub(crate) mod milestones;
 pub(crate) mod reactions;
+pub(crate) mod state;
+pub(crate) mod submissions;
 mod target;
 pub(crate) use target::Target;
 
@@ -36,10 +42,7 @@ impl Subject {
         format!("{kind}/{:016x}", self.number)
     }
 
-    pub(crate) fn closed(
-        self,
-        context: &RepositoryTransaction<'_>,
-    ) -> crate::cells::Result<Option<bool>> {
+    pub(crate) fn closed(self, context: &Transaction<'_>) -> crate::cells::Result<Option<bool>> {
         validate_number(self.number)?;
         let query = match self.kind {
             SubjectKind::Issue => "SELECT state FROM repository_issues WHERE number = ?",
@@ -81,7 +84,7 @@ pub(crate) enum SubjectState {
 impl Subject {
     pub(crate) fn summary(
         self,
-        context: &RepositoryTransaction<'_>,
+        context: &Transaction<'_>,
     ) -> crate::cells::Result<Option<SubjectSummary>> {
         validate_number(self.number)?;
         let query = match self.kind {

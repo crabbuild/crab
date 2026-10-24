@@ -5,15 +5,23 @@ mod branches;
 mod catalog;
 mod checks;
 mod contents;
+mod conversation;
+mod discussion_bulk;
+mod discussion_creation;
+mod discussion_search;
+mod discussion_state;
 mod issues;
 mod labels;
 mod links;
 mod members;
 mod milestones;
+mod organizations;
+mod profiles;
 mod pulls;
 mod reactions;
 mod releases;
 mod statuses;
+mod write;
 
 mod query;
 mod representation;
@@ -220,7 +228,7 @@ pub(crate) async fn read(
     let Some(entry) = server
         .repositories
         .get(&(owner, name))
-        .filter(|entry| principal.can_read(&entry.config))
+        .filter(|entry| principal.can_read(entry.id))
     else {
         return (
             StatusCode::NOT_FOUND,
@@ -285,7 +293,7 @@ pub(crate) async fn read(
         let repository = &opened.git;
         generation = Some(repository.generation());
         let projection_source = if matches!(action, Action::TreeAttribution) {
-            if let Some(router) = server.repository_cells() {
+            if let Some(router) = server.cells() {
                 // Attribution must identify the same immutable snapshot as the
                 // directory reader, even if refs advance during this request.
                 let source = &opened.source;
@@ -410,9 +418,14 @@ pub(crate) async fn read(
 
 pub(crate) fn routes(server: Arc<Server>) -> axum::Router<Arc<Server>> {
     axum::Router::new()
+        .merge(profiles::routes(Arc::clone(&server)))
+        .merge(organizations::routes(Arc::clone(&server)))
         .merge(members::routes())
         .merge(milestones::routes(Arc::clone(&server)))
         .merge(activity::routes(Arc::clone(&server)))
+        .merge(conversation::routes(Arc::clone(&server)))
+        .merge(discussion_state::routes(Arc::clone(&server)))
+        .merge(discussion_bulk::routes(Arc::clone(&server)))
         .merge(links::routes(Arc::clone(&server)))
         .merge(reactions::routes(Arc::clone(&server)))
         .merge(assignees::routes(Arc::clone(&server)))
@@ -420,6 +433,7 @@ pub(crate) fn routes(server: Arc<Server>) -> axum::Router<Arc<Server>> {
         .merge(checks::routes(Arc::clone(&server)))
         .merge(contents::routes())
         .merge(issues::routes(Arc::clone(&server)))
+        .merge(discussion_search::routes(Arc::clone(&server)))
         .merge(labels::routes(Arc::clone(&server)))
         .merge(releases::routes(Arc::clone(&server)))
         .merge(pulls::routes(Arc::clone(&server)))

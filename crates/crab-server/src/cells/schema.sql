@@ -68,7 +68,7 @@ CREATE TABLE repository_issues (
     body TEXT NOT NULL,
     state INTEGER NOT NULL DEFAULT 0 CHECK (state IN (0, 1)),
     label_ids BLOB NOT NULL DEFAULT X'00000000',
-    assignee_subjects BLOB NOT NULL DEFAULT X'00000000',
+    assignees BLOB NOT NULL DEFAULT X'00000000',
     version INTEGER NOT NULL DEFAULT 1 CHECK (version BETWEEN 1 AND 9007199254740991),
     created_at_ms INTEGER NOT NULL CHECK (created_at_ms >= 0),
     updated_at_ms INTEGER NOT NULL CHECK (updated_at_ms >= created_at_ms)
@@ -198,7 +198,7 @@ CREATE TABLE repository_pulls (
     head_ref TEXT NOT NULL,
     head_oid TEXT NOT NULL CHECK (length(head_oid) = 40),
     label_ids BLOB NOT NULL DEFAULT X'00000000',
-    assignee_subjects BLOB NOT NULL DEFAULT X'00000000',
+    assignees BLOB NOT NULL DEFAULT X'00000000',
     pending_merge BLOB CHECK (pending_merge IS NULL OR length(pending_merge) <= 131072),
     completed_merge BLOB CHECK (completed_merge IS NULL OR length(completed_merge) <= 131072),
     version INTEGER NOT NULL DEFAULT 1 CHECK (version BETWEEN 1 AND 9007199254740991),

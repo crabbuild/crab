@@ -21,7 +21,7 @@ fn identity() -> MutationIdentity {
 }
 fn cell(server: &crate::server::Server) -> RepositoryCell {
     server
-        .repository_cells()
+        .cells()
         .unwrap()
         .repository(server.repositories.values()[0].id)
         .unwrap()
@@ -37,6 +37,7 @@ async fn create_issue(cell: &RepositoryCell) {
     let result = write::<CreateIssue>(
         cell,
         CreateIssueInput {
+            metadata: Default::default(),
             submission_id: *Uuid::now_v7().as_bytes(),
             author: actor("alice"),
             title: "Discuss".into(),
@@ -177,6 +178,7 @@ async fn every_discussion_target_is_scoped_to_its_parent() {
     write::<CreatePull>(
         &cell,
         CreatePullInput {
+            metadata: Default::default(),
             draft: false,
             submission_id: *Uuid::now_v7().as_bytes(),
             author: actor("alice"),
@@ -368,6 +370,7 @@ async fn native_restart_restores_actor_memberships_counts_and_command_receipts()
             &repository,
             identity(),
             CreateIssueInput {
+                metadata: Default::default(),
                 submission_id: *Uuid::now_v7().as_bytes(),
                 author: actor("alice"),
                 title: "Durable reactions".into(),

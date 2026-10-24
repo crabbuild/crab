@@ -26,7 +26,8 @@ test("Git tokens require a repository and keep secrets tied to that selection", 
     if (path === "/api/repos")
       return route.fulfill({
         json: {
-          repositories: ["first", "second"].map((name) => ({
+          repositories: ["first", "second"].map((name, index) => ({
+            id: `00000000-0000-4000-8000-${String(index + 1).padStart(12, "0")}`,
             owner: "team",
             name,
             description: "",
@@ -68,7 +69,7 @@ test("Git tokens require a repository and keep secrets tied to that selection", 
   await selectDarkTheme(page);
   await page.getByText("Credential manager setup", { exact: true }).click();
   await expect(page.locator(".credential-setup code")).toHaveText(
-    "git config --global 'credential.http://127.0.0.1:5175.useHttpPath' true",
+    `git config --global 'credential.${new URL(page.url()).origin}.useHttpPath' true`,
   );
   const generate = page.getByRole("button", {
     name: "Generate token",

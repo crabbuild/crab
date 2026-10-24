@@ -195,7 +195,7 @@ pub(crate) async fn download(
     let entry = server
         .repositories
         .get(&(owner, name))
-        .filter(|entry| principal.can_read(&entry.config))
+        .filter(|entry| principal.can_read(entry.id))
         .ok_or(Error::NotFound)?;
     let cancellation = server.cancellation.child_token();
     let permit = server.acquire_transfer(&cancellation).await?;

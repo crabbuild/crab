@@ -1,6 +1,6 @@
 use serde::{Deserialize, Serialize};
 
-use super::super::{RepositoryTransaction, SqlBatch, integer, statement, validate_number};
+use super::super::{SqlBatch, Transaction, integer, statement, validate_number};
 use super::{Subject, SubjectKind};
 
 #[derive(Clone, Copy, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -63,7 +63,7 @@ impl Target {
         }
     }
 
-    pub(super) fn exists(self, context: &RepositoryTransaction<'_>) -> crate::cells::Result<bool> {
+    pub(super) fn exists(self, context: &Transaction<'_>) -> crate::cells::Result<bool> {
         self.validate()?;
         let (query, parameters) = match self {
             Self::Issue { .. } | Self::Pull { .. } => {

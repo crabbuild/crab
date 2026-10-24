@@ -16,7 +16,7 @@ fn identity() -> MutationIdentity {
 }
 fn cell(server: &crate::server::Server) -> RepositoryCell {
     server
-        .repository_cells()
+        .cells()
         .unwrap()
         .repository(server.repositories.values()[0].id)
         .unwrap()
@@ -33,6 +33,7 @@ async fn seed(cell: &RepositoryCell, count: u64) {
         write::<CreateIssue>(
             cell,
             CreateIssueInput {
+                metadata: Default::default(),
                 submission_id: *Uuid::now_v7().as_bytes(),
                 author: actor(),
                 title: format!("Issue {number}"),
@@ -44,6 +45,7 @@ async fn seed(cell: &RepositoryCell, count: u64) {
     write::<CreatePull>(
         cell,
         CreatePullInput {
+            metadata: Default::default(),
             draft: false,
             submission_id: *Uuid::now_v7().as_bytes(),
             author: actor(),
@@ -194,15 +196,16 @@ async fn linked_work_uses_live_subject_summaries_and_exclusive_pages() {
     write::<UpdateIssue>(
         &cell,
         UpdateIssueInput {
+            state_reason: None,
             number: 2,
             version: 1,
             actor: actor(),
-            can_manage_metadata: false,
+            can_triage: false,
             title: Some("Renamed".into()),
             body: None,
             state: Some(1),
             label_ids: None,
-            assignee_subjects: None,
+            assignees: None,
         },
     )
     .await;

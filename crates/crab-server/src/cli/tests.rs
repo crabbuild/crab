@@ -100,6 +100,19 @@ fn healthcheck_uses_the_stable_tls_name_against_the_local_listener() {
         resolution,
         Some(("crab-server-peer".into(), "127.0.0.1:8789".parse().unwrap()))
     );
+    let (url, resolution) = management_target(&config, "/internal/organizations/00000000-0000-4000-8000-000000000001/teams?actor=00000000-0000-4000-8000-000000000002").unwrap();
+    assert_eq!(
+        url.path(),
+        "/internal/organizations/00000000-0000-4000-8000-000000000001/teams"
+    );
+    assert_eq!(
+        url.query(),
+        Some("actor=00000000-0000-4000-8000-000000000002")
+    );
+    assert_eq!(
+        resolution,
+        Some(("crab-server-peer".into(), "127.0.0.1:8789".parse().unwrap()))
+    );
 }
 
 #[test]

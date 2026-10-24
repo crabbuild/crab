@@ -13,12 +13,12 @@ use cellar::{
 };
 use tokio::net::TcpListener;
 
-use super::{Error, RepositoryClient, Result, application};
+use super::{CellClient, Error, Result, application, directory, organization, repository};
 use crate::{CellDurabilityMode, Config};
 
 pub(crate) struct RunningCells {
     pub node: Node,
-    pub client: Arc<RepositoryClient>,
+    pub client: Arc<CellClient>,
 }
 
 pub(crate) fn bucket(config: &Config) -> Result<Bucket> {
@@ -217,7 +217,7 @@ pub(crate) async fn start_with_bucket(
         .map_err(Error::sdk)?;
     Ok(RunningCells {
         node,
-        client: Arc::new(RepositoryClient::new(ingress)),
+        client: Arc::new(CellClient::new(ingress)),
     })
 }
 
@@ -232,8 +232,16 @@ fn graph() -> DeploymentGraph {
             stream_bindings: Vec::new(),
             src: String::new(),
             script_name: application::SCRIPT.into(),
-            do_classes: vec![application::CLASS.into()],
-            bindings: vec![(application::NAMESPACE.into(), application::CLASS.into())],
+            do_classes: vec![
+                repository::CLASS.into(),
+                directory::CLASS.into(),
+                organization::CLASS.into(),
+            ],
+            bindings: vec![
+                (repository::NAMESPACE.into(), repository::CLASS.into()),
+                (directory::NAMESPACE.into(), directory::CLASS.into()),
+                (organization::NAMESPACE.into(), organization::CLASS.into()),
+            ],
             sql_bindings: Vec::new(),
             kv_bindings: Vec::new(),
             blob_bindings: Vec::new(),
@@ -302,7 +310,7 @@ pub(crate) async fn test_node(
 
 #[cfg(test)]
 pub(crate) struct TestRuntime {
-    pub client: Arc<RepositoryClient>,
+    pub client: Arc<CellClient>,
     node: tokio::sync::Mutex<Option<Node>>,
     directory: Option<tempfile::TempDir>,
     closed: std::sync::atomic::AtomicBool,

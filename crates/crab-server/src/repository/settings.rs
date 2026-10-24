@@ -137,7 +137,7 @@ pub(crate) async fn replace_lifecycle(
     }
 }
 
-fn protection_record(rule: BranchProtection) -> BranchProtectionRecord {
+pub(crate) fn protection_record(rule: BranchProtection) -> BranchProtectionRecord {
     BranchProtectionRecord {
         branch: rule.branch,
         required_approvals: rule.required_approvals,

@@ -19,6 +19,10 @@ async fn publish_release(
         .header(header::COOKIE, cookie)
         .header(header::ORIGIN, &h.origin)
         .header("x-csrf-token", csrf)
+        .header(
+            "x-crab-repository-id",
+            h.server.repositories.values()[0].id.to_string(),
+        )
         .header(header::CONTENT_TYPE, "application/json")
         .body(body.to_string())
         .send()
@@ -42,6 +46,10 @@ async fn edit_release(
         .header(header::COOKIE, cookie)
         .header(header::ORIGIN, &h.origin)
         .header("x-csrf-token", csrf)
+        .header(
+            "x-crab-repository-id",
+            h.server.repositories.values()[0].id.to_string(),
+        )
         .header(header::CONTENT_TYPE, "application/json")
         .body(body.to_string())
         .send()
@@ -64,6 +72,10 @@ async fn delete_release(
         .header(header::COOKIE, cookie)
         .header(header::ORIGIN, &h.origin)
         .header("x-csrf-token", csrf)
+        .header(
+            "x-crab-repository-id",
+            h.server.repositories.values()[0].id.to_string(),
+        )
         .header(header::CONTENT_TYPE, "application/json")
         .body(json!({"version":version}).to_string())
         .send()
@@ -89,6 +101,10 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
         .header(header::COOKIE, &alice)
         .header(header::ORIGIN, &h.origin)
         .header("x-csrf-token", csrf)
+        .header(
+            "x-crab-repository-id",
+            h.server.repositories.values()[0].id.to_string(),
+        )
         .header(header::CONTENT_TYPE, "application/json")
         .body(json!({"owner":"team","repository":"private","access":"write"}).to_string())
         .send()
@@ -158,6 +174,10 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
         .post(format!("{}{RELEASES}", h.origin))
         .header(header::COOKIE, &alice)
         .header("x-csrf-token", csrf)
+        .header(
+            "x-crab-repository-id",
+            h.server.repositories.values()[0].id.to_string(),
+        )
         .header(header::CONTENT_TYPE, "application/json")
         .body(first.to_string())
         .send()
@@ -187,6 +207,10 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
         .header(header::COOKIE, &alice)
         .header(header::ORIGIN, &h.origin)
         .header("x-csrf-token", csrf)
+        .header(
+            "x-crab-repository-id",
+            h.server.repositories.values()[0].id.to_string(),
+        )
         .header(header::CONTENT_TYPE, "application/gzip")
         .body("release asset bytes")
         .send()
@@ -208,6 +232,10 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
         .header(header::COOKIE, &alice)
         .header(header::ORIGIN, &h.origin)
         .header("x-csrf-token", csrf)
+        .header(
+            "x-crab-repository-id",
+            h.server.repositories.values()[0].id.to_string(),
+        )
         .header(header::CONTENT_TYPE, "application/gzip")
         .body("release asset bytes")
         .send()
@@ -223,6 +251,7 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
         .header(header::COOKIE, &alice)
         .header(header::ORIGIN, &h.origin)
         .header("x-csrf-token", csrf)
+        .header("x-crab-repository-id", h.server.repositories.values()[0].id.to_string())
         .header(header::CONTENT_TYPE, "application/gzip")
         .body("other bytes")
         .send()
@@ -255,6 +284,10 @@ async fn browser_release_publishes_and_recovers_native_git_tags() {
         .header(header::COOKIE, &alice)
         .header(header::ORIGIN, &h.origin)
         .header("x-csrf-token", csrf)
+        .header(
+            "x-crab-repository-id",
+            h.server.repositories.values()[0].id.to_string(),
+        )
         .header(header::CONTENT_TYPE, "application/json")
         .body(json!({"version":2}).to_string())
         .send()

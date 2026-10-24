@@ -102,6 +102,15 @@ pub(crate) enum ReceiveError {
     },
 }
 
+impl From<crate::app::Error> for ReceiveError {
+    fn from(error: crate::app::Error) -> Self {
+        match error {
+            crate::app::Error::NotFound => Self::NotFound,
+            error => Self::Settings(Box::new(error)),
+        }
+    }
+}
+
 impl From<crate::transfer_admission::Error> for ReceiveError {
     fn from(error: crate::transfer_admission::Error) -> Self {
         match error {
@@ -355,9 +364,9 @@ pub(crate) async fn advertise(
     let entry = server
         .repositories
         .get(&(owner.to_owned(), name.to_owned()))
-        .filter(|entry| principal.can_read(&entry.config))
+        .filter(|entry| principal.can_read(entry.id))
         .ok_or(ReceiveError::NotFound)?;
-    if !principal.can_write(&entry.config) {
+    if !principal.can_write(entry.id) {
         return Err(ReceiveError::Forbidden);
     }
     let repository = entry
@@ -396,9 +405,9 @@ pub(crate) async fn receive(
     let entry = server
         .repositories
         .get(&(owner.clone(), name.clone()))
-        .filter(|entry| principal.can_read(&entry.config))
+        .filter(|entry| principal.can_read(entry.id))
         .ok_or(ReceiveError::NotFound)?;
-    if !principal.can_write(&entry.config) {
+    if !principal.can_write(entry.id) {
         return Err(ReceiveError::Forbidden);
     }
     if headers

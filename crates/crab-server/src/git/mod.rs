@@ -184,7 +184,7 @@ pub(crate) async fn advertise(
     if !server
         .repositories
         .get(&(owner, name))
-        .is_some_and(|entry| principal.can_read(&entry.config))
+        .is_some_and(|entry| principal.can_read(entry.id))
     {
         return Err(GitError::NotFound);
     }
@@ -227,7 +227,7 @@ pub(crate) async fn upload_pack(
     let entry = server
         .repositories
         .get(&(owner, name))
-        .filter(|entry| principal.can_read(&entry.config))
+        .filter(|entry| principal.can_read(entry.id))
         .ok_or(GitError::NotFound)?;
     if headers
         .get("content-type")

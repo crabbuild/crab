@@ -1,3 +1,4 @@
+import { conversationPage } from "./conversation";
 import { emptyReactions } from "./fixtures";
 import { expect, test, type Page } from "@playwright/test";
 import {
@@ -9,18 +10,25 @@ async function openDiscussion(page: Page) {
   const record = {
     reactions: emptyReactions(),
     number: 1,
-    author: "Alice",
+    author: { name: "Alice", profile: null },
     body: "Original description",
     version: 1,
     created_at: 1_700_000_000_000,
     updated_at: 1_700_000_000_000,
     can_edit: true,
+    can_close: true,
   };
   let issue = { ...record, title: "Keyboard discussion", state: "open" };
   const comments = [{ ...record, body: "Original comment" }];
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
+    if (path.endsWith("/issues/pins") && request.method() === "GET")
+      return route.fulfill({
+        json: { version: 0, items: [], can_manage: true },
+      });
+    if (path.endsWith("/conversation"))
+      return conversationPage(route, { comments });
     if (path.endsWith("/links"))
       return route.fulfill({
         json: { items: [], next: null, can_manage: false },
@@ -43,6 +51,7 @@ async function openDiscussion(page: Page) {
       json = {
         repositories: [
           {
+            id: "00000000-0000-4000-8000-000000000099",
             owner: "team",
             name: "project",
             description: "",
@@ -54,6 +63,20 @@ async function openDiscussion(page: Page) {
           },
         ],
       };
+    } else if (path === "/api/repos/team/project/issues/1/state") {
+      const input = request.postDataJSON();
+      if (input.version !== issue.version)
+        return route.fulfill({
+          status: 409,
+          headers: { "X-Crab-Write-Outcome": "rejected" },
+          json: { error: { code: "conflict", message: "Content changed" } },
+        });
+      issue = { ...issue, state: input.state, version: issue.version + 1 };
+      const saved = input.body
+        ? { ...record, number: comments.length + 1, body: input.body }
+        : null;
+      if (saved) comments.push(saved);
+      json = { comment: saved };
     } else if (path === "/api/repos/team/project/issues/1") {
       if (request.method() === "PATCH") {
         const update = request.postDataJSON() as {
@@ -168,7 +191,7 @@ test("comment edits restore focus and Markdown preview posts reset to Write", as
   page,
 }) => {
   await openDiscussion(page);
-  const card = page.locator("#comment-1");
+  const card = page.locator("#issuecomment-1");
   const edit = card.getByRole("button", { name: "Edit comment", exact: true });
   await edit.click();
   const editComment = page.getByRole("textbox", {
@@ -230,7 +253,7 @@ test("comment edits restore focus and Markdown preview posts reset to Write", as
   await expect(
     editor.getByRole("textbox", { name: "Comment", exact: true }),
   ).toHaveValue("");
-  await expect(page.locator("#comment-2")).toContainText("New comment");
+  await expect(page.locator("#issuecomment-2")).toContainText("New comment");
 });
 
 test("failed posts preserve drafts and slow replies do not steal focus", async ({
@@ -269,7 +292,7 @@ test("failed posts preserve drafts and slow replies do not steal focus", async (
       editor.getByRole("button", { name: "Posting…", exact: true }),
     ).toBeDisabled();
     const elsewhere = page.getByRole("button", {
-      name: "Refresh discussion",
+      name: "Refresh conversation",
       exact: true,
     });
     await elsewhere.focus();
@@ -387,7 +410,7 @@ for (const kind of ["issue", "comment"] as const) {
     const rendered =
       kind === "issue"
         ? page.locator(".issue-detail .discussion-main > .discussion-card")
-        : page.locator("#comment-1");
+        : page.locator("#issuecomment-1");
     await expect(rendered).toContainText("My additions");
     await page.reload();
     await expect(rendered).toContainText("Another concurrent edit");

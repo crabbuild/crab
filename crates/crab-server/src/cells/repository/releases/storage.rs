@@ -104,7 +104,7 @@ pub(super) fn update_release_statement(
 }
 
 pub(super) fn update_release_row(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     release: &ReleaseRecord,
     expected_version: u64,
 ) -> crate::cells::Result<()> {
@@ -124,7 +124,7 @@ fn release_select() -> &'static str {
 }
 
 pub(super) fn load_release(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     number: u64,
 ) -> crate::cells::Result<Option<ReleaseRecord>> {
     let result = context.sql(&SqlBatch { statements: vec![
@@ -139,7 +139,7 @@ pub(super) fn load_release(
 }
 
 pub(super) fn load_release_query(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     number: u64,
 ) -> crate::cells::Result<Option<ReleaseRecord>> {
     let result = context.sql(&SqlBatch { statements: vec![

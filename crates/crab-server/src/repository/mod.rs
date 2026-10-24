@@ -177,7 +177,7 @@ impl Repository {
                 maintenance::Pass::BackgroundMaintenance,
                 Some(maintenance::ProjectionContext {
                     repository_id: self.id,
-                    client: server.repository_cells().map(|router| (*router).clone()),
+                    client: server.cells().map(|router| (*router).clone()),
                     metrics: server.metrics.clone(),
                     identity: self.identity.clone(),
                     runtime: Arc::clone(&server.runtime),
@@ -219,6 +219,31 @@ impl Repository {
         )
         .await
         .map_err(Into::into)
+    }
+
+    pub(crate) async fn ref_oid(&self, name: &str) -> Result<Option<String>> {
+        let names = std::collections::BTreeSet::from([name.to_owned()]);
+        Ok(self.ref_oids(&names).await?.remove(name))
+    }
+
+    pub(crate) async fn ref_oids(
+        &self,
+        names: &std::collections::BTreeSet<String>,
+    ) -> Result<std::collections::BTreeMap<String, String>> {
+        let root = crab_metadata::capsule_protocol::load_root(&self.layout)
+            .await
+            .map_err(|source| crate::Error::Settings {
+                source: Box::new(source),
+            })?;
+        // Capture selected heads from one authoritative view. List and review
+        // freshness need no packs, browse indexes, or unrelated branches.
+        let view = crab_read::capsule_protocol::open_ref_view_from_root_for_refs(
+            &self.layout,
+            root,
+            names,
+        )
+        .await?;
+        Ok(view.refs().clone())
     }
 
     pub(crate) async fn open_ref_view(

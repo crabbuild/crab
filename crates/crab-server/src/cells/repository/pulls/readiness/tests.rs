@@ -16,13 +16,14 @@ fn identity() -> MutationIdentity {
 }
 fn cell(server: &crate::server::Server) -> RepositoryCell {
     server
-        .repository_cells()
+        .cells()
         .unwrap()
         .repository(server.repositories.values()[0].id)
         .unwrap()
 }
 fn input(draft: bool) -> CreatePullInput {
     CreatePullInput {
+        metadata: Default::default(),
         draft,
         submission_id: *Uuid::now_v7().as_bytes(),
         author: actor("Alice"),
@@ -125,11 +126,11 @@ async fn draft_creation_and_mode_conflicts_preserve_the_original_submission() {
         .query::<ListPulls>(
             &cell.target,
             None,
-            PullListInput {
+            SearchInput {
                 before: None,
                 limit: 50,
-                state: 2,
                 query: None,
+                ..Default::default()
             },
         )
         .await
@@ -407,13 +408,13 @@ async fn missing_closed_and_archived_pulls_reject_readiness_changes() {
         UpdatePullInput {
             number: 1,
             actor: actor("Alice"),
-            can_manage: false,
+            can_triage: false,
             version: 1,
             title: None,
             body: None,
             state: Some(PullState::Closed),
             label_ids: None,
-            assignee_subjects: None,
+            assignees: None,
         },
     )
     .await
@@ -491,13 +492,13 @@ async fn closing_and_reopening_a_draft_preserves_its_merge_block() {
     let close = UpdatePullInput {
         number: pull.number,
         actor: actor("Alice"),
-        can_manage: false,
+        can_triage: false,
         version: pull.version,
         title: None,
         body: None,
         state: Some(PullState::Closed),
         label_ids: None,
-        assignee_subjects: None,
+        assignees: None,
     };
     let UpdatePullOutcome::Updated(closed) = write::<UpdatePull>(&cell, close.clone()).await else {
         panic!("draft did not close")

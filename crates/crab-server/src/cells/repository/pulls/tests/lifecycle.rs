@@ -17,7 +17,7 @@ fn identity() -> MutationIdentity {
 }
 fn cell(server: &crate::server::Server) -> RepositoryCell {
     server
-        .repository_cells()
+        .cells()
         .unwrap()
         .repository(server.repositories.values()[0].id)
         .unwrap()
@@ -31,6 +31,7 @@ async fn write<M: Mutation>(cell: &RepositoryCell, input: M::Input) -> M::Output
 }
 fn input() -> CreatePullInput {
     CreatePullInput {
+        metadata: Default::default(),
         draft: false,
         submission_id: *Uuid::now_v7().as_bytes(),
         author: actor("Alice"),
@@ -76,13 +77,13 @@ fn edit(version: u64, title: &str) -> UpdatePullInput {
     UpdatePullInput {
         number: 1,
         actor: actor("Alice"),
-        can_manage: false,
+        can_triage: false,
         version,
         title: Some(title.into()),
         body: None,
         state: None,
         label_ids: None,
-        assignee_subjects: None,
+        assignees: None,
     }
 }
 async fn rejected<M: Mutation>(cell: &RepositoryCell, revision: u64, input: M::Input)

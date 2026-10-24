@@ -118,6 +118,7 @@ pub(crate) enum DeleteLabelOutcome {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct CreateIssueInput {
+    pub metadata: super::collaboration::creation::Input,
     pub submission_id: [u8; 16],
     pub author: RepositoryAuthor,
     pub title: String,
@@ -126,6 +127,7 @@ pub(crate) struct CreateIssueInput {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) enum CreateIssueOutcome {
+    MetadataRejected(super::collaboration::creation::Failure),
     Archived,
     Created(Box<IssueRecord>),
     RequestConflict,
@@ -139,7 +141,7 @@ pub(crate) struct IssueRecord {
     pub body: String,
     pub state: u8,
     pub label_ids: Vec<u64>,
-    pub assignee_subjects: Vec<String>,
+    pub assignees: Vec<super::assignments::Assignee>,
     pub version: u64,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
@@ -180,15 +182,18 @@ pub(crate) struct CommentKey {
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct UpdateIssueInput {
+    // Absence retains the persisted command digest for pre-lifecycle receipts.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub state_reason: Option<super::issues::lifecycle::Reason>,
     pub number: u64,
     pub actor: RepositoryAuthor,
-    pub can_manage_metadata: bool,
+    pub can_triage: bool,
     pub version: u64,
     pub title: Option<String>,
     pub body: Option<String>,
     pub state: Option<u8>,
     pub label_ids: Option<Vec<u64>>,
-    pub assignee_subjects: Option<Vec<String>>,
+    pub assignees: Option<Vec<super::assignments::Assignee>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -200,6 +205,7 @@ pub(crate) enum UpdateIssueOutcome {
     LabelForbidden,
     LabelInvalid,
     AssigneeForbidden,
+    InvalidStateReason,
     Conflict,
 }
 
@@ -221,30 +227,19 @@ pub(crate) enum UpdateCommentOutcome {
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct ListIssuesInput {
-    pub before: Option<u64>,
-    pub limit: u8,
-    pub state: u8,
-    pub query: Option<String>,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub(crate) struct IssueSummary {
+    pub lifecycle: super::issues::lifecycle::Lifecycle,
     pub number: u64,
     pub author: RepositoryAuthor,
     pub title: String,
     pub state: u8,
     pub label_ids: Vec<u64>,
-    pub assignee_subjects: Vec<String>,
+    pub assignees: Vec<super::assignments::Assignee>,
     pub version: u64,
     pub created_at_ms: u64,
     pub updated_at_ms: u64,
-}
-
-#[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-pub(crate) struct IssuePage {
-    pub items: Vec<IssueSummary>,
-    pub next: Option<u64>,
+    pub comment_count: u64,
+    pub reaction_count: u64,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]

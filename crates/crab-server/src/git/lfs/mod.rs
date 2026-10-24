@@ -228,9 +228,9 @@ fn repository(
     let entry = server
         .repositories
         .get(&(owner.to_owned(), name.to_owned()))
-        .filter(|entry| principal.can_read(&entry.config))
+        .filter(|entry| principal.can_read(entry.id))
         .ok_or(Error::NotFound)?;
-    if write && !principal.can_write(&entry.config) {
+    if write && !principal.can_write(entry.id) {
         return Err(Error::Forbidden);
     }
     Ok(entry)
@@ -242,6 +242,15 @@ async fn ensure_active(
     repository: &Repository,
 ) -> Result<()> {
     principal.identity().ok_or(Error::Forbidden)?;
+    let current = crate::app::membership(server, principal, repository)
+        .await
+        .map_err(|error| match error {
+            crate::app::Error::NotFound => Error::NotFound,
+            error => Error::Settings(Box::new(error)),
+        })?;
+    if !current.principal.can_write(repository.id) {
+        return Err(Error::Forbidden);
+    }
     if crate::repository::settings::load_lifecycle(server, repository)
         .await
         .map_err(|error| Error::Settings(Box::new(error)))?

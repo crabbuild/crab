@@ -1,5 +1,8 @@
+import { emptyPullRollup } from "../fixtures";
+import { conversationPage } from "../conversation";
+import type { DiscussionAuthor } from "@/components/discussion/author";
 import { expect, type Locator, type Page } from "@playwright/test";
-import { emptyReactions, emptyReviewRequests } from "../fixtures";
+import { emptyReactions, emptyReviewers } from "../fixtures";
 
 const base = "a".repeat(40);
 const head = "b".repeat(40);
@@ -8,7 +11,14 @@ const pathHex = "README.md"
   .map((character) => character.charCodeAt(0).toString(16).padStart(2, "0"))
   .join("");
 
-export async function mockPullRequest(page: Page) {
+export async function mockPullRequest(
+  page: Page,
+  profiles: Record<string, DiscussionAuthor["profile"]> = {},
+) {
+  const author = (name: string): DiscussionAuthor => ({
+    name,
+    profile: profiles[name] ?? null,
+  });
   const reactionStates = new Map<string, ReturnType<typeof emptyReactions>>();
   const reactionWrites: string[] = [];
   function reactions(target: string) {
@@ -31,9 +41,16 @@ export async function mockPullRequest(page: Page) {
     ).toHaveAttribute("aria-pressed", "true");
   }
   const lifecycle: {
+    repositoryId: string;
     state: "open" | "closed" | "merged";
     branchesAvailable: boolean;
-  } = { state: "open", branchesAvailable: true };
+    head: string;
+  } = {
+    repositoryId: "00000000-0000-4000-8000-000000000099",
+    state: "open",
+    branchesAvailable: true,
+    head,
+  };
   let created = false;
   let mergePending = false;
   let mergeRequest = "";
@@ -51,7 +68,7 @@ export async function mockPullRequest(page: Page) {
       side: "new",
       start_line: 1,
       end_line: 1,
-      author: "Bob",
+      author: author("Bob"),
       body: "Consider a clearer opening.",
       reactions: reactions("pulls/2/threads/1"),
       suggested_text: "Applied content",
@@ -82,15 +99,17 @@ export async function mockPullRequest(page: Page) {
       body: created ? "This explains the **new behavior**." : "Please review.",
       reactions: reactions(`pulls/${created ? 2 : 1}`),
       state: lifecycle.state,
-      author: "Alice",
+      author: author("Alice"),
       base_ref: "refs/heads/main",
       base_oid: base,
       head_ref: "refs/heads/feature/docs",
-      head_oid: head,
+      head_oid: lifecycle.head,
       original_base_oid: base,
-      original_head_oid: head,
+      original_head_oid: lifecycle.head,
       version: lifecycle.state === "open" ? 1 : 2,
       created_at: 1_700_000_000_000,
+      closed_at: lifecycle.state === "open" ? null : 1_700_000_060_000,
+      merged_at: lifecycle.state === "merged" ? 1_700_000_060_000 : null,
       updated_at: 1_700_000_000_000,
       can_edit: true,
       can_manage: !mergePending,
@@ -127,9 +146,9 @@ export async function mockPullRequest(page: Page) {
       merge:
         lifecycle.state === "merged"
           ? {
-              author: "Local operator",
+              author: author("Local operator"),
               method: mergeMethod,
-              commit_oid: head,
+              commit_oid: lifecycle.head,
               message: mergeMessage,
               created_at: 1_700_000_200_000,
             }
@@ -137,11 +156,11 @@ export async function mockPullRequest(page: Page) {
       merge_pending: mergePending
         ? {
             request_id: mergeRequest,
-            author: "Local operator",
+            author: author("Local operator"),
             method: mergeMethod,
             pull_version: 1,
             base_oid: base,
-            head_oid: head,
+            head_oid: lifecycle.head,
             message: mergeMessage,
             created_at: 1_700_000_150_000,
           }
@@ -152,8 +171,38 @@ export async function mockPullRequest(page: Page) {
     const request = route.request();
     const url = new URL(request.url());
     const path = url.pathname;
-    if (path.endsWith("/review-requests"))
-      return route.fulfill({ json: emptyReviewRequests() });
+    if (path.endsWith("/issues/pins") && request.method() === "GET")
+      return route.fulfill({
+        json: { version: 0, items: [], can_manage: true },
+      });
+    if (
+      url.pathname.startsWith("/api/repos/team/project/") &&
+      !["GET", "HEAD"].includes(route.request().method())
+    )
+      expect(route.request().headers()["x-crab-repository-id"]).toBe(
+        lifecycle.repositoryId,
+      );
+    if (path.endsWith("/assignees"))
+      return route.fulfill({ json: { items: [], can_manage: true } });
+    if (path.endsWith("/labels"))
+      return route.fulfill({ json: { items: [], can_manage: true } });
+    if (path.endsWith("/discussion-search"))
+      return route.fulfill({
+        json: {
+          start: 0,
+          end: (url.searchParams.get("query") ?? "").length,
+          items: [],
+          error: null,
+        },
+      });
+    if (path.endsWith("/conversation"))
+      return conversationPage(route, {
+        comments,
+        reviews,
+        head: lifecycle.branchesAvailable ? lifecycle.head : null,
+      });
+    if (path.endsWith("/reviewers"))
+      return route.fulfill({ json: emptyReviewers() });
     if (path.endsWith("/links"))
       return route.fulfill({
         json: { items: [], next: null, can_manage: false },
@@ -173,6 +222,7 @@ export async function mockPullRequest(page: Page) {
         json: {
           repositories: [
             {
+              id: lifecycle.repositoryId,
               owner: "team",
               name: "project",
               description: "A repository for our team.",
@@ -198,7 +248,7 @@ export async function mockPullRequest(page: Page) {
           unborn_head: null,
           refs: [
             { name: "refs/heads/main", oid: base },
-            { name: "refs/heads/feature/docs", oid: head },
+            { name: "refs/heads/feature/docs", oid: lifecycle.head },
           ],
           generation: 2,
         },
@@ -207,7 +257,7 @@ export async function mockPullRequest(page: Page) {
       return route.fulfill({
         json: {
           base,
-          commit: head,
+          commit: lifecycle.head,
           changes: [
             {
               path: "README.md",
@@ -235,7 +285,7 @@ export async function mockPullRequest(page: Page) {
       return route.fulfill({
         json: {
           base,
-          commit: head,
+          commit: lifecycle.head,
           path: "README.md",
           old: {
             oid: "c".repeat(40),
@@ -254,7 +304,7 @@ export async function mockPullRequest(page: Page) {
         },
       });
     if (path === "/api/repos/team/project/file") {
-      expect(url.searchParams.get("rev")).toBe(head);
+      expect(url.searchParams.get("rev")).toBe(lifecycle.head);
       expect(url.searchParams.get("path_hex")).toBe(pathHex);
       return route.fulfill({
         json: {
@@ -273,7 +323,7 @@ export async function mockPullRequest(page: Page) {
     ) {
       const input = request.postDataJSON();
       expect(input.branch).toBe("refs/heads/feature/docs");
-      expect(input.expected_head).toBe(head);
+      expect(input.expected_head).toBe(lifecycle.head);
       expect(input.expected_blob).toBe("d".repeat(40));
       expect(input.path_hex).toBe(pathHex);
       expect(input.content).toBe("Applied content\n");
@@ -284,14 +334,14 @@ export async function mockPullRequest(page: Page) {
       });
     }
     if (path === "/api/repos/team/project/commits") {
-      expect(url.searchParams.get("rev")).toBe(head);
+      expect(url.searchParams.get("rev")).toBe(lifecycle.head);
       expect(url.searchParams.get("base")).toBe(base);
       expect(url.searchParams.get("limit")).toBe("50");
       return route.fulfill({
         json: {
           items: [
             {
-              oid: head,
+              oid: lifecycle.head,
               tree: "e".repeat(40),
               parents: [base],
               author: "Alice",
@@ -303,15 +353,17 @@ export async function mockPullRequest(page: Page) {
         },
       });
     }
-    if (path === `/api/repos/team/project/commits/${head}/check-runs`) {
+    if (
+      path === `/api/repos/team/project/commits/${lifecycle.head}/check-runs`
+    ) {
       expect(url.searchParams.get("limit")).toBe("50");
       return route.fulfill({
         json: {
-          sha: head,
+          sha: lifecycle.head,
           items: [
             {
               id: 7,
-              head_sha: head,
+              head_sha: lifecycle.head,
               name: "ci/test",
               status: "completed",
               conclusion: "success",
@@ -329,11 +381,13 @@ export async function mockPullRequest(page: Page) {
         },
       });
     }
-    if (path === `/api/repos/team/project/commits/${head}/check-runs/7`)
+    if (
+      path === `/api/repos/team/project/commits/${lifecycle.head}/check-runs/7`
+    )
       return route.fulfill({
         json: {
           id: 7,
-          head_sha: head,
+          head_sha: lifecycle.head,
           name: "ci/test",
           status: "completed",
           conclusion: "success",
@@ -379,11 +433,44 @@ export async function mockPullRequest(page: Page) {
       const item = pull();
       const matches =
         !query ||
-        [item.title, item.body, item.author].some((value) =>
+        [item.title, item.body].some((value) =>
           value.toLowerCase().includes(query),
         );
       return route.fulfill({
-        json: { items: matches ? [item] : [], next: null },
+        json: {
+          items: matches
+            ? [
+                {
+                  ...item,
+                  kind: "pull",
+                  rollup: emptyPullRollup(
+                    item.number,
+                    lifecycle.branchesAvailable ? lifecycle.head : null,
+                  ),
+                  comment_count: comments.length,
+                  reaction_count: 0,
+                },
+              ]
+            : [],
+          next: null,
+          counts: {
+            open: matches && item.state === "open" ? 1 : 0,
+            closed: matches && item.state !== "open" ? 1 : 0,
+            merged: matches && item.state === "merged" ? 1 : 0,
+          },
+          authored_by_me: false,
+          assigned_to_me: false,
+          review_requested_from_me: false,
+          matching: matches ? 1 : 0,
+          navigation: query
+            ? { kind: "results" }
+            : {
+                kind: "state",
+                selected: "open",
+                open: "is:open",
+                closed: "is:closed",
+              },
+        },
       });
     }
     if (path.includes("/reactions/")) {
@@ -403,6 +490,24 @@ export async function mockPullRequest(page: Page) {
       reactionWrites.push(target);
       return route.fulfill({ json: summary });
     }
+    if (/\/pulls\/\d+\/state$/.test(path)) {
+      const input = request.postDataJSON();
+      lifecycle.state = input.state;
+      const saved = input.body
+        ? {
+            number: comments.length + 1,
+            author: author("Alice"),
+            body: input.body,
+            reactions: emptyReactions(),
+            version: 1,
+            created_at: Date.now(),
+            updated_at: Date.now(),
+            can_edit: true,
+          }
+        : null;
+      if (saved) comments.push(saved);
+      return route.fulfill({ json: { comment: saved } });
+    }
     if (/\/pulls\/\d+$/.test(path)) {
       if (request.method() === "PATCH") {
         lifecycle.state = "closed";
@@ -417,7 +522,7 @@ export async function mockPullRequest(page: Page) {
       if (request.method() === "POST") {
         comments.push({
           number: 1,
-          author: "Alice",
+          author: author("Alice"),
           body: "Verified in the browser.",
           reactions: reactions("pulls/2/comments/1"),
           version: 1,
@@ -441,7 +546,7 @@ export async function mockPullRequest(page: Page) {
           side: input.side,
           start_line: input.start_line,
           end_line: input.end_line,
-          author: "Alice",
+          author: author("Alice"),
           body: input.body,
           suggested_text: input.suggested_text,
           base_oid: input.base_oid,
@@ -483,7 +588,7 @@ export async function mockPullRequest(page: Page) {
           ),
           pull: 2,
           thread: Number(path.match(/threads\/(\d+)\/replies$/)?.[1] ?? 1),
-          author: "Alice",
+          author: author("Alice"),
           body: input.body,
           version: 1,
           created_at: 1_700_000_080_000,
@@ -516,14 +621,26 @@ export async function mockPullRequest(page: Page) {
     }
     if (/\/pulls\/\d+\/reviews$/.test(path)) {
       if (request.method() === "POST") {
+        const input = request.postDataJSON();
+        if (input.commit_oid !== lifecycle.head)
+          return route.fulfill({
+            status: 409,
+            json: {
+              error: {
+                code: "conflict",
+                message:
+                  "The pull request head changed. Reload the comparison.",
+              },
+            },
+          });
         checkState = "success";
         reviews.push({
           number: 1,
-          author: "Bob",
-          body: "Ready to merge.",
+          author: author("Bob"),
+          body: input.body,
           reactions: reactions("pulls/2/reviews/1"),
-          state: "approved",
-          commit_oid: head,
+          state: input.state,
+          commit_oid: lifecycle.head,
           current: lifecycle.branchesAvailable,
           version: 1,
           created_at: 1_700_000_050_000,
@@ -534,6 +651,7 @@ export async function mockPullRequest(page: Page) {
       }
       return route.fulfill({
         json: {
+          head_oid: lifecycle.branchesAvailable ? lifecycle.head : null,
           items: reviews.map((review) => ({
             ...review,
             current: lifecycle.branchesAvailable,
@@ -572,5 +690,5 @@ export async function mockPullRequest(page: Page) {
     });
   });
 
-  return { react, reactionWrites, lifecycle };
+  return { react, reactionWrites, lifecycle, pull };
 }

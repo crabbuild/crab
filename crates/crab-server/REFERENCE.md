@@ -26,6 +26,35 @@ Use this map to enter the reference without reading it in order.
 | Run verification | [Current verification](#current-verification) |
 | Assess release readiness | [Completion requirements](#completion-requirements) |
 
+## Bind browser mutations to repository identity
+
+Repository catalog responses expose an immutable `id` UUID. Session-authenticated
+and local-trust mutations under `/api/repos/{owner}/{name}/...` must send exactly
+one `X-Crab-Repository-Id` header containing the UUID captured when the repository
+was opened. Keep it with the original intent through retries; do not resolve a
+new UUID just to make an old action pass.
+
+The shared HTTP boundary compares the header with the decoded route's current
+repository after authentication, CSRF and durable membership checks. On resolved,
+authorized routes, missing, malformed, duplicate or different UUIDs return
+409 `repository_changed` before
+Cell, Git, upload or catalog mutation effects. The admitted principal retains an
+immutable repository constraint through routing and grant refreshes, including
+local trust. Case-insensitive membership resolution also requires that constraint;
+unresolved or unauthorized targets retain a hidden 404. This error has no proven-rejection
+marker: an earlier attempt may have committed in the original repository. Resolve
+the original outcome before starting another action. An unknown repository or
+revoked membership retains the usual hidden/not-found behavior.
+
+The embedded UI and browser clients send this precondition for discussion edits,
+reviews/merge, metadata catalogs, settings, files, branches, uploads and releases.
+Repository component state is keyed by UUID; a replacement cannot inherit the old
+repository's draft or pending controller. Account/organization APIs do not address
+repositories by these routes. Native Git and status/check integration tokens
+already bind their authenticated scope to a repository UUID and do not use this
+browser header. This updates the unreleased browser/API contract; no name-only
+mutation fallback or storage migration is introduced.
+
 ## Understand the runtime architecture
 
 Crab owns HTTP authentication and authorization, repository policy, the durable
@@ -802,7 +831,8 @@ kubectl --namespace crab exec --stdin deployment/crab-server -- \
 | Access | Capabilities |
 | --- | --- |
 | `read` | Browse, fetch, download LFS, and participate in issues, pull requests, comments, and reviews |
-| `write` | All member actions plus Git writes, LFS upload, merge, releases, labels, assignees, statuses, checks, and scoped write-token issuance |
+| `triage` | Read actions plus closing/reopening discussions, assigning existing labels, assignees and milestones, and requesting reviews; no code writes or definition management |
+| `write` | All Triage actions plus Git writes, LFS upload, merge, releases, labels, assignees, statuses, checks, and scoped write-token issuance |
 | `admin` | All write actions plus repository settings and branch protections |
 
 Subjects can contain at most 512 characters. Names can contain at most 160 characters. Subjects and case-insensitive names must be unique within a repository.
@@ -823,7 +853,7 @@ snapshot.
 
 Administrators can make the same full replacement in **Settings → Members**.
 The browser loads membership only when that section opens, presents stable
-subject, display name, and `read`/`write`/`admin` access, and sends the session
+subject, display name, and `read`/`triage`/`write`/`admin` access, and sends the session
 CSRF token with a single revision-guarded replacement. Add, edit, and remove
 are staged locally; removal requires an explicit confirmation. A conflict keeps
 the unsaved draft and requires **Reload members** before another save; it never
@@ -858,8 +888,21 @@ There is no browser audit-history API yet.
 
 An authenticated account without membership sees an empty catalog. Unauthorized
 and absent repositories both return HTTP 404 after authentication. Catalog
-membership changes do not invalidate the user's shared session and become
-effective on every replica after refresh.
+membership changes do not invalidate the user's shared session. Every authenticated
+repository request resolves the current durable catalog grant before repository
+access, independently of routing refresh. Global repository lists resolve grants
+from one catalog snapshot; body-scoped Git-token issuance resolves its target
+explicitly. Failed authority reads fail closed. Decoded route names select a
+repository, but the admitted grant and Git token bind its immutable UUID. The
+provider issuer must also match; display names and public handles grant nothing.
+Git publication and LFS upload refresh grants at their existing late checkpoints.
+These reads do not make catalog changes and repository publications one atomic
+transaction: cross-authority fencing remains unfinished. Admission adds one
+bounded catalog object read per authenticated repository request; handlers with
+late permission checks perform additional reads. Repository listing reads the
+catalog once and indexes grants by UUID. There is no permission cache that waits
+for the routing refresh interval. Explicit local-operator mode bypasses these
+member lookups.
 
 ### Configure protected branches
 
@@ -890,7 +933,13 @@ root rather than pod memory.
 
 Session cookies use `HttpOnly` and `SameSite=Lax`. HTTPS deployments also use `Secure` and the `__Host-` prefix. OIDC sessions expire at the earlier of ID-token expiry or eight hours; GitHub sessions expire after eight hours. The server does not retain refresh tokens or GitHub access tokens.
 
-Restarting or replacing a replica preserves sessions and Git tokens. Logout
+Restarting or replacing a replica preserves sessions and current-format Git
+tokens. Git-token format 2 requires the immutable repository UUID. Older tokens
+are rejected and must be revoked/reissued; there is no name-only reader or
+conversion. Upgrade all serving replicas together so an older replica cannot
+continue accepting retired credentials. Browser sessions retain their existing
+format. Revoking all Git tokens remains available even when an old token cannot
+be decoded. Logout
 requires the canonical `Origin` and the session's cross-site request forgery
 (CSRF) token. It removes the durable session, invalidating subsequent browser
 and Git-token authentication on every replica, but does not sign the account
@@ -1258,6 +1307,131 @@ are authoritative in object storage. Milestones and reactions use bounded typed 
 documents in that same SQLite transaction boundary. Collaboration does not mutate
 Git refs unless a pull request merge publishes a ref update.
 
+### Prepare and use account profiles
+
+With the server running, explicitly initialize its shared native Directory:
+
+```sh
+"$SERVER" --config /secure/server.toml cells initialize-directory
+```
+
+The command uses the configured private mTLS management listener. It is
+idempotent, leaves repository state unchanged and does not enroll accounts.
+`cells directory-status` and `GET /internal/directory` report `missing`,
+`outdated`, `migrating`, or `ready` with the current format/progress/revision. Missing preparation returns 503 `directory_unavailable` from profile
+APIs and nonempty issue/PR lists; ordinary repository readiness does not imply
+Directory readiness. Prepare it before enabling the updated UI/list contract.
+
+Directory format 2 separates immutable qualified account identities from optional
+public profiles. Existing format-1 directories require an explicit upgrade:
+
+```sh
+"$SERVER" --config /secure/server.toml cells directory-status
+"$SERVER" --config /secure/server.toml cells migrate-directory
+```
+
+Deploy all serving peers together before migration. Initialization does not
+convert an old directory. Ordinary Directory operations return a visible
+503 `schema_upgrade_required` until the upgrade finishes. The private command
+copies at most 100 profiles per native transaction and persists its cursor;
+rerun after interruption to resume. Existing UUIDs, names, handles, profile
+versions, timestamps, enrollment reservations and command receipts are preserved.
+Source table renames stop old code from creating new profile writes during the
+copy, but mixed-version serving remains unsupported. After the final atomic
+format switch, retired tables and migration progress are removed. Only migration
+code reads format 1. The 100-row limit also fits maximum-width Unicode identity
+records within the native SQL byte bound. Repository records and the discussion
+index do not change.
+
+A trusted operator can reserve stable account UUIDs before public enrollment:
+
+```json
+[
+  {"issuer":"https://identity.example","subject":"opaque-provider-subject"}
+]
+```
+
+Save that array as a private identity file, then run:
+
+```sh
+"$SERVER" --config /secure/server.toml cells register-accounts --identities-file accounts.json
+```
+
+The private mTLS command accepts 1–100 explicit qualified identities in a file
+of at most 256 KiB and returns ordered `ids` plus the native revision. Duplicate
+or repeated keys return the same UUID without another account mutation. Different
+issuers with the same subject remain separate accounts. Registration creates no
+public username, profile, repository, owner, organization, team or project grant.
+Do not derive issuer/subject keys from names or owner labels. Profile enrollment
+reuses a registered UUID; when no account exists it creates that identity and its
+profile in the same native transaction. Public profile/list DTOs stay unchanged,
+and accounts without a chosen profile remain absent from public handle results.
+Existing assignments require the explicit actor-ID preparation below; membership
+remains catalog-owned and still needs its separate native-authority cutover.
+
+Open `/-/profile` through the header's profile icon to choose a public username
+and display name. The stable profile URL is `/-/users/{actor-uuid}`; `-` is a
+reserved server route owner. These pages use the shared shadcn/Geist foundation
+and retain request diagnostics behind `powerbar=1`.
+
+| Endpoint | Contract |
+| --- | --- |
+| `GET /api/profile` | Current account's `{profile: object or null}` |
+| `POST /api/profile` | Enroll with `{request_id, handle, name}`; returns 201 |
+| `PATCH /api/profile` | Edit own profile with `{version, handle, name}` |
+| `GET /api/actors/{id}` | Public profile by stable actor UUID |
+
+Profiles require an active account session or trusted loopback local-operator
+mode. Repository Git credentials alone cannot read or edit them. Mutations use
+the existing session, Origin and CSRF checks and a 2 KiB body limit. Inputs
+reject unknown fields; callers cannot supply an authentication identity or edit
+another actor. Responses expose only `id`, `handle`, `name`, `version`,
+`created_at_ms` and `updated_at_ms`, visible to signed-in users of this server.
+Private `(issuer, subject)` keys are unique and never inferred from matching
+email or display names.
+
+Handles are unique, 1–39 lowercase ASCII letters/digits with single internal
+hyphens. Display names contain 1–100 Unicode scalar values, without surrounding
+whitespace or control characters. Enrollment retains its submission identity:
+an identical retry resolves the current profile; conflicting payloads fail.
+Edits use the captured version. An identical immediate successor acknowledges a
+lost reply without another write; other stale edits return 409. The UI retains
+the draft and offers an explicit choice of saved values or rebasing that draft.
+Renaming preserves the actor UUID and never changes repository permissions.
+
+Issue/PR list and detail authors, comments, reviews, inline threads/replies,
+thread resolving actors, activity actors and merge/pending-merge actors use `{name, profile}`: `name` is the recorded display-name
+snapshot; `profile` is either `{id, handle, name}` from the current Directory or
+null when that qualified account has not enrolled. The browser links the current
+handle to the stable UUID; it never guesses a handle from the snapshot name.
+The previous string shape is removed for these responses, including mutations
+and submission replays. Git commit signatures and check/status
+actors retain their separate contracts; reviewer invitations use the same
+public author shape for reviewers and requesters. Actor-based
+assignments use the separate contract below; catalog membership is unchanged.
+
+The HTTP owner deduplicates page actors into one native Directory read
+(at most 50 records, or 100 keys including thread resolving actors). Its private
+`LookupActors` operation accepts at most 100 qualified keys,
+returns minimal public summaries in input order and uses one Directory snapshot.
+It performs indexed identity lookups rather than a catalog scan. Inputs count
+Unicode scalar values, matching SQLite schema bounds and stored repository
+identities. Native receipt/class checks still apply. Handlers recheck durable
+repository membership after enrichment; thread reply/resolve controls use those
+refreshed grants. Repository counts/cursors and
+Directory display names have separate snapshots; enrichment is not a distributed
+transaction or an access grant. A rename neither rewrites source records nor
+requires a discussion-index rebuild. Prepare the Directory before these enriched
+responses are deployed, and update serving peers and the bundled UI together
+for the DTO change. No missing-schema reader or old DTO alias is supplied.
+Response enrichment follows the repository transaction, so an enrichment error
+does not imply a rolled-back mutation. Retry creates with the same submission
+ID; reload versioned edits before retrying.
+
+Organization/team repository grants, owner registration and remaining actor-backed
+contracts and predicates remain unfinished. Choosing a handle matching a catalog
+owner label does not acquire ownership.
+
 ### Use the collaboration route families
 
 | Surface | Routes |
@@ -1270,20 +1444,365 @@ Git refs unless a pull request merge publishes a ref update.
 | Inline review threads | `GET/POST /api/repos/{owner}/{name}/pulls/{number}/threads`, `GET/PATCH /api/repos/{owner}/{name}/pulls/{number}/threads/{thread}` |
 | Thread replies | `GET/POST /api/repos/{owner}/{name}/pulls/{number}/threads/{thread}/replies`, `GET/PATCH /api/repos/{owner}/{name}/pulls/{number}/threads/{thread}/replies/{reply}` |
 | Merge | `POST /api/repos/{owner}/{name}/pulls/{number}/merge` |
+| Label search choices | `GET /api/repos/{owner}/{name}/discussion-search/labels` |
+| Milestone search choices | `GET /api/repos/{owner}/{name}/discussion-search/milestones` |
 | Labels | `GET/POST /api/repos/{owner}/{name}/labels`, `PATCH/DELETE /api/repos/{owner}/{name}/labels/{number}` |
 | Assignees | `GET /api/repos/{owner}/{name}/assignees`; issue and pull `PATCH` requests replace assignments |
 | Milestones | `GET/POST /api/repos/{owner}/{name}/milestones`, `GET/PATCH /api/repos/{owner}/{name}/milestones/{number}`, `GET /api/repos/{owner}/{name}/milestones/{number}/items`; issue/pull `GET/PUT .../{number}/milestone` |
 | Reactions | `PUT /api/repos/{owner}/{name}/reactions/{target}`; discussion responses include personalized summaries |
+| Conversation | `GET /api/repos/{owner}/{name}/issues/{number}/conversation`, `GET /api/repos/{owner}/{name}/pulls/{number}/conversation` |
 | Activity | `GET /api/repos/{owner}/{name}/activity`, `GET /api/repos/{owner}/{name}/issues/{number}/activity`, `GET /api/repos/{owner}/{name}/pulls/{number}/activity` |
 | Linked work | Issue/pull `GET .../{number}/links`; `GET/PUT /api/repos/{owner}/{name}/pulls/{pull}/linked-issues/{issue}` |
 
 Every route prefix is `/api/repos/{owner}/{name}`. Browser mutations require the session cookie, canonical `Origin`, and CSRF token.
 
+### Separate collaboration triage from code write access
+
+Repository membership supports `read`, `triage`, `write` and `admin` roles.
+The collaboration split follows [GitHub’s repository-role reference](https://docs.github.com/en/organizations/managing-user-access-to-your-organizations-repositories/managing-repository-roles/repository-roles-for-an-organization); full role parity remains incomplete.
+Triage can close/reopen other authors’ issues and PRs, apply/remove existing
+labels and assignees, apply milestones, and request/cancel reviews. It cannot
+push code, issue write-scoped Git tokens, merge, change draft readiness on
+another author’s PR, edit another author’s title/body, create/edit label or
+milestone definitions, publish releases, or administer members/settings. Write
+and Admin retain Triage capabilities. Authors retain their existing description
+and own-item state controls; archive, pending-merge and version guards still
+apply inside native commands.
+
+Issue detail responses include `can_close` separately from `can_edit`; the
+browser uses that capability for state controls. PR `can_manage` controls state
+while `can_merge` still requires code write permission. Role edits use the
+existing revisioned membership catalog and audit chain. Detail capabilities and
+edit admission read durable membership instead of inferring it from a public
+profile or delayed routing snapshot. Rechecks across awaited reads are not an
+atomic cross-authority fence: the planned native grant cutover remains required.
+Maintain, owner/organization/team grants, complete moderation and required-review
+permission parity remain delivery work.
+
+Native issue/PR edit inputs carry `can_triage` instead of their earlier coarse
+management flag. Update fleet peers together before assigning the new role.
+No catalog, canonical repository or discussion-index schema change is needed;
+existing member records remain valid. No alias accepts superseded native inputs.
+
+### Search issues and pull requests
+
+List endpoints accept `q` (up to 256 characters), `limit` (1–50), `sort`,
+`direction`, and an opaque exclusive `before` cursor. State belongs in the query,
+for example `q=is:closed label:bug`. An absent `q` defaults to
+`is:issue is:open` for the issue workspace and `is:open` for the PR workspace.
+An explicit query has no additional hidden state filter. The issue endpoint
+searches both discussion kinds; the PR endpoint retains its PR scope.
+Use `is:issue` or `is:pr` to include all states of that kind. The former separate
+`state` parameter is rejected; milestone and release state parameters keep their
+own contracts. Text terms search titles, bodies, conversation comments, submitted reviews, inline threads and replies. Spaces and `AND` require both terms; `OR` matches either; parentheses
+support up to five nested groups. Quote phrases and multiword label names.
+
+Common qualifiers include `is:open`, `is:closed`, `is:merged`, `is:unmerged`,
+`is:issue`, `is:pr`, `state:open`, `state:closed`, `draft:true`, `draft:false`,
+`label:name`, `milestone:"title"`, `author:username`, `author:@me`, `no:label`,
+`no:assignee`, `no:milestone`, `assignee:username`, `assignee:@me`,
+`assignee:*`, and `assignee:actor/UUID`. `is:closed` includes merged PRs.
+Repeated label qualifiers mean AND; comma-separated label names mean OR.
+Milestone titles match exactly, case-insensitively, including closed milestones.
+Quote spaces, commas, colons or escaped quotation marks as literal title content.
+`-milestone:"title"` excludes that milestone; `no:milestone` finds unassigned
+issues and PRs. Counts use the same authoritative predicate as results.
+Prefix a term or qualifier with `-` to exclude it. Missing-metadata qualifiers
+cannot be negated. Unknown qualifiers and malformed syntax return 400.
+
+Count qualifiers `comments`, `reactions`, and `interactions` accept a nonnegative
+integer, `>n`, `>=n`, `<n`, `<=n`, inclusive `n..n`, `n..*`, or `*..n`.
+For example, `is:open comments:>=3 -reactions:0` finds open work with at least
+three conversation comments and at least one reaction. Interactions are the sum
+of conversation comments and reactions on the issue/PR itself; inline review
+replies and reactions on individual comments/reviews remain separate targets.
+Each bound must fit a signed 64-bit integer. Negative/fractional counts,
+overflow, empty or reversed ranges return 400. Boolean grouping, exclusions,
+state counts, sorting and query-bound cursors use the same native predicate.
+No new schema/preparation is required: domain mutations already update these
+metrics in the discussion index transaction. Completion offers numeric examples.
+
+Author usernames match current Directory handles case-insensitively; `@me`
+binds the authenticated qualified account even without a public profile.
+Unknown handles match no records; exclusion, AND/OR and grouping retain their
+normal meanings. Display names never resolve identities. Renames release the old
+handle without rewriting discussion records; handles are not access grants.
+Private native list inputs carry exactly the ordered bindings extracted from
+the query. Public HTTP parameters cannot supply those bindings. Directory reads
+7/8 resolve at most 64 handles or return up to 20 public actor summaries from
+one indexed handle prefix. Read 8 returns `items` and `truncated`, rather than a
+bare array; update all native peers together. No older-output reader is supported.
+Integration-account author syntax, mentions and complete involvement predicates remain open.
+
+The shared Author menu uses `GET .../discussion-search/authors` with `query` and
+`search`. It searches registered public usernames by prefix, ignoring ASCII case
+and an optional leading `@`; it does not resolve display names or infer accounts
+from repository member names. The response includes public `actor` summaries,
+validated query destinations, selection state, `self`/`clear` choices and an exact
+truncation flag. No issuer/subject claims cross HTTP. Native query navigation
+replaces global author conjunctions and exclusions while retaining predicates
+inside OR groups. Maximum-length queries disable destinations that cannot fit.
+
+Selecting a username or Yourself closes the menu, clears pagination, and preserves
+sort, direction and diagnostics in the URL. Clear removes global author terms.
+Keyboard navigation, focus return, reload, failed-read retry and narrow layouts
+use the same shadcn picker as labels and milestones. `@me` remains useful without
+a registered profile. Non-enrolled authors have no selectable username; recent
+contributor ordering, integration accounts and complete participant filtering
+remain unfinished. Directory reads recheck current repository access before
+returning choices. No canonical schema or discussion-index rebuild is needed.
+
+`GET .../discussion-search?query=label:he&cursor=8` returns authorized
+repository suggestions and syntax feedback. `cursor`, `start`, and `end` count
+browser UTF-16 units; replacement offsets enclose the current token.
+Suggestions discover both kinds, draft/merge predicates, and up to 20 active
+labels or public author usernames without crossing the repository authorization boundary.
+
+Lists query a native SQLite/FTS5 projection across all matching records. Each
+response includes `matching` for the exact query, `counts: {open, closed,
+merged}`, `authored_by_me`, and `navigation`. `authored_by_me` identifies a
+global positive `author:@me` conjunction; excluded self terms and self terms
+inside OR groups do not select the personal view. The UI uses that native result
+for its Created by me/Authored by me navigation. A global positive Open/Closed conjunction produces
+`navigation: {kind:"state", selected, open, closed}`. Those counters describe
+its destination queries; closed includes merged PRs. Other searches produce
+`navigation: {kind:"results"}` and retain the exact predicate, showing the total
+matching result count instead of manufacturing state tabs. This includes
+unrestricted searches, merge-state predicates, exclusions, conflicting states,
+and states inside OR groups. Repeated identical global state terms remain one
+state facet. Non-state atom spelling, quoted literals, and boolean grouping
+survive state changes. A state destination is null when it cannot fit the
+grammar's size/depth/term limits; the UI disables that control and explains the
+limit without truncating filters. Counts, ordered rows, selected label
+names/colors, and navigation share a native snapshot. Each list item carries
+`kind: "issue"` or `kind: "pull"`; PR items also include draft and branch metadata.
+Clients must use kind with number for identity and destination links because
+issues and PRs allocate numbers independently. Summaries omit bodies;
+`comment_count` counts conversation comments, and `reaction_count` counts
+reactions on the issue/PR body.
+
+`sort` accepts `created` (default), `updated`, `comments`, `reactions`,
+`thumbs_up`, `thumbs_down`, `laugh`, `hooray`, `confused`, `heart`, `rocket`,
+`eyes`, and `relevance`. `updated` uses the source discussion's update timestamp;
+comment/reaction writes do not fabricate edit timestamps. Relevance combines FTS5
+BM25 ranks for positive scoped text terms; terms shorter than three Unicode scalars
+retain literal substring matching without trigram ranking. `direction` is
+`desc` (default) or `asc`. Discussion number, then kind, break ties in the same direction.
+`next` is null on the last page. Cursors bind the repository, query, endpoint kind scope,
+ordering, resolved author identities, generation and revision. Reassigning a
+handle invalidates its old cursor even without a repository mutation. Malformed cursors return 400; changed
+queries or index contents return 409 `stale_search_cursor`. Restart at the first
+page to obtain a fresh snapshot. Comment pagination remains numeric.
+
+The current discussion index format is 10. It retains qualified author identities,
+milestone catalog entries and stable actor assignment keys, and adds searchable
+assignment name snapshots, transactional reviewer relationships and per-source
+commenter identities, transactional contribution text/FTS, latest-review/decision
+references and chronological conversation references. Older indexes report
+`outdated`; run the explicit rebuild below before admitting indexed traffic.
+It rebuilds only derived tables and preserves canonical milestone and assignment
+records. Clearing, milestone catalog preparation and discussion projection are
+separate bounded phases, with restart/resume through the existing management CLI.
+
+New empty repositories initialize their index. Existing native repositories
+require `cells rebuild-search --owner OWNER --name NAME` against the running
+private mTLS listener. This bounded operation resumes after interruption and
+blocks fresh mutations and indexed reads until complete. Missing/building
+indexes return 503 `discussion_index_unavailable`; detail reads and recorded
+command replays remain available. The command never recreates domain records.
+Other actor qualifiers and advanced metadata predicates remain delivery work. Release
+search retains its separate plain-text contract.
+
+Assignee predicates resolve public handles to stable Directory accounts; `@me`
+uses the authenticated qualified account even without enrollment. Unknown accounts
+match nothing. A handle change/rebinding changes cursor identity; explicit
+`actor/UUID` values retain stable identity without requiring a public profile.
+The Assignee menu (`GET .../discussion-search/assignees?query=...&search=...`)
+combines historical snapshots, current members and public handle completion.
+It returns at most 20 deduplicated `person`/query choices, `truncated`, and
+`clear`, `missing`, `self`, and `any` destinations. Results recheck durable grants
+after awaited reads. Definitions, grants and canonical assignments are unchanged.
+Both list outputs include `assigned_to_me` for global positive self predicates;
+conditional/excluded predicates retain arbitrary-search navigation.
+
+Reviewer predicates accept public usernames or `@me`: `review-requested`,
+`reviewed-by`, `review-involves`, and `user-review-requested`. The last qualifier
+selects direct requests; team relationships are not implemented. A submitted
+review fulfills its pending direct request and remains a participant; cancellation
+without a review removes participation. Qualified issuer/subject bindings prevent
+cross-provider subject collisions. Exclusion, boolean groups, exact full counts
+and query-bound cursors use the same native predicate on mixed and PR-only lists.
+The PR workspace adds Review requests navigation from the native
+`review_requested_from_me` result flag. Negated/conditional self terms do not
+select that personal view.
+
+Named reviewer predicates use shared public-handle completion. The Reviews menu
+uses the status/personal destinations described below; the former unshipped
+reviewer-picker endpoint and its choice builder are removed.
+
+`commenter:username` and `commenter:@me` match conversation comments, all submitted
+reviews (including empty approvals), inline thread comments and replies. An author
+with no such contributions does not match. Merely being assigned or requested to
+review does not match. Public handles resolve against current Directory identities;
+equal subjects under different issuers remain distinct. Exclusions, Boolean groups,
+state counts and cursors share the native predicate on both list surfaces.
+
+Format 7 stores one source identity per canonical contribution, indexed by
+qualified identity and discussion kind/number. Source deletion triggers preserve
+other contributions by the same actor and follow canonical cascades. Bounded
+rebuild clears this projection separately and scans each canonical composite key
+in frames of eight, with a durable source cursor. Private list inputs consolidate
+author, reviewer and commenter names into one exact ordered `people` collection;
+update and drain peers together. No old-shape decoder is supported. Commenter
+completion includes public usernames and `@me`; no authentication claims cross
+HTTP. Mentions and `involves` remain unsupported.
+
+Text fields use `in:title`, `in:body`, `in:comments`, or a comma-separated
+combination. Without `in:`, all three fields are searched. Repeated selectors in
+the same conjunction combine; explicit inner field scopes override enclosing
+fields, and OR branches retain their own scopes. For example,
+`(fix in:title) OR (workaround in:comments)` preserves each branch when another
+facet is selected. Negated field directives are rejected; use `-word in:comments`
+to exclude a word from comments. Unknown/empty fields return 400.
+
+Phrase matches stay within one title, description or contribution body. Separate
+terms may match different contributions to the same discussion. Text comparisons
+use folded literal substrings, including the existing one/two-scalar path for
+trigram-ineligible terms. Author names are not searchable discussion text; use
+`author:username` or `author:@me`. Best-match sorting sums positive-term header
+ranks and each term's best matching contribution rank, avoiding a bonus solely
+for repeating a word across many comments. This is native FTS5 ranking, not a
+claim to reproduce GitHub's private ranking algorithm.
+
+Format 8 adds a text row and contentless-delete trigram FTS entry for each
+contribution. Composite foreign keys preserve identity/source ownership. Dirty-ID
+triggers and bounded native flush keep inserts, edits, deletion cascades and
+receipts atomic, without virtual-table writes from untrusted triggers. During
+explicit preparation, header rows clear in bounded frames before their empty
+shape is recreated without recorded-author text; all five contribution sources
+then rebuild with their existing keyset cursor. Canonical records and versions
+are unchanged. Both FTS indexes are checked before indexed readiness.
+
+### Issue close reasons
+
+Issue details and list summaries include nullable `state_reason`
+(`completed`, `not_planned`, `reopened`) and `closed_at` (Unix milliseconds).
+PATCH accepts optional `state_reason` alongside the expected `version`. Closing
+without a reason chooses completed; an explicit not-planned close uses
+`{"version":1,"state":"closed","state_reason":"not_planned"}`. An already
+closed issue can change its reason without resetting the original close time.
+Reopening clears `closed_at` and records reopened. Invalid state/reason pairs
+return 400; permissions and version conflicts retain the existing contracts.
+The native record, metadata, progress and events commit together.
+
+Search supports `reason:completed`, `reason:"not planned"`, `reason:reopened`
+and `no:reason`, including Boolean grouping and exclusions. Positive reason
+predicates match only issues. Unknown historical reasons remain null; no-reason
+also matches never-closed issues. Duplicate reasons/links and close-date search
+are not implemented. Existing repositories require private explicit
+`cells prepare-issue-state --owner OWNER --name REPO`; absent or partial
+preparation returns 503 `schema_upgrade_required`. The command pages existing
+issues/activity and recovers only proven history, without changing record
+versions or original command outcomes. No discussion-index rebuild is required.
+
+### Comment and state submission
+
+POST `/api/repos/{owner}/{name}/issues/{number}/state` or the corresponding
+`pulls/{number}/state` accepts `{request_id, version, state, reason?, body?}`.
+State is `open` or `closed`. Reasons are issue-only completed/not-planned closure
+reasons; omit the reason when reopening. An optional nonempty body posts a
+conversation comment in the same transaction as the state change. Responses are
+`{comment: object or null}` using the existing public comment DTO. Reload the
+subject for its current canonical state; a recovered action can predate later
+changes by another user.
+
+Retry an uncertain action with exactly the same UUID, expected version, state,
+reason and body. Recovery returns the existing comment without changing state
+again, even after later archive or version changes. Altered payloads conflict.
+Current repository access is always required. State permissions, archive, pending
+merge and merged-state restrictions remain canonical; rejection cannot leave an
+orphan comment or advance progress. Immutable-payload validation and confirmed
+native domain rejection carry `X-Crab-Write-Outcome: rejected`. Context errors
+(access, routing, transport, decoding) and submission-identity conflicts stay
+unmarked: a previous attempt may already have committed. Preserve the original
+intent until it can be recovered. A confirmed native rejection is permanent for
+that UUID; archive, version or permission changes cannot turn it into a new write.
+After resolving a rejection, a deliberate new action uses a fresh UUID.
+
+Existing repositories must run both `cells prepare-issue-state` and
+`cells prepare-pull-state`. These now also convert historical successful state
+submissions to decision format 2, eight records per restartable frame, preserving
+keys, digests, comment references and canonical history. State writes remain
+unavailable until their kind is prepared. No discussion-index rebuild is needed.
+The private mTLS GET/POST endpoint is
+`/internal/repositories/{owner}/{name}/discussion-submissions/{kind}`; POST uses
+`{version}` and returns the existing lifecycle preparation status. Kinds are
+`issue`, `pull`, `bulk` and `pins`; issue preparation also prepares bulk/pins,
+and pull preparation also prepares bulk. Existing state format-2 records remain
+unchanged. Update private CLI clients for the renamed management route. Drain requests,
+update private peers and UI together, and reload browser sessions before resuming
+state actions. Historical failed actions cannot be recovered from absent records.
+See [native state decisions](CELLAR.md#atomic-discussion-state-actions).
+
+### Bulk discussion triage
+
+Issue and PR lists expose the stable `repository_id` and `can_bulk_edit` from
+current repository Triage authority.
+Row checkboxes, Shift selection and Select all operate on the current page only.
+
+GET `/api/repos/{owner}/{name}/discussions/selection?repository_id={uuid}&items=issue:1:3,pull:2:4`
+checks 1–100 distinct subjects and their expected record versions in one native
+snapshot. Its `{repository_id, items}` response contains `{item: {subject: {kind, number}, version},
+milestone_version}` entries. A stale or missing subject rejects preparation;
+current Triage permission is required. The UUID must match the resolved repository;
+a reused owner/name cannot retarget the captured selection. The browser retains
+these exact entries and UUID.
+
+POST `/api/repos/{owner}/{name}/discussions/bulk` accepts
+`{repository_id, request_id, items, action}`. Supported action shapes:
+
+- `{kind: "state", state: "open" | "closed", reason?: "completed" | "not_planned"}`;
+  explicit reasons require an issue-only closed selection. Merged PRs retain
+  their state and pending merges reject state changes.
+- `{kind: "labels", add: [label IDs], remove: [label IDs]}`;
+  disjoint additions/removals preserve other active labels, with at most 20 per item.
+- `{kind: "assignees", add: [actor UUIDs], remove: [actor UUIDs]}`;
+  additions require current repository membership, with at most 10 per item.
+  Historical assignees remain removable after losing access.
+- `{kind: "milestone", number: milestone number or null}`;
+  both source record and independent milestone assignment versions are checked.
+
+All selected changes, source versions, progress, activity, index effects and the
+permanent submission receipt commit together. Any rejection rolls all items back;
+there is no partial-success response. Success returns `{count}` for the selected
+items processed, including items already carrying the requested value. Reload
+counts/results; a changed list cursor starts again at the first page.
+
+Uncertain retries must retain the original repository UUID, request UUID, entries
+and action. Qualified
+actor and payload bind the permanent receipt; name, role and eligibility snapshots
+do not alter it. Recovery cannot reapply an edit after later versions, archive or
+membership changes, but always requires current repository read access. The shared
+`X-Crab-Write-Outcome: rejected` marker has the same commit-aware meaning as the
+combined comment/state endpoint. An explicit reload permits a new selection after
+a confirmed conflict. Context and repository-identity errors cannot release a
+retained intent; native submission-identity conflicts also remain unmarked.
+Confirmed native rejections are permanent for that UUID, including after a role,
+eligibility or archive change. A deliberate revised action uses a fresh UUID.
+Existing repositories must prepare the bulk decision ledger through either
+issue/pull state preparation. Historical successful counts/digests/keys are
+preserved in bounded frames; old failed decisions cannot be reconstructed.
+No discussion-index rebuild is required. HTTP defers archive policy to the native
+command so a committed submission can recover after archive.
+Catalog-owned grants remain the authority; native grant cutover/cross-Cell fencing,
+Projects/type bulk actions and wider GitHub parity remain delivery work.
+
 ### Browse activity
 
-Repository activity lives at `/{owner}/{name}/activity`. Issue and PR conversation
-pages include their own activity panel. Feeds use `limit` (1–50, default 30) and
-an exclusive numeric `before` cursor, ordered newest first by event number.
+Repository activity lives at `/{owner}/{name}/activity`. Its feed APIs use `limit`
+(1–50, default 30) and an exclusive numeric `before` cursor, ordered newest first
+by event number. Issue and PR pages use the unified chronological conversation
+below; they do not render a second activity panel.
 
 Events record new discussion changes, review decisions, inline conversations,
 merge completion, and milestone assignments. They capture actor names and subject
@@ -1317,25 +1836,99 @@ immutable-submission, and exact-ref checks.
 
 ### Request pull request reviews
 
-`GET /api/repos/{owner}/{name}/pulls/{number}/review-requests` returns bounded
-pages with an opaque exclusive `before` cursor, the current PR version, eligible
-members, and the caller's management permission. Items retain requested,
-cancelled, or fulfilled state. Fulfilled items name their submitted review.
+The reviewer sidebar uses a searchable shadcn popover and stable actor UUIDs.
+`GET /api/repos/{owner}/{name}/pulls/{number}/reviewers` returns participants,
+including people who submitted a review without an invitation. Each item has
+an opaque `id`, a public `reviewer` author, nullable current `candidate_id`, and
+nullable `request`, `review`, and `decision` records. The request contains its
+own cancellation `id`, state, public `requested_by`, and timestamps. `review`
+identifies the latest submitted review; `decision` identifies the latest
+approval or change request. A later comment does not replace a decision.
+Summary records contain `number`, `state`, `commit_oid`, and `current`.
 
-`PUT` to the same endpoint takes `version` and a typed `change`:
-`{"version":1,"change":{"kind":"request","subject":"member-subject"}}` or
-`{"version":2,"change":{"kind":"cancel","id":"opaque-request-id"}}`. Authors or writers manage open
-PR requests; pending merges block changes and archived repositories reject them.
-The PR author cannot request their own review. Selection resolves durable
-membership instead of waiting for background catalog materialization. A renamed
-member retains identity; an existing request for a removed member can be cancelled
-by its opaque ID. Public request items omit identity issuer/subject claims.
+Freshness compares the recorded commit with the actual source ref. `current`
+is true for the observed head, false for an older commit, and null if the head
+is missing. Merged PRs use their recorded source head. Only a current decision
+gets a positive or negative status color; older decisions show “Outdated review,”
+and an absent head shows “Head unavailable.” A re-request remains visible
+alongside the previous review. Fulfillment alone never implies approval.
+Conversation review responses and their timeline use the same three-state
+freshness contract. The review list envelope includes nullable `head_oid` from
+that read; all loaded review cards follow this head, including older pages kept
+during refresh. Storage errors remain errors rather than missing refs.
 
-New reviews fulfill a matching outstanding request atomically. Reviewing twice
-or replaying an earlier submission cannot fulfill a later re-request. The PR
-version advances once for fulfillment and a decision committed together. Requests
-do not add a merge gate or alter required approvals. The sidebar keeps failed
-choices, requires explicit conflict refresh, and preserves read-only status.
+Issue and PR pages read `GET .../{issues|pulls}/{number}/conversation`. The
+response contains chronological tagged `items` (`comment`, `review`, `activity`),
+nullable opaque `start`/`end` cursors, `has_earlier`/`has_later`, and nullable
+`head_oid`. `limit` is 1–50 (default 30); the native page is also byte bounded.
+Use exactly one of `before`, `after`, or `focus=comment:N|review:N|activity:N`;
+omit all three for the latest window. Focus seeks a window ending at that entry,
+without walking intervening pages. Cursors bind subject, creation time, source,
+number and index generation. Malformed/cross-subject inputs return 400; a
+changed index generation or absent cursor boundary returns 409. Missing focused
+entries return 404. Storage failures remain errors.
+
+Native index format 10 references existing canonical records and events without
+copying bodies. Creation time, source and number define order even if historical
+timestamps run backwards. Opening and contribution activity snapshots do not
+duplicate the description or editable cards. Inline and metadata/lifecycle events
+remain compact linked entries. `cells rebuild-search` prepares historical source
+rows in bounded, restartable frames; no serving scan or fallback is used.
+
+The shared UI offers earlier/later windows and same-range retry while retaining
+loaded content. Explicit refresh returns to the selected/latest window. Cached
+editors retain their drafts and captured versions; stale pages cannot replace a
+newer record. All review cards use the settled window's selected source head.
+Comment timestamps use `#issuecomment-N`, reviews/sidebar decisions use
+`#pullrequestreview-N`, and compact events use `#event-N`. Window reads support
+reload/back/forward, focus the requested entry, and expose failures for recovery.
+There is one whole-conversation timing widget, shown only with `powerbar=1`.
+
+PR detail retains comment drafts, pending writes and submission identity across
+tabs and metadata refreshes. Hidden panels pause conversation reads and remove
+portaled controls, while cached editors and pending writes stay mounted until
+the discussion actually unmounts. Successful recovery
+clears the submitted draft; intentional same-text posts get a new identity.
+Posting from an old window preserves navigation and offers an explicit View
+comment link; posting at the end extends the window with a bounded forward read.
+
+Pages contain at most 50 accounts, an opaque exclusive ascending `after` cursor,
+current PR version, management permission, and public `candidates` in
+`{id, name, profile}` form. Cancelled invitations with no submitted review are
+omitted. Cancellation preserves previously submitted participation. No private
+issuer or subject is exposed. The old request-only GET route and private read
+are removed; there is no response alias or history-scan fallback.
+
+`PUT .../review-requests` retains versioned selection:
+`{version, change: {kind: "request", actor_id: "UUID"}}` or
+`{version, change: {kind: "cancel", id: "opaque request ID"}}`.
+Directory UUIDs bind immutable qualified accounts to current repository members.
+Another provider's account, a removed member or an unknown UUID cannot acquire
+eligibility through a name or profile. Private registration creates no grants
+or handles. Public enrichment precedes the final durable membership read.
+Following [GitHub’s review permissions](https://docs.github.com/en/pull-requests/reference/pull-request-reviews#requesting-and-requiring-reviews),
+HTTP and native commands require triage/write authority, including for a pull
+author. Read access still permits submitting reviews. Profile renames update
+presentation without changing the source request or review. Historical names
+remain visible when no public profile exists. Removed members cannot receive a
+new request, but an authorized manager can cancel their outstanding request.
+
+New reviews fulfill a matching request atomically. A retry cannot fulfill a
+later re-request. Fulfillment and a decision advance the PR version once in the
+same transaction. Requests do not add a merge gate or change approval policy.
+Pending merges and archived repositories reject fresh changes. The picker
+retains failed choices and requires explicit refresh after a version conflict.
+
+Discussion index format 9 stores one latest-review reference and optional
+request reference per qualified participant. The native page uses primary-key
+seeks and point joins, independent of review-history length. Run
+`cells rebuild-search` before serving existing indexes. Preparation clears eight
+participants per frame, replaces the empty derived table, and replays review
+and request sources in bounded frames. It preserves canonical records and
+submission receipts. Update serving peers and bundled UI together for the new
+native read and public DTO; see [reviewer status preparation](CELLAR.md#reviewer-status-preparation).
+Pending/dismissed reviews, team review requests, code-owner suggestions, and notifications
+remain separate delivery work.
 
 ### Link related work
 
@@ -1371,8 +1964,8 @@ Responses expose counts and the current actor's membership, without listing
 identity claims. Archived repositories retain readable counts and reject fresh
 reaction mutations.
 
-Discussion detail and list responses include a `reactions` summary. Lists batch
-these reads in one native transaction. The summary's native `revision` orders
+Discussion detail responses include a `reactions` summary. List summaries expose
+body `reaction_count` through the transactional search projection. The summary's native `revision` orders
 completed writes and refreshes so delayed responses cannot replace newer browser
 state. Reaction writes do not change discussion edit versions.
 
@@ -1398,7 +1991,8 @@ Members can list and read issues. Members can create issues and comments. Author
 
 Identity uses the exact OIDC issuer and subject. Display names do not establish ownership. The loopback server uses one trusted operator identity.
 
-Lists accept `state=open|closed|all`, a case-insensitive `q`, `limit`, and exclusive numeric `before`. They return newest items first.
+Issue lists use the indexed search/count/sort/cursor contract above. Comment
+lists retain exclusive numeric cursors and descending comment-number order.
 
 Issue responses load the label catalog only when returned issues have selected
 labels or an edit needs to validate nonempty label input. Repository archive
@@ -1407,7 +2001,83 @@ A retried creation returns the existing issue with its current labels.
 Response enrichment may fail after a mutation commits; retry creations with
 the original submission ID, or reload an edited issue and reconcile its version.
 
+### Pin repository issues
+
+`GET .../issues/pins` returns the ordered collection `version`, up to three
+current issue summaries and `can_manage`. Any current reader can view the cards,
+including closed issues. Current Write access is required to change pins;
+Triage alone does not grant it. Archived repositories retain their visible pins.
+
+`PUT .../issues/pins` accepts `{request_id, version, numbers}`. `numbers` is the
+complete ordered set of distinct existing issue numbers, with a maximum of three;
+an empty set removes all pins. The native transaction compares the collection
+version and changes the whole set atomically. Pinning leaves issue edit versions
+unchanged. The collection lives in native Repository KV storage, alongside its
+permanent submissions; cards use at most three indexed issue reads and maintained
+comment counters. Existing repositories must explicitly prepare its decision
+ledger with `cells prepare-issue-state`; historical successful versions, digests
+and keys remain intact. No discussion-index rebuild is needed.
+
+A submission UUID binds its original ordered set, expected version and qualified
+actor. Exact retries recover the original version after reordering, archive or
+loss of Write access, provided current Read access remains. They do not restore
+the old collection. Reusing a UUID for another intent returns an unmarked
+submission conflict. Proven native rejections carry `X-Crab-Write-Outcome:
+rejected`, including when archive middleware changes their error presentation.
+Those native rejection decisions remain terminal after roles/archive change.
+A deliberate new action uses a fresh UUID; uncertain errors keep the original intent. The UI reloads the current collection
+after success/recovery and records pin/unpin events in each issue conversation;
+pure reorder does not add a timeline event.
+
 ### Work with pull requests and reviews
+
+Pull details and summaries expose nullable `closed_at` and `merged_at` in Unix
+milliseconds. A successful close records its transition time; reopening clears
+it. A completed merge sets both to the native completion time, independently of
+`merge.created_at` (reservation time). Later metadata edits, no-op closure changes
+and merge retries preserve these dates.
+
+List rows distinguish opened, closed and merged states and retain draft labels.
+The pinned MIT-licensed `@github/relative-time-element` 5.3.1 owns date rounding,
+live refresh and its default 30-day calendar-date threshold. shadcn tooltips show
+localized exact dates on hover or keyboard focus. Unknown historical dates remain
+explicitly unknown, including in the merge summary. See the [upstream component
+contract](https://github.com/github/relative-time-element) and [documentation](https://github.github.com/relative-time-element/).
+
+Existing native repositories require `cells prepare-pull-state --owner OWNER
+--name REPO`. This bounded, restartable preparation derives metadata only from
+matching immutable activity and leaves original records, versions and command
+receipts unchanged. Unprepared reads/writes return 503 `schema_upgrade_required`.
+No discussion-index rebuild is needed. See [native lifecycle preparation](CELLAR.md#prepare-pull-lifecycle-metadata).
+
+
+Pull list rows, including PR rows returned by issue search, include `rollup` with
+`number`, captured `head_oid`, `checks` and `reviews`. Check counts distinguish
+success, neutral, skipped, pending and failed outcomes. Latest commit statuses
+and latest check runs remain separate sources; the newest run number wins per
+case-insensitive run name, matching the existing native check presentation.
+Review counts include selected-head approvals, unresolved requests for changes,
+outstanding review requests and decisions anchored on earlier commits. Requested
+changes remain active after a new push until the same reviewer replaces the
+decision or an authorized user dismisses it. They describe recorded reviews, not merge
+eligibility or current branch-protection satisfaction.
+
+The API captures the selected source refs in one verified ref view, then one
+native read compares the selected PR versions and computes the summaries in one
+Cell snapshot. Concurrent source record changes return `page_changed`; failed
+ref/storage reads fail the list rather than returning green or empty counts.
+Missing source refs produce null head/check/review fields. Merged rows use the
+recorded merged source head, including after branch deletion. Issue-only pages
+open no Git ref view for this enrichment.
+
+Discussion index format 11 adds a per-PR outstanding-request counter, maintained
+by the reviewer projection's insert/update/delete triggers. It avoids scanning
+historical participants. Existing Cells require explicit `cells rebuild-search`
+preparation; serving never upgrades implicitly. The bounded clear/rebuild resets
+aggregate rows before clearing participants, then reconstructs them from canonical
+review/request records. SQL/KV records, issue/PR versions and original reviews
+remain unchanged. Update serving peers and the bundled UI together.
+
 
 Pull creation records exact base and head branch names plus their opening commit OIDs. Detail reads refresh both live tips without rewriting the immutable opening evidence.
 
@@ -1415,11 +2085,114 @@ If either branch is deleted, the conversation and original OIDs remain visible w
 
 Reviews record `commented`, `approved`, or `changes_requested` against the exact current head. Pull authors cannot approve or request changes on their own pull. Advancing the head marks older reviews as not current.
 
+Review submission opens a shadcn “Review changes” dialog above the diff. The
+modal stays fixed while asynchronous file content loads. Comment, Approve and
+Request changes use the shared radio-group component. Draft text and submission
+identity stay with the pull detail, surviving dialog closure and data reloads.
+They are discarded when leaving the pull; no browser storage is used.
+
+`POST .../pulls/{number}/reviews` requires `request_id`, `body`, `state` and
+`commit_oid`. The latter is the exact lowercase, nonzero SHA-1 inspected by the
+browser. A fresh submission is rejected with 409 `conflict` if the live head
+has advanced. Reloading preserves the draft and its old commit pin; the user
+must explicitly choose “Use current comparison” after inspecting the updated
+comparison. A changed pin creates a new submission identity. There is no
+implicit latest-head default or old-payload decoder.
+
+Existing submissions are verified by the native immutable ledger, including
+the original body, decision and commit. Editing the current review does not
+invalidate a valid retry; a mismatched payload returns `submission_conflict`.
+Replays do not add another review or fulfill a newer request. Current native
+permission and archival policy still applies. Review freshness after merge
+uses the recorded source head, matching the PR comparison, rather than the
+synthetic merge commit. Review `current` is nullable when the source ref is missing. Canonical records and native inputs are unchanged.
+Deploy the API and bundled UI together for the required commit pin.
+
 Inline threads store a raw Git path, old/new side, inclusive line range, exact base/head OIDs, and the anchored blob OIDs. Root comments publish immediately; repository members can create and reply, replies are durable child records, and every creation is idempotent by UUID. Pull authors and writers can resolve or reopen a thread, while only the thread author can edit its body or suggestion. A thread is marked outdated when the comparison OIDs or anchored blob no longer match; deleted paths remain listed with the original anchor evidence.
 
 Suggestions are allowed only on new-side text anchors. The browser applies a current suggestion through the existing exact-head/exact-blob contents update contract, so it creates the normal Git commit and stale branch or blob tips return a conflict rather than silently changing a different file.
 
-For protected branches, only each reviewer's latest decision on the current head counts. A current request for changes blocks merge until the same reviewer submits a current approval.
+For protected branches requiring review, only each reviewer's latest approval on the current head counts. Unresolved requests for changes also block merging when anchored on an older commit; pushing new commits cannot resolve another reviewer's decision. The same reviewer must submit a current approval, or an authorized user must dismiss the active review. This follows [GitHub's required-review behavior](https://docs.github.com/en/pull-requests/how-tos/review-pull-requests/approving-a-pull-request-with-required-reviews).
+
+### Review status filters
+
+Both discussion list kinds accept `review:none`, `review:required`,
+`review:approved`, and `review:changes_requested`, including negation and Boolean
+expressions. These predicates, matching totals, state destinations and paging
+operate over the whole repository in one native snapshot. Comment-only reviews
+and dismissed opinions do not count as an active decision for `review:none`;
+`reviewed-by` still includes their historical participation. Changes requested
+remain active across pushes. Required/approved compare selected-head approval
+counts against the effective base-branch rule; unresolved changes take precedence.
+An unprotected branch is never review-required, and an approved match still needs
+at least one active approval. Checks and other merge conditions are independent.
+
+Head-dependent filters bind the verified Git source token to a ready immutable
+ref projection. Pending reconciliation returns 503 `review_index_pending` with
+visible retry. Source changes and effective rule edits invalidate cursors.
+An empty repository requires no Git manifest. Completed merges use the recorded
+source head, decoded by the canonical binary codec, even after branch deletion.
+Filtered rollups retain the same captured source rather than resolving newer refs.
+Missing unmerged source refs have no proven latest head: rollups report null
+source/check/review fields. Retaining that historical source head remains parity
+work; the opening OID is not used as a freshness fallback.
+
+`GET .../discussion-search/reviews?query=...` returns grammar-preserving native
+menu destinations and selection. The shadcn Reviews menu exposes the four status
+filters plus reviewed-by-you, not-reviewed-by-you and awaiting-your-review.
+Existing named reviewer search/completion remains available. Team requests are
+explicitly unavailable until their native model exists. Menu reads do not enroll
+a profile. Diagnostics remain behind `powerbar=1`.
+
+Discussion index format 12 adds derived source-ref/merged-head columns. Run
+`cells rebuild-search --owner OWNER --name REPO` explicitly for existing Cells.
+Preparation preserves canonical SQL/KV records, versions and permanent submission
+ledgers. Transport receipts retain their normal bounded expiry. Serving never
+installs this relation. Upgrade all peers and embedded UI together
+for the changed private search/rollup input contract.
+
+### Dismiss a pull request review
+
+PUT `/api/repos/{owner}/{name}/pulls/{number}/reviews/{review}/dismissals`
+accepts `{request_id, version, body}`. The nonempty reason uses the existing
+64 KiB discussion-body contract. Write permission is required; on a protected
+base branch, Admin permission is required. The native transaction reads current
+branch protection, archive and pending merge state, verifies the review version,
+records the explanation, advances review/PR versions, removes only the matching
+active decision and appends one conversation event. An older dismissal cannot
+erase a newer decision or revive a prior approval. Merge publication blocks
+fresh dismissals until its reservation resolves.
+
+The configured version-zero policy applies before the first administrative save,
+as it does for merge and Git publication. Native dismissal receives that initial
+branch classification from HTTP composition; rules saved in the native transaction
+take precedence, including an explicitly empty set. Review create/edit/detail/list
+and conversation capabilities use the same precedence. This retains the existing
+configuration seed contract; native cross-Cell authority fencing remains separate.
+
+Public review details, lists and conversation entries expose effective state
+`dismissed`, nullable `dismissal: {author, body, created_at}` and `can_dismiss`.
+Original submitted state/body remain available to their native receipt contract;
+dismissal is a separate canonical SQL relation. Public attribution resolves both
+actors without exposing provider-qualified keys and rechecks current membership.
+Dismissed latest reviews remain visible in the reviewer sidebar; active decision
+and list/merge summaries use the canonical decision table. Search participation
+still records the submitted review. A discussion-index rebuild cannot revive it.
+
+A permanent submission UUID binds actor, review, expected version and reason.
+Exact retries do not reapply the action after later reviews, archive or Write
+revocation; current Read access is still required. Changed intent conflicts.
+Proven rejections carry the shared write-outcome header; uncertain errors retain
+the original payload. The shadcn dialog preserves the reason through cancellation
+and conflicts, requires inspection of a newer version, and returns keyboard focus
+to the review after success. Reasons appear with the original review; the later
+conversation event links directly to it.
+
+Run private `cells prepare-review-state --owner OWNER --name REPO` on existing
+repositories. Serving never installs missing schemas. Full per-user/team review
+dismissal restrictions and broader review/workspace parity remain open. This
+workflow follows [GitHub review dismissal](https://docs.github.com/en/pull-requests/how-tos/review-pull-requests/dismissing-a-pull-request-review)
+and its [protected-branch permission contract](https://docs.github.com/en/rest/pulls/reviews#dismiss-a-review-for-a-pull-request), checked 2026-10-22.
 
 ### Merge a pull request
 
@@ -1436,6 +2209,31 @@ The server revalidates live refs, approvals, required checks, pointer dependenci
 
 ### Manage labels and assignees
 
+Assignments store stable Directory account UUIDs and explicit display-name
+snapshots. `GET .../assignees` returns `{items:[{id,name,profile}],can_manage}`;
+`profile` is `{id,handle,name}` or null. Issue/PR edits accept
+`{version,assignee_ids:[UUID]}`. The old provider-subject request shape is removed.
+Current membership determines eligibility and triage permission after awaited
+Directory reads. Account registration creates no profile or grant. Historical
+assignments remain visible after membership removal and link to a chosen public
+profile when one exists.
+
+The shadcn picker loads candidates when opened, searches names/handles, supports
+keyboard focus/Escape, and permits removing unavailable historical selections
+without re-adding them. It submits the record version captured when editing
+starts; conflicts retain choices and require a refreshed record. This is a
+metadata picker. The separate Assignee list menu supports native public-handle,
+current-account, historical actor-ID and assigned/unassigned filtering.
+
+Existing repositories need private `cells assignment-inventory`,
+`cells migrate-assignments` and then `cells rebuild-search`. Nonempty legacy
+assignments require explicit per-record qualified-identity JSON Lines mappings;
+empty records convert without a file. Migration uses eight records per native
+transaction, durable progress, conflict receipts and rename/update operations
+that avoid whole-table rewrites. See [assignment preparation](CELLAR.md#assignment-preparation)
+for the exact format, prerequisites, interruption and fleet upgrade procedure.
+
+
 Label constraints:
 
 - 1 to 50 characters per name
@@ -1445,13 +2243,66 @@ Label constraints:
 - At most 20 labels per issue or pull
 - At most 500 allocated label IDs during repository lifetime
 
-Assignments contain at most 10 distinct configured member subjects. Only repository writers can change label or assignee sets.
+The Labels menu uses `GET .../discussion-search/labels` with `query` and a
+bounded `search` substring. It searches the complete canonical active-label
+catalog and returns up to 20 choices, exact matches first, with a truncation
+indicator. Colors and descriptions come from validated label records. Native
+include, exclude, no-label and clear destinations retain the current query's
+other terms and boolean grouping. Selection describes global label clauses;
+labels inside OR remain conditional predicates rather than global selections.
 
-Stored assignments use stable IDs or subjects. Label renames appear immediately. Deleted labels disappear without rewriting every discussion. Removed members disappear from resolved assignment responses.
+Selecting several labels adds separate conjunctions. Clicking a selected label
+removes it; Alt+click or Alt+Enter toggles exclusion. Editing a name within a
+comma-OR clause retains its other members. Choosing no labels replaces global
+label constraints; clearing the final constraint spells an unrestricted query
+rather than resetting to the default open list. Oversized destinations are
+disabled. Recent personal suggestions are not yet implemented.
+
+The shared filter picker remains open during multi-selection and exposes
+loading, unavailable, retry, selection and excluded states. Issue/PR result
+ownership is shared: controls survive a refresh while counts and rows clear,
+and one `powerbar=1` boundary encloses the complete list. A failed request shows
+unavailable counts rather than a permanent loading message.
+Issue/PR lists share a collapsible icon navigation rail and comfortable/compact
+rows. These are browser-local preferences, retained across reload and list
+navigation without changing query parameters, native cursors or data requests.
+Compact rows preserve the displayed metadata. When browser storage is denied,
+the current component's selection still works in memory. The sidebar measures
+available viewport height with diagnostics present, and wraps on narrow screens.
+Detail/create routes keep full-width layouts. These controls do not implement
+saved views or personal author/assignment/review navigation.
+Count/loading rows and the optional diagnostic header retain their height during
+refresh so a completed request cannot move an open menu under a pressed pointer.
+Before a measurement exists, the diagnostic header shows a dash and explains
+that no request timing has completed; normal pages have no diagnostic header.
+
+The Milestone dropdown on issue and PR lists searches the complete native
+milestone catalog and switches between open/closed milestones. Its choice
+endpoint accepts the current `query`, a bounded `search` substring and optional
+`state=open|closed`. It returns at most 20 choices, an explicit truncation flag,
+and native query destinations/selection for each choice, no milestone and
+clearing the global facet. Exact title matches sort first. Refine the search to
+reach additional matches; filtering never uses only a browser-loaded page.
+Both search metadata endpoints recheck durable repository membership after the
+awaited native read, so a stale materialized grant cannot expose revoked choices.
+
+Choosing a milestone replaces global milestone conjunctions while retaining
+other filters and boolean groups. Milestone predicates inside OR remain intact;
+the chosen facet adds a global conjunction. The UI preserves sort/direction and
+`powerbar=1`, resets pagination, and disables destinations that exceed query
+bounds rather than truncating other filters. Keyboard selection, Escape/focus
+return, empty/loading, request failure and retry are supported.
+
+Assignments contain at most 10 distinct stable account UUIDs. Current repository
+triage permission controls changes to label or assignee sets.
+
+Stored assignments retain stable IDs and name snapshots after grant removal.
+Public profiles provide current presentation without granting access. Label
+renames appear immediately; deleted labels disappear without rewriting discussions.
 
 ### Understand pagination and storage
 
-Issue, pull, comment, and review lists default to 30 items and accept 1 to 50. Each page scans at most 200 allocated numbers. A filtered page can be empty and still return `next`; clients must follow that cursor. Label lists return the complete bounded catalog of at most 500 active labels.
+Issue, pull, comment, and review lists default to 30 items and accept 1 to 50. Indexed discussion lists return matching summaries and use the opaque cursor contract above. Comment/review lists scan at most 200 allocated numbers; a page can be empty and still return `next`. Label lists return the complete bounded catalog of at most 500 active labels.
 
 Titles accept 1 to 256 characters. Markdown bodies accept 64 KiB. Collaboration requests use an 80 KiB body limit, eight concurrent application slots, and a 30-second handler deadline.
 
@@ -1459,6 +2310,7 @@ Serving data currently uses these roots:
 
 | Root | Content |
 | --- | --- |
+| Directory Cell/LTX namespace | Stable qualified accounts, optional public profiles, enrollment submissions, explicit migration progress and command receipts |
 | Repository Cell/LTX namespace | Issues, comments, labels, commit statuses, check runs, branch protections, lifecycle, Pulls/reviews, Releases/asset references, counters, publication intent, and permanent submission ledgers |
 | `app/v1/issues` | Retired issue documents; serving ignores them and operators delete them at hard cutover |
 | `app/v1/pulls` | Retired Pull documents; serving ignores them and operators delete them at hard cutover |
@@ -1658,3 +2510,78 @@ The interface follows these upstream contracts:
 - [GitHub repository archive behavior](https://docs.github.com/en/repositories/archiving-a-github-repository/archiving-repositories)
 
 The OIDC dependency includes `rsa` for public-key signature verification. [RUSTSEC-2023-0071](https://rustsec.org/advisories/RUSTSEC-2023-0071.html) concerns private-key timing leakage. This relying party holds no RSA signing keys and decrypts no RSA ciphertext. The test issuer uses Ed25519 only in the test harness. No advisory suppression or dependency override is present; a complete dependency audit remains part of production qualification.
+
+
+## Organization authority foundation
+
+The new `Organization` native class uses schema 1 under `cells/organization/` and
+shares the Cellar transaction, receipt and output gate. Explicit private
+`cells bootstrap-organization --organization UUID --input-file JSON` resolves the
+first owner's exact `{issuer, subject}` through Directory without profile
+enrollment. It returns `/-/organizations/UUID`. Public HTTP has no bootstrap route.
+
+`/api/organizations/{id}` reads/edits metadata; `/members` lists bounded current
+members, and `/members/{actor}` changes/removes active grants with expected
+membership versions. `/invitations` lists bounded pending/expired offers;
+`/invitations/candidates` searches public usernames;
+`/invitations/{recipient}` reads, creates/edits/retries or cancels an offer.
+`/invitation` reads/decides only the authenticated recipient's offer. Bodies deny
+unknown fields. Repository Git tokens cannot access these account features.
+Native authorization precedes receipt replay and mutations; last-owner guards,
+invitation decisions, membership tombstones and audit append are transactional.
+
+Organization authority grants no catalog repository access. Registered-account
+invitations currently use manually shared acceptance links; email delivery,
+owner-name discovery, nested teams, owner registry and cross-authority repository/project
+fencing remain unfinished. See `CELLAR.md` for preparation, expiry and coordinated
+deployment contracts. Native tests live in `cells/organization/tests/`, HTTP tests
+in `api/organizations/tests/`, and browser fixtures in
+`packages/ui/tests/browser/organizations.e2e.ts`. The process qualifier also covers
+private bootstrap, metadata persistence, profile enrichment and last-owner denial.
+
+The manual `api::organizations::tests::browser` qualification uses two actual
+browser/OIDC sessions and the embedded bundle. With `agent-browser` available,
+build the UI, set the checkout's mounted `CARGO_TARGET_DIR`, and run
+`cargo test -p crab-server --locked --lib api::organizations::tests::browser -- --ignored --nocapture`.
+It creates a public profile, creates/accepts an invitation, observes the native
+membership and checks that removal hides current metadata while retaining only
+the recipient's historical decision. Browser cleanup is bounded and scoped to
+its own sessions. The normal suite ignores it because it needs an external browser.
+
+
+### Native standalone teams
+
+`cells/organization/teams/` and `api/organizations/teams/` own direct teams,
+current-incarnation memberships, visible/secret reads, maintainer controls,
+creation policy, bounded pages and permanent submission cancellation/recovery.
+Organization membership transitions update the same native authority. Fresh
+private bootstrap prepares teams; existing organizations require
+`cells prepare-organization-teams --organization UUID --actor OWNER_ACTOR_UUID`.
+Read [the team preparation and API contract](CELLAR.md#standalone-teams).
+
+The UI owner is `packages/ui/src/features/organizations/teams/`. Its account-bound
+submission controller lives above application routing, so lost acknowledgements
+can recover after navigation or organization removal without retargeting the
+write. New native/HTTP tests live beside their team owners; responsive,
+accessibility, conflict and recovery scenarios live in
+`packages/ui/tests/browser/teams.e2e.ts`. Native team authority does not yet bind
+repository permissions or PR review requests; hierarchy, autocomplete and Projects
+remain separate work.
+
+Current team qualification: 13 native/HTTP team checks, all 476 native regressions
+(six existing opt-in qualifications ignored), 13 CLI checks, 164 browser scenarios,
+107 UI unit checks, strict all-target Clippy and architecture/format/build checks.
+Real RustFS/two-account OIDC browser runs cover native side effects, a lost edit
+reply followed by revocation, non-restoring rejoin, permanent rejected/cancelled
+submissions, restart and team name reuse. Desktop and actual mobile dark screens
+were inspected. The local preview preserves all 18 public repository resources
+and 39 canonical tables per repository Cell. These results qualify the standalone
+team slice; they do not complete hierarchy, repository authority or Projects.
+
+Initial issue/PR metadata is owned by `cells/repository/collaboration/creation/`
+and composed by `api/discussion_creation/`. Public create bodies optionally include
+`metadata: {label_ids, assignee_ids, milestone}`. Initial values commit atomically at
+record version one. Applied UUIDs recover current records without resetting later
+assignments; metadata rejections remain terminal and permit explicit input review.
+The private PR submission read returns original comparison tips for both outcomes.
+See `CELLAR.md` for coordinated peer DTO deployment and native storage contracts.

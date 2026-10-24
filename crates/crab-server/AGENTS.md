@@ -15,7 +15,7 @@ and migration limitations.
 1. `crates/crab-server/src/main.rs` — thin binary entry; `src/cli/mod.rs` owns command parsing and dispatch, with ECS discovery and CLI tests beside it.
 2. `crates/crab-server/src/server/mod.rs` — `serve`: process composition and ordered shutdown; `src/server/http/mod.rs` composes routes and `src/repository/mod.rs` owns pinned reads and maintenance.
 3. `crates/crab-server/src/app.rs` — `admit / repository`: request repository/principal boundary and error mapping.
-4. `crates/crab-server/src/auth/mod.rs` — `Principal / Authentication`: identity and configuration; `auth/state.rs` owns durable sessions, `auth/http/mod.rs` owns login/session endpoints, and `auth/transport.rs` bounds provider requests.
+4. `crates/crab-server/src/auth/mod.rs` — `Authentication`: identity and configuration; `auth/principal/` owns credentials and UUID-bound current grants; `auth/state.rs` owns durable sessions, `auth/http/mod.rs` owns login/session endpoints, and `auth/transport.rs` bounds provider requests.
 5. `crates/crab-server/src/git/receive/mod.rs` — `receive / publish_objects`: bounded native receive and publication orchestration.
 
 Trace one path: `crates/crab-server/src/main.rs` → `src/cli/mod.rs` → `serve` in
@@ -24,24 +24,134 @@ Receive continues through `crates/crab-server/src/git/receive/mod.rs` to the
 shared publication owner `crates/crab-write/src/journal.rs`.
 
 The Cell repository facade in `src/cells/repository/mod.rs` exposes typed
-operations. `models.rs` owns common records/inputs; `issues.rs` owns issue and
-comment operations. Feature commands and their persistence helpers live under
+operations. `models.rs` owns common records/inputs; `issues/` owns issue and
+comment operations, `reads.rs` owns snapshot presentation reads and `lifecycle/`
+owns canonical close reasons/times and explicit bounded preparation.
+`issues/pins/` owns the independently versioned, three-slot
+repository pin collection and permanent submissions; `api/issues/pins/` enriches
+its bounded current issue summaries and composes current Write capability. Tests stay
+with that owner. Private preparation is `cells prepare-issue-state`. Feature commands and their persistence helpers live under
 `checks/`, `labels/`, `statuses/`, `settings/`, `releases/`, and `pulls/`. Pull
 readiness belongs to `pulls/readiness/`, reviewer invitations and fulfillment
-belong to `pulls/review_requests/`, and review threads belong to
+belong to `pulls/review_requests/`, bounded reviewer summaries to
+`pulls/reviewers/`. `pulls/rollups/` owns bounded current-head check/review summaries;
+`api/pulls/rollups/` captures selected source refs once for both list kinds and
+checks source versions before composition. Outstanding request counts live in
+the transactional discussion projection. `pulls/reviews/` owns submitted review commands; `reviews/dismissals/` owns
+canonical dismissal SQL, effective detail reads, and permanent recovery. Public
+review presentation uses these native records directly in `api/pulls/reviews/`.
+Private `cells prepare-review-state` installs the empty feature relation on
+existing repositories, without rewriting reviews or receipts. Review threads belong to
 `pulls/review_threads/`; browse projection reads and
-writes belong to `projection/`. `dispatch.rs` alone decodes operation IDs.
+writes belong to `projection/`. `dispatch.rs` alone decodes operation IDs. `search/` owns the shared issue/PR
+query grammar; `search/results/` owns tagged issue/PR results and the mixed
+list operation; `search/counts/` owns exact integer comment/reaction/interaction
+comparisons and ranges over the transactional index; `search/navigation/` owns query edits and state destinations;
+`search/index/` owns transactional projections, full counts,
+sorting/query-bound cursors, and explicit bounded preparation; `search/completion/` owns repository-scoped
+suggestions and browser UTF-16 replacement ranges. `search/milestones/` owns
+milestone projection/catalog reads, grammar-preserving facet destinations and
+the native choice read. `search/people/` owns qualified identity digests, public name validation and
+shared resolved bindings. `search/authors/` owns global author-facet destinations
+and personal-view selection. `search/contributions/` owns per-contribution qualified
+identities, text/FTS maintenance, canonical deletion triggers and bounded five-source rebuilding;
+`search/text/` owns field scopes, text predicates and relevance SQL;
+`search/reviews/` owns reviewer predicates, transactional
+review/request projections and bounded rebuild source cursors. Its `status/`
+owner binds source epochs and effective branch rules for repository-wide review
+status predicates and grammar-preserving menu choices; tests stay beside it.
+`search/assignees/` owns stable-ID predicates, resolved binding validation,
+historical snapshot choices and personal selection; `api/discussion_search/assignees/`
+resolves handles/current accounts and composes authorized filter choices.
+`search/labels/` owns bounded active-label choices and
+include/exclude/no-label transitions; it reuses the canonical label decoder.
+`search/navigation/` shares global-conjunction extraction, bounded destinations
+and choice records between facets and state controls. Canonical milestone
+commands update that projection in their transaction; assignment changes dirty
+the discussion projection. The HTTP
+choice endpoint stays with other search reads in `api/discussion_search/`.
 
-Collaboration documents live in `cells/repository/collaboration/`. Its `target.rs`
+`pulls/lifecycle/` owns canonical close/merge-completion times and a consistent
+pull-detail read. `collaboration/lifecycle/` shares bounded explicit preparation
+with issue lifecycle metadata; each owner recovers only matching transition events.
+Private `cells prepare-pull-state` prepares existing native repositories.
+
+Collaboration documents live in `cells/repository/collaboration/`. `creation/`
+owns initial metadata validation, stable selection digest terms, terminal metadata
+rejections and canonical initial milestone assignment. Both create writers commit
+labels/assignee snapshots at version one; `api/discussion_creation/` resolves the
+current roster and triage capability. Its tests stay with those owners. `state/`
+owns atomic close/reopen with optional comments; `bulk/` owns bounded mixed-kind
+selection and atomic metadata/state edits. `submissions/` owns their shared
+applied/rejected decision storage with issue pins. Its `preparation/` alone reads
+historical successful documents in bounded frames. Existing issue/pull state
+preparation commands also prepare these ledgers; ordinary mutations require their
+prepared format. Nested SDK scopes discard domain work before a terminal
+rejection commits. State format-2 records remain unchanged by this extraction.
+`api/discussion_bulk/` binds repository UUIDs, resolves current roster eligibility
+and owns the bulk HTTP contract.
+`api/write.rs` owns the shared proven-rejection response marker.
+`api/discussion_state/` owns current membership and state HTTP composition.
+`server/http/boundary.rs` binds browser mutation headers to the stable repository
+UUID before domain effects; the public catalog exposes that UUID. The admitted
+principal retains its repository constraint across route/grant refreshes, including
+local trust and case-insensitive membership resolution.
+Plain and combined comments share their canonical issue/PR writers. Its `target.rs`
 owns shared discussion addresses, `activity/` owns append-only events and subject
 indexes, and `reactions/` owns actor membership/counts. Activity append calls stay
 inside domain commands so their SQL/KV changes and events commit together.
+`conversation/` owns the chronological contribution/event reference index,
+bounded before/after/focus reads, and explicit restartable preparation under the
+shared discussion-index lifecycle. `api/conversation/` enriches these native
+windows with public authors, reactions and selected-head review freshness.
 `links/` owns versioned issue/PR relationships and both subject indexes; its
 single activity event is indexed into both timelines.
 
 The native runtime lives in `src/cells/runtime.rs`; `src/cells/client.rs` owns
-typed ingress, `src/cells/application.rs` owns transaction/replay dispatch, and
-`src/cells/schema.sql` is the canonical initial schema. HTTP authorization and
+the authority-checked `CellClient` and target-bound read receipts.
+`src/cells/application.rs` owns shared `Transaction`, replay dispatch and the
+output gate. `src/cells/address.rs` identifies Repository, Directory and Organization targets;
+commands and reads declare their native class. Repository initialization lives
+in `src/cells/repository/schema.rs`, using the canonical `src/cells/schema.sql`.
+`cells/repository/assignments/` owns stable actor references and name snapshots;
+its `migration/` alone reads retired subject bytes and performs bounded explicit
+conversion. `api/members/roster.rs` binds current member UUIDs to qualified private
+accounts and public candidate profiles for assignments and reviewer selection.
+`api/pulls/reviewers/` composes current-head status and public participant pages;
+`repository::ref_oid` uses the selected-ref data plane without opening packs.
+`api/assignees/resolution.rs` owns assignment selection limits and historical
+assignee presentation. Both refresh grants after Directory reads. Private
+assignment inventory/migration live in `server/management/assignments.rs` and
+`cli/assignments.rs`. `src/cells/directory/` owns qualified private account identities and optional
+public profiles. `accounts/` owns stable UUID registration; `profiles/` owns
+chosen names/handles and immutable submissions. `migration/` alone reads format 1,
+with bounded, restartable format-2 conversion and colocated historical-input tests.
+Private status/migration/registration are in `server/management/directory.rs` and
+the `cells` CLI. Registration does not grant permissions.
+`cells/directory/lookup/` owns bounded qualified account-ID reads and public
+profile reads by qualified key or actor UUID. `cells/directory/search/` owns bounded indexed handle resolution
+and completion. Handle completion returns bounded public matches plus an exact
+truncation flag. `api/discussion_search/people/` resolves the shared author/reviewer/commenter name union
+before native reads and composes public choices with final membership checks.
+`api/discussion_search/authors/` and `reviews/` own their filter endpoints. `api/profiles/attribution/` deduplicates discussion authors into one
+Directory read for lists, details and conversation responses; handlers recheck
+durable membership afterward. `api/issues/view.rs` owns issue/comment JSON
+presentation.
+`cells/organization/` owns native organization metadata, membership tombstones,
+versioned invitation decisions, indexed roster pages and transactional audit.
+`cells/organization/teams/` owns standalone teams, current-incarnation direct
+memberships, visibility/creation policy, bounded explicit preparation and permanent
+applied/cancelled submissions. `api/organizations/teams/` owns its browser contract
+and revision-checked profile enrichment. Existing organizations require private
+`cells prepare-organization-teams`; ordinary serving never installs its feature DDL.
+`api/organizations/` owns account-to-actor resolution, late permission checks after
+Directory enrichment and browser routes. Explicit first-owner bootstrap belongs
+to `server/management/organizations.rs` and `cells bootstrap-organization`.
+Membership checks run inside the shared native transaction before receipt replay;
+repository grants stay catalog-owned. Public sessions cannot bootstrap authority.
+`src/api/profiles/` exposes session-authenticated profile reads/edits without
+exposing authentication claims. `src/server/management/directory.rs` owns explicit
+private initialization; serving never creates its schema implicitly. HTTP authorization and
 Cell error mapping stay in `src/app.rs`. No previous-runtime readers or catalog
 and session migration paths are supported.
 
@@ -73,7 +183,7 @@ and session migration paths are supported.
 | Content reads | `crates/crab-server/src/api/contents.rs` | `crates/crab-remote-git/src/snapshot.rs` |
 | Auth or routing | `crates/crab-server/src/server/http/mod.rs` | `crates/crab-server/src/server/http/boundary.rs`, `src/auth/mod.rs` |
 | Read readiness | `crates/crab-server/src/repository/mod.rs` | `src/server/background.rs`, `src/repository/maintenance.rs`, `crates/crab-write/src/generation.rs` |
-| Management and capacity | `crates/crab-server/src/server/management.rs` | `src/server/capacity.rs`, `src/metrics/mod.rs` |
+| Management and capacity | `crates/crab-server/src/server/management/mod.rs` | `src/server/capacity.rs`, `src/metrics/mod.rs` |
 | Git imports | `crates/crab-server/src/git_import/mod.rs` | `src/git_import/source.rs` (validation), `src/git_import/git.rs` (process isolation) |
 | Browse APIs | `crates/crab-server/src/api/mod.rs` | `src/api/query.rs` (Git queries), `src/api/representation.rs` (encoding/ranges) |
 
@@ -93,8 +203,13 @@ No declared Cargo features. Both library and auto-discovered main binary exist. 
 ## Verification
 
 Tests live under their owner: `api/tests.rs`, `auth/tests/`,
-`api/<feature>/tests.rs`, `auth/<feature>/tests.rs`, `catalog/tests.rs`,
-`cells/repository/<feature>/tests.rs`, `git/receive/tests/`, `git/lfs/tests.rs`,
+`api/<feature>/tests.rs` (larger suites such as membership use `tests/mod.rs`), `auth/<feature>/tests.rs`, `catalog/tests.rs`,
+`cells/repository/<feature>/tests.rs`, `cells/directory/tests.rs`,
+`cells/directory/profiles/tests.rs`, `git/receive/tests/`, `git/lfs/tests.rs`,
+`cells/directory/lookup/tests.rs`, `cells/directory/search/tests.rs`, `cells/organization/tests/`,
+`api/organizations/tests/`,
+`cells/repository/search/authors/tests.rs`, `api/discussion_search/authors/tests.rs`,
+`api/profiles/attribution/tests.rs`,
 `api/pulls/tests/`, and `repository/tests/`. `server/peer_e2e_tests.rs`
 exercises process composition and native peer handoff.
 Shared setup lives in test-only `src/test_support/`; feature suites never import
@@ -127,7 +242,10 @@ are in `crab/scripts/check-crate-interface-builds.py` and
 - `crates/crab-server/REFERENCE.md` — detailed contracts and qualification history.
 - `crates/crab-server/Cargo.toml` — dependency and feature authority.
 
-Read `crates/crab-server/build.rs` and `packages/ui/package.json` for embedding changes. Dedicated image/service proof: `.github/workflows/http-server-container.yml`; native fetch proof: `.github/workflows/git-protocol-v2-partial-clone.yml`. Browser UI changes require their own frontend checks.
+Read `crates/crab-server/build.rs` and `packages/ui/package.json` for embedding changes. Dedicated image/service proof: `.github/workflows/http-server-container.yml`; native fetch proof: `.github/workflows/git-protocol-v2-partial-clone.yml`. Browser UI changes require their own frontend checks. The explicitly ignored
+`api::organizations::tests::browser` qualification requires `agent-browser` and
+built embedded UI assets; it drives two real OIDC sessions through invitation,
+consent and removal against isolated native Cells.
 
 Update this guide when entry points, ownership, invariants, features, or test
 routes change. Keep detailed API preconditions in rustdoc rather than copying

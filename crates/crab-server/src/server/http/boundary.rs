@@ -2,8 +2,8 @@
 
 use crate::{app, auth::Principal, server::Server};
 use axum::{
-    Json,
-    extract::{Request, State},
+    Json, RequestExt,
+    extract::{Path, Request, State},
     http::StatusCode,
     middleware::Next,
     response::{IntoResponse, Response},
@@ -81,15 +81,15 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
     let integration_request = integration_api_path(request.uri().path());
     let token_request = integration_request && request.headers().contains_key("authorization");
     let authentication_started = Instant::now();
-    let principal = if internal_import {
-        Principal::Local
+    let mut principal = if internal_import {
+        Principal::local()
     } else {
         match &server.auth {
             Some(auth) if git_request || token_request => {
                 auth.git_principal(request.headers()).await
             }
             Some(auth) => auth.principal(request.headers()).await,
-            None => Principal::Local,
+            None => Principal::local(),
         }
     };
     tracing::debug!(
@@ -102,7 +102,7 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
     // Membership's handler hides absent and non-admin repositories uniformly.
     // Only anonymous callers bypass generic login/CSRF responses; signed-in
     // mutations retain the normal Origin and session-CSRF requirements.
-    let anonymous_membership = matches!(principal, Principal::Anonymous)
+    let anonymous_membership = principal.is_anonymous()
         && matches!(
             *request.method(),
             axum::http::Method::GET | axum::http::Method::HEAD | axum::http::Method::PUT
@@ -129,12 +129,78 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
         && !anonymous_membership
         && !git_request
         && unsafe_method
-        && !matches!(principal, Principal::Git(_))
+        && !principal.is_git()
         && server
             .auth
             .as_ref()
             .is_some_and(|auth| !auth.accepts_mutation(&principal, request.headers()));
-    let check_archive = !denied && !rejected_mutation && unsafe_method && !git_request;
+    // Resolve decoded route parameters using Axum's extractor. Credentials alone
+    // never authorize repository access; routing config supplies no grant.
+    let params = request
+        .extract_parts::<Path<std::collections::HashMap<String, String>>>()
+        .await
+        .ok()
+        .map(|Path(params)| params);
+    let browser_repository = protected
+        && params
+            .as_ref()
+            .is_some_and(|params| params.contains_key("owner") && params.contains_key("name"))
+        && !principal.is_git();
+    let requested_repository = repository_identity(request.headers());
+    let mut authorization_error = None;
+    if !denied
+        && !rejected_mutation
+        && principal.authenticated()
+        && let Some(params) = &params
+        && let (Some(owner), Some(name)) = (params.get("owner"), params.get("name"))
+        && let Some(name) = (if git_request {
+            name.strip_suffix(".git")
+        } else {
+            Some(name.as_str())
+        })
+        && let Some(repository) = server.repositories.get(&(owner.clone(), name.to_owned()))
+    {
+        let current = if principal.is_local() {
+            true
+        } else {
+            match app::membership(&server, &principal, &repository).await {
+                Ok(current) => {
+                    principal = current.principal;
+                    true
+                }
+                Err(app::Error::NotFound) => false,
+                Err(error) => {
+                    authorization_error = Some(error.into_response());
+                    false
+                }
+            }
+        };
+        if current {
+            principal = principal.scoped_to_repository(Some(repository.id));
+        }
+        // Browser sessions authorize names through the current catalog. Bind the
+        // captured UUID before any mutation, so a reused name cannot retarget it.
+        // Git credentials already carry the UUID in their authenticated scope.
+        if current
+            && unsafe_method
+            && protected
+            && !principal.is_git()
+            && requested_repository != Some(repository.id)
+        {
+            authorization_error = Some(app::Error::RepositoryChanged.into_response());
+        }
+    }
+    if browser_repository && unsafe_method {
+        // Membership can resolve a case-insensitive catalog name independently
+        // of the live routing key. Its refreshed grant must still match the
+        // captured UUID; absent/invalid identity denies repository access.
+        principal = principal.scoped_to_repository(requested_repository);
+    }
+    let check_archive = !denied
+        && !rejected_mutation
+        && authorization_error.is_none()
+        && unsafe_method
+        && !git_request;
     let deferred_archive = (check_archive && command_checks_archive(request.uri().path()))
         .then(|| request.uri().clone());
     let archive_check_started = Instant::now();
@@ -164,6 +230,8 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
         (StatusCode::UNAUTHORIZED, Json(json!({"error":{"code":"sign_in_required","message":"Sign in to access repositories"}}))).into_response()
     } else if rejected_mutation {
         (StatusCode::FORBIDDEN, Json(json!({"error":{"code":"csrf_rejected","message":"Reload the page before trying again"}}))).into_response()
+    } else if let Some(response) = authorization_error {
+        response
     } else if let Some(response) = archived_response {
         response
     } else {
@@ -174,8 +242,21 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
     // a server error that may represent an ambiguous committed mutation.
     if let Some(uri) = deferred_archive
         && response.status().is_client_error()
-        && let Some(archived) = archived_mutation_response(&server, &principal, uri.path()).await
+        && let Some(mut archived) =
+            archived_mutation_response(&server, &principal, uri.path()).await
     {
+        // Changing the error presentation must retain a native proof of no
+        // effects. Unmarked context or submission conflicts remain uncertain.
+        if response
+            .headers()
+            .get("x-crab-write-outcome")
+            .is_some_and(|value| value == "rejected")
+        {
+            archived.headers_mut().insert(
+                "x-crab-write-outcome",
+                axum::http::HeaderValue::from_static("rejected"),
+            );
+        }
         response = archived;
     }
     response
@@ -189,6 +270,18 @@ async fn boundary_request(server: Arc<Server>, mut request: Request, next: Next)
             ("content-security-policy", "default-src 'self'; script-src 'self' 'wasm-unsafe-eval'; connect-src 'self' https://extensions.duckdb.org; style-src 'self' 'unsafe-inline'; worker-src 'self' blob:; img-src 'self' data: blob:; media-src 'self' blob:; frame-src 'self' blob:; object-src 'none'; base-uri 'none'; frame-ancestors 'none'"),
         ], response,
     ).into_response()
+}
+
+fn repository_identity(headers: &axum::http::HeaderMap) -> Option<Uuid> {
+    let mut values = headers.get_all("x-crab-repository-id").iter();
+    let identity = values
+        .next()
+        .and_then(|value| value.to_str().ok())
+        .and_then(|value| value.parse::<Uuid>().ok());
+    if values.next().is_some() {
+        return None;
+    }
+    identity
 }
 
 fn is_local_host(host: Option<&str>) -> bool {
@@ -212,8 +305,12 @@ fn is_local_host(host: Option<&str>) -> bool {
 fn command_checks_archive(path: &str) -> bool {
     // These commands enforce lifecycle transactionally. Merge recovery may
     // finish an admitted Git publication after archive; preflight must not strand it.
-    path.strip_prefix("/api/repos/")
-        .is_some_and(|path| matches!(path.split('/').nth(2), Some("issues" | "labels" | "pulls")))
+    path.strip_prefix("/api/repos/").is_some_and(|path| {
+        matches!(
+            path.split('/').nth(2),
+            Some("issues" | "labels" | "pulls" | "discussions")
+        )
+    })
 }
 
 async fn archived_mutation_response(
@@ -239,7 +336,7 @@ async fn archived_mutation_response(
     let repository = server
         .repositories
         .get(&(owner.to_owned(), name.to_owned()))
-        .filter(|repository| principal.can_read(&repository.config))?;
+        .filter(|repository| principal.can_read(repository.id))?;
     app::actor(principal).ok()?;
     match crate::repository::settings::load_lifecycle(server, &repository).await {
         Ok(lifecycle) if lifecycle.archived => Some(app::Error::Archived.into_response()),

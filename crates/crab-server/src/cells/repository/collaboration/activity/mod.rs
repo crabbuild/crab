@@ -1,7 +1,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::super::{
-    Read, RepositoryAuthor, RepositoryTransaction, timestamp, validate_author, validate_number,
+    Read, RepositoryAuthor, Transaction, timestamp, validate_author, validate_number,
     validate_title,
 };
 use super::{Page, Subject, Target};
@@ -15,25 +15,51 @@ pub(crate) enum Action {
     Created,
     Drafted,
     ReadyForReview,
-    ReviewRequested { reviewer: String },
-    ReviewRequestCancelled { reviewer: String },
+    ReviewRequested {
+        reviewer: String,
+    },
+    ReviewRequestCancelled {
+        reviewer: String,
+    },
     Updated,
     Closed,
+    IssueClosed {
+        reason: crate::cells::repository::issues::lifecycle::Reason,
+    },
+    IssueCloseReasonChanged {
+        from: Option<crate::cells::repository::issues::lifecycle::Reason>,
+        to: crate::cells::repository::issues::lifecycle::Reason,
+    },
     Reopened,
+    Pinned,
+    Unpinned,
     Approved,
     ChangesRequested,
+    ReviewDismissed,
     Commented,
     Merged,
     Resolved,
     Unresolved,
-    MilestoneAssigned { number: u64, title: String },
-    MilestoneRemoved { number: u64, title: String },
-    IssueLinked { number: u64, title: String },
-    IssueUnlinked { number: u64, title: String },
+    MilestoneAssigned {
+        number: u64,
+        title: String,
+    },
+    MilestoneRemoved {
+        number: u64,
+        title: String,
+    },
+    IssueLinked {
+        number: u64,
+        title: String,
+    },
+    IssueUnlinked {
+        number: u64,
+        title: String,
+    },
 }
 
 impl Action {
-    fn related_subject(&self) -> Option<Subject> {
+    pub(super) fn related_subject(&self) -> Option<Subject> {
         match self {
             Self::IssueLinked { number, .. } | Self::IssueUnlinked { number, .. } => {
                 Some(Subject {
@@ -53,6 +79,10 @@ impl Action {
                     | Self::Updated
                     | Self::Closed
                     | Self::Reopened
+                    | Self::Pinned
+                    | Self::Unpinned
+                    | Self::IssueClosed { .. }
+                    | Self::IssueCloseReasonChanged { .. }
                     | Self::MilestoneAssigned { .. }
                     | Self::MilestoneRemoved { .. }
             ),
@@ -77,7 +107,11 @@ impl Action {
             }
             Target::PullReview { .. } => matches!(
                 self,
-                Self::Approved | Self::ChangesRequested | Self::Commented | Self::Updated
+                Self::Approved
+                    | Self::ChangesRequested
+                    | Self::Commented
+                    | Self::Updated
+                    | Self::ReviewDismissed
             ),
             Target::PullThread { .. } => matches!(
                 self,
@@ -95,6 +129,22 @@ impl Action {
         if let Self::ReviewRequested { reviewer } | Self::ReviewRequestCancelled { reviewer } = self
         {
             validate_title(reviewer)?;
+        }
+        if matches!(
+            self,
+            Self::IssueClosed {
+                reason: super::super::issues::lifecycle::Reason::Reopened
+            } | Self::IssueCloseReasonChanged {
+                from: Some(super::super::issues::lifecycle::Reason::Reopened),
+                ..
+            } | Self::IssueCloseReasonChanged {
+                to: super::super::issues::lifecycle::Reason::Reopened,
+                ..
+            }
+        ) {
+            return Err(crate::cells::Error::Invalid(
+                "closure activity reason is invalid",
+            ));
         }
         if !valid {
             return Err(crate::cells::Error::Invalid(
@@ -124,7 +174,7 @@ fn events(subject: Option<Subject>) -> String {
 }
 
 pub(in crate::cells::repository) fn append(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     target: Target,
     actor: &RepositoryAuthor,
     action: Action,
@@ -169,6 +219,7 @@ pub(in crate::cells::repository) fn append(
         // A relationship is one repository event visible from both subjects.
         context.put_document(&format!("{}{number:016x}", events(Some(related))), &true)?;
     }
+    super::conversation::project_event(context, &event)?;
     Ok(())
 }
 
@@ -182,14 +233,12 @@ pub(crate) struct Query {
 
 pub(crate) struct ListActivity;
 impl Read for ListActivity {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 220;
     type Input = Query;
     type Output = Option<Page<Event>>;
 
-    fn execute(
-        context: &mut RepositoryTransaction<'_>,
-        input: Query,
-    ) -> crate::cells::Result<Self::Output> {
+    fn execute(context: &mut Transaction<'_>, input: Query) -> crate::cells::Result<Self::Output> {
         if !(1..=50).contains(&input.limit) {
             return Err(crate::cells::Error::Invalid(
                 "activity pages require 1–50 events",
@@ -243,6 +292,18 @@ impl Read for ListActivity {
         };
         Ok(Some(Page { items, next }))
     }
+}
+
+pub(super) fn event(
+    context: &Transaction<'_>,
+    number: u64,
+    subject: Option<Subject>,
+) -> crate::cells::Result<Option<Event>> {
+    validate_number(number)?;
+    context
+        .document::<Event>(&format!("{}{number:016x}", events(None)))?
+        .map(|event| validate(event, number, subject))
+        .transpose()
 }
 
 fn number(key: &str, prefix: &str) -> crate::cells::Result<u64> {

@@ -1,5 +1,6 @@
+import { conversationPage } from "./conversation";
 import { expect, test, type Page } from "@playwright/test";
-import { emptyReactions, emptyReviewRequests } from "./fixtures";
+import { emptyReactions, emptyReviewers } from "./fixtures";
 import {
   expectNoAccessibilityViolations,
   selectDarkTheme,
@@ -14,13 +15,14 @@ async function setup(page: Page) {
   const unexpected: string[] = [];
   const record = {
     number: 1,
-    author: "Alice",
+    author: { name: "Alice", profile: null },
     body: "Related work",
     state: "open",
     version: 1,
     created_at: 1700000000000,
     updated_at: 1700000000000,
     can_edit: false,
+    can_close: false,
     can_label: false,
     can_assign: false,
     labels: [],
@@ -30,6 +32,14 @@ async function setup(page: Page) {
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
+    if (path.endsWith("/issues/pins") && request.method() === "GET")
+      return route.fulfill({
+        json: {
+          version: 0,
+          items: [],
+          can_manage: access === "write" && !archived,
+        },
+      });
     if (path === "/api/session")
       return route.fulfill({
         json: {
@@ -44,6 +54,7 @@ async function setup(page: Page) {
         json: {
           repositories: [
             {
+              id: "00000000-0000-4000-8000-000000000099",
               owner: "team",
               name: "project",
               description: "",
@@ -82,8 +93,8 @@ async function setup(page: Page) {
       }
       return route.fulfill({ json: { active, version } });
     }
-    if (path.endsWith("/review-requests"))
-      return route.fulfill({ json: emptyReviewRequests() });
+    if (path.endsWith("/reviewers"))
+      return route.fulfill({ json: emptyReviewers() });
     if (path.endsWith("/links")) {
       const pull = path.includes("/pulls/");
       return route.fulfill({
@@ -105,6 +116,26 @@ async function setup(page: Page) {
         },
       });
     }
+    if (path.endsWith("/conversation"))
+      return conversationPage(route, {
+        activity: version
+          ? [
+              {
+                number: version,
+                target: { kind: "pull", number: 1 },
+                title: "Related pull",
+                actor: { name: "Alice", profile: null },
+                action: {
+                  kind: active ? "issue_linked" : "issue_unlinked",
+                  number: 1,
+                  title: "Related issue",
+                },
+                created_at: 1700000000000,
+              },
+            ]
+          : [],
+        head: "b".repeat(40),
+      });
     if (path.endsWith("/activity"))
       return route.fulfill({
         json: {
@@ -114,7 +145,7 @@ async function setup(page: Page) {
                   number: version,
                   target: { kind: "pull", number: 1 },
                   title: "Related pull",
-                  actor: "Alice",
+                  actor: { name: "Alice", profile: null },
                   action: {
                     kind: active ? "issue_linked" : "issue_unlinked",
                     number: 1,
@@ -209,7 +240,7 @@ test("linking and unlinking related work updates both pages and retains failed d
     panel.getByRole("link", { name: "#1 Related issue" }),
   ).toBeVisible();
   await expect(
-    page.getByRole("region", { name: "Activity", exact: true }),
+    page.getByRole("region", { name: "Conversation history", exact: true }),
   ).toContainText("linked issue Related issue on #1 Related pull");
   await page.reload();
   await panel.getByRole("link", { name: "#1 Related issue" }).click();
@@ -232,7 +263,7 @@ test("linking and unlinking related work updates both pages and retains failed d
   await page.goto("/team/project/pull/1");
   await expect(panel).toContainText("No linked issues.");
   await expect(
-    page.getByRole("region", { name: "Activity", exact: true }),
+    page.getByRole("region", { name: "Conversation history", exact: true }),
   ).toContainText("unlinked issue");
   expect(state.unexpected).toEqual([]);
 });

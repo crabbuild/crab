@@ -237,7 +237,7 @@ async fn pull_discussion_views_preserve_reactions_through_replay_and_edits() {
         ),
         (
             "reviews",
-            json!({"request_id":uuid::Uuid::now_v7(),"body":"Review body","state":"commented"}),
+            json!({"request_id":uuid::Uuid::now_v7(),"body":"Review body","state":"commented","commit_oid":pull["head_oid"]}),
         ),
         ("threads", thread),
         (

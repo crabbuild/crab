@@ -1,0 +1,123 @@
+import { PullRollups } from "@/features/pull-requests/rollups";
+import { CircleSlashIcon } from "lucide-react";
+import { IssueClosedIcon, IssueOpenedIcon } from "@primer/octicons-react";
+import { Link } from "@/components/navigation/link";
+import { LabelBadges } from "@/features/labels/selection";
+import type { IssueListItem } from "@/features/issues/model";
+import type { PullListItem } from "@/features/pull-requests/model";
+import {
+  branch,
+  pullIcons,
+  pullStatus,
+} from "@/features/pull-requests/presentation";
+import type { Repository } from "@/lib/api";
+import { repoHref } from "@/lib/repository-route";
+import { DiscussionCommentCount } from "./list";
+import { AssigneeAvatars } from "./metadata";
+import { RelativeTime } from "./time";
+import { Author } from "./author";
+import { Checkbox } from "@/components/ui/checkbox";
+
+export type DiscussionItem = IssueListItem | PullListItem;
+
+export function DiscussionRow({
+  item,
+  repo,
+  selection,
+}: {
+  item: DiscussionItem;
+  repo: Repository;
+  selection?: {
+    checked: boolean;
+    disabled: boolean;
+    toggle: (range: boolean) => void;
+  };
+}) {
+  const status =
+    item.kind === "pull"
+      ? pullStatus(item)
+      : item.state === "closed" && item.state_reason === "not_planned"
+        ? "not-planned"
+        : item.state;
+  const Icon =
+    item.kind === "pull"
+      ? pullIcons[pullStatus(item)]
+      : item.state === "open"
+        ? IssueOpenedIcon
+        : item.state_reason === "not_planned"
+          ? CircleSlashIcon
+          : IssueClosedIcon;
+  const href = repoHref(
+    repo,
+    item.kind === "pull"
+      ? { view: "pulls", pull: String(item.number) }
+      : { view: "issues", issue: String(item.number) },
+  );
+  return (
+    <li>
+      {selection && (
+        <Checkbox
+          className="mt-1"
+          aria-label={`Select ${item.kind === "pull" ? "pull request" : "issue"} #${item.number}: ${item.title}`}
+          checked={selection.checked}
+          disabled={selection.disabled}
+          onCheckedChange={() => selection.toggle(false)}
+          onClick={(event) => {
+            if (event.shiftKey) {
+              event.preventDefault();
+              selection.toggle(true);
+            }
+          }}
+        />
+      )}
+      <span
+        className={`${item.kind === "pull" ? "pull" : "issue"}-status-icon ${status}`}
+        role="img"
+        aria-label={status}
+      >
+        <Icon />
+      </span>
+      <div className="discussion-row-content">
+        <Link className="issue-link" href={href}>
+          {item.title}
+        </Link>
+        <LabelBadges labels={item.labels} />
+        <p className="muted">
+          {item.state === "open" ? (
+            <>
+              #{item.number} opened <RelativeTime value={item.created_at} /> by{" "}
+              <Author author={item.author} />
+            </>
+          ) : (
+            <>
+              #{item.number} by <Author author={item.author} /> was{" "}
+              {item.state === "merged" ? "merged" : "closed"}{" "}
+              <RelativeTime
+                value={
+                  item.kind === "pull" && item.state === "merged"
+                    ? item.merged_at
+                    : item.closed_at
+                }
+              />
+            </>
+          )}
+          {item.kind === "pull" && item.draft && " · Draft"}
+          {item.kind === "pull" && (
+            <span className="ml-2 inline-flex flex-wrap items-center gap-2">
+              <PullRollups repo={repo} rollup={item.rollup} />
+            </span>
+          )}
+        </p>
+        {item.kind === "pull" && (
+          <p className="pull-branches muted">
+            <code>{branch(item.head_ref)}</code>
+            <span>into</span>
+            <code>{branch(item.base_ref)}</code>
+          </p>
+        )}
+      </div>
+      <AssigneeAvatars assignees={item.assignees} />
+      <DiscussionCommentCount count={item.comment_count} href={href} />
+    </li>
+  );
+}

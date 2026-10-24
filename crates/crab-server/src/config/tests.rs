@@ -277,3 +277,31 @@ fn public_listeners_require_identity_and_https() {
         assert!(config.validate().is_err(), "{replacement}");
     }
 }
+
+#[test]
+fn repository_owners_cannot_shadow_global_server_namespaces() {
+    for owner in ["api", "assets", "auth", "git", "-"] {
+        let repository: RepositoryConfig = toml::from_str(&format!(
+            "owner='{owner}'\nname='project'\nbucket='bucket'\nprefix='project'"
+        ))
+        .unwrap();
+        assert!(validate_repository(&repository).is_err(), "{owner}");
+    }
+}
+
+#[test]
+fn repository_triage_role_round_trips_without_becoming_write_access() {
+    let mut repo = repository();
+    repo.members.push(RepositoryMember {
+        subject: "triager".into(),
+        name: "Triager".into(),
+        access: RepositoryAccess::Triage,
+    });
+    validate_repository(&repo).unwrap();
+    let json = serde_json::to_value(&repo.members).unwrap();
+    assert_eq!(json[0]["access"], "triage");
+    assert!(
+        RepositoryAccess::Read < RepositoryAccess::Triage
+            && RepositoryAccess::Triage < RepositoryAccess::Write
+    );
+}

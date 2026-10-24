@@ -85,14 +85,81 @@ Repository pages use GitHub-style paths. **Code**, **Issues**, **Pull requests**
 **Go to file** (keyboard `T`) opens file search, and **Add file** offers the
 existing create and upload actions.
 
+Issue and pull-request list rows show their opening, closing or merge-completion
+time, with relative dates and keyboard-accessible exact-time tooltips. Later
+edits keep the original closure time; reopening clears it. Prepare existing
+native repositories with `cells prepare-pull-state --owner OWNER --name REPO`
+before reopening traffic. Historical times come only from matching activity;
+missing evidence stays unknown. No discussion-index rebuild is needed.
+
 Pull requests can be created as drafts, converted to drafts, and marked ready
 for review. Draft badges appear in lists and details; merge admission rejects
 drafts and stale readiness changes. Authors or writers manage readiness, and
 conversion is blocked while a merge is pending.
 
-The reviewer sidebar requests or cancels reviews from current repository members.
-Submitted reviews fulfill matching requests; stale changes require explicit
-reload. Requests invite review and retain the existing branch protection rules.
+Writers can dismiss an approval or change request with a required explanation.
+Protected branches require an administrator. The conversation retains the review
+and reason; merge requirements and list/sidebar summaries stop counting that
+exact decision. An uncertain retry keeps its original intent, including after
+archive or loss of Write access while Read access remains. Prepare existing
+repositories with `cells prepare-review-state --owner OWNER --name REPO` before
+reopening traffic. No discussion-index rebuild is needed.
+
+The reviewer sidebar searches current members by public handle or display name,
+selects stable actor UUIDs, and links public profiles. Triage or write authority
+is required to request, cancel or re-request reviews. Submitted reviews fulfill
+matching requests; stale changes require explicit reload. Fulfillment does not
+imply approval or current-head validity. The sidebar includes uninvited reviewers,
+keeps approval decisions separate from later comments, and distinguishes an
+outdated review from a missing head. Existing discussion indexes require
+`cells rebuild-search` for current format 11 before serving. Branch protection rules stay separate.
+The “Review changes” dialog keeps submission stable while the diff loads and
+pins a review to the inspected commit. A changed head requires comparison
+reload and explicit draft rebasing; retries use the native submission ledger.
+
+Stable qualified account UUIDs now exist independently of public profiles.
+Private `cells register-accounts --identities-file` registration creates no
+username or permissions; later enrollment keeps the same UUID. Existing native
+Directory format 1 needs explicit `cells migrate-directory`, which preserves
+profiles and resumes bounded work after interruption. `cells directory-status`
+reports preparation state. Update peers together; repository records and the
+search index are unchanged. Assignment and native grant migrations remain work.
+See [account preparation](REFERENCE.md#prepare-and-use-account-profiles).
+
+Issue/PR authors share public profile links across lists, details, comments,
+reviews and inline conversations. Renaming keeps the actor UUID and historical
+source attribution. Prepare Directory before serving these responses; missing
+preparation produces a visible error, and profiles grant no access.
+
+Issue and PR lists include a searchable Labels menu with colors, descriptions,
+multiple selections, exclusions and a no-label option. Choosing labels requires
+all selected labels; Alt+click or Alt+Enter toggles exclusion. The menu stays
+open across result refreshes, while stale counts and rows clear. Native choices
+preserve other filters and conditional boolean groups. Recent personal label
+suggestions remain unfinished.
+
+Issue and PR lists include a searchable Milestone filter with open/closed
+choices and a no-milestone option. It preserves boolean queries, sort and
+pagination semantics and searches the complete native catalog. The search box
+also accepts `milestone:"title"`, `-milestone:"title"` and `no:milestone`, with
+native suggestions. Existing indexes need explicit `cells rebuild-search`
+preparation for discussion index format 3; canonical collaboration data remains
+unchanged.
+
+Search also accepts `author:username`, `-author:username` and `author:@me`.
+Usernames resolve through current public profiles; `@me` works before enrollment.
+Created by me and Authored by me are native filtered views with URL/reload,
+state and sort support. Author suggestions search indexed public handles; names
+never act as identities or grants. Format-1/2 indexes need an explicit rebuild
+before serving the new lists; update fleet peers together.
+
+Repository members can receive Triage access in Settings → Members. It permits
+issue/PR state changes, existing metadata assignment and review requests while
+code publication, merging, catalog definitions and administration retain their
+separate permissions. Issue state controls use `can_close` independently of
+`can_edit`. Existing schema/index data needs no rebuild; deploy peers together
+for the updated native edit input. Full role and organization authority parity
+remains tracked in the collaboration plan.
 
 Pull request conversations show merge requirements above the comment editor.
 Choose a merge method, review the commit message, and confirm the merge; an
@@ -123,6 +190,42 @@ rendering. In-app navigation retains the flag; `powerbar=0` disables it.
 | Branches, tags, or labels | `/branches`, `/tags`, `/labels` |
 | Settings | `/settings`, `/settings/branches`, `/settings/access` |
 | File creation, upload, editing, deletion | `/new/{ref}/{directory?}`, `/upload/{ref}/{directory?}`, `/edit/{ref}/{path}`, `/delete/{ref}/{path}` |
+
+Account pages live outside repository routes: `/-/profile` edits the signed-in
+account's public profile; `/-/users/{actor-uuid}` shows its stable public URL.
+The header's profile icon opens account settings. Initialize the shared directory
+before serving profiles or nonempty issue/PR lists, using
+`cells initialize-directory` against the running private mTLS listener. Existing assignment data also requires explicit
+`cells migrate-assignments` and a current-format `cells rebuild-search`; nonempty records
+need qualified-identity mappings. See [assignment preparation](CELLAR.md#assignment-preparation).
+Users choose a username and display name; authentication claims are
+never published as profile fields. Changing a profile grants no repository or
+organization access. `-` is reserved as a server route owner.
+Issue/PR list authors link enrolled profiles by stable UUID and show their current
+handle; unenrolled authors keep their recorded display name. Detail/comment/
+review attribution and additional participant predicates remain unfinished.
+Assignee metadata links public profiles; list filters support usernames, `@me`,
+`*`, `no:assignee` and explicit `actor/UUID` values. The searchable Assignee menu
+and assigned-to-me sidebar use native queries. Existing derived indexes require
+a format-8 rebuild; canonical assignments remain format 2.
+PR lists also support `review-requested`, `reviewed-by`, `review-involves` and
+`user-review-requested` with a public username or `@me`. The Reviews filter and
+Review requests sidebar use those native relationships; submitted reviews leave
+pending results and retain review participation.
+`commenter:username` and `commenter:@me` find conversation comments, submitted
+reviews (including empty approvals), inline threads and replies. Opening an issue
+or PR alone does not count. Public username completion uses the same current
+qualified identity as author/reviewer filters. Mentions and `involves` remain unfinished.
+Text searches include titles, descriptions and all five contribution types. Use
+`in:title`, `in:body`, `in:comments`, or `in:title,body` to select fields. Native
+FTS updates with comment edits and deletion cascades. Author names require the
+explicit `author:` filter.
+Issue and PR search also accepts `comments`, `reactions`, and `interactions`
+counts: `comments:>=3`, `reactions:0`, `interactions:5..20`, `comments:10..*`,
+or `-reactions:>0`. Interactions sum conversation comments and reactions on the
+issue/PR itself. Inline review replies and reactions to individual comments are
+not included. These filters use the existing transactional index without a new
+preparation step; search completion offers examples.
 
 Generated links encode a slash-containing ref as one URL segment. Pasted paths
 with unescaped ref slashes resolve against the longest known ref. Raw Git
@@ -205,7 +308,15 @@ credentials. Then create a cataloged repository and start:
 entry ready. `repository adopt` initializes an empty collaboration Cell for an
 existing Git repository; it does not import application data from another runtime.
 `cells capacity --json` reports admission limits. `cells runtime` reports the
-native runtime version. The supported management surface and retired commands
+native runtime version. Existing native repositories require
+`cells rebuild-search --owner OWNER --name NAME` against the running private
+mTLS listener before admitting traffic with the indexed discussion lists. The
+command resumes an interrupted rebuild without changing domain records.
+Before serving account profiles or nonempty issue/PR lists, run
+`cells initialize-directory` against that same running listener. It initializes
+a separate native Directory and leaves
+repository records unchanged; users enroll their own profiles afterward.
+The supported management surface and retired commands
 are listed in [CELLAR.md](CELLAR.md).
 
 The bucket or container must already exist. `repository adopt` can publish an
@@ -260,7 +371,7 @@ Read these sources in order:
 | [app.rs](src/app.rs) | Admission timeout, repository access, input validation, and HTTP error mapping |
 | [cells/client.rs](src/cells/client.rs) | Typed requests through native ingress |
 | [cells/application.rs](src/cells/application.rs) | Transaction, replay receipts, and native output gate |
-| [cells/repository/issues.rs](src/cells/repository/issues.rs) | SQLite transaction, submission reservation, number allocation, and typed outcome |
+| [cells/repository/issues/](src/cells/repository/issues/mod.rs) | SQLite transaction, submission reservation, number allocation, and typed outcome |
 | [Cellar SDK](https://github.com/crabbuild/cellar) | Native ownership, persistence, recovery, and output durability |
 
 Example JSON body, subject to the server's authentication and mutation checks:
@@ -273,9 +384,17 @@ Example JSON body, subject to the server's authentication and mutation checks:
 }
 ```
 
+Issue and PR create bodies optionally accept `metadata` with `label_ids`,
+`assignee_ids` (stable actor UUIDs), and `milestone` (number or null). Setting any
+initial metadata requires triage access. The targets must be available when the
+native creation runs; selected metadata and milestone progress commit atomically
+with the discussion at version one.
+
 Generate a fresh submission ID for a new issue. If the response is lost, retry
-with the same ID and original title/body: the reservation preserves the issue
-number. Reusing that ID with different content or another author is a conflict.
+with the same ID and entire original payload, including metadata: the reservation
+preserves the issue number. Reusing that ID with different content or another
+author is a conflict. A replay returns the current record and preserves later
+metadata edits.
 
 The Cell command commits and publishes before the handler loads label and
 assignee presentation data. A lost or failed HTTP response therefore does not
@@ -326,10 +445,10 @@ The internal owners are:
 | `cli/` | Command parsing/dispatch, management client, and ECS address discovery |
 | `server/mod.rs` | Startup, shared application state, and ordered shutdown |
 | `server/background.rs` | Catalog refresh and fair projection scheduling |
-| `server/management.rs`, `server/capacity.rs`, `server/storage.rs` | Private management, resource policy, and storage preflight |
+| `server/management/mod.rs`, `server/capacity.rs`, `server/storage.rs` | Private management, resource policy, and storage preflight |
 | `repository/` | Pinned Git snapshots, maintenance, browse projections, and atomic catalog installation |
 | `catalog/` | Durable catalog records and membership audit |
-| `auth/mod.rs`, `auth/state.rs`, `auth/http/mod.rs`, `auth/transport.rs` | Identity, durable sessions, login endpoints, and bounded provider transport |
+| `auth/` | Identity, durable sessions, UUID-bound current grants in `principal/`, login endpoints, and bounded provider transport |
 | `git_import/mod.rs`, `git_import/source.rs`, `git_import/git.rs` | Import jobs/workflow, source validation, and isolated Git processes |
 | `api/` | Browse HTTP orchestration, feature handlers, Git queries, and wire encoding |
 | `git/` | Native Git protocol, object, receive, and LFS endpoints |
@@ -338,6 +457,7 @@ The internal owners are:
 | `cells/` | Native ingress and durable transaction/replay boundary |
 | `cells/repository/` | Typed domain facade and shared repository invariants |
 | `cells/repository/pulls/` | Pull records, comments, reviews, merge commands, and review threads |
+| `cells/repository/search/` | Query grammar, completion, transactional search projection, sorting/counts, and explicit index preparation |
 | `cells/repository/{checks,settings,releases,labels,statuses,projection}/` | Feature commands, local persistence/validation, and tests |
 
 Authentication always uses shared durable state, including in-memory object-store

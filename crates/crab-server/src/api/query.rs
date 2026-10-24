@@ -140,7 +140,7 @@ pub(super) async fn execute(
                     .await?
                     .ok_or(Error::PathNotFound)?;
                 let projected = server
-                    .repository_cells()
+                    .cells()
                     .zip(projection_source)
                     .map(|(router, source)| {
                         let paths = result

@@ -4939,9 +4939,11 @@ async fn load_selected_ref_heads(
         )>,
     >,
 > {
-    futures_util::stream::iter(ref_names.iter().map(|ref_name| async move {
+    // Each I/O future owns its name so selected-ref reads remain Send when
+    // composed into multithreaded callers; buffering still bounds retained names.
+    futures_util::stream::iter(ref_names.iter().cloned().map(|ref_name| async move {
         let path = router.capsule_ref_head_path(
-            &crab_metadata::capsule_protocol::capsule_ref_name_key(ref_name),
+            &crab_metadata::capsule_protocol::capsule_ref_name_key(&ref_name),
         );
         let (body, etag) = match router.store().get_with_etag(&path).await {
             Ok(value) => value,
@@ -6767,11 +6769,13 @@ mod tests {
         let router = StoreLayout::new(store, "repositories/test".to_owned());
         let root = load_root(&router).await.unwrap();
 
-        let refs = read_visible_refs_from_root_for_refs(
-            &router,
-            &root,
-            &BTreeSet::from(["refs/heads/feature".to_owned()]),
-        )
+        fn send<F: std::future::Future + Send>(future: F) -> F {
+            future
+        }
+        let selected = BTreeSet::from(["refs/heads/feature".to_owned()]);
+        let refs = send(read_visible_refs_from_root_for_refs(
+            &router, &root, &selected,
+        ))
         .await
         .unwrap();
 

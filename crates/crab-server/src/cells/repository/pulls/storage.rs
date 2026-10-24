@@ -2,7 +2,7 @@ use super::*;
 
 pub(super) fn insert_pull_statement(record: &PullRecord) -> crate::cells::Result<SqlStatement> {
     Ok(statement(
-        "INSERT INTO repository_pulls(number, create_request_id, author_issuer, author_subject, author_name, title, body, state, base_ref, base_oid, head_ref, head_oid, label_ids, assignee_subjects, pending_merge, completed_merge, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO repository_pulls(number, create_request_id, author_issuer, author_subject, author_name, title, body, state, base_ref, base_oid, head_ref, head_oid, label_ids, assignees, pending_merge, completed_merge, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
         vec![
             integer(record.number)?,
             SqlValue::Blob(record.create_submission_id.to_vec()),
@@ -17,7 +17,7 @@ pub(super) fn insert_pull_statement(record: &PullRecord) -> crate::cells::Result
             SqlValue::Text(record.head_ref.clone()),
             SqlValue::Text(record.head_oid.clone()),
             SqlValue::Blob(encode_label_ids(&record.label_ids)?),
-            SqlValue::Blob(encode_assignees(&record.assignee_subjects)?),
+            SqlValue::Blob(assignments::encode(&record.assignees)?),
             optional_record(&record.merge_pending)?,
             optional_record(&record.merge)?,
             integer(record.version)?,
@@ -28,11 +28,11 @@ pub(super) fn insert_pull_statement(record: &PullRecord) -> crate::cells::Result
 }
 
 pub(super) fn update_pull_row(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     record: &PullRecord,
     expected: u64,
 ) -> crate::cells::Result<()> {
-    let result = context.sql(&SqlBatch { statements: vec![statement("UPDATE repository_pulls SET title = ?, body = ?, state = ?, label_ids = ?, assignee_subjects = ?, pending_merge = ?, completed_merge = ?, version = ?, updated_at_ms = ? WHERE number = ? AND version = ?", vec![SqlValue::Text(record.title.clone()), SqlValue::Text(record.body.clone()), SqlValue::Integer(i64::from(record.state.code())), SqlValue::Blob(encode_label_ids(&record.label_ids)?), SqlValue::Blob(encode_assignees(&record.assignee_subjects)?), optional_record(&record.merge_pending)?, optional_record(&record.merge)?, integer(record.version)?, integer(record.updated_at_ms)?, integer(record.number)?, integer(expected)?])] })?;
+    let result = context.sql(&SqlBatch { statements: vec![statement("UPDATE repository_pulls SET title = ?, body = ?, state = ?, label_ids = ?, assignees = ?, pending_merge = ?, completed_merge = ?, version = ?, updated_at_ms = ? WHERE number = ? AND version = ?", vec![SqlValue::Text(record.title.clone()), SqlValue::Text(record.body.clone()), SqlValue::Integer(i64::from(record.state.code())), SqlValue::Blob(encode_label_ids(&record.label_ids)?), SqlValue::Blob(assignments::encode(&record.assignees)?), optional_record(&record.merge_pending)?, optional_record(&record.merge)?, integer(record.version)?, integer(record.updated_at_ms)?, integer(record.number)?, integer(expected)?])] })?;
     if result[0].rows_affected != 1 {
         return Err(crate::cells::Error::Invalid(
             "repository pull update lost its transaction",
@@ -55,7 +55,9 @@ fn optional_record<T: StoredRecord>(value: &Option<T>) -> crate::cells::Result<S
     }
 }
 
-fn decode_optional_record<T: StoredRecord>(value: &SqlValue) -> crate::cells::Result<Option<T>> {
+pub(super) fn decode_optional_record<T: StoredRecord>(
+    value: &SqlValue,
+) -> crate::cells::Result<Option<T>> {
     match value {
         SqlValue::Null => Ok(None),
         SqlValue::Blob(bytes) => {
@@ -75,11 +77,11 @@ fn decode_optional_record<T: StoredRecord>(value: &SqlValue) -> crate::cells::Re
 }
 
 fn pull_select() -> &'static str {
-    "SELECT number, create_request_id, author_issuer, author_subject, author_name, title, body, state, base_ref, base_oid, head_ref, head_oid, label_ids, assignee_subjects, pending_merge, completed_merge, version, created_at_ms, updated_at_ms FROM repository_pulls WHERE number = ?"
+    "SELECT number, create_request_id, author_issuer, author_subject, author_name, title, body, state, base_ref, base_oid, head_ref, head_oid, label_ids, assignees, pending_merge, completed_merge, version, created_at_ms, updated_at_ms FROM repository_pulls WHERE number = ?"
 }
 
 pub(super) fn load_pull(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     number: u64,
 ) -> crate::cells::Result<Option<PullRecord>> {
     let result = context.sql(&SqlBatch { statements: vec![statement(pull_select(), vec![integer(number)?]), statement("SELECT review_number, author_issuer, author_subject, author_name, state, commit_oid FROM repository_pull_review_decisions WHERE pull_number = ? ORDER BY review_number", vec![integer(number)?])] })?;
@@ -91,7 +93,7 @@ pub(super) fn load_pull(
 }
 
 pub(super) fn load_pull_query(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     number: u64,
 ) -> crate::cells::Result<Option<PullRecord>> {
     let result = context.sql(&SqlBatch { statements: vec![statement(pull_select(), vec![integer(number)?]), statement("SELECT review_number, author_issuer, author_subject, author_name, state, commit_oid FROM repository_pull_review_decisions WHERE pull_number = ? ORDER BY review_number", vec![integer(number)?])] })?;
@@ -103,7 +105,7 @@ pub(super) fn load_pull_query(
 }
 
 fn pull_from_rows(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     row: &[SqlValue],
     decisions: &[Vec<SqlValue>],
 ) -> crate::cells::Result<PullRecord> {
@@ -134,7 +136,7 @@ fn pull_from_rows(
         head_ref: result_text(row, 10)?,
         head_oid: result_text(row, 11)?,
         label_ids: decode_label_ids(result_blob(row, 12)?)?,
-        assignee_subjects: decode_assignees(result_blob(row, 13)?)?,
+        assignees: assignments::decode(result_blob(row, 13)?)?,
         merge_pending: decode_optional_record(&row[14])?,
         merge: decode_optional_record(&row[15])?,
         review_decisions,
@@ -156,7 +158,7 @@ pub(super) fn author_from_row(
 }
 
 pub(super) fn next_child_number(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     table: &str,
     pull: u64,
 ) -> crate::cells::Result<u64> {
@@ -228,7 +230,7 @@ pub(super) fn decode_record<T: StoredRecord>(bytes: &[u8]) -> crate::cells::Resu
 }
 
 pub(super) fn load_comment(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     key: PullChildKey,
 ) -> crate::cells::Result<Option<PullCommentRecord>> {
     let result = context.sql(&SqlBatch { statements: vec![statement("SELECT pull_number, number, author_issuer, author_subject, author_name, body, version, created_at_ms, updated_at_ms FROM repository_pull_comments WHERE pull_number = ? AND number = ?", vec![integer(key.pull)?, integer(key.number)?])] })?;
@@ -239,7 +241,7 @@ pub(super) fn load_comment(
         .transpose()
 }
 pub(super) fn load_comment_query(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     key: PullChildKey,
 ) -> crate::cells::Result<Option<PullCommentRecord>> {
     validate_number(key.pull)?;
@@ -263,7 +265,7 @@ pub(super) fn comment_from_row(row: &[SqlValue]) -> crate::cells::Result<PullCom
     })
 }
 pub(super) fn load_review(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     key: PullChildKey,
 ) -> crate::cells::Result<Option<PullReviewRecord>> {
     let result = context.sql(&SqlBatch { statements: vec![statement("SELECT pull_number, number, author_issuer, author_subject, author_name, body, state, commit_oid, version, created_at_ms, updated_at_ms FROM repository_pull_reviews WHERE pull_number = ? AND number = ?", vec![integer(key.pull)?, integer(key.number)?])] })?;
@@ -274,7 +276,7 @@ pub(super) fn load_review(
         .transpose()
 }
 pub(super) fn load_review_query(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     key: PullChildKey,
 ) -> crate::cells::Result<Option<PullReviewRecord>> {
     validate_number(key.pull)?;
@@ -300,7 +302,7 @@ pub(super) fn review_from_row(row: &[SqlValue]) -> crate::cells::Result<PullRevi
     })
 }
 pub(super) fn list_child_rows(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     table: &str,
     input: &PullChildListInput,
     columns: &str,

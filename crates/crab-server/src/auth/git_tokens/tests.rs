@@ -120,6 +120,7 @@ async fn token_permissions_intersect_repository_membership_and_requested_scope()
             );
         }
         let principal = principal(&h, token).await;
+        let repository_id = h.server.repositories.values()[0].id;
         let mut config = h
             .server
             .repositories
@@ -127,25 +128,45 @@ async fn token_permissions_intersect_repository_membership_and_requested_scope()
             .unwrap()
             .config
             .clone();
+        let resolved = principal.with_membership(repository_id, &config, &h.provider.issuer);
         assert_eq!(
-            (principal.can_read(&config), principal.can_write(&config)),
+            (
+                resolved.can_read(repository_id),
+                resolved.can_write(repository_id)
+            ),
             (true, access == "write")
         );
         for member in &mut config.members {
             member.access = crate::RepositoryAccess::Read;
         }
+        let resolved = principal.with_membership(repository_id, &config, &h.provider.issuer);
         assert_eq!(
-            (principal.can_read(&config), principal.can_write(&config)),
+            (
+                resolved.can_read(repository_id),
+                resolved.can_write(repository_id)
+            ),
             (true, false)
         );
         config.name = "another".into();
-        assert!(!principal.can_read(&config));
+        assert!(
+            !principal
+                .with_membership(repository_id, &config, &h.provider.issuer)
+                .can_read(repository_id)
+        );
         config.name = "private".into();
         config.owner = "another".into();
-        assert!(!principal.can_read(&config));
+        assert!(
+            !principal
+                .with_membership(repository_id, &config, &h.provider.issuer)
+                .can_read(repository_id)
+        );
         config.owner = "team".into();
         config.members.clear();
-        assert!(!principal.can_read(&config));
+        assert!(
+            !principal
+                .with_membership(repository_id, &config, &h.provider.issuer)
+                .can_read(repository_id)
+        );
     }
     h.close().await;
 }
@@ -296,7 +317,13 @@ async fn git_tokens_are_read_scoped_and_revoked_with_the_browser_session() {
     assert_eq!(response.status(), StatusCode::OK);
     let issued: Value = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
     let token = issued["token"].as_str().unwrap();
-    let retained = principal(&h, token).await;
+    let authenticated = principal(&h, token).await;
+    let repository = h.server.repositories.values()[0].clone();
+    let retained = crate::app::membership(&h.server, &authenticated, &repository)
+        .await
+        .unwrap()
+        .principal;
+    assert!(retained.can_read(repository.id));
     for authenticated in [false, true] {
         let request = h
             .http
@@ -411,15 +438,7 @@ async fn git_tokens_are_read_scoped_and_revoked_with_the_browser_session() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::NO_CONTENT);
     assert!(!retained.authenticated());
-    assert!(
-        !retained.can_read(
-            &h.server
-                .repositories
-                .get(&("team".into(), "private".into()))
-                .unwrap()
-                .config
-        )
-    );
+    assert!(!retained.can_read(h.server.repositories.values()[0].id));
     let response = h
         .http
         .get(&git_url)
@@ -616,5 +635,49 @@ async fn lfs_tokens_enforce_scope_and_revocation_before_upload_publication() {
     }
     h.server.receives.close();
     h.server.receives.wait().await;
+    h.close().await;
+}
+
+#[tokio::test]
+async fn tokens_without_current_repository_identity_are_rejected_and_remain_revocable() {
+    let h = Harness::new(false).await;
+    let token = issue_token(&h, "valid", "write").await;
+    let auth = h.server.auth.as_ref().unwrap();
+    let token_key = auth::key(&token);
+    let path = auth.state.path("git-tokens", &token_key);
+    let (bytes, _) = auth
+        .state
+        .store
+        .get_with_etag_bounded(&path, 65536)
+        .await
+        .unwrap();
+    let valid: Value = serde_json::from_slice(&bytes).unwrap();
+    let session_key = serde_json::from_value(valid["session_key"].clone()).unwrap();
+    assert!(principal(&h, &token).await.authenticated());
+    for invalid in ["missing-id", "nil-id", "old-format"] {
+        let mut record = valid.clone();
+        match invalid {
+            "missing-id" => {
+                record.as_object_mut().unwrap().remove("repository_id");
+            }
+            "nil-id" => record["repository_id"] = json!(uuid::Uuid::nil()),
+            _ => record["format"] = json!(1),
+        }
+        let (_, etag) = auth
+            .state
+            .store
+            .get_with_etag_bounded(&path, 65536)
+            .await
+            .unwrap();
+        auth.state
+            .store
+            .update(&path, serde_json::to_vec(&record).unwrap().into(), etag)
+            .await
+            .unwrap();
+        assert!(!principal(&h, &token).await.authenticated(), "{invalid}");
+    }
+    let session = auth.load_session(session_key).await.unwrap();
+    auth.remove_git_tokens(&session).await.unwrap();
+    assert!(!principal(&h, &token).await.authenticated());
     h.close().await;
 }

@@ -7,18 +7,21 @@ use crate::cells::repository::collaboration::{
 pub(crate) struct CreatePull;
 
 impl Mutation for CreatePull {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 16;
     type Input = CreatePullInput;
     type Output = CreatePullOutcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         if settings::archived(context)? {
             return Ok(MutationResult::Rejected(CreatePullOutcome::Archived));
         }
+        lifecycle::ensure_ready(context)?;
         validate_create_pull(&input)?;
+        input.metadata.selection.validate()?;
         let digest = create_pull_digest(&input);
         let existing = context.sql(&SqlBatch { statements: vec![statement(
             "SELECT payload_digest, pull_number FROM repository_pull_submissions WHERE request_id = ?",
@@ -34,6 +37,29 @@ impl Mutation for CreatePull {
                 )?),
             )));
         }
+        use crate::cells::repository::collaboration::{Subject, SubjectKind, creation};
+        let comparison = Some(creation::Comparison {
+            base_oid: input.base_oid.clone(),
+            head_oid: input.head_oid.clone(),
+        });
+        match input.metadata.resolve(
+            context,
+            SubjectKind::Pull,
+            input.submission_id,
+            digest,
+            comparison,
+        )? {
+            creation::Resolution::Ready => {}
+            creation::Resolution::Rejected(reason) => {
+                return Ok(MutationResult::Success(
+                    CreatePullOutcome::MetadataRejected(reason),
+                ));
+            }
+            creation::Resolution::Conflict => {
+                return Ok(MutationResult::Rejected(CreatePullOutcome::RequestConflict));
+            }
+        }
+        let milestone = input.metadata.selection.milestone;
         let sequence = context.sql(&SqlBatch { statements: vec![
             statement("UPDATE repository_sequences SET last = last + 1 WHERE kind = 'pull' AND last < 9007199254740991", vec![]),
             statement("SELECT last FROM repository_sequences WHERE kind = 'pull'", vec![]),
@@ -56,8 +82,8 @@ impl Mutation for CreatePull {
             base_oid: input.base_oid,
             head_ref: input.head_ref,
             head_oid: input.head_oid,
-            label_ids: vec![],
-            assignee_subjects: vec![],
+            label_ids: input.metadata.selection.label_ids,
+            assignees: input.metadata.eligible,
             merge_pending: None,
             merge: None,
             review_decisions: vec![],
@@ -69,6 +95,7 @@ impl Mutation for CreatePull {
             statement("INSERT INTO repository_pull_submissions(request_id, payload_digest, pull_number) VALUES (?, ?, ?)", vec![SqlValue::Blob(record.create_submission_id.to_vec()), SqlValue::Blob(digest.as_bytes().to_vec()), integer(record.number)?]),
             insert_pull_statement(&record)?,
         ] })?;
+        lifecycle::create(context, record.number)?;
         let state = if input.draft {
             PullReadiness::Draft
         } else {
@@ -80,6 +107,15 @@ impl Mutation for CreatePull {
             number: record.number,
         };
         activity::append(context, target, &record.author, Action::Created)?;
+        creation::assign_milestone(
+            context,
+            Subject {
+                kind: SubjectKind::Pull,
+                number: record.number,
+            },
+            &record.author,
+            milestone,
+        )?;
         Ok(MutationResult::Success(CreatePullOutcome::Created(
             Box::new(record),
         )))
@@ -89,17 +125,19 @@ impl Mutation for CreatePull {
 pub(crate) struct UpdatePull;
 
 impl Mutation for UpdatePull {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 17;
     type Input = UpdatePullInput;
     type Output = UpdatePullOutcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         if settings::archived(context)? {
             return Ok(MutationResult::Rejected(UpdatePullOutcome::Archived));
         }
+        lifecycle::ensure_ready(context)?;
         validate_number(input.number)?;
         validate_author(&input.actor)?;
         validate_number(input.version)?;
@@ -112,12 +150,13 @@ impl Mutation for UpdatePull {
         if let Some(labels) = &input.label_ids {
             validate_label_ids(labels)?;
         }
-        if let Some(assignees) = &input.assignee_subjects {
-            validate_assignees(assignees)?;
+        if let Some(assignees) = &input.assignees {
+            assignments::validate(assignees)?;
         }
         let Some(mut pull) = load_pull(context, input.number)? else {
             return Ok(MutationResult::Rejected(UpdatePullOutcome::NotFound));
         };
+        let was_state = pull.state;
         let was_closed = pull.state != PullState::Open;
         let edited = input
             .title
@@ -129,9 +168,9 @@ impl Mutation for UpdatePull {
                 .as_ref()
                 .is_some_and(|value| value != &pull.label_ids)
             || input
-                .assignee_subjects
+                .assignees
                 .as_ref()
-                .is_some_and(|value| value != &pull.assignee_subjects);
+                .is_some_and(|value| value != &pull.assignees);
         if pull.version != input.version {
             return Ok(MutationResult::Rejected(UpdatePullOutcome::Conflict));
         }
@@ -140,8 +179,8 @@ impl Mutation for UpdatePull {
         }
         let author = same_author(&pull.author, &input.actor);
         if (input.title.is_some() || input.body.is_some()) && !author
-            || input.state.is_some() && !(author || input.can_manage)
-            || (input.label_ids.is_some() || input.assignee_subjects.is_some()) && !input.can_manage
+            || input.state.is_some() && !(author || input.can_triage)
+            || (input.label_ids.is_some() || input.assignees.is_some()) && !input.can_triage
         {
             return Ok(MutationResult::Rejected(UpdatePullOutcome::Forbidden));
         }
@@ -168,8 +207,8 @@ impl Mutation for UpdatePull {
         if let Some(value) = input.label_ids {
             pull.label_ids = value;
         }
-        if let Some(value) = input.assignee_subjects {
-            pull.assignee_subjects = value;
+        if let Some(value) = input.assignees {
+            pull.assignees = value;
         }
         pull.version = pull
             .version
@@ -180,6 +219,13 @@ impl Mutation for UpdatePull {
             ))?;
         pull.updated_at_ms = timestamp(context.now_ms())?;
         update_pull_row(context, &pull, input.version)?;
+        lifecycle::change(
+            context,
+            pull.number,
+            was_state,
+            pull.state,
+            pull.updated_at_ms,
+        )?;
         // Progress changes commit with close/reopen and merge completion.
         let subject = collaboration::Subject {
             kind: collaboration::SubjectKind::Pull,
@@ -215,12 +261,13 @@ impl Mutation for UpdatePull {
 pub(crate) struct GetPull;
 
 impl Read for GetPull {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 15;
     type Input = u64;
     type Output = Option<PullRecord>;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         number: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         validate_number(number)?;
@@ -231,12 +278,13 @@ impl Read for GetPull {
 pub(crate) struct GetPullSubmission;
 
 impl Read for GetPullSubmission {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 16;
     type Input = PullSubmissionKey;
-    type Output = Option<PullRecord>;
+    type Output = Option<crate::cells::repository::collaboration::creation::Comparison>;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         key: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         if key.pull.is_some() {
@@ -250,82 +298,80 @@ impl Read for GetPullSubmission {
                 vec![SqlValue::Blob(key.submission_id.to_vec())],
             )],
         })?;
-        result[0]
+        let record = result[0]
             .rows
             .first()
             .map(|row| result_u64_from_row(row, 0))
             .transpose()?
             .map(|number| load_pull_query(context, number))
             .transpose()
-            .map(Option::flatten)
+            .map(Option::flatten)?;
+        if let Some(record) = record {
+            return Ok(Some(
+                crate::cells::repository::collaboration::creation::Comparison {
+                    base_oid: record.base_oid,
+                    head_oid: record.head_oid,
+                },
+            ));
+        }
+        // A rejected creation also keeps its original tips so branch movement
+        // cannot rebind an unknown response to a different comparison.
+        crate::cells::repository::collaboration::creation::rejected_comparison(
+            context,
+            key.submission_id,
+        )
     }
 }
 
 pub(crate) struct ListPulls;
-
 impl Read for ListPulls {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 17;
-    type Input = PullListInput;
-    type Output = PullPage;
-
+    type Input = SearchInput;
+    type Output = search::index::Page<PullSummary>;
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
-        validate_list(input.before, input.limit)?;
-        validate_query(input.query.as_deref())?;
-        if input.state > 2 {
-            return Err(crate::cells::Error::Invalid(
-                "repository pull list state is invalid",
-            ));
-        }
-        let upper = input.before.map_or(MAX_NUMBER, |value| value - 1);
-        let result = context.sql(&SqlBatch { statements: vec![statement(
-            "SELECT number, author_issuer, author_subject, author_name, title, state, base_ref, head_ref, label_ids, assignee_subjects, created_at_ms, updated_at_ms, body FROM repository_pulls WHERE number <= ? ORDER BY number DESC LIMIT 200",
-            vec![integer(upper)?],
-        )] })?;
-        let mut items = Vec::new();
-        let mut examined = 0_u64;
-        let mut last_examined = None;
-        for row in &result[0].rows {
-            examined += 1;
-            last_examined = Some(result_u64_from_row(row, 0)?);
-            let state = PullState::from_code(result_u64_from_row(row, 5)?)?;
-            let matches_state = input.state == 2
-                || input.state == 0 && state == PullState::Open
-                || input.state == 1 && state != PullState::Open;
-            let title = result_text(row, 4)?;
-            let body = result_text(row, 12)?;
-            let author_name = result_text(row, 3)?;
-            let matches_text = input.query.as_ref().is_none_or(|query| {
-                [&title, &body, &author_name]
-                    .iter()
-                    .any(|value| value.to_lowercase().contains(query))
-            });
-            if matches_state && matches_text {
-                items.push(PullSummary {
-                    draft: readiness::load(context, result_u64_from_row(row, 0)?)?
-                        == PullReadiness::Draft,
-                    number: result_u64_from_row(row, 0)?,
-                    author: author_from_row(row, 1)?,
-                    title: result_text(row, 4)?,
-                    state,
-                    base_ref: result_text(row, 6)?,
-                    head_ref: result_text(row, 7)?,
-                    label_ids: decode_label_ids(result_blob(row, 8)?)?,
-                    assignee_subjects: decode_assignees(result_blob(row, 9)?)?,
-                    created_at_ms: result_u64_from_row(row, 10)?,
-                    updated_at_ms: result_u64_from_row(row, 11)?,
-                });
-            }
-            if items.len() == usize::from(input.limit) {
-                break;
-            }
-        }
-        let next = (examined == MAX_LIST_SCAN || items.len() == usize::from(input.limit))
-            .then_some(last_examined)
-            .flatten();
-        Ok(PullPage { items, next })
+        search::index::page(
+            context,
+            input,
+            Some(collaboration::SubjectKind::Pull),
+            |context, subject, metrics| PullSummary::load(context, subject.number, metrics),
+        )
+    }
+}
+
+impl PullSummary {
+    pub(in crate::cells::repository) fn load(
+        context: &Transaction<'_>,
+        number: u64,
+        metrics: search::index::Metrics,
+    ) -> crate::cells::Result<Self> {
+        let result = context.sql(&SqlBatch { statements: vec![statement("SELECT number, author_issuer, author_subject, author_name, title, state, base_ref, head_ref, label_ids, assignees, version, created_at_ms, updated_at_ms FROM repository_pulls WHERE number = ?", vec![integer(number)?])] })?;
+        let row = result[0].rows.first().ok_or(crate::cells::Error::Invalid(
+            "indexed pull request is missing",
+        ))?;
+        let state = PullState::from_code(result_u64_from_row(row, 5)?)?;
+        let lifecycle = lifecycle::get(context, number, state)?;
+        Ok(PullSummary {
+            number: result_u64_from_row(row, 0)?,
+            author: author_from_row(row, 1)?,
+            title: result_text(row, 4)?,
+            state,
+            closed_at_ms: lifecycle.closed_at_ms,
+            merged_at_ms: lifecycle.merged_at_ms,
+            base_ref: result_text(row, 6)?,
+            head_ref: result_text(row, 7)?,
+            label_ids: decode_label_ids(result_blob(row, 8)?)?,
+            assignees: assignments::decode(result_blob(row, 9)?)?,
+            version: result_u64_from_row(row, 10)?,
+            created_at_ms: result_u64_from_row(row, 11)?,
+            updated_at_ms: result_u64_from_row(row, 12)?,
+            draft: readiness::load(context, number)? == PullReadiness::Draft,
+            comment_count: metrics.comments,
+            reaction_count: metrics.reactions,
+        })
     }
 }
 
@@ -392,5 +438,6 @@ fn create_pull_digest(input: &CreatePullInput) -> blake3::Hash {
     if input.draft {
         hasher.update(b"draft\0");
     }
+    input.metadata.selection.hash(&mut hasher);
     hasher.finalize()
 }

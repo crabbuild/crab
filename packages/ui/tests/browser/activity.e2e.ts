@@ -1,5 +1,6 @@
-import type { ActivityEvent } from "../../src/collaboration/activity";
+import type { ActivityEvent } from "@/components/discussion/conversation/model";
 import { expect, test, type Page } from "@playwright/test";
+import { conversationPage } from "./conversation";
 import { emptyReactions } from "./fixtures";
 import {
   expectNoAccessibilityViolations,
@@ -19,6 +20,7 @@ async function repository(page: Page) {
         json: {
           repositories: [
             {
+              id: "00000000-0000-4000-8000-000000000099",
               owner: "team",
               name: "project",
               description: "",
@@ -44,7 +46,7 @@ async function repository(page: Page) {
 function event(number: number, kind: "created" | "closed"): ActivityEvent {
   return {
     number,
-    actor: "Alice",
+    actor: { name: "Alice", profile: null },
     target: { kind: "issue", number: 1 },
     title: "Timeline issue",
     action: { kind },
@@ -132,7 +134,7 @@ test("repository activity retains pages through errors and supports refresh and 
   expect(unexpected).toEqual([]);
 });
 
-test("issue changes and new comments refresh their durable activity panel", async ({
+test("issue changes and comments share one durable conversation without duplicate snapshots", async ({
   page,
 }) => {
   const unexpected = await repository(page);
@@ -144,7 +146,7 @@ test("issue changes and new comments refresh their durable activity panel", asyn
     number: 1,
     title: "Timeline issue",
     body: "Discussion",
-    author: "Alice",
+    author: { name: "Alice", profile: null },
     state,
     version,
     created_at: 1700000000000,
@@ -152,6 +154,7 @@ test("issue changes and new comments refresh their durable activity panel", asyn
     labels: [],
     assignees: [],
     can_edit: true,
+    can_close: true,
     can_label: false,
     can_assign: false,
     reactions: emptyReactions(),
@@ -159,8 +162,12 @@ test("issue changes and new comments refresh their durable activity panel", asyn
   await page.route("**/api/repos/team/project/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
-    if (path.endsWith("/activity"))
-      return route.fulfill({ json: { items: events, next: null } });
+    if (path.endsWith("/issues/pins") && request.method() === "GET")
+      return route.fulfill({
+        json: { version: 0, items: [], can_manage: true },
+      });
+    if (path.endsWith("/conversation"))
+      return conversationPage(route, { comments, activity: events });
     if (path.endsWith("/links"))
       return route.fulfill({
         json: { items: [], next: null, can_manage: false },
@@ -174,7 +181,7 @@ test("issue changes and new comments refresh their durable activity panel", asyn
         const input = request.postDataJSON();
         const comment = {
           number: 1,
-          author: "Alice",
+          author: { name: "Alice", profile: null },
           body: input.body,
           version: 1,
           created_at: 1700000000003,
@@ -191,6 +198,14 @@ test("issue changes and new comments refresh their durable activity panel", asyn
       }
       return route.fulfill({ json: { items: comments, next: null } });
     }
+    if (path.endsWith("/issues/1/state")) {
+      const input = request.postDataJSON();
+      expect(input.version).toBe(version);
+      state = input.state;
+      version++;
+      events.unshift(event(2, "closed"));
+      return route.fulfill({ json: { comment: null } });
+    }
     if (path.endsWith("/issues/1")) {
       if (request.method() === "PATCH") {
         const input = request.postDataJSON();
@@ -204,18 +219,27 @@ test("issue changes and new comments refresh their durable activity panel", asyn
     return route.fallback();
   });
   await page.goto("/team/project/issues/1");
-  const panel = page.getByRole("region", { name: "Activity", exact: true });
-  await expect(panel).toContainText("opened issue");
+  const panel = page.getByRole("region", {
+    name: "Conversation history",
+    exact: true,
+  });
+  await expect(panel.locator(".conversation-events > li:visible")).toHaveCount(
+    0,
+  );
   await page.getByRole("button", { name: "Close issue", exact: true }).click();
   await expect(panel).toContainText("Alice closed");
   await page
     .getByRole("textbox", { name: "Comment", exact: true })
     .fill("A new conversation");
   await page.getByRole("button", { name: "Comment", exact: true }).click();
-  await expect(panel).toContainText("commented on");
-  await expect(panel.locator("li")).toHaveCount(3);
+  await expect(panel).toContainText("A new conversation");
+  await expect(panel.locator(".conversation-events > li:visible")).toHaveCount(
+    2,
+  );
   await page.reload();
-  await expect(panel.locator("li")).toHaveCount(3);
+  await expect(panel.locator(".conversation-events > li:visible")).toHaveCount(
+    2,
+  );
   await expect(panel).toContainText("Alice closed");
   await expectNoAccessibilityViolations(page);
   expect(unexpected).toEqual([]);
@@ -228,7 +252,7 @@ test("inline review activity links remain distinguishable in dark mode", async (
   const events: ActivityEvent[] = ["resolved", "unresolved", "commented"].map(
     (kind, index) => ({
       ...event(index + 1, "created"),
-      actor: "Local operator",
+      actor: { name: "Local operator", profile: null },
       target: {
         kind: kind === "commented" ? "pull_review" : "pull_thread",
         pull: 1,

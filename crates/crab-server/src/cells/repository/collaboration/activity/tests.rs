@@ -16,7 +16,7 @@ fn identity() -> MutationIdentity {
 }
 fn cell(server: &crate::server::Server) -> RepositoryCell {
     server
-        .repository_cells()
+        .cells()
         .unwrap()
         .repository(server.repositories.values()[0].id)
         .unwrap()
@@ -30,6 +30,7 @@ async fn write<M: Mutation>(cell: &RepositoryCell, input: M::Input) -> M::Output
 }
 fn issue(title: &str) -> CreateIssueInput {
     CreateIssueInput {
+        metadata: Default::default(),
         submission_id: *Uuid::now_v7().as_bytes(),
         author: actor("Alice"),
         title: title.into(),
@@ -101,15 +102,16 @@ async fn state_and_content_changes_are_ordered_and_rejected_or_noop_edits_emit_n
     let cell = cell(&server);
     write::<CreateIssue>(&cell, issue("Issue")).await;
     let input = UpdateIssueInput {
+        state_reason: None,
         number: 1,
         version: 1,
         actor: actor("Alice"),
-        can_manage_metadata: false,
+        can_triage: false,
         title: Some("Updated title".into()),
         body: None,
         state: Some(1),
         label_ids: None,
-        assignee_subjects: None,
+        assignees: None,
     };
     assert!(matches!(
         write::<UpdateIssue>(&cell, input.clone()).await,
@@ -133,7 +135,12 @@ async fn state_and_content_changes_are_ordered_and_rejected_or_noop_edits_emit_n
             .map(|event| (event.number, event.action.clone()))
             .collect::<Vec<_>>(),
         vec![
-            (3, Action::Closed),
+            (
+                3,
+                Action::IssueClosed {
+                    reason: crate::cells::repository::issues::lifecycle::Reason::Completed
+                }
+            ),
             (2, Action::Updated),
             (1, Action::Created)
         ]
@@ -337,6 +344,7 @@ async fn review_threads_replies_and_merge_completion_record_their_actual_targets
     write::<CreatePull>(
         &cell,
         CreatePullInput {
+            metadata: Default::default(),
             draft: false,
             submission_id: *Uuid::now_v7().as_bytes(),
             author: actor("Alice"),

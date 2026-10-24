@@ -26,6 +26,10 @@ async fn write(
         .header(header::COOKIE, cookie)
         .header(header::ORIGIN, &h.origin)
         .header("x-csrf-token", session["csrf"].as_str().unwrap())
+        .header(
+            "x-crab-repository-id",
+            h.server.repositories.values()[0].id.to_string(),
+        )
         .header(header::CONTENT_TYPE, "application/json")
         .body(body.to_string())
         .send()
@@ -41,6 +45,7 @@ async fn write(
 #[tokio::test]
 async fn issues_comments_edits_and_replays_preserve_durable_state() {
     let h = Harness::new(false).await;
+    h.initialize_directory().await;
     let cookie = h.login().await;
     let (status, issue) = write(&h, &cookie, "POST", ROOT, input(1)).await;
     assert_eq!(status, StatusCode::CREATED);
@@ -108,16 +113,16 @@ async fn issues_comments_edits_and_replays_preserve_durable_state() {
             .is_empty()
     );
     assert_eq!(
-        h.json(&format!("{ROOT}?state=closed"), &cookie).await["items"][0]["number"],
+        h.json(&format!("{ROOT}?q=is:closed"), &cookie).await["items"][0]["number"],
         id
     );
     assert_eq!(
-        h.json(&format!("{ROOT}?state=closed&q=REVIEWED"), &cookie)
+        h.json(&format!("{ROOT}?q=is:closed%20REVIEWED"), &cookie)
             .await["items"][0]["number"],
         id
     );
     assert!(
-        h.json(&format!("{ROOT}?state=closed&q=missing"), &cookie)
+        h.json(&format!("{ROOT}?q=is:closed%20missing"), &cookie)
             .await["items"]
             .as_array()
             .unwrap()
@@ -141,6 +146,7 @@ async fn issues_comments_edits_and_replays_preserve_durable_state() {
 #[tokio::test(flavor = "multi_thread")]
 async fn concurrent_creation_is_idempotent_and_sparse_pages_do_not_duplicate_issues() {
     let h = Harness::new(false).await;
+    h.initialize_directory().await;
     let cookie = h.login().await;
     let results = futures_util::future::join_all(
         (0..8).map(|i| write(&h, &cookie, "POST", ROOT, input(if i < 4 { 1 } else { i }))),
@@ -151,12 +157,14 @@ async fn concurrent_creation_is_idempotent_and_sparse_pages_do_not_duplicate_iss
             .iter()
             .all(|(status, _)| *status == StatusCode::CREATED)
     );
-    let mut cursor = None;
+    let mut cursor: Option<String> = None;
     let mut numbers = Vec::new();
     loop {
         let path = format!(
-            "{ROOT}?state=all&limit=2{}",
-            cursor.map_or(String::new(), |n| format!("&before={n}"))
+            "{ROOT}?q=is:issue&limit=2{}",
+            cursor
+                .as_deref()
+                .map_or(String::new(), |n| format!("&before={n}"))
         );
         let page = h.json(&path, &cookie).await;
         numbers.extend(
@@ -166,7 +174,7 @@ async fn concurrent_creation_is_idempotent_and_sparse_pages_do_not_duplicate_iss
                 .iter()
                 .map(|issue| issue["number"].as_u64().unwrap()),
         );
-        cursor = page["next"].as_u64();
+        cursor = page["next"].as_str().map(str::to_owned);
         if cursor.is_none() {
             break;
         }
@@ -197,6 +205,7 @@ async fn concurrent_creation_is_idempotent_and_sparse_pages_do_not_duplicate_iss
 #[tokio::test]
 async fn membership_author_ownership_and_csrf_protect_all_mutations() {
     let h = Harness::new(false).await;
+    h.initialize_directory().await;
     let alice = h.login().await;
     let issue = write(&h, &alice, "POST", ROOT, input(1)).await.1;
     let path = format!("{ROOT}/{}", issue["number"]);
@@ -282,6 +291,7 @@ async fn membership_author_ownership_and_csrf_protect_all_mutations() {
 #[tokio::test]
 async fn invalid_inputs_fail_and_legacy_issue_objects_are_not_a_serving_path() {
     let h = Harness::new(false).await;
+    h.initialize_directory().await;
     let cookie = h.login().await;
     for value in [
         json!({"request_id":"../escape","title":"Title","body":""}),
@@ -322,5 +332,211 @@ async fn invalid_inputs_fail_and_legacy_issue_objects_are_not_a_serving_path() {
     assert_eq!(status, StatusCode::CREATED);
     assert_eq!(issue["number"], 1);
     assert_eq!(h.json(ROOT, &cookie).await["items"][0]["number"], 1);
+    h.close().await;
+}
+
+#[tokio::test]
+async fn advanced_search_preserves_caseful_operators_and_reports_invalid_syntax() {
+    let h = Harness::new(false).await;
+    h.initialize_directory().await;
+    let cookie = h.login().await;
+    for (index, title, body) in [
+        (1, "Keyboard focus", "Accessibility"),
+        (2, "Color contrast", "Accessibility"),
+        (3, "Unrelated work", "Different topic"),
+    ] {
+        let value = json!({"request_id":nonce(index),"title":title,"body":body});
+        assert_eq!(
+            write(&h, &cookie, "POST", ROOT, value).await.0,
+            StatusCode::CREATED
+        );
+    }
+    assert_eq!(
+        write(
+            &h,
+            &cookie,
+            "PATCH",
+            &format!("{ROOT}/2"),
+            json!({"version":1,"state":"closed"})
+        )
+        .await
+        .0,
+        StatusCode::OK
+    );
+    let default_page = h.json(ROOT, &cookie).await;
+    assert_eq!(default_page["matching"], 2);
+    assert_eq!(default_page["counts"]["closed"], 1);
+    assert_eq!(default_page["navigation"]["selected"], "open");
+    let retired = h
+        .http
+        .get(format!("{}{ROOT}?state=closed", h.origin))
+        .header(header::COOKIE, &cookie)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(retired.status(), StatusCode::BAD_REQUEST);
+    let query = "(keyboard OR contrast) AND accessibility -unrelated no:assignee";
+    let response = h
+        .http
+        .get(format!("{}{ROOT}", h.origin))
+        .header(header::COOKIE, &cookie)
+        .query(&[("q", query), ("limit", "1")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let first: Value = response.json().await.unwrap();
+    assert_eq!(
+        first["items"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .map(|item| item["number"].as_u64().unwrap())
+            .collect::<Vec<_>>(),
+        vec![2]
+    );
+    assert_eq!(first["counts"]["open"], 1);
+    assert_eq!(first["counts"]["closed"], 1);
+    assert_eq!(first["navigation"]["kind"], "results");
+    assert_eq!(first["matching"], 2);
+    let filtered_query = format!("({query}) is:open");
+    let filtered: Value = h
+        .http
+        .get(format!("{}{ROOT}", h.origin))
+        .header(header::COOKIE, &cookie)
+        .query(&[("q", &filtered_query)])
+        .send()
+        .await
+        .unwrap()
+        .json()
+        .await
+        .unwrap();
+    for state in ["open", "closed"] {
+        let query = filtered["navigation"][state].as_str().unwrap();
+        let response = h
+            .http
+            .get(format!("{}{ROOT}", h.origin))
+            .header(header::COOKIE, &cookie)
+            .query(&[("q", query)])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        let target: Value = response.json().await.unwrap();
+        assert_eq!(target["matching"], filtered["counts"][state]);
+        assert_eq!(target["navigation"]["selected"], state);
+        assert_eq!(target["items"][0]["state"], state);
+    }
+    let next = first["next"].as_str().unwrap().to_owned();
+    let stale = h
+        .http
+        .get(format!("{}{ROOT}", h.origin))
+        .header(header::COOKIE, &cookie)
+        .query(&[("q", query), ("before", &next), ("sort", "comments")])
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(stale.status(), StatusCode::CONFLICT);
+    assert_eq!(
+        stale.json::<Value>().await.unwrap()["error"]["code"],
+        "stale_search_cursor"
+    );
+    let response = h
+        .http
+        .get(format!("{}{ROOT}", h.origin))
+        .header(header::COOKIE, &cookie)
+        .query(&[("q", query), ("limit", "1"), ("before", &next)])
+        .send()
+        .await
+        .unwrap();
+    let next: Value = response.json().await.unwrap();
+    assert_eq!(next["items"][0]["number"], 1);
+    for query in [
+        "keyboard OR",
+        "(keyboard",
+        "label:\"unfinished",
+        "sort:updated",
+        "author:app/bot",
+    ] {
+        let response = h
+            .http
+            .get(format!("{}{ROOT}", h.origin))
+            .header(header::COOKIE, &cookie)
+            .query(&[("q", query)])
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::BAD_REQUEST, "{query}");
+    }
+    h.close().await;
+}
+
+#[tokio::test]
+async fn closure_metadata_is_coherent_across_edits_details_search_and_timeline() {
+    let h = Harness::new(false).await;
+    h.initialize_directory().await;
+    let cookie = h.login().await;
+    let (_, issue) = write(&h, &cookie, "POST", ROOT, input(991)).await;
+    assert!(issue["state_reason"].is_null() && issue["closed_at"].is_null());
+    let path = format!("{ROOT}/{}", issue["number"]);
+    let (status, closed) = write(
+        &h,
+        &cookie,
+        "PATCH",
+        &path,
+        json!({"version":1,"state":"closed","state_reason":"not_planned"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(closed["state_reason"], "not_planned");
+    assert_eq!(closed["closed_at"], closed["updated_at"]);
+    assert_eq!(h.json(&path, &cookie).await, closed);
+    let search = h
+        .json(
+            &format!("{ROOT}?q=is:closed%20reason:%22not%20planned%22"),
+            &cookie,
+        )
+        .await;
+    assert_eq!(search["matching"], 1);
+    assert_eq!(search["items"][0]["closed_at"], closed["closed_at"]);
+    let (status, changed) = write(
+        &h,
+        &cookie,
+        "PATCH",
+        &path,
+        json!({"version":2,"state_reason":"completed"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(changed["closed_at"], closed["closed_at"]);
+    let activity = h.json(&format!("{path}/activity"), &cookie).await;
+    assert_eq!(
+        activity["items"][0]["action"],
+        json!({"kind":"issue_close_reason_changed","from":"not_planned","to":"completed"})
+    );
+    assert_eq!(
+        write(
+            &h,
+            &cookie,
+            "PATCH",
+            &path,
+            json!({"version":3,"state_reason":"reopened"})
+        )
+        .await
+        .0,
+        StatusCode::BAD_REQUEST
+    );
+    assert_eq!(h.json(&path, &cookie).await, changed);
+    let (status, reopened) = write(
+        &h,
+        &cookie,
+        "PATCH",
+        &path,
+        json!({"version":3,"state":"open"}),
+    )
+    .await;
+    assert_eq!(status, StatusCode::OK);
+    assert_eq!(reopened["state_reason"], "reopened");
+    assert!(reopened["closed_at"].is_null());
     h.close().await;
 }

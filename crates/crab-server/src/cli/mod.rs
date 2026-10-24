@@ -8,7 +8,10 @@ use crab_server::{RepositoryAccess, RepositoryMember};
 use serde::Deserialize;
 use tracing_subscriber::EnvFilter;
 
+mod assignments;
 mod ecs;
+mod lifecycle;
+mod teams;
 
 #[derive(Parser)]
 #[command(version, about = "Serve and administer Crab repositories")]
@@ -52,6 +55,68 @@ enum Command {
 
 #[derive(Subcommand)]
 enum CellsCommand {
+    /// Export bounded legacy assignment records as JSON Lines for explicit mapping.
+    AssignmentInventory {
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        name: String,
+    },
+    /// Migrate subject assignments to stable actors using explicit JSON Lines mappings.
+    MigrateAssignments {
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        name: String,
+        #[arg(long)]
+        mappings_file: Option<PathBuf>,
+    },
+    /// Initialize the shared native actor directory without changing repositories.
+    InitializeDirectory,
+    /// Print the shared Directory schema and migration state.
+    DirectoryStatus,
+    /// Explicitly migrate the shared Directory in restartable bounded batches.
+    MigrateDirectory,
+    /// Register stable private account identities without creating public profiles or grants.
+    RegisterAccounts {
+        #[arg(long)]
+        identities_file: PathBuf,
+    },
+    /// Bootstrap native organization authority with an explicit qualified owner.
+    BootstrapOrganization {
+        #[arg(long)]
+        organization: uuid::Uuid,
+        #[arg(long)]
+        input_file: PathBuf,
+    },
+    /// Prepare team authority for an existing organization using its current owner.
+    PrepareOrganizationTeams {
+        #[arg(long)]
+        organization: uuid::Uuid,
+        #[arg(long)]
+        actor: uuid::Uuid,
+    },
+    /// Prepare canonical issue closure metadata in restartable bounded frames.
+    PrepareIssueState {
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        name: String,
+    },
+    /// Prepare canonical PR close/merge times in restartable bounded frames.
+    PreparePullState {
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        name: String,
+    },
+    /// Prepare canonical review dismissal storage before reopening traffic.
+    PrepareReviewState {
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        name: String,
+    },
     /// Print the resource-derived Cell admission envelope.
     Capacity {
         #[arg(long, required = true)]
@@ -63,6 +128,13 @@ enum CellsCommand {
     Metrics,
     /// Print the durable control state for one repository Cell.
     Status {
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        name: String,
+    },
+    /// Build or resume the authoritative issue/PR search index.
+    RebuildSearch {
         #[arg(long)]
         owner: String,
         #[arg(long)]
@@ -195,6 +267,82 @@ pub(super) async fn run() -> crab_server::Result<()> {
 
 async fn cells(config: &crab_server::Config, command: CellsCommand) -> crab_server::Result<()> {
     let bytes = match command {
+        CellsCommand::AssignmentInventory { owner, name } => {
+            return assignments::inventory(config, &owner, &name).await;
+        }
+        CellsCommand::MigrateAssignments {
+            owner,
+            name,
+            mappings_file,
+        } => assignments::migrate(config, &owner, &name, mappings_file.as_deref()).await?,
+        CellsCommand::InitializeDirectory => {
+            management_request(config, reqwest::Method::POST, "/internal/directory", None)
+                .await?
+                .bytes()
+                .await
+                .map_err(|source| crab_server::Error::Healthcheck { source })?
+                .to_vec()
+        }
+        CellsCommand::BootstrapOrganization {
+            organization,
+            input_file,
+        } => {
+            let mut bytes = Vec::new();
+            std::fs::File::open(input_file)?
+                .take(32 * 1024 + 1)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() > 32 * 1024 {
+                return Err(crab_server::Error::Config(
+                    "Organization bootstrap input exceeds 32 KiB",
+                ));
+            }
+            let input: serde_json::Value = serde_json::from_slice(&bytes)?;
+            let path = format!("/internal/organizations/{organization}");
+            management_request(config, reqwest::Method::POST, &path, Some(&input))
+                .await?
+                .bytes()
+                .await
+                .map_err(|source| crab_server::Error::Healthcheck { source })?
+                .to_vec()
+        }
+        CellsCommand::PrepareOrganizationTeams {
+            organization,
+            actor,
+        } => teams::prepare(config, organization, actor).await?,
+        CellsCommand::PrepareIssueState { owner, name } => {
+            lifecycle::prepare(config, &owner, &name, lifecycle::Scope::Issue).await?
+        }
+        CellsCommand::PreparePullState { owner, name } => {
+            lifecycle::prepare(config, &owner, &name, lifecycle::Scope::Pull).await?
+        }
+        CellsCommand::PrepareReviewState { owner, name } => {
+            lifecycle::prepare(config, &owner, &name, lifecycle::Scope::Review).await?
+        }
+        CellsCommand::DirectoryStatus => management_body(config, "/internal/directory").await?,
+        CellsCommand::MigrateDirectory => migrate_directory(config).await?,
+        CellsCommand::RegisterAccounts { identities_file } => {
+            let mut bytes = Vec::new();
+            std::fs::File::open(identities_file)?
+                .take(256 * 1024 + 1)
+                .read_to_end(&mut bytes)?;
+            if bytes.len() > 256 * 1024 {
+                return Err(crab_server::Error::Config(
+                    "account identity file exceeds 256 KiB",
+                ));
+            }
+            let identities: serde_json::Value = serde_json::from_slice(&bytes)?;
+            management_request(
+                config,
+                reqwest::Method::POST,
+                "/internal/directory/accounts",
+                Some(&identities),
+            )
+            .await?
+            .bytes()
+            .await
+            .map_err(|source| crab_server::Error::Healthcheck { source })?
+            .to_vec()
+        }
         CellsCommand::Capacity {
             json: true,
             live: true,
@@ -211,6 +359,9 @@ async fn cells(config: &crab_server::Config, command: CellsCommand) -> crab_serv
             let path = format!("/internal/repositories/{owner}/{name}/cell");
             management_body(config, &path).await?
         }
+        CellsCommand::RebuildSearch { owner, name } => {
+            rebuild_search(config, &owner, &name).await?
+        }
         CellsCommand::Runtime => {
             serde_json::to_vec(&serde_json::json!({"runtime": "cellar", "version": "0.1.0"}))?
         }
@@ -222,7 +373,7 @@ async fn cells(config: &crab_server::Config, command: CellsCommand) -> crab_serv
 }
 
 async fn healthcheck(config: &crab_server::Config) -> crab_server::Result<()> {
-    management_get(config, "/readyz").await?;
+    management_request(config, reqwest::Method::GET, "/readyz", None).await?;
     Ok(())
 }
 
@@ -231,7 +382,7 @@ async fn live_capacity(config: &crab_server::Config) -> crab_server::Result<Vec<
 }
 
 async fn management_body(config: &crab_server::Config, path: &str) -> crab_server::Result<Vec<u8>> {
-    Ok(management_get(config, path)
+    Ok(management_request(config, reqwest::Method::GET, path, None)
         .await?
         .bytes()
         .await
@@ -239,9 +390,11 @@ async fn management_body(config: &crab_server::Config, path: &str) -> crab_serve
         .to_vec())
 }
 
-async fn management_get(
+async fn management_request(
     config: &crab_server::Config,
+    method: reqwest::Method,
     path: &str,
+    body: Option<&serde_json::Value>,
 ) -> crab_server::Result<reqwest::Response> {
     let mut identity = std::fs::read(&config.cells.peer_certificate)?;
     identity.extend_from_slice(&std::fs::read(&config.cells.peer_private_key)?);
@@ -264,14 +417,106 @@ async fn management_get(
     for authority in authorities {
         client = client.add_root_certificate(authority);
     }
-    client
+    let mut request = client
         .build()
         .map_err(|source| crab_server::Error::Healthcheck { source })?
-        .get(url)
+        .request(method, url);
+    if let Some(body) = body {
+        request = request.json(body);
+    }
+    request
         .send()
         .await
         .and_then(reqwest::Response::error_for_status)
         .map_err(|source| crab_server::Error::Healthcheck { source })
+}
+
+async fn migrate_directory(config: &crab_server::Config) -> crab_server::Result<Vec<u8>> {
+    loop {
+        let bytes = management_request(
+            config,
+            reqwest::Method::POST,
+            "/internal/directory/migrate",
+            None,
+        )
+        .await?
+        .bytes()
+        .await
+        .map_err(|source| crab_server::Error::Healthcheck { source })?;
+        let progress: crab_server::DirectoryState = serde_json::from_slice(&bytes)?;
+        match progress {
+            crab_server::DirectoryState::Ready { .. } => return Ok(bytes.to_vec()),
+            crab_server::DirectoryState::Migrating { copied } => {
+                tracing::info!(copied, "migrating Directory accounts")
+            }
+            crab_server::DirectoryState::Outdated { .. } => {
+                return Err(crab_server::Error::Config(
+                    "Directory migration did not start",
+                ));
+            }
+        }
+    }
+}
+
+async fn rebuild_search(
+    config: &crab_server::Config,
+    owner: &str,
+    name: &str,
+) -> crab_server::Result<Vec<u8>> {
+    let path = format!("/internal/repositories/{owner}/{name}/discussion-index");
+    let initial = management_body(config, &path).await?;
+    let status: crab_server::SearchIndexStatus = serde_json::from_slice(&initial)?;
+    let begin = match status {
+        crab_server::SearchIndexStatus::Missing => Some(None),
+        crab_server::SearchIndexStatus::Ready { generation, .. }
+        | crab_server::SearchIndexStatus::Outdated { generation, .. } => Some(Some(generation)),
+        crab_server::SearchIndexStatus::Building { .. } => None,
+    };
+    let mut status = if let Some(expected) = begin {
+        let input = serde_json::to_value(crab_server::RebuildSearchInput::Begin {
+            expected,
+            generation: uuid::Uuid::now_v7(),
+        })?;
+        serde_json::from_slice(
+            &management_request(config, reqwest::Method::POST, &path, Some(&input))
+                .await?
+                .bytes()
+                .await
+                .map_err(|source| crab_server::Error::Healthcheck { source })?,
+        )?
+    } else {
+        status
+    };
+    loop {
+        match status {
+            crab_server::SearchIndexStatus::Ready { .. } => {
+                return Ok(serde_json::to_vec(&status)?);
+            }
+            crab_server::SearchIndexStatus::Missing
+            | crab_server::SearchIndexStatus::Outdated { .. } => {
+                return Err(crab_server::Error::Config(
+                    "discussion index preparation did not start",
+                ));
+            }
+            crab_server::SearchIndexStatus::Building {
+                generation,
+                ref progress,
+            } => {
+                tracing::info!(phase = ?progress.phase, processed = progress.processed, "preparing discussion index");
+                let input = serde_json::to_value(crab_server::RebuildSearchInput::Step {
+                    generation,
+                    version: progress.version,
+                })?;
+                status = serde_json::from_slice(
+                    &management_request(config, reqwest::Method::POST, &path, Some(&input))
+                        .await?
+                        .bytes()
+                        .await
+                        .map_err(|source| crab_server::Error::Healthcheck { source })?,
+                )?;
+            }
+        }
+    }
 }
 
 fn management_target(
@@ -290,7 +535,11 @@ fn management_target(
         .to_owned();
     url.set_host(Some(&tls_name))
         .map_err(|_| crab_server::Error::Config("Cell peer TLS server name is invalid"))?;
+    let (path, query) = path
+        .split_once('?')
+        .map_or((path, None), |(path, query)| (path, Some(query)));
     url.set_path(path);
+    url.set_query(query);
     let resolution = if tls_name.parse::<std::net::IpAddr>().is_err() {
         let listen_ip = config.management_listen.ip();
         let local_ip = if listen_ip.is_unspecified() {

@@ -1,0 +1,128 @@
+import { afterEach, describe, expect, it, vi } from "vitest";
+import { displayHex, endpoint, parentHex, request } from "./api";
+
+const repo = {
+  id: "00000000-0000-4000-8000-000000000099",
+  owner: "team",
+  name: "repo.name",
+  description: "",
+  access: "read" as const,
+  can_admin: false,
+  archive_version: 0,
+  archived: false,
+  protection_version: 0,
+  protected_branches: [],
+};
+afterEach(() => vi.unstubAllGlobals());
+
+describe("byte-preserving repository navigation", () => {
+  it("does not confuse a hex nibble pair with a directory separator", () => {
+    expect(parentHex("e2f02f66696c65")).toBe("e2f0");
+    expect(parentHex("e2f0")).toBe("");
+  });
+  it("keeps invalid UTF-8 and literal escape-like names distinct", () => {
+    expect(displayHex("ff2f252f612562")).toBe("%FF/%25/a%25b");
+    expect(displayHex("254646")).toBe("%25FF");
+  });
+  it("preserves opaque API cursors", () => {
+    expect(
+      new URL(
+        endpoint(repo, "tree", { cursor: "a+b/c=" }),
+        "http://localhost",
+      ).searchParams.get("cursor"),
+    ).toBe("a+b/c=");
+  });
+});
+
+it("shows the server error rather than pretending failed data loaded", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(
+      async () =>
+        new Response(
+          JSON.stringify({
+            error: { code: "read_limit", message: "Read budget exceeded" },
+          }),
+          { status: 422 },
+        ),
+    ),
+  );
+  await expect(
+    request("/api/repos/team/repo.name/file", new AbortController().signal),
+  ).rejects.toThrow("Read budget exceeded");
+});
+
+it("shows a plain-text server error instead of a JSON parse failure", async () => {
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(
+      async () =>
+        new Response("Failed to deserialize query string", {
+          status: 400,
+          headers: { "Content-Type": "text/plain; charset=utf-8" },
+        }),
+    ),
+  );
+  await expect(
+    request("/api/repos/team/repo.name/tree", new AbortController().signal),
+  ).rejects.toThrow("Failed to deserialize query string");
+});
+
+it("notifies the application when a repository request loses its session", async () => {
+  const browser = new EventTarget();
+  const expired = vi.fn();
+  browser.addEventListener("crab-session-expired", expired);
+  vi.stubGlobal("window", browser);
+  vi.stubGlobal(
+    "fetch",
+    vi.fn(
+      async () =>
+        new Response(JSON.stringify({ error: { message: "Sign in" } }), {
+          status: 401,
+        }),
+    ),
+  );
+  await expect(
+    request("/api/repos", new AbortController().signal),
+  ).rejects.toThrow("Sign in");
+  expect(expired).toHaveBeenCalledOnce();
+});
+
+it("coalesces concurrent repository reads without coupling abort signals", async () => {
+  let resolveResponse: (response: Response) => void = () => undefined;
+  const fetchMock = vi.fn(
+    () =>
+      new Promise<Response>((resolve) => {
+        resolveResponse = resolve;
+      }),
+  );
+  vi.stubGlobal("fetch", fetchMock);
+  const firstController = new AbortController();
+  const secondController = new AbortController();
+  const firstUrl = "/api/repos/team/repo.name/tree?limit=200&path_hex=";
+  const secondUrl = "/api/repos/team/repo.name/tree?path_hex=&limit=100";
+
+  const first = request(firstUrl, firstController.signal);
+  firstController.abort();
+  const second = request(secondUrl, secondController.signal);
+
+  expect(fetchMock).toHaveBeenCalledOnce();
+  resolveResponse(new Response(JSON.stringify({ items: [] })));
+  await expect(first).rejects.toMatchObject({ name: "AbortError" });
+  await expect(second).resolves.toMatchObject({ data: { items: [] } });
+
+  fetchMock.mockImplementation(
+    async () => new Response(JSON.stringify({ items: [] })),
+  );
+  await Promise.all([
+    request(
+      "/api/repos/team/repo.name/tree?limit=200&cursor=page",
+      new AbortController().signal,
+    ),
+    request(
+      "/api/repos/team/repo.name/tree?limit=100&cursor=page",
+      new AbortController().signal,
+    ),
+  ]);
+  expect(fetchMock).toHaveBeenCalledTimes(3);
+});

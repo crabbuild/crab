@@ -27,7 +27,7 @@ fn identity() -> MutationIdentity {
 
 fn cell(server: &Server) -> RepositoryCell {
     server
-        .repository_cells()
+        .cells()
         .unwrap()
         .repository(server.repositories.values()[0].id)
         .unwrap()
@@ -66,6 +66,7 @@ async fn assignment_progress_tracks_issue_state_and_duplicate_commands() {
             &cell.target,
             identity(),
             CreateIssueInput {
+                metadata: Default::default(),
                 submission_id: *Uuid::now_v7().as_bytes(),
                 author: actor(),
                 title: "Ship the release".into(),
@@ -98,15 +99,16 @@ async fn assignment_progress_tracks_issue_state_and_duplicate_commands() {
     assert_eq!(applied(selected.output).milestone.unwrap().open_count, 1);
     let request = identity();
     let close = UpdateIssueInput {
+        state_reason: None,
         number: issue.number,
         actor: actor(),
-        can_manage_metadata: true,
+        can_triage: true,
         version: issue.version,
         title: None,
         body: None,
         state: Some(1),
         label_ids: None,
-        assignee_subjects: None,
+        assignees: None,
     };
     let first = cell
         .client
@@ -369,6 +371,7 @@ async fn assigned_work_pages_follow_reassignment_without_duplicates_or_orphans()
                 &cell.target,
                 identity(),
                 CreateIssueInput {
+                    metadata: Default::default(),
                     submission_id: *Uuid::now_v7().as_bytes(),
                     author: actor(),
                     title: format!("Work {number}"),
@@ -569,6 +572,7 @@ async fn pull_close_reopen_and_merge_completion_update_milestone_progress() {
             &cell.target,
             identity(),
             CreatePullInput {
+                metadata: Default::default(),
                 draft: false,
                 submission_id: *Uuid::now_v7().as_bytes(),
                 author: actor(),
@@ -610,13 +614,13 @@ async fn pull_close_reopen_and_merge_completion_update_milestone_progress() {
                 UpdatePullInput {
                     number: pull.number,
                     actor: actor(),
-                    can_manage: true,
+                    can_triage: true,
                     version,
                     title: None,
                     body: None,
                     state: Some(state),
                     label_ids: None,
-                    assignee_subjects: None,
+                    assignees: None,
                 },
             )
             .await

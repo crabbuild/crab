@@ -7,12 +7,13 @@ use crate::cells::repository::collaboration::{
 pub(crate) struct CreatePullComment;
 
 impl Mutation for CreatePullComment {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 18;
     type Input = CreatePullCommentInput;
     type Output = CreatePullCommentOutcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         if settings::archived(context)? {
@@ -55,42 +56,56 @@ impl Mutation for CreatePullComment {
                 record,
             )));
         }
-        let number = next_child_number(context, "repository_pull_comment_sequences", input.pull)?;
-        let now = timestamp(context.now_ms())?;
-        let record = PullCommentRecord {
-            pull: input.pull,
-            number,
-            author: input.author,
-            body: input.body,
-            version: 1,
-            created_at_ms: now,
-            updated_at_ms: now,
-        };
-        context.sql(&SqlBatch { statements: vec![
-            statement("INSERT INTO repository_pull_comment_submissions(pull_number, request_id, payload_digest, comment_number) VALUES (?, ?, ?, ?)", vec![integer(record.pull)?, SqlValue::Blob(input.submission_id.to_vec()), SqlValue::Blob(digest.as_bytes().to_vec()), integer(record.number)?]),
-            statement("INSERT INTO repository_pull_comments(pull_number, number, author_issuer, author_subject, author_name, body, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", vec![integer(record.pull)?, integer(record.number)?, SqlValue::Text(record.author.issuer.clone()), SqlValue::Text(record.author.subject.clone()), SqlValue::Text(record.author.name.clone()), SqlValue::Text(record.body.clone()), integer(record.version)?, integer(record.created_at_ms)?, integer(record.updated_at_ms)?]),
-        ] })?;
-        advance_revision(context)?;
-        let target = Target::PullComment {
-            pull: record.pull,
-            number: record.number,
-        };
-        activity::append(context, target, &record.author, Action::Created)?;
+        let record = append_comment(context, input.pull, &input.author, &input.body)?;
+        context.query("INSERT INTO repository_pull_comment_submissions(pull_number, request_id, payload_digest, comment_number) VALUES (?, ?, ?, ?)", &[integer(record.pull)?, SqlValue::Blob(input.submission_id.to_vec()), SqlValue::Blob(digest.as_bytes().to_vec()), integer(record.number)?])?;
         Ok(MutationResult::Success(CreatePullCommentOutcome::Created(
             record,
         )))
     }
 }
 
+// Submission ownership stays with the caller; contribution rows, search and
+// activity must follow the same path for plain and combined state comments.
+pub(in crate::cells::repository) fn append_comment(
+    context: &Transaction<'_>,
+    pull: u64,
+    author: &RepositoryAuthor,
+    body: &str,
+) -> crate::cells::Result<PullCommentRecord> {
+    let number = next_child_number(context, "repository_pull_comment_sequences", pull)?;
+    let now = timestamp(context.now_ms())?;
+    let record = PullCommentRecord {
+        pull,
+        number,
+        author: author.clone(),
+        body: body.to_owned(),
+        version: 1,
+        created_at_ms: now,
+        updated_at_ms: now,
+    };
+    context.sql(&SqlBatch { statements: vec![
+        statement("INSERT INTO repository_pull_comments(pull_number, number, author_issuer, author_subject, author_name, body, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)", vec![integer(record.pull)?, integer(record.number)?, SqlValue::Text(record.author.issuer.clone()), SqlValue::Text(record.author.subject.clone()), SqlValue::Text(record.author.name.clone()), SqlValue::Text(record.body.clone()), integer(record.version)?, integer(record.created_at_ms)?, integer(record.updated_at_ms)?]),
+    ] })?;
+    advance_revision(context)?;
+    let target = Target::PullComment {
+        pull: record.pull,
+        number: record.number,
+    };
+    super::super::search::contributions::project(context, target, &record.author, &record.body)?;
+    activity::append(context, target, &record.author, Action::Created)?;
+    Ok(record)
+}
+
 pub(crate) struct UpdatePullComment;
 
 impl Mutation for UpdatePullComment {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 19;
     type Input = UpdatePullCommentInput;
     type Output = UpdatePullCommentOutcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         if settings::archived(context)? {
@@ -123,6 +138,7 @@ impl Mutation for UpdatePullComment {
                 pull: record.pull,
                 number: record.number,
             };
+            crate::cells::repository::search::contributions::edit(context, target, &record.body)?;
             activity::append(context, target, &input.actor, Action::Updated)?;
         }
         Ok(MutationResult::Success(UpdatePullCommentOutcome::Updated(
@@ -133,11 +149,12 @@ impl Mutation for UpdatePullComment {
 
 pub(crate) struct GetPullComment;
 impl Read for GetPullComment {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 18;
     type Input = PullChildKey;
     type Output = Option<PullCommentRecord>;
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         key: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         load_comment_query(context, key)
@@ -145,11 +162,12 @@ impl Read for GetPullComment {
 }
 pub(crate) struct ListPullComments;
 impl Read for ListPullComments {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 19;
     type Input = PullChildListInput;
     type Output = Option<PullCommentPage>;
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         if load_pull_query(context, input.pull)?.is_none() {

@@ -1,19 +1,22 @@
+pub(in crate::cells) const CLASS: &str = "Repository";
+pub(in crate::cells) const NAMESPACE: &str = "REPOSITORIES";
+
 pub(super) use dispatch::{dispatch_mutation, dispatch_read};
 pub(crate) use issues::{CreateComment, CreateIssue, GetComment, GetIssue, GetIssueDetail};
 pub(crate) use models::{
     CommentKey, CommentPage, CommentRecord, CommitStatusCatalog, CommitStatusRecord,
     CommitStatusSubmissionKey, CreateCommentInput, CreateCommentOutcome, CreateCommitStatusInput,
     CreateCommitStatusOutcome, CreateIssueInput, CreateIssueOutcome, CreateLabelInput,
-    CreateLabelOutcome, DeleteLabelInput, DeleteLabelOutcome, IssuePage, IssueRecord, IssueSummary,
-    LabelCatalog, LabelRecord, ListCommentsInput, ListIssuesInput, RepositoryAuthor,
-    UpdateCommentInput, UpdateCommentOutcome, UpdateIssueInput, UpdateIssueOutcome,
-    UpdateLabelInput, UpdateLabelOutcome,
+    CreateLabelOutcome, DeleteLabelInput, DeleteLabelOutcome, IssueRecord, IssueSummary,
+    LabelCatalog, LabelRecord, ListCommentsInput, RepositoryAuthor, UpdateCommentInput,
+    UpdateCommentOutcome, UpdateIssueInput, UpdateIssueOutcome, UpdateLabelInput,
+    UpdateLabelOutcome,
 };
 
 use crate::cells::application::{SqlBatch, SqlResultSet, SqlStatement, SqlValue};
 use crate::cells::records::{RecordDecoder, RecordEncoder, StoredRecord};
 
-use crate::cells::application::{Mutation, MutationResult, Read, RepositoryTransaction};
+use crate::cells::application::{Mutation, MutationResult, Read, Transaction};
 
 pub(crate) use checks::{
     CheckAnnotationRecord, CheckOutputRecord, CheckReportInput, CheckRunDetail, CheckRunKey,
@@ -21,9 +24,9 @@ pub(crate) use checks::{
     CreateCheckRunOutcome, GetCheckCreateSubmission, GetCheckRun, GetCheckUpdateSubmission,
     ListCheckRuns, ListCheckRunsInput, UpdateCheckRun, UpdateCheckRunInput, UpdateCheckRunOutcome,
 };
-pub(crate) use issues::{ListComments, ListIssues, UpdateComment, UpdateIssue};
+pub(crate) use issues::{ListComments, UpdateComment, UpdateIssue};
 pub(crate) use labels::{CreateLabel, DeleteLabel, ListLabels, UpdateLabel};
-pub(crate) use pulls::review_requests;
+pub(crate) use pulls::review_dismissals;
 pub(crate) use pulls::review_threads::{
     CreatePullReviewReply, CreatePullReviewReplyInput, CreatePullReviewReplyOutcome,
     CreatePullReviewThread, CreatePullReviewThreadInput, CreatePullReviewThreadOutcome,
@@ -40,13 +43,17 @@ pub(crate) use pulls::{
     CreatePullInput, CreatePullOutcome, CreatePullReview, CreatePullReviewInput,
     CreatePullReviewOutcome, GetPull, GetPullComment, GetPullMergeSubmission, GetPullReview,
     GetPullReviewSubmission, GetPullSubmission, ListPullComments, ListPullReviews, ListPulls,
-    MergeMethod, PullChildKey, PullChildListInput, PullCommentRecord, PullListInput, PullMerge,
+    MergeMethod, PullChildKey, PullChildListInput, PullCommentRecord, PullMerge,
     PullMergeTransition, PullReadiness, PullRecord, PullReviewRecord, PullState, PullSubmissionKey,
-    ReservePullMerge, ReservePullMergeInput, ReservePullMergeOutcome, ReviewState,
+    PullSummary, ReservePullMerge, ReservePullMergeInput, ReservePullMergeOutcome, ReviewState,
     SetPullReadiness, SetPullReadinessInput, SetPullReadinessOutcome, TransitionPullMerge,
     TransitionPullMergeInput, TransitionPullMergeOutcome, UpdatePull, UpdatePullComment,
     UpdatePullCommentInput, UpdatePullCommentOutcome, UpdatePullInput, UpdatePullOutcome,
     UpdatePullReview, UpdatePullReviewInput, UpdatePullReviewOutcome,
+};
+pub(crate) use pulls::{
+    GetPullDetail, GetPullLifecycleStatus, PreparePullLifecycle, PullLifecycle, review_requests,
+    reviewers, rollups,
 };
 pub(crate) use releases::{
     AttachReleaseAsset, AttachReleaseAssetInput, AttachReleaseAssetOutcome,
@@ -73,20 +80,25 @@ const MAX_LABELS: usize = 20;
 const MAX_REPOSITORY_LABELS: u64 = 500;
 const MAX_STATUS_CONTEXTS: u64 = 128;
 const MAX_STATUS_SUBMISSIONS: u64 = 1_000;
-const MAX_ASSIGNEES: usize = 10;
 const MAX_LIST_OUTPUT_BYTES: usize = 1024 * 1024;
 
+pub(crate) mod assignments;
 mod checks;
 pub(crate) mod collaboration;
 mod dispatch;
-mod issues;
+pub(crate) mod issues;
 mod labels;
 mod models;
 pub(crate) mod projection;
 mod pulls;
 mod releases;
+mod schema;
+pub(crate) mod search;
 mod settings;
 mod statuses;
+pub(in crate::cells) use schema::initialize;
+pub(crate) use search::index::SearchInput;
+pub(crate) use search::results::{DiscussionSummary, ListDiscussions};
 
 fn statement(sql: &str, parameters: Vec<SqlValue>) -> SqlStatement {
     SqlStatement {
@@ -95,13 +107,10 @@ fn statement(sql: &str, parameters: Vec<SqlValue>) -> SqlStatement {
     }
 }
 
-fn insert_issue(
-    context: &RepositoryTransaction<'_>,
-    record: &IssueRecord,
-) -> crate::cells::Result<()> {
+fn insert_issue(context: &Transaction<'_>, record: &IssueRecord) -> crate::cells::Result<()> {
     context.sql(&SqlBatch {
         statements: vec![statement(
-            "INSERT INTO repository_issues(number, author_issuer, author_subject, author_name, title, body, state, label_ids, assignee_subjects, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO repository_issues(number, author_issuer, author_subject, author_name, title, body, state, label_ids, assignees, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             vec![
                 integer(record.number)?,
                 SqlValue::Text(record.author.issuer.clone()),
@@ -111,7 +120,7 @@ fn insert_issue(
                 SqlValue::Text(record.body.clone()),
                 SqlValue::Integer(i64::from(record.state)),
                 SqlValue::Blob(encode_label_ids(&record.label_ids)?),
-                SqlValue::Blob(encode_assignees(&record.assignee_subjects)?),
+                SqlValue::Blob(assignments::encode(&record.assignees)?),
                 integer(record.version)?,
                 integer(record.created_at_ms)?,
                 integer(record.updated_at_ms)?,
@@ -121,10 +130,7 @@ fn insert_issue(
     Ok(())
 }
 
-fn insert_comment(
-    context: &RepositoryTransaction<'_>,
-    record: &CommentRecord,
-) -> crate::cells::Result<()> {
+fn insert_comment(context: &Transaction<'_>, record: &CommentRecord) -> crate::cells::Result<()> {
     context.sql(&SqlBatch {
         statements: vec![statement(
             "INSERT INTO repository_issue_comments(issue_number, number, author_issuer, author_subject, author_name, body, version, created_at_ms, updated_at_ms) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
@@ -153,6 +159,7 @@ pub(super) fn issue_submission_digest(input: &CreateIssueInput) -> blake3::Hash 
     hash_text(&mut hasher, &input.author.subject);
     hash_text(&mut hasher, &input.title);
     hash_text(&mut hasher, &input.body);
+    input.metadata.selection.hash(&mut hasher);
     hasher.finalize()
 }
 
@@ -190,7 +197,7 @@ fn integer(value: u64) -> crate::cells::Result<SqlValue> {
     })?))
 }
 
-fn advance_revision(context: &RepositoryTransaction<'_>) -> crate::cells::Result<()> {
+fn advance_revision(context: &Transaction<'_>) -> crate::cells::Result<()> {
     let result = context.sql(&SqlBatch {
         statements: vec![statement(
             "UPDATE repository_identity SET app_revision = app_revision + 1 WHERE singleton = 1 AND app_revision < 9007199254740991",
@@ -264,7 +271,7 @@ fn issue_from_row(row: &[SqlValue]) -> crate::cells::Result<IssueRecord> {
         body: result_text(row, 5)?,
         state,
         label_ids: decode_label_ids(result_blob(row, 7)?)?,
-        assignee_subjects: decode_assignees(result_blob(row, 8)?)?,
+        assignees: assignments::decode(result_blob(row, 8)?)?,
         version: result_u64_from_row(row, 9)?,
         created_at_ms: result_u64_from_row(row, 10)?,
         updated_at_ms: result_u64_from_row(row, 11)?,
@@ -359,7 +366,7 @@ fn validate_issue(record: &IssueRecord) -> crate::cells::Result<()> {
     validate_title(&record.title)?;
     validate_body(&record.body, false)?;
     validate_label_ids(&record.label_ids)?;
-    validate_assignees(&record.assignee_subjects)?;
+    assignments::validate(&record.assignees)?;
     validate_number(record.version)?;
     if record.state > 1 || record.updated_at_ms < record.created_at_ms {
         return Err(crate::cells::Error::Invalid(
@@ -381,22 +388,6 @@ fn validate_label_ids(labels: &[u64]) -> crate::cells::Result<()> {
     Ok(())
 }
 
-fn validate_assignees(assignees: &[String]) -> crate::cells::Result<()> {
-    if assignees.len() > MAX_ASSIGNEES
-        || assignees.iter().any(|subject| {
-            subject.is_empty()
-                || subject.chars().count() > 512
-                || subject.chars().any(char::is_control)
-        })
-        || assignees.windows(2).any(|pair| pair[0] >= pair[1])
-    {
-        return Err(crate::cells::Error::Invalid(
-            "repository issue assignees are invalid",
-        ));
-    }
-    Ok(())
-}
-
 fn validate_list(before: Option<u64>, limit: u8) -> crate::cells::Result<()> {
     if limit == 0
         || usize::from(limit) > MAX_LIST_ITEMS
@@ -407,29 +398,6 @@ fn validate_list(before: Option<u64>, limit: u8) -> crate::cells::Result<()> {
         ));
     }
     Ok(())
-}
-
-fn validate_query(query: Option<&str>) -> crate::cells::Result<()> {
-    if query.is_some_and(|query| {
-        query.is_empty()
-            || query.trim() != query
-            || query.chars().count() > 256
-            || query.chars().any(char::is_control)
-            || query.to_lowercase() != query
-    }) {
-        return Err(crate::cells::Error::Invalid(
-            "repository search query is invalid",
-        ));
-    }
-    Ok(())
-}
-
-fn matches_query(query: Option<&str>, issue: &IssueRecord) -> bool {
-    query.is_none_or(|query| {
-        [&issue.title, &issue.body, &issue.author.name]
-            .iter()
-            .any(|value| value.to_lowercase().contains(query))
-    })
 }
 
 fn same_author(left: &RepositoryAuthor, right: &RepositoryAuthor) -> bool {
@@ -474,49 +442,6 @@ fn decode_label_ids(bytes: &[u8]) -> crate::cells::Result<Vec<u64>> {
         .map_err(|_| crate::cells::Error::Invalid("repository label encoding is invalid"))?;
     validate_label_ids(&labels)?;
     Ok(labels)
-}
-
-fn encode_assignees(assignees: &[String]) -> crate::cells::Result<Vec<u8>> {
-    let mut encoder = RecordEncoder::new(16 * 1024)
-        .map_err(|_| crate::cells::Error::Invalid("repository assignee encoding failed"))?;
-    encoder
-        .write_count(assignees.len())
-        .map_err(|_| crate::cells::Error::Invalid("repository assignee encoding failed"))?;
-    for assignee in assignees {
-        encoder
-            .write_text(assignee)
-            .map_err(|_| crate::cells::Error::Invalid("repository assignee encoding failed"))?;
-    }
-    Ok(encoder.finish())
-}
-
-fn decode_assignees(bytes: &[u8]) -> crate::cells::Result<Vec<String>> {
-    let mut decoder = RecordDecoder::new(bytes, 16 * 1024)
-        .map_err(|_| crate::cells::Error::Invalid("repository assignee encoding is invalid"))?;
-    let count = decoder
-        .read_count()
-        .map_err(|_| crate::cells::Error::Invalid("repository assignee encoding is invalid"))?;
-    if count > MAX_ASSIGNEES {
-        return Err(crate::cells::Error::Invalid(
-            "repository assignee encoding is invalid",
-        ));
-    }
-    let mut assignees = Vec::with_capacity(count);
-    for _ in 0..count {
-        assignees.push(
-            decoder
-                .read_text()
-                .map_err(|_| {
-                    crate::cells::Error::Invalid("repository assignee encoding is invalid")
-                })?
-                .to_owned(),
-        );
-    }
-    decoder
-        .finish()
-        .map_err(|_| crate::cells::Error::Invalid("repository assignee encoding is invalid"))?;
-    validate_assignees(&assignees)?;
-    Ok(assignees)
 }
 
 fn encoded_size<T: serde::Serialize>(value: &T) -> crate::cells::Result<usize> {

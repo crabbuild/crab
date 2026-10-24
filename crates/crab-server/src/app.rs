@@ -23,6 +23,18 @@ pub(crate) const MAX_NUMBER: u64 = 9_007_199_254_740_991;
 
 #[derive(Debug, thiserror::Error)]
 pub(crate) enum Error {
+    #[error("Initial discussion metadata was rejected: {0:?}")]
+    CreationRejected(crate::cells::repository::collaboration::creation::Failure),
+    #[error("Git references are being indexed. Retry shortly")]
+    ReviewIndexPending,
+    #[error("Sign in to use account features")]
+    SessionRequired,
+    #[error("Repository permissions are temporarily unavailable")]
+    Membership(#[source] Box<crate::catalog::CatalogError>),
+    #[error("This username is already taken")]
+    ProfileHandleTaken,
+    #[error("Your profile is already registered; reload to edit it")]
+    ProfileExists,
     #[error("{0}")]
     Invalid(&'static str),
     #[error("Not found")]
@@ -39,6 +51,12 @@ pub(crate) enum Error {
     DraftPull,
     #[error("This content changed; reload before saving your draft")]
     Conflict,
+    #[error(
+        "This repository was replaced; reload before starting another action. An earlier action may have completed in the original repository"
+    )]
+    RepositoryChanged,
+    #[error("This list changed; reload from the first page")]
+    PageChanged,
     #[error("The pull request changes conflict or its branch tips changed")]
     MergeConflict,
     #[error("Git writes are busy")]
@@ -55,9 +73,11 @@ pub(crate) enum Error {
     CheckPermission,
     #[error("Check run not found")]
     CheckNotFound,
-    #[error("Write access is required to manage repository labels")]
+    #[error("You do not have permission to change labels")]
     LabelPermission,
-    #[error("Write access is required to manage milestones")]
+    #[error("Write access is required to pin issues")]
+    PinPermission,
+    #[error("You do not have permission to change milestones")]
     MilestonePermission,
     #[error("Write access is required to manage linked work")]
     LinkPermission,
@@ -65,9 +85,11 @@ pub(crate) enum Error {
     MilestoneConflict,
     #[error("A repository label with this name already exists")]
     LabelConflict,
+    #[error("A team with this name already exists")]
+    TeamNameConflict,
     #[error("Repository label not found")]
     LabelNotFound,
-    #[error("Write access is required to manage assignees")]
+    #[error("Triage access is required to manage assignees")]
     AssigneePermission,
     #[error("Write access is required to manage releases")]
     ReleasePermission,
@@ -100,7 +122,7 @@ pub(crate) enum Error {
     #[error("Pull request merge object construction failed")]
     MergeObject(#[source] Box<crab_remote::objects::Error>),
     #[error(
-        "This submission ID was already used for different content; check the existing discussion before submitting again"
+        "This submission ID was already used for different content; check the existing result before submitting again"
     )]
     RequestConflict,
     #[error("Collaboration Cell routing is unavailable")]
@@ -149,7 +171,7 @@ pub(crate) fn repository_cell(
     repository: &Repository,
 ) -> Result<crate::cells::RepositoryCell> {
     server
-        .repository_cells()
+        .cells()
         .ok_or(Error::CellUnavailable)?
         .repository(repository.id)
         .map_err(Error::Cell)
@@ -168,6 +190,7 @@ impl IntoResponse for Error {
                     | Self::Json(_)
                     | Self::Clock(_)
                     | Self::Repository(_)
+                    | Self::Membership(_)
                     | Self::Merge(_)
                     | Self::MergeObject(_)
                     | Self::Release(_)
@@ -192,8 +215,48 @@ impl IntoResponse for Error {
                 .into_response();
         }
         let (status, code, message) = match &self {
+            Self::Membership(_) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "membership_unavailable",
+                "Repository permissions are temporarily unavailable.",
+            ),
+            Self::SessionRequired => (
+                StatusCode::UNAUTHORIZED,
+                "session_required",
+                "Sign in to use account features",
+            ),
+            Self::ProfileHandleTaken => (
+                StatusCode::CONFLICT,
+                "handle_taken",
+                "This username is already taken",
+            ),
+            Self::ProfileExists => (
+                StatusCode::CONFLICT,
+                "profile_exists",
+                "Your profile is already registered; reload to edit it",
+            ),
+            Self::Cell(crate::cells::Error::AccessDenied) => (
+                StatusCode::FORBIDDEN,
+                "permission_required",
+                "Current membership does not permit this operation",
+            ),
+            Self::Cell(crate::cells::Error::SchemaUnavailable) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "schema_upgrade_required",
+                "Your server needs an update. Contact your administrator.",
+            ),
+            Self::Cell(crate::cells::Error::NotInitialized) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "directory_unavailable",
+                "Profiles are not ready. Contact your server administrator.",
+            ),
+            Self::PageChanged => (
+                StatusCode::CONFLICT,
+                "page_changed",
+                "This list changed; reload from the first page",
+            ),
             Self::Invalid(message) => (StatusCode::BAD_REQUEST, "invalid_request", *message),
-            Self::NotFound => (StatusCode::NOT_FOUND, "not_found", "Discussion not found"),
+            Self::NotFound => (StatusCode::NOT_FOUND, "not_found", "Resource not found"),
             Self::CommitNotFound => (StatusCode::NOT_FOUND, "not_found", "Commit not found"),
             Self::Forbidden => (
                 StatusCode::FORBIDDEN,
@@ -243,7 +306,7 @@ impl IntoResponse for Error {
             Self::MergeBlocked => (
                 StatusCode::CONFLICT,
                 "merge_blocked",
-                "Required approvals or status checks are not satisfied on the current head",
+                "Required reviews or status checks are not satisfied",
             ),
             Self::StatusPermission => (
                 StatusCode::FORBIDDEN,
@@ -259,7 +322,7 @@ impl IntoResponse for Error {
             Self::MilestonePermission => (
                 StatusCode::FORBIDDEN,
                 "forbidden",
-                "Write access is required to manage milestones",
+                "You do not have permission to change milestones",
             ),
             Self::LinkPermission => (
                 StatusCode::FORBIDDEN,
@@ -274,12 +337,22 @@ impl IntoResponse for Error {
             Self::LabelPermission => (
                 StatusCode::FORBIDDEN,
                 "forbidden",
-                "Write access is required to manage repository labels",
+                "You do not have permission to change labels",
+            ),
+            Self::PinPermission => (
+                StatusCode::FORBIDDEN,
+                "forbidden",
+                "Write access is required to pin issues",
             ),
             Self::LabelConflict => (
                 StatusCode::CONFLICT,
                 "label_conflict",
                 "A repository label with this name already exists",
+            ),
+            Self::TeamNameConflict => (
+                StatusCode::CONFLICT,
+                "team_name_conflict",
+                "A team with this name already exists",
             ),
             Self::LabelNotFound => (
                 StatusCode::NOT_FOUND,
@@ -289,7 +362,7 @@ impl IntoResponse for Error {
             Self::AssigneePermission => (
                 StatusCode::FORBIDDEN,
                 "forbidden",
-                "Write access is required to manage assignees",
+                "Triage access is required to manage assignees",
             ),
             Self::ReleasePermission => (
                 StatusCode::FORBIDDEN,
@@ -345,10 +418,52 @@ impl IntoResponse for Error {
                 "asset_storage",
                 "Release asset storage is unavailable. Retry shortly",
             ),
+            Self::RepositoryChanged => (
+                StatusCode::CONFLICT,
+                "repository_changed",
+                "This repository was replaced; reload before starting another action. An earlier action may have completed in the original repository",
+            ),
             Self::RequestConflict => (
                 StatusCode::CONFLICT,
                 "submission_conflict",
-                "This submission ID was already used for different content; check the existing discussion before submitting again",
+                "This submission ID was already used for different content; check the existing result before submitting again",
+            ),
+            Self::CreationRejected(reason) => match reason {
+                crate::cells::repository::collaboration::creation::Failure::Forbidden => (
+                    StatusCode::FORBIDDEN,
+                    "creation_rejected",
+                    "Triage access is required to set initial discussion metadata",
+                ),
+                crate::cells::repository::collaboration::creation::Failure::Labels => (
+                    StatusCode::BAD_REQUEST,
+                    "creation_rejected",
+                    "An initial label is no longer available",
+                ),
+                crate::cells::repository::collaboration::creation::Failure::Assignees => (
+                    StatusCode::BAD_REQUEST,
+                    "creation_rejected",
+                    "An initial assignee is no longer available",
+                ),
+                crate::cells::repository::collaboration::creation::Failure::Milestone => (
+                    StatusCode::BAD_REQUEST,
+                    "creation_rejected",
+                    "The initial milestone is no longer available",
+                ),
+            },
+            Self::ReviewIndexPending => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "review_index_pending",
+                "Git references are being indexed. Retry shortly",
+            ),
+            Self::Cell(crate::cells::Error::IndexUnavailable) => (
+                StatusCode::SERVICE_UNAVAILABLE,
+                "discussion_index_unavailable",
+                "Repository search requires preparation. An administrator must rebuild the discussion index.",
+            ),
+            Self::Cell(crate::cells::Error::StaleSearch) => (
+                StatusCode::CONFLICT,
+                "stale_search_cursor",
+                "This discussion list has changed. Return to the first page to continue.",
             ),
             Self::Cell(crate::cells::Error::StaleRead) => (
                 StatusCode::CONFLICT,
@@ -419,6 +534,19 @@ impl IntoResponse for Error {
     }
 }
 
+pub(crate) fn account(principal: &Principal) -> Result<crate::cells::directory::IdentityKey> {
+    // Git tokens are repository-scoped credentials, even when their issuing
+    // account can administer a repository. They cannot manage account identity.
+    if !(principal.is_user() || principal.is_local()) {
+        return Err(Error::SessionRequired);
+    }
+    let actor = principal.identity().ok_or(Error::SessionRequired)?;
+    Ok(crate::cells::directory::IdentityKey {
+        issuer: actor.issuer,
+        subject: actor.subject,
+    })
+}
+
 pub(crate) async fn admit(
     State(server): State<Arc<Server>>,
     request: Request,
@@ -459,13 +587,13 @@ pub(crate) fn repository(
     server
         .repositories
         .get(key)
-        .filter(|repo| principal.can_read(&repo.config))
+        .filter(|repo| principal.can_read(repo.id))
         .ok_or(Error::NotFound)
 }
 
 pub(crate) struct Membership {
     pub members: Vec<crate::RepositoryMember>,
-    pub can_write: bool,
+    pub principal: Principal,
 }
 
 pub(crate) async fn membership(
@@ -473,30 +601,37 @@ pub(crate) async fn membership(
     principal: &Principal,
     repo: &Repository,
 ) -> Result<Membership> {
-    if matches!(principal, Principal::Local) {
+    if principal.is_local() {
+        if !principal.can_read(repo.id) {
+            return Err(Error::NotFound);
+        }
         return Ok(Membership {
             members: Vec::new(),
-            can_write: true,
+            principal: principal.clone(),
         });
     }
-    let catalog = server.catalog().ok_or(Error::NotFound)?;
-    // Participant selection must use durable membership, not a background
-    // materialization that could still offer a renamed or revoked reviewer.
-    let snapshot = catalog
+    let issuer = server.auth.as_ref().ok_or(Error::NotFound)?.issuer();
+    let snapshot = server
+        .catalog()
+        .ok_or(Error::NotFound)?
         .membership(&repo.config.owner, &repo.config.name)
         .await
         .map_err(|error| match error {
             crate::catalog::CatalogError::NotFound => Error::NotFound,
-            error => Error::Repository(crate::Error::Catalog(error)),
+            error => Error::Membership(Box::new(error)),
         })?;
+    if snapshot.repository_id != repo.id {
+        return Err(Error::NotFound);
+    }
     let mut config = repo.config.clone();
     config.members = snapshot.members;
-    if !principal.can_read(&config) {
+    let principal = principal.with_membership(repo.id, &config, issuer);
+    if !principal.can_read(repo.id) {
         return Err(Error::NotFound);
     }
     Ok(Membership {
-        can_write: principal.can_write(&config),
         members: config.members,
+        principal,
     })
 }
 
@@ -563,7 +698,8 @@ pub(crate) fn search_query(value: Option<&str>) -> Result<Option<String>> {
     if value.is_empty() {
         return Ok(None);
     }
-    Ok(Some(value.to_lowercase()))
+    crate::cells::repository::search::Query::parse(Some(value)).map_err(Error::Invalid)?;
+    Ok(Some(value.to_owned()))
 }
 
 pub(crate) fn body(value: &str, required: bool) -> Result<()> {

@@ -8,17 +8,13 @@ const ROOT: &str = "/api/repos/team/private";
 async fn seed(h: &Harness, cookie: &str) {
     h.write(Method::POST,&format!("{ROOT}/issues"),cookie,json!({"request_id":uuid::Uuid::now_v7(),"title":"Related issue","body":"Private issue body"})).await.error_for_status().unwrap();
     let repository = h.server.repositories.values()[0].id;
-    let cell = h
-        .server
-        .repository_cells()
-        .unwrap()
-        .repository(repository)
-        .unwrap();
+    let cell = h.server.cells().unwrap().repository(repository).unwrap();
     cell.client
         .command::<CreatePull>(
             &cell.target,
             crate::app::mutation_identity().unwrap(),
             CreatePullInput {
+                metadata: Default::default(),
                 draft: false,
                 submission_id: *uuid::Uuid::now_v7().as_bytes(),
                 author: RepositoryAuthor {

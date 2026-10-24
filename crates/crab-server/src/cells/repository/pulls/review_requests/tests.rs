@@ -15,7 +15,7 @@ fn identity() -> MutationIdentity {
 }
 fn cell(server: &crate::server::Server) -> RepositoryCell {
     server
-        .repository_cells()
+        .cells()
         .unwrap()
         .repository(server.repositories.values()[0].id)
         .unwrap()
@@ -29,6 +29,7 @@ async fn write<M: Mutation>(cell: &RepositoryCell, input: M::Input) -> M::Output
 }
 async fn seed(cell: &RepositoryCell) {
     let input = CreatePullInput {
+        metadata: Default::default(),
         draft: false,
         submission_id: *Uuid::now_v7().as_bytes(),
         author: author("Alice"),
@@ -49,20 +50,36 @@ fn request(subject: &str, version: u64, requested: bool) -> Selection {
         pull: 1,
         version,
         actor: author("Alice"),
-        can_manage: false,
+        can_manage: true,
         reviewer: author(subject),
         requested,
     }
 }
-async fn page(cell: &RepositoryCell, before: Option<String>, limit: u8) -> Page {
+async fn page(cell: &RepositoryCell) -> super::super::reviewers::Page {
+    use super::super::reviewers::{ListReviewers, Query};
     cell.client
-        .query::<ListReviewRequests>(
+        .query::<ListReviewers>(
             &cell.target,
             None,
             Query {
                 pull: 1,
-                before,
-                limit,
+                after: None,
+                limit: 50,
+            },
+        )
+        .await
+        .unwrap()
+        .output
+        .unwrap()
+}
+async fn stored(cell: &RepositoryCell, subject: &str) -> Request {
+    cell.client
+        .query::<GetReviewRequest>(
+            &cell.target,
+            None,
+            Key {
+                pull: 1,
+                id: reviewer_id(&author(subject)),
             },
         )
         .await
@@ -106,7 +123,7 @@ async fn qualified_requests_are_versioned_and_do_not_follow_display_names() {
         write::<SetReviewRequest>(&cell, renamed.clone()).await,
         committed.output
     );
-    assert_eq!(page(&cell, None, 50).await.version, 2);
+    assert_eq!(page(&cell).await.version, 2);
     let mut other_issuer = input.clone();
     other_issuer.reviewer.issuer = "https://other.test".into();
     other_issuer.version = 2;
@@ -114,7 +131,7 @@ async fn qualified_requests_are_versioned_and_do_not_follow_display_names() {
         write::<SetReviewRequest>(&cell, other_issuer).await,
         Outcome::Applied(_)
     ));
-    assert_eq!(page(&cell, None, 50).await.items.len(), 2);
+    assert_eq!(page(&cell).await.items.len(), 2);
     assert_eq!(
         write::<SetReviewRequest>(&cell, request("Bob", 1, false)).await,
         Outcome::Conflict
@@ -128,6 +145,7 @@ async fn qualified_requests_are_versioned_and_do_not_follow_display_names() {
             ..
         })
     ));
+    assert_eq!(stored(&cell, "Bob").await.state, State::Cancelled);
     assert!(matches!(
         write::<SetReviewRequest>(&cell, request("Bob", 4, true)).await,
         Outcome::Applied(_)
@@ -136,13 +154,13 @@ async fn qualified_requests_are_versioned_and_do_not_follow_display_names() {
         write::<SetReviewRequest>(&cell, request("Bob", 3, false)).await,
         Outcome::Conflict
     );
-    let current = page(&cell, None, 50).await;
+    let current = page(&cell).await;
     assert_eq!(current.version, 5);
     assert!(
         current
             .items
             .iter()
-            .all(|request| request.state == State::Requested)
+            .all(|reviewer| reviewer.request.as_ref().unwrap().state == State::Requested)
     );
     fixtures::close(&server).await;
 }
@@ -157,7 +175,7 @@ async fn concurrent_duplicate_requests_create_one_transition_and_one_event() {
         write::<SetReviewRequest>(&cell, request("Bob", 1, true))
     );
     assert_eq!(a, b);
-    assert_eq!(page(&cell, None, 50).await.version, 2);
+    assert_eq!(page(&cell).await.version, 2);
     let events = cell
         .client
         .query::<activity::ListActivity>(
@@ -193,7 +211,7 @@ async fn submitted_reviews_fulfill_once_and_replays_cannot_fulfill_a_new_request
     let mut same_name = review("Bob", ReviewState::Commented);
     same_name.author.issuer = "https://other.test".into();
     write::<CreatePullReview>(&cell, same_name).await;
-    assert_eq!(page(&cell, None, 50).await.items[0].state, State::Requested);
+    assert_eq!(stored(&cell, "Bob").await.state, State::Requested);
     let input = review("Bob", ReviewState::Commented);
     let id = identity();
     let committed = cell
@@ -201,9 +219,9 @@ async fn submitted_reviews_fulfill_once_and_replays_cannot_fulfill_a_new_request
         .command::<CreatePullReview>(&cell.target, id, input.clone())
         .await
         .unwrap();
-    let current = page(&cell, None, 50).await;
+    let current = page(&cell).await;
     assert_eq!(
-        (current.version, current.items[0].state.clone()),
+        (current.version, stored(&cell, "Bob").await.state),
         (3, State::Fulfilled { review: 2 })
     );
     write::<SetReviewRequest>(&cell, request("Bob", 3, true)).await;
@@ -218,11 +236,11 @@ async fn submitted_reviews_fulfill_once_and_replays_cannot_fulfill_a_new_request
         write::<CreatePullReview>(&cell, input).await,
         committed.output
     );
-    assert_eq!(page(&cell, None, 50).await.items[0].state, State::Requested);
+    assert_eq!(stored(&cell, "Bob").await.state, State::Requested);
     write::<CreatePullReview>(&cell, review("Bob", ReviewState::Approved)).await;
-    let current = page(&cell, None, 50).await;
+    let current = page(&cell).await;
     assert_eq!(
-        (current.version, current.items[0].state.clone()),
+        (current.version, stored(&cell, "Bob").await.state),
         (5, State::Fulfilled { review: 3 })
     );
     let pull = cell
@@ -237,11 +255,16 @@ async fn submitted_reviews_fulfill_once_and_replays_cannot_fulfill_a_new_request
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn requests_require_an_author_or_writer_and_an_open_unarchived_pull() {
+async fn requests_require_triage_authority_and_an_open_unarchived_pull() {
     let server = fixtures::fixture().await;
     let cell = cell(&server);
     seed(&cell).await;
     let mut input = request("Bob", 1, true);
+    input.can_manage = false;
+    assert_eq!(
+        write::<SetReviewRequest>(&cell, input.clone()).await,
+        Outcome::Forbidden
+    );
     input.actor = author("Carol");
     assert_eq!(
         write::<SetReviewRequest>(&cell, input.clone()).await,
@@ -265,13 +288,13 @@ async fn requests_require_an_author_or_writer_and_an_open_unarchived_pull() {
     let edit = UpdatePullInput {
         number: 1,
         actor: author("Alice"),
-        can_manage: false,
+        can_triage: false,
         version: 2,
         title: None,
         body: None,
         state: Some(PullState::Closed),
         label_ids: None,
-        assignee_subjects: None,
+        assignees: None,
     };
     write::<UpdatePull>(&cell, edit).await;
     assert_eq!(
@@ -290,47 +313,7 @@ async fn requests_require_an_author_or_writer_and_an_open_unarchived_pull() {
         write::<SetReviewRequest>(&cell, request("Bob", 3, false)).await,
         Outcome::Archived
     );
-    assert_eq!(page(&cell, None, 50).await.items[0].state, State::Requested);
-    fixtures::close(&server).await;
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn request_pages_are_bounded_exclusive_and_keep_cancelled_state() {
-    let server = fixtures::fixture().await;
-    let cell = cell(&server);
-    seed(&cell).await;
-    for (index, subject) in ["Bob", "Carol", "Dave"].into_iter().enumerate() {
-        write::<SetReviewRequest>(&cell, request(subject, index as u64 + 1, true)).await;
-    }
-    write::<SetReviewRequest>(&cell, request("Bob", 4, false)).await;
-    let all = page(&cell, None, 50).await;
-    let first = page(&cell, None, 2).await;
-    let second = page(&cell, first.next.clone(), 2).await;
-    assert_eq!([first.items, second.items].concat(), all.items);
-    assert!(second.next.is_none());
-    assert_eq!(
-        all.items
-            .iter()
-            .filter(|request| request.state == State::Cancelled)
-            .count(),
-        1
-    );
-    for (before, limit) in [(None, 0), (None, 51), (Some("invalid".into()), 1)] {
-        assert!(
-            cell.client
-                .query::<ListReviewRequests>(
-                    &cell.target,
-                    None,
-                    Query {
-                        pull: 1,
-                        before,
-                        limit
-                    }
-                )
-                .await
-                .is_err()
-        );
-    }
+    assert_eq!(stored(&cell, "Bob").await.state, State::Requested);
     fixtures::close(&server).await;
 }
 
@@ -353,7 +336,7 @@ async fn native_restart_restores_requests_fulfillment_and_receipts() {
         .command::<CreatePullReview>(&cell.target, id, input.clone())
         .await
         .unwrap();
-    let before = page(&cell, None, 50).await;
+    let before = page(&cell).await;
     let NodeOutcome::Stopped(report) = started.node.shutdown(ShutdownMode::Preserve).await.unwrap()
     else {
         panic!("node did not stop")
@@ -361,7 +344,7 @@ async fn native_restart_restores_requests_fulfillment_and_receipts() {
     assert!(report.cells_drained && !report.drain_timed_out);
     let restored = crate::cells::runtime::test_node(directory.path(), address).await;
     let cell = restored.client.repository(repository).unwrap();
-    let after = page(&cell, None, 50).await;
+    let after = page(&cell).await;
     assert_eq!((after.version, after.items), (before.version, before.items));
     assert_eq!(
         committed,
@@ -434,6 +417,6 @@ async fn request_changes_invalidate_merge_admission_and_pending_merges_freeze_re
         write::<CreatePullReview>(&cell, review("Bob", ReviewState::Approved)).await,
         CreatePullReviewOutcome::MergePending
     );
-    assert_eq!(page(&cell, None, 50).await.items[0].state, State::Requested);
+    assert_eq!(stored(&cell, "Bob").await.state, State::Requested);
     fixtures::close(&server).await;
 }

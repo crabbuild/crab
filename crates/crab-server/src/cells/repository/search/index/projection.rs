@@ -1,0 +1,139 @@
+use super::*;
+use crate::cells::repository::assignments;
+use crate::cells::repository::collaboration::{Target, reactions};
+use crate::cells::repository::{decode_label_ids, result_blob, result_text, result_u64_from_row};
+
+pub(super) fn remove(context: &Transaction<'_>, id: u64) -> crate::cells::Result<()> {
+    context.sql(&SqlBatch {
+        statements: vec![
+            statement(
+                "DELETE FROM discussion_fts WHERE rowid = ?",
+                vec![integer(id)?],
+            ),
+            statement(
+                "DELETE FROM discussion_index WHERE rowid = ?",
+                vec![integer(id)?],
+            ),
+        ],
+    })?;
+    Ok(())
+}
+
+pub(super) fn refresh(context: &Transaction<'_>, subject: Subject) -> crate::cells::Result<()> {
+    let (table, comments, foreign, target) = match subject.kind {
+        SubjectKind::Issue => (
+            "repository_issues",
+            "repository_issue_comments",
+            "issue_number",
+            Target::Issue {
+                number: subject.number,
+            },
+        ),
+        SubjectKind::Pull => (
+            "repository_pulls",
+            "repository_pull_comments",
+            "pull_number",
+            Target::Pull {
+                number: subject.number,
+            },
+        ),
+    };
+    let query = format!(
+        "SELECT title, body, state, label_ids, assignees, created_at_ms, updated_at_ms, author_issuer, author_subject FROM {table} WHERE number = ?"
+    );
+    let rows = context.sql(&SqlBatch {
+        statements: vec![statement(&query, vec![integer(subject.number)?])],
+    })?;
+    let id = rowid(subject);
+    let Some(row) = rows[0].rows.first() else {
+        return remove(context, id);
+    };
+    let title = result_text(row, 0)?.to_lowercase();
+    let body = result_text(row, 1)?.to_lowercase();
+    let state = result_u64_from_row(row, 2)?;
+    let labels = decode_label_ids(result_blob(row, 3)?)?;
+    let assignees = assignments::decode(result_blob(row, 4)?)?;
+    let created = result_u64_from_row(row, 5)?;
+    let updated = result_u64_from_row(row, 6)?;
+    let issuer = result_text(row, 7)?;
+    let subject_key = result_text(row, 8)?;
+    let author_identity = super::super::people::identity(&issuer, &subject_key)?;
+    let draft = subject.kind == SubjectKind::Pull
+        && crate::cells::repository::pulls::readiness::load(context, subject.number)?
+            == crate::cells::repository::PullReadiness::Draft;
+    let counts = reactions::counts(context, target)?;
+    let total = counts.values().try_fold(0u64, |total, count| {
+        total
+            .checked_add(*count)
+            .filter(|total| *total <= MAX_NUMBER)
+            .ok_or(crate::cells::Error::Invalid(
+                "discussion reaction total exceeds its count range",
+            ))
+    })?;
+    let comment_rows = context.sql(&SqlBatch {
+        statements: vec![statement(
+            &format!("SELECT COUNT(*) FROM {comments} WHERE {foreign} = ?"),
+            vec![integer(subject.number)?],
+        )],
+    })?;
+    let comments = result_u64(&comment_rows, 0, 0)?;
+    // Folded text and all metadata rows commit with the domain mutation. FTS5
+    // contentless-delete avoids triggers that require trusted-schema access.
+    // Reviewer rows attach to canonical PRs and survive this replacement.
+    // Tying them to these disposable documents would erase review relationships.
+    remove(context, id)?;
+    context.sql(&SqlBatch { statements: vec![statement(
+        "INSERT INTO discussion_index(rowid, kind, number, state, draft, created_at_ms, updated_at_ms, title, body, comments, reactions) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        vec![integer(id)?, SqlValue::Integer(kind(subject.kind)), integer(subject.number)?, integer(state)?, SqlValue::Integer(i64::from(draft)), integer(created)?, integer(updated)?, SqlValue::Text(title.clone()), SqlValue::Text(body.clone()), integer(comments)?, integer(total)?],
+    )] })?;
+    let mut statements = Vec::with_capacity(labels.len() + assignees.len() + counts.len() + 1);
+    if subject.kind == SubjectKind::Pull {
+        let (base, head, merged) =
+            crate::cells::repository::pulls::review_source(context, subject.number)?;
+        statements.push(statement(
+            "INSERT INTO discussion_index_pull_sources(document,base_ref,head_ref,merged_head_oid) VALUES (?,?,?,?)",
+            vec![integer(id)?, SqlValue::Text(base), SqlValue::Blob(head.into_bytes()), merged.map_or(SqlValue::Null,SqlValue::Text)],
+        ));
+    }
+
+    statements.push(statement(
+        "INSERT INTO discussion_index_authors(document, identity) VALUES (?, ?)",
+        vec![integer(id)?, SqlValue::Blob(author_identity.to_vec())],
+    ));
+    for label in labels {
+        statements.push(statement(
+            "INSERT INTO discussion_index_labels(document, label) VALUES (?, ?)",
+            vec![integer(id)?, integer(label)?],
+        ));
+    }
+    for assignee in assignees {
+        statements.push(statement(
+            "INSERT INTO discussion_index_assignees(document, actor, name, name_key) VALUES (?, ?, ?, ?)",
+            vec![integer(id)?, SqlValue::Text(assignee.id.to_string()), SqlValue::Text(assignee.name.clone()), SqlValue::Text(assignee.name.to_lowercase())],
+        ));
+    }
+    if let Some(milestone) =
+        crate::cells::repository::collaboration::milestones::selected(context, subject)?
+    {
+        statements.push(statement(
+            "INSERT INTO discussion_index_milestones(document, milestone) VALUES (?, ?)",
+            vec![integer(id)?, integer(milestone)?],
+        ));
+    }
+    for (kind, count) in counts {
+        statements.push(statement(
+            "INSERT INTO discussion_index_reaction_counts(document, kind, count) VALUES (?, ?, ?)",
+            vec![
+                integer(id)?,
+                SqlValue::Text(kind.key().into()),
+                integer(count)?,
+            ],
+        ));
+    }
+    statements.push(statement(
+        "INSERT INTO discussion_fts(rowid, title, body) VALUES (?, ?, ?)",
+        vec![integer(id)?, SqlValue::Text(title), SqlValue::Text(body)],
+    ));
+    context.sql(&SqlBatch { statements })?;
+    Ok(())
+}

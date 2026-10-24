@@ -194,6 +194,13 @@ test.beforeEach(async ({ page }) => {
   }> = [];
   await page.route("**/api/**", async (route) => {
     const url = new URL(route.request().url());
+    if (
+      url.pathname.startsWith("/api/repos/team/project/") &&
+      !["GET", "HEAD"].includes(route.request().method())
+    )
+      expect(route.request().headers()["x-crab-repository-id"]).toBe(
+        "00000000-0000-4000-8000-000000000099",
+      );
     if (url.pathname === "/api/session")
       return route.fulfill({
         json: { authenticated: true, mode: "local", user: null, csrf: null },
@@ -203,6 +210,7 @@ test.beforeEach(async ({ page }) => {
         json: {
           repositories: [
             {
+              id: "00000000-0000-4000-8000-000000000099",
               owner: "team",
               name: "project",
               description: "A repository for our team.",
@@ -689,12 +697,19 @@ test.beforeEach(async ({ page }) => {
         json: {
           items: [
             {
-              number: 42,
-              author: "Alice",
+              kind: "issue",
+              number: url.searchParams.get("q") === "is:closed" ? 43 : 42,
+              comment_count: 0,
+              reaction_count: 0,
+              author: { name: "Alice", profile: null },
               body: null,
               title: "Keep object storage reads bounded",
+              closed_at:
+                url.searchParams.get("q") === "is:closed"
+                  ? 1700000001000
+                  : null,
               state:
-                url.searchParams.get("state") === "closed" ? "closed" : "open",
+                url.searchParams.get("q") === "is:closed" ? "closed" : "open",
               labels: [
                 {
                   id: 1,
@@ -706,7 +721,13 @@ test.beforeEach(async ({ page }) => {
                   updated_at: 1_700_000_000_000,
                 },
               ],
-              assignees: [{ subject: "alice", name: "Alice" }],
+              assignees: [
+                {
+                  id: "00000000-0000-4000-8000-000000000001",
+                  name: "Alice",
+                  profile: null,
+                },
+              ],
               version: 1,
               created_at: 1_700_000_000_000,
               updated_at: 1_700_000_000_000,
@@ -716,6 +737,22 @@ test.beforeEach(async ({ page }) => {
             },
           ],
           next: null,
+          counts: {
+            open: 1,
+            closed: 1,
+            merged: 0,
+          },
+          authored_by_me: false,
+          assigned_to_me: false,
+          review_requested_from_me: false,
+          matching: 1,
+          navigation: {
+            kind: "state",
+            selected:
+              url.searchParams.get("q") === "is:closed" ? "closed" : "open",
+            open: "is:open",
+            closed: "is:closed",
+          },
         },
       });
     return route.fulfill({
@@ -819,6 +856,8 @@ for (const path of [
   `/team/project?rev=main&path=${pathHex("README.md")}&kind=Blob#L3`,
   "/team/project?view=releases&release=2",
   "/team/project/releases/2",
+  "/team/project/issues?state=closed",
+  "/team/project/pulls?state=open",
 ]) {
   test(`unsupported browser address shows not found without repository reads: ${path}`, async ({
     page,
@@ -1733,14 +1772,14 @@ test("file tree controls align the branch picker and place collapse after search
   );
   expect(collapseBounds!.y).toBe(searchBounds!.y);
   const iconOffset = await branch.evaluate((node) => {
-    const icon = node.querySelector('[data-component="leadingVisual"]')!;
+    const icon = node.querySelector('[data-icon="inline-start"]')!;
     return (
       icon.getBoundingClientRect().left - node.getBoundingClientRect().left
     );
   });
   expect(iconOffset).toBeLessThan(16);
   const arrowOffset = await branch.evaluate((node) => {
-    const arrow = node.querySelector('[data-component="trailingVisual"]')!;
+    const arrow = node.querySelector('[data-icon="inline-end"]')!;
     return (
       node.getBoundingClientRect().right - arrow.getBoundingClientRect().right
     );
@@ -1976,9 +2015,8 @@ test("deep links expand the active path and select its file", async ({
       const selectedStyle = active ? getComputedStyle(active) : null;
       const selectedRail = active ? getComputedStyle(active, "::after") : null;
       const tokenProbe = document.createElement("span");
-      tokenProbe.style.backgroundColor =
-        "var(--control-transparent-bgColor-hover)";
-      tokenProbe.style.color = "var(--fgColor-accent)";
+      tokenProbe.style.backgroundColor = "var(--secondary)";
+      tokenProbe.style.color = "var(--info)";
       tree.closest(".app-shell")?.append(tokenProbe);
       const neutralBackground = getComputedStyle(tokenProbe).backgroundColor;
       const accentColor = getComputedStyle(tokenProbe).color;
@@ -2220,7 +2258,7 @@ test("mobile Code menu stays within the viewport and theme selection persists", 
     await page.locator(".clone-menu summary").click();
     await expect(
       page.getByLabel("Repository URL", { exact: true }),
-    ).toHaveValue("http://127.0.0.1:5175/git/team/project.git");
+    ).toHaveValue(`${new URL(page.url()).origin}/git/team/project.git`);
     await expect(
       page.getByRole("button", { name: "Copy URL", exact: true }),
     ).toBeVisible();
@@ -2267,10 +2305,10 @@ test("issues follow the GitHub list hierarchy in both themes and on mobile", asy
   );
   await expect(page.getByText("kind/bug", { exact: true })).toBeVisible();
 
-  await page.getByRole("link", { name: "Closed", exact: true }).click();
-  await expect(page).toHaveURL(/state=closed/);
+  await page.getByRole("link", { name: /^Closed \d+$/, exact: true }).click();
+  await expect(page).toHaveURL(/q=is%3Aclosed/);
   await expect(
-    page.getByRole("link", { name: "Closed", exact: true }),
+    page.getByRole("link", { name: /^Closed \d+$/, exact: true }),
   ).toHaveAttribute("aria-current", "page");
 
   for (const [width, theme] of [
@@ -2422,6 +2460,7 @@ test("branch and tag pages follow the GitHub refs hierarchy", async ({
         json: {
           repositories: [
             {
+              id: "00000000-0000-4000-8000-000000000099",
               owner: "team",
               name: "project",
               description: "A repository for our team.",
@@ -2893,7 +2932,7 @@ test("repository settings manage members with a revisioned CSRF-protected replac
   form = page.locator(".member-form");
   await form.getByLabel("Display name").fill("Charles");
   await form.getByRole("button", { name: "Access" }).click();
-  await page.getByRole("menuitemradio", { name: /^Write/ }).click();
+  await page.getByRole("menuitemradio", { name: /^Triage/ }).click();
   await form.getByRole("button", { name: "Save member" }).click();
 
   await page.getByRole("button", { name: "Remove Bob" }).click();
@@ -2905,10 +2944,23 @@ test("repository settings manage members with a revisioned CSRF-protected replac
     expected_revision: 42,
     members: [
       { subject: "alice-id", name: "Alice", access: "admin" },
-      { subject: "charlie-id", name: "Charles", access: "write" },
+      { subject: "charlie-id", name: "Charles", access: "triage" },
     ],
   });
   await expect(page.getByRole("status")).toContainText("Membership updated.");
+  await page.reload();
+  await expect(
+    page.locator('.member-role[data-access="triage"]'),
+  ).toContainText("Triage");
+  await page.getByRole("button", { name: "Edit Charles" }).click();
+  form = page.locator(".member-form");
+  await form.getByRole("button", { name: "Access" }).click();
+  await page.getByRole("menuitemradio", { name: /^Write/ }).click();
+  await form.getByRole("button", { name: "Save member" }).click();
+  await page.getByRole("button", { name: "Save members" }).click();
+  await expect(page.locator('.member-role[data-access="write"]')).toContainText(
+    "Write",
+  );
 
   await page.getByRole("button", { name: "Edit Charles" }).click();
   form = page.locator(".member-form");

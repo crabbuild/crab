@@ -4,7 +4,7 @@ use std::sync::Arc;
 use std::time::Instant;
 
 use crate::cells::MutationIdentity;
-use crate::cells::{Committed, RepositoryClient};
+use crate::cells::{CellClient, Committed};
 use crab_metadata::manifest_store::RepositorySnapshot;
 use crab_metadata::path_state::{PathStateItem, PathStateReader, PathStateRecord};
 use crab_metadata::split_commit_graph::{SplitCommitGraph, load_split_commit_graph};
@@ -95,7 +95,7 @@ pub(crate) async fn reconcile(
 }
 
 async fn collect_epochs(
-    client: &RepositoryClient,
+    client: &CellClient,
     target: &Uuid,
     source: &projection::SourceIdentity,
 ) -> crate::Result<()> {
@@ -206,7 +206,7 @@ fn path_state_error(error: crab_metadata::error::MetadataError) -> crate::Error 
 }
 
 pub(crate) async fn state(
-    client: &RepositoryClient,
+    client: &CellClient,
     repository_id: Uuid,
 ) -> crate::Result<projection::ProjectionStateView> {
     let cell = client.repository(repository_id)?;
@@ -218,7 +218,7 @@ pub(crate) async fn state(
 }
 
 pub(crate) async fn attribution(
-    client: &RepositoryClient,
+    client: &CellClient,
     repository_id: Uuid,
     source_token: &str,
     commit_oid: &[u8],
@@ -305,7 +305,7 @@ async fn build_epoch(
     layout: &StoreLayout<Store>,
     options: RepositoryOptions,
     repository: &RemoteGitRepository,
-    client: &RepositoryClient,
+    client: &CellClient,
     target: &Uuid,
     source: &projection::SourceIdentity,
     snapshot: &RepositorySnapshot,
@@ -393,7 +393,7 @@ async fn build_epoch_contents(
     layout: &StoreLayout<Store>,
     options: RepositoryOptions,
     repository: &RemoteGitRepository,
-    client: &RepositoryClient,
+    client: &CellClient,
     target: &Uuid,
     source: &projection::SourceIdentity,
     snapshot: &RepositorySnapshot,
@@ -471,7 +471,7 @@ async fn project_attribution(
     store: &Store,
     graph: &SplitCommitGraph,
     path_state: &PathStateReader,
-    client: &RepositoryClient,
+    client: &CellClient,
     target: &Uuid,
     source: &projection::SourceIdentity,
     epoch: u64,
@@ -669,7 +669,7 @@ fn commit_row(ordinal: u32, record: &PathStateRecord) -> projection::CommitRow {
 }
 
 async fn send_json_batch<T: serde::Serialize>(
-    client: &RepositoryClient,
+    client: &CellClient,
     target: &Uuid,
     operation: u8,
     epoch: u64,
@@ -710,7 +710,7 @@ async fn send_json_batch<T: serde::Serialize>(
 }
 
 async fn apply_batch(
-    client: &RepositoryClient,
+    client: &CellClient,
     target: &Uuid,
     operation: u8,
     epoch: u64,

@@ -1,3 +1,4 @@
+import { conversationPage } from "./conversation";
 import { expect, test } from "@playwright/test";
 import { emptyReactions } from "./fixtures";
 import {
@@ -38,6 +39,7 @@ test("reactions persist on refresh, stay scoped, and ignore older snapshots", as
         json: {
           repositories: [
             {
+              id: "00000000-0000-4000-8000-000000000099",
               owner: "team",
               name: "project",
               description: "",
@@ -89,12 +91,13 @@ test("reactions persist on refresh, stay scoped, and ignore older snapshots", as
           number: 1,
           title: "Discuss reactions",
           body: "Issue body",
-          author: "Alice",
+          author: { name: "Alice", profile: null },
           version: 1,
           state: "open",
           created_at: 1700000000000,
           updated_at: 1700000000000,
           can_edit: false,
+          can_close: false,
           can_label: false,
           can_assign: false,
           labels: [],
@@ -102,23 +105,20 @@ test("reactions persist on refresh, stay scoped, and ignore older snapshots", as
           reactions: staleRefresh ? emptyReactions() : issueReactions,
         },
       });
-    if (path === "/api/repos/team/project/issues/1/comments")
-      return route.fulfill({
-        json: {
-          items: [
-            {
-              number: 1,
-              body: "Comment body",
-              author: "Bob",
-              version: 1,
-              created_at: 1700000001000,
-              updated_at: 1700000001000,
-              can_edit: false,
-              reactions: commentReactions,
-            },
-          ],
-          next: null,
-        },
+    if (path.endsWith("/conversation"))
+      return conversationPage(route, {
+        comments: [
+          {
+            number: 1,
+            body: "Comment body",
+            author: { name: "Bob", profile: null },
+            version: 1,
+            created_at: 1700000001000,
+            updated_at: 1700000001000,
+            can_edit: false,
+            reactions: commentReactions,
+          },
+        ],
       });
     return route.fulfill({
       status: 404,
@@ -153,7 +153,7 @@ test("reactions persist on refresh, stay scoped, and ignore older snapshots", as
   staleRefresh = false;
   await page.reload();
   await expect(thumb).toHaveAttribute("aria-pressed", "true");
-  const comment = page.locator("#comment-1");
+  const comment = page.locator("#issuecomment-1");
   await comment
     .getByRole("button", { name: "Add reaction", exact: true })
     .click();

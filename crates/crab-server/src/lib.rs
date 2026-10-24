@@ -21,6 +21,12 @@ mod storage_root;
 mod test_support;
 mod transfer_admission;
 
+pub use cells::directory::DirectoryState;
+pub use cells::organization::teams::OrganizationTeamState;
+pub use cells::repository::collaboration::lifecycle::LifecycleStatus;
+pub use cells::repository::search::index::{
+    RebuildSearchInput, SearchIndexPhase, SearchIndexProgress, SearchIndexStatus,
+};
 pub use config::{
     AuthProvider, BranchProtection, CellDurabilityMode, CellsConfig, Config, GitHubConfig,
     ImportConfig, OidcConfig, RepositoryAccess, RepositoryConfig, RepositoryMember, StorageConfig,

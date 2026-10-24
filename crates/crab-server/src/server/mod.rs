@@ -33,7 +33,7 @@ const SHUTDOWN_DEADLINE: Duration = Duration::from_secs(110);
 pub(crate) struct Server {
     pub(crate) repositories: RepositorySet,
     pub(crate) runtime: Arc<RemoteGitRuntime>,
-    pub(crate) repository_cells: Option<Arc<crate::cells::RepositoryClient>>,
+    pub(crate) cells: Option<Arc<crate::cells::CellClient>>,
     pub(crate) cell_services: Option<Arc<cellar::sdk::HostServices>>,
     #[cfg(test)]
     pub(crate) cell_test_runtime: Option<Arc<crate::cells::runtime::TestRuntime>>,
@@ -65,7 +65,7 @@ impl Server {
         Self {
             repositories,
             runtime: Arc::new(RemoteGitRuntime::default()),
-            repository_cells: None,
+            cells: None,
             cell_services: None,
             cell_test_runtime: None,
             shutdown_mode: tokio::sync::watch::channel(cellar::sdk::ShutdownMode::Preserve).0,
@@ -88,8 +88,8 @@ impl Server {
         }
     }
 
-    pub(crate) fn repository_cells(&self) -> Option<Arc<crate::cells::RepositoryClient>> {
-        self.repository_cells.clone()
+    pub(crate) fn cells(&self) -> Option<Arc<crate::cells::CellClient>> {
+        self.cells.clone()
     }
     pub(crate) fn catalog(&self) -> Option<CatalogStore> {
         self.catalog.clone()
@@ -105,7 +105,7 @@ impl Server {
         let catalog = self.catalog().ok_or(crate::Error::Config(
             "repository catalog installation requires a catalog",
         ))?;
-        let router = self.repository_cells().ok_or(crate::Error::Config(
+        let router = self.cells().ok_or(crate::Error::Config(
             "repository catalog installation requires Cell routing",
         ))?;
         let repositories = document
@@ -128,7 +128,7 @@ impl Server {
         self.node_healthy.load(Ordering::Acquire)
             && !self.cancellation.is_cancelled()
             && self
-                .repository_cells
+                .cells
                 .as_ref()
                 .is_some_and(|router| !router.is_closed())
     }
@@ -272,7 +272,7 @@ pub async fn serve(config: Config) -> Result<()> {
     let server = Arc::new(Server {
         repositories: repositories.into(),
         runtime: runtime.clone(),
-        repository_cells: Some(started.client.clone()),
+        cells: Some(started.client.clone()),
         cell_services: Some(node.services()),
         shutdown_mode: tokio::sync::watch::channel(cellar::sdk::ShutdownMode::Preserve).0,
         options,

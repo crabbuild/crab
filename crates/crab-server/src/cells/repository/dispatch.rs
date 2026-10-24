@@ -5,13 +5,118 @@ use super::collaboration::milestones::{
 };
 use super::collaboration::reactions::{GetReactions, SetReaction};
 use super::*;
+use crate::cells::application::{invoke_mutation, invoke_read};
 
 pub(in crate::cells) fn dispatch_mutation(
-    context: &mut RepositoryTransaction<'_>,
+    context: &mut Transaction<'_>,
     id: u32,
     input: serde_json::Value,
 ) -> crate::cells::Result<MutationResult<serde_json::Value>> {
-    match id {
+    let maintenance = id == <search::index::RebuildIndex as Mutation>::ID
+        || id == <assignments::MigrateAssignments as Mutation>::ID
+        || id == issues::lifecycle::PrepareIssueLifecycle::ID
+        || id == PreparePullLifecycle::ID
+        || id == review_dismissals::PrepareReviewState::ID
+        || id == collaboration::submissions::preparation::Prepare::ID;
+    #[cfg(test)]
+    let maintenance = maintenance
+        || id == assignments::migration::tests::SeedSubjects::ID
+        || id == reviewers::tests::PreviousIndex::ID
+        || id == rollups::tests::PreviousFormat::ID
+        || id == search::reviews::status::tests::PreviousFormat::ID
+        || id == collaboration::conversation::tests::Inspect::ID
+        || id == collaboration::submissions::preparation::tests::Historical::ID
+        || id == collaboration::submissions::preparation::tests::Interrupted::ID
+        || id == collaboration::state::tests::Historical::ID
+        || id == collaboration::state::tests::FailedPreparation::ID
+        || id == issues::lifecycle::tests::Historical::ID
+        || id == pulls::lifecycle::tests::Historical::ID;
+    if !maintenance {
+        search::index::ensure_ready(context)?;
+    }
+    let result = match id {
+        #[cfg(test)]
+        collaboration::creation::tests::ExhaustProgress::ID => {
+            invoke_mutation::<collaboration::creation::tests::ExhaustProgress>(context, input)
+        }
+        #[cfg(test)]
+        collaboration::submissions::preparation::tests::Historical::ID => invoke_mutation::<
+            collaboration::submissions::preparation::tests::Historical,
+        >(context, input),
+        #[cfg(test)]
+        collaboration::submissions::preparation::tests::Interrupted::ID => invoke_mutation::<
+            collaboration::submissions::preparation::tests::Interrupted,
+        >(context, input),
+        #[cfg(test)]
+        collaboration::state::tests::Historical::ID => {
+            invoke_mutation::<collaboration::state::tests::Historical>(context, input)
+        }
+        #[cfg(test)]
+        collaboration::state::tests::FailedPreparation::ID => {
+            invoke_mutation::<collaboration::state::tests::FailedPreparation>(context, input)
+        }
+        collaboration::submissions::preparation::Prepare::ID => {
+            invoke_mutation::<collaboration::submissions::preparation::Prepare>(context, input)
+        }
+        issues::pins::SetPins::ID => invoke_mutation::<issues::pins::SetPins>(context, input),
+        collaboration::bulk::Edit::ID => {
+            invoke_mutation::<collaboration::bulk::Edit>(context, input)
+        }
+        collaboration::state::ChangeState::ID => {
+            invoke_mutation::<collaboration::state::ChangeState>(context, input)
+        }
+        #[cfg(test)]
+        search::reviews::status::tests::PreviousFormat::ID => {
+            invoke_mutation::<search::reviews::status::tests::PreviousFormat>(context, input)
+        }
+        #[cfg(test)]
+        rollups::tests::PreviousFormat::ID => {
+            invoke_mutation::<rollups::tests::PreviousFormat>(context, input)
+        }
+        #[cfg(test)]
+        issues::lifecycle::tests::Historical::ID => {
+            invoke_mutation::<issues::lifecycle::tests::Historical>(context, input)
+        }
+        #[cfg(test)]
+        pulls::lifecycle::tests::Historical::ID => {
+            invoke_mutation::<pulls::lifecycle::tests::Historical>(context, input)
+        }
+        review_dismissals::PrepareReviewState::ID => {
+            invoke_mutation::<review_dismissals::PrepareReviewState>(context, input)
+        }
+        #[cfg(test)]
+        review_dismissals::tests::Historical::ID => {
+            invoke_mutation::<review_dismissals::tests::Historical>(context, input)
+        }
+        review_dismissals::DismissReview::ID => {
+            invoke_mutation::<review_dismissals::DismissReview>(context, input)
+        }
+        PreparePullLifecycle::ID => invoke_mutation::<PreparePullLifecycle>(context, input),
+        issues::lifecycle::PrepareIssueLifecycle::ID => {
+            invoke_mutation::<issues::lifecycle::PrepareIssueLifecycle>(context, input)
+        }
+        #[cfg(test)]
+        collaboration::conversation::tests::Inspect::ID => {
+            invoke_mutation::<collaboration::conversation::tests::Inspect>(context, input)
+        }
+        #[cfg(test)]
+        reviewers::tests::PreviousIndex::ID => {
+            invoke_mutation::<reviewers::tests::PreviousIndex>(context, input)
+        }
+        #[cfg(test)]
+        search::contributions::tests::DeleteSource::ID => {
+            invoke_mutation::<search::contributions::tests::DeleteSource>(context, input)
+        }
+        #[cfg(test)]
+        assignments::migration::tests::SeedSubjects::ID => {
+            invoke_mutation::<assignments::migration::tests::SeedSubjects>(context, input)
+        }
+        <assignments::MigrateAssignments as Mutation>::ID => {
+            invoke_mutation::<assignments::MigrateAssignments>(context, input)
+        }
+        <search::index::RebuildIndex as Mutation>::ID => {
+            invoke_mutation::<search::index::RebuildIndex>(context, input)
+        }
         <review_requests::SetReviewRequest as Mutation>::ID => {
             invoke_mutation::<review_requests::SetReviewRequest>(context, input)
         }
@@ -80,17 +185,81 @@ pub(in crate::cells) fn dispatch_mutation(
             invoke_mutation::<projection::ApplyProjectionBatch>(context, input)
         }
         _ => Err(crate::cells::Error::Invalid("unknown repository operation")),
+    }?;
+    // Domain writes, metadata projections, and their receipt share the SDK
+    // transaction. Failed projection work must roll the domain write back.
+    if !maintenance && matches!(result, MutationResult::Success(_)) {
+        search::index::flush(context)?;
     }
+    Ok(result)
 }
 
 pub(in crate::cells) fn dispatch_read(
-    context: &mut RepositoryTransaction<'_>,
+    context: &mut Transaction<'_>,
     id: u32,
     input: serde_json::Value,
 ) -> crate::cells::Result<serde_json::Value> {
     match id {
+        #[cfg(test)]
+        collaboration::submissions::preparation::tests::Inspect::ID => {
+            invoke_read::<collaboration::submissions::preparation::tests::Inspect>(context, input)
+        }
+        #[cfg(test)]
+        collaboration::state::tests::Inspect::ID => {
+            invoke_read::<collaboration::state::tests::Inspect>(context, input)
+        }
+        collaboration::submissions::preparation::GetPreparation::ID => {
+            invoke_read::<collaboration::submissions::preparation::GetPreparation>(context, input)
+        }
+        pulls::rollups::GetRollups::ID => invoke_read::<pulls::rollups::GetRollups>(context, input),
+        issues::pins::GetPins::ID => invoke_read::<issues::pins::GetPins>(context, input),
+        collaboration::bulk::Select::ID => {
+            invoke_read::<collaboration::bulk::Select>(context, input)
+        }
+        GetPullLifecycleStatus::ID => invoke_read::<GetPullLifecycleStatus>(context, input),
+        search::reviews::status::GetSourceState::ID => {
+            invoke_read::<search::reviews::status::GetSourceState>(context, input)
+        }
+        review_dismissals::GetReviewState::ID => {
+            invoke_read::<review_dismissals::GetReviewState>(context, input)
+        }
+        review_dismissals::GetReviewDetail::ID => {
+            invoke_read::<review_dismissals::GetReviewDetail>(context, input)
+        }
+        review_dismissals::ListReviewDetails::ID => {
+            invoke_read::<review_dismissals::ListReviewDetails>(context, input)
+        }
+        GetPullDetail::ID => invoke_read::<GetPullDetail>(context, input),
+        issues::lifecycle::GetIssueLifecycleStatus::ID => {
+            invoke_read::<issues::lifecycle::GetIssueLifecycleStatus>(context, input)
+        }
+        #[cfg(test)]
+        assignments::migration::tests::InspectColumns::ID => {
+            invoke_read::<assignments::migration::tests::InspectColumns>(context, input)
+        }
+        <assignments::GetAssignmentBatch as Read>::ID => {
+            invoke_read::<assignments::GetAssignmentBatch>(context, input)
+        }
+        <search::index::GetSearchIndexStatus as Read>::ID => {
+            invoke_read::<search::index::GetSearchIndexStatus>(context, input)
+        }
+        <search::assignees::AssigneeOptions as Read>::ID => {
+            invoke_read::<search::assignees::AssigneeOptions>(context, input)
+        }
+        <search::labels::LabelOptions as Read>::ID => {
+            invoke_read::<search::labels::LabelOptions>(context, input)
+        }
+        <search::milestones::MilestoneOptions as Read>::ID => {
+            invoke_read::<search::milestones::MilestoneOptions>(context, input)
+        }
+        <search::completion::CompleteSearch as Read>::ID => {
+            invoke_read::<search::completion::CompleteSearch>(context, input)
+        }
         <GetLink as Read>::ID => invoke_read::<GetLink>(context, input),
         <ListLinks as Read>::ID => invoke_read::<ListLinks>(context, input),
+        <collaboration::conversation::ListConversation as Read>::ID => {
+            invoke_read::<collaboration::conversation::ListConversation>(context, input)
+        }
         <collaboration::activity::ListActivity as Read>::ID => {
             invoke_read::<collaboration::activity::ListActivity>(context, input)
         }
@@ -102,7 +271,7 @@ pub(in crate::cells) fn dispatch_read(
         <GetIssue as Read>::ID => invoke_read::<GetIssue>(context, input),
         <GetIssueDetail as Read>::ID => invoke_read::<GetIssueDetail>(context, input),
         <GetComment as Read>::ID => invoke_read::<GetComment>(context, input),
-        <ListIssues as Read>::ID => invoke_read::<ListIssues>(context, input),
+        <ListDiscussions as Read>::ID => invoke_read::<ListDiscussions>(context, input),
         <ListComments as Read>::ID => invoke_read::<ListComments>(context, input),
         <ListLabels as Read>::ID => invoke_read::<ListLabels>(context, input),
         <ListCommitStatuses as Read>::ID => invoke_read::<ListCommitStatuses>(context, input),
@@ -126,9 +295,10 @@ pub(in crate::cells) fn dispatch_read(
         <review_requests::GetReviewRequest as Read>::ID => {
             invoke_read::<review_requests::GetReviewRequest>(context, input)
         }
-        <review_requests::ListReviewRequests as Read>::ID => {
-            invoke_read::<review_requests::ListReviewRequests>(context, input)
+        <reviewers::ListReviewers as Read>::ID => {
+            invoke_read::<reviewers::ListReviewers>(context, input)
         }
+
         <ListPulls as Read>::ID => invoke_read::<ListPulls>(context, input),
         <GetPullComment as Read>::ID => invoke_read::<GetPullComment>(context, input),
         <ListPullComments as Read>::ID => invoke_read::<ListPullComments>(context, input),
@@ -162,25 +332,4 @@ pub(in crate::cells) fn dispatch_read(
         }
         _ => Err(crate::cells::Error::Invalid("unknown repository operation")),
     }
-}
-
-fn invoke_mutation<T: Mutation>(
-    context: &mut RepositoryTransaction<'_>,
-    input: serde_json::Value,
-) -> crate::cells::Result<MutationResult<serde_json::Value>> {
-    let input = serde_json::from_value(input)?;
-    Ok(match T::execute(context, input)? {
-        MutationResult::Success(value) => MutationResult::Success(serde_json::to_value(value)?),
-        MutationResult::Rejected(value) => MutationResult::Rejected(serde_json::to_value(value)?),
-    })
-}
-
-fn invoke_read<T: Read>(
-    context: &mut RepositoryTransaction<'_>,
-    input: serde_json::Value,
-) -> crate::cells::Result<serde_json::Value> {
-    Ok(serde_json::to_value(T::execute(
-        context,
-        serde_json::from_value(input)?,
-    )?)?)
 }

@@ -129,12 +129,13 @@ pub(crate) struct CheckRunPage {
 pub(crate) struct CreateCheckRun;
 
 impl Mutation for CreateCheckRun {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 12;
     type Input = CreateCheckRunInput;
     type Output = CreateCheckRunOutcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         validate_author(&input.author)?;
@@ -227,12 +228,13 @@ impl Mutation for CreateCheckRun {
 pub(crate) struct UpdateCheckRun;
 
 impl Mutation for UpdateCheckRun {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 13;
     type Input = UpdateCheckRunInput;
     type Output = UpdateCheckRunOutcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         validate_author(&input.actor)?;
@@ -330,12 +332,13 @@ impl Mutation for UpdateCheckRun {
 pub(crate) struct ListCheckRuns;
 
 impl Read for ListCheckRuns {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 9;
     type Input = ListCheckRunsInput;
     type Output = CheckRunPage;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         validate_oid(&input.oid)?;
@@ -375,12 +378,13 @@ impl Read for ListCheckRuns {
 pub(crate) struct GetCheckRun;
 
 impl Read for GetCheckRun {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 10;
     type Input = CheckRunKey;
     type Output = Option<CheckRunDetail>;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         validate_oid(&input.oid)?;
@@ -392,12 +396,13 @@ impl Read for GetCheckRun {
 pub(crate) struct GetCheckCreateSubmission;
 
 impl Read for GetCheckCreateSubmission {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 11;
     type Input = CheckSubmissionKey;
     type Output = Option<CheckRunDetail>;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         let result = context.sql(&SqlBatch {
@@ -417,12 +422,13 @@ impl Read for GetCheckCreateSubmission {
 pub(crate) struct GetCheckUpdateSubmission;
 
 impl Read for GetCheckUpdateSubmission {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 12;
     type Input = CheckSubmissionKey;
     type Output = Option<CheckRunDetail>;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         let result = context.sql(&SqlBatch {

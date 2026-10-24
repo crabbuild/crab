@@ -12,24 +12,29 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 
 use crate::{
-    api::assignees::{self, Assignee},
-    api::labels::{self, Label},
-    api::reactions,
+    api::{assignees::Selection, labels, profiles::attribution::Authors, reactions},
     app::{self, Error, Result, actor, body, number, repository, title},
-    auth::{Identity, Principal},
+    auth::Principal,
     cells::repository::collaboration::Target,
     cells::repository::{
-        CommentKey, CommentPage, CommentRecord, CreateComment, CreateCommentInput,
-        CreateCommentOutcome, CreateIssue, CreateIssueInput, CreateIssueOutcome, GetComment,
-        GetIssueDetail, IssueRecord, IssueSummary, ListComments, ListCommentsInput, ListIssues,
-        ListIssuesInput, RepositoryAuthor, UpdateComment, UpdateCommentInput, UpdateCommentOutcome,
-        UpdateIssue, UpdateIssueInput, UpdateIssueOutcome,
+        CommentKey, CommentPage, CreateComment, CreateCommentInput, CreateCommentOutcome,
+        CreateIssue, CreateIssueInput, CreateIssueOutcome, DiscussionSummary, GetComment,
+        GetIssueDetail, ListComments, ListCommentsInput, ListDiscussions, UpdateComment,
+        UpdateCommentInput, UpdateCommentOutcome, UpdateIssue, UpdateIssueInput,
+        UpdateIssueOutcome,
     },
     server::Server,
 };
 
+mod pins;
+pub(super) mod view;
+
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
+        .route(
+            "/api/repos/{owner}/{name}/issues/pins",
+            get(pins::list).put(pins::set),
+        )
         .route("/api/repos/{owner}/{name}/issues", get(list).post(create))
         .route(
             "/api/repos/{owner}/{name}/issues/{number}",
@@ -45,81 +50,6 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         )
         .layer(axum::extract::DefaultBodyLimit::max(80 * 1024))
         .route_layer(middleware::from_fn_with_state(server, crate::app::admit))
-}
-
-fn issue_view(
-    issue: &IssueRecord,
-    author: &Identity,
-    labels: &[Label],
-    assignees: &[Assignee],
-    can_manage_metadata: bool,
-    reactions: &reactions::View,
-) -> Value {
-    json!({
-        "number": issue.number,
-        "title": issue.title,
-        "body": issue.body,
-        "reactions": reactions,
-        "state": state_name(issue.state),
-        "author": issue.author.name,
-        "version": issue.version,
-        "created_at": issue.created_at_ms,
-        "updated_at": issue.updated_at_ms,
-        "labels": labels::selection_view(&issue.label_ids, labels),
-        "assignees": assignees::selection_view(&issue.assignee_subjects, assignees),
-        "can_edit": same_author(&issue.author, author),
-        "can_label": can_manage_metadata,
-        "can_assign": can_manage_metadata,
-    })
-}
-
-fn issue_summary_view(
-    issue: &IssueSummary,
-    author: &Identity,
-    labels: &[Label],
-    assignees: &[Assignee],
-    can_manage_metadata: bool,
-) -> Value {
-    json!({
-        "number": issue.number,
-        "title": issue.title,
-        "body": Value::Null,
-        "state": state_name(issue.state),
-        "author": issue.author.name,
-        "version": issue.version,
-        "created_at": issue.created_at_ms,
-        "updated_at": issue.updated_at_ms,
-        "labels": labels::selection_view(&issue.label_ids, labels),
-        "assignees": assignees::selection_view(&issue.assignee_subjects, assignees),
-        "can_edit": same_author(&issue.author, author),
-        "can_label": can_manage_metadata,
-        "can_assign": can_manage_metadata,
-    })
-}
-
-fn comment_view(comment: &CommentRecord, author: &Identity, reactions: &reactions::View) -> Value {
-    json!({
-        "number": comment.number,
-        "body": comment.body,
-        "reactions": reactions,
-        "author": comment.author.name,
-        "version": comment.version,
-        "created_at": comment.created_at_ms,
-        "updated_at": comment.updated_at_ms,
-        "can_edit": same_author(&comment.author, author),
-    })
-}
-
-fn state_name(state: u8) -> &'static str {
-    match state {
-        0 => "open",
-        1 => "closed",
-        _ => "invalid",
-    }
-}
-
-fn same_author(left: &RepositoryAuthor, right: &Identity) -> bool {
-    left.issuer == right.issuer && left.subject == right.subject
 }
 
 #[derive(Clone, Copy, Deserialize)]
@@ -156,15 +86,6 @@ impl ListParameters {
             .ok_or(Error::Invalid("Page size must be 1–50"))
     }
 
-    fn state(&self) -> Result<u8> {
-        match self.state.as_deref().unwrap_or("open") {
-            "open" => Ok(0),
-            "closed" => Ok(1),
-            "all" => Ok(2),
-            _ => Err(Error::Invalid("Issue state must be open, closed or all")),
-        }
-    }
-
     fn before(&self) -> Result<Option<u64>> {
         if self
             .before
@@ -180,44 +101,73 @@ async fn list(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
     Path(key): Path<(String, String)>,
-    Query(params): Query<ListParameters>,
+    Query(params): Query<super::discussion_search::ListParameters>,
 ) -> Result<Json<Value>> {
     let repo = repository(&server, &principal, &key)?;
-    let author = actor(&principal)?;
-    let assignees = assignees::available(&repo, &author);
-    let can_manage_metadata = principal.can_write(&repo.config);
     let routed = crate::app::repository_cell(&server, &repo)?;
+    let mut input = params.input("is:issue is:open")?;
+    super::discussion_search::resolve_people(&server, &principal, &repo, &mut input).await?;
+    let review_source = input
+        .review_context
+        .as_ref()
+        .and_then(|value| value.source_token.clone());
     let page = crate::app::query_output(
         routed
             .client
-            .query::<ListIssues>(
-                &routed.target,
-                None,
-                ListIssuesInput {
-                    before: params.before()?,
-                    limit: params.limit()?,
-                    state: params.state()?,
-                    query: crate::app::search_query(params.q.as_deref())?,
-                },
-            )
+            .query::<ListDiscussions>(&routed.target, None, input)
             .await,
     )?;
-    let labels = if page.items.iter().all(|issue| issue.label_ids.is_empty()) {
-        vec![]
-    } else {
-        labels::catalog(&server, &repo).await?
-    };
+    let rollups = super::pulls::rollups::load(
+        &server,
+        &repo,
+        review_source.as_deref(),
+        page.items.iter().filter_map(|item| match item {
+            DiscussionSummary::Pull(pull) => Some(pull),
+            DiscussionSummary::Issue(_) => None,
+        }),
+    )
+    .await?;
+    let authors = super::profiles::attribution::Authors::load(
+        &server,
+        &principal,
+        page.items.iter().map(|item| match item {
+            DiscussionSummary::Issue(issue) => &issue.author,
+            DiscussionSummary::Pull(pull) => &pull.author,
+        }),
+    )
+    .await?;
+    let assignees = Selection::load(
+        &server,
+        &principal,
+        &repo,
+        page.items.iter().flat_map(|item| match item {
+            DiscussionSummary::Issue(issue) => issue.assignees.iter(),
+            DiscussionSummary::Pull(pull) => pull.assignees.iter(),
+        }),
+    )
+    .await?;
     let items = page
         .items
         .iter()
-        .map(|issue| issue_summary_view(issue, &author, &labels, &assignees, can_manage_metadata))
-        .collect::<Vec<_>>();
-    Ok(Json(json!({"items":items,"next":page.next})))
+        .map(|item| match item {
+            DiscussionSummary::Issue(issue) => {
+                Ok(view::summary(&authors, issue, &page.labels, &assignees))
+            }
+            DiscussionSummary::Pull(pull) => {
+                super::pulls::pull_list_view(&authors, pull, &page.labels, &assignees, &rollups)
+            }
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Json(
+        json!({"repository_id":repo.id,"can_bulk_edit":assignees.principal.can_triage(repo.id),"items":items,"next":page.next,"counts":page.counts,"matching":page.matching,"navigation":page.navigation,"authored_by_me":page.authored_by_me,"assigned_to_me":page.assigned_to_me,"review_requested_from_me":page.review_requested_from_me}),
+    ))
 }
 
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct NewIssue {
+    #[serde(default)]
+    metadata: crate::cells::repository::collaboration::creation::Selection,
     request_id: String,
     title: String,
     body: String,
@@ -228,68 +178,51 @@ async fn create(
     Extension(principal): Extension<Principal>,
     Path(key): Path<(String, String)>,
     input: std::result::Result<Json<NewIssue>, JsonRejection>,
-) -> Result<impl IntoResponse> {
+) -> Result<Response> {
     let repo = repository(&server, &principal, &key)?;
     let Json(input) = input?;
     let author = actor(&principal)?;
     let title = title(&input.title)?;
     body(&input.body, false)?;
+    let metadata =
+        super::discussion_creation::resolve(&server, &principal, &repo, input.metadata).await?;
     let routed = crate::app::repository_cell(&server, &repo)?;
-    let output = crate::app::command_output(
-        routed
-            .client
-            .command::<CreateIssue>(
-                &routed.target,
-                crate::app::mutation_identity()?,
-                CreateIssueInput {
-                    submission_id: app::submission_id(&input.request_id)?,
-                    author: crate::cells::repository::RepositoryAuthor::from(&author),
-                    title,
-                    body: input.body,
-                },
-            )
-            .await,
-    )?;
+    let committed = routed
+        .client
+        .command::<CreateIssue>(
+            &routed.target,
+            crate::app::mutation_identity()?,
+            CreateIssueInput {
+                metadata,
+                submission_id: app::submission_id(&input.request_id)?,
+                author: crate::cells::repository::RepositoryAuthor::from(&author),
+                title,
+                body: input.body,
+            },
+        )
+        .await
+        .map_err(Error::Cell)?;
+    let minimum = Some(committed.receipt);
+    let output = committed.output;
     let issue = match output {
+        CreateIssueOutcome::MetadataRejected(reason) => {
+            return Ok(super::write::rejected(Error::CreationRejected(reason)));
+        }
         CreateIssueOutcome::Archived => return Err(Error::Archived),
         CreateIssueOutcome::Created(issue) => issue,
         CreateIssueOutcome::RequestConflict => return Err(Error::RequestConflict),
     };
     let enrichment_started = Instant::now();
-    // A replay returns the issue's current state, which may have acquired labels
-    // since creation. Decide from that result, not from the create input.
-    let labels = if issue.label_ids.is_empty() {
-        vec![]
-    } else {
-        labels::catalog(&server, &repo).await?
-    };
-    let assignees = assignees::available(&repo, &author);
-    let reaction = reactions::one(
-        &server,
-        &repo,
-        &author,
-        Target::Issue {
-            number: issue.number,
-        },
-    )
-    .await?;
     let response = (
         StatusCode::CREATED,
-        Json(issue_view(
-            &issue,
-            &author,
-            &labels,
-            &assignees,
-            principal.can_write(&repo.config),
-            &reaction,
-        )),
+        rendered(&server, &principal, &repo, issue.number, minimum).await?,
     );
     tracing::debug!(
         target: "crab_server::action",
         event = "application_response_prepared",
         elapsed_us = enrichment_started.elapsed().as_micros(),
     );
-    Ok(response)
+    Ok(response.into_response())
 }
 
 #[derive(Default, Deserialize)]
@@ -307,43 +240,15 @@ async fn detail(
     Query(params): Query<DetailParameters>,
 ) -> Result<Response> {
     let repo = repository(&server, &principal, &(owner, name))?;
-    let author = actor(&principal)?;
     if params.read.as_deref().is_some_and(|mode| mode != "owner")
         || params.after_incarnation.is_some()
         || params.after_sequence.is_some()
     {
         return Err(Error::Invalid("Cellar supports owner-routed issue reads"));
     }
-    let routed = crate::app::repository_cell(&server, &repo)?;
-    let detail = crate::app::query_output(
-        routed
-            .client
-            .query::<GetIssueDetail>(&routed.target, None, number(id)?)
-            .await,
-    )?;
-    let issue = detail.issue;
-    let labels = detail.labels.labels;
-    let issue = issue.ok_or(Error::NotFound)?;
-    let assignees = assignees::available(&repo, &author);
-    let reaction = reactions::one(
-        &server,
-        &repo,
-        &author,
-        Target::Issue {
-            number: issue.number,
-        },
-    )
-    .await?;
-    let response = Json(issue_view(
-        &issue,
-        &author,
-        &labels,
-        &assignees,
-        principal.can_write(&repo.config),
-        &reaction,
-    ))
-    .into_response();
-    Ok(response)
+    Ok(rendered(&server, &principal, &repo, number(id)?, None)
+        .await?
+        .into_response())
 }
 
 #[derive(Deserialize)]
@@ -353,8 +258,9 @@ struct IssueEdit {
     title: Option<String>,
     body: Option<String>,
     state: Option<IssueState>,
+    state_reason: Option<crate::cells::repository::issues::lifecycle::Reason>,
     label_ids: Option<Vec<u64>>,
-    assignees: Option<Vec<String>>,
+    assignee_ids: Option<Vec<uuid::Uuid>>,
 }
 
 async fn edit(
@@ -369,16 +275,20 @@ async fn edit(
     if input.title.is_none()
         && input.body.is_none()
         && input.state.is_none()
+        && input.state_reason.is_none()
         && input.label_ids.is_none()
-        && input.assignees.is_none()
+        && input.assignee_ids.is_none()
     {
         return Err(Error::Invalid("No issue changes supplied"));
     }
-    let can_manage_metadata = principal.can_write(&repo.config);
-    if input.label_ids.is_some() && !can_manage_metadata {
+    let can_triage = app::membership(&server, &principal, &repo)
+        .await?
+        .principal
+        .can_triage(repo.id);
+    if input.label_ids.is_some() && !can_triage {
         return Err(Error::LabelPermission);
     }
-    if input.assignees.is_some() && !can_manage_metadata {
+    if input.assignee_ids.is_some() && !can_triage {
         return Err(Error::AssigneePermission);
     }
     let labels = if input.label_ids.as_ref().is_some_and(|ids| !ids.is_empty()) {
@@ -386,7 +296,6 @@ async fn edit(
     } else {
         vec![]
     };
-    let assignees = assignees::available(&repo, &author);
     let title = input.title.as_deref().map(title).transpose()?;
     if let Some(value) = input.body.as_deref() {
         body(value, false)?;
@@ -395,32 +304,46 @@ async fn edit(
         .label_ids
         .map(|value| labels::validate_selection(value, &labels))
         .transpose()?;
-    let assignee_subjects = input
-        .assignees
-        .map(|value| assignees::validate_selection(value, &assignees))
-        .transpose()?;
+    // Assignment eligibility and caller role must share the final current roster.
+    let (can_triage, assignees) = if let Some(ids) = input.assignee_ids {
+        let roster = crate::api::members::roster::Roster::load(&server, &principal, &repo).await?;
+        if !roster.principal.can_triage(repo.id) {
+            return Err(Error::AssigneePermission);
+        }
+        (true, Some(Selection::validate(&roster, ids)?))
+    } else {
+        let permissions = app::membership(&server, &principal, &repo).await?;
+        (permissions.principal.can_triage(repo.id), None)
+    };
     let routed = crate::app::repository_cell(&server, &repo)?;
-    let output = crate::app::command_output(
-        routed
-            .client
-            .command::<UpdateIssue>(
-                &routed.target,
-                crate::app::mutation_identity()?,
-                UpdateIssueInput {
-                    number: number(id)?,
-                    actor: crate::cells::repository::RepositoryAuthor::from(&author),
-                    can_manage_metadata,
-                    version: input.version,
-                    title,
-                    body: input.body,
-                    state: input.state.map(IssueState::code),
-                    label_ids,
-                    assignee_subjects,
-                },
-            )
-            .await,
-    )?;
+    let committed = routed
+        .client
+        .command::<UpdateIssue>(
+            &routed.target,
+            crate::app::mutation_identity()?,
+            UpdateIssueInput {
+                state_reason: input.state_reason,
+                number: number(id)?,
+                actor: crate::cells::repository::RepositoryAuthor::from(&author),
+                can_triage,
+                version: input.version,
+                title,
+                body: input.body,
+                state: input.state.map(IssueState::code),
+                label_ids,
+                assignees,
+            },
+        )
+        .await
+        .map_err(Error::Cell)?;
+    let minimum = Some(committed.receipt);
+    let output = committed.output;
     let issue = match output {
+        UpdateIssueOutcome::InvalidStateReason => {
+            return Err(Error::Invalid(
+                "Close reasons require a closed issue; reopening clears the close reason",
+            ));
+        }
         UpdateIssueOutcome::Archived => return Err(Error::Archived),
         UpdateIssueOutcome::Updated(issue) => issue,
         UpdateIssueOutcome::NotFound => return Err(Error::NotFound),
@@ -434,28 +357,41 @@ async fn edit(
         UpdateIssueOutcome::AssigneeForbidden => return Err(Error::AssigneePermission),
         UpdateIssueOutcome::Conflict => return Err(Error::Conflict),
     };
-    // An edit without label changes can return existing selections. Reuse any
-    // catalog fetched for validation; otherwise fetch only for actual rendering.
-    let labels = if labels.is_empty() && !issue.label_ids.is_empty() {
-        labels::catalog(&server, &repo).await?
-    } else {
-        labels
-    };
-    let reaction = reactions::one(
-        &server,
-        &repo,
-        &author,
-        Target::Issue {
-            number: issue.number,
-        },
-    )
-    .await?;
-    Ok(Json(issue_view(
+    rendered(&server, &principal, &repo, issue.number, minimum).await
+}
+
+async fn rendered(
+    server: &Server,
+    principal: &Principal,
+    repo: &crate::repository::Repository,
+    id: u64,
+    minimum: Option<crate::cells::Receipt>,
+) -> Result<Json<Value>> {
+    let author = actor(principal)?;
+    let routed = app::repository_cell(server, repo)?;
+    // Mutation receipts keep their original record bytes. Read lifecycle and
+    // content together after the commit so replay/enrichment cannot mix versions.
+    let detail = app::query_output(
+        routed
+            .client
+            .query::<GetIssueDetail>(&routed.target, minimum, id)
+            .await,
+    )?;
+    let issue = detail.issue.ok_or(Error::NotFound)?;
+    let lifecycle = detail
+        .lifecycle
+        .ok_or(Error::CellContract("Issue lifecycle is missing"))?;
+    let reaction = reactions::one(server, repo, &author, Target::Issue { number: id }).await?;
+    let authors = Authors::load(server, principal, std::iter::once(&issue.author)).await?;
+    let assignees = Selection::load(server, principal, repo, issue.assignees.iter()).await?;
+    Ok(Json(view::issue(
+        &authors,
         &issue,
+        &lifecycle,
         &author,
-        &labels,
+        &detail.labels.labels,
         &assignees,
-        can_manage_metadata,
+        assignees.principal.can_triage(repo.id),
         &reaction,
     )))
 }
@@ -497,11 +433,18 @@ async fn comments(
         })
         .collect();
     let reactions = reactions::read(&server, &repo, &author, targets).await?;
+    let authors = Authors::load(
+        &server,
+        &principal,
+        items.iter().map(|comment| &comment.author),
+    )
+    .await?;
+    app::membership(&server, &principal, &repo).await?;
     Ok(Json(json!({
         "items": items
             .iter()
             .zip(reactions)
-            .map(|(comment, reactions)| comment_view(comment, &author, &reactions))
+            .map(|(comment, reactions)| view::comment(&authors, comment, &author, &reactions))
             .collect::<Vec<_>>(),
         "next": next,
     })))
@@ -556,9 +499,11 @@ async fn comment(
         },
     )
     .await?;
+    let authors = Authors::load(&server, &principal, std::iter::once(&comment.author)).await?;
+    app::membership(&server, &principal, &repo).await?;
     Ok((
         StatusCode::CREATED,
-        Json(comment_view(&comment, &author, &reaction)),
+        Json(view::comment(&authors, &comment, &author, &reaction)),
     ))
 }
 
@@ -594,7 +539,9 @@ async fn comment_detail(
         },
     )
     .await?;
-    Ok(Json(comment_view(&comment, &author, &reaction)))
+    let authors = Authors::load(&server, &principal, std::iter::once(&comment.author)).await?;
+    app::membership(&server, &principal, &repo).await?;
+    Ok(Json(view::comment(&authors, &comment, &author, &reaction)))
 }
 
 #[derive(Deserialize)]
@@ -650,7 +597,9 @@ async fn edit_comment(
         },
     )
     .await?;
-    Ok(Json(comment_view(&comment, &author, &reaction)))
+    let authors = Authors::load(&server, &principal, std::iter::once(&comment.author)).await?;
+    app::membership(&server, &principal, &repo).await?;
+    Ok(Json(view::comment(&authors, &comment, &author, &reaction)))
 }
 
 #[cfg(test)]

@@ -3,12 +3,13 @@ use super::*;
 pub(crate) struct CreateRelease;
 
 impl Mutation for CreateRelease {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 24;
     type Input = CreateReleaseInput;
     type Output = CreateReleaseOutcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         validate_create(&input)?;
@@ -106,12 +107,13 @@ fn create_outcome(release: ReleaseRecord) -> CreateReleaseOutcome {
 pub(crate) struct UpdateRelease;
 
 impl Mutation for UpdateRelease {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 25;
     type Input = UpdateReleaseInput;
     type Output = UpdateReleaseOutcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         validate_number(input.number)?;
@@ -178,12 +180,13 @@ impl Mutation for UpdateRelease {
 pub(crate) struct CompleteReleasePublication;
 
 impl Mutation for CompleteReleasePublication {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 26;
     type Input = CompleteReleasePublicationInput;
     type Output = CompleteReleasePublicationOutcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         validate_number(input.number)?;
@@ -241,12 +244,13 @@ impl Mutation for CompleteReleasePublication {
 pub(crate) struct DeleteRelease;
 
 impl Mutation for DeleteRelease {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 27;
     type Input = DeleteReleaseInput;
     type Output = DeleteReleaseOutcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         validate_number(input.number)?;
@@ -285,12 +289,13 @@ impl Mutation for DeleteRelease {
 pub(crate) struct GetRelease;
 
 impl Read for GetRelease {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 24;
     type Input = u64;
     type Output = Option<ReleaseRecord>;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         number: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         validate_number(number)?;
@@ -301,12 +306,13 @@ impl Read for GetRelease {
 pub(crate) struct GetReleaseByTag;
 
 impl Read for GetReleaseByTag {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 37;
     type Input = String;
     type Output = Option<ReleaseRecord>;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         tag: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         validate_tag_name(&tag)?;
@@ -332,12 +338,13 @@ impl Read for GetReleaseByTag {
 pub(crate) struct GetReleaseSubmission;
 
 impl Read for GetReleaseSubmission {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 25;
     type Input = ReleaseSubmissionKey;
     type Output = Option<ReleaseRecord>;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         key: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         let result = context.sql(&SqlBatch {
@@ -360,12 +367,13 @@ impl Read for GetReleaseSubmission {
 pub(crate) struct ListReleases;
 
 impl Read for ListReleases {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 26;
     type Input = ReleaseListInput;
     type Output = ReleasePage;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         validate_list(input.before, input.limit)?;

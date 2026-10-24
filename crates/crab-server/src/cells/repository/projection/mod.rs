@@ -3,7 +3,7 @@
 use crate::cells::application::{SqlBatch, SqlResultSet, SqlStatement, SqlValue};
 use serde::{Deserialize, Serialize};
 
-use crate::cells::application::{Mutation, MutationResult, Read, RepositoryTransaction};
+use crate::cells::application::{Mutation, MutationResult, Read, Transaction};
 
 pub(crate) const OP_BEGIN: u8 = 1;
 pub(crate) const OP_REFS: u8 = 2;
@@ -107,12 +107,13 @@ pub(crate) struct AttributionBatch {
 pub(crate) struct ApplyProjectionBatch;
 
 impl Mutation for ApplyProjectionBatch {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 31;
     type Input = ProjectionBatch;
     type Output = ProjectionAck;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         if input.source.len() > MAX_SOURCE_BYTES || input.payload.len() > MAX_BATCH_BYTES {
@@ -188,12 +189,13 @@ impl Mutation for ApplyProjectionBatch {
 pub(crate) struct GetProjectionState;
 
 impl Read for GetProjectionState {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 27;
     type Input = ProjectionState;
     type Output = ProjectionStateView;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         _input: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         let result = context.sql(&SqlBatch {
@@ -241,12 +243,13 @@ pub(crate) struct AttributionResponse {
 pub(crate) struct GetProjectionAttribution;
 
 impl Read for GetProjectionAttribution {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 28;
     type Input = Vec<u8>;
     type Output = Vec<u8>;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         let request: AttributionQuery = serde_json::from_slice(&input)
@@ -258,7 +261,7 @@ impl Read for GetProjectionAttribution {
 }
 
 fn attribution(
-    context: &RepositoryTransaction<'_>,
+    context: &Transaction<'_>,
     request: &AttributionQuery,
 ) -> crate::cells::Result<AttributionResponse> {
     if request.source_token.len() > 128
@@ -397,3 +400,18 @@ use storage::{
     optional_u64, require_epoch, result_i64, result_text, result_u64, statement, text,
     validate_source,
 };
+
+pub(in crate::cells::repository) fn ready_epoch(
+    context: &Transaction<'_>,
+    token: &str,
+) -> crate::cells::Result<u64> {
+    let result=context.query("SELECT s.ready_epoch,e.source_token FROM git_projection_state s LEFT JOIN git_projection_epochs e ON e.epoch_id=s.ready_epoch WHERE s.singleton=1",&[])?;
+    let row = result
+        .rows
+        .first()
+        .ok_or(crate::cells::Error::StaleSearch)?;
+    if optional_text(row, 1)?.as_deref() != Some(token) {
+        return Err(crate::cells::Error::StaleSearch);
+    }
+    optional_u64(row, 0)?.ok_or(crate::cells::Error::StaleSearch)
+}

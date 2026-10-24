@@ -164,7 +164,7 @@ async fn list(
     let labels = catalog(&server, &repo).await?;
     Ok(Json(json!({
         "items": labels.iter().map(view).collect::<Vec<_>>(),
-        "can_manage": principal.can_write(&repo.config),
+        "can_manage": principal.can_write(repo.id),
     })))
 }
 
@@ -175,7 +175,7 @@ async fn create(
     input: std::result::Result<Json<NewLabel>, JsonRejection>,
 ) -> Result<impl IntoResponse> {
     let repo = app::repository(&server, &principal, &key)?;
-    if !principal.can_write(&repo.config) {
+    if !principal.can_write(repo.id) {
         return Err(Error::LabelPermission);
     }
     let Json(input) = input?;
@@ -219,7 +219,7 @@ async fn edit(
     input: std::result::Result<Json<LabelEdit>, JsonRejection>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &(owner, name_key))?;
-    if !principal.can_write(&repo.config) {
+    if !principal.can_write(repo.id) {
         return Err(Error::LabelPermission);
     }
     let Json(input) = input?;
@@ -258,7 +258,7 @@ async fn remove(
     input: std::result::Result<Json<LabelDelete>, JsonRejection>,
 ) -> Result<StatusCode> {
     let repo = app::repository(&server, &principal, &(owner, name))?;
-    if !principal.can_write(&repo.config) {
+    if !principal.can_write(repo.id) {
         return Err(Error::LabelPermission);
     }
     let Json(input) = input?;

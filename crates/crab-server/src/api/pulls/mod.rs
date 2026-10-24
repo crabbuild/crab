@@ -14,9 +14,9 @@ use serde_json::{Value, json};
 
 use crate::{
     BranchProtection,
-    api::assignees::{self, Assignee},
+    api::assignees::Selection,
     api::checks::{self, CheckRun},
-    api::labels::{self, Label},
+    api::labels,
     api::reactions,
     api::statuses::{self, CommitStatus, StatusState},
     app::{self, Error, Result},
@@ -26,16 +26,17 @@ use crate::{
     server::Server,
 };
 
-mod comments;
+pub(super) mod comments;
 mod merge;
 mod readiness;
 mod review_requests;
 mod review_threads;
-mod reviews;
-mod storage;
-use storage::{NewPullRequest, PullRequest, PullState, PullSummary};
-
-const MAX_NUMBER: u64 = 9_007_199_254_740_991;
+mod reviewers;
+pub(super) mod reviews;
+pub(super) mod rollups;
+pub(super) mod storage;
+use crate::cells::repository::{ListPulls, PullSummary};
+use storage::{NewPullRequest, PullRequest, PullState};
 
 fn same_author(left: &Identity, right: &Identity) -> bool {
     left.issuer == right.issuer && left.subject == right.subject
@@ -54,18 +55,23 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         .merge(merge::routes())
         .merge(readiness::routes())
         .merge(review_requests::routes())
+        .merge(reviewers::routes())
         .layer(axum::extract::DefaultBodyLimit::max(160 * 1024))
         .route_layer(middleware::from_fn_with_state(server, app::admit))
 }
 
 async fn pull_view(
-    pull: &PullRequest,
+    number: u64,
     actor: &Identity,
     server: &Server,
     repo: &Repository,
-    can_write: bool,
+    principal: &Principal,
     current: Option<&(String, String)>,
 ) -> Result<Value> {
+    let details = storage::detail(server, repo, number)
+        .await?
+        .ok_or(Error::NotFound)?;
+    let pull = &details.pull;
     let base_oid = pull.merge.as_ref().map_or_else(
         || current.map_or(pull.base_oid.as_str(), |value| value.0.as_str()),
         |merge| merge.base_oid.as_str(),
@@ -89,7 +95,6 @@ async fn pull_view(
     } else {
         labels::catalog(server, repo).await?
     };
-    let assignees = assignees::available(repo, actor);
     let requirements = merge_requirements(pull, protection, head_oid, &statuses, &check_runs);
     let reaction = reactions::one(
         server,
@@ -100,6 +105,17 @@ async fn pull_view(
         },
     )
     .await?;
+    let authors = super::profiles::attribution::Authors::load(
+        server,
+        principal,
+        std::iter::once(&pull.author)
+            .chain(pull.merge.as_ref().map(|merge| &merge.author))
+            .chain(pull.merge_pending.as_ref().map(|merge| &merge.author)),
+    )
+    .await?;
+    let assignees = Selection::load(server, principal, repo, pull.assignees.iter()).await?;
+    let can_write = assignees.principal.can_write(repo.id);
+    let can_triage = assignees.principal.can_triage(repo.id);
     Ok(json!({
         "draft": pull.draft,
         "number": pull.number,
@@ -107,7 +123,7 @@ async fn pull_view(
         "body": pull.body,
         "reactions": reaction,
         "state": pull.state,
-        "author": pull.author.name,
+        "author": authors.view(&pull.author),
         "base_ref": pull.base_ref,
         "base_oid": base_oid,
         "head_ref": pull.head_ref,
@@ -116,15 +132,17 @@ async fn pull_view(
         "original_head_oid": pull.head_oid,
         "version": pull.version,
         "created_at": pull.created_at,
+        "closed_at":details.lifecycle.closed_at_ms,
+        "merged_at":details.lifecycle.merged_at_ms,
         "updated_at": pull.updated_at,
         "labels": labels::selection_view(&pull.label_ids, &labels),
-        "assignees": assignees::selection_view(&pull.assignee_subjects, &assignees),
-        "can_label": can_write,
-        "can_assign": can_write,
+        "assignees": assignees.view(&pull.assignees),
+        "can_label": can_triage,
+        "can_assign": can_triage,
         "can_edit": same_author(&pull.author, actor),
         "can_manage": pull.state != PullState::Merged
             && pull.merge_pending.is_none()
-            && (can_write || same_author(&pull.author, actor)),
+            && (can_triage || same_author(&pull.author, actor)),
         "can_decide": pull.state == PullState::Open
             && current.is_some()
             && !same_author(&pull.author, actor),
@@ -152,7 +170,7 @@ async fn pull_view(
             "satisfied": requirements.satisfied,
         },
         "merge": pull.merge.as_ref().map(|merge| json!({
-            "author": merge.author.name,
+            "author": authors.view(&merge.author),
             "method": merge.method,
             "commit_oid": merge.commit_oid,
             "message": merge.message,
@@ -160,7 +178,7 @@ async fn pull_view(
         })),
         "merge_pending": pull.merge_pending.as_ref().map(|merge| json!({
             "request_id": merge.request_id,
-            "author": merge.author.name,
+            "author": authors.view(&merge.author),
             "method": merge.method,
             "pull_version": merge.pull_version,
             "base_oid": merge.base_oid,
@@ -212,13 +230,12 @@ fn merge_requirements(
     let mut approvals = 0;
     let mut changes_requested = 0;
     for decision in &pull.review_decisions {
-        if decision.commit_oid != head_oid {
-            continue;
-        }
+        // New commits require fresh approval; they cannot resolve a reviewer's
+        // requested changes without a new decision or authorized dismissal.
         match decision.state {
-            storage::ReviewState::Approved => approvals += 1,
+            storage::ReviewState::Approved if decision.commit_oid == head_oid => approvals += 1,
             storage::ReviewState::ChangesRequested => changes_requested += 1,
-            storage::ReviewState::Commented => {}
+            storage::ReviewState::Approved | storage::ReviewState::Commented => {}
         }
     }
     let required_approvals = usize::from(rule.required_approvals);
@@ -272,98 +289,81 @@ fn merge_requirements(
     }
 }
 
-fn pull_list_view(pull: &PullSummary, labels: &[Label], assignees: &[Assignee]) -> Value {
-    json!({
+pub(super) fn pull_list_view(
+    authors: &super::profiles::attribution::Authors,
+    pull: &PullSummary,
+    labels: &[crate::cells::repository::search::index::LabelSummary],
+    assignees: &Selection,
+    rollups: &std::collections::BTreeMap<u64, crate::cells::repository::rollups::Rollup>,
+) -> Result<Value> {
+    let rollup = rollups
+        .get(&pull.number)
+        .ok_or(Error::CellContract("Pull rollup is missing"))?;
+    Ok(json!({
+        "kind": "pull",
+        "rollup": rollup,
         "draft": pull.draft,
+        "version": pull.version,
+        "comment_count": pull.comment_count,
+        "reaction_count": pull.reaction_count,
         "number": pull.number,
         "title": pull.title,
         "state": pull.state,
-        "author": pull.author.name,
+        "author": authors.view(&pull.author),
         "base_ref": pull.base_ref,
         "head_ref": pull.head_ref,
-        "created_at": pull.created_at,
-        "updated_at": pull.updated_at,
-        "labels": labels::selection_view(&pull.label_ids, labels),
-        "assignees": assignees::selection_view(&pull.assignee_subjects, assignees),
-    })
-}
-
-#[derive(Default, Deserialize)]
-#[serde(default, deny_unknown_fields)]
-struct ListParameters {
-    before: Option<u64>,
-    limit: Option<usize>,
-    state: Option<String>,
-    q: Option<String>,
-}
-
-impl ListParameters {
-    fn limit(&self) -> Result<usize> {
-        let limit = self.limit.unwrap_or(30);
-        if !(1..=50).contains(&limit)
-            || self
-                .before
-                .is_some_and(|value| value == 0 || value > MAX_NUMBER)
-        {
-            return Err(Error::Invalid("Invalid pull request page"));
-        }
-        Ok(limit)
-    }
-
-    fn state(&self) -> Result<ListState> {
-        match self.state.as_deref().unwrap_or("open") {
-            "open" => Ok(ListState::Open),
-            "closed" => Ok(ListState::Closed),
-            "all" => Ok(ListState::All),
-            _ => Err(Error::Invalid(
-                "Pull request state must be open, closed or all",
-            )),
-        }
-    }
-}
-
-enum ListState {
-    Open,
-    Closed,
-    All,
-}
-
-impl ListState {
-    const fn code(&self) -> u8 {
-        match self {
-            Self::Open => 0,
-            Self::Closed => 1,
-            Self::All => 2,
-        }
-    }
+        "created_at": pull.created_at_ms,
+        "closed_at":pull.closed_at_ms,
+        "merged_at":pull.merged_at_ms,
+        "updated_at": pull.updated_at_ms,
+        "labels": pull.label_ids.iter().filter_map(|id|labels.iter().find(|label|label.id==*id)).collect::<Vec<_>>(),
+        "assignees": assignees.view(&pull.assignees),
+    }))
 }
 
 async fn list(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
     Path(key): Path<(String, String)>,
-    Query(params): Query<ListParameters>,
+    Query(params): Query<super::discussion_search::ListParameters>,
 ) -> Result<Json<Value>> {
     let repo = app::repository(&server, &principal, &key)?;
     let repo = repo.as_ref();
-    let actor = app::actor(&principal)?;
-    let limit =
-        u8::try_from(params.limit()?).map_err(|_| Error::Invalid("Invalid pull request page"))?;
-    let state = params.state()?.code();
-    let query = app::search_query(params.q.as_deref())?;
-    let assignees = assignees::available(repo, &actor);
-    let (pulls, next) =
-        storage::list_pulls(&server, repo, params.before, limit, state, query).await?;
-    let labels = if pulls.iter().all(|pull| pull.label_ids.is_empty()) {
-        vec![]
-    } else {
-        labels::catalog(&server, repo).await?
-    };
+    let routed = app::repository_cell(&server, repo)?;
+    let mut input = params.input("is:open")?;
+    super::discussion_search::resolve_people(&server, &principal, repo, &mut input).await?;
+    let review_source = input
+        .review_context
+        .as_ref()
+        .and_then(|value| value.source_token.clone());
+    let page = app::query_output(
+        routed
+            .client
+            .query::<ListPulls>(&routed.target, None, input)
+            .await,
+    )?;
+    let rollups = rollups::load(&server, repo, review_source.as_deref(), page.items.iter()).await?;
+    let authors = super::profiles::attribution::Authors::load(
+        &server,
+        &principal,
+        page.items.iter().map(|pull| &pull.author),
+    )
+    .await?;
+    let assignees = Selection::load(
+        &server,
+        &principal,
+        repo,
+        page.items.iter().flat_map(|pull| pull.assignees.iter()),
+    )
+    .await?;
+    let pulls = &page.items;
     let items = pulls
         .iter()
-        .map(|pull| pull_list_view(pull, &labels, &assignees))
-        .collect::<Vec<_>>();
-    Ok(Json(json!({"items":items,"next":next})))
+        .map(|pull| pull_list_view(&authors, pull, &page.labels, &assignees, &rollups))
+        .collect::<Result<Vec<_>>>()?;
+    Ok(Json(
+        json!({"repository_id":repo.id,"can_bulk_edit":assignees.principal.can_triage(repo.id),"items":items,"next":page.next,"counts":page.counts,"matching":page.matching,"navigation":page.navigation,"authored_by_me":page.authored_by_me,"assigned_to_me":page.assigned_to_me,"review_requested_from_me":page.review_requested_from_me}),
+    ))
 }
 
 fn resolve_branch(repository: &RemoteGitRepository, name: &str) -> Result<String> {
@@ -400,6 +400,8 @@ fn current_branches(
 #[serde(deny_unknown_fields)]
 struct NewPull {
     #[serde(default)]
+    metadata: crate::cells::repository::collaboration::creation::Selection,
+    #[serde(default)]
     draft: bool,
     request_id: String,
     title: String,
@@ -413,7 +415,7 @@ async fn create(
     Extension(principal): Extension<Principal>,
     Path(key): Path<(String, String)>,
     input: std::result::Result<Json<NewPull>, JsonRejection>,
-) -> Result<impl IntoResponse> {
+) -> Result<axum::response::Response> {
     let repo = app::repository(&server, &principal, &key)?;
     let repo = repo.as_ref();
     let Json(input) = input?;
@@ -424,59 +426,33 @@ async fn create(
     if input.base_ref == input.head_ref {
         return Err(Error::Invalid("Base and head branches must differ"));
     }
-    if let Some(pull) = storage::pull_submission(&server, repo, &request_id).await? {
-        // Native submission validation compares the original payload, even when
-        // the current PR body or readiness changed after creation.
-        let pull = storage::create_pull(
-            &server,
-            repo,
-            NewPullRequest {
-                draft: input.draft,
-                author: actor.clone(),
-                request_id,
-                title,
-                body: input.body,
-                base_ref: input.base_ref,
-                head_ref: input.head_ref,
-                base_oid: pull.base_oid,
-                head_oid: pull.head_oid,
-            },
-        )
-        .await?;
+    let metadata =
+        super::discussion_creation::resolve(&server, &principal, repo, input.metadata).await?;
+    let existing = storage::pull_submission(&server, repo, &request_id).await?;
+    let (repository, base_oid, head_oid) = if let Some(pull) = existing {
+        // Recovery keeps the original comparison even after branch movement or
+        // deletion. Git reads enrich the response; they cannot rebind its intent.
         let repository = repo
             .open_current(&server, RepositoryOptions::default(), &server.cancellation)
             .await
             .ok();
-        let current = repository
-            .as_ref()
-            .and_then(|repository| current_branches(repository, &pull));
-        return Ok((
-            StatusCode::CREATED,
-            Json(
-                pull_view(
-                    &pull,
-                    &actor,
-                    &server,
-                    repo,
-                    principal.can_write(&repo.config),
-                    current.as_ref(),
-                )
-                .await?,
-            ),
-        ));
-    }
-    let repository = repo
-        .open_current(&server, RepositoryOptions::default(), &server.cancellation)
-        .await?;
-    let base_oid = resolve_branch(&repository, &input.base_ref)?;
-    let head_oid = resolve_branch(&repository, &input.head_ref)?;
-    if base_oid == head_oid {
-        return Err(Error::Invalid("Head branch has no commits to compare"));
-    }
-    let pull = storage::create_pull(
+        (repository, pull.base_oid, pull.head_oid)
+    } else {
+        let repository = repo
+            .open_current(&server, RepositoryOptions::default(), &server.cancellation)
+            .await?;
+        let base_oid = resolve_branch(&repository, &input.base_ref)?;
+        let head_oid = resolve_branch(&repository, &input.head_ref)?;
+        if base_oid == head_oid {
+            return Err(Error::Invalid("Head branch has no commits to compare"));
+        }
+        (Some(repository), base_oid, head_oid)
+    };
+    let result = storage::create_pull(
         &server,
         repo,
         NewPullRequest {
+            metadata,
             draft: input.draft,
             author: actor.clone(),
             request_id,
@@ -488,22 +464,31 @@ async fn create(
             head_oid,
         },
     )
-    .await?;
-    let current = current_branches(&repository, &pull);
+    .await;
+    let pull = match result {
+        Err(Error::CreationRejected(reason)) => {
+            return Ok(super::write::rejected(Error::CreationRejected(reason)));
+        }
+        other => other?,
+    };
+    let current = repository
+        .as_ref()
+        .and_then(|repository| current_branches(repository, &pull));
     Ok((
         StatusCode::CREATED,
         Json(
             pull_view(
-                &pull,
+                pull.number,
                 &actor,
                 &server,
                 repo,
-                principal.can_write(&repo.config),
+                &principal,
                 current.as_ref(),
             )
             .await?,
         ),
-    ))
+    )
+        .into_response())
 }
 
 async fn detail(
@@ -526,11 +511,11 @@ async fn detail(
         .and_then(|repository| current_branches(repository, &pull));
     Ok(Json(
         pull_view(
-            &pull,
+            pull.number,
             &actor,
             &server,
             repo,
-            principal.can_write(&repo.config),
+            &principal,
             current.as_ref(),
         )
         .await?,
@@ -545,7 +530,7 @@ struct PullEdit {
     body: Option<String>,
     state: Option<PullState>,
     label_ids: Option<Vec<u64>>,
-    assignees: Option<Vec<String>>,
+    assignee_ids: Option<Vec<uuid::Uuid>>,
 }
 
 async fn edit(
@@ -568,7 +553,11 @@ async fn edit(
         .as_ref()
         .is_some_and(|labels| !labels.is_empty())
         || (input.label_ids.is_none() && !pull.label_ids.is_empty());
-    let assignee_change = input.assignees.is_some();
+    let assignee_change = input.assignee_ids.is_some();
+    let can_triage = app::membership(&server, &principal, repo)
+        .await?
+        .principal
+        .can_triage(repo.id);
     let author = same_author(&pull.author, &actor);
     if pull.merge_pending.is_some() {
         return Err(Error::MergePending);
@@ -576,13 +565,13 @@ async fn edit(
     if (input.title.is_some() || input.body.is_some()) && !author {
         return Err(Error::Forbidden);
     }
-    if input.state.is_some() && !(author || principal.can_write(&repo.config)) {
+    if input.state.is_some() && !(author || can_triage) {
         return Err(Error::Forbidden);
     }
-    if label_change && !principal.can_write(&repo.config) {
+    if label_change && !can_triage {
         return Err(Error::LabelPermission);
     }
-    if assignee_change && !principal.can_write(&repo.config) {
+    if assignee_change && !can_triage {
         return Err(Error::AssigneePermission);
     }
     if input.state == Some(PullState::Merged) || (pull.merge.is_some() && input.state.is_some()) {
@@ -595,7 +584,7 @@ async fn edit(
         && input.body.is_none()
         && input.state.is_none()
         && input.label_ids.is_none()
-        && input.assignees.is_none()
+        && input.assignee_ids.is_none()
     {
         return Err(Error::Invalid("No pull request changes supplied"));
     }
@@ -604,7 +593,6 @@ async fn edit(
     } else {
         vec![]
     };
-    let assignees = assignees::available(repo, &actor);
     let title = input.title.map(|value| app::title(&value)).transpose()?;
     let body = input
         .body
@@ -617,15 +605,19 @@ async fn edit(
         .label_ids
         .map(|value| labels::validate_selection(value, &labels))
         .transpose()?;
-    let assignee_subjects = input
-        .assignees
-        .map(|value| assignees::validate_selection(value, &assignees))
-        .transpose()?;
-    if label_change && !principal.can_write(&repo.config) {
+    // Assignment eligibility and caller role must share the final current roster.
+    let (can_triage, assignees) = if let Some(ids) = input.assignee_ids {
+        let roster = crate::api::members::roster::Roster::load(&server, &principal, repo).await?;
+        if !roster.principal.can_triage(repo.id) {
+            return Err(Error::AssigneePermission);
+        }
+        (true, Some(Selection::validate(&roster, ids)?))
+    } else {
+        let permissions = app::membership(&server, &principal, repo).await?;
+        (permissions.principal.can_triage(repo.id), None)
+    };
+    if label_change && !can_triage {
         return Err(Error::LabelPermission);
-    }
-    if assignee_change && !principal.can_write(&repo.config) {
-        return Err(Error::AssigneePermission);
     }
     let pull = storage::update_pull(
         &server,
@@ -633,13 +625,13 @@ async fn edit(
         number,
         storage::PullEdit {
             actor: actor.clone(),
-            can_manage: principal.can_write(&repo.config),
+            can_triage,
             version: input.version,
             title,
             body,
             state: input.state,
             label_ids,
-            assignee_subjects,
+            assignees,
         },
     )
     .await?;
@@ -652,11 +644,11 @@ async fn edit(
         .and_then(|repository| current_branches(repository, &pull));
     Ok(Json(
         pull_view(
-            &pull,
+            pull.number,
             &actor,
             &server,
             repo,
-            principal.can_write(&repo.config),
+            &principal,
             current.as_ref(),
         )
         .await?,

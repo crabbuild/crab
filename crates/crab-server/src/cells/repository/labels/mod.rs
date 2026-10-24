@@ -3,12 +3,13 @@ use super::*;
 pub(crate) struct CreateLabel;
 
 impl Mutation for CreateLabel {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 8;
     type Input = CreateLabelInput;
     type Output = CreateLabelOutcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         if settings::archived(context)? {
@@ -118,12 +119,13 @@ impl Mutation for CreateLabel {
 pub(crate) struct UpdateLabel;
 
 impl Mutation for UpdateLabel {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 9;
     type Input = UpdateLabelInput;
     type Output = UpdateLabelOutcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         if settings::archived(context)? {
@@ -199,12 +201,13 @@ impl Mutation for UpdateLabel {
 pub(crate) struct DeleteLabel;
 
 impl Mutation for DeleteLabel {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 10;
     type Input = DeleteLabelInput;
     type Output = DeleteLabelOutcome;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
         if settings::archived(context)? {
@@ -256,12 +259,13 @@ impl Mutation for DeleteLabel {
 pub(crate) struct ListLabels;
 
 impl Read for ListLabels {
+    const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 6;
     type Input = ();
     type Output = LabelCatalog;
 
     fn execute(
-        context: &mut RepositoryTransaction<'_>,
+        context: &mut Transaction<'_>,
         (): Self::Input,
     ) -> crate::cells::Result<Self::Output> {
         let result = context.sql(&SqlBatch {
@@ -303,7 +307,9 @@ fn label_submission_digest(input: &CreateLabelInput) -> blake3::Hash {
     hasher.finalize()
 }
 
-fn label_from_row(row: &[SqlValue]) -> crate::cells::Result<LabelRecord> {
+pub(in crate::cells::repository) fn label_from_row(
+    row: &[SqlValue],
+) -> crate::cells::Result<LabelRecord> {
     let record = LabelRecord {
         number: result_u64_from_row(row, 0)?,
         name: result_text(row, 1)?,

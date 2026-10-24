@@ -16,13 +16,16 @@ test("pull creation and review navigation preserve GitHub-style controls", async
   await expectNoAccessibilityViolations(page);
   await selectDarkTheme(page);
   const search = page.getByRole("search", { name: "Search pulls" });
-  await search.getByRole("textbox").fill("missing workflow");
+  await search.getByRole("combobox").fill("missing workflow");
   await search.getByRole("button", { name: "Search", exact: true }).click();
   await expect(page).toHaveURL(/q=missing\+workflow/);
   await expect(
     page.getByRole("heading", {
       name: "No pulls match “missing workflow”",
     }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("heading", { name: "0 results", exact: true }),
   ).toBeVisible();
   await search.getByRole("button", { name: "Clear", exact: true }).click();
   await expect(page).not.toHaveURL(/q=/);
@@ -41,7 +44,7 @@ test("pull creation and review navigation preserve GitHub-style controls", async
     "refs/heads/feature/docs",
   );
   await page.getByLabel("Title", { exact: true }).fill("Document the feature");
-  const pullForm = page.locator(".pull-form");
+  const pullForm = page.getByRole("form", { name: "Create discussion" });
   const description = pullForm.getByRole("textbox", {
     name: "Description",
     exact: true,
@@ -85,11 +88,7 @@ test("pull creation and review navigation preserve GitHub-style controls", async
     commentPosition!.y,
   );
   await page.goto("/team/project/pull/2?powerbar=1");
-  for (const component of [
-    "Pull request",
-    "Conversation comments",
-    "Pull request reviews",
-  ]) {
+  for (const component of ["Pull request", "Conversation"]) {
     const timing = page.locator(
       `details[aria-label="${component} request timing"]`,
     );
@@ -250,6 +249,9 @@ test("review conversations and ambiguous merge recovery preserve the pull workfl
   await expectNoAccessibilityViolations(page);
 
   await page
+    .getByRole("button", { name: "Review changes", exact: true })
+    .click();
+  await page
     .getByRole("textbox", { name: "Review summary", exact: true })
     .fill("Ready to merge.");
   await page.getByLabel("Approve").check();
@@ -295,7 +297,7 @@ test("review conversations and ambiguous merge recovery preserve the pull workfl
   await expect(page.locator(".pull-conversation")).toContainText(
     "Verified in the browser.",
   );
-  await expect(page.locator(".review-event")).toContainText("Outdated");
+  await expect(page.locator(".review-event")).toContainText("Head unavailable");
 
   lifecycle.branchesAvailable = true;
   lifecycle.state = "open";
