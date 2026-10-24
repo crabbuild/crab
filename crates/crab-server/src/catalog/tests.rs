@@ -17,6 +17,62 @@ fn actor() -> MembershipActor {
     }
 }
 
+#[tokio::test]
+async fn group_only_access_edits_are_audited_and_member_commands_preserve_them() {
+    let catalog = catalog();
+    catalog
+        .create_repository(
+            "team".into(),
+            "project".into(),
+            "team/project".into(),
+            "main".into(),
+            String::new(),
+            vec![admin()],
+        )
+        .await
+        .unwrap();
+    let before = catalog.membership("team", "project").await.unwrap();
+    let groups = vec![RepositoryGroup {
+        group: "/Engineering".into(),
+        access: crate::RepositoryAccess::Write,
+    }];
+    let saved = catalog
+        .replace_access(
+            "team",
+            "project",
+            AccessUpdate {
+                expected_revision: before.revision,
+                members: before.members,
+                groups: groups.clone(),
+            },
+            actor(),
+            true,
+        )
+        .await
+        .unwrap();
+    let (after, _) = catalog.load().await.unwrap();
+    let head = after.membership_audit_head.unwrap();
+    let (body, _) = catalog
+        .root
+        .store
+        .get_with_etag_bounded(&catalog.root.path(&head), 8192)
+        .await
+        .unwrap();
+    let event: MembershipAuditEvent = serde_json::from_slice(&body).unwrap();
+    assert_ne!(event.previous_members_digest, event.new_members_digest);
+    assert_eq!(saved.groups, groups);
+    let mut renamed = admin();
+    renamed.name = "Alice renamed".into();
+    catalog
+        .set_members("team", "project", vec![renamed], true)
+        .await
+        .unwrap();
+    assert_eq!(
+        catalog.membership("team", "project").await.unwrap().groups,
+        groups
+    );
+}
+
 fn admin() -> RepositoryMember {
     RepositoryMember {
         subject: "alice-id".into(),
@@ -42,11 +98,14 @@ async fn membership_requires_current_revision_and_final_admin_without_writes() {
     let (before, etag) = catalog.load().await.unwrap();
     assert!(matches!(
         catalog
-            .replace_members(
+            .replace_access(
                 "team",
                 "project",
-                before.version - 1,
-                vec![admin()],
+                AccessUpdate {
+                    expected_revision: before.version - 1,
+                    members: vec![admin()],
+                    groups: vec![]
+                },
                 actor(),
                 true
             )
@@ -55,7 +114,17 @@ async fn membership_requires_current_revision_and_final_admin_without_writes() {
     ));
     assert!(matches!(
         catalog
-            .replace_members("team", "project", before.version, vec![], actor(), true)
+            .replace_access(
+                "team",
+                "project",
+                AccessUpdate {
+                    expected_revision: before.version,
+                    members: vec![],
+                    groups: vec![]
+                },
+                actor(),
+                true
+            )
             .await,
         Err(CatalogError::Invalid(
             "at least one administrator is required"
@@ -100,11 +169,14 @@ async fn pending_audit_survives_crash_and_later_mutation_keeps_chain() {
     let mut member = admin();
     member.name = "Alice renamed".into();
     catalog
-        .replace_members(
+        .replace_access(
             "team",
             "project",
-            document.version,
-            vec![member],
+            AccessUpdate {
+                expected_revision: document.version,
+                members: vec![member],
+                groups: vec![],
+            },
             actor(),
             true,
         )
@@ -217,8 +289,8 @@ fn membership_digest_is_independent_of_presentation_order() {
         access: crate::RepositoryAccess::Read,
     };
     assert_eq!(
-        membership_digest(&[first.clone(), second.clone()]).unwrap(),
-        membership_digest(&[second, first]).unwrap()
+        membership_digest(&[first.clone(), second.clone()], &[]).unwrap(),
+        membership_digest(&[second, first], &[]).unwrap()
     );
 }
 

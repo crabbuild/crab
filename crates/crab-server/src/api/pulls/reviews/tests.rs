@@ -104,7 +104,7 @@ async fn dismissal_is_authorized_audited_and_recovers_after_write_revocation_and
     .error_for_status()
     .unwrap();
     let members = h.json("/api/repos/team/private/members", &alice).await;
-    h.write(Method::PUT,"/api/repos/team/private/members",&alice,json!({"expected_revision":members["revision"],"members":[{"subject":"alice-id","name":"Alice","access":"read"},{"subject":"bob-id","name":"Bob","access":"admin"}]})).await.error_for_status().unwrap();
+    h.write(Method::PUT,"/api/repos/team/private/members",&alice,json!({"groups": [], "expected_revision":members["revision"],"members":[{"subject":"alice-id","name":"Alice","access":"read"},{"subject":"bob-id","name":"Bob","access":"admin"}]})).await.error_for_status().unwrap();
     h.write(Method::PUT, &target, &alice, input.clone())
         .await
         .error_for_status()
@@ -127,7 +127,7 @@ async fn configured_protection_blocks_writer_dismissal_until_an_admin_replaces_i
     let head = create_pull(&h, &alice).await;
     let members = h.json("/api/repos/team/private/members", &alice).await;
     h.write(Method::PUT, "/api/repos/team/private/members", &alice, json!({
-        "expected_revision":members["revision"],
+        "groups": [], "expected_revision":members["revision"],
         "members":[{"subject":"alice-id","name":"Alice","access":"admin"},{"subject":"bob-id","name":"Bob","access":"write"}]
     })).await.error_for_status().unwrap();
     *h.provider.mode.lock().await = "member".into();

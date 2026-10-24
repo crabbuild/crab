@@ -33,6 +33,7 @@ import {
   IssueOpenedIcon,
   SidebarCollapseIcon,
   TagIcon,
+  ProjectIcon,
 } from "@primer/octicons-react";
 import {
   Suspense,
@@ -71,6 +72,7 @@ const PullRequests = lazy(() =>
     default: module.PullRequests,
   })),
 );
+const ProjectsPage = lazy(() => import("@/features/projects"));
 const ActivityPage = lazy(() => import("@/features/activity"));
 const MilestonesPage = lazy(() => import("@/features/milestones"));
 const LabelsPage = lazy(() =>
@@ -121,7 +123,8 @@ export function RepositoryPage({
   const view = route?.view ?? "code";
   const canWrite = repo.access === "write" && !repo.archived;
   const refs = useRequest<Refs>(
-    view === "issues" ||
+    view === "projects" ||
+      view === "issues" ||
       view === "labels" ||
       view === "milestones" ||
       view === "activity"
@@ -330,7 +333,8 @@ export function RepositoryPage({
                 !issuesView &&
                 view !== "pulls" &&
                 view !== "settings" &&
-                view !== "activity",
+                view !== "activity" &&
+                view !== "projects",
             },
             {
               view: "issues",
@@ -343,6 +347,12 @@ export function RepositoryPage({
               label: "Pull requests",
               icon: GitPullRequestIcon,
               active: view === "pulls",
+            },
+            {
+              view: "projects",
+              label: "Projects",
+              icon: ProjectIcon,
+              active: view === "projects",
             },
             {
               view: "activity",
@@ -379,9 +389,20 @@ export function RepositoryPage({
         </div>
       )}
       <div
-        className={`repo-body${overview ? " repo-overview" : ""}${fileWorkspace ? " repo-file-workspace" : ""}${discussionNavigation ? " repo-discussion-workspace" : ""}${view === "settings" ? " repo-settings-workspace" : ""}`}
+        className={`repo-body${view === "projects" ? " repo-project-workspace" : ""}${overview ? " repo-overview" : ""}${fileWorkspace ? " repo-file-workspace" : ""}${discussionNavigation ? " repo-discussion-workspace" : ""}${view === "settings" ? " repo-settings-workspace" : ""}`}
       >
-        {view === "activity" ? (
+        {view === "projects" ? (
+          <Suspense
+            fallback={
+              <div className="notice" role="status">
+                <Spinner />
+                Loading projects…
+              </div>
+            }
+          >
+            <ProjectsPage repo={repo} url={url} project={route?.project} />
+          </Suspense>
+        ) : view === "activity" ? (
           <Suspense
             fallback={
               <div className="notice" role="status">

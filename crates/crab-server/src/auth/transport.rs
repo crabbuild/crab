@@ -1,17 +1,14 @@
 use super::{AuthError, Client};
 use crate::{OidcConfig, config::validate_identity_url};
 use axum::http;
-use openidconnect::{
-    ClientId, ClientSecret, RedirectUrl,
-    core::{CoreClient, CoreProviderMetadata},
-};
+use openidconnect::{ClientId, ClientSecret, RedirectUrl, core::CoreProviderMetadata};
 use url::Url;
 
 pub(super) async fn discover(
     config: &OidcConfig,
     secret: Option<ClientSecret>,
     http: &reqwest::Client,
-) -> Result<Client, AuthError> {
+) -> Result<(Client, bool), AuthError> {
     let transport =
         |request| bounded_http(http.clone(), request, config.public_url.scheme() == "http");
     let issuer = config.issuer.clone();
@@ -30,12 +27,13 @@ pub(super) async fn discover(
         .public_url
         .join("auth/callback")
         .map_err(AuthError::provider)?;
-    Ok(CoreClient::from_provider_metadata(
-        metadata,
-        ClientId::new(config.client_id.clone()),
-        secret,
-    )
-    .set_redirect_uri(RedirectUrl::new(redirect.to_string()).map_err(AuthError::provider)?))
+    let groups_scope = metadata
+        .scopes_supported()
+        .is_some_and(|scopes| scopes.iter().any(|scope| scope.as_str() == "groups"));
+    let client =
+        Client::from_provider_metadata(metadata, ClientId::new(config.client_id.clone()), secret)
+            .set_redirect_uri(RedirectUrl::new(redirect.to_string()).map_err(AuthError::provider)?);
+    Ok((client, groups_scope))
 }
 
 pub(super) async fn bounded_http(

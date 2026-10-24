@@ -254,12 +254,12 @@ async fn renaming_or_revoking_a_member_preserves_the_request_identity_and_cancel
         .unwrap();
     let members_path = "/api/repos/team/private/members";
     let members = h.json(members_path, &alice).await;
-    let renamed=h.write(Method::PUT,members_path,&alice,json!({"expected_revision":members["revision"],"members":[{"subject":"alice-id","name":"Alice","access":"admin"},{"subject":"bob-id","name":"Robert","access":"read"}]})).await.error_for_status().unwrap().json::<Value>().await.unwrap();
+    let renamed=h.write(Method::PUT,members_path,&alice,json!({"groups": [], "expected_revision":members["revision"],"members":[{"subject":"alice-id","name":"Alice","access":"admin"},{"subject":"bob-id","name":"Robert","access":"read"}]})).await.error_for_status().unwrap().json::<Value>().await.unwrap();
     let page = h.json(REVIEWERS, &alice).await;
     assert_eq!(page["items"][0]["reviewer"]["name"], "Bob");
     assert_eq!(page["candidates"][0]["name"], "Robert");
     assert_eq!(page["items"][0]["request"]["id"], created["id"]);
-    h.write(Method::PUT,members_path,&alice,json!({"expected_revision":renamed["revision"],"members":[{"subject":"alice-id","name":"Alice","access":"admin"}]})).await.error_for_status().unwrap();
+    h.write(Method::PUT,members_path,&alice,json!({"groups": [], "expected_revision":renamed["revision"],"members":[{"subject":"alice-id","name":"Alice","access":"admin"}]})).await.error_for_status().unwrap();
     let page = h.json(REVIEWERS, &alice).await;
     assert_eq!(page["items"][0]["candidate_id"], Value::Null);
     assert_eq!(page["candidates"], json!([]));

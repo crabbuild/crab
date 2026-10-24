@@ -14,12 +14,14 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import { Separator } from "@/components/ui/separator";
 import {
   endpoint,
   navigate,
   type MembershipState,
   type Repository,
   type RepositoryMember,
+  type RepositoryGroup,
   type Session,
 } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
@@ -36,6 +38,8 @@ import {
 } from "@primer/octicons-react";
 import { ChevronDownIcon } from "lucide-react";
 import { useEffect, useRef, useState, type FormEvent } from "react";
+
+import { GroupAccess } from "./groups";
 
 type DraftMember = RepositoryMember & { id: number };
 
@@ -99,6 +103,7 @@ export function MemberSettings({
 }) {
   const [state, setState] = useState<MembershipState>();
   const [draft, setDraft] = useState<DraftMember[]>([]);
+  const [groups, setGroups] = useState<RepositoryGroup[]>([]);
   const [error, setError] = useState<string>();
   const [success, setSuccess] = useState<string>();
   const [conflict, setConflict] = useState(false);
@@ -153,6 +158,7 @@ export function MemberSettings({
       const membership = body as MembershipState;
       setState(membership);
       setDraft(membersToDraft(membership.members));
+      setGroups(membership.groups);
       setEditing(undefined);
       setForm(undefined);
       setRemoving(undefined);
@@ -195,6 +201,7 @@ export function MemberSettings({
         body: JSON.stringify({
           expected_revision: state.revision,
           members: normalizedMembers(),
+          groups,
         }),
       });
       if (response.status === 401)
@@ -212,19 +219,13 @@ export function MemberSettings({
       const membership = body as MembershipState;
       setState(membership);
       setDraft(membersToDraft(membership.members));
+      setGroups(membership.groups);
       setEditing(undefined);
       setForm(undefined);
       setRemoving(undefined);
       setConflict(false);
-      setSuccess("Membership updated.");
-      if (
-        identity &&
-        !membership.members.some(
-          (member) =>
-            member.subject === identity.subject && member.access === "admin",
-        )
-      )
-        setRedirecting(true);
+      setSuccess("Access updated.");
+      if (identity && !membership.can_admin) setRedirecting(true);
     } catch (failure) {
       setError(
         failure instanceof Error
@@ -544,6 +545,17 @@ export function MemberSettings({
           Every member needs a subject and display name before saving.
         </p>
       )}
+      {state?.groups_supported && (
+        <>
+          <Separator className="my-6" />
+          <GroupAccess
+            value={groups}
+            onChange={setGroups}
+            disabled={saving || loading || redirecting}
+          />
+        </>
+      )}
+      <Separator className="my-6" />
       <div className="member-save-bar">
         <span className="member-save-hint">
           Changes apply to the repository when you save.
@@ -553,7 +565,7 @@ export function MemberSettings({
           disabled={saving || missingRequiredField || redirecting}
           onClick={() => void save()}
         >
-          {saving ? "Saving…" : "Save members"}
+          {saving ? "Saving…" : "Save access"}
         </Button>
       </div>
     </section>

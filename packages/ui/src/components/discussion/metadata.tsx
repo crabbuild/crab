@@ -1,3 +1,4 @@
+import { DiscussionProjects } from "@/features/projects/discussion";
 import { useId, useRef, useState, type ReactNode } from "react";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -350,6 +351,7 @@ export function DiscussionMetadata({
         csrf={csrf}
         onSaved={onSaved}
       />
+      <DiscussionProjects repo={repo} path={path} />
       <MilestonePicker
         version={version}
         repo={repo}

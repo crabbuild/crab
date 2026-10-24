@@ -62,17 +62,25 @@ fn validate_return_to(auth: &Authentication, return_to: &str) -> Result<(), Auth
 }
 
 async fn login_oidc(auth: &Authentication, return_to: String) -> Result<Response, AuthError> {
-    let client = auth.client.as_ref().ok_or(AuthError::Invalid)?;
+    let (client, groups_scope) = auth.client.as_ref().ok_or(AuthError::Invalid)?;
     let (challenge, verifier) = PkceCodeChallenge::new_random_sha256();
-    let (url, state, nonce) = client
+    let request = client
         .authorize_url(
             CoreAuthenticationFlow::AuthorizationCode,
             CsrfToken::new_random,
             Nonce::new_random,
         )
         .add_scope(Scope::new("profile".into()))
-        .set_pkce_challenge(challenge)
-        .url();
+        .add_extra_param("claims", r#"{"id_token":{"groups":null}}"#)
+        .set_pkce_challenge(challenge);
+    // Groups is provider-specific; requesting an unadvertised scope breaks
+    // otherwise valid OIDC providers such as Entra ID.
+    let request = if *groups_scope {
+        request.add_scope(Scope::new("groups".into()))
+    } else {
+        request
+    };
+    let (url, state, nonce) = request.url();
     auth.store_flow(
         key(state.secret()),
         Flow {
@@ -181,7 +189,7 @@ async fn finish_login(
     }
     let code = query.code.ok_or(AuthError::Invalid)?;
     // Discover fresh signing keys at every callback so provider rotation does not require a restart.
-    let client = discover(&auth.config, auth.secret.clone(), &auth.http).await?;
+    let (client, _) = discover(&auth.config, auth.secret.clone(), &auth.http).await?;
     let transport = |request| {
         bounded_http(
             auth.http.clone(),
@@ -236,7 +244,15 @@ async fn finish_login(
         .checked_sub(now)
         .filter(|seconds| *seconds > 0)
         .ok_or(AuthError::Invalid)?;
-    let lifetime = Duration::from_secs(seconds).min(SESSION_LIFETIME);
+    let groups = claims.additional_claims().groups()?;
+    // Group grants are refreshed by a new verified SSO login, never by trusting
+    // browser data. Bound stale IdP membership to fifteen minutes at most.
+    let maximum = if groups.is_empty() {
+        SESSION_LIFETIME
+    } else {
+        Duration::from_secs(15 * 60)
+    };
+    let lifetime = Duration::from_secs(seconds).min(maximum);
     let subject = claims.subject().as_str().to_owned();
     if subject.is_empty() {
         return Err(AuthError::Invalid);
@@ -255,6 +271,7 @@ async fn finish_login(
             subject,
             name,
         },
+        groups,
         lifetime,
     )
     .await
@@ -265,12 +282,14 @@ async fn establish_session(
     headers: &HeaderMap,
     return_to: String,
     identity: Identity,
+    groups: Vec<String>,
     lifetime: Duration,
 ) -> Result<Response, AuthError> {
     let now = now_epoch()?;
     let token = CsrfToken::new_random_len(32);
     let session_key = key(token.secret());
     let session = Arc::new(Session {
+        groups,
         identity,
         csrf: CsrfToken::new_random_len(32).secret().clone(),
         expires_at: now
@@ -422,6 +441,7 @@ async fn finish_github_login(
             subject: user.id.to_string(),
             name,
         },
+        Vec::new(),
         SESSION_LIFETIME,
     )
     .await

@@ -5,7 +5,10 @@ use crab_storage::{ETag, StorageError};
 use serde::{Deserialize, Serialize};
 use uuid::Uuid;
 
-use crate::{BranchProtection, RepositoryConfig, RepositoryMember, storage_root::StorageRoot};
+use crate::{
+    BranchProtection, RepositoryConfig, RepositoryGroup, RepositoryMember,
+    storage_root::StorageRoot,
+};
 
 const SCHEMA_VERSION: u32 = 3;
 const MAX_CATALOG_BYTES: u64 = 8 * 1024 * 1024;
@@ -45,6 +48,8 @@ pub struct CatalogRecord {
     pub application: RepositoryApplicationState,
     pub description: String,
     pub members: Vec<RepositoryMember>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<RepositoryGroup>,
     pub protected_branches: Vec<BranchProtection>,
 }
 
@@ -67,6 +72,15 @@ pub struct CatalogDocument {
     pub pending_membership_audit: Option<MembershipAuditEvent>,
 }
 
+/// Revision-bound replacement of the complete repository access list.
+#[derive(Clone, Debug, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct AccessUpdate {
+    pub expected_revision: u64,
+    pub members: Vec<RepositoryMember>,
+    pub groups: Vec<RepositoryGroup>,
+}
+
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(deny_unknown_fields)]
 pub struct MembershipActor {
@@ -80,6 +94,8 @@ pub struct MembershipSnapshot {
     pub repository_id: Uuid,
     pub revision: u64,
     pub members: Vec<RepositoryMember>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<RepositoryGroup>,
 }
 
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
@@ -140,7 +156,7 @@ impl CatalogDocument {
                 .iter()
                 .find(|record| record.id == event.repository_id)
                 .ok_or(CatalogError::Invalid("audit repository is missing"))?;
-            if membership_digest(&record.members)? != event.new_members_digest {
+            if membership_digest(&record.members, &record.groups)? != event.new_members_digest {
                 return Err(CatalogError::Invalid(
                     "membership audit digest does not match",
                 ));
@@ -208,13 +224,22 @@ fn valid_audit_path(path: &str) -> bool {
     version.parse::<u64>().is_ok_and(|value| value > 0) && Uuid::parse_str(id).is_ok()
 }
 
-fn membership_digest(members: &[RepositoryMember]) -> Result<String, CatalogError> {
+fn membership_digest(
+    members: &[RepositoryMember],
+    groups: &[RepositoryGroup],
+) -> Result<String, CatalogError> {
     let mut canonical = members.to_vec();
     canonical.sort_by(|a, b| (&a.subject, &a.name, a.access).cmp(&(&b.subject, &b.name, b.access)));
     let bytes = serde_json::to_vec(&canonical)?;
     let mut hasher = blake3::Hasher::new();
     hasher.update(b"crab membership digest v1");
     hasher.update(&bytes);
+    if !groups.is_empty() {
+        let mut groups = groups.to_vec();
+        groups.sort_by(|a, b| a.group.cmp(&b.group));
+        hasher.update(b"oidc-groups\0");
+        hasher.update(&serde_json::to_vec(&groups)?);
+    }
     Ok(hasher.finalize().to_hex().to_string())
 }
 
@@ -241,6 +266,7 @@ impl CatalogRecord {
             default_branch: default_branch.to_owned(),
             description: self.description.clone(),
             members: self.members.clone(),
+            groups: self.groups.clone(),
             protected_branches: self.protected_branches.clone(),
         })
     }
@@ -305,6 +331,7 @@ impl CatalogStore {
             repository_id: record.id,
             revision: document.version,
             members: record.members.clone(),
+            groups: record.groups.clone(),
         })
     }
 
@@ -369,6 +396,7 @@ impl CatalogStore {
             application: RepositoryApplicationState::EmptyCellPending,
             description,
             members,
+            groups: Vec::new(),
             protected_branches: Vec::new(),
         };
         let runtime = record.runtime_config(&self.root, &default_branch)?;
@@ -402,6 +430,7 @@ impl CatalogStore {
             application: RepositoryApplicationState::EmptyCellPending,
             description,
             members,
+            groups: Vec::new(),
             protected_branches: Vec::new(),
         };
         let runtime = record.runtime_config(&self.root, "main")?;
@@ -451,11 +480,16 @@ impl CatalogStore {
         require_administrator: bool,
     ) -> Result<CatalogRecord, CatalogError> {
         let snapshot = self.membership(owner, name).await?;
-        self.replace_members(
+        // set-members edits people only. Keep groups under the same revision
+        // so this command cannot erase an independently updated SSO access list.
+        self.replace_access(
             owner,
             name,
-            snapshot.revision,
-            members,
+            AccessUpdate {
+                expected_revision: snapshot.revision,
+                members,
+                groups: snapshot.groups,
+            },
             MembershipActor {
                 issuer: "urn:crab:local".into(),
                 subject: "operator".into(),
@@ -465,17 +499,16 @@ impl CatalogStore {
         .await
     }
 
-    pub async fn replace_members(
+    pub async fn replace_access(
         &self,
         owner: &str,
         name: &str,
-        expected_revision: u64,
-        members: Vec<RepositoryMember>,
+        input: AccessUpdate,
         actor: MembershipActor,
         require_administrator: bool,
     ) -> Result<CatalogRecord, CatalogError> {
         let (mut document, etag) = self.load_for_mutation().await?;
-        if document.version != expected_revision {
+        if document.version != input.expected_revision {
             return Err(CatalogError::Conflict);
         }
         let Some(record) = document.repositories.iter_mut().find(|record| {
@@ -484,11 +517,13 @@ impl CatalogStore {
             return Err(CatalogError::NotFound);
         };
         let mut candidate = record.clone();
-        candidate.members = members.clone();
+        candidate.members = input.members.clone();
+        candidate.groups = input.groups.clone();
         crate::config::validate_repository(&candidate.runtime_config(&self.root, "main")?)
             .map_err(|_| CatalogError::Invalid("repository record failed validation"))?;
         if require_administrator
-            && !members
+            && !input
+                .members
                 .iter()
                 .any(|member| member.access == crate::RepositoryAccess::Admin)
         {
@@ -496,12 +531,13 @@ impl CatalogStore {
                 "at least one administrator is required",
             ));
         }
-        if record.members == members {
+        if record.members == input.members && record.groups == input.groups {
             return Ok(record.clone());
         }
-        let previous_digest = membership_digest(&record.members)?;
-        let new_digest = membership_digest(&members)?;
-        record.members = members;
+        let previous_digest = membership_digest(&record.members, &record.groups)?;
+        let new_digest = membership_digest(&input.members, &input.groups)?;
+        record.members = input.members;
+        record.groups = input.groups;
         let updated = record.clone();
         document.version = document
             .version
@@ -650,8 +686,8 @@ impl CatalogStore {
                         issuer: "urn:crab:local".into(),
                         subject: "operator".into(),
                     },
-                    previous_members_digest: membership_digest(&[])?,
-                    new_members_digest: membership_digest(&record.members)?,
+                    previous_members_digest: membership_digest(&[], &[])?,
+                    new_members_digest: membership_digest(&record.members, &record.groups)?,
                     repository_version: document.version,
                     occurred_at: std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)

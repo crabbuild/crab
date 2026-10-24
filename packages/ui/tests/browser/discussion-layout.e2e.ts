@@ -4,6 +4,7 @@ import { mockPullRequest } from "./pulls/fixture";
 import {
   expectNoAccessibilityViolations,
   selectDarkTheme,
+  contrastRatio,
 } from "./accessibility";
 
 async function fixture(page: Page) {
@@ -60,6 +61,38 @@ async function fixture(page: Page) {
   }
   return reads;
 }
+
+test("link buttons retain the same readable control colors and geometry as native buttons", async ({
+  page,
+}) => {
+  await fixture(page);
+  await page.goto("/team/project/pulls");
+  const labels = page
+    .locator(".section-heading")
+    .getByRole("link", { name: "Labels", exact: true });
+  const create = page.getByRole("button", {
+    name: "New pull request",
+    exact: true,
+  });
+  for (const theme of ["Light", "Dark"]) {
+    await page.getByRole("button", { name: theme, exact: true }).click();
+    const colors = await labels.evaluate((node) => ({
+      foreground: getComputedStyle(node).color,
+      background: getComputedStyle(node).backgroundColor,
+      body: getComputedStyle(document.body).color,
+    }));
+    expect(colors.foreground).toBe(colors.body);
+    expect(
+      contrastRatio(colors.foreground, colors.background),
+    ).toBeGreaterThanOrEqual(4.5);
+    await labels.hover();
+    await expect(labels).toHaveCSS("text-decoration-line", "none");
+    expect((await labels.boundingBox())!.height).toBe(
+      (await create.boundingBox())!.height,
+    );
+    await expectNoAccessibilityViolations(page);
+  }
+});
 
 test("density changes both discussion kinds without fetching, rewriting the query or losing metadata", async ({
   page,

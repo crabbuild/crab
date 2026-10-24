@@ -16,6 +16,11 @@ use std::sync::Arc;
 pub(super) fn routes() -> Router<Arc<Server>> {
     Router::new()
         .route(
+            "/internal/repositories/{owner}/{name}/project-state",
+            get(status::<crate::cells::repository::projects::preparation::GetState>)
+                .post(prepare::<crate::cells::repository::projects::preparation::Prepare>),
+        )
+        .route(
             "/internal/repositories/{owner}/{name}/issue-state",
             get(status::<GetIssueLifecycleStatus>).post(prepare::<PrepareIssueLifecycle>),
         )

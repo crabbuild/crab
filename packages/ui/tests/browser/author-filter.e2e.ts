@@ -248,7 +248,12 @@ for (const view of ["issues", "pulls"] as const) {
       .poll(() => new URL(page.url()).searchParams.get("q"))
       .toBe("is:open");
     await trigger.click();
-    await page.getByRole("option", { name: "Yourself", exact: true }).click();
+    await page
+      .getByRole("option", {
+        name: "Created by me Your contributions",
+        exact: true,
+      })
+      .click();
     await expect
       .poll(() => new URL(page.url()).searchParams.get("q"))
       .toBe("is:open author:@me");

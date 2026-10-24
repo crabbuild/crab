@@ -1,6 +1,19 @@
 import { Button } from "@/components/ui/button";
 import { Spinner } from "@/components/ui/spinner";
-import { useDeferredValue, useEffect, useMemo, useRef, useState } from "react";
+import { Field, FieldLabel } from "@/components/ui/field";
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupInput,
+} from "@/components/ui/input-group";
+import {
+  useDeferredValue,
+  useEffect,
+  useId,
+  useMemo,
+  useRef,
+  useState,
+} from "react";
 
 import {
   ChevronLeftIcon,
@@ -48,6 +61,7 @@ export function CodeSymbolsPanel({
   onClose,
 }: Props) {
   const panel = useRef<HTMLElement>(null);
+  const searchId = useId();
   const [filter, setFilter] = useState("");
   const deferredFilter = useDeferredValue(filter.trim().toLowerCase());
   const definitions = useMemo(
@@ -85,6 +99,8 @@ export function CodeSymbolsPanel({
       frame = requestAnimationFrame(() => {
         const node = panel.current;
         if (!node) return;
+        const workspace = node.closest<HTMLElement>(".file-source-workspace");
+        if (!workspace) return;
         const fileHeader = node
           .closest(".file-panel")
           ?.querySelector<HTMLElement>(":scope > .panel-header");
@@ -94,11 +110,14 @@ export function CodeSymbolsPanel({
           0,
           fileHeader?.getBoundingClientRect().bottom ?? 0,
         );
-        node.style.setProperty("--code-symbols-sticky-top", `${stickyTop}px`);
+        workspace.style.setProperty(
+          "--code-symbols-sticky-top",
+          `${stickyTop}px`,
+        );
         // The pane grows as it becomes sticky; a fixed viewport fraction either
         // truncates tall screens or overflows below the fold before it sticks.
         const top = Math.max(0, node.getBoundingClientRect().top);
-        node.style.setProperty(
+        workspace.style.setProperty(
           "--code-symbols-available-height",
           `${window.innerHeight - top}px`,
         );
@@ -132,15 +151,22 @@ export function CodeSymbolsPanel({
       </header>
       {active === null ? (
         <>
-          <label className="code-symbols-search">
-            <SearchIcon size={16} aria-hidden="true" />
-            <span className="sr-only">Filter symbols</span>
-            <input
-              value={filter}
-              onChange={(event) => setFilter(event.target.value)}
-              placeholder="Filter symbols"
-            />
-          </label>
+          <Field className="code-symbols-search">
+            <FieldLabel htmlFor={searchId} className="sr-only">
+              Filter symbols
+            </FieldLabel>
+            <InputGroup>
+              <InputGroupAddon>
+                <SearchIcon aria-hidden="true" />
+              </InputGroupAddon>
+              <InputGroupInput
+                id={searchId}
+                value={filter}
+                onChange={(event) => setFilter(event.target.value)}
+                placeholder="Filter symbols"
+              />
+            </InputGroup>
+          </Field>
           <div className="code-symbols-list" aria-live="polite">
             {state.status === "loading" ? (
               <div className="code-symbols-status">

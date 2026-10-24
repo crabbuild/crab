@@ -12,7 +12,8 @@ pub(in crate::cells) fn dispatch_mutation(
     id: u32,
     input: serde_json::Value,
 ) -> crate::cells::Result<MutationResult<serde_json::Value>> {
-    let maintenance = id == <search::index::RebuildIndex as Mutation>::ID
+    let maintenance = id == projects::preparation::Prepare::ID
+        || id == <search::index::RebuildIndex as Mutation>::ID
         || id == <assignments::MigrateAssignments as Mutation>::ID
         || id == issues::lifecycle::PrepareIssueLifecycle::ID
         || id == PreparePullLifecycle::ID
@@ -20,6 +21,7 @@ pub(in crate::cells) fn dispatch_mutation(
         || id == collaboration::submissions::preparation::Prepare::ID;
     #[cfg(test)]
     let maintenance = maintenance
+        || id == projects::tests::Historical::ID
         || id == assignments::migration::tests::SeedSubjects::ID
         || id == reviewers::tests::PreviousIndex::ID
         || id == rollups::tests::PreviousFormat::ID
@@ -35,6 +37,14 @@ pub(in crate::cells) fn dispatch_mutation(
         search::index::ensure_ready(context)?;
     }
     let result = match id {
+        #[cfg(test)]
+        projects::tests::Historical::ID => {
+            invoke_mutation::<projects::tests::Historical>(context, input)
+        }
+        projects::Change::ID => invoke_mutation::<projects::Change>(context, input),
+        projects::preparation::Prepare::ID => {
+            invoke_mutation::<projects::preparation::Prepare>(context, input)
+        }
         #[cfg(test)]
         collaboration::creation::tests::ExhaustProgress::ID => {
             invoke_mutation::<collaboration::creation::tests::ExhaustProgress>(context, input)
@@ -200,6 +210,17 @@ pub(in crate::cells) fn dispatch_read(
     input: serde_json::Value,
 ) -> crate::cells::Result<serde_json::Value> {
     match id {
+        projects::preparation::GetState::ID => {
+            invoke_read::<projects::preparation::GetState>(context, input)
+        }
+        projects::ListProjects::ID => invoke_read::<projects::ListProjects>(context, input),
+        projects::GetProject::ID => invoke_read::<projects::GetProject>(context, input),
+        projects::Candidates::ID => invoke_read::<projects::Candidates>(context, input),
+        projects::Items::ID => invoke_read::<projects::Items>(context, input),
+        projects::Memberships::ID => invoke_read::<projects::Memberships>(context, input),
+        projects::hierarchy::GetHierarchy::ID => {
+            invoke_read::<projects::hierarchy::GetHierarchy>(context, input)
+        }
         #[cfg(test)]
         collaboration::submissions::preparation::tests::Inspect::ID => {
             invoke_read::<collaboration::submissions::preparation::tests::Inspect>(context, input)

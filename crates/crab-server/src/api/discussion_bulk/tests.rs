@@ -145,7 +145,7 @@ async fn bulk_state_edits_use_versions_counts_replay_and_current_permissions() {
         Method::PUT,
         &format!("{ROOT}/members"),
         &alice,
-        json!({"expected_revision":before["revision"],"members":members}),
+        json!({"groups": [], "expected_revision":before["revision"],"members":members}),
     )
     .await
     .error_for_status()
@@ -275,7 +275,7 @@ async fn proven_rejection_remains_terminal_after_triage_grant() {
                 Method::PUT,
                 &format!("{ROOT}/members"),
                 &alice,
-                json!({"expected_revision":current["revision"],"members":members}),
+                json!({"groups": [], "expected_revision":current["revision"],"members":members}),
             )
             .await
             .error_for_status()

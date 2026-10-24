@@ -1,6 +1,6 @@
 import { Button } from "@/components/ui/button";
 import { repoHref, revisionAddress } from "@/lib/repository-route";
-import { Fragment, useState } from "react";
+import { Fragment, useLayoutEffect, useRef, useState } from "react";
 
 import {
   CheckIcon,
@@ -36,6 +36,21 @@ export function FileBreadcrumb({
   path: string;
 }) {
   const [copiedPath, setCopiedPath] = useState<string | null>(null);
+  const trail = useRef<HTMLElement>(null);
+  useLayoutEffect(() => {
+    const node = trail.current;
+    if (!node) return;
+    // Width and font changes must keep the current file visible without moving
+    // the document's line target. Manual horizontal scrolling stays available.
+    const revealCurrent = () => {
+      node.scrollLeft = node.scrollWidth;
+    };
+    revealCurrent();
+    const observer = new ResizeObserver(revealCurrent);
+    observer.observe(node);
+    if (node.lastElementChild) observer.observe(node.lastElementChild);
+    return () => observer.disconnect();
+  }, [path]);
   const parts = splitPathHex(path);
   const displayedPath = displayHex(path);
   const copied = copiedPath === path;
@@ -45,41 +60,47 @@ export function FileBreadcrumb({
   }));
   return (
     <div className="breadcrumb">
-      <Link href={repoHref(repo, { rev })}>{repo.name}</Link>
+      <nav ref={trail} className="breadcrumb-path" aria-label="File path">
+        <Link href={repoHref(repo, { rev })}>{repo.name}</Link>
+        {path && (
+          <>
+            <span>/</span>
+            {ancestors.map((ancestor) => (
+              <Fragment key={ancestor.path}>
+                <Link href={repoHref(repo, { rev, path: ancestor.path })}>
+                  {ancestor.name}
+                </Link>
+                <span>/</span>
+              </Fragment>
+            ))}
+            <strong aria-current="page">
+              {displayHex(parts.at(-1) ?? "")}
+            </strong>
+          </>
+        )}
+      </nav>
       {path && (
-        <>
-          <span>/</span>
-          {ancestors.map((ancestor) => (
-            <Fragment key={ancestor.path}>
-              <Link href={repoHref(repo, { rev, path: ancestor.path })}>
-                {ancestor.name}
-              </Link>
-              <span>/</span>
-            </Fragment>
-          ))}
-          <strong>{displayHex(parts.at(-1) ?? "")}</strong>
-          <Button
-            className="copy-path-button"
-            aria-label={copied ? "Path copied" : "Copy path"}
-            title={copied ? "Path copied" : "Copy path"}
-            variant="ghost"
-            size="icon-sm"
-            onClick={async () => {
-              try {
-                await navigator.clipboard.writeText(displayedPath);
-                setCopiedPath(path);
-              } catch {
-                setCopiedPath(null);
-              }
-            }}
-          >
-            {copied ? (
-              <CheckIcon data-icon="inline-start" />
-            ) : (
-              <CopyIcon data-icon="inline-start" />
-            )}
-          </Button>
-        </>
+        <Button
+          className="copy-path-button"
+          aria-label={copied ? "Path copied" : "Copy path"}
+          title={copied ? "Path copied" : "Copy path"}
+          variant="ghost"
+          size="icon-sm"
+          onClick={async () => {
+            try {
+              await navigator.clipboard.writeText(displayedPath);
+              setCopiedPath(path);
+            } catch {
+              setCopiedPath(null);
+            }
+          }}
+        >
+          {copied ? (
+            <CheckIcon data-icon="inline-start" />
+          ) : (
+            <CopyIcon data-icon="inline-start" />
+          )}
+        </Button>
       )}
     </div>
   );
@@ -134,7 +155,12 @@ export function FileNavigation({
         }
       />
       <FileBreadcrumb repo={repo} rev={rev} path={path} />
-      <button className="file-search-opener" type="button" onClick={onSearch}>
+      <button
+        className="file-search-opener"
+        type="button"
+        aria-label="Go to file"
+        onClick={onSearch}
+      >
         <SearchIcon />
         <span>Go to file</span>
         <kbd>T</kbd>

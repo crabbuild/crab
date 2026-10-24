@@ -194,6 +194,65 @@ test("syntax and suggestion errors remain visible without losing the query", asy
 });
 
 for (const view of ["issues", "pulls"] as const) {
+  test(`${view} reaction sorting supports keyboard submenus and preserves search and order`, async ({
+    page,
+  }) => {
+    await searchFixture(page);
+    await page.goto(
+      `/team/project/${view}?q=is%3Aopen&direction=asc&before=old-cursor&powerbar=1`,
+    );
+    const sort = page.getByRole("button", { name: "Sort discussions" });
+    await sort.click();
+    const reactions = page.getByRole("menuitem", {
+      name: "Reactions",
+      exact: true,
+    });
+    const total = page.getByRole("menuitemradio", {
+      name: "Total reactions",
+      exact: true,
+    });
+    await expect(total).toBeHidden();
+    await reactions.focus();
+    await page.keyboard.press("ArrowRight");
+    await expect(total).toBeFocused();
+    await page.keyboard.press("Enter");
+    await expect(page).not.toHaveURL(/before=/);
+    await expect
+      .poll(() => new URL(page.url()).searchParams.get("sort"))
+      .toBe("reactions");
+    await sort.click();
+    await reactions.focus();
+    await page.keyboard.press("ArrowRight");
+    await expect(total).toHaveAttribute("aria-checked", "true");
+    const heart = page.getByRole("menuitemradio", {
+      name: "❤️ reactions",
+      exact: true,
+    });
+    await heart.focus();
+    await page.keyboard.press("Enter");
+    await expect
+      .poll(() => new URL(page.url()).searchParams.get("sort"))
+      .toBe("heart");
+    const params = new URL(page.url()).searchParams;
+    expect(params.get("q")).toBe("is:open");
+    expect(params.get("direction")).toBe("asc");
+    expect(params.get("powerbar")).toBe("1");
+    await page.reload();
+    await selectDarkTheme(page);
+    await page.setViewportSize({ width: 390, height: 844 });
+    await sort.click();
+    await reactions.focus();
+    await page.keyboard.press("ArrowRight");
+    await expect(heart).toHaveAttribute("aria-checked", "true");
+    await expect(heart).toBeInViewport({ ratio: 1 });
+    await heart.focus();
+    await expectNoAccessibilityViolations(page);
+    await page.keyboard.press("ArrowLeft");
+    await expect(reactions).toBeFocused();
+    await page.keyboard.press("Escape");
+    await expect(sort).toBeFocused();
+  });
+
   test(`${view} counts, ordering and opaque pagination preserve the query`, async ({
     page,
   }) => {

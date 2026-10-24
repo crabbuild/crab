@@ -5,7 +5,14 @@ import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
-import { Label } from "@/components/ui/label";
+import {
+  Field,
+  FieldDescription,
+  FieldGroup,
+  FieldLabel,
+  FieldLegend,
+  FieldSet,
+} from "@/components/ui/field";
 import { useRequest } from "@/lib/api";
 import type { ActorProfile, OwnProfile } from "./model";
 
@@ -37,7 +44,7 @@ export function ProfileForm({
   };
   return (
     <form
-      className="min-w-0 space-y-6"
+      className="flex min-w-0 flex-col gap-6"
       onSubmit={async (event) => {
         event.preventDefault();
         setNotice("");
@@ -56,56 +63,49 @@ export function ProfileForm({
         setNotice(version ? "Profile updated." : "Profile created.");
       }}
     >
-      <fieldset
-        className="m-0 grid min-w-0 gap-6 border-0 p-0"
-        disabled={mutation.pending}
-      >
-        <legend className="sr-only">Profile details</legend>
-        <div className="grid gap-2">
-          <Label htmlFor="profile-handle">Username</Label>
-          <Input
-            id="profile-handle"
-            name="username"
-            autoComplete="username"
-            value={handle}
-            onChange={(event) => {
-              setHandle(event.target.value.toLowerCase());
-              setNotice("");
-            }}
-            required
-            maxLength={39}
-            pattern="[a-z0-9]+(?:-[a-z0-9]+)*"
-            aria-describedby="profile-handle-help"
-          />
-          <p
-            id="profile-handle-help"
-            className="m-0 text-xs text-muted-foreground"
-          >
-            Use 1–39 lowercase letters, digits, or single hyphens.
-          </p>
-        </div>
-        <div className="grid gap-2">
-          <Label htmlFor="profile-name">Display name</Label>
-          <Input
-            id="profile-name"
-            name="name"
-            autoComplete="name"
-            value={name}
-            onChange={(event) => {
-              setName(event.target.value);
-              setNotice("");
-            }}
-            required
-            maxLength={200}
-            aria-describedby="profile-name-help"
-          />
-          <p
-            id="profile-name-help"
-            className="m-0 text-xs text-muted-foreground"
-          >
-            Your name can contain up to 100 characters.
-          </p>
-        </div>
+      <FieldSet disabled={mutation.pending}>
+        <FieldLegend className="sr-only">Profile details</FieldLegend>
+        <FieldGroup>
+          <Field>
+            <FieldLabel htmlFor="profile-handle">Username</FieldLabel>
+            <Input
+              id="profile-handle"
+              name="username"
+              autoComplete="username"
+              value={handle}
+              onChange={(event) => {
+                setHandle(event.target.value.toLowerCase());
+                setNotice("");
+              }}
+              required
+              maxLength={39}
+              pattern="[a-z0-9]+(?:-[a-z0-9]+)*"
+              aria-describedby="profile-handle-help"
+            />
+            <FieldDescription id="profile-handle-help">
+              Use 1–39 lowercase letters, digits, or single hyphens.
+            </FieldDescription>
+          </Field>
+          <Field>
+            <FieldLabel htmlFor="profile-name">Display name</FieldLabel>
+            <Input
+              id="profile-name"
+              name="name"
+              autoComplete="name"
+              value={name}
+              onChange={(event) => {
+                setName(event.target.value);
+                setNotice("");
+              }}
+              required
+              maxLength={200}
+              aria-describedby="profile-name-help"
+            />
+            <FieldDescription id="profile-name-help">
+              Your name can contain up to 100 characters.
+            </FieldDescription>
+          </Field>
+        </FieldGroup>
         <div className="flex flex-wrap items-center gap-3">
           <Button type="submit">
             {mutation.pending
@@ -116,7 +116,7 @@ export function ProfileForm({
           </Button>
           {profile && <Link href={`/-/users/${profile.id}`}>View profile</Link>}
         </div>
-      </fieldset>
+      </FieldSet>
       {notice && (
         <p role="status" className="notice">
           {notice}
@@ -139,7 +139,7 @@ export function ProfileForm({
           {({ profile: saved }) =>
             saved && (
               <section
-                className="notice space-y-3"
+                className="notice flex flex-col gap-3"
                 aria-label="Review saved profile"
               >
                 <h2 className="m-0 text-sm font-semibold">

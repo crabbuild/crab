@@ -29,7 +29,8 @@ pub use cells::repository::search::index::{
 };
 pub use config::{
     AuthProvider, BranchProtection, CellDurabilityMode, CellsConfig, Config, GitHubConfig,
-    ImportConfig, OidcConfig, RepositoryAccess, RepositoryConfig, RepositoryMember, StorageConfig,
+    ImportConfig, OidcConfig, RepositoryAccess, RepositoryConfig, RepositoryGroup,
+    RepositoryMember, StorageConfig,
 };
 pub use server::serve;
 pub use server::storage::probe_storage;

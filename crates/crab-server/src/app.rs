@@ -81,6 +81,8 @@ pub(crate) enum Error {
     MilestonePermission,
     #[error("Write access is required to manage linked work")]
     LinkPermission,
+    #[error("Write access is required to manage projects and sub-issues")]
+    ProjectPermission,
     #[error("A milestone with this title already exists")]
     MilestoneConflict,
     #[error("A repository label with this name already exists")]
@@ -323,6 +325,11 @@ impl IntoResponse for Error {
                 StatusCode::FORBIDDEN,
                 "forbidden",
                 "You do not have permission to change milestones",
+            ),
+            Self::ProjectPermission => (
+                StatusCode::FORBIDDEN,
+                "project_permission",
+                "Write access is required to manage projects and sub-issues",
             ),
             Self::LinkPermission => (
                 StatusCode::FORBIDDEN,
@@ -625,6 +632,7 @@ pub(crate) async fn membership(
     }
     let mut config = repo.config.clone();
     config.members = snapshot.members;
+    config.groups = snapshot.groups;
     let principal = principal.with_membership(repo.id, &config, issuer);
     if !principal.can_read(repo.id) {
         return Err(Error::NotFound);

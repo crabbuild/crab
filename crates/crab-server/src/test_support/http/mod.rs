@@ -138,6 +138,7 @@ impl Harness {
         let mut repository = Repository::new(
             uuid::Uuid::from_bytes([1; 16]),
             RepositoryConfig {
+                groups: Vec::new(),
                 owner: "team".into(),
                 name: "private".into(),
                 bucket: "test".into(),

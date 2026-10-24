@@ -34,6 +34,16 @@ export type Target =
     }
   | { kind: "pull_reply"; pull: number; thread: number; number: number };
 export type Action =
+  | {
+      kind: "project_changed" | "project_removed";
+      project: string;
+      title: string;
+    }
+  | {
+      kind: "parent_assigned" | "parent_removed";
+      number: number;
+      title: string;
+    }
   | { kind: "issue_closed"; reason: "completed" | "not_planned" }
   | {
       kind: "issue_close_reason_changed";

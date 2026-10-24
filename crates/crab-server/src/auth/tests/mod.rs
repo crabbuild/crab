@@ -1,9 +1,6 @@
 use super::*;
 use bytes::Bytes;
-use openidconnect::{
-    ClientId,
-    core::{CoreClient, CoreProviderMetadata},
-};
+use openidconnect::{ClientId, core::CoreProviderMetadata};
 use serde_json::json;
 use url::Url;
 
@@ -21,6 +18,7 @@ async fn expired_sessions_are_rejected_and_https_cookies_cannot_be_shadowed() {
         HeaderValue::from_static("__Host-crab_session=test-token"),
     );
     let session = Arc::new(Session {
+        groups: Vec::new(),
         identity: Identity {
             issuer: "https://identity.example".into(),
             subject: "alice".into(),
@@ -77,10 +75,9 @@ fn shared_auth(store: Store) -> Authentication {
         config,
         secret: None,
         http: reqwest::Client::new(),
-        client: Some(CoreClient::from_provider_metadata(
-            metadata,
-            ClientId::new("crab".into()),
-            None,
+        client: Some((
+            Client::from_provider_metadata(metadata, ClientId::new("crab".into()), None),
+            false,
         )),
         sessions: Mutex::new(HashMap::new()),
         git_tokens: Mutex::new(HashMap::new()),
@@ -101,6 +98,7 @@ async fn shared_state_crosses_replica_boundaries_and_consumes_flows_once() {
     let second = shared_auth(store);
     let session_key = key("browser-token");
     let session = Arc::new(Session {
+        groups: Vec::new(),
         identity: Identity {
             issuer: "https://id.example".into(),
             subject: "alice".into(),
@@ -169,6 +167,7 @@ async fn identity_revocation_crosses_replicas_and_deletes_derived_tokens() {
         ("other", "https://other.example"),
     ] {
         let session = Arc::new(Session {
+            groups: Vec::new(),
             identity: Identity {
                 issuer: issuer.into(),
                 subject: "alice".into(),
@@ -226,6 +225,7 @@ async fn session_without_its_identity_marker_is_rejected() {
     let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
     let auth = shared_auth(store);
     let session = Arc::new(Session {
+        groups: Vec::new(),
         identity: Identity {
             issuer: "https://id.example".into(),
             subject: "alice".into(),
@@ -256,6 +256,7 @@ async fn failed_session_creation_removes_its_marker_and_stale_markers_are_collec
     let auth = shared_auth(store.clone());
     let state = &auth.state;
     let session = Arc::new(Session {
+        groups: Vec::new(),
         identity: Identity {
             issuer: "https://id.example".into(),
             subject: "alice".into(),
@@ -267,6 +268,7 @@ async fn failed_session_creation_removes_its_marker_and_stale_markers_are_collec
         revoked: AtomicBool::new(false),
     });
     let record = StoredSession {
+        groups: Vec::new(),
         identity: session.identity.clone(),
         csrf: session.csrf.clone(),
         expires_at: session.expires_at,
@@ -313,6 +315,7 @@ async fn token_attachment_racing_revocation_cannot_leave_a_usable_credential() {
     let auth = shared_auth(store.clone());
     for index in 0..8 {
         let session = Arc::new(Session {
+            groups: Vec::new(),
             identity: Identity {
                 issuer: "https://id.example".into(),
                 subject: "alice".into(),
@@ -355,6 +358,7 @@ async fn session_creation_racing_logout_never_leaves_an_unindexed_parent() {
     let state = &auth.state;
     for index in 0..16 {
         let session = Arc::new(Session {
+            groups: Vec::new(),
             identity: Identity {
                 issuer: "https://id.example".into(),
                 subject: "alice".into(),

@@ -36,6 +36,12 @@ export function browse(repository: Repository) {
 }
 `;
 const additionalSymbolSources = {
+  "src/navigation.rs": [
+    `// ${"A wide source line with horizontal scrolling. ".repeat(12)}`,
+    ...Array.from({ length: 80 }, (_, index) => `// Before ${index}`),
+    "pub fn navigate() {}",
+    ...Array.from({ length: 80 }, (_, index) => `// After ${index}`),
+  ].join("\n"),
   "src/main.py": `class Repository:
     def open(self):
         return None
@@ -794,12 +800,16 @@ test("GitHub paths retain file context, pin permalinks, and restore browser hist
     "Code",
     "Issues",
     "Pull requests",
+    "Projects",
     "Activity",
     "Settings",
   ]);
   await expect(
     navigation.getByRole("link", { name: "Pull requests" }),
   ).toHaveAttribute("href", "/team/project/pulls");
+  await expect(
+    navigation.getByRole("link", { name: "Projects", exact: true }),
+  ).toHaveAttribute("href", "/team/project/projects");
   await expect(
     navigation.getByRole("link", { name: "Activity", exact: true }),
   ).toHaveAttribute("href", "/team/project/activity");
@@ -1356,6 +1366,28 @@ test("supported source files expose browser-parsed current-file symbols", async 
   await expect(
     symbols.getByRole("button", { name: /serve function 7/ }),
   ).toBeVisible();
+  const resize = page.getByRole("separator", { name: "Resize symbols pane" });
+  const originalWidth = (await symbols.boundingBox())!.width;
+  await resize.focus();
+  await resize.press("ArrowLeft");
+  await expect
+    .poll(async () => (await symbols.boundingBox())!.width)
+    .toBeGreaterThan(originalWidth + 10);
+  const grip = resize.locator(":scope > div");
+  const bounds = (await grip.boundingBox())!;
+  const keyboardWidth = (await symbols.boundingBox())!.width;
+  await page.mouse.move(
+    bounds.x + bounds.width / 2,
+    bounds.y + bounds.height / 2,
+  );
+  await page.mouse.down();
+  await page.mouse.move(bounds.x - 50, bounds.y + bounds.height / 2, {
+    steps: 5,
+  });
+  await page.mouse.up();
+  await expect
+    .poll(async () => (await symbols.boundingBox())!.width)
+    .toBeGreaterThan(keyboardWidth + 35);
   await expectNoAccessibilityViolations(page);
 
   await page.locator(".file-source-code").evaluate((node) => {
@@ -1409,6 +1441,17 @@ test("supported source files expose browser-parsed current-file symbols", async 
     })
     .toEqual([0, 0, 0]);
   await expect(symbols).toBeVisible();
+  await expect
+    .poll(async () => {
+      const [handle, pane] = await Promise.all([
+        grip.boundingBox(),
+        symbols.boundingBox(),
+      ]);
+      return Math.abs(
+        handle!.y + handle!.height / 2 - pane!.y - pane!.height / 2,
+      );
+    })
+    .toBeLessThanOrEqual(1);
   await page.evaluate(() => window.scrollTo(0, 0));
 
   await symbols.getByPlaceholder("Filter symbols").fill("serve");
@@ -1463,6 +1506,139 @@ test("supported source files expose browser-parsed current-file symbols", async 
         .getByRole("button", { name: symbol }),
     ).toBeVisible();
   }
+});
+
+test("source stays beside the file tree across tablet widths and remains reachable on mobile", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1133, height: 1140 });
+  await page.goto("/team/project/blob/main/src/navigation.rs#L82");
+  const source = page.locator('.file-source-code [data-line="82"]');
+  await expect(source).toBeInViewport();
+
+  for (const width of [900, 785, 641, 600, 390, 1133]) {
+    await page.setViewportSize({ width, height: 1140 });
+    if (width > 640) {
+      await expect
+        .poll(() =>
+          page.evaluate(() => {
+            const tree = document
+              .querySelector(".tree-sidebar")!
+              .getBoundingClientRect();
+            const main = document
+              .querySelector(".code-main")!
+              .getBoundingClientRect();
+            return main.left >= tree.right && main.right <= innerWidth;
+          }),
+        )
+        .toBe(true);
+    }
+    await expect(page.locator(".file-source-code")).toBeVisible();
+    expect(
+      await page.evaluate(() => document.documentElement.scrollWidth),
+    ).toBeLessThanOrEqual(width);
+  }
+
+  await page.setViewportSize({ width: 785, height: 1140 });
+  await page
+    .getByRole("button", { name: "Close file tree", exact: true })
+    .click();
+  await expect(page.locator(".tree-sidebar")).toHaveCount(0);
+  await expect
+    .poll(() =>
+      page
+        .locator(".code-main")
+        .evaluate((node) => node.getBoundingClientRect().width),
+    )
+    .toBe(785);
+  await expectNoAccessibilityViolations(page);
+});
+
+test("symbol and line-hash navigation preserve the source horizontal scroll position", async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 1133, height: 900 });
+  await page.goto("/team/project/blob/main/src/navigation.rs#L82");
+  const source = page.locator(".file-source-code [data-code]");
+  const target = page.locator('.file-source-code [data-line="82"]');
+  await expect(target).toBeInViewport();
+  await expect(source).toHaveJSProperty("scrollLeft", 0);
+  const symbols = page.getByRole("complementary", { name: "Code symbols" });
+
+  for (const offset of [0, 120]) {
+    await source.evaluate((node, left) => {
+      node.scrollLeft = left;
+    }, offset);
+    await page.evaluate(() => window.scrollTo({ top: 0, behavior: "instant" }));
+    await symbols
+      .getByRole("button", { name: "navigate function 82", exact: true })
+      .click();
+    await expect(target).toHaveAttribute("data-code-symbol-target", "true");
+    await expect(target).toBeInViewport();
+    await expect
+      .poll(() =>
+        target.evaluate((node) =>
+          Math.abs(
+            node.getBoundingClientRect().top +
+              node.getBoundingClientRect().height / 2 -
+              innerHeight / 2,
+          ),
+        ),
+      )
+      .toBeLessThanOrEqual(1);
+    await expect(source).toHaveJSProperty("scrollLeft", offset);
+    await symbols
+      .getByRole("button", { name: "All symbols", exact: true })
+      .click();
+  }
+  await expect(page).toHaveURL(/#L82$/);
+});
+
+test("long file breadcrumbs keep complete entry names on one line and leave copying reachable", async ({
+  page,
+  context,
+}) => {
+  await context.grantPermissions(["clipboard-read", "clipboard-write"]);
+  const path =
+    "source/commands/history_recovery/fixtures/layered_catalog_reconstruction_tests.rs";
+  await page.setViewportSize({ width: 917, height: 1314 });
+  await page.goto(`/team/project/blob/main/${path}`);
+  const trail = page.getByRole("navigation", {
+    name: "File path",
+    exact: true,
+  });
+  await expect(trail).toBeVisible();
+  const entries = await trail.locator("a, strong").evaluateAll((elements) =>
+    elements.map((element) => {
+      const range = document.createRange();
+      range.selectNodeContents(element);
+      return {
+        lines: range.getClientRects().length,
+        width: element.clientWidth,
+        full: element.scrollWidth,
+      };
+    }),
+  );
+  expect(entries.length).toBeGreaterThan(3);
+  expect(
+    entries.every((entry) => entry.lines === 1 && entry.width >= entry.full),
+  ).toBe(true);
+  await expect(trail.locator("strong")).toBeInViewport({ ratio: 1 });
+  await page.getByRole("button", { name: "Copy path", exact: true }).click();
+  await expect
+    .poll(() => page.evaluate(() => navigator.clipboard.readText()))
+    .toBe(path);
+  await page.setViewportSize({ width: 390, height: 844 });
+  await selectDarkTheme(page);
+  await expect(
+    page.getByRole("separator", { name: "Resize symbols pane" }),
+  ).toHaveCount(0);
+  expect(
+    await page.evaluate(
+      () => document.documentElement.scrollWidth <= innerWidth,
+    ),
+  ).toBe(true);
+  await expectNoAccessibilityViolations(page);
 });
 
 test("format-aware previews explore data, office files, media, and databases locally", async ({
@@ -2869,7 +3045,17 @@ test("repository settings manage members with a revisioned CSRF-protected replac
     (url) => url.pathname === "/api/repos/team/project/members",
     (route) => {
       if (route.request().method() === "GET")
-        return route.fulfill({ json: { revision, members } });
+        return route.fulfill({
+          json: {
+            revision,
+            members,
+            groups: [],
+            can_admin: members.some(
+              (m) => m.subject === "alice-id" && m.access === "admin",
+            ),
+            groups_supported: true,
+          },
+        });
 
       expect(route.request().method()).toBe("PUT");
       expect(route.request().headers()["x-csrf-token"]).toBe("membership-csrf");
@@ -2908,7 +3094,17 @@ test("repository settings manage members with a revisioned CSRF-protected replac
       expect(update.expected_revision).toBe(revision);
       revision += 1;
       members = update.members;
-      return route.fulfill({ json: { revision, members } });
+      return route.fulfill({
+        json: {
+          revision,
+          members,
+          groups: [],
+          can_admin: members.some(
+            (m) => m.subject === "alice-id" && m.access === "admin",
+          ),
+          groups_supported: true,
+        },
+      });
     },
   );
 
@@ -2939,15 +3135,16 @@ test("repository settings manage members with a revisioned CSRF-protected replac
   const removal = page.getByRole("region", { name: "Remove member" });
   await expect(removal).toContainText("Remove this member?");
   await removal.getByRole("button", { name: "Remove member" }).click();
-  await page.getByRole("button", { name: "Save members" }).click();
+  await page.getByRole("button", { name: "Save access" }).click();
   expect(updates[0]).toEqual({
     expected_revision: 42,
+    groups: [],
     members: [
       { subject: "alice-id", name: "Alice", access: "admin" },
       { subject: "charlie-id", name: "Charles", access: "triage" },
     ],
   });
-  await expect(page.getByRole("status")).toContainText("Membership updated.");
+  await expect(page.getByRole("status")).toContainText("Access updated.");
   await page.reload();
   await expect(
     page.locator('.member-role[data-access="triage"]'),
@@ -2957,7 +3154,7 @@ test("repository settings manage members with a revisioned CSRF-protected replac
   await form.getByRole("button", { name: "Access" }).click();
   await page.getByRole("menuitemradio", { name: /^Write/ }).click();
   await form.getByRole("button", { name: "Save member" }).click();
-  await page.getByRole("button", { name: "Save members" }).click();
+  await page.getByRole("button", { name: "Save access" }).click();
   await expect(page.locator('.member-role[data-access="write"]')).toContainText(
     "Write",
   );
@@ -2967,7 +3164,7 @@ test("repository settings manage members with a revisioned CSRF-protected replac
   await form.getByLabel("Display name").fill("Charles draft");
   await form.getByRole("button", { name: "Save member" }).click();
   conflictNext = true;
-  await page.getByRole("button", { name: "Save members" }).click();
+  await page.getByRole("button", { name: "Save access" }).click();
   await expect(page.getByRole("alert")).toContainText(
     "Another administrator changed membership.",
   );
@@ -2982,7 +3179,7 @@ test("repository settings manage members with a revisioned CSRF-protected replac
     .getByRole("region", { name: "Remove member" })
     .getByRole("button", { name: "Remove member" })
     .click();
-  await page.getByRole("button", { name: "Save members" }).click();
+  await page.getByRole("button", { name: "Save access" }).click();
   await expect(page.getByRole("alert")).toContainText(
     "At least one administrator is required.",
   );

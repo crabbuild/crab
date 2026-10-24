@@ -24,6 +24,7 @@ pub(in crate::cells) fn initialize(
         super::issues::lifecycle::initialize(context)?;
         super::pulls::lifecycle::initialize(context)?;
         review_dismissals::initialize(context)?;
+        projects::preparation::initialize(context)?;
         collaboration::submissions::initialize(context)?;
         search::index::initialize(context, repository)?;
         assignments::initialize(context)?;
@@ -57,6 +58,8 @@ pub(in crate::cells) fn initialize(
                 false
             )
             | (collaboration::submissions::preparation::Prepare::ID, true)
+            | (projects::preparation::GetState::ID, false)
+            | (projects::preparation::Prepare::ID, true)
             | (GetRepositoryLifecycle::ID, false)
             | (GetBranchProtections::ID, false)
             | (search::index::GetSearchIndexStatus::ID, false)

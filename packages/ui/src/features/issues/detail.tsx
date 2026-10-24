@@ -1,3 +1,4 @@
+import { SubIssues } from "@/features/projects/discussion";
 import { Author } from "@/components/discussion/author";
 import { Reactions } from "@/components/discussion/reactions";
 import { repoHref } from "@/lib/repository-route";
@@ -146,6 +147,7 @@ export function IssueDetail({
               />
             </article>
           )}
+          <SubIssues repo={repo} number={number} />
           <Comments
             repo={repo}
             issue={current}

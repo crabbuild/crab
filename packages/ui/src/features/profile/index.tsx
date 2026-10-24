@@ -17,7 +17,7 @@ export function ProfileSettings({
   const own = useRequest<OwnProfile>("/api/profile");
   const [saved, setSaved] = useState<ActorProfile>();
   return (
-    <div className="mx-auto grid w-full max-w-5xl gap-8 p-4 sm:grid-cols-[200px_minmax(0,1fr)] sm:p-8">
+    <div className="account-settings">
       <aside aria-label="Account settings">
         <Link
           href="/-/profile"
@@ -56,7 +56,7 @@ export function UserProfile({ id }: { id: string }) {
     `/api/actors/${encodeURIComponent(id)}`,
   );
   return (
-    <section className="mx-auto w-full max-w-3xl p-4 sm:p-8">
+    <section className="account-profile">
       <Result state={actor} timingLabel="Actor profile">
         {(profile) => (
           <article className="flex min-w-0 items-start gap-5 rounded-xl border p-6">

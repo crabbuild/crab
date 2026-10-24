@@ -212,7 +212,8 @@ export function DiscussionWorkspace({
             <TooltipTrigger asChild>
               <Button
                 variant="ghost"
-                className="discussion-sidebar-toggle"
+                size="lg"
+                className="discussion-sidebar-toggle h-11"
                 aria-label={toggle}
                 aria-controls={id}
                 aria-expanded={!collapsed}
