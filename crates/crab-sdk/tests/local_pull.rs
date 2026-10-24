@@ -354,9 +354,11 @@ async fn hydration_failure_reports_new_head() {
     let fixture = fixture();
     let remote = commit(&fixture.git, &fixture.source, "remote.txt", "remote");
     run(&fixture.git, &fixture.source, &["push", "origin", "main"]);
+    // Ordinary files defer provider setup. Fail URL validation instead, so the
+    // real executable exercises this error independently of cloud credentials.
     std::fs::write(
         fixture.checkout.join("crab.toml"),
-        b"version = 1\n[remote]\nurl = \"crab://bucket/repository\"\n",
+        b"version = 1\n[remote]\nurl = \"crab://\"\n",
     )
     .unwrap();
     let sdk = client(fixture.store.path(), fixture.scratch.path());

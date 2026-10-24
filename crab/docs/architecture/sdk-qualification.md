@@ -365,6 +365,33 @@ status operation after the selected Git wrapper exits. All seven tool tests,
 and an all-feature SDK build (`sdk-exited-parent-*.log`). The CLI's separate
 runner already observes cancellation while its pipe workers drain.
 
+At `9b916f06234`, hosted RustFS, Ubuntu, macOS, current-stable and read-performance
+jobs pass ([run 40118036830](https://github.com/crabbuild/crab/actions/runs/40118036830)).
+The [RustFS artifact](https://github.com/crabbuild/crab/actions/runs/40118036830/artifacts/12570527999)
+records ten selected live cases with one pass and zero failures/ignored tests
+each. Native HTTP, the seeded 1 GiB cycle and cleanup pass; the prebuilt local
+cycle peaks at 1.24 GiB against its 2 GiB limit. The
+[read-performance artifact](https://github.com/crabbuild/crab/actions/runs/40118036830/artifacts/12569908572)
+passes five cold/warm pairs at 2.99/0.63 seconds and 427 MiB peak RSS, with paired
+SDK/core ratios 0.931/0.830 and identical origin traffic. Artifact source
+`6f957e867c3` is GitHub's merge of this head into `33f8e6c360d`.
+
+Windows now passes the formerly failing Git-launch/configuration paths, then
+fails `hydration_failure_reports_new_head`: its ordinary-only fixture returns
+`Ready` with the real executable. The Unix stub instead rejects every hydrate
+call. Real hydration correctly avoids provider setup without pending content.
+The fixture now supplies an invalid configured URL, making hydration fail
+deterministically after Git advances HEAD, independently of cloud credentials.
+Its existing failed-hydration/new-HEAD assertions are unchanged. Selecting the
+actual compatible CLI locally reproduces the original failure and passes with
+the corrected fixture (`sdk-pull-hydration-real-{before,after}.log`); direct CLI
+checks also prove ordinary no-op success and invalid-URL rejection. New-head
+Windows proof remains required; shared publication and packaging were queued.
+All eight pull tests, strict SDK all-target lint and pinned workflow lint pass
+with the corrected fixture (`sdk-pull-hydration-fixture-*.log`).
+Platform and current-stable commands now use Cargo's `--no-fail-fast` so one
+failed test target cannot hide later targets; any failure still fails the job.
+
 The gateway write-soak failure is also present at the unchanged `crab-v2` base
 `33f8e6c360d`: [run 40087756593](https://github.com/crabbuild/crab/actions/runs/40087756593)
 retains 0.776928 of early throughput; SDK head `55b0fb9bb4a` retains 0.777382.

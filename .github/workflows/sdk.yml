@@ -237,7 +237,7 @@ jobs:
       - uses: dtolnay/rust-toolchain@stable
       - run: sudo apt-get update -y && sudo apt-get install -y libfuse3-dev
       - uses: Swatinem/rust-cache@v2
-      - run: cargo test -p crab-sdk --locked --all-features
+      - run: cargo test -p crab-sdk --locked --all-features --no-fail-fast
 
   platform:
     name: SDK ${{ matrix.os }}
@@ -267,7 +267,7 @@ jobs:
         run: |
           "CRAB_SDK_TEST_CRAB_BIN=$env:CARGO_TARGET_DIR\debug\crab.exe" |
             Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
-      - run: cargo +${{ env.SDK_MSRV }} test -p crab-sdk --locked --all-features
+      - run: cargo +${{ env.SDK_MSRV }} test -p crab-sdk --locked --all-features --no-fail-fast
 
   rustfs:
     name: SDK RustFS end-to-end
