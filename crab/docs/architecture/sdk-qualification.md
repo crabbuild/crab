@@ -392,6 +392,18 @@ with the corrected fixture (`sdk-pull-hydration-fixture-*.log`).
 Platform and current-stable commands now use Cargo's `--no-fail-fast` so one
 failed test target cannot hide later targets; any failure still fails the job.
 
+A log audit of the passing `18d7cd03d93` publication job finds three metadata
+commands selecting zero tests: their modules require the `storage` feature.
+The other publication/CLI tests pass, but those empty selections are not proof.
+A dedicated metadata step now enables `storage` and uses the existing
+qualification runner to require exactly three native-plan tests, 14 shared
+receipt tests and one restart-recovery test, with no failures or ignored cases.
+It retains JSON reports whose fixture digests bind the defining test sources.
+Running the exact workflow block locally passes all 18 checks; replaying the
+original featureless selection is rejected (`sdk-metadata-feature-*.log`,
+`sdk-metadata-empty-selection.json`). Test assertions and metadata code are
+unchanged. Hosted metadata count reports remain required for this follow-up.
+
 The gateway write-soak failure is also present at the unchanged `crab-v2` base
 `33f8e6c360d`: [run 40087756593](https://github.com/crabbuild/crab/actions/runs/40087756593)
 retains 0.776928 of early throughput; SDK head `55b0fb9bb4a` retains 0.777382.

@@ -201,14 +201,27 @@ jobs:
         run: |
           cargo "+${SDK_MSRV}" test -p crab-lfs --locked --lib
           cargo "+${SDK_MSRV}" test -p crab-remote --locked --all-features --test publication --test capsule_preparation
-          cargo "+${SDK_MSRV}" test -p crab-metadata --locked capsule_protocol::plan::tests
           cargo "+${SDK_MSRV}" test -p crab-auth-server --locked --lib
           cargo "+${SDK_MSRV}" test -p crab-metadata --locked --features file-index-reader --lib file_index_lookup
           cargo "+${SDK_MSRV}" test -p crab-read --locked --lib store_client::tests
           cargo "+${SDK_MSRV}" test -p crab-remote-git --locked budget::tests
-          cargo "+${SDK_MSRV}" test -p crab-metadata --locked plan_receipt::tests
-          cargo "+${SDK_MSRV}" test -p crab-metadata --locked --test plan_receipt_recovery
           cargo "+${SDK_MSRV}" test -p crab-write --locked --test journal --test generation --test catalog
+      - name: Qualify metadata recovery contracts
+        shell: bash
+        run: |
+          while read -r label expected target_kind target fixture_source; do
+            fixture_digest="$(sha256sum "$fixture_source" | cut -d' ' -f1)"
+            python3 crab/scripts/qualify_sdk.py run \
+              --output "$RUNNER_TEMP/sdk-metadata-evidence/${label}.json" \
+              --backend in-memory --features storage --fixture-digest "$fixture_digest" \
+              --expected-tests "$expected" --toolchain "$SDK_MSRV" --timeout-seconds 1200 -- \
+              cargo "+${SDK_MSRV}" test -p crab-metadata --locked --features storage \
+              "$target_kind" "$target"
+          done <<'CASES'
+          capsule-plan 3 --lib capsule_protocol::plan::tests crates/crab-metadata/src/capsule_protocol/plan.rs
+          plan-receipt 14 --lib plan_receipt::tests crates/crab-metadata/src/plan_receipt.rs
+          receipt-recovery 1 --test plan_receipt_recovery crates/crab-metadata/tests/plan_receipt_recovery.rs
+          CASES
       - name: Qualify HTTP receive fault recovery
         run: >-
           cargo "+${SDK_MSRV}" test -p crab-server --locked --lib
@@ -227,6 +240,14 @@ jobs:
           cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport cmd::push::tests::uncertain_commit_does_not_enter_automatic_transient_retry -- --exact
           cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport cmd::mirror::reconcile::tests::lost_success_response_recovers_the_plan_receipt_without_another_push -- --exact
           cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport cmd::gc::tests::repo_gc_retains_plan_recovery_after_compaction_and_restart -- --exact
+      - name: Retain metadata recovery evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-metadata-recovery-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sdk-metadata-evidence/**
+          if-no-files-found: error
+          retention-days: 30
 
   current-rust:
     name: SDK current stable
