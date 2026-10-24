@@ -14,6 +14,25 @@ SPEC.loader.exec_module(RUNNER)
 
 
 class NativeRustfsTests(unittest.TestCase):
+    def test_bulk_delete_per_key_errors_and_missing_acknowledgements_fail(self):
+        for result in ({"Errors": [{"Code": "ServiceUnavailable"}]}, {}):
+            with self.subTest(result=result), tempfile.TemporaryDirectory() as directory:
+                payload = b""
+
+                def response(_environment, *arguments):
+                    nonlocal payload
+                    if arguments[:2] == ("s3api", "put-object"):
+                        payload = Path(arguments[-1]).read_bytes()
+                    if arguments[:2] == ("s3api", "get-object"):
+                        Path(arguments[-1]).write_bytes(payload)
+                    if arguments[:2] == ("s3api", "delete-objects"):
+                        return result
+                    return {}
+
+                with patch.object(RUNNER, "aws", side_effect=response):
+                    with self.assertRaisesRegex(RuntimeError, "bulk deletion"):
+                        RUNNER.preflight_backend({}, Path(directory), "owned-fixture")
+
     def test_backend_errors_retain_diagnostics_without_credentials(self):
         environment = {"AWS_ENDPOINT_URL": "http://127.0.0.1:12345",
                        "AWS_ACCESS_KEY_ID": "fixture-access", "AWS_SECRET_ACCESS_KEY": "fixture-secret"}

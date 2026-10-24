@@ -141,9 +141,13 @@ def preflight_backend(environment: dict[str, str], work: Path, bucket: str) -> N
     received = work / "probe-received"
     content = b"SDK storage contract probe\n"
     body.write_bytes(content)
-    # Check both upload shapes without SDK code before relying on this backend.
-    for multipart in (False, True):
-        key = f"qualification/backend-probe/{multipart}"
+    # The SDK dependency uses bulk deletion even for a single key by default.
+    # Keep a sibling while deleting nested keys to exercise parent pruning too.
+    retained = "qualification/backend-probe/retained"
+    aws(environment, "s3api", "put-object", "--bucket", bucket, "--key", retained,
+        "--body", str(body))
+    for multipart, bulk in ((False, False), (False, True), (True, False), (True, True)):
+        key = f"qualification/backend-probe/{multipart}/{bulk}"
         if multipart:
             upload = aws(environment, "s3api", "create-multipart-upload", "--bucket", bucket,
                          "--key", key)["UploadId"]
@@ -158,7 +162,20 @@ def preflight_backend(environment: dict[str, str], work: Path, bucket: str) -> N
         aws(environment, "s3api", "get-object", "--bucket", bucket, "--key", key, str(received))
         if received.read_bytes() != content:
             raise RuntimeError("fixture backend returned incorrect object bytes")
-        aws(environment, "s3api", "delete-object", "--bucket", bucket, "--key", key)
+        if bulk:
+            request = json.dumps({"Objects": [{"Key": key}], "Quiet": False})
+            result = aws(environment, "s3api", "delete-objects", "--bucket", bucket,
+                         "--delete", request)
+            deleted = [entry.get("Key") for entry in result.get("Deleted", [])]
+            if result.get("Errors") or deleted != [key]:
+                raise RuntimeError("fixture backend did not confirm bulk deletion")
+        else:
+            aws(environment, "s3api", "delete-object", "--bucket", bucket, "--key", key)
+        aws(environment, "s3api", "get-object", "--bucket", bucket,
+            "--key", retained, str(received))
+        if received.read_bytes() != content:
+            raise RuntimeError("fixture backend changed a retained sibling")
+    aws(environment, "s3api", "delete-object", "--bucket", bucket, "--key", retained)
     if aws(environment, "s3api", "list-objects-v2", "--bucket", bucket).get("Contents"):
         raise RuntimeError("fixture backend retained deleted probe objects")
 

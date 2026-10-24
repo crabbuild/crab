@@ -8,6 +8,15 @@ execution or backend qualification. The chronological implementation evidence
 below records intermediate states; current-head CI artifacts supersede those
 states for release decisions.
 
+At `ca8c60759c9`, native capsule access with bucket credentials and a repository
+prefix has live isolated S3-compatible proof: ordinary/LFS/Xet reads, direct
+writes and recovery, local workflows, and native HTTP Git. Linux and macOS live
+lanes pass; Windows reads and recovery pass but cleanup failures prevent its
+write/local cases from qualifying. Credentialed AWS/GCS/Azure and real managed
+service qualification remain outstanding. The SDK is not fully qualified.
+Implemented inventory cells include explicit rejection contracts for unsupported
+operations; they do not represent 45 supported end-to-end features.
+
 ## Native capsule migration, 2026-10-24
 
 The current SDK worktree starts from `33f8e6c360d` on `origin/crab-v2`.
@@ -457,7 +466,13 @@ token assertion; production fetch/integration persistence already uses writable
 handles and directory sync is Unix-only. Windows remains unqualified.
 
 The native harness now checks plain and multipart upload, exact GET bytes and
-deletion through AWS CLI before running SDK cases. Failures retain sanitized
+single/bulk deletion through AWS CLI before running SDK cases. Bulk responses
+must confirm each key and contain no per-key errors: locked `object_store`
+uses `DeleteObjects` even for a single-key SDK deletion by default. The four
+upload/delete combinations preserve a retained sibling while pruning nested
+keys. They pass in an owned native service, and 24 script
+tests pass (one explicit skip), including rejected bulk acknowledgements
+(`sdk-bulk-preflight-*.log/json`, `sdk-bulk-siblings-preflight-live.json`). Failures retain sanitized
 diagnostics; native storage work uses a shorter owned temporary directory and
 retains disk diagnostics. These checks distinguish backend failures from SDK
 failures; they do not waive cleanup or count unexecuted tests as success.
@@ -484,12 +499,47 @@ at 1.15 GiB RSS, backend preflight and cleanup pass. Current-Git HTTP tests,
 strict SDK/remote lint, 23 script tests (one explicit skip), formatting and pinned
 workflow lint pass (`sdk-min-git-*.log/json`). Linux CI now builds checksum-pinned
 Git 2.30.9 and selects these local, direct-storage and actual native HTTP gates.
-Hosted minimum-Git and corrected Windows reports remain required.
+Hosted minimum-Git proof follows below; Windows remains unqualified.
 
 A path-decoder regression also reproduces Unix `repository\r` opening a
 neighboring `repository` and returning its commit. CRLF trimming is now
 Windows-only; Unix native path bytes remain exact. The two-repository regression
 verifies both the selected canonical directory and commit (`sdk-path-cr-*.log`).
+
+At `ca8c60759c9`, the
+[macOS native artifact](https://github.com/crabbuild/crab/actions/runs/40133023479/artifacts/12576082594)
+passes all nine selected cases, backend preflight and cleanup. Its source
+`8c8b2b29377` is GitHub's merge of that head into `33f8e6c360d`. The 10,000-file
+case completes in 12.08 seconds; the mixed large cycle uses 1.23 GiB RSS against
+the 2 GiB limit. The read guard confirms 40 GETs, zero writes and zero proxy
+failures. This artifact predates the additional bulk-delete preflight checks.
+
+The same head's
+[Windows artifact](https://github.com/crabbuild/crab/actions/runs/40133023479/artifacts/12576862048)
+passes restart recovery, both read cases and initialization preservation. Five
+write/local cases still fail during cleanup, and AWS CLI cleanup independently
+returns server errors. Shorter data paths did not resolve the failure. Native
+RustFS logs `remove_dir` failures with an uncategorized error kind but no OS code;
+the underlying cause remains unproven. The
+[release read artifact](https://github.com/crabbuild/crab/actions/runs/40133023479/artifacts/12576547405)
+passes five 1 GiB cold/warm pairs: SDK medians 2.82/0.61 seconds, 418 MiB peak SDK
+RSS, paired SDK/core ratios 0.940/0.820 and identical origin traffic. This is
+isolated RustFS evidence, not credentialed cloud performance or a historical
+before/after speedup.
+
+The same head's
+[Linux RustFS artifact](https://github.com/crabbuild/crab/actions/runs/40133023479/artifacts/12576583508)
+passes the current-Git read/write/recovery, large-tree, HTTP and local cases.
+Its minimum-Git reports identify 2.30.9 and execute 44 local/HTTP tests, eight
+tool tests, three live local workflows and the actual native HTTP case, with
+zero failures or ignored tests. Both large local cycles remain below 2 GiB;
+the hosted cleanup step passes. The
+[package artifact](https://github.com/crabbuild/crab/actions/runs/40133023479/artifacts/12576956708)
+also passes: 18 archives, four external consumer profiles and five required
+compile failures. These artifacts share source `8c8b2b29377`.
+Shared publication, HTTP fault recovery and CLI caller steps also pass at that
+source; the [metadata artifact](https://github.com/crabbuild/crab/actions/runs/40133023479/artifacts/12576504862)
+records 3/14/1 passing tests with no failures or ignored cases.
 
 The gateway write-soak failure is also present at the unchanged `crab-v2` base
 `33f8e6c360d`: [run 40087756593](https://github.com/crabbuild/crab/actions/runs/40087756593)
