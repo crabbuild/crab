@@ -374,6 +374,11 @@ client_secret_file = "/run/secrets/crab/oidc-client-secret"
 state_key_file = "/run/secrets/crab/state-key"
 ```
 
+IdP configuration belongs to the deployment's server TOML, rather than a
+repository settings page. Restart the server after changing it. For local
+browser login, use the [Keycloak development fixture](deploy/oidc/README.md),
+which imports a public PKCE client, sample users and signed group claims.
+
 Keep secrets outside the repository. The existing OIDC flow verifies the signing
 key, issuer, audience/authorized party, expiry, nonce and PKCE exchange. Identity
 is the provider's stable subject, qualified by the issuer; an email, display name
@@ -548,3 +553,25 @@ invocation. Broader protocol, browser, live-storage, and container qualification
 belongs in CI or a dedicated test environment. See the
 [verification commands and evidence](REFERENCE.md#current-verification);
 component tests alone do not establish production readiness.
+
+## Repository projects
+
+Open `/{owner}/{name}/projects` to create a project from Team planning, Kanban,
+Feature release, Bug tracker, Iterative development, Product launch, Roadmap,
+Team retrospective, or a blank Table/Board template. Existing repository ACLs
+apply: Read to view, Write to manage. Projects use native Cellar persistence.
+
+Projects support saved table/board/roadmap views, validated custom fields,
+workflow status/priority/dates, draft notes, current issue/PR references and links,
+settings/README, archival and reusable repository templates. Issue details support
+creating/linking sub-issues, moving/removing parents and live completion progress.
+Creating/converting a project draft into an issue and assigning a parent are
+atomic. Workflow status does not close issues or merge PRs automatically.
+
+For an existing repository, update peers and explicitly run:
+
+```sh
+crab-server --config server.toml cells prepare-projects --owner OWNER --name NAME
+```
+
+See `CELLAR.md` for schema ownership, command recovery, bounds and access rules.

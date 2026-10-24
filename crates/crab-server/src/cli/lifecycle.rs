@@ -5,6 +5,7 @@ pub(super) enum Scope {
     Issue,
     Pull,
     Review,
+    Project,
 }
 
 pub(super) async fn prepare(
@@ -19,6 +20,7 @@ pub(super) async fn prepare(
         Scope::Issue => ("issue-state", &["issue", "bulk", "pins"]),
         Scope::Pull => ("pull-state", &["pull", "bulk"]),
         Scope::Review => ("review-state", &[]),
+        Scope::Project => ("project-state", &[]),
     };
     let path = format!("/internal/repositories/{owner}/{name}/{state}");
     let mut body = frames(config, &path).await?;

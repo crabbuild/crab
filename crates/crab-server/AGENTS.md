@@ -256,3 +256,13 @@ consent and removal against isolated native Cells.
 Update this guide when entry points, ownership, invariants, features, or test
 routes change. Keep detailed API preconditions in rustdoc rather than copying
 them into a second specification.
+
+`cells/repository/projects/` owns repository project definitions, typed fields,
+saved views, item membership and draft conversion. Its `hierarchy.rs` owns
+versioned issue parents, cycle/depth checks and canonical child progress;
+`preparation.rs` alone installs the new feature for existing repositories.
+`api/projects/` owns its repository-authorized HTTP routes and read enrichment
+boundary. Native and HTTP tests stay with those owners. Private preparation
+reuses `server/management/lifecycle.rs` and `cli/lifecycle.rs` through
+`cells prepare-projects`. The browser owner is `packages/ui/src/features/projects/`;
+its account/repository-bound command provider stays above route loading.

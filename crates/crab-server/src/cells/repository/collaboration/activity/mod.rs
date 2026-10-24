@@ -12,6 +12,22 @@ const SEQUENCE: &str = "collaboration/v1/activity/sequence";
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Action {
+    ProjectChanged {
+        project: uuid::Uuid,
+        title: String,
+    },
+    ProjectRemoved {
+        project: uuid::Uuid,
+        title: String,
+    },
+    ParentAssigned {
+        number: u64,
+        title: String,
+    },
+    ParentRemoved {
+        number: u64,
+        title: String,
+    },
     Created,
     Drafted,
     ReadyForReview,
@@ -61,12 +77,13 @@ pub(crate) enum Action {
 impl Action {
     pub(super) fn related_subject(&self) -> Option<Subject> {
         match self {
-            Self::IssueLinked { number, .. } | Self::IssueUnlinked { number, .. } => {
-                Some(Subject {
-                    kind: super::SubjectKind::Issue,
-                    number: *number,
-                })
-            }
+            Self::IssueLinked { number, .. }
+            | Self::IssueUnlinked { number, .. }
+            | Self::ParentAssigned { number, .. }
+            | Self::ParentRemoved { number, .. } => Some(Subject {
+                kind: super::SubjectKind::Issue,
+                number: *number,
+            }),
             _ => None,
         }
     }
@@ -75,7 +92,11 @@ impl Action {
         let valid = match target {
             Target::Issue { .. } => matches!(
                 self,
-                Self::Created
+                Self::ProjectChanged { .. }
+                    | Self::ProjectRemoved { .. }
+                    | Self::ParentAssigned { .. }
+                    | Self::ParentRemoved { .. }
+                    | Self::Created
                     | Self::Updated
                     | Self::Closed
                     | Self::Reopened
@@ -88,7 +109,9 @@ impl Action {
             ),
             Target::Pull { .. } => matches!(
                 self,
-                Self::Created
+                Self::ProjectChanged { .. }
+                    | Self::ProjectRemoved { .. }
+                    | Self::Created
                     | Self::Updated
                     | Self::Closed
                     | Self::Reopened
@@ -121,9 +144,19 @@ impl Action {
         if let Self::MilestoneAssigned { number, title }
         | Self::MilestoneRemoved { number, title }
         | Self::IssueLinked { number, title }
-        | Self::IssueUnlinked { number, title } = self
+        | Self::IssueUnlinked { number, title }
+        | Self::ParentAssigned { number, title }
+        | Self::ParentRemoved { number, title } = self
         {
             validate_number(*number)?;
+            validate_title(title)?;
+        }
+        if let Self::ProjectChanged { project, title } | Self::ProjectRemoved { project, title } =
+            self
+        {
+            if project.is_nil() {
+                return Err(crate::cells::Error::Invalid("activity project is invalid"));
+            }
             validate_title(title)?;
         }
         if let Self::ReviewRequested { reviewer } | Self::ReviewRequestCancelled { reviewer } = self

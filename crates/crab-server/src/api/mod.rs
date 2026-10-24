@@ -17,6 +17,7 @@ mod members;
 mod milestones;
 mod organizations;
 mod profiles;
+mod projects;
 mod pulls;
 mod reactions;
 mod releases;
@@ -427,6 +428,7 @@ pub(crate) fn routes(server: Arc<Server>) -> axum::Router<Arc<Server>> {
         .merge(discussion_state::routes(Arc::clone(&server)))
         .merge(discussion_bulk::routes(Arc::clone(&server)))
         .merge(links::routes(Arc::clone(&server)))
+        .merge(projects::routes(Arc::clone(&server)))
         .merge(reactions::routes(Arc::clone(&server)))
         .merge(assignees::routes(Arc::clone(&server)))
         .merge(branches::routes())

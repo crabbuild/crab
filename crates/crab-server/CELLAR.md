@@ -881,3 +881,66 @@ the access editor was visible. No grants, profiles or organizations were created
 in the preserved preview. Source growth is about 348 production lines for verified
 group claims, shared role resolution, atomic access-list edits and the group editor;
 there is one canonical grant owner and no additional authorization store.
+
+## Repository projects and sub-issues
+
+`cells/repository/projects/` owns repository-scoped project definitions, typed
+issue/PR memberships, draft items, planning fields, saved views, and issue parent
+edges. All records live in the existing native Repository Cell. Fresh repository
+initialization installs `projects/schema.sql`. Existing repositories require an
+explicit private preparation after all serving peers have been updated:
+
+```sh
+crab-server --config server.toml cells prepare-projects --owner OWNER --name NAME
+```
+
+Preparation installs only empty project/parent relations and indexes; it does not
+rewrite issues, PRs, assignments, discussion indexes, or their receipts. Ordinary
+reads and commands return `schema_upgrade_required` until prepared. There is no
+serving-time DDL or historical-reader fallback.
+
+Repository Read permits project reads. Write permits project/item/parent commands;
+repository archival rejects fresh changes. Projects inherit the repository ACL,
+including individual/SSO group grants; they do not create organization or team
+authority. Project archival retains memberships, permits settings/reopening, and
+rejects item changes. Public handlers recheck current catalog membership after
+native reads. Mutation headers retain the shared stable-repository binding.
+
+`projects/commands` and `projects/cancel` accept the same `{request_id, command}`.
+The native transaction commits domain changes, discussion activity, and a
+permanent issuer/subject/payload-bound decision together. A rejection rolls back
+domain work before its decision is recorded. Cancellation either recovers that
+decision or fences an unapplied command. Immutable JSON/body-limit rejections use the existing proven-rejection response
+marker; authority/transport failures remain unproven. An uncertain browser submission retains
+its account, repository UUID, payload, and UUID above route loading, warns before
+unload, and permits only retry/cancellation until resolved. Conflicting settings
+and item drafts retain the version on which editing started.
+
+Built-in templates seed workflows, typed fields, and table/board/roadmap views.
+Repository templates copy definitions, without copying issue/PR memberships.
+Definitions allow 12 workflow statuses, 12 views and 20 text/number/date/select
+fields, bounded to 64 KiB. Items allow 24 KiB including their draft body/field
+values. Existing field types remain stable while items exist; select options may
+expand. Removing an occupied workflow status is rejected. Each repository has at
+most 200 projects, each project 1,000 items, and each discussion 20 memberships.
+Project collections seek 20 UUIDs per page; item pages seek 50 and bind subsequent
+pages to the repository revision. Counts and rows share a native snapshot. Board
+counts cover the complete filtered project even when rows are paginated.
+
+Project items reference canonical issues/PRs by kind and number. Native reads
+compose their current title/state, issue parent and direct-child progress, and a
+bounded linked-work summary in the same transaction. Title search for adding work
+uses the existing discussion index; `#number` uses indexed point reads. Planning
+status is independent of issue state and PR merge readiness. Draft-to-issue
+conversion, project attachment, and optional parent assignment commit atomically;
+failed attachment leaves neither an orphan issue nor a lost draft.
+
+Sub-issues have one versioned parent, at most 100 direct children and 16 levels.
+Reparenting checks ancestors and a bounded subtree before changing either edge.
+Removing a parent keeps its version tombstone, preventing delayed edits from
+replacing a newer relationship. Parent activity appears in both issue timelines.
+Creating a sub-issue from its parent is one native transaction. Child progress
+reads canonical issue states and updates immediately when children close/reopen.
+
+This is repository project management. Cross-repository organization projects,
+project-specific ACLs, workflow automation and analytics are outside this slice.

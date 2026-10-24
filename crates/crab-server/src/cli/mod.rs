@@ -110,6 +110,13 @@ enum CellsCommand {
         #[arg(long)]
         name: String,
     },
+    /// Prepare project and sub-issue storage for an existing repository.
+    PrepareProjects {
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        name: String,
+    },
     /// Prepare canonical review dismissal storage before reopening traffic.
     PrepareReviewState {
         #[arg(long)]
@@ -314,6 +321,9 @@ async fn cells(config: &crab_server::Config, command: CellsCommand) -> crab_serv
         }
         CellsCommand::PreparePullState { owner, name } => {
             lifecycle::prepare(config, &owner, &name, lifecycle::Scope::Pull).await?
+        }
+        CellsCommand::PrepareProjects { owner, name } => {
+            lifecycle::prepare(config, &owner, &name, lifecycle::Scope::Project).await?
         }
         CellsCommand::PrepareReviewState { owner, name } => {
             lifecycle::prepare(config, &owner, &name, lifecycle::Scope::Review).await?

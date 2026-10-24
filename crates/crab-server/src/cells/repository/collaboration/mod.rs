@@ -138,7 +138,7 @@ pub(crate) enum Decision<T> {
     LimitReached,
 }
 
-fn next_version(value: u64) -> crate::cells::Result<u64> {
+pub(in crate::cells::repository) fn next_version(value: u64) -> crate::cells::Result<u64> {
     value
         .checked_add(1)
         .filter(|next| *next <= super::MAX_NUMBER)

@@ -90,6 +90,7 @@ pub(crate) mod issues;
 mod labels;
 mod models;
 pub(crate) mod projection;
+pub(crate) mod projects;
 mod pulls;
 mod releases;
 mod schema;
