@@ -1007,6 +1007,8 @@ async fn git_path(
         .await
         .map_err(local_error)?;
     let raw = output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout);
+    // Unix carriage returns are filename bytes; trimming can select another repository.
+    #[cfg(windows)]
     let raw = raw.strip_suffix(b"\r").unwrap_or(raw);
     if raw.is_empty() || raw.contains(&0) {
         return Err(Error::new(

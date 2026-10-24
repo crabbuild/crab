@@ -200,6 +200,34 @@ async fn linked_worktree_preserves_sibling() {
     sdk.close().await.unwrap();
 }
 
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn local_open_preserves_trailing_carriage_return() {
+    let scratch = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let git = git_path();
+    let neighbor = scratch.path().join("repository");
+    let actual = scratch.path().join("repository\r");
+    for path in [&neighbor, &actual] {
+        std::fs::create_dir(path).unwrap();
+        run(&git, path, &["init", "-b", "main"]);
+    }
+    commit(&git, &neighbor, "file.txt", "neighbor");
+    let target = commit(&git, &actual, "file.txt", "actual");
+    let sdk = client(store.path(), scratch.path());
+    let repository = sdk
+        .open(crab_sdk::OpenOptions::local(&actual))
+        .await
+        .unwrap();
+    let local = repository.local().unwrap();
+    let snapshot = local.snapshot("HEAD").await.unwrap();
+    assert_eq!(
+        (local.path(), snapshot.commit_id().to_string()),
+        (actual.canonicalize().unwrap().as_path(), target)
+    );
+    sdk.close().await.unwrap();
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn fetch_recovers_each_metadata_boundary() {
     let scratch = tempfile::tempdir().unwrap();

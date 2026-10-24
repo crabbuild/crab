@@ -544,7 +544,7 @@ jobs:
           python3 crab/scripts/qualify_sdk.py run \
             --output "$RUNNER_TEMP/sdk-evidence/minimum-git-local.json" \
             --backend filesystem --features remote,content,write,local,managed --fixture-digest "$fixture_digest" \
-            --expected-tests 43 --toolchain "$SDK_MSRV" \
+            --expected-tests 44 --toolchain "$SDK_MSRV" \
             --git "$CRAB_SDK_TEST_GIT_BIN" --crab "$CRAB_SDK_TEST_CRAB_BIN" \
             --timeout-seconds 1200 -- \
             cargo "+${SDK_MSRV}" test -p crab-sdk --locked --all-features \

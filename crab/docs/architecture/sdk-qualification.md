@@ -477,7 +477,7 @@ failure only, advertised object IDs can establish the unsupported format while
 preserving the original error. Healthy clones add no request. The empty HTTP
 fixture follows Git's selected branch: Git 2.30 does not advertise unborn HEAD;
 the 2.31 protocol adds that feature. Direct capsule clones retain their captured
-native HEAD contract. All 43 local/HTTP tests and eight tool tests pass under
+native HEAD contract. All 44 local/HTTP tests and eight tool tests pass under
 2.30.9, including the unchanged hook/filter assertions. All nine native RustFS
 cases also pass locally with that Git: the mixed large cycle takes 274.91 seconds
 at 1.15 GiB RSS, backend preflight and cleanup pass. Current-Git HTTP tests,
@@ -485,6 +485,11 @@ strict SDK/remote lint, 23 script tests (one explicit skip), formatting and pinn
 workflow lint pass (`sdk-min-git-*.log/json`). Linux CI now builds checksum-pinned
 Git 2.30.9 and selects these local, direct-storage and actual native HTTP gates.
 Hosted minimum-Git and corrected Windows reports remain required.
+
+A path-decoder regression also reproduces Unix `repository\r` opening a
+neighboring `repository` and returning its commit. CRLF trimming is now
+Windows-only; Unix native path bytes remain exact. The two-repository regression
+verifies both the selected canonical directory and commit (`sdk-path-cr-*.log`).
 
 The gateway write-soak failure is also present at the unchanged `crab-v2` base
 `33f8e6c360d`: [run 40087756593](https://github.com/crabbuild/crab/actions/runs/40087756593)
