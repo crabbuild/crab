@@ -152,9 +152,11 @@ def qualify(output: Path, tests: dict[str, Path], environment: dict[str, str],
             toolchain: str, git: Path, crab: Path) -> None:
     sources = [ROOT / f"crates/crab-sdk/tests/{name}.rs"
                for name in ("remote_blob", "remote_write", "local_round_trip")]
+    sources.append(ROOT / "crates/crab-sdk/tests/remote_blob/large_tree.rs")
     digest = hashlib.sha256(b"".join(path.read_bytes() for path in sources)).hexdigest()
     cases = [
         ("remote_blob", "s3_pack_reads_survive_source_removal_and_keep_snapshots_pinned"),
+        ("remote_blob", "large_tree::s3_ten_thousand_files_paginate_and_archive_without_source"),
         ("remote_write", "remote_edit_round_trip_without_git"),
         ("remote_write", "stale_ref_batch_changes_no_refs"),
         ("remote_write", "initialization_preserves_foreign_content"),
@@ -173,7 +175,7 @@ def qualify(output: Path, tests: dict[str, Path], environment: dict[str, str],
             "--fixture-digest", digest, "--expected-tests", "1", "--toolchain", toolchain,
             "--git", str(git), "--crab", str(crab), "--timeout-seconds", "1800",
         ]
-        if target == "remote_blob":
+        if case == "s3_pack_reads_survive_source_removal_and_keep_snapshots_pinned":
             arguments += ["--transport-report", environment["CRAB_SDK_TEST_READ_GUARD_REPORT"]]
         if target == "local_round_trip":
             arguments += ["--require-rss-below", "2147483648"]

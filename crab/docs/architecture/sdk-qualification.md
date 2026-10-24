@@ -411,7 +411,7 @@ The package artifact verifies 18 archives, four external consumer profiles and
 five expected compile failures. Live AWS/GCS/Azure/managed jobs are skipped;
 ordinary macOS/Windows tests do not qualify live storage transfers.
 
-The platform lane now selects eight live cases against an owned native RustFS
+The platform lane now selects nine live cases against an owned native RustFS
 on macOS arm64 and Windows x86_64. The harness pins official RustFS 1.0.3 assets
 by SHA-256, isolates inherited provider selectors, creates a fresh loopback
 server and bucket, and verifies object/multipart cleanup before stopping it.
@@ -430,6 +430,16 @@ rehearsal seeds one object and one incomplete multipart upload, removes both,
 and verifies bucket removal (`sdk-native-cleanup-rehearsal.json`). Four harness
 regressions, the SDK script suite, strict changed-test Clippy, formatting and
 pinned workflow lint pass. These worktree checks do not replace hosted reports.
+
+The additional scale case publishes a native tree containing 10,000 ordinary
+4 KiB files, removes its source checkout and pack, and verifies ordered SDK
+pagination plus every streamed archive entry. Default finite traversal limits
+still reject oversized work; explicit larger limits permit the complete
+archive. The minimal remote profile and all-feature read siblings pass locally.
+The native RustFS case passes in 6.42 seconds including fixture creation, at
+33 MiB process-tree RSS; owned-bucket cleanup passes (`sdk-large-tree-*.log/json`).
+This is path/tree qualification using repeated bytes, not a throughput result.
+Linux and native macOS/Windows lanes explicitly select the live case.
 
 The gateway write-soak failure is also present at the unchanged `crab-v2` base
 `33f8e6c360d`: [run 40087756593](https://github.com/crabbuild/crab/actions/runs/40087756593)

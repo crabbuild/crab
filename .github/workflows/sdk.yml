@@ -426,6 +426,19 @@ jobs:
           --features remote,content --test remote_blob
           s3_pack_reads_survive_source_removal_and_keep_snapshots_pinned
           -- --exact --ignored --nocapture
+      - name: Qualify large ordinary trees
+        run: >-
+          python3 crab/scripts/qualify_sdk.py run
+          --output "$RUNNER_TEMP/sdk-evidence/large-tree.json"
+          --backend rustfs --features remote,content
+          --fixture-digest "$(sha256sum crates/crab-sdk/tests/remote_blob/large_tree.rs | cut -d' ' -f1)"
+          --expected-tests 1 --toolchain "$SDK_MSRV"
+          --git "$CRAB_SDK_TEST_GIT_BIN" --crab "$CRAB_SDK_TEST_CRAB_BIN"
+          --timeout-seconds 1200 --
+          cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features
+          --features remote,content --test remote_blob
+          large_tree::s3_ten_thousand_files_paginate_and_archive_without_source
+          -- --exact --ignored --nocapture
       - name: Qualify remote write and recovery
         shell: bash
         run: |

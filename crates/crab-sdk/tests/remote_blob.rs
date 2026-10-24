@@ -8,6 +8,8 @@ mod crab;
 #[cfg(feature = "content")]
 #[path = "remote_blob/large.rs"]
 mod large;
+#[path = "remote_blob/large_tree.rs"]
+mod large_tree;
 #[cfg(feature = "content")]
 #[path = "remote_blob/lfs.rs"]
 mod lfs;
