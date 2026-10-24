@@ -6,6 +6,10 @@ use tokio_util::sync::CancellationToken;
 #[ignore = "requires isolated RustFS and the compiled SDK HTTP test binary"]
 async fn native_http_sdk_rustfs() {
     let sdk = std::env::var_os("CRAB_SDK_HTTP_TEST_BIN").expect("compiled SDK HTTP tests");
+    // Hosted Git LFS installations provide global drivers. The approved local
+    // Crab driver must win without allowing those shadowed commands to execute.
+    let global_config = tempfile::NamedTempFile::new().unwrap();
+    std::fs::write(global_config.path(), "[filter \"lfs\"]\nprocess = git-lfs filter-process\nclean = git-lfs clean -- %f\nsmudge = git-lfs smudge -- %f\nrequired = true\n").unwrap();
     let server = super::rustfs_server().await;
     let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
     let address = listener.local_addr().unwrap();
@@ -29,6 +33,7 @@ async fn native_http_sdk_rustfs() {
             "--nocapture",
         ])
         .env("CRAB_SDK_TEST_HTTP_URL", url)
+        .env("GIT_CONFIG_GLOBAL", global_config.path())
         .kill_on_drop(true)
         .output()
         .await;

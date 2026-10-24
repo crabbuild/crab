@@ -541,7 +541,7 @@ async fn hydrated_clone(
     target
 }
 
-fn failure(error: &crab_sdk::Error) -> String {
+pub(super) fn failure(error: &crab_sdk::Error) -> String {
     let mut message = error.to_string();
     let mut source = error.source();
     while let Some(error) = source {

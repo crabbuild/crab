@@ -604,7 +604,7 @@ impl LocalTools {
             Err(error) => return Err(error),
         };
         let expected = local_filter_driver_values(&self.inner.crab).unwrap_or_default();
-        let mut overrides = Vec::new();
+        let mut effective = std::collections::BTreeMap::new();
         for entry in output.stdout.split(|byte| *byte == 0) {
             if entry.is_empty() {
                 continue;
@@ -615,6 +615,13 @@ impl LocalTools {
             let name = std::str::from_utf8(&entry[..separator])
                 .map_err(|_| LocalError::GitConfigSyntax)?;
             let value = &entry[separator + 1..];
+            // Git returns canonical keys in precedence order. A shadowed global
+            // driver must not disable the approved repository-local filter;
+            // evaluate only the last value, as Git does when executing it.
+            effective.insert(name, value);
+        }
+        let mut overrides = Vec::new();
+        for (name, value) in effective {
             if expected.iter().any(|(key, expected)| {
                 name.eq_ignore_ascii_case(key) && value == expected.as_bytes()
             }) {
@@ -932,6 +939,60 @@ mod tests {
             )
         );
         assert_eq!(values[3], ("filter.crab.required", "true".to_owned()));
+    }
+
+    #[tokio::test]
+    async fn untrusted_processes_preserve_the_effective_approved_filter() {
+        let root = tempfile::tempdir().unwrap();
+        let global = root.path().join("global.config");
+        std::fs::write(&global, "[filter \"lfs\"]\nprocess = untrusted-program\n").unwrap();
+        let git = git_path();
+        let tools = LocalTools::new(&git, &git).unwrap().with_environment(vec![
+            ("GIT_CONFIG_GLOBAL".into(), Some(global.into_os_string())),
+            ("GIT_CONFIG_NOSYSTEM".into(), Some("1".into())),
+        ]);
+        let cancel = CancellationToken::new();
+        tools
+            .run_git(Some(root.path()), ["init"], true, &cancel)
+            .await
+            .unwrap();
+        tools.configure_filters(root.path(), &cancel).await.unwrap();
+        let expected = local_filter_driver_values(&git)
+            .unwrap()
+            .into_iter()
+            .find(|(key, _)| *key == "filter.lfs.process")
+            .unwrap()
+            .1;
+        for (value, approved) in [
+            (expected.as_str(), true),
+            ("untrusted-program", false),
+            (expected.as_str(), true),
+        ] {
+            tools
+                .run_git(
+                    Some(root.path()),
+                    ["config", "--add", "filter.lfs.process", value],
+                    true,
+                    &cancel,
+                )
+                .await
+                .unwrap();
+            let actual = tools
+                .run_git(
+                    Some(root.path()),
+                    ["config", "--get", "filter.lfs.process"],
+                    false,
+                    &cancel,
+                )
+                .await
+                .unwrap();
+            let expected = if approved {
+                format!("{expected}\n")
+            } else {
+                "\n".to_owned()
+            };
+            assert_eq!(actual.stdout, expected.as_bytes());
+        }
     }
 
     #[tokio::test]

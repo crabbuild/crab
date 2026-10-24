@@ -279,6 +279,31 @@ precedes revision configuration, matching the direct clone's absent-head path.
 The regression clones an unborn branch, creates its first local commit and
 publishes it through the SDK (`sdk-empty-http-{before,after}.log`).
 
+The `cb9961e088a` [1 GiB performance artifact](https://github.com/crabbuild/crab/actions/runs/40107811251/artifacts/12565776452)
+passes five cold/warm pairs on Linux x86_64. SDK medians are 2.84/0.63 seconds,
+with a 420 MiB peak process-tree RSS. Paired SDK/core latency ratios are
+0.888/0.843, with identical request counts (33/12) and response bytes. Its source
+is CI merge `3598b20b2f20`, combining this head with base `33f8e6c360d`.
+These paired results measure SDK overhead on that runner; separate hosted runs
+do not establish a before/after performance improvement.
+
+At `cb9961e088a`, six non-opt-in SDK jobs pass; the native HTTP and Windows
+configuration-fixture jobs fail. The native HTTP diagnostic identifies the LFS
+smudge path. An isolated global LFS driver reproduces the same clone failure
+locally: the untrusted-command guard disabled the approved local process because
+it also evaluated a shadowed global value. It now normalizes Git's canonical
+keys to their effective last value before applying the existing policy, following
+the [Git configuration precedence contract](https://git-scm.com/docs/git-config).
+The regression checks approved/unapproved final values; the complete native
+HTTP/LFS fixture also passes with the shadowed driver. The host fixture now
+supplies that global configuration explicitly for all platforms.
+
+Windows still fails the ordinary eager configuration clone after lazy provider
+admission. Its source chain is now retained. Running that same configuration
+test with the actual compatible CLI succeeds locally; the Unix mock remains
+available for command-selection assertions. The Windows cause remains unproven
+pending the next hosted diagnostic. No passing local check qualifies it.
+
 The gateway write-soak failure is also present at the unchanged `crab-v2` base
 `33f8e6c360d`: [run 40087756593](https://github.com/crabbuild/crab/actions/runs/40087756593)
 retains 0.776928 of early throughput; SDK head `55b0fb9bb4a` retains 0.777382.

@@ -407,14 +407,31 @@ async fn clone_hydration_precedence_matches_committed_project_config() {
     );
     let server = GitHttpServer::start(fixture.path().to_owned(), git_path());
     let store = tempfile::tempdir().unwrap();
-    let sdk = client(store.path(), fixture.path());
+    let real_crab = cfg!(unix)
+        .then(|| std::env::var_os("CRAB_SDK_TEST_CRAB_BIN"))
+        .flatten();
+    #[cfg(unix)]
+    let mocked = real_crab.is_none();
+    let sdk = if let Some(crab) = real_crab {
+        crab_sdk::Client::builder()
+            .direct_store(crab_sdk::storage::DirectStoreOptions::filesystem(store.path()).unwrap())
+            .local(crab_sdk::local::Options::new(
+                crab_sdk::local::Tools::new(git_path(), PathBuf::from(crab)).unwrap(),
+            ))
+            .build()
+            .unwrap()
+    } else {
+        client(store.path(), fixture.path())
+    };
 
     #[cfg(unix)]
-    std::fs::write(
-        fixture.path().join("crab fixture.enable-hydrate"),
-        b"enabled",
-    )
-    .unwrap();
+    if mocked {
+        std::fs::write(
+            fixture.path().join("crab fixture.enable-hydrate"),
+            b"enabled",
+        )
+        .unwrap();
+    }
 
     let configured = fixture.path().join("configured-hydration");
     sdk.clone_local(
@@ -423,14 +440,14 @@ async fn clone_hydration_precedence_matches_committed_project_config() {
         CloneOptions::default(),
     )
     .await
-    .unwrap();
+    .unwrap_or_else(|error| panic!("configured HTTP clone: {}", native_crab::failure(&error)));
     assert!(
         std::fs::read_to_string(configured.join(".crab/local.toml"))
             .unwrap()
             .contains("lazy = false")
     );
     #[cfg(unix)]
-    {
+    if mocked {
         assert_eq!(
             std::fs::read_to_string(fixture.path().join("crab fixture.hydrate")).unwrap(),
             "--json\n--all\n"
@@ -445,7 +462,7 @@ async fn clone_hydration_precedence_matches_committed_project_config() {
         CloneOptions::default().lazy(),
     )
     .await
-    .unwrap();
+    .unwrap_or_else(|error| panic!("explicit HTTP clone: {}", native_crab::failure(&error)));
     assert!(
         std::fs::read_to_string(overridden.join(".crab/local.toml"))
             .unwrap()
@@ -474,16 +491,18 @@ async fn clone_hydration_precedence_matches_committed_project_config() {
             CloneOptions::default(),
         )
         .await
-        .unwrap();
+        .unwrap_or_else(|error| panic!("patterned HTTP clone: {}", native_crab::failure(&error)));
         assert!(
             std::fs::read_to_string(patterned.join(".crab/local.toml"))
                 .unwrap()
                 .contains("lazy = true")
         );
-        assert_eq!(
-            std::fs::read_to_string(fixture.path().join("crab fixture.hydrate")).unwrap(),
-            "--json\n--\nmodels/**\n-leading\n"
-        );
+        if mocked {
+            assert_eq!(
+                std::fs::read_to_string(fixture.path().join("crab fixture.hydrate")).unwrap(),
+                "--json\n--\nmodels/**\n-leading\n"
+            );
+        }
     }
     sdk.close().await.unwrap();
 }
