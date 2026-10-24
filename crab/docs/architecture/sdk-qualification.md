@@ -71,9 +71,10 @@ The committed web sources also pass production Next.js build, typecheck, lint
 (no errors), all ten web tests and rendered link validation in an isolated source
 copy on the workspace volume. Link validation covers 398 HTML pages and 4,307
 fragments (`sdk-native-web-*.log`). The prior missing-build link-check failure is
-resolved. Repository and organization metadata expose no configured SDK provider
-secrets or managed fixture variables, and no runner with the `sdk-managed` label
-is registered; opt-in live-backend jobs cannot run in the present environment.
+resolved. Repository metadata exposes no configured SDK provider secrets or
+managed fixture variables, and no runner with the `sdk-managed` label is
+registered. Organization secret/variable listings now return HTTP 403, so their
+availability is unknown; opt-in live-backend jobs cannot be qualified here.
 
 The follow-up dependency audit reproduced legacy lookup through the shared
 current-state file-index opener used by clean/filter/hydration and term/store
@@ -157,6 +158,42 @@ Both client and server runtimes drain before assertions; the owned object
 service stops after verification. The existing native HTTP RustFS suite also
 passes with the shared fixture (`sdk-native-http-sibling.log`). SDK CI explicitly
 selects the new live case and validates both compiled test artifacts.
+
+All eight non-opt-in SDK jobs pass at `229808789c0`
+([run 40090784067](https://github.com/crabbuild/crab/actions/runs/40090784067)).
+Its RustFS artifact records one passed, zero failed and zero ignored tests for
+each selected live case, including native HTTP. Read-only example transport
+records 40 GETs and zero writes. The prebuilt 1 GiB local cycle peaks at 1.21 GiB,
+below its 2 GiB limit, and cleanup passes. The read-performance artifact passes
+five cold/warm pairs with medians of 6.78/0.76 seconds and 457 MiB peak RSS;
+paired SDK/core latency ratios are 0.999/1.025 with identical origin traffic.
+Artifact source `31a0eae1732` is GitHub's merge of that head into `33f8e6c360d`.
+The full protocol workflow also passes at that head
+([run 40090784107](https://github.com/crabbuild/crab/actions/runs/40090784107)),
+alongside architecture, provider, replica, cache, NFS and HTTP-container checks.
+
+The phase-0 profile also requires credentialed AWS S3, which the workflow
+previously omitted. Its opt-in S3 lane now selects native ordinary/LFS/Xet reads,
+remote writes, restart recovery and all three local workflows. Configure
+`CRAB_SDK_TEST_S3_BUCKET`, `CRAB_SDK_TEST_S3_ACCESS_KEY_ID` and
+`CRAB_SDK_TEST_S3_SECRET_ACCESS_KEY` secrets, the optional
+`CRAB_SDK_TEST_S3_SESSION_TOKEN` secret, and the existing `AWS_REGION` variable.
+Use an exclusive empty general-purpose bucket in a commercial AWS region that
+has never enabled versioning, so fixture deletions cannot retain old versions.
+The identity needs bucket versioning/list access and fixture object read/write/
+delete access. Preflight rejects populated or versioned buckets before writes.
+Tests remove repository objects. Workflow cleanup rejects unrelated keys,
+deletes explicitly listed shared `.crab/` and run-owned recovery objects after
+clients exit, and checks that the bucket is empty. The explicit local client
+also carries session tokens through its isolated child environment. This lane
+has no live AWS evidence yet; its functional reports include Cargo descendants
+and do not establish runtime-only memory limits.
+All three local workflows pass after the credential-fixture change. A live
+RustFS cleanup rehearsal removes eight retained shared objects and verifies zero
+remaining objects. Thirteen guard cases cover preflight rejection, unrelated
+keys, per-object deletion errors, residual writes and 1,000-key batch limits;
+strict SDK test-target Clippy and pinned workflow linting pass. These are local
+harness checks, not credentialed AWS evidence (`sdk-s3-lane-*.log/json`).
 
 The gateway write-soak failure is also present at the unchanged `crab-v2` base
 `33f8e6c360d`: [run 40087756593](https://github.com/crabbuild/crab/actions/runs/40087756593)

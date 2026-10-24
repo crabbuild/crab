@@ -37,7 +37,7 @@ fn failure(error: &crab_sdk::Error) -> String {
 fn live_client(scratch: &Path) -> (Client, RepositoryLocator) {
     let bucket = required("CRAB_SDK_TEST_S3_BUCKET");
     let endpoint = required("AWS_ENDPOINT_URL_S3");
-    let options = S3Options::new(
+    let mut options = S3Options::new(
         &bucket,
         &required("AWS_REGION"),
         &required("AWS_ACCESS_KEY_ID"),
@@ -45,6 +45,13 @@ fn live_client(scratch: &Path) -> (Client, RepositoryLocator) {
     )
     .unwrap()
     .with_endpoint(&endpoint);
+    // Child environments retain only the credentials bound to this explicit
+    // store, including the session scope of temporary AWS credentials.
+    if let Ok(token) = std::env::var("AWS_SESSION_TOKEN")
+        && !token.is_empty()
+    {
+        options = options.with_session_token(&token).unwrap();
+    }
     let cache = scratch.join("cache");
     std::fs::create_dir(&cache).unwrap();
     let client = Client::builder()
