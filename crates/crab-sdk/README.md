@@ -123,7 +123,9 @@ file edits, commit creation, atomic ref updates, and result handling.
 ## Local repositories
 
 Enable `local` and provide absolute paths to compatible Git and Crab
-executables. Opening a local repository does not contact its remote.
+executables. Crab must advertise the `git-forward` capability so nested calls
+use the selected Git installation, including its wrapper and support files.
+Opening a local repository does not contact its remote.
 
 ```rust,no_run
 use crab_sdk::local::{Options as LocalOptions, Tools};

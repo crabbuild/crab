@@ -425,6 +425,9 @@ format versions, and product build identity. Reject incompatible capabilities
 before changing a repository. Product version strings alone are insufficient.
 Git minimum is 2.30.9, matching the existing compatibility matrix; use only
 commands available at that minimum and test it alongside current Git.
+The executable must advertise `git-forward`: private child discovery forwards
+to the exact selected Git path without moving installation wrappers. Its
+internal target binding is scoped to child processes, not user configuration.
 
 Extract `crab/src/git/process.rs` into the local feature of `crab-remote`.
 Pass argv without a shell, explicitly set repository paths, bound diagnostics,

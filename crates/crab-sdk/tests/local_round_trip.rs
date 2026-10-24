@@ -302,7 +302,10 @@ async fn stage_commit_push_round_trip() {
         .await
         .unwrap();
     let persisted = prepared.recovery_token().to_json().unwrap();
-    let pushed = prepared.execute().await.unwrap();
+    let pushed = prepared
+        .execute()
+        .await
+        .unwrap_or_else(|error| panic!("local round-trip push: {}", failure(&error)));
     assert!(
         matches!(pushed, LocalPushOutcome::Committed { .. }),
         "unexpected push outcome: {pushed:?}"

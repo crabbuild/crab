@@ -391,7 +391,7 @@ impl LocalRepository {
                 let crab = locator
                     .as_ref()
                     .filter(|locator| locator.http_url().is_none());
-                let (advertised, placement) = if let Some(locator) = crab {
+                let (advertised, placement, content_origin) = if let Some(locator) = crab {
                     let capture = state
                         .capture_repository(locator, &mutation_options, &cancel)
                         .await?;
@@ -403,10 +403,15 @@ impl LocalRepository {
                                 "native push has no placement identity",
                             )
                         })?),
+                        Some(crab_storage::StoreLayout::new(
+                            capture.read_store,
+                            capture.resolved.prefix,
+                        )),
                     )
                 } else {
                     (
                         git::remote_refs(&tools.owner, &root, &options.remote, &cancel).await?,
+                        None,
                         None,
                     )
                 };
@@ -521,14 +526,20 @@ impl LocalRepository {
                     &cancel,
                 )
                 .await?;
+                let origin = content_origin.as_ref().ok_or_else(|| {
+                    Error::new(ErrorKind::Corruption, "native content origin disappeared")
+                })?;
                 let content = content::prepare(
-                    &tools.owner,
-                    &root,
-                    &common,
-                    &advertised,
-                    &local_updates,
-                    pack_directory.path(),
-                    mutation_options.read_limits().max_fetched_bytes,
+                    content::Preparation {
+                        tools: &tools.owner,
+                        root: &root,
+                        common: &common,
+                        advertised: &advertised,
+                        updates: &local_updates,
+                        scratch: pack_directory.path(),
+                        origin,
+                        limits: mutation_options.read_limits(),
+                    },
                     &cancel,
                 )
                 .await?;

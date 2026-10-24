@@ -101,6 +101,10 @@ pub(crate) struct CapturedRepository {
     pub(crate) repository: RemoteGitRepository,
     pub(crate) resolved: ResolvedRepository,
     pub(crate) capsule: crab_read::capsule_protocol::CapsuleRepositoryView,
+    // Local preparation shares construction admission. Long-lived repository
+    // handles keep the plain resolved store, so an expired scope cannot poison them.
+    #[cfg(feature = "local")]
+    pub(crate) read_store: Store,
 }
 
 impl ClientState {
@@ -169,6 +173,8 @@ impl ClientState {
             repository: owner,
             resolved,
             capsule,
+            #[cfg(feature = "local")]
+            read_store: captured_layout.store().clone(),
         })
     }
 
@@ -323,6 +329,8 @@ impl Client {
             repository: owner,
             resolved,
             capsule,
+            #[cfg(feature = "local")]
+                read_store: _,
         } = self
             .0
             .operations

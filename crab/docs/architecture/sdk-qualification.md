@@ -304,6 +304,57 @@ test with the actual compatible CLI succeeds locally; the Unix mock remains
 available for command-selection assertions. The Windows cause remains unproven
 pending the next hosted diagnostic. No passing local check qualifies it.
 
+The `74fb25fbee2` hosted diagnostic reaches `git ls-files` and reports
+`error launching git: The system cannot find the path specified`. The private
+Git alias hard-linked the Windows installation wrapper away from its relative
+payload. The [upstream wrapper contract](https://gitforwindows.org/git-wrapper.html)
+requires its installation context. Private discovery now forwards to the exact
+selected path through the compatible Crab executable; `git-forward` is required
+by the handshake. An adjacent-support-file Unix wrapper also reproduces the
+failure before the fix. Forwarding runs before dotenv and CLI initialization,
+preserving the selected credentials and all three standard streams.
+
+The SDK launcher now owns the process group/job rather than only its direct
+child. A deterministic cancellation regression previously hung on pipes retained
+by a descendant; it now drains before returning. Seven local-tool tests and
+four compatible-executable tests pass locally. Windows runtime proof remains
+required. The native HTTP fixture passes in Linux CI at `74fb25fbee2`; its later
+1 GiB local cycle fails with `LimitExceeded` at push, below the memory threshold.
+That cycle passes locally against a fresh bucket. Repeating CI's order locally
+reproduces `dependency verification exceeds file bytes`: the earlier HTTP test
+published chunks that staging reused without retaining their payload locally.
+The SDK prepared only new local xorbs and omitted those origin-only chunks.
+
+Local preparation now reads reused locations from the committed staging recipe,
+verifies origin xorb framing, payload digest and identity, and checks each chunk
+before reconstructing the exact file. The existing native builder verifies the
+committed file hash and prepares the complete publication dependency set. Its
+immutable uploader retains an existing valid encoding rather than overwriting
+it. Origin reads share the capture's aggregate request/byte admission; neither
+limits nor corruption checks are relaxed. Verified parsers are reused within
+the preparation to avoid fetching the same origin xorb for every occurrence.
+
+The small native HTTP regression passes with a file made from existing chunks,
+mixed Xet/LFS recovery, exact independent eager-clone bytes and unchanged dry-run
+inventory (`sdk-shared-chunks-small-after.log`). The seeded 1 GiB local cycle also
+passes in 336.25 seconds, followed by verified owned-bucket cleanup
+(`sdk-shared-chunks-large-after.log`, `sdk-shared-chunks-fixture-after.log`).
+Three focused tests prove parser reuse, corrupt-payload rejection and preservation
+of admission already consumed during capture (`sdk-reused-xorb-contracts.log`).
+These debug results establish correctness on isolated S3-compatible storage;
+new-head CI, Windows runtime and credentialed cloud qualification remain required.
+
+Final focused checks pass: 64 SDK library tests (one explicitly ignored),
+42 local/HTTP tests (the separately exercised live HTTP case is ignored by the
+ordinary command), seven local-tool tests and four compatible-executable tests.
+Strict SDK/remote all-target lint, minimal remote/content compilation, all ten
+dependency feature profiles, formatting and the 48-cell inventory check pass
+(`sdk-final-*.log/json`). The compatible CLI is rebuilt through `make install`.
+The `74fb25fbee2` architecture job separately rejects the new production
+`crab-remote` → `crab-lfs` edge: verified native publication uses the existing
+LFS upload owner, while the architecture allowlist omits that edge. Updating
+that baseline requires explicit approval under `AGENTS.md`; it remains unchanged.
+
 The gateway write-soak failure is also present at the unchanged `crab-v2` base
 `33f8e6c360d`: [run 40087756593](https://github.com/crabbuild/crab/actions/runs/40087756593)
 retains 0.776928 of early throughput; SDK head `55b0fb9bb4a` retains 0.777382.

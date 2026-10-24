@@ -21,13 +21,16 @@ pub const STAGING_FORMAT_VERSION: u32 = 1;
 /// Process-local bridge to the canonical durable publication-plan owner.
 pub const PUBLICATION_PLAN_ID_ENV: &str = "CRAB_INTERNAL_MIRROR_PLAN_ID";
 
+/// Process-scoped target for the compatible executable's Git forwarding entry.
+pub const GIT_EXECUTABLE_ENV: &str = "CRAB_INTERNAL_GIT_EXECUTABLE";
+
 /// Canonical capability document emitted without fallible runtime serialization.
 pub const CURRENT_CAPABILITIES_JSON: &str = concat!(
     "{\"schema_version\":1,\"crab_version\":\"",
     env!("CARGO_PKG_VERSION"),
     "\",\"product_build\":\"crab-remote/",
     env!("CARGO_PKG_VERSION"),
-    "\",\"local_workflow_protocol\":1,\"storage_format_version\":2,\"staging_format_version\":1,\"operations\":[\"clone\",\"fetch-content\",\"stage\",\"hydrate\",\"dehydrate\",\"filter-process\",\"remote-helper\"]}"
+    "\",\"local_workflow_protocol\":1,\"storage_format_version\":2,\"staging_format_version\":1,\"operations\":[\"clone\",\"fetch-content\",\"stage\",\"hydrate\",\"dehydrate\",\"filter-process\",\"remote-helper\",\"git-forward\"]}"
 );
 
 /// Capabilities advertised by a Crab executable to a local SDK client.
@@ -81,6 +84,7 @@ impl ExecutableCapabilities {
                 "dehydrate",
                 "filter-process",
                 "remote-helper",
+                "git-forward",
             ]
             .into_iter()
             .map(str::to_owned)
@@ -108,7 +112,7 @@ impl ExecutableCapabilities {
         {
             return Err(CapabilityError::Format);
         }
-        for required in ["clone", "filter-process", "remote-helper"] {
+        for required in ["clone", "filter-process", "remote-helper", "git-forward"] {
             if !self
                 .operations
                 .iter()
@@ -158,7 +162,10 @@ impl LocalTools {
         let crab = executable(crab, "Crab")?;
         let directory = tempfile::tempdir().map_err(LocalError::Scratch)?;
         let hooks = tempfile::tempdir().map_err(LocalError::Scratch)?;
-        install_alias(&git, directory.path(), executable_name("git"))?;
+        // Git installation wrappers resolve their payload beside their own
+        // executable. Relocating Git breaks that contract; Crab forwards argv
+        // to the selected original path instead, including custom tool names.
+        install_alias(&crab, directory.path(), executable_name("git"))?;
         install_alias(&crab, directory.path(), executable_name("crab"))?;
         install_alias(&crab, directory.path(), executable_name("git-remote-crab"))?;
         Ok(Self {
@@ -478,8 +485,7 @@ impl LocalTools {
                 Stdio::null()
             })
             .stdout(io.output.map_or_else(Stdio::piped, Stdio::from))
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
+            .stderr(Stdio::piped());
         if let Some(current_dir) = current_dir {
             command.current_dir(current_dir);
         }
@@ -494,6 +500,7 @@ impl LocalTools {
             }
         }
         command.envs(env);
+        command.env(GIT_EXECUTABLE_ENV, &self.inner.git);
         let path = process_path(self.inner.directory.path());
         command.env("PATH", path);
         if !trust_hooks {
@@ -508,21 +515,27 @@ impl LocalTools {
                     .env(format!("GIT_CONFIG_VALUE_{index}"), value);
             }
         }
+        let mut command = process_wrap::tokio::CommandWrap::from(command);
+        command.wrap(process_wrap::tokio::KillOnDrop);
+        #[cfg(unix)]
+        command.wrap(process_wrap::tokio::ProcessGroup::leader());
+        #[cfg(windows)]
+        command.wrap(process_wrap::tokio::JobObject);
         let mut child = command.spawn().map_err(|source| LocalError::Spawn {
             executable: executable.to_owned(),
             source,
         })?;
         let stdout = if capture_stdout {
-            let stdout = child.stdout.take().ok_or(LocalError::MissingPipe)?;
+            let stdout = child.stdout().take().ok_or(LocalError::MissingPipe)?;
             Some(tokio::spawn(read_bounded(stdout)))
         } else {
             None
         };
-        let stderr = child.stderr.take().ok_or(LocalError::MissingPipe)?;
+        let stderr = child.stderr().take().ok_or(LocalError::MissingPipe)?;
         let stderr = tokio::spawn(read_bounded(stderr));
         let stdin = match io.input {
             Some(input) => {
-                let mut stdin = child.stdin.take().ok_or(LocalError::MissingPipe)?;
+                let mut stdin = child.stdin().take().ok_or(LocalError::MissingPipe)?;
                 Some(tokio::spawn(async move {
                     stdin.write_all(&input).await.map_err(LocalError::Write)?;
                     stdin.shutdown().await.map_err(LocalError::Write)
@@ -533,8 +546,10 @@ impl LocalTools {
         let status = tokio::select! {
             biased;
             () = cancel.cancelled() => {
-                child.kill().await.map_err(LocalError::Kill)?;
-                let _ = child.wait().await;
+                // Descendants can retain the diagnostic pipes after the direct
+                // child is killed. Stop the owned tree before joining readers.
+                child.start_kill().map_err(LocalError::Kill)?;
+                child.wait().await.map_err(LocalError::Wait)?;
                 None
             }
             result = child.wait() => Some(result.map_err(LocalError::Wait)?),
@@ -919,6 +934,18 @@ mod tests {
     }
 
     #[test]
+    fn executable_without_git_forwarding_is_rejected() {
+        let mut capabilities = ExecutableCapabilities::current();
+        capabilities
+            .operations
+            .retain(|operation| operation != "git-forward");
+        assert!(matches!(
+            capabilities.validate_for_sdk(),
+            Err(CapabilityError::MissingOperation("git-forward"))
+        ));
+    }
+
+    #[test]
     fn incompatible_protocol_is_rejected() {
         let mut capabilities = ExecutableCapabilities::current();
         capabilities.local_workflow_protocol += 1;
@@ -939,6 +966,49 @@ mod tests {
             )
         );
         assert_eq!(values[3], ("filter.crab.required", "true".to_owned()));
+    }
+
+    #[tokio::test]
+    #[cfg(unix)]
+    async fn cancellation_drains_descendants_holding_output_pipes() {
+        use std::os::unix::fs::PermissionsExt as _;
+        let directory = tempfile::tempdir().unwrap();
+        let crab = directory.path().join("owned-command");
+        std::fs::write(
+            &crab,
+            "#!/bin/sh\nsleep 120 &\nprintf '%s' \"$!\" > child.pid\nwait\n",
+        )
+        .unwrap();
+        std::fs::set_permissions(&crab, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let tools = LocalTools::new(&git_path(), &crab).unwrap();
+        let cancel = CancellationToken::new();
+        let child_cancel = cancel.clone();
+        let root = directory.path().to_owned();
+        let mut task = tokio::spawn(async move {
+            tools
+                .run_crab(Some(&root), std::iter::empty::<&str>(), true, &child_cancel)
+                .await
+        });
+        let pid_file = directory.path().join("child.pid");
+        tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !pid_file.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+        })
+        .await
+        .unwrap();
+        let pid = std::fs::read_to_string(pid_file).unwrap();
+        cancel.cancel();
+        let result = tokio::time::timeout(std::time::Duration::from_secs(3), &mut task).await;
+        if result.is_err() {
+            // Reclaim only this fixture's known descendant if the regression
+            // returns to killing the parent while leaving its pipes open.
+            let _ = std::process::Command::new("/bin/kill")
+                .args(["-KILL", pid.trim()])
+                .output();
+            let _ = task.await;
+        }
+        assert!(matches!(result, Ok(Ok(Err(LocalError::Cancelled)))));
     }
 
     #[tokio::test]

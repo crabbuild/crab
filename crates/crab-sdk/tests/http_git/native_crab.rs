@@ -31,15 +31,31 @@ async fn round_trip() {
     let store = scratch.path().join("local-store");
     std::fs::create_dir(&store).unwrap();
     let git = git_path();
+    #[cfg(unix)]
+    let supplied_git = {
+        use std::os::unix::fs::PermissionsExt as _;
+        // Installation wrappers resolve support files beside their executable.
+        // Child Git discovery must invoke the selected path without relocating it.
+        let directory = scratch.path().join("Git installation's directory");
+        std::fs::create_dir(&directory).unwrap();
+        std::fs::write(directory.join("git-support"), b"installed").unwrap();
+        let wrapper = directory.join("chosen-git");
+        let executable = git.to_str().unwrap().replace('\'', "'\\''");
+        std::fs::write(&wrapper, format!("#!/bin/sh\n[ -f \"$(dirname \"$0\")/git-support\" ] || exit 97\nexec '{executable}' \"$@\"\n")).unwrap();
+        std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+        wrapper
+    };
+    #[cfg(not(unix))]
+    let supplied_git = git.clone();
     let sdk = Client::builder()
         .direct_store(DirectStoreOptions::filesystem(&store).unwrap())
-        .local(Options::new(Tools::new(&git, &crab).unwrap()))
+        .local(Options::new(Tools::new(&supplied_git, &crab).unwrap()))
         .build()
         .unwrap();
     let bucket = std::env::var("QUALIFICATION_BUCKET").unwrap();
     let content = Client::builder()
         .direct_store(DirectStoreOptions::s3_from_env(&bucket).unwrap())
-        .local(Options::new(Tools::new(&git, &crab).unwrap()))
+        .local(Options::new(Tools::new(&supplied_git, &crab).unwrap()))
         .build()
         .unwrap();
     let result = AssertUnwindSafe(async {
@@ -460,6 +476,10 @@ async fn hydrated_clone(
         &["config", "lfs.storage", "cache directory's payloads"],
     );
     std::fs::write(checkout.join("b.lfs"), &updated_lfs).unwrap();
+    // The remote already contains this chunk pattern, but this file has a new
+    // identity and needs its own authenticated native catalog entry.
+    let reused_chunks = bytes.repeat(2);
+    std::fs::write(checkout.join("reused.bin"), &reused_chunks).unwrap();
     let local = cloned.local().unwrap();
     run(
         git,
@@ -478,7 +498,10 @@ async fn hydrated_clone(
         &checkout,
         &["config", "--remove-section", "lfs.extension.fixture"],
     );
-    local.stage(vec!["b.lfs".into()]).await.unwrap();
+    local
+        .stage(vec!["b.lfs".into(), "reused.bin".into()])
+        .await
+        .unwrap();
     let identity =
         CommitIdentity::new("SDK qualification", "sdk@example.invalid", 1_700_000_000, 0).unwrap();
     local
@@ -523,7 +546,7 @@ async fn hydrated_clone(
             scratch.to_owned()
         )
         .await
-        .unwrap(),
+        .unwrap_or_else(|error| panic!("resumed native content: {}", failure(&error))),
         PushOutcome::Committed { .. }
     ));
     let verified = scratch.join("local-lfs-independent");
@@ -538,6 +561,7 @@ async fn hydrated_clone(
     .await
     .unwrap();
     assert!(std::fs::read(verified.join("b.lfs")).unwrap() == updated_lfs);
+    assert!(std::fs::read(verified.join("reused.bin")).unwrap() == reused_chunks);
     target
 }
 
