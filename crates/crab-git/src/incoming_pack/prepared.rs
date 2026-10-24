@@ -519,7 +519,7 @@ impl IncomingPack {
 
 enum DecodedObjects<'a> {
     Spool(File),
-    Generated(&'a BTreeMap<ObjectId, Box<[u8]>>),
+    Generated(&'a BTreeMap<ObjectId, bytes::Bytes>),
 }
 
 impl DecodedObjects<'_> {
@@ -560,7 +560,7 @@ impl Read for ObjectReader<'_> {
 }
 
 fn generated_bytes<'a>(
-    objects: &'a BTreeMap<ObjectId, Box<[u8]>>,
+    objects: &'a BTreeMap<ObjectId, bytes::Bytes>,
     object: &super::IncomingObject,
 ) -> Result<&'a [u8]> {
     objects

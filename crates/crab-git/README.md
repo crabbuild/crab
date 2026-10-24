@@ -185,8 +185,11 @@ retains admission on refusal and releases bytes after directory cleanup. Hosts
 inject their shared disk policy; standalone and generated inputs use their
 finite `ReceiveLimits` without importing host-specific dependencies.
 
-`IncomingPack::from_generated_objects` gives trusted in-process Git object
-builders bounded ownership of their existing decoded buffers. It checks count,
+`GeneratedObject` binds owned bytes to a collision-checked Git identity and
+exposes only immutable access. `IncomingPack::from_verified_objects` takes
+these objects without recomputing their identities. The published tuple-based
+`from_generated_objects` entry point computes identities before using the same
+bounded collector. Both check count,
 individual size, aggregate decoded bytes, and cancellation without writing and
 rereading an object spool. Preparation borrows these bytes for deltas and streams
 full entries through the same identity checks as quarantined input. `prepare`

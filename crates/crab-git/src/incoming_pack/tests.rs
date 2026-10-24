@@ -209,9 +209,20 @@ fn generated_and_quarantined_objects_produce_identical_artifacts() {
         (Kind::Blob, vec![b'x'; 128 * 1024]),
         (Kind::Tree, tree),
     ];
-    let generated =
+    let generated = [
         IncomingPack::from_generated_objects(objects.clone(), temp.path(), limits(), || false)
-            .unwrap();
+            .unwrap(),
+        IncomingPack::from_verified_objects(
+            objects
+                .clone()
+                .into_iter()
+                .map(|(kind, data)| GeneratedObject::new(kind, data).unwrap()),
+            temp.path(),
+            limits(),
+            || false,
+        )
+        .unwrap(),
+    ];
     let quarantined = quarantine(
         Cursor::new(pack(&objects.map(|(kind, data)| {
             let header = match kind {
@@ -228,29 +239,31 @@ fn generated_and_quarantined_objects_produce_identical_artifacts() {
     )
     .unwrap();
     let cancelled = AtomicBool::new(false);
-    let generated_pack = generated
-        .prepare(temp.path(), limits().max_pack_bytes, &cancelled)
-        .unwrap()
-        .unwrap();
     let quarantined_pack = quarantined
         .prepare(temp.path(), limits().max_pack_bytes, &cancelled)
         .unwrap()
         .unwrap();
-    for (generated, quarantined) in [
-        (generated_pack.pack_path(), quarantined_pack.pack_path()),
-        (generated_pack.index_path(), quarantined_pack.index_path()),
-        (
-            generated_pack.reverse_path(),
-            quarantined_pack.reverse_path(),
-        ),
-        (generated_pack.kinds_path(), quarantined_pack.kinds_path()),
-    ] {
-        assert_eq!(
-            std::fs::read(generated).unwrap(),
-            std::fs::read(quarantined).unwrap()
-        );
+    for generated in generated {
+        let generated_pack = generated
+            .prepare(temp.path(), limits().max_pack_bytes, &cancelled)
+            .unwrap()
+            .unwrap();
+        for (generated, quarantined) in [
+            (generated_pack.pack_path(), quarantined_pack.pack_path()),
+            (generated_pack.index_path(), quarantined_pack.index_path()),
+            (
+                generated_pack.reverse_path(),
+                quarantined_pack.reverse_path(),
+            ),
+            (generated_pack.kinds_path(), quarantined_pack.kinds_path()),
+        ] {
+            assert_eq!(
+                std::fs::read(generated).unwrap(),
+                std::fs::read(quarantined).unwrap()
+            );
+        }
+        verify_prepared_artifacts_with_native_git(&generated, &generated_pack, temp.path());
     }
-    verify_prepared_artifacts_with_native_git(&generated, &generated_pack, temp.path());
 }
 
 #[test]
@@ -269,8 +282,9 @@ fn generated_corruption_fails_full_and_delta_preparation_without_retaining_outpu
         target[2000] = b'y';
         let base_oid = object_id(Kind::Blob, &base);
         let target_oid = object_id(Kind::Blob, &target);
-        let mut generated = IncomingPack::from_generated_objects(
-            [(Kind::Blob, base), (Kind::Blob, target)],
+        let mut generated = IncomingPack::from_verified_objects(
+            [(Kind::Blob, base), (Kind::Blob, target)]
+                .map(|(kind, data)| GeneratedObject::new(kind, data).unwrap()),
             temp.path(),
             limits(),
             || false,
@@ -283,11 +297,13 @@ fn generated_corruption_fails_full_and_delta_preparation_without_retaining_outpu
             .unwrap()
             .get_mut(&corrupt_oid)
             .unwrap();
+        let mut corrupt = bytes.to_vec();
         if truncate {
-            *bytes = bytes[..bytes.len() - 1].into();
+            corrupt.pop();
         } else {
-            bytes[0] ^= 1;
+            corrupt[0] ^= 1;
         }
+        *bytes = corrupt.into();
         let bases = if delta {
             BTreeMap::from([(target_oid, base_oid)])
         } else {

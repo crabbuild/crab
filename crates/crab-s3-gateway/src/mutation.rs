@@ -9,6 +9,7 @@ use std::{
 
 use bytes::Bytes;
 use crab_coordination::{GcFenceHeartbeat, GcFenceLease, PushLock};
+use crab_git::incoming_pack::GeneratedObject;
 use crab_metadata::{git_visibility, manifests::PackManifestEntry, ref_journal::RefJournalEdit};
 use crab_remote_git::{EntryMode, OperationKind, RemoteGitRepository};
 use gix_hash::ObjectId;
@@ -2111,11 +2112,11 @@ async fn upload_built_batch(
                 .or_default()
                 .push(candidate);
         }
-        for GeneratedObject { oid, kind, bytes } in built.objects {
-            if seen.insert(oid) {
-                objects.push((kind, bytes));
+        for object in built.objects {
+            if seen.insert(object.oid()) {
+                objects.push(object);
             } else {
-                repeated_objects.insert(oid);
+                repeated_objects.insert(object.oid());
             }
         }
     }
@@ -2165,14 +2166,14 @@ async fn upload_built_batch(
     // Tree construction already hashed these bytes. Pack preparation still
     // independently verifies identities before this inventory is published.
     let visible_objects = seen.iter().map(ToString::to_string).collect();
-    let generated_object_bytes = objects.iter().fold(0_usize, |total, (_, bytes)| {
-        total.saturating_add(bytes.len())
+    let generated_object_bytes = objects.iter().fold(0_usize, |total, object| {
+        total.saturating_add(object.data().len())
     });
     let generated_tree_bytes = objects
         .iter()
-        .filter(|(kind, _)| *kind == Kind::Tree)
-        .fold(0_usize, |total, (_, bytes)| {
-            total.saturating_add(bytes.len())
+        .filter(|object| object.kind() == Kind::Tree)
+        .fold(0_usize, |total, object| {
+            total.saturating_add(object.data().len())
         });
     let upload_attributes = async {
         futures_util::future::try_join_all(attribute_deltas.into_iter().map(
@@ -2351,9 +2352,9 @@ async fn upload_built_batch(
     Ok(uploaded)
 }
 
-fn pack_scratch_reservation(objects: &[(Kind, Vec<u8>)]) -> u64 {
-    let bytes = objects.iter().fold(0_u64, |total, (_, object)| {
-        total.saturating_add(object.len() as u64)
+fn pack_scratch_reservation(objects: &[GeneratedObject]) -> u64 {
+    let bytes = objects.iter().fold(0_u64, |total, object| {
+        total.saturating_add(object.data().len() as u64)
     });
     let sidecars = (objects.len() as u64).saturating_mul(64);
     // Direct generated-pack preparation retains one decoded spool and one
@@ -2561,12 +2562,6 @@ struct BuiltCommit {
     objects: Vec<GeneratedObject>,
     tree_delta_bases: Vec<TreeDeltaBase>,
     attribute_changes: std::collections::BTreeMap<String, Option<attributes::ObjectAttributes>>,
-}
-
-struct GeneratedObject {
-    oid: ObjectId,
-    kind: Kind,
-    bytes: Vec<u8>,
 }
 
 struct TreeDeltaBase {
@@ -3029,7 +3024,8 @@ async fn build_commit(
             attributes,
             condition: _,
         } => {
-            let oid = object_id(Kind::Blob, &bytes)?;
+            let object = GeneratedObject::new(Kind::Blob, bytes.clone())?;
+            let oid = object.oid();
             let digest = md5::Md5::digest(&bytes);
             let logical_size = attributes.logical_size.unwrap_or(bytes.len() as u64);
             let etag = attributes
@@ -3052,10 +3048,7 @@ async fn build_commit(
                     oid,
                 }),
             });
-            let changed = old
-                .filter(|(old_oid, _)| *old_oid == oid)
-                .map(|_| None)
-                .unwrap_or_else(|| Some((oid, bytes.to_vec())));
+            let changed = (!old.is_some_and(|(old_oid, _)| old_oid == oid)).then_some(object);
             (Some(etag), changed, Some((oid, attributes, logical_size)))
         }
         Change::Attributes {
@@ -3095,12 +3088,8 @@ async fn build_commit(
     let mut objects = Vec::new();
     let mut tree_delta_bases = Vec::new();
     let mut attribute_changes = std::collections::BTreeMap::new();
-    if let Some((oid, bytes)) = changed {
-        objects.push(GeneratedObject {
-            oid,
-            kind: Kind::Blob,
-            bytes,
-        });
+    if let Some(object) = changed {
+        objects.push(object);
     }
     if let Some(attributes) = lfs_attributes {
         let attributes_path = push_component(&directory_path, b".gitattributes")?;
@@ -3108,9 +3097,9 @@ async fn build_commit(
             .map_err(|_| std::io::Error::other("S3 attribute path is not UTF-8"))?
             .to_owned();
         let generated_attributes = attributes::ObjectAttributes::new(
-            attributes.oid,
-            crate::gateway::md5_hex(&attributes.bytes),
-            attributes.bytes.len() as u64,
+            attributes.object.oid(),
+            crate::gateway::md5_hex(attributes.object.data()),
+            attributes.object.data().len() as u64,
             seconds,
             attributes::PutAttributes::default(),
         );
@@ -3119,15 +3108,11 @@ async fn build_commit(
             replacement: Some(tree::Entry {
                 mode: attributes.mode,
                 filename: BString::from(b".gitattributes".to_vec()),
-                oid: attributes.oid,
+                oid: attributes.object.oid(),
             }),
         });
         attribute_changes.insert(attributes_path, Some(generated_attributes));
-        objects.push(GeneratedObject {
-            oid: attributes.oid,
-            kind: Kind::Blob,
-            bytes: attributes.bytes,
-        });
+        objects.push(attributes.object);
     }
     let object_attributes = pending_attributes.map(|(oid, pending, size)| {
         attributes::ObjectAttributes::new(
@@ -3188,12 +3173,9 @@ async fn build_commit(
     }
     let tree = tree_oid.ok_or_else(|| std::io::Error::other("root tree was not encoded"))?;
     let commit_bytes = commit_bytes(tree, parent, principal, seconds, attribute_digest.as_str());
-    let commit = object_id(Kind::Commit, &commit_bytes)?;
-    objects.push(GeneratedObject {
-        oid: commit,
-        kind: Kind::Commit,
-        bytes: commit_bytes,
-    });
+    let object = GeneratedObject::new(Kind::Commit, commit_bytes)?;
+    let commit = object.oid();
+    objects.push(object);
     tree_state.commit(directory_edits, generated_attributes)?;
     for (path, attributes) in &attribute_changes {
         manifest.update(path.clone(), attributes.clone());
@@ -3280,9 +3262,8 @@ fn object_condition_matches(
 }
 
 struct LfsAttributesChange {
-    oid: ObjectId,
+    object: GeneratedObject,
     mode: gix_object::tree::EntryMode,
-    bytes: Vec<u8>,
 }
 
 async fn prepare_lfs_attributes(
@@ -3323,11 +3304,11 @@ async fn prepare_lfs_attributes(
     }
     bytes.extend_from_slice(line.as_bytes());
     bytes.push(b'\n');
-    let oid = object_id(Kind::Blob, &bytes)?;
-    if old_oid == Some(oid) {
+    let object = GeneratedObject::new(Kind::Blob, bytes)?;
+    if old_oid == Some(object.oid()) {
         return Ok(None);
     }
-    Ok(Some(LfsAttributesChange { oid, mode, bytes }))
+    Ok(Some(LfsAttributesChange { object, mode }))
 }
 
 fn lfs_attributes_line(filename: &[u8]) -> String {
@@ -3502,12 +3483,12 @@ fn generated_attribute_update(
         return current.is_some().then(|| (path.to_vec(), None));
     };
     for object in objects {
-        if object.kind == Kind::Blob && object.oid == attributes.oid {
+        if object.kind() == Kind::Blob && object.oid() == attributes.oid {
             return Some((
                 path.to_vec(),
                 Some(GeneratedAttributeBlob {
                     oid: attributes.oid,
-                    bytes: object.bytes.clone(),
+                    bytes: object.data().to_vec(),
                 }),
             ));
         }
@@ -3566,12 +3547,9 @@ fn encode_tree_with_edits(
     }
     encoding.extend(&old.encoding, cursor..old.entries.len());
     encoding.offsets.push(encoding.bytes.len());
-    let oid = object_id(Kind::Tree, &encoding.bytes)?;
-    objects.push(GeneratedObject {
-        oid,
-        kind: Kind::Tree,
-        bytes: encoding.bytes.clone(),
-    });
+    let object = GeneratedObject::new(Kind::Tree, encoding.bytes.clone())?;
+    let oid = object.oid();
+    objects.push(object);
     let mut delta_ancestors = Vec::new();
     let candidate = if old.generated_in_batch {
         old.oid
@@ -3642,12 +3620,13 @@ fn commit_bytes(
     .into_bytes()
 }
 
+#[cfg(test)]
 fn object_id(kind: Kind, bytes: &[u8]) -> std::result::Result<ObjectId, gix_hash::hasher::Error> {
     gix_object::compute_hash(gix_hash::Kind::Sha1, kind, bytes)
 }
 
 async fn prepare_pack(
-    objects: Vec<(Kind, Vec<u8>)>,
+    objects: Vec<GeneratedObject>,
     delta_bases: BTreeMap<ObjectId, ObjectId>,
     external_delta_bases: BTreeMap<ObjectId, crab_git::incoming_pack::ExternalDeltaBase>,
     cancel: &CancellationToken,
@@ -3662,7 +3641,7 @@ async fn prepare_pack(
     let worker_flag = Arc::clone(&cancelled);
     let result = tokio::task::spawn_blocking(move || {
         let owner = tempfile::tempdir()?;
-        let incoming = crab_git::incoming_pack::IncomingPack::from_generated_objects(
+        let incoming = crab_git::incoming_pack::IncomingPack::from_verified_objects(
             objects,
             owner.path(),
             crab_git::incoming_pack::ReceiveLimits {
@@ -3734,8 +3713,8 @@ mod tests {
     #[test]
     fn generated_pack_reservation_covers_peak_temporary_copies() {
         let objects = vec![
-            (Kind::Blob, vec![0; 64 * 1024]),
-            (Kind::Tree, vec![0; 1024]),
+            GeneratedObject::new(Kind::Blob, vec![0; 64 * 1024]).unwrap(),
+            GeneratedObject::new(Kind::Tree, vec![0; 1024]).unwrap(),
         ];
         let bytes = 64 * 1024 + 1024;
 
@@ -3789,7 +3768,7 @@ mod tests {
         assert_eq!(
             objects
                 .into_iter()
-                .map(|object| (object.oid, object.kind, object.bytes))
+                .map(|object| (object.oid(), object.kind(), object.data().to_vec()))
                 .collect::<Vec<_>>(),
             vec![(oid, Kind::Tree, expected)]
         );
@@ -3873,7 +3852,7 @@ mod tests {
         assert_eq!(
             objects
                 .into_iter()
-                .map(|object| (object.oid, object.kind, object.bytes))
+                .map(|object| (object.oid(), object.kind(), object.data().to_vec()))
                 .collect::<Vec<_>>(),
             vec![(oid, Kind::Tree, expected)]
         );
@@ -3950,7 +3929,7 @@ mod tests {
                 &mut Vec::new(),
             )
             .unwrap();
-            assert_eq!(objects[0].bytes, expected, "round {round}");
+            assert_eq!(objects[0].data(), expected, "round {round}");
             tree_state
                 .commit(
                     vec![DirectoryEdit {
