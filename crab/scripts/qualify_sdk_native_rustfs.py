@@ -119,6 +119,10 @@ def fixture_environment(work: Path, output: Path, endpoint: str, bucket: str,
         "CRAB_SDK_TEST_READ_GUARD_REPORT": str(output / "read-transport.json"),
         "QUALIFICATION_BUCKET": bucket, "QUALIFICATION_PREFIX": "qualification/sdk-ref-native",
     })
+    if os.name == "nt":
+        # Keep fixture cleanup on the core single-key DELETE API. The separate
+        # preflight still verifies DeleteObjects directly against RustFS.
+        environment["AWS_DISABLE_BULK_DELETE"] = "true"
     return environment
 
 
@@ -296,13 +300,13 @@ def main() -> None:
                 qualify(output, tests, environment, args.toolchain, git, crab)
                 qualified = True
             finally:
+                cleanup_error = None
                 try:
                     report["cleanup"] = "failed"
-                    if created:
+                    if created and os.name != "nt":
                         cleanup_bucket(environment, bucket)
-                    report["cleanup"] = "passed"
-                    if qualified:
-                        report["terminal_state"] = "passed"
+                except Exception as error:
+                    cleanup_error = error
                 finally:
                     server.terminate()
                     try:
@@ -310,12 +314,22 @@ def main() -> None:
                     except subprocess.TimeoutExpired:
                         server.kill()
                         server.wait()
+                    if os.name == "nt":
+                        try:
+                            shutil.rmtree(data)
+                        except Exception as error:
+                            cleanup_error = error
+                    report["cleanup"] = "failed" if cleanup_error else "passed"
+                    if qualified and cleanup_error is None:
+                        report["terminal_state"] = "passed"
                     log.flush()
                     contents = (work / "server.log").read_text(errors="replace")
                     for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"):
                         contents = contents.replace(environment[name], "[redacted]")
                     (output / "rustfs.log").write_text(contents)
                     (output / "service.json").write_text(json.dumps(report, indent=2) + "\n")
+                if cleanup_error is not None:
+                    raise cleanup_error
 
 
 if __name__ == "__main__":
