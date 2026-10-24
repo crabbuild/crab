@@ -9,33 +9,36 @@ use uuid::Uuid;
 fn lose_responses(remaining: Arc<AtomicUsize>) -> Arc<dyn cellar::sdk::Application> {
     let application = application::compiled().unwrap();
     let cells = application.clone();
-    Arc::new(
-        cellar::sdk::Registry::new(move |context, invocation| {
-            let application = application.clone();
-            let remaining = remaining.clone();
-            Box::pin(async move {
-                // Lose the reply after the actual Cell and its output durability gate
-                // succeed. A retry must recover the receipt, not apply another write.
-                let output = application.invoke(context.clone(), invocation).await?;
-                if remaining
-                    .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
-                        value.checked_sub(1)
-                    })
-                    .is_ok()
-                {
-                    return Ok(cellar::sdk::Output::Http(
-                        cellar::sdk::http::Response::new(503, "response lost", vec![])
-                            .into_http(&context)?,
-                    ));
-                }
-                Ok(output)
+    let mut registry = cellar::sdk::Registry::new(move |context, invocation| {
+        let application = application.clone();
+        let remaining = remaining.clone();
+        Box::pin(async move {
+            // Lose the reply after the actual Cell and its output durability gate
+            // succeed. A retry must recover the receipt, not apply another write.
+            let output = application.invoke(context.clone(), invocation).await?;
+            if remaining
+                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |value| {
+                    value.checked_sub(1)
+                })
+                .is_ok()
+            {
+                return Ok(cellar::sdk::Output::Http(
+                    cellar::sdk::http::Response::new(503, "response lost", vec![])
+                        .into_http(&context)?,
+                ));
+            }
+            Ok(output)
+        })
+    });
+    for class in [repository::CLASS, directory::CLASS, organization::CLASS] {
+        let cells = cells.clone();
+        registry = registry
+            .cell(class, move |context, identity| {
+                cells.create_cell(context, identity)
             })
-        })
-        .cell(application::CLASS, move |context, identity| {
-            cells.create_cell(context, identity)
-        })
-        .unwrap(),
-    )
+            .unwrap();
+    }
+    Arc::new(registry)
 }
 
 #[tokio::test(flavor = "multi_thread")]
