@@ -826,14 +826,25 @@ impl Prepared {
             let Some(object) = objects.remove(&pointer.oid) else {
                 continue;
             };
-            tokio::select! {
-                biased;
-                () = cancel.cancelled() => return Err(Error::Cancelled),
-                result = store.put_stream_with_size(&object.protocol_hash, Some(object.size), &object.path) => {
-                    result.map_err(|source| Error::Dependency(Box::new(
-                        crab_read::dependency_proof::DependencyProofError::Lfs { blob: dependency.blob, source },
-                    )))?;
-                },
+            if cancel.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            // S3/GCS cannot abort a multipart upload on drop. Drain this admitted
+            // object through completion or cleanup before honoring cancellation;
+            // dropping its future would lose the known session and orphan parts.
+            store
+                .put_stream_with_size(&object.protocol_hash, Some(object.size), &object.path)
+                .await
+                .map_err(|source| {
+                    Error::Dependency(Box::new(
+                        crab_read::dependency_proof::DependencyProofError::Lfs {
+                            blob: dependency.blob,
+                            source,
+                        },
+                    ))
+                })?;
+            if cancel.is_cancelled() {
+                return Err(Error::Cancelled);
             }
         }
         Ok(())

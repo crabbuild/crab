@@ -297,6 +297,51 @@ fn seeded_sha256_remote(root: &Path) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn empty_http_repository_can_be_cloned_and_published() {
+    let _serial = HTTP_TESTS.lock().await;
+    let fixture = tempfile::tempdir().unwrap();
+    let git = git_path();
+    run(
+        &git,
+        fixture.path(),
+        &["init", "--bare", "--initial-branch=main", "remote.git"],
+    );
+    run(
+        &git,
+        fixture.path(),
+        &["--git-dir=remote.git", "config", "http.receivepack", "true"],
+    );
+    let server = GitHttpServer::start(fixture.path().to_owned(), git.clone());
+    let store = tempfile::tempdir().unwrap();
+    let sdk = client(store.path(), fixture.path());
+    let checkout = fixture.path().join("checkout");
+    let repository = sdk
+        .clone_local(
+            RepositoryLocator::http(&server.url()).unwrap(),
+            &checkout,
+            CloneOptions::default(),
+        )
+        .await
+        .unwrap();
+    let local = repository.local().unwrap();
+    let target = commit(&git, &checkout, "file.txt", "first");
+    let outcome = local
+        .prepare_push(PushOptions::current_branch())
+        .await
+        .unwrap()
+        .execute()
+        .await
+        .unwrap();
+    let actual = run(
+        &git,
+        fixture.path(),
+        &["--git-dir=remote.git", "rev-parse", "refs/heads/main"],
+    );
+    sdk.close().await.unwrap();
+    assert!(matches!(outcome, LocalPushOutcome::TransportCommitted { .. }) && actual == target);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn native_http_round_trip() {
     let _serial = HTTP_TESTS.lock().await;
     let fixture = tempfile::tempdir().unwrap();

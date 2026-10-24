@@ -265,6 +265,20 @@ fails its lazy-clone operation; the retained SDK error omitted its source chain.
 That test now retains the diagnostic chain. New-head CI remains required for
 both fixes and for cross-platform LFS publication qualification.
 
+Cancellation after multipart initiation reproduced a missing terminal cleanup
+operation. The shared publication owner now awaits the admitted LFS object's
+completion or abort before returning cancellation; it admits no further object
+and cannot publish a ref. This follows the SDK's owned-cleanup contract without
+dropping a known S3/GCS upload handle. Cancellation latency includes draining
+the current object. The deterministic observer regression passes alongside all
+14 non-opt-in capsule-preparation tests (`sdk-lfs-cancel-{before,after}.log`).
+
+An empty HTTP repository exposed another clone failure: hydration inspected
+`HEAD` before the existing empty-repository check. That admission check now
+precedes revision configuration, matching the direct clone's absent-head path.
+The regression clones an unborn branch, creates its first local commit and
+publishes it through the SDK (`sdk-empty-http-{before,after}.log`).
+
 The gateway write-soak failure is also present at the unchanged `crab-v2` base
 `33f8e6c360d`: [run 40087756593](https://github.com/crabbuild/crab/actions/runs/40087756593)
 retains 0.776928 of early throughput; SDK head `55b0fb9bb4a` retains 0.777382.

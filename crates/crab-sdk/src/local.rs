@@ -759,10 +759,7 @@ async fn clone_http_repository(
         .await
         .map_err(local_error)?;
     ensure_supported_mutation(tools, staged, cancel).await?;
-    let hydration =
-        prepare_clone_hydration(tools, staged, Some("HEAD"), options.lazy, cancel).await?;
-    configure_clone(staged, hydration.lazy(), None, None).await?;
-    match tools
+    let has_refs = match tools
         .run_git(
             Some(staged),
             ["show-ref", "--head", "--quiet"],
@@ -771,14 +768,22 @@ async fn clone_http_repository(
         )
         .await
     {
-        Ok(_) => {
-            tools
-                .run_git(Some(staged), ["reset", "--hard", "HEAD"], trusted, cancel)
-                .await
-                .map_err(local_error)?;
+        Ok(_) => true,
+        Err(crab_remote::local::LocalError::Exit(output)) if output.status.code() == Some(1) => {
+            false
         }
-        Err(crab_remote::local::LocalError::Exit(output)) if output.status.code() == Some(1) => {}
         Err(source) => return Err(local_error(source)),
+    };
+    // An empty clone has no revision to inspect for committed configuration.
+    // Keep its unborn branch so the first local commit can be published.
+    let revision = has_refs.then_some("HEAD");
+    let hydration = prepare_clone_hydration(tools, staged, revision, options.lazy, cancel).await?;
+    configure_clone(staged, hydration.lazy(), None, None).await?;
+    if has_refs {
+        tools
+            .run_git(Some(staged), ["reset", "--hard", "HEAD"], trusted, cancel)
+            .await
+            .map_err(local_error)?;
     }
     hydrate_cloned_checkout(tools, staged, &hydration, &[], trusted, cancel).await?;
     fetch::verify_repository(tools, staged, cancel).await

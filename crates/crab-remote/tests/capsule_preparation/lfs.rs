@@ -41,6 +41,61 @@ fn source(body: &[u8], oid: &str) -> (tempfile::TempDir, PreparedContent, crab_g
 const ABC_OID: &str = "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad";
 const EMPTY_OID: &str = "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855";
 
+struct CancelUpload {
+    cancel: CancellationToken,
+    terminal: std::sync::atomic::AtomicBool,
+}
+
+impl crab_storage::StorageObserver for CancelUpload {
+    fn started(&self, _: crab_storage::StorageOperation) {}
+    fn finished(&self, event: crab_storage::StorageObservation) {
+        use crab_storage::{StorageOperation as Op, StorageOutcome};
+        if event.outcome != StorageOutcome::Success {
+            return;
+        }
+        match event.operation {
+            Op::MultipartStart => self.cancel.cancel(),
+            Op::MultipartComplete | Op::MultipartAbort => self
+                .terminal
+                .store(true, std::sync::atomic::Ordering::Relaxed),
+            _ => {}
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn cancelled_lfs_publication_drains_the_known_upload() {
+    let (directory, content, _) = source(b"abc", ABC_OID);
+    let (layout, _) = layout().await;
+    let cancel = CancellationToken::new();
+    let observer = Arc::new(CancelUpload {
+        cancel: cancel.clone(),
+        terminal: false.into(),
+    });
+    let layout = crab_storage::StoreLayout::new(
+        layout
+            .store()
+            .clone()
+            .with_storage_observer(observer.clone()),
+        layout.repo_prefix().to_owned(),
+    );
+    let (prepared, view, runtime, leases) = prepare(&layout, directory.path(), Some(content)).await;
+    let result = prepared
+        .upload_capsule(&view, proof_limits(), &cancel)
+        .await;
+    let drained = observer.terminal.load(std::sync::atomic::Ordering::Relaxed);
+    let root = crab_metadata::capsule_protocol::load_root(&layout)
+        .await
+        .unwrap();
+    leases.release().await;
+    runtime.shutdown().await;
+    assert!(
+        matches!(result, Err(crab_remote::prepare::Error::Cancelled))
+            && drained
+            && root.record().root().refs().is_empty()
+    );
+}
+
 struct OriginProof {
     size: u64,
     wrote: std::sync::atomic::AtomicBool,
