@@ -14,6 +14,7 @@ import {
   type CodeSymbol,
 } from "@/features/repository/files/symbols";
 import { CodeSymbolsPanel } from "@/features/repository/files/symbols/panel";
+import { SourceWorkspace } from "./symbols/workspace";
 import {
   endpoint,
   navigate,
@@ -160,14 +161,34 @@ export function FileView({
       .forEach((element) => element.removeAttribute("data-code-symbol-target"));
   }
 
+  function revealSourceLine(
+    lineNumber: number,
+    behavior: ScrollBehavior = "instant",
+  ) {
+    const line = sourceRoot()?.querySelector<HTMLElement>(
+      `[data-line="${lineNumber}"]`,
+    );
+    if (!line) return;
+    clearSourceTarget();
+    line.setAttribute("data-code-symbol-target", "true");
+    // The document owns vertical scrolling; Pierre owns horizontal source scroll.
+    // scrollIntoView also moves that inner scrollport and clips line beginnings.
+    const bounds = line.getBoundingClientRect();
+    window.scrollTo({
+      top:
+        window.scrollY + bounds.top - (window.innerHeight - bounds.height) / 2,
+      behavior,
+    });
+  }
+
   function navigateToSymbol(symbol: CodeSymbol) {
     setActiveSymbol(symbol);
-    clearSourceTarget();
-    const line = sourceRoot()?.querySelector<HTMLElement>(
-      `[data-line="${symbol.line}"]`,
+    revealSourceLine(
+      symbol.line,
+      matchMedia("(prefers-reduced-motion: reduce)").matches
+        ? "instant"
+        : "smooth",
     );
-    line?.setAttribute("data-code-symbol-target", "true");
-    line?.scrollIntoView({ block: "center", behavior: "smooth" });
     window.history.replaceState(null, "", `#L${symbol.line}`);
   }
 
@@ -199,17 +220,13 @@ export function FileView({
         enableCodeKeyboardScroll(container);
         const match = window.location.hash.match(/^#L(\d+)$/);
         if (!match) return;
-        const line = container.shadowRoot?.querySelector<HTMLElement>(
-          `[data-line="${match[1]}"]`,
-        );
-        line?.setAttribute("data-code-symbol-target", "true");
-        line?.scrollIntoView({ block: "center" });
+        revealSourceLine(Number(match[1]));
       },
       ...(symbolLanguage
         ? {
             unsafeCSS: `
               [data-code-symbol-hover] { background: color-mix(in srgb, var(--warning) 10%, transparent); border-radius: 3px; cursor: pointer; }
-              [data-code-symbol-target] { background: color-mix(in srgb, var(--info) 10%, transparent); }
+              [data-code-symbol-target] { background: color-mix(in srgb, var(--info) 5%, transparent); }
             `,
             onTokenEnter: (token: TokenEventBase) => {
               if (tokenSymbol(token)) {
@@ -530,8 +547,19 @@ export function FileView({
               </div>
             ) : null
           ) : (
-            <div
-              className={`file-source-workspace${symbolsOpen && symbolLanguage ? " has-symbols" : ""}`}
+            <SourceWorkspace
+              symbols={
+                symbolsOpen &&
+                symbolLanguage && (
+                  <CodeSymbolsPanel
+                    state={symbolState}
+                    active={activeSymbol}
+                    onActivate={navigateToSymbol}
+                    onClearActive={() => setActiveSymbol(null)}
+                    onClose={() => setSymbolsOpen(false)}
+                  />
+                )
+              }
             >
               <div className="file-source-code">
                 <File
@@ -540,16 +568,7 @@ export function FileView({
                   options={options}
                 />
               </div>
-              {symbolsOpen && symbolLanguage && (
-                <CodeSymbolsPanel
-                  state={symbolState}
-                  active={activeSymbol}
-                  onActivate={navigateToSymbol}
-                  onClearActive={() => setActiveSymbol(null)}
-                  onClose={() => setSymbolsOpen(false)}
-                />
-              )}
-            </div>
+            </SourceWorkspace>
           )}
         </section>
       )}

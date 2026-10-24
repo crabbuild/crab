@@ -9,6 +9,7 @@ import {
   UserRoundIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
+import { Avatar, AvatarFallback } from "@/components/ui/avatar";
 import { Field, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import {
@@ -68,7 +69,7 @@ const presentations = {
     title: "Filter by author",
     trigger: "Author",
     find: "Find a username",
-    initial: "Yourself",
+    initial: "Created by me",
     noun: "authors",
     singular: "author",
     timing: "Author filters",
@@ -121,6 +122,7 @@ function CatalogFilter({
   kind: keyof typeof presentations;
 }) {
   const text = presentations[kind];
+  const people = kind === "authors" || kind === "assignees";
   const id = useId();
   const input = useRef<HTMLInputElement>(null);
   const [open, setOpen] = useState(false);
@@ -149,6 +151,7 @@ function CatalogFilter({
           ...("missing" in data ? data.missing : data.self),
           number: 0,
           title: text.initial,
+          description: kind === "authors" ? "Your contributions" : undefined,
         },
         ...("any" in data
           ? [
@@ -294,7 +297,10 @@ function CatalogFilter({
                       : "Milestones"
               }
               aria-multiselectable={kind === "labels" || undefined}
-              className="max-h-64 overflow-y-auto"
+              className={cn(
+                "max-h-64 overflow-y-auto",
+                people && "flex flex-col gap-1",
+              )}
             >
               {choices.map((choice, index) => {
                 const key =
@@ -319,6 +325,10 @@ function CatalogFilter({
                       : choice.description;
                 const color = "color" in choice ? choice.color : undefined;
                 const excluded = "excluded" in choice && choice.excluded;
+                const initial =
+                  "actor" in choice || "person" in choice
+                    ? Array.from(title.trim())[0]?.toUpperCase()
+                    : undefined;
                 return (
                   <Button
                     key={key}
@@ -347,16 +357,20 @@ function CatalogFilter({
                       ) : (
                         <SquareIcon className="size-4 shrink-0 text-muted-foreground" />
                       )
-                    ) : (
+                    ) : !people ? (
                       <CheckIcon
                         className={cn(
                           "size-4 shrink-0",
                           !choice.selected && "invisible",
                         )}
                       />
-                    )}
-                    {("actor" in choice || "person" in choice) && (
-                      <UserRoundIcon data-icon="inline-start" />
+                    ) : null}
+                    {people && (
+                      <Avatar size="sm" aria-hidden="true">
+                        <AvatarFallback>
+                          {initial || <UserRoundIcon />}
+                        </AvatarFallback>
+                      </Avatar>
                     )}
                     {color && (
                       <span
@@ -380,6 +394,12 @@ function CatalogFilter({
                         </span>
                       )}
                     </span>
+                    {people && (
+                      <CheckIcon
+                        aria-hidden="true"
+                        className={cn(!choice.selected && "invisible")}
+                      />
+                    )}
                   </Button>
                 );
               })}

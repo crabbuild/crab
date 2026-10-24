@@ -29,6 +29,27 @@ async function openDiscussion(page: Page) {
       });
     if (path.endsWith("/conversation"))
       return conversationPage(route, { comments });
+    if (
+      path === "/api/repos/team/project/issues/1/projects" &&
+      request.method() === "GET"
+    )
+      return route.fulfill({ json: { items: [], can_manage: true } });
+    if (
+      path === "/api/repos/team/project/issues/1/hierarchy" &&
+      request.method() === "GET"
+    )
+      return route.fulfill({
+        json: {
+          hierarchy: {
+            parent: null,
+            version: 0,
+            progress: { total: 0, closed: 0 },
+            children: [],
+            next: null,
+          },
+          can_manage: true,
+        },
+      });
     if (path.endsWith("/links"))
       return route.fulfill({
         json: { items: [], next: null, can_manage: false },

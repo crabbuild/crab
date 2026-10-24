@@ -18,6 +18,14 @@ function subject(target: Target) {
 
 function action(event: ActivityEvent): string {
   switch (event.action.kind) {
+    case "project_changed":
+      return "updated planning in project";
+    case "project_removed":
+      return "removed from project";
+    case "parent_assigned":
+      return "set parent issue";
+    case "parent_removed":
+      return "removed parent issue";
     case "created":
       switch (event.target.kind) {
         case "issue":
@@ -109,16 +117,25 @@ export function ActivityItem({
       : event.action.kind === "unpinned"
         ? PinOffIcon
         : HistoryIcon;
-  const related = "number" in event.action ? event.action : undefined;
+  const related =
+    "number" in event.action || "project" in event.action
+      ? event.action
+      : undefined;
   const linkedIssue =
-    related?.kind === "issue_linked" || related?.kind === "issue_unlinked";
-  const relatedHref = related
-    ? repoHref(repo, {
-        view: linkedIssue ? "issues" : "milestones",
-        issue: linkedIssue ? String(related.number) : undefined,
-        milestone: linkedIssue ? undefined : String(related.number),
-      })
-    : undefined;
+    related?.kind === "issue_linked" ||
+    related?.kind === "issue_unlinked" ||
+    related?.kind === "parent_assigned" ||
+    related?.kind === "parent_removed";
+  const relatedHref =
+    related && "project" in related
+      ? repoHref(repo, { view: "projects", project: related.project })
+      : related
+        ? repoHref(repo, {
+            view: linkedIssue ? "issues" : "milestones",
+            issue: linkedIssue ? String(related.number) : undefined,
+            milestone: linkedIssue ? undefined : String(related.number),
+          })
+        : undefined;
 
   return (
     <li

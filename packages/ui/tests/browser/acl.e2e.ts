@@ -2,7 +2,7 @@ import { test, expect } from "@playwright/test";
 import { mockPullRequest } from "./pulls/fixture";
 import {
   expectNoAccessibilityViolations,
-  selectDarkTheme,
+  contrastRatio,
 } from "./accessibility";
 import type { RepositoryGroup } from "@/lib/api";
 
@@ -77,7 +77,21 @@ test("SSO group access edits are revisioned, persist after reload and preserve g
     },
   );
   await page.goto("/team/project/settings/access");
-  await selectDarkTheme(page);
+  const addMember = page.getByRole("button", {
+    name: "Add member",
+    exact: true,
+  });
+  for (const theme of ["Light", "Dark"]) {
+    await page.getByRole("button", { name: theme, exact: true }).click();
+    await expect(addMember).toHaveCSS("font-size", "13px");
+    const colors = await addMember.evaluate((node) => ({
+      foreground: getComputedStyle(node).color,
+      background: getComputedStyle(node).backgroundColor,
+    }));
+    expect(
+      contrastRatio(colors.foreground, colors.background),
+    ).toBeGreaterThanOrEqual(4.5);
+  }
   await page.getByRole("button", { name: "Add SSO group" }).click();
   await page
     .getByLabel("Group identifier 2", { exact: true })

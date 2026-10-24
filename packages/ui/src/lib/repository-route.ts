@@ -12,6 +12,7 @@ export interface RepositoryRoute {
   pullTab?: string;
   release?: string;
   milestone?: string;
+  project?: string;
   action?: string;
   section?: string;
   base?: string;
@@ -92,6 +93,7 @@ export function repoHref(
     pull_tab,
     release,
     milestone,
+    project,
     action,
     section,
     ...filters
@@ -126,6 +128,8 @@ export function repoHref(
         ? `/pull/${encodeURIComponent(pull)}${pull_tab && pull_tab !== "conversation" ? `/${pull_tab}` : ""}`
         : "/pulls";
     }
+  } else if (view === "projects") {
+    suffix = `/projects${project ? `/${encodeURIComponent(project)}` : ""}`;
   } else if (view === "milestones") {
     suffix =
       action === "new"
@@ -248,6 +252,12 @@ export function repositoryRoute(url: URL, refs?: Refs): RepositoryRoute | null {
         ...route,
         view: "issues",
         issue: tail[0] && decodeURIComponent(tail[0]),
+      };
+    if (page === "projects" && tail.length <= 1)
+      return {
+        ...route,
+        view: "projects",
+        project: tail[0] && decodeURIComponent(tail[0]),
       };
     if (page === "pulls" && !tail.length) return { ...route, view: "pulls" };
     if (

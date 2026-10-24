@@ -182,16 +182,14 @@ export function DiscussionSearch({
                   }
                 }}
               />
-              <InputGroupAddon>
-                <SearchIcon aria-hidden="true" />
-              </InputGroupAddon>
               <InputGroupAddon align="inline-end">
                 <InputGroupButton
                   type="submit"
+                  size="icon-xs"
                   aria-label="Search"
                   title={label}
                 >
-                  Search
+                  <SearchIcon aria-hidden="true" />
                 </InputGroupButton>
               </InputGroupAddon>
             </InputGroup>

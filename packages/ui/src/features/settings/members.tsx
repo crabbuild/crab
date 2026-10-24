@@ -14,6 +14,7 @@ import {
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { Input } from "@/components/ui/input";
+import { Separator } from "@/components/ui/separator";
 import {
   endpoint,
   navigate,
@@ -545,12 +546,16 @@ export function MemberSettings({
         </p>
       )}
       {state?.groups_supported && (
-        <GroupAccess
-          value={groups}
-          onChange={setGroups}
-          disabled={saving || loading || redirecting}
-        />
+        <>
+          <Separator className="my-6" />
+          <GroupAccess
+            value={groups}
+            onChange={setGroups}
+            disabled={saving || loading || redirecting}
+          />
+        </>
       )}
+      <Separator className="my-6" />
       <div className="member-save-bar">
         <span className="member-save-hint">
           Changes apply to the repository when you save.

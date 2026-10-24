@@ -1,5 +1,12 @@
 import { useBrowserPreference } from "@/lib/browser-preference";
-import { IssueOpenedIcon, GitPullRequestIcon } from "@primer/octicons-react";
+import { CircleDotIcon, GitPullRequestIcon } from "lucide-react";
+import {
+  Empty,
+  EmptyHeader,
+  EmptyMedia,
+  EmptyTitle,
+  EmptyDescription,
+} from "@/components/ui/empty";
 import { Link } from "@/components/navigation/link";
 import { Result, RequestWidget } from "@/components/request/result";
 import { endpoint, navigate, useRequest, type Repository } from "@/lib/api";
@@ -63,7 +70,7 @@ export function DiscussionResults({
     page.data?.assigned_to_me,
     page.data?.review_requested_from_me,
   );
-  const Icon = view === "issues" ? IssueOpenedIcon : GitPullRequestIcon;
+  const Icon = view === "issues" ? CircleDotIcon : GitPullRequestIcon;
   return (
     <>
       {before && (
@@ -120,28 +127,32 @@ export function DiscussionResults({
                     ))}
                   </ul>
                 ) : (
-                  <div className="issue-empty">
-                    <Icon size={32} />
-                    <h3>
-                      {view === "issues"
-                        ? query
-                          ? `No results match “${query}”`
-                          : "No results"
-                        : query
-                          ? `No pulls match “${query}”`
-                          : "No matching pulls"}
-                    </h3>
-                    <p className="muted">
-                      {query
-                        ? "Try adjusting your search or filters."
-                        : view === "issues"
-                          ? "Try adjusting your search filters."
-                          : "Compare two branches to start a review."}
-                    </p>
-                  </div>
+                  <Empty className="min-h-64 py-12">
+                    <EmptyHeader>
+                      <EmptyMedia variant="icon">
+                        <Icon aria-hidden="true" />
+                      </EmptyMedia>
+                      <EmptyTitle role="heading" aria-level={3}>
+                        {view === "issues"
+                          ? query
+                            ? `No results match “${query}”`
+                            : "No results"
+                          : query
+                            ? `No pulls match “${query}”`
+                            : "No matching pulls"}
+                      </EmptyTitle>
+                      <EmptyDescription>
+                        {query
+                          ? "Try adjusting your search or filters."
+                          : view === "issues"
+                            ? "Try adjusting your search filters."
+                            : "Compare two branches to start a review."}
+                      </EmptyDescription>
+                    </EmptyHeader>
+                  </Empty>
                 )}
-                <div className="discussion-pagination">
-                  {data.next && (
+                {data.next && (
+                  <div className="discussion-pagination">
                     <Link
                       href={repoHref(repo, {
                         view,
@@ -151,8 +162,8 @@ export function DiscussionResults({
                     >
                       {view === "issues" ? "Older results →" : "Older pulls →"}
                     </Link>
-                  )}
-                </div>
+                  </div>
+                )}
               </>
             )}
           </Result>

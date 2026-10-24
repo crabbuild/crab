@@ -4,16 +4,22 @@ import {
   Rows2Icon,
   ChevronDownIcon,
   MessageSquareIcon,
+  CheckIcon,
 } from "lucide-react";
 import { Link } from "@/components/navigation/link";
 import { Button } from "@/components/ui/button";
 import {
   DropdownMenu,
   DropdownMenuContent,
+  DropdownMenuGroup,
   DropdownMenuLabel,
+  DropdownMenuPortal,
   DropdownMenuRadioGroup,
   DropdownMenuRadioItem,
   DropdownMenuSeparator,
+  DropdownMenuSub,
+  DropdownMenuSubContent,
+  DropdownMenuSubTrigger,
   DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { navigate, type Repository, type RepositoryLabel } from "@/lib/api";
@@ -54,6 +60,9 @@ const sorts = [
   ["created", "Created"],
   ["updated", "Updated"],
   ["comments", "Comments"],
+  ["relevance", "Relevance"],
+] as const;
+const reactionSorts = [
   ["reactions", "Total reactions"],
   ["thumbs_up", "👍 reactions"],
   ["thumbs_down", "👎 reactions"],
@@ -63,7 +72,6 @@ const sorts = [
   ["heart", "❤️ reactions"],
   ["rocket", "🚀 reactions"],
   ["eyes", "👀 reactions"],
-  ["relevance", "Relevance"],
 ] as const;
 
 // Search, state, sort, and pagination share one URL. A changed filter starts at
@@ -108,7 +116,10 @@ export function DiscussionListControls({
   const cannotChangeState =
     navigation?.kind === "state" &&
     (navigation.open === null || navigation.closed === null);
-  const sortLabel = sorts.find(([key]) => key === filters.sort)?.[1];
+  const sortLabel = [...sorts, ...reactionSorts].find(
+    ([key]) => key === filters.sort,
+  )?.[1];
+  const reactionSelected = reactionSorts.some(([key]) => key === filters.sort);
   const filterKinds =
     view === "pulls"
       ? (["authors", "labels", "milestones", "assignees", "reviewers"] as const)
@@ -188,18 +199,40 @@ export function DiscussionListControls({
           </DropdownMenuTrigger>
           {/* Closing scopes must unmount before a rapid reopen during refresh. */}
           {sortOpen && (
-            <DropdownMenuContent align="end" className="w-56" tabIndex={0}>
-              <DropdownMenuLabel>Sort by</DropdownMenuLabel>
-              <DropdownMenuRadioGroup
-                value={filters.sort}
-                onValueChange={(sort) => change({ sort })}
-              >
-                {sorts.map(([value, label]) => (
-                  <DropdownMenuRadioItem key={value} value={value}>
-                    {label}
-                  </DropdownMenuRadioItem>
-                ))}
-              </DropdownMenuRadioGroup>
+            <DropdownMenuContent align="end" className="w-48" tabIndex={0}>
+              <DropdownMenuGroup>
+                <DropdownMenuLabel>Sort by</DropdownMenuLabel>
+                <DropdownMenuRadioGroup
+                  value={filters.sort}
+                  onValueChange={(sort) => change({ sort })}
+                >
+                  {sorts.map(([value, label]) => (
+                    <DropdownMenuRadioItem key={value} value={value}>
+                      {label}
+                    </DropdownMenuRadioItem>
+                  ))}
+                </DropdownMenuRadioGroup>
+                <DropdownMenuSub>
+                  <DropdownMenuSubTrigger>
+                    Reactions
+                    {reactionSelected && <CheckIcon aria-hidden="true" />}
+                  </DropdownMenuSubTrigger>
+                  <DropdownMenuPortal>
+                    <DropdownMenuSubContent className="w-48">
+                      <DropdownMenuRadioGroup
+                        value={filters.sort}
+                        onValueChange={(sort) => change({ sort })}
+                      >
+                        {reactionSorts.map(([value, label]) => (
+                          <DropdownMenuRadioItem key={value} value={value}>
+                            {label}
+                          </DropdownMenuRadioItem>
+                        ))}
+                      </DropdownMenuRadioGroup>
+                    </DropdownMenuSubContent>
+                  </DropdownMenuPortal>
+                </DropdownMenuSub>
+              </DropdownMenuGroup>
               <DropdownMenuSeparator />
               <DropdownMenuLabel>Order</DropdownMenuLabel>
               <DropdownMenuRadioGroup
