@@ -80,7 +80,9 @@ async fn initial_commit(client: &Client, locator: &RepositoryLocator, scratch: &
         .initialize_remote(locator.clone(), "refs/heads/main")
         .await
         .unwrap_or_else(|error| panic!("{}", failure(&error)));
-    let attributes = b"*.bin filter=crab diff=crab merge=crab -text\n".to_vec();
+    let attributes =
+        b"*.bin filter=crab diff=crab merge=crab -text\n*.lfs filter=lfs diff=lfs merge=lfs -text\n"
+            .to_vec();
     let project = format!(
         "version = 1\n[remote]\nurl = \"crab://{}/{}\"\n",
         required("CRAB_SDK_TEST_S3_BUCKET"),
@@ -270,8 +272,14 @@ async fn stage_commit_push_round_trip() {
     let large_size = 1024 * 1024 * 1024;
     std::fs::write(checkout.join("README.md"), b"updated locally\n").unwrap();
     let large_digest = write_large_fixture(&checkout.join("large.bin"), large_size);
+    let lfs_size = 32 * 1024 * 1024;
+    let lfs_digest = write_large_fixture(&checkout.join("large.lfs"), lfs_size);
     local
-        .stage(vec!["README.md".into(), "large.bin".into()])
+        .stage(vec![
+            "README.md".into(),
+            "large.bin".into(),
+            "large.lfs".into(),
+        ])
         .await
         .unwrap();
     let identity = self::identity();
@@ -283,6 +291,17 @@ async fn stage_commit_push_round_trip() {
         .await
         .unwrap();
     let git = PathBuf::from(required("CRAB_SDK_TEST_GIT_BIN"));
+    let lfs_pointer = std::process::Command::new(&git)
+        .current_dir(&checkout)
+        .args(["show", "HEAD:large.lfs"])
+        .output()
+        .unwrap();
+    assert!(lfs_pointer.status.success());
+    assert!(
+        lfs_pointer
+            .stdout
+            .starts_with(b"version https://git-lfs.github.com/spec/v1\n")
+    );
     let tag = std::process::Command::new(&git)
         .current_dir(&checkout)
         .args(["tag", "sdk-round-trip"])
@@ -351,6 +370,10 @@ async fn stage_commit_push_round_trip() {
     assert_eq!(
         file_digest(&verified.join("large.bin")),
         (large_size, large_digest)
+    );
+    assert_eq!(
+        file_digest(&verified.join("large.lfs")),
+        (lfs_size, lfs_digest)
     );
     let status = cloned.status().await.unwrap();
     assert!(

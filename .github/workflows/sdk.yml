@@ -279,8 +279,8 @@ jobs:
       - uses: Swatinem/rust-cache@v2
         with:
           key: sdk-${{ matrix.os }}
-      - name: Build compatible Crab for Windows local workflows
-        if: runner.os == 'Windows'
+      - name: Build compatible Crab for native platform workflows
+        if: runner.os != 'Linux'
         run: cargo +${{ env.SDK_MSRV }} build -p crab --locked --no-default-features
       - name: Select compatible Crab for Windows local workflows
         if: runner.os == 'Windows'
@@ -289,6 +289,34 @@ jobs:
           "CRAB_SDK_TEST_CRAB_BIN=$env:CARGO_TARGET_DIR\debug\crab.exe" |
             Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - run: cargo +${{ env.SDK_MSRV }} test -p crab-sdk --locked --all-features --no-fail-fast
+      - name: Set up native fixture Python
+        if: runner.os != 'Linux'
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Install native fixture AWS CLI
+        if: runner.os != 'Linux'
+        run: python -m pip install awscli
+      - name: Qualify native RustFS transfers
+        if: runner.os != 'Linux'
+        shell: bash
+        run: |
+          crab_binary="$CARGO_TARGET_DIR/debug/crab"
+          if [ "$RUNNER_OS" = Windows ]; then crab_binary="$crab_binary.exe"; fi
+          python crab/scripts/qualify_sdk_native_rustfs.py \
+            --output "$RUNNER_TEMP/sdk-native-rustfs" \
+            --toolchain "$SDK_MSRV" --crab "$crab_binary"
+      - name: Upload native platform transfer evidence
+        if: always() && runner.os != 'Linux'
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-native-rustfs-${{ matrix.os }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: |
+            ${{ runner.temp }}/sdk-native-rustfs/*.json
+            ${{ runner.temp }}/sdk-native-rustfs/*.jsonl
+            ${{ runner.temp }}/sdk-native-rustfs/*.log
+          if-no-files-found: error
+          retention-days: 30
 
   rustfs:
     name: SDK RustFS end-to-end

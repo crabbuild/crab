@@ -404,6 +404,33 @@ original featureless selection is rejected (`sdk-metadata-feature-*.log`,
 `sdk-metadata-empty-selection.json`). Test assertions and metadata code are
 unchanged. Hosted metadata count reports remain required for this follow-up.
 
+All eight non-opt-in SDK jobs pass at `18d7cd03d93`, including Windows and the
+corrected hydration-error fixture
+([run 40120717667](https://github.com/crabbuild/crab/actions/runs/40120717667)).
+The package artifact verifies 18 archives, four external consumer profiles and
+five expected compile failures. Live AWS/GCS/Azure/managed jobs are skipped;
+ordinary macOS/Windows tests do not qualify live storage transfers.
+
+The platform lane now selects eight live cases against an owned native RustFS
+on macOS arm64 and Windows x86_64. The harness pins official RustFS 1.0.3 assets
+by SHA-256, isolates inherited provider selectors, creates a fresh loopback
+server and bucket, and verifies object/multipart cleanup before stopping it.
+Prebuilt tests and examples cover read-only ordinary/LFS/Xet content, remote
+writes/ref rejection, restart recovery and three local workflows. Each case
+must execute exactly once; local cases retain the existing 2 GiB process-tree
+RSS limit. The large local cycle stages both 1 GiB Xet and 32 MiB LFS content,
+checks that Git stored an LFS pointer, then verifies complete bytes through an
+independent eager clone. Linux retains its existing Docker/native HTTP lane.
+Hosted macOS/Windows transfer reports remain required for this addition.
+The local macOS rehearsal passes all eight SDK cases; the mixed large cycle
+takes 258.74 seconds with 1.15 GiB peak RSS, and the read guard records 40 reads,
+zero writes and zero proxy failures. AWS CLI's paginator omits per-page
+`KeyCount`, so cleanup checks aggregated `Contents`. A separate live cleanup
+rehearsal seeds one object and one incomplete multipart upload, removes both,
+and verifies bucket removal (`sdk-native-cleanup-rehearsal.json`). Four harness
+regressions, the SDK script suite, strict changed-test Clippy, formatting and
+pinned workflow lint pass. These worktree checks do not replace hosted reports.
+
 The gateway write-soak failure is also present at the unchanged `crab-v2` base
 `33f8e6c360d`: [run 40087756593](https://github.com/crabbuild/crab/actions/runs/40087756593)
 retains 0.776928 of early throughput; SDK head `55b0fb9bb4a` retains 0.777382.
