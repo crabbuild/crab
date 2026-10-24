@@ -344,7 +344,8 @@ jobs:
       - name: Install dependencies
         run: |
           sudo apt-get update -y
-          sudo apt-get install -y libfuse3-dev pipx
+          sudo apt-get install -y libfuse3-dev pipx build-essential \
+            libcurl4-gnutls-dev libexpat1-dev libssl-dev zlib1g-dev xz-utils
           pipx install awscli
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
       - uses: Swatinem/rust-cache@v2
@@ -512,6 +513,67 @@ jobs:
               "$CRAB_SDK_LOCAL_ROUND_TRIP_BIN" "$test" \
               --exact --ignored --nocapture
           done
+      - name: Build pinned minimum Git
+        shell: bash
+        run: |
+          curl --fail --location --silent --show-error \
+            https://www.kernel.org/pub/software/scm/git/git-2.30.9.tar.xz \
+            --output "$RUNNER_TEMP/git-2.30.9.tar.xz"
+          (cd "$RUNNER_TEMP" && echo '4e3985a641d9ebdfec9e56b370cdbe362a672d9b45270c1acb1406cdab0f5bb4  git-2.30.9.tar.xz' | sha256sum --check --strict)
+          tar -xJf "$RUNNER_TEMP/git-2.30.9.tar.xz" -C "$RUNNER_TEMP"
+          git_prefix="$RUNNER_TEMP/sdk-minimum-git"
+          make -C "$RUNNER_TEMP/git-2.30.9" -j2 prefix="$git_prefix" \
+            NO_GETTEXT=YesPlease NO_TCLTK=YesPlease NO_PERL=YesPlease NO_PYTHON=YesPlease all \
+            > "$RUNNER_TEMP/sdk-evidence/minimum-git-build.log" 2>&1
+          make -C "$RUNNER_TEMP/git-2.30.9" prefix="$git_prefix" \
+            NO_GETTEXT=YesPlease NO_TCLTK=YesPlease NO_PERL=YesPlease NO_PYTHON=YesPlease install \
+            >> "$RUNNER_TEMP/sdk-evidence/minimum-git-build.log" 2>&1
+          "$git_prefix/bin/git" --version
+          echo "$git_prefix/bin" >> "$GITHUB_PATH"
+          echo "CRAB_SDK_TEST_GIT_BIN=$git_prefix/bin/git" >> "$GITHUB_ENV"
+      - name: Qualify minimum Git local contracts
+        shell: bash
+        run: |
+          fixture_digest="$(sha256sum crates/crab-remote/src/local.rs | cut -d' ' -f1)"
+          python3 crab/scripts/qualify_sdk.py run \
+            --output "$RUNNER_TEMP/sdk-evidence/minimum-git-tools.json" \
+            --backend filesystem --features local,publication --fixture-digest "$fixture_digest" \
+            --expected-tests 8 --toolchain "$SDK_MSRV" \
+            --git "$CRAB_SDK_TEST_GIT_BIN" --timeout-seconds 1200 -- \
+            cargo "+${SDK_MSRV}" test -p crab-remote --locked --all-features --lib local::tests::
+          python3 crab/scripts/qualify_sdk.py run \
+            --output "$RUNNER_TEMP/sdk-evidence/minimum-git-local.json" \
+            --backend filesystem --features remote,content,write,local,managed --fixture-digest "$fixture_digest" \
+            --expected-tests 43 --toolchain "$SDK_MSRV" \
+            --git "$CRAB_SDK_TEST_GIT_BIN" --crab "$CRAB_SDK_TEST_CRAB_BIN" \
+            --timeout-seconds 1200 -- \
+            cargo "+${SDK_MSRV}" test -p crab-sdk --locked --all-features \
+            --test local_edit --test local_fetch --test local_pull --test http_git --no-fail-fast \
+            -- --skip native_crab::round_trip
+      - name: Qualify minimum Git live storage workflows
+        shell: bash
+        run: |
+          for test in stage_commit_push_round_trip fetch_checkout_and_pull_round_trip conflict_continue_and_abort_round_trip; do
+            python3 crab/scripts/qualify_sdk.py run \
+              --output "$RUNNER_TEMP/sdk-evidence/minimum-git-${test}.json" \
+              --backend rustfs --features local \
+              --fixture-digest "$(sha256sum crates/crab-sdk/tests/local_round_trip.rs | cut -d' ' -f1)" \
+              --expected-tests 1 --require-rss-below 2147483648 \
+              --toolchain "$SDK_MSRV" --git "$CRAB_SDK_TEST_GIT_BIN" \
+              --crab "$CRAB_SDK_TEST_CRAB_BIN" --timeout-seconds 1800 -- \
+              "$CRAB_SDK_LOCAL_ROUND_TRIP_BIN" "$test" --exact --ignored --nocapture
+          done
+          QUALIFICATION_BUCKET="$CRAB_SDK_TEST_S3_BUCKET" \
+          QUALIFICATION_PREFIX="qualification/http-push-sdk-minimum-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}" \
+            python3 crab/scripts/qualify_sdk.py run \
+              --output "$RUNNER_TEMP/sdk-evidence/minimum-git-native-http.json" \
+              --backend rustfs --features local \
+              --fixture-digest "$(sha256sum crates/crab-sdk/tests/http_git/native_crab.rs | cut -d' ' -f1)" \
+              --expected-tests 1 --toolchain "$SDK_MSRV" \
+              --git "$CRAB_SDK_TEST_GIT_BIN" --crab "$CRAB_SDK_TEST_CRAB_BIN" \
+              --timeout-seconds 1200 -- \
+              cargo "+${SDK_MSRV}" test -p crab-server --locked --lib \
+              git::receive::tests::sdk::native_http_sdk_rustfs -- --exact --ignored --nocapture
       - name: Remove qualification fixtures and verify cleanup
         run: |
           aws --endpoint-url "$AWS_ENDPOINT_URL" s3 rm \

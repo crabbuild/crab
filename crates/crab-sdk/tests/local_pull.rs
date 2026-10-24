@@ -66,7 +66,7 @@ async fn open_preserves_stale_integration_until_the_next_pull() {
     let git_dir = std::path::PathBuf::from(run(
         &fixture.git,
         &fixture.checkout,
-        &["rev-parse", "--path-format=absolute", "--git-dir"],
+        &["rev-parse", "--absolute-git-dir"],
     ));
     let head = run(&fixture.git, &fixture.checkout, &["rev-parse", "HEAD"]);
     let intent = serde_json::json!({
@@ -202,7 +202,7 @@ async fn merge_and_rebase_resume_conflicts() {
     let git_dir = std::path::PathBuf::from(run(
         &fixture.git,
         &fixture.checkout,
-        &["rev-parse", "--path-format=absolute", "--git-dir"],
+        &["rev-parse", "--absolute-git-dir"],
     ));
     let intent_path = git_dir.join("crab-sdk-integration-v1.json");
     let intent = std::fs::read(&intent_path).unwrap();

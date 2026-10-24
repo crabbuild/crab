@@ -1,4 +1,4 @@
-use super::{LocalPushUpdate, git_line, local_error};
+use super::{LocalPushUpdate, local_error};
 use crate::{Error, ErrorKind, Result};
 
 pub(super) struct Preparation<'a> {
@@ -370,19 +370,14 @@ async fn discover_push_pointers(
     let objects = tools
         .run_git_with_input(
             Some(root),
-            [
-                "rev-list",
-                "--objects",
-                "--filter=object:type=blob",
-                "--stdin",
-            ],
+            ["rev-list", "--objects", "--no-object-names", "--stdin"],
             super::revision_input(targets, advertised),
             false,
             cancel,
         )
         .await
         .map_err(local_error)?;
-    let mut pointers = PushPointers::default();
+    let mut oids = Vec::new();
     for line in objects.stdout.split(|byte| *byte == b'\n') {
         if line.is_empty() {
             continue;
@@ -396,50 +391,99 @@ async fn discover_push_pointers(
                 "Git returned an invalid object during push discovery",
             ));
         }
-        let oid = std::str::from_utf8(oid).map_err(|source| {
-            Error::with_source(ErrorKind::Corruption, "Git object ID is not UTF-8", source)
-        })?;
-        if git_line(tools, root, ["cat-file", "-t", oid], cancel).await? != "blob" {
-            continue;
-        }
-        let size = git_line(tools, root, ["cat-file", "-s", oid], cancel)
-            .await?
-            .parse::<usize>()
-            .map_err(|source| {
-                Error::with_source(ErrorKind::Corruption, "Git blob size is invalid", source)
-            })?;
-        if size
-            > crab_types::pointer::MAX_POINTER_SIZE.max(crab_git::lfs_pointer::MAX_LFS_POINTER_SIZE)
-        {
-            continue;
-        }
-        let body = tools
-            .run_git(Some(root), ["cat-file", "blob", oid], false, cancel)
+        oids.push(oid);
+    }
+    let mut pointers = PushPointers::default();
+    // Batch type/size inspection works on the minimum Git version and avoids
+    // two subprocesses per blob. Bounded batches retain the tool output ceiling.
+    for batch in oids.chunks(1024) {
+        let input = batch
+            .iter()
+            .flat_map(|oid| oid.iter().copied().chain(std::iter::once(b'\n')))
+            .collect();
+        let metadata = tools
+            .run_git_with_input(
+                Some(root),
+                ["cat-file", "--batch-check", "--buffer"],
+                input,
+                false,
+                cancel,
+            )
             .await
-            .map_err(local_error)?
-            .stdout;
-        let pointer = match crab_git::classify(&body) {
-            crab_git::pointer_detect::PointerKind::Lfs(pointer) => {
-                if let Some(existing) = pointers.lfs.insert(pointer.oid, pointer.clone())
-                    && existing != pointer
-                {
-                    return Err(Error::new(
-                        ErrorKind::Corruption,
-                        "one LFS identity has inconsistent pointer metadata",
-                    ));
-                }
-                continue;
-            }
-            crab_git::pointer_detect::PointerKind::Crab(pointer) => pointer,
-            crab_git::pointer_detect::PointerKind::NotAPointer => continue,
-        };
-        if let Some(existing) = pointers.crab.insert(pointer.file_hash, pointer.clone())
-            && existing != pointer
-        {
+            .map_err(local_error)?;
+        let rows = metadata
+            .stdout
+            .split(|byte| *byte == b'\n')
+            .filter(|line| !line.is_empty())
+            .collect::<Vec<_>>();
+        if rows.len() != batch.len() {
             return Err(Error::new(
                 ErrorKind::Corruption,
-                "one Crab file identity has inconsistent pointer metadata",
+                "Git returned incomplete object metadata",
             ));
+        }
+        for (expected, row) in batch.iter().zip(rows) {
+            let fields = row.split(|byte| *byte == b' ').collect::<Vec<_>>();
+            let [oid, kind, size] = fields.as_slice() else {
+                return Err(Error::new(
+                    ErrorKind::Corruption,
+                    "Git returned invalid object metadata",
+                ));
+            };
+            if oid != expected {
+                return Err(Error::new(
+                    ErrorKind::Corruption,
+                    "Git object metadata changed identity",
+                ));
+            }
+            if *kind != b"blob" {
+                continue;
+            }
+            let size = std::str::from_utf8(size)
+                .map_err(|source| {
+                    Error::with_source(ErrorKind::Corruption, "Git blob size is not UTF-8", source)
+                })?
+                .parse::<usize>()
+                .map_err(|source| {
+                    Error::with_source(ErrorKind::Corruption, "Git blob size is invalid", source)
+                })?;
+            let oid = std::str::from_utf8(oid).map_err(|source| {
+                Error::with_source(ErrorKind::Corruption, "Git object ID is not UTF-8", source)
+            })?;
+            if size
+                > crab_types::pointer::MAX_POINTER_SIZE
+                    .max(crab_git::lfs_pointer::MAX_LFS_POINTER_SIZE)
+            {
+                continue;
+            }
+            let body = tools
+                .run_git(Some(root), ["cat-file", "blob", oid], false, cancel)
+                .await
+                .map_err(local_error)?
+                .stdout;
+            let pointer = match crab_git::classify(&body) {
+                crab_git::pointer_detect::PointerKind::Lfs(pointer) => {
+                    if let Some(existing) = pointers.lfs.insert(pointer.oid, pointer.clone())
+                        && existing != pointer
+                    {
+                        return Err(Error::new(
+                            ErrorKind::Corruption,
+                            "one LFS identity has inconsistent pointer metadata",
+                        ));
+                    }
+                    continue;
+                }
+                crab_git::pointer_detect::PointerKind::Crab(pointer) => pointer,
+                crab_git::pointer_detect::PointerKind::NotAPointer => continue,
+            };
+            if let Some(existing) = pointers.crab.insert(pointer.file_hash, pointer.clone())
+                && existing != pointer
+            {
+                return Err(Error::new(
+                    ErrorKind::Corruption,
+                    "one Crab file identity has inconsistent pointer metadata",
+                ));
+            }
         }
     }
     Ok(pointers)

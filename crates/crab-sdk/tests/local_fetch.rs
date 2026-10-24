@@ -219,11 +219,7 @@ async fn fetch_recovers_each_metadata_boundary() {
             )
             .await
             .unwrap_or_else(|error| panic!("{}", failure(&error)));
-        let git_dir = PathBuf::from(run(
-            &git,
-            &checkout,
-            &["rev-parse", "--path-format=absolute", "--git-dir"],
-        ));
+        let git_dir = PathBuf::from(run(&git, &checkout, &["rev-parse", "--absolute-git-dir"]));
         run(
             &git,
             &checkout,
@@ -319,11 +315,7 @@ async fn open_rejects_missing_fetch_object_without_mutation() {
         )
         .await
         .unwrap();
-    let git_dir = PathBuf::from(run(
-        &git,
-        &checkout,
-        &["rev-parse", "--path-format=absolute", "--git-dir"],
-    ));
+    let git_dir = PathBuf::from(run(&git, &checkout, &["rev-parse", "--absolute-git-dir"]));
     let missing = "1111111111111111111111111111111111111111";
     let expected = commits[0].clone();
     let intent = serde_json::to_vec(&serde_json::json!({

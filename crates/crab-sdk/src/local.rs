@@ -749,10 +749,43 @@ async fn clone_http_repository(
         args.extend([OsString::from("--depth"), OsString::from(depth.to_string())]);
     }
     args.extend([OsString::from(url), staged.as_os_str().to_owned()]);
-    tools
-        .run_git(Some(parent), args, trusted, cancel)
-        .await
-        .map_err(local_error)?;
+    if let Err(source) = tools.run_git(Some(parent), args, trusted, cancel).await {
+        if matches!(source, crab_remote::local::LocalError::Exit(_)) {
+            // Older Git can fail before creating an inspectable repository.
+            // Advertised IDs identify unsupported hashes without parsing diagnostics.
+            let advertisement = tools
+                .run_git(
+                    Some(parent),
+                    ["ls-remote", "--", url, "HEAD"],
+                    trusted,
+                    cancel,
+                )
+                .await;
+            match advertisement {
+                Ok(advertisement)
+                    if advertisement
+                        .stdout
+                        .split(|byte| *byte == b'\n')
+                        .any(|line| {
+                            line.split(|byte| *byte == b'\t').next().is_some_and(|oid| {
+                                oid.len() == 64 && oid.iter().all(u8::is_ascii_hexdigit)
+                            })
+                        }) =>
+                {
+                    return Err(Error::with_source(
+                        ErrorKind::UnsupportedCapability,
+                        "SHA-256 Git repositories are not supported",
+                        source,
+                    ));
+                }
+                Err(crab_remote::local::LocalError::Cancelled) => {
+                    return Err(local_error(crab_remote::local::LocalError::Cancelled));
+                }
+                _ => {}
+            }
+        }
+        return Err(local_error(source));
+    }
     verify_object_format(tools, staged, cancel).await?;
     tools
         .configure_filters(staged, cancel)
@@ -970,12 +1003,7 @@ async fn git_path(
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<PathBuf> {
     let output = tools
-        .run_git(
-            Some(path),
-            ["rev-parse", "--path-format=absolute", selector],
-            false,
-            cancel,
-        )
+        .run_git(Some(path), ["rev-parse", selector], false, cancel)
         .await
         .map_err(local_error)?;
     let raw = output.stdout.strip_suffix(b"\n").unwrap_or(&output.stdout);
@@ -986,9 +1014,13 @@ async fn git_path(
             "Git returned an invalid repository path",
         ));
     }
-    git_output_path(raw)?.canonicalize().map_err(|source| {
-        Error::with_source(ErrorKind::Io, "cannot resolve Git repository path", source)
-    })
+    // Git 2.30 returns some paths relative to its working directory.
+    // Resolve there rather than requiring Git 2.31's --path-format flag.
+    path.join(git_output_path(raw)?)
+        .canonicalize()
+        .map_err(|source| {
+            Error::with_source(ErrorKind::Io, "cannot resolve Git repository path", source)
+        })
 }
 
 #[cfg(unix)]

@@ -504,16 +504,29 @@ impl LocalTools {
         let path = process_path(self.inner.directory.path());
         command.env("PATH", path);
         if !trust_hooks {
-            command.env("GIT_CONFIG_COUNT", (untrusted_config.len() + 1).to_string());
-            command
-                .env("GIT_CONFIG_KEY_0", "core.hooksPath")
-                .env("GIT_CONFIG_VALUE_0", self.inner.hooks.path());
-            for (offset, (key, value)) in untrusted_config.into_iter().enumerate() {
-                let index = offset + 1;
-                command
-                    .env(format!("GIT_CONFIG_KEY_{index}"), key)
-                    .env(format!("GIT_CONFIG_VALUE_{index}"), value);
+            let configured = command
+                .as_std()
+                .get_envs()
+                .find(|(key, _)| *key == "GIT_CONFIG_PARAMETERS")
+                .map(|(_, value)| value.map(OsStr::to_os_string));
+            let mut parameters = configured
+                .unwrap_or_else(|| std::env::var_os("GIT_CONFIG_PARAMETERS"))
+                .unwrap_or_default();
+            let hook = (
+                OsString::from("core.hooksPath"),
+                self.inner.hooks.path().as_os_str().to_owned(),
+            );
+            // Git 2.30 ignores GIT_CONFIG_COUNT. Its parameter encoding also
+            // reaches nested Git children; append policy after inherited values.
+            for (mut key, value) in std::iter::once(hook).chain(untrusted_config) {
+                key.push("=");
+                key.push(value);
+                if !parameters.is_empty() {
+                    parameters.push(" ");
+                }
+                parameters.push(quote_git_config_parameter(&key));
             }
+            command.env("GIT_CONFIG_PARAMETERS", parameters);
         }
         let mut command = process_wrap::tokio::CommandWrap::from(command);
         command.wrap(process_wrap::tokio::KillOnDrop);
@@ -677,6 +690,37 @@ fn local_filter_driver_values(crab: &Path) -> Result<Vec<(&'static str, String)>
         ("filter.lfs.required", "true".to_owned()),
     ]);
     Ok(values)
+}
+
+fn quote_git_config_parameter(value: &OsStr) -> OsString {
+    #[cfg(unix)]
+    use std::os::unix::ffi::{OsStrExt as _, OsStringExt as _};
+    #[cfg(windows)]
+    use std::os::windows::ffi::{OsStrExt as _, OsStringExt as _};
+
+    #[cfg(unix)]
+    let units = value.as_bytes().iter().copied().map(u16::from);
+    #[cfg(windows)]
+    let units = value.encode_wide();
+    let quote = u16::from(b'\'');
+    let mut encoded = vec![quote];
+    // Match Git's sq_quote_buf without losing native filename bytes or UTF-16.
+    for unit in units {
+        if unit == quote || unit == u16::from(b'!') {
+            encoded.extend([quote, u16::from(b'\\'), unit, quote]);
+        } else {
+            encoded.push(unit);
+        }
+    }
+    encoded.push(quote);
+    #[cfg(unix)]
+    {
+        OsString::from_vec(encoded.into_iter().map(|unit| unit as u8).collect())
+    }
+    #[cfg(windows)]
+    {
+        OsString::from_wide(&encoded)
+    }
 }
 
 fn quote_git_command_path(path: &Path) -> Result<String, LocalError> {
@@ -967,6 +1011,36 @@ mod tests {
             )
         );
         assert_eq!(values[3], ("filter.crab.required", "true".to_owned()));
+    }
+
+    #[test]
+    fn scoped_configuration_round_trips_through_git() {
+        let values = [
+            OsString::from(""),
+            OsString::from("spaces 'quotes' ! and = signs\n海蟹"),
+            #[cfg(unix)]
+            {
+                use std::os::unix::ffi::OsStringExt as _;
+                OsString::from_vec(b"native-\xff!'\n".to_vec())
+            },
+        ];
+        for value in values {
+            let mut parameter = OsString::from("sdk.quoted=");
+            parameter.push(&value);
+            let output = std::process::Command::new(git_path())
+                .args(["config", "--null", "--get", "sdk.quoted"])
+                .env(
+                    "GIT_CONFIG_PARAMETERS",
+                    quote_git_config_parameter(&parameter),
+                )
+                .env_remove("GIT_CONFIG_COUNT")
+                .output()
+                .unwrap();
+            assert!(output.status.success(), "{:?}", output.stderr);
+            let mut expected = value.as_encoded_bytes().to_vec();
+            expected.push(0);
+            assert_eq!(output.stdout, expected);
+        }
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

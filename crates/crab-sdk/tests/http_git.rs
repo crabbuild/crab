@@ -324,6 +324,8 @@ async fn empty_http_repository_can_be_cloned_and_published() {
         .await
         .unwrap();
     let local = repository.local().unwrap();
+    // Older Git servers do not advertise unborn HEAD; use Git's selected branch.
+    let branch = run(&git, &checkout, &["symbolic-ref", "HEAD"]);
     let target = commit(&git, &checkout, "file.txt", "first");
     let outcome = local
         .prepare_push(PushOptions::current_branch())
@@ -335,7 +337,7 @@ async fn empty_http_repository_can_be_cloned_and_published() {
     let actual = run(
         &git,
         fixture.path(),
-        &["--git-dir=remote.git", "rev-parse", "refs/heads/main"],
+        &["--git-dir=remote.git", "rev-parse", &branch],
     );
     sdk.close().await.unwrap();
     assert!(matches!(outcome, LocalPushOutcome::TransportCommitted { .. }) && actual == target);
@@ -654,7 +656,12 @@ async fn sha256_http_contract() {
         .await
         .err()
         .unwrap();
-    assert_eq!(error.kind(), ErrorKind::UnsupportedCapability);
+    assert_eq!(
+        error.kind(),
+        ErrorKind::UnsupportedCapability,
+        "{:?}",
+        std::error::Error::source(&error).map(ToString::to_string)
+    );
     assert!(!checkout.exists());
     sdk.close().await.unwrap();
 }

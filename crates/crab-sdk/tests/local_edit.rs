@@ -1,5 +1,7 @@
 #![cfg(feature = "local")]
 
+use std::error::Error as _;
+
 use crab_sdk::local::{
     CheckoutOptions, CommitOptions as LocalCommitOptions, ExecutionPolicy as LocalExecutionPolicy,
     PushOptions, PushOutcome as LocalPushOutcome,
@@ -130,7 +132,15 @@ async fn dry_run_creates_no_remote_objects() {
                 .dry_run(true),
         )
         .await
-        .unwrap();
+        .unwrap_or_else(|error| {
+            let mut message = error.to_string();
+            let mut source = error.source();
+            while let Some(error) = source {
+                message.push_str(&format!(": {error}"));
+                source = error.source();
+            }
+            panic!("{message}");
+        });
     let outcome = prepared.execute().await.unwrap();
 
     assert!(matches!(outcome, LocalPushOutcome::DryRun { .. }));
