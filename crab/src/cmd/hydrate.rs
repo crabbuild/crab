@@ -3692,7 +3692,7 @@ mod tests {
     use std::process::Command;
     use std::sync::MutexGuard;
 
-    use crate::git::push::{PushConfig, RefPushOutcome, run_push_batch};
+    use crate::git::push::{PushConfig, RefPushOutcome};
     use crate::git::remote_helper::PushSpec;
     use crate::storage::StoreLayout;
     use crate::storage::store::Store;
@@ -4354,33 +4354,32 @@ mod tests {
         run_git(fixture.work_tree(), &["commit", "-m", "pointer"]);
 
         let router = StoreLayout::new(store.clone(), TEST_REPLICA_PREFIX.to_owned());
-        crate::core::remote_layout::initialize(&store, &router)
+        crate::cmd::init::initialize_remote_repository_store(&store, &router, "refs/heads/main")
             .await
-            .expect("initialize canonical command-path repository");
-        crate::metadata::manifest::create_manifest(
+            .expect("initialize native command-path repository");
+
+        let specs = [PushSpec {
+            force: false,
+            src: "refs/heads/main".to_owned(),
+            dst: "refs/heads/main".to_owned(),
+        }];
+        let config = PushConfig::default();
+        let staging = Arc::new(staging);
+        let cancel = CancellationToken::new();
+        let (result, _) = crate::git::capsule_push::run(
+            &config,
+            &specs,
             &store,
             &router,
-            &crate::metadata::manifest::Manifest::default_for_repo("refs/heads/main"),
+            None,
+            &[],
+            Some(&staging),
+            None,
+            None,
+            &cancel,
         )
         .await
-        .expect("initialize canonical v1 command-path manifest");
-
-        let result = run_push_batch(
-            &[PushSpec {
-                force: false,
-                src: "refs/heads/main".to_owned(),
-                dst: "refs/heads/main".to_owned(),
-            }],
-            &PushConfig::default(),
-            Some(store.clone()),
-            None,
-            Some(Arc::new(staging)),
-            router,
-            None,
-            CancellationToken::new(),
-            None,
-        )
-        .await;
+        .expect("publish native command-path content");
 
         assert!(
             matches!(
@@ -4390,6 +4389,18 @@ mod tests {
             "push must publish reconstructible metadata; outcomes: {:?}",
             result.outcomes
         );
+
+        let layout = crab_storage::StoreLayout::new(
+            store.as_storage().clone(),
+            TEST_REPLICA_PREFIX.to_owned(),
+        );
+        crab_metadata::capsule_protocol::load_root(&layout)
+            .await
+            .expect("hydration fixture must publish native authority");
+        assert!(matches!(
+            store.head(&router.manifest_path()).await,
+            Err(error::CrabError::NotFound { .. })
+        ));
 
         let global_objects = store
             .list_prefix(&object_store::path::Path::from(".crab"))

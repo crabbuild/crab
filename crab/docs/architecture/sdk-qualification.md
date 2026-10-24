@@ -121,6 +121,28 @@ uses native capture and catalog lookup. HTTP fault jobs exposed the missing
 serialization match arm. Those fixes and the remaining matrix require new-head
 CI; neither failed job counts as qualification evidence.
 
+CI run [40085023320](https://github.com/crabbuild/crab/actions/runs/40085023320)
+at `55b0fb9bb4a` passes all eight non-opt-in SDK jobs, including packaging,
+Linux/macOS/Windows/current-stable tests, live RustFS, HTTP publication faults
+and shared publication/recovery. Its package artifact verifies four external
+consumer profiles and five required compile failures. The controlled release
+benchmark verifies five cold/warm pairs for 1 GiB: SDK medians are 3.05 seconds
+cold and 0.63 seconds warm, with peak process-tree RSS of 418 MiB. Origin traffic
+matches the shared core: 33 cold requests and 12 warm requests. This is RustFS
+fixture evidence, not a credentialed AWS performance claim.
+
+Broader Linux/macOS protocol CI then reproduced two hydration failures. Their
+shared fixture invoked the retired manifest publisher; an authority probe
+confirmed a successful push with no `v2/root`. The fixture now uses the product
+capsule initializer/publisher and requires native authority without a manifest.
+All 88 command hydration tests pass, retaining reconstruction, disk-cache reuse,
+cancellation, typed failures and destination-preservation assertions
+(`sdk-native-command-hydration-before.log`,
+`sdk-native-command-hydration-authority-probe.log`,
+`sdk-native-command-hydration-after.log`). SDK CI now runs this caller slice too.
+Production hydration and error handling are unchanged; no legacy lookup is
+reintroduced. New-head protocol CI must confirm the fixture migration.
+
 Remaining qualification and improvement work:
 
 - Public capability limits still apply: SHA-256 repositories, recursive
@@ -131,11 +153,14 @@ Remaining qualification and improvement work:
 - GCS, Azure and managed service remain preview until dedicated live fixtures
   prove writes, authorization expiry/revocation, placement changes and lost
   finalize responses. Local mocks and compilation are not that evidence.
-- AWS service behavior, new-head CI, package-consumer and Linux/Windows proof
-  remain separate gates.
-- Release-build cold/warm benchmarks must establish throughput, latency and peak
-  memory relative to the shared reader. Debug functional runs establish no
-  production performance percentage or latency claim.
+- Credentialed AWS service behavior and post-fixture-change CI remain separate
+  gates. The hosted package-consumer and Linux/Windows proof above is complete
+  for its named source revision.
+- Repeat release-build cold/warm qualification on credentialed cloud services.
+  Direct write/recovery reports can include compiler descendants and have no
+  runtime-memory threshold; prebuilt-executable memory gates are still needed.
+  Cold LFS ranges without a valid receipt verify the entire object first;
+  measure locally cached, exact-version verification proofs before optimizing.
 - Native recovery artifacts and receipts under `v2/plans/` currently have no GC
   retention policy. Define safe expiry without removing unresolved attempts or
   promised historical evidence before adding collection.
