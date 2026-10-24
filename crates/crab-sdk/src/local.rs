@@ -666,7 +666,7 @@ impl Client {
                 )
                 .await?;
                 let head = cloned_head(options.branch.as_deref(), &snapshot)?;
-                let hydration = clone_hydration(
+                let hydration = prepare_clone_hydration(
                     &tools.owner,
                     &staged,
                     head.target.as_deref(),
@@ -674,7 +674,17 @@ impl Client {
                     &cancel,
                 )
                 .await?;
-                configure_clone(&staged, hydration.lazy(), managed_token_cache).await?;
+                // Filesystem pack transfer has no CLI storage URL. Cloud and
+                // managed transports provide the clone's content location when
+                // the selected commit predates committed project configuration.
+                let content_remote = remote.starts_with("crab://").then_some(remote.as_str());
+                configure_clone(
+                    &staged,
+                    hydration.lazy(),
+                    content_remote,
+                    managed_token_cache,
+                )
+                .await?;
                 checkout_cloned_head(
                     &tools.owner,
                     &staged,
@@ -685,10 +695,10 @@ impl Client {
                     &cancel,
                 )
                 .await?;
-                hydrate_clone_patterns(
+                hydrate_cloned_checkout(
                     &tools.owner,
                     &staged,
-                    hydration.patterns(),
+                    &hydration,
                     &environment,
                     trusted,
                     &cancel,
@@ -747,8 +757,9 @@ async fn clone_http_repository(
         .configure_filters(staged, cancel)
         .await
         .map_err(local_error)?;
-    let hydration = clone_hydration(tools, staged, Some("HEAD"), options.lazy, cancel).await?;
-    configure_clone(staged, hydration.lazy(), None).await?;
+    let hydration =
+        prepare_clone_hydration(tools, staged, Some("HEAD"), options.lazy, cancel).await?;
+    configure_clone(staged, hydration.lazy(), None, None).await?;
     match tools
         .run_git(
             Some(staged),
@@ -767,7 +778,7 @@ async fn clone_http_repository(
         Err(crab_remote::local::LocalError::Exit(output)) if output.status.code() == Some(1) => {}
         Err(source) => return Err(local_error(source)),
     }
-    hydrate_clone_patterns(tools, staged, hydration.patterns(), &[], trusted, cancel).await?;
+    hydrate_cloned_checkout(tools, staged, &hydration, &[], trusted, cancel).await?;
     fetch::verify_repository(tools, staged, cancel).await
 }
 
@@ -981,12 +992,24 @@ fn git_output_path(raw: &[u8]) -> Result<PathBuf> {
     Ok(PathBuf::from(raw))
 }
 
-async fn configure_clone(root: &Path, lazy: bool, token_cache: Option<&Path>) -> Result<()> {
+async fn configure_clone(
+    root: &Path,
+    lazy: bool,
+    content_remote: Option<&str>,
+    token_cache: Option<&Path>,
+) -> Result<()> {
     let directory = root.join(".crab");
     tokio::fs::create_dir_all(&directory)
         .await
         .map_err(|source| Error::with_source(ErrorKind::Io, "cannot create .crab", source))?;
     let mut configuration = format!("# Crab local settings\n[checkout]\nlazy = {lazy}\n");
+    if let Some(remote) = content_remote {
+        // Project configuration still wins in the shared resolver. Keep the
+        // explicit clone location private so historical clones stay clean.
+        configuration.push_str("\n[remote]\nurl = ");
+        configuration.push_str(&toml::Value::String(remote.to_owned()).to_string());
+        configuration.push('\n');
+    }
     if let Some(token_cache) = token_cache {
         let token_cache = token_cache.to_str().ok_or_else(|| {
             Error::new(
@@ -1050,7 +1073,7 @@ fn cloned_head(
     Ok(ClonedHead { branch, target })
 }
 
-async fn clone_hydration(
+async fn prepare_clone_hydration(
     tools: &crab_remote::local::LocalTools,
     root: &Path,
     revision: Option<&str>,
@@ -1088,13 +1111,27 @@ async fn clone_hydration(
                     source,
                 )
             })?;
-            crab_remote::config::parse_repository_hydration(document).map_err(|source| {
-                Error::with_source(
-                    ErrorKind::Corruption,
-                    "committed crab.toml has invalid checkout configuration",
-                    source,
-                )
-            })?
+            let hydration =
+                crab_remote::config::parse_repository_hydration(document).map_err(|source| {
+                    Error::with_source(
+                        ErrorKind::Corruption,
+                        "committed crab.toml has invalid checkout configuration",
+                        source,
+                    )
+                })?;
+            // Filters can run before Git writes crab.toml. Install the selected
+            // revision's exact config in private staging first, so both pointer
+            // kinds use committed storage settings on their first smudge.
+            tokio::fs::write(root.join("crab.toml"), &output.stdout)
+                .await
+                .map_err(|source| {
+                    Error::with_source(
+                        ErrorKind::Io,
+                        "cannot stage committed configuration",
+                        source,
+                    )
+                })?;
+            hydration
         }
     } else {
         None
@@ -1106,23 +1143,26 @@ async fn clone_hydration(
     ))
 }
 
-async fn hydrate_clone_patterns(
+async fn hydrate_cloned_checkout(
     tools: &crab_remote::local::LocalTools,
     root: &Path,
-    patterns: &[String],
+    hydration: &crab_remote::config::CheckoutHydration,
     environment: &[(OsString, OsString)],
     trusted: bool,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<()> {
-    if patterns.is_empty() {
+    if hydration.lazy() && hydration.patterns().is_empty() {
         return Ok(());
     }
-    let mut args = vec![
-        OsString::from("hydrate"),
-        OsString::from("--json"),
-        OsString::from("--"),
-    ];
-    args.extend(patterns.iter().map(OsString::from));
+    // Smudge can defer failed reconstruction by leaving a pointer. Verify eager
+    // hydration after configuration is checked out, before publishing the clone.
+    let mut args = vec![OsString::from("hydrate"), OsString::from("--json")];
+    if hydration.lazy() {
+        args.push(OsString::from("--"));
+        args.extend(hydration.patterns().iter().map(OsString::from));
+    } else {
+        args.push(OsString::from("--all"));
+    }
     tools
         .run_crab_with_env(
             Some(root),

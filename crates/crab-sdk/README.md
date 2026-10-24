@@ -159,6 +159,12 @@ Use `Client::clone_local` to create a worktree. The local interface provides
 snapshot, fetch, status, stage, commit, checkout, pull, conflict
 continue/abort, hydrate, dehydrate, prefetch, and prepared push operations.
 Repository hooks and executable Git drivers are disabled by default.
+The validated Crab executable handles both Crab and LFS filters. Eager clones
+finish hydration in private staging before exposing the destination; missing
+content fails the clone. Lazy clones retain both pointer formats. Direct and
+managed clones keep their content location in private local settings when no
+committed project configuration exists. HTTP content clones need the committed
+direct-storage URL and matching bucket credentials.
 
 ## Managed repositories
 

@@ -5,10 +5,17 @@ use crab_sdk::local::{
     CloneOptions, CommitOptions, FetchDepth, FetchOptions, Options, PullOptions, PushOptions,
     PushOutcome, PushRefspec, Tools,
 };
-use crab_sdk::remote::write::CommitIdentity;
+use crab_sdk::remote::EntryMode;
+use crab_sdk::remote::write::{
+    CommitIdentity, CommitOptions as RemoteCommitOptions, FileEdit, MutationOutcome,
+};
 use crab_sdk::storage::DirectStoreOptions;
-use crab_sdk::{Client, ErrorKind, ObjectId, RepositoryLocator, WritePolicy};
-use futures_util::FutureExt as _;
+use crab_sdk::{
+    Client, ErrorKind, GitPath, ObjectId, OpenOptions, RepositoryLocator, Revision, WritePolicy,
+};
+use futures_util::{FutureExt as _, TryStreamExt as _};
+use object_store::ObjectStoreExt as _;
+use sha2::Digest as _;
 
 use super::local_support::{commit, git_path, run};
 
@@ -25,18 +32,29 @@ async fn round_trip() {
     let git = git_path();
     let sdk = Client::builder()
         .direct_store(DirectStoreOptions::filesystem(&store).unwrap())
-        .local(Options::new(Tools::new(&git, crab).unwrap()))
+        .local(Options::new(Tools::new(&git, &crab).unwrap()))
         .build()
         .unwrap();
-    let result = AssertUnwindSafe(exercise(&sdk, &git, scratch.path(), &url))
-        .catch_unwind()
-        .await;
+    let bucket = std::env::var("QUALIFICATION_BUCKET").unwrap();
+    let content = Client::builder()
+        .direct_store(DirectStoreOptions::s3_from_env(&bucket).unwrap())
+        .local(Options::new(Tools::new(&git, &crab).unwrap()))
+        .build()
+        .unwrap();
+    let result = AssertUnwindSafe(async {
+        let base = exercise(&sdk, &git, scratch.path(), &url).await;
+        hydrated_clone(&content, &git, scratch.path(), &url, base).await
+    })
+    .catch_unwind()
+    .await;
     let close = sdk.close().await;
+    let content_close = content.close().await;
     let commit = match result {
         Ok(commit) => commit,
         Err(panic) => std::panic::resume_unwind(panic),
     };
     close.unwrap();
+    content_close.unwrap();
     println!("native-http-sdk-commit={commit}");
 }
 
@@ -184,7 +202,7 @@ async fn exercise(sdk: &Client, git: &Path, scratch: &Path, url: &str) -> Object
 
     let independent = scratch.join("independent");
     let fresh = sdk
-        .clone_local(locator, &independent, CloneOptions::default())
+        .clone_local(locator, &independent, CloneOptions::default().eager())
         .await
         .unwrap();
     assert_eq!(
@@ -196,5 +214,240 @@ async fn exercise(sdk: &Client, git: &Path, scratch: &Path, url: &str) -> Object
         b"native SDK update\n"
     );
     run(git, &independent, &["fsck", "--strict"]);
+    target
+}
+
+async fn hydrated_clone(
+    sdk: &Client,
+    git: &Path,
+    scratch: &Path,
+    url: &str,
+    base: ObjectId,
+) -> ObjectId {
+    let bucket = std::env::var("QUALIFICATION_BUCKET").unwrap();
+    let prefix = std::env::var("QUALIFICATION_PREFIX").unwrap();
+    let mut bytes = (0..256 * 1024)
+        .map(|index: usize| (index.wrapping_mul(73) ^ (index >> 8)) as u8)
+        .collect::<Vec<_>>();
+    // Per-fixture bytes keep an earlier verified cache from hiding a missing xorb.
+    bytes.extend_from_slice(prefix.as_bytes());
+    let lfs_bytes = bytes.iter().map(|byte| byte ^ 0x5a).collect::<Vec<_>>();
+    let oid = sha2::Sha256::digest(&lfs_bytes).into();
+    let store =
+        crab_storage::build_static_env_store(&bucket, crab_storage::StorageProviderKind::S3)
+            .unwrap();
+    let layout = crab_storage::StoreLayout::new(store.clone(), prefix.clone());
+    let xorb_prefix = crab_storage::layout::global_content_prefix(layout.global_prefix(), "xorbs");
+    let existing_xorbs = store
+        .inner()
+        .list(Some(&xorb_prefix))
+        .map_ok(|object| object.location)
+        .try_collect::<std::collections::HashSet<_>>()
+        .await
+        .unwrap();
+    crab_lfs::LfsObjectStore::new(store.clone(), &prefix)
+        .put(&oid, lfs_bytes.clone().into())
+        .await
+        .unwrap();
+    let pointer = crab_git::LfsPointer {
+        oid,
+        size: bytes.len() as u64,
+        extensions: Vec::new(),
+    }
+    .serialize();
+    let attributes = b"*.bin filter=crab diff=crab merge=crab -text\n*.lfs filter=lfs diff=lfs merge=lfs -text\n".to_vec();
+    let project =
+        format!("version = 1\n[remote]\nurl = \"crab://{bucket}/{prefix}\"\n").into_bytes();
+    let identity =
+        CommitIdentity::new("SDK qualification", "sdk@example.invalid", 1_700_000_000, 0).unwrap();
+    let prepared = sdk
+        .open(OpenOptions::remote(
+            RepositoryLocator::new(&prefix).unwrap(),
+        ))
+        .await
+        .unwrap()
+        .remote()
+        .unwrap()
+        .prepare_commit(
+            RemoteCommitOptions::new(
+                base,
+                "refs/heads/main",
+                Some(base),
+                identity.clone(),
+                identity,
+                b"native HTTP content\n".to_vec(),
+            )
+            .unwrap(),
+            vec![
+                FileEdit::git(
+                    GitPath::new(".gitattributes").unwrap(),
+                    EntryMode::Regular,
+                    attributes.len() as u64,
+                    std::io::Cursor::new(attributes),
+                )
+                .unwrap(),
+                FileEdit::git(
+                    GitPath::new("crab.toml").unwrap(),
+                    EntryMode::Regular,
+                    project.len() as u64,
+                    std::io::Cursor::new(project),
+                )
+                .unwrap(),
+                FileEdit::hydrated(
+                    GitPath::new("a.bin").unwrap(),
+                    EntryMode::Regular,
+                    bytes.len() as u64,
+                    std::io::Cursor::new(bytes.clone()),
+                )
+                .unwrap(),
+                FileEdit::git(
+                    GitPath::new("b.lfs").unwrap(),
+                    EntryMode::Regular,
+                    pointer.len() as u64,
+                    std::io::Cursor::new(pointer.clone()),
+                )
+                .unwrap(),
+            ],
+            scratch.to_owned(),
+        )
+        .await
+        .unwrap();
+    let target = prepared.commit_id().unwrap();
+    assert!(matches!(
+        prepared.execute().await.unwrap(),
+        MutationOutcome::Committed { .. }
+    ));
+    let uploaded = store
+        .inner()
+        .list(Some(&xorb_prefix))
+        .try_collect::<Vec<_>>()
+        .await
+        .unwrap();
+    let mut removed = Vec::new();
+    for object in uploaded {
+        if existing_xorbs.contains(&object.location) {
+            continue;
+        }
+        let body = store
+            .inner()
+            .get(&object.location)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        store.delete(&object.location).await.unwrap();
+        removed.push((object.location, body));
+    }
+    assert!(!removed.is_empty(), "fixture must publish a fresh xorb");
+    let lazy_path = scratch.join("lazy-content-http");
+    let lazy = sdk
+        .clone_local(
+            RepositoryLocator::http(url).unwrap(),
+            &lazy_path,
+            CloneOptions::default().lazy(),
+        )
+        .await;
+    let failed_path = scratch.join("missing-content-http");
+    let failed = sdk
+        .clone_local(
+            RepositoryLocator::http(url).unwrap(),
+            &failed_path,
+            CloneOptions::default().eager(),
+        )
+        .await;
+    for (path, body) in removed {
+        store.put(&path, body).await.unwrap();
+    }
+    let lazy = lazy.unwrap();
+    let raw = sdk
+        .open(OpenOptions::remote(
+            RepositoryLocator::new(&prefix).unwrap(),
+        ))
+        .await
+        .unwrap()
+        .remote()
+        .unwrap()
+        .snapshot(Revision::branch("main").unwrap())
+        .await
+        .unwrap()
+        .read_blob(GitPath::new("a.bin").unwrap())
+        .await
+        .unwrap();
+    assert_eq!(
+        std::fs::read(lazy_path.join("a.bin")).unwrap(),
+        raw.as_ref()
+    );
+    assert_eq!(std::fs::read(lazy_path.join("b.lfs")).unwrap(), pointer);
+    assert!(lazy.local().unwrap().status().await.unwrap().is_clean());
+    assert!(failed.is_err(), "missing content must fail an eager clone");
+    assert!(
+        !failed_path.exists(),
+        "failed clone must not publish a destination"
+    );
+    let checkout = scratch.join("hydrated-http");
+    let cloned = sdk
+        .clone_local(
+            RepositoryLocator::http(url).unwrap(),
+            &checkout,
+            CloneOptions::default().eager(),
+        )
+        .await
+        .unwrap();
+    assert!(
+        std::fs::read(checkout.join("a.bin")).unwrap() == bytes,
+        "eager HTTP clone must materialize Crab content"
+    );
+    assert!(
+        std::fs::read(checkout.join("b.lfs")).unwrap() == lfs_bytes,
+        "eager HTTP clone must materialize LFS content"
+    );
+    assert!(cloned.local().unwrap().status().await.unwrap().is_clean());
+    run(git, &checkout, &["fsck", "--strict"]);
+    let identity =
+        CommitIdentity::new("SDK qualification", "sdk@example.invalid", 1_700_000_000, 0).unwrap();
+    let committed = sdk
+        .open(OpenOptions::remote(
+            RepositoryLocator::new(&prefix).unwrap(),
+        ))
+        .await
+        .unwrap()
+        .remote()
+        .unwrap()
+        .prepare_commit(
+            RemoteCommitOptions::new(
+                target,
+                "refs/heads/without-project-config",
+                None,
+                identity.clone(),
+                identity,
+                b"content without project configuration\n".to_vec(),
+            )
+            .unwrap(),
+            vec![FileEdit::delete(GitPath::new("crab.toml").unwrap()).unwrap()],
+            scratch.to_owned(),
+        )
+        .await
+        .unwrap()
+        .execute()
+        .await
+        .unwrap();
+    assert!(matches!(committed, MutationOutcome::Committed { .. }));
+    let checkout = scratch.join("hydrated-direct-without-config");
+    let cloned = sdk
+        .clone_local(
+            RepositoryLocator::new(&prefix).unwrap(),
+            &checkout,
+            CloneOptions::default()
+                .with_branch("without-project-config")
+                .unwrap()
+                .eager(),
+        )
+        .await
+        .unwrap();
+    assert!(std::fs::read(checkout.join("a.bin")).unwrap() == bytes);
+    assert!(std::fs::read(checkout.join("b.lfs")).unwrap() == lfs_bytes);
+    assert!(!checkout.join("crab.toml").exists());
+    assert!(cloned.local().unwrap().status().await.unwrap().is_clean());
     target
 }

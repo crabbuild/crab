@@ -250,34 +250,40 @@ impl PrefetchQueue {
     /// If the task has not completed yet, waits for it. Returns an
     /// error if the task failed or the pathname was never submitted.
     pub async fn take_result(&self, pathname: &str) -> Result<PrefetchedFile> {
-        // Fast path: result already materialized by `poll_completed`.
-        {
+        // This public helper shipped in v1.2.4 with an unknown-path error.
+        // Protocol consumers need absence distinct from a queued read failure.
+        self.take_result_if_present(pathname)
+            .await?
+            .ok_or_else(|| CrabError::NotFound {
+                path: format!("prefetch result for {pathname}"),
+            })
+    }
+
+    pub(crate) async fn take_result_if_present(
+        &self,
+        pathname: &str,
+    ) -> Result<Option<PrefetchedFile>> {
+        // Claim completed output or its task under one lock so concurrent
+        // completion polling cannot turn an owned result into absence.
+        let handle = {
             let mut state = self.state.lock().await;
             if let Some(bytes) = state.results.remove(pathname) {
-                return Ok(bytes);
+                return Ok(Some(bytes));
             }
             if let Some(error) = state.errors.remove(pathname) {
                 return Err(error);
             }
-        }
-
-        // Slow path: task still running. Pull the handle out under
-        // the lock, then await it outside the lock so other submits
-        // are not blocked.
-        let handle = {
-            let mut state = self.state.lock().await;
             state.in_flight.remove(pathname)
         };
 
         let Some(handle) = handle else {
-            return Err(CrabError::NotFound {
-                path: format!("prefetch result for {pathname}"),
-            });
+            return Ok(None);
         };
 
         handle
             .await
             .map_err(|error| CrabError::Io(std::io::Error::other(error)))?
+            .map(Some)
     }
 
     /// Cancel all in-flight prefetches and wait for the tasks to
@@ -327,10 +333,10 @@ impl PrefetchQueue {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, reason = "test assertions")]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
-    fn queue() -> (tempfile::TempDir, PrefetchQueue) {
+    pub(crate) fn queue() -> (tempfile::TempDir, PrefetchQueue) {
         let directory = tempfile::tempdir().unwrap();
         let origin = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
         let local = Arc::new(crate::cache::LocalCache::new(

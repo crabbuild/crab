@@ -364,6 +364,13 @@ async fn clone_hydration_precedence_matches_committed_project_config() {
     let store = tempfile::tempdir().unwrap();
     let sdk = client(store.path(), fixture.path());
 
+    #[cfg(unix)]
+    std::fs::write(
+        fixture.path().join("crab fixture.enable-hydrate"),
+        b"enabled",
+    )
+    .unwrap();
+
     let configured = fixture.path().join("configured-hydration");
     sdk.clone_local(
         RepositoryLocator::http(&server.url()).unwrap(),
@@ -377,6 +384,14 @@ async fn clone_hydration_precedence_matches_committed_project_config() {
             .unwrap()
             .contains("lazy = false")
     );
+    #[cfg(unix)]
+    {
+        assert_eq!(
+            std::fs::read_to_string(fixture.path().join("crab fixture.hydrate")).unwrap(),
+            "--json\n--all\n"
+        );
+        std::fs::remove_file(fixture.path().join("crab fixture.hydrate")).unwrap();
+    }
 
     let overridden = fixture.path().join("explicit-hydration");
     sdk.clone_local(
@@ -391,14 +406,11 @@ async fn clone_hydration_precedence_matches_committed_project_config() {
             .unwrap()
             .contains("lazy = true")
     );
+    #[cfg(unix)]
+    assert!(!fixture.path().join("crab fixture.hydrate").exists());
 
     #[cfg(unix)]
     {
-        std::fs::write(
-            fixture.path().join("crab fixture.enable-hydrate"),
-            b"enabled",
-        )
-        .unwrap();
         commit(
             &git_path(),
             &fixture.path().join("seed"),

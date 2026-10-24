@@ -225,7 +225,7 @@ impl LocalTools {
         repository: &Path,
         cancel: &CancellationToken,
     ) -> Result<(), LocalError> {
-        let values = filter_driver_values(&self.inner.crab)?;
+        let values = local_filter_driver_values(&self.inner.crab)?;
         for (key, value) in values {
             self.run_git(
                 Some(repository),
@@ -244,7 +244,7 @@ impl LocalTools {
         repository: &Path,
         cancel: &CancellationToken,
     ) -> Result<bool, LocalError> {
-        let expected = filter_driver_values(&self.inner.crab)?;
+        let expected = local_filter_driver_values(&self.inner.crab)?;
         for (key, value) in expected {
             let actual = match self
                 .run_git(
@@ -601,7 +601,7 @@ impl LocalTools {
             }
             Err(error) => return Err(error),
         };
-        let expected = filter_driver_values(&self.inner.crab).unwrap_or_default();
+        let expected = local_filter_driver_values(&self.inner.crab).unwrap_or_default();
         let mut overrides = Vec::new();
         for entry in output.stdout.split(|byte| *byte == 0) {
             if entry.is_empty() {
@@ -639,6 +639,19 @@ pub fn filter_driver_values(crab: &Path) -> Result<Vec<(&'static str, String)>, 
         ("filter.crab.required", "true".to_owned()),
         ("diff.crab.command", format!("{quoted} diff-driver")),
     ])
+}
+
+fn local_filter_driver_values(crab: &Path) -> Result<Vec<(&'static str, String)>, LocalError> {
+    // SDK worktrees use the same validated engine for both pointer kinds, so
+    // checkout policy and scoped credentials also govern LFS. CLI Crab-only
+    // installation keeps its separate filter_driver_values contract.
+    let mut values = filter_driver_values(crab)?;
+    let quoted = quote_git_command_path(crab)?;
+    values.extend([
+        ("filter.lfs.process", format!("{quoted} filter-process")),
+        ("filter.lfs.required", "true".to_owned()),
+    ]);
+    Ok(values)
 }
 
 fn quote_git_command_path(path: &Path) -> Result<String, LocalError> {
@@ -929,12 +942,13 @@ mod tests {
             .run_git(Some(root.path()), ["init"], true, &cancel)
             .await
             .unwrap();
-        tools
-            .run_git(
+        for filter in ["untrusted", "lfs"] {
+            let key = format!("filter.{filter}.clean");
+            tools.run_git(
                 Some(root.path()),
                 [
                     "config",
-                    "filter.untrusted.clean",
+                    key.as_str(),
                     "printf executed > driver-ran; while IFS= read -r line; do printf '%s\\n' \"$line\"; done",
                 ],
                 true,
@@ -942,15 +956,22 @@ mod tests {
             )
             .await
             .unwrap();
+        }
         std::fs::write(
             root.path().join(".gitattributes"),
-            "*.txt filter=untrusted\n",
+            "*.txt filter=untrusted\n*.bin filter=lfs\n",
         )
         .unwrap();
         std::fs::write(root.path().join("first.txt"), "first\n").unwrap();
+        std::fs::write(root.path().join("first.bin"), "first\n").unwrap();
 
         tools
-            .run_git(Some(root.path()), ["add", "first.txt"], false, &cancel)
+            .run_git(
+                Some(root.path()),
+                ["add", "first.txt", "first.bin"],
+                false,
+                &cancel,
+            )
             .await
             .unwrap();
         assert!(!root.path().join("driver-ran").exists());

@@ -1217,30 +1217,11 @@ fn dispatch_command<R: Read, W: Write>(
                 return Ok(());
             }
 
-            // Non-delayed path: if a pathname was previously delayed,
-            // git will re-issue `command=smudge` without `can-delay=1`
-            // to collect the queued content. In that case the content
-            // bytes git sent are the same pointer bytes as before — we
-            // just hand back the prefetched result.
+            // Git retries delayed paths with empty input. A queued read failure
+            // must stay an error: inline fallback would turn that empty request
+            // into a successful zero-byte file.
             if let (Some(pf), Some(h)) = (prefetch, handle)
-                && let Some(file) = h.block_on(async {
-                    // Non-blocking peek: take_result only succeeds if
-                    // the result is already materialized or the task is
-                    // ready. A missing entry surfaces as NotFound and
-                    // we fall through to the inline smudge path.
-                    match pf.take_result(&cmd.pathname).await {
-                        Ok(file) => Some(file),
-                        Err(CrabError::NotFound { .. }) => None,
-                        Err(e) => {
-                            tracing::warn!(
-                                path = %cmd.pathname,
-                                error = %e,
-                                "prefetched result unavailable, falling back to inline smudge"
-                            );
-                            None
-                        }
-                    }
-                })
+                && let Some(file) = h.block_on(pf.take_result_if_present(&cmd.pathname))?
             {
                 output.content_response(|output| write_content_file(output, file.path()))?;
                 return Ok(());
@@ -3497,6 +3478,65 @@ size 1048576\n";
     #[test]
     fn failed_smudge_preserves_the_next_request() {
         assert_failed_smudge_preserves_the_next_request(LfsStoreSource::eager(None));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn failed_delayed_smudge_reports_error_and_preserves_the_next_request() {
+        let (_directory, queue) = crate::git::prefetch::tests::queue();
+        let queue = Arc::new(queue);
+        queue
+            .submit(
+                "missing.bin".into(),
+                crab_types::pointer::Pointer {
+                    file_hash: *blake3::hash(b"missing").as_bytes(),
+                    size: 7,
+                    shard_hint: None,
+                },
+            )
+            .await;
+        let mut input = build_handshake_input();
+        input.extend(pkt_text("command=list_available_blobs"));
+        input.extend(pkt_flush());
+        input.extend(pkt_text("command=smudge"));
+        input.extend(pkt_text("pathname=missing.bin"));
+        input.extend(pkt_flush());
+        input.extend(pkt_flush());
+        input.extend(pkt_text("command=smudge"));
+        input.extend(pkt_text("pathname=readme.txt"));
+        input.extend(pkt_flush());
+        input.extend(pkt_data(b"next file"));
+        input.extend(pkt_flush());
+        let handle = tokio::runtime::Handle::current();
+        let worker_queue = Arc::clone(&queue);
+        let result = tokio::task::spawn_blocking(move || {
+            let mut output = Vec::new();
+            run_filter_loop(
+                &mut &input[..],
+                &mut output,
+                AppContext::default(),
+                Arc::new(std::sync::Mutex::new(LazyStaging::Unavailable)),
+                None,
+                Some(worker_queue),
+                None,
+                Some(handle),
+                Arc::new(std::sync::Mutex::new(None)),
+            )
+            .map(|()| output)
+        })
+        .await;
+        queue.drain_for_shutdown().await;
+        let output = result.unwrap().unwrap();
+        let mut expected = Vec::new();
+        handshake(&mut &build_handshake_input()[..], &mut expected).unwrap();
+        write_available_blobs_response(&mut expected, &["missing.bin".into()]).unwrap();
+        expected.extend(pkt_text("status=error"));
+        expected.extend(pkt_flush());
+        expected.extend(pkt_text("status=success"));
+        expected.extend(pkt_flush());
+        expected.extend(pkt_data(b"next file"));
+        expected.extend(pkt_flush());
+        expected.extend(pkt_flush());
+        assert_eq!(output, expected);
     }
 
     #[test]

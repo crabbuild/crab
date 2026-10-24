@@ -32,7 +32,7 @@ pointer syntax and independent local-workflow/API schemas keep their own version
 | Recovery after restart | SDK token → `read_capsule_plan_receipt` → matching immutable committed activation | Read-only inventory proof; live restart without Git after checkpoint and removal of the mutable coordinator |
 | Local workflows | clone/fetch/pull/push → native pack installer, local lease and scoped tools | Real Git plus compatible Crab against isolated RustFS; selected/changed remotes, shallow/deepen/unshallow, tags/prune, linked worktrees, conflict continuation/abort and 1 GiB staged content round trip |
 | Local push outcomes | prepared handle → Git acknowledgement or native receipt | Fresh push URLs, unchanged native pushes without writes, dry-run recovery without writes, lost Git replies remain indeterminate, saved Git tokens do not replay after ABA, token trust cannot exceed client policy |
-| Native HTTP local Git | Public SDK HTTP test binary → actual Crab HTTP router/receive → isolated RustFS | Clone, SDK stage/commit/push, fetch/FF pull, shallow/unshallow, atomic branch/tag create/delete, typed force rejection, independent bytes and Git fsck |
+| Native HTTP local Git | Public SDK HTTP test binary → actual Crab HTTP router/receive → isolated RustFS | Clone, SDK stage/commit/push, fetch/FF pull, shallow/unshallow, atomic branch/tag create/delete, typed force rejection, ordinary/Crab/LFS bytes, lazy pointers, missing-xorb eager failure and Git fsck |
 | Protected staging | SDK → `CapsuleArtifacts::stage_protected_plan` → protected service promotion | Shared regression stages a schema-3 native plan without exposing refs; live service qualification remains pending |
 | Provider selection | `DirectStoreOptions` → locked `object_store` 0.14.1 and child environment | Explicit S3 credentials/endpoint live proof; conflicting parent environment isolation; Azure request-level and GCS configuration proof |
 
@@ -195,6 +195,44 @@ keys, per-object deletion errors, residual writes and 1,000-key batch limits;
 strict SDK test-target Clippy and pinned workflow linting pass. These are local
 harness checks, not credentialed AWS evidence (`sdk-s3-lane-*.log/json`).
 
+All eight non-opt-in SDK jobs and the full protocol workflow pass at
+`9f36dd82363` ([SDK](https://github.com/crabbuild/crab/actions/runs/40094484316),
+[protocol](https://github.com/crabbuild/crab/actions/runs/40094484458)).
+That release benchmark verifies five cold/warm pairs: SDK medians are 5.95/0.37
+seconds, paired SDK/core ratios are 0.992/0.902, and peak RSS is 456 MiB.
+Origin traffic remains identical at 33 cold and 12 warm requests. Absolute
+latencies across hosted runs are not controlled performance comparisons.
+
+The expanded native HTTP content test then reproduced eager clone returning
+Crab/LFS pointers. SDK worktrees now register the validated Crab process for
+both filters, stage exact committed configuration before the first smudge, and
+run the existing post-checkout hydration command before publishing a destination.
+Direct/managed clones also record their known content URL in private local
+settings; an absent committed `crab.toml` no longer leaves filters unconfigured.
+Committed project settings retain their existing precedence. HTTP large-content
+proof uses that committed direct URL and matching bucket credentials.
+
+Injecting a missing xorb exposed a separate shared delayed-filter defect:
+queued reconstruction errors fell through to inline processing of Git's empty
+retry input, producing a successful zero-byte file. The queue now distinguishes
+an unknown path from a failed queued read atomically, and dispatch propagates
+the original error. Git's
+[documented delayed-filter contract](https://git-scm.com/docs/gitattributes/2.30.0)
+requires empty retry input and error status on failed content. The public
+`PrefetchQueue::take_result` helper shipped in `v1.2.4`; its unknown-path error
+contract remains intact through the same result owner. This preserves a public
+helper API, without reintroducing v1 repository reads.
+
+The packet regression fails before the queue fix and passes afterward, including
+correct framing of the following request. The actual HTTP/RustFS test verifies
+exact Crab/Xet and LFS content, clean status, Git fsck, lazy pointers while content
+is missing, eager failure without a published destination, and direct content
+clone without a committed project file. Adjacent local
+SDK tests (41), filter tests (58), queue tests (5), command hydration tests (88),
+untrusted-driver checks and strict SDK/remote all-target Clippy pass locally
+(`sdk-native-http-content-*.log`, `sdk-delayed-smudge-{before,after}.log`).
+New-head hosted and cross-platform checks remain required for these follow-ups.
+
 The gateway write-soak failure is also present at the unchanged `crab-v2` base
 `33f8e6c360d`: [run 40087756593](https://github.com/crabbuild/crab/actions/runs/40087756593)
 retains 0.776928 of early throughput; SDK head `55b0fb9bb4a` retains 0.777382.
@@ -204,6 +242,9 @@ performance issue, not evidence of passing performance qualification. All
 eight non-opt-in SDK jobs and the full protocol workflow pass at `1a7b3604d94`
 ([SDK](https://github.com/crabbuild/crab/actions/runs/40087763473),
 [protocol](https://github.com/crabbuild/crab/actions/runs/40087763461)).
+The same gate fails at `9f36dd82363` with 0.776021 throughput retention and
+zero failed writes or missing acknowledgements
+([run 40094484356](https://github.com/crabbuild/crab/actions/runs/40094484356)).
 
 Remaining qualification and improvement work:
 
