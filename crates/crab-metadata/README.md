@@ -43,6 +43,11 @@ heads and immutable capsule runs. Complete capsule reads share storage's bounded
 immutable transfer policy, including concurrent ranges for large seed capsules.
 Full decoding still materializes the body and validates every pointer commitment.
 
+Run construction reuses verified immutable capsule descriptors. Compaction checks
+byte-for-byte equality when moving capsules into its new buffer, releases the old
+buffers, and hashes the completed run once. Downloaded runs still pass full capsule,
+section, pooled index, catalog, and admission verification; the wire format is unchanged.
+
 `capsule_protocol::CapsuleChunkIndex` reads paged global advisory chunk heads
 and exact placement IDs without opening the released manifest receipt database.
 `write_capsule_chunk_candidates` conditionally publishes verified immutable pages

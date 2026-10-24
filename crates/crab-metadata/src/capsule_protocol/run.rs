@@ -1043,6 +1043,7 @@ impl CapsuleRun {
                 },
             });
         }
+        let capsule_end = body.len() as u64;
         let git_packs = pack_members(&capsules, &locations)?;
         // Preserve canonical capsule sections for recovery and whole-member
         // installation. A compacted run duplicates only its indexes here so
@@ -1106,42 +1107,67 @@ impl CapsuleRun {
                 ))
             })
             .transpose()?;
-        let footer_bytes = {
-            let footer = CapsuleRunFooter {
-                version: RUN_VERSION,
-                level,
-                capsules: locations.clone(),
-                git_packs: git_packs.clone(),
-                index_pool: index_pool.clone(),
-                visibility_pool,
-                catalog: catalog.as_ref().map(|(range, _)| range.clone()),
-                catalog_pages: catalog.as_ref().map(|(_, descriptor)| descriptor.clone()),
-                admission: admission.as_ref().map(|(_, range)| range.clone()),
-                admission_pages: admission
-                    .as_ref()
-                    .map(|(_, range)| {
-                        let start = range.offset as usize;
-                        AdmissionPages::decode(&body[start..start + range.length as usize])
-                    })
-                    .transpose()?,
-            };
-            let footer_bytes = serde_json::to_vec(&footer).map_err(|source| {
-                MetadataError::Internal(format!("capsule run serialization failed: {source}"))
-            })?;
-            if footer_bytes.len() > MAX_RUN_FOOTER_BYTES {
-                return Err(contract_error(format!(
-                    "capsule run footer exceeds {MAX_RUN_FOOTER_BYTES} bytes"
-                )));
-            }
-            footer_bytes
+        let footer = CapsuleRunFooter {
+            version: RUN_VERSION,
+            level,
+            capsules: locations,
+            git_packs: git_packs.clone(),
+            index_pool,
+            visibility_pool,
+            catalog: catalog.as_ref().map(|(range, _)| range.clone()),
+            catalog_pages: catalog.as_ref().map(|(_, descriptor)| descriptor.clone()),
+            admission: admission.as_ref().map(|(_, range)| range.clone()),
+            admission_pages: admission
+                .as_ref()
+                .map(|(_, range)| {
+                    let start = range.offset as usize;
+                    AdmissionPages::decode(&body[start..start + range.length as usize])
+                })
+                .transpose()?,
         };
+        let footer_bytes = serde_json::to_vec(&footer).map_err(|source| {
+            MetadataError::Internal(format!("capsule run serialization failed: {source}"))
+        })?;
+        if footer_bytes.len() > MAX_RUN_FOOTER_BYTES {
+            return Err(contract_error(format!(
+                "capsule run footer exceeds {MAX_RUN_FOOTER_BYTES} bytes"
+            )));
+        }
+        // Keep the wire layout checks shared with downloaded runs. Payload and
+        // page commitments already come from verified capsules and their builders.
+        let body_end = body.len() as u64;
+        let index_end = validate_index_pool(&footer, capsule_end, body_end)?;
+        let visibility_end = visibility_pool::validate(&footer, index_end, body_end)?;
+        let catalog_end = validate_catalog(&footer, visibility_end, body_end)?;
+        if let Some(range) = &footer.admission {
+            validate_body_range(range, catalog_end, body_end)?;
+        } else if catalog_end != body_end {
+            return Err(corrupt("capsule runs do not cover the complete body"));
+        }
         let footer_length = u64::try_from(footer_bytes.len())
             .map_err(|_| contract_error("capsule run footer length cannot be represented"))?;
         body.extend_from_slice(&footer_bytes);
         body.extend_from_slice(&footer_length.to_be_bytes());
         body.extend_from_slice(blake3::hash(&footer_bytes).as_bytes());
         body.extend_from_slice(RUN_MAGIC);
-        Self::decode(Bytes::from(body))
+        let bytes = Bytes::from(body);
+        let capsules = capsules
+            .into_iter()
+            .zip(&footer.capsules)
+            .map(|(capsule, location)| {
+                let start = location.offset as usize;
+                capsule.relocate(bytes.slice(start..start + location.length as usize))
+            })
+            .collect::<Result<Vec<_>>>()?;
+        Ok(Self {
+            hash: blake3::hash(&bytes).to_hex().to_string(),
+            bytes,
+            footer,
+            footer_length,
+            capsules,
+            git_packs,
+            admission: admission.map(|(admission, _)| admission),
+        })
     }
 
     /// Decode and verify a run plus every complete capsule it contains.
@@ -1481,7 +1507,7 @@ fn pack_members(
     let mut members = Vec::new();
     for (capsule, location) in capsules.iter().zip(locations) {
         for descriptor in capsule.git_packs() {
-            let range = |section: u32, bytes: &Bytes| -> Result<PackRange> {
+            let range = |section: u32| -> Result<PackRange> {
                 let section_index = usize::try_from(section)
                     .map_err(|_| corrupt("capsule section index cannot be represented"))?;
                 let section_location = capsule
@@ -1492,21 +1518,15 @@ fn pack_members(
                     .offset
                     .checked_add(section_location.offset())
                     .ok_or_else(|| corrupt("capsule run pack range overflowed"))?;
-                let range = PackRange::new(offset, bytes)?;
-                if range.blake3() != section_location.blake3() {
-                    return Err(corrupt("capsule run pack section hash does not match"));
-                }
-                Ok(range)
+                // Capsule owns immutable bytes verified by its decoder. Moving
+                // their range preserves the authenticated section commitment.
+                PackRange::from_parts(offset, section_location.length(), section_location.blake3())
             };
-            let pack = capsule.section_bytes(descriptor.pack_section())?;
-            let index = capsule.section_bytes(descriptor.index_section())?;
-            let reverse = capsule.section_bytes(descriptor.reverse_index_section())?;
-            let locator = capsule.section_bytes(descriptor.locator_section())?;
             members.push(PackMemberDescriptor::new(
-                range(descriptor.pack_section(), &pack)?,
-                range(descriptor.index_section(), &index)?,
-                range(descriptor.reverse_index_section(), &reverse)?,
-                range(descriptor.locator_section(), &locator)?,
+                range(descriptor.pack_section())?,
+                range(descriptor.index_section())?,
+                range(descriptor.reverse_index_section())?,
+                range(descriptor.locator_section())?,
                 descriptor.git_checksum(),
                 descriptor.object_count(),
                 descriptor.external_delta_bases().to_vec(),
@@ -1860,6 +1880,26 @@ mod tests {
     }
 
     #[test]
+    fn compaction_releases_source_buffers_and_relocates_capsules_into_output() {
+        let inputs = vec![
+            CapsuleRun::leaf(capsule('1', '2')).unwrap(),
+            CapsuleRun::leaf(capsule('3', '4')).unwrap(),
+        ];
+        let sources = inputs
+            .iter()
+            .map(|run| run.bytes().clone())
+            .collect::<Vec<_>>();
+        let run = CapsuleRun::compact(inputs).unwrap();
+        assert!(sources.iter().all(Bytes::is_unique));
+        for (capsule, location) in run.capsules.iter().zip(&run.footer.capsules) {
+            assert_eq!(
+                capsule.bytes().as_ptr(),
+                run.bytes()[location.offset as usize..].as_ptr()
+            );
+        }
+    }
+
+    #[test]
     fn compacted_run_indexes_are_contiguous_without_relocating_canonical_members() {
         let older = CapsuleRun::leaf(capsule('1', '2')).unwrap();
         let newer = CapsuleRun::leaf(capsule('3', '4')).unwrap();
@@ -1964,6 +2004,10 @@ mod tests {
             let mut runs = vec![CapsuleRun::compact(leaves[..count / 2].to_vec()).unwrap()];
             runs.extend_from_slice(&leaves[count / 2..]);
             let compacted = CapsuleRun::compact(runs).unwrap();
+            assert_eq!(
+                CapsuleRun::decode(compacted.bytes().clone()).unwrap(),
+                compacted
+            );
             assert_eq!(compacted, expected);
         }
     }

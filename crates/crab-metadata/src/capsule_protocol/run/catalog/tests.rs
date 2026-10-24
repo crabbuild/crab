@@ -120,6 +120,7 @@ fn catalog_page_roots_and_full_run_agree_after_compaction() {
         })
         .collect();
     let run = CapsuleRun::compact(runs).unwrap();
+    assert_eq!(CapsuleRun::decode(run.bytes().clone()).unwrap(), run);
     let control = CapsuleRunControl::decode_suffix(
         run.bytes().slice(run.control_offset() as usize..),
         run.bytes().len() as u64,
