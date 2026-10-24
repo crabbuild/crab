@@ -59,6 +59,7 @@ pub(crate) struct WorkBudget {
 
 #[derive(Clone)]
 pub(crate) struct OperationBudget {
+    parent_read_admission: Option<Arc<dyn crab_storage::ReadAdmission>>,
     work: Arc<Mutex<WorkBudget>>,
     runtime: Arc<RemoteGitRuntime>,
     id: u64,
@@ -84,10 +85,19 @@ static NEXT_BUDGET_ID: AtomicU64 = AtomicU64::new(1);
 impl OperationBudget {
     pub(crate) fn new(limits: OperationLimits, runtime: Arc<RemoteGitRuntime>) -> Self {
         Self {
+            parent_read_admission: None,
             work: Arc::new(Mutex::new(WorkBudget::new(limits))),
             runtime,
             id: NEXT_BUDGET_ID.fetch_add(1, Ordering::Relaxed),
         }
+    }
+
+    pub(crate) fn with_parent_read_admission(
+        mut self,
+        admission: Arc<dyn crab_storage::ReadAdmission>,
+    ) -> Self {
+        self.parent_read_admission = Some(admission);
+        self
     }
 
     pub(crate) fn read_admission(
@@ -276,6 +286,9 @@ impl crab_storage::ReadAdmission for ReadBudgetAdmission {
             .charge(BudgetDimension::StorageRequests, 1)
             .await
             .map_err(|error| self.reject(error))?;
+        if let Some(parent) = &self.budget.parent_read_admission {
+            parent.request().await?;
+        }
         Ok(())
     }
 
@@ -293,6 +306,9 @@ impl crab_storage::ReadAdmission for ReadBudgetAdmission {
             .charge(BudgetDimension::FetchedBytes, bytes)
             .await
             .map_err(|error| self.reject(error))?;
+        if let Some(parent) = &self.budget.parent_read_admission {
+            parent.bytes(bytes).await?;
+        }
         Ok(())
     }
 }
@@ -300,6 +316,28 @@ impl crab_storage::ReadAdmission for ReadBudgetAdmission {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn derived_graph_reads_share_capture_admission_without_tightening_later_reads() {
+        let runtime = Arc::new(RemoteGitRuntime::default());
+        let limits = OperationLimits {
+            max_storage_requests: 1,
+            ..OperationLimits::default()
+        };
+        let capture =
+            OperationBudget::new(limits, runtime.clone()).read_admission(CancellationToken::new());
+        capture.request().await.unwrap();
+        let opening = OperationBudget::new(limits, runtime.clone())
+            .with_parent_read_admission(capture)
+            .read_admission(CancellationToken::new());
+        let exhausted = opening.request().await.is_err();
+        let later = OperationBudget::new(limits, runtime)
+            .read_admission(CancellationToken::new())
+            .request()
+            .await
+            .is_ok();
+        assert!(exhausted && later);
+    }
 
     #[tokio::test]
     async fn read_admission_reuses_the_first_budget_rejection() {

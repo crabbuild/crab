@@ -1032,6 +1032,7 @@ async fn read_layered_delta_bases(
                 options,
                 maximum_bytes,
                 cancel,
+                None,
             )
             .await?;
         let operation = repository

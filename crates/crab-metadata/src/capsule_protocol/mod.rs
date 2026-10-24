@@ -67,7 +67,7 @@ pub use layered::{LayeredVisibilityReader, fold_checkpoint_catalog, merge_checkp
 pub use plan::{
     CapsulePlanReceipt, ensure_capsule_plan_unattempted, prepare_capsule_plan,
     publish_capsule_plan_receipt, publish_capsule_plan_repair_receipt, read_capsule_plan_intent,
-    resolve_capsule_plan_receipt,
+    read_capsule_plan_receipt, resolve_capsule_plan_receipt,
 };
 pub use pointer::{
     FileCatalogEntry, MAX_CATALOG_BYTES, PointerCatalog, PointerCatalogAssembly, ShardCatalogEntry,

@@ -222,8 +222,8 @@ async fn lookup_committed_record(
 
 /// Read-only file-index lookup session for repo-scoped batches.
 ///
-/// Opens the repo's `file_index_db` once, serves one or many point lookups, and
-/// closes the underlying SlateDB reader when consumed.
+/// Current-state opens capture native catalog authority without writes. Explicit
+/// snapshot constructors retain their caller's authority and owned reader cleanup.
 pub struct FileIndexLookupSession {
     catalog: Option<Arc<crate::capsule_protocol::PointerCatalogLookup>>,
     reader: Option<Arc<slatedb::DbReader>>,
@@ -244,16 +244,24 @@ impl FileIndexLookupSession {
         router: crab_storage::StoreLayout<crab_storage::Store>,
         snapshot: &RepositorySnapshot,
     ) -> Result<Self> {
-        Ok(Self {
+        let anchor = CommittedShardAnchor::from_snapshot(snapshot)?;
+        Ok(Self::from_anchor(router, anchor))
+    }
+
+    fn from_anchor(
+        router: crab_storage::StoreLayout<crab_storage::Store>,
+        anchor: Option<CommittedShardAnchor>,
+    ) -> Self {
+        Self {
             catalog: None,
             reader: None,
-            anchor: CommittedShardAnchor::from_snapshot(snapshot)?,
+            anchor,
             storage: router.store().clone(),
             router,
             parsers: tokio_util::task::TaskTracker::new(),
             resolved_files: tokio::sync::Mutex::new(FileLookupCache::default()),
             limits: FileIndexLookupLimits::CURRENT_STATE,
-        })
+        }
     }
 
     /// Open acceleration against the caller's captured repository snapshot.
@@ -274,19 +282,17 @@ impl FileIndexLookupSession {
 
     /// Open a read-only lookup session for `repo_prefix`.
     ///
-    /// A never-written `file_index_db` opens as an empty session: every lookup
-    /// returns `None`.
+    /// An absent native root produces an empty session. Legacy manifests and
+    /// acceleration indexes never supply current repository authority.
     pub async fn open(store: Arc<dyn ObjectStore>, repo_prefix: &str) -> Result<Self> {
-        Self::open_with_mode(crab_storage::Store::new(store), repo_prefix, true).await
+        Self::open_current(crab_storage::Store::new(store), repo_prefix).await
     }
 
-    /// Open a lookup session using the storage scope's safe read mode.
+    /// Open a native lookup using the caller's scoped storage layout.
     ///
-    /// SlateDB readers maintain checkpoints by writing manifests. Scoped
-    /// stores can be read-only, so they use the manifest-pinned shard fallback
-    /// instead of attempting those maintenance writes.
+    /// Current-state lookup never opens SlateDB or writes reader checkpoints.
     pub async fn open_for_storage(store: &crab_storage::Store, repo_prefix: &str) -> Result<Self> {
-        Self::open_with_mode(store.clone(), repo_prefix, store.storage_scope().is_none()).await
+        Self::open_current(store.clone(), repo_prefix).await
     }
 
     /// Bind canonical shard lookups to an already captured repository snapshot.
@@ -379,57 +385,32 @@ impl FileIndexLookupSession {
         })
     }
 
-    async fn open_with_mode(
-        storage: crab_storage::Store,
-        repo_prefix: &str,
-        use_acceleration: bool,
-    ) -> Result<Self> {
+    async fn open_current(storage: crab_storage::Store, repo_prefix: &str) -> Result<Self> {
         let router = crab_storage::StoreLayout::new(storage.clone(), repo_prefix.to_owned());
-        match crate::capsule_protocol::load_root(&router).await {
+        let catalog = match crate::capsule_protocol::load_root(&router).await {
             Ok(root) => {
-                // Only an absent root permits v1 lookup. Missing dependencies
-                // under a verified v2 root must not revive older v1 authority.
-                let catalog =
-                    crate::capsule_protocol::load_pointer_catalog_lookup_from_root(&router, &root)
-                        .await?;
-                return Ok(Self {
-                    catalog: Some(Arc::new(catalog)),
-                    reader: None,
-                    anchor: None,
-                    storage,
-                    router,
-                    parsers: tokio_util::task::TaskTracker::new(),
-                    resolved_files: tokio::sync::Mutex::new(FileLookupCache::default()),
-                    limits: FileIndexLookupLimits::CURRENT_STATE,
-                });
+                crate::capsule_protocol::load_pointer_catalog_lookup_from_root(&router, &root)
+                    .await?
             }
             Err(MetadataError::Storage {
                 source: crab_storage::StorageError::NotFound { .. },
-            }) => {}
-            Err(error) => return Err(error),
-        }
-        let anchor = match crate::manifest_store::read_repository_snapshot(&storage, &router).await
-        {
-            Ok(snapshot) => CommittedShardAnchor::from_snapshot(&snapshot)?,
-            Err(MetadataError::Storage {
-                source: crab_storage::StorageError::NotFound { .. },
-            }) => None,
+            }) => crate::capsule_protocol::PointerCatalogLookup::empty(
+                crate::capsule_protocol::MAX_CATALOG_BYTES,
+            ),
             Err(error) => return Err(error),
         };
-        let mut session = Self {
-            catalog: None,
+        // Clean/filter helpers also use this opener. An absent native root must
+        // not revive a legacy manifest or create acceleration-reader checkpoints.
+        Ok(Self {
+            catalog: Some(Arc::new(catalog)),
             reader: None,
-            anchor,
+            anchor: None,
             storage,
             router,
             parsers: tokio_util::task::TaskTracker::new(),
             resolved_files: tokio::sync::Mutex::new(FileLookupCache::default()),
             limits: FileIndexLookupLimits::CURRENT_STATE,
-        };
-        if use_acceleration {
-            session.open_acceleration().await?;
-        }
-        Ok(session)
+        })
     }
 
     async fn open_acceleration(&mut self) -> Result<()> {
@@ -791,10 +772,13 @@ enum LookupSource {
         router: crab_storage::StoreLayout<crab_storage::Store>,
         lookup: Arc<crate::capsule_protocol::PointerCatalogLookup>,
     },
+    Snapshot {
+        router: crab_storage::StoreLayout<crab_storage::Store>,
+        anchor: Option<CommittedShardAnchor>,
+    },
     Current {
         store: crab_storage::Store,
         repo_prefix: String,
-        use_acceleration: bool,
     },
     ShardIndex {
         router: crab_storage::StoreLayout<crab_storage::Store>,
@@ -817,17 +801,12 @@ impl LookupSource {
                 resolved_files: tokio::sync::Mutex::new(FileLookupCache::default()),
                 limits: FileIndexLookupLimits::CURRENT_STATE,
             }),
-            Self::Current {
-                store,
-                repo_prefix,
-                use_acceleration,
-            } => {
-                FileIndexLookupSession::open_with_mode(
-                    store.clone(),
-                    repo_prefix,
-                    *use_acceleration,
-                )
-                .await
+            Self::Snapshot { router, anchor } => Ok(FileIndexLookupSession::from_anchor(
+                router.clone(),
+                anchor.clone(),
+            )),
+            Self::Current { store, repo_prefix } => {
+                FileIndexLookupSession::open_current(store.clone(), repo_prefix).await
             }
             Self::ShardIndex {
                 router,
@@ -862,18 +841,36 @@ impl SharedFileIndexLookup {
     #[must_use]
     pub fn for_pointer_catalog(
         router: crab_storage::StoreLayout<crab_storage::Store>,
-        lookup: crate::capsule_protocol::PointerCatalogLookup,
+        lookup: impl Into<Arc<crate::capsule_protocol::PointerCatalogLookup>>,
     ) -> Self {
         Self {
             inner: Arc::new(SharedFileIndexLookupInner {
                 source: LookupSource::Catalog {
                     router,
-                    lookup: Arc::new(lookup),
+                    lookup: lookup.into(),
                 },
                 session: tokio::sync::RwLock::new(tokio::sync::OnceCell::new()),
                 closed: AtomicBool::new(false),
             }),
         }
+    }
+
+    /// Share canonical lookups bound to a caller-captured repository snapshot.
+    ///
+    /// The caller owns layout binding, freshness and GC protection. This never
+    /// opens current authority or creates SlateDB reader checkpoints.
+    pub fn from_snapshot(
+        router: crab_storage::StoreLayout<crab_storage::Store>,
+        snapshot: &RepositorySnapshot,
+    ) -> Result<Self> {
+        let anchor = CommittedShardAnchor::from_snapshot(snapshot)?;
+        Ok(Self {
+            inner: Arc::new(SharedFileIndexLookupInner {
+                source: LookupSource::Snapshot { router, anchor },
+                session: tokio::sync::RwLock::new(tokio::sync::OnceCell::new()),
+                closed: AtomicBool::new(false),
+            }),
+        })
     }
 
     /// Lazily resolve files from one captured immutable shard-index root without writes.
@@ -904,26 +901,21 @@ impl SharedFileIndexLookup {
 
     /// Create a lazy lookup handle bound to one object store and repo.
     pub fn new(store: Arc<dyn ObjectStore>, repo_prefix: impl Into<String>) -> Self {
-        Self::new_with_mode(crab_storage::Store::new(store), repo_prefix, true)
+        Self::new_with_storage(crab_storage::Store::new(store), repo_prefix)
     }
 
-    /// Create a lazy lookup using the storage scope's safe read mode.
+    /// Create a lazy current-native lookup within the caller's storage scope.
     #[must_use]
     pub fn new_for_storage(store: &crab_storage::Store, repo_prefix: impl Into<String>) -> Self {
-        Self::new_with_mode(store.clone(), repo_prefix, store.storage_scope().is_none())
+        Self::new_with_storage(store.clone(), repo_prefix)
     }
 
-    fn new_with_mode(
-        store: crab_storage::Store,
-        repo_prefix: impl Into<String>,
-        use_acceleration: bool,
-    ) -> Self {
+    fn new_with_storage(store: crab_storage::Store, repo_prefix: impl Into<String>) -> Self {
         Self {
             inner: Arc::new(SharedFileIndexLookupInner {
                 source: LookupSource::Current {
                     store,
                     repo_prefix: repo_prefix.into(),
-                    use_acceleration,
                 },
                 session: tokio::sync::RwLock::new(tokio::sync::OnceCell::new()),
                 closed: AtomicBool::new(false),
@@ -1136,44 +1128,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn resolve_round_trips_a_written_entry() {
-        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let file_hash = hash_from_seed(42);
-        let shard_hash = hash_from_seed(100);
-        seed_file_index(Arc::clone(&store), "org/ml", &[(file_hash, shard_hash)]).await;
-
-        let got = resolve_file_hash_to_shard(Arc::clone(&store), "org/ml", &file_hash)
-            .await
-            .expect("lookup succeeds");
-        assert_eq!(got, Some(shard_hash));
-    }
-
-    #[tokio::test]
-    async fn session_batch_preserves_order() {
-        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let file_a = hash_from_seed(1);
-        let file_b = hash_from_seed(2);
-        let shard_a = hash_from_seed(101);
-        let shard_b = hash_from_seed(102);
-        seed_file_index(
-            Arc::clone(&store),
-            "org/ml",
-            &[(file_a, shard_a), (file_b, shard_b)],
-        )
-        .await;
-
-        let session = FileIndexLookupSession::open(Arc::clone(&store), "org/ml")
-            .await
-            .expect("open session");
-        let got = session
-            .lookup_batch(&[file_b, file_a])
-            .await
-            .expect("batch lookup");
-        assert_eq!(got, vec![Some(shard_b), Some(shard_a)]);
-        session.close().await.expect("close");
-    }
-
-    #[tokio::test]
     async fn captured_snapshot_does_not_follow_later_manifests_or_index_rows() {
         let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
         let storage = crab_storage::Store::new(Arc::clone(&store));
@@ -1240,9 +1194,12 @@ mod tests {
             FileIndexLookupSession::for_snapshot(&router, &captured, lookup_limits()).unwrap();
         let pinned_result = pinned.lookup_batch(&[old_file, new_file]).await;
         pinned.close().await.unwrap();
-        let latest = FileIndexLookupSession::open(Arc::clone(&store), "pinned/repo")
+        let current_snapshot = crate::manifest_store::read_repository_snapshot(&storage, &router)
             .await
             .unwrap();
+        let latest =
+            FileIndexLookupSession::for_snapshot(&router, &current_snapshot, lookup_limits())
+                .unwrap();
         let latest_result = latest.lookup_batch(&[old_file, new_file]).await;
         latest.close().await.unwrap();
         assert_eq!(
@@ -1595,252 +1552,6 @@ mod tests {
             .is_err();
         drop(all);
         assert_eq!((timed_out, reads.load(Ordering::Relaxed)), (true, 0));
-    }
-
-    #[tokio::test]
-    async fn scoped_storage_lookup_does_not_write_reader_checkpoints() {
-        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let file_hash = hash_from_seed(42);
-        let shard_hash = hash_from_seed(100);
-        seed_file_index(
-            Arc::clone(&store),
-            "scoped/repo",
-            &[(file_hash, shard_hash)],
-        )
-        .await;
-        let manifest_prefix = ObjectPath::from("scoped/repo/file_index_db/manifest");
-        let before = store
-            .list(Some(&manifest_prefix))
-            .try_collect::<Vec<_>>()
-            .await
-            .expect("list manifests before lookup")
-            .len();
-        let scoped = crab_storage::Store::new(Arc::clone(&store)).with_storage_scope(
-            crab_storage::StorageScope {
-                repo_prefix: "scoped/repo".to_owned(),
-                global_prefix: ".crab".to_owned(),
-                source_repo: "org/repo".to_owned(),
-                scope_hash: "scope".to_owned(),
-            },
-        );
-
-        let session = FileIndexLookupSession::open_for_storage(&scoped, "ignored")
-            .await
-            .expect("open scoped lookup");
-        session.close().await.expect("close scoped lookup");
-
-        let after = store
-            .list(Some(&manifest_prefix))
-            .try_collect::<Vec<_>>()
-            .await
-            .expect("list manifests after lookup")
-            .len();
-        assert_eq!(after, before);
-    }
-
-    #[tokio::test]
-    async fn manifest_shard_search_recovers_missing_file_index_entry() {
-        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let storage = crab_storage::Store::new(Arc::clone(&store));
-        let router = crab_storage::StoreLayout::new(storage.clone(), "org/recovery".to_owned());
-        let file_hash = hash_from_seed(42);
-        let (shard_bytes, shard_hash) = shard_with_file(file_hash);
-        storage
-            .put(&router.shard_path(&shard_hash), Bytes::from(shard_bytes))
-            .await
-            .unwrap();
-        let (shard_index_hash, _, shard_write) = crate::manifests::append_shard_index(
-            crate::segmented::SegmentIndex::default(),
-            1,
-            &[shard_hash.hex()],
-        )
-        .unwrap();
-        crate::manifest_store::upload_segmented_bulk(
-            &storage,
-            &router,
-            &crate::manifests::BulkData {
-                shard_index: shard_write,
-                pack_index: crate::segmented::SegmentWrite::default(),
-            },
-        )
-        .await
-        .unwrap();
-        let mut manifest = crate::manifests::Manifest::default_for_repo("refs/heads/main");
-        manifest.generation = 1;
-        manifest.shard_index_hash = shard_index_hash;
-        manifest.seal_git_validation();
-        crate::layout_descriptor::ensure_canonical_layout(&storage, &router)
-            .await
-            .unwrap();
-        crate::manifest_store::create_manifest(&storage, &router, &manifest)
-            .await
-            .unwrap();
-
-        let session = FileIndexLookupSession::open(store, "org/recovery")
-            .await
-            .unwrap();
-        assert_eq!(session.lookup(&file_hash).await.unwrap(), Some(shard_hash));
-        session.close().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn journal_shard_search_recovers_before_compaction() {
-        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let storage = crab_storage::Store::new(Arc::clone(&store));
-        let router = crab_storage::StoreLayout::new(storage.clone(), "org/journal".to_owned());
-        crate::layout_descriptor::ensure_canonical_layout(&storage, &router)
-            .await
-            .unwrap();
-        let file_hash = hash_from_seed(52);
-        let (shard_bytes, shard_hash) = shard_with_file(file_hash);
-        storage
-            .put(&router.shard_path(&shard_hash), Bytes::from(shard_bytes))
-            .await
-            .unwrap();
-        let manifest = crate::manifests::Manifest::default_for_repo("refs/heads/main");
-        crate::manifest_store::create_manifest(&storage, &router, &manifest)
-            .await
-            .unwrap();
-        let ref_name = "refs/heads/main";
-        let head = crate::ref_journal::read_ref_head(&storage, &router, ref_name)
-            .await
-            .unwrap();
-        let transaction = crate::ref_journal::RefJournalTransaction::new(
-            BTreeMap::from([(ref_name.to_owned(), head.visible_transaction.clone())]),
-            vec![crate::ref_journal::RefJournalEdit {
-                ref_name: ref_name.to_owned(),
-                old_oid: None,
-                new_oid: Some("a".repeat(40)),
-                peeled_oid: None,
-                lock_holder: None,
-                visibility_evidence_hash: None,
-            }],
-            None,
-            Vec::new(),
-            vec![shard_hash.hex()],
-        )
-        .unwrap();
-        crate::ref_journal::commit_ref_transaction(
-            &storage,
-            &router,
-            &transaction,
-            &[head],
-            || false,
-        )
-        .await
-        .unwrap();
-
-        let session = FileIndexLookupSession::open(store, "org/journal")
-            .await
-            .unwrap();
-        assert_eq!(session.lookup(&file_hash).await.unwrap(), Some(shard_hash));
-        session.close().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn journal_candidate_index_survives_concurrent_sibling_transaction() {
-        let store: Arc<dyn ObjectStore> = Arc::new(InMemory::new());
-        let storage = crab_storage::Store::new(Arc::clone(&store));
-        let repo_prefix = "org/journal-index";
-        let router = crab_storage::StoreLayout::new(storage.clone(), repo_prefix.to_owned());
-        crate::layout_descriptor::ensure_canonical_layout(&storage, &router)
-            .await
-            .unwrap();
-        let file_hash = hash_from_seed(62);
-        let shard_hash = hash_from_seed(63);
-        let mut manifest = crate::manifests::Manifest::default_for_repo("refs/heads/main");
-        manifest.generation = 1;
-        manifest.seal_git_validation();
-        crate::manifest_store::create_manifest(&storage, &router, &manifest)
-            .await
-            .unwrap();
-        let ref_name = "refs/heads/main";
-        let head = crate::ref_journal::read_ref_head(&storage, &router, ref_name)
-            .await
-            .unwrap();
-        let transaction = crate::ref_journal::RefJournalTransaction::new(
-            BTreeMap::from([(ref_name.to_owned(), head.visible_transaction.clone())]),
-            vec![crate::ref_journal::RefJournalEdit {
-                ref_name: ref_name.to_owned(),
-                old_oid: None,
-                new_oid: Some("a".repeat(40)),
-                peeled_oid: None,
-                lock_holder: None,
-                visibility_evidence_hash: None,
-            }],
-            None,
-            Vec::new(),
-            vec![shard_hash.hex()],
-        )
-        .unwrap();
-        crate::ref_journal::commit_ref_transaction(
-            &storage,
-            &router,
-            &transaction,
-            &[head],
-            || false,
-        )
-        .await
-        .unwrap();
-        let sibling_ref = "refs/heads/sibling";
-        let sibling_head = crate::ref_journal::read_ref_head(&storage, &router, sibling_ref)
-            .await
-            .unwrap();
-        let sibling = crate::ref_journal::RefJournalTransaction::new(
-            BTreeMap::from([(
-                sibling_ref.to_owned(),
-                sibling_head.visible_transaction.clone(),
-            )]),
-            vec![crate::ref_journal::RefJournalEdit {
-                ref_name: sibling_ref.to_owned(),
-                old_oid: None,
-                new_oid: Some("b".repeat(40)),
-                peeled_oid: None,
-                lock_holder: None,
-                visibility_evidence_hash: None,
-            }],
-            None,
-            Vec::new(),
-            vec![hash_from_seed(64).hex()],
-        )
-        .unwrap();
-        crate::ref_journal::commit_ref_transaction(
-            &storage,
-            &router,
-            &sibling,
-            &[sibling_head],
-            || false,
-        )
-        .await
-        .unwrap();
-        let db = slatedb::Db::open(
-            ObjectPath::from(file_index_path(repo_prefix).as_str()),
-            Arc::clone(&store),
-        )
-        .await
-        .unwrap();
-        let (base_shard_index_hash, _, _) = crate::manifests::compact_shard_index(1, &[]).unwrap();
-        db.put(
-            crate::key_codec::encode_committed_file_key(&file_hash, 1),
-            crate::value_codec::encode_committed_file_record(
-                &crate::value_codec::CommittedFileRecord {
-                    recipe_hash: [7; 32],
-                    shard_hash,
-                    committed_generation: 1,
-                    shard_index_hash: MerkleHash::from_hex(&base_shard_index_hash).unwrap(),
-                },
-            ),
-        )
-        .await
-        .unwrap();
-        db.flush().await.unwrap();
-        db.close().await.unwrap();
-
-        let session = FileIndexLookupSession::open(store, repo_prefix)
-            .await
-            .unwrap();
-        assert_eq!(session.lookup(&file_hash).await.unwrap(), Some(shard_hash));
-        session.close().await.unwrap();
     }
 
     #[tokio::test]

@@ -108,7 +108,7 @@ pub async fn verify_dependencies_except_crab(
     let cancellation = cancellation.child_token();
     let _guard = cancellation.clone().drop_guard();
     let proof = async {
-        let unique = normalize(dependencies, excluded_crab, limits)?;
+        let unique = normalize(dependencies, excluded_crab, &BTreeSet::new(), limits)?;
         let hashes: Vec<_> = unique
             .values()
             .filter_map(|dependency| match &dependency.pointer {
@@ -171,13 +171,15 @@ pub async fn verify_dependencies_except_crab(
 /// Crab files supplied by the same fenced publication may be excluded only
 /// after their local xorb and shard closure has been validated. Every other
 /// Crab pointer is resolved through the captured catalog; pointer hints cannot
-/// select content outside that view. LFS remains repository-scoped immutable
-/// content and is verified from the origin store.
-pub async fn verify_capsule_dependencies_except_crab(
+/// select content outside that view. LFS payloads may be excluded only after
+/// their exact size and SHA-256 have been verified by the same publication.
+/// Every other LFS dependency is verified from the origin store.
+pub async fn verify_capsule_dependencies_except_prepared(
     layout: &StoreLayout<Store>,
     catalog: &PointerCatalog,
     dependencies: &[PointerDependency],
     excluded_crab: &BTreeSet<[u8; 32]>,
+    excluded_lfs: &BTreeSet<[u8; 32]>,
     limits: DependencyProofLimits,
     cancellation: &CancellationToken,
 ) -> Result<()> {
@@ -185,7 +187,7 @@ pub async fn verify_capsule_dependencies_except_crab(
     let _guard = cancellation.clone().drop_guard();
     let proof =
         async {
-            let unique = normalize(dependencies, excluded_crab, limits)?;
+            let unique = normalize(dependencies, excluded_crab, excluded_lfs, limits)?;
             let lfs = crab_lfs::LfsObjectStore::new(layout.store().clone(), layout.repo_prefix());
             for dependency in unique.values() {
                 if cancellation.is_cancelled() {
@@ -249,6 +251,7 @@ enum ContentId {
 fn normalize<'a>(
     dependencies: &'a [PointerDependency],
     excluded_crab: &BTreeSet<[u8; 32]>,
+    excluded_lfs: &BTreeSet<[u8; 32]>,
     limits: DependencyProofLimits,
 ) -> Result<BTreeMap<ContentId, &'a PointerDependency>> {
     if dependencies.len() > limits.max_dependencies {
@@ -258,7 +261,9 @@ fn normalize<'a>(
     let mut total = 0u64;
     for dependency in dependencies {
         let (id, size) = identity(dependency)?;
-        if matches!(id, ContentId::Crab(hash) if excluded_crab.contains(&hash)) {
+        if matches!(id, ContentId::Crab(hash) if excluded_crab.contains(&hash))
+            || matches!(id, ContentId::Lfs(oid) if excluded_lfs.contains(&oid))
+        {
             continue;
         }
         if size > limits.content.max_file_bytes

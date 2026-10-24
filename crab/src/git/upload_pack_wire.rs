@@ -1455,6 +1455,7 @@ async fn open_capsule_repository_from_root(
             options,
             maximum,
             cancellation,
+            None,
         )
         .await?;
     let lease_provider = ObjectStoreGeneratedPackLeaseProvider {

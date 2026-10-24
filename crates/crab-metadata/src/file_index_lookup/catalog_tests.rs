@@ -313,6 +313,36 @@ async fn current_state_opener_keeps_catalog_pages_selected_and_pins_its_first_ro
 }
 
 #[tokio::test]
+async fn current_native_lookup_respects_scoped_routing_without_writes() {
+    let storage = crab_storage::Store::new(Arc::new(InMemory::new()));
+    let layout = crab_storage::StoreLayout::new(storage.clone(), "scoped/native".to_owned());
+    capture(&layout, catalog(100), 512 * 1024).await;
+    let prefix = ObjectPath::from(layout.repo_prefix());
+    let before = storage.list_prefix(&prefix).await.unwrap();
+    let scoped = storage
+        .clone()
+        .with_storage_scope(crab_storage::StorageScope {
+            repo_prefix: layout.repo_prefix().to_owned(),
+            global_prefix: layout.global_prefix().to_owned(),
+            source_repo: "org/source".to_owned(),
+            scope_hash: "scope".to_owned(),
+        });
+    let session = FileIndexLookupSession::open_for_storage(&scoped, "ignored")
+        .await
+        .unwrap();
+    let found = session
+        .lookup(&super::tests::hash_from_seed(42))
+        .await
+        .unwrap();
+    session.close().await.unwrap();
+    let after = storage.list_prefix(&prefix).await.unwrap();
+    assert_eq!(
+        (found, before),
+        (Some(super::tests::hash_from_seed(1_000_042)), after)
+    );
+}
+
+#[tokio::test]
 async fn repeated_large_recipe_binding_queries_reuse_verified_results() {
     let reads = Arc::new(AtomicUsize::new(0));
     let observed = reads.clone();

@@ -25,27 +25,23 @@ pub(super) async fn verify(
         assert_eq!(actual, original[range.start as usize..range.end as usize]);
         stream.close().await.unwrap();
     }
-    for limits in [
-        crab_sdk::operation::ReadLimits {
-            max_fetched_bytes: 1,
-            ..Default::default()
-        },
-        crab_sdk::operation::ReadLimits {
-            max_storage_requests: 1,
-            ..Default::default()
-        },
-    ] {
-        super::ranges::verify_hydration_limit(
-            snapshot,
-            path.clone(),
-            ReadOptions::default()
-                .with_limits(limits)
-                .unwrap()
-                .with_range(1..size - 1)
-                .unwrap(),
-        )
-        .await;
-    }
+    // Native captures may resolve Git pointers without origin I/O. A single
+    // LFS GET then fits a one-request budget; byte exhaustion still proves the
+    // additional content read shares its Git operation's admission.
+    let limits = crab_sdk::operation::ReadLimits {
+        max_fetched_bytes: 1,
+        ..Default::default()
+    };
+    super::ranges::verify_hydration_limit(
+        snapshot,
+        path.clone(),
+        ReadOptions::default()
+            .with_limits(limits)
+            .unwrap()
+            .with_range(1..size - 1)
+            .unwrap(),
+    )
+    .await;
     let invalid = snapshot
         .open_file(path.clone())
         .with_options(ReadOptions::default().with_range(size..size + 1).unwrap())

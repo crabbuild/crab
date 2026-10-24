@@ -7,7 +7,7 @@ use crab_sdk::local::{CloneOptions, FetchDepth, FetchOptions};
 use crab_sdk::{ErrorKind, RepositoryLocator};
 
 #[path = "local_support/direct.rs"]
-mod direct_support;
+pub mod direct_support;
 mod local_support;
 use direct_support::direct_remote;
 use local_support::{client, commit, git_path, run};
@@ -434,4 +434,76 @@ async fn shallow_deepen_unshallow_round_trip() {
             .is_some_and(|code| code != 0)
     );
     sdk.close().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn fetch_resolves_the_selected_remote_after_open() {
+    for scenario in ["custom", "changed-url", "second-remote"] {
+        let scratch = tempfile::tempdir().unwrap();
+        let store = tempfile::tempdir().unwrap();
+        direct_remote(store.path(), "first", 1).await;
+        let second = direct_remote(store.path(), "second", 3).await;
+        let sdk = client(store.path(), scratch.path());
+        let destination = scratch.path().join("checkout");
+        let clone_options = if scenario == "custom" {
+            CloneOptions::default().with_remote_name("team").unwrap()
+        } else {
+            CloneOptions::default()
+        };
+        let repository = sdk
+            .clone_local(
+                RepositoryLocator::new("first").unwrap(),
+                &destination,
+                clone_options,
+            )
+            .await
+            .unwrap();
+        let repository = if scenario == "custom" {
+            sdk.open(crab_sdk::OpenOptions::local(&destination))
+                .await
+                .unwrap()
+        } else {
+            repository
+        };
+        let remote = if scenario == "custom" {
+            "team"
+        } else if scenario == "second-remote" {
+            "secondary"
+        } else {
+            "origin"
+        };
+        let action = if scenario == "second-remote" {
+            "add"
+        } else {
+            "set-url"
+        };
+        run(
+            &git_path(),
+            &destination,
+            &["remote", action, remote, "crab-sdk:second"],
+        );
+        repository
+            .local()
+            .unwrap()
+            .fetch(
+                FetchOptions::default()
+                    .with_remote(remote)
+                    .unwrap()
+                    .tags(false),
+            )
+            .await
+            .unwrap();
+        let tracking = format!("refs/remotes/{remote}/main");
+        assert_eq!(
+            run(&git_path(), &destination, &["rev-parse", &tracking]),
+            second[2],
+            "{scenario}"
+        );
+        let fetch_head = std::fs::read_to_string(destination.join(".git/FETCH_HEAD")).unwrap();
+        assert!(
+            fetch_head.contains(&second[2]) && fetch_head.contains("crab-sdk:second"),
+            "{scenario}"
+        );
+        sdk.close().await.unwrap();
+    }
 }

@@ -65,6 +65,7 @@ pub(super) async fn load_changed_capsule_history(
             options,
             options.operation_limits().max_inflated_bytes,
             &cancellation,
+            None,
         )
         .await?;
     let opened = repository

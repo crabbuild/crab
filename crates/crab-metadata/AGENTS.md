@@ -42,6 +42,9 @@ Trace one path: `crates/crab-write/src/journal.rs` → `commit_ref_transaction` 
   access and rejects new work. Keep exclusive access through reader cleanup so
   concurrent close calls cannot finish early. Use SharedFileIndexLookup.
   Source: `crates/crab-metadata/src/file_index_lookup.rs`.
+- Current-state file lookup captures only native root/catalog authority. An
+  absent root means no bindings; do not revive legacy manifest, journal or
+  acceleration-index authority through CLI/filter/shared hydration callers.
 - Keep explicit close ownership when adding index readers/writers; inspect error and cancellation paths as well as successful reads.
   Source: `crates/crab-metadata/src/git_object_locator`.
 

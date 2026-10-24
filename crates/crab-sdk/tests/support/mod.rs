@@ -1,8 +1,6 @@
+pub mod capsule_fixture;
 pub mod read_fixture;
 
-use crab_metadata::git_object_locator::{
-    GitLocatorCoverage, GitObjectLocatorEntry, GitObjectLocatorWriter, GitPackLocatorRecord,
-};
 use crab_storage::Store;
 use futures_util::TryStreamExt;
 use object_store::ObjectStoreExt;
@@ -36,21 +34,6 @@ pub fn git<S: AsRef<std::ffi::OsStr> + std::fmt::Debug>(directory: &Path, args: 
     String::from_utf8(output.stdout).unwrap().trim().to_owned()
 }
 
-pub async fn publish_catalog(
-    store: &Store,
-    coverage: GitLocatorCoverage,
-    record: GitPackLocatorRecord,
-    entries: &[GitObjectLocatorEntry],
-) {
-    let mut writer = GitObjectLocatorWriter::open(store.inner().clone(), "repository")
-        .await
-        .unwrap();
-    let binding = writer.bind_packs(&[record]).await.unwrap()[0];
-    writer.write_locations(binding, entries).await.unwrap();
-    writer.set_coverage(coverage).await.unwrap();
-    writer.close().await.unwrap();
-}
-
 pub async fn copy_published_objects(
     store: &Store,
     root: &Path,
@@ -66,6 +49,14 @@ pub async fn copy_published_objects(
         .await
         .unwrap();
     for object in objects {
+        // A closed read fixture needs published data, not coordinator clocks.
+        // Object stores allow both `state` and `state/clock`; a filesystem
+        // cannot mirror that mutable lock namespace as files and directories.
+        if object.location.as_ref().starts_with(".crab/locks/")
+            || object.location.as_ref().starts_with("repository/locks/")
+        {
+            continue;
+        }
         let bytes = store
             .inner()
             .get(&object.location)
@@ -84,7 +75,12 @@ pub async fn copy_published_objects(
         }
         published.insert(object.location.clone());
         let path = root.join(object.location.as_ref());
-        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap_or_else(|error| {
+            panic!(
+                "cannot create fixture parent for {}: {error}",
+                path.display()
+            )
+        });
         std::fs::write(path, bytes).unwrap();
     }
 }

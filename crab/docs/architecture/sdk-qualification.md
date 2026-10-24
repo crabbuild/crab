@@ -8,6 +8,410 @@ execution or backend qualification. The chronological implementation evidence
 below records intermediate states; current-head CI artifacts supersede those
 states for release decisions.
 
+## Native capsule migration, 2026-10-24
+
+The current SDK worktree starts from `33f8e6c360d` on `origin/crab-v2`.
+The earlier audit at `d0e8ee12f81e` reproduced a valid v2-only repository failing
+to open, dual metadata selecting legacy refs, a corrupt native root being ignored,
+a selected local remote fetching another repository, and explicit credentials
+not reaching child tools. Those are historical failures, not current behavior.
+
+The SDK now captures only `v2/root` through the shared capsule reader. It pins
+native Git visibility, pointer catalogs and matching optional browse indexes;
+legacy-only repositories fail and corrupt native authority is never bypassed.
+Initialization, local pack transfer, file/ref publication and durable recovery
+use native capsule owners. Remote tokens use version 6, local push tokens use
+version 4, and the executable storage handshake requires version 2. Existing
+pointer syntax and independent local-workflow/API schemas keep their own versions.
+
+| Surface | Entry point and shared owner | Current proof |
+| --- | --- | --- |
+| Read-only authority and budgets | `ClientState::capture_repository` → `crab-read::capsule_protocol` → `crab-remote-git` | Five authority regressions; aggregate capture/index budgets; a cached indexed view survives cancellation of its original capture |
+| Git browse and file content | `RemoteRepository` / `RemoteSnapshot` → native visibility and pointer lookup → verified Git/LFS/Xet readers | Independent native fixtures; source checkout removed; ordinary/LFS/Xet complete and range reads, raw pointers, archive output, corruption and pinned snapshots |
+| Init and direct writes | `initialize_remote`, `prepare_commit`, `prepare_ref_update` → shared native preparation/publication | Init tests, streamed file edits, atomic ref changes, expected-value rejection, byte/request limits and post-commit readiness |
+| Recovery after restart | SDK token → `read_capsule_plan_receipt` → matching immutable committed activation | Read-only inventory proof; live restart without Git after checkpoint and removal of the mutable coordinator |
+| Local workflows | clone/fetch/pull/push → native pack installer, local lease and scoped tools | Real Git plus compatible Crab against isolated RustFS; selected/changed remotes, shallow/deepen/unshallow, tags/prune, linked worktrees, conflict continuation/abort and 1 GiB staged content round trip |
+| Local push outcomes | prepared handle → Git acknowledgement or native receipt | Fresh push URLs, unchanged native pushes without writes, dry-run recovery without writes, lost Git replies remain indeterminate, saved Git tokens do not replay after ABA, token trust cannot exceed client policy |
+| Native HTTP local Git | Public SDK HTTP test binary → actual Crab HTTP router/receive → isolated RustFS | Clone, SDK stage/commit/push, fetch/FF pull, shallow/unshallow, atomic branch/tag create/delete, typed force rejection, ordinary/Crab/LFS bytes, lazy pointers, missing-xorb eager failure and Git fsck |
+| Protected staging | SDK → `CapsuleArtifacts::stage_protected_plan` → protected service promotion | Shared regression stages a schema-3 native plan without exposing refs; live service qualification remains pending |
+| Provider selection | `DirectStoreOptions` → locked `object_store` 0.14.1 and child environment | Explicit S3 credentials/endpoint live proof; conflicting parent environment isolation; Azure request-level and GCS configuration proof |
+
+The isolated S3-compatible service uses disposable test credentials and its own
+bucket/data directory. It is not a credentialed AWS run against an existing user
+repository. The live read test validates ordinary, LFS and Xet bytes and ranges;
+the three live local workflows include the 1 GiB stage → commit → push → independent
+eager clone → dehydrate/hydrate cycle. The native recovery test checkpoints the
+repository and removes the retired mutable coordinator before a fresh process
+reconciles from immutable evidence. No bucket-wide GC was run.
+
+Local evidence under this worktree's external qualification directory includes
+`sdk-native-all-tests.log` (138 passing, 20 explicitly ignored),
+`sdk-native-clippy.log`, `sdk-native-remote-only-tests.log`,
+`sdk-native-feature-graph.json` (10 profiles), `sdk-native-python-tests.log`,
+`sdk-native-inventory.log` (48 discoverable capability cells),
+`sdk-native-architecture.log`,
+`sdk-native-shared-publication.log`, `sdk-native-live-content.log`,
+`sdk-native-live-refs.log` and `sdk-native-live-local-round-trip.log` and `sdk-native-live-local-selection-final.log`. The SDK workflow now
+runs for PRs to `crab-v2` and exercises native publication, receipt and budget
+owners alongside existing sibling checks. Local logs are not hosted CI artifacts;
+new-head CI, packaging and cross-platform jobs must still complete.
+
+The dependency boundary is deliberate: metadata-only consumers enable
+`crab-read` without hydration; content/write consumers enable verified hydration
+explicitly. Existing CLI, server, gateway and VFS consumers retain hydration.
+The optional opening admission charges constructor reads while retained object
+readers use the plain origin, preventing expired request budgets from poisoning
+later reads. Sibling gateway/auth-server compilation and shared reader tests
+cover the changed factory argument. Filesystem storage remains read-capable but
+cannot execute conditional publication, as required by the provider contract.
+Git's documented porcelain rejection status proves failure; its distinct remote
+failure status includes missing acknowledgements and cannot establish history.
+
+The committed web sources also pass production Next.js build, typecheck, lint
+(no errors), all ten web tests and rendered link validation in an isolated source
+copy on the workspace volume. Link validation covers 398 HTML pages and 4,307
+fragments (`sdk-native-web-*.log`). The prior missing-build link-check failure is
+resolved. Repository metadata exposes no configured SDK provider secrets or
+managed fixture variables, and no runner with the `sdk-managed` label is
+registered. Organization secret/variable listings now return HTTP 403, so their
+availability is unknown; opt-in live-backend jobs cannot be qualified here.
+
+The follow-up dependency audit reproduced legacy lookup through the shared
+current-state file-index opener used by clean/filter/hydration and term/store
+clients. That opener now captures only native catalogs and treats a missing root
+as no bindings, without reading manifests, journals or acceleration indexes.
+The absent-root regression proves one root request and unchanged remote inventory;
+native scoped lookup, pinned pages and concurrent close/abandonment remain covered.
+Explicit caller-captured snapshot APIs for other consumers retain their existing
+contracts; SDK paths do not use them for protocol selection. The standalone
+manifest view helper shipped in `v1.2.4` now supplies its captured snapshot
+explicitly. Native view hydration pins the catalog from the same source capture;
+neither path recaptures authority during reconstruction. All 28 lookup tests and
+237 reader tests pass. The retired checkpoint test no longer needs the reader's
+direct SlateDB dev-dependency: the lockfile removes only that dependency edge,
+with no package version or checksum changes.
+
+The released manifest fsck audit (`v1.2.4`) also requires explicit snapshot
+authority. Its unchanged positive regression reproduced a false missing-index
+finding after default lookup retirement; supplying that snapshot restores the
+audit without widening native lookup. All 37 store-backed fsck tests, 57 clean
+tests and six hydration-batch tests pass. Clean fast-path fixtures now commit
+native catalog bindings while retaining their binding-plus-shard checks.
+The compatible CLI rebuild and repeated isolated RustFS content/local tests also
+pass, including the 1 GiB stage/commit/push/clone/hydrate cycle
+(`sdk-native-*-owner-after.log`, `sdk-native-live-*-closure.log`). The owned service
+is stopped after validation. These debug runs establish functional proof only.
+
+A protected-session regression also reproduced legacy-first preparation when both
+metadata protocols coexist. Preparation now selects the same native authority as
+validation, scoped views and capsule verification, including corrupt-root rejection.
+All 107 protected-helper tests pass (`sdk-native-protected-authority-after.log`),
+including native verification/commit/retry, scoped hidden-object rejection and
+filtered view reconstruction. The HTTP receiver additionally maps the new
+serialization error without discarding its source; its three local fault tests
+pass (`sdk-native-http-caller-faults.log`). Strict all-target Clippy passes for
+SDK, remote, reader, metadata and protected-helper crates
+(`sdk-native-native-closure-clippy.log`); architecture, feature graphs, capability
+discovery and SDK Python checks also pass after the lookup retirement.
+
+CI run [40080053263](https://github.com/crabbuild/crab/actions/runs/40080053263)
+passed the SDK contract/package job and Linux/macOS/Windows/current-stable tests. The
+package artifact proves four external consumer profiles and five expected
+compile failures against Rust 1.97. Its performance baseline failed before any
+measurement because the example still requested `repository/manifest`; it now
+uses native capture and catalog lookup. HTTP fault jobs exposed the missing
+serialization match arm. Those fixes and the remaining matrix require new-head
+CI; neither failed job counts as qualification evidence.
+
+CI run [40085023320](https://github.com/crabbuild/crab/actions/runs/40085023320)
+at `55b0fb9bb4a` passes all eight non-opt-in SDK jobs, including packaging,
+Linux/macOS/Windows/current-stable tests, live RustFS, HTTP publication faults
+and shared publication/recovery. Its package artifact verifies four external
+consumer profiles and five required compile failures. The controlled release
+benchmark verifies five cold/warm pairs for 1 GiB: SDK medians are 3.05 seconds
+cold and 0.63 seconds warm, with peak process-tree RSS of 418 MiB. Origin traffic
+matches the shared core: 33 cold requests and 12 warm requests. This is RustFS
+fixture evidence, not a credentialed AWS performance claim.
+
+Broader Linux/macOS protocol CI then reproduced two hydration failures. Their
+shared fixture invoked the retired manifest publisher; an authority probe
+confirmed a successful push with no `v2/root`. The fixture now uses the product
+capsule initializer/publisher and requires native authority without a manifest.
+All 88 command hydration tests pass, retaining reconstruction, disk-cache reuse,
+cancellation, typed failures and destination-preservation assertions
+(`sdk-native-command-hydration-before.log`,
+`sdk-native-command-hydration-authority-probe.log`,
+`sdk-native-command-hydration-after.log`). SDK CI now runs this caller slice too.
+Production hydration and error handling are unchanged; no legacy lookup is
+reintroduced. New-head protocol CI must confirm the fixture migration.
+
+The ordinary Git HTTP fixtures execute Git's `http-backend`; they are not proof
+of the native Crab server. A separate opt-in test now runs the public SDK test
+binary against the actual Crab HTTP router/receive stack and real RustFS.
+The server host verifies that the SDK test executed exactly once, that its
+reported commit is the committed native ref, and that no manifest was created.
+This keeps server crates out of the SDK dependency graph. The local run passes,
+as does strict SDK/server all-target Clippy (`sdk-native-http-round-trip.log`,
+`sdk-native-http-clippy.log`). The original 1 GiB direct-storage and ordinary,
+LFS and Xet content qualification remains separate from this HTTP Git check.
+Both client and server runtimes drain before assertions; the owned object
+service stops after verification. The existing native HTTP RustFS suite also
+passes with the shared fixture (`sdk-native-http-sibling.log`). SDK CI explicitly
+selects the new live case and validates both compiled test artifacts.
+
+All eight non-opt-in SDK jobs pass at `229808789c0`
+([run 40090784067](https://github.com/crabbuild/crab/actions/runs/40090784067)).
+Its RustFS artifact records one passed, zero failed and zero ignored tests for
+each selected live case, including native HTTP. Read-only example transport
+records 40 GETs and zero writes. The prebuilt 1 GiB local cycle peaks at 1.21 GiB,
+below its 2 GiB limit, and cleanup passes. The read-performance artifact passes
+five cold/warm pairs with medians of 6.78/0.76 seconds and 457 MiB peak RSS;
+paired SDK/core latency ratios are 0.999/1.025 with identical origin traffic.
+Artifact source `31a0eae1732` is GitHub's merge of that head into `33f8e6c360d`.
+The full protocol workflow also passes at that head
+([run 40090784107](https://github.com/crabbuild/crab/actions/runs/40090784107)),
+alongside architecture, provider, replica, cache, NFS and HTTP-container checks.
+
+The phase-0 profile also requires credentialed AWS S3, which the workflow
+previously omitted. Its opt-in S3 lane now selects native ordinary/LFS/Xet reads,
+remote writes, restart recovery and all three local workflows. Configure
+`CRAB_SDK_TEST_S3_BUCKET`, `CRAB_SDK_TEST_S3_ACCESS_KEY_ID` and
+`CRAB_SDK_TEST_S3_SECRET_ACCESS_KEY` secrets, the optional
+`CRAB_SDK_TEST_S3_SESSION_TOKEN` secret, and the existing `AWS_REGION` variable.
+Use an exclusive empty general-purpose bucket in a commercial AWS region that
+has never enabled versioning, so fixture deletions cannot retain old versions.
+The identity needs bucket versioning/list access and fixture object read/write/
+delete access. Preflight rejects populated or versioned buckets before writes.
+Tests remove repository objects. Workflow cleanup rejects unrelated keys,
+deletes explicitly listed shared `.crab/` and run-owned recovery objects after
+clients exit, and checks that the bucket is empty. The explicit local client
+also carries session tokens through its isolated child environment. This lane
+has no live AWS evidence yet; its functional reports include Cargo descendants
+and do not establish runtime-only memory limits.
+All three local workflows pass after the credential-fixture change. A live
+RustFS cleanup rehearsal removes eight retained shared objects and verifies zero
+remaining objects. Thirteen guard cases cover preflight rejection, unrelated
+keys, per-object deletion errors, residual writes and 1,000-key batch limits;
+strict SDK test-target Clippy and pinned workflow linting pass. These are local
+harness checks, not credentialed AWS evidence (`sdk-s3-lane-*.log/json`).
+
+All eight non-opt-in SDK jobs and the full protocol workflow pass at
+`9f36dd82363` ([SDK](https://github.com/crabbuild/crab/actions/runs/40094484316),
+[protocol](https://github.com/crabbuild/crab/actions/runs/40094484458)).
+That release benchmark verifies five cold/warm pairs: SDK medians are 5.95/0.37
+seconds, paired SDK/core ratios are 0.992/0.902, and peak RSS is 456 MiB.
+Origin traffic remains identical at 33 cold and 12 warm requests. Absolute
+latencies across hosted runs are not controlled performance comparisons.
+
+The expanded native HTTP content test then reproduced eager clone returning
+Crab/LFS pointers. SDK worktrees now register the validated Crab process for
+both filters, stage exact committed configuration before the first smudge, and
+run the existing post-checkout hydration command before publishing a destination.
+Direct/managed clones also record their known content URL in private local
+settings; an absent committed `crab.toml` no longer leaves filters unconfigured.
+Committed project settings retain their existing precedence. HTTP large-content
+proof uses that committed direct URL and matching bucket credentials.
+
+Injecting a missing xorb exposed a separate shared delayed-filter defect:
+queued reconstruction errors fell through to inline processing of Git's empty
+retry input, producing a successful zero-byte file. The queue now distinguishes
+an unknown path from a failed queued read atomically, and dispatch propagates
+the original error. Git's
+[documented delayed-filter contract](https://git-scm.com/docs/gitattributes/2.30.0)
+requires empty retry input and error status on failed content. The public
+`PrefetchQueue::take_result` helper shipped in `v1.2.4`; its unknown-path error
+contract remains intact through the same result owner. This preserves a public
+helper API, without reintroducing v1 repository reads.
+
+The packet regression fails before the queue fix and passes afterward, including
+correct framing of the following request. The actual HTTP/RustFS test verifies
+exact Crab/Xet and LFS content, clean status, Git fsck, lazy pointers while content
+is missing, eager failure without a published destination, and direct content
+clone without a committed project file. Adjacent local
+SDK tests (41), filter tests (58), queue tests (5), command hydration tests (88),
+untrusted-driver checks and strict SDK/remote all-target Clippy pass locally
+(`sdk-native-http-content-*.log`, `sdk-delayed-smudge-{before,after}.log`).
+New-head hosted and cross-platform checks remain required for these follow-ups.
+
+New local LFS publication required another correction. The staged pointer and
+payload were valid, but native SDK push did not upload the local LFS object and
+returned `NotFound`. Preparation now freezes exact SHA-256/size-verified payloads,
+binds their body digests into version-6 recovery tokens and checkpoints them
+under the native plan. Resume reloads those bounded artifacts; dry-run does not
+write remote objects. Git blob discovery uses the shared pointer classifier,
+so ordinary empty Git blobs cannot become LFS dependencies.
+
+The real RustFS regression passes stage/commit, unchanged remote inventory on
+dry-run, token resume after deleting the local payload cache, and independent
+eager-clone byte verification. The 16 MiB payload crosses multipart part
+boundaries and uses a configured LFS cache path.
+Shared tests cover corrupted snapshots, zero-size imported pointers, durable
+recovery and protected staging. Streamed LFS uploads now begin and complete
+through the storage facade; the raw origin handle bypassed protected routing and
+inventory. Multipart completion records the verified body digest and length.
+Verification receipts are rebuilt for canonical objects after promotion and
+are not staged as unreachable cache objects. The protected service regression
+also verifies, commits and retries a mixed Git/Xet/LFS capsule and reads exact
+published payload bytes. These local owner tests do not replace a real managed
+service fixture.
+
+At `baace3e5caf`, six non-opt-in SDK jobs pass. Windows fails the new eager
+fixture because an ordinary Git-only checkout tries to initialize remote storage
+before selecting any pointers. The same failure reproduces locally against an
+unreachable endpoint. Hydration now validates configuration first and defers
+provider/auth setup until verified local recovery leaves content to fetch;
+all 89 command hydration regressions pass. The native HTTP Linux fixture also
+fails its lazy-clone operation; the retained SDK error omitted its source chain.
+That test now retains the diagnostic chain. New-head CI remains required for
+both fixes and for cross-platform LFS publication qualification.
+
+Cancellation after multipart initiation reproduced a missing terminal cleanup
+operation. The shared publication owner now awaits the admitted LFS object's
+completion or abort before returning cancellation; it admits no further object
+and cannot publish a ref. This follows the SDK's owned-cleanup contract without
+dropping a known S3/GCS upload handle. Cancellation latency includes draining
+the current object. The deterministic observer regression passes alongside all
+14 non-opt-in capsule-preparation tests (`sdk-lfs-cancel-{before,after}.log`).
+
+An empty HTTP repository exposed another clone failure: hydration inspected
+`HEAD` before the existing empty-repository check. That admission check now
+precedes revision configuration, matching the direct clone's absent-head path.
+The regression clones an unborn branch, creates its first local commit and
+publishes it through the SDK (`sdk-empty-http-{before,after}.log`).
+
+The `cb9961e088a` [1 GiB performance artifact](https://github.com/crabbuild/crab/actions/runs/40107811251/artifacts/12565776452)
+passes five cold/warm pairs on Linux x86_64. SDK medians are 2.84/0.63 seconds,
+with a 420 MiB peak process-tree RSS. Paired SDK/core latency ratios are
+0.888/0.843, with identical request counts (33/12) and response bytes. Its source
+is CI merge `3598b20b2f20`, combining this head with base `33f8e6c360d`.
+These paired results measure SDK overhead on that runner; separate hosted runs
+do not establish a before/after performance improvement.
+
+At `cb9961e088a`, six non-opt-in SDK jobs pass; the native HTTP and Windows
+configuration-fixture jobs fail. The native HTTP diagnostic identifies the LFS
+smudge path. An isolated global LFS driver reproduces the same clone failure
+locally: the untrusted-command guard disabled the approved local process because
+it also evaluated a shadowed global value. It now normalizes Git's canonical
+keys to their effective last value before applying the existing policy, following
+the [Git configuration precedence contract](https://git-scm.com/docs/git-config).
+The regression checks approved/unapproved final values; the complete native
+HTTP/LFS fixture also passes with the shadowed driver. The host fixture now
+supplies that global configuration explicitly for all platforms.
+
+Windows still fails the ordinary eager configuration clone after lazy provider
+admission. Its source chain is now retained. Running that same configuration
+test with the actual compatible CLI succeeds locally; the Unix mock remains
+available for command-selection assertions. The Windows cause remains unproven
+pending the next hosted diagnostic. No passing local check qualifies it.
+
+The `74fb25fbee2` hosted diagnostic reaches `git ls-files` and reports
+`error launching git: The system cannot find the path specified`. The private
+Git alias hard-linked the Windows installation wrapper away from its relative
+payload. The [upstream wrapper contract](https://gitforwindows.org/git-wrapper.html)
+requires its installation context. Private discovery now forwards to the exact
+selected path through the compatible Crab executable; `git-forward` is required
+by the handshake. An adjacent-support-file Unix wrapper also reproduces the
+failure before the fix. Forwarding runs before dotenv and CLI initialization,
+preserving the selected credentials and all three standard streams.
+
+The SDK launcher now owns the process group/job rather than only its direct
+child. A deterministic cancellation regression previously hung on pipes retained
+by a descendant; it now drains before returning. Seven local-tool tests and
+four compatible-executable tests pass locally. Windows runtime proof remains
+required. The native HTTP fixture passes in Linux CI at `74fb25fbee2`; its later
+1 GiB local cycle fails with `LimitExceeded` at push, below the memory threshold.
+That cycle passes locally against a fresh bucket. Repeating CI's order locally
+reproduces `dependency verification exceeds file bytes`: the earlier HTTP test
+published chunks that staging reused without retaining their payload locally.
+The SDK prepared only new local xorbs and omitted those origin-only chunks.
+
+Local preparation now reads reused locations from the committed staging recipe,
+verifies origin xorb framing, payload digest and identity, and checks each chunk
+before reconstructing the exact file. The existing native builder verifies the
+committed file hash and prepares the complete publication dependency set. Its
+immutable uploader retains an existing valid encoding rather than overwriting
+it. Origin reads share the capture's aggregate request/byte admission; neither
+limits nor corruption checks are relaxed. Verified parsers are reused within
+the preparation to avoid fetching the same origin xorb for every occurrence.
+
+The small native HTTP regression passes with a file made from existing chunks,
+mixed Xet/LFS recovery, exact independent eager-clone bytes and unchanged dry-run
+inventory (`sdk-shared-chunks-small-after.log`). The seeded 1 GiB local cycle also
+passes in 336.25 seconds, followed by verified owned-bucket cleanup
+(`sdk-shared-chunks-large-after.log`, `sdk-shared-chunks-fixture-after.log`).
+Three focused tests prove parser reuse, corrupt-payload rejection and preservation
+of admission already consumed during capture (`sdk-reused-xorb-contracts.log`).
+These debug results establish correctness on isolated S3-compatible storage;
+new-head CI, Windows runtime and credentialed cloud qualification remain required.
+
+At `49563dc15d7`, focused checks pass: 64 SDK library tests (one explicitly ignored),
+42 local/HTTP tests (the separately exercised live HTTP case is ignored by the
+ordinary command), seven local-tool tests and four compatible-executable tests.
+Strict SDK/remote all-target lint, minimal remote/content compilation, all ten
+dependency feature profiles, formatting and the 48-cell inventory check pass
+(`sdk-final-*.log/json`). The compatible CLI is rebuilt through `make install`.
+The `74fb25fbee2` architecture job separately rejects the new production
+`crab-remote` → `crab-lfs` edge: verified native publication uses the existing
+LFS upload owner, while the architecture allowlist omits that edge. Updating
+that baseline requires explicit approval under `AGENTS.md`; it remains unchanged.
+
+A further shutdown regression reproduces cancellation hanging after the tool
+parent exits while a descendant retains its pipes. Tool completion now keeps
+cancellation active through communication draining, then stops the same owned
+tree before returning. The regression covers both a waiting and an exited
+parent; a public SDK test also proves `Client::close` drains a pending local
+status operation after the selected Git wrapper exits. All seven tool tests,
+11 local-edit tests and lifecycle tests pass, alongside strict SDK/remote lint
+and an all-feature SDK build (`sdk-exited-parent-*.log`). The CLI's separate
+runner already observes cancellation while its pipe workers drain.
+
+The gateway write-soak failure is also present at the unchanged `crab-v2` base
+`33f8e6c360d`: [run 40087756593](https://github.com/crabbuild/crab/actions/runs/40087756593)
+retains 0.776928 of early throughput; SDK head `55b0fb9bb4a` retains 0.777382.
+Both runs have zero failed writes or missing acknowledgements. The required
+0.800000 retention gate remains unchanged; this is an existing gateway
+performance issue, not evidence of passing performance qualification. All
+eight non-opt-in SDK jobs and the full protocol workflow pass at `1a7b3604d94`
+([SDK](https://github.com/crabbuild/crab/actions/runs/40087763473),
+[protocol](https://github.com/crabbuild/crab/actions/runs/40087763461)).
+The same gate fails at `9f36dd82363` with 0.776021 throughput retention and
+zero failed writes or missing acknowledgements
+([run 40094484356](https://github.com/crabbuild/crab/actions/runs/40094484356)).
+
+Remaining qualification and improvement work:
+
+- Public capability limits still apply: SHA-256 repositories, recursive
+  submodules, sparse/partial-clone mutations, linked-worktree creation and LFS
+  custom extensions are unsupported. Existing linked worktrees can be opened.
+  Remote file edits create Git blobs or native Crab content; there is no dedicated
+  new-LFS-object upload API. Managed protected ref deletion is also unsupported.
+- GCS, Azure and managed service remain preview until dedicated live fixtures
+  prove writes, authorization expiry/revocation, placement changes and lost
+  finalize responses. Local mocks and compilation are not that evidence.
+- Credentialed AWS service behavior and post-fixture-change CI remain separate
+  gates. The hosted package-consumer and Linux/Windows proof above is complete
+  for its named source revision.
+- Repeat release-build cold/warm qualification on credentialed cloud services.
+  Direct write/recovery reports can include compiler descendants and have no
+  runtime-memory threshold; prebuilt-executable memory gates are still needed.
+  Cold LFS ranges without a valid receipt verify the entire object first;
+  measure locally cached, exact-version verification proofs before optimizing.
+- Native recovery artifacts and receipts under `v2/plans/` currently have no GC
+  retention policy. Define safe expiry without removing unresolved attempts or
+  promised historical evidence before adding collection.
+- Shared upload preparation compares the entire captured ref map and generation.
+  Unrelated ref churn can therefore reject safe selected-ref work. Narrowing that
+  check needs complete dependency/visibility proof and concurrent-writer tests.
+- Git transports lack durable SDK attempt receipts. Saved tokens remain
+  indeterminate through resume/reconcile; a server receipt contract is needed
+  for historical attribution or safe automatic restart execution.
+
+The migration adds shared ownership for native capture admission, read-only plan
+proof and protected staging rather than a second SDK protocol implementation.
+Additional source lines pay for those boundaries, credential isolation and
+read-only local validation; legacy SDK read/publication paths and standalone
+legacy pack-transfer logic are removed.
+
 ## PR 160 CI failure diagnosis
 
 The SDK branch is rebased onto `f63e03fab05`. Conflict resolution retains main's

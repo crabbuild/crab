@@ -582,17 +582,18 @@ not provide asynchronous cleanup.
 
 ### Shared lookup lifecycle
 
-`SharedFileIndexLookup::new_for_storage` opens one lazy session for concurrent
-lookups. Initialization is shared; a slow first canonical shard scan does not
-hold an exclusive session lock and block unrelated acceleration-index hits.
-Canonical scans still serialize through their session cache.
+`SharedFileIndexLookup::new_for_storage` lazily captures only the current
+native root and its authenticated pointer catalog. An absent root yields no
+bindings; it never opens legacy manifests, journals or acceleration indexes.
+Corrupt native roots and missing committed dependencies remain errors. CLI
+clean/filter/hydration and shared term/store clients use this same path.
 
-Await `close()` after the operation's readers finish. Close rejects new lookups
-and waits for active lookups before closing SlateDB, even if handle clones
-remain. Concurrent close calls also wait for reader cleanup.
-
-Await close to completion; dropping the owner or close future cannot perform asynchronous
-cleanup. Scoped stores retain write-free canonical reads.
+Initialization is shared. Cold catalog-page reads do not block unrelated warm
+queries. Await `close()` after the operation's readers finish: close rejects new
+queries and waits for active reads and parser cleanup, including when handle
+clones remain. Concurrent close calls wait for the same cleanup. Current-state
+lookup does not create SlateDB checkpoints. Explicit snapshot constructors retain
+their separate captured-authority and reader-lifecycle contracts.
 
 ### Snapshot-bound lookup
 

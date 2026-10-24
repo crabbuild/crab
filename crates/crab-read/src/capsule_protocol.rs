@@ -1,12 +1,14 @@
 //! Verified loading of one capsule-protocol root and its bounded capsule frontier.
 
 use bytes::Bytes;
+#[cfg(feature = "hydration")]
+use crab_metadata::capsule_protocol::visibility_object_set_digest;
 use crab_metadata::capsule_protocol::{
     Capsule, CapsuleControl, CapsulePointer, CapsuleRun, CapsuleRunControl, CapturedVisibility,
     CheckpointPointer, LayeredCheckpoint, PackMemberDescriptor, PackRange, PackSourceDescriptor,
     PackSourceKind, PointerCatalog, PointerCatalogAssembly, RootRecord, VisibilityReconciliation,
     apply_transaction_visibility_index, capture_ref_heads, load_root,
-    resolve_referenced_activations, visibility_is_ready, visibility_object_set_digest,
+    resolve_referenced_activations, visibility_is_ready,
 };
 use crab_metadata::capsule_protocol::{
     apply_control_refs, materialize_visible_ref_heads, order_ref_controls,
@@ -23,13 +25,15 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{ReadError, Result};
 
+#[cfg(feature = "hydration")]
 mod dependency;
+#[cfg(feature = "hydration")]
 pub use dependency::{
     verify_captured_installed_pointer_bytes, verify_installed_catalog_dependencies,
     verify_installed_dependencies, verify_reachable_dependencies,
 };
 
-#[cfg(test)]
+#[cfg(all(test, feature = "hydration"))]
 mod visibility_tests;
 
 const LAYERED_SIDECAR_COALESCE_GAP_BYTES: u64 = 64 * 1024;
@@ -512,6 +516,7 @@ impl CapsuleRepositoryView {
             .then_some(self.capsule_run_sources.as_slice())
     }
 
+    #[cfg(feature = "hydration")]
     fn verify_cold_clone_visibility(&self, object_ids: &[[u8; 20]]) -> Result<bool> {
         for tip in self.refs.values().chain(self.peeled_refs.values()) {
             let oid = ObjectId::from_hex(tip.as_bytes())
@@ -1051,12 +1056,16 @@ impl CapsuleRepositoryView {
             options,
             lookup_sources,
             cancellation,
+            None,
         )
         .await
         .map_err(Into::into)
     }
 
     /// Open authenticated layered sources or an uncheckpointed capsule frontier.
+    ///
+    /// Optional opening admission shares capture bounds with derived graph reads;
+    /// it is released after opening and never retained by later Git operations.
     pub async fn git_repository_from_store(
         &self,
         layout: crab_storage::StoreLayout<crab_storage::Store>,
@@ -1065,11 +1074,26 @@ impl CapsuleRepositoryView {
         options: crab_remote_git::RepositoryOptions,
         max_input_bytes: u64,
         cancellation: &CancellationToken,
+        opening_admission: Option<Arc<dyn crab_storage::ReadAdmission>>,
     ) -> Result<crab_remote_git::RemoteGitRepository> {
         if cancellation.is_cancelled() {
             return Err(ReadError::Cancelled);
         }
         let snapshot = self.git_snapshot()?;
+        // Only this opening's admission may bound startup reads. Captured views
+        // can outlive their original request; retaining that token in index
+        // origins would cancel later operations on an otherwise valid view.
+        let metadata_layout = match opening_admission.as_ref() {
+            Some(admission) => StoreLayout::with_global_prefix(
+                layout
+                    .store()
+                    .clone()
+                    .with_read_admission(admission.clone()),
+                layout.repo_prefix().to_owned(),
+                layout.global_prefix().to_owned(),
+            ),
+            None => layout.clone(),
+        };
         let object_index = match self
             .browse_indexes
             .as_ref()
@@ -1079,7 +1103,7 @@ impl CapsuleRepositoryView {
                 biased;
                 () = cancellation.cancelled() => return Err(ReadError::Cancelled),
                 result = crab_metadata::git_object_locator::PagedGitObjectIndex::load(
-                    layout.store(), &layout, hash, &snapshot.manifest_etag, &snapshot.manifest,
+                    metadata_layout.store(), &layout, hash, &snapshot.manifest_etag, &snapshot.manifest,
                     options.object_limits().max_pack_index_bytes,
                 ) => result?,
             }),
@@ -1236,8 +1260,13 @@ impl CapsuleRepositoryView {
             && !all_members.is_empty()
         {
             inline_locators.extend(
-                physical_locators_for_members(&all_members, &layout, max_input_bytes, cancellation)
-                    .await?,
+                physical_locators_for_members(
+                    &all_members,
+                    &metadata_layout,
+                    max_input_bytes,
+                    cancellation,
+                )
+                .await?,
             );
         }
         // Complete bounded frontiers reuse authenticated resident bytes;
@@ -1385,6 +1414,7 @@ impl CapsuleRepositoryView {
             options,
             lookup_sources,
             cancellation,
+            opening_admission,
         )
         .await
         .map_err(Into::into)
@@ -2024,6 +2054,7 @@ fn order_native_pack_payloads(payloads: Vec<GitPackPayload>) -> Result<Vec<GitPa
 /// The layout owns the selected origin; a cache never changes read authority.
 /// Signal cancellation and await completion so file and blocking installers drain
 /// before private staging is removed. Already verified local packs may remain.
+#[cfg(feature = "hydration")]
 pub async fn install_git_packs_from_store(
     view: &CapsuleRepositoryView,
     router: &StoreLayout<Store>,
@@ -2048,6 +2079,7 @@ pub async fn install_git_packs_from_store(
 ///
 /// Candidates must be bound to the captured root by the caller. Base and candidate
 /// packs share intake limits and external-delta ordering; no catalog bodies are read.
+#[cfg(feature = "hydration")]
 pub async fn install_git_packs_with_candidates_from_store(
     view: &CapsuleRepositoryView,
     candidates: &[Capsule],
@@ -2120,6 +2152,7 @@ pub async fn install_git_packs_with_candidates_from_store(
     })
 }
 
+#[cfg(feature = "hydration")]
 struct StagedColdClonePack {
     pack_path: PathBuf,
     index_path: PathBuf,
@@ -2129,6 +2162,7 @@ struct StagedColdClonePack {
     identity: crab_git::pack::VerifiedPackIdentity,
 }
 
+#[cfg(feature = "hydration")]
 fn cold_clone_sidecar_range(member: &PackMemberDescriptor) -> Result<std::ops::Range<u64>> {
     let start = member
         .index()
@@ -2146,6 +2180,7 @@ fn cold_clone_sidecar_range(member: &PackMemberDescriptor) -> Result<std::ops::R
         })
 }
 
+#[cfg(feature = "hydration")]
 async fn install_layered_cold_clone_packs_from_store(
     view: &CapsuleRepositoryView,
     router: &StoreLayout<Store>,
@@ -3437,7 +3472,7 @@ enum LayeredPayloadWindowMode {
     Packs,
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "hydration"))]
 fn plan_layered_payload_windows(
     members: &[LayeredPayloadMemberRead],
     mode: LayeredPayloadWindowMode,
@@ -5276,7 +5311,7 @@ fn corrupt_path(path: impl Into<String>, reason: impl Into<String>) -> ReadError
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "hydration"))]
 #[expect(clippy::unwrap_used, reason = "test assertions")]
 mod tests {
     use std::sync::{Arc, Mutex};

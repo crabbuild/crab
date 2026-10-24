@@ -142,6 +142,14 @@ configuration, and exact command-path quoting. `transfer` owns direct clone and
 fetch snapshots used by the SDK while local ref, shallow, and worktree state
 remain under Git locks.
 
+Nested Git calls use the compatible Crab executable's `git-forward` capability
+and the launcher's process-scoped `CRAB_INTERNAL_GIT_EXECUTABLE` binding. Git
+runs at its selected installation path; copying a Windows installation wrapper
+loses its relative payload and custom Unix wrappers can require adjacent files.
+Forwarding preserves argv and standard streams before CLI configuration loads.
+The launcher owns a Unix process group or Windows kill-on-close job and stops
+the owned tree before draining pipes on explicit cancellation.
+
 Every publication callback retains its terminal outcome while leases and
 heartbeats drain. Missing historical proof stays indeterminate; current ref
 equality never invents attribution. Protected receive remains server-authorized

@@ -6,7 +6,7 @@ use crab_sdk::local::{
 use crab_sdk::{ErrorKind, RepositoryLocator};
 
 #[path = "local_support/direct.rs"]
-mod direct_support;
+pub mod direct_support;
 mod local_support;
 use direct_support::direct_remote;
 use local_support::{client, commit, git_path, run};

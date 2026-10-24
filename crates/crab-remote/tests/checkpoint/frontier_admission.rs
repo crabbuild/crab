@@ -145,6 +145,7 @@ async fn paged_checkpoint_placement_keeps_unrelated_pack_indexes_cold() {
             crab_remote_git::RepositoryOptions::default(),
             LIMIT,
             &cancel,
+            None,
         )
         .await
         .unwrap();
@@ -335,6 +336,7 @@ async fn frontier_delta_base_placement_does_not_probe_unrelated_member_indexes()
                 crab_remote_git::RepositoryOptions::default(),
                 LIMIT,
                 &cancel,
+                None,
             )
             .await
             .unwrap();

@@ -2121,8 +2121,8 @@ pub async fn run_hydrate(
     restore_flags: &crate::cmd::hydrate_restore::RestoreFlags,
     cancel: &CancellationToken,
 ) -> Result<()> {
-    let hydrator = configured_hydrator(config, restore_flags, cancel).await?;
-    run_hydrate_in(root, args, config, hydrator.as_ref(), cancel).await
+    let hydrator = ConfiguredHydrator::new(config, restore_flags, cancel)?;
+    run_hydrate_in(root, args, config, &hydrator, cancel).await
 }
 
 /// Hydrate as a step whose caller owns progress and the terminal result.
@@ -2133,8 +2133,48 @@ pub(crate) async fn hydrate_worktree(
     cancel: &CancellationToken,
 ) -> Result<()> {
     let flags = crate::cmd::hydrate_restore::RestoreFlags::default();
-    let hydrator = configured_hydrator(config, &flags, cancel).await?;
-    run_hydrate_in_with_reporting(root, args, config, hydrator.as_ref(), None, cancel).await
+    let hydrator = ConfiguredHydrator::new(config, &flags, cancel)?;
+    run_hydrate_in_with_reporting(root, args, config, &hydrator, None, cancel).await
+}
+
+struct ConfiguredHydrator<'a> {
+    config: &'a Config,
+    restore_flags: &'a crate::cmd::hydrate_restore::RestoreFlags,
+}
+
+impl<'a> ConfiguredHydrator<'a> {
+    fn new(
+        config: &'a Config,
+        restore_flags: &'a crate::cmd::hydrate_restore::RestoreFlags,
+        cancel: &CancellationToken,
+    ) -> Result<Self> {
+        error::check_cancelled(cancel)?;
+        resolve_hydrate_remote_url(config)?;
+        Ok(Self {
+            config,
+            restore_flags,
+        })
+    }
+}
+
+impl Hydrator for ConfiguredHydrator<'_> {
+    fn hydrate_batch<'a>(
+        &'a self,
+        items: &'a [(PathBuf, Pointer)],
+        cancel: &'a CancellationToken,
+        progress: Option<&'a Arc<HydrateProgress>>,
+    ) -> Pin<Box<dyn Future<Output = Result<HydrateSummary>> + Send + 'a>> {
+        Box::pin(async move {
+            error::check_cancelled(cancel)?;
+            // Selection and verified local recovery can leave no remote work.
+            // Defer provider/auth setup so ordinary eager clones stay offline.
+            if items.is_empty() {
+                return Ok(HydrateSummary::default());
+            }
+            let hydrator = configured_hydrator(self.config, self.restore_flags, cancel).await?;
+            hydrator.hydrate_batch(items, cancel, progress).await
+        })
+    }
 }
 
 async fn configured_hydrator(
@@ -2217,12 +2257,12 @@ pub(crate) async fn hydrate_selected(
         return Ok(HydrateSummary::default());
     }
     let flags = crate::cmd::hydrate_restore::RestoreFlags::default();
-    let hydrator = configured_hydrator(config, &flags, cancel).await?;
+    let hydrator = ConfiguredHydrator::new(config, &flags, cancel)?;
     refresh_pointer_attributes(root, mode);
     run_selected_hydration(
         root,
         selected,
-        hydrator.as_ref(),
+        &hydrator,
         HydrateReporting {
             mode: Some(mode),
             manifest: false,
@@ -3692,7 +3732,7 @@ mod tests {
     use std::process::Command;
     use std::sync::MutexGuard;
 
-    use crate::git::push::{PushConfig, RefPushOutcome, run_push_batch};
+    use crate::git::push::{PushConfig, RefPushOutcome};
     use crate::git::remote_helper::PushSpec;
     use crate::storage::StoreLayout;
     use crate::storage::store::Store;
@@ -4354,33 +4394,32 @@ mod tests {
         run_git(fixture.work_tree(), &["commit", "-m", "pointer"]);
 
         let router = StoreLayout::new(store.clone(), TEST_REPLICA_PREFIX.to_owned());
-        crate::core::remote_layout::initialize(&store, &router)
+        crate::cmd::init::initialize_remote_repository_store(&store, &router, "refs/heads/main")
             .await
-            .expect("initialize canonical command-path repository");
-        crate::metadata::manifest::create_manifest(
+            .expect("initialize native command-path repository");
+
+        let specs = [PushSpec {
+            force: false,
+            src: "refs/heads/main".to_owned(),
+            dst: "refs/heads/main".to_owned(),
+        }];
+        let config = PushConfig::default();
+        let staging = Arc::new(staging);
+        let cancel = CancellationToken::new();
+        let (result, _) = crate::git::capsule_push::run(
+            &config,
+            &specs,
             &store,
             &router,
-            &crate::metadata::manifest::Manifest::default_for_repo("refs/heads/main"),
+            None,
+            &[],
+            Some(&staging),
+            None,
+            None,
+            &cancel,
         )
         .await
-        .expect("initialize canonical v1 command-path manifest");
-
-        let result = run_push_batch(
-            &[PushSpec {
-                force: false,
-                src: "refs/heads/main".to_owned(),
-                dst: "refs/heads/main".to_owned(),
-            }],
-            &PushConfig::default(),
-            Some(store.clone()),
-            None,
-            Some(Arc::new(staging)),
-            router,
-            None,
-            CancellationToken::new(),
-            None,
-        )
-        .await;
+        .expect("publish native command-path content");
 
         assert!(
             matches!(
@@ -4390,6 +4429,18 @@ mod tests {
             "push must publish reconstructible metadata; outcomes: {:?}",
             result.outcomes
         );
+
+        let layout = crab_storage::StoreLayout::new(
+            store.as_storage().clone(),
+            TEST_REPLICA_PREFIX.to_owned(),
+        );
+        crab_metadata::capsule_protocol::load_root(&layout)
+            .await
+            .expect("hydration fixture must publish native authority");
+        assert!(matches!(
+            store.head(&router.manifest_path()).await,
+            Err(error::CrabError::NotFound { .. })
+        ));
 
         let global_objects = store
             .list_prefix(&object_store::path::Path::from(".crab"))
@@ -4472,6 +4523,27 @@ mod tests {
                 Err(error::CrabError::Configuration { .. })
             ));
         }
+    }
+
+    #[tokio::test]
+    async fn ordinary_checkout_hydration_needs_no_remote_initialization() {
+        let fixture = GitFixture::new();
+        let root = fixture.work_tree();
+        std::fs::write(root.join("README.md"), b"ordinary Git content\n").unwrap();
+        let mut config = Config::default();
+        config.remote_url = Some("crab://sdk-unneeded-remote/repository".to_owned());
+        let mut args = default_args();
+        args.all = true;
+        args.mode = OutputMode::Json;
+        let result = run_hydrate(
+            root,
+            &args,
+            &config,
+            &crate::cmd::hydrate_restore::RestoreFlags::default(),
+            &CancellationToken::new(),
+        )
+        .await;
+        assert!(result.is_ok());
     }
 
     #[tokio::test]

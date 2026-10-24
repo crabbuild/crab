@@ -1,7 +1,7 @@
 //! Shared-owner baseline for complete Crab-pointer reconstruction.
 use crab_remote_git::{
-    NoopMetrics, OperationKind, RemoteGitRepository, RemoteGitRuntime, RepositoryIdentity,
-    RepositoryOptions, RuntimeOptions,
+    NoopMetrics, OperationKind, RemoteGitRuntime, RepositoryIdentity, RepositoryOptions,
+    RuntimeOptions,
 };
 use std::{io::Write, path::PathBuf, sync::Arc, time::Duration};
 use tokio_util::sync::CancellationToken;
@@ -72,15 +72,44 @@ async fn main() -> Result<(), Failure> {
     )?);
     let cancel = CancellationToken::new();
     let result = async {
-        let owner = RemoteGitRepository::open(
-            store,
-            layout.clone(),
-            RepositoryIdentity::new(namespace.clone(), repository.clone(), 1)?,
-            runtime.clone(),
-            RepositoryOptions::default(),
-            &cancel,
-        )
-        .await?;
+        let limits = crab_remote_git::OperationLimits::default();
+        let admission = runtime.read_admission(limits, cancel.clone())?;
+        let captured = crab_storage::StoreLayout::new(
+            store.with_read_admission(admission.clone()),
+            repository.clone(),
+        );
+        let root = crab_metadata::capsule_protocol::load_root(&captured).await?;
+        let view = crab_read::capsule_protocol::open_git_view_from_root(
+            &captured,
+            root,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: limits.max_fetched_bytes,
+                max_frontier_bytes: limits.max_fetched_bytes,
+            },
+        );
+        let indexes = async {
+            crab_metadata::capsule_protocol::load_browse_indexes(&captured)
+                .await
+                .map_err(crab_read::ReadError::from)
+        };
+        let (view, indexes) = tokio::try_join!(view, indexes)?;
+        let view = view.with_browse_indexes(indexes);
+        let catalog =
+            Arc::new(view.pointer_catalog_lookup(
+                &layout,
+                crab_metadata::capsule_protocol::MAX_CATALOG_BYTES,
+            )?);
+        let owner = view
+            .git_repository_from_store(
+                layout.clone(),
+                RepositoryIdentity::new(namespace.clone(), repository.clone(), 1)?,
+                runtime.clone(),
+                RepositoryOptions::new(Default::default(), limits)?,
+                limits.max_fetched_bytes,
+                &cancel,
+                Some(admission),
+            )
+            .await?;
         let operation = owner.operation(OperationKind::Snapshot, &cancel).await?;
         let snapshot = owner
             .snapshot(
@@ -135,16 +164,17 @@ async fn main() -> Result<(), Failure> {
             })
             .await??
             .with_read_admission(operation.read_admission());
-            let lookup = hydrator.file_index_lookup(
-                owner.shard_index_hash().to_owned(),
-                owner.generation(),
-                crab_metadata::file_index_lookup::FileIndexLookupLimits {
-                    max_files: 10_000,
-                    max_shard_visits: 100_000,
-                    max_shard_bytes: 4 * 1024 * 1024 * 1024,
-                    max_recipe_entries: 100_000,
-                },
-            );
+            let lookup =
+                crab_metadata::file_index_lookup::SharedFileIndexLookup::for_pointer_catalog(
+                    crab_storage::StoreLayout::new(
+                        layout
+                            .store()
+                            .clone()
+                            .with_read_admission(operation.read_admission()),
+                        layout.repo_prefix().to_owned(),
+                    ),
+                    catalog,
+                );
             let (send, hash) = tokio::sync::oneshot::channel();
             let size = hydrator
                 .reconstruct_to_writer_with_cancel(

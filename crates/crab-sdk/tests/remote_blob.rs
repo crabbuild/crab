@@ -15,26 +15,18 @@ mod lfs;
 mod ranges;
 
 pub mod support;
-use support::{copy_published_objects, git, publish_catalog};
+#[cfg(feature = "content")]
+use support::capsule_fixture::catalog_for_shard;
+use support::{capsule_fixture::CapsuleFixture, copy_published_objects, git};
 
 use std::process::Command;
 use std::sync::Arc;
 
 use bytes::Bytes;
-use crab_metadata::git_object_locator::{
-    GitLocatorCoverage, GitObjectLocation, GitObjectLocatorEntry, GitPackLocatorRecord,
-};
-use crab_metadata::manifest_store::{
-    create_manifest, read_manifest, upload_segmented_bulk, write_manifest_cas,
-};
-use crab_metadata::manifests::{
-    BulkData, Manifest, PackManifestEntry, compact_pack_index, compact_shard_index,
-};
 use crab_sdk::operation::ReadOptions;
 use crab_sdk::storage::DirectStoreOptions;
 use crab_sdk::{Client, GitPath, RepositoryLocator, Revision};
 use crab_storage::{Store, StoreLayout};
-use crab_xet::hash::MerkleHash;
 use futures_util::TryStreamExt;
 use sha2::Digest as _;
 
@@ -182,17 +174,6 @@ async fn verify_native_reads(bucket: Option<String>) {
         ],
     );
     let pack = directory.path().join(format!("fixture-{hash}.pack"));
-    let index = pack.with_extension("idx");
-    let reverse = pack.with_extension("rev");
-    crab_git::write_pack_reverse_index(&index, &reverse).unwrap();
-    let pack_bytes = std::fs::read(&pack).unwrap();
-    let pack_size = pack_bytes.len() as u64;
-    let pack_id = MerkleHash::from_hex(blake3::hash(&pack_bytes).to_hex().as_str()).unwrap();
-    let locations = crab_git::PackLocationIter::open(&index, &reverse, pack_size)
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    let object_count = locations.len() as u64;
     let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
     let layout = StoreLayout::new(store.clone(), "repository".to_owned());
     #[cfg(feature = "content")]
@@ -209,83 +190,24 @@ async fn verify_native_reads(bucket: Option<String>) {
             .unwrap();
     }
 
-    store
-        .put(&layout.pack_path(&pack_id), Bytes::from(pack_bytes))
-        .await
-        .unwrap();
-    store
-        .put(
-            &layout.pack_index_path(&pack_id),
-            Bytes::from(std::fs::read(index).unwrap()),
-        )
-        .await
-        .unwrap();
-    store
-        .put(
-            &layout.pack_reverse_index_path(&pack_id),
-            Bytes::from(std::fs::read(reverse).unwrap()),
-        )
-        .await
-        .unwrap();
-    let (pack_index_hash, _, pack_index) = compact_pack_index(
-        1,
-        &[PackManifestEntry {
-            pack_id: pack_id.to_string(),
-            size: pack_size,
-            content_hash: pack_id.to_string(),
-            ref_tips: vec![second.clone()],
-            object_count,
-        }],
+    let mut native = CapsuleFixture::new(
+        layout.clone(),
+        &source,
+        &pack,
+        &[first.clone(), second.clone()],
     )
-    .unwrap();
+    .await;
     #[cfg(feature = "content")]
-    let shards = vec![crab_fixture.shard.0.hex()];
+    let catalog =
+        catalog_for_shard(&layout, &crab_fixture.shard.0.hex(), &crab_fixture.shard.1).await;
     #[cfg(not(feature = "content"))]
-    let shards = vec![];
-    let (shard_index_hash, _, shard_index) = compact_shard_index(1, &shards).unwrap();
-    upload_segmented_bulk(
-        &store,
-        &layout,
-        &BulkData {
-            shard_index,
-            pack_index,
-        },
-    )
-    .await
-    .unwrap();
-    let mut manifest = Manifest::default_for_repo("refs/heads/main");
-    manifest.generation = 1;
-    manifest
-        .refs
-        .insert("refs/heads/main".to_owned(), first.clone());
-    manifest.pack_index_hash = pack_index_hash;
-    manifest.shard_index_hash = shard_index_hash;
-    manifest.seal_git_validation();
-    create_manifest(&store, &layout, &manifest).await.unwrap();
-    let mut coverage = GitLocatorCoverage {
-        generation: 1,
-        pack_index_hash: MerkleHash::from_hex(&manifest.pack_index_hash).unwrap(),
-    };
-    let record = GitPackLocatorRecord {
-        pack_id,
-        committed_generation: 1,
-        pack_index_hash: coverage.pack_index_hash,
-        object_count,
-        pack_size,
-    };
-    let entries = locations
-        .into_iter()
-        .map(|entry| GitObjectLocatorEntry {
-            oid: entry.oid.as_bytes().try_into().unwrap(),
-            location: GitObjectLocation {
-                pack_offset: entry.pack_offset,
-                entry_len: entry.entry_len,
-                crc32: entry.crc32,
-            },
-            metadata: Default::default(),
-        })
-        .collect::<Vec<_>>();
-    publish_catalog(&store, coverage, record, &entries).await;
+    let catalog = Default::default();
+    native
+        .publish(
+            std::collections::BTreeMap::from([("refs/heads/main".to_owned(), first.clone())]),
+            catalog,
+        )
+        .await;
     copy_published_objects(&store, &storage, cloud.as_ref(), &mut published).await;
     std::fs::remove_dir_all(source).unwrap();
     std::fs::remove_file(pack).unwrap();
@@ -369,17 +291,12 @@ async fn verify_native_reads(bucket: Option<String>) {
         first_bytes
     );
 
-    let (_, etag) = read_manifest(&store, &layout).await.unwrap();
-    manifest.generation = 2;
-    manifest
-        .refs
-        .insert("refs/heads/main".to_owned(), second.clone());
-    manifest.seal_git_validation();
-    write_manifest_cas(&store, &layout, &manifest, &etag)
-        .await
-        .unwrap();
-    coverage.generation = 2;
-    publish_catalog(&store, coverage, record, &entries).await;
+    native
+        .publish(
+            std::collections::BTreeMap::from([("refs/heads/main".to_owned(), second.clone())]),
+            Default::default(),
+        )
+        .await;
     copy_published_objects(&store, &storage, cloud.as_ref(), &mut published).await;
     let refreshed = repository.remote().unwrap().refresh().await.unwrap();
     assert_eq!(
@@ -658,15 +575,7 @@ async fn verify_native_reads(bucket: Option<String>) {
     assert_eq!(parent.items[0].id.to_string(), first);
     assert!(parent.next.is_none());
 
-    let (_, etag) = read_manifest(&store, &layout).await.unwrap();
-    manifest.generation = 3;
-    manifest.shard_index_hash.clear();
-    manifest.seal_git_validation();
-    write_manifest_cas(&store, &layout, &manifest, &etag)
-        .await
-        .unwrap();
-    coverage.generation = 3;
-    publish_catalog(&store, coverage, record, &entries).await;
+    native.replace_without_catalog().await;
     copy_published_objects(&store, &storage, cloud.as_ref(), &mut published).await;
     let refreshed = refreshed.remote().unwrap().refresh().await.unwrap();
     let same_commit = refreshed

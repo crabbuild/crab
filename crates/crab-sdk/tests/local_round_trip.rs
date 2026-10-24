@@ -37,7 +37,7 @@ fn failure(error: &crab_sdk::Error) -> String {
 fn live_client(scratch: &Path) -> (Client, RepositoryLocator) {
     let bucket = required("CRAB_SDK_TEST_S3_BUCKET");
     let endpoint = required("AWS_ENDPOINT_URL_S3");
-    let options = S3Options::new(
+    let mut options = S3Options::new(
         &bucket,
         &required("AWS_REGION"),
         &required("AWS_ACCESS_KEY_ID"),
@@ -45,6 +45,13 @@ fn live_client(scratch: &Path) -> (Client, RepositoryLocator) {
     )
     .unwrap()
     .with_endpoint(&endpoint);
+    // Child environments retain only the credentials bound to this explicit
+    // store, including the session scope of temporary AWS credentials.
+    if let Ok(token) = std::env::var("AWS_SESSION_TOKEN")
+        && !token.is_empty()
+    {
+        options = options.with_session_token(&token).unwrap();
+    }
     let cache = scratch.join("cache");
     std::fs::create_dir(&cache).unwrap();
     let client = Client::builder()
@@ -295,7 +302,10 @@ async fn stage_commit_push_round_trip() {
         .await
         .unwrap();
     let persisted = prepared.recovery_token().to_json().unwrap();
-    let pushed = prepared.execute().await.unwrap();
+    let pushed = prepared
+        .execute()
+        .await
+        .unwrap_or_else(|error| panic!("local round-trip push: {}", failure(&error)));
     assert!(
         matches!(pushed, LocalPushOutcome::Committed { .. }),
         "unexpected push outcome: {pushed:?}"
@@ -565,6 +575,36 @@ async fn fetch_checkout_and_pull_round_trip() {
         .unwrap();
     assert!(matches!(pulled, PullOutcome::Updated { head, .. } if head == fifth));
     assert_eq!(git_output(&["rev-parse", "HEAD"]), fifth.to_string());
+
+    let before_unchanged = stored_objects(&locator).await;
+    let unchanged = local
+        .prepare_push(
+            PushOptions::current_branch()
+                .with_remote("upstream")
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let token = crab_sdk::local::PushRecoveryToken::from_json(
+        &unchanged.recovery_token().to_json().unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        unchanged.execute().await.unwrap(),
+        LocalPushOutcome::TransportCommitted { .. }
+    ));
+    assert!(matches!(
+        client
+            .resume_local_push(token.clone(), scratch.path().join("resume"))
+            .await
+            .unwrap(),
+        LocalPushOutcome::TransportCommitted { .. }
+    ));
+    assert!(matches!(
+        client.reconcile_local_push(token).await.unwrap(),
+        LocalPushOutcome::TransportCommitted { .. }
+    ));
+    assert_eq!(stored_objects(&locator).await, before_unchanged);
 
     let linked = scratch.path().join("linked");
     let linked_text = linked.to_str().unwrap();

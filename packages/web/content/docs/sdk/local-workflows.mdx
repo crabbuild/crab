@@ -21,7 +21,10 @@ let local = repository.local()?;
 
 Configuration is repository-local. Child processes receive the selected tools
 and credentials without changing the application environment, current
-directory, or global Git configuration.
+directory, or global Git configuration. Explicit provider credentials also clear
+inherited optional session tokens, credential sources and endpoint overrides.
+The executable handshake requires repository storage format 2; an older
+executable is rejected before the operation changes the worktree.
 
 ## Clone and fetch
 
@@ -29,6 +32,11 @@ directory, or global Git configuration.
 shallow state, `FETCH_HEAD`, filters, and checkout succeed. Direct and managed
 Crab clones use shared Rust transfer services. `RepositoryLocator::http`
 selects native Git smart HTTP.
+
+Each fetch, pull and push resolves the selected remote's current URL under the
+local repository lease. Custom remote names and URL changes after opening are
+honored; push uses the configured push URL. Atomic push preparation requires a
+single push URL.
 
 `local::CloneOptions` controls the branch, depth, and hydration override.
 `local::FetchOptions` supports pruning, tags, depth, deepen, and unshallow.

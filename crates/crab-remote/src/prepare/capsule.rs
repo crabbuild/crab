@@ -3,10 +3,10 @@ use super::*;
 impl Prepared {
     /// Upload artifacts for one captured capsule-protocol repository view.
     ///
-    /// The caller must hold ref leases and GC fences from before opening
-    /// `view` through commitment. This validates all historical dependencies
-    /// against that view, uploads same-publication Xet content before Git
-    /// visibility, and retains the exact root snapshot for per-ref CAS.
+    /// Direct publishers hold ref leases and GC fences from capture through
+    /// commitment. Protected callers stage candidates; their service revalidates
+    /// the root and dependencies under its own leases before canonical promotion.
+    /// Xet uploads precede Git visibility; per-ref CAS retains the captured root.
     pub async fn upload_capsule(
         &self,
         view: &crab_read::capsule_protocol::CapsuleRepositoryView,
@@ -66,11 +66,30 @@ impl Prepared {
                     .collect::<std::collections::BTreeSet<_>>()
             })
             .unwrap_or_default();
-        crab_read::dependency_proof::verify_capsule_dependencies_except_crab(
+        // LFS bytes must exist before the shared closure proof. Protected stores
+        // retain these writes in the same staged-object inventory as the capsule.
+        self.upload_lfs(cancel).await?;
+        // Direct publication proves freshly uploaded LFS bytes at the origin.
+        // Staged bytes remain hidden; the protected service repeats full proof
+        // during promotion before it can make refs visible.
+        let prepared_lfs = self
+            .content
+            .as_ref()
+            .filter(|_| self.layout.store().staging_write_prefix().is_some())
+            .map(|content| {
+                content
+                    .lfs
+                    .iter()
+                    .map(|object| object.protocol_hash)
+                    .collect::<std::collections::BTreeSet<_>>()
+            })
+            .unwrap_or_default();
+        crab_read::dependency_proof::verify_capsule_dependencies_except_prepared(
             &self.layout,
             &base_catalog,
             self.plan.pointers(),
             &prepared_files,
+            &prepared_lfs,
             limits,
             cancel,
         )
@@ -159,34 +178,27 @@ impl Prepared {
 }
 
 impl CapsuleArtifacts {
-    /// Commit through independently mutable ref heads and one capsule authority.
-    ///
-    /// Revalidate authorization and repository policy immediately before this
-    /// call. The caller must retain its original ref leases and GC fences until
-    /// the returned outcome is known and all lease cleanup has completed.
-    pub async fn commit(
-        self,
+    async fn encode(
+        &mut self,
         plan_id: Option<&str>,
-        namespace_ttl: Duration,
-        cancel: &CancellationToken,
-    ) -> Result<CapsuleCommitOutcome> {
-        if cancel.is_cancelled() {
-            return Err(Error::Cancelled);
-        }
+    ) -> Result<(
+        crab_metadata::capsule_protocol::CapsuleTransaction,
+        crab_metadata::capsule_protocol::Capsule,
+    )> {
         let transaction = match plan_id {
             Some(plan_id) => crab_metadata::capsule_protocol::CapsuleTransaction::for_plan(
                 self.base.record().digest(),
                 plan_id,
-                self.edits,
+                self.edits.clone(),
             )?,
             None => crab_metadata::capsule_protocol::CapsuleTransaction::new(
                 self.base.record().digest(),
-                self.edits,
+                self.edits.clone(),
             )?,
         };
         let transaction_id = transaction.id()?;
         let started = Instant::now();
-        let mut sections = self.sections;
+        let mut sections = std::mem::take(&mut self.sections);
         if !self.pointer_delta.is_empty() {
             sections.insert(
                 0,
@@ -199,7 +211,7 @@ impl CapsuleArtifacts {
         // Capsule encoding hashes complete packs. It must not occupy the
         // executor that renews the caller's ref and runtime leases.
         let encoding_transaction = transaction.clone();
-        let packs = self.packs;
+        let packs = std::mem::take(&mut self.packs);
         let capsule = tokio::task::spawn_blocking(move || {
             crab_metadata::capsule_protocol::Capsule::build(&encoding_transaction, packs, sections)
         })
@@ -211,6 +223,93 @@ impl CapsuleArtifacts {
             elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
             "Git receive phase completed"
         );
+        Ok((transaction, capsule))
+    }
+
+    /// Stage one native capsule for server-authorized protected publication.
+    ///
+    /// This uploads immutable inputs only. The protected service verifies the
+    /// exact root, ref edits and complete closure before making refs visible.
+    pub async fn stage_protected_plan(
+        mut self,
+        push_id: &str,
+        upload_prefix: &str,
+        ref_updates: Vec<crab_auth::PushRefUpdate>,
+        cancel: &CancellationToken,
+    ) -> Result<crate::protected::ProtectedCapsulePushPlan> {
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let expected = self
+            .edits
+            .iter()
+            .map(|edit| {
+                Ok(crab_auth::PushRefUpdate {
+                    ref_name: edit.ref_name().to_owned(),
+                    old_oid: edit.expected_old().map(str::to_owned),
+                    new_oid: edit
+                        .new_oid()
+                        .ok_or(Error::Request(
+                            "protected publication does not support ref deletion",
+                        ))?
+                        .to_owned(),
+                })
+            })
+            .collect::<Result<Vec<_>>>()?;
+        if expected != ref_updates {
+            return Err(Error::Request(
+                "protected authorization differs from prepared ref edits",
+            ));
+        }
+        let (transaction, capsule) = self.encode(None).await?;
+        let run = crab_write::capsule_protocol::capsule_leaf_run(&capsule)?;
+        let store = self.layout.store();
+        store
+            .put(&self.layout.capsule_path(run.hash()), run.bytes().clone())
+            .await?;
+        let staged_objects = store.flush_staged_writes(16).await?;
+        let plan = crate::protected::ProtectedCapsulePushPlan {
+            schema_version: crate::protected::PROTECTED_CAPSULE_PUSH_PLAN_SCHEMA_VERSION,
+            repo_prefix: self.layout.repo_prefix().to_owned(),
+            push_id: push_id.to_owned(),
+            upload_prefix: upload_prefix.to_owned(),
+            base_root_digest: transaction.base_root_digest().to_owned(),
+            transaction_id: transaction.id()?,
+            run_hash: run.hash().to_owned(),
+            run_size: run.bytes().len() as u64,
+            ref_updates,
+            staged_objects,
+        };
+        let body = Bytes::from(serde_json::to_vec_pretty(&plan).map_err(Error::Serialization)?);
+        let size = body.len() as u64;
+        let path = object_store::path::Path::from(format!(
+            "{}/push-plan.json",
+            upload_prefix.trim_matches('/')
+        ));
+        store.put_exact(&path, body).await?;
+        store.flush_staging_object(&path, size).await?;
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        Ok(plan)
+    }
+
+    /// Commit through independently mutable ref heads and one capsule authority.
+    ///
+    /// Revalidate authorization and repository policy immediately before this
+    /// call. The caller must retain its original ref leases and GC fences until
+    /// the returned outcome is known and all lease cleanup has completed.
+    pub async fn commit(
+        mut self,
+        plan_id: Option<&str>,
+        namespace_ttl: Duration,
+        cancel: &CancellationToken,
+    ) -> Result<CapsuleCommitOutcome> {
+        if cancel.is_cancelled() {
+            return Err(Error::Cancelled);
+        }
+        let (transaction, capsule) = self.encode(plan_id).await?;
+        let transaction_id = transaction.id()?;
         let publish = if self.changes_namespace {
             let ref_names = transaction
                 .edits()
@@ -392,6 +491,14 @@ async fn upload_capsule_content(
             .await?;
         let hash = crab_xet::hash::MerkleHash::from(artifact.protocol_hash);
         let path = layout.xorb_path(&hash);
+        if layout.store().staging_write_prefix().is_some() {
+            // A protected grant can stage candidates but cannot acknowledge a
+            // canonical create or update GC roots. The service owns promotion
+            // and origin receipts after validating the exact native plan.
+            layout.store().put_if_absent_verified(&path, bytes).await?;
+            delta.insert_xorb(xorb_hash, local_entry.clone())?;
+            continue;
+        }
         let payload_digest = crab_xet::xorb::parser::XorbParser::parse(bytes.clone())
             .map_err(Error::ContentFormat)?
             .payload_digest();
@@ -461,7 +568,7 @@ async fn upload_capsule_content(
             )
             .await?;
     }
-    if !delta.shards().is_empty() {
+    if !delta.shards().is_empty() && layout.store().staging_write_prefix().is_none() {
         crab_metadata::ref_registry::union_register_repo_shards(
             layout.store(),
             layout,

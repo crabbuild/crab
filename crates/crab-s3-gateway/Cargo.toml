@@ -19,7 +19,7 @@ crab-lfs = { workspace = true }
 crab-metadata = { workspace = true, features = ["storage"] }
 crab-remote = { workspace = true, features = ["publication"] }
 crab-remote-git = { workspace = true }
-crab-read = { workspace = true }
+crab-read = { workspace = true, features = ["hydration"] }
 crab-git = { workspace = true }
 crab-storage = { workspace = true }
 crab-write = { workspace = true }

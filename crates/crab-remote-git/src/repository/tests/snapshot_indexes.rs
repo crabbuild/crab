@@ -121,6 +121,7 @@ async fn snapshot_read_indexes_supply_exact_attribution_without_manifest_or_cata
                     RepositoryOptions::default(),
                     SnapshotLookupSources::default(),
                     &cancel,
+                    None,
                 )
                 .await
             }

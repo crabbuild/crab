@@ -338,6 +338,19 @@ pub struct RemoteGitRuntime {
 }
 
 impl RemoteGitRuntime {
+    /// Apply this runtime's request, byte and cancellation admission to metadata capture.
+    pub fn read_admission(
+        self: &Arc<Self>,
+        limits: crate::OperationLimits,
+        cancellation: CancellationToken,
+    ) -> Result<Arc<dyn crab_storage::ReadAdmission>> {
+        crate::RepositoryOptions::new(crate::ObjectLimits::default(), limits)?;
+        Ok(
+            crate::budget::OperationBudget::new(limits, Arc::clone(self))
+                .read_admission(cancellation),
+        )
+    }
+
     /// Construct a validated process runtime and metrics sink.
     ///
     /// Zero object-cache bounds disable that cache. Admission bounds must be

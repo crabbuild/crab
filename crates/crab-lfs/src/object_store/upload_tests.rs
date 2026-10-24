@@ -1,6 +1,41 @@
 use super::*;
+use object_store::ObjectStoreExt as _;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
+
+#[tokio::test]
+async fn streamed_payload_uses_the_protected_write_store_and_inventory() {
+    let read = Arc::new(object_store::memory::InMemory::new());
+    let write = Arc::new(object_store::memory::InMemory::new());
+    let store = crab_storage::Store::new(read.clone())
+        .with_staging_write_store("repo/staging/session".to_owned(), write.clone());
+    let lfs = LfsObjectStore::new(store.clone(), "repo");
+    let body = b"protected LFS payload";
+    let oid = Sha256::digest(body).into();
+    let directory = tempfile::tempdir().unwrap();
+    let source = directory.path().join("payload");
+    tokio::fs::write(&source, body).await.unwrap();
+    lfs.put_stream_with_size(&oid, Some(body.len() as u64), &source)
+        .await
+        .unwrap();
+    let inventory = store.flush_staged_writes(1).await.unwrap();
+    let object = &inventory[0];
+    let bytes = write
+        .get(&Path::from(object.staged_key.clone()))
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    let canonical = read.head(&lfs.object_path(&oid)).await;
+    assert!(
+        inventory.len() == 1
+            && object.canonical_key == lfs.object_path(&oid).as_ref()
+            && object.blake3 == blake3::hash(body).to_hex().as_str()
+            && bytes == body.as_slice()
+            && matches!(canonical, Err(object_store::Error::NotFound { .. }))
+    );
+}
 
 #[derive(Debug, Default)]
 struct PartCounts {

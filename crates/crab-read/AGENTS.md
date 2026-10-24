@@ -63,7 +63,7 @@ For object download changes continue into `crates/crab-read/src/store_client.rs`
 
 ## Features and platform
 
-No declared Cargo features. The manifest explicitly enables dependency cache/index capabilities. Hydration fixtures cannot prove live replica selection or mounted read behavior; qualify those affected consumers separately.
+Default `hydration` enables dependency proofs, cache/index integration and verified reconstruction. Without default features, only capsule metadata capture, Git views and base errors are available. Test both profiles. Hydration fixtures cannot prove live replica selection or mounted read behavior; qualify those affected consumers separately.
 
 ## Verification
 

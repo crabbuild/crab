@@ -46,6 +46,12 @@ impl LocalTools {
                 .map_err(local_error)?,
         })
     }
+    pub(crate) fn with_store(mut self, store: &crate::DirectStoreOptions) -> Result<Self> {
+        self.owner = self
+            .owner
+            .with_environment(store.scoped_local_environment()?);
+        Ok(self)
+    }
 }
 
 /// Validated local tool versions and executable capabilities.
@@ -231,7 +237,6 @@ pub struct LocalRepository {
     root: PathBuf,
     git_dir: PathBuf,
     common_dir: PathBuf,
-    locator: Option<RepositoryLocator>,
 }
 
 /// An immutable local commit selection that requires no remote access.
@@ -354,12 +359,12 @@ impl LocalRepository {
         options: FetchOptions,
         operation: OperationOptions,
     ) -> Result<FetchOutcome> {
-        let locator = self.locator.clone();
         let tools = self.tools()?.clone();
         let root = self.root.clone();
         let git_dir = self.git_dir.clone();
         let common_dir = self.common_dir.clone();
         let state = self.client.0.clone();
+        let read_options = operation.clone();
         self.client
             .0
             .operations
@@ -370,12 +375,12 @@ impl LocalRepository {
                 ensure_supported_mutation(&tools.owner, &root, &cancel).await?;
                 fetch::fetch_locked(
                     &state,
-                    locator,
                     &tools.owner,
                     &root,
                     &git_dir,
                     &common_dir,
                     &options,
+                    &read_options,
                     &cancel,
                 )
                 .await
@@ -469,7 +474,7 @@ impl Client {
             .operations
             .run(options, move |cancel| async move {
                 tools.owner.handshake(&cancel).await.map_err(local_error)?;
-                discover_local(client, &tools.owner, &path, None, &cancel).await
+                discover_local(client, &tools.owner, &path, &cancel).await
             })
             .await
     }
@@ -500,6 +505,7 @@ impl Client {
                 "local tools are required for local operations",
             )
         })?;
+        let read_options = operation.clone();
         let state = self.0.clone();
         let client = self.clone();
         let trusted = self.0.local_execution_policy.is_trusted();
@@ -552,7 +558,7 @@ impl Client {
                                 source,
                             )
                         })?;
-                    return discover_local(client, &tools.owner, &destination, None, &cancel).await;
+                    return discover_local(client, &tools.owner, &destination, &cancel).await;
                 }
                 let resolved = state.resolve_repository(&locator, &cancel).await?;
                 let (remote, environment, managed_token_cache) = if resolved.managed {
@@ -628,15 +634,16 @@ impl Client {
                     .configure_filters(&staged, &cancel)
                     .await
                     .map_err(local_error)?;
+                ensure_supported_mutation(&tools.owner, &staged, &cancel).await?;
                 let git_dir = staged.join(".git");
                 let layout = crab_storage::StoreLayout::new(
-                    resolved.store.clone(),
+                    state.admitted_store(&resolved.store, &read_options, &cancel)?,
                     resolved.prefix.clone(),
                 );
                 let snapshot = crab_remote::transfer::fetch_snapshot(
-                    &resolved.store,
                     &layout,
-                    &git_dir.join("objects").join("pack"),
+                    &git_dir,
+                    read_options.owner_limits().max_fetched_bytes,
                     &cancel,
                 )
                 .await
@@ -660,7 +667,7 @@ impl Client {
                 )
                 .await?;
                 let head = cloned_head(options.branch.as_deref(), &snapshot)?;
-                let hydration = clone_hydration(
+                let hydration = prepare_clone_hydration(
                     &tools.owner,
                     &staged,
                     head.target.as_deref(),
@@ -668,7 +675,17 @@ impl Client {
                     &cancel,
                 )
                 .await?;
-                configure_clone(&staged, hydration.lazy(), managed_token_cache).await?;
+                // Filesystem pack transfer has no CLI storage URL. Cloud and
+                // managed transports provide the clone's content location when
+                // the selected commit predates committed project configuration.
+                let content_remote = remote.starts_with("crab://").then_some(remote.as_str());
+                configure_clone(
+                    &staged,
+                    hydration.lazy(),
+                    content_remote,
+                    managed_token_cache,
+                )
+                .await?;
                 checkout_cloned_head(
                     &tools.owner,
                     &staged,
@@ -679,10 +696,10 @@ impl Client {
                     &cancel,
                 )
                 .await?;
-                hydrate_clone_patterns(
+                hydrate_cloned_checkout(
                     &tools.owner,
                     &staged,
-                    hydration.patterns(),
+                    &hydration,
                     &environment,
                     trusted,
                     &cancel,
@@ -704,7 +721,7 @@ impl Client {
                             source,
                         )
                     })?;
-                discover_local(client, &tools.owner, &destination, Some(locator), &cancel).await
+                discover_local(client, &tools.owner, &destination, &cancel).await
             })
             .await
     }
@@ -741,9 +758,8 @@ async fn clone_http_repository(
         .configure_filters(staged, cancel)
         .await
         .map_err(local_error)?;
-    let hydration = clone_hydration(tools, staged, Some("HEAD"), options.lazy, cancel).await?;
-    configure_clone(staged, hydration.lazy(), None).await?;
-    match tools
+    ensure_supported_mutation(tools, staged, cancel).await?;
+    let has_refs = match tools
         .run_git(
             Some(staged),
             ["show-ref", "--head", "--quiet"],
@@ -752,16 +768,24 @@ async fn clone_http_repository(
         )
         .await
     {
-        Ok(_) => {
-            tools
-                .run_git(Some(staged), ["reset", "--hard", "HEAD"], trusted, cancel)
-                .await
-                .map_err(local_error)?;
+        Ok(_) => true,
+        Err(crab_remote::local::LocalError::Exit(output)) if output.status.code() == Some(1) => {
+            false
         }
-        Err(crab_remote::local::LocalError::Exit(output)) if output.status.code() == Some(1) => {}
         Err(source) => return Err(local_error(source)),
+    };
+    // An empty clone has no revision to inspect for committed configuration.
+    // Keep its unborn branch so the first local commit can be published.
+    let revision = has_refs.then_some("HEAD");
+    let hydration = prepare_clone_hydration(tools, staged, revision, options.lazy, cancel).await?;
+    configure_clone(staged, hydration.lazy(), None, None).await?;
+    if has_refs {
+        tools
+            .run_git(Some(staged), ["reset", "--hard", "HEAD"], trusted, cancel)
+            .await
+            .map_err(local_error)?;
     }
-    hydrate_clone_patterns(tools, staged, hydration.patterns(), &[], trusted, cancel).await?;
+    hydrate_cloned_checkout(tools, staged, &hydration, &[], trusted, cancel).await?;
     fetch::verify_repository(tools, staged, cancel).await
 }
 
@@ -769,7 +793,6 @@ async fn discover_local(
     client: Client,
     tools: &crab_remote::local::LocalTools,
     path: &Path,
-    locator: Option<RepositoryLocator>,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<LocalRepository> {
     let root = git_path(tools, path, "--show-toplevel", cancel).await?;
@@ -802,16 +825,11 @@ async fn discover_local(
     }
     fetch::validate_fetch_intent_on_open(tools, &root, &git_dir, cancel).await?;
     edit::validate_integration_intent_on_open(&git_dir).await?;
-    let locator = match locator {
-        Some(locator) => Some(locator),
-        None => discover_locator(&client, tools, &root, cancel).await?,
-    };
     Ok(LocalRepository {
         client,
         root,
         git_dir,
         common_dir,
-        locator,
     })
 }
 
@@ -849,7 +867,7 @@ pub(super) async fn ensure_supported_mutation(
             [
                 "config",
                 "--get-regexp",
-                "^(extensions\\.partialclone|remote\\..*\\.promisor|core\\.sparsecheckout|core\\.sparsecheckoutcone)$",
+                "^(extensions\\.partialclone|remote\\..*\\.promisor|core\\.sparsecheckout|core\\.sparsecheckoutcone|lfs\\.extension\\..*)$",
             ],
             false,
             cancel,
@@ -867,6 +885,12 @@ pub(super) async fn ensure_supported_mutation(
             continue;
         };
         let key = &line[..separator];
+        if key.starts_with(b"lfs.extension.") {
+            return Err(Error::new(
+                ErrorKind::UnsupportedCapability,
+                "LFS extensions are not supported by local SDK mutations",
+            ));
+        }
         let value = line[separator..]
             .iter()
             .copied()
@@ -887,19 +911,23 @@ pub(super) async fn ensure_supported_mutation(
 }
 
 async fn discover_locator(
-    client: &Client,
+    state: &crate::client::ClientState,
     tools: &crab_remote::local::LocalTools,
     root: &Path,
+    name: &str,
+    push: bool,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<Option<RepositoryLocator>> {
-    let output = match tools
-        .run_git(Some(root), ["remote", "get-url", "origin"], false, cancel)
-        .await
-    {
-        Ok(output) => output,
-        Err(crab_remote::local::LocalError::Exit(_)) => return Ok(None),
-        Err(error) => return Err(local_error(error)),
+    validate_remote_name(name)?;
+    let args = if push {
+        vec!["remote", "get-url", "--push", "--all", name]
+    } else {
+        vec!["remote", "get-url", name]
     };
+    let output = tools
+        .run_git(Some(root), args, false, cancel)
+        .await
+        .map_err(local_error)?;
     let remote = std::str::from_utf8(&output.stdout)
         .map_err(|source| {
             Error::with_source(
@@ -909,8 +937,14 @@ async fn discover_locator(
             )
         })?
         .trim();
+    if remote.lines().count() != 1 {
+        return Err(Error::new(
+            ErrorKind::UnsupportedCapability,
+            "atomic local transfer requires one remote URL",
+        ));
+    }
     #[cfg(feature = "managed")]
-    if let Some(managed) = client.0.managed.as_ref() {
+    if let Some(managed) = state.managed.as_ref() {
         match managed.resolver.classify(remote) {
             Ok(crab_git::RepositoryLocator::Managed(repository)) => {
                 return Ok(Some(RepositoryLocator::from_managed_owner(repository)));
@@ -919,7 +953,7 @@ async fn discover_locator(
             Err(source) => return Err(crate::managed_impl::managed_repository_error(source)),
         }
     }
-    let Some(store) = client.0.local_store.as_ref() else {
+    let Some(store) = state.local_store.as_ref() else {
         return Ok(None);
     };
     match store.locator_from_remote(remote) {
@@ -971,12 +1005,24 @@ fn git_output_path(raw: &[u8]) -> Result<PathBuf> {
     Ok(PathBuf::from(raw))
 }
 
-async fn configure_clone(root: &Path, lazy: bool, token_cache: Option<&Path>) -> Result<()> {
+async fn configure_clone(
+    root: &Path,
+    lazy: bool,
+    content_remote: Option<&str>,
+    token_cache: Option<&Path>,
+) -> Result<()> {
     let directory = root.join(".crab");
     tokio::fs::create_dir_all(&directory)
         .await
         .map_err(|source| Error::with_source(ErrorKind::Io, "cannot create .crab", source))?;
     let mut configuration = format!("# Crab local settings\n[checkout]\nlazy = {lazy}\n");
+    if let Some(remote) = content_remote {
+        // Project configuration still wins in the shared resolver. Keep the
+        // explicit clone location private so historical clones stay clean.
+        configuration.push_str("\n[remote]\nurl = ");
+        configuration.push_str(&toml::Value::String(remote.to_owned()).to_string());
+        configuration.push('\n');
+    }
     if let Some(token_cache) = token_cache {
         let token_cache = token_cache.to_str().ok_or_else(|| {
             Error::new(
@@ -1040,7 +1086,7 @@ fn cloned_head(
     Ok(ClonedHead { branch, target })
 }
 
-async fn clone_hydration(
+async fn prepare_clone_hydration(
     tools: &crab_remote::local::LocalTools,
     root: &Path,
     revision: Option<&str>,
@@ -1078,13 +1124,27 @@ async fn clone_hydration(
                     source,
                 )
             })?;
-            crab_remote::config::parse_repository_hydration(document).map_err(|source| {
-                Error::with_source(
-                    ErrorKind::Corruption,
-                    "committed crab.toml has invalid checkout configuration",
-                    source,
-                )
-            })?
+            let hydration =
+                crab_remote::config::parse_repository_hydration(document).map_err(|source| {
+                    Error::with_source(
+                        ErrorKind::Corruption,
+                        "committed crab.toml has invalid checkout configuration",
+                        source,
+                    )
+                })?;
+            // Filters can run before Git writes crab.toml. Install the selected
+            // revision's exact config in private staging first, so both pointer
+            // kinds use committed storage settings on their first smudge.
+            tokio::fs::write(root.join("crab.toml"), &output.stdout)
+                .await
+                .map_err(|source| {
+                    Error::with_source(
+                        ErrorKind::Io,
+                        "cannot stage committed configuration",
+                        source,
+                    )
+                })?;
+            hydration
         }
     } else {
         None
@@ -1096,23 +1156,26 @@ async fn clone_hydration(
     ))
 }
 
-async fn hydrate_clone_patterns(
+async fn hydrate_cloned_checkout(
     tools: &crab_remote::local::LocalTools,
     root: &Path,
-    patterns: &[String],
+    hydration: &crab_remote::config::CheckoutHydration,
     environment: &[(OsString, OsString)],
     trusted: bool,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<()> {
-    if patterns.is_empty() {
+    if hydration.lazy() && hydration.patterns().is_empty() {
         return Ok(());
     }
-    let mut args = vec![
-        OsString::from("hydrate"),
-        OsString::from("--json"),
-        OsString::from("--"),
-    ];
-    args.extend(patterns.iter().map(OsString::from));
+    // Smudge can defer failed reconstruction by leaving a pointer. Verify eager
+    // hydration after configuration is checked out, before publishing the clone.
+    let mut args = vec![OsString::from("hydrate"), OsString::from("--json")];
+    if hydration.lazy() {
+        args.push(OsString::from("--"));
+        args.extend(hydration.patterns().iter().map(OsString::from));
+    } else {
+        args.push(OsString::from("--all"));
+    }
     tools
         .run_crab_with_env(
             Some(root),
@@ -1230,17 +1293,15 @@ fn local_error(source: crab_remote::local::LocalError) -> Error {
 }
 
 fn transfer_error(source: crab_remote::transfer::Error) -> Error {
-    let kind = match source {
-        crab_remote::transfer::Error::Cancelled => ErrorKind::Cancelled,
-        crab_remote::transfer::Error::Metadata(_) | crab_remote::transfer::Error::Pack(_) => {
-            ErrorKind::Corruption
+    match source {
+        crab_remote::transfer::Error::Read(source) => crate::remote_error::read_error(source),
+        crab_remote::transfer::Error::Metadata(source) => Error::with_source(
+            crate::remote_error::metadata_kind(&source),
+            "direct repository transfer failed",
+            source,
+        ),
+        crab_remote::transfer::Error::Cancelled => {
+            Error::new(ErrorKind::Cancelled, "direct repository transfer cancelled")
         }
-        crab_remote::transfer::Error::Storage(ref error) => {
-            crate::remote_error::storage_kind(error)
-        }
-        crab_remote::transfer::Error::Scratch(_) | crab_remote::transfer::Error::Installer(_) => {
-            ErrorKind::Io
-        }
-    };
-    Error::with_source(kind, "direct repository transfer failed", source)
+    }
 }

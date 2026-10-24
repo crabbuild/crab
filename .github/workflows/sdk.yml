@@ -2,7 +2,7 @@ name: Rust SDK
 
 on:
   push:
-    branches: [main]
+    branches: [main, crab-v2]
     paths:
       - ".github/workflows/sdk.yml"
       - "Cargo.lock"
@@ -17,10 +17,14 @@ on:
       - "crab/src/cmd/push.rs"
       - "crab/src/git/push.rs"
       - "crab/src/git/push_native.rs"
+      - "crab/src/git/filter_process.rs"
+      - "crab/src/git/prefetch.rs"
+      - "crab/src/cmd/hydrate.rs"
+      - "crab/src/lfs/**"
       - "crates/crab-*/**"
       - "packages/web/content/docs/sdk/**"
   pull_request:
-    branches: [main]
+    branches: [main, crab-v2]
     paths:
       - ".github/workflows/sdk.yml"
       - "Cargo.lock"
@@ -35,6 +39,10 @@ on:
       - "crab/src/cmd/push.rs"
       - "crab/src/git/push.rs"
       - "crab/src/git/push_native.rs"
+      - "crab/src/git/filter_process.rs"
+      - "crab/src/git/prefetch.rs"
+      - "crab/src/cmd/hydrate.rs"
+      - "crab/src/lfs/**"
       - "crates/crab-*/**"
       - "packages/web/content/docs/sdk/**"
   schedule:
@@ -42,7 +50,7 @@ on:
   workflow_dispatch:
     inputs:
       live_backends:
-        description: "Run credentialed GCS, Azure, and managed qualification"
+        description: "Run credentialed S3, GCS, Azure, and managed qualification"
         required: true
         default: false
         type: boolean
@@ -108,7 +116,7 @@ jobs:
 
       - name: Deny SDK and publication lints
         run: >-
-          cargo "+${SDK_MSRV}" clippy -p crab-sdk -p crab-remote
+          cargo "+${SDK_MSRV}" clippy -p crab-sdk -p crab-remote -p crab-lfs
           --locked --all-targets --all-features -- -D warnings
 
       - name: Deny rustdoc warnings
@@ -191,7 +199,13 @@ jobs:
           npm run build --prefix packages/ui
       - name: Qualify shared publication owners
         run: |
-          cargo "+${SDK_MSRV}" test -p crab-remote --locked --all-features --test publication
+          cargo "+${SDK_MSRV}" test -p crab-lfs --locked --lib
+          cargo "+${SDK_MSRV}" test -p crab-remote --locked --all-features --test publication --test capsule_preparation
+          cargo "+${SDK_MSRV}" test -p crab-metadata --locked capsule_protocol::plan::tests
+          cargo "+${SDK_MSRV}" test -p crab-auth-server --locked --lib
+          cargo "+${SDK_MSRV}" test -p crab-metadata --locked --features file-index-reader --lib file_index_lookup
+          cargo "+${SDK_MSRV}" test -p crab-read --locked --lib store_client::tests
+          cargo "+${SDK_MSRV}" test -p crab-remote-git --locked budget::tests
           cargo "+${SDK_MSRV}" test -p crab-metadata --locked plan_receipt::tests
           cargo "+${SDK_MSRV}" test -p crab-metadata --locked --test plan_receipt_recovery
           cargo "+${SDK_MSRV}" test -p crab-write --locked --test journal --test generation --test catalog
@@ -201,6 +215,13 @@ jobs:
           git::receive::tests::faults::
       - name: Qualify CLI publication callers
         run: |
+          cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport cmd::fsck_store::tests::
+          cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport git::clean::tests::
+          cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport hydrate::batch::tests::
+          cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport cmd::hydrate::tests::
+          cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport git::filter_process::tests::
+          cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport git::prefetch::tests::
+          cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport lfs::config::tests::
           cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport git::push_native::tests::unresolved_plan_blocks_replay_before_ref_admission -- --exact
           cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport git::push::tests::next_writer_repairs_publication_cancelled_at_active_marker -- --exact
           cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport cmd::push::tests::uncertain_commit_does_not_enter_automatic_transient_retry -- --exact
@@ -307,26 +328,32 @@ jobs:
           cargo "+${SDK_MSRV}" build -p crab --locked --no-default-features \
             --features simd-accel,tier,watch
           cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features \
-            --features local --test local_round_trip --no-run --message-format=json \
-            > "$RUNNER_TEMP/local-round-trip-artifacts.json"
+            --features local --test local_round_trip --test http_git --no-run --message-format=json \
+            > "$RUNNER_TEMP/sdk-local-artifacts.json"
           python3 - <<'PY'
           import json
           import os
           from pathlib import Path
 
-          manifest = Path(os.environ["RUNNER_TEMP"]) / "local-round-trip-artifacts.json"
-          executables = []
+          manifest = Path(os.environ["RUNNER_TEMP"]) / "sdk-local-artifacts.json"
+          targets = {
+              "local_round_trip": "CRAB_SDK_LOCAL_ROUND_TRIP_BIN",
+              "http_git": "CRAB_SDK_HTTP_TEST_BIN",
+          }
+          executables = {name: [] for name in targets}
           for line in manifest.read_text().splitlines():
               message = json.loads(line)
               target = message.get("target", {})
               if (message.get("reason") == "compiler-artifact"
-                      and target.get("name") == "local_round_trip"
+                      and target.get("name") in targets
                       and "test" in target.get("kind", [])
                       and message.get("executable")):
-                  executables.append(message["executable"])
-          if len(executables) != 1 or not Path(executables[0]).is_file():
-              raise SystemExit(f"expected one local-round-trip test executable, got {executables}")
-          (Path(os.environ["RUNNER_TEMP"]) / "local-round-trip-bin").write_text(executables[0])
+                  executables[target["name"]].append(message["executable"])
+          with Path(os.environ["GITHUB_ENV"]).open("a") as environment:
+              for name, paths in executables.items():
+                  if len(paths) != 1 or not Path(paths[0]).is_file():
+                      raise SystemExit(f"expected one {name} test executable, got {paths}")
+                  environment.write(f"{targets[name]}={paths[0]}\n")
           PY
           mkdir -p "$RUNNER_TEMP/sdk-evidence"
           {
@@ -335,7 +362,6 @@ jobs:
             echo "CRAB_SDK_TEST_GIT_BIN=$(command -v git)"
             echo "CRAB_SDK_TEST_READ_GUARD=$GITHUB_WORKSPACE/crab/scripts/verify-sdk-read-only.py"
             echo "CRAB_SDK_TEST_READ_GUARD_REPORT=$RUNNER_TEMP/sdk-evidence/read-transport.json"
-            echo "CRAB_SDK_LOCAL_ROUND_TRIP_BIN=$(cat "$RUNNER_TEMP/local-round-trip-bin")"
           } >> "$GITHUB_ENV"
       - name: Qualify read-only transport
         run: >-
@@ -393,6 +419,21 @@ jobs:
           --timeout-seconds 1200 --
           cargo "+${SDK_MSRV}" test -p crab-server --locked --lib
           git::receive::tests::faults::receive_faults_rustfs
+          -- --exact --ignored --nocapture
+      - name: Qualify SDK against native Crab HTTP
+        env:
+          QUALIFICATION_BUCKET: ${{ env.CRAB_SDK_TEST_S3_BUCKET }}
+          QUALIFICATION_PREFIX: qualification/http-push-sdk-${{ github.run_id }}-${{ github.run_attempt }}
+        run: >-
+          python3 crab/scripts/qualify_sdk.py run
+          --output "$RUNNER_TEMP/sdk-evidence/native-http-sdk.json"
+          --backend rustfs --features local
+          --fixture-digest 38f0f2ca3cd8afbb9d29853c2f8cfd77ceac0caa37b23f1b43d5153041266b15
+          --expected-tests 1 --toolchain "$SDK_MSRV"
+          --git "$CRAB_SDK_TEST_GIT_BIN" --crab "$CRAB_SDK_TEST_CRAB_BIN"
+          --timeout-seconds 1200 --
+          cargo "+${SDK_MSRV}" test -p crab-server --locked --lib
+          git::receive::tests::sdk::native_http_sdk_rustfs
           -- --exact --ignored --nocapture
       - name: Qualify local workflows and memory
         shell: bash
@@ -519,6 +560,178 @@ jobs:
         with:
           name: sdk-read-performance-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/sdk-read-performance/**
+          if-no-files-found: error
+          retention-days: 30
+
+  s3:
+    name: SDK live AWS S3
+    if: github.event_name == 'schedule' || (github.event_name == 'workflow_dispatch' && inputs.live_backends)
+    runs-on: ubuntu-24.04
+    timeout-minutes: 120
+    env:
+      AWS_ACCESS_KEY_ID: ${{ secrets.CRAB_SDK_TEST_S3_ACCESS_KEY_ID }}
+      AWS_SECRET_ACCESS_KEY: ${{ secrets.CRAB_SDK_TEST_S3_SECRET_ACCESS_KEY }}
+      AWS_SESSION_TOKEN: ${{ secrets.CRAB_SDK_TEST_S3_SESSION_TOKEN }}
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      AWS_DEFAULT_REGION: ${{ vars.AWS_REGION }}
+      AWS_EC2_METADATA_DISABLED: true
+      AWS_ALLOW_HTTP: false
+      AWS_VIRTUAL_HOSTED_STYLE_REQUEST: false
+      AWS_ENDPOINT_URL_S3: https://s3.${{ vars.AWS_REGION }}.amazonaws.com
+      CRAB_SDK_TEST_S3_BUCKET: ${{ secrets.CRAB_SDK_TEST_S3_BUCKET }}
+      QUALIFICATION_BUCKET: ${{ secrets.CRAB_SDK_TEST_S3_BUCKET }}
+      QUALIFICATION_PREFIX: qualification/sdk-ref-aws-${{ github.run_id }}-${{ github.run_attempt }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: ${{ env.SDK_MSRV }}
+      - name: Install dependencies
+        run: |
+          sudo apt-get update -y
+          sudo apt-get install -y libfuse3-dev pipx
+          pipx install awscli
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+      - name: Require an empty dedicated unversioned S3 fixture
+        id: fixture
+        shell: bash
+        run: |
+          set -euo pipefail
+          for name in AWS_ACCESS_KEY_ID AWS_SECRET_ACCESS_KEY AWS_REGION CRAB_SDK_TEST_S3_BUCKET; do
+            test -n "${!name:-}" || { echo "::error::$name is required"; exit 1; }
+          done
+          [[ "$AWS_REGION" =~ ^[a-z]{2}-[a-z]+-[0-9]+$ ]] || {
+            echo "::error::AWS_REGION must name a commercial AWS region"; exit 1;
+          }
+          mkdir -p "$RUNNER_TEMP/sdk-s3-evidence"
+          aws s3api get-bucket-versioning --bucket "$CRAB_SDK_TEST_S3_BUCKET" \
+            --output json > "$RUNNER_TEMP/sdk-s3-evidence/versioning.json"
+          aws s3api list-objects-v2 --bucket "$CRAB_SDK_TEST_S3_BUCKET" \
+            --max-keys 1 --output json > "$RUNNER_TEMP/sdk-s3-evidence/inventory-before.json"
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["RUNNER_TEMP"]) / "sdk-s3-evidence"
+          if json.loads((root / "versioning.json").read_text()).get("Status") is not None:
+              raise SystemExit("Use a dedicated S3 bucket that has never enabled versioning")
+          if json.loads((root / "inventory-before.json").read_text()).get("Contents"):
+              raise SystemExit("Use an empty dedicated S3 bucket")
+          PY
+          echo "ready=true" >> "$GITHUB_OUTPUT"
+      - uses: Swatinem/rust-cache@v2
+      - name: Build compatible Crab
+        run: |
+          cargo "+${SDK_MSRV}" build -p crab --locked --no-default-features \
+            --features simd-accel,tier,watch
+          {
+            echo "CRAB_SDK_TEST_CRAB_BIN=$CARGO_TARGET_DIR/debug/crab"
+            echo "CRAB_SDK_TEST_GIT_BIN=$(command -v git)"
+          } >> "$GITHUB_ENV"
+      - name: Qualify native S3 content reads
+        run: >-
+          python3 crab/scripts/qualify_sdk.py run
+          --output "$RUNNER_TEMP/sdk-s3-evidence/read.json"
+          --backend s3 --features remote,content
+          --fixture-digest 38f0f2ca3cd8afbb9d29853c2f8cfd77ceac0caa37b23f1b43d5153041266b15
+          --expected-tests 1 --toolchain "$SDK_MSRV" --timeout-seconds 1200 --
+          cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features
+          --features remote,content --test remote_blob
+          s3_pack_reads_survive_source_removal_and_keep_snapshots_pinned
+          -- --exact --ignored --nocapture
+      - name: Qualify native S3 writes and restart recovery
+        shell: bash
+        run: |
+          set -euo pipefail
+          for test in remote_edit_round_trip_without_git stale_ref_batch_changes_no_refs initialization_preserves_foreign_content; do
+            python3 crab/scripts/qualify_sdk.py run \
+              --output "$RUNNER_TEMP/sdk-s3-evidence/${test}.json" \
+              --backend s3 --features remote,content,write \
+              --fixture-digest 38f0f2ca3cd8afbb9d29853c2f8cfd77ceac0caa37b23f1b43d5153041266b15 \
+              --expected-tests 1 --toolchain "$SDK_MSRV" --timeout-seconds 1200 -- \
+              cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features \
+              --features remote,content,write --test remote_write "$test" \
+              -- --exact --ignored --nocapture
+          done
+          python3 crab/scripts/qualify_sdk.py run \
+            --output "$RUNNER_TEMP/sdk-s3-evidence/restart.json" \
+            --backend s3 --features remote,content,write \
+            --fixture-digest 38f0f2ca3cd8afbb9d29853c2f8cfd77ceac0caa37b23f1b43d5153041266b15 \
+            --expected-tests 1 --toolchain "$SDK_MSRV" --timeout-seconds 1200 -- \
+            cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features \
+            --features remote,content,write --lib \
+            client::mutation::tests::ref_batches_rustfs_recover_without_git_after_restart \
+            -- --exact --ignored --nocapture
+      - name: Qualify local S3 workflows
+        shell: bash
+        run: |
+          set -euo pipefail
+          for test in stage_commit_push_round_trip fetch_checkout_and_pull_round_trip conflict_continue_and_abort_round_trip; do
+            python3 crab/scripts/qualify_sdk.py run \
+              --output "$RUNNER_TEMP/sdk-s3-evidence/${test}.json" \
+              --backend s3 --features local \
+              --fixture-digest 38f0f2ca3cd8afbb9d29853c2f8cfd77ceac0caa37b23f1b43d5153041266b15 \
+              --expected-tests 1 --toolchain "$SDK_MSRV" \
+              --git "$CRAB_SDK_TEST_GIT_BIN" --crab "$CRAB_SDK_TEST_CRAB_BIN" \
+              --timeout-seconds 1800 -- \
+              cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features \
+              --features local --test local_round_trip "$test" \
+              -- --exact --ignored --nocapture
+          done
+      - name: Remove owned fixture objects and verify cleanup
+        if: always() && steps.fixture.outputs.ready == 'true'
+        run: |
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+
+          root = Path(os.environ["RUNNER_TEMP"]) / "sdk-s3-evidence"
+          bucket = os.environ["CRAB_SDK_TEST_S3_BUCKET"]
+          def inventory():
+              result = subprocess.run(
+                  ["aws", "s3api", "list-objects-v2", "--bucket", bucket, "--output", "json"],
+                  check=True, capture_output=True, text=True,
+              )
+              return json.loads(result.stdout).get("Contents", [])
+
+          objects = inventory()
+          keys = [item["Key"] for item in objects]
+          prefixes = (".crab/", os.environ["QUALIFICATION_PREFIX"] + "/")
+          if any(not key.startswith(prefixes) for key in keys):
+              raise SystemExit("Unexpected fixture objects; refusing cleanup")
+          # Native writes share content and fences outside repository prefixes.
+          # Empty preflight plus exclusive fixture ownership makes these keys ours;
+          # delete listed keys only, after every test client/process has exited.
+          for start in range(0, len(keys), 1000):
+              request = root / "delete.json"
+              request.write_text(json.dumps({
+                  "Objects": [{"Key": key} for key in keys[start:start + 1000]],
+                  "Quiet": True,
+              }))
+              result = subprocess.run(
+                  ["aws", "s3api", "delete-objects", "--bucket", bucket,
+                   "--delete", "file://" + str(request), "--output", "json"],
+                  check=True, capture_output=True, text=True,
+              )
+              if json.loads(result.stdout).get("Errors"):
+                  raise SystemExit("Fixture object deletion failed")
+          if inventory():
+              raise SystemExit("Fixture objects remain after cleanup")
+          (root / "cleanup.json").write_text(json.dumps({
+              "verified": True, "deleted_objects": len(keys), "remaining_objects": 0,
+          }) + "\n")
+          PY
+      - name: Upload AWS S3 evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: sdk-s3-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sdk-s3-evidence/**
           if-no-files-found: error
           retention-days: 30
 

@@ -17,7 +17,7 @@ use crate::LfsReadSession;
 use bytes::Bytes;
 use futures_util::{Stream, StreamExt};
 use object_store::path::Path;
-use object_store::{MultipartUpload, ObjectMeta, ObjectStoreExt, PutPayload, PutPayloadMut};
+use object_store::{MultipartUpload, ObjectMeta, PutPayload, PutPayloadMut};
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
@@ -458,6 +458,34 @@ impl LfsObjectStore {
         source: UploadSource<'_>,
     ) -> Result<()> {
         let path = self.object_path(oid);
+        // An empty object has no multipart parts to complete on S3. Verify EOF
+        // from the supplied source before using the ordinary verified write.
+        if planned_size == 0 {
+            let empty = match source {
+                UploadSource::File { file, path } => {
+                    file.read(&mut [0u8; 1])
+                        .await
+                        .map_err(|error| annotate_io_error(error, path))?
+                        == 0
+                }
+                UploadSource::Bytes(mut stream) => {
+                    let mut empty = true;
+                    while let Some(bytes) = stream.next().await {
+                        if !bytes?.is_empty() {
+                            empty = false;
+                            break;
+                        }
+                    }
+                    empty
+                }
+            };
+            if !empty || expected_size != 0 {
+                return Err(LfsError::ObjectCorrupt {
+                    oid: hex_encode(oid),
+                });
+            }
+            return self.put(oid, Bytes::new()).await;
+        }
         let limits = crab_storage::multipart::upload_limits(self.store.bucket_identity().cloud);
         let upload_plan = upload_plan(planned_size, limits).map_err(|error| match &source {
             UploadSource::File {
@@ -469,11 +497,7 @@ impl LfsObjectStore {
         // Begin the multipart upload. A failure here short-circuits
         // before we read any file bytes, so there's nothing to clean
         // up on the remote.
-        let inner = self.store.inner();
-        let mut upload = inner
-            .put_multipart(&path)
-            .await
-            .map_err(|e| LfsError::from(crab_storage::map_object_store_error(e, path.as_ref())))?;
+        let mut upload = self.store.create_multipart_upload(&path).await?;
 
         // Drive the upload with a bounded FuturesUnordered. Normal parts retain
         // limited concurrency; adaptive large parts submit synchronously.
@@ -510,10 +534,11 @@ impl LfsObjectStore {
         };
 
         match hash_result {
-            Ok(actual_size) => {
-                let result =
-                    crab_storage::multipart::complete_upload_with_result(&mut *upload, &path)
-                        .await?;
+            Ok((actual_size, body_hash)) => {
+                let result = self
+                    .store
+                    .complete_multipart_upload(&mut *upload, &path, actual_size, &body_hash)
+                    .await?;
                 Self::record_verification_receipt(
                     &self.store,
                     &self.prefix,
@@ -995,6 +1020,12 @@ impl LfsObjectStore {
         e_tag: Option<String>,
         version: Option<String>,
     ) {
+        // A staged write's validator identifies its unpublished key. Receipts
+        // belong to canonical objects and are rebuilt after promotion; staging
+        // them would also add unreachable cache objects to the receive plan.
+        if store.staging_write_prefix().is_some() {
+            return;
+        }
         let object_path = Self::object_path_at(prefix, oid);
         if !has_byte_validator_values(e_tag.as_deref(), version.as_deref()) {
             // A receipt without a provider validator cannot prove that the
@@ -1276,6 +1307,7 @@ struct StreamingUpload<'a> {
     remote_path: &'a Path,
     plan: UploadPlan,
     hasher: Sha256,
+    body_hasher: blake3::Hasher,
     pending: futures_util::stream::FuturesUnordered<object_store::UploadPart>,
     part: PutPayloadMut,
     total_bytes: u64,
@@ -1294,6 +1326,7 @@ impl<'a> StreamingUpload<'a> {
             remote_path,
             plan,
             hasher: Sha256::new(),
+            body_hasher: blake3::Hasher::new(),
             pending: futures_util::stream::FuturesUnordered::new(),
             part: PutPayloadMut::new().with_block_size(FILE_READ_BUF),
             total_bytes: 0,
@@ -1318,6 +1351,7 @@ impl<'a> StreamingUpload<'a> {
         }
         self.total_bytes = total_bytes;
         self.hasher.update(bytes);
+        self.body_hasher.update(bytes);
         let mut offset = 0;
         while offset < bytes.len() {
             let remaining = self.plan.part_size - self.part.content_length();
@@ -1339,7 +1373,7 @@ impl<'a> StreamingUpload<'a> {
         Ok(())
     }
 
-    async fn finish(mut self, expected_oid: &[u8; 32]) -> Result<u64> {
+    async fn finish(mut self, expected_oid: &[u8; 32]) -> Result<(u64, [u8; 32])> {
         if !self.part.is_empty() {
             dispatch_part(
                 self.upload,
@@ -1377,7 +1411,7 @@ impl<'a> StreamingUpload<'a> {
             bytes = self.total_bytes,
             "LFS streaming upload: hash verified, ready to complete"
         );
-        Ok(self.total_bytes)
+        Ok((self.total_bytes, *self.body_hasher.finalize().as_bytes()))
     }
 }
 
@@ -1389,7 +1423,7 @@ async fn stream_file_parts(
     file_path: &StdPath,
     remote_path: &Path,
     plan: UploadPlan,
-) -> Result<u64> {
+) -> Result<(u64, [u8; 32])> {
     let mut upload = StreamingUpload::new(upload, remote_path, plan, expected_size);
     let mut read_buf = vec![0u8; FILE_READ_BUF];
     loop {
@@ -1412,7 +1446,7 @@ async fn stream_byte_parts(
     expected_size: Option<u64>,
     remote_path: &Path,
     plan: UploadPlan,
-) -> Result<u64> {
+) -> Result<(u64, [u8; 32])> {
     let mut upload = StreamingUpload::new(upload, remote_path, plan, expected_size);
     while let Some(chunk) = source.next().await {
         upload.write(&chunk?, expected_oid).await?;
@@ -1485,6 +1519,7 @@ mod tests {
     use std::sync::Arc;
 
     use bytes::Bytes;
+    use object_store::ObjectStoreExt;
     use object_store::memory::InMemory;
     use sha2::{Digest, Sha256};
 

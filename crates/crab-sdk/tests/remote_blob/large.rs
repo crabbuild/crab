@@ -106,8 +106,9 @@ async fn publish_large_qualification_repository() {
         })
         .unwrap();
     let (shard_bytes, shard_hash) = shard.finalize().unwrap();
+    let shard_bytes = Bytes::from(shard_bytes);
     store
-        .put(&layout.shard_path(&shard_hash), shard_bytes.into())
+        .put(&layout.shard_path(&shard_hash), shard_bytes.clone())
         .await
         .unwrap();
     let pointer = crab_types::pointer::Pointer {
@@ -162,90 +163,20 @@ async fn publish_large_qualification_repository() {
         ],
     );
     let pack = directory.path().join(format!("fixture-{pack_hash}.pack"));
-    let index = pack.with_extension("idx");
-    let reverse = pack.with_extension("rev");
-    crab_git::write_pack_reverse_index(&index, &reverse).unwrap();
-    let bytes = std::fs::read(&pack).unwrap();
-    let pack_size = bytes.len() as u64;
-    let pack_id = MerkleHash::from_hex(blake3::hash(&bytes).to_hex().as_str()).unwrap();
-    let locations = crab_git::PackLocationIter::open(&index, &reverse, pack_size)
-        .unwrap()
-        .collect::<Result<Vec<_>, _>>()
-        .unwrap();
-    let object_count = locations.len() as u64;
-    store
-        .put(&layout.pack_path(&pack_id), bytes.into())
-        .await
-        .unwrap();
-    store
-        .put(
-            &layout.pack_index_path(&pack_id),
-            std::fs::read(index).unwrap().into(),
-        )
-        .await
-        .unwrap();
-    store
-        .put(
-            &layout.pack_reverse_index_path(&pack_id),
-            std::fs::read(reverse).unwrap().into(),
-        )
-        .await
-        .unwrap();
-    let (pack_index_hash, _, pack_index) = compact_pack_index(
-        1,
-        &[PackManifestEntry {
-            pack_id: pack_id.to_string(),
-            size: pack_size,
-            content_hash: pack_id.to_string(),
-            ref_tips: vec![commit.clone()],
-            object_count,
-        }],
+    let catalog = catalog_for_shard(&layout, &shard_hash.hex(), &shard_bytes).await;
+    let mut native = CapsuleFixture::new(
+        layout.clone(),
+        &source,
+        &pack,
+        std::slice::from_ref(&commit),
     )
-    .unwrap();
-    let (shard_index_hash, _, shard_index) = compact_shard_index(1, &[shard_hash.hex()]).unwrap();
-    upload_segmented_bulk(
-        &store,
-        &layout,
-        &BulkData {
-            shard_index,
-            pack_index,
-        },
-    )
-    .await
-    .unwrap();
-    let mut manifest = Manifest::default_for_repo("refs/heads/main");
-    manifest.generation = 1;
-    manifest
-        .refs
-        .insert("refs/heads/main".to_owned(), commit.clone());
-    manifest.pack_index_hash = pack_index_hash;
-    manifest.shard_index_hash = shard_index_hash;
-    manifest.seal_git_validation();
-    create_manifest(&store, &layout, &manifest).await.unwrap();
-    let coverage = GitLocatorCoverage {
-        generation: 1,
-        pack_index_hash: MerkleHash::from_hex(&manifest.pack_index_hash).unwrap(),
-    };
-    let record = GitPackLocatorRecord {
-        pack_id,
-        committed_generation: 1,
-        pack_index_hash: coverage.pack_index_hash,
-        object_count,
-        pack_size,
-    };
-    let entries = locations
-        .into_iter()
-        .map(|entry| GitObjectLocatorEntry {
-            oid: entry.oid.as_bytes().try_into().unwrap(),
-            location: GitObjectLocation {
-                pack_offset: entry.pack_offset,
-                entry_len: entry.entry_len,
-                crc32: entry.crc32,
-            },
-            metadata: Default::default(),
-        })
-        .collect::<Vec<_>>();
-    publish_catalog(&store, coverage, record, &entries).await;
+    .await;
+    native
+        .publish(
+            std::collections::BTreeMap::from([("refs/heads/main".to_owned(), commit.clone())]),
+            catalog,
+        )
+        .await;
     directory.close().unwrap();
     println!(
         "commit={commit} crab_bytes={total} crab_blake3={} lfs_blake3={lfs_hash}",

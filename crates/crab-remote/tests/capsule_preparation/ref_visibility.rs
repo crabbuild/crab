@@ -211,6 +211,7 @@ async fn branch_survives_source_deletion(
                 crab_remote_git::RepositoryOptions::default(),
                 LIMIT,
                 &cancel,
+                None,
             )
             .await
             .unwrap();

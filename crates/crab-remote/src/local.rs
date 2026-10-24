@@ -15,11 +15,14 @@ pub const CAPABILITIES_SCHEMA_VERSION: u32 = 1;
 
 /// Minimum compatible local-workflow protocol implemented by this crate.
 pub const LOCAL_WORKFLOW_PROTOCOL_VERSION: u32 = 1;
-pub const STORAGE_FORMAT_VERSION: u32 = 1;
+pub const STORAGE_FORMAT_VERSION: u32 = 2;
 pub const STAGING_FORMAT_VERSION: u32 = 1;
 
 /// Process-local bridge to the canonical durable publication-plan owner.
 pub const PUBLICATION_PLAN_ID_ENV: &str = "CRAB_INTERNAL_MIRROR_PLAN_ID";
+
+/// Process-scoped target for the compatible executable's Git forwarding entry.
+pub const GIT_EXECUTABLE_ENV: &str = "CRAB_INTERNAL_GIT_EXECUTABLE";
 
 /// Canonical capability document emitted without fallible runtime serialization.
 pub const CURRENT_CAPABILITIES_JSON: &str = concat!(
@@ -27,7 +30,7 @@ pub const CURRENT_CAPABILITIES_JSON: &str = concat!(
     env!("CARGO_PKG_VERSION"),
     "\",\"product_build\":\"crab-remote/",
     env!("CARGO_PKG_VERSION"),
-    "\",\"local_workflow_protocol\":1,\"storage_format_version\":1,\"staging_format_version\":1,\"operations\":[\"clone\",\"fetch-content\",\"stage\",\"hydrate\",\"dehydrate\",\"filter-process\",\"remote-helper\"]}"
+    "\",\"local_workflow_protocol\":1,\"storage_format_version\":2,\"staging_format_version\":1,\"operations\":[\"clone\",\"fetch-content\",\"stage\",\"hydrate\",\"dehydrate\",\"filter-process\",\"remote-helper\",\"git-forward\"]}"
 );
 
 /// Capabilities advertised by a Crab executable to a local SDK client.
@@ -81,6 +84,7 @@ impl ExecutableCapabilities {
                 "dehydrate",
                 "filter-process",
                 "remote-helper",
+                "git-forward",
             ]
             .into_iter()
             .map(str::to_owned)
@@ -108,7 +112,7 @@ impl ExecutableCapabilities {
         {
             return Err(CapabilityError::Format);
         }
-        for required in ["clone", "filter-process", "remote-helper"] {
+        for required in ["clone", "filter-process", "remote-helper", "git-forward"] {
             if !self
                 .operations
                 .iter()
@@ -141,6 +145,7 @@ pub const MAX_TOOL_OUTPUT_BYTES: usize = 8 * 1024 * 1024;
 #[derive(Clone)]
 pub struct LocalTools {
     inner: Arc<ToolEnvironment>,
+    environment: Arc<Vec<(OsString, Option<OsString>)>>,
 }
 
 struct ToolEnvironment {
@@ -157,7 +162,10 @@ impl LocalTools {
         let crab = executable(crab, "Crab")?;
         let directory = tempfile::tempdir().map_err(LocalError::Scratch)?;
         let hooks = tempfile::tempdir().map_err(LocalError::Scratch)?;
-        install_alias(&git, directory.path(), executable_name("git"))?;
+        // Git installation wrappers resolve their payload beside their own
+        // executable. Relocating Git breaks that contract; Crab forwards argv
+        // to the selected original path instead, including custom tool names.
+        install_alias(&crab, directory.path(), executable_name("git"))?;
         install_alias(&crab, directory.path(), executable_name("crab"))?;
         install_alias(&crab, directory.path(), executable_name("git-remote-crab"))?;
         Ok(Self {
@@ -167,7 +175,20 @@ impl LocalTools {
                 directory,
                 hooks,
             }),
+            environment: Arc::new(Vec::new()),
         })
+    }
+
+    /// Scope environment overrides and removals to every invocation of these tools.
+    ///
+    /// Child filters and helpers inherit the same selection. The process-global
+    /// environment and sibling tool instances remain untouched.
+    #[must_use]
+    pub fn with_environment(&self, environment: Vec<(OsString, Option<OsString>)>) -> Self {
+        Self {
+            inner: self.inner.clone(),
+            environment: Arc::new(environment),
+        }
     }
 
     /// Return the selected Git executable.
@@ -211,7 +232,7 @@ impl LocalTools {
         repository: &Path,
         cancel: &CancellationToken,
     ) -> Result<(), LocalError> {
-        let values = filter_driver_values(&self.inner.crab)?;
+        let values = local_filter_driver_values(&self.inner.crab)?;
         for (key, value) in values {
             self.run_git(
                 Some(repository),
@@ -230,7 +251,7 @@ impl LocalTools {
         repository: &Path,
         cancel: &CancellationToken,
     ) -> Result<bool, LocalError> {
-        let expected = filter_driver_values(&self.inner.crab)?;
+        let expected = local_filter_driver_values(&self.inner.crab)?;
         for (key, value) in expected {
             let actual = match self
                 .run_git(
@@ -464,12 +485,22 @@ impl LocalTools {
                 Stdio::null()
             })
             .stdout(io.output.map_or_else(Stdio::piped, Stdio::from))
-            .stderr(Stdio::piped())
-            .kill_on_drop(true);
+            .stderr(Stdio::piped());
         if let Some(current_dir) = current_dir {
             command.current_dir(current_dir);
         }
+        for (key, value) in self.environment.iter() {
+            match value {
+                Some(value) => {
+                    command.env(key, value);
+                }
+                None => {
+                    command.env_remove(key);
+                }
+            }
+        }
         command.envs(env);
+        command.env(GIT_EXECUTABLE_ENV, &self.inner.git);
         let path = process_path(self.inner.directory.path());
         command.env("PATH", path);
         if !trust_hooks {
@@ -484,21 +515,27 @@ impl LocalTools {
                     .env(format!("GIT_CONFIG_VALUE_{index}"), value);
             }
         }
+        let mut command = process_wrap::tokio::CommandWrap::from(command);
+        command.wrap(process_wrap::tokio::KillOnDrop);
+        #[cfg(unix)]
+        command.wrap(process_wrap::tokio::ProcessGroup::leader());
+        #[cfg(windows)]
+        command.wrap(process_wrap::tokio::JobObject);
         let mut child = command.spawn().map_err(|source| LocalError::Spawn {
             executable: executable.to_owned(),
             source,
         })?;
         let stdout = if capture_stdout {
-            let stdout = child.stdout.take().ok_or(LocalError::MissingPipe)?;
+            let stdout = child.stdout().take().ok_or(LocalError::MissingPipe)?;
             Some(tokio::spawn(read_bounded(stdout)))
         } else {
             None
         };
-        let stderr = child.stderr.take().ok_or(LocalError::MissingPipe)?;
+        let stderr = child.stderr().take().ok_or(LocalError::MissingPipe)?;
         let stderr = tokio::spawn(read_bounded(stderr));
         let stdin = match io.input {
             Some(input) => {
-                let mut stdin = child.stdin.take().ok_or(LocalError::MissingPipe)?;
+                let mut stdin = child.stdin().take().ok_or(LocalError::MissingPipe)?;
                 Some(tokio::spawn(async move {
                     stdin.write_all(&input).await.map_err(LocalError::Write)?;
                     stdin.shutdown().await.map_err(LocalError::Write)
@@ -506,37 +543,40 @@ impl LocalTools {
             }
             None => None,
         };
-        let status = tokio::select! {
-            biased;
-            () = cancel.cancelled() => {
-                child.kill().await.map_err(LocalError::Kill)?;
-                let _ = child.wait().await;
-                None
-            }
-            result = child.wait() => Some(result.map_err(LocalError::Wait)?),
-        };
-        if status.is_none() {
+        let output = async move {
             if let Some(stdin) = stdin {
-                let _ = stdin.await;
+                stdin.await.map_err(LocalError::WriterTask)??;
             }
-            if let Some(stdout) = stdout {
-                let _ = stdout.await;
-            }
-            let _ = stderr.await;
-            return Err(LocalError::Cancelled);
-        }
-        let status = status.ok_or(LocalError::Cancelled)?;
-        if let Some(stdin) = stdin {
-            stdin.await.map_err(LocalError::WriterTask)??;
-        }
-        let stdout = match stdout {
-            Some(stdout) => stdout.await.map_err(LocalError::ReaderTask)??,
-            None => BoundedBytes {
-                bytes: Vec::new(),
-                overflow: false,
-            },
+            let stdout = match stdout {
+                Some(stdout) => stdout.await.map_err(LocalError::ReaderTask)??,
+                None => BoundedBytes {
+                    bytes: Vec::new(),
+                    overflow: false,
+                },
+            };
+            let stderr = stderr.await.map_err(LocalError::ReaderTask)??;
+            Ok::<_, LocalError>((stdout, stderr))
         };
-        let stderr = stderr.await.map_err(LocalError::ReaderTask)??;
+        tokio::pin!(output);
+        // The parent can exit before descendants release its pipes. Keep
+        // cancellation admitted until all communication has drained, so close
+        // can stop the owned tree even after the parent's status is available.
+        let completed = tokio::select! {
+            biased;
+            () = cancel.cancelled() => None,
+            result = async {
+                let status = child.wait().await.map_err(LocalError::Wait)?;
+                let (stdout, stderr) = output.as_mut().await?;
+                Ok::<_, LocalError>((status, stdout, stderr))
+            } => Some(result),
+        };
+        let Some(completed) = completed else {
+            child.start_kill().map_err(LocalError::Kill)?;
+            child.wait().await.map_err(LocalError::Wait)?;
+            let _ = output.await;
+            return Err(LocalError::Cancelled);
+        };
+        let (status, stdout, stderr) = completed?;
         if stdout.overflow || stderr.overflow {
             return Err(LocalError::OutputLimit);
         }
@@ -551,12 +591,14 @@ impl LocalTools {
         Ok(output)
     }
 
+    // Crab's LFS filter can launch configured extension commands. Apply the
+    // same execution policy to those child commands as to Git drivers.
     async fn untrusted_git_config(
         &self,
         current_dir: Option<&Path>,
         cancel: &CancellationToken,
     ) -> Result<Vec<(OsString, OsString)>, LocalError> {
-        const EXECUTABLE_CONFIG: &str = "^(core\\.fsmonitor|diff\\..*\\.(command|textconv)|filter\\..*\\.(clean|smudge|process)|merge\\..*\\.driver)$";
+        const EXECUTABLE_CONFIG: &str = "^(core\\.fsmonitor|diff\\..*\\.(command|textconv)|filter\\..*\\.(clean|smudge|process)|merge\\..*\\.driver|lfs\\.extension\\..*\\.(clean|smudge))$";
         let Some(current_dir) = current_dir else {
             return Ok(Vec::new());
         };
@@ -577,8 +619,8 @@ impl LocalTools {
             }
             Err(error) => return Err(error),
         };
-        let expected = filter_driver_values(&self.inner.crab).unwrap_or_default();
-        let mut overrides = Vec::new();
+        let expected = local_filter_driver_values(&self.inner.crab).unwrap_or_default();
+        let mut effective = std::collections::BTreeMap::new();
         for entry in output.stdout.split(|byte| *byte == 0) {
             if entry.is_empty() {
                 continue;
@@ -589,6 +631,13 @@ impl LocalTools {
             let name = std::str::from_utf8(&entry[..separator])
                 .map_err(|_| LocalError::GitConfigSyntax)?;
             let value = &entry[separator + 1..];
+            // Git returns canonical keys in precedence order. A shadowed global
+            // driver must not disable the approved repository-local filter;
+            // evaluate only the last value, as Git does when executing it.
+            effective.insert(name, value);
+        }
+        let mut overrides = Vec::new();
+        for (name, value) in effective {
             if expected.iter().any(|(key, expected)| {
                 name.eq_ignore_ascii_case(key) && value == expected.as_bytes()
             }) {
@@ -615,6 +664,19 @@ pub fn filter_driver_values(crab: &Path) -> Result<Vec<(&'static str, String)>, 
         ("filter.crab.required", "true".to_owned()),
         ("diff.crab.command", format!("{quoted} diff-driver")),
     ])
+}
+
+fn local_filter_driver_values(crab: &Path) -> Result<Vec<(&'static str, String)>, LocalError> {
+    // SDK worktrees use the same validated engine for both pointer kinds, so
+    // checkout policy and scoped credentials also govern LFS. CLI Crab-only
+    // installation keeps its separate filter_driver_values contract.
+    let mut values = filter_driver_values(crab)?;
+    let quoted = quote_git_command_path(crab)?;
+    values.extend([
+        ("filter.lfs.process", format!("{quoted} filter-process")),
+        ("filter.lfs.required", "true".to_owned()),
+    ]);
+    Ok(values)
 }
 
 fn quote_git_command_path(path: &Path) -> Result<String, LocalError> {
@@ -873,6 +935,18 @@ mod tests {
     }
 
     #[test]
+    fn executable_without_git_forwarding_is_rejected() {
+        let mut capabilities = ExecutableCapabilities::current();
+        capabilities
+            .operations
+            .retain(|operation| operation != "git-forward");
+        assert!(matches!(
+            capabilities.validate_for_sdk(),
+            Err(CapabilityError::MissingOperation("git-forward"))
+        ));
+    }
+
+    #[test]
     fn incompatible_protocol_is_rejected() {
         let mut capabilities = ExecutableCapabilities::current();
         capabilities.local_workflow_protocol += 1;
@@ -895,6 +969,130 @@ mod tests {
         assert_eq!(values[3], ("filter.crab.required", "true".to_owned()));
     }
 
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    #[cfg(unix)]
+    async fn cancellation_drains_descendants_holding_output_pipes() {
+        use std::os::unix::fs::PermissionsExt as _;
+        for parent_waits in [true, false] {
+            let directory = tempfile::tempdir().unwrap();
+            let crab = directory.path().join("owned-command");
+            std::fs::write(
+                &crab,
+                format!(
+                    "#!/bin/sh\nsleep 120 &\nprintf '%s %s' \"$$\" \"$!\" > child.pid\n{}\n",
+                    if parent_waits { "wait" } else { "exit 0" }
+                ),
+            )
+            .unwrap();
+            std::fs::set_permissions(&crab, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let tools = LocalTools::new(&git_path(), &crab).unwrap();
+            let cancel = CancellationToken::new();
+            let child_cancel = cancel.clone();
+            let root = directory.path().to_owned();
+            let mut task = tokio::spawn(async move {
+                tools
+                    .run_crab(Some(&root), std::iter::empty::<&str>(), true, &child_cancel)
+                    .await
+            });
+            let pid_file = directory.path().join("child.pid");
+            tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                while !pid_file.exists() {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await
+            .unwrap();
+            let pids = std::fs::read_to_string(pid_file).unwrap();
+            let pids = pids.split_whitespace().collect::<Vec<_>>();
+            let parent_exited = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                if parent_waits {
+                    return;
+                }
+                while tokio::process::Command::new("/bin/kill")
+                    .args(["-0", pids[0]])
+                    .output()
+                    .await
+                    .unwrap()
+                    .status
+                    .success()
+                {
+                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                }
+            })
+            .await;
+            cancel.cancel();
+            let result = tokio::time::timeout(std::time::Duration::from_secs(3), &mut task).await;
+            if result.is_err() {
+                // Reclaim only this fixture's known descendant if the regression
+                // returns to killing the parent while leaving its pipes open.
+                for pid in pids {
+                    let _ = std::process::Command::new("/bin/kill")
+                        .args(["-KILL", pid])
+                        .output();
+                }
+                let _ = task.await;
+            }
+            assert!(
+                parent_exited.is_ok() && matches!(result, Ok(Ok(Err(LocalError::Cancelled)))),
+                "parent_waits={parent_waits}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn untrusted_processes_preserve_the_effective_approved_filter() {
+        let root = tempfile::tempdir().unwrap();
+        let global = root.path().join("global.config");
+        std::fs::write(&global, "[filter \"lfs\"]\nprocess = untrusted-program\n").unwrap();
+        let git = git_path();
+        let tools = LocalTools::new(&git, &git).unwrap().with_environment(vec![
+            ("GIT_CONFIG_GLOBAL".into(), Some(global.into_os_string())),
+            ("GIT_CONFIG_NOSYSTEM".into(), Some("1".into())),
+        ]);
+        let cancel = CancellationToken::new();
+        tools
+            .run_git(Some(root.path()), ["init"], true, &cancel)
+            .await
+            .unwrap();
+        tools.configure_filters(root.path(), &cancel).await.unwrap();
+        let expected = local_filter_driver_values(&git)
+            .unwrap()
+            .into_iter()
+            .find(|(key, _)| *key == "filter.lfs.process")
+            .unwrap()
+            .1;
+        for (value, approved) in [
+            (expected.as_str(), true),
+            ("untrusted-program", false),
+            (expected.as_str(), true),
+        ] {
+            tools
+                .run_git(
+                    Some(root.path()),
+                    ["config", "--add", "filter.lfs.process", value],
+                    true,
+                    &cancel,
+                )
+                .await
+                .unwrap();
+            let actual = tools
+                .run_git(
+                    Some(root.path()),
+                    ["config", "--get", "filter.lfs.process"],
+                    false,
+                    &cancel,
+                )
+                .await
+                .unwrap();
+            let expected = if approved {
+                format!("{expected}\n")
+            } else {
+                "\n".to_owned()
+            };
+            assert_eq!(actual.stdout, expected.as_bytes());
+        }
+    }
+
     #[tokio::test]
     async fn untrusted_processes_disable_configured_executable_drivers() {
         let root = tempfile::tempdir().unwrap();
@@ -905,12 +1103,13 @@ mod tests {
             .run_git(Some(root.path()), ["init"], true, &cancel)
             .await
             .unwrap();
-        tools
-            .run_git(
+        for filter in ["untrusted", "lfs"] {
+            let key = format!("filter.{filter}.clean");
+            tools.run_git(
                 Some(root.path()),
                 [
                     "config",
-                    "filter.untrusted.clean",
+                    key.as_str(),
                     "printf executed > driver-ran; while IFS= read -r line; do printf '%s\\n' \"$line\"; done",
                 ],
                 true,
@@ -918,15 +1117,41 @@ mod tests {
             )
             .await
             .unwrap();
+        }
         std::fs::write(
             root.path().join(".gitattributes"),
-            "*.txt filter=untrusted\n",
+            "*.txt filter=untrusted\n*.bin filter=lfs\n",
         )
         .unwrap();
         std::fs::write(root.path().join("first.txt"), "first\n").unwrap();
+        std::fs::write(root.path().join("first.bin"), "first\n").unwrap();
+        tools
+            .run_git(
+                Some(root.path()),
+                ["config", "lfs.extension.fixture.clean", "untrusted-program"],
+                true,
+                &cancel,
+            )
+            .await
+            .unwrap();
+        let disabled = tools
+            .run_crab(
+                Some(root.path()),
+                ["config", "--get", "lfs.extension.fixture.clean"],
+                false,
+                &cancel,
+            )
+            .await
+            .unwrap();
+        assert_eq!(disabled.stdout, b"\n");
 
         tools
-            .run_git(Some(root.path()), ["add", "first.txt"], false, &cancel)
+            .run_git(
+                Some(root.path()),
+                ["add", "first.txt", "first.bin"],
+                false,
+                &cancel,
+            )
             .await
             .unwrap();
         assert!(!root.path().join("driver-ran").exists());
@@ -940,5 +1165,15 @@ mod tests {
             std::fs::read(root.path().join("driver-ran")).unwrap(),
             b"executed"
         );
+        let enabled = tools
+            .run_crab(
+                Some(root.path()),
+                ["config", "--get", "lfs.extension.fixture.clean"],
+                true,
+                &cancel,
+            )
+            .await
+            .unwrap();
+        assert_eq!(enabled.stdout, b"untrusted-program\n");
     }
 }

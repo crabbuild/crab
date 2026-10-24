@@ -147,7 +147,10 @@ authenticated object-to-member admission, and non-canonical pack ranges share
 this path. The caller authenticates them against its snapshot; opening validates
 preferred inventory membership and source pack sizes. An explicitly empty
 preferred index set remains distinct from an unspecified set. The canonical
-snapshot and catalog-tail constructors retain their existing behavior.
+snapshot and catalog-tail constructors retain their existing behavior. A caller
+can forward opening read admission so derived graph loading shares the capsule
+capture's request and byte limits. That admission ends with opening; retained
+index origins and later Git operations use independently admitted reads.
 
 Paged checkpoint member admission selects indexes without loading unrelated
 packs or materializing the whole object dictionary. Each selected member must

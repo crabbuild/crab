@@ -149,7 +149,7 @@ pub struct FileIndexHeadResult {
 /// Trait abstracting the file-index fast-path check for testability.
 ///
 /// The real implementation resolves `file_hash -> shard_hash` through
-/// `file_index_db` and verifies the referenced shard object exists.
+/// the native pointer catalog and verifies the referenced shard object exists.
 pub trait FileIndexChecker: Send {
     /// Check whether the file is already reconstructable from remote storage.
     ///
@@ -172,12 +172,10 @@ impl FileIndexChecker for NoopFileIndexChecker {
 
 /// File-index checker backed by a [`StoreLayout`].
 ///
-/// Routes file-hash existence checks through the per-repo
-/// `file_index_db` via
-/// [`crab_metadata::file_index_lookup::resolve_file_hash_to_shard`].
-/// Uses `Handle::block_on` to bridge the sync [`FileIndexChecker`]
-/// trait with the async SlateDB access path — safe because the
-/// filter-process loop invokes the checker inside `spawn_blocking`.
+/// Captures native catalog authority through
+/// [`crab_metadata::file_index_lookup::FileIndexLookupSession`].
+/// Uses `Handle::block_on` to bridge the sync [`FileIndexChecker`] trait with
+/// async reads; the filter-process loop invokes it inside `spawn_blocking`.
 pub struct StoreFileIndexChecker {
     router: StoreLayout,
     handle: tokio::runtime::Handle,
@@ -3450,68 +3448,76 @@ mod tests {
         }
     }
 
-    // --- StoreFileIndexChecker tests ---
-
-    fn seed_file_index(
+    fn seed_native_file_binding(
         rt: &tokio::runtime::Runtime,
         store: Arc<dyn object_store::ObjectStore>,
         repo_prefix: &str,
         file_hash: &MerkleHash,
         shard_hash: &MerkleHash,
     ) {
-        rt.block_on(async {
-            let storage = crab_storage::Store::new(Arc::clone(&store));
-            let router = crab_storage::StoreLayout::new(storage.clone(), repo_prefix.to_owned());
-            crab_metadata::layout_descriptor::ensure_canonical_layout(&storage, &router)
-                .await
-                .expect("initialize canonical layout");
-            let (shard_index_hash, _, shard_write) = crab_metadata::manifests::append_shard_index(
-                crab_metadata::segmented::SegmentIndex::default(),
-                1,
-                &[shard_hash.hex()],
-            )
-            .expect("build shard index");
-            crab_metadata::manifest_store::upload_segmented_bulk(
-                &storage,
-                &router,
-                &crab_metadata::manifests::BulkData {
-                    shard_index: shard_write,
-                    pack_index: crab_metadata::segmented::SegmentWrite::default(),
-                },
-            )
-            .await
-            .expect("upload shard index");
-            let mut manifest =
-                crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main");
-            manifest.generation = 1;
-            manifest.shard_index_hash = shard_index_hash.clone();
-            manifest.seal_git_validation();
-            crab_metadata::manifest_store::create_manifest(&storage, &router, &manifest)
-                .await
-                .expect("create manifest");
+        use crab_metadata::capsule_protocol::{
+            Capsule, CapsulePointer, CapsuleRefEdit, CapsuleRun, CapsuleSection,
+            CapsuleSectionKind, CapsuleTransaction, FileCatalogEntry, PointerCatalog,
+            RepositoryRoot, RootRecord, ShardCatalogEntry,
+        };
 
-            let metadb = crate::metadata::MetaDb::new(
-                store,
-                repo_prefix.to_owned(),
-                crate::metadata::MetaDbConfig::for_repo(repo_prefix),
+        rt.block_on(async {
+            let storage = crab_storage::Store::new(store);
+            let router = crab_storage::StoreLayout::new(storage.clone(), repo_prefix.to_owned());
+            let mut catalog = PointerCatalog::new();
+            catalog
+                .insert_file(file_hash.hex(), FileCatalogEntry::new(1, shard_hash.hex()))
+                .unwrap();
+            catalog
+                .insert_shard(shard_hash.hex(), ShardCatalogEntry::new(10, vec![]))
+                .unwrap();
+            let base = RootRecord::encode(
+                RepositoryRoot::initial(&"1".repeat(64), "refs/heads/main").unwrap(),
+            )
+            .unwrap();
+            crab_metadata::capsule_protocol::create_root(&router, base.clone())
+                .await
+                .unwrap();
+            let tip = "2".repeat(40);
+            let edit = CapsuleRefEdit::new("refs/heads/main", None, Some(tip.clone()), None);
+            let transaction = CapsuleTransaction::new(base.digest(), vec![edit]).unwrap();
+            let section = CapsuleSection::new(
+                CapsuleSectionKind::CatalogDelta,
+                catalog.encode_delta().unwrap(),
             );
-            let file_store = metadb.file_index().await.expect("file index store");
-            let mut txn = metadb.new_transaction();
-            file_store.save_committed_batch(
-                &mut txn,
-                &[(
-                    *file_hash,
-                    crab_metadata::value_codec::CommittedFileRecord {
-                        recipe_hash: [0xC7; 32],
-                        shard_hash: *shard_hash,
-                        committed_generation: 1,
-                        shard_index_hash: MerkleHash::from_hex(&shard_index_hash)
-                            .expect("valid shard-index hash"),
-                    },
-                )],
-            );
-            metadb.commit(txn).await.expect("seed file-index");
-            metadb.close_all().await.expect("close metadb");
+            let capsule = Capsule::build(&transaction, vec![], vec![section]).unwrap();
+            let run = CapsuleRun::leaf(capsule).unwrap();
+            storage
+                .put(&router.capsule_path(run.hash()), run.bytes().clone())
+                .await
+                .unwrap();
+            let pointer = CapsulePointer::new(
+                run.hash(),
+                run.bytes().len() as u64,
+                run.control_offset(),
+                run.control_size(),
+                run.footer_hash(),
+                run.level(),
+                run.transaction_ids().to_vec(),
+                run.newest_base_root_digest(),
+            )
+            .unwrap();
+            let refs = std::collections::BTreeMap::from([("refs/heads/main".to_owned(), tip)]);
+            let root = base
+                .root()
+                .advance(
+                    base.digest(),
+                    refs,
+                    Default::default(),
+                    vec![pointer],
+                    &transaction.id().unwrap(),
+                )
+                .unwrap();
+            let root = RootRecord::encode(root).unwrap();
+            storage
+                .put_overwrite(&router.capsule_root_path(), root.bytes().clone())
+                .await
+                .unwrap();
         });
     }
 
@@ -3526,7 +3532,7 @@ mod tests {
         let file_hash = MerkleHash::from([31_u64, 0, 0, 0]);
         let shard_hash = MerkleHash::from([32_u64, 0, 0, 0]);
 
-        seed_file_index(
+        seed_native_file_binding(
             &rt,
             Arc::clone(&inner),
             repo_prefix,
@@ -3564,7 +3570,7 @@ mod tests {
         let file_hash = MerkleHash::from([33_u64, 0, 0, 0]);
         let shard_hash = MerkleHash::from([34_u64, 0, 0, 0]);
 
-        seed_file_index(
+        seed_native_file_binding(
             &rt,
             Arc::clone(&inner),
             repo_prefix,

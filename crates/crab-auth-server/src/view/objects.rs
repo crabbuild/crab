@@ -555,9 +555,14 @@ mod tests {
             size: content.len() as u64,
             shard_hint: None,
         };
-        super::super::verify_crab_pointers_backed_by_view(&store, repo_prefix, &[pointer])
-            .await
-            .unwrap();
+        super::super::verify_crab_pointers_backed_by_view(
+            &store,
+            repo_prefix,
+            &[pointer],
+            super::super::ViewProtocol::Manifest,
+        )
+        .await
+        .unwrap();
     }
 
     #[tokio::test]

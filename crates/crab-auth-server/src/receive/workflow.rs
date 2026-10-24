@@ -1295,9 +1295,19 @@ mod tests {
         run_git(["config", "user.name", "Alice"], Some(source.path()))?;
         let xet_content = b"unrestricted protected Xet content\n";
         let xet = xet_fixture(xet_content)?;
+        let lfs_content = b"unrestricted protected LFS content\n";
+        let lfs_pointer = crab_git::LfsPointer {
+            oid: sha2::Sha256::digest(lfs_content).into(),
+            size: lfs_content.len() as u64,
+            extensions: Vec::new(),
+        };
+        std::fs::write(source.path().join("asset.lfs"), lfs_pointer.serialize())?;
         std::fs::write(source.path().join("tracked.txt"), b"protected capsule\n")?;
         std::fs::write(source.path().join("model.bin"), xet.pointer.serialize())?;
-        run_git(["add", "tracked.txt", "model.bin"], Some(source.path()))?;
+        run_git(
+            ["add", "tracked.txt", "model.bin", "asset.lfs"],
+            Some(source.path()),
+        )?;
         run_git(["commit", "-m", "capsule candidate"], Some(source.path()))?;
         let tip = run_git_capture(["-C", path_str(source.path())?, "rev-parse", "HEAD"])?
             .trim()
@@ -1368,17 +1378,29 @@ mod tests {
             &xet.shard_bytes,
         );
         put_staged(&ctx, &shard_object, xet.shard_bytes.clone()).await?;
+        let upload_prefix = format!("{}/staging/{PUSH_ID}/", ctx.repo_prefix());
+        let staged = ctx
+            .store()
+            .clone()
+            .with_staging_writes(upload_prefix.clone());
+        let lfs = crab_lfs::LfsObjectStore::new(staged.clone(), ctx.repo_prefix());
+        let payload = source.path().join("lfs-payload");
+        std::fs::write(&payload, lfs_content)?;
+        lfs.put_stream_with_size(&lfs_pointer.oid, Some(lfs_pointer.size), &payload)
+            .await?;
+        let mut objects = vec![run_object, xorb_object, shard_object];
+        objects.extend(staged.flush_staged_writes(16).await?);
         let plan = super::super::ProtectedCapsulePushPlan {
             schema_version: crab_remote::protected::PROTECTED_CAPSULE_PUSH_PLAN_SCHEMA_VERSION,
             repo_prefix: ctx.repo_prefix().to_owned(),
             push_id: ctx.push_id().to_owned(),
-            upload_prefix: format!("{}/staging/{PUSH_ID}/", ctx.repo_prefix()),
+            upload_prefix,
             base_root_digest: root.record().digest().to_owned(),
             transaction_id: transaction.id()?,
             run_hash: run.hash().to_owned(),
             run_size: run.bytes().len() as u64,
             ref_updates: vec![update],
-            staged_objects: vec![run_object, xorb_object, shard_object],
+            staged_objects: objects,
         };
         write_plan(&ctx, &plan).await?;
 
@@ -1387,7 +1409,7 @@ mod tests {
         assert_eq!(verified.ref_updates, plan.ref_updates);
         assert_eq!(
             verified.verified_changed_paths,
-            vec!["model.bin", "tracked.txt"]
+            vec!["asset.lfs", "model.bin", "tracked.txt"]
         );
         assert_eq!(
             verified.verified_staged_bytes,
@@ -1427,6 +1449,8 @@ mod tests {
             .await?;
         let parsed = crab_xet::xorb::parser::XorbParser::parse(body)?;
         assert_eq!(parsed.get_chunk(0)?.data.as_ref(), xet_content);
+        let lfs = crab_lfs::LfsObjectStore::new(ctx.store().clone(), ctx.repo_prefix());
+        assert_eq!(lfs.get(&lfs_pointer.oid).await?.as_ref(), lfs_content);
         let receipt = crab_metadata::capsule_protocol::resolve_capsule_plan_receipt(
             ctx.store(),
             ctx.router(),
