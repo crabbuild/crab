@@ -104,77 +104,6 @@ async fn load_shard_checks_availability_before_fetching_external_object() {
     );
 }
 
-async fn seed_file_index(client: &StoreClient, entries: &[(MerkleHash, MerkleHash)]) {
-    crab_metadata::layout_descriptor::ensure_canonical_layout(
-        client.store.origin(),
-        &client.router,
-    )
-    .await
-    .expect("initialize canonical layout");
-    let shard_hashes = entries
-        .iter()
-        .map(|(_, shard_hash)| shard_hash.hex())
-        .collect::<Vec<_>>();
-    let (shard_index_hash, _, shard_write) = crab_metadata::manifests::append_shard_index(
-        crab_metadata::segmented::SegmentIndex::default(),
-        1,
-        &shard_hashes,
-    )
-    .expect("build shard index");
-    crab_metadata::manifest_store::upload_segmented_bulk(
-        client.store.origin(),
-        &client.router,
-        &crab_metadata::manifests::BulkData {
-            shard_index: shard_write,
-            pack_index: crab_metadata::segmented::SegmentWrite::default(),
-        },
-    )
-    .await
-    .expect("upload shard index");
-    let mut manifest = crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main");
-    manifest.generation = 1;
-    manifest.shard_index_hash = shard_index_hash.clone();
-    manifest.seal_git_validation();
-    crab_metadata::manifest_store::create_manifest(
-        client.store.origin(),
-        &client.router,
-        &manifest,
-    )
-    .await
-    .expect("create manifest");
-
-    let shard_index_hash = MerkleHash::from_hex(&shard_index_hash).expect("index hash");
-    let db = slatedb::Db::open(
-        object_store::path::Path::from(format!("{}/file_index_db/", client.router.repo_prefix())),
-        Arc::clone(client.store.origin().inner()),
-    )
-    .await
-    .expect("open file-index writer");
-    let mut result = Ok(());
-    for (file_hash, shard_hash) in entries {
-        result = db
-            .put(
-                crab_metadata::key_codec::encode_committed_file_key(file_hash, 1),
-                crab_metadata::value_codec::encode_committed_file_record(
-                    &crab_metadata::value_codec::CommittedFileRecord {
-                        recipe_hash: [0xC8; 32],
-                        shard_hash: *shard_hash,
-                        committed_generation: 1,
-                        shard_index_hash,
-                    },
-                ),
-            )
-            .await
-            .map(|_| ());
-        if result.is_err() {
-            break;
-        }
-    }
-    let closed = db.close().await;
-    result.expect("write committed records");
-    closed.expect("close file-index writer");
-}
-
 #[test]
 fn xorb_url_round_trip_single_range() {
     let hash = hash_from_seed(42);
@@ -498,100 +427,13 @@ async fn batch_get_reconstruction_empty_is_empty() {
 }
 
 #[tokio::test]
-async fn abandoned_term_batches_remove_managed_reader_checkpoints() {
-    use object_store::throttle::{ThrottleConfig, ThrottledStore};
-    use std::time::Duration;
-    use tokio::time::timeout;
-
-    for (mode, during_cleanup) in [
-        ("terms", false),
-        ("terms", true),
-        ("sequences", false),
-        ("sequences", true),
-        ("strict", false),
-        ("strict", true),
-    ] {
-        let (client, _tmp) = test_client();
-        let file_hash = hash_from_seed(42);
-        seed_file_index(&client, &[(file_hash, hash_from_seed(43))]).await;
-        let inner = Arc::clone(client.store.origin().inner());
-        let admin = slatedb::admin::Admin::builder(
-            format!("{}/file_index_db/", client.router.repo_prefix()),
-            Arc::clone(&inner),
-        )
-        .build();
-        assert!(admin.list_checkpoints(None).await.unwrap().is_empty());
-        // Keep origin reads pending long enough to observe reader ownership,
-        // without changing the caller's cancellation token or the stored index.
-        let throttled = Arc::new(ThrottledStore::new(
-            inner,
-            ThrottleConfig {
-                wait_get_per_call: Duration::from_millis(20),
-                ..ThrottleConfig::default()
-            },
-        ));
-        let origin = Store::new(throttled.clone());
-        let cache = Arc::clone(client.store.local_cache());
-        let store = CachingStore::new_with_local_cache(
-            origin.clone(),
-            CacheConfig::default(),
-            Arc::clone(&cache),
-        )
-        .unwrap();
-        let layout = StoreLayout::new(origin, client.router.repo_prefix().to_owned());
-        let resolver = crate::TermResolver::new(store, layout, cache, 1).unwrap();
-        let cache_owners = Arc::strong_count(client.store.local_cache());
-        let cancel = tokio_util::sync::CancellationToken::new();
-        let mut batch = Box::pin(async {
-            let terms = [(file_hash, None)];
-            let files = [(file_hash, None, 16)];
-            let source = crab_diff::types::ChunkSequenceSourceKind::Committed;
-            match mode {
-                "terms" => resolver.resolve_batch(&terms, &cancel).await.map(|_| ()),
-                "sequences" => resolver
-                    .resolve_sequences_batch(&files, source, &cancel)
-                    .await
-                    .map(|_| ()),
-                _ => resolver
-                    .resolve_sequences_batch_strict(&files, source, &cancel)
-                    .await
-                    .map(|_| ()),
-            }
-        });
-        timeout(Duration::from_secs(5), async {
-            loop {
-                tokio::select! {
-                    result = &mut batch => panic!("batch ended before checkpoint observation: {result:?}"),
-                    checkpoints = admin.list_checkpoints(None) => {
-                        let workers_released = Arc::strong_count(client.store.local_cache()) == cache_owners;
-                        if !checkpoints.unwrap().is_empty() && (!during_cleanup || workers_released) {
-                            break;
-                        }
-                    }
-                }
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .expect("reader reached the requested abandonment phase");
-        drop(batch);
-        throttled.config_mut(|config| config.wait_get_per_call = Duration::ZERO);
-        timeout(Duration::from_secs(2), async {
-            while !admin.list_checkpoints(None).await.unwrap().is_empty() {
-                tokio::task::yield_now().await;
-            }
-        })
-        .await
-        .unwrap_or_else(|_| {
-            panic!(
-                "{mode} abandoned its managed reader checkpoint (during_cleanup={during_cleanup})"
-            )
-        });
-    }
-}
-
-#[tokio::test]
 async fn file_index_resolution_agrees_between_term_and_reconstruction_batches() {
+    use crab_metadata::capsule_protocol::{
+        Capsule, CapsulePointer, CapsuleRefEdit, CapsuleRun, CapsuleSection, CapsuleSectionKind,
+        CapsuleTransaction, FileCatalogEntry, PointerCatalog, RepositoryRoot, RootRecord,
+        ShardCatalogEntry, XorbCatalogEntry, XorbChunkEntry,
+    };
+
     let (client, _tmp) = test_client();
     let file_hash = hash_from_seed(42);
     let missing_hash = hash_from_seed(43);
@@ -621,6 +463,7 @@ async fn file_index_resolution_agrees_between_term_and_reconstruction_batches() 
         .expect("add xorb metadata");
     shard.add_file(file_info).expect("add file");
     let (shard_bytes, shard_hash) = shard.finalize().expect("finalize shard");
+    let shard_size = shard_bytes.len() as u64;
     client
         .store
         .origin()
@@ -630,7 +473,70 @@ async fn file_index_resolution_agrees_between_term_and_reconstruction_batches() 
         )
         .await
         .expect("upload shard");
-    seed_file_index(&client, &[(file_hash, shard_hash)]).await;
+    let mut catalog = PointerCatalog::new();
+    catalog
+        .insert_file(
+            file_hash.hex(),
+            FileCatalogEntry::new(2048, shard_hash.hex()),
+        )
+        .unwrap();
+    let shard_entry = ShardCatalogEntry::new(shard_size, vec![xorb_hash.hex()]);
+    catalog.insert_shard(shard_hash.hex(), shard_entry).unwrap();
+    let chunks = (0..6)
+        .map(|index| XorbChunkEntry::new(hash_from_seed(100 + index).hex(), 512))
+        .collect();
+    let xorb_entry = XorbCatalogEntry::new(3072, "a".repeat(64), chunks);
+    catalog.insert_xorb(xorb_hash.hex(), xorb_entry).unwrap();
+    let base =
+        RootRecord::encode(RepositoryRoot::initial(&"1".repeat(64), "refs/heads/main").unwrap())
+            .unwrap();
+    crab_metadata::capsule_protocol::create_root(&client.router, base.clone())
+        .await
+        .unwrap();
+    let tip = "2".repeat(40);
+    let edit = CapsuleRefEdit::new("refs/heads/main", None, Some(tip.clone()), None);
+    let transaction = CapsuleTransaction::new(base.digest(), vec![edit]).unwrap();
+    let section = CapsuleSection::new(
+        CapsuleSectionKind::CatalogDelta,
+        catalog.encode_delta().unwrap(),
+    );
+    let capsule = Capsule::build(&transaction, vec![], vec![section]).unwrap();
+    let run = CapsuleRun::leaf(capsule).unwrap();
+    client
+        .store
+        .origin()
+        .put(&client.router.capsule_path(run.hash()), run.bytes().clone())
+        .await
+        .unwrap();
+    let pointer = CapsulePointer::new(
+        run.hash(),
+        run.bytes().len() as u64,
+        run.control_offset(),
+        run.control_size(),
+        run.footer_hash(),
+        run.level(),
+        run.transaction_ids(),
+        run.newest_base_root_digest(),
+    )
+    .unwrap();
+    let refs = [("refs/heads/main".to_owned(), tip)].into_iter().collect();
+    let root = base
+        .root()
+        .advance(
+            base.digest(),
+            refs,
+            Default::default(),
+            vec![pointer],
+            &transaction.id().unwrap(),
+        )
+        .unwrap();
+    let root = RootRecord::encode(root).unwrap();
+    client
+        .store
+        .origin()
+        .put_overwrite(&client.router.capsule_root_path(), root.bytes().clone())
+        .await
+        .unwrap();
 
     let resolver = crate::TermResolver::new(
         client.store.clone(),

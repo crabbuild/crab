@@ -204,26 +204,10 @@ impl ReceiveContext {
         view_ref_updates: Vec<PushRefUpdate>,
         view_scope: Option<PreparedViewScope>,
     ) -> Result<PushPrepareRecord> {
-        let record = match read_manifest(&self.store, &self.router).await {
-            Ok((manifest, etag)) => build_prepare_record(
-                &self.repo_prefix,
-                &self.push_id,
-                (&manifest, &etag),
-                view_ref_updates,
-                view_scope,
-            )?,
-            Err(AuthServerError::NotFound { .. }) => {
-                let root = crab_metadata::capsule_protocol::load_root(&self.router)
-                    .await
-                    .map_err(|error| match error {
-                        crab_metadata::error::MetadataError::Storage {
-                            source: StorageError::NotFound { path },
-                        } => AuthServerError::CorruptObject {
-                            path,
-                            reason: "repository has neither a canonical v1 manifest nor a protocol-v2 root; initialize or reset it with `crab init` before protected push".to_owned(),
-                        },
-                        other => other.into(),
-                    })?;
+        // Verification and scoped views select native authority first. Preparing
+        // a manifest session for the same repository makes capsule finalization fail.
+        let record = match crab_metadata::capsule_protocol::load_root(&self.router).await {
+            Ok(root) => {
                 let view = crab_read::capsule_protocol::open_ref_view_from_root(&self.router, root)
                     .await?;
                 build_capsule_prepare_record(
@@ -236,7 +220,27 @@ impl ReceiveContext {
                     view_scope,
                 )?
             }
-            Err(error) => return Err(error),
+            Err(crab_metadata::error::MetadataError::Storage {
+                source: StorageError::NotFound { .. },
+            }) => {
+                let (manifest, etag) = read_manifest(&self.store, &self.router).await.map_err(|error| {
+                    match error {
+                        AuthServerError::NotFound { path } => AuthServerError::CorruptObject {
+                            path,
+                            reason: "repository has neither a protocol-v2 root nor a canonical v1 manifest; initialize or reset it with `crab init` before protected push".to_owned(),
+                        },
+                        other => other,
+                    }
+                })?;
+                build_prepare_record(
+                    &self.repo_prefix,
+                    &self.push_id,
+                    (&manifest, &etag),
+                    view_ref_updates,
+                    view_scope,
+                )?
+            }
+            Err(error) => return Err(error.into()),
         };
         let bytes = serde_json::to_vec_pretty(&record)
             .map_err(|e| AuthServerError::Internal(format!("prepare record serialize: {e}")))?;
@@ -601,6 +605,62 @@ mod tests {
         assert_eq!(record.source_root_digest.as_deref(), Some(root.digest()));
         assert_eq!(record.source_ref_updates[0].old_oid, None);
         validate_prepare_record_shape(&record, "org/repo", PUSH_ID)
+    }
+
+    #[tokio::test]
+    async fn native_prepare_never_uses_legacy_metadata() -> Result<()> {
+        for (valid_native, valid_legacy) in [(true, true), (true, false), (false, true)] {
+            let ctx = context();
+            let root = crab_metadata::capsule_protocol::RootRecord::encode(
+                crab_metadata::capsule_protocol::RepositoryRoot::initial(
+                    &hash('a'),
+                    "refs/heads/main",
+                )?,
+            )?;
+            crab_metadata::capsule_protocol::create_root(ctx.router(), root.clone()).await?;
+            manifest_store::create_manifest(
+                ctx.store(),
+                ctx.router(),
+                &Manifest::default_for_repo("refs/heads/legacy"),
+            )
+            .await?;
+            let corrupt_path = if !valid_native {
+                Some(ctx.router().capsule_root_path())
+            } else if !valid_legacy {
+                Some(ctx.router().manifest_path())
+            } else {
+                None
+            };
+            if let Some(path) = corrupt_path {
+                ctx.store()
+                    .put_overwrite(&path, Bytes::from_static(b"corrupt authority"))
+                    .await?;
+            }
+            let result = ctx
+                .write_prepare_record(
+                    vec![PushRefUpdate {
+                        ref_name: "refs/heads/main".to_owned(),
+                        old_oid: None,
+                        new_oid: oid('2'),
+                    }],
+                    None,
+                )
+                .await;
+            let correct = if valid_native {
+                result.is_ok_and(|record| {
+                    record.schema_version == 2
+                        && record.source_root_digest.as_deref() == Some(root.digest())
+                })
+            } else {
+                matches!(result, Err(AuthServerError::CorruptObject { .. }))
+                    && matches!(
+                        ctx.store().head(&ctx.prepare_record_path()).await,
+                        Err(StorageError::NotFound { .. })
+                    )
+            };
+            assert!(correct, "native={valid_native}, legacy={valid_legacy}");
+        }
+        Ok(())
     }
 
     #[tokio::test]

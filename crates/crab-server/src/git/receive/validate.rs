@@ -50,6 +50,7 @@ pub(super) fn map_error(error: crab_remote::prepare::Error) -> super::ReceiveErr
         Error::Graph(error) => ReceiveError::Graph(error),
         Error::Prepare(error) => ReceiveError::Prepare(error),
         Error::Io(error) => ReceiveError::Io(error),
+        Error::Serialization(error) => ReceiveError::Io(std::io::Error::other(error)),
         Error::Dependency(error) => ReceiveError::Dependency(error),
         Error::CapsuleRead(error) => ReceiveError::Read(error),
         Error::Write(error) => ReceiveError::Write(error),

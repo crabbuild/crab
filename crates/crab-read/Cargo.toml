@@ -48,5 +48,4 @@ xet-data = { workspace = true, optional = true }
 xet-runtime = { workspace = true, optional = true }
 
 [dev-dependencies]
-slatedb = { version = "=0.15.0", features = ["wal_disable", "zstd"] }
 tokio = { workspace = true, features = ["macros", "rt"] }

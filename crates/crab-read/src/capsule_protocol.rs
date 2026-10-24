@@ -5317,8 +5317,6 @@ mod tests {
     use std::sync::{Arc, Mutex};
 
     use bytes::Bytes;
-    #[cfg(feature = "hydration")]
-    use crab_metadata::capsule_protocol::visibility_object_set_digest;
     use crab_metadata::capsule_protocol::{
         CapsuleGitPack, CapsuleRefEdit, CapsuleSection, CapsuleSectionKind, CapsuleTransaction,
         CapsuleVisibilityDelta, CheckpointPointer, HistorySegment, HistorySegmentState, PackLayer,

@@ -2516,7 +2516,6 @@ dependencies = [
  "gix-packetline",
  "globset",
  "object_store 0.14.1",
- "slatedb",
  "tempfile",
  "thiserror 2.0.18",
  "tokio",

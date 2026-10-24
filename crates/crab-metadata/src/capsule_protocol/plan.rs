@@ -459,7 +459,7 @@ mod tests {
             (0..600)
                 .map(|index| {
                     super::super::CapsuleRefEdit::new(
-                        &format!("refs/tags/{index}-{}", "x".repeat(128)),
+                        format!("refs/tags/{index}-{}", "x".repeat(128)),
                         None,
                         Some("1".repeat(40)),
                         None,

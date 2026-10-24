@@ -66,6 +66,50 @@ cannot execute conditional publication, as required by the provider contract.
 Git's documented porcelain rejection status proves failure; its distinct remote
 failure status includes missing acknowledgements and cannot establish history.
 
+The committed web sources also pass production Next.js build, typecheck, lint
+(no errors), all ten web tests and rendered link validation in an isolated source
+copy on the workspace volume. Link validation covers 398 HTML pages and 4,307
+fragments (`sdk-native-web-*.log`). The prior missing-build link-check failure is
+resolved. Repository and organization metadata expose no configured SDK provider
+secrets or managed fixture variables, and no runner with the `sdk-managed` label
+is registered; opt-in live-backend jobs cannot run in the present environment.
+
+The follow-up dependency audit reproduced legacy lookup through the shared
+current-state file-index opener used by clean/filter/hydration and term/store
+clients. That opener now captures only native catalogs and treats a missing root
+as no bindings, without reading manifests, journals or acceleration indexes.
+The absent-root regression proves one root request and unchanged remote inventory;
+native scoped lookup, pinned pages and concurrent close/abandonment remain covered.
+Explicit caller-captured snapshot APIs for other consumers retain their existing
+contracts; SDK paths do not use them for protocol selection. The standalone
+manifest view helper shipped in `v1.2.4` now supplies its captured snapshot
+explicitly. Native view hydration pins the catalog from the same source capture;
+neither path recaptures authority during reconstruction. All 28 lookup tests and
+237 reader tests pass. The retired checkpoint test no longer needs the reader's
+direct SlateDB dev-dependency: the lockfile removes only that dependency edge,
+with no package version or checksum changes.
+
+A protected-session regression also reproduced legacy-first preparation when both
+metadata protocols coexist. Preparation now selects the same native authority as
+validation, scoped views and capsule verification, including corrupt-root rejection.
+All 107 protected-helper tests pass (`sdk-native-protected-authority-after.log`),
+including native verification/commit/retry, scoped hidden-object rejection and
+filtered view reconstruction. The HTTP receiver additionally maps the new
+serialization error without discarding its source; its three local fault tests
+pass (`sdk-native-http-caller-faults.log`). Strict all-target Clippy passes for
+SDK, remote, reader, metadata and protected-helper crates
+(`sdk-native-native-closure-clippy.log`); architecture, feature graphs, capability
+discovery and SDK Python checks also pass after the lookup retirement.
+
+CI run [40080053263](https://github.com/crabbuild/crab/actions/runs/40080053263)
+passed the SDK contract/package job and Linux/macOS/Windows/current-stable tests. The
+package artifact proves four external consumer profiles and five expected
+compile failures against Rust 1.97. Its performance baseline failed before any
+measurement because the example still requested `repository/manifest`; it now
+uses native capture and catalog lookup. HTTP fault jobs exposed the missing
+serialization match arm. Those fixes and the remaining matrix require new-head
+CI; neither failed job counts as qualification evidence.
+
 Remaining qualification and improvement work:
 
 - Public capability limits still apply: SHA-256 repositories, recursive
@@ -77,8 +121,7 @@ Remaining qualification and improvement work:
   prove writes, authorization expiry/revocation, placement changes and lost
   finalize responses. Local mocks and compilation are not that evidence.
 - AWS service behavior, new-head CI, package-consumer and Linux/Windows proof
-  remain separate gates. The website link checker additionally requires a
-  production Next.js build; the local link check stopped at that missing build.
+  remain separate gates.
 - Release-build cold/warm benchmarks must establish throughput, latency and peak
   memory relative to the shared reader. Debug functional runs establish no
   production performance percentage or latency claim.

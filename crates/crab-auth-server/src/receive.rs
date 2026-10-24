@@ -2832,7 +2832,7 @@ fn conflict(message: impl Into<String>) -> AuthServerError {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use crab_metadata::file_index_lookup::resolve_file_hash_to_shard;
+    use crab_metadata::file_index_lookup::FileIndexLookupSession;
     use crab_metadata::pack_metadata::PackMetadata;
     use crab_metadata::receipts::PushCommitReceipt;
     use crab_metadata::remote_index::read_chunk_index_entry;
@@ -3876,10 +3876,12 @@ mod tests {
             .await?;
         commit_service_metadata(&store, &router, &plan, &committed_manifest, 1).await?;
 
-        assert_eq!(
-            resolve_file_hash_to_shard(Arc::clone(store.inner()), "org/repo", &file_hash).await?,
-            Some(shard_hash)
-        );
+        let snapshot =
+            crab_metadata::manifest_store::read_repository_snapshot(&store, &router).await?;
+        let session = FileIndexLookupSession::open_from_snapshot(router.clone(), &snapshot).await?;
+        let found = session.lookup(&file_hash).await?;
+        session.close().await?;
+        assert_eq!(found, Some(shard_hash));
         let first_chunk = expected_chunks
             .first()
             .ok_or_else(|| invalid("test shard had no chunk entries"))?;

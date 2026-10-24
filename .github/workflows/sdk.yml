@@ -193,6 +193,9 @@ jobs:
         run: |
           cargo "+${SDK_MSRV}" test -p crab-remote --locked --all-features --test publication --test capsule_preparation
           cargo "+${SDK_MSRV}" test -p crab-metadata --locked capsule_protocol::plan::tests
+          cargo "+${SDK_MSRV}" test -p crab-auth-server --locked --lib
+          cargo "+${SDK_MSRV}" test -p crab-metadata --locked --features file-index-reader --lib file_index_lookup
+          cargo "+${SDK_MSRV}" test -p crab-read --locked --lib store_client::tests
           cargo "+${SDK_MSRV}" test -p crab-remote-git --locked budget::tests
           cargo "+${SDK_MSRV}" test -p crab-metadata --locked plan_receipt::tests
           cargo "+${SDK_MSRV}" test -p crab-metadata --locked --test plan_receipt_recovery

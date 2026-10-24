@@ -74,15 +74,15 @@ historical documentation describes a retired implementation.
 | File content | `crates/crab-read/src/lib.rs`; CLI hydration and protected receive | Share verified reconstruction; raw Git blobs and hydrated content are separate APIs |
 | Content ranges | `crates/crab-read/src/hydrator.rs`; VFS range readers and CLI hydration facade | Existing range helper buffers the requested range and creates its own cancellation token; add shared bounded streaming with caller-owned cancellation for SDK streams |
 | LFS streaming | `crates/crab-lfs/src/object_store.rs` `get_verified_stream_at`; HTTP LFS download | The current helper attempts a verification-receipt write, then opens another read; SDK reads need a read-only owner path and proof that delivered bytes match the verified object version |
-| Ref publication | `crates/crab-write/src/journal.rs`, `generation.rs`; CLI push and HTTP receive; `tests/journal.rs`, `tests/generation.rs`, `tests/catalog.rs` | Journal commit does not itself own all locks, validation, or read readiness |
-| Attribution | `crates/crab-metadata/src/plan_receipt.rs`; mirror publication and GC | Reuse durable intent/receipt mechanics; current ref equality is not historical commit proof |
+| Ref publication | `crates/crab-write/src/capsule_protocol.rs`; `crates/crab-remote/src/prepare/capsule.rs` and `publication.rs`; CLI and protected receive | Native commit still requires caller authorization, shared leases/fences, dependency proof and read readiness |
+| Attribution | `crates/crab-metadata/src/capsule_protocol/plan.rs`; native publication, recovery and checkpoint | Read immutable commitment evidence without repair; current ref equality is not historical commit proof |
 | Direct transfer | `crab/src/git/fetch.rs`, `push.rs`, `push_native.rs`, `upload_pack_wire.rs`; remote helper and import | Extract orchestration with callers in the same phase; wrapping CLI argument structs is insufficient |
 | Local workflow | `crab/src/cmd/clone.rs`, `pull.rs`, `add.rs`; `crab/src/git/process.rs`; `crab/tests/e2e_add_commit_push.rs` | Extract reusable worktree services and owned subprocess handling |
 | Filters | `crab/src/cmd/init.rs` `DRIVER_CONFIG`; `crab/src/git/worktree_hydration.rs` | Full local mode needs a compatible executable and shared configuration |
 | Managed access | `crates/crab-git/src/url.rs`; `crates/crab-auth-store/src/managed_repository.rs`; `crates/crab-auth/src/managed/client.rs` | Preserve direct/managed classification, grants, prepare/finalize, and lifecycle endpoints |
 | Protected writer | `crates/crab-auth-server/src/receive/workflow.rs` | Final authorization and publication remain server responsibilities |
 | HTTP receive | `crates/crab-server/src/git/receive/publish.rs`; `receive_tests.rs`, `receive_fault_tests.rs` | Share publication mechanics while retaining HTTP policy; current server rejects forced updates |
-| Release | Supporting crate manifests use `publish = false`; workspace dependencies use paths | Publish the dependency closure deliberately before publishing the SDK |
+| Release | Supporting crate manifests are publishable; exact sibling versions retain workspace paths for development | Verify packaged consumers and publish the dependency closure deliberately before publishing the SDK |
 
 Existing tests establish starting points, not SDK proof. Every acceptance test
 below enters through the new public SDK API where that API exists.
@@ -124,7 +124,7 @@ implementation types, and server state. Re-export an existing Crab value type
 only after documenting its semver support obligation. `bytes::Bytes`, Tokio
 `AsyncRead`, and standard Rust path/time types are permitted public dependencies.
 
-`crab-write` retains journal/catalog mechanisms. `crab-remote::publication`
+`crab-write` retains native capsule/catalog mechanisms. `crab-remote::publication`
 owns leases, fences, verified object preparation, commit coordination, and
 outcome recovery. It accepts caller policy through a narrow admission boundary.
 HTTP authorization, branch protection, sessions, and application state remain
@@ -508,7 +508,7 @@ not implicitly fetch, merge, rebase, stage, or commit.
 ## 7. Management and authorization
 
 `initialize_remote` targets one direct repository prefix and uses
-`crab_write::initialize::initialize_repository`. Existing valid initialization
+`crab_write::capsule_protocol::initialize`. Existing valid initialization
 is adopted according to that owner contract; incompatible/nonempty prefixes
 fail without destructive conversion. It never creates a bucket.
 
@@ -647,15 +647,16 @@ Acceptance:
 
 ### Phase 2 — Shared publication and recovery
 
-Context: journal commit exists, but complete lifecycle and durable attribution
-are caller responsibilities. Prerequisite: phase 1.
+Context: native capsule commit exists, but complete lifecycle and durable
+attribution require shared owners and caller authorization. Prerequisite: phase 1.
 
 Work: add `crab-remote` publication feature; extract shared validation/lifecycle
 from CLI and HTTP callers; generalize existing plan attribution as specified in
 section 5. Add read-only reconciliation, operation serialization, readiness
 results and owned cleanup. Update CLI/mirror/HTTP callers and metadata/GC tests
 together. Protected receive retains its authorization boundary and consumes
-only mechanics appropriate to its existing manifest authority.
+the native capsule authority while retaining server-owned verification and
+canonical promotion.
 
 Acceptance:
 
