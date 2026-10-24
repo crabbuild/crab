@@ -206,6 +206,9 @@ jobs:
           git::receive::tests::faults::
       - name: Qualify CLI publication callers
         run: |
+          cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport cmd::fsck_store::tests::
+          cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport git::clean::tests::
+          cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport hydrate::batch::tests::
           cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport git::push_native::tests::unresolved_plan_blocks_replay_before_ref_admission -- --exact
           cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport git::push::tests::next_writer_repairs_publication_cancelled_at_active_marker -- --exact
           cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport cmd::push::tests::uncertain_commit_does_not_enter_automatic_transient_retry -- --exact

@@ -89,6 +89,17 @@ neither path recaptures authority during reconstruction. All 28 lookup tests and
 direct SlateDB dev-dependency: the lockfile removes only that dependency edge,
 with no package version or checksum changes.
 
+The released manifest fsck audit (`v1.2.4`) also requires explicit snapshot
+authority. Its unchanged positive regression reproduced a false missing-index
+finding after default lookup retirement; supplying that snapshot restores the
+audit without widening native lookup. All 37 store-backed fsck tests, 57 clean
+tests and six hydration-batch tests pass. Clean fast-path fixtures now commit
+native catalog bindings while retaining their binding-plus-shard checks.
+The compatible CLI rebuild and repeated isolated RustFS content/local tests also
+pass, including the 1 GiB stage/commit/push/clone/hydrate cycle
+(`sdk-native-*-owner-after.log`, `sdk-native-live-*-closure.log`). The owned service
+is stopped after validation. These debug runs establish functional proof only.
+
 A protected-session regression also reproduced legacy-first preparation when both
 metadata protocols coexist. Preparation now selects the same native authority as
 validation, scoped views and capsule verification, including corrupt-root rejection.

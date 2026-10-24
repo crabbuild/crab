@@ -673,9 +673,16 @@ impl StoreChecker {
         }
 
         let file_hashes: Vec<MerkleHash> = expected.keys().copied().collect();
-        let session = crab_metadata::file_index_lookup::FileIndexLookupSession::open(
-            Arc::clone(self.store.inner()),
-            &self.prefix,
+        let snapshot = read_repository_snapshot(&self.store, &self.router).await?;
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            self.store.as_storage().clone(),
+            self.router.repo_prefix().to_owned(),
+            self.router.global_prefix().to_owned(),
+        );
+        // This released maintenance path audits manifest acceleration rows.
+        // Supply its authority explicitly; native current lookup never opens it.
+        let session = crab_metadata::file_index_lookup::FileIndexLookupSession::open_from_snapshot(
+            layout, &snapshot,
         )
         .await?;
         // Fsck audits the acceleration database itself. The normal lookup
@@ -1405,9 +1412,18 @@ impl StoreRepairer {
     }
 
     async fn file_index_target_has_file(&self, file_hash: &MerkleHash) -> Result<bool> {
-        let session = crab_metadata::file_index_lookup::FileIndexLookupSession::open(
-            Arc::clone(self.store.inner()),
-            &self.prefix,
+        let snapshot = match read_repository_snapshot(&self.store, &self.router).await {
+            Ok(snapshot) => snapshot,
+            Err(CrabError::NotFound { .. }) => return Ok(false),
+            Err(error) => return Err(error),
+        };
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            self.store.as_storage().clone(),
+            self.router.repo_prefix().to_owned(),
+            self.router.global_prefix().to_owned(),
+        );
+        let session = crab_metadata::file_index_lookup::FileIndexLookupSession::open_from_snapshot(
+            layout, &snapshot,
         )
         .await?;
         let lookup = session
