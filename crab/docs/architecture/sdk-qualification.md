@@ -32,6 +32,7 @@ pointer syntax and independent local-workflow/API schemas keep their own version
 | Recovery after restart | SDK token → `read_capsule_plan_receipt` → matching immutable committed activation | Read-only inventory proof; live restart without Git after checkpoint and removal of the mutable coordinator |
 | Local workflows | clone/fetch/pull/push → native pack installer, local lease and scoped tools | Real Git plus compatible Crab against isolated RustFS; selected/changed remotes, shallow/deepen/unshallow, tags/prune, linked worktrees, conflict continuation/abort and 1 GiB staged content round trip |
 | Local push outcomes | prepared handle → Git acknowledgement or native receipt | Fresh push URLs, unchanged native pushes without writes, dry-run recovery without writes, lost Git replies remain indeterminate, saved Git tokens do not replay after ABA, token trust cannot exceed client policy |
+| Native HTTP local Git | Public SDK HTTP test binary → actual Crab HTTP router/receive → isolated RustFS | Clone, SDK stage/commit/push, fetch/FF pull, shallow/unshallow, atomic branch/tag create/delete, typed force rejection, independent bytes and Git fsck |
 | Protected staging | SDK → `CapsuleArtifacts::stage_protected_plan` → protected service promotion | Shared regression stages a schema-3 native plan without exposing refs; live service qualification remains pending |
 | Provider selection | `DirectStoreOptions` → locked `object_store` 0.14.1 and child environment | Explicit S3 credentials/endpoint live proof; conflicting parent environment isolation; Azure request-level and GCS configuration proof |
 
@@ -142,6 +143,30 @@ cancellation, typed failures and destination-preservation assertions
 `sdk-native-command-hydration-after.log`). SDK CI now runs this caller slice too.
 Production hydration and error handling are unchanged; no legacy lookup is
 reintroduced. New-head protocol CI must confirm the fixture migration.
+
+The ordinary Git HTTP fixtures execute Git's `http-backend`; they are not proof
+of the native Crab server. A separate opt-in test now runs the public SDK test
+binary against the actual Crab HTTP router/receive stack and real RustFS.
+The server host verifies that the SDK test executed exactly once, that its
+reported commit is the committed native ref, and that no manifest was created.
+This keeps server crates out of the SDK dependency graph. The local run passes,
+as does strict SDK/server all-target Clippy (`sdk-native-http-round-trip.log`,
+`sdk-native-http-clippy.log`). The original 1 GiB direct-storage and ordinary,
+LFS and Xet content qualification remains separate from this HTTP Git check.
+Both client and server runtimes drain before assertions; the owned object
+service stops after verification. The existing native HTTP RustFS suite also
+passes with the shared fixture (`sdk-native-http-sibling.log`). SDK CI explicitly
+selects the new live case and validates both compiled test artifacts.
+
+The gateway write-soak failure is also present at the unchanged `crab-v2` base
+`33f8e6c360d`: [run 40087756593](https://github.com/crabbuild/crab/actions/runs/40087756593)
+retains 0.776928 of early throughput; SDK head `55b0fb9bb4a` retains 0.777382.
+Both runs have zero failed writes or missing acknowledgements. The required
+0.800000 retention gate remains unchanged; this is an existing gateway
+performance issue, not evidence of passing performance qualification. All
+eight non-opt-in SDK jobs and the full protocol workflow pass at `1a7b3604d94`
+([SDK](https://github.com/crabbuild/crab/actions/runs/40087763473),
+[protocol](https://github.com/crabbuild/crab/actions/runs/40087763461)).
 
 Remaining qualification and improvement work:
 

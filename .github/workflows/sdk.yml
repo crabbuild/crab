@@ -316,26 +316,32 @@ jobs:
           cargo "+${SDK_MSRV}" build -p crab --locked --no-default-features \
             --features simd-accel,tier,watch
           cargo "+${SDK_MSRV}" test -p crab-sdk --locked --no-default-features \
-            --features local --test local_round_trip --no-run --message-format=json \
-            > "$RUNNER_TEMP/local-round-trip-artifacts.json"
+            --features local --test local_round_trip --test http_git --no-run --message-format=json \
+            > "$RUNNER_TEMP/sdk-local-artifacts.json"
           python3 - <<'PY'
           import json
           import os
           from pathlib import Path
 
-          manifest = Path(os.environ["RUNNER_TEMP"]) / "local-round-trip-artifacts.json"
-          executables = []
+          manifest = Path(os.environ["RUNNER_TEMP"]) / "sdk-local-artifacts.json"
+          targets = {
+              "local_round_trip": "CRAB_SDK_LOCAL_ROUND_TRIP_BIN",
+              "http_git": "CRAB_SDK_HTTP_TEST_BIN",
+          }
+          executables = {name: [] for name in targets}
           for line in manifest.read_text().splitlines():
               message = json.loads(line)
               target = message.get("target", {})
               if (message.get("reason") == "compiler-artifact"
-                      and target.get("name") == "local_round_trip"
+                      and target.get("name") in targets
                       and "test" in target.get("kind", [])
                       and message.get("executable")):
-                  executables.append(message["executable"])
-          if len(executables) != 1 or not Path(executables[0]).is_file():
-              raise SystemExit(f"expected one local-round-trip test executable, got {executables}")
-          (Path(os.environ["RUNNER_TEMP"]) / "local-round-trip-bin").write_text(executables[0])
+                  executables[target["name"]].append(message["executable"])
+          with Path(os.environ["GITHUB_ENV"]).open("a") as environment:
+              for name, paths in executables.items():
+                  if len(paths) != 1 or not Path(paths[0]).is_file():
+                      raise SystemExit(f"expected one {name} test executable, got {paths}")
+                  environment.write(f"{targets[name]}={paths[0]}\n")
           PY
           mkdir -p "$RUNNER_TEMP/sdk-evidence"
           {
@@ -344,7 +350,6 @@ jobs:
             echo "CRAB_SDK_TEST_GIT_BIN=$(command -v git)"
             echo "CRAB_SDK_TEST_READ_GUARD=$GITHUB_WORKSPACE/crab/scripts/verify-sdk-read-only.py"
             echo "CRAB_SDK_TEST_READ_GUARD_REPORT=$RUNNER_TEMP/sdk-evidence/read-transport.json"
-            echo "CRAB_SDK_LOCAL_ROUND_TRIP_BIN=$(cat "$RUNNER_TEMP/local-round-trip-bin")"
           } >> "$GITHUB_ENV"
       - name: Qualify read-only transport
         run: >-
@@ -402,6 +407,21 @@ jobs:
           --timeout-seconds 1200 --
           cargo "+${SDK_MSRV}" test -p crab-server --locked --lib
           git::receive::tests::faults::receive_faults_rustfs
+          -- --exact --ignored --nocapture
+      - name: Qualify SDK against native Crab HTTP
+        env:
+          QUALIFICATION_BUCKET: ${{ env.CRAB_SDK_TEST_S3_BUCKET }}
+          QUALIFICATION_PREFIX: qualification/http-push-sdk-${{ github.run_id }}-${{ github.run_attempt }}
+        run: >-
+          python3 crab/scripts/qualify_sdk.py run
+          --output "$RUNNER_TEMP/sdk-evidence/native-http-sdk.json"
+          --backend rustfs --features local
+          --fixture-digest 38f0f2ca3cd8afbb9d29853c2f8cfd77ceac0caa37b23f1b43d5153041266b15
+          --expected-tests 1 --toolchain "$SDK_MSRV"
+          --git "$CRAB_SDK_TEST_GIT_BIN" --crab "$CRAB_SDK_TEST_CRAB_BIN"
+          --timeout-seconds 1200 --
+          cargo "+${SDK_MSRV}" test -p crab-server --locked --lib
+          git::receive::tests::sdk::native_http_sdk_rustfs
           -- --exact --ignored --nocapture
       - name: Qualify local workflows and memory
         shell: bash

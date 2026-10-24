@@ -1,6 +1,7 @@
 use crate::test_support::git::{git, success};
 
 mod faults;
+mod sdk;
 
 use crate::server::Server;
 use crate::server::http::router;
@@ -224,6 +225,11 @@ async fn native_http_receive_rejects_locked_paths_even_when_the_tip_reverts() {
 #[tokio::test(flavor = "multi_thread")]
 #[ignore = "requires an isolated local RustFS bucket/prefix and environment credentials"]
 async fn native_http_push_rustfs() {
+    let server = rustfs_server().await;
+    exercise(server, "trunk").await;
+}
+
+async fn rustfs_server() -> Arc<Server> {
     let bucket = std::env::var("QUALIFICATION_BUCKET").unwrap();
     let prefix = std::env::var("QUALIFICATION_PREFIX").unwrap();
     assert!(prefix.starts_with("qualification/http-push-"));
@@ -249,7 +255,7 @@ async fn native_http_push_rustfs() {
     repo.config.prefix = prefix;
     repo.store = store;
     repo.layout = layout;
-    exercise(server, "trunk").await;
+    server
 }
 
 async fn exercise(server: Arc<Server>, branch: &str) {

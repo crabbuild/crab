@@ -1,6 +1,8 @@
 #![cfg(feature = "local")]
 
 mod local_support;
+#[path = "http_git/native_crab.rs"]
+mod native_crab;
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
