@@ -1171,7 +1171,13 @@ async fn ref_batches_rustfs_recover_without_git_after_restart() {
                 .unwrap();
             // Persist before crossing native publication; a new process gets only this token.
             std::fs::write(&saved, prepared.recovery_token().to_json().unwrap()).unwrap();
-            std::fs::File::open(&saved).unwrap().sync_all().unwrap();
+            // Windows FlushFileBuffers requires a writable handle.
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&saved)
+                .unwrap()
+                .sync_all()
+                .unwrap();
             drop(prepared);
         } else if phase == "execute" {
             let token =

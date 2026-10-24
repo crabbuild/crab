@@ -14,6 +14,16 @@ SPEC.loader.exec_module(RUNNER)
 
 
 class NativeRustfsTests(unittest.TestCase):
+    def test_backend_errors_retain_diagnostics_without_credentials(self):
+        environment = {"AWS_ENDPOINT_URL": "http://127.0.0.1:12345",
+                       "AWS_ACCESS_KEY_ID": "fixture-access", "AWS_SECRET_ACCESS_KEY": "fixture-secret"}
+        result = RUNNER.subprocess.CompletedProcess([], 1, "", "InternalError fixture-access fixture-secret")
+        with patch.object(RUNNER.subprocess, "run", return_value=result):
+            with self.assertRaisesRegex(RuntimeError, "InternalError") as failure:
+                RUNNER.aws(environment, "s3api", "delete-object")
+        self.assertNotIn("fixture-access", str(failure.exception))
+        self.assertNotIn("fixture-secret", str(failure.exception))
+
     def test_paginated_empty_listing_allows_bucket_removal(self):
         with patch.object(RUNNER, "aws", return_value={}) as aws:
             RUNNER.cleanup_bucket({}, "owned-fixture")

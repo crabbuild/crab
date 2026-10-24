@@ -441,6 +441,51 @@ The native RustFS case passes in 6.42 seconds including fixture creation, at
 This is path/tree qualification using repeated bytes, not a throughput result.
 Linux and native macOS/Windows lanes explicitly select the live case.
 
+Hosted evidence at `d1e0b2a98c5` now confirms the metadata gate executes
+3/14/1 passing tests with no failures or ignored cases
+([artifact](https://github.com/crabbuild/crab/actions/runs/40126916143/artifacts/12573559803)).
+Its source `0cc993a8d25` is GitHub's merge into `33f8e6c360d`. The
+[macOS native artifact](https://github.com/crabbuild/crab/actions/runs/40126916143/artifacts/12573901824)
+passes all eight then-selected live cases and cleanup. The mixed large cycle
+uses 1.21 GiB RSS against its 2 GiB limit. The
+[Windows artifact](https://github.com/crabbuild/crab/actions/runs/40126916143/artifacts/12574870653)
+passes native reads and initialization preservation; five write/local cases
+fail during S3 deletion in fixture cleanup, with native RustFS returning server
+errors. Restart recovery separately fails when its test syncs a read-only file
+handle. The fixture now opens that handle for writing, preserving its durable
+token assertion; production fetch/integration persistence already uses writable
+handles and directory sync is Unix-only. Windows remains unqualified.
+
+The native harness now checks plain and multipart upload, exact GET bytes and
+deletion through AWS CLI before running SDK cases. Failures retain sanitized
+diagnostics; native storage work uses a shorter owned temporary directory and
+retains disk diagnostics. These checks distinguish backend failures from SDK
+failures; they do not waive cleanup or count unexecuted tests as success.
+
+The minimum-Git audit reproduces local opening failure with Git 2.30.9:
+`--path-format` requires 2.31. Git paths now resolve against the queried working
+directory. The same real-Git run reproduces execution of disabled hooks/filters:
+2.30 ignores `GIT_CONFIG_COUNT`. Scoped policy now uses Git's parameter encoding,
+preserving inherited values and exact native filename units. A Git round-trip
+test covers quotes, exclamation marks, newlines, Unicode and Unix non-UTF-8 bytes.
+Pointer discovery also rejects the newer object-type filter. Its canonical path
+now batches type/size queries in bounded groups, replacing per-object metadata
+subprocesses while retaining pointer classification and payload verification.
+
+Older Git may reject SHA-256 HTTP clone before creating a repository. On clone
+failure only, advertised object IDs can establish the unsupported format while
+preserving the original error. Healthy clones add no request. The empty HTTP
+fixture follows Git's selected branch: Git 2.30 does not advertise unborn HEAD;
+the 2.31 protocol adds that feature. Direct capsule clones retain their captured
+native HEAD contract. All 43 local/HTTP tests and eight tool tests pass under
+2.30.9, including the unchanged hook/filter assertions. All nine native RustFS
+cases also pass locally with that Git: the mixed large cycle takes 274.91 seconds
+at 1.15 GiB RSS, backend preflight and cleanup pass. Current-Git HTTP tests,
+strict SDK/remote lint, 23 script tests (one explicit skip), formatting and pinned
+workflow lint pass (`sdk-min-git-*.log/json`). Linux CI now builds checksum-pinned
+Git 2.30.9 and selects these local, direct-storage and actual native HTTP gates.
+Hosted minimum-Git and corrected Windows reports remain required.
+
 The gateway write-soak failure is also present at the unchanged `crab-v2` base
 `33f8e6c360d`: [run 40087756593](https://github.com/crabbuild/crab/actions/runs/40087756593)
 retains 0.776928 of early throughput; SDK head `55b0fb9bb4a` retains 0.777382.

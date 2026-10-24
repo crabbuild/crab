@@ -129,9 +129,38 @@ def aws(environment: dict[str, str], *arguments: str) -> dict:
         env=environment, capture_output=True, text=True, timeout=30,
     )
     if result.returncode:
-        # Diagnostics must not print provider inputs or signed requests.
-        raise RuntimeError(f"fixture AWS CLI operation failed: {' '.join(arguments[:2])}")
+        diagnostic = result.stderr.strip()
+        for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"):
+            diagnostic = diagnostic.replace(environment[name], "[redacted]")
+        raise RuntimeError(f"fixture AWS CLI operation failed: {' '.join(arguments[:2])}: {diagnostic}")
     return json.loads(result.stdout or "{}")
+
+
+def preflight_backend(environment: dict[str, str], work: Path, bucket: str) -> None:
+    body = work / "probe-body"
+    received = work / "probe-received"
+    content = b"SDK storage contract probe\n"
+    body.write_bytes(content)
+    # Check both upload shapes without SDK code before relying on this backend.
+    for multipart in (False, True):
+        key = f"qualification/backend-probe/{multipart}"
+        if multipart:
+            upload = aws(environment, "s3api", "create-multipart-upload", "--bucket", bucket,
+                         "--key", key)["UploadId"]
+            part = aws(environment, "s3api", "upload-part", "--bucket", bucket, "--key", key,
+                       "--upload-id", upload, "--part-number", "1", "--body", str(body))
+            parts = json.dumps({"Parts": [{"ETag": part["ETag"], "PartNumber": 1}]})
+            aws(environment, "s3api", "complete-multipart-upload", "--bucket", bucket,
+                "--key", key, "--upload-id", upload, "--multipart-upload", parts)
+        else:
+            aws(environment, "s3api", "put-object", "--bucket", bucket, "--key", key,
+                "--body", str(body))
+        aws(environment, "s3api", "get-object", "--bucket", bucket, "--key", key, str(received))
+        if received.read_bytes() != content:
+            raise RuntimeError("fixture backend returned incorrect object bytes")
+        aws(environment, "s3api", "delete-object", "--bucket", bucket, "--key", key)
+    if aws(environment, "s3api", "list-objects-v2", "--bucket", bucket).get("Contents"):
+        raise RuntimeError("fixture backend retained deleted probe objects")
 
 
 def cleanup_bucket(environment: dict[str, str], bucket: str) -> None:
@@ -206,9 +235,9 @@ def main() -> None:
     git, crab = Path(selected_git).resolve(strict=True), args.crab.resolve(strict=True)
     tests = build_tests(output, args.toolchain)
     executable, asset, digest = install_rustfs(output / "tools")
-    report = {"release": RELEASE, "asset": asset, "sha256": digest,
+    report = {"release": RELEASE, "asset": asset, "sha256": digest, "preflight": "not_started",
               "terminal_state": "failed", "cleanup": "not_started"}
-    with tempfile.TemporaryDirectory(prefix="rfs-", dir=output) as temporary:
+    with tempfile.TemporaryDirectory(prefix="rfs-", dir=output.parent) as temporary:
         work = Path(temporary)
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", 0))
@@ -219,6 +248,7 @@ def main() -> None:
         server_environment = {**environment,
                               "RUSTFS_ACCESS_KEY": environment["AWS_ACCESS_KEY_ID"],
                               "RUSTFS_SECRET_KEY": environment["AWS_SECRET_ACCESS_KEY"],
+                              "RUST_LOG": "warn,rustfs_ecstore=debug",
                               "RUSTFS_CONSOLE_ENABLE": "false"}
         data = work / "data"
         data.mkdir()
@@ -243,6 +273,9 @@ def main() -> None:
                         time.sleep(1)
                 aws(environment, "s3api", "create-bucket", "--bucket", bucket)
                 created = True
+                report["preflight"] = "failed"
+                preflight_backend(environment, work, bucket)
+                report["preflight"] = "passed"
                 qualify(output, tests, environment, args.toolchain, git, crab)
                 qualified = True
             finally:
