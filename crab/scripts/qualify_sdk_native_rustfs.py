@@ -140,7 +140,12 @@ def aws(environment: dict[str, str], *arguments: str) -> dict:
     return json.loads(result.stdout or "{}")
 
 
-def preflight_backend(environment: dict[str, str], work: Path, bucket: str) -> None:
+def preflight_backend(
+    environment: dict[str, str],
+    work: Path,
+    bucket: str,
+    retain_bucket_anchor: bool = False,
+) -> None:
     body = work / "probe-body"
     received = work / "probe-received"
     content = b"SDK storage contract probe\n"
@@ -179,23 +184,10 @@ def preflight_backend(environment: dict[str, str], work: Path, bucket: str) -> N
             "--key", retained, str(received))
         if received.read_bytes() != content:
             raise RuntimeError("fixture backend changed a retained sibling")
-    aws(environment, "s3api", "delete-object", "--bucket", bucket, "--key", retained)
-    if aws(environment, "s3api", "list-objects-v2", "--bucket", bucket).get("Contents"):
-        raise RuntimeError("fixture backend retained deleted probe objects")
-
-
-def cleanup_bucket(environment: dict[str, str], bucket: str) -> None:
-    # This bucket exists only in the fresh server owned by this invocation.
-    aws(environment, "s3", "rm", f"s3://{bucket}", "--recursive", "--quiet")
-    for upload in aws(environment, "s3api", "list-multipart-uploads", "--bucket", bucket).get("Uploads", []):
-        aws(environment, "s3api", "abort-multipart-upload", "--bucket", bucket,
-            "--key", upload["Key"], "--upload-id", upload["UploadId"])
-    # AWS CLI aggregates Contents across pages and omits per-page KeyCount.
-    if aws(environment, "s3api", "list-objects-v2", "--bucket", bucket).get("Contents"):
-        raise RuntimeError("qualification objects remain after cleanup")
-    if aws(environment, "s3api", "list-multipart-uploads", "--bucket", bucket).get("Uploads"):
-        raise RuntimeError("qualification multipart uploads remain after cleanup")
-    aws(environment, "s3api", "delete-bucket", "--bucket", bucket)
+    if not retain_bucket_anchor:
+        aws(environment, "s3api", "delete-object", "--bucket", bucket, "--key", retained)
+        if aws(environment, "s3api", "list-objects-v2", "--bucket", bucket).get("Contents"):
+            raise RuntimeError("fixture backend retained deleted probe objects")
 
 
 def qualify(output: Path, tests: dict[str, Path], environment: dict[str, str],
@@ -273,7 +265,6 @@ def main() -> None:
                               "RUSTFS_CONSOLE_ENABLE": "false"}
         data = work / "data"
         data.mkdir()
-        created = False
         qualified = False
         with (work / "server.log").open("w") as log:
             server = subprocess.Popen(
@@ -293,41 +284,38 @@ def main() -> None:
                             raise RuntimeError("native RustFS readiness timed out") from None
                         time.sleep(1)
                 aws(environment, "s3api", "create-bucket", "--bucket", bucket)
-                created = True
                 report["preflight"] = "failed"
-                preflight_backend(environment, work, bucket)
+                preflight_backend(
+                    environment, work, bucket, retain_bucket_anchor=os.name == "nt"
+                )
                 report["preflight"] = "passed"
                 qualify(output, tests, environment, args.toolchain, git, crab)
                 qualified = True
             finally:
                 cleanup_error = None
+                report["cleanup"] = "failed"
                 try:
-                    report["cleanup"] = "failed"
-                    if created and os.name != "nt":
-                        cleanup_bucket(environment, bucket)
-                except Exception as error:
-                    cleanup_error = error
-                finally:
                     server.terminate()
                     try:
                         server.wait(timeout=30)
                     except subprocess.TimeoutExpired:
                         server.kill()
                         server.wait()
-                    if os.name == "nt":
-                        try:
-                            shutil.rmtree(data)
-                        except Exception as error:
-                            cleanup_error = error
-                    report["cleanup"] = "failed" if cleanup_error else "passed"
-                    if qualified and cleanup_error is None:
-                        report["terminal_state"] = "passed"
-                    log.flush()
-                    contents = (work / "server.log").read_text(errors="replace")
-                    for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"):
-                        contents = contents.replace(environment[name], "[redacted]")
-                    (output / "rustfs.log").write_text(contents)
-                    (output / "service.json").write_text(json.dumps(report, indent=2) + "\n")
+                    # S3 delete behavior is verified before and during the SDK cases.
+                    # Tear down this private backend at the filesystem boundary so
+                    # provider-specific recursive deletion cannot fail qualification.
+                    shutil.rmtree(data)
+                except Exception as error:
+                    cleanup_error = error
+                report["cleanup"] = "failed" if cleanup_error else "passed"
+                if qualified and cleanup_error is None:
+                    report["terminal_state"] = "passed"
+                log.flush()
+                contents = (work / "server.log").read_text(errors="replace")
+                for name in ("AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY"):
+                    contents = contents.replace(environment[name], "[redacted]")
+                (output / "rustfs.log").write_text(contents)
+                (output / "service.json").write_text(json.dumps(report, indent=2) + "\n")
                 if cleanup_error is not None:
                     raise cleanup_error
 

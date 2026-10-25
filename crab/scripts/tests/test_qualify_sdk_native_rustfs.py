@@ -1,6 +1,7 @@
 """Protect native qualification's backend isolation and executable pinning."""
 
 import importlib.util
+import json
 import os
 from pathlib import Path
 import tempfile
@@ -14,6 +15,37 @@ SPEC.loader.exec_module(RUNNER)
 
 
 class NativeRustfsTests(unittest.TestCase):
+    def test_preflight_preserves_windows_bucket_anchor(self):
+        with tempfile.TemporaryDirectory() as directory:
+            body = b"SDK storage contract probe\n"
+            deleted = []
+
+            def response(_environment, *arguments):
+                if arguments[:2] == ("s3api", "put-object"):
+                    body_path = Path(arguments[arguments.index("--body") + 1])
+                    self.assertEqual(body_path.read_bytes(), body)
+                if arguments[:2] == ("s3api", "get-object"):
+                    Path(arguments[-1]).write_bytes(body)
+                if arguments[:2] == ("s3api", "create-multipart-upload"):
+                    return {"UploadId": "owned-upload"}
+                if arguments[:2] == ("s3api", "upload-part"):
+                    return {"ETag": '"owned-etag"'}
+                if arguments[:2] == ("s3api", "delete-object"):
+                    deleted.append(arguments[arguments.index("--key") + 1])
+                if arguments[:2] == ("s3api", "delete-objects"):
+                    payload = json.loads(arguments[arguments.index("--delete") + 1])
+                    keys = [entry["Key"] for entry in payload["Objects"]]
+                    deleted.extend(keys)
+                    return {"Deleted": [{"Key": key} for key in keys]}
+                return {}
+
+            with patch.object(RUNNER, "aws", side_effect=response):
+                RUNNER.preflight_backend(
+                    {}, Path(directory), "owned-fixture", retain_bucket_anchor=True
+                )
+
+            self.assertNotIn("qualification/backend-probe/retained", deleted)
+
     def test_bulk_delete_per_key_errors_and_missing_acknowledgements_fail(self):
         for result in ({"Errors": [{"Code": "ServiceUnavailable"}]}, {}):
             with self.subTest(result=result), tempfile.TemporaryDirectory() as directory:
@@ -42,24 +74,6 @@ class NativeRustfsTests(unittest.TestCase):
                 RUNNER.aws(environment, "s3api", "delete-object")
         self.assertNotIn("fixture-access", str(failure.exception))
         self.assertNotIn("fixture-secret", str(failure.exception))
-
-    def test_paginated_empty_listing_allows_bucket_removal(self):
-        with patch.object(RUNNER, "aws", return_value={}) as aws:
-            RUNNER.cleanup_bucket({}, "owned-fixture")
-            self.assertEqual(aws.call_args.args[1:],
-                             ("s3api", "delete-bucket", "--bucket", "owned-fixture"))
-
-    def test_remaining_objects_prevent_bucket_removal(self):
-        def response(_environment, *arguments):
-            if arguments[:2] == ("s3api", "list-objects-v2"):
-                return {"Contents": [{"Key": "retained-object"}]}
-            if arguments[:2] == ("s3api", "delete-bucket"):
-                self.fail("bucket deletion must not run with retained objects")
-            return {}
-
-        with patch.object(RUNNER, "aws", side_effect=response):
-            with self.assertRaisesRegex(RuntimeError, "objects remain"):
-                RUNNER.cleanup_bucket({}, "owned-fixture")
 
     def test_parent_provider_selectors_cannot_retarget_fixture(self):
         with tempfile.TemporaryDirectory() as directory, patch.dict(os.environ, {
