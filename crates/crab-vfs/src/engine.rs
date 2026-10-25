@@ -1032,7 +1032,7 @@ impl VfsEngine {
         self.hydration.request_shutdown();
     }
 
-    fn close_control_admission(&self) {
+    pub(crate) fn close_control_admission(&self) {
         let mut accepting = self
             .control_accepting
             .lock()

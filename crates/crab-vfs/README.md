@@ -274,7 +274,8 @@ Its throughput is not directly comparable with older kernel-cached runs.
 | Hydration queue workers and read-window prefetch | `HydrationService`, retained by the mount owner | Await `shutdown()` after backend teardown; queued work is discarded and admitted prefetch finishes |
 | Ordinary Git loads and promotion copies | `OdbReader`, retained by `VfsEngine` | `VfsEngine::shutdown_background()` closes admission and drains admitted blocking operations before cache ownership is released |
 | Ref/snapshot refresh | Coordinator, daemon, or interactive NFS runtime | Cancel polling and await the task, including any admitted blocking Git/snapshot work |
-| NFS server and control | NFS mount runtime | Backend teardown controls these separately from hydration |
+| NFS control connections | NFS control server, joined by the mount runtime | Cancel idle reads and await admitted handlers/replies before native unmount and read-resource shutdown |
+| NFS data server | NFS mount runtime | Native unmount precedes listener abort/join; upstream connection-task completion remains unqualified |
 
 The NFS helper reports its actual cache identity when accepting shutdown. CLI
 unmount succeeds only after the kernel mount disappears and it acquires that
@@ -332,6 +333,23 @@ the daemon lock. The startup retry budget does not bound an individual connect.
 
 ### NFS control deadlines
 
+The mount runtime supervises the control server: a bind or listener failure
+starts teardown and is returned after cleanup. Teardown closes engine control
+admission, cancels future polling and idle connection reads, and awaits accepted
+handlers without aborting their blocking work. The data server remains available
+while admitted controls finish client writeback. Final responses, including the
+shutdown acknowledgement, have a ten-second write/flush deadline after dispatch;
+an operation itself may still delay shutdown.
+
+Unix preflight and the serving control owner hold the same exclusive endpoint
+lease. Preflight removes a stale socket only after a missing/refused connection;
+the server never unlinks an endpoint before binding. Teardown retains the lease
+through connection drain and removes only the socket device/inode it bound.
+The zero-byte `.sock.lock` file remains intentionally: unlinking it could let a
+replacement bypass a process holding the previous inode. A live lease makes
+preflight fail even while its server is draining. Other endpoint connection
+errors propagate without stale cleanup.
+
 Each control call owns a fresh socket. Its timeout covers connection setup,
 request writes, and the response read: ten seconds normally, thirty minutes for
 commit. TCP and Unix sockets share the same JSON exchange. Timeout or caller
@@ -339,8 +357,9 @@ cancellation drops the socket; the client does not retry a mutation whose result
 is unknown. A timeout does not prove that the helper stopped an admitted commit.
 
 These are asynchronous I/O deadlines, not CPU preemption or a deadline for the
-native OS mount command. See `nfs_control::tests` for stalled-write and socket
-closure regressions.
+native OS mount command. Regressions live in the flat siblings
+`nfs_control_connection_tests.rs` and `nfs_mount_control_tests.rs`, alongside
+the existing client exchange tests in `nfs_control::tests`.
 
 ## Usage
 

@@ -2007,6 +2007,86 @@ and control proof. This checkpoint does not close macOS mapped writeback,
 stalled shutdown, daemon/private admission, full generation/GC retention,
 stored pack-v1 retirement or optimized data-plane performance.
 
+## Thirty-third checkpoint: owned NFS control teardown
+
+The previous installed helper left a Unix socket pathname after successful
+native unmount: its PID was dead and connect returned ECONNREFUSED. Regressions
+against `a3614ba492a` reproduce three failures: ignored control bind failure,
+socket cleanup skipped on cancellation, and detached blocking runtime snapshots.
+The baseline overlays only test declarations and fixture visibility onto the
+previous production sources; it exits with all three regressions failing.
+
+`run_until_cancelled` now supervises the control owner and returns its failure
+after teardown. It closes engine control admission, cancels future work, joins
+refresh and control tasks, then proceeds to native unmount and read-resource
+shutdown. Unix and authenticated TCP handlers share one implementation and an
+owned JoinSet. Idle reads stop on cancellation; admitted dispatch and final
+replies finish. A ten-second write/flush deadline prevents a non-reading client
+from retaining a completed handler indefinitely. Control jobs and native Git
+operations themselves still have no completion deadline.
+
+Unix preflight and serving use the same per-endpoint exclusive lease. Preflight
+cleans missing/refused stale sockets; other connect failures propagate. Serving
+binds without unlinking. The lease survives accepted-handler drain and cleanup
+of only the bound socket's device/inode. Its zero-byte `.sock.lock` file remains
+on purpose: deleting it would let a replacement bypass an old open descriptor.
+The locked fs4 0.13.1 source returns `Ok(false)` for contention; the owner maps
+that result to WouldBlock. Locked Tokio 1.53.1 documents cancel-safe `join_next`
+and aborts remaining tasks when a JoinSet drops, which requires explicit drain.
+[Rust 1.97's Unix file owner](https://github.com/rust-lang/rust/blob/1.97.0/library/std/src/sys/fs/unix.rs)
+combines custom open flags with O_CLOEXEC, so executed Git children do not
+inherit the endpoint lease.
+
+Proof on the final Rust sources:
+
+- Dedicated Linux passes 654 VFS tests, all 16 ignored native FUSE/NFS probes,
+  all 136 CLI mount tests and strict combined-feature all-target VFS Clippy.
+  Native probes exercise writable/read-only mounts, descriptor lifetime,
+  mapped transitions and publication against their in-memory origin.
+- macOS passes 103 selected NFS tests and strict NFS all-target VFS Clippy.
+  Eight new regressions cover the three reproduced failures, duplicate bind,
+  replacement preservation, stable lease identity, TCP idle-handler drain and
+  bounded stalled replies. Extracted tests use flat sibling files.
+- Make-installed roles on both platforms repeat native foreground RW,
+  foreground RO and background RW. Live status identifies the actual owner;
+  write/fsync, diff, export, no-push commit, cache exclusion, RO rejection and
+  retained unpublished bytes after remount pass. macOS reads 8 KiB plus a
+  29-byte note; Linux verifies the existing 10 MiB Capsule/RustFS fixture plus
+  that note. These are correctness probes, not optimized performance results.
+- Each native case keeps an idle Unix control client open.
+  Control unmount and SIGINT close that client, remove the owned socket,
+  release the endpoint lease and clear the owned registry record without
+  forced cleanup. A separate OS lock attempt confirms exclusivity while live
+  and availability after teardown. The new doctor removes the known stale
+  socket from the previous native checkpoint after dead-PID/refused-connect
+  checks; the persistent lease remains.
+
+Local `nfs-control/source-manifest.json` and installed-artifact hashes bind
+these probes to 1,525 final Rust/manifest/Makefile sources; raw proof stays outside
+the PR. No dependencies, lockfiles, wire formats or runtime settings change.
+Production LOC grows for endpoint exclusion, connection ownership and mount
+supervision while deleting the duplicate Unix/TCP handler loops. No second
+control or discovery path is added.
+
+Daemon NFS calls the same mount/control owner, but its private discovery and
+stalled teardown still need native qualification. Coordinator FUSE has a
+different lock boundary and detached IPC handlers; blindly joining those under
+its coordinator lock could deadlock. Its lifecycle remains explicit follow-up.
+The locked nfs3_server 0.11.0 data listener separately spawns detached connection,
+message and transaction-cleaner tasks. Joining the listener does not join those
+children. Busy native-unmount failure also still stops the data listener; normal
+process-exit probes do not prove safe in-process ownership in that failure path.
+This checkpoint closes control-plane ownership, not those data-plane gates or
+the macOS dirty-mapping writeback failure.
+
+CI at the preceding `a3614ba492a` head passes NFS evidence and large-repository
+RustFS qualification. Its architecture job rejects two dependency-policy edges
+and two replication layout sites; the partial-clone workflow fails fresh mirror
+refs and compatibility smoke; gateway qualification fails its sustained-write
+throughput/report gate. These are open PR gates, not attributed to an unrelated
+base without reproduction. No inventory, threshold or expected-failure file is
+changed to bypass them. The draft is not ready to merge.
+
 ## Remaining priority order
 
 The helper-layout gap and live read-only inspection leak are closed by the
@@ -2021,6 +2101,9 @@ process-spanning freeze and never retry an uncertain live operation offline.
 Checkpoint-32 repairs CLI foreground NFS discovery and qualifies cooperative
 foreground/helper teardown. Native macOS mapped-write draining, stalled cleanup
 and the remaining product owners still block signoff.
+Checkpoint-33 closes the reproduced Unix control-socket and accepted-control
+ownership gaps. Next qualify data-server child tasks and busy-unmount ownership,
+plus the macOS mapping barrier, before claiming teardown complete.
 
 1. **Correctness: coherent Git/Capsule generations.** Atomically install selected
    Git state, pinned catalog and read service for startup, refresh, switch and

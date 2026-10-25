@@ -146,6 +146,13 @@ mount/control owners consume the pipeline output separately.
 - NFS control deadlines cover connect/write/read on a request-owned socket.
   Timeout closes that socket; it does not roll back a helper mutation. Do not
   retry an uncertain commit. Source: `crates/crab-vfs/src/nfs_control.rs`.
+- NFS teardown closes engine control admission, cancels polling/connection reads
+  and joins the control owner before stopping data callbacks. Accepted handlers
+  retain blocking work and final replies through cancellation. Unix preflight
+  and serving share one endpoint lease; retain it through handler drain and
+  inode-conditional socket cleanup. Keep its persistent `.sock.lock` inode.
+  Sources: `nfs_mount.rs`, `nfs_control.rs`; flat sibling regressions:
+  `nfs_mount_control_tests.rs`, `nfs_control_connection_tests.rs`.
 - FUSE IPC exchanges temporarily own their connection. Restore it only after a
   valid response; cancellation or errors must close it so a late response cannot
   satisfy a later request. Source: `crates/crab-vfs/src/ipc_client.rs`.

@@ -262,7 +262,7 @@ pub async fn run_until_cancelled(
     cancel: CancellationToken,
 ) -> Result<()> {
     let control_state = session.control_state();
-    let control_handle = nfs_control::spawn_server(
+    let mut control_handle = nfs_control::spawn_server(
         session.control_endpoint.clone(),
         control_state.clone(),
         cancel.clone(),
@@ -271,6 +271,7 @@ pub async fn run_until_cancelled(
         .auto_refresh_interval
         .map(|interval| nfs_control::spawn_auto_refresh(control_state, interval, cancel.clone()));
     let mut server_error = None;
+    let mut control_joined = false;
     let server_joined = loop {
         tokio::select! {
             () = cancel.cancelled() => {
@@ -299,10 +300,23 @@ pub async fn run_until_cancelled(
                     }
                     Err(error) if error.is_cancelled() => break true,
                     Err(error) => {
-                        server_error = Some(CrabError::Internal(format!("NFS server task failed: {error}")));
+                        server_error = Some(CrabError::ReadTask(error));
                         break true;
                     }
                 }
+            }
+            result = async {
+                match control_handle.as_mut() {
+                    Some(handle) => handle.await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                control_joined = true;
+                server_error = result
+                    .map_err(CrabError::ReadTask)
+                    .and_then(std::convert::identity)
+                    .err();
+                break false;
             }
             () = tokio::time::sleep(Duration::from_secs(2)) => {
                 if !is_mounted(&session.mountpoint) {
@@ -314,15 +328,27 @@ pub async fn run_until_cancelled(
     };
 
     let shutdown_start = Instant::now();
+    // Stop new controls before draining accepted connections. Regular NFS WRITE
+    // callbacks remain available to finish admitted client writeback and commits.
+    session.engine.close_control_admission();
     cancel.cancel();
     if let Some(handle) = refresh_handle {
         // Refresh awaits blocking snapshot work; cancellation stops future
         // polls, while joining retains ownership through the current refresh.
-        let _ = handle.await;
+        if let Err(error) = handle.await {
+            server_error.get_or_insert(CrabError::ReadTask(error));
+        }
     }
-    if let Some(handle) = control_handle {
-        handle.abort();
-        let _ = handle.await;
+    if !control_joined
+        && let Some(handle) = control_handle
+        && let Err(error) = handle
+            .await
+            .map_err(CrabError::ReadTask)
+            .and_then(std::convert::identity)
+    {
+        // The control owner joins its admitted handlers and removes its socket.
+        // Aborting it skips cleanup and can detach blocking runtime work.
+        server_error.get_or_insert(error);
     }
     // Flush overlay state and unmount while the local NFS server can still
     // answer the kernel client. Forced macOS unmounts require root even when
@@ -1076,6 +1102,10 @@ fn sudo_noninteractive_available() -> bool {
     command.status().is_ok_and(|status| status.success())
 }
 
+#[cfg(all(test, unix))]
+#[path = "nfs_mount_control_tests.rs"]
+mod control_lifecycle_tests;
+
 #[cfg(test)]
 #[expect(
     clippy::unwrap_used,
@@ -1084,7 +1114,7 @@ fn sudo_noninteractive_available() -> bool {
 mod tests {
     use super::*;
 
-    fn synthetic_session(
+    pub(super) fn synthetic_session(
         root: &Path,
         server_handle: tokio::task::JoinHandle<Result<()>>,
         mount_rx: mpsc::Receiver<bool>,
