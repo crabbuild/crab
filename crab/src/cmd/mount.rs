@@ -2738,29 +2738,77 @@ fn unmount_stale_registry_mount(
 #[cfg(any(feature = "fuse", feature = "nfs"))]
 pub async fn run_unmount_all_live_or_persisted() -> Result<()> {
     let registry_path = crate::vfs::mounts_registry::registry_path()?;
-    let entries = crate::vfs::mounts_registry::list_entries(&registry_path)?;
-
+    let entries = crate::vfs::mount_control::control_targets().await?;
     if entries.is_empty() {
         println!("No active mounts.");
         return Ok(());
     }
-
     let mut unmounted = 0u32;
     for entry in &entries {
         let mountpoint = Path::new(&entry.mountpoint);
+        if entry.live {
+            let conflicting = crate::vfs::mounts_registry::list_entries(&registry_path)?
+                .into_iter()
+                .any(|saved| {
+                    saved.mountpoint == entry.mountpoint && saved.backend != entry.backend
+                });
+            if conflicting {
+                return Err(CrabError::Configuration {
+                    key: format!("conflicting mount owners at {}", entry.mountpoint),
+                    origin: "crab unmount --all".into(),
+                });
+            }
+        }
         if try_mount_control_unmount(mountpoint).await? {
             unmounted += 1;
             continue;
         }
-
-        if unmount_registry_entry(&registry_path, entry)? {
+        // A discovered live owner cannot become PID-based stale cleanup after
+        // its control connection disappears. The caller can retry discovery.
+        if entry.live {
+            return Err(CrabError::Configuration {
+                key: format!(
+                    "live mount control disappeared before batch unmount: {}",
+                    entry.mountpoint
+                ),
+                origin: "crab unmount --all".into(),
+            });
+        }
+        let saved = crate::vfs::mounts_registry::list_entries(&registry_path)?
+            .into_iter()
+            .find(|saved| saved.mountpoint == entry.mountpoint);
+        let Some(saved) = saved else {
+            return Err(CrabError::Configuration {
+                key: format!(
+                    "registered mount owner disappeared during batch unmount: {}",
+                    entry.mountpoint
+                ),
+                origin: "crab unmount --all".into(),
+            });
+        };
+        if Some(saved.pid) != entry.pid
+            || Some(&saved.start_time) != entry.start_time.as_ref()
+            || saved.control_endpoint != entry.control_endpoint
+            || is_pid_alive(saved.pid)
+        {
+            return Err(CrabError::Configuration {
+                key: format!(
+                    "registered mount owner changed or remains alive without control: {}",
+                    entry.mountpoint
+                ),
+                origin: "crab unmount --all".into(),
+            });
+        }
+        if unmount_registry_entry(&registry_path, &saved)? {
             unmounted += 1;
         }
     }
-
     println!("Unmounted {unmounted} mount(s).");
     Ok(())
 }
+
+#[cfg(all(test, unix, any(feature = "fuse", feature = "nfs")))]
+mod batch_unmount_tests;
 
 fn normalize_unmount_path(path: &Path) -> PathBuf {
     #[cfg(all(any(windows, test), feature = "nfs"))]

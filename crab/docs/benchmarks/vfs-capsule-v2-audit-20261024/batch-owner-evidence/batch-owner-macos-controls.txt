@@ -1,0 +1,20 @@
+   Compiling crab-vfs v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-vfs)
+    Finished `test` profile [unoptimized] target(s) in 13.27s
+     Running unittests src/lib.rs (/Users/haipingfu/Workspace/crabbuild-target/crab-ios-02d01345-vfs/debug/deps/crab_vfs-a83e992940fb17ec)
+
+running 13 tests
+test mount_control::tests::backend_names_match_registry_values ... ok
+test mount_control::tests::inspection_uses_live_nfs_mode_when_registry_is_stale ... ok
+test mount_control::tests::list_keeps_registry_entries_when_live_probe_fails ... ok
+test mount_control::tests::listing_rejects_incomplete_coordinator_discovery ... ok
+test mount_control::tests::nfs_context_ignores_non_nfs_registry_entries ... ok
+test mount_control::tests::nfs_context_uses_registry_backend_and_endpoint ... ok
+test mount_control::tests::nfs_control_list_refreshes_live_registry_entries ... ok
+test mount_control::tests::nfs_control_refresh_and_switch_route_to_helper_endpoint ... ok
+test mount_control::tests::nfs_control_status_and_shutdown_route_through_registry_endpoint ... ok
+test mount_control::tests::normalize_preserves_missing_paths ... ok
+test mount_control::tests::persisted_list_reads_registry_entries ... ok
+test mount_control::tests::unix_controls_reach_fuse_without_linking_the_server ... ok
+test mount_control::tests::upsert_list_entry_preserves_registry_metadata ... ok
+
+test result: ok. 13 passed; 0 failed; 0 ignored; 0 measured; 628 filtered out; finished in 0.17s

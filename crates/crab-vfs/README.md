@@ -97,6 +97,17 @@ uses its existing process-spanning freeze and mounted-view reads for metadata-on
 base renames. Its full generation/control ownership remains a separate gate;
 inspection's ownership does not make that later copy one atomic operation.
 
+Batch unmount discovers both persisted helpers and coordinator-owned FUSE
+mounts through `mount_control::control_targets`. Inventory discovery is strict:
+rejected or incomplete coordinator lists are errors, while missing/refused
+coordinator connections permit absence. Optional status fields are gathered only
+for display; batch unmount does not issue NFS status requests. A discovered live
+owner disappearing cannot authorize PID cleanup. Conflicting backend ownership,
+changed registry identity, or a live registered process without control returns
+an error. Stale cleanup requires the same recorded owner and a confirmed dead PID.
+This covers registered helpers and the coordinator; daemon/private owners and
+native admission racing stale force cleanup require separate qualification.
+
 On Unix, either backend enables `ipc_client` and the unchanged `ipc_protocol`
 wire types. An NFS-only main CLI can control an existing FUSE coordinator without
 linking its server. Coordinator bootstrap and server ownership require `fuse`.

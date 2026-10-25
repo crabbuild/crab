@@ -85,15 +85,46 @@ pub struct NfsMountControlContext {
 }
 
 pub async fn list() -> Result<Vec<MountControlListEntry>> {
-    let mut entries = persisted_list()?;
-
+    let mut entries = control_targets().await?;
     #[cfg(feature = "nfs")]
     refresh_nfs_list_entries(&mut entries).await;
-
     #[cfg(unix)]
-    refresh_fuse_list_entries(&mut entries).await;
-
+    refresh_fuse_status(&mut entries).await;
     Ok(entries)
+}
+
+/// Discover registered and coordinator-owned mounts without querying status.
+pub async fn control_targets() -> Result<Vec<MountControlListEntry>> {
+    let entries = persisted_list()?;
+    #[cfg(unix)]
+    {
+        let mut entries = entries;
+        if let Some((_client, mounts)) = coordinator_mounts().await? {
+            for mount in mounts {
+                upsert_list_entry(
+                    &mut entries,
+                    MountControlListEntry {
+                        name: crate::mounts_registry::derive_name_from_source(&mount.remote),
+                        backend: Some(MountControlBackend::Fuse.as_str().to_owned()),
+                        mountpoint: mount.mountpoint,
+                        source: mount.remote,
+                        head_ref: mount.r#ref,
+                        read_only: mount.read_only,
+                        pid: None,
+                        start_time: None,
+                        log_path: None,
+                        control_endpoint: None,
+                        live: true,
+                    },
+                );
+            }
+        }
+        Ok(entries)
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(entries)
+    }
 }
 
 pub fn persisted_list() -> Result<Vec<MountControlListEntry>> {
@@ -220,55 +251,31 @@ async fn refresh_nfs_list_entries(entries: &mut [MountControlListEntry]) {
 }
 
 #[cfg(unix)]
-async fn refresh_fuse_list_entries(entries: &mut Vec<MountControlListEntry>) {
+async fn refresh_fuse_status(entries: &mut [MountControlListEntry]) {
+    // Discovery already owns membership. Optional display metadata must not
+    // erase a listed owner when a later status exchange fails.
     let Ok(Some(mut client)) = coordinator_client().await else {
         return;
     };
-    let Ok(response) = send_fuse_request(&mut client, crate::ipc_protocol::IpcRequest::List).await
-    else {
-        return;
-    };
-    let Some(mounts) = response.mounts else {
-        return;
-    };
-    for mount in mounts {
+    for entry in entries
+        .iter_mut()
+        .filter(|entry| entry.live && entry.backend.as_deref() == Some("fuse"))
+    {
         let status = send_fuse_request(
             &mut client,
             crate::ipc_protocol::IpcRequest::Status {
-                mountpoint: mount.mountpoint.clone(),
+                mountpoint: entry.mountpoint.clone(),
             },
         )
         .await
         .ok()
         .and_then(|response| response.status);
-        let pid = status.as_ref().and_then(|status| status.pid);
-        let head_ref = status
-            .as_ref()
-            .map(|status| status.r#ref.clone())
-            .unwrap_or(mount.r#ref);
-        let source = status
-            .as_ref()
-            .map(|status| status.remote.clone())
-            .unwrap_or(mount.remote);
-        let read_only = status
-            .as_ref()
-            .map_or(mount.read_only, |status| status.read_only);
-        upsert_list_entry(
-            entries,
-            MountControlListEntry {
-                name: crate::mounts_registry::derive_name_from_source(&source),
-                backend: Some(MountControlBackend::Fuse.as_str().to_owned()),
-                mountpoint: mount.mountpoint,
-                source,
-                head_ref,
-                read_only,
-                pid,
-                start_time: None,
-                log_path: None,
-                control_endpoint: None,
-                live: true,
-            },
-        );
+        if let Some(status) = status {
+            entry.pid = status.pid.or(entry.pid);
+            entry.head_ref = status.r#ref;
+            entry.source = status.remote;
+            entry.read_only = status.read_only;
+        }
     }
 }
 
@@ -551,16 +558,29 @@ async fn coordinator_client() -> Result<Option<crate::ipc_client::IpcClient>> {
 }
 
 #[cfg(unix)]
-async fn fuse_mount_client(mountpoint: &str) -> Result<Option<crate::ipc_client::IpcClient>> {
+async fn coordinator_mounts() -> Result<
+    Option<(
+        crate::ipc_client::IpcClient,
+        Vec<crate::ipc_protocol::MountInfo>,
+    )>,
+> {
     let Some(mut client) = coordinator_client().await? else {
         return Ok(None);
     };
     // List establishes ownership without interpreting application error text.
-    // A failed exchange must not redirect a live mutation to offline state.
+    // Rejected or incomplete discovery cannot authorize absence or offline work.
     let response = send_fuse_request(&mut client, crate::ipc_protocol::IpcRequest::List).await?;
     let mounts = response
         .mounts
         .ok_or_else(|| CrabError::Internal("FUSE list response missing mounts".into()))?;
+    Ok(Some((client, mounts)))
+}
+
+#[cfg(unix)]
+async fn fuse_mount_client(mountpoint: &str) -> Result<Option<crate::ipc_client::IpcClient>> {
+    let Some((client, mounts)) = coordinator_mounts().await? else {
+        return Ok(None);
+    };
     Ok(mounts
         .iter()
         .any(|mount| mount.mountpoint == mountpoint)

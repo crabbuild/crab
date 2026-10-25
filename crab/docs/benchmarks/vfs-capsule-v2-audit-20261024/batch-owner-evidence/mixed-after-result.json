@@ -1,0 +1,35 @@
+{
+  "findings": [
+    {
+      "round": 0,
+      "readonly": false,
+      "exit": 0,
+      "still_mounted": {
+        "nfs": false,
+        "fuse": false
+      },
+      "stdout": "Unmounted /mnt/mixed-nfs.\nUnmounted /mnt/mixed-fuse.\nUnmounted 2 mount(s).\n"
+    },
+    {
+      "round": 1,
+      "readonly": false,
+      "exit": 0,
+      "still_mounted": {
+        "nfs": false,
+        "fuse": false
+      },
+      "stdout": "Unmounted /mnt/mixed-nfs.\nUnmounted /mnt/mixed-fuse.\nUnmounted 2 mount(s).\n"
+    },
+    {
+      "round": 2,
+      "readonly": true,
+      "exit": 0,
+      "still_mounted": {
+        "nfs": false,
+        "fuse": false
+      },
+      "stdout": "Unmounted /mnt/mixed-nfs.\nUnmounted /mnt/mixed-fuse.\nUnmounted 2 mount(s).\n"
+    }
+  ],
+  "immediate_cache_handoff_assertions": 6
+}

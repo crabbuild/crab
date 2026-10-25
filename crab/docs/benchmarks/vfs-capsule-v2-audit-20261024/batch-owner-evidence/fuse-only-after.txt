@@ -1,0 +1,1 @@
+{"backend": "fuse", "exit": 0, "still_mounted": false, "stdout": "Unmounted /mnt/owner.\nUnmounted 1 mount(s).\n"}

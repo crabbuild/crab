@@ -1603,16 +1603,71 @@ list already merging coordinator owners. Retain this failing gate. Canonical
 all-owner batch discovery and disappearance/error semantics are the next repair,
 before export ownership; they are not fixed by cache-lease completion.
 
+## Twenty-sixth checkpoint: strict batch owner discovery
+
+The prior FUSE-only diagnostic returns success/No active mounts while the native
+mount remains attached. A new mixed RustFS reproduction on the checkpoint-25
+installed roles returns Unmounted 1 mount(s): NFS is gone, FUSE remains mounted.
+Both before probes clean their remaining mounts explicitly. All first five CLI
+regressions fail before the fix; direct VFS listing also converts rejected
+coordinator discovery into an empty successful list before this repair.
+
+`mount_control::control_targets` now merges registered helpers with the live
+coordinator inventory. One shared coordinator List validator serves discovery
+and individual FUSE control admission. Rejected and incomplete responses propagate;
+only missing/refused connections represent absence. User-facing list status
+metadata is enriched after discovery. Batch unmount performs no extra NFS status
+queries. A lost known live owner cannot select stale/PID cleanup. Backend
+conflicts, changed recorded identity and live processes without control fail
+closed; only the same recorded dead owner may select stale cleanup.
+
+Both Linux and macOS pass all 24 unmount tests, including eight new batch cases.
+They cover coordinator-only discovery, rejected/malformed inventory, owner loss,
+rejected unmount, conflicting backend records, a live unowned PID, and registry
+replacement during discovery. Linux passes 639 VFS tests, strict combined
+all-target VFS Clippy and a FUSE-only check. macOS passes 13 VFS control tests
+and strict combined VFS Clippy. No baseline/expected-format patch was applied.
+
+Final Make-installed NFS-only main/NFS helper and combined FUSE helper pass the
+FUSE-only empty-registry case and three mixed RustFS rounds: writable mounts,
+writable remounts retaining exact bytes, and read-only mounts hiding the saved
+writable overlay. Each mixed round unmounts both adapters, reports 2 mounts,
+clears registered owners and permits immediate nonblocking acquisition of both
+cache leases. All six cache handoff assertions pass without waits or retries.
+Installed rejected-control probes still preserve the owner PID/registry and
+original error for single and batch unmount.
+
+A separate paired warm live-list check compares the previous and final main CLI
+against the same two actual mounts. All structured fields except uptime match.
+After three warmup pairs, ten retained samples per client give medians 8.32 ms
+(previous) and 8.59 ms (current), with alternating execution order. These debug
+CLI measurements do not establish data-plane throughput or tail performance.
+
+The task-owned Colima profile was authoritatively stopped when final Linux
+qualification resumed. Restart reused that same profile and its existing RustFS
+containers. The failed launch happened before compilation and is excluded from
+passing proof. No other VM, target or external repository was reset or cleaned.
+Source/binary bindings and retained inputs/results are in
+`batch-owner-checkpoint.json` and adjacent evidence.
+
+Non-test growth owns the strict inventory/display split and the batch safety
+checks; duplicate coordinator List validation is removed. Individual controls
+still revalidate membership, so large-batch request/registry amplification needs
+measurement before adding an owner-side batch operation. This checkpoint does
+not qualify daemon/private mounts, stale native cleanup racing new admission,
+or concurrent coordinator teardown/cancellation. `take_mount` removes a handle
+before asynchronous cleanup; reservation/idle-shutdown ownership needs its own
+controlled native concurrency probe before a verdict.
+
 ## Remaining priority order
 
 The helper-layout gap and live read-only inspection leak are closed by the
-installed-role proofs. The checkpoint-25 installed-role cycles close the
-reproduced Linux NFS unmount/cache handoff gap. Next repair batch unmount
-discovery of coordinator-only FUSE mounts (confirmed omitted by the native
-diagnostic), complete live export materialization ownership, and prove
-concurrent reset/commit plus lost-owner behavior. Preserve
-the existing process-spanning export freeze. Do not add an offline retry after
-an uncertain live operation.
+installed-role proofs. Checkpoint-25 closes the reproduced Linux NFS cache
+handoff gap, and checkpoint-26 closes coordinator-only/mixed batch discovery.
+Next complete live export materialization ownership, then prove concurrent
+reset/commit, teardown/admission and lost-owner behavior across the remaining
+owners. Preserve the existing process-spanning export freeze. Do not add an
+offline retry after an uncertain live operation.
 
 1. **Correctness: coherent Git/Capsule generations.** Atomically install selected
    Git state, pinned catalog and read service for startup, refresh, switch and
@@ -1672,6 +1727,13 @@ increasing metadata or read concurrency. Qualify an ordinary workspace upgrade
 with all seven direct consumers and their enabled feature slices. Audit SQL
 integer conversions against upstream ToSql/FromSql contracts before changing
 callers. No dependency override or vendored patch is authorized.
+
+The deferred expected-format patch changes an ordinary inline Rust integration
+assertion, not a baseline/inventory/snapshot file. Re-audit that assertion against
+Capsule's canonical checkpoint writer and decoder during protocol retirement;
+do not treat its literal 5 as a valid current production contract or assume
+it is the stored pack-v1 protocol merely because it is an old format number.
+No permission flow or source change follows from this note alone.
 
 The current `clone_cache` non-Unix lock helper is a pre-existing no-op. The
 checkpoint-25 cache-ownership proof applies to Unix; Windows NFS handoff is not

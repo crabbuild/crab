@@ -1,0 +1,25 @@
+RUN cargo test -p crab-vfs --locked --lib --no-default-features --features nfs,fuse --no-run --message-format=json
+   Compiling crab-vfs v0.1.0 (/src/crates/crab-vfs)
+    Finished `test` profile [unoptimized] target(s) in 1m 35s
+TEST_EXECUTABLE /root/Workspace/crabbuild-target/vfs-audit/target/debug/deps/crab_vfs-ec3636ce5848f5ba
+
+running 1 test
+
+thread 'mount_control::tests::listing_rejects_incomplete_coordinator_discovery' (41) panicked at crates/crab-vfs/src/mount_control/tests.rs:643:28:
+called `Result::unwrap_err()` on an `Ok` value: []
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test mount_control::tests::listing_rejects_incomplete_coordinator_discovery ... FAILED
+
+failures:
+
+failures:
+    mount_control::tests::listing_rejects_incomplete_coordinator_discovery
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 655 filtered out; finished in 0.00s
+
+Traceback (most recent call last):
+  File "/qualification/batch-owner-before.py", line 20, in <module>
+    subprocess.run([executables[0],"mount_control::tests::listing_rejects_incomplete_coordinator_discovery","--exact","--nocapture"],cwd=os.environ["TMPDIR"],check=True)
+  File "/usr/lib/python3.11/subprocess.py", line 571, in run
+    raise CalledProcessError(retcode, process.args,
+subprocess.CalledProcessError: Command '['/root/Workspace/crabbuild-target/vfs-audit/target/debug/deps/crab_vfs-ec3636ce5848f5ba', 'mount_control::tests::listing_rejects_incomplete_coordinator_discovery', '--exact', '--nocapture']' returned non-zero exit status 101.

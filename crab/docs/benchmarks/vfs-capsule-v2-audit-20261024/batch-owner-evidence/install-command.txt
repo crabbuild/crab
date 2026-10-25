@@ -1,0 +1,10 @@
+Final install command (recorded from this task's executed invocation):
+
+sh "$HOME/Workspace/crabbuild-target/crab-ios-02d01345-vfs/linux/run-vfs-command.sh" batch-owner-install sh -c 'set -eu
+test -x /root/Workspace/crabbuild-target/vfs-audit/linker/ld
+COMPILER_PATH=/root/Workspace/crabbuild-target/vfs-audit/linker make -C /src/crab install RELEASE_FLAGS= CRAB_CLI_FEATURES_WITH_FUSE=nfs,fuse CRAB_CLI_FEATURES_NO_FUSE=nfs TARGET_DIR="$CARGO_TARGET_DIR" RELEASE_BIN="$CARGO_TARGET_DIR/debug/crab" FUSE_MOUNT_RELEASE_BIN="$CARGO_TARGET_DIR/debug/crab-fuse-mount" NFS_MOUNT_RELEASE_BIN="$CARGO_TARGET_DIR/debug/crab-nfs-mount" CACHE_SERVER_RELEASE_BIN="$CARGO_TARGET_DIR/debug/crab-cache-server" PREFIX=/root/Workspace/crabbuild-target/vfs-audit/batch-owner/bin CARGO_BIN=/qualification/batch-owner/bin'
+
+The external runner binds this checkout read-only, sets its per-worktree VM
+Cargo target, and exposes the literal host proof directory as /qualification.
+The main binary is rebuilt without FUSE after the combined build is installed
+as the FUSE helper. Product binaries are installed only by make install.

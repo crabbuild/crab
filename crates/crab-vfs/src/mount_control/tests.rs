@@ -610,3 +610,44 @@ fn inspection_uses_live_nfs_mode_when_registry_is_stale() {
         assert!(error.to_string().contains("read-only mount"));
     });
 }
+
+#[cfg(unix)]
+#[test]
+fn listing_rejects_incomplete_coordinator_discovery() {
+    let _env_lock = crate::test_support::GIT_DIR_MUTEX
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    for (response, expected) in [
+        (
+            serde_json::json!({"ok":false,"error":"discovery refused"}),
+            "discovery refused",
+        ),
+        (serde_json::json!({"ok":true}), "missing mounts"),
+    ] {
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = HomeGuard::set(tmp.path());
+        let socket = crate::ipc_client::default_socket_path().unwrap();
+        std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
+            use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+            let listener = tokio::net::UnixListener::bind(socket).unwrap();
+            let peer = tokio::spawn(async move {
+                let (stream, _) = listener.accept().await.unwrap();
+                let mut lines = BufReader::new(stream).lines();
+                let request: serde_json::Value =
+                    serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+                assert_eq!(request["op"], "list");
+                let mut bytes = serde_json::to_vec(&response).unwrap();
+                bytes.push(b'\n');
+                lines.get_mut().get_mut().write_all(&bytes).await.unwrap();
+            });
+            let result = list().await;
+            peer.await.unwrap();
+            assert!(result.unwrap_err().to_string().contains(expected));
+        });
+    }
+}

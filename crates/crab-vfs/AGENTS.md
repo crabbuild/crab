@@ -128,6 +128,10 @@ mount/control owners consume the pipeline output separately.
   removal. Single/batch callers propagate live-control errors; only a helper
   confirmed dead before sending may select stale cleanup. Sources: `nfs_control.rs`,
   `clone_cache.rs`, `mounts_registry.rs`, and `crab/src/cmd/mount.rs`.
+- Batch controls use strict owner inventory, not optional status enrichment.
+  Coordinator discovery failures cannot become an empty list. A listed live
+  owner disappearing must fail before stale/PID cleanup. Sources:
+  `mount_control.rs` and `crab/src/cmd/mount.rs`.
 - NFS control deadlines cover connect/write/read on a request-owned socket.
   Timeout closes that socket; it does not roll back a helper mutation. Do not
   retry an uncertain commit. Source: `crates/crab-vfs/src/nfs_control.rs`.
