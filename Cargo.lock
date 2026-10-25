@@ -6691,8 +6691,6 @@ dependencies = [
 [[package]]
 name = "nfs3_server"
 version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96d135ac708765b71461a1465cf4a25f009a44d33d9d15ab07e0c00d446d4a0c"
 dependencies = [
  "anyhow",
  "nfs3_types",

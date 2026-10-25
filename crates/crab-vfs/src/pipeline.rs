@@ -203,6 +203,9 @@ impl MountPipelineBuilder {
     /// the error.
     pub fn execute(self) -> Result<PipelineOutput> {
         let config = &self.config;
+        if config.cancel_token.is_cancelled() {
+            return Err(CrabError::Cancelled);
+        }
         let redacted = redact_url(&config.source);
 
         info!(
@@ -264,6 +267,9 @@ impl MountPipelineBuilder {
 
         // All fallible preparation must finish before workers retain cache state.
         // From here the service passes directly to the successful pipeline owner.
+        if config.cancel_token.is_cancelled() {
+            return Err(CrabError::Cancelled);
+        }
         hydration.spawn_workers();
 
         info!(
@@ -394,7 +400,9 @@ impl MountPipelineBuilder {
         create_hydration(
             cache,
             verified,
-            self.config.cancel_token.clone(),
+            // Native clients can remain busy after shutdown is requested. The
+            // backend owns foreground hydration until kernel detachment.
+            CancellationToken::new(),
             self.store_layout.clone(),
             self.read_hydrator.clone(),
             Some(crate::repository::staging_root_for_git_dir(
@@ -637,6 +645,26 @@ impl crate::data_plane::XorbFetcher for StubXorbFetcher {
 mod tests {
     use super::*;
 
+    #[tokio::test]
+    async fn cancelled_preparation_does_not_start_a_clone() {
+        let root = tempfile::tempdir().unwrap();
+        let cancel = CancellationToken::new();
+        cancel.cancel();
+        let git_dir = root.path().join("git");
+        let result = MountPipelineBuilder::new(PipelineConfig {
+            source: root.path().join("missing-source").display().to_string(),
+            git_dir: git_dir.clone(),
+            git_metadata: GitMetadataOwnership::Mount,
+            ref_name: None,
+            read_only: true,
+            cache_dir: root.path().join("state"),
+            cancel_token: cancel,
+        })
+        .execute();
+        assert!(matches!(result, Err(CrabError::Cancelled)));
+        assert!(!git_dir.exists());
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn disposable_blob_cache_path_does_not_block_preparation() {
         let tmp = tempfile::tempdir().unwrap();
@@ -727,6 +755,8 @@ mod tests {
         .with_read_context(stored.context.clone());
         let service = builder.step_create_hydration().unwrap();
         service.spawn_workers();
+        // Shutdown is a detach request; a busy native mount still needs cold bytes.
+        cancel.cancel();
         assert_eq!(
             service.read_range(&stored.pointer, 0, 1024).await.unwrap(),
             content

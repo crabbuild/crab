@@ -940,7 +940,8 @@ impl DaemonService {
         let hydration = crate::pipeline::create_hydration(
             Arc::clone(&self.cache),
             verified,
-            repo_cancel.clone(),
+            // Keep mounted reads alive while the backend drains/detaches.
+            CancellationToken::new(),
             store_layout,
             read_hydrator,
             Some(crate::repository::staging_root_for_git_dir(&paths.git_dir)?),

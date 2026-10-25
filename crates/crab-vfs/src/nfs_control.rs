@@ -39,6 +39,8 @@ const TCP_CONTROL_PORT_RANGE: u16 = 16_384;
 
 #[derive(Clone)]
 pub struct NfsControlState {
+    /// Request native detachment without closing the transport before it completes.
+    pub shutdown: CancellationToken,
     pub mountpoint: PathBuf,
     pub read_only: bool,
     pub read_leases: Arc<ReadLeasePool>,
@@ -1063,7 +1065,7 @@ where
             serde_json::from_str::<NfsControlRequest>(&line).map(Some)
         };
         let response = match request {
-            Ok(Some(request)) => dispatch_request(request, &state, &cancel).await,
+            Ok(Some(request)) => dispatch_request(request, &state).await,
             Ok(None) => NfsControlResponse::err("unauthorized NFS control request"),
             Err(error) => NfsControlResponse::err(format!("invalid request: {error}")),
         };
@@ -1076,7 +1078,6 @@ where
 async fn dispatch_request(
     request: NfsControlRequest,
     state: &NfsControlState,
-    cancel: &CancellationToken,
 ) -> NfsControlResponse {
     match request {
         NfsControlRequest::Ping => NfsControlResponse::ping_ok(),
@@ -1122,7 +1123,7 @@ async fn dispatch_request(
                 .transpose();
             match cache_dir {
                 Ok(cache_dir) => {
-                    cancel.cancel();
+                    state.shutdown.cancel();
                     NfsControlResponse::shutdown_ok(cache_dir)
                 }
                 Err(error) => NfsControlResponse::err(error.to_string()),
@@ -1908,6 +1909,7 @@ mod tests {
         let endpoint = format!("unix:{}", socket_path.display());
         let cancel = CancellationToken::new();
         let state = NfsControlState {
+            shutdown: cancel.clone(),
             mountpoint: mountpoint.clone(),
             read_only: true,
             read_leases: ReadLeasePool::new(4, 4096),
@@ -1962,6 +1964,7 @@ mod tests {
         let endpoint = format!("tcp:{addr}?token=test-token");
         let cancel = CancellationToken::new();
         let state = NfsControlState {
+            shutdown: cancel.clone(),
             mountpoint: mountpoint.clone(),
             read_only: true,
             read_leases: ReadLeasePool::new(4, 4096),

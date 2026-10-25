@@ -188,8 +188,13 @@ fn upsert_list_entry_preserves_registry_metadata() {
 }
 
 #[cfg(feature = "nfs")]
-fn nfs_control_state(mountpoint: &Path, read_only: bool) -> crate::nfs_control::NfsControlState {
+fn nfs_control_state(
+    mountpoint: &Path,
+    read_only: bool,
+    shutdown: CancellationToken,
+) -> crate::nfs_control::NfsControlState {
     crate::nfs_control::NfsControlState {
+        shutdown,
         mountpoint: mountpoint.to_path_buf(),
         read_only,
         read_leases: crate::read_lease_pool::ReadLeasePool::new(4, 4096),
@@ -312,7 +317,7 @@ fn nfs_control_status_and_shutdown_route_through_registry_endpoint() {
             .execute()
             .unwrap();
         let engine = Arc::clone(&output.engine);
-        let mut state = nfs_control_state(&mountpoint, false);
+        let mut state = nfs_control_state(&mountpoint, false, cancel.clone());
         state.engine = Some(Arc::clone(&engine));
         state.runtime = Some(Arc::new(std::sync::Mutex::new(
             crate::nfs_control::NfsMountRuntime {
@@ -381,7 +386,7 @@ fn nfs_control_list_refreshes_live_registry_entries() {
         let cancel = CancellationToken::new();
         let handle = crate::nfs_control::spawn_server(
             Some(endpoint.clone()),
-            nfs_control_state(&mountpoint, false),
+            nfs_control_state(&mountpoint, false, cancel.clone()),
             cancel.clone(),
         )
         .unwrap();
@@ -425,7 +430,7 @@ fn nfs_control_refresh_and_switch_route_to_helper_endpoint() {
         let cancel = CancellationToken::new();
         let handle = crate::nfs_control::spawn_server(
             Some(endpoint.clone()),
-            nfs_control_state(&mountpoint, true),
+            nfs_control_state(&mountpoint, true, cancel.clone()),
             cancel.clone(),
         )
         .unwrap();
@@ -602,7 +607,7 @@ fn inspection_uses_live_nfs_mode_when_registry_is_stale() {
         let cancel = CancellationToken::new();
         let server = crate::nfs_control::spawn_server(
             Some(endpoint.clone()),
-            nfs_control_state(&mountpoint, true),
+            nfs_control_state(&mountpoint, true, cancel.clone()),
             cancel,
         )
         .unwrap();

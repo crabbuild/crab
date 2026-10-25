@@ -18,9 +18,9 @@ async fn owner_cancellation_joins_control_cleanup_before_returning() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("control.sock");
     let endpoint = format!("unix:{}", socket.display());
-    let server = tokio::spawn(std::future::pending::<Result<()>>());
+    let (server_cancel, server) = tests::idle_server();
     let (_sender, receiver) = mpsc::channel(1);
-    let mut session = tests::synthetic_session(root.path(), server, receiver);
+    let mut session = tests::synthetic_session(root.path(), server, server_cancel, receiver);
     session.control_endpoint = Some(endpoint.clone());
     let cancel = CancellationToken::new();
     let shutdown = run_until_cancelled(session, cancel.clone());
@@ -41,9 +41,9 @@ async fn control_bind_failure_stops_the_mount_and_preserves_the_existing_file() 
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("control.sock");
     std::fs::write(&socket, b"existing source").unwrap();
-    let server = tokio::spawn(std::future::pending::<Result<()>>());
+    let (server_cancel, server) = tests::idle_server();
     let (_sender, receiver) = mpsc::channel(1);
-    let mut session = tests::synthetic_session(root.path(), server, receiver);
+    let mut session = tests::synthetic_session(root.path(), server, server_cancel, receiver);
     session.control_endpoint = Some(format!("unix:{}", socket.display()));
     let cancel = CancellationToken::new();
     let mut owner = tokio::spawn(run_until_cancelled(session, cancel.clone()));
@@ -62,9 +62,9 @@ async fn control_bind_failure_stops_the_mount_and_preserves_the_existing_file() 
 async fn owner_shutdown_waits_for_a_contended_control_snapshot() {
     let root = tempfile::tempdir().unwrap();
     let endpoint = format!("unix:{}", root.path().join("control.sock").display());
-    let server = tokio::spawn(std::future::pending::<Result<()>>());
+    let (server_cancel, server) = tests::idle_server();
     let (_sender, receiver) = mpsc::channel(1);
-    let mut session = tests::synthetic_session(root.path(), server, receiver);
+    let mut session = tests::synthetic_session(root.path(), server, server_cancel, receiver);
     session.control_endpoint = Some(endpoint.clone());
     let runtime = Arc::clone(session.runtime.as_ref().unwrap());
     let cancel = CancellationToken::new();
@@ -128,4 +128,29 @@ async fn owner_shutdown_waits_for_a_contended_control_snapshot() {
     );
     assert_eq!(Arc::strong_count(&runtime), 1);
     nfs_control::probe_endpoint_available(Some(&endpoint)).unwrap();
+}
+
+#[tokio::test]
+async fn teardown_releases_mount_notifications_before_rpc_drain() {
+    let root = tempfile::tempdir().unwrap();
+    let (sender, receiver) = mpsc::channel(1);
+    sender.send(true).await.unwrap();
+    let server_cancel = CancellationToken::new();
+    let stopping = server_cancel.clone();
+    let server = tokio::spawn(async move {
+        stopping.cancelled().await;
+        // A second notification cannot fit until the lifecycle receiver closes.
+        assert!(sender.send(false).await.is_err());
+        Ok(())
+    });
+    let session = tests::synthetic_session(root.path(), server, server_cancel, receiver);
+    let shutdown = CancellationToken::new();
+    shutdown.cancel();
+    tokio::time::timeout(
+        Duration::from_secs(2),
+        run_until_cancelled(session, shutdown),
+    )
+    .await
+    .unwrap()
+    .unwrap();
 }

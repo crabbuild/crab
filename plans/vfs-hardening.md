@@ -2171,6 +2171,95 @@ encodings or runtime settings change in this checkpoint. The approved NFS
 dependency work remains separate. Stored pack-v1 retirement is still incomplete
 at protected receive, gateway, legacy initialization and maintenance/publication.
 
+## Thirty-sixth checkpoint: graceful NFS data ownership
+
+The approved nfs3_server 0.11.0 patch is now integrated through one graceful
+serving path. The listener owns accepted connections; each owns its parser and
+admitted RPC JoinSet. Listener-owned transaction cleanup replaces the detached
+cleaner. After native detachment, the mount owner signals transport shutdown and
+awaits all descendants rather than aborting only the listener. Incomplete input
+and blocked replies stop; admitted filesystem operations finish even after their
+client disconnects. RFC 9293 section 3.6.1 permits TCP reset when unread partial
+bytes remain; complete idle RPC exchanges must still close with EOF.
+
+Ordinary native unmount now runs in an awaited blocking task and retries while
+busy. Cache admission, the data listener and control status remain owned until
+the kernel client detaches. Engine control admission closes and admitted controls
+drain while WRITE callbacks still work. Requesting shutdown no longer closes the
+control transport immediately; repeated shutdown/status reach the same owner.
+Pipeline and daemon hydration use an independent data lifetime, so request
+cancellation cannot reject a busy client's cold pointer read. Background shutdown
+still uses the existing explicit service drain contract. Already-cancelled
+pipeline preparation returns before clone/startup, with a final check before
+worker admission.
+
+MOUNT/UMOUNT handlers await sends on a bounded notification channel. Teardown
+closes its receiver before joining RPCs; mount failure drops it too. Otherwise a
+second admitted notification could wait forever after the lifecycle loop exits.
+Synthetic servers in ownership tests now stop cooperatively through their token,
+rather than depending on the production abort being tested.
+
+A late-write regression against the candidate's original pre-unmount journal
+flush returns with one unstable write still pending. Its owned callback finishes
+a real NFS adapter/overlay write only after listener shutdown starts. The final
+flush now follows every RPC and control join, before engine shutdown. The test
+requires a cleared journal, successful local sync and exact retained bytes.
+
+The complete locked package, BSD-3-Clause license and provenance are retained at
+`vendor/nfs3_server`. All retained upstream files match the registry package except
+four patched Rust modules and README trailing-whitespace normalization. Cargo workspace membership stays unchanged. Cargo.lock only
+removes this package's registry source/checksum; versions and dependency edges do
+not change. The user explicitly approved this dependency patch and vendor scope;
+no Cellar/SQLite or other override is authorized.
+
+Final-source qualification:
+
+- Dedicated Linux passes 663 VFS tests and all 16 native FUSE/NFS probes;
+  macOS passes 139 selected NFS/control/pipeline/hydration tests. Strict all-target
+  VFS Clippy passes both feature/platform slices; all 136 Linux CLI mount tests
+  also pass. Linux minimal and FUSE-only
+  checks and the dependency's test-reexport feature through crab-vfs also pass.
+- Make-installed roles on each platform pass foreground RW/RO and background RW
+  NFS flows: live owner identity, cache exclusion, write/fsync, diff/export,
+  no-push commit, retained bytes on remount, RO rejection, idle-control EOF,
+  socket removal, endpoint-lease release and registry cleanup. Linux verifies
+  the existing 10 MiB Capsule/RustFS fixture; macOS normal flows use real local
+  Git bytes. No forced cleanup is used.
+- A separate native busy-client process retains its mount cwd. On both Linux
+  and macOS, SIGINT/RO and CLI-control/RW shutdown retain the serving owner,
+  kernel mount, cache exclusion and live status. A new VFS read after shutdown
+  returns the exact 6 MiB RustFS pointer; counters prove new hydration requests
+  and window misses. Lower cache warmth is not origin-performance proof.
+  RW additionally completes native write/fsync after shutdown was requested.
+  Releasing the client produces ordinary detachment, owner exit zero, cache
+  availability and clean registry; the control CLI also exits zero. All four
+  cases require no emergency/forced cleanup.
+- All five Docker stages that explicitly copy workspace Cargo inputs now include
+  this vendor directory, and the root context whitelist includes only that new
+  vendor subtree. An ordinary directory-context build with the old ignore rules
+  fails to find it; the corrected source context builds and offline Cargo
+  dependency resolution selects `/build/vendor/nfs3_server`. Eleven auth-helper
+  packaging checks pass. Full service-image/runtime proof remains CI-owned.
+  The release builders copy the whole context; the unpublished VFS crate is
+  absent from the SDK's published package closure.
+
+Local `nfs-data/source-manifest.json` binds 1,556 Rust/manifest/build-context
+inputs, with actual installed binary hashes on both platforms; raw evidence
+stays outside the PR. The initial Linux install exhausted the VM root disk.
+Only this task's build/artifact directory was moved to the VM's existing data
+filesystem, preserving its paths and contents; final installs and native checks
+then pass. No unrelated VM, target or repository was cleaned. Production code
+adds explicit ownership rather than a second serving path; the complete vendored
+package accounts for most of the LOC increase, while the upstream delta is four
+modules. Test additions use flat siblings.
+
+The separate startup launcher still eventually force-kills after ten seconds;
+this shared-owner repair does not qualify that path or daemon/private modes.
+Mount-presence query failures still collapse to a boolean in the inherited probe;
+error-aware ownership decisions need separate reproduction and repair. macOS
+mapped-write draining, complete generation/remote-GC retention, stored pack-v1
+retirement, Windows locks and optimized total-resource/performance gates remain.
+
 ## Remaining priority order
 
 The helper-layout gap and live read-only inspection leak are closed by the
@@ -2186,8 +2275,9 @@ Checkpoint-32 repairs CLI foreground NFS discovery and qualifies cooperative
 foreground/helper teardown. Native macOS mapped-write draining, stalled cleanup
 and the remaining product owners still block signoff.
 Checkpoint-33 closes the reproduced Unix control-socket and accepted-control
-ownership gaps. Next qualify data-server child tasks and busy-unmount ownership,
-plus the macOS mapping barrier, before claiming teardown complete.
+ownership gaps. Checkpoint-36 repairs the shared data owner and busy-unmount
+lifetime; qualify stalled launcher startup, daemon/private owners and the macOS
+mapping barrier before claiming teardown complete.
 
 1. **Correctness: coherent Git/Capsule generations.** Atomically install selected
    Git state, pinned catalog and read service for startup, refresh, switch and

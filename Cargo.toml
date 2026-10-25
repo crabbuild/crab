@@ -1,5 +1,6 @@
 [workspace]
 resolver = "3"
+exclude = ["vendor/nfs3_server"]
 members = [
     "crates/crab-auth",
     "crates/crab-auth-store",
@@ -160,3 +161,6 @@ strip = "symbols"
 # Keep debug builds fast; full debug info only when profiling.
 opt-level = 0
 debug = true
+
+[patch.crates-io]
+nfs3_server = { path = "vendor/nfs3_server" }

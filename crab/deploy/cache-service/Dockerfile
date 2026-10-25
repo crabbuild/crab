@@ -23,6 +23,7 @@ WORKDIR /build
 
 # Copy workspace root files first for layer caching.
 COPY Cargo.toml Cargo.lock ./
+COPY vendor/nfs3_server/ vendor/nfs3_server/
 
 # Copy the crates the workspace needs.
 COPY crates/ crates/

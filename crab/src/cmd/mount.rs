@@ -6456,7 +6456,10 @@ mod unmount_tests {
     }
 
     #[cfg(feature = "nfs")]
-    fn nfs_control_state(mountpoint: &Path) -> crate::vfs::nfs_control::NfsControlState {
+    fn nfs_control_state(
+        mountpoint: &Path,
+        shutdown: tokio_util::sync::CancellationToken,
+    ) -> crate::vfs::nfs_control::NfsControlState {
         let root = mountpoint.parent().unwrap();
         let source = root.join("control-source");
         for args in [
@@ -6502,6 +6505,7 @@ mod unmount_tests {
             .execute()
             .unwrap();
         crate::vfs::nfs_control::NfsControlState {
+            shutdown,
             mountpoint: mountpoint.to_path_buf(),
             read_only: true,
             read_leases: crate::vfs::read_lease_pool::ReadLeasePool::new(4, 4096),
@@ -6745,7 +6749,7 @@ mod unmount_tests {
             assert!(!nfs_background_control_ready(Some(&endpoint)).await);
 
             let cancel = tokio_util::sync::CancellationToken::new();
-            let state = nfs_control_state(&mountpoint);
+            let state = nfs_control_state(&mountpoint, cancel.clone());
             let engine = state.engine.clone().unwrap();
             let handle = crate::vfs::nfs_control::spawn_server(
                 Some(endpoint.clone()),
@@ -6793,7 +6797,7 @@ mod unmount_tests {
 
         runtime.block_on(async {
             let cancel = tokio_util::sync::CancellationToken::new();
-            let state = nfs_control_state(&mountpoint);
+            let state = nfs_control_state(&mountpoint, cancel.clone());
             let engine = state.engine.clone().unwrap();
             let handle = crate::vfs::nfs_control::spawn_server(
                 Some(endpoint.clone()),

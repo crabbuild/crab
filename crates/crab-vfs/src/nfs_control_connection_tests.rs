@@ -3,8 +3,9 @@
 use super::*;
 use tokio::io::AsyncBufReadExt;
 
-fn state(root: &Path) -> NfsControlState {
+fn state(root: &Path, shutdown: CancellationToken) -> NfsControlState {
     NfsControlState {
+        shutdown,
         mountpoint: root.join("view"),
         read_only: true,
         read_leases: ReadLeasePool::new(4, 4096),
@@ -27,7 +28,12 @@ async fn start_unix(
 ) {
     let endpoint = format!("unix:{}", root.join("control.sock").display());
     let cancel = CancellationToken::new();
-    let handle = spawn_server(Some(endpoint.clone()), state(root), cancel.clone()).unwrap();
+    let handle = spawn_server(
+        Some(endpoint.clone()),
+        state(root, cancel.clone()),
+        cancel.clone(),
+    )
+    .unwrap();
     for _ in 0..40 {
         if ping(&endpoint).await.is_ok() {
             return (endpoint, cancel, handle);
@@ -46,7 +52,7 @@ async fn duplicate_control_bind_does_not_unlink_the_serving_owner() {
     let second_cancel = CancellationToken::new();
     let mut second = spawn_server(
         Some(endpoint.clone()),
-        state(root.path()),
+        state(root.path(), second_cancel.clone()),
         second_cancel.clone(),
     )
     .unwrap();
@@ -121,9 +127,9 @@ async fn tcp_shutdown_joins_idle_authenticated_connections() {
         .await
         .unwrap();
     let addr = listener.local_addr().unwrap();
-    let state = state(root.path());
-    let leases = Arc::clone(&state.read_leases);
     let cancel = CancellationToken::new();
+    let state = state(root.path(), cancel.clone());
+    let leases = Arc::clone(&state.read_leases);
     let handle = tokio::spawn(run_tcp_listener(
         listener,
         "owned-token".into(),
@@ -160,4 +166,33 @@ async fn stalled_control_reply_has_a_write_deadline() {
     )
     .await;
     assert!(matches!(result, Ok(Err(error)) if error.kind() == std::io::ErrorKind::TimedOut));
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn shutdown_request_keeps_control_live_until_native_detachment() {
+    let root = tempfile::tempdir().unwrap();
+    let endpoint = format!("unix:{}", root.path().join("control.sock").display());
+    let detach = CancellationToken::new();
+    let transport = CancellationToken::new();
+    let owner = spawn_server(
+        Some(endpoint.clone()),
+        state(root.path(), detach.clone()),
+        transport.clone(),
+    )
+    .unwrap();
+    for _ in 0..40 {
+        if ping(&endpoint).await.is_ok() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    shutdown(&endpoint).await.unwrap();
+    assert!(detach.is_cancelled());
+    assert!(!transport.is_cancelled());
+    ping(&endpoint).await.unwrap();
+    // Repeated shutdown must acknowledge the same draining owner.
+    shutdown(&endpoint).await.unwrap();
+    transport.cancel();
+    owner.await.unwrap().unwrap();
 }

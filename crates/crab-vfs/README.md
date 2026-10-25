@@ -274,8 +274,23 @@ Its throughput is not directly comparable with older kernel-cached runs.
 | Hydration queue workers and read-window prefetch | `HydrationService`, retained by the mount owner | Await `shutdown()` after backend teardown; queued work is discarded and admitted prefetch finishes |
 | Ordinary Git loads and promotion copies | `OdbReader`, retained by `VfsEngine` | `VfsEngine::shutdown_background()` closes admission and drains admitted blocking operations before cache ownership is released |
 | Ref/snapshot refresh | Coordinator, daemon, or interactive NFS runtime | Cancel polling and await the task, including any admitted blocking Git/snapshot work |
-| NFS control connections | NFS control server, joined by the mount runtime | Cancel idle reads and await admitted handlers/replies before native unmount and read-resource shutdown |
-| NFS data server | NFS mount runtime | Native unmount precedes listener abort/join; upstream connection-task completion remains unqualified |
+| NFS control connections | NFS control server, joined by the mount runtime | Close engine mutation admission and drain controls before detach; keep status/shutdown live while busy, then stop idle reads and join handlers/replies |
+| NFS data server, connection parsers and RPCs | NFS mount runtime and the scoped nfs3_server owner | Retry ordinary native unmount while retaining serving/cache ownership; after detachment request graceful transport shutdown and join every admitted RPC |
+
+NFS shutdown requests stop refresh and new engine controls, while the installed
+data service remains available until native detachment. Pipeline and daemon
+hydration therefore use a separate lifetime from their shutdown-request token.
+A busy mount retains cold reads, WRITE callbacks, status and cache exclusion;
+ordinary unmount retries without forcing it. Mount-event admission closes before
+RPC drain so a bounded MOUNT/UMOUNT notification cannot retain that drain.
+The scoped `vendor/nfs3_server` patch owns accepted connections, their parsers,
+RPC tasks and transaction cleanup; `handle_forever` delegates to the same serving
+path. Transport shutdown stops incomplete input and blocked replies, then waits
+for admitted filesystem operations. The final journal flush follows RPC/control
+drain, covering unstable writes completed during teardown. Blocking Git/origin
+work may delay completion.
+The background launcher's eventual forced startup cleanup and daemon/private
+mode qualification remain separate gates.
 
 The NFS helper reports its actual cache identity when accepting shutdown. CLI
 unmount succeeds only after the kernel mount disappears and it acquires that

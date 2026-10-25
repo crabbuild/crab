@@ -1014,8 +1014,7 @@ impl VfsEngine {
     /// Foreground requests remain owned by the backend. Abandoned blocking work,
     /// queued workers and admitted prefetch retain ownership through completion.
     pub async fn shutdown_background(&self) {
-        self.close_control_admission();
-        self.control_tasks.wait().await;
+        self.drain_controls().await;
         self.request_shutdown();
         if let Some(reader) = &self.odb_reader {
             reader.shutdown().await;
@@ -1030,6 +1029,11 @@ impl VfsEngine {
             reader.request_shutdown();
         }
         self.hydration.request_shutdown();
+    }
+
+    pub(crate) async fn drain_controls(&self) {
+        self.close_control_admission();
+        self.control_tasks.wait().await;
     }
 
     pub(crate) fn close_control_admission(&self) {
