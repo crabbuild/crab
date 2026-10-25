@@ -2140,7 +2140,13 @@ async fn upload_built_batch(
             let external = candidate.external.ok_or_else(|| {
                 std::io::Error::other("external tree delta base bytes disappeared")
             })?;
-            let Some(next_external_bytes) = external_delta_bytes.checked_add(external.len()) else {
+            if external.oid() != candidate.base {
+                return Err(
+                    std::io::Error::other("external tree delta base identity diverged").into(),
+                );
+            }
+            let Some(next_external_bytes) = external_delta_bytes.checked_add(external.data().len())
+            else {
                 continue;
             };
             if next_external_bytes > MAX_GENERATED_PACK_BYTES as usize {
@@ -2149,12 +2155,7 @@ async fn upload_built_batch(
             external_delta_bytes = next_external_bytes;
             external_delta_bases.insert(
                 object,
-                crab_git::incoming_pack::ExternalDeltaBase::new(
-                    candidate.base,
-                    Kind::Tree,
-                    external,
-                    0,
-                ),
+                crab_git::incoming_pack::ExternalDeltaBase::from_generated_object(external, 0),
             );
         }
         delta_bases.insert(object, candidate.base);
@@ -2163,8 +2164,8 @@ async fn upload_built_batch(
     let capacity = metrics.reserve_scratch(scratch_bytes)?;
     let mut scratch = metrics.start_scratch(ScratchPurpose::GitPack);
     scratch.reserve(scratch_bytes);
-    // Tree construction already hashed these bytes. Pack preparation still
-    // independently verifies identities before this inventory is published.
+    // Generated objects bind their identities at construction. Preparation
+    // verifies current pack targets and raw external bases before publication.
     let visible_objects = seen.iter().map(ToString::to_string).collect();
     let generated_object_bytes = objects.iter().fold(0_usize, |total, object| {
         total.saturating_add(object.data().len())
@@ -2567,7 +2568,7 @@ struct BuiltCommit {
 struct TreeDeltaBase {
     object: ObjectId,
     base: ObjectId,
-    external: Option<Vec<u8>>,
+    external: Option<GeneratedObject>,
 }
 
 enum Build {
@@ -2585,6 +2586,7 @@ struct DirectoryEdit {
     oid: Option<ObjectId>,
     entries: Vec<TreeEntryEdit>,
     encoding: Option<TreeEncoding>,
+    generated_object: Option<GeneratedObject>,
     generated: bool,
     delta_ancestors: Vec<ObjectId>,
 }
@@ -2594,6 +2596,7 @@ struct DirectoryState {
     entries: Vec<tree::Entry>,
     encoding: TreeEncoding,
     delta_anchor: Option<TreeDeltaAnchor>,
+    pending_object: Option<GeneratedObject>,
     delta_ancestors: Vec<ObjectId>,
     generated_in_batch: bool,
 }
@@ -2642,9 +2645,10 @@ impl TreeEncoding {
     }
 }
 
+// Keep the identity-bound object with cached anchor bytes so reused REF_DELTA
+// bases need no repeated full-tree hash on each write.
 struct TreeDeltaAnchor {
-    oid: ObjectId,
-    bytes: Vec<u8>,
+    object: GeneratedObject,
     reused_batches: u32,
 }
 
@@ -2674,6 +2678,7 @@ impl WarmTree {
                 .estimated_bytes
                 .saturating_sub(estimated_tree_provenance_bytes(directory));
             directory.delta_anchor = None;
+            directory.pending_object = None;
             directory.delta_ancestors = Vec::new();
             directory.generated_in_batch = false;
         }
@@ -2695,16 +2700,26 @@ impl WarmTree {
             if depth == 0 {
                 // Reuse a verified full entry across batches; chaining each new
                 // tip forces repeated full copies of growing directories.
-                let bytes = directory.encoding.bytes.clone();
-                directory.delta_anchor =
-                    (bytes.len() <= MAX_GENERATED_TREE_DELTA_BYTES).then_some(TreeDeltaAnchor {
-                        oid,
-                        bytes,
+                let object = directory.pending_object.take().ok_or_else(|| {
+                    std::io::Error::other("generated directory lost its verified object")
+                })?;
+                if object.oid() != oid {
+                    return Err(std::io::Error::other(
+                        "generated directory object identity diverged",
+                    )
+                    .into());
+                }
+                directory.delta_anchor = (object.data().len() <= MAX_GENERATED_TREE_DELTA_BYTES)
+                    .then_some(TreeDeltaAnchor {
+                        object,
                         reused_batches: 0,
                     });
                 directory.delta_ancestors = Vec::new();
-            } else if let Some(anchor) = &mut directory.delta_anchor {
-                anchor.reused_batches = anchor.reused_batches.saturating_add(1);
+            } else {
+                directory.pending_object = None;
+                if let Some(anchor) = &mut directory.delta_anchor {
+                    anchor.reused_batches = anchor.reused_batches.saturating_add(1);
+                }
             }
             directory.generated_in_batch = false;
             self.estimated_bytes = self
@@ -2783,6 +2798,7 @@ impl MutableTree {
                     encoding: TreeEncoding::new(&entries),
                     entries,
                     delta_anchor: None,
+                    pending_object: None,
                     delta_ancestors: Vec::new(),
                     generated_in_batch: false,
                 };
@@ -2861,9 +2877,11 @@ impl MutableTree {
             let previous_provenance = estimated_tree_provenance_bytes(state);
             if edit.oid.is_none() {
                 state.delta_anchor = None;
+                state.pending_object = None;
                 state.delta_ancestors = Vec::new();
                 state.generated_in_batch = false;
             } else if edit.generated {
+                state.pending_object = edit.generated_object;
                 state.delta_ancestors = edit.delta_ancestors;
                 state.generated_in_batch = true;
             }
@@ -2943,7 +2961,10 @@ fn estimated_tree_provenance_bytes(directory: &DirectoryState) -> usize {
         .capacity()
         .saturating_mul(std::mem::size_of::<ObjectId>())
         .saturating_add(directory.delta_anchor.as_ref().map_or(0, |anchor| {
-            std::mem::size_of::<TreeDeltaAnchor>().saturating_add(anchor.bytes.capacity())
+            std::mem::size_of::<TreeDeltaAnchor>().saturating_add(anchor.object.data().len())
+        }))
+        .saturating_add(directory.pending_object.as_ref().map_or(0, |object| {
+            std::mem::size_of::<GeneratedObject>().saturating_add(object.data().len())
         }))
 }
 
@@ -3140,20 +3161,21 @@ async fn build_commit(
             .ok_or_else(|| std::io::Error::other("mutation directory state disappeared"))?;
         let changed = tree_entries_changed(&state.entries, &entries);
         let empty = tree_entry_count_after_edits(&state.entries, &entries) == 0;
-        let (oid, delta_ancestors, encoding) = if !changed {
-            (state.oid, Vec::new(), None)
+        let (oid, delta_ancestors, encoding, generated_object) = if !changed {
+            (state.oid, Vec::new(), None, None)
         } else if depth > 0 && empty {
-            (None, Vec::new(), None)
+            (None, Vec::new(), None, None)
         } else {
-            let encoded =
+            let (oid, ancestors, encoding, object) =
                 encode_tree_with_edits(state, &entries, &mut objects, &mut tree_delta_bases)?;
-            (Some(encoded.0), encoded.1, Some(encoded.2))
+            (Some(oid), ancestors, Some(encoding), Some(object))
         };
         directory_edits.push(DirectoryEdit {
             path: paths[depth].clone(),
             oid,
             entries,
             encoding,
+            generated_object,
             generated: changed && !(depth > 0 && empty),
             delta_ancestors,
         });
@@ -3505,7 +3527,7 @@ fn encode_tree_with_edits(
     edits: &[TreeEntryEdit],
     objects: &mut Vec<GeneratedObject>,
     delta_bases: &mut Vec<TreeDeltaBase>,
-) -> Result<(ObjectId, Vec<ObjectId>, TreeEncoding)> {
+) -> Result<(ObjectId, Vec<ObjectId>, TreeEncoding, GeneratedObject)> {
     let mut changes = BTreeMap::<usize, (bool, Vec<&tree::Entry>)>::new();
     for edit in edits {
         if let Some(index) = entry_index(&old.entries, &edit.name) {
@@ -3549,7 +3571,7 @@ fn encode_tree_with_edits(
     encoding.offsets.push(encoding.bytes.len());
     let object = GeneratedObject::new(Kind::Tree, encoding.bytes.clone())?;
     let oid = object.oid();
-    objects.push(object);
+    objects.push(object.clone());
     let mut delta_ancestors = Vec::new();
     let candidate = if old.generated_in_batch {
         old.oid
@@ -3561,7 +3583,7 @@ fn encode_tree_with_edits(
         old.delta_anchor
             .as_ref()
             .filter(|anchor| anchor.reused_batches < GENERATED_TREE_ANCHOR_REUSE_BATCHES)
-            .map(|anchor| (anchor.oid, Some(anchor.bytes.clone())))
+            .map(|anchor| (anchor.object.oid(), Some(anchor.object.clone())))
     };
     if let Some((base, external)) = candidate
         && oid != base
@@ -3576,7 +3598,7 @@ fn encode_tree_with_edits(
             external,
         });
     }
-    Ok((oid, delta_ancestors, encoding))
+    Ok((oid, delta_ancestors, encoding, object))
 }
 
 #[cfg(test)]
@@ -3748,12 +3770,13 @@ mod tests {
         let mut objects = Vec::new();
         let mut delta_bases = Vec::new();
 
-        let (oid, ancestors, _) = encode_tree_with_edits(
+        let (oid, ancestors, _, _) = encode_tree_with_edits(
             &DirectoryState {
                 oid: None,
                 entries: entries.clone(),
                 encoding: TreeEncoding::new(&entries),
                 delta_anchor: None,
+                pending_object: None,
                 delta_ancestors: Vec::new(),
                 generated_in_batch: false,
             },
@@ -3831,12 +3854,13 @@ mod tests {
         let mut objects = Vec::new();
         let mut delta_bases = Vec::new();
 
-        let (oid, ancestors, _) = encode_tree_with_edits(
+        let (oid, ancestors, _, _) = encode_tree_with_edits(
             &DirectoryState {
                 oid: Some(ObjectId::from([9; 20])),
                 entries: original.clone(),
                 encoding: TreeEncoding::new(&original),
                 delta_anchor: None,
+                pending_object: None,
                 delta_ancestors: Vec::new(),
                 generated_in_batch: true,
             },
@@ -3884,6 +3908,7 @@ mod tests {
             entries: Vec::new(),
             encoding: TreeEncoding::new(&[]),
             delta_anchor: None,
+            pending_object: None,
             delta_ancestors: Vec::new(),
             generated_in_batch: false,
         };
@@ -3922,7 +3947,7 @@ mod tests {
             .write_to(&mut expected)
             .unwrap();
             let mut objects = Vec::new();
-            let (oid, delta_ancestors, encoding) = encode_tree_with_edits(
+            let (oid, delta_ancestors, encoding, generated_object) = encode_tree_with_edits(
                 &tree_state.directories[&Vec::new()],
                 &edits,
                 &mut objects,
@@ -3937,6 +3962,7 @@ mod tests {
                         oid: Some(oid),
                         entries: edits,
                         encoding: Some(encoding),
+                        generated_object: Some(generated_object),
                         generated: true,
                         delta_ancestors,
                     }],
@@ -3976,15 +4002,15 @@ mod tests {
             entries: original.clone(),
             encoding: TreeEncoding::new(&original),
             delta_anchor: Some(TreeDeltaAnchor {
-                oid: old_oid,
-                bytes: encode_tree(&original),
+                object: GeneratedObject::new(Kind::Tree, encode_tree(&original)).unwrap(),
                 reused_batches: 0,
             }),
+            pending_object: None,
             delta_ancestors: Vec::new(),
             generated_in_batch: false,
         };
 
-        let (target, ancestors, _) = encode_tree_with_edits(
+        let (target, ancestors, _, _) = encode_tree_with_edits(
             &state,
             std::slice::from_ref(&edit),
             &mut objects,
@@ -3996,7 +4022,8 @@ mod tests {
         assert_eq!(bases[0].object, target);
         assert_eq!(bases[0].base, old_oid);
         let external = bases[0].external.as_ref().unwrap();
-        assert_eq!(*external, encode_tree(&original));
+        assert_eq!(external.oid(), old_oid);
+        assert_eq!(external.data(), encode_tree(&original));
         assert_eq!(ancestors, vec![old_oid]);
 
         let path = b"directory".to_vec();
@@ -4018,6 +4045,66 @@ mod tests {
     }
 
     #[test]
+    fn prepared_full_tree_becomes_the_identity_bound_warm_anchor() {
+        use std::sync::atomic::AtomicBool;
+
+        let temp = tempfile::tempdir().unwrap();
+        let entries = vec![tree::Entry {
+            mode: tree::EntryKind::Blob.into(),
+            filename: BString::from("file"),
+            oid: ObjectId::from([7; 20]),
+        }];
+        let object = GeneratedObject::new(Kind::Tree, encode_tree(&entries)).unwrap();
+        let oid = object.oid();
+        let state = DirectoryState {
+            oid: Some(oid),
+            entries: entries.clone(),
+            encoding: TreeEncoding::new(&entries),
+            delta_anchor: None,
+            pending_object: Some(object.clone()),
+            delta_ancestors: Vec::new(),
+            generated_in_batch: true,
+        };
+        let path = Vec::new();
+        let estimated_bytes = estimated_directory_bytes(&path, &state);
+        let mut tree = WarmTree {
+            directories: HashMap::from([(path.clone(), state)]),
+            estimated_bytes,
+            ..Default::default()
+        };
+        let limits = crab_git::incoming_pack::ReceiveLimits {
+            max_pack_bytes: 1024 * 1024,
+            max_objects: 10,
+            max_object_bytes: 1024 * 1024,
+            max_inflated_bytes: 1024 * 1024,
+            max_delta_depth: 1,
+        };
+        let incoming = crab_git::incoming_pack::IncomingPack::from_verified_objects(
+            [object],
+            temp.path(),
+            limits,
+            || false,
+        )
+        .unwrap();
+        let pack = incoming
+            .prepare(temp.path(), limits.max_pack_bytes, &AtomicBool::new(false))
+            .unwrap()
+            .unwrap();
+
+        tree.bind_prepared_pack(&pack).unwrap();
+
+        let state = &tree.directories[&path];
+        let anchor = state.delta_anchor.as_ref().unwrap();
+        assert_eq!(anchor.object.oid(), oid);
+        assert_eq!(anchor.object.data(), encode_tree(&entries));
+        assert!(state.pending_object.is_none());
+        assert_eq!(
+            tree.estimated_bytes,
+            estimated_directory_bytes(&path, state)
+        );
+    }
+
+    #[test]
     fn warm_tree_delta_does_not_point_back_to_an_ancestor() {
         let original = vec![tree::Entry {
             mode: tree::EntryKind::Blob.into(),
@@ -4031,6 +4118,7 @@ mod tests {
             entries: Vec::new(),
             encoding: TreeEncoding::new(&[]),
             delta_anchor: None,
+            pending_object: None,
             delta_ancestors: vec![target_oid],
             generated_in_batch: true,
         };
@@ -4041,7 +4129,7 @@ mod tests {
         let mut objects = Vec::new();
         let mut bases = Vec::new();
 
-        let (oid, ancestors, _) =
+        let (oid, ancestors, _, _) =
             encode_tree_with_edits(&state, &[edit], &mut objects, &mut bases).unwrap();
 
         assert_eq!(oid, target_oid);

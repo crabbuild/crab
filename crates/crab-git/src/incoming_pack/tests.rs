@@ -914,7 +914,10 @@ fn generated_external_tree_base_produces_bounded_cross_pack_ref_delta() {
             &BTreeMap::from([(target_oid, base_oid)]),
             &BTreeMap::from([(
                 target_oid,
-                ExternalDeltaBase::new(base_oid, Kind::Tree, base.clone(), 0),
+                ExternalDeltaBase::from_generated_object(
+                    GeneratedObject::new(Kind::Tree, base.clone()).unwrap(),
+                    0,
+                ),
             )]),
             8,
             1024 * 1024,
@@ -957,6 +960,55 @@ fn generated_external_tree_base_produces_bounded_cross_pack_ref_delta() {
         ),
         target
     );
+}
+
+#[test]
+fn raw_external_delta_base_with_wrong_identity_falls_back_to_full_object() {
+    use std::sync::atomic::AtomicBool;
+
+    let temp = tempfile::tempdir().unwrap();
+    let base = vec![b'x'; 4096];
+    let mut target = base.clone();
+    target[2048] = b'y';
+    let base_oid = object_id(Kind::Blob, &base);
+    let target_oid = object_id(Kind::Blob, &target);
+    let accepted = IncomingPack::from_generated_objects(
+        [(Kind::Blob, target)],
+        temp.path(),
+        ReceiveLimits {
+            max_pack_bytes: 16 * 1024 * 1024,
+            max_objects: 10,
+            max_object_bytes: 1024 * 1024,
+            max_inflated_bytes: 2 * 1024 * 1024,
+            max_delta_depth: 8,
+        },
+        || false,
+    )
+    .unwrap();
+    let flag = AtomicBool::new(false);
+    let full = accepted
+        .prepare(temp.path(), 16 * 1024 * 1024, &flag)
+        .unwrap()
+        .unwrap();
+    let mismatched = accepted
+        .prepare_with_external_delta_bases(
+            temp.path(),
+            16 * 1024 * 1024,
+            &flag,
+            &BTreeMap::from([(target_oid, base_oid)]),
+            &BTreeMap::from([(
+                target_oid,
+                ExternalDeltaBase::new(base_oid, Kind::Blob, vec![b'z'; base.len()], 0),
+            )]),
+            8,
+            1024 * 1024,
+        )
+        .unwrap()
+        .unwrap();
+
+    assert_eq!(mismatched.size(), full.size());
+    assert_eq!(mismatched.external_delta_count(), 0);
+    assert_eq!(mismatched.delta_depth(&target_oid), Some(0));
 }
 
 #[test]
