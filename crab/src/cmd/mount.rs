@@ -6814,10 +6814,10 @@ mod unmount_tests {
     }
 
     #[cfg(feature = "fuse")]
-    #[test]
-    fn flush_mount_writes_accepts_existing_directory() {
+    #[tokio::test]
+    async fn flush_mount_writes_accepts_existing_directory() {
         let tmp = tempfile::tempdir().unwrap();
-        flush_mount_writes(tmp.path()).unwrap();
+        flush_mount_writes(tmp.path()).await.unwrap();
     }
 }
 
@@ -7205,7 +7205,7 @@ mod nfs_mount_registration_tests {
     }
 
     #[test]
-    fn background_registration_stores_canonical_local_source() {
+    fn background_registration_retains_canonical_source_after_it_disappears() {
         let tmp = tempfile::tempdir().unwrap();
         let repo = tmp.path().join("repo");
         std::fs::create_dir_all(repo.join(".git")).unwrap();
@@ -7216,8 +7216,13 @@ mod nfs_mount_registration_tests {
         let _cwd = CurrentDirGuard::set(tmp.path());
         let _home = set_test_home(tmp.path());
 
+        let source = crate::vfs::source::MountSource::canonical_input("./repo").unwrap();
+        let canonical_repo = std::fs::canonicalize(&repo).unwrap();
+        // The CLI normalizes before helper startup; registry publication must
+        // retain that identity even if the source disappears while starting.
+        std::fs::remove_dir_all(&repo).unwrap();
         register_nfs_background_mount(
-            &opts("./repo", mountpoint.clone()),
+            &opts(&source, mountpoint.clone()),
             &mountpoint,
             12345,
             &log_path,
@@ -7227,7 +7232,6 @@ mod nfs_mount_registration_tests {
 
         let entries =
             mounts_registry::read_entries(&mounts_registry::registry_path().unwrap()).unwrap();
-        let canonical_repo = std::fs::canonicalize(repo).unwrap();
 
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].source, canonical_repo.display().to_string());

@@ -6079,7 +6079,7 @@ mod tests {
             dst: "refs/heads/main".to_owned(),
         })]);
 
-        dispatch_batch(
+        Box::pin(dispatch_batch(
             &batch,
             &HelperOptions::default(),
             &mut writer,
@@ -6095,7 +6095,7 @@ mod tests {
             None,
             None,
             &cancel,
-        )
+        ))
         .await
         .expect("dispatch push batch");
 
@@ -6166,7 +6166,7 @@ mod tests {
                 .expect("reopen staging readonly"),
         );
         let mut writer = Vec::new();
-        dispatch_batch(
+        Box::pin(dispatch_batch(
             &batch,
             &HelperOptions::default(),
             &mut writer,
@@ -6182,7 +6182,7 @@ mod tests {
             None,
             None,
             &cancel,
-        )
+        ))
         .await
         .expect("dispatch incremental pointer push");
         assert_eq!(
@@ -6256,7 +6256,7 @@ mod tests {
                 .checkpoint()
                 .unwrap()
                 .format(),
-            5
+            9
         );
         let repeated = crate::cmd::repack::run_repack_from_root(
             &store,
@@ -6322,32 +6322,47 @@ mod tests {
             .expect("hydrate pointer after checkpoint");
         assert_eq!(reconstructed, updated_content);
 
-        // These are advisory placement hints, not discovery or durability proof.
-        // The v2 writer must verify origin bytes under GC admission before reuse.
-        let mut remote_candidates = std::collections::HashMap::new();
-        for (xorb_hash, entry) in updated_catalog.xorbs() {
-            let xorb_hash =
-                crab_xet::hash::MerkleHash::from_hex(xorb_hash).expect("catalog xorb hash");
-            for (chunk_index, chunk) in entry.chunks().iter().enumerate() {
-                let chunk_hash =
-                    crab_xet::hash::MerkleHash::from_hex(chunk.hash()).expect("catalog chunk hash");
-                let identity =
-                    *blake3::hash(format!("{xorb_hash}:{chunk_index}:{chunk_hash}").as_bytes())
-                        .as_bytes();
-                remote_candidates.insert(
-                    chunk_hash,
+        // Use published proof identities, as add does. Invented IDs are stale
+        // authority and cannot justify deleting the local payload copy.
+        let chunk_hashes = updated_catalog
+            .xorbs()
+            .values()
+            .flat_map(|entry| entry.chunks())
+            .map(|chunk| {
+                crab_xet::hash::MerkleHash::from_hex(chunk.hash()).expect("catalog chunk hash")
+            })
+            .collect::<Vec<_>>();
+        let candidates = crab_metadata::capsule_protocol::CapsuleChunkIndex::new(&layout)
+            .candidates(
+                store.as_storage(),
+                &chunk_hashes,
+                crab_metadata::capsule_protocol::MAX_CATALOG_BYTES,
+            )
+            .await
+            .expect("load published remote candidates");
+        let remote_candidates = candidates
+            .placements
+            .into_iter()
+            .map(|(hash, placement)| {
+                (
+                    crab_xet::hash::MerkleHash::from(hash),
                     crab_staging::push_plan::ExistingChunkCandidate {
                         xorb_ref: crab_xet::xorb::format::XorbRef {
-                            xorb_hash,
-                            chunk_index: u32::try_from(chunk_index).expect("chunk index"),
-                            uncompressed_size: chunk.uncompressed_size(),
+                            xorb_hash: crab_xet::hash::MerkleHash::from(placement.xorb_hash),
+                            chunk_index: placement.chunk_index,
+                            uncompressed_size: placement.uncompressed_size,
                         },
-                        placement_id: identity,
-                        origin_proof_id: identity,
+                        placement_id: placement.placement_id(),
+                        origin_proof_id: placement.origin_proof_id,
                     },
-                );
-            }
-        }
+                )
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        assert!(
+            chunk_hashes
+                .iter()
+                .all(|hash| remote_candidates.contains_key(hash))
+        );
 
         drop(_git_guard);
         let consumer = tmp.path().join("consumer");
@@ -6394,7 +6409,7 @@ mod tests {
         let mut consumer_cache = SessionCache::new(consumer_config);
         let mut consumer_push_state = PushState::default();
         let mut consumer_writer = Vec::new();
-        dispatch_batch(
+        Box::pin(dispatch_batch(
             &batch,
             &HelperOptions::default(),
             &mut consumer_writer,
@@ -6410,7 +6425,7 @@ mod tests {
             None,
             None,
             &cancel,
-        )
+        ))
         .await
         .expect("dispatch cross-repository pointer push");
         assert_eq!(
