@@ -1,0 +1,30 @@
+{
+  "observed_at_utc": "2026-10-25T07:39:03.975889+00:00",
+  "source_checkpoint": "bc368d189ce",
+  "upstream_base": "33f8e6c360d922b3ab1e2c0e5115a2d200eccd97",
+  "latest_upstream_observed": "9cc0fdab60a",
+  "source_files_sha256": {
+    "crates/crab-vfs/src/lib.rs": "a63fe8fb69ff9a59e8b23ee73ceecb322e5011e84688d8f0f486a8a2d07b1485",
+    "crates/crab-vfs/src/ipc_protocol.rs": "9e1d52c86fe22fd722dd8e645842a84ef1afd5a5061e4f7aeb2a2e1810081458",
+    "crates/crab-vfs/src/ipc_client.rs": "50ad1caa3ae030cfa049678eb066f24bf8b19e006596d94a45a30bf78d0929c1",
+    "crates/crab-vfs/src/ipc_server.rs": "b41622bd17f9a30b0978166c82b7feac9fd883cdff0cac6768d55f05fdb643ee",
+    "crates/crab-vfs/src/mount_control.rs": "28cf68c1ef5c09f4215506f50bcaa188a34574c9c90eb029e2bcf6e8501271b7",
+    "crates/crab-vfs/src/mount_control/tests.rs": "c32a50efec16386256eb6f215a1dfb63c168acc45532b2be57ebaf7c2884c8a0",
+    "crab/src/cmd/mount.rs": "458704874dc1a304f0ac9b4df4eee7786a64272b84f11995b91f1a82a0d0982a",
+    "crab/src/cmd/coordinator.rs": "e547c638797f8b82a6eaf6e0bf291d3353a7fe3ab7860e1603f9b44ee5df358a",
+    "crab/tests/coordinator_lifecycle.rs": "e1114d4a5aaebda3b833b564899e5369c6132e16d62886643404cd9c2b68c496",
+    "crab/tests/prop_coordinator.rs": "9951bfb6c52ef52b7828f2933db9685ab979dcb7482f7fdcdcd272febfce5ac0"
+  },
+  "verified": {
+    "linux_nfs_only_control_tests": 11,
+    "macos_nfs_only_compile": true,
+    "format": true
+  },
+  "pending": [
+    "latest crab-v2 integration",
+    "fresh combined/native final run",
+    "distinct installed main CLI FUSE controls with RustFS",
+    "all-mode and optimized performance qualification"
+  ],
+  "full_goal_complete": false
+}

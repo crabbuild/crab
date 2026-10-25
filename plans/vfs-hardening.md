@@ -1371,12 +1371,19 @@ no longer requires linking FUSE, and duplicate live reset handling is removed.
 All request/response consumers, including coordinator integration/property tests,
 now import the protocol module. Transport errors preserve their source chain.
 
-The NFS-only Unix peer regression covers all shared controls and a rejected
-publication. Exact installed-binary/provider qualification of this checkpoint is
+The fresh Linux NFS-only Unix peer regression passes all 11 control tests,
+including a rejected publication. Fresh macOS NFS-only compilation and formatting
+pass. Make has built the combined-feature macOS CLI; the distinct role install
+is continuing. Exact installed-binary/provider qualification of this checkpoint is
 pending; checkpoint-21 helper-only proof does not qualify it. Historical logs
 remain retained. At this checkpoint the external build directory was absent;
 fresh Linux/macOS build directories were created on the mounted Workspace volume.
 The task-owned VM and RustFS services were retained. No prior binary was reused.
+Two broad Linux attempts pass 633 tests and fail two Git fixtures because Cargo
+starts their executable below the source mount's host-only linked-worktree
+pointer. Changing Cargo's own working directory does not change test cwd. A
+rerun executes the exact newly built test binary from the isolated ext4 fixture
+directory; source/tests are unchanged. Retain both failed harness runs.
 
 `origin/crab-v2` advanced from the audited base to `9cc0fdab60a` (SDK/Capsule PR
 #629). Its read-feature and metadata contracts overlap this patch. The first PR
