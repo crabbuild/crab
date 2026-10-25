@@ -1,0 +1,313 @@
+    Checking rand_core v0.6.4
+    Checking zerocopy v0.8.48
+    Checking unicode-normalization v0.1.25
+    Checking human_format v1.2.1
+    Checking bytesize v2.3.1
+    Checking crypto-common v0.1.7
+    Checking digest v0.10.7
+    Checking gix-utils v0.3.3
+    Checking prodash v31.0.0
+    Checking gix-error v0.2.4
+    Checking libm v0.2.16
+    Checking byteorder v1.5.0
+    Checking tokio v1.53.1
+    Checking gix-features v0.48.0
+    Checking rustix v1.1.4
+    Checking hash32 v0.3.1
+    Checking heapless v0.8.0
+    Checking num-traits v0.2.19
+    Checking faster-hex v0.10.0
+    Checking ahash v0.8.12
+    Checking sha1 v0.10.6
+    Checking indexmap v2.14.0
+    Checking gix-date v0.15.5
+    Checking sha1-checked v0.10.0
+    Checking gix-actor v0.41.1
+    Checking gix-hash v0.25.0
+    Checking tempfile v3.27.0
+    Checking hashbrown v0.14.5
+    Checking gix-hashtable v0.15.0
+    Checking gix-fs v0.21.1
+    Checking gix-object v0.60.0
+    Checking gix-chunk v0.7.2
+    Checking chrono v0.4.45
+    Checking gix-commitgraph v0.37.0
+    Checking gix-quote v0.7.2
+    Checking gix-revwalk v0.31.0
+    Checking signal-hook v0.4.4
+    Checking dashmap v6.1.0
+    Checking gix-glob v0.26.0
+    Checking arrayvec v0.7.6
+    Checking tokio-util v0.7.18
+    Checking tower v0.5.3
+    Checking tokio-rustls v0.26.4
+    Checking gix-tempfile v23.0.0
+    Checking shell-words v1.1.1
+    Checking gix-lock v23.0.1
+    Checking gix-command v0.9.0
+    Checking tower-http v0.6.8
+    Checking gix-attributes v0.33.0
+    Checking h2 v0.4.19
+    Checking gix-traverse v0.57.0
+    Checking gix-config-value v0.18.0
+    Checking gix-packetline v0.21.3
+    Checking blake3 v1.8.5
+    Checking deranged v0.5.8
+    Checking gix-bitmap v0.3.2
+    Checking ppv-lite86 v0.2.21
+    Checking gix-index v0.51.0
+    Checking rand_chacha v0.9.0
+    Checking encoding_rs v0.8.35
+    Checking time v0.3.47
+    Checking rand v0.9.4
+    Checking gix-ignore v0.21.0
+    Checking gix-worktree v0.52.0
+    Checking gix-filter v0.30.0
+    Checking nix v0.31.3
+    Checking gix-pathspec v0.18.0
+    Checking crc-fast v1.10.0
+    Checking gix-ref v0.63.0
+    Checking hyper v1.11.1
+    Checking md-5 v0.11.0
+    Checking tracing-appender v0.2.5
+    Checking gix-diff v0.63.0
+    Checking hyper-util v0.1.20
+    Checking approx v0.5.1
+    Checking statrs v0.18.0
+    Checking gix-discover v0.51.0
+    Checking uluru v3.1.0
+    Checking tokio-retry v0.3.1
+    Checking fs4 v0.13.1
+    Checking clru v0.6.3
+    Checking simd-adler32 v0.3.9
+    Checking foyer-tokio v0.22.3
+    Checking gix-pack v0.70.0
+    Checking hashlink v0.9.1
+    Checking miniz_oxide v0.8.9
+    Checking num-integer v0.1.46
+    Checking toml_edit v0.22.27
+    Checking hyper-rustls v0.27.9
+    Checking rusqlite v0.31.0
+    Checking reqwest v0.13.3
+    Checking reqwest v0.12.28
+    Checking gix-odb v0.80.0
+    Checking object_store v0.14.1
+    Checking xet-runtime v1.6.0
+    Checking reqwest-middleware v0.5.1
+    Checking foyer-common v0.22.3
+    Checking flate2 v1.1.9
+    Checking serde_yaml v0.9.34+deprecated
+    Checking foyer-memory v0.22.3
+    Checking toml v0.8.23
+    Checking num-bigint v0.4.6
+    Checking sha2 v0.10.9
+    Checking crab-git v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-git)
+    Checking xet-core-structures v1.6.0
+    Checking num-rational v0.4.2
+    Checking foyer-storage v0.22.3
+    Checking rust_decimal v1.41.0
+    Checking xet-client v1.6.0
+    Checking num-iter v0.1.45
+    Checking num-complex v0.4.6
+    Checking duration-str v0.11.3
+    Checking foyer v0.22.3
+    Checking num v0.4.3
+    Checking figment v0.10.19
+    Checking crab-storage v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-storage)
+    Checking slatedb-common v0.15.0
+    Checking slatedb-txn-obj v0.15.0
+    Checking fail-parallel v0.6.0
+    Checking ulid v1.2.1
+    Checking backon v1.6.0
+    Checking half v2.7.1
+    Checking lexical-util v1.0.7
+    Checking slatedb v0.15.0
+    Checking arrow-buffer v55.2.0
+    Checking inout v0.1.4
+    Checking arrow-schema v55.2.0
+    Checking cipher v0.4.4
+    Checking arrow-data v55.2.0
+    Checking crab-coordination v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-coordination)
+    Checking universal-hash v0.5.1
+    Checking utf8parse v0.2.2
+    Checking opaque-debug v0.3.1
+    Checking poly1305 v0.8.0
+    Checking anstyle-parse v1.0.0
+    Checking arrow-array v55.2.0
+    Checking xet-data v1.6.0
+    Checking chacha20 v0.9.1
+    Checking lexical-parse-integer v1.0.6
+    Checking lexical-write-integer v1.0.6
+    Checking gix-revision v0.45.0
+    Checking aead v0.5.2
+    Checking colorchoice v1.0.5
+    Checking anstyle-query v1.1.5
+    Checking is_terminal_polyfill v1.70.2
+    Checking anstyle v1.0.14
+    Checking gix-refspec v0.41.0
+    Checking crab-xet v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-xet)
+    Checking anstream v1.0.0
+    Checking chacha20poly1305 v0.10.1
+    Checking lexical-write-float v1.0.6
+    Checking lexical-parse-float v1.0.6
+    Checking utoipa v5.5.0
+    Checking crab-lfs v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-lfs)
+    Checking crab-diff v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-diff)
+    Checking crab-cache v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-cache)
+    Checking crab-staging v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-staging)
+    Checking gix-prompt v0.15.0
+    Checking clap_lex v1.1.0
+    Checking strsim v0.11.1
+    Checking clap_builder v4.6.0
+    Checking crab-cache-store v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-cache-store)
+    Checking gix-credentials v0.38.0
+    Checking crab-auth v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-auth)
+    Checking lexical-core v1.0.6
+    Checking arrow-select v55.2.0
+    Checking gix-dir v0.25.0
+    Checking gix-transport v0.57.0
+    Checking gix-config v0.56.0
+    Checking gix-worktree-stream v0.32.0
+    Checking gix-shallow v0.12.0
+    Checking gix-negotiate v0.31.0
+    Checking atoi v2.0.0
+    Checking ordered-float v2.10.1
+    Checking io-close v0.3.7
+    Checking integer-encoding v3.0.4
+    Checking bumpalo v3.20.2
+    Checking fixedbitset v0.4.2
+    Checking zopfli v0.8.3
+    Checking crab-metadata v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-metadata)
+    Checking petgraph v0.6.5
+    Checking thrift v0.17.0
+    Checking gix-worktree-state v0.30.0
+    Checking gix-protocol v0.61.0
+    Checking arrow-cast v55.2.0
+    Checking gix-submodule v0.30.0
+    Checking gix-archive v0.32.0
+    Checking gix-status v0.30.0
+    Checking nfs3_server v0.11.0
+    Checking clap v4.6.1
+    Checking snap v1.1.1
+    Checking arrow-ipc v55.2.0
+    Checking gix-blame v0.13.0
+    Checking process-wrap v10.0.0
+    Checking lz4_flex v0.11.6
+    Checking gix-mailmap v0.33.1
+    Checking xattr v1.6.1
+    Checking unicode-width v0.2.2
+    Checking parquet v55.2.0
+    Checking tar v0.4.45
+    Checking console v0.15.11
+    Checking gix v0.83.0
+   Compiling crab v1.2.4 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crab)
+    Checking clap_complete v4.6.5
+    Checking crab-auth-store v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-auth-store)
+    Checking crab-workflow v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-workflow)
+    Checking zip v6.0.0
+    Checking gix-fsck v0.21.0
+    Checking self-replace v1.5.0
+    Checking quick-xml v0.37.5
+    Checking memory-stats v1.2.0
+    Checking semver v1.0.28
+    Checking regex-lite v0.1.9
+    Checking crab-remote-git v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-remote-git)
+    Checking crab-read v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-read)
+    Checking crab-write v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-write)
+    Checking crab-vfs v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-vfs)
+    Checking crab-remote v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-remote)
+warning: unused import: `std::fmt`
+ --> crab/src/replication/mod.rs:9:5
+  |
+9 | use std::fmt;
+  |     ^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `tracing::warn`
+  --> crab/src/storage/head_class.rs:57:5
+   |
+57 | use tracing::warn;
+   |     ^^^^^^^^^^^^^
+
+warning: unused variable: `rel_path`
+    --> crab/src/cmd/add.rs:2768:10
+     |
+2768 |     for (rel_path, abs_path) in selected_dirs {
+     |          ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_rel_path`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `prefix` is never read
+    --> crab/src/cmd/fsck_store.rs:1389:5
+     |
+1387 | pub struct StoreRepairer {
+     |            ------------- field in this struct
+1388 |     store: Store,
+1389 |     prefix: String,
+     |     ^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `run_yaml_single_stage` is never used
+    --> crab/src/cmd/run.rs:1348:10
+     |
+1348 | async fn run_yaml_single_stage(
+     |          ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `preview_stage_cache_hit` is never used
+    --> crab/src/cmd/run.rs:3618:4
+     |
+3618 | fn preview_stage_cache_hit(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `object_relative_key` is never used
+   --> crab/src/import/versions.rs:536:4
+    |
+536 | fn object_relative_key(prefix: &str, full_key: &str) -> Option<String> {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `snapshot_records_at` is never used
+   --> crab/src/import/versions.rs:548:4
+    |
+548 | fn snapshot_records_at(records: Vec<VersionRecord>, at: i64) -> Vec<VersionRecord> {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `is_newer_snapshot_record` is never used
+   --> crab/src/import/versions.rs:568:4
+    |
+568 | fn is_newer_snapshot_record(candidate: &VersionRecord, existing: &VersionRecord) -> bool {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `control_plane_backend_initialization_failed` is never used
+    --> crab/src/replication/mod.rs:2149:4
+     |
+2149 | fn control_plane_backend_initialization_failed(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `gcs_pair_policy_state` is never used
+    --> crab/src/replication/mod.rs:5753:4
+     |
+5753 | fn gcs_pair_policy_state(
+     |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_coordinator_gc_snapshot_admission` is never used
+    --> crab/src/replication/mod.rs:7439:4
+     |
+7439 | fn validate_coordinator_gc_snapshot_admission(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `coordinator_gc_snapshot_status_error` is never used
+    --> crab/src/replication/mod.rs:7469:4
+     |
+7469 | fn coordinator_gc_snapshot_status_error(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `aws_region` is never used
+   --> crab/src/tier/runtime.rs:159:4
+    |
+159 | fn aws_region(config: &Config) -> String {
+    |    ^^^^^^^^^^
+
+warning: `crab` (lib) generated 14 warnings (run `cargo fix --lib -p crab` to apply 3 suggestions)
+    Finished `dev` profile [unoptimized] target(s) in 1m 25s

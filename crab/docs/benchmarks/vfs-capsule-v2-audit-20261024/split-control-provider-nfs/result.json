@@ -1,0 +1,30 @@
+{
+  "backend": "nfs",
+  "helper_controls": false,
+  "salt": "8bfa159de6f245e3800641b547e1ab82",
+  "remote": "crab://crab/mount-large/mapped-nfs-8bfa159de6f245e3800641b547e1ab82",
+  "work": "/root/Workspace/crabbuild-target/vfs-audit/run/mapped-provider-nfs-8bfa159de6",
+  "results": [
+    {
+      "action": "refresh",
+      "branch": "main",
+      "bytes": 4194304,
+      "expected_sha256": "ba88f083380110f6d847231410eef4a34ca4e2e658f76bbf7326ada37c59ef12",
+      "clone_sha256": "ba88f083380110f6d847231410eef4a34ca4e2e658f76bbf7326ada37c59ef12"
+    },
+    {
+      "action": "switch",
+      "branch": "other",
+      "bytes": 4194304,
+      "expected_sha256": "597200b2ab31a492e80314aef1cfdf422293ff90a59ab9d69581b22d5e111d2e",
+      "clone_sha256": "597200b2ab31a492e80314aef1cfdf422293ff90a59ab9d69581b22d5e111d2e"
+    },
+    {
+      "action": "automatic",
+      "branch": "other",
+      "bytes": 4194304,
+      "expected_sha256": "ba88f083380110f6d847231410eef4a34ca4e2e658f76bbf7326ada37c59ef12",
+      "clone_sha256": "ba88f083380110f6d847231410eef4a34ca4e2e658f76bbf7326ada37c59ef12"
+    }
+  ]
+}

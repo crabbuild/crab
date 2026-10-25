@@ -1,0 +1,4 @@
+Mounted at /mnt/mapped
+  PID: 646
+  HEAD: 5816c0fd4610069c53e86b85e2cae2a95ea0cba1
+Use `crab unmount --mountpoint /mnt/mapped` to stop.

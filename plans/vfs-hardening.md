@@ -8,7 +8,10 @@ full objective across implementation checkpoints. No release qualification is
 claimed by a partial checkpoint.
 
 Baseline: `origin/crab-v2` at `33f8e6c360d922b3ab1e2c0e5115a2d200eccd97`.
-Working branch: `codex/vfs-hardening`. PR checkpoint; follow-up hardening remains active.
+Working branch: `codex/vfs-hardening`. Draft PR:
+https://github.com/crabbuild/crab/pull/630 (base `crab-v2`). Follow-up hardening
+remains active. The PR checkpoint is rebased onto `9cc0fdab60a`; fresh integration
+and installed-role evidence is recorded at the twenty-third checkpoint.
 
 Baseline evidence and reproductions:
 `crab/docs/benchmarks/vfs-capsule-v2-audit-20261024.md` and its adjacent evidence
@@ -1397,12 +1400,79 @@ this checkpoint or historical passing logs as latest-base release qualification.
 The checkpoint-format expected-value patch remains unapplied. SQLite/Cellar,
 remaining stored-format retirement, all-mode and performance gates stay open.
 
+## Twenty-third checkpoint: integrate native SDK/Capsule authority
+
+Rebased onto `origin/crab-v2` at `9cc0fdab60a` (SDK/Capsule #629). Five conflicts
+were resolved across CLI/VFS read dependencies, read feature declarations,
+exports and scoped guidance. `local-staging` explicitly implies `hydration`;
+CLI/VFS select that one capability. Upstream metadata-only/SDK read gates remain
+intact. No compatibility alias, dependency override, version change or second
+hydration path was introduced. Fresh macOS NFS-only VFS and minimal `crab-read`
+checks pass. All ten SDK dependency profiles pass their existing boundary checker.
+The new base passes 635 VFS tests, all 14 native NFS/FUSE probes, strict combined
+all-target VFS Clippy, and minimal/NFS-only/FUSE-only VFS checks. Minimal read and
+SDK checks pass. The final VFS rerun retains 635 passes after normalizing the new
+Unix peer fixture's macOS temp alias to the canonical path advertised by the CLI;
+all 11 macOS NFS-only control tests pass without changing their assertions.
+Native production/harness sources were unaffected by that fixture correction.
+
+Make installs distinct Linux roles from the external debug target: NFS-only main
+CLI/NFS helper, combined-feature FUSE helper and cache server. Main-CLI RustFS
+probes pass status/list, writable diff/reset, mapped manual refresh/switch and
+real automatic refresh, then commit/push and independent fresh-cache eager clone.
+All six salted 4 MiB full-file hashes match across the two backends. Read-only
+main-CLI probes also verify status/list, real reads, denied writes/commits,
+refresh/switch hashes and unmount. The read-only overlay-diff diagnostic is a
+separate retained failure/parity finding below; it is not hidden by the narrower
+supported read-only-control probe.
+
+Both CLI coordinator consumers pass: nine lifecycle tests and eight property
+tests. Their initial parallel GNU linker attempt was killed; the retained kernel
+log confirms an OOM victim `ld` with about 2.2 GiB resident memory. Retrying with
+the already bundled Rust LLVM linker and one build job passes all 17 tests. No
+dependency patch/version/override was added. The current CLI feature slice has
+14 warnings, including an upstream unused fsck field; strict whole-CLI Clippy
+and full CLI tests are not claimed. Debug functional probes are not optimized
+performance qualification. Source and binary bindings are in
+`integration-checkpoint.json` beside completed logs and probe inputs.
+
+The new read-only diagnostic exposes the next confirmed parity issue: FUSE
+`mount diff` rejects a read-only mount through the coordinator's writable-overlay
+check, while NFS succeeds through local overlay-path inspection. The CLI help
+specifies writable mounts. Sources: `crab/src/cmd/mount.rs::overlay_diff_once`,
+`crates/crab-vfs/src/coordinator.rs::inspect_mount_overlay`, and the mount diff
+help in `crab/src/main.rs`. Live NFS inspection/export and read-only policy need
+one ownership review; do not repair only the error message. Export already takes
+OverlayStore's process-spanning freeze lease, so it must not be described as
+unguarded. Prove generation/control ownership and concurrent-operation behavior
+before choosing its next bounded refactor.
+
+Upstream SDK `Client::initialize_remote` now delegates directly to
+`crab_write::capsule_protocol::initialize`; its prior manifest-only initialization
+lead is closed by that upstream change. Workspace search finds the old shared
+`initialize_repository` helper still exported, with remaining calls in legacy
+fixtures. Audit/remove that obsolete writer together with gateway admission and
+fixtures; do not implement another SDK initializer or label upstream work as a
+new change in this PR.
+
+The rebuilt Linux target lives in this task's VM ext4 namespace. The Docker bind
+using the host HOME symlink resolves inside the VM rather than to the host proof
+directory. The VM disks remain on Workspace and the target is worktree-specific.
+Qualification now binds the literal `/Volumes/Workspace` proof directory separately
+for scripts and installed binaries. Two script launches failed before any Cargo
+operation because the former bind did not expose the host script; source and
+previous library/native results are unaffected. The explicit proof bind is
+verified before restarting qualification. No other VM, target or repository was
+cleaned or reused.
+
 ## Remaining priority order
 
-First close the checkpoint-21 default helper-layout control gap: the NFS-only
-main CLI must control a live FUSE mount through the same Unix protocol without
-linking FUSE. Require real main-CLI status/list/refresh/switch/commit/reset/unmount
-proof on the distinct installed binaries; helper-only evidence is insufficient.
+The checkpoint-21 helper-layout gap is closed by the shared Unix client and
+checkpoint-23 installed main-CLI proof. Next, align live overlay inspection/export
+ownership and read-only policy: the retained RustFS diagnostic shows FUSE rejecting
+read-only diff while NFS reads its local overlay paths. Preserve the existing
+process-spanning export freeze and prove concurrent reset/commit plus lost-owner
+behavior. Do not add an offline retry after an uncertain live operation.
 
 1. **Correctness: coherent Git/Capsule generations.** Atomically install selected
    Git state, pinned catalog and read service for startup, refresh, switch and
@@ -1465,7 +1535,7 @@ callers. No dependency override or vendored patch is authorized.
 
 Correctness gates precede tuning. Generation, cache and descriptor ownership
 also determine which performance optimizations are safe. The full hardening
-goal remains active; the working patch is uncommitted.
+goal remains active; the qualified checkpoint is published in draft PR #630.
 
 ## Resource and format decisions
 
@@ -1503,10 +1573,10 @@ Remaining located storage-authority boundaries:
 
 - `crab/src/cmd/compact.rs`: missing roots still dispatch to
   `run_legacy_compact_inner`; remove that path and qualify Capsule compaction.
-- `crates/crab-sdk/src/client/mutation.rs`: `initialize_remote` delegates to
-  `crates/crab-write/src/initialize.rs::initialize_repository`, which creates a
-  layout descriptor and generation-zero manifest rather than a Capsule root.
-  Audit initial-import publication and all callers together before cutover.
+- SDK `initialize_remote` was changed upstream in #629 to canonical Capsule
+  initialization. The exported old initializer in
+  `crates/crab-write/src/initialize.rs` and its legacy fixtures still need removal
+  alongside gateway authority; no current production SDK caller remains.
 - `crates/crab-auth-server/src/receive.rs`: manifest-based protected push plans
   accept schemas 1/2 beside the separate Capsule plan. Audit routing, preparation,
   finalization and recovery contracts before deleting those storage-authority paths.

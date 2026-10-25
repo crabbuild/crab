@@ -108,7 +108,8 @@ metadata's shared file lookup. A lookup loads only its selected file dependency
 closure, preserving the captured publication order and immutable descriptor
 checks. It never substitutes a later catalog or mutable file-index session.
 
-The opt-in `local-staging` feature supplies `PointerReader` for writable mounts.
+The opt-in `local-staging` feature enables `hydration` and supplies `PointerReader`
+for writable mounts.
 Published files stay on their captured remote catalog. Files outside that
 capture can read retained local recipes, including committed versions not yet
 pushed. Range reads verify selected chunks and coverage; full reconstruction

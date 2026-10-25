@@ -471,6 +471,8 @@ fn unix_controls_reach_fuse_without_linking_the_server() {
     let _home = HomeGuard::set(directory.path());
     let mountpoint = directory.path().join("view");
     std::fs::create_dir(&mountpoint).unwrap();
+    // The CLI advertises canonical mount paths, including macOS temp aliases.
+    let mountpoint = normalize_mountpoint(&mountpoint);
     let socket = directory.path().join(".crab/mounts/daemon.sock");
     std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
     let runtime = tokio::runtime::Builder::new_current_thread()

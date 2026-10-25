@@ -1,0 +1,52 @@
+{
+  "default": {
+    "packages": 38,
+    "forbidden": [],
+    "missing": []
+  },
+  "remote": {
+    "packages": 417,
+    "forbidden": [],
+    "missing": []
+  },
+  "remote-content": {
+    "packages": 441,
+    "forbidden": [],
+    "missing": []
+  },
+  "write": {
+    "packages": 458,
+    "forbidden": [],
+    "missing": []
+  },
+  "local": {
+    "packages": 459,
+    "forbidden": [],
+    "missing": []
+  },
+  "managed": {
+    "packages": 429,
+    "forbidden": [],
+    "missing": []
+  },
+  "managed-remote": {
+    "packages": 429,
+    "forbidden": [],
+    "missing": []
+  },
+  "managed-content": {
+    "packages": 453,
+    "forbidden": [],
+    "missing": []
+  },
+  "managed-write": {
+    "packages": 459,
+    "forbidden": [],
+    "missing": []
+  },
+  "local-managed": {
+    "packages": 460,
+    "forbidden": [],
+    "missing": []
+  }
+}

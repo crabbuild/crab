@@ -1,0 +1,16 @@
+{
+  "mountpoint": "/mnt/mapped",
+  "backend": "fuse",
+  "source": "crab://crab/mount-large/mapped-fuse-d2a1e7265f3c4a52a8b951a00c6c5a73",
+  "ref": "main",
+  "head_oid": "1c42d0a0296e7a31f5efcfbecd9e99cae862d29a",
+  "mode": "read-write",
+  "state": "running (PID 95)",
+  "pid": 95,
+  "overlay_dirty_count": 0,
+  "cache_size_bytes": 0,
+  "cache_size_human": "0 B",
+  "last_refresh": "2026-10-25T08:00:04Z",
+  "last_refresh_relative": "just now",
+  "read_only": false
+}

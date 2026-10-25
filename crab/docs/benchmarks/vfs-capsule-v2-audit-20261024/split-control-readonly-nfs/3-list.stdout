@@ -1,0 +1,16 @@
+[
+  {
+    "name": "mapped-nfs-8bfa159de6f245e3800641b547e1ab82",
+    "backend": "nfs",
+    "mountpoint": "/mnt/readonly",
+    "source": "crab://crab/mount-large/mapped-nfs-8bfa159de6f245e3800641b547e1ab82",
+    "ref": "other",
+    "state": "running",
+    "pid": 18,
+    "uptime": "< 1m",
+    "read_only": true,
+    "start_time": "2026-10-25T08:07:25Z",
+    "log_path": "/root/.crab/mounts/logs/nfs-mnt-readonly.log",
+    "control_endpoint": "unix:/tmp/crab-nfs-0/control/nfs-b24f2b5216de.sock"
+  }
+]

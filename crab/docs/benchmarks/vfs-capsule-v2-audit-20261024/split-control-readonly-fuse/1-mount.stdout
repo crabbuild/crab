@@ -1,0 +1,4 @@
+Mounted at /mnt/readonly
+  PID: 23
+  HEAD: e14f45bd9bcc0c88a9e20a8d825f412b3a971269
+Use `crab unmount --mountpoint /mnt/readonly` to stop.

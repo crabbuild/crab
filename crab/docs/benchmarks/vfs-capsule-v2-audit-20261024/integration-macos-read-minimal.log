@@ -1,0 +1,73 @@
+    Checking aho-corasick v1.1.4
+    Checking tokio v1.53.1
+   Compiling num-traits v0.2.19
+   Compiling blake3 v1.8.5
+    Checking regex-automata v0.4.14
+    Checking chrono v0.4.45
+    Checking fs4 v0.13.1
+    Checking rust_decimal v1.41.0
+    Checking duration-str v0.11.3
+    Checking sha2 v0.10.9
+    Checking bstr v1.12.1
+    Checking matchers v0.2.0
+    Checking regex v1.12.3
+    Checking tracing-subscriber v0.3.23
+    Checking gix-validate v0.11.1
+    Checking gix-error v0.2.4
+    Checking gix-path v0.12.0
+    Checking gix-date v0.15.5
+    Checking tokio-util v0.7.18
+    Checking tower v0.5.3
+    Checking gix-features v0.48.0
+    Checking tokio-rustls v0.26.4
+    Checking gix-hash v0.25.0
+    Checking tower-http v0.6.8
+    Checking h2 v0.4.19
+    Checking gix-hashtable v0.15.0
+    Checking gix-actor v0.41.1
+    Checking gix-fs v0.21.1
+    Checking gix-object v0.60.0
+    Checking foyer-tokio v0.22.3
+    Checking gix-chunk v0.7.2
+    Checking gix-tempfile v23.0.0
+    Checking gix-commitgraph v0.37.0
+    Checking foyer-common v0.22.3
+    Checking tracing-appender v0.2.5
+    Checking gix-revwalk v0.31.0
+    Checking foyer-memory v0.22.3
+    Checking shellexpand v3.1.2
+    Checking gix-traverse v0.57.0
+    Checking gix-diff v0.63.0
+    Checking gix-lock v23.0.1
+    Checking gix-quote v0.7.2
+    Checking gix-ref v0.63.0
+    Checking gix-pack v0.70.0
+    Checking foyer-storage v0.22.3
+    Checking gix-glob v0.26.0
+    Checking fail-parallel v0.6.0
+    Checking backon v1.6.0
+    Checking gix-odb v0.80.0
+    Checking gix-attributes v0.33.0
+    Checking hyper v1.11.1
+    Checking gix-discover v0.51.0
+    Checking gix-url v0.36.0
+    Checking gix-packetline v0.21.3
+    Checking foyer v0.22.3
+    Checking gix-imara-diff v0.2.3
+    Checking crab-git v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-git)
+    Checking hyper-util v0.1.20
+    Checking hyper-rustls v0.27.9
+    Checking reqwest v0.13.3
+    Checking reqwest v0.12.28
+    Checking object_store v0.14.1
+    Checking xet-runtime v1.6.0
+    Checking xet-core-structures v1.6.0
+    Checking crab-xet v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-xet)
+    Checking slatedb-common v0.15.0
+    Checking crab-storage v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-storage)
+    Checking slatedb-txn-obj v0.15.0
+    Checking slatedb v0.15.0
+    Checking crab-metadata v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-metadata)
+    Checking crab-remote-git v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-remote-git)
+    Checking crab-read v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-read)
+    Finished `dev` profile [unoptimized] target(s) in 30.77s

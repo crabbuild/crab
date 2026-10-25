@@ -1,0 +1,8 @@
+{
+  "backend": "nfs",
+  "remote": "crab://crab/mount-large/mapped-nfs-8bfa159de6f245e3800641b547e1ab82",
+  "main_cli_controls": true,
+  "write_rejected": true,
+  "commit_rejected": true,
+  "refresh_switch_hashes_match": true
+}

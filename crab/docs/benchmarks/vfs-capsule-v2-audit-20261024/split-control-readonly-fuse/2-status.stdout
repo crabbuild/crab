@@ -1,0 +1,16 @@
+{
+  "mountpoint": "/mnt/readonly",
+  "backend": "fuse",
+  "source": "crab://crab/mount-large/mapped-fuse-d2a1e7265f3c4a52a8b951a00c6c5a73",
+  "ref": "other",
+  "head_oid": "e14f45bd9bcc0c88a9e20a8d825f412b3a971269",
+  "mode": "read-only",
+  "state": "running (PID 23)",
+  "pid": 23,
+  "overlay_dirty_count": 0,
+  "cache_size_bytes": 0,
+  "cache_size_human": "0 B",
+  "last_refresh": "2026-10-25T08:17:46Z",
+  "last_refresh_relative": "just now",
+  "read_only": true
+}

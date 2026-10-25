@@ -1,0 +1,171 @@
+{
+  "mountpoint": "/mnt/mapped",
+  "backend": "nfs",
+  "source": "crab://crab/mount-large/mapped-nfs-8bfa159de6f245e3800641b547e1ab82",
+  "ref": "other",
+  "head_oid": "b8c3da1bc0b61fae6dfa30f76868bcef4e8da3fb",
+  "mode": "read-write",
+  "state": "running (PID 641)",
+  "pid": 641,
+  "overlay_dirty_count": 1,
+  "cache_size_bytes": 4254477,
+  "cache_size_human": "4.1 MB",
+  "last_refresh": "2026-10-25T08:00:14Z",
+  "last_refresh_relative": "just now",
+  "uptime": "< 1m",
+  "start_time": "2026-10-25T08:00:15Z",
+  "read_only": false,
+  "name": "mapped-nfs-8bfa159de6f245e3800641b547e1ab82",
+  "log_path": "/root/.crab/mounts/logs/nfs-mnt-mapped.log",
+  "control_endpoint": "unix:/tmp/crab-nfs-0/control/nfs-0a921eda1691.sock",
+  "nfs_runtime": {
+    "lifecycle": {
+      "server_bind_ms": 0,
+      "native_mount_ms": 3,
+      "startup_ms": 4
+    },
+    "read_leases": {
+      "entries": 0,
+      "max_entries": 1024,
+      "estimated_bytes": 0,
+      "max_estimated_bytes": 8388608,
+      "pinned_entries": 0,
+      "active_pins": 0,
+      "temporary_overflows": 0,
+      "hits": 3,
+      "misses": 1,
+      "evictions": 1,
+      "stale_retries": 0
+    },
+    "directory_pages": {
+      "entries": 0,
+      "max_entries": 256,
+      "estimated_bytes": 0,
+      "max_estimated_bytes": 16777216,
+      "hits": 0,
+      "misses": 0,
+      "evictions": 0,
+      "stale_evictions": 0
+    },
+    "write_journal": {
+      "pending_paths": 0,
+      "oldest_dirty_age_secs": null,
+      "paths_with_sync_errors": 0,
+      "sync_attempts": 1,
+      "sync_successes": 1,
+      "sync_failures": 0,
+      "total_sync_latency_ms": 17,
+      "last_sync_latency_ms": 17,
+      "max_sync_latency_ms": 17,
+      "poisoned": false,
+      "entries": []
+    },
+    "protocol": {
+      "read_rpcs": 4,
+      "read_requested_bytes": 4194304,
+      "read_returned_bytes": 4194304,
+      "read_size_le_4k": 0,
+      "read_size_le_64k": 0,
+      "read_size_le_1m": 4,
+      "read_size_gt_1m": 0,
+      "readdirplus_rpcs": 0,
+      "readdirplus_entries": 0,
+      "readdirplus_materialized_entries": 0,
+      "readdirplus_returned_candidates": 0,
+      "readdirplus_attr_resolutions": 0,
+      "readdirplus_prefetch_paths": 0,
+      "readdirplus_cookie_resumes": 0,
+      "readdirplus_cookie_misses": 0,
+      "readdirplus_skipped_entries": 0,
+      "readdirplus_large_dirs": 0,
+      "readdirplus_prefetch_errors": 0
+    },
+    "vfs": {
+      "open_read_calls": 1,
+      "read_at_calls": 4,
+      "returned_bytes": 4194304,
+      "stale_generation_rejections": 0,
+      "stale_overlay_view_rejections": 0,
+      "stale_overlay_file_rejections": 0,
+      "source_cache_entries": 0,
+      "source_cache_max_entries": 1024,
+      "source_cache_estimated_bytes": 0,
+      "source_cache_max_estimated_bytes": 16777216,
+      "source_cache_hits": 0,
+      "resolver_calls_avoided": 0,
+      "source_cache_misses": 1,
+      "source_cache_evictions": 0,
+      "source_cache_invalidations": 1,
+      "source_cache_stale_evictions": 0,
+      "invalidation_path_events": 1,
+      "invalidation_subtree_events": 0,
+      "invalidation_rename_events": 0,
+      "invalidation_generation_events": 0,
+      "invalidation_overlay_reset_events": 0,
+      "invalidation_compacted_full_resets": 0,
+      "base_pointer": {
+        "reads": 4,
+        "bytes": 4194304,
+        "adaptive": {
+          "first": 1,
+          "sequential": 3,
+          "strided": 0,
+          "repeated": 0,
+          "random": 0
+        }
+      },
+      "base_blob": {
+        "reads": 0,
+        "bytes": 0,
+        "adaptive": {
+          "first": 0,
+          "sequential": 0,
+          "strided": 0,
+          "repeated": 0,
+          "random": 0
+        }
+      },
+      "base_empty": {
+        "reads": 0,
+        "bytes": 0,
+        "adaptive": {
+          "first": 0,
+          "sequential": 0,
+          "strided": 0,
+          "repeated": 0,
+          "random": 0
+        }
+      },
+      "overlay_file": {
+        "reads": 0,
+        "bytes": 0,
+        "adaptive": {
+          "first": 0,
+          "sequential": 0,
+          "strided": 0,
+          "repeated": 0,
+          "random": 0
+        }
+      }
+    },
+    "hydration": {
+      "read_range_requests": 4,
+      "read_range_requested_bytes": 4194304,
+      "read_range_returned_bytes": 4194304,
+      "read_window_cache_hits": 3,
+      "read_window_cache_misses": 1,
+      "read_window_inflight_waits": 0,
+      "read_window_remote_fetches": 1,
+      "read_window_remote_bytes": 4194304,
+      "read_window_prefetch_requests": 3,
+      "read_window_prefetch_scheduled": 0,
+      "read_window_prefetch_skipped": 3,
+      "read_window_prefetch_errors": 0,
+      "chunk_cache_hits": 0,
+      "chunk_cache_misses": 0,
+      "chunk_inflight_waits": 0,
+      "chunk_remote_fetches": 0,
+      "chunk_remote_bytes": 0
+    }
+  }
+}
