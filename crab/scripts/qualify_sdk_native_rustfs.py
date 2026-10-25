@@ -126,6 +126,12 @@ def fixture_environment(work: Path, output: Path, endpoint: str, bucket: str,
     return environment
 
 
+def rustfs_work_parent(output: Path) -> Path:
+    # RustFS adds bucket, key, and metadata components below its data root;
+    # keep Windows object paths short enough for filesystem cleanup to succeed.
+    return output.parent.parent if os.name == "nt" else output.parent
+
+
 def aws(environment: dict[str, str], *arguments: str) -> dict:
     result = subprocess.run(
         [sys.executable, "-m", "awscli", "--endpoint-url", environment["AWS_ENDPOINT_URL"],
@@ -244,7 +250,7 @@ def main() -> None:
     executable, asset, digest = install_rustfs(output / "tools")
     report = {"release": RELEASE, "asset": asset, "sha256": digest, "preflight": "not_started",
               "terminal_state": "failed", "cleanup": "not_started"}
-    with tempfile.TemporaryDirectory(prefix="rfs-", dir=output.parent) as temporary:
+    with tempfile.TemporaryDirectory(prefix="rfs-", dir=rustfs_work_parent(output)) as temporary:
         work = Path(temporary)
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", 0))

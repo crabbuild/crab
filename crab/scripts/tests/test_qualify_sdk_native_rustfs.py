@@ -5,6 +5,7 @@ import json
 import os
 from pathlib import Path
 import tempfile
+from types import SimpleNamespace
 import unittest
 from unittest.mock import patch
 
@@ -15,6 +16,20 @@ SPEC.loader.exec_module(RUNNER)
 
 
 class NativeRustfsTests(unittest.TestCase):
+    def test_windows_fixture_uses_a_shorter_parent(self):
+        with tempfile.TemporaryDirectory() as directory:
+            runner_temp = Path(directory) / "runner-temp"
+            runner_temp.mkdir()
+            work = runner_temp / "work"
+            work.mkdir()
+            output = runner_temp / "output"
+            output.mkdir()
+            with patch.object(RUNNER, "os", SimpleNamespace(name="nt")):
+                parent = RUNNER.rustfs_work_parent(output)
+            self.assertEqual(parent, Path(directory))
+            self.assertLess(len(str(parent / "rfs-12345678" / "data")),
+                            len(str(work / "data")))
+
     def test_preflight_verifies_single_and_bulk_deletion(self):
         with tempfile.TemporaryDirectory() as directory:
             body = b"SDK storage contract probe\n"
