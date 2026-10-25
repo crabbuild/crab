@@ -143,29 +143,23 @@ pub fn inspect_overlay_store(store: &OverlayStore) -> Result<OverlayDiff> {
     diff_from_store(store)
 }
 
+/// Export saved backing files while excluding live cache owners.
 pub fn export_overlay(paths: &OverlayPaths, destination: &Path) -> Result<OverlayDiff> {
-    export_overlay_with_view(paths, destination, None)
-}
-
-pub fn export_overlay_from_view(
-    paths: &OverlayPaths,
-    destination: &Path,
-    view_root: &Path,
-) -> Result<OverlayDiff> {
-    export_overlay_with_view(paths, destination, Some(view_root))
-}
-
-fn export_overlay_with_view(
-    paths: &OverlayPaths,
-    destination: &Path,
-    view_root: Option<&Path>,
-) -> Result<OverlayDiff> {
-    let destination = prepare_export_destination(paths, destination, view_root)?;
+    // A starting helper must not adopt this cache while an offline copy owns it.
+    let _cache = crate::clone_cache::MountCacheLock::acquire(&paths.cache_dir)?;
+    let destination = prepare_export_destination(paths, destination, None)?;
     if !paths.db_path.exists() {
         return Ok(empty_diff());
     }
-
     let store = OverlayStore::open(&paths.db_path, &paths.upper_dir)?;
+    export_overlay_store(&store, &destination, None)
+}
+
+pub(crate) fn export_overlay_store(
+    store: &OverlayStore,
+    destination: &Path,
+    engine: Option<&crate::engine::VfsEngine>,
+) -> Result<OverlayDiff> {
     let _freeze = store.freeze_writes()?;
     let all_records = store.records()?;
     let records = publishable_records(&all_records);
@@ -177,29 +171,29 @@ fn export_overlay_with_view(
                 deletion_manifest.push(record.path.clone());
             }
             OverlayChangeKind::Mkdir => {
-                std::fs::create_dir_all(safe_join(&destination, &record.path)?)?;
+                std::fs::create_dir_all(safe_join(destination, &record.path)?)?;
             }
             OverlayChangeKind::Symlink => {
                 let Some(backing) = &record.backing_path else {
                     continue;
                 };
-                materialize_symlink(backing, &safe_join(&destination, &record.path)?)?;
+                materialize_symlink(backing, &safe_join(destination, &record.path)?)?;
             }
             OverlayChangeKind::Create | OverlayChangeKind::Modify | OverlayChangeKind::Rename => {
                 if is_metadata_base_rename(record) {
-                    let Some(view_root) = view_root else {
+                    let Some(engine) = engine else {
                         return Err(CrabError::Internal(format!(
-                            "overlay entry {} requires a mounted view for export",
+                            "overlay entry {} requires an active mount for export",
                             record.path
                         )));
                     };
-                    export_from_mounted_view(record, view_root, &destination)?;
+                    export_from_engine(record, engine, destination)?;
                     continue;
                 }
                 let Some(backing) = &record.backing_path else {
                     continue;
                 };
-                let target = safe_join(&destination, &record.path)?;
+                let target = safe_join(destination, &record.path)?;
                 if let Some(parent) = target.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
@@ -218,7 +212,7 @@ fn export_overlay_with_view(
     Ok(diff_from_records(&records))
 }
 
-fn prepare_export_destination(
+pub(crate) fn prepare_export_destination(
     paths: &OverlayPaths,
     destination: &Path,
     view_root: Option<&Path>,
@@ -252,14 +246,47 @@ fn prepare_export_destination(
     Ok(destination)
 }
 
-fn export_from_mounted_view(
+fn export_from_engine(
     record: &crate::overlay::OverlayRecord,
-    view_root: &Path,
+    engine: &crate::engine::VfsEngine,
     destination: &Path,
 ) -> Result<()> {
-    let source = safe_join(view_root, &record.path)?;
+    use std::io::Write;
+
     let target = safe_join(destination, &record.path)?;
-    copy_view_path(&source, &target, record.mode)
+    let (mode, _, node_type, _) = engine.getattr(&record.path)?;
+    if node_type == crate::snapshot::NodeType::Dir {
+        std::fs::create_dir_all(&target)?;
+        return Ok(());
+    }
+    if let Some(parent) = target.parent() {
+        std::fs::create_dir_all(parent)?;
+    }
+    if node_type == crate::snapshot::NodeType::Symlink {
+        return create_platform_symlink(&engine.symlink_target(&record.path)?, &target);
+    }
+    let runtime = tokio::runtime::Handle::current();
+    let lease = engine.open_read(&record.path)?;
+    // Per-window reads cannot retain an unpublished recipe across push/GC.
+    // Keep its ready pin until the complete captured file has been copied.
+    let _staged = runtime.block_on(lease.pin_staged_file())?;
+    let mut output = std::fs::File::create(&target)?;
+    let mut offset = 0;
+    loop {
+        let bytes = runtime.block_on(engine.read_at(&lease, offset, 1024 * 1024))?;
+        if bytes.is_empty() {
+            break;
+        }
+        output.write_all(&bytes)?;
+        offset += bytes.len() as u64;
+    }
+    if lease.known_size().is_some_and(|size| size != offset) {
+        return Err(CrabError::CorruptObject {
+            path: record.path.clone(),
+            reason: format!("exported {offset} bytes from a captured file of different size"),
+        });
+    }
+    set_regular_permissions(&target, mode)
 }
 
 pub fn reset_overlay(paths: &OverlayPaths) -> Result<OverlayDiff> {
@@ -1181,25 +1208,6 @@ fn remove_existing_path(path: &Path) -> Result<()> {
     Ok(())
 }
 
-fn copy_view_path(source: &Path, target: &Path, mode: u32) -> Result<()> {
-    let metadata = std::fs::symlink_metadata(source)?;
-    if metadata.is_dir() && !metadata.file_type().is_symlink() {
-        std::fs::create_dir_all(target)?;
-        return Ok(());
-    }
-    remove_existing_path(target)?;
-    if let Some(parent) = target.parent() {
-        std::fs::create_dir_all(parent)?;
-    }
-    if metadata.file_type().is_symlink() {
-        let link_target = std::fs::read_link(source)?;
-        create_platform_symlink_path(&link_target, target)?;
-        return Ok(());
-    }
-    std::fs::copy(source, target)?;
-    set_regular_permissions(target, mode)
-}
-
 #[cfg(unix)]
 fn set_regular_permissions(path: &Path, mode: u32) -> Result<()> {
     use std::os::unix::fs::PermissionsExt;
@@ -1224,20 +1232,6 @@ fn create_platform_symlink(_link_target: &str, _path: &Path) -> Result<()> {
     Err(CrabError::Configuration {
         key: "symlink publish is unsupported on this platform".into(),
         origin: "crab mount commit".into(),
-    })
-}
-
-#[cfg(unix)]
-fn create_platform_symlink_path(link_target: &Path, path: &Path) -> Result<()> {
-    std::os::unix::fs::symlink(link_target, path)?;
-    Ok(())
-}
-
-#[cfg(not(unix))]
-fn create_platform_symlink_path(_link_target: &Path, _path: &Path) -> Result<()> {
-    Err(CrabError::Configuration {
-        key: "symlink export is unsupported on this platform".into(),
-        origin: "crab mount export".into(),
     })
 }
 
@@ -1966,7 +1960,7 @@ mod tests {
 
     fn temp_overlay() -> (tempfile::TempDir, OverlayPaths, OverlayStore) {
         let dir = tempfile::tempdir().unwrap();
-        let paths = OverlayPaths::from_cache_dir(dir.path());
+        let paths = OverlayPaths::from_cache_dir(&dir.path().join("cache"));
         let store = OverlayStore::open(&paths.db_path, &paths.upper_dir).unwrap();
         (dir, paths, store)
     }
@@ -2016,6 +2010,16 @@ mod tests {
     }
 
     #[test]
+    fn offline_export_rejects_a_cache_owned_by_a_live_helper() {
+        let (root, paths, _store) = temp_overlay();
+        let _owner = crate::clone_cache::MountCacheLock::acquire(&paths.cache_dir).unwrap();
+        let destination = root.path().join("review");
+        let result = export_overlay(&paths, &destination);
+        assert!(result.is_err());
+        assert!(!destination.exists());
+    }
+
+    #[test]
     fn export_overlay_rejects_its_own_backing_directory() {
         let (_dir, paths, store) = temp_overlay();
         store.create_file("retained.txt", 0o100_644).unwrap();
@@ -2036,7 +2040,7 @@ mod tests {
     }
 
     #[test]
-    fn export_overlay_from_view_rejects_destination_in_the_view() {
+    fn export_destination_rejects_a_path_in_the_view() {
         let dir = tempfile::tempdir().unwrap();
         let paths = OverlayPaths::from_cache_dir(&dir.path().join("cache"));
         let store = OverlayStore::open(&paths.db_path, &paths.upper_dir).unwrap();
@@ -2048,7 +2052,7 @@ mod tests {
         std::fs::create_dir(&view).unwrap();
         let destination = view.join("export");
 
-        let result = export_overlay_from_view(&paths, &destination, &view);
+        let result = prepare_export_destination(&paths, &destination, Some(&view));
 
         assert!(
             !destination.exists(),
@@ -2107,51 +2111,6 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(export_dir.join(DELETIONS_MANIFEST)).unwrap(),
             "gone.txt\n"
-        );
-    }
-
-    #[test]
-    fn export_overlay_from_view_copies_metadata_base_rename() {
-        let dir = tempfile::tempdir().unwrap();
-        let paths = OverlayPaths::from_cache_dir(dir.path().join("cache").as_path());
-        let store = OverlayStore::open(&paths.db_path, &paths.upper_dir).unwrap();
-        store
-            .rename_base_subtree(&[
-                BaseRenameEntry {
-                    old_path: "archive".to_owned(),
-                    new_path: "moved-archive".to_owned(),
-                    node_type: crate::snapshot::NodeType::Dir,
-                    mode: 0o040_755,
-                    size: 0,
-                    source_oid: None,
-                },
-                BaseRenameEntry {
-                    old_path: "archive/model.bin".to_owned(),
-                    new_path: "moved-archive/model.bin".to_owned(),
-                    node_type: crate::snapshot::NodeType::File,
-                    mode: 0o100_644,
-                    size: 11,
-                    source_oid: Some("base-oid".to_owned()),
-                },
-            ])
-            .unwrap();
-
-        let view_root = dir.path().join("mounted");
-        std::fs::create_dir_all(view_root.join("moved-archive")).unwrap();
-        std::fs::write(view_root.join("moved-archive/model.bin"), b"base export").unwrap();
-        let export_dir = dir.path().join("export");
-
-        let diff = export_overlay_from_view(&paths, &export_dir, &view_root).unwrap();
-
-        assert_eq!(diff.estimated_upload_bytes, 0);
-        assert_eq!(
-            std::fs::read_to_string(export_dir.join("moved-archive/model.bin")).unwrap(),
-            "base export"
-        );
-        assert!(
-            std::fs::read_to_string(export_dir.join(DELETIONS_MANIFEST))
-                .unwrap()
-                .contains("archive/model.bin")
         );
     }
 

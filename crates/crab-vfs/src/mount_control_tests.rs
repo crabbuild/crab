@@ -549,7 +549,8 @@ fn unix_controls_reach_fuse_without_linking_the_server() {
                         "refresh" | "switch_ref" => serde_json::json!({"ok":true,"head_oid":"next"}),
                         "commit_overlay" if request["message"] == "reject" => serde_json::json!({"ok":false,"error":"publication refused"}),
                         "commit_overlay" => serde_json::json!({"ok":true,"overlay_commit_result":{"transaction_id":"commit","commit_oid":"next","pushed":true,"overlay_cleaned":true,"diff":{"changes":[],"estimated_upload_bytes":0,"deletion_count":0}}}),
-                        "reset_overlay" | "diff_overlay" => serde_json::json!({"ok":true,"overlay_diff":{"changes":[],"estimated_upload_bytes":0,"deletion_count":0}}),
+                        "export_overlay" if request["destination"].as_str().unwrap().ends_with("/reject") => serde_json::json!({"ok":false,"error":"export refused"}),
+                        "reset_overlay" | "diff_overlay" | "export_overlay" => serde_json::json!({"ok":true,"overlay_diff":{"changes":[],"estimated_upload_bytes":0,"deletion_count":0}}),
                         "unmount" => serde_json::json!({"ok":true}),
                         other => panic!("unexpected request {other}"),
                     };
@@ -568,6 +569,8 @@ fn unix_controls_reach_fuse_without_linking_the_server() {
         let rejected = commit(&mountpoint, "reject", true).await.unwrap_err();
         assert!(rejected.to_string().contains("publication refused"));
         assert!(inspect_overlay(&mountpoint).await.unwrap().is_some());
+        assert!(export_overlay(&mountpoint, Path::new("review")).await.unwrap().is_some());
+        assert!(export_overlay(&mountpoint, Path::new("reject")).await.unwrap_err().to_string().contains("export refused"));
         assert!(reset_overlay(&mountpoint).await.unwrap().is_some());
         assert!(matches!(shutdown(&mountpoint).await.unwrap().unwrap(), MountControlShutdown::Fuse { .. }));
         server.abort();
@@ -605,9 +608,13 @@ fn inspection_uses_live_nfs_mode_when_registry_is_stale() {
         .unwrap();
         wait_for_nfs_status(&mountpoint).await;
         let error = inspect_overlay(&mountpoint).await.unwrap_err();
+        let export_error = export_overlay(&mountpoint, &tmp.path().join("review"))
+            .await
+            .unwrap_err();
         crate::nfs_control::shutdown(&endpoint).await.unwrap();
         server.await.unwrap().unwrap();
         assert!(error.to_string().contains("read-only mount"));
+        assert!(export_error.to_string().contains("read-only mount"));
     });
 }
 

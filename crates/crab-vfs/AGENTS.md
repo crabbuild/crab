@@ -123,6 +123,12 @@ mount/control owners consume the pipeline output separately.
   epochs or invalidate open readers. Keep the cross-process freeze through the
   metadata read. Never redirect a known owner's failed exchange to saved state.
   Sources: `mount_control.rs`, `mount_runtime.rs`, both backend control owners.
+- Live export owns its engine control task, mutation gate, cross-process freeze
+  and blocking copy through completion after caller cancellation. Flush client
+  writeback before the gates. Read metadata-only renames through captured engine
+  leases, never mounted kernel paths; retain a whole-file staging pin through
+  pointer copying. Saved exports require exclusive cache admission. Sources:
+  `mount_runtime.rs`, `publish.rs`, `engine.rs`, both backend control owners.
 - NFS helper unmount completion requires kernel detachment and the live owner's
   cache lease. Retain the acquired lease through owner-conditional registry
   removal. Single/batch callers propagate live-control errors; only a helper

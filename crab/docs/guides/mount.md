@@ -310,6 +310,11 @@ Export requires a new destination directory outside the mount and its cache,
 with an existing parent directory. Existing destinations are rejected to prevent
 symlinks or aliases from overwriting unpublished source bytes.
 
+Live exports run inside the mount helper and retain the captured engine view
+through copying. Metadata-only renames hydrate through canonical reads rather
+than through the mounted path, and pointer exports pin local staged content for
+the whole file. Losing the caller does not release the helper's copy guards.
+
 `crab mount commit` freezes overlay writes while it snapshots the overlay,
 checks that the mounted base ref has not moved, creates a Git commit, refreshes
 the mounted snapshot, and clears the overlay after a successful local commit.

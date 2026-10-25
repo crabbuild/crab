@@ -3621,12 +3621,25 @@ pub async fn run_mount_diff(path: &Path, json: bool) -> Result<()> {
 #[cfg(any(feature = "fuse", feature = "nfs"))]
 pub async fn run_mount_export(path: &Path, destination: &Path, json: bool) -> Result<()> {
     let context = resolve_mount_overlay_context(path).await?;
-    let _ = overlay_diff_once(&context).await?;
-    let diff = crate::vfs::publish::export_overlay_from_view(
-        &context.overlay_paths,
-        destination,
-        &context.mountpoint_path,
-    )?;
+    let diff = if let Some(diff) =
+        crate::vfs::mount_control::export_overlay(&context.mountpoint_path, destination).await?
+    {
+        diff
+    } else {
+        if context.live_owner || context.read_only {
+            return Err(CrabError::Configuration {
+                key: "writable live mount control unavailable for export".into(),
+                origin: "crab mount export".into(),
+            });
+        }
+        let paths = context.overlay_paths.clone();
+        let destination = destination.to_owned();
+        tokio::task::spawn_blocking(move || {
+            crate::vfs::publish::export_overlay(&paths, &destination)
+        })
+        .await
+        .map_err(crate::vfs::error::VfsError::ReadTask)??
+    };
     if json {
         emit_json(
             "mount.export",

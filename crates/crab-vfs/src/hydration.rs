@@ -751,7 +751,6 @@ impl HydrationService {
             .get(key)
     }
 
-    #[cfg(feature = "fuse")]
     pub(crate) async fn pin_file(
         &self,
         pointer: &Pointer,

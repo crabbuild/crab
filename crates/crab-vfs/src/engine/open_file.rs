@@ -304,17 +304,7 @@ impl VfsEngine {
             },
             None => None,
         };
-        let staged = match lease.source.as_ref() {
-            ReadSource::BasePointer { pointer, .. } => match lease
-                ._snapshot_view
-                .as_ref()
-                .and_then(|view| view.hydration.as_ref())
-            {
-                Some(hydration) => hydration.pin_file(pointer).await?,
-                None => None,
-            },
-            _ => None,
-        };
+        let staged = lease.pin_staged_file().await?;
         let binding = local
             .as_ref()
             .map(|local| self.open_files.register(local.any()?))

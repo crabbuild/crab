@@ -28,7 +28,7 @@ use crate::pipeline::{PipelineConfig, PipelineOutput};
 use crate::read_lease_pool::{ReadLeasePool, ReadLeasePoolSnapshot};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-const COMMIT_REQUEST_TIMEOUT: Duration = Duration::from_mins(30);
+const PUBLISH_REQUEST_TIMEOUT: Duration = Duration::from_mins(30);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 pub const CONTROL_ENDPOINT_ENV: &str = "CRAB_NFS_CONTROL_ENDPOINT";
 #[cfg(any(not(unix), test))]
@@ -69,6 +69,7 @@ pub enum NfsControlRequest {
     Refresh,
     SwitchRef { r#ref: String },
     DiffOverlay,
+    ExportOverlay { destination: PathBuf },
     ResetOverlay,
     Commit { message: String, push: bool },
     Shutdown,
@@ -1039,6 +1040,12 @@ async fn dispatch_request(
             Ok(diff) => NfsControlResponse::overlay_diff_ok(diff),
             Err(error) => NfsControlResponse::err(error.to_string()),
         },
+        NfsControlRequest::ExportOverlay { destination } => {
+            match export_overlay_runtime(state, destination).await {
+                Ok(diff) => NfsControlResponse::overlay_diff_ok(diff),
+                Err(error) => NfsControlResponse::err(error.to_string()),
+            }
+        }
         NfsControlRequest::ResetOverlay => match reset_overlay_runtime(state).await {
             Ok(diff) => NfsControlResponse::overlay_diff_ok(diff),
             Err(error) => NfsControlResponse::err(error.to_string()),
@@ -1068,7 +1075,9 @@ async fn dispatch_request(
     }
 }
 
-async fn inspect_overlay_runtime(state: &NfsControlState) -> Result<crate::publish::OverlayDiff> {
+fn overlay_target(
+    state: &NfsControlState,
+) -> Result<(Arc<VfsEngine>, Arc<crate::overlay::OverlayStore>, PathBuf)> {
     if state.read_only {
         return Err(CrabError::Forbidden {
             path: format!("read-only mount: {}", state.mountpoint.display()),
@@ -1077,17 +1086,38 @@ async fn inspect_overlay_runtime(state: &NfsControlState) -> Result<crate::publi
     let runtime = state
         .runtime
         .as_ref()
-        .ok_or_else(|| CrabError::Internal("NFS inspection runtime unavailable".into()))?;
-    let (engine, overlay) = {
-        let runtime = lock_runtime(runtime)?;
-        let overlay = runtime
-            .output
-            .overlay
-            .clone()
-            .ok_or_else(|| CrabError::Internal("NFS inspection overlay unavailable".into()))?;
-        (Arc::clone(&runtime.output.engine), overlay)
-    };
+        .ok_or_else(|| CrabError::Internal("NFS overlay runtime unavailable".into()))?;
+    let runtime = lock_runtime(runtime)?;
+    let overlay = runtime
+        .output
+        .overlay
+        .clone()
+        .ok_or_else(|| CrabError::Internal("NFS overlay unavailable".into()))?;
+    Ok((
+        Arc::clone(&runtime.output.engine),
+        overlay,
+        runtime.config.cache_dir.clone(),
+    ))
+}
+
+async fn inspect_overlay_runtime(state: &NfsControlState) -> Result<crate::publish::OverlayDiff> {
+    let (engine, overlay, _) = overlay_target(state)?;
     crate::mount_runtime::inspect_overlay_runtime(engine, overlay, state.mountpoint.clone()).await
+}
+
+async fn export_overlay_runtime(
+    state: &NfsControlState,
+    destination: PathBuf,
+) -> Result<crate::publish::OverlayDiff> {
+    let (engine, overlay, cache_dir) = overlay_target(state)?;
+    crate::mount_runtime::export_overlay_runtime(
+        engine,
+        overlay,
+        cache_dir,
+        state.mountpoint.clone(),
+        destination,
+    )
+    .await
 }
 
 async fn reset_overlay_runtime(state: &NfsControlState) -> Result<crate::publish::OverlayDiff> {
@@ -1366,6 +1396,18 @@ pub async fn inspect_overlay(endpoint: &str) -> Result<crate::publish::OverlayDi
     overlay_diff_from_response(response)
 }
 
+/// Export the running helper's overlay under its owned read boundary.
+pub async fn export_overlay(
+    endpoint: &str,
+    destination: &Path,
+) -> Result<crate::publish::OverlayDiff> {
+    let request = NfsControlRequest::ExportOverlay {
+        destination: destination.to_owned(),
+    };
+    let response = request_with_timeout(endpoint, &request, PUBLISH_REQUEST_TIMEOUT).await?;
+    overlay_diff_from_response(response)
+}
+
 pub async fn reset_overlay(endpoint: &str) -> Result<crate::publish::OverlayDiff> {
     let response = request(endpoint, &NfsControlRequest::ResetOverlay).await?;
     overlay_diff_from_response(response)
@@ -1395,7 +1437,7 @@ pub async fn commit(
             message: message.to_owned(),
             push,
         },
-        COMMIT_REQUEST_TIMEOUT,
+        PUBLISH_REQUEST_TIMEOUT,
     )
     .await?;
     if !response.ok {

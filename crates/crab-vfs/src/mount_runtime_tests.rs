@@ -660,3 +660,6 @@ async fn inspection_preserves_open_read_leases() {
     assert_eq!(diff.changes[0].path, "base.txt");
     assert_eq!(visible.unwrap().as_ref(), b"edit");
 }
+
+#[path = "mount_runtime_export_tests.rs"]
+mod exports;

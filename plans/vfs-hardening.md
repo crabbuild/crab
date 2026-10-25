@@ -1693,16 +1693,77 @@ whole-file staging pins; qualify concurrent writes, refresh, retirement and
 cancellation before treating live export ownership as complete. Optimized
 performance, native macOS NFS and full stored pack-v1 retirement remain open.
 
+## Twenty-eighth checkpoint: live export owns materialization
+
+The controlled-view regression fails against the previous materializer: a
+metadata-only rename copies changed mounted-path bytes rather than the engine's
+captured base. The new regression covers a captured file, directory, symlink and
+unchanged pre-existing read lease. It does not claim a native corruption race was
+observed; the native baseline establishes the extra kernel reads described below.
+
+`run_mount_export` routes to the live NFS/FUSE owner for the complete operation.
+Both transports capture the actual overlay/cache and reject read-only state.
+The shared runtime tracks export through caller cancellation, performs the
+platform writeback step before mutation exclusion, and retains that exclusion
+plus the process-spanning freeze through blocking materialization. Metadata-only
+renames use direct engine leases, with bounded 1 MiB reads and a whole-file local
+staging pin. FUSE descriptor opens share that pin selection unchanged. The old
+mounted-view copier and its public entry point are removed.
+
+Saved backing-file export remains a released CLI path, reachable in
+[`v1.2.4` mount export](https://github.com/crabbuild/crab/blob/v1.2.4/crab/src/cmd/mount.rs#L3496).
+It now acquires exclusive cache admission before inspecting/copying, excluding a
+starting helper; metadata-only renames require an active engine. A known owner's
+failure never selects saved state. This is local overlay recovery, not a stored
+pack-format compatibility reader. New destination admission remains common to
+both paths. No dependency, runtime setting or format fallback was added.
+
+Proof on the final source:
+- Linux: 645 VFS tests, all 16 dedicated native lifetime/mapped probes, strict
+  combined-feature all-target VFS Clippy, and a FUSE-only check pass.
+- macOS: 11 export tests, 13 control tests, strict NFS VFS Clippy and an NFS-only
+  CLI library check pass. The CLI retains its 14 existing feature-slice warnings.
+- Controlled origin admission proves a cancelled waiter cannot release export's
+  mutation exclusion. A 3 MiB unpublished-pointer export works without an origin
+  and leaves no inflight staging markers. Offline cache exclusion is tested.
+- Make-installed NFS-only main/combined FUSE helper runs each export a 4 MiB
+  remote pointer and distinct 4 MiB unpublished local pointer after metadata-only
+  renames. Both rename records have no backing file; independent hashes, ordinary
+  Git bytes, nested files, symlink targets and the deletion manifest match.
+- Both native backends reject actual read-only owners despite stale registry
+  flags. New clients against previous owners preserve the original unsupported
+  operation error, leave no output and preserve source bytes. Destination/cache/
+  symlink/existing-tree rejection probes pass through the new RPC path too.
+- For the same warm 8 MiB NFS fixture, export's kernel READ count falls from 32
+  to zero. These debug structural counts do not establish optimized throughput,
+  tail latency or origin amplification.
+
+The shared pin contract is `PointerReader::pin_file`/`StagedFilePin`, unchanged
+below the new lease helper. Tokio 1.53.1's `Handle::block_on` runtime contract is
+satisfied on an owned blocking worker while the runtime drives IO; shutdown waits
+for the tracked control before shutting down hydration. Coordinator/runtime
+mutexes are released before waiting for export. The extra production code is
+mainly the two transport operations and the owned copy path replacing kernel
+re-entry; there is no second reconstruction implementation.
+
+Local `export-owner/checkpoint.json` binds 1,518 Rust sources/manifests, installed
+binary hashes and retained probes. Raw evidence stays outside the PR. A slow
+helper build was observed through the same live process/container handles and
+completed without a restart. macOS still uses its existing non-waiting sync
+request: native macOS NFS and a waiting barrier remain a separate required gate.
+Full stored pack-v1 retirement and release performance qualification remain open.
+
 ## Remaining priority order
 
 The helper-layout gap and live read-only inspection leak are closed by the
 installed-role proofs. Checkpoint-25 closes the reproduced Linux NFS cache
 handoff gap, checkpoint-26 closes coordinator-only/mixed batch discovery,
 and checkpoint-27 prevents export destinations from overwriting source bytes.
-Next complete live export materialization ownership, then prove concurrent
-reset/commit, teardown/admission and lost-owner behavior across the remaining
-owners. Preserve the existing process-spanning export freeze. Do not add an
-offline retry after an uncertain live operation.
+Checkpoint-28 moves live export materialization into the owner and removes
+mounted-path re-entry. Next prove concurrent reset/commit, teardown/admission and
+lost-owner behavior across remaining owners, qualify a waiting native macOS NFS
+barrier, and finish all stored pack-v1 authority removal. Preserve the shared
+process-spanning freeze and never retry an uncertain live operation offline.
 
 1. **Correctness: coherent Git/Capsule generations.** Atomically install selected
    Git state, pinned catalog and read service for startup, refresh, switch and

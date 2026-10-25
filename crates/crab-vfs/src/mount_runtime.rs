@@ -265,6 +265,37 @@ pub(crate) async fn inspect_overlay_runtime(
         .await
 }
 
+pub(crate) async fn export_overlay_runtime(
+    engine: Arc<crate::engine::VfsEngine>,
+    overlay: Arc<crate::overlay::OverlayStore>,
+    cache_dir: std::path::PathBuf,
+    mountpoint: std::path::PathBuf,
+    destination: std::path::PathBuf,
+) -> Result<crate::publish::OverlayDiff> {
+    let owner = Arc::clone(&engine);
+    engine
+        .run_control(async move {
+            let client = mountpoint.clone();
+            let destination = tokio::task::spawn_blocking(move || {
+                let paths = crate::publish::OverlayPaths::from_cache_dir(&cache_dir);
+                crate::publish::prepare_export_destination(&paths, &destination, Some(&mountpoint))
+            })
+            .await
+            .map_err(CrabError::ReadTask)??;
+            flush_mount_writes(&client).await?;
+            let quiesce = owner.quiesce_overlay().await;
+            tokio::task::spawn_blocking(move || {
+                // The owned blocking job retains both gates after caller cancellation.
+                // Canonical engine reads never re-enter blocked kernel callbacks.
+                let _quiesce = quiesce;
+                crate::publish::export_overlay_store(&overlay, &destination, Some(&owner))
+            })
+            .await
+            .map_err(CrabError::ReadTask)?
+        })
+        .await
+}
+
 /// Flush client writeback before taking the engine mutation gate.
 ///
 /// Linux waits for syncfs; macOS retains its global sync request. A missing

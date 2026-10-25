@@ -97,10 +97,16 @@ the mounted view and private cache. Canonical parent checks reject symlink
 aliases before locking or writing; existing output trees cannot overwrite
 unpublished backing bytes.
 
-Export preflight uses this live inspection boundary. Export materialization still
-uses its existing process-spanning freeze and mounted-view reads for metadata-only
-base renames. Its full generation/control ownership remains a separate gate;
-inspection's ownership does not make that later copy one atomic operation.
+Live export is one owned control operation. The helper validates its actual
+cache/mount boundaries, runs the platform writeback step, then holds mutation
+exclusion and the process-spanning freeze through materialization. Linux waits
+for syncfs; macOS still needs a qualified waiting barrier. Metadata-only renames
+read captured engine leases directly; they never re-enter the mounted filesystem.
+Pointer copies retain a whole-file staging pin, shared with FUSE descriptor opens,
+until copying finishes. Inspection/export preserve reader epochs and open leases.
+Caller cancellation cannot release their owned blocking work. Saved backing-file
+export requires exclusive cache admission and rejects metadata-only renames that
+need an active engine; a known owner's failed request never selects that path.
 
 Batch unmount discovers both persisted helpers and coordinator-owned FUSE
 mounts through `mount_control::control_targets`. Inventory discovery is strict:

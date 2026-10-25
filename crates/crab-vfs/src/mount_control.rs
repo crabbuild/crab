@@ -433,6 +433,45 @@ pub async fn inspect_overlay(path: &Path) -> Result<Option<crate::publish::Overl
     }
 }
 
+/// Export an active writable mount through its live owner.
+pub async fn export_overlay(
+    path: &Path,
+    destination: &Path,
+) -> Result<Option<crate::publish::OverlayDiff>> {
+    let destination = std::env::current_dir()?.join(destination);
+    #[cfg(feature = "nfs")]
+    if let Some(context) = nfs_context(path)? {
+        return crate::nfs_control::export_overlay(&context.endpoint, &destination)
+            .await
+            .map(Some);
+    }
+    #[cfg(unix)]
+    {
+        let mountpoint = normalize_mountpoint(path).display().to_string();
+        let Some(mut client) = fuse_mount_client(&mountpoint).await? else {
+            return Ok(None);
+        };
+        let response = send_fuse_request_with_timeout(
+            &mut client,
+            crate::ipc_protocol::IpcRequest::ExportOverlay {
+                mountpoint,
+                destination,
+            },
+            std::time::Duration::from_mins(30),
+        )
+        .await?;
+        response
+            .overlay_diff
+            .map(Some)
+            .ok_or_else(|| CrabError::Internal("FUSE export response missing diff".into()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, destination);
+        Ok(None)
+    }
+}
+
 pub async fn reset_overlay(path: &Path) -> Result<Option<crate::publish::OverlayDiff>> {
     #[cfg(feature = "nfs")]
     if let Some(context) = nfs_context(path)? {

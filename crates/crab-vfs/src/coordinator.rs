@@ -574,7 +574,7 @@ impl Coordinator {
     pub(crate) fn overlay_inspection_target(
         &self,
         mountpoint: &Path,
-    ) -> Result<(Arc<VfsEngine>, Arc<OverlayStore>)> {
+    ) -> Result<(Arc<VfsEngine>, Arc<OverlayStore>, PathBuf)> {
         let handle = self
             .mounts
             .get(mountpoint)
@@ -587,7 +587,11 @@ impl Coordinator {
         let overlay = handle.pipeline_output.overlay.as_ref().ok_or_else(|| {
             CrabError::Internal(format!("mount has no overlay: {}", mountpoint.display()))
         })?;
-        Ok((Arc::clone(&handle.engine), Arc::clone(overlay)))
+        Ok((
+            Arc::clone(&handle.engine),
+            Arc::clone(overlay),
+            handle.config.cache_dir.clone(),
+        ))
     }
 
     /// Return the live resources needed to commit a mounted overlay without

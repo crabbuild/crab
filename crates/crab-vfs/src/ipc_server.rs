@@ -266,6 +266,10 @@ async fn dispatch_request(
         IpcRequest::DiffOverlay { mountpoint } => {
             handle_diff_overlay(coordinator, mountpoint).await
         }
+        IpcRequest::ExportOverlay {
+            mountpoint,
+            destination,
+        } => handle_export_overlay(coordinator, mountpoint, destination).await,
         IpcRequest::ResetOverlay { mountpoint } => {
             handle_reset_overlay(coordinator, mountpoint).await
         }
@@ -613,7 +617,7 @@ async fn handle_diff_overlay(
     coordinator: &Arc<Mutex<Coordinator>>,
     mountpoint: String,
 ) -> IpcResponse {
-    let (engine, overlay) = {
+    let (engine, overlay, _) = {
         let coord = coordinator.lock().await;
         match coord.overlay_inspection_target(Path::new(&mountpoint)) {
             Ok(target) => target,
@@ -630,6 +634,37 @@ async fn handle_diff_overlay(
             response
         }
         Err(e) => IpcResponse::err(format!("diff failed: {e}")),
+    }
+}
+
+async fn handle_export_overlay(
+    coordinator: &Arc<Mutex<Coordinator>>,
+    mountpoint: String,
+    destination: PathBuf,
+) -> IpcResponse {
+    let (engine, overlay, cache_dir) = {
+        let coord = coordinator.lock().await;
+        match coord.overlay_inspection_target(Path::new(&mountpoint)) {
+            Ok(target) => target,
+            Err(error) => return IpcResponse::err(format!("export failed: {error}")),
+        }
+    };
+    match crate::mount_runtime::export_overlay_runtime(
+        engine,
+        overlay,
+        cache_dir,
+        PathBuf::from(&mountpoint),
+        destination,
+    )
+    .await
+    {
+        Ok(diff) => {
+            let mut response = IpcResponse::ok();
+            response.mountpoint = Some(mountpoint);
+            response.overlay_diff = Some(diff);
+            response
+        }
+        Err(error) => IpcResponse::err(format!("export failed: {error}")),
     }
 }
 

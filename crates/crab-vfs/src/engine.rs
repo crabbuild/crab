@@ -384,6 +384,20 @@ impl VfsReadLease {
             + std::mem::size_of::<ReadPatternState>()
     }
 
+    pub(crate) async fn pin_staged_file(&self) -> Result<Option<crab_staging::StagedFilePin>> {
+        match self.source.as_ref() {
+            ReadSource::BasePointer { pointer, .. } => match self
+                ._snapshot_view
+                .as_ref()
+                .and_then(|view| view.hydration.as_ref())
+            {
+                Some(hydration) => hydration.pin_file(pointer).await,
+                None => Ok(None),
+            },
+            _ => Ok(None),
+        }
+    }
+
     fn record_read_pattern(&self, offset: u64, size: u32) -> AdaptiveReadDecision {
         self.pattern.record_read(offset, size)
     }
@@ -1638,6 +1652,28 @@ impl VfsEngine {
     // -----------------------------------------------------------------------
     // Symlink support
     // -----------------------------------------------------------------------
+
+    pub(crate) fn symlink_target(&self, path: &str) -> Result<String> {
+        let view = self.resolver.capture_view();
+        match self.resolver.resolve_path_in(&view, path)? {
+            ResolvedNode::Base(base) => {
+                let oid = base.object_oid.ok_or_else(|| {
+                    CrabError::Internal(format!("symlink has no object identity: {path}"))
+                })?;
+                self.read_symlink_target(&oid)
+            }
+            ResolvedNode::Overlay(_) => {
+                let backing = self
+                    .overlay
+                    .as_ref()
+                    .and_then(|overlay| overlay.get_backing_path(path))
+                    .ok_or_else(|| {
+                        CrabError::Internal(format!("symlink has no backing: {path}"))
+                    })?;
+                Ok(std::fs::read_to_string(backing)?)
+            }
+        }
+    }
 
     /// Read the target of a symlink stored as a git blob.
     ///

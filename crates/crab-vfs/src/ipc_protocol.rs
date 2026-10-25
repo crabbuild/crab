@@ -32,6 +32,11 @@ pub enum IpcRequest {
     },
     /// Inspect a writable mount overlay through the live coordinator state.
     DiffOverlay { mountpoint: String },
+    /// Export a writable overlay through its live coordinator owner.
+    ExportOverlay {
+        mountpoint: String,
+        destination: std::path::PathBuf,
+    },
     /// Reset a writable mount overlay through the live coordinator state.
     ResetOverlay { mountpoint: String },
     /// Commit a writable mount overlay and adopt the published generation.
