@@ -315,7 +315,12 @@ teardown still require backend proof.
 The locked `nfs3_server` listener also spawns connection handlers and a transaction
 cleaner without exposing join handles. Listener drop notifies the cleaner, but
 neither that notification nor joining the listener proves child-task completion.
-Native unmount and backend task cleanup need separate verification.
+A real TCP RPC probe confirms an idle accepted connection retains the engine
+after the Crab mount owner returns; closing that client releases it. In a
+dedicated Linux native probe, a client holding its working directory in the
+mount makes ordinary unmount fail. The helper then exits while the kernel mount
+remains attached and its cache lease is already released. Busy-unmount ownership
+and dependency task drain are unresolved correctness gates.
 
 ## Control exchange ownership
 

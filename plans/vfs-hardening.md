@@ -2087,6 +2087,90 @@ throughput/report gate. These are open PR gates, not attributed to an unrelated
 base without reproduction. No inventory, threshold or expected-failure file is
 changed to bypass them. The draft is not ready to merge.
 
+## Thirty-fourth checkpoint: reproduced NFS data-owner failures
+
+The preceding control repair does not establish data-plane teardown. A temporary
+diagnostic module at `55647f5f771` uses the real nfs3_server TCP listener and
+answers an NFS NULL RPC. After `run_until_cancelled` returns and joins its
+listener, the accepted idle connection remains open and retains the engine.
+Closing that client releases the engine. The diagnostic module declaration was
+removed after capture; no expected-failure test or dependency override is added.
+
+A Make-installed Linux helper mounts the existing Capsule/RustFS fixture
+read-only. A separate process holds its current working directory in the mount.
+SIGINT makes ordinary unmount fail as busy; the helper exits with code 9 while
+the kernel mount remains attached and the cache lease is already available.
+Releasing the client does not detach the filesystem. The diagnostic needs lazy
+detachment of only its disposable read-only task mount afterward; that is failed
+product cleanup, not a passing teardown result. Retained proof lives under local
+`nfs-data/` and `linux/nfs-data/baseline/` outside the PR.
+
+The dependency trace is listener → accepted connection → message parser → RPC
+task. Locked nfs3_server 0.11.0 detaches all three task layers and exposes no
+public child-task drain. Its transaction cleaner also uses a detached task and
+Notify waiter. Blocking-RPC/disconnect behavior still needs a dedicated probe;
+idle retention and busy native unmount are now reproduced, not source leads.
+
+A busy-unmount retry alone is insufficient. Pipeline and daemon production
+owners give hydration their shutdown-request token; cold pointer reads reject
+that token after cancellation. Installed data service lifetime must instead
+extend through native detachment, with retained control discovery and cache
+admission, followed by complete RPC/engine drain. FUSE, daemon and CLI callers
+must preserve the same ownership ordering.
+
+A four-file dependency patch is prepared outside the checkout for review only.
+It proposes a graceful listener API, owned connections/parser/RPC tasks and
+listener-owned transaction cleanup, without changing the NFS wire format or
+adding dependencies. It is rustfmt parsed but unapplied and uncompiled.
+Root `AGENTS.md` requires explicit approval for dependency patches/overrides/vendor
+changes. The user approved this scoped nfs3_server 0.11.0 patch, vendoring with
+its license and the corresponding Cargo manifest/lockfile changes. No other
+dependency override is approved. It remains unapplied at this checkpoint;
+implementation and full native regression qualification follow the LFS change.
+
+## Thirty-fifth checkpoint: Capsule-only LFS pre-push history
+
+`run_lfs_pre_push_batch` resolves the primary store before collecting published
+ref tips. Its resolver already requires a Capsule root through
+`StoreResolver::write_store` → `build_repository_url_store_with_root` →
+`open_repository_root`. The later ref read nevertheless fell back to a manifest,
+or an empty exclusion set, if its root was missing. That could reinterpret
+storage authority after admission. Current `origin/main` at `cc2e4e25f46` reads
+only manifest tips; the previous crab-v2 implementation prefers Capsule but
+retains this fallback.
+
+The pre-push reader now requires a root and reads its transaction-consistent
+visible refs through `crab_read`. Missing/corrupt roots propagate before payload
+transfers. The manifest reader, empty-root substitute and redundant CLI storage
+adapters are removed. Standalone push and object-ID push already use the same
+rooted primary admission; managed LFS writes remain rejected by their existing
+protected-push contract. Fresh remotes still use canonical Capsule initialization.
+
+Two regressions fail against the previous implementation: an empty missing-root
+context and a canonically initialized pack-v1 repository both returned success.
+The latter uses the real legacy initializer, not an incomplete shard-list-only
+fixture. The new behavior passes both, while empty valid roots and corrupt-root
+errors retain their canonical behavior. All 25 LFS push tests and five repository
+admission tests pass on macOS NFS-only and dedicated Linux NFS/FUSE. Tests move
+to flat siblings `push_tests.rs` and `push_all_tests.rs`.
+
+Make-installed Linux roles initialize a new RustFS prefix, then real Git pushes
+run the installed LFS pre-push hook for first and incremental publication. Each
+hook reports uploading its one new 64 KiB payload. Visible Capsule refs match
+both commits. A fresh eager clone reproduces the current bytes; fetch-all then
+verifies both historical LFS payload hashes, and strict Git fsck passes. The
+initial harness used `--skip-repo`, which skipped hook installation: its successful
+Git push/clone was insufficient proof of this caller. That run is retained
+separately, and the corrected run asserts actual hook upload output.
+
+Local `lfs-capsule/source-manifest.json` binds 1,525 Rust source/manifest/Makefile
+hashes to these probes and the actual installed VM artifact hashes. macOS proof
+is compiled CLI unit coverage; no new native macOS LFS or optimized performance
+claim is made. Production LOC shrinks. No dependencies, lockfiles, protocol
+encodings or runtime settings change in this checkpoint. The approved NFS
+dependency work remains separate. Stored pack-v1 retirement is still incomplete
+at protected receive, gateway, legacy initialization and maintenance/publication.
+
 ## Remaining priority order
 
 The helper-layout gap and live read-only inspection leak are closed by the
@@ -2238,9 +2322,9 @@ Remaining located storage-authority boundaries:
 - `crates/crab-s3-gateway/src/repository.rs`: missing-root detection selects
   legacy catalog and generation maintenance at both background owners. Require
   Capsule authority across the scheduling, read-view and checkpoint callers.
-- `crab/src/cmd/lfs/push.rs::load_remote_ref_tips`: missing roots still read
-  manifest refs. Preserve fresh empty-prefix behavior through canonical v2
-  initialization, without retaining manifest-only admission.
+- LFS pre-push ref discovery now requires a Capsule root; its missing-root
+  manifest/empty-base fallback is removed at checkpoint-35. First and incremental
+  real Git hook publication plus an independent eager clone pass on RustFS.
 - `crab/src/cmd/metadb.rs::capsule_owner_root`: optional roots select alternative
   generation, maintenance and recovery paths. `crab/src/cmd/gc/bucket.rs` also
   has missing-root fallback at registered-repository root collection. Read and

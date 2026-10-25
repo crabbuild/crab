@@ -1,6 +1,7 @@
 use super::*;
 use sha2::Digest;
 
+#[path = "push_all_tests.rs"]
 mod all;
 
 fn oid(byte: u8) -> String {
@@ -93,24 +94,39 @@ fn pre_push_revisions_use_oids_for_tags_and_differently_named_destinations() {
 }
 
 #[test]
-fn missing_remote_authority_is_an_empty_base_tip_set() {
+fn remote_ref_tips_reject_a_missing_capsule_root() {
     let store =
         crate::storage::Store::new(std::sync::Arc::new(object_store::memory::InMemory::new()));
     let context = lfs_remote_context(&store, "org/lfs-pre-push");
 
-    assert!(load_remote_ref_tips(&context).unwrap().is_empty());
+    assert!(matches!(
+        load_remote_ref_tips(&context),
+        Err(CrabError::NotFound { .. })
+    ));
 }
 
 #[test]
-fn remote_ref_tips_fall_back_to_v1_manifest() {
+fn remote_ref_tips_reject_a_manifest_repository_without_a_capsule_root() {
     let store =
         crate::storage::Store::new(std::sync::Arc::new(object_store::memory::InMemory::new()));
     let prefix = "org/lfs-pre-push-v1";
-    let expected = git_oid(1);
-    create_v1_manifest(&store, prefix, &expected);
+    let layout = crab_storage::StoreLayout::new(store.as_storage().clone(), prefix.to_owned());
+    crate::cmd::lfs::block_on_runtime(async {
+        crab_write::initialize::initialize_repository(
+            store.as_storage(),
+            &layout,
+            "refs/heads/main",
+        )
+        .await
+        .map_err(CrabError::from)
+    })
+    .unwrap();
     let context = lfs_remote_context(&store, prefix);
 
-    assert_eq!(load_remote_ref_tips(&context).unwrap(), vec![expected]);
+    assert!(matches!(
+        load_remote_ref_tips(&context),
+        Err(CrabError::NotFound { .. })
+    ));
 }
 
 #[test]
