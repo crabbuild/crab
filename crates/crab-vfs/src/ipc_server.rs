@@ -613,10 +613,16 @@ async fn handle_diff_overlay(
     coordinator: &Arc<Mutex<Coordinator>>,
     mountpoint: String,
 ) -> IpcResponse {
-    let coord = coordinator.lock().await;
-    let mp = Path::new(&mountpoint);
-
-    match coord.inspect_mount_overlay(mp) {
+    let (engine, overlay) = {
+        let coord = coordinator.lock().await;
+        match coord.overlay_inspection_target(Path::new(&mountpoint)) {
+            Ok(target) => target,
+            Err(error) => return IpcResponse::err(format!("diff failed: {error}")),
+        }
+    };
+    match crate::mount_runtime::inspect_overlay_runtime(engine, overlay, PathBuf::from(&mountpoint))
+        .await
+    {
         Ok(diff) => {
             let mut response = IpcResponse::ok();
             response.mountpoint = Some(mountpoint);

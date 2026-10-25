@@ -513,9 +513,46 @@ fn unix_controls_reach_fuse_without_linking_the_server() {
         assert!(commit(&mountpoint, "save", true).await.unwrap().unwrap().pushed);
         let rejected = commit(&mountpoint, "reject", true).await.unwrap_err();
         assert!(rejected.to_string().contains("publication refused"));
+        assert!(inspect_overlay(&mountpoint).await.unwrap().is_some());
         assert!(reset_overlay(&mountpoint).await.unwrap().is_some());
         assert_eq!(shutdown(&mountpoint).await.unwrap().unwrap().backend, MountControlBackend::Fuse);
         server.abort();
         let _ = server.await;
+    });
+}
+
+#[cfg(feature = "nfs")]
+#[test]
+fn inspection_uses_live_nfs_mode_when_registry_is_stale() {
+    let _env_lock = crate::test_support::GIT_DIR_MUTEX
+        .lock()
+        .unwrap_or_else(std::sync::PoisonError::into_inner);
+    let tmp = tempfile::tempdir().unwrap();
+    let _home = HomeGuard::set(tmp.path());
+    let mountpoint = tmp.path().join("view");
+    std::fs::create_dir(&mountpoint).unwrap();
+    let mountpoint = normalize_mountpoint(&mountpoint);
+    let registry_path = crate::mounts_registry::registry_path().unwrap();
+    let endpoint = free_tcp_control_endpoint();
+    let mut entry = add_nfs_mount_entry(&registry_path, &mountpoint, &endpoint);
+    entry.read_only = false;
+    crate::mounts_registry::add_entry(&registry_path, entry).unwrap();
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    runtime.block_on(async {
+        let cancel = CancellationToken::new();
+        let server = crate::nfs_control::spawn_server(
+            Some(endpoint.clone()),
+            nfs_control_state(&mountpoint, true),
+            cancel,
+        )
+        .unwrap();
+        wait_for_nfs_status(&mountpoint).await;
+        let error = inspect_overlay(&mountpoint).await.unwrap_err();
+        crate::nfs_control::shutdown(&endpoint).await.unwrap();
+        server.await.unwrap().unwrap();
+        assert!(error.to_string().contains("read-only mount"));
     });
 }

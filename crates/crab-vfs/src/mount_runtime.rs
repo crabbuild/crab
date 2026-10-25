@@ -239,6 +239,37 @@ pub(crate) async fn begin_mount_update<'a>(
     engine: &'a crate::engine::VfsEngine,
     mountpoint: &Path,
 ) -> Result<crate::engine::OverlayResetGuard<'a>> {
+    flush_mount_writes(mountpoint).await?;
+    Ok(engine.begin_overlay_reset().await)
+}
+
+pub(crate) async fn inspect_overlay_runtime(
+    engine: Arc<crate::engine::VfsEngine>,
+    overlay: Arc<crate::overlay::OverlayStore>,
+    mountpoint: std::path::PathBuf,
+) -> Result<crate::publish::OverlayDiff> {
+    let owner = Arc::clone(&engine);
+    engine
+        .run_control(async move {
+            flush_mount_writes(&mountpoint).await?;
+            // Inspection blocks mutations without changing epochs or invalidating
+            // open readers. The freeze also excludes other-process publishers.
+            let _quiesce = owner.quiesce_overlay().await;
+            tokio::task::spawn_blocking(move || {
+                let _freeze = overlay.freeze_writes()?;
+                crate::publish::inspect_overlay_store(&overlay)
+            })
+            .await
+            .map_err(CrabError::ReadTask)?
+        })
+        .await
+}
+
+/// Flush client writeback before taking the engine mutation gate.
+///
+/// Linux waits for syncfs; macOS retains its global sync request. A missing
+/// synthetic Git file identifies an inactive helper with no client to flush.
+pub async fn flush_mount_writes(mountpoint: &Path) -> Result<()> {
     #[cfg(target_os = "linux")]
     {
         let gitfile = mountpoint.join(".git");
@@ -274,9 +305,27 @@ pub(crate) async fn begin_mount_update<'a>(
         .await
         .map_err(CrabError::ReadTask)??;
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        let gitfile = mountpoint.join(".git");
+        tokio::task::spawn_blocking(move || -> Result<()> {
+            let _client = match std::fs::File::open(gitfile) {
+                Ok(file) => file,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+                Err(error) => return Err(error.into()),
+            };
+            // Preserve the CLI's writeback request in the live owner. A waiting
+            // per-mount macOS barrier still needs native filesystem qualification.
+            // SAFETY: sync takes no arguments and requests filesystem writeback.
+            unsafe { libc::sync() };
+            Ok(())
+        })
+        .await
+        .map_err(CrabError::ReadTask)??;
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     let _ = mountpoint;
-    Ok(engine.begin_overlay_reset().await)
+    Ok(())
 }
 
 pub(crate) async fn commit_mount_runtime(

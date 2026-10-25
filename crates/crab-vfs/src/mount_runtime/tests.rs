@@ -630,3 +630,32 @@ async fn committed_generations_are_adopted_before_pruning_live_resolver() {
 }
 
 mod catalog;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn inspection_preserves_open_read_leases() {
+    let root = tempfile::tempdir().unwrap();
+    let source = source_repo(root.path());
+    let config = PipelineConfig {
+        source: source.display().to_string(),
+        git_dir: source.join(".git"),
+        git_metadata: GitMetadataOwnership::Borrowed,
+        ref_name: Some("refs/heads/main".into()),
+        read_only: false,
+        cache_dir: root.path().join("cache"),
+        cancel_token: CancellationToken::new(),
+    };
+    let output = MountPipelineBuilder::new(config).execute().unwrap();
+    output.engine.write("base.txt", 0, b"edit").await.unwrap();
+    let lease = output.engine.open_read("base.txt").unwrap();
+    let diff = inspect_overlay_runtime(
+        Arc::clone(&output.engine),
+        output.overlay.clone().unwrap(),
+        root.path().join("inactive-view"),
+    )
+    .await
+    .unwrap();
+    let visible = output.engine.read_at(&lease, 0, 4).await;
+    output.engine.shutdown_background().await;
+    assert_eq!(diff.changes[0].path, "base.txt");
+    assert_eq!(visible.unwrap().as_ref(), b"edit");
+}

@@ -83,6 +83,20 @@ publication. Manual branch selection therefore cannot be undone by an older poll
 Hydration services for successive views share caches, admission and shutdown;
 capturing a new catalog does not create an independent resource budget.
 
+Live overlay inspection uses the current helper/coordinator's overlay and mode.
+Read-only mounts have no live overlay: inspection and overlay export reject them,
+without reading or changing a retained writable cache. Linux flushes mapped client
+writes before quiescing engine mutations; a process-spanning overlay freeze then
+protects the metadata read. Inspection preserves reader epochs and leases and
+performs no WAL checkpoint. A known owner disappearing must return an error,
+rather than redirecting the command to private saved state. The CLI no longer
+polls repeated equal summaries as a substitute for owning this read boundary.
+
+Export preflight uses this live inspection boundary. Export materialization still
+uses its existing process-spanning freeze and mounted-view reads for metadata-only
+base renames. Its full generation/control ownership remains a separate gate;
+inspection's ownership does not make that later copy one atomic operation.
+
 On Unix, either backend enables `ipc_client` and the unchanged `ipc_protocol`
 wire types. An NFS-only main CLI can control an existing FUSE coordinator without
 linking its server. Coordinator bootstrap and server ownership require `fuse`.

@@ -118,6 +118,11 @@ mount/control owners consume the pipeline output separately.
   completion even when callers stop waiting. Shutdown closes admission and drains
   controls before read resources. Owned jobs must not reacquire a coordinator
   lock held by shutdown. Sources: `engine.rs`, `mount_runtime.rs`, `ipc_server.rs`.
+- Live inspection uses the helper/coordinator's actual overlay and mode.
+  Flush client writeback before quiescing mutations; inspection does not change
+  epochs or invalidate open readers. Keep the cross-process freeze through the
+  metadata read. Never redirect a known owner's failed exchange to saved state.
+  Sources: `mount_control.rs`, `mount_runtime.rs`, both backend control owners.
 - NFS control deadlines cover connect/write/read on a request-owned socket.
   Timeout closes that socket; it does not roll back a helper mutation. Do not
   retry an uncertain commit. Source: `crates/crab-vfs/src/nfs_control.rs`.

@@ -1,0 +1,38 @@
+    Checking crab-types v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-types)
+    Checking ahash v0.8.12
+    Checking crab-xet v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-xet)
+    Checking hashbrown v0.14.5
+    Checking slatedb-common v0.15.0
+    Checking crab-storage v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-storage)
+    Checking foyer-storage v0.22.3
+    Checking hashlink v0.9.1
+    Checking rusqlite v0.31.0
+    Checking foyer v0.22.3
+    Checking slatedb-txn-obj v0.15.0
+    Checking fail-parallel v0.6.0
+    Checking slatedb v0.15.0
+    Checking crab-git v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-git)
+    Checking crab-metadata v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-metadata)
+    Checking crab-cache v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-cache)
+    Checking crab-diff v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-diff)
+    Checking ref-cast v1.0.25
+    Checking crab-staging v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-staging)
+    Checking crab-cache-store v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-cache-store)
+    Checking crab-lfs v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-lfs)
+    Checking num_enum v0.7.6
+    Checking crab-remote-git v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-remote-git)
+    Checking nix v0.30.1
+    Checking page_size v0.6.0
+    Checking wait-timeout v0.2.1
+    Checking bit-vec v0.8.0
+    Checking quick-error v1.2.3
+    Checking rusty-fork v0.3.1
+    Checking bit-set v0.8.0
+    Checking fuser v0.17.0
+    Checking dashmap v6.1.0
+    Checking rand_xorshift v0.4.0
+    Checking unarray v0.1.4
+    Checking proptest v1.11.0
+    Checking crab-read v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-read)
+    Checking crab-vfs v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-vfs)
+    Finished `dev` profile [unoptimized] target(s) in 31.96s

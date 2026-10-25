@@ -68,6 +68,7 @@ pub enum NfsControlRequest {
     Status,
     Refresh,
     SwitchRef { r#ref: String },
+    DiffOverlay,
     ResetOverlay,
     Commit { message: String, push: bool },
     Shutdown,
@@ -327,7 +328,7 @@ impl NfsControlResponse {
         }
     }
 
-    fn reset_ok(diff: crate::publish::OverlayDiff) -> Self {
+    fn overlay_diff_ok(diff: crate::publish::OverlayDiff) -> Self {
         Self {
             ok: true,
             error: None,
@@ -1025,8 +1026,12 @@ async fn dispatch_request(
             Ok(update) => NfsControlResponse::update_ok(update),
             Err(error) => NfsControlResponse::err(error.to_string()),
         },
+        NfsControlRequest::DiffOverlay => match inspect_overlay_runtime(state).await {
+            Ok(diff) => NfsControlResponse::overlay_diff_ok(diff),
+            Err(error) => NfsControlResponse::err(error.to_string()),
+        },
         NfsControlRequest::ResetOverlay => match reset_overlay_runtime(state).await {
-            Ok(diff) => NfsControlResponse::reset_ok(diff),
+            Ok(diff) => NfsControlResponse::overlay_diff_ok(diff),
             Err(error) => NfsControlResponse::err(error.to_string()),
         },
         NfsControlRequest::Commit { message, push } => {
@@ -1040,6 +1045,28 @@ async fn dispatch_request(
             NfsControlResponse::ok()
         }
     }
+}
+
+async fn inspect_overlay_runtime(state: &NfsControlState) -> Result<crate::publish::OverlayDiff> {
+    if state.read_only {
+        return Err(CrabError::Forbidden {
+            path: format!("read-only mount: {}", state.mountpoint.display()),
+        });
+    }
+    let runtime = state
+        .runtime
+        .as_ref()
+        .ok_or_else(|| CrabError::Internal("NFS inspection runtime unavailable".into()))?;
+    let (engine, overlay) = {
+        let runtime = lock_runtime(runtime)?;
+        let overlay = runtime
+            .output
+            .overlay
+            .clone()
+            .ok_or_else(|| CrabError::Internal("NFS inspection overlay unavailable".into()))?;
+        (Arc::clone(&runtime.output.engine), overlay)
+    };
+    crate::mount_runtime::inspect_overlay_runtime(engine, overlay, state.mountpoint.clone()).await
 }
 
 async fn reset_overlay_runtime(state: &NfsControlState) -> Result<crate::publish::OverlayDiff> {
@@ -1311,13 +1338,23 @@ pub async fn switch_ref(endpoint: &str, git_ref: &str) -> Result<NfsControlUpdat
     control_update_from_response(response, "NFS control switch failed")
 }
 
+/// Inspect the running helper's writable overlay state.
+pub async fn inspect_overlay(endpoint: &str) -> Result<crate::publish::OverlayDiff> {
+    let response = request(endpoint, &NfsControlRequest::DiffOverlay).await?;
+    overlay_diff_from_response(response)
+}
+
 pub async fn reset_overlay(endpoint: &str) -> Result<crate::publish::OverlayDiff> {
     let response = request(endpoint, &NfsControlRequest::ResetOverlay).await?;
+    overlay_diff_from_response(response)
+}
+
+fn overlay_diff_from_response(response: NfsControlResponse) -> Result<crate::publish::OverlayDiff> {
     if !response.ok {
         return Err(CrabError::Internal(
             response
                 .error
-                .unwrap_or_else(|| "NFS control reset failed".to_owned()),
+                .unwrap_or_else(|| "NFS overlay request failed".to_owned()),
         ));
     }
     response

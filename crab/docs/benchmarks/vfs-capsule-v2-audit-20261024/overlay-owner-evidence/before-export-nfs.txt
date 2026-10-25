@@ -1,0 +1,6 @@
+{"backend": "nfs", "readonly_export_exit": 0, "hidden_path_exported": true, "readonly_diff_exit": 0, "invisible_path_reported": true, "readonly_view_has_path": false}
+Traceback (most recent call last):
+  File "/e2e/probe.py", line 64, in <module>
+    assert exported.returncode!=0,'read-only export copied hidden writable state'
+           ^^^^^^^^^^^^^^^^^^^^^^
+AssertionError: read-only export copied hidden writable state

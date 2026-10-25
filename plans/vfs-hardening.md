@@ -1465,14 +1465,84 @@ previous library/native results are unaffected. The explicit proof bind is
 verified before restarting qualification. No other VM, target or repository was
 cleaned or reused.
 
+## Twenty-fourth checkpoint: owner-routed overlay inspection
+
+A real writable → read-only → writable RustFS mode cycle proves the earlier
+parity diagnostic is a correctness bug: the read-only NFS view does not contain
+`unpublished-owner.txt`, but `mount diff` reports it and `mount export` copies its
+saved writable bytes. A final writable remount recovers those exact bytes. FUSE's
+coordinator rejects read-only inspection. The mode cycle distinguishes hidden
+saved overlay state from the current mounted namespace; it is stronger than an
+empty read-only cache probe. Initial host-bind executable startup attempts timed
+out before mounting and one helper startup failed; those attempts are not product
+mode-cycle proof. Completed before runs use writable artifact binds and retain
+helper logs on failures.
+
+NFS now has a live `diff_overlay` request. Both adapters hand the live overlay to
+one owned runtime inspection operation. Linux client writeback finishes before
+the engine's exclusive mutation gate; a process-spanning freeze then protects the
+metadata read. A non-mutating quiesce guard preserves existing reader epochs and
+leases. FUSE releases the coordinator lock before waiting and no longer performs
+a WAL checkpoint just to inspect. The CLI removes repeated summary polling and
+uses actual owner errors for read-only inspection/export preflight. Commit/reset
+already own their drain boundary and no longer perform a separate diff preflight.
+
+A second failing CLI regression proves that removing an NFS registry entry
+between context capture and inspection could select private offline state. The
+context now marks both registered backends as known owners and refuses that
+redirection. Legacy/unregistered foreground and offline recovery ownership still
+need separate qualification; this change does not claim to wire those owners.
+All three offline CLI call sites share the same filesystem writeback helper;
+CLI path validation stays above the helper's inactive-client skip. macOS retains
+its previous global sync request in the live owner before the gate. A waiting
+per-mount native NFS barrier is still unqualified. Apple's SDK declares
+`fsync_volume_np` and `SYNC_VOLUME_WAIT`, but upstream implementation/error and NFS
+contracts require proof before selecting it; no dependency binding override or
+new product knob was introduced.
+
+Current checks pass 637 Linux VFS tests and all 16 native probes, including two
+new held-WRITE mapped inspection cases. The read-lease regression would fail if
+inspection reused the mutating reset guard. macOS passes both new VFS inspection
+tests and both CLI context tests; the lost-owner regression fails before its fix.
+Strict combined-feature VFS Clippy passes on both platforms. All six real RustFS
+4 MiB mapped refresh/switch/automatic → commit/push → independent eager clone
+hash flows pass on the final installed roles. Final installed-role
+RustFS mode cycles reject read-only diff/export on both adapters and recover the
+saved writable bytes. A separate test precondition waits for the cache lease
+between modes: NFS needed 111 ms after unmount had already returned. The original
+immediate-remount NFS run is retained as a failure, with the new helper reporting
+cache-already-in-use. This checkpoint does not repair that lifecycle gap.
+
+Paired warm CLI diff runs compare the previous and new CLI against the same live
+helper and identical structured diff payload: NFS median 201 → 61 ms, FUSE
+154 → 40 ms (10 retained samples each after warmup). These debug results qualify
+removal of summary polling only; they do not measure read throughput or establish
+optimized production performance. Evidence, scripts and source/binary hashes live
+under `crab/docs/benchmarks/vfs-capsule-v2-audit-20261024/overlay-owner-*`.
+
+NFS unmount/cache-lease handoff is the next confirmed correctness repair. Wait
+for the authoritative live cache owner to finish shutdown; do not insert a
+mount retry or consider a missing kernel mount sufficient. Preserve the sibling
+FUSE/coordinator and daemon ordering, which drains the engine before dropping
+cache ownership.
+
+Export remains the next inspection ownership boundary. Its existing freeze spans processes,
+but metadata-only base renames are copied through the mounted path. Reproduce
+interaction with blocked writes and refresh before a bounded refactor. A direct
+canonical engine reader must keep local recipe pins for the whole exported file,
+avoid kernel re-entry while holding the gate/freeze, preserve symlink/directory
+semantics, and reject outputs overlapping the live mount or its private cache.
+No second pointer reconstruction implementation or offline retry is acceptable.
+
 ## Remaining priority order
 
-The checkpoint-21 helper-layout gap is closed by the shared Unix client and
-checkpoint-23 installed main-CLI proof. Next, align live overlay inspection/export
-ownership and read-only policy: the retained RustFS diagnostic shows FUSE rejecting
-read-only diff while NFS reads its local overlay paths. Preserve the existing
-process-spanning export freeze and prove concurrent reset/commit plus lost-owner
-behavior. Do not add an offline retry after an uncertain live operation.
+The helper-layout gap and live read-only inspection leak are closed by the
+installed-role proofs. First repair the confirmed NFS unmount/cache handoff:
+unmount currently succeeds before its helper releases mutable cache ownership,
+so an immediate mode switch can fail. Then complete live export materialization
+ownership and prove concurrent reset/commit plus lost-owner behavior. Preserve
+the existing process-spanning export freeze. Do not add an offline retry after
+an uncertain live operation.
 
 1. **Correctness: coherent Git/Capsule generations.** Atomically install selected
    Git state, pinned catalog and read service for startup, refresh, switch and

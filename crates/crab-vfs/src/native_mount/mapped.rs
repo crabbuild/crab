@@ -1,4 +1,5 @@
 use super::*;
+use std::sync::Arc;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 
 #[derive(Clone, Copy)]
@@ -6,6 +7,7 @@ enum Transition {
     Refresh,
     Switch,
     Automatic,
+    Inspect,
 }
 
 async fn qualify_mapped_transition(fuse: bool, transition_kind: Transition) {
@@ -108,6 +110,13 @@ os.close(fd)
                     .await
                     .map(|_| ())
             }
+            Transition::Inspect => crate::mount_runtime::inspect_overlay_runtime(
+                Arc::clone(&output.engine),
+                output.overlay.clone().unwrap(),
+                mountpoint,
+            )
+            .await
+            .map(|_| ()),
             Transition::Automatic => {
                 let refresh = crate::pipeline::spawn_refresh_loop(
                     &output,
@@ -220,4 +229,16 @@ async fn fuse_mapped_automatic_refresh_without_msync() {
 #[ignore = "requires a dedicated Linux environment with native FUSE/NFS mount privileges"]
 async fn nfs_mapped_automatic_refresh_without_msync() {
     qualify_mapped_transition(false, Transition::Automatic).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires a dedicated Linux environment with native FUSE/NFS mount privileges"]
+async fn fuse_mapped_inspection_without_msync() {
+    qualify_mapped_transition(true, Transition::Inspect).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires a dedicated Linux environment with native FUSE/NFS mount privileges"]
+async fn nfs_mapped_inspection_without_msync() {
+    qualify_mapped_transition(false, Transition::Inspect).await;
 }

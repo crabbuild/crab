@@ -1,0 +1,9 @@
+   Compiling crab-vfs v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-vfs)
+    Finished `test` profile [unoptimized] target(s) in 12.90s
+     Running unittests src/lib.rs (/Users/haipingfu/Workspace/crabbuild-target/crab-ios-02d01345-vfs/debug/deps/crab_vfs-1fbf9bc8d8bcec64)
+
+running 2 tests
+test mount_control::tests::inspection_uses_live_nfs_mode_when_registry_is_stale ... ok
+test mount_runtime::tests::inspection_preserves_open_read_leases ... ok
+
+test result: ok. 2 passed; 0 failed; 0 ignored; 0 measured; 548 filtered out; finished in 0.15s

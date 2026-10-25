@@ -571,8 +571,10 @@ impl Coordinator {
             .await
     }
 
-    /// Inspect a mounted writable overlay through the live store.
-    pub fn inspect_mount_overlay(&self, mountpoint: &Path) -> Result<crate::publish::OverlayDiff> {
+    pub(crate) fn overlay_inspection_target(
+        &self,
+        mountpoint: &Path,
+    ) -> Result<(Arc<VfsEngine>, Arc<OverlayStore>)> {
         let handle = self
             .mounts
             .get(mountpoint)
@@ -585,9 +587,7 @@ impl Coordinator {
         let overlay = handle.pipeline_output.overlay.as_ref().ok_or_else(|| {
             CrabError::Internal(format!("mount has no overlay: {}", mountpoint.display()))
         })?;
-        let diff = crate::publish::inspect_overlay_store(overlay)?;
-        overlay.checkpoint_wal()?;
-        Ok(diff)
+        Ok((Arc::clone(&handle.engine), Arc::clone(overlay)))
     }
 
     /// Return the live resources needed to commit a mounted overlay without

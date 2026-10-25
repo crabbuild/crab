@@ -1,0 +1,211 @@
+make: Entering directory '/src/crab'
+   Compiling crab-vfs v0.1.0 (/src/crates/crab-vfs)
+warning: crab@1.2.4: crab build.rs: could not resolve git sha, using "unknown" (is git installed and is this a git checkout?)
+   Compiling crab v1.2.4 (/src/crab)
+warning: unused import: `std::fmt`
+ --> crab/src/replication/mod.rs:9:5
+  |
+9 | use std::fmt;
+  |     ^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `tracing::warn`
+  --> crab/src/storage/head_class.rs:57:5
+   |
+57 | use tracing::warn;
+   |     ^^^^^^^^^^^^^
+
+warning: unused variable: `rel_path`
+    --> crab/src/cmd/add.rs:2768:10
+     |
+2768 |     for (rel_path, abs_path) in selected_dirs {
+     |          ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_rel_path`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `prefix` is never read
+    --> crab/src/cmd/fsck_store.rs:1389:5
+     |
+1387 | pub struct StoreRepairer {
+     |            ------------- field in this struct
+1388 |     store: Store,
+1389 |     prefix: String,
+     |     ^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `run_yaml_single_stage` is never used
+    --> crab/src/cmd/run.rs:1348:10
+     |
+1348 | async fn run_yaml_single_stage(
+     |          ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `preview_stage_cache_hit` is never used
+    --> crab/src/cmd/run.rs:3618:4
+     |
+3618 | fn preview_stage_cache_hit(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `object_relative_key` is never used
+   --> crab/src/import/versions.rs:536:4
+    |
+536 | fn object_relative_key(prefix: &str, full_key: &str) -> Option<String> {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `snapshot_records_at` is never used
+   --> crab/src/import/versions.rs:548:4
+    |
+548 | fn snapshot_records_at(records: Vec<VersionRecord>, at: i64) -> Vec<VersionRecord> {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `is_newer_snapshot_record` is never used
+   --> crab/src/import/versions.rs:568:4
+    |
+568 | fn is_newer_snapshot_record(candidate: &VersionRecord, existing: &VersionRecord) -> bool {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `control_plane_backend_initialization_failed` is never used
+    --> crab/src/replication/mod.rs:2149:4
+     |
+2149 | fn control_plane_backend_initialization_failed(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `gcs_pair_policy_state` is never used
+    --> crab/src/replication/mod.rs:5753:4
+     |
+5753 | fn gcs_pair_policy_state(
+     |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_coordinator_gc_snapshot_admission` is never used
+    --> crab/src/replication/mod.rs:7439:4
+     |
+7439 | fn validate_coordinator_gc_snapshot_admission(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `coordinator_gc_snapshot_status_error` is never used
+    --> crab/src/replication/mod.rs:7469:4
+     |
+7469 | fn coordinator_gc_snapshot_status_error(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `aws_region` is never used
+   --> crab/src/tier/runtime.rs:159:4
+    |
+159 | fn aws_region(config: &Config) -> String {
+    |    ^^^^^^^^^^
+
+warning: `crab` (lib) generated 14 warnings (run `cargo fix --lib -p crab` to apply 3 suggestions)
+    Finished `dev` profile [unoptimized] target(s) in 1m 26s
+   Compiling crab-vfs v0.1.0 (/src/crates/crab-vfs)
+warning: crab@1.2.4: crab build.rs: could not resolve git sha, using "unknown" (is git installed and is this a git checkout?)
+   Compiling crab v1.2.4 (/src/crab)
+warning: unused import: `std::fmt`
+ --> crab/src/replication/mod.rs:9:5
+  |
+9 | use std::fmt;
+  |     ^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `tracing::warn`
+  --> crab/src/storage/head_class.rs:57:5
+   |
+57 | use tracing::warn;
+   |     ^^^^^^^^^^^^^
+
+warning: unused variable: `rel_path`
+    --> crab/src/cmd/add.rs:2768:10
+     |
+2768 |     for (rel_path, abs_path) in selected_dirs {
+     |          ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_rel_path`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `prefix` is never read
+    --> crab/src/cmd/fsck_store.rs:1389:5
+     |
+1387 | pub struct StoreRepairer {
+     |            ------------- field in this struct
+1388 |     store: Store,
+1389 |     prefix: String,
+     |     ^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `run_yaml_single_stage` is never used
+    --> crab/src/cmd/run.rs:1348:10
+     |
+1348 | async fn run_yaml_single_stage(
+     |          ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `preview_stage_cache_hit` is never used
+    --> crab/src/cmd/run.rs:3618:4
+     |
+3618 | fn preview_stage_cache_hit(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `object_relative_key` is never used
+   --> crab/src/import/versions.rs:536:4
+    |
+536 | fn object_relative_key(prefix: &str, full_key: &str) -> Option<String> {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `snapshot_records_at` is never used
+   --> crab/src/import/versions.rs:548:4
+    |
+548 | fn snapshot_records_at(records: Vec<VersionRecord>, at: i64) -> Vec<VersionRecord> {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `is_newer_snapshot_record` is never used
+   --> crab/src/import/versions.rs:568:4
+    |
+568 | fn is_newer_snapshot_record(candidate: &VersionRecord, existing: &VersionRecord) -> bool {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `control_plane_backend_initialization_failed` is never used
+    --> crab/src/replication/mod.rs:2149:4
+     |
+2149 | fn control_plane_backend_initialization_failed(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `gcs_pair_policy_state` is never used
+    --> crab/src/replication/mod.rs:5753:4
+     |
+5753 | fn gcs_pair_policy_state(
+     |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_coordinator_gc_snapshot_admission` is never used
+    --> crab/src/replication/mod.rs:7439:4
+     |
+7439 | fn validate_coordinator_gc_snapshot_admission(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `coordinator_gc_snapshot_status_error` is never used
+    --> crab/src/replication/mod.rs:7469:4
+     |
+7469 | fn coordinator_gc_snapshot_status_error(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `aws_region` is never used
+   --> crab/src/tier/runtime.rs:159:4
+    |
+159 | fn aws_region(config: &Config) -> String {
+    |    ^^^^^^^^^^
+
+warning: `crab` (lib) generated 14 warnings (run `cargo fix --lib -p crab` to apply 3 suggestions)
+    Finished `dev` profile [unoptimized] target(s) in 1m 26s
+    Finished `dev` profile [unoptimized] target(s) in 0.27s
+installed crab -> /root/Workspace/crabbuild-target/vfs-audit/overlay-owner/bin/crab
+installed crab-cache-server -> /root/Workspace/crabbuild-target/vfs-audit/overlay-owner/bin/crab-cache-server
+installed crab-nfs-mount -> /root/Workspace/crabbuild-target/vfs-audit/overlay-owner/bin/crab-nfs-mount
+installed crab-fuse-mount -> /root/Workspace/crabbuild-target/vfs-audit/overlay-owner/bin/crab-fuse-mount
+symlinked git-remote-crab -> /root/Workspace/crabbuild-target/vfs-audit/overlay-owner/bin/git-remote-crab
+installed crab -> /qualification/overlay-owner/bin/crab
+installed crab-cache-server -> /qualification/overlay-owner/bin/crab-cache-server
+installed crab-nfs-mount -> /qualification/overlay-owner/bin/crab-nfs-mount
+installed crab-fuse-mount -> /qualification/overlay-owner/bin/crab-fuse-mount
+symlinked git-remote-crab -> /qualification/overlay-owner/bin/git-remote-crab
+
+verify: crab version
+make: Leaving directory '/src/crab'

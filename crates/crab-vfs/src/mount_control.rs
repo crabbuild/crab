@@ -392,6 +392,37 @@ pub async fn commit(
     }
 }
 
+/// Inspect an active writable mount through its live owner.
+pub async fn inspect_overlay(path: &Path) -> Result<Option<crate::publish::OverlayDiff>> {
+    #[cfg(feature = "nfs")]
+    if let Some(context) = nfs_context(path)? {
+        return crate::nfs_control::inspect_overlay(&context.endpoint)
+            .await
+            .map(Some);
+    }
+    #[cfg(unix)]
+    {
+        let mountpoint = normalize_mountpoint(path).display().to_string();
+        let Some(mut client) = fuse_mount_client(&mountpoint).await? else {
+            return Ok(None);
+        };
+        let response = send_fuse_request(
+            &mut client,
+            crate::ipc_protocol::IpcRequest::DiffOverlay { mountpoint },
+        )
+        .await?;
+        let diff = response
+            .overlay_diff
+            .ok_or_else(|| CrabError::Internal("FUSE inspection response missing diff".into()))?;
+        Ok(Some(diff))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(None)
+    }
+}
+
 pub async fn reset_overlay(path: &Path) -> Result<Option<crate::publish::OverlayDiff>> {
     #[cfg(feature = "nfs")]
     if let Some(context) = nfs_context(path)? {

@@ -499,26 +499,6 @@ pub async fn try_ipc_invalidate(mountpoint: &str, paths: Vec<String>) -> Result<
     Err(CrabError::Internal(format!("invalidate failed: {msg}")))
 }
 
-/// Ask the coordinator to inspect the live writable overlay for a mounted path.
-pub async fn try_ipc_overlay_diff(mountpoint: &str) -> Result<crate::publish::OverlayDiff> {
-    let socket_path = default_socket_path()?;
-    let mut client = IpcClient::connect(&socket_path)
-        .await
-        .map_err(CrabError::from)?;
-
-    let request = IpcRequest::DiffOverlay {
-        mountpoint: mountpoint.to_owned(),
-    };
-    let response = client.send(&request).await.map_err(CrabError::from)?;
-    if response.ok {
-        return response
-            .overlay_diff
-            .ok_or_else(|| CrabError::Internal("diff response missing overlay diff".into()));
-    }
-    let msg = response.error.unwrap_or_else(|| "unknown error".to_owned());
-    Err(CrabError::Internal(format!("diff failed: {msg}")))
-}
-
 /// Ask the coordinator to reset the live writable overlay for a mounted path.
 pub async fn try_ipc_reset_overlay(mountpoint: &str) -> Result<crate::publish::OverlayDiff> {
     let socket_path = default_socket_path()?;

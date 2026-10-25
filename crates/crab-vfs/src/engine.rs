@@ -1870,8 +1870,12 @@ impl VfsEngine {
         self.overlay_reset_gate.clone().read_owned().await
     }
 
+    pub(crate) async fn quiesce_overlay(&self) -> OwnedRwLockWriteGuard<()> {
+        self.overlay_reset_gate.clone().write_owned().await
+    }
+
     pub async fn begin_overlay_reset(&self) -> OverlayResetGuard<'_> {
-        let guard = self.overlay_reset_gate.clone().write_owned().await;
+        let guard = self.quiesce_overlay().await;
         let previous = self.overlay_reset_epoch.fetch_add(1, Ordering::AcqRel);
         if !previous.is_multiple_of(2) {
             warn!(epoch = previous, "overlay reset epoch was already active");

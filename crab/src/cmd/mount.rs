@@ -13,12 +13,8 @@ use std::path::{Path, PathBuf};
 
 #[cfg(any(feature = "fuse", feature = "nfs"))]
 use serde::Serialize;
-#[cfg(all(any(feature = "fuse", feature = "nfs"), target_os = "linux"))]
-use std::os::fd::AsRawFd;
 #[cfg(any(feature = "fuse", feature = "nfs"))]
 use std::time::Duration;
-#[cfg(any(feature = "fuse", feature = "nfs"))]
-use tracing::debug;
 use tracing::{info, warn};
 
 use crate::core::error::{CrabError, Result};
@@ -3560,7 +3556,7 @@ pub struct MountOverlayCommitPayload {
 #[cfg(any(feature = "fuse", feature = "nfs"))]
 pub async fn run_mount_diff(path: &Path, json: bool) -> Result<()> {
     let context = resolve_mount_overlay_context(path).await?;
-    let diff = stable_overlay_diff(&context).await?;
+    let diff = overlay_diff_once(&context).await?;
     if json {
         emit_json(
             "mount.diff",
@@ -3580,7 +3576,7 @@ pub async fn run_mount_diff(path: &Path, json: bool) -> Result<()> {
 #[cfg(any(feature = "fuse", feature = "nfs"))]
 pub async fn run_mount_export(path: &Path, destination: &Path, json: bool) -> Result<()> {
     let context = resolve_mount_overlay_context(path).await?;
-    let _ = stable_overlay_diff(&context).await?;
+    let _ = overlay_diff_once(&context).await?;
     let diff = crate::vfs::publish::export_overlay_from_view(
         &context.overlay_paths,
         destination,
@@ -3620,7 +3616,6 @@ pub async fn run_mount_reset(path: &Path, overlay: bool, yes: bool, json: bool) 
     }
 
     let context = resolve_mount_overlay_context(path).await?;
-    let _ = stable_overlay_diff(&context).await?;
     let diff = reset_overlay_for_context(&context).await?;
     if json {
         emit_json(
@@ -3646,12 +3641,13 @@ async fn reset_overlay_for_context(
         return Ok(diff);
     }
     // Losing a live owner cannot authorize mutating its backing database offline.
-    if context.invalidate_via_ipc {
+    if context.live_owner {
         return Err(CrabError::Configuration {
             key: "live mount control disappeared before reset".into(),
             origin: "crab mount reset".into(),
         });
     }
+    flush_mount_writes(&context.mountpoint_path).await?;
     Ok(crate::vfs::publish::reset_overlay(&context.overlay_paths)?)
 }
 
@@ -3664,13 +3660,12 @@ pub async fn run_mount_commit(path: &Path, message: &str, push: bool, json: bool
             origin: "crab mount commit".into(),
         });
     }
-    let _ = stable_overlay_diff(&context).await?;
     let result =
         if let Some(result) = crate::vfs::mount_control::commit(path, message, push).await? {
             result
         } else {
             // A lost/uncertain live operation must not become a second offline commit.
-            if context.invalidate_via_ipc {
+            if context.live_owner {
                 return Err(CrabError::Configuration {
                     key: "live mount control disappeared before commit".into(),
                     origin: "crab mount commit".into(),
@@ -3691,6 +3686,7 @@ pub async fn run_mount_commit(path: &Path, message: &str, push: bool, json: bool
                     origin: "crab mount commit".into(),
                 })?;
 
+            flush_mount_writes(&context.mountpoint_path).await?;
             crate::vfs::publish::commit_overlay(&crate::vfs::publish::OverlayCommitOptions {
                 cache_dir: context.overlay_paths.cache_dir.clone(),
                 git_dir,
@@ -3718,108 +3714,30 @@ pub async fn run_mount_commit(path: &Path, message: &str, push: bool, json: bool
 }
 
 #[cfg(any(feature = "fuse", feature = "nfs"))]
-async fn stable_overlay_diff(
-    context: &MountOverlayContext,
-) -> Result<crate::vfs::publish::OverlayDiff> {
-    const STABLE_PASSES: usize = 3;
-    const MAX_PASSES: usize = 40;
-    const QUIESCE_DELAY: Duration = Duration::from_millis(50);
-
-    let mut last_key = None;
-    let mut stable_passes = 0;
-
-    for pass in 1..=MAX_PASSES {
-        let diff = overlay_diff_once(context).await?;
-        let key = overlay_diff_key(&diff);
-        if last_key.as_ref() == Some(&key) {
-            stable_passes += 1;
-        } else {
-            last_key = Some(key);
-            stable_passes = 1;
-        }
-
-        if stable_passes >= STABLE_PASSES {
-            return Ok(diff);
-        }
-
-        debug!(
-            mountpoint = %context.mountpoint,
-            pass,
-            "waiting for mounted overlay writes to quiesce"
-        );
-        tokio::time::sleep(QUIESCE_DELAY).await;
-    }
-
-    Err(CrabError::Internal(
-        "mounted overlay writes did not quiesce".into(),
-    ))
-}
-
-#[cfg(any(feature = "fuse", feature = "nfs"))]
 async fn overlay_diff_once(
     context: &MountOverlayContext,
 ) -> Result<crate::vfs::publish::OverlayDiff> {
-    flush_mount_writes(&context.mountpoint_path)?;
-    if context.invalidate_via_ipc {
-        #[cfg(unix)]
-        return Ok(crate::vfs::ipc_client::try_ipc_overlay_diff(&context.mountpoint).await?);
-        #[cfg(not(unix))]
-        return Err(CrabError::Internal(
-            "Unix mount control is unavailable on this platform".into(),
-        ));
+    if let Some(diff) = crate::vfs::mount_control::inspect_overlay(&context.mountpoint_path).await?
+    {
+        return Ok(diff);
     }
+    if context.live_owner {
+        return Err(CrabError::Configuration {
+            key: "live mount control disappeared before inspection".into(),
+            origin: "crab mount diff".into(),
+        });
+    }
+    flush_mount_writes(&context.mountpoint_path).await?;
     Ok(crate::vfs::publish::inspect_overlay(
         &context.overlay_paths,
     )?)
 }
 
 #[cfg(any(feature = "fuse", feature = "nfs"))]
-fn overlay_diff_key(diff: &crate::vfs::publish::OverlayDiff) -> Vec<String> {
-    diff.changes
-        .iter()
-        .map(|change| {
-            format!(
-                "{}\0{}\0{}\0{}\0{}",
-                change.path, change.kind, change.size_bytes, change.mode, change.has_backing_file
-            )
-        })
-        .collect()
-}
-
-#[cfg(all(any(feature = "fuse", feature = "nfs"), target_os = "linux"))]
-fn flush_mount_writes(mountpoint: &Path) -> Result<()> {
-    let file = std::fs::File::open(mountpoint)?;
-    // SAFETY: syncfs only borrows a valid open directory/file descriptor and
-    // does not retain it after the call returns.
-    let rc = unsafe { libc::syncfs(file.as_raw_fd()) };
-    if rc == 0 {
-        return Ok(());
-    }
-    Err(CrabError::Io(std::io::Error::last_os_error()))
-}
-
-#[cfg(all(any(feature = "fuse", feature = "nfs"), target_os = "macos"))]
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "keeps shared flush call sites fallible on every platform"
-)]
-fn flush_mount_writes(_mountpoint: &Path) -> Result<()> {
-    // SAFETY: libc::sync has no arguments and only asks the OS to schedule a
-    // global filesystem flush. macOS does not expose Linux syncfs.
-    unsafe { libc::sync() };
-    Ok(())
-}
-
-#[cfg(all(
-    any(feature = "fuse", feature = "nfs"),
-    not(any(target_os = "linux", target_os = "macos"))
-))]
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "keeps shared flush call sites fallible on every platform"
-)]
-fn flush_mount_writes(_mountpoint: &Path) -> Result<()> {
-    Ok(())
+async fn flush_mount_writes(mountpoint: &Path) -> Result<()> {
+    // CLI input must exist even when the helper has no mounted client to flush.
+    let _mountpoint = std::fs::File::open(mountpoint)?;
+    Ok(crate::vfs::mount_runtime::flush_mount_writes(mountpoint).await?)
 }
 
 #[cfg(any(feature = "fuse", feature = "nfs"))]
@@ -3830,7 +3748,7 @@ struct MountOverlayContext {
     git_dir: Option<PathBuf>,
     ref_name: Option<String>,
     read_only: bool,
-    invalidate_via_ipc: bool,
+    live_owner: bool,
 }
 
 #[cfg(any(feature = "fuse", feature = "nfs"))]
@@ -3877,7 +3795,7 @@ async fn resolve_mount_overlay_context(path: &Path) -> Result<MountOverlayContex
         git_dir: None,
         ref_name: None,
         read_only: false,
-        invalidate_via_ipc: false,
+        live_owner: false,
     })
 }
 
@@ -3908,7 +3826,7 @@ fn mount_context_from_entry(
         git_dir: Some(git_dir),
         ref_name: Some(entry.git_ref),
         read_only: entry.read_only,
-        invalidate_via_ipc: false,
+        live_owner: entry.backend.is_some(),
     })
 }
 
@@ -3931,7 +3849,7 @@ fn mount_context_from_control_status(
         git_dir: Some(git_dir),
         ref_name: Some(ref_name),
         read_only: status.read_only,
-        invalidate_via_ipc: status.backend == crate::vfs::mount_control::MountControlBackend::Fuse,
+        live_owner: true,
     })
 }
 
@@ -6898,6 +6816,46 @@ mod mount_overlay_context_tests {
     use super::*;
     use crate::vfs::mounts_registry::{self, MountEntry};
 
+    #[cfg(feature = "nfs")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn inspection_refuses_offline_state_after_losing_known_owner() {
+        use crate::vfs::engine::OverlayWriter;
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = set_test_home(tmp.path());
+        let mountpoint = tmp.path().join("view");
+        std::fs::create_dir(&mountpoint).unwrap();
+        let mountpoint = std::fs::canonicalize(mountpoint).unwrap();
+        let registry_path = mounts_registry::registry_path().unwrap();
+        mounts_registry::add_entry(
+            &registry_path,
+            MountEntry {
+                mountpoint: mountpoint.display().to_string(),
+                source: "crab://bucket/repo".into(),
+                git_ref: "refs/heads/main".into(),
+                pid: 123,
+                start_time: "2026-01-01T00:00:00Z".into(),
+                read_only: false,
+                name: "repo".into(),
+                backend: Some("nfs".into()),
+                log_path: None,
+                control_endpoint: Some("unix:/missing/control.sock".into()),
+            },
+        )
+        .unwrap();
+        let context = resolve_mount_overlay_context(&mountpoint).await.unwrap();
+        let store = crate::vfs::overlay::OverlayStore::open(
+            &context.overlay_paths.db_path,
+            &context.overlay_paths.upper_dir,
+        )
+        .unwrap();
+        store.create_file("private.txt", 0o100_644).unwrap();
+        store.write_file("private.txt", 0, b"preserve").unwrap();
+        mounts_registry::remove_entry(&registry_path, &context.mountpoint).unwrap();
+        let result = overlay_diff_once(&context).await;
+        assert!(matches!(result, Err(CrabError::Configuration { .. })));
+        assert_eq!(store.records().unwrap().len(), 1);
+    }
+
     #[tokio::test(flavor = "multi_thread")]
     async fn registered_mount_context_skips_stale_fuse_ipc_status() {
         let tmp = tempfile::tempdir().unwrap();
@@ -6955,7 +6913,7 @@ mod mount_overlay_context_tests {
 
         assert_eq!(context.mountpoint, mountpoint.display().to_string());
         assert_eq!(context.ref_name, Some("HEAD".to_owned()));
-        assert!(!context.invalidate_via_ipc);
+        assert!(!context.live_owner);
         assert!(!contacted.load(Ordering::SeqCst));
     }
 }
