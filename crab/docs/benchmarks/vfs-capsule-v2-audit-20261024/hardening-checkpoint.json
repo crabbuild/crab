@@ -1,0 +1,44 @@
+{
+  "observed_at_utc": "2026-10-24T17:21:47.707833+00:00",
+  "base_commit": "33f8e6c360d922b3ab1e2c0e5115a2d200eccd97",
+  "branch": "codex/vfs-hardening",
+  "status": "incomplete; working tree uncommitted",
+  "tracked_source_diff_sha256": "f7304d8a5720ecc7d0d535ad53372a24e9e61b8a4c4665acc347a35e91c39071",
+  "native_test_file_sha256": "7a2799352e4f2124898249464d2abc94984954acd7b7c11ad662d27eae083599",
+  "linux_full": {
+    "passed": 586,
+    "failed": 1,
+    "ignored": 4,
+    "filtered": 0,
+    "failures": [
+      "mount_runtime::tests::audit_local_pointer_commit_remains_readable"
+    ]
+  },
+  "linux_native": {
+    "passed": 3,
+    "failed": 1,
+    "failures": [
+      "native_mount::fuse_writable: open descriptor after rename returns ENOENT"
+    ]
+  },
+  "macos": {
+    "pipeline_tests_passed": 11,
+    "runtime_tests_passed": 6,
+    "refresh_tests_passed": 25,
+    "hydration_tests_passed": 36,
+    "strict_clippy": "passed",
+    "minimal_check": "passed",
+    "fuse_only_check": "passed",
+    "cli_nfs_fuse_no_default_features_check": "passed"
+  },
+  "linux_strict_clippy": {
+    "status": "failed",
+    "findings": [
+      "daemon.rs unnecessary_map_or",
+      "nfs_mount.rs map_unwrap_or"
+    ],
+    "baseline": "same expressions verified in fetched origin/main"
+  },
+  "capsule_rustfs_final_source_e2e": "not yet run; baseline refresh failure remains open",
+  "performance_qualification": "not yet achieved"
+}

@@ -1,0 +1,4 @@
+Mounted at /e2e/run/mnt-rw-refresh
+  PID: 397
+  HEAD: 683467dd663a5bf138d89363c540a1c416567330
+Use `crab unmount --mountpoint /e2e/run/mnt-rw-refresh` to stop.

@@ -1,0 +1,234 @@
+   Compiling crab-read v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-read)
+   Compiling crab-remote v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-remote)
+   Compiling crab-vfs v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-vfs)
+   Compiling crab v1.2.4 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crab)
+warning: unused import: `std::time::Duration`
+  --> crab/src/cmd/coordinator.rs:10:5
+   |
+10 | use std::time::Duration;
+   |     ^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `crate::core::output::OutputMode`
+  --> crab/src/cmd/mount.rs:25:5
+   |
+25 | use crate::core::output::OutputMode;
+   |     ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: unused import: `std::fmt`
+ --> crab/src/replication/mod.rs:9:5
+  |
+9 | use std::fmt;
+  |     ^^^^^^^^
+
+warning: unused import: `tracing::warn`
+  --> crab/src/storage/head_class.rs:57:5
+   |
+57 | use tracing::warn;
+   |     ^^^^^^^^^^^^^
+
+warning: unreachable expression
+    --> crab/src/cmd/mount.rs:1407:5
+     |
+1393 | /         return Some(MountDoctorAutoDecision {
+1394 | |             selected_backend: None,
+1395 | |             reason: "neither NFS nor FUSE support is compiled into this Crab build".to_owned(),
+1396 | |             next_action: Some(
+...    |
+1403 | |             fuse_error: None,
+1404 | |         });
+     | |__________- any code following this expression is unreachable
+...
+1407 |       None
+     |       ^^^^ unreachable expression
+     |
+     = note: `#[warn(unreachable_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `rel_path`
+    --> crab/src/cmd/add.rs:2768:10
+     |
+2768 |     for (rel_path, abs_path) in selected_dirs {
+     |          ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_rel_path`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `collected`
+    --> crab/src/cmd/mount.rs:1336:5
+     |
+1336 |     collected: &MountDoctorCollectedChecks,
+     |     ^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_collected`
+
+warning: enum `ResolvedMountBackend` is never used
+  --> crab/src/cmd/mount.rs:54:6
+   |
+54 | enum ResolvedMountBackend {
+   |      ^^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `windows_tasklist_csv_line_has_pid` is never used
+    --> crab/src/cmd/mount.rs:3001:4
+     |
+3001 | fn windows_tasklist_csv_line_has_pid(line: &str, pid: u32) -> bool {
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `run_yaml_single_stage` is never used
+    --> crab/src/cmd/run.rs:1348:10
+     |
+1348 | async fn run_yaml_single_stage(
+     |          ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `preview_stage_cache_hit` is never used
+    --> crab/src/cmd/run.rs:3618:4
+     |
+3618 | fn preview_stage_cache_hit(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `control_plane_backend_initialization_failed` is never used
+    --> crab/src/replication/mod.rs:2149:4
+     |
+2149 | fn control_plane_backend_initialization_failed(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `gcs_pair_policy_state` is never used
+    --> crab/src/replication/mod.rs:5753:4
+     |
+5753 | fn gcs_pair_policy_state(
+     |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_coordinator_gc_snapshot_admission` is never used
+    --> crab/src/replication/mod.rs:7439:4
+     |
+7439 | fn validate_coordinator_gc_snapshot_admission(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `coordinator_gc_snapshot_status_error` is never used
+    --> crab/src/replication/mod.rs:7469:4
+     |
+7469 | fn coordinator_gc_snapshot_status_error(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `aws_region` is never used
+   --> crab/src/tier/runtime.rs:159:4
+    |
+159 | fn aws_region(config: &Config) -> String {
+    |    ^^^^^^^^^^
+
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `crab` (lib test) generated 17 warnings (run `cargo fix --lib -p crab --tests` to apply 6 suggestions)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 3m 07s
+     Running unittests src/lib.rs (/Users/haipingfu/Workspace/crabbuild-target/crab-ios-02d01345-vfs/debug/deps/crab-e8a8e3c13020cb94)
+
+running 105 tests
+test replication::tests::active_active_config_rejects_unsupported_coordinator_url ... ok
+test replication::tests::active_active_config_rejects_empty_coordinator_name ... ok
+test replication::tests::active_active_config_rejects_duplicate_enabled_writer_regions ... ok
+test replication::tests::active_active_push_plan_rejects_empty_ref_set ... ok
+test replication::tests::active_active_push_plan_rejects_disabled_preferred_writer ... ok
+test replication::tests::active_active_push_plan_uses_preferred_enabled_writer ... ok
+test replication::tests::active_active_push_plan_selects_first_enabled_writer ... ok
+test replication::tests::active_active_push_operation_id_changes_for_uploaded_objects ... ok
+test replication::tests::active_active_push_operation_id_is_stable_for_ref_order ... ok
+test replication::tests::active_active_push_operation_id_changes_for_ref_content ... ok
+test replication::tests::active_active_repair_plan_rejects_missing_writer_region ... ok
+test replication::tests::active_active_maintenance_fails_closed_without_adapter ... ok
+test replication::tests::active_active_push_operation_id_changes_for_target_regions ... ok
+test replication::tests::active_active_repair_plan_rejects_disabled_writer_region ... ok
+test replication::tests::active_active_requires_coordinator_and_writer ... ok
+test replication::tests::active_active_bucket_gc_rejects_mismatched_current_repo_registration ... ok
+test replication::tests::active_active_bucket_gc_requires_current_repo_registration ... ok
+test replication::tests::active_active_resume_requires_repair_verified_proof ... ok
+test replication::tests::active_active_bucket_gc_fails_closed_for_unwired_registered_provider ... ok
+test replication::tests::active_active_gc_snapshot_fails_closed_without_data_plane ... ok
+test replication::tests::active_active_write_admission_fails_closed_without_adapter ... ok
+test replication::tests::active_active_write_admission_rejects_mismatched_coordinator_status ... ok
+test replication::tests::active_active_status_blocks_wrong_provider_for_coordinator_url ... ok
+test replication::tests::active_active_status_blocks_mismatched_coordinator_status ... ok
+test replication::tests::active_active_status_enables_writes_for_verified_coordinator ... ok
+test replication::tests::active_active_write_admission_accepts_verified_coordinator_status ... ok
+test replication::tests::active_active_maintenance_admission_accepts_verified_coordinator_status ... ok
+test replication::tests::active_active_status_blocks_missing_coordinator_resource ... ok
+test replication::tests::azure_plan_requires_change_feed_and_versioning ... ok
+test replication::tests::active_active_repair_plan_maps_gaps_to_enabled_writers ... ok
+test replication::tests::azure_remove_plan_preserves_account_level_toggles ... ok
+test replication::tests::azure_backfill_plan_tracks_existing_blobs ... ok
+test replication::tests::azure_backfill_verifier_fails_closed_for_root_prefix ... ok
+test replication::tests::control_plane_apply_allows_missing_resources_after_drift_check ... ok
+test replication::tests::control_plane_apply_rejects_drifted_resources ... ok
+test replication::tests::azure_replication_url_requires_account_and_container ... ok
+test replication::tests::control_plane_apply_rejects_missing_policy_validation_proof ... ok
+test replication::tests::control_plane_apply_rejects_status_for_different_replica ... ok
+test replication::tests::control_plane_backend_apply_and_status_verify_resources ... ok
+test replication::tests::control_plane_backend_provider_mismatch_fails ... ok
+test replication::tests::control_plane_apply_requires_drift_checked_status ... ok
+test replication::tests::control_plane_apply_fails_closed_without_backend ... ok
+test replication::tests::control_plane_remove_only_includes_reversible_requests ... ok
+test replication::tests::control_plane_remove_requires_verified_status ... ok
+test replication::tests::control_plane_remove_uses_verified_backend_status ... ok
+test replication::tests::control_plane_status_reports_unverified_checks_without_backend ... ok
+test replication::tests::azure_backfill_spec_uses_source_and_destination_prefixes ... ok
+test replication::tests::control_plane_plan_marks_crab_owned_s3_requests ... ok
+test replication::tests::cli_store_operations_are_classified ... ok
+test replication::tests::fallback_reason_classifies_operator_reasons ... ok
+test replication::tests::azure_policy_spec_uses_account_container_and_relative_prefixes ... ok
+test replication::tests::gcs_backend_apply_rejects_incomplete_storage_transfer_backfill ... ok
+test replication::tests::azure_backend_status_blocks_incomplete_existing_blob_backfill ... ok
+test replication::tests::gcs_backend_apply_uses_metageneration_precondition_for_turbo_rpo ... ok
+test replication::tests::azure_backend_remove_deletes_only_object_replication_policy ... ok
+test replication::tests::azure_backend_apply_rejects_drifted_object_replication_policy ... ok
+test replication::tests::azure_backend_apply_sets_prerequisites_policy_and_verifies_status ... ok
+test replication::tests::gcs_backend_apply_sets_turbo_rpo_and_verifies_status ... ok
+test replication::tests::gcs_backend_rejects_turbo_rpo_on_non_dual_region_bucket ... ok
+test replication::tests::gcs_fast_plan_sets_turbo_rpo ... ok
+test replication::tests::gcs_backfill_plan_includes_storage_transfer_check ... ok
+test replication::tests::gcs_remove_plan_does_not_revert_bucket_level_turbo_rpo ... ok
+test replication::tests::maintenance_guard_allows_read_replica_mode ... ok
+test replication::tests::provider_parse_accepts_aliases ... ok
+test replication::tests::read_policy_parses_operator_values ... ok
+test replication::tests::read_policy_env_adapter_preserves_env_key_for_parse_errors ... ok
+test replication::tests::provider_policy_validation_checks_are_planned ... ok
+test replication::tests::control_plane_export_contains_request_shape ... ok
+test replication::tests::read_replica_validation_does_not_downgrade_a_corrupt_capsule_root ... ok
+test replication::tests::read_replica_validation_rejects_manifest_without_capsule_root ... ok
+test replication::tests::azure_backfill_verifier_requires_destination_object_set ... ok
+test replication::tests::readiness_cache_expires_and_can_be_bypassed ... ok
+test replication::tests::readiness_cache_fingerprint_includes_effective_repo ... ok
+test replication::tests::readiness_accepts_an_exact_capsule_view ... ok
+test replication::tests::readiness_cache_requires_fresh_primary_state ... ok
+test replication::tests::readiness_env_bool_accepts_operator_values ... ok
+test replication::tests::cached_readiness_rechecks_the_authenticated_replica_view ... ok
+test replication::tests::readiness_env_ttl_requires_integer_milliseconds ... ok
+test replication::tests::readiness_rejects_primary_without_capsule_root ... ok
+test replication::tests::repair_lfs_key_requires_canonical_sha256_layout ... ok
+test replication::tests::repair_materialization_refuses_missing_transaction_object ... ok
+test replication::tests::repair_materialization_writes_manifest_projection ... ok
+test replication::tests::repair_object_key_remaps_repo_local_prefix ... ok
+test replication::tests::repair_materialization_hashes_lfs_body_before_ref_visibility ... ok
+test replication::tests::replica_event_summary_tracks_read_selection_and_latest_fallback ... ok
+test replication::tests::repair_refuses_to_replicate_mismatched_v1_visibility ... ok
+test replication::tests::replica_url_provider_must_match_raw_scheme ... ok
+test replication::tests::s3_backend_apply_rejects_failed_policy_validation ... ok
+test replication::tests::s3_backend_status_blocks_incomplete_batch_replication_job ... ok
+test replication::tests::s3_backend_apply_creates_missing_resources_and_verifies_status ... ok
+test replication::tests::s3_batch_prefix_scope_resolves_repo_placeholder ... ok
+test replication::tests::s3_control_plane_orders_role_before_replication_rule ... ok
+test replication::tests::s3_fast_plan_includes_rtc_and_backfill ... ok
+test replication::tests::s3_backend_status_detects_replication_rule_drift ... ok
+test replication::tests::status_with_events_preserves_live_readiness_reason ... ok
+test replication::tests::read_policy_can_force_named_replica ... ok
+test replication::tests::read_policy_can_force_primary_without_probe ... ok
+test replication::tests::provider_control_plane_sync_invalidates_and_clears_readiness_cache ... ok
+test replication::tests::read_resolver_falls_back_when_replica_client_auth_fails ... ok
+test replication::tests::direct_store_build_calls_are_classified ... ok
+test replication::tests::read_resolver_falls_back_when_replica_catalog_precedes_payload_objects ... ok
+test replication::tests::read_resolver_falls_back_when_replica_readiness_probe_fails ... ok
+test replication::tests::read_resolver_uses_ready_replica_for_user_read_operations ... ok
+test replication::tests::readiness_cache_invalidation_marker_blocks_cache_hits ... ok
+test replication::tests::readiness_cache_changes_with_per_ref_capsule_state ... ok
+
+test result: ok. 105 passed; 0 failed; 0 ignored; 0 measured; 4153 filtered out; finished in 1.08s
+

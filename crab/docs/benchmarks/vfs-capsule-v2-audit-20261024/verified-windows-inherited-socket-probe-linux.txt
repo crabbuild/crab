@@ -1,0 +1,1 @@
+After parent closes listener: connect succeeds while fork child retains fd; after child exit: ECONNREFUSED.

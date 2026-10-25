@@ -1,0 +1,21 @@
+
+Welcome to Crab — serverless Git for large files.
+
+  Get to your first push:
+    1. Create a cloud bucket/container and sign in to its provider
+    2. crab configure <provider://bucket/repository>
+    3. crab ship . -m 'Initial commit'
+
+  Joining an existing repository?  crab clone <remote>
+  Setup not working?              crab doctor
+
+  Guide: https://crab.build/docs/cli/getting-started/first-repository
+
+Remote 'origin' → crab://crab/mount-large/retirement-nfs
+OK: Credentials: AWS_ACCESS_KEY_ID=****
+Remote repository ready → crab://crab/mount-large/retirement-nfs
+
+Next:
+  1. crab setup            # detect large files and write .gitattributes
+  2. git status            # review crab.toml and tracking rules
+  3. crab ship -m 'init'   # commit and push to Crab

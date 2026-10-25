@@ -1,0 +1,19 @@
+   Compiling crab-vfs v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-vfs)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 8.94s
+     Running unittests src/lib.rs (/Users/haipingfu/Workspace/crabbuild-target/crab-ios-02d01345-vfs/debug/deps/crab_vfs-ad5c539dce92b356)
+
+running 1 test
+
+thread 'repository::tests::failed_clone_preserves_preexisting_destination' (25756670) panicked at crates/crab-vfs/src/repository/tests.rs:328:57:
+called `Result::unwrap()` on an `Err` value: Os { code: 2, kind: NotFound, message: "No such file or directory" }
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test repository::tests::failed_clone_preserves_preexisting_destination ... FAILED
+
+failures:
+
+failures:
+    repository::tests::failed_clone_preserves_preexisting_destination
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 497 filtered out; finished in 0.05s
+
+error: test failed, to rerun pass `-p crab-vfs --lib`

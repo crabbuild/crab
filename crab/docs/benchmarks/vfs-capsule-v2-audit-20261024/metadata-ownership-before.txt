@@ -1,0 +1,26 @@
+   Compiling crab-vfs v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-vfs)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 18.16s
+     Running unittests src/lib.rs (/Users/haipingfu/Workspace/crabbuild-target/crab-ios-02d01345-vfs/debug/deps/crab_vfs-fd7adbf649ffcdd5)
+
+running 1 test
+Initialized empty Git repository in /private/var/folders/rn/k2b7mvbs2dgb__6ys6_h94pm0000gn/T/.tmpL8ynhT/source/.git/
+[main (root-commit) 9b7b50f] base
+ 2 files changed, 2 insertions(+)
+ create mode 100644 .gitattributes
+ create mode 100644 base.txt
+
+thread 'mount_runtime::tests::borrowed_mount_with_remote_data_origin_preserves_staged_index' (25903123) panicked at crates/crab-vfs/src/mount_runtime.rs:331:9:
+assertion `left == right` failed: read-only mount rewrote the source repository's staged version
+  left: "8681f8b8f32615a16703053bc1eaffb3e5e720a5"
+ right: "8b829ee8f1a06ea6c86f5639ffc21646b52f3beb"
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test mount_runtime::tests::borrowed_mount_with_remote_data_origin_preserves_staged_index ... FAILED
+
+failures:
+
+failures:
+    mount_runtime::tests::borrowed_mount_with_remote_data_origin_preserves_staged_index
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 595 filtered out; finished in 0.14s
+
+error: test failed, to rerun pass `-p crab-vfs --lib`

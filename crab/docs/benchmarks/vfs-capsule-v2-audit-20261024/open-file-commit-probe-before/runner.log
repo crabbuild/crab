@@ -1,0 +1,5 @@
+{"mmap": {"shared": {"ok": false, "errno": 19, "error": "[Errno 19] No such device"}, "private": {"ok": true}}}
+Traceback (most recent call last):
+  File "<stdin>", line 30, in <module>
+AssertionError: successful post-commit descriptor write disappeared from the pathname
+{"held": "AFTER!", "path": "before"}

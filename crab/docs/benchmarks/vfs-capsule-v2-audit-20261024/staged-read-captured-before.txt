@@ -1,0 +1,19 @@
+   Compiling crab-read v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-read)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 17.05s
+     Running unittests src/lib.rs (/Users/haipingfu/Workspace/crabbuild-target/crab-ios-02d01345-vfs/debug/deps/crab_read-f4a47fd85e18a433)
+
+running 1 test
+
+thread 'hydrator::tests::pinned_file_index_lookup_keeps_reconstruction_on_captured_catalog' (26101521) panicked at crates/crab-read/src/hydrator.rs:1333:120:
+called `Result::unwrap()` on an `Err` value: Staging(Io(Os { code: 20, kind: NotADirectory, message: "Not a directory" }))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test hydrator::tests::pinned_file_index_lookup_keeps_reconstruction_on_captured_catalog ... FAILED
+
+failures:
+
+failures:
+    hydrator::tests::pinned_file_index_lookup_keeps_reconstruction_on_captured_catalog
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 237 filtered out; finished in 0.06s
+
+error: test failed, to rerun pass `-p crab-read --lib`

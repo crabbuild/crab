@@ -1,0 +1,10 @@
+{
+  "shared": {
+    "ok": false,
+    "errno": 19,
+    "error": "[Errno 19] No such device"
+  },
+  "private": {
+    "ok": true
+  }
+}

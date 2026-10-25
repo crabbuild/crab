@@ -1,0 +1,5 @@
+error: internal error [CRAB-E0099]: commit failed: internal VFS error: git push failed: {"timestamp":"2026-10-25T03:10:36.965834Z","level":"ERROR","fields":{"message":"push pipeline failed","error":"corrupt object at .crab/locks/internal/gc-fence/state [CRAB-E0020]: duplicate writer fence holder"},"target":"crab::git::remote_helper"}
+To crab://crab/mount-large/replica-v1-20261025-fuse
+ ! [remote rejected] main -> main (internal (internal error: corrupt object at .crab/locks/internal/gc-fence/state [CRAB-E0020]: duplicate writer fence holder))
+error: failed to push some refs to 'crab://crab/mount-large/replica-v1-20261025-fuse'
+help: Run `crab errors CRAB-E0099` for recovery steps.

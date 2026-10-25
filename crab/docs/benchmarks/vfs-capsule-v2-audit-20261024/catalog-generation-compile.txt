@@ -1,0 +1,21 @@
+    Checking crab-vfs v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-vfs)
+error[E0609]: no field `tracked_ref` on type `RefreshConfig`
+   --> crates/crab-vfs/src/refresh.rs:354:40
+    |
+354 |             tracked_ref = ?self.config.tracked_ref,
+    |                                        ^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `remote_poll_interval`, `local_poll_interval`, `git_dir`
+
+error[E0609]: no field `tracked_ref` on type `refresh::RefreshConfig`
+   --> crates/crab-vfs/src/refresh.rs:354:40
+    |
+354 |             tracked_ref = ?self.config.tracked_ref,
+    |                                        ^^^^^^^^^^^ unknown field
+    |
+    = note: available fields are: `remote_poll_interval`, `local_poll_interval`, `git_dir`
+
+For more information about this error, try `rustc --explain E0609`.
+error: could not compile `crab-vfs` (lib) due to 1 previous error
+warning: build failed, waiting for other jobs to finish...
+error: could not compile `crab-vfs` (lib test) due to 1 previous error

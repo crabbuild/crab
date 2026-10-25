@@ -1,0 +1,16 @@
+    Updating crates.io index
+error: failed to select a version for `libsqlite3-sys`.
+    ... required by package `rusqlite v0.41.0`
+    ... which satisfies dependency `rusqlite = "^0.41"` of package `crab-sqlite-resolution-proof v0.0.0 (/Volumes/Workspace/crabbuild-target/crab-ios-02d01345-vfs/sqlite-upgrade/resolution-proof)`
+versions that meet the requirements `^0.39.0` are: 0.39.1, 0.39.0
+
+package `libsqlite3-sys` links to the native library `sqlite3`, but it conflicts with a previous package which links to `sqlite3` as well:
+package `libsqlite3-sys v0.28.0`
+    ... which satisfies dependency `libsqlite3-sys = "^0.28.0"` of package `rusqlite v0.31.0`
+    ... which satisfies dependency `rusqlite = "^0.31"` of package `cellar-main v0.1.0`
+    ... which satisfies dependency `cellar = "=0.1.0"` of package `crab-sqlite-resolution-proof v0.0.0 (/Volumes/Workspace/crabbuild-target/crab-ios-02d01345-vfs/sqlite-upgrade/resolution-proof)`
+note: only one package in the dependency graph may specify the same links value to ensure that only one copy of a native library is linked in the final binary
+for more information, see https://doc.rust-lang.org/cargo/reference/resolver.html#links
+help: try to adjust your dependencies so that only one package uses the `links = "sqlite3"` value
+
+failed to select a version for `libsqlite3-sys` which could resolve this conflict

@@ -1,0 +1,2318 @@
+[Sat Oct 24 10:02:38 2026] Booting Linux on physical CPU 0x0000000000 [0x610f0000]
+[Sat Oct 24 10:02:38 2026] Linux version 6.8.0-117-generic (buildd@bos03-arm64-024) (aarch64-linux-gnu-gcc-13 (Ubuntu 13.3.0-6ubuntu2~24.04.1) 13.3.0, GNU ld (GNU Binutils for Ubuntu) 2.42) #117-Ubuntu SMP PREEMPT_DYNAMIC Thu May  7 17:26:37 UTC 2026 (Ubuntu 6.8.0-117.117-generic 6.8.12)
+[Sat Oct 24 10:02:38 2026] KASLR enabled
+[Sat Oct 24 10:02:38 2026] efi: EFI v2.7 by EDK II
+[Sat Oct 24 10:02:38 2026] efi: ACPI 2.0=0x26fbf0018 SMBIOS=0xfffff000 SMBIOS 3.0=0x26fc1a000 MOKvar=0x26fba0000 RNG=0x26fbffd18 MEMRESERVE=0x26e44da18 
+[Sat Oct 24 10:02:38 2026] random: crng init done
+[Sat Oct 24 10:02:38 2026] secureboot: Secure boot disabled
+[Sat Oct 24 10:02:38 2026] ACPI: Early table checksum verification disabled
+[Sat Oct 24 10:02:38 2026] ACPI: RSDP 0x000000026FBF0018 000024 (v02 APPLE )
+[Sat Oct 24 10:02:38 2026] ACPI: XSDT 0x000000026FBFFE98 000044 (v01 APPLE  Apple Vz 00000001      01000013)
+[Sat Oct 24 10:02:38 2026] ACPI: FACP 0x000000026FBFFA98 000114 (v06 APPLE  Apple Vz 00000001 AAPL 20180427)
+[Sat Oct 24 10:02:38 2026] ACPI: DSDT 0x000000026FBFF698 000394 (v02 APPLE  Apple Vz 00000001 AAPL 20180427)
+[Sat Oct 24 10:02:38 2026] ACPI: GTDT 0x000000026FBFFC18 000068 (v03 APPLE  Apple Vz 00000001 AAPL 20180427)
+[Sat Oct 24 10:02:38 2026] ACPI: APIC 0x000000026FBFE998 0001AC (v05 APPLE  Apple Vz 00000001 AAPL 20180427)
+[Sat Oct 24 10:02:38 2026] ACPI: MCFG 0x000000026FBFFF98 00003C (v01 APPLE  Apple Vz 00000001 AAPL 20180427)
+[Sat Oct 24 10:02:38 2026] NUMA: Failed to initialise from firmware
+[Sat Oct 24 10:02:38 2026] NUMA: Faking a node at [mem 0x0000000070000000-0x000000026fffffff]
+[Sat Oct 24 10:02:38 2026] NUMA: NODE_DATA [mem 0x26ef155c0-0x26ef1afff]
+[Sat Oct 24 10:02:38 2026] Zone ranges:
+[Sat Oct 24 10:02:38 2026]   DMA      [mem 0x0000000070000000-0x00000000ffffffff]
+[Sat Oct 24 10:02:38 2026]   DMA32    empty
+[Sat Oct 24 10:02:38 2026]   Normal   [mem 0x0000000100000000-0x000000026fffffff]
+[Sat Oct 24 10:02:38 2026]   Device   empty
+[Sat Oct 24 10:02:38 2026] Movable zone start for each node
+[Sat Oct 24 10:02:38 2026] Early memory node ranges
+[Sat Oct 24 10:02:38 2026]   node   0: [mem 0x0000000070000000-0x00000000ffffdfff]
+[Sat Oct 24 10:02:38 2026]   node   0: [mem 0x00000000ffffe000-0x00000000ffffffff]
+[Sat Oct 24 10:02:38 2026]   node   0: [mem 0x0000000100000000-0x000000026e56ffff]
+[Sat Oct 24 10:02:38 2026]   node   0: [mem 0x000000026e570000-0x000000026e6fffff]
+[Sat Oct 24 10:02:38 2026]   node   0: [mem 0x000000026e700000-0x000000026fafffff]
+[Sat Oct 24 10:02:38 2026]   node   0: [mem 0x000000026fb00000-0x000000026fb8ffff]
+[Sat Oct 24 10:02:38 2026]   node   0: [mem 0x000000026fb90000-0x000000026fb9ffff]
+[Sat Oct 24 10:02:38 2026]   node   0: [mem 0x000000026fba0000-0x000000026fbdffff]
+[Sat Oct 24 10:02:38 2026]   node   0: [mem 0x000000026fbe0000-0x000000026fc18fff]
+[Sat Oct 24 10:02:38 2026]   node   0: [mem 0x000000026fc19000-0x000000026fc1afff]
+[Sat Oct 24 10:02:38 2026]   node   0: [mem 0x000000026fc1b000-0x000000026fffffff]
+[Sat Oct 24 10:02:38 2026] Initmem setup node 0 [mem 0x0000000070000000-0x000000026fffffff]
+[Sat Oct 24 10:02:38 2026] cma: Reserved 32 MiB at 0x00000000fde00000 on node -1
+[Sat Oct 24 10:02:38 2026] psci: probing for conduit method from ACPI.
+[Sat Oct 24 10:02:38 2026] psci: PSCIv1.1 detected in firmware.
+[Sat Oct 24 10:02:38 2026] psci: Using standard PSCI v0.2 function IDs
+[Sat Oct 24 10:02:38 2026] psci: Trusted OS migration not required
+[Sat Oct 24 10:02:38 2026] psci: SMC Calling Convention v1.1
+[Sat Oct 24 10:02:38 2026] percpu: Embedded 54 pages/cpu s95080 r8192 d117912 u221184
+[Sat Oct 24 10:02:38 2026] pcpu-alloc: s95080 r8192 d117912 u221184 alloc=54*4096
+[Sat Oct 24 10:02:38 2026] pcpu-alloc: [0] 0 [0] 1 [0] 2 [0] 3 
+[Sat Oct 24 10:02:38 2026] Detected PIPT I-cache on CPU0
+[Sat Oct 24 10:02:38 2026] CPU features: detected: Address authentication (IMP DEF algorithm)
+[Sat Oct 24 10:02:38 2026] CPU features: detected: GIC system register CPU interface
+[Sat Oct 24 10:02:38 2026] CPU features: detected: Spectre-v4
+[Sat Oct 24 10:02:38 2026] CPU features: detected: Spectre-BHB
+[Sat Oct 24 10:02:38 2026] alternatives: applying boot alternatives
+[Sat Oct 24 10:02:38 2026] Kernel command line: BOOT_IMAGE=/vmlinuz-6.8.0-117-generic root=PARTUUID=b42f7b28-0777-4823-9ec1-0098926cabac ro console=tty1 console=ttyAMA0
+[Sat Oct 24 10:02:38 2026] Dentry cache hash table entries: 1048576 (order: 11, 8388608 bytes, linear)
+[Sat Oct 24 10:02:38 2026] Inode-cache hash table entries: 524288 (order: 10, 4194304 bytes, linear)
+[Sat Oct 24 10:02:38 2026] Fallback order for Node 0: 0 
+[Sat Oct 24 10:02:38 2026] Built 1 zonelists, mobility grouping on.  Total pages: 2064384
+[Sat Oct 24 10:02:38 2026] Policy zone: Normal
+[Sat Oct 24 10:02:38 2026] mem auto-init: stack:all(zero), heap alloc:on, heap free:off
+[Sat Oct 24 10:02:38 2026] software IO TLB: area num 4.
+[Sat Oct 24 10:02:38 2026] software IO TLB: mapped [mem 0x00000000f9e00000-0x00000000fde00000] (64MB)
+[Sat Oct 24 10:02:38 2026] Memory: 8067420K/8388608K available (23552K kernel code, 5208K rwdata, 16448K rodata, 12288K init, 1233K bss, 288420K reserved, 32768K cma-reserved)
+[Sat Oct 24 10:02:38 2026] SLUB: HWalign=64, Order=0-3, MinObjects=0, CPUs=4, Nodes=1
+[Sat Oct 24 10:02:38 2026] ftrace: allocating 63091 entries in 247 pages
+[Sat Oct 24 10:02:38 2026] ftrace: allocated 247 pages with 7 groups
+[Sat Oct 24 10:02:38 2026] Dynamic Preempt: voluntary
+[Sat Oct 24 10:02:38 2026] rcu: Preemptible hierarchical RCU implementation.
+[Sat Oct 24 10:02:38 2026] rcu: 	RCU restricting CPUs from NR_CPUS=512 to nr_cpu_ids=4.
+[Sat Oct 24 10:02:38 2026] 	Trampoline variant of Tasks RCU enabled.
+[Sat Oct 24 10:02:38 2026] 	Rude variant of Tasks RCU enabled.
+[Sat Oct 24 10:02:38 2026] 	Tracing variant of Tasks RCU enabled.
+[Sat Oct 24 10:02:38 2026] rcu: RCU calculated value of scheduler-enlistment delay is 100 jiffies.
+[Sat Oct 24 10:02:38 2026] rcu: Adjusting geometry for rcu_fanout_leaf=16, nr_cpu_ids=4
+[Sat Oct 24 10:02:38 2026] RCU Tasks: Setting shift to 2 and lim to 1 rcu_task_cb_adjust=1 rcu_task_cpu_ids=4.
+[Sat Oct 24 10:02:38 2026] RCU Tasks Rude: Setting shift to 2 and lim to 1 rcu_task_cb_adjust=1 rcu_task_cpu_ids=4.
+[Sat Oct 24 10:02:38 2026] RCU Tasks Trace: Setting shift to 2 and lim to 1 rcu_task_cb_adjust=1 rcu_task_cpu_ids=4.
+[Sat Oct 24 10:02:38 2026] NR_IRQS: 64, nr_irqs: 64, preallocated irqs: 0
+[Sat Oct 24 10:02:38 2026] GICv3: 988 SPIs implemented
+[Sat Oct 24 10:02:38 2026] GICv3: 0 Extended SPIs implemented
+[Sat Oct 24 10:02:38 2026] Root IRQ handler: gic_handle_irq
+[Sat Oct 24 10:02:38 2026] GICv3: GICv3 features: 16 PPIs, RSS
+[Sat Oct 24 10:02:38 2026] GICv3: CPU0: found redistributor 0 region 0:0x0000000010010000
+[Sat Oct 24 10:02:38 2026] GICv2m: range[mem 0x1fff0000-0x1fff0fff], SPI[128:255]
+[Sat Oct 24 10:02:38 2026] rcu: srcu_init: Setting srcu_struct sizes based on contention.
+[Sat Oct 24 10:02:38 2026] arch_timer: cp15 timer(s) running at 24.00MHz (virt).
+[Sat Oct 24 10:02:38 2026] clocksource: arch_sys_counter: mask: 0xffffffffffffff max_cycles: 0x588fe9dc0, max_idle_ns: 440795202592 ns
+[Sat Oct 24 10:02:38 2026] sched_clock: 56 bits at 24MHz, resolution 41ns, wraps every 4398046511097ns
+[Sat Oct 24 10:02:38 2026] Console: colour dummy device 80x25
+[Sat Oct 24 10:02:38 2026] printk: legacy console [tty1] enabled
+[Sat Oct 24 10:02:38 2026] ACPI: Core revision 20230628
+[Sat Oct 24 10:02:38 2026] Calibrating delay loop (skipped), value calculated using timer frequency.. 48.00 BogoMIPS (lpj=24000)
+[Sat Oct 24 10:02:38 2026] pid_max: default: 32768 minimum: 301
+[Sat Oct 24 10:02:38 2026] LSM: initializing lsm=lockdown,capability,landlock,yama,apparmor,integrity
+[Sat Oct 24 10:02:38 2026] landlock: Up and running.
+[Sat Oct 24 10:02:38 2026] Yama: becoming mindful.
+[Sat Oct 24 10:02:38 2026] AppArmor: AppArmor initialized
+[Sat Oct 24 10:02:38 2026] Mount-cache hash table entries: 16384 (order: 5, 131072 bytes, linear)
+[Sat Oct 24 10:02:38 2026] Mountpoint-cache hash table entries: 16384 (order: 5, 131072 bytes, linear)
+[Sat Oct 24 10:02:38 2026] ACPI PPTT: No PPTT table found, CPU and cache topology may be inaccurate
+[Sat Oct 24 10:02:38 2026] cacheinfo: Unable to detect cache hierarchy for CPU 0
+[Sat Oct 24 10:02:38 2026] rcu: Hierarchical SRCU implementation.
+[Sat Oct 24 10:02:38 2026] rcu: 	Max phase no-delay instances is 400.
+[Sat Oct 24 10:02:38 2026] Remapping and enabling EFI services.
+[Sat Oct 24 10:02:38 2026] smp: Bringing up secondary CPUs ...
+[Sat Oct 24 10:02:38 2026] Detected PIPT I-cache on CPU1
+[Sat Oct 24 10:02:38 2026] GICv3: CPU1: found redistributor 1 region 0:0x0000000010030000
+[Sat Oct 24 10:02:38 2026] CPU1: Booted secondary processor 0x0000000001 [0x610f0000]
+[Sat Oct 24 10:02:38 2026] Detected PIPT I-cache on CPU2
+[Sat Oct 24 10:02:38 2026] GICv3: CPU2: found redistributor 2 region 0:0x0000000010050000
+[Sat Oct 24 10:02:38 2026] CPU2: Booted secondary processor 0x0000000002 [0x610f0000]
+[Sat Oct 24 10:02:38 2026] Detected PIPT I-cache on CPU3
+[Sat Oct 24 10:02:38 2026] GICv3: CPU3: found redistributor 3 region 0:0x0000000010070000
+[Sat Oct 24 10:02:38 2026] CPU3: Booted secondary processor 0x0000000003 [0x610f0000]
+[Sat Oct 24 10:02:38 2026] smp: Brought up 1 node, 4 CPUs
+[Sat Oct 24 10:02:38 2026] SMP: Total of 4 processors activated.
+[Sat Oct 24 10:02:38 2026] CPU: All CPU(s) started at EL1
+[Sat Oct 24 10:02:38 2026] CPU features: detected: Branch Target Identification
+[Sat Oct 24 10:02:38 2026] CPU features: detected: ARMv8.4 Translation Table Level
+[Sat Oct 24 10:02:38 2026] CPU features: detected: Data cache clean to the PoU not required for I/D coherence
+[Sat Oct 24 10:02:38 2026] CPU features: detected: Common not Private translations
+[Sat Oct 24 10:02:38 2026] CPU features: detected: CRC32 instructions
+[Sat Oct 24 10:02:38 2026] CPU features: detected: Data cache clean to Point of Deep Persistence
+[Sat Oct 24 10:02:38 2026] CPU features: detected: Data cache clean to Point of Persistence
+[Sat Oct 24 10:02:38 2026] CPU features: detected: Data independent timing control (DIT)
+[Sat Oct 24 10:02:38 2026] CPU features: detected: E0PD
+[Sat Oct 24 10:02:38 2026] CPU features: detected: Generic authentication (IMP DEF algorithm)
+[Sat Oct 24 10:02:38 2026] CPU features: detected: RCpc load-acquire (LDAPR)
+[Sat Oct 24 10:02:38 2026] CPU features: detected: LSE atomic instructions
+[Sat Oct 24 10:02:38 2026] CPU features: detected: Privileged Access Never
+[Sat Oct 24 10:02:38 2026] CPU features: detected: RAS Extension Support
+[Sat Oct 24 10:02:38 2026] CPU features: detected: Speculation barrier (SB)
+[Sat Oct 24 10:02:38 2026] CPU features: detected: TLB range maintenance instructions
+[Sat Oct 24 10:02:38 2026] alternatives: applying system-wide alternatives
+[Sat Oct 24 10:02:38 2026] devtmpfs: initialized
+[Sat Oct 24 10:02:38 2026] setend instruction emulation is not supported on this system
+[Sat Oct 24 10:02:38 2026] clocksource: jiffies: mask: 0xffffffff max_cycles: 0xffffffff, max_idle_ns: 1911260446275000 ns
+[Sat Oct 24 10:02:38 2026] futex hash table entries: 1024 (order: 4, 65536 bytes, linear)
+[Sat Oct 24 10:02:38 2026] pinctrl core: initialized pinctrl subsystem
+[Sat Oct 24 10:02:38 2026] SMBIOS 3.3.0 present.
+[Sat Oct 24 10:02:38 2026] DMI: Apple Inc. Apple Virtualization Generic Platform, BIOS 2103.100.6.0.0 04/18/2026
+[Sat Oct 24 10:02:38 2026] NET: Registered PF_NETLINK/PF_ROUTE protocol family
+[Sat Oct 24 10:02:38 2026] DMA: preallocated 1024 KiB GFP_KERNEL pool for atomic allocations
+[Sat Oct 24 10:02:38 2026] DMA: preallocated 1024 KiB GFP_KERNEL|GFP_DMA pool for atomic allocations
+[Sat Oct 24 10:02:38 2026] DMA: preallocated 1024 KiB GFP_KERNEL|GFP_DMA32 pool for atomic allocations
+[Sat Oct 24 10:02:38 2026] audit: initializing netlink subsys (disabled)
+[Sat Oct 24 10:02:38 2026] audit: type=2000 audit(0.009:1): state=initialized audit_enabled=0 res=1
+[Sat Oct 24 10:02:38 2026] thermal_sys: Registered thermal governor 'fair_share'
+[Sat Oct 24 10:02:38 2026] thermal_sys: Registered thermal governor 'bang_bang'
+[Sat Oct 24 10:02:38 2026] thermal_sys: Registered thermal governor 'step_wise'
+[Sat Oct 24 10:02:38 2026] thermal_sys: Registered thermal governor 'user_space'
+[Sat Oct 24 10:02:38 2026] thermal_sys: Registered thermal governor 'power_allocator'
+[Sat Oct 24 10:02:38 2026] cpuidle: using governor ladder
+[Sat Oct 24 10:02:38 2026] cpuidle: using governor menu
+[Sat Oct 24 10:02:38 2026] hw-breakpoint: found 6 breakpoint and 4 watchpoint registers.
+[Sat Oct 24 10:02:38 2026] ASID allocator initialised with 256 entries
+[Sat Oct 24 10:02:38 2026] acpiphp: ACPI Hot Plug PCI Controller Driver version: 0.5
+[Sat Oct 24 10:02:38 2026] Serial: AMBA PL011 UART driver
+[Sat Oct 24 10:02:38 2026] Modules: 2G module region forced by RANDOMIZE_MODULE_REGION_FULL
+[Sat Oct 24 10:02:38 2026] Modules: 0 pages in range for non-PLT usage
+[Sat Oct 24 10:02:38 2026] Modules: 509552 pages in range for PLT usage
+[Sat Oct 24 10:02:38 2026] HugeTLB: registered 1.00 GiB page size, pre-allocated 0 pages
+[Sat Oct 24 10:02:38 2026] HugeTLB: 0 KiB vmemmap can be freed for a 1.00 GiB page
+[Sat Oct 24 10:02:38 2026] HugeTLB: registered 32.0 MiB page size, pre-allocated 0 pages
+[Sat Oct 24 10:02:38 2026] HugeTLB: 0 KiB vmemmap can be freed for a 32.0 MiB page
+[Sat Oct 24 10:02:38 2026] HugeTLB: registered 2.00 MiB page size, pre-allocated 0 pages
+[Sat Oct 24 10:02:38 2026] HugeTLB: 0 KiB vmemmap can be freed for a 2.00 MiB page
+[Sat Oct 24 10:02:38 2026] HugeTLB: registered 64.0 KiB page size, pre-allocated 0 pages
+[Sat Oct 24 10:02:38 2026] HugeTLB: 0 KiB vmemmap can be freed for a 64.0 KiB page
+[Sat Oct 24 10:02:38 2026] fbcon: Taking over console
+[Sat Oct 24 10:02:38 2026] ACPI: Added _OSI(Module Device)
+[Sat Oct 24 10:02:38 2026] ACPI: Added _OSI(Processor Device)
+[Sat Oct 24 10:02:38 2026] ACPI: Added _OSI(Processor Aggregator Device)
+[Sat Oct 24 10:02:38 2026] ACPI: 1 ACPI AML tables successfully acquired and loaded
+[Sat Oct 24 10:02:38 2026] ACPI: Interpreter enabled
+[Sat Oct 24 10:02:38 2026] ACPI: Using GIC for interrupt routing
+[Sat Oct 24 10:02:38 2026] ACPI: MCFG table detected, 1 entries
+[Sat Oct 24 10:02:38 2026] ACPI: PCI Root Bridge [PCI0] (domain 0000 [bus 00-ff])
+[Sat Oct 24 10:02:38 2026] acpi PNP0A08:00: _OSC: OS supports [ExtendedConfig ASPM ClockPM Segments MSI EDR HPX-Type3]
+[Sat Oct 24 10:02:38 2026] acpi PNP0A08:00: _OSC: OS requested [PCIeHotplug SHPCHotplug PME AER PCIeCapability LTR DPC]
+[Sat Oct 24 10:02:38 2026] acpi PNP0A08:00: _OSC: platform willing to grant [PCIeHotplug SHPCHotplug PME AER PCIeCapability LTR DPC]
+[Sat Oct 24 10:02:38 2026] acpi PNP0A08:00: _OSC: platform retains control of PCIe features (AE_NOT_FOUND)
+[Sat Oct 24 10:02:38 2026] acpi PNP0A08:00: ECAM area [mem 0x40000000-0x4fffffff] reserved by PNP0C02:00
+[Sat Oct 24 10:02:38 2026] acpi PNP0A08:00: ECAM at [mem 0x40000000-0x4fffffff] for [bus 00-ff]
+[Sat Oct 24 10:02:38 2026] ACPI: Remapped I/O 0x000000006fff0000 to [io  0x0000-0xffff window]
+[Sat Oct 24 10:02:38 2026] PCI host bridge to bus 0000:00
+[Sat Oct 24 10:02:38 2026] pci_bus 0000:00: root bus resource [mem 0x50000000-0x6ffdffff window]
+[Sat Oct 24 10:02:38 2026] pci_bus 0000:00: root bus resource [mem 0x280000000-0x67fffffff window]
+[Sat Oct 24 10:02:38 2026] pci_bus 0000:00: root bus resource [io  0x0000-0xffff window]
+[Sat Oct 24 10:02:38 2026] pci_bus 0000:00: root bus resource [bus 00-ff]
+[Sat Oct 24 10:02:38 2026] pci 0000:00:00.0: [106b:1a05] type 00 class 0x060000 conventional PCI endpoint
+[Sat Oct 24 10:02:38 2026] pci 0000:00:01.0: [1af4:1041] type 00 class 0x020000 conventional PCI endpoint
+[Sat Oct 24 10:02:38 2026] pci 0000:00:01.0: BAR 0 [mem 0x280080000-0x28008ffff 64bit]
+[Sat Oct 24 10:02:38 2026] pci 0000:00:01.0: BAR 2 [mem 0x5000b000-0x5000b03f]
+[Sat Oct 24 10:02:38 2026] pci 0000:00:05.0: [1af4:1043] type 00 class 0x078000 conventional PCI endpoint
+[Sat Oct 24 10:02:38 2026] pci 0000:00:05.0: BAR 0 [mem 0x280070000-0x28007ffff 64bit]
+[Sat Oct 24 10:02:38 2026] pci 0000:00:05.0: BAR 2 [mem 0x50003000-0x5000307f]
+[Sat Oct 24 10:02:38 2026] pci 0000:00:06.0: [1af4:1042] type 00 class 0x018000 conventional PCI endpoint
+[Sat Oct 24 10:02:38 2026] pci 0000:00:06.0: BAR 0 [mem 0x280060000-0x28006ffff 64bit]
+[Sat Oct 24 10:02:38 2026] pci 0000:00:06.0: BAR 2 [mem 0x5000a000-0x5000a03f]
+[Sat Oct 24 10:02:38 2026] pci 0000:00:07.0: [1af4:1042] type 00 class 0x018000 conventional PCI endpoint
+[Sat Oct 24 10:02:38 2026] pci 0000:00:07.0: BAR 0 [mem 0x280050000-0x28005ffff 64bit]
+[Sat Oct 24 10:02:38 2026] pci 0000:00:07.0: BAR 2 [mem 0x50009000-0x5000903f]
+[Sat Oct 24 10:02:38 2026] pci 0000:00:08.0: [1af4:1042] type 00 class 0x018000 conventional PCI endpoint
+[Sat Oct 24 10:02:38 2026] pci 0000:00:08.0: BAR 0 [mem 0x280040000-0x28004ffff 64bit]
+[Sat Oct 24 10:02:38 2026] pci 0000:00:08.0: BAR 2 [mem 0x50008000-0x5000803f]
+[Sat Oct 24 10:02:38 2026] pci 0000:00:09.0: [1af4:105a] type 00 class 0x018000 conventional PCI endpoint
+[Sat Oct 24 10:02:38 2026] pci 0000:00:09.0: BAR 0 [mem 0x280030000-0x28003ffff 64bit]
+[Sat Oct 24 10:02:38 2026] pci 0000:00:09.0: BAR 2 [mem 0x50007000-0x5000703f]
+[Sat Oct 24 10:02:38 2026] pci 0000:00:0a.0: [1af4:105a] type 00 class 0x018000 conventional PCI endpoint
+[Sat Oct 24 10:02:38 2026] pci 0000:00:0a.0: BAR 0 [mem 0x280020000-0x28002ffff 64bit]
+[Sat Oct 24 10:02:38 2026] pci 0000:00:0a.0: BAR 2 [mem 0x50006000-0x5000603f]
+[Sat Oct 24 10:02:38 2026] pci 0000:00:0b.0: [1af4:1053] type 00 class 0x078000 conventional PCI endpoint
+[Sat Oct 24 10:02:38 2026] pci 0000:00:0b.0: BAR 0 [mem 0x280010000-0x28001ffff 64bit]
+[Sat Oct 24 10:02:38 2026] pci 0000:00:0b.0: BAR 2 [mem 0x50002000-0x5000207f]
+[Sat Oct 24 10:02:38 2026] pci 0000:00:0c.0: [1af4:1044] type 00 class 0x100000 conventional PCI endpoint
+[Sat Oct 24 10:02:38 2026] pci 0000:00:0c.0: BAR 0 [mem 0x280090000-0x280097fff 64bit]
+[Sat Oct 24 10:02:38 2026] pci 0000:00:0c.0: BAR 2 [mem 0x50005000-0x5000503f]
+[Sat Oct 24 10:02:38 2026] pci 0000:00:0d.0: [1af4:1045] type 00 class 0x058000 conventional PCI endpoint
+[Sat Oct 24 10:02:38 2026] pci 0000:00:0d.0: BAR 0 [mem 0x280000000-0x28000ffff 64bit]
+[Sat Oct 24 10:02:38 2026] pci 0000:00:0d.0: BAR 2 [mem 0x50004000-0x5000403f]
+[Sat Oct 24 10:02:38 2026] pci 0000:00:0e.0: [106b:1a06] type 00 class 0x0c0330 conventional PCI endpoint
+[Sat Oct 24 10:02:38 2026] pci 0000:00:0e.0: BAR 0 [mem 0x50001000-0x50001fff]
+[Sat Oct 24 10:02:38 2026] pci 0000:00:0e.0: BAR 1 [mem 0x50000000-0x500003ff]
+[Sat Oct 24 10:02:38 2026] pci 0000:00:01.0: BAR 0 [mem 0x280000000-0x28000ffff 64bit]: assigned
+[Sat Oct 24 10:02:38 2026] pci 0000:00:05.0: BAR 0 [mem 0x280010000-0x28001ffff 64bit]: assigned
+[Sat Oct 24 10:02:38 2026] pci 0000:00:06.0: BAR 0 [mem 0x280020000-0x28002ffff 64bit]: assigned
+[Sat Oct 24 10:02:38 2026] pci 0000:00:07.0: BAR 0 [mem 0x280030000-0x28003ffff 64bit]: assigned
+[Sat Oct 24 10:02:38 2026] pci 0000:00:08.0: BAR 0 [mem 0x280040000-0x28004ffff 64bit]: assigned
+[Sat Oct 24 10:02:38 2026] pci 0000:00:09.0: BAR 0 [mem 0x280050000-0x28005ffff 64bit]: assigned
+[Sat Oct 24 10:02:38 2026] pci 0000:00:0a.0: BAR 0 [mem 0x280060000-0x28006ffff 64bit]: assigned
+[Sat Oct 24 10:02:38 2026] pci 0000:00:0b.0: BAR 0 [mem 0x280070000-0x28007ffff 64bit]: assigned
+[Sat Oct 24 10:02:38 2026] pci 0000:00:0d.0: BAR 0 [mem 0x280080000-0x28008ffff 64bit]: assigned
+[Sat Oct 24 10:02:38 2026] pci 0000:00:0c.0: BAR 0 [mem 0x280090000-0x280097fff 64bit]: assigned
+[Sat Oct 24 10:02:38 2026] pci 0000:00:0e.0: BAR 0 [mem 0x50000000-0x50000fff]: assigned
+[Sat Oct 24 10:02:38 2026] pci 0000:00:0e.0: BAR 1 [mem 0x50001000-0x500013ff]: assigned
+[Sat Oct 24 10:02:38 2026] pci 0000:00:05.0: BAR 2 [mem 0x50001400-0x5000147f]: assigned
+[Sat Oct 24 10:02:38 2026] pci 0000:00:0b.0: BAR 2 [mem 0x50001480-0x500014ff]: assigned
+[Sat Oct 24 10:02:38 2026] pci 0000:00:01.0: BAR 2 [mem 0x50001500-0x5000153f]: assigned
+[Sat Oct 24 10:02:38 2026] pci 0000:00:06.0: BAR 2 [mem 0x50001540-0x5000157f]: assigned
+[Sat Oct 24 10:02:38 2026] pci 0000:00:07.0: BAR 2 [mem 0x50001580-0x500015bf]: assigned
+[Sat Oct 24 10:02:38 2026] pci 0000:00:08.0: BAR 2 [mem 0x500015c0-0x500015ff]: assigned
+[Sat Oct 24 10:02:38 2026] pci 0000:00:09.0: BAR 2 [mem 0x50001600-0x5000163f]: assigned
+[Sat Oct 24 10:02:38 2026] pci 0000:00:0a.0: BAR 2 [mem 0x50001640-0x5000167f]: assigned
+[Sat Oct 24 10:02:38 2026] pci 0000:00:0c.0: BAR 2 [mem 0x50001680-0x500016bf]: assigned
+[Sat Oct 24 10:02:38 2026] pci 0000:00:0d.0: BAR 2 [mem 0x500016c0-0x500016ff]: assigned
+[Sat Oct 24 10:02:38 2026] pci_bus 0000:00: resource 4 [mem 0x50000000-0x6ffdffff window]
+[Sat Oct 24 10:02:38 2026] pci_bus 0000:00: resource 5 [mem 0x280000000-0x67fffffff window]
+[Sat Oct 24 10:02:38 2026] pci_bus 0000:00: resource 6 [io  0x0000-0xffff window]
+[Sat Oct 24 10:02:38 2026] iommu: Default domain type: Translated
+[Sat Oct 24 10:02:38 2026] iommu: DMA domain TLB invalidation policy: strict mode
+[Sat Oct 24 10:02:38 2026] SCSI subsystem initialized
+[Sat Oct 24 10:02:38 2026] libata version 3.00 loaded.
+[Sat Oct 24 10:02:38 2026] ACPI: bus type USB registered
+[Sat Oct 24 10:02:38 2026] usbcore: registered new interface driver usbfs
+[Sat Oct 24 10:02:38 2026] usbcore: registered new interface driver hub
+[Sat Oct 24 10:02:38 2026] usbcore: registered new device driver usb
+[Sat Oct 24 10:02:38 2026] pps_core: LinuxPPS API ver. 1 registered
+[Sat Oct 24 10:02:38 2026] pps_core: Software ver. 5.3.6 - Copyright 2005-2007 Rodolfo Giometti <giometti@linux.it>
+[Sat Oct 24 10:02:38 2026] PTP clock support registered
+[Sat Oct 24 10:02:38 2026] EDAC MC: Ver: 3.0.0
+[Sat Oct 24 10:02:38 2026] scmi_core: SCMI protocol bus registered
+[Sat Oct 24 10:02:38 2026] efivars: Registered efivars operations
+[Sat Oct 24 10:02:38 2026] NetLabel: Initializing
+[Sat Oct 24 10:02:38 2026] NetLabel:  domain hash size = 128
+[Sat Oct 24 10:02:38 2026] NetLabel:  protocols = UNLABELED CIPSOv4 CALIPSO
+[Sat Oct 24 10:02:38 2026] NetLabel:  unlabeled traffic allowed by default
+[Sat Oct 24 10:02:38 2026] mctp: management component transport protocol core
+[Sat Oct 24 10:02:38 2026] NET: Registered PF_MCTP protocol family
+[Sat Oct 24 10:02:38 2026] vgaarb: loaded
+[Sat Oct 24 10:02:38 2026] clocksource: Switched to clocksource arch_sys_counter
+[Sat Oct 24 10:02:38 2026] VFS: Disk quotas dquot_6.6.0
+[Sat Oct 24 10:02:38 2026] VFS: Dquot-cache hash table entries: 512 (order 0, 4096 bytes)
+[Sat Oct 24 10:02:38 2026] AppArmor: AppArmor Filesystem Enabled
+[Sat Oct 24 10:02:38 2026] pnp: PnP ACPI init
+[Sat Oct 24 10:02:38 2026] system 00:00: [mem 0x40000000-0x4fffffff] could not be reserved
+[Sat Oct 24 10:02:38 2026] pnp: PnP ACPI: found 1 devices
+[Sat Oct 24 10:02:38 2026] NET: Registered PF_INET protocol family
+[Sat Oct 24 10:02:38 2026] IP idents hash table entries: 131072 (order: 8, 1048576 bytes, linear)
+[Sat Oct 24 10:02:38 2026] tcp_listen_portaddr_hash hash table entries: 4096 (order: 4, 65536 bytes, linear)
+[Sat Oct 24 10:02:38 2026] Table-perturb hash table entries: 65536 (order: 6, 262144 bytes, linear)
+[Sat Oct 24 10:02:38 2026] TCP established hash table entries: 65536 (order: 7, 524288 bytes, linear)
+[Sat Oct 24 10:02:38 2026] TCP bind hash table entries: 65536 (order: 9, 2097152 bytes, linear)
+[Sat Oct 24 10:02:38 2026] TCP: Hash tables configured (established 65536 bind 65536)
+[Sat Oct 24 10:02:38 2026] MPTCP token hash table entries: 8192 (order: 6, 196608 bytes, linear)
+[Sat Oct 24 10:02:38 2026] UDP hash table entries: 4096 (order: 5, 131072 bytes, linear)
+[Sat Oct 24 10:02:38 2026] UDP-Lite hash table entries: 4096 (order: 5, 131072 bytes, linear)
+[Sat Oct 24 10:02:38 2026] NET: Registered PF_UNIX/PF_LOCAL protocol family
+[Sat Oct 24 10:02:38 2026] NET: Registered PF_XDP protocol family
+[Sat Oct 24 10:02:38 2026] pci 0000:00:0e.0: enabling device (0010 -> 0012)
+[Sat Oct 24 10:02:38 2026] PCI: CLS 0 bytes, default 64
+[Sat Oct 24 10:02:38 2026] kvm [1]: HYP mode not available
+[Sat Oct 24 10:02:38 2026] Initialise system trusted keyrings
+[Sat Oct 24 10:02:38 2026] Key type blacklist registered
+[Sat Oct 24 10:02:38 2026] workingset: timestamp_bits=40 max_order=21 bucket_order=0
+[Sat Oct 24 10:02:38 2026] zbud: loaded
+[Sat Oct 24 10:02:38 2026] squashfs: version 4.0 (2009/01/31) Phillip Lougher
+[Sat Oct 24 10:02:38 2026] fuse: init (API version 7.39)
+[Sat Oct 24 10:02:38 2026] integrity: Platform Keyring initialized
+[Sat Oct 24 10:02:38 2026] integrity: Machine keyring initialized
+[Sat Oct 24 10:02:38 2026] Key type asymmetric registered
+[Sat Oct 24 10:02:38 2026] Asymmetric key parser 'x509' registered
+[Sat Oct 24 10:02:38 2026] Block layer SCSI generic (bsg) driver version 0.4 loaded (major 242)
+[Sat Oct 24 10:02:38 2026] io scheduler mq-deadline registered
+[Sat Oct 24 10:02:38 2026] pl061_gpio ARMH0061:00: PL061 GPIO chip registered
+[Sat Oct 24 10:02:38 2026] shpchp: Standard Hot Plug PCI Controller Driver version: 0.4
+[Sat Oct 24 10:02:38 2026] input: Power Button as /devices/LNXSYSTM:00/PNP0C0C:00/input/input0
+[Sat Oct 24 10:02:38 2026] ACPI: button: Power Button [PWRB]
+[Sat Oct 24 10:02:38 2026] Serial: 8250/16550 driver, 32 ports, IRQ sharing enabled
+[Sat Oct 24 10:02:38 2026] msm_serial: driver initialized
+[Sat Oct 24 10:02:38 2026] SuperH (H)SCI(F) driver initialized
+[Sat Oct 24 10:02:38 2026] loop: module loaded
+[Sat Oct 24 10:02:38 2026] virtio_blk virtio2: 1/0/0 default/read/poll queues
+[Sat Oct 24 10:02:38 2026] virtio_blk virtio2: [vda] 41943040 512-byte logical blocks (21.5 GB/20.0 GiB)
+[Sat Oct 24 10:02:38 2026]  vda: vda1 vda15 vda16
+[Sat Oct 24 10:02:38 2026] virtio_blk virtio3: 1/0/0 default/read/poll queues
+[Sat Oct 24 10:02:38 2026] virtio_blk virtio3: [vdb] 83886080 512-byte logical blocks (42.9 GB/40.0 GiB)
+[Sat Oct 24 10:02:38 2026]  vdb: vdb1
+[Sat Oct 24 10:02:38 2026] virtio_blk virtio4: 1/0/0 default/read/poll queues
+[Sat Oct 24 10:02:38 2026] virtio_blk virtio4: [vdc] 38672 512-byte logical blocks (19.8 MB/18.9 MiB)
+[Sat Oct 24 10:02:38 2026] ACPI: bus type drm_connector registered
+[Sat Oct 24 10:02:38 2026] tun: Universal TUN/TAP device driver, 1.6
+[Sat Oct 24 10:02:38 2026] PPP generic driver version 2.4.2
+[Sat Oct 24 10:02:38 2026] mousedev: PS/2 mouse device common for all mice
+[Sat Oct 24 10:02:38 2026] rtc-efi rtc-efi.0: registered as rtc0
+[Sat Oct 24 10:02:38 2026] rtc-efi rtc-efi.0: setting system clock to 2026-10-24T17:03:04 UTC (1792861384)
+[Sat Oct 24 10:02:38 2026] i2c_dev: i2c /dev entries driver
+[Sat Oct 24 10:02:38 2026] device-mapper: core: CONFIG_IMA_DISABLE_HTABLE is disabled. Duplicate IMA measurements will not be recorded in the IMA log.
+[Sat Oct 24 10:02:38 2026] device-mapper: uevent: version 1.0.3
+[Sat Oct 24 10:02:38 2026] device-mapper: ioctl: 4.48.0-ioctl (2023-03-01) initialised: dm-devel@redhat.com
+[Sat Oct 24 10:02:38 2026] ledtrig-cpu: registered to indicate activity on CPUs
+[Sat Oct 24 10:02:38 2026] drop_monitor: Initializing network drop monitor service
+[Sat Oct 24 10:02:38 2026] NET: Registered PF_INET6 protocol family
+[Sat Oct 24 10:02:38 2026] Segment Routing with IPv6
+[Sat Oct 24 10:02:38 2026] In-situ OAM (IOAM) with IPv6
+[Sat Oct 24 10:02:38 2026] NET: Registered PF_PACKET protocol family
+[Sat Oct 24 10:02:38 2026] Key type dns_resolver registered
+[Sat Oct 24 10:02:38 2026] registered taskstats version 1
+[Sat Oct 24 10:02:38 2026] Loading compiled-in X.509 certificates
+[Sat Oct 24 10:02:38 2026] Loaded X.509 cert 'Build time autogenerated kernel key: 01368eec69cd6f653a28dd100cca076d466f9945'
+[Sat Oct 24 10:02:38 2026] Loaded X.509 cert 'Canonical Ltd. Live Patch Signing 2025 Kmod: d541cef61dc7e793b7eb7e899970a2eef0b5dc8c'
+[Sat Oct 24 10:02:38 2026] Loaded X.509 cert 'Canonical Ltd. Live Patch Signing: 14df34d1a87cf37625abec039ef2bf521249b969'
+[Sat Oct 24 10:02:38 2026] Loaded X.509 cert 'Canonical Ltd. Kernel Module Signing 2025 Kmod: 4627603d2357a2a3f81006370894c221175893e9'
+[Sat Oct 24 10:02:38 2026] Loaded X.509 cert 'Canonical Ltd. Kernel Module Signing: 88f752e560a1e0737e31163a466ad7b70a850c19'
+[Sat Oct 24 10:02:38 2026] blacklist: Loading compiled-in revocation X.509 certificates
+[Sat Oct 24 10:02:38 2026] Loaded X.509 cert 'Canonical Ltd. Secure Boot Signing: 61482aa2830d0ab2ad5af10b7250da9033ddcef0'
+[Sat Oct 24 10:02:38 2026] Loaded X.509 cert 'Canonical Ltd. Secure Boot Signing (2017): 242ade75ac4a15e50d50c84b0d45ff3eae707a03'
+[Sat Oct 24 10:02:38 2026] Loaded X.509 cert 'Canonical Ltd. Secure Boot Signing (ESM 2018): 365188c1d374d6b07c3c8f240f8ef722433d6a8b'
+[Sat Oct 24 10:02:38 2026] Loaded X.509 cert 'Canonical Ltd. Secure Boot Signing (2019): c0746fd6c5da3ae827864651ad66ae47fe24b3e8'
+[Sat Oct 24 10:02:38 2026] Loaded X.509 cert 'Canonical Ltd. Secure Boot Signing (2021 v1): a8d54bbb3825cfb94fa13c9f8a594a195c107b8d'
+[Sat Oct 24 10:02:38 2026] Loaded X.509 cert 'Canonical Ltd. Secure Boot Signing (2021 v2): 4cf046892d6fd3c9a5b03f98d845f90851dc6a8c'
+[Sat Oct 24 10:02:38 2026] Loaded X.509 cert 'Canonical Ltd. Secure Boot Signing (2021 v3): 100437bb6de6e469b581e61cd66bce3ef4ed53af'
+[Sat Oct 24 10:02:38 2026] Loaded X.509 cert 'Canonical Ltd. Secure Boot Signing (Ubuntu Core 2019): c1d57b8f6b743f23ee41f4f7ee292f06eecadfb9'
+[Sat Oct 24 10:02:38 2026] Key type .fscrypt registered
+[Sat Oct 24 10:02:38 2026] Key type fscrypt-provisioning registered
+[Sat Oct 24 10:02:38 2026] Key type encrypted registered
+[Sat Oct 24 10:02:38 2026] AppArmor: AppArmor sha256 policy hashing enabled
+[Sat Oct 24 10:02:38 2026] ima: secureboot mode disabled
+[Sat Oct 24 10:02:38 2026] ima: No TPM chip found, activating TPM-bypass!
+[Sat Oct 24 10:02:38 2026] Loading compiled-in module X.509 certificates
+[Sat Oct 24 10:02:38 2026] Loaded X.509 cert 'Build time autogenerated kernel key: 01368eec69cd6f653a28dd100cca076d466f9945'
+[Sat Oct 24 10:02:38 2026] ima: Allocated hash algorithm: sha256
+[Sat Oct 24 10:02:38 2026] ima: No architecture policies found
+[Sat Oct 24 10:02:38 2026] evm: Initialising EVM extended attributes:
+[Sat Oct 24 10:02:38 2026] evm: security.selinux
+[Sat Oct 24 10:02:38 2026] evm: security.SMACK64
+[Sat Oct 24 10:02:38 2026] evm: security.SMACK64EXEC
+[Sat Oct 24 10:02:38 2026] evm: security.SMACK64TRANSMUTE
+[Sat Oct 24 10:02:38 2026] evm: security.SMACK64MMAP
+[Sat Oct 24 10:02:38 2026] evm: security.apparmor
+[Sat Oct 24 10:02:38 2026] evm: security.ima
+[Sat Oct 24 10:02:38 2026] evm: security.capability
+[Sat Oct 24 10:02:38 2026] evm: HMAC attrs: 0x1
+[Sat Oct 24 10:02:38 2026] clk: Disabling unused clocks
+[Sat Oct 24 10:02:38 2026] md: Waiting for all devices to be available before autodetect
+[Sat Oct 24 10:02:38 2026] md: If you don't use raid, use raid=noautodetect
+[Sat Oct 24 10:02:38 2026] md: Autodetecting RAID arrays.
+[Sat Oct 24 10:02:38 2026] md: autorun ...
+[Sat Oct 24 10:02:38 2026] md: ... autorun DONE.
+[Sat Oct 24 10:02:38 2026] EXT4-fs (vda1): mounted filesystem fa7c4d0c-8766-404e-88e9-d9385ac9734c ro with ordered data mode. Quota mode: none.
+[Sat Oct 24 10:02:38 2026] VFS: Mounted root (ext4 filesystem) readonly on device 253:1.
+[Sat Oct 24 10:02:38 2026] devtmpfs: mounted
+[Sat Oct 24 10:02:38 2026] Freeing unused kernel memory: 12288K
+[Sat Oct 24 10:02:38 2026] Checked W+X mappings: passed, no W+X pages found
+[Sat Oct 24 10:02:38 2026] Run /sbin/init as init process
+[Sat Oct 24 10:02:38 2026]   with arguments:
+[Sat Oct 24 10:02:38 2026]     /sbin/init
+[Sat Oct 24 10:02:38 2026]   with environment:
+[Sat Oct 24 10:02:38 2026]     HOME=/
+[Sat Oct 24 10:02:38 2026]     TERM=linux
+[Sat Oct 24 10:02:38 2026] systemd[1]: Inserted module 'autofs4'
+[Sat Oct 24 10:02:38 2026] NET: Registered PF_VSOCK protocol family
+[Sat Oct 24 10:02:38 2026] virtiofs virtio5: virtio_fs_setup_dax: No cache capability
+[Sat Oct 24 10:02:38 2026] virtiofs virtio6: virtio_fs_setup_dax: No cache capability
+[Sat Oct 24 10:02:38 2026] systemd[1]: systemd 255.4-1ubuntu8.15 running in system mode (+PAM +AUDIT +SELINUX +APPARMOR +IMA +SMACK +SECCOMP +GCRYPT -GNUTLS +OPENSSL +ACL +BLKID +CURL +ELFUTILS +FIDO2 +IDN2 -IDN +IPTC +KMOD +LIBCRYPTSETUP +LIBFDISK +PCRE2 -PWQUALITY +P11KIT +QRENCODE +TPM2 +BZIP2 +LZ4 +XZ +ZLIB +ZSTD -BPF_FRAMEWORK -XKBCOMMON +UTMP +SYSVINIT default-hierarchy=unified)
+[Sat Oct 24 10:02:38 2026] systemd[1]: Detected virtualization apple.
+[Sat Oct 24 10:02:38 2026] systemd[1]: Detected architecture arm64.
+[Sat Oct 24 10:02:38 2026] systemd[1]: Hostname set to <colima>.
+[Sat Oct 24 10:02:39 2026] systemd[1]: Queued start job for default target graphical.target.
+[Sat Oct 24 10:02:39 2026] systemd[1]: Created slice system-getty.slice - Slice /system/getty.
+[Sat Oct 24 10:02:39 2026] systemd[1]: Created slice system-modprobe.slice - Slice /system/modprobe.
+[Sat Oct 24 10:02:39 2026] systemd[1]: Created slice system-serial\x2dgetty.slice - Slice /system/serial-getty.
+[Sat Oct 24 10:02:39 2026] systemd[1]: Created slice system-systemd\x2dfsck.slice - Slice /system/systemd-fsck.
+[Sat Oct 24 10:02:39 2026] systemd[1]: Created slice user.slice - User and Session Slice.
+[Sat Oct 24 10:02:39 2026] systemd[1]: Started systemd-ask-password-console.path - Dispatch Password Requests to Console Directory Watch.
+[Sat Oct 24 10:02:39 2026] systemd[1]: Started systemd-ask-password-wall.path - Forward Password Requests to Wall Directory Watch.
+[Sat Oct 24 10:02:39 2026] systemd[1]: Set up automount proc-sys-fs-binfmt_misc.automount - Arbitrary Executable File Formats File System Automount Point.
+[Sat Oct 24 10:02:39 2026] systemd[1]: Expecting device dev-disk-by\x2dlabel-BOOT.device - /dev/disk/by-label/BOOT...
+[Sat Oct 24 10:02:39 2026] systemd[1]: Expecting device dev-disk-by\x2dlabel-UEFI.device - /dev/disk/by-label/UEFI...
+[Sat Oct 24 10:02:39 2026] systemd[1]: Expecting device dev-hvc0.device - /dev/hvc0...
+[Sat Oct 24 10:02:39 2026] systemd[1]: Reached target cryptsetup.target - Local Encrypted Volumes.
+[Sat Oct 24 10:02:39 2026] systemd[1]: Reached target integritysetup.target - Local Integrity Protected Volumes.
+[Sat Oct 24 10:02:39 2026] systemd[1]: Reached target paths.target - Path Units.
+[Sat Oct 24 10:02:39 2026] systemd[1]: Reached target remote-fs.target - Remote File Systems.
+[Sat Oct 24 10:02:39 2026] systemd[1]: Reached target slices.target - Slice Units.
+[Sat Oct 24 10:02:39 2026] systemd[1]: Reached target swap.target - Swaps.
+[Sat Oct 24 10:02:39 2026] systemd[1]: Reached target veritysetup.target - Local Verity Protected Volumes.
+[Sat Oct 24 10:02:39 2026] systemd[1]: Listening on systemd-fsckd.socket - fsck to fsckd communication Socket.
+[Sat Oct 24 10:02:39 2026] systemd[1]: Listening on systemd-initctl.socket - initctl Compatibility Named Pipe.
+[Sat Oct 24 10:02:39 2026] systemd[1]: Listening on systemd-journald-dev-log.socket - Journal Socket (/dev/log).
+[Sat Oct 24 10:02:39 2026] systemd[1]: Listening on systemd-journald.socket - Journal Socket.
+[Sat Oct 24 10:02:39 2026] systemd[1]: Listening on systemd-networkd.socket - Network Service Netlink Socket.
+[Sat Oct 24 10:02:39 2026] systemd[1]: systemd-pcrextend.socket - TPM2 PCR Extension (Varlink) was skipped because of an unmet condition check (ConditionSecurity=measured-uki).
+[Sat Oct 24 10:02:39 2026] systemd[1]: Listening on systemd-udevd-control.socket - udev Control Socket.
+[Sat Oct 24 10:02:39 2026] systemd[1]: Listening on systemd-udevd-kernel.socket - udev Kernel Socket.
+[Sat Oct 24 10:02:39 2026] systemd[1]: Mounting dev-hugepages.mount - Huge Pages File System...
+[Sat Oct 24 10:02:39 2026] systemd[1]: Mounting dev-mqueue.mount - POSIX Message Queue File System...
+[Sat Oct 24 10:02:39 2026] systemd[1]: Mounting sys-kernel-debug.mount - Kernel Debug File System...
+[Sat Oct 24 10:02:39 2026] systemd[1]: Mounting sys-kernel-tracing.mount - Kernel Trace File System...
+[Sat Oct 24 10:02:39 2026] systemd[1]: Starting systemd-journald.service - Journal Service...
+[Sat Oct 24 10:02:39 2026] systemd[1]: Starting kmod-static-nodes.service - Create List of Static Device Nodes...
+[Sat Oct 24 10:02:39 2026] systemd[1]: Starting modprobe@configfs.service - Load Kernel Module configfs...
+[Sat Oct 24 10:02:39 2026] systemd[1]: Starting modprobe@dm_mod.service - Load Kernel Module dm_mod...
+[Sat Oct 24 10:02:39 2026] systemd[1]: Starting modprobe@drm.service - Load Kernel Module drm...
+[Sat Oct 24 10:02:39 2026] systemd[1]: Starting modprobe@efi_pstore.service - Load Kernel Module efi_pstore...
+[Sat Oct 24 10:02:39 2026] systemd[1]: Starting modprobe@fuse.service - Load Kernel Module fuse...
+[Sat Oct 24 10:02:39 2026] systemd[1]: Starting modprobe@loop.service - Load Kernel Module loop...
+[Sat Oct 24 10:02:39 2026] systemd[1]: netplan-ovs-cleanup.service - OpenVSwitch configuration for cleanup was skipped because of an unmet condition check (ConditionFileIsExecutable=/usr/bin/ovs-vsctl).
+[Sat Oct 24 10:02:39 2026] systemd[1]: Starting systemd-fsck-root.service - File System Check on Root Device...
+[Sat Oct 24 10:02:39 2026] systemd[1]: Starting systemd-modules-load.service - Load Kernel Modules...
+[Sat Oct 24 10:02:39 2026] systemd[1]: systemd-pcrmachine.service - TPM2 PCR Machine ID Measurement was skipped because of an unmet condition check (ConditionSecurity=measured-uki).
+[Sat Oct 24 10:02:39 2026] systemd[1]: systemd-tpm2-setup-early.service - TPM2 SRK Setup (Early) was skipped because of an unmet condition check (ConditionSecurity=measured-uki).
+[Sat Oct 24 10:02:39 2026] pstore: Using crash dump compression: deflate
+[Sat Oct 24 10:02:39 2026] systemd[1]: Starting systemd-udev-trigger.service - Coldplug All udev Devices...
+[Sat Oct 24 10:02:39 2026] systemd[1]: Mounted dev-hugepages.mount - Huge Pages File System.
+[Sat Oct 24 10:02:39 2026] systemd[1]: Mounted dev-mqueue.mount - POSIX Message Queue File System.
+[Sat Oct 24 10:02:39 2026] systemd[1]: Mounted sys-kernel-debug.mount - Kernel Debug File System.
+[Sat Oct 24 10:02:39 2026] systemd[1]: Mounted sys-kernel-tracing.mount - Kernel Trace File System.
+[Sat Oct 24 10:02:39 2026] systemd[1]: Finished kmod-static-nodes.service - Create List of Static Device Nodes.
+[Sat Oct 24 10:02:39 2026] systemd[1]: modprobe@configfs.service: Deactivated successfully.
+[Sat Oct 24 10:02:39 2026] systemd[1]: Finished modprobe@configfs.service - Load Kernel Module configfs.
+[Sat Oct 24 10:02:39 2026] systemd[1]: modprobe@dm_mod.service: Deactivated successfully.
+[Sat Oct 24 10:02:39 2026] systemd[1]: Finished modprobe@dm_mod.service - Load Kernel Module dm_mod.
+[Sat Oct 24 10:02:39 2026] systemd[1]: modprobe@drm.service: Deactivated successfully.
+[Sat Oct 24 10:02:39 2026] systemd[1]: Finished modprobe@drm.service - Load Kernel Module drm.
+[Sat Oct 24 10:02:39 2026] systemd[1]: modprobe@fuse.service: Deactivated successfully.
+[Sat Oct 24 10:02:39 2026] systemd[1]: Finished modprobe@fuse.service - Load Kernel Module fuse.
+[Sat Oct 24 10:02:39 2026] systemd[1]: modprobe@loop.service: Deactivated successfully.
+[Sat Oct 24 10:02:39 2026] systemd[1]: Finished modprobe@loop.service - Load Kernel Module loop.
+[Sat Oct 24 10:02:39 2026] systemd[1]: Mounting sys-fs-fuse-connections.mount - FUSE Control File System...
+[Sat Oct 24 10:02:39 2026] systemd[1]: Mounting sys-kernel-config.mount - Kernel Configuration File System...
+[Sat Oct 24 10:02:39 2026] systemd[1]: systemd-repart.service - Repartition Root Disk was skipped because no trigger condition checks were met.
+[Sat Oct 24 10:02:39 2026] systemd[1]: Starting systemd-tmpfiles-setup-dev-early.service - Create Static Device Nodes in /dev gracefully...
+[Sat Oct 24 10:02:39 2026] systemd-journald[134]: Collecting audit messages is disabled.
+[Sat Oct 24 10:02:39 2026] systemd[1]: Finished systemd-modules-load.service - Load Kernel Modules.
+[Sat Oct 24 10:02:39 2026] systemd[1]: Mounted sys-fs-fuse-connections.mount - FUSE Control File System.
+[Sat Oct 24 10:02:39 2026] systemd[1]: Mounted sys-kernel-config.mount - Kernel Configuration File System.
+[Sat Oct 24 10:02:39 2026] systemd[1]: Started systemd-fsckd.service - File System Check Daemon to report status.
+[Sat Oct 24 10:02:39 2026] systemd[1]: Starting systemd-sysctl.service - Apply Kernel Variables...
+[Sat Oct 24 10:02:39 2026] systemd[1]: Started systemd-journald.service - Journal Service.
+[Sat Oct 24 10:02:39 2026] pstore: Registered efi_pstore as persistent store backend
+[Sat Oct 24 10:02:39 2026] EXT4-fs (vda1): re-mounted fa7c4d0c-8766-404e-88e9-d9385ac9734c r/w.
+[Sat Oct 24 10:02:39 2026] systemd-journald[134]: Received client request to flush runtime journal.
+[Sat Oct 24 10:02:39 2026] systemd-journald[134]: /var/log/journal/49aa394292f64aceade4def10fd249f3/system.journal: Journal file uses a different sequence number ID, rotating.
+[Sat Oct 24 10:02:39 2026] systemd-journald[134]: Rotating system journal.
+[Sat Oct 24 10:02:39 2026] xhci_hcd 0000:00:0e.0: xHCI Host Controller
+[Sat Oct 24 10:02:39 2026] xhci_hcd 0000:00:0e.0: new USB bus registered, assigned bus number 1
+[Sat Oct 24 10:02:39 2026] xhci_hcd 0000:00:0e.0: hcc params 0x02600801 hci version 0x110 quirks 0x0000000000000010
+[Sat Oct 24 10:02:39 2026] xhci_hcd 0000:00:0e.0: xHCI Host Controller
+[Sat Oct 24 10:02:39 2026] xhci_hcd 0000:00:0e.0: new USB bus registered, assigned bus number 2
+[Sat Oct 24 10:02:39 2026] xhci_hcd 0000:00:0e.0: Host supports USB 3.1 Enhanced SuperSpeed
+[Sat Oct 24 10:02:39 2026] usb usb1: New USB device found, idVendor=1d6b, idProduct=0002, bcdDevice= 6.08
+[Sat Oct 24 10:02:39 2026] usb usb1: New USB device strings: Mfr=3, Product=2, SerialNumber=1
+[Sat Oct 24 10:02:39 2026] usb usb1: Product: xHCI Host Controller
+[Sat Oct 24 10:02:39 2026] usb usb1: Manufacturer: Linux 6.8.0-117-generic xhci-hcd
+[Sat Oct 24 10:02:39 2026] usb usb1: SerialNumber: 0000:00:0e.0
+[Sat Oct 24 10:02:39 2026] hub 1-0:1.0: USB hub found
+[Sat Oct 24 10:02:39 2026] hub 1-0:1.0: 8 ports detected
+[Sat Oct 24 10:02:39 2026] usb usb2: We don't know the algorithms for LPM for this host, disabling LPM.
+[Sat Oct 24 10:02:39 2026] usb usb2: New USB device found, idVendor=1d6b, idProduct=0003, bcdDevice= 6.08
+[Sat Oct 24 10:02:39 2026] usb usb2: New USB device strings: Mfr=3, Product=2, SerialNumber=1
+[Sat Oct 24 10:02:39 2026] usb usb2: Product: xHCI Host Controller
+[Sat Oct 24 10:02:39 2026] usb usb2: Manufacturer: Linux 6.8.0-117-generic xhci-hcd
+[Sat Oct 24 10:02:39 2026] usb usb2: SerialNumber: 0000:00:0e.0
+[Sat Oct 24 10:02:39 2026] hub 2-0:1.0: USB hub found
+[Sat Oct 24 10:02:39 2026] hub 2-0:1.0: 8 ports detected
+[Sat Oct 24 10:02:39 2026] EXT4-fs (vda16): mounted filesystem 40bbbb89-65b4-41f0-ad66-b2637a3d87a1 r/w with ordered data mode. Quota mode: none.
+[Sat Oct 24 10:02:40 2026] usb 1-1: new full-speed USB device number 2 using xhci_hcd
+[Sat Oct 24 10:02:40 2026] usb 1-1: New USB device found, idVendor=05ac, idProduct=8105, bcdDevice= 0.00
+[Sat Oct 24 10:02:40 2026] usb 1-1: New USB device strings: Mfr=2, Product=3, SerialNumber=0
+[Sat Oct 24 10:02:40 2026] usb 1-1: Product: Virtual USB Keyboard
+[Sat Oct 24 10:02:40 2026] usb 1-1: Manufacturer: Apple Inc.
+[Sat Oct 24 10:02:40 2026] hid: raw HID events driver (C) Jiri Kosina
+[Sat Oct 24 10:02:40 2026] usbcore: registered new interface driver usbhid
+[Sat Oct 24 10:02:40 2026] usbhid: USB HID core driver
+[Sat Oct 24 10:02:40 2026] input: Apple Inc. Virtual USB Keyboard as /devices/pci0000:00/0000:00:0e.0/usb1/1-1/1-1:1.0/0003:05AC:8105.0001/input/input1
+[Sat Oct 24 10:02:40 2026] hid-generic 0003:05AC:8105.0001: input,hidraw0: USB HID v1.10 Keyboard [Apple Inc. Virtual USB Keyboard] on usb-0000:00:0e.0-1/input0
+[Sat Oct 24 10:02:40 2026] usb 1-2: new full-speed USB device number 3 using xhci_hcd
+[Sat Oct 24 10:02:40 2026] usb 1-2: New USB device found, idVendor=05ac, idProduct=8106, bcdDevice= 0.00
+[Sat Oct 24 10:02:40 2026] usb 1-2: New USB device strings: Mfr=2, Product=3, SerialNumber=0
+[Sat Oct 24 10:02:40 2026] usb 1-2: Product: Virtual USB Digitizer
+[Sat Oct 24 10:02:40 2026] usb 1-2: Manufacturer: Apple Inc.
+[Sat Oct 24 10:02:40 2026] input: Apple Inc. Virtual USB Digitizer as /devices/pci0000:00/0000:00:0e.0/usb1/1-2/1-2:1.0/0003:05AC:8106.0002/input/input2
+[Sat Oct 24 10:02:40 2026] hid-generic 0003:05AC:8106.0002: input,hidraw1: USB HID v1.10 Mouse [Apple Inc. Virtual USB Digitizer] on usb-0000:00:0e.0-2/input0
+[Sat Oct 24 10:02:40 2026] audit: type=1400 audit(1792861386.459:2): apparmor="STATUS" operation="profile_load" profile="unconfined" name="Discord" pid=261 comm="apparmor_parser"
+[Sat Oct 24 10:02:40 2026] audit: type=1400 audit(1792861386.459:3): apparmor="STATUS" operation="profile_load" profile="unconfined" name=4D6F6E676F444220436F6D70617373 pid=262 comm="apparmor_parser"
+[Sat Oct 24 10:02:40 2026] audit: type=1400 audit(1792861386.460:4): apparmor="STATUS" operation="profile_load" profile="unconfined" name="1password" pid=260 comm="apparmor_parser"
+[Sat Oct 24 10:02:40 2026] audit: type=1400 audit(1792861386.460:5): apparmor="STATUS" operation="profile_load" profile="unconfined" name="QtWebEngineProcess" pid=263 comm="apparmor_parser"
+[Sat Oct 24 10:02:40 2026] audit: type=1400 audit(1792861386.462:6): apparmor="STATUS" operation="profile_load" profile="unconfined" name="balena-etcher" pid=266 comm="apparmor_parser"
+[Sat Oct 24 10:02:40 2026] audit: type=1400 audit(1792861386.463:7): apparmor="STATUS" operation="profile_load" profile="unconfined" name="brave" pid=267 comm="apparmor_parser"
+[Sat Oct 24 10:02:40 2026] audit: type=1400 audit(1792861386.464:8): apparmor="STATUS" operation="profile_load" profile="unconfined" name="cam" pid=269 comm="apparmor_parser"
+[Sat Oct 24 10:02:40 2026] audit: type=1400 audit(1792861386.465:9): apparmor="STATUS" operation="profile_load" profile="unconfined" name="buildah" pid=268 comm="apparmor_parser"
+[Sat Oct 24 10:02:40 2026] audit: type=1400 audit(1792861386.465:10): apparmor="STATUS" operation="profile_load" profile="unconfined" name="ch-run" pid=271 comm="apparmor_parser"
+[Sat Oct 24 10:02:40 2026] ISO 9660 Extensions: IEEE_P1282
+[Sat Oct 24 10:02:44 2026] kauditd_printk_skb: 101 callbacks suppressed
+[Sat Oct 24 10:02:44 2026] audit: type=1400 audit(1792861390.655:112): apparmor="STATUS" operation="profile_load" profile="unconfined" name="docker-default" pid=596 comm="apparmor_parser"
+[Sat Oct 24 10:02:44 2026] Initializing XFRM netlink socket
+[Sat Oct 24 10:02:44 2026] bridge: filtering via arp/ip/ip6tables is no longer available by default. Update your scripts to load br_netfilter if you need this.
+[Sat Oct 24 10:02:45 2026] ISO 9660 Extensions: IEEE_P1282
+[Sat Oct 24 10:02:45 2026] EXT4-fs (vdb1): mounted filesystem eebafef4-d137-4b97-922d-8645e357fe51 r/w with ordered data mode. Quota mode: none.
+[Sat Oct 24 10:02:59 2026] audit: type=1400 audit(1792861404.860:113): apparmor="STATUS" operation="profile_replace" info="same as current profile, skipping" profile="unconfined" name="docker-default" pid=1657 comm="apparmor_parser"
+[Sat Oct 24 10:03:50 2026] evm: overlay not supported
+[Sat Oct 24 10:03:50 2026] docker0: port 1(vethcef7d67) entered blocking state
+[Sat Oct 24 10:03:50 2026] docker0: port 1(vethcef7d67) entered disabled state
+[Sat Oct 24 10:03:50 2026] vethcef7d67: entered allmulticast mode
+[Sat Oct 24 10:03:50 2026] vethcef7d67: entered promiscuous mode
+[Sat Oct 24 10:03:50 2026] eth0: renamed from veth71d9427
+[Sat Oct 24 10:03:50 2026] docker0: port 1(vethcef7d67) entered blocking state
+[Sat Oct 24 10:03:50 2026] docker0: port 1(vethcef7d67) entered forwarding state
+[Sat Oct 24 10:04:42 2026] netfs: FS-Cache loaded
+[Sat Oct 24 10:04:42 2026] RPC: Registered named UNIX socket transport module.
+[Sat Oct 24 10:04:42 2026] RPC: Registered udp transport module.
+[Sat Oct 24 10:04:42 2026] RPC: Registered tcp transport module.
+[Sat Oct 24 10:04:42 2026] RPC: Registered tcp-with-tls transport module.
+[Sat Oct 24 10:04:42 2026] RPC: Registered tcp NFSv4.1 backchannel transport module.
+[Sat Oct 24 10:04:43 2026] docker0: port 1(vethcef7d67) entered disabled state
+[Sat Oct 24 10:04:43 2026] veth71d9427: renamed from eth0
+[Sat Oct 24 10:04:43 2026] docker0: port 1(vethcef7d67) entered disabled state
+[Sat Oct 24 10:04:43 2026] vethcef7d67 (unregistering): left allmulticast mode
+[Sat Oct 24 10:04:43 2026] vethcef7d67 (unregistering): left promiscuous mode
+[Sat Oct 24 10:04:43 2026] docker0: port 1(vethcef7d67) entered disabled state
+[Sat Oct 24 10:05:18 2026] docker0: port 1(vethc19a813) entered blocking state
+[Sat Oct 24 10:05:18 2026] docker0: port 1(vethc19a813) entered disabled state
+[Sat Oct 24 10:05:18 2026] vethc19a813: entered allmulticast mode
+[Sat Oct 24 10:05:18 2026] vethc19a813: entered promiscuous mode
+[Sat Oct 24 10:05:18 2026] eth0: renamed from veth1fcd971
+[Sat Oct 24 10:05:18 2026] docker0: port 1(vethc19a813) entered blocking state
+[Sat Oct 24 10:05:18 2026] docker0: port 1(vethc19a813) entered forwarding state
+[Sat Oct 24 10:05:32 2026] docker0: port 1(vethc19a813) entered disabled state
+[Sat Oct 24 10:05:32 2026] veth1fcd971: renamed from eth0
+[Sat Oct 24 10:05:32 2026] docker0: port 1(vethc19a813) entered disabled state
+[Sat Oct 24 10:05:32 2026] vethc19a813 (unregistering): left allmulticast mode
+[Sat Oct 24 10:05:32 2026] vethc19a813 (unregistering): left promiscuous mode
+[Sat Oct 24 10:05:32 2026] docker0: port 1(vethc19a813) entered disabled state
+[Sat Oct 24 10:07:13 2026] docker0: port 1(vethd58637a) entered blocking state
+[Sat Oct 24 10:07:13 2026] docker0: port 1(vethd58637a) entered disabled state
+[Sat Oct 24 10:07:13 2026] vethd58637a: entered allmulticast mode
+[Sat Oct 24 10:07:13 2026] vethd58637a: entered promiscuous mode
+[Sat Oct 24 10:07:13 2026] eth0: renamed from veth3338605
+[Sat Oct 24 10:07:13 2026] docker0: port 1(vethd58637a) entered blocking state
+[Sat Oct 24 10:07:13 2026] docker0: port 1(vethd58637a) entered forwarding state
+[Sat Oct 24 10:08:18 2026] docker0: port 1(vethd58637a) entered disabled state
+[Sat Oct 24 10:08:18 2026] veth3338605: renamed from eth0
+[Sat Oct 24 10:08:18 2026] docker0: port 1(vethd58637a) entered disabled state
+[Sat Oct 24 10:08:18 2026] vethd58637a (unregistering): left allmulticast mode
+[Sat Oct 24 10:08:18 2026] vethd58637a (unregistering): left promiscuous mode
+[Sat Oct 24 10:08:18 2026] docker0: port 1(vethd58637a) entered disabled state
+[Sat Oct 24 10:13:05 2026] docker0: port 1(veth8d67202) entered blocking state
+[Sat Oct 24 10:13:05 2026] docker0: port 1(veth8d67202) entered disabled state
+[Sat Oct 24 10:13:05 2026] veth8d67202: entered allmulticast mode
+[Sat Oct 24 10:13:05 2026] veth8d67202: entered promiscuous mode
+[Sat Oct 24 10:13:05 2026] eth0: renamed from vethf6297e9
+[Sat Oct 24 10:13:05 2026] docker0: port 1(veth8d67202) entered blocking state
+[Sat Oct 24 10:13:05 2026] docker0: port 1(veth8d67202) entered forwarding state
+[Sat Oct 24 10:14:12 2026] docker0: port 1(veth8d67202) entered disabled state
+[Sat Oct 24 10:14:12 2026] vethf6297e9: renamed from eth0
+[Sat Oct 24 10:14:12 2026] docker0: port 1(veth8d67202) entered disabled state
+[Sat Oct 24 10:14:12 2026] veth8d67202 (unregistering): left allmulticast mode
+[Sat Oct 24 10:14:12 2026] veth8d67202 (unregistering): left promiscuous mode
+[Sat Oct 24 10:14:12 2026] docker0: port 1(veth8d67202) entered disabled state
+[Sat Oct 24 10:19:06 2026] docker0: port 1(veth176339c) entered blocking state
+[Sat Oct 24 10:19:06 2026] docker0: port 1(veth176339c) entered disabled state
+[Sat Oct 24 10:19:06 2026] veth176339c: entered allmulticast mode
+[Sat Oct 24 10:19:06 2026] veth176339c: entered promiscuous mode
+[Sat Oct 24 10:19:06 2026] eth0: renamed from vethc48662d
+[Sat Oct 24 10:19:06 2026] docker0: port 1(veth176339c) entered blocking state
+[Sat Oct 24 10:19:06 2026] docker0: port 1(veth176339c) entered forwarding state
+[Sat Oct 24 10:20:17 2026] docker0: port 1(veth176339c) entered disabled state
+[Sat Oct 24 10:20:17 2026] vethc48662d: renamed from eth0
+[Sat Oct 24 10:20:17 2026] docker0: port 1(veth176339c) entered disabled state
+[Sat Oct 24 10:20:17 2026] veth176339c (unregistering): left allmulticast mode
+[Sat Oct 24 10:20:17 2026] veth176339c (unregistering): left promiscuous mode
+[Sat Oct 24 10:20:17 2026] docker0: port 1(veth176339c) entered disabled state
+[Sat Oct 24 11:14:54 2026] docker0: port 1(veth3a55e56) entered blocking state
+[Sat Oct 24 11:14:54 2026] docker0: port 1(veth3a55e56) entered disabled state
+[Sat Oct 24 11:14:54 2026] veth3a55e56: entered allmulticast mode
+[Sat Oct 24 11:14:54 2026] veth3a55e56: entered promiscuous mode
+[Sat Oct 24 11:14:54 2026] eth0: renamed from veth5cb532d
+[Sat Oct 24 11:14:54 2026] docker0: port 1(veth3a55e56) entered blocking state
+[Sat Oct 24 11:14:54 2026] docker0: port 1(veth3a55e56) entered forwarding state
+[Sat Oct 24 11:15:58 2026] docker0: port 1(veth3a55e56) entered disabled state
+[Sat Oct 24 11:15:58 2026] veth5cb532d: renamed from eth0
+[Sat Oct 24 11:15:58 2026] docker0: port 1(veth3a55e56) entered disabled state
+[Sat Oct 24 11:15:58 2026] veth3a55e56 (unregistering): left allmulticast mode
+[Sat Oct 24 11:15:58 2026] veth3a55e56 (unregistering): left promiscuous mode
+[Sat Oct 24 11:15:58 2026] docker0: port 1(veth3a55e56) entered disabled state
+[Sat Oct 24 11:24:24 2026] docker0: port 1(veth8379d2b) entered blocking state
+[Sat Oct 24 11:24:24 2026] docker0: port 1(veth8379d2b) entered disabled state
+[Sat Oct 24 11:24:24 2026] veth8379d2b: entered allmulticast mode
+[Sat Oct 24 11:24:24 2026] veth8379d2b: entered promiscuous mode
+[Sat Oct 24 11:24:24 2026] eth0: renamed from veth511e5cd
+[Sat Oct 24 11:24:24 2026] docker0: port 1(veth8379d2b) entered blocking state
+[Sat Oct 24 11:24:24 2026] docker0: port 1(veth8379d2b) entered forwarding state
+[Sat Oct 24 11:25:31 2026] docker0: port 1(veth8379d2b) entered disabled state
+[Sat Oct 24 11:25:31 2026] veth511e5cd: renamed from eth0
+[Sat Oct 24 11:25:31 2026] docker0: port 1(veth8379d2b) entered disabled state
+[Sat Oct 24 11:25:31 2026] veth8379d2b (unregistering): left allmulticast mode
+[Sat Oct 24 11:25:31 2026] veth8379d2b (unregistering): left promiscuous mode
+[Sat Oct 24 11:25:31 2026] docker0: port 1(veth8379d2b) entered disabled state
+[Sat Oct 24 11:37:19 2026] docker0: port 1(vethd512d4e) entered blocking state
+[Sat Oct 24 11:37:19 2026] docker0: port 1(vethd512d4e) entered disabled state
+[Sat Oct 24 11:37:19 2026] vethd512d4e: entered allmulticast mode
+[Sat Oct 24 11:37:19 2026] vethd512d4e: entered promiscuous mode
+[Sat Oct 24 11:37:19 2026] eth0: renamed from veth0bb9f3f
+[Sat Oct 24 11:37:19 2026] docker0: port 1(vethd512d4e) entered blocking state
+[Sat Oct 24 11:37:19 2026] docker0: port 1(vethd512d4e) entered forwarding state
+[Sat Oct 24 11:37:56 2026] docker0: port 1(vethd512d4e) entered disabled state
+[Sat Oct 24 11:37:56 2026] veth0bb9f3f: renamed from eth0
+[Sat Oct 24 11:37:56 2026] docker0: port 1(vethd512d4e) entered disabled state
+[Sat Oct 24 11:37:56 2026] vethd512d4e (unregistering): left allmulticast mode
+[Sat Oct 24 11:37:56 2026] vethd512d4e (unregistering): left promiscuous mode
+[Sat Oct 24 11:37:56 2026] docker0: port 1(vethd512d4e) entered disabled state
+[Sat Oct 24 11:54:31 2026] docker0: port 1(veth12d76c1) entered blocking state
+[Sat Oct 24 11:54:31 2026] docker0: port 1(veth12d76c1) entered disabled state
+[Sat Oct 24 11:54:31 2026] veth12d76c1: entered allmulticast mode
+[Sat Oct 24 11:54:31 2026] veth12d76c1: entered promiscuous mode
+[Sat Oct 24 11:54:31 2026] eth0: renamed from veth226508f
+[Sat Oct 24 11:54:31 2026] docker0: port 1(veth12d76c1) entered blocking state
+[Sat Oct 24 11:54:31 2026] docker0: port 1(veth12d76c1) entered forwarding state
+[Sat Oct 24 11:55:37 2026] docker0: port 1(veth12d76c1) entered disabled state
+[Sat Oct 24 11:55:37 2026] veth226508f: renamed from eth0
+[Sat Oct 24 11:55:37 2026] docker0: port 1(veth12d76c1) entered disabled state
+[Sat Oct 24 11:55:37 2026] veth12d76c1 (unregistering): left allmulticast mode
+[Sat Oct 24 11:55:37 2026] veth12d76c1 (unregistering): left promiscuous mode
+[Sat Oct 24 11:55:37 2026] docker0: port 1(veth12d76c1) entered disabled state
+[Sat Oct 24 12:25:10 2026] docker0: port 1(vethe210666) entered blocking state
+[Sat Oct 24 12:25:10 2026] docker0: port 1(vethe210666) entered disabled state
+[Sat Oct 24 12:25:10 2026] vethe210666: entered allmulticast mode
+[Sat Oct 24 12:25:10 2026] vethe210666: entered promiscuous mode
+[Sat Oct 24 12:25:10 2026] eth0: renamed from veth2962961
+[Sat Oct 24 12:25:10 2026] docker0: port 1(vethe210666) entered blocking state
+[Sat Oct 24 12:25:10 2026] docker0: port 1(vethe210666) entered forwarding state
+[Sat Oct 24 12:31:15 2026] docker0: port 1(vethe210666) entered disabled state
+[Sat Oct 24 12:31:15 2026] veth2962961: renamed from eth0
+[Sat Oct 24 12:31:15 2026] docker0: port 1(vethe210666) entered disabled state
+[Sat Oct 24 12:31:15 2026] vethe210666 (unregistering): left allmulticast mode
+[Sat Oct 24 12:31:15 2026] vethe210666 (unregistering): left promiscuous mode
+[Sat Oct 24 12:31:15 2026] docker0: port 1(vethe210666) entered disabled state
+[Sat Oct 24 12:34:00 2026] docker0: port 1(vethed4cfaf) entered blocking state
+[Sat Oct 24 12:34:00 2026] docker0: port 1(vethed4cfaf) entered disabled state
+[Sat Oct 24 12:34:00 2026] vethed4cfaf: entered allmulticast mode
+[Sat Oct 24 12:34:00 2026] vethed4cfaf: entered promiscuous mode
+[Sat Oct 24 12:34:00 2026] eth0: renamed from veth43d609f
+[Sat Oct 24 12:34:00 2026] docker0: port 1(vethed4cfaf) entered blocking state
+[Sat Oct 24 12:34:00 2026] docker0: port 1(vethed4cfaf) entered forwarding state
+[Sat Oct 24 12:36:49 2026] docker0: port 1(vethed4cfaf) entered disabled state
+[Sat Oct 24 12:36:49 2026] veth43d609f: renamed from eth0
+[Sat Oct 24 12:36:49 2026] docker0: port 1(vethed4cfaf) entered disabled state
+[Sat Oct 24 12:36:49 2026] vethed4cfaf (unregistering): left allmulticast mode
+[Sat Oct 24 12:36:49 2026] vethed4cfaf (unregistering): left promiscuous mode
+[Sat Oct 24 12:36:49 2026] docker0: port 1(vethed4cfaf) entered disabled state
+[Sat Oct 24 12:38:48 2026] docker0: port 1(veth6249acb) entered blocking state
+[Sat Oct 24 12:38:48 2026] docker0: port 1(veth6249acb) entered disabled state
+[Sat Oct 24 12:38:48 2026] veth6249acb: entered allmulticast mode
+[Sat Oct 24 12:38:48 2026] veth6249acb: entered promiscuous mode
+[Sat Oct 24 12:38:48 2026] eth0: renamed from vetha798989
+[Sat Oct 24 12:38:48 2026] docker0: port 1(veth6249acb) entered blocking state
+[Sat Oct 24 12:38:48 2026] docker0: port 1(veth6249acb) entered forwarding state
+[Sat Oct 24 12:38:51 2026] docker0: port 1(veth6249acb) entered disabled state
+[Sat Oct 24 12:38:51 2026] vetha798989: renamed from eth0
+[Sat Oct 24 12:38:51 2026] docker0: port 1(veth6249acb) entered disabled state
+[Sat Oct 24 12:38:51 2026] veth6249acb (unregistering): left allmulticast mode
+[Sat Oct 24 12:38:51 2026] veth6249acb (unregistering): left promiscuous mode
+[Sat Oct 24 12:38:51 2026] docker0: port 1(veth6249acb) entered disabled state
+[Sat Oct 24 12:41:16 2026] docker0: port 1(veth0989cf2) entered blocking state
+[Sat Oct 24 12:41:16 2026] docker0: port 1(veth0989cf2) entered disabled state
+[Sat Oct 24 12:41:16 2026] veth0989cf2: entered allmulticast mode
+[Sat Oct 24 12:41:16 2026] veth0989cf2: entered promiscuous mode
+[Sat Oct 24 12:41:16 2026] eth0: renamed from vethffda8c3
+[Sat Oct 24 12:41:16 2026] docker0: port 1(veth0989cf2) entered blocking state
+[Sat Oct 24 12:41:16 2026] docker0: port 1(veth0989cf2) entered forwarding state
+[Sat Oct 24 12:41:34 2026] docker0: port 1(veth0989cf2) entered disabled state
+[Sat Oct 24 12:41:34 2026] vethffda8c3: renamed from eth0
+[Sat Oct 24 12:41:35 2026] docker0: port 1(veth0989cf2) entered disabled state
+[Sat Oct 24 12:41:35 2026] veth0989cf2 (unregistering): left allmulticast mode
+[Sat Oct 24 12:41:35 2026] veth0989cf2 (unregistering): left promiscuous mode
+[Sat Oct 24 12:41:35 2026] docker0: port 1(veth0989cf2) entered disabled state
+[Sat Oct 24 12:46:47 2026] docker0: port 1(veth37d2581) entered blocking state
+[Sat Oct 24 12:46:47 2026] docker0: port 1(veth37d2581) entered disabled state
+[Sat Oct 24 12:46:47 2026] veth37d2581: entered allmulticast mode
+[Sat Oct 24 12:46:47 2026] veth37d2581: entered promiscuous mode
+[Sat Oct 24 12:46:47 2026] eth0: renamed from veth6cf3c40
+[Sat Oct 24 12:46:47 2026] docker0: port 1(veth37d2581) entered blocking state
+[Sat Oct 24 12:46:47 2026] docker0: port 1(veth37d2581) entered forwarding state
+[Sat Oct 24 12:49:18 2026] docker0: port 1(veth37d2581) entered disabled state
+[Sat Oct 24 12:49:18 2026] veth6cf3c40: renamed from eth0
+[Sat Oct 24 12:49:18 2026] docker0: port 1(veth37d2581) entered disabled state
+[Sat Oct 24 12:49:18 2026] veth37d2581 (unregistering): left allmulticast mode
+[Sat Oct 24 12:49:18 2026] veth37d2581 (unregistering): left promiscuous mode
+[Sat Oct 24 12:49:18 2026] docker0: port 1(veth37d2581) entered disabled state
+[Sat Oct 24 12:58:39 2026] docker0: port 1(vethe85732e) entered blocking state
+[Sat Oct 24 12:58:39 2026] docker0: port 1(vethe85732e) entered disabled state
+[Sat Oct 24 12:58:39 2026] vethe85732e: entered allmulticast mode
+[Sat Oct 24 12:58:39 2026] vethe85732e: entered promiscuous mode
+[Sat Oct 24 12:58:39 2026] eth0: renamed from veth1b0c57a
+[Sat Oct 24 12:58:39 2026] docker0: port 1(vethe85732e) entered blocking state
+[Sat Oct 24 12:58:39 2026] docker0: port 1(vethe85732e) entered forwarding state
+[Sat Oct 24 13:01:17 2026] docker0: port 1(vethe85732e) entered disabled state
+[Sat Oct 24 13:01:17 2026] veth1b0c57a: renamed from eth0
+[Sat Oct 24 13:01:17 2026] docker0: port 1(vethe85732e) entered disabled state
+[Sat Oct 24 13:01:17 2026] vethe85732e (unregistering): left allmulticast mode
+[Sat Oct 24 13:01:17 2026] vethe85732e (unregistering): left promiscuous mode
+[Sat Oct 24 13:01:17 2026] docker0: port 1(vethe85732e) entered disabled state
+[Sat Oct 24 13:07:16 2026] docker0: port 1(vethd3f0562) entered blocking state
+[Sat Oct 24 13:07:16 2026] docker0: port 1(vethd3f0562) entered disabled state
+[Sat Oct 24 13:07:16 2026] vethd3f0562: entered allmulticast mode
+[Sat Oct 24 13:07:16 2026] vethd3f0562: entered promiscuous mode
+[Sat Oct 24 13:07:16 2026] eth0: renamed from veth8b95eaa
+[Sat Oct 24 13:07:16 2026] docker0: port 1(vethd3f0562) entered blocking state
+[Sat Oct 24 13:07:16 2026] docker0: port 1(vethd3f0562) entered forwarding state
+[Sat Oct 24 13:08:58 2026] docker0: port 1(vethd3f0562) entered disabled state
+[Sat Oct 24 13:08:58 2026] veth8b95eaa: renamed from eth0
+[Sat Oct 24 13:08:58 2026] docker0: port 1(vethd3f0562) entered disabled state
+[Sat Oct 24 13:08:58 2026] vethd3f0562 (unregistering): left allmulticast mode
+[Sat Oct 24 13:08:58 2026] vethd3f0562 (unregistering): left promiscuous mode
+[Sat Oct 24 13:08:58 2026] docker0: port 1(vethd3f0562) entered disabled state
+[Sat Oct 24 13:20:20 2026] docker0: port 1(vethcd1d588) entered blocking state
+[Sat Oct 24 13:20:20 2026] docker0: port 1(vethcd1d588) entered disabled state
+[Sat Oct 24 13:20:20 2026] vethcd1d588: entered allmulticast mode
+[Sat Oct 24 13:20:20 2026] vethcd1d588: entered promiscuous mode
+[Sat Oct 24 13:20:20 2026] eth0: renamed from vethbf9d420
+[Sat Oct 24 13:20:20 2026] docker0: port 1(vethcd1d588) entered blocking state
+[Sat Oct 24 13:20:20 2026] docker0: port 1(vethcd1d588) entered forwarding state
+[Sat Oct 24 13:22:29 2026] docker0: port 1(vethcd1d588) entered disabled state
+[Sat Oct 24 13:22:29 2026] vethbf9d420: renamed from eth0
+[Sat Oct 24 13:22:29 2026] docker0: port 1(vethcd1d588) entered disabled state
+[Sat Oct 24 13:22:29 2026] vethcd1d588 (unregistering): left allmulticast mode
+[Sat Oct 24 13:22:29 2026] vethcd1d588 (unregistering): left promiscuous mode
+[Sat Oct 24 13:22:29 2026] docker0: port 1(vethcd1d588) entered disabled state
+[Sat Oct 24 13:22:38 2026] docker0: port 1(veth38e1d0e) entered blocking state
+[Sat Oct 24 13:22:38 2026] docker0: port 1(veth38e1d0e) entered disabled state
+[Sat Oct 24 13:22:38 2026] veth38e1d0e: entered allmulticast mode
+[Sat Oct 24 13:22:38 2026] veth38e1d0e: entered promiscuous mode
+[Sat Oct 24 13:22:38 2026] eth0: renamed from vethbd2e9b6
+[Sat Oct 24 13:22:38 2026] docker0: port 1(veth38e1d0e) entered blocking state
+[Sat Oct 24 13:22:38 2026] docker0: port 1(veth38e1d0e) entered forwarding state
+[Sat Oct 24 13:22:39 2026] docker0: port 1(veth38e1d0e) entered disabled state
+[Sat Oct 24 13:22:39 2026] vethbd2e9b6: renamed from eth0
+[Sat Oct 24 13:22:39 2026] docker0: port 1(veth38e1d0e) entered disabled state
+[Sat Oct 24 13:22:39 2026] veth38e1d0e (unregistering): left allmulticast mode
+[Sat Oct 24 13:22:39 2026] veth38e1d0e (unregistering): left promiscuous mode
+[Sat Oct 24 13:22:39 2026] docker0: port 1(veth38e1d0e) entered disabled state
+[Sat Oct 24 13:22:48 2026] docker0: port 1(vethe04210e) entered blocking state
+[Sat Oct 24 13:22:48 2026] docker0: port 1(vethe04210e) entered disabled state
+[Sat Oct 24 13:22:48 2026] vethe04210e: entered allmulticast mode
+[Sat Oct 24 13:22:48 2026] vethe04210e: entered promiscuous mode
+[Sat Oct 24 13:22:48 2026] eth0: renamed from veth24537da
+[Sat Oct 24 13:22:48 2026] docker0: port 1(vethe04210e) entered blocking state
+[Sat Oct 24 13:22:48 2026] docker0: port 1(vethe04210e) entered forwarding state
+[Sat Oct 24 13:22:50 2026] docker0: port 1(vethe04210e) entered disabled state
+[Sat Oct 24 13:22:50 2026] veth24537da: renamed from eth0
+[Sat Oct 24 13:22:50 2026] docker0: port 1(vethe04210e) entered disabled state
+[Sat Oct 24 13:22:50 2026] vethe04210e (unregistering): left allmulticast mode
+[Sat Oct 24 13:22:50 2026] vethe04210e (unregistering): left promiscuous mode
+[Sat Oct 24 13:22:50 2026] docker0: port 1(vethe04210e) entered disabled state
+[Sat Oct 24 13:23:53 2026] docker0: port 1(veth2ac9d3e) entered blocking state
+[Sat Oct 24 13:23:53 2026] docker0: port 1(veth2ac9d3e) entered disabled state
+[Sat Oct 24 13:23:53 2026] veth2ac9d3e: entered allmulticast mode
+[Sat Oct 24 13:23:53 2026] veth2ac9d3e: entered promiscuous mode
+[Sat Oct 24 13:23:53 2026] eth0: renamed from veth6bf1013
+[Sat Oct 24 13:23:53 2026] docker0: port 1(veth2ac9d3e) entered blocking state
+[Sat Oct 24 13:23:53 2026] docker0: port 1(veth2ac9d3e) entered forwarding state
+[Sat Oct 24 13:23:53 2026] docker0: port 1(veth2ac9d3e) entered disabled state
+[Sat Oct 24 13:23:53 2026] veth6bf1013: renamed from eth0
+[Sat Oct 24 13:23:53 2026] docker0: port 1(veth2ac9d3e) entered disabled state
+[Sat Oct 24 13:23:53 2026] veth2ac9d3e (unregistering): left allmulticast mode
+[Sat Oct 24 13:23:53 2026] veth2ac9d3e (unregistering): left promiscuous mode
+[Sat Oct 24 13:23:53 2026] docker0: port 1(veth2ac9d3e) entered disabled state
+[Sat Oct 24 13:24:16 2026] docker0: port 1(veth7f6328c) entered blocking state
+[Sat Oct 24 13:24:16 2026] docker0: port 1(veth7f6328c) entered disabled state
+[Sat Oct 24 13:24:16 2026] veth7f6328c: entered allmulticast mode
+[Sat Oct 24 13:24:16 2026] veth7f6328c: entered promiscuous mode
+[Sat Oct 24 13:24:16 2026] eth0: renamed from vethb4f67df
+[Sat Oct 24 13:24:16 2026] docker0: port 1(veth7f6328c) entered blocking state
+[Sat Oct 24 13:24:16 2026] docker0: port 1(veth7f6328c) entered forwarding state
+[Sat Oct 24 13:27:02 2026] docker0: port 1(veth7f6328c) entered disabled state
+[Sat Oct 24 13:27:02 2026] vethb4f67df: renamed from eth0
+[Sat Oct 24 13:27:02 2026] docker0: port 1(veth7f6328c) entered disabled state
+[Sat Oct 24 13:27:02 2026] veth7f6328c (unregistering): left allmulticast mode
+[Sat Oct 24 13:27:02 2026] veth7f6328c (unregistering): left promiscuous mode
+[Sat Oct 24 13:27:02 2026] docker0: port 1(veth7f6328c) entered disabled state
+[Sat Oct 24 13:28:36 2026] docker0: port 1(veth7c3c546) entered blocking state
+[Sat Oct 24 13:28:36 2026] docker0: port 1(veth7c3c546) entered disabled state
+[Sat Oct 24 13:28:36 2026] veth7c3c546: entered allmulticast mode
+[Sat Oct 24 13:28:36 2026] veth7c3c546: entered promiscuous mode
+[Sat Oct 24 13:28:36 2026] eth0: renamed from vethb1e018f
+[Sat Oct 24 13:28:36 2026] docker0: port 1(veth7c3c546) entered blocking state
+[Sat Oct 24 13:28:36 2026] docker0: port 1(veth7c3c546) entered forwarding state
+[Sat Oct 24 13:28:40 2026] vethb1e018f: renamed from eth0
+[Sat Oct 24 13:28:40 2026] docker0: port 1(veth7c3c546) entered disabled state
+[Sat Oct 24 13:28:40 2026] docker0: port 2(vethdbf8e9b) entered blocking state
+[Sat Oct 24 13:28:40 2026] docker0: port 2(vethdbf8e9b) entered disabled state
+[Sat Oct 24 13:28:40 2026] vethdbf8e9b: entered allmulticast mode
+[Sat Oct 24 13:28:40 2026] vethdbf8e9b: entered promiscuous mode
+[Sat Oct 24 13:28:40 2026] docker0: port 1(veth7c3c546) entered disabled state
+[Sat Oct 24 13:28:40 2026] veth7c3c546 (unregistering): left allmulticast mode
+[Sat Oct 24 13:28:40 2026] veth7c3c546 (unregistering): left promiscuous mode
+[Sat Oct 24 13:28:40 2026] docker0: port 1(veth7c3c546) entered disabled state
+[Sat Oct 24 13:28:40 2026] eth0: renamed from veth449212e
+[Sat Oct 24 13:28:41 2026] docker0: port 2(vethdbf8e9b) entered blocking state
+[Sat Oct 24 13:28:41 2026] docker0: port 2(vethdbf8e9b) entered forwarding state
+[Sat Oct 24 13:28:41 2026] docker0: port 2(vethdbf8e9b) entered disabled state
+[Sat Oct 24 13:28:41 2026] veth449212e: renamed from eth0
+[Sat Oct 24 13:28:41 2026] docker0: port 2(vethdbf8e9b) entered disabled state
+[Sat Oct 24 13:28:41 2026] vethdbf8e9b (unregistering): left allmulticast mode
+[Sat Oct 24 13:28:41 2026] vethdbf8e9b (unregistering): left promiscuous mode
+[Sat Oct 24 13:28:41 2026] docker0: port 2(vethdbf8e9b) entered disabled state
+[Sat Oct 24 13:29:41 2026] docker0: port 1(vethade1200) entered blocking state
+[Sat Oct 24 13:29:41 2026] docker0: port 1(vethade1200) entered disabled state
+[Sat Oct 24 13:29:41 2026] vethade1200: entered allmulticast mode
+[Sat Oct 24 13:29:41 2026] vethade1200: entered promiscuous mode
+[Sat Oct 24 13:29:41 2026] eth0: renamed from veth1151312
+[Sat Oct 24 13:29:41 2026] docker0: port 1(vethade1200) entered blocking state
+[Sat Oct 24 13:29:41 2026] docker0: port 1(vethade1200) entered forwarding state
+[Sat Oct 24 13:32:31 2026] docker0: port 1(vethade1200) entered disabled state
+[Sat Oct 24 13:32:31 2026] veth1151312: renamed from eth0
+[Sat Oct 24 13:32:32 2026] docker0: port 1(vethade1200) entered disabled state
+[Sat Oct 24 13:32:32 2026] vethade1200 (unregistering): left allmulticast mode
+[Sat Oct 24 13:32:32 2026] vethade1200 (unregistering): left promiscuous mode
+[Sat Oct 24 13:32:32 2026] docker0: port 1(vethade1200) entered disabled state
+[Sat Oct 24 13:39:12 2026] docker0: port 1(veth5be3fd0) entered blocking state
+[Sat Oct 24 13:39:12 2026] docker0: port 1(veth5be3fd0) entered disabled state
+[Sat Oct 24 13:39:12 2026] veth5be3fd0: entered allmulticast mode
+[Sat Oct 24 13:39:12 2026] veth5be3fd0: entered promiscuous mode
+[Sat Oct 24 13:39:12 2026] eth0: renamed from vethfaaaa54
+[Sat Oct 24 13:39:12 2026] docker0: port 1(veth5be3fd0) entered blocking state
+[Sat Oct 24 13:39:12 2026] docker0: port 1(veth5be3fd0) entered forwarding state
+[Sat Oct 24 13:39:42 2026] docker0: port 1(veth5be3fd0) entered disabled state
+[Sat Oct 24 13:39:42 2026] vethfaaaa54: renamed from eth0
+[Sat Oct 24 13:39:42 2026] docker0: port 1(veth5be3fd0) entered disabled state
+[Sat Oct 24 13:39:42 2026] veth5be3fd0 (unregistering): left allmulticast mode
+[Sat Oct 24 13:39:42 2026] veth5be3fd0 (unregistering): left promiscuous mode
+[Sat Oct 24 13:39:42 2026] docker0: port 1(veth5be3fd0) entered disabled state
+[Sat Oct 24 14:05:42 2026] docker0: port 1(veth4f11ad1) entered blocking state
+[Sat Oct 24 14:05:42 2026] docker0: port 1(veth4f11ad1) entered disabled state
+[Sat Oct 24 14:05:42 2026] veth4f11ad1: entered allmulticast mode
+[Sat Oct 24 14:05:42 2026] veth4f11ad1: entered promiscuous mode
+[Sat Oct 24 14:05:42 2026] eth0: renamed from veth5ff5035
+[Sat Oct 24 14:05:42 2026] docker0: port 1(veth4f11ad1) entered blocking state
+[Sat Oct 24 14:05:42 2026] docker0: port 1(veth4f11ad1) entered forwarding state
+[Sat Oct 24 14:08:04 2026] docker0: port 1(veth4f11ad1) entered disabled state
+[Sat Oct 24 14:08:04 2026] veth5ff5035: renamed from eth0
+[Sat Oct 24 14:08:04 2026] docker0: port 1(veth4f11ad1) entered disabled state
+[Sat Oct 24 14:08:04 2026] veth4f11ad1 (unregistering): left allmulticast mode
+[Sat Oct 24 14:08:04 2026] veth4f11ad1 (unregistering): left promiscuous mode
+[Sat Oct 24 14:08:04 2026] docker0: port 1(veth4f11ad1) entered disabled state
+[Sat Oct 24 14:22:18 2026] docker0: port 1(veth664a070) entered blocking state
+[Sat Oct 24 14:22:18 2026] docker0: port 1(veth664a070) entered disabled state
+[Sat Oct 24 14:22:18 2026] veth664a070: entered allmulticast mode
+[Sat Oct 24 14:22:18 2026] veth664a070: entered promiscuous mode
+[Sat Oct 24 14:22:18 2026] eth0: renamed from veth3bcbcf3
+[Sat Oct 24 14:22:18 2026] docker0: port 1(veth664a070) entered blocking state
+[Sat Oct 24 14:22:18 2026] docker0: port 1(veth664a070) entered forwarding state
+[Sat Oct 24 14:24:31 2026] docker0: port 1(veth664a070) entered disabled state
+[Sat Oct 24 14:24:31 2026] veth3bcbcf3: renamed from eth0
+[Sat Oct 24 14:24:31 2026] docker0: port 1(veth664a070) entered disabled state
+[Sat Oct 24 14:24:31 2026] veth664a070 (unregistering): left allmulticast mode
+[Sat Oct 24 14:24:31 2026] veth664a070 (unregistering): left promiscuous mode
+[Sat Oct 24 14:24:31 2026] docker0: port 1(veth664a070) entered disabled state
+[Sat Oct 24 14:35:52 2026] docker0: port 1(vethff096b7) entered blocking state
+[Sat Oct 24 14:35:52 2026] docker0: port 1(vethff096b7) entered disabled state
+[Sat Oct 24 14:35:52 2026] vethff096b7: entered allmulticast mode
+[Sat Oct 24 14:35:52 2026] vethff096b7: entered promiscuous mode
+[Sat Oct 24 14:35:52 2026] eth0: renamed from vethfdab0a7
+[Sat Oct 24 14:35:52 2026] docker0: port 1(vethff096b7) entered blocking state
+[Sat Oct 24 14:35:52 2026] docker0: port 1(vethff096b7) entered forwarding state
+[Sat Oct 24 14:37:37 2026] docker0: port 1(vethff096b7) entered disabled state
+[Sat Oct 24 14:37:37 2026] vethfdab0a7: renamed from eth0
+[Sat Oct 24 14:37:37 2026] docker0: port 1(vethff096b7) entered disabled state
+[Sat Oct 24 14:37:37 2026] vethff096b7 (unregistering): left allmulticast mode
+[Sat Oct 24 14:37:37 2026] vethff096b7 (unregistering): left promiscuous mode
+[Sat Oct 24 14:37:37 2026] docker0: port 1(vethff096b7) entered disabled state
+[Sat Oct 24 14:40:12 2026] docker0: port 1(veth2657bd1) entered blocking state
+[Sat Oct 24 14:40:12 2026] docker0: port 1(veth2657bd1) entered disabled state
+[Sat Oct 24 14:40:12 2026] veth2657bd1: entered allmulticast mode
+[Sat Oct 24 14:40:12 2026] veth2657bd1: entered promiscuous mode
+[Sat Oct 24 14:40:12 2026] eth0: renamed from veth3c3bf38
+[Sat Oct 24 14:40:12 2026] docker0: port 1(veth2657bd1) entered blocking state
+[Sat Oct 24 14:40:12 2026] docker0: port 1(veth2657bd1) entered forwarding state
+[Sat Oct 24 14:41:50 2026] docker0: port 1(veth2657bd1) entered disabled state
+[Sat Oct 24 14:41:50 2026] veth3c3bf38: renamed from eth0
+[Sat Oct 24 14:41:51 2026] docker0: port 1(veth2657bd1) entered disabled state
+[Sat Oct 24 14:41:51 2026] veth2657bd1 (unregistering): left allmulticast mode
+[Sat Oct 24 14:41:51 2026] veth2657bd1 (unregistering): left promiscuous mode
+[Sat Oct 24 14:41:51 2026] docker0: port 1(veth2657bd1) entered disabled state
+[Sat Oct 24 15:08:29 2026] docker0: port 1(vethe4faa63) entered blocking state
+[Sat Oct 24 15:08:29 2026] docker0: port 1(vethe4faa63) entered disabled state
+[Sat Oct 24 15:08:29 2026] vethe4faa63: entered allmulticast mode
+[Sat Oct 24 15:08:29 2026] vethe4faa63: entered promiscuous mode
+[Sat Oct 24 15:08:29 2026] eth0: renamed from veth0084827
+[Sat Oct 24 15:08:29 2026] docker0: port 1(vethe4faa63) entered blocking state
+[Sat Oct 24 15:08:29 2026] docker0: port 1(vethe4faa63) entered forwarding state
+[Sat Oct 24 15:15:17 2026] docker0: port 1(vethe4faa63) entered disabled state
+[Sat Oct 24 15:15:17 2026] veth0084827: renamed from eth0
+[Sat Oct 24 15:15:17 2026] docker0: port 1(vethe4faa63) entered disabled state
+[Sat Oct 24 15:15:17 2026] vethe4faa63 (unregistering): left allmulticast mode
+[Sat Oct 24 15:15:17 2026] vethe4faa63 (unregistering): left promiscuous mode
+[Sat Oct 24 15:15:17 2026] docker0: port 1(vethe4faa63) entered disabled state
+[Sat Oct 24 15:22:59 2026] docker0: port 1(vethaec42bb) entered blocking state
+[Sat Oct 24 15:22:59 2026] docker0: port 1(vethaec42bb) entered disabled state
+[Sat Oct 24 15:22:59 2026] vethaec42bb: entered allmulticast mode
+[Sat Oct 24 15:22:59 2026] vethaec42bb: entered promiscuous mode
+[Sat Oct 24 15:22:59 2026] eth0: renamed from veth234f0f8
+[Sat Oct 24 15:22:59 2026] docker0: port 1(vethaec42bb) entered blocking state
+[Sat Oct 24 15:22:59 2026] docker0: port 1(vethaec42bb) entered forwarding state
+[Sat Oct 24 15:25:13 2026] hrtimer: interrupt took 13892645 ns
+[Sat Oct 24 15:35:52 2026] docker0: port 1(vethaec42bb) entered disabled state
+[Sat Oct 24 15:35:52 2026] veth234f0f8: renamed from eth0
+[Sat Oct 24 15:35:52 2026] docker0: port 1(vethaec42bb) entered disabled state
+[Sat Oct 24 15:35:52 2026] vethaec42bb (unregistering): left allmulticast mode
+[Sat Oct 24 15:35:52 2026] vethaec42bb (unregistering): left promiscuous mode
+[Sat Oct 24 15:35:52 2026] docker0: port 1(vethaec42bb) entered disabled state
+[Sat Oct 24 15:37:56 2026] docker0: port 1(veth29c813d) entered blocking state
+[Sat Oct 24 15:37:56 2026] docker0: port 1(veth29c813d) entered disabled state
+[Sat Oct 24 15:37:56 2026] veth29c813d: entered allmulticast mode
+[Sat Oct 24 15:37:56 2026] veth29c813d: entered promiscuous mode
+[Sat Oct 24 15:37:56 2026] eth0: renamed from veth3776e16
+[Sat Oct 24 15:37:56 2026] docker0: port 1(veth29c813d) entered blocking state
+[Sat Oct 24 15:37:56 2026] docker0: port 1(veth29c813d) entered forwarding state
+[Sat Oct 24 15:38:47 2026] docker0: port 1(veth29c813d) entered disabled state
+[Sat Oct 24 15:38:47 2026] veth3776e16: renamed from eth0
+[Sat Oct 24 15:38:47 2026] docker0: port 1(veth29c813d) entered disabled state
+[Sat Oct 24 15:38:47 2026] veth29c813d (unregistering): left allmulticast mode
+[Sat Oct 24 15:38:47 2026] veth29c813d (unregistering): left promiscuous mode
+[Sat Oct 24 15:38:47 2026] docker0: port 1(veth29c813d) entered disabled state
+[Sat Oct 24 15:39:32 2026] br-654364155fc1: port 1(veth3b68c85) entered blocking state
+[Sat Oct 24 15:39:32 2026] br-654364155fc1: port 1(veth3b68c85) entered disabled state
+[Sat Oct 24 15:39:32 2026] veth3b68c85: entered allmulticast mode
+[Sat Oct 24 15:39:32 2026] veth3b68c85: entered promiscuous mode
+[Sat Oct 24 15:39:32 2026] eth0: renamed from vethf4f2929
+[Sat Oct 24 15:39:32 2026] br-654364155fc1: port 1(veth3b68c85) entered blocking state
+[Sat Oct 24 15:39:32 2026] br-654364155fc1: port 1(veth3b68c85) entered forwarding state
+[Sat Oct 24 15:39:41 2026] br-654364155fc1: port 2(vethde6afd7) entered blocking state
+[Sat Oct 24 15:39:41 2026] br-654364155fc1: port 2(vethde6afd7) entered disabled state
+[Sat Oct 24 15:39:41 2026] vethde6afd7: entered allmulticast mode
+[Sat Oct 24 15:39:41 2026] vethde6afd7: entered promiscuous mode
+[Sat Oct 24 15:39:41 2026] eth0: renamed from veth47838bd
+[Sat Oct 24 15:39:41 2026] br-654364155fc1: port 2(vethde6afd7) entered blocking state
+[Sat Oct 24 15:39:41 2026] br-654364155fc1: port 2(vethde6afd7) entered forwarding state
+[Sat Oct 24 15:42:23 2026] br-654364155fc1: port 2(vethde6afd7) entered disabled state
+[Sat Oct 24 15:42:23 2026] veth47838bd: renamed from eth0
+[Sat Oct 24 15:42:23 2026] br-654364155fc1: port 2(vethde6afd7) entered disabled state
+[Sat Oct 24 15:42:23 2026] vethde6afd7 (unregistering): left allmulticast mode
+[Sat Oct 24 15:42:23 2026] vethde6afd7 (unregistering): left promiscuous mode
+[Sat Oct 24 15:42:23 2026] br-654364155fc1: port 2(vethde6afd7) entered disabled state
+[Sat Oct 24 15:43:39 2026] br-654364155fc1: port 2(veth020a3d3) entered blocking state
+[Sat Oct 24 15:43:39 2026] br-654364155fc1: port 2(veth020a3d3) entered disabled state
+[Sat Oct 24 15:43:39 2026] veth020a3d3: entered allmulticast mode
+[Sat Oct 24 15:43:39 2026] veth020a3d3: entered promiscuous mode
+[Sat Oct 24 15:43:40 2026] eth0: renamed from veth2e50e1d
+[Sat Oct 24 15:43:40 2026] br-654364155fc1: port 2(veth020a3d3) entered blocking state
+[Sat Oct 24 15:43:40 2026] br-654364155fc1: port 2(veth020a3d3) entered forwarding state
+[Sat Oct 24 15:45:10 2026] docker0: port 1(vethf097a8c) entered blocking state
+[Sat Oct 24 15:45:10 2026] docker0: port 1(vethf097a8c) entered disabled state
+[Sat Oct 24 15:45:10 2026] vethf097a8c: entered allmulticast mode
+[Sat Oct 24 15:45:10 2026] vethf097a8c: entered promiscuous mode
+[Sat Oct 24 15:45:11 2026] eth0: renamed from veth3d5c530
+[Sat Oct 24 15:45:11 2026] docker0: port 1(vethf097a8c) entered blocking state
+[Sat Oct 24 15:45:11 2026] docker0: port 1(vethf097a8c) entered forwarding state
+[Sat Oct 24 15:45:41 2026] br-654364155fc1: port 2(veth020a3d3) entered disabled state
+[Sat Oct 24 15:45:41 2026] veth2e50e1d: renamed from eth0
+[Sat Oct 24 15:45:41 2026] br-654364155fc1: port 2(veth020a3d3) entered disabled state
+[Sat Oct 24 15:45:41 2026] veth020a3d3 (unregistering): left allmulticast mode
+[Sat Oct 24 15:45:41 2026] veth020a3d3 (unregistering): left promiscuous mode
+[Sat Oct 24 15:45:41 2026] br-654364155fc1: port 2(veth020a3d3) entered disabled state
+[Sat Oct 24 15:46:16 2026] docker0: port 1(vethf097a8c) entered disabled state
+[Sat Oct 24 15:46:16 2026] veth3d5c530: renamed from eth0
+[Sat Oct 24 15:46:16 2026] docker0: port 1(vethf097a8c) entered disabled state
+[Sat Oct 24 15:46:16 2026] vethf097a8c (unregistering): left allmulticast mode
+[Sat Oct 24 15:46:16 2026] vethf097a8c (unregistering): left promiscuous mode
+[Sat Oct 24 15:46:16 2026] docker0: port 1(vethf097a8c) entered disabled state
+[Sat Oct 24 15:50:28 2026] docker0: port 1(veth2882357) entered blocking state
+[Sat Oct 24 15:50:28 2026] docker0: port 1(veth2882357) entered disabled state
+[Sat Oct 24 15:50:28 2026] veth2882357: entered allmulticast mode
+[Sat Oct 24 15:50:28 2026] veth2882357: entered promiscuous mode
+[Sat Oct 24 15:50:28 2026] eth0: renamed from vethf3b4d77
+[Sat Oct 24 15:50:28 2026] docker0: port 1(veth2882357) entered blocking state
+[Sat Oct 24 15:50:28 2026] docker0: port 1(veth2882357) entered forwarding state
+[Sat Oct 24 15:58:03 2026] docker0: port 1(veth2882357) entered disabled state
+[Sat Oct 24 15:58:03 2026] vethf3b4d77: renamed from eth0
+[Sat Oct 24 15:58:03 2026] docker0: port 1(veth2882357) entered disabled state
+[Sat Oct 24 15:58:03 2026] veth2882357 (unregistering): left allmulticast mode
+[Sat Oct 24 15:58:03 2026] veth2882357 (unregistering): left promiscuous mode
+[Sat Oct 24 15:58:03 2026] docker0: port 1(veth2882357) entered disabled state
+[Sat Oct 24 15:58:31 2026] br-654364155fc1: port 2(veth88711ee) entered blocking state
+[Sat Oct 24 15:58:31 2026] br-654364155fc1: port 2(veth88711ee) entered disabled state
+[Sat Oct 24 15:58:31 2026] veth88711ee: entered allmulticast mode
+[Sat Oct 24 15:58:31 2026] veth88711ee: entered promiscuous mode
+[Sat Oct 24 15:58:31 2026] eth0: renamed from veth40f6858
+[Sat Oct 24 15:58:31 2026] br-654364155fc1: port 2(veth88711ee) entered blocking state
+[Sat Oct 24 15:58:31 2026] br-654364155fc1: port 2(veth88711ee) entered forwarding state
+[Sat Oct 24 15:58:32 2026] docker0: port 1(veth6183346) entered blocking state
+[Sat Oct 24 15:58:32 2026] docker0: port 1(veth6183346) entered disabled state
+[Sat Oct 24 15:58:32 2026] veth6183346: entered allmulticast mode
+[Sat Oct 24 15:58:32 2026] veth6183346: entered promiscuous mode
+[Sat Oct 24 15:58:32 2026] eth0: renamed from veth5d85c48
+[Sat Oct 24 15:58:32 2026] docker0: port 1(veth6183346) entered blocking state
+[Sat Oct 24 15:58:32 2026] docker0: port 1(veth6183346) entered forwarding state
+[Sat Oct 24 15:59:26 2026] docker0: port 1(veth6183346) entered disabled state
+[Sat Oct 24 15:59:26 2026] veth5d85c48: renamed from eth0
+[Sat Oct 24 15:59:26 2026] docker0: port 1(veth6183346) entered disabled state
+[Sat Oct 24 15:59:26 2026] veth6183346 (unregistering): left allmulticast mode
+[Sat Oct 24 15:59:26 2026] veth6183346 (unregistering): left promiscuous mode
+[Sat Oct 24 15:59:26 2026] docker0: port 1(veth6183346) entered disabled state
+[Sat Oct 24 16:00:22 2026] br-654364155fc1: port 2(veth88711ee) entered disabled state
+[Sat Oct 24 16:00:22 2026] veth40f6858: renamed from eth0
+[Sat Oct 24 16:00:22 2026] br-654364155fc1: port 2(veth88711ee) entered disabled state
+[Sat Oct 24 16:00:22 2026] veth88711ee (unregistering): left allmulticast mode
+[Sat Oct 24 16:00:22 2026] veth88711ee (unregistering): left promiscuous mode
+[Sat Oct 24 16:00:22 2026] br-654364155fc1: port 2(veth88711ee) entered disabled state
+[Sat Oct 24 16:00:38 2026] br-654364155fc1: port 2(vethef827a7) entered blocking state
+[Sat Oct 24 16:00:38 2026] br-654364155fc1: port 2(vethef827a7) entered disabled state
+[Sat Oct 24 16:00:38 2026] vethef827a7: entered allmulticast mode
+[Sat Oct 24 16:00:38 2026] vethef827a7: entered promiscuous mode
+[Sat Oct 24 16:00:38 2026] eth0: renamed from veth114f844
+[Sat Oct 24 16:00:38 2026] br-654364155fc1: port 2(vethef827a7) entered blocking state
+[Sat Oct 24 16:00:38 2026] br-654364155fc1: port 2(vethef827a7) entered forwarding state
+[Sat Oct 24 16:01:53 2026] br-654364155fc1: port 2(vethef827a7) entered disabled state
+[Sat Oct 24 16:01:53 2026] veth114f844: renamed from eth0
+[Sat Oct 24 16:01:53 2026] br-654364155fc1: port 2(vethef827a7) entered disabled state
+[Sat Oct 24 16:01:53 2026] vethef827a7 (unregistering): left allmulticast mode
+[Sat Oct 24 16:01:53 2026] vethef827a7 (unregistering): left promiscuous mode
+[Sat Oct 24 16:01:53 2026] br-654364155fc1: port 2(vethef827a7) entered disabled state
+[Sat Oct 24 16:26:05 2026] docker0: port 1(veth8c2872b) entered blocking state
+[Sat Oct 24 16:26:05 2026] docker0: port 1(veth8c2872b) entered disabled state
+[Sat Oct 24 16:26:05 2026] veth8c2872b: entered allmulticast mode
+[Sat Oct 24 16:26:05 2026] veth8c2872b: entered promiscuous mode
+[Sat Oct 24 16:26:05 2026] eth0: renamed from veth405f5e5
+[Sat Oct 24 16:26:05 2026] docker0: port 1(veth8c2872b) entered blocking state
+[Sat Oct 24 16:26:05 2026] docker0: port 1(veth8c2872b) entered forwarding state
+[Sat Oct 24 16:27:20 2026] docker0: port 1(veth8c2872b) entered disabled state
+[Sat Oct 24 16:27:20 2026] veth405f5e5: renamed from eth0
+[Sat Oct 24 16:27:20 2026] docker0: port 1(veth8c2872b) entered disabled state
+[Sat Oct 24 16:27:20 2026] veth8c2872b (unregistering): left allmulticast mode
+[Sat Oct 24 16:27:20 2026] veth8c2872b (unregistering): left promiscuous mode
+[Sat Oct 24 16:27:20 2026] docker0: port 1(veth8c2872b) entered disabled state
+[Sat Oct 24 16:40:07 2026] docker0: port 1(veth032fe33) entered blocking state
+[Sat Oct 24 16:40:07 2026] docker0: port 1(veth032fe33) entered disabled state
+[Sat Oct 24 16:40:07 2026] veth032fe33: entered allmulticast mode
+[Sat Oct 24 16:40:07 2026] veth032fe33: entered promiscuous mode
+[Sat Oct 24 16:40:07 2026] eth0: renamed from veth0d824f0
+[Sat Oct 24 16:40:07 2026] docker0: port 1(veth032fe33) entered blocking state
+[Sat Oct 24 16:40:07 2026] docker0: port 1(veth032fe33) entered forwarding state
+[Sat Oct 24 16:40:50 2026] docker0: port 1(veth032fe33) entered disabled state
+[Sat Oct 24 16:40:50 2026] veth0d824f0: renamed from eth0
+[Sat Oct 24 16:40:50 2026] docker0: port 1(veth032fe33) entered disabled state
+[Sat Oct 24 16:40:50 2026] veth032fe33 (unregistering): left allmulticast mode
+[Sat Oct 24 16:40:50 2026] veth032fe33 (unregistering): left promiscuous mode
+[Sat Oct 24 16:40:50 2026] docker0: port 1(veth032fe33) entered disabled state
+[Sat Oct 24 16:41:23 2026] docker0: port 1(vethc756047) entered blocking state
+[Sat Oct 24 16:41:23 2026] docker0: port 1(vethc756047) entered disabled state
+[Sat Oct 24 16:41:23 2026] vethc756047: entered allmulticast mode
+[Sat Oct 24 16:41:23 2026] vethc756047: entered promiscuous mode
+[Sat Oct 24 16:41:23 2026] eth0: renamed from vethf69ad29
+[Sat Oct 24 16:41:23 2026] docker0: port 1(vethc756047) entered blocking state
+[Sat Oct 24 16:41:23 2026] docker0: port 1(vethc756047) entered forwarding state
+[Sat Oct 24 16:42:00 2026] docker0: port 1(vethc756047) entered disabled state
+[Sat Oct 24 16:42:00 2026] vethf69ad29: renamed from eth0
+[Sat Oct 24 16:42:00 2026] docker0: port 1(vethc756047) entered disabled state
+[Sat Oct 24 16:42:00 2026] vethc756047 (unregistering): left allmulticast mode
+[Sat Oct 24 16:42:00 2026] vethc756047 (unregistering): left promiscuous mode
+[Sat Oct 24 16:42:00 2026] docker0: port 1(vethc756047) entered disabled state
+[Sat Oct 24 16:46:36 2026] docker0: port 1(veth0a9a130) entered blocking state
+[Sat Oct 24 16:46:36 2026] docker0: port 1(veth0a9a130) entered disabled state
+[Sat Oct 24 16:46:36 2026] veth0a9a130: entered allmulticast mode
+[Sat Oct 24 16:46:36 2026] veth0a9a130: entered promiscuous mode
+[Sat Oct 24 16:46:36 2026] eth0: renamed from veth8cb7d64
+[Sat Oct 24 16:46:36 2026] docker0: port 1(veth0a9a130) entered blocking state
+[Sat Oct 24 16:46:36 2026] docker0: port 1(veth0a9a130) entered forwarding state
+[Sat Oct 24 16:48:56 2026] docker0: port 1(veth0a9a130) entered disabled state
+[Sat Oct 24 16:48:56 2026] veth8cb7d64: renamed from eth0
+[Sat Oct 24 16:48:56 2026] docker0: port 1(veth0a9a130) entered disabled state
+[Sat Oct 24 16:48:56 2026] veth0a9a130 (unregistering): left allmulticast mode
+[Sat Oct 24 16:48:56 2026] veth0a9a130 (unregistering): left promiscuous mode
+[Sat Oct 24 16:48:56 2026] docker0: port 1(veth0a9a130) entered disabled state
+[Sat Oct 24 16:54:31 2026] docker0: port 1(veth9c202f3) entered blocking state
+[Sat Oct 24 16:54:31 2026] docker0: port 1(veth9c202f3) entered disabled state
+[Sat Oct 24 16:54:31 2026] veth9c202f3: entered allmulticast mode
+[Sat Oct 24 16:54:31 2026] veth9c202f3: entered promiscuous mode
+[Sat Oct 24 16:54:31 2026] eth0: renamed from veth355f99a
+[Sat Oct 24 16:54:31 2026] docker0: port 1(veth9c202f3) entered blocking state
+[Sat Oct 24 16:54:31 2026] docker0: port 1(veth9c202f3) entered forwarding state
+[Sat Oct 24 16:56:50 2026] docker0: port 1(veth9c202f3) entered disabled state
+[Sat Oct 24 16:56:50 2026] veth355f99a: renamed from eth0
+[Sat Oct 24 16:56:50 2026] docker0: port 1(veth9c202f3) entered disabled state
+[Sat Oct 24 16:56:50 2026] veth9c202f3 (unregistering): left allmulticast mode
+[Sat Oct 24 16:56:50 2026] veth9c202f3 (unregistering): left promiscuous mode
+[Sat Oct 24 16:56:50 2026] docker0: port 1(veth9c202f3) entered disabled state
+[Sat Oct 24 16:57:22 2026] docker0: port 1(vethb0b2ce9) entered blocking state
+[Sat Oct 24 16:57:22 2026] docker0: port 1(vethb0b2ce9) entered disabled state
+[Sat Oct 24 16:57:22 2026] vethb0b2ce9: entered allmulticast mode
+[Sat Oct 24 16:57:22 2026] vethb0b2ce9: entered promiscuous mode
+[Sat Oct 24 16:57:22 2026] eth0: renamed from vethb3d9648
+[Sat Oct 24 16:57:22 2026] docker0: port 1(vethb0b2ce9) entered blocking state
+[Sat Oct 24 16:57:22 2026] docker0: port 1(vethb0b2ce9) entered forwarding state
+[Sat Oct 24 17:01:54 2026] vethb3d9648: renamed from eth0
+[Sat Oct 24 17:01:54 2026] docker0: port 1(vethb0b2ce9) entered disabled state
+[Sat Oct 24 17:01:54 2026] docker0: port 1(vethb0b2ce9) entered disabled state
+[Sat Oct 24 17:01:54 2026] vethb0b2ce9 (unregistering): left allmulticast mode
+[Sat Oct 24 17:01:54 2026] vethb0b2ce9 (unregistering): left promiscuous mode
+[Sat Oct 24 17:01:54 2026] docker0: port 1(vethb0b2ce9) entered disabled state
+[Sat Oct 24 17:02:10 2026] br-654364155fc1: port 2(veth6ae2be4) entered blocking state
+[Sat Oct 24 17:02:10 2026] br-654364155fc1: port 2(veth6ae2be4) entered disabled state
+[Sat Oct 24 17:02:10 2026] veth6ae2be4: entered allmulticast mode
+[Sat Oct 24 17:02:10 2026] veth6ae2be4: entered promiscuous mode
+[Sat Oct 24 17:02:10 2026] br-654364155fc1: port 3(veth091332e) entered blocking state
+[Sat Oct 24 17:02:10 2026] br-654364155fc1: port 3(veth091332e) entered disabled state
+[Sat Oct 24 17:02:10 2026] veth091332e: entered allmulticast mode
+[Sat Oct 24 17:02:10 2026] veth091332e: entered promiscuous mode
+[Sat Oct 24 17:02:10 2026] eth0: renamed from vethdbe1ba6
+[Sat Oct 24 17:02:10 2026] br-654364155fc1: port 2(veth6ae2be4) entered blocking state
+[Sat Oct 24 17:02:10 2026] br-654364155fc1: port 2(veth6ae2be4) entered forwarding state
+[Sat Oct 24 17:02:10 2026] eth0: renamed from vethcb994be
+[Sat Oct 24 17:02:10 2026] br-654364155fc1: port 3(veth091332e) entered blocking state
+[Sat Oct 24 17:02:10 2026] br-654364155fc1: port 3(veth091332e) entered forwarding state
+[Sat Oct 24 17:03:29 2026] br-654364155fc1: port 3(veth091332e) entered disabled state
+[Sat Oct 24 17:03:29 2026] vethcb994be: renamed from eth0
+[Sat Oct 24 17:03:29 2026] br-654364155fc1: port 3(veth091332e) entered disabled state
+[Sat Oct 24 17:03:29 2026] veth091332e (unregistering): left allmulticast mode
+[Sat Oct 24 17:03:29 2026] veth091332e (unregistering): left promiscuous mode
+[Sat Oct 24 17:03:29 2026] br-654364155fc1: port 3(veth091332e) entered disabled state
+[Sat Oct 24 17:03:59 2026] br-654364155fc1: port 2(veth6ae2be4) entered disabled state
+[Sat Oct 24 17:03:59 2026] vethdbe1ba6: renamed from eth0
+[Sat Oct 24 17:03:59 2026] br-654364155fc1: port 2(veth6ae2be4) entered disabled state
+[Sat Oct 24 17:03:59 2026] veth6ae2be4 (unregistering): left allmulticast mode
+[Sat Oct 24 17:03:59 2026] veth6ae2be4 (unregistering): left promiscuous mode
+[Sat Oct 24 17:03:59 2026] br-654364155fc1: port 2(veth6ae2be4) entered disabled state
+[Sat Oct 24 17:04:04 2026] br-654364155fc1: port 2(veth8f64144) entered blocking state
+[Sat Oct 24 17:04:04 2026] br-654364155fc1: port 2(veth8f64144) entered disabled state
+[Sat Oct 24 17:04:04 2026] veth8f64144: entered allmulticast mode
+[Sat Oct 24 17:04:04 2026] veth8f64144: entered promiscuous mode
+[Sat Oct 24 17:04:04 2026] eth0: renamed from veth6b2ddd1
+[Sat Oct 24 17:04:04 2026] br-654364155fc1: port 2(veth8f64144) entered blocking state
+[Sat Oct 24 17:04:04 2026] br-654364155fc1: port 2(veth8f64144) entered forwarding state
+[Sat Oct 24 17:04:17 2026] br-654364155fc1: port 2(veth8f64144) entered disabled state
+[Sat Oct 24 17:04:17 2026] veth6b2ddd1: renamed from eth0
+[Sat Oct 24 17:04:17 2026] br-654364155fc1: port 2(veth8f64144) entered disabled state
+[Sat Oct 24 17:04:17 2026] veth8f64144 (unregistering): left allmulticast mode
+[Sat Oct 24 17:04:17 2026] veth8f64144 (unregistering): left promiscuous mode
+[Sat Oct 24 17:04:17 2026] br-654364155fc1: port 2(veth8f64144) entered disabled state
+[Sat Oct 24 17:07:35 2026] docker0: port 1(veth6968095) entered blocking state
+[Sat Oct 24 17:07:35 2026] docker0: port 1(veth6968095) entered disabled state
+[Sat Oct 24 17:07:35 2026] veth6968095: entered allmulticast mode
+[Sat Oct 24 17:07:35 2026] veth6968095: entered promiscuous mode
+[Sat Oct 24 17:07:35 2026] eth0: renamed from veth3ca2f2f
+[Sat Oct 24 17:07:36 2026] docker0: port 1(veth6968095) entered blocking state
+[Sat Oct 24 17:07:36 2026] docker0: port 1(veth6968095) entered forwarding state
+[Sat Oct 24 17:09:02 2026] docker0: port 1(veth6968095) entered disabled state
+[Sat Oct 24 17:09:02 2026] veth3ca2f2f: renamed from eth0
+[Sat Oct 24 17:09:02 2026] docker0: port 1(veth6968095) entered disabled state
+[Sat Oct 24 17:09:02 2026] veth6968095 (unregistering): left allmulticast mode
+[Sat Oct 24 17:09:02 2026] veth6968095 (unregistering): left promiscuous mode
+[Sat Oct 24 17:09:02 2026] docker0: port 1(veth6968095) entered disabled state
+[Sat Oct 24 17:14:55 2026] docker0: port 1(veth9f2f211) entered blocking state
+[Sat Oct 24 17:14:55 2026] docker0: port 1(veth9f2f211) entered disabled state
+[Sat Oct 24 17:14:55 2026] veth9f2f211: entered allmulticast mode
+[Sat Oct 24 17:14:55 2026] veth9f2f211: entered promiscuous mode
+[Sat Oct 24 17:14:55 2026] eth0: renamed from veth91ebc4d
+[Sat Oct 24 17:14:55 2026] docker0: port 1(veth9f2f211) entered blocking state
+[Sat Oct 24 17:14:55 2026] docker0: port 1(veth9f2f211) entered forwarding state
+[Sat Oct 24 17:15:26 2026] docker0: port 1(veth9f2f211) entered disabled state
+[Sat Oct 24 17:15:26 2026] veth91ebc4d: renamed from eth0
+[Sat Oct 24 17:15:26 2026] docker0: port 1(veth9f2f211) entered disabled state
+[Sat Oct 24 17:15:26 2026] veth9f2f211 (unregistering): left allmulticast mode
+[Sat Oct 24 17:15:26 2026] veth9f2f211 (unregistering): left promiscuous mode
+[Sat Oct 24 17:15:26 2026] docker0: port 1(veth9f2f211) entered disabled state
+[Sat Oct 24 17:31:47 2026] docker0: port 1(veth9acc256) entered blocking state
+[Sat Oct 24 17:31:47 2026] docker0: port 1(veth9acc256) entered disabled state
+[Sat Oct 24 17:31:47 2026] veth9acc256: entered allmulticast mode
+[Sat Oct 24 17:31:47 2026] veth9acc256: entered promiscuous mode
+[Sat Oct 24 17:31:47 2026] eth0: renamed from veth1694515
+[Sat Oct 24 17:31:47 2026] docker0: port 1(veth9acc256) entered blocking state
+[Sat Oct 24 17:31:47 2026] docker0: port 1(veth9acc256) entered forwarding state
+[Sat Oct 24 17:31:57 2026] docker0: port 1(veth9acc256) entered disabled state
+[Sat Oct 24 17:31:57 2026] veth1694515: renamed from eth0
+[Sat Oct 24 17:31:57 2026] docker0: port 1(veth9acc256) entered disabled state
+[Sat Oct 24 17:31:57 2026] veth9acc256 (unregistering): left allmulticast mode
+[Sat Oct 24 17:31:57 2026] veth9acc256 (unregistering): left promiscuous mode
+[Sat Oct 24 17:31:57 2026] docker0: port 1(veth9acc256) entered disabled state
+[Sat Oct 24 17:33:43 2026] docker0: port 1(veth7a1f18c) entered blocking state
+[Sat Oct 24 17:33:43 2026] docker0: port 1(veth7a1f18c) entered disabled state
+[Sat Oct 24 17:33:43 2026] veth7a1f18c: entered allmulticast mode
+[Sat Oct 24 17:33:43 2026] veth7a1f18c: entered promiscuous mode
+[Sat Oct 24 17:33:43 2026] eth0: renamed from veth153d62f
+[Sat Oct 24 17:33:43 2026] docker0: port 1(veth7a1f18c) entered blocking state
+[Sat Oct 24 17:33:43 2026] docker0: port 1(veth7a1f18c) entered forwarding state
+[Sat Oct 24 17:33:51 2026] docker0: port 1(veth7a1f18c) entered disabled state
+[Sat Oct 24 17:33:51 2026] veth153d62f: renamed from eth0
+[Sat Oct 24 17:33:51 2026] docker0: port 1(veth7a1f18c) entered disabled state
+[Sat Oct 24 17:33:51 2026] veth7a1f18c (unregistering): left allmulticast mode
+[Sat Oct 24 17:33:51 2026] veth7a1f18c (unregistering): left promiscuous mode
+[Sat Oct 24 17:33:51 2026] docker0: port 1(veth7a1f18c) entered disabled state
+[Sat Oct 24 17:34:46 2026] docker0: port 1(vetha4e2df3) entered blocking state
+[Sat Oct 24 17:34:46 2026] docker0: port 1(vetha4e2df3) entered disabled state
+[Sat Oct 24 17:34:46 2026] vetha4e2df3: entered allmulticast mode
+[Sat Oct 24 17:34:46 2026] vetha4e2df3: entered promiscuous mode
+[Sat Oct 24 17:34:46 2026] eth0: renamed from veth520e567
+[Sat Oct 24 17:34:46 2026] docker0: port 1(vetha4e2df3) entered blocking state
+[Sat Oct 24 17:34:46 2026] docker0: port 1(vetha4e2df3) entered forwarding state
+[Sat Oct 24 17:35:28 2026] docker0: port 1(vetha4e2df3) entered disabled state
+[Sat Oct 24 17:35:28 2026] veth520e567: renamed from eth0
+[Sat Oct 24 17:35:28 2026] docker0: port 1(vetha4e2df3) entered disabled state
+[Sat Oct 24 17:35:28 2026] vetha4e2df3 (unregistering): left allmulticast mode
+[Sat Oct 24 17:35:28 2026] vetha4e2df3 (unregistering): left promiscuous mode
+[Sat Oct 24 17:35:28 2026] docker0: port 1(vetha4e2df3) entered disabled state
+[Sat Oct 24 17:37:44 2026] docker0: port 1(veth2607f5e) entered blocking state
+[Sat Oct 24 17:37:44 2026] docker0: port 1(veth2607f5e) entered disabled state
+[Sat Oct 24 17:37:44 2026] veth2607f5e: entered allmulticast mode
+[Sat Oct 24 17:37:44 2026] veth2607f5e: entered promiscuous mode
+[Sat Oct 24 17:37:44 2026] eth0: renamed from veth4a67d18
+[Sat Oct 24 17:37:44 2026] docker0: port 1(veth2607f5e) entered blocking state
+[Sat Oct 24 17:37:44 2026] docker0: port 1(veth2607f5e) entered forwarding state
+[Sat Oct 24 17:38:25 2026] docker0: port 1(veth2607f5e) entered disabled state
+[Sat Oct 24 17:38:25 2026] veth4a67d18: renamed from eth0
+[Sat Oct 24 17:38:25 2026] docker0: port 1(veth2607f5e) entered disabled state
+[Sat Oct 24 17:38:25 2026] veth2607f5e (unregistering): left allmulticast mode
+[Sat Oct 24 17:38:25 2026] veth2607f5e (unregistering): left promiscuous mode
+[Sat Oct 24 17:38:25 2026] docker0: port 1(veth2607f5e) entered disabled state
+[Sat Oct 24 17:39:38 2026] docker0: port 1(veth4c80827) entered blocking state
+[Sat Oct 24 17:39:38 2026] docker0: port 1(veth4c80827) entered disabled state
+[Sat Oct 24 17:39:38 2026] veth4c80827: entered allmulticast mode
+[Sat Oct 24 17:39:38 2026] veth4c80827: entered promiscuous mode
+[Sat Oct 24 17:39:38 2026] eth0: renamed from vethf5b6b43
+[Sat Oct 24 17:39:38 2026] docker0: port 1(veth4c80827) entered blocking state
+[Sat Oct 24 17:39:38 2026] docker0: port 1(veth4c80827) entered forwarding state
+[Sat Oct 24 17:40:21 2026] docker0: port 1(veth4c80827) entered disabled state
+[Sat Oct 24 17:40:21 2026] vethf5b6b43: renamed from eth0
+[Sat Oct 24 17:40:21 2026] docker0: port 1(veth4c80827) entered disabled state
+[Sat Oct 24 17:40:21 2026] veth4c80827 (unregistering): left allmulticast mode
+[Sat Oct 24 17:40:21 2026] veth4c80827 (unregistering): left promiscuous mode
+[Sat Oct 24 17:40:21 2026] docker0: port 1(veth4c80827) entered disabled state
+[Sat Oct 24 17:44:25 2026] docker0: port 1(veth38e8a48) entered blocking state
+[Sat Oct 24 17:44:25 2026] docker0: port 1(veth38e8a48) entered disabled state
+[Sat Oct 24 17:44:25 2026] veth38e8a48: entered allmulticast mode
+[Sat Oct 24 17:44:25 2026] veth38e8a48: entered promiscuous mode
+[Sat Oct 24 17:44:25 2026] eth0: renamed from veth11076e6
+[Sat Oct 24 17:44:25 2026] docker0: port 1(veth38e8a48) entered blocking state
+[Sat Oct 24 17:44:25 2026] docker0: port 1(veth38e8a48) entered forwarding state
+[Sat Oct 24 17:45:54 2026] docker0: port 1(veth38e8a48) entered disabled state
+[Sat Oct 24 17:45:54 2026] veth11076e6: renamed from eth0
+[Sat Oct 24 17:45:54 2026] docker0: port 1(veth38e8a48) entered disabled state
+[Sat Oct 24 17:45:54 2026] veth38e8a48 (unregistering): left allmulticast mode
+[Sat Oct 24 17:45:54 2026] veth38e8a48 (unregistering): left promiscuous mode
+[Sat Oct 24 17:45:54 2026] docker0: port 1(veth38e8a48) entered disabled state
+[Sat Oct 24 17:50:06 2026] docker0: port 1(veth8161683) entered blocking state
+[Sat Oct 24 17:50:06 2026] docker0: port 1(veth8161683) entered disabled state
+[Sat Oct 24 17:50:06 2026] veth8161683: entered allmulticast mode
+[Sat Oct 24 17:50:06 2026] veth8161683: entered promiscuous mode
+[Sat Oct 24 17:50:06 2026] eth0: renamed from veth3775d4e
+[Sat Oct 24 17:50:06 2026] docker0: port 1(veth8161683) entered blocking state
+[Sat Oct 24 17:50:06 2026] docker0: port 1(veth8161683) entered forwarding state
+[Sat Oct 24 17:50:55 2026] docker0: port 1(veth8161683) entered disabled state
+[Sat Oct 24 17:50:55 2026] veth3775d4e: renamed from eth0
+[Sat Oct 24 17:50:55 2026] docker0: port 1(veth8161683) entered disabled state
+[Sat Oct 24 17:50:55 2026] veth8161683 (unregistering): left allmulticast mode
+[Sat Oct 24 17:50:55 2026] veth8161683 (unregistering): left promiscuous mode
+[Sat Oct 24 17:50:55 2026] docker0: port 1(veth8161683) entered disabled state
+[Sat Oct 24 17:55:19 2026] docker0: port 1(vethcbfb615) entered blocking state
+[Sat Oct 24 17:55:19 2026] docker0: port 1(vethcbfb615) entered disabled state
+[Sat Oct 24 17:55:19 2026] vethcbfb615: entered allmulticast mode
+[Sat Oct 24 17:55:19 2026] vethcbfb615: entered promiscuous mode
+[Sat Oct 24 17:55:19 2026] eth0: renamed from veth8dc3563
+[Sat Oct 24 17:55:19 2026] docker0: port 1(vethcbfb615) entered blocking state
+[Sat Oct 24 17:55:19 2026] docker0: port 1(vethcbfb615) entered forwarding state
+[Sat Oct 24 17:57:18 2026] docker0: port 1(vethcbfb615) entered disabled state
+[Sat Oct 24 17:57:18 2026] veth8dc3563: renamed from eth0
+[Sat Oct 24 17:57:18 2026] docker0: port 1(vethcbfb615) entered disabled state
+[Sat Oct 24 17:57:18 2026] vethcbfb615 (unregistering): left allmulticast mode
+[Sat Oct 24 17:57:18 2026] vethcbfb615 (unregistering): left promiscuous mode
+[Sat Oct 24 17:57:18 2026] docker0: port 1(vethcbfb615) entered disabled state
+[Sat Oct 24 17:59:16 2026] docker0: port 1(veth39f7561) entered blocking state
+[Sat Oct 24 17:59:16 2026] docker0: port 1(veth39f7561) entered disabled state
+[Sat Oct 24 17:59:16 2026] veth39f7561: entered allmulticast mode
+[Sat Oct 24 17:59:16 2026] veth39f7561: entered promiscuous mode
+[Sat Oct 24 17:59:16 2026] eth0: renamed from vethab3b234
+[Sat Oct 24 17:59:17 2026] docker0: port 1(veth39f7561) entered blocking state
+[Sat Oct 24 17:59:17 2026] docker0: port 1(veth39f7561) entered forwarding state
+[Sat Oct 24 18:01:45 2026] docker0: port 1(veth39f7561) entered disabled state
+[Sat Oct 24 18:01:45 2026] vethab3b234: renamed from eth0
+[Sat Oct 24 18:01:45 2026] docker0: port 1(veth39f7561) entered disabled state
+[Sat Oct 24 18:01:45 2026] veth39f7561 (unregistering): left allmulticast mode
+[Sat Oct 24 18:01:45 2026] veth39f7561 (unregistering): left promiscuous mode
+[Sat Oct 24 18:01:45 2026] docker0: port 1(veth39f7561) entered disabled state
+[Sat Oct 24 18:03:02 2026] br-654364155fc1: port 2(vethb00ad77) entered blocking state
+[Sat Oct 24 18:03:02 2026] br-654364155fc1: port 2(vethb00ad77) entered disabled state
+[Sat Oct 24 18:03:02 2026] vethb00ad77: entered allmulticast mode
+[Sat Oct 24 18:03:02 2026] vethb00ad77: entered promiscuous mode
+[Sat Oct 24 18:03:02 2026] eth0: renamed from veth2ca5c1d
+[Sat Oct 24 18:03:02 2026] br-654364155fc1: port 2(vethb00ad77) entered blocking state
+[Sat Oct 24 18:03:02 2026] br-654364155fc1: port 2(vethb00ad77) entered forwarding state
+[Sat Oct 24 18:03:02 2026] br-654364155fc1: port 3(veth9ba5f93) entered blocking state
+[Sat Oct 24 18:03:02 2026] br-654364155fc1: port 3(veth9ba5f93) entered disabled state
+[Sat Oct 24 18:03:02 2026] veth9ba5f93: entered allmulticast mode
+[Sat Oct 24 18:03:02 2026] veth9ba5f93: entered promiscuous mode
+[Sat Oct 24 18:03:02 2026] br-654364155fc1: port 4(veth260c40d) entered blocking state
+[Sat Oct 24 18:03:02 2026] br-654364155fc1: port 4(veth260c40d) entered disabled state
+[Sat Oct 24 18:03:02 2026] veth260c40d: entered allmulticast mode
+[Sat Oct 24 18:03:02 2026] veth260c40d: entered promiscuous mode
+[Sat Oct 24 18:03:02 2026] eth0: renamed from vethaddbde5
+[Sat Oct 24 18:03:02 2026] br-654364155fc1: port 3(veth9ba5f93) entered blocking state
+[Sat Oct 24 18:03:02 2026] br-654364155fc1: port 3(veth9ba5f93) entered forwarding state
+[Sat Oct 24 18:03:02 2026] eth0: renamed from veth752af40
+[Sat Oct 24 18:03:02 2026] br-654364155fc1: port 4(veth260c40d) entered blocking state
+[Sat Oct 24 18:03:02 2026] br-654364155fc1: port 4(veth260c40d) entered forwarding state
+[Sat Oct 24 18:03:18 2026] br-654364155fc1: port 2(vethb00ad77) entered disabled state
+[Sat Oct 24 18:03:18 2026] veth2ca5c1d: renamed from eth0
+[Sat Oct 24 18:03:18 2026] br-654364155fc1: port 2(vethb00ad77) entered disabled state
+[Sat Oct 24 18:03:18 2026] vethb00ad77 (unregistering): left allmulticast mode
+[Sat Oct 24 18:03:18 2026] vethb00ad77 (unregistering): left promiscuous mode
+[Sat Oct 24 18:03:18 2026] br-654364155fc1: port 2(vethb00ad77) entered disabled state
+[Sat Oct 24 18:04:20 2026] br-654364155fc1: port 3(veth9ba5f93) entered disabled state
+[Sat Oct 24 18:04:20 2026] vethaddbde5: renamed from eth0
+[Sat Oct 24 18:04:20 2026] br-654364155fc1: port 3(veth9ba5f93) entered disabled state
+[Sat Oct 24 18:04:20 2026] veth9ba5f93 (unregistering): left allmulticast mode
+[Sat Oct 24 18:04:20 2026] veth9ba5f93 (unregistering): left promiscuous mode
+[Sat Oct 24 18:04:20 2026] br-654364155fc1: port 3(veth9ba5f93) entered disabled state
+[Sat Oct 24 18:04:47 2026] br-654364155fc1: port 4(veth260c40d) entered disabled state
+[Sat Oct 24 18:04:47 2026] veth752af40: renamed from eth0
+[Sat Oct 24 18:04:47 2026] br-654364155fc1: port 4(veth260c40d) entered disabled state
+[Sat Oct 24 18:04:47 2026] veth260c40d (unregistering): left allmulticast mode
+[Sat Oct 24 18:04:47 2026] veth260c40d (unregistering): left promiscuous mode
+[Sat Oct 24 18:04:47 2026] br-654364155fc1: port 4(veth260c40d) entered disabled state
+[Sat Oct 24 18:08:18 2026] docker0: port 1(vethc051b8f) entered blocking state
+[Sat Oct 24 18:08:18 2026] docker0: port 1(vethc051b8f) entered disabled state
+[Sat Oct 24 18:08:18 2026] vethc051b8f: entered allmulticast mode
+[Sat Oct 24 18:08:18 2026] vethc051b8f: entered promiscuous mode
+[Sat Oct 24 18:08:18 2026] eth0: renamed from veth76217de
+[Sat Oct 24 18:08:18 2026] docker0: port 1(vethc051b8f) entered blocking state
+[Sat Oct 24 18:08:18 2026] docker0: port 1(vethc051b8f) entered forwarding state
+[Sat Oct 24 18:10:03 2026] docker0: port 1(vethc051b8f) entered disabled state
+[Sat Oct 24 18:10:03 2026] veth76217de: renamed from eth0
+[Sat Oct 24 18:10:03 2026] docker0: port 1(vethc051b8f) entered disabled state
+[Sat Oct 24 18:10:03 2026] vethc051b8f (unregistering): left allmulticast mode
+[Sat Oct 24 18:10:03 2026] vethc051b8f (unregistering): left promiscuous mode
+[Sat Oct 24 18:10:03 2026] docker0: port 1(vethc051b8f) entered disabled state
+[Sat Oct 24 18:14:32 2026] br-654364155fc1: port 2(veth58512f8) entered blocking state
+[Sat Oct 24 18:14:32 2026] br-654364155fc1: port 2(veth58512f8) entered disabled state
+[Sat Oct 24 18:14:32 2026] veth58512f8: entered allmulticast mode
+[Sat Oct 24 18:14:32 2026] veth58512f8: entered promiscuous mode
+[Sat Oct 24 18:14:32 2026] eth0: renamed from veth8d95532
+[Sat Oct 24 18:14:32 2026] br-654364155fc1: port 2(veth58512f8) entered blocking state
+[Sat Oct 24 18:14:32 2026] br-654364155fc1: port 2(veth58512f8) entered forwarding state
+[Sat Oct 24 18:14:50 2026] br-654364155fc1: port 2(veth58512f8) entered disabled state
+[Sat Oct 24 18:14:50 2026] veth8d95532: renamed from eth0
+[Sat Oct 24 18:14:50 2026] br-654364155fc1: port 2(veth58512f8) entered disabled state
+[Sat Oct 24 18:14:50 2026] veth58512f8 (unregistering): left allmulticast mode
+[Sat Oct 24 18:14:50 2026] veth58512f8 (unregistering): left promiscuous mode
+[Sat Oct 24 18:14:50 2026] br-654364155fc1: port 2(veth58512f8) entered disabled state
+[Sat Oct 24 18:32:10 2026] docker0: port 1(vethb584975) entered blocking state
+[Sat Oct 24 18:32:10 2026] docker0: port 1(vethb584975) entered disabled state
+[Sat Oct 24 18:32:10 2026] vethb584975: entered allmulticast mode
+[Sat Oct 24 18:32:10 2026] vethb584975: entered promiscuous mode
+[Sat Oct 24 18:32:10 2026] br-654364155fc1: port 2(veth1d51391) entered blocking state
+[Sat Oct 24 18:32:10 2026] br-654364155fc1: port 2(veth1d51391) entered disabled state
+[Sat Oct 24 18:32:10 2026] veth1d51391: entered allmulticast mode
+[Sat Oct 24 18:32:10 2026] veth1d51391: entered promiscuous mode
+[Sat Oct 24 18:32:10 2026] eth0: renamed from veth21869bf
+[Sat Oct 24 18:32:10 2026] docker0: port 1(vethb584975) entered blocking state
+[Sat Oct 24 18:32:10 2026] docker0: port 1(vethb584975) entered forwarding state
+[Sat Oct 24 18:32:10 2026] eth0: renamed from veth3ed146d
+[Sat Oct 24 18:32:10 2026] br-654364155fc1: port 2(veth1d51391) entered blocking state
+[Sat Oct 24 18:32:10 2026] br-654364155fc1: port 2(veth1d51391) entered forwarding state
+[Sat Oct 24 18:32:10 2026] docker0: port 1(vethb584975) entered disabled state
+[Sat Oct 24 18:32:10 2026] veth21869bf: renamed from eth0
+[Sat Oct 24 18:32:10 2026] br-654364155fc1: port 2(veth1d51391) entered disabled state
+[Sat Oct 24 18:32:10 2026] veth3ed146d: renamed from eth0
+[Sat Oct 24 18:32:10 2026] docker0: port 1(vethb584975) entered disabled state
+[Sat Oct 24 18:32:10 2026] vethb584975 (unregistering): left allmulticast mode
+[Sat Oct 24 18:32:10 2026] vethb584975 (unregistering): left promiscuous mode
+[Sat Oct 24 18:32:10 2026] docker0: port 1(vethb584975) entered disabled state
+[Sat Oct 24 18:32:10 2026] br-654364155fc1: port 2(veth1d51391) entered disabled state
+[Sat Oct 24 18:32:10 2026] veth1d51391 (unregistering): left allmulticast mode
+[Sat Oct 24 18:32:10 2026] veth1d51391 (unregistering): left promiscuous mode
+[Sat Oct 24 18:32:10 2026] br-654364155fc1: port 2(veth1d51391) entered disabled state
+[Sat Oct 24 18:32:38 2026] br-654364155fc1: port 2(veth39fb58c) entered blocking state
+[Sat Oct 24 18:32:38 2026] br-654364155fc1: port 2(veth39fb58c) entered disabled state
+[Sat Oct 24 18:32:38 2026] veth39fb58c: entered allmulticast mode
+[Sat Oct 24 18:32:38 2026] veth39fb58c: entered promiscuous mode
+[Sat Oct 24 18:32:38 2026] docker0: port 1(veth26af31b) entered blocking state
+[Sat Oct 24 18:32:38 2026] docker0: port 1(veth26af31b) entered disabled state
+[Sat Oct 24 18:32:38 2026] veth26af31b: entered allmulticast mode
+[Sat Oct 24 18:32:38 2026] veth26af31b: entered promiscuous mode
+[Sat Oct 24 18:32:38 2026] eth0: renamed from veth76ce316
+[Sat Oct 24 18:32:38 2026] eth0: renamed from vetha631574
+[Sat Oct 24 18:32:38 2026] br-654364155fc1: port 2(veth39fb58c) entered blocking state
+[Sat Oct 24 18:32:38 2026] br-654364155fc1: port 2(veth39fb58c) entered forwarding state
+[Sat Oct 24 18:32:38 2026] docker0: port 1(veth26af31b) entered blocking state
+[Sat Oct 24 18:32:38 2026] docker0: port 1(veth26af31b) entered forwarding state
+[Sat Oct 24 18:32:52 2026] br-654364155fc1: port 2(veth39fb58c) entered disabled state
+[Sat Oct 24 18:32:52 2026] veth76ce316: renamed from eth0
+[Sat Oct 24 18:32:52 2026] br-654364155fc1: port 2(veth39fb58c) entered disabled state
+[Sat Oct 24 18:32:52 2026] veth39fb58c (unregistering): left allmulticast mode
+[Sat Oct 24 18:32:52 2026] veth39fb58c (unregistering): left promiscuous mode
+[Sat Oct 24 18:32:52 2026] br-654364155fc1: port 2(veth39fb58c) entered disabled state
+[Sat Oct 24 18:34:20 2026] docker0: port 1(veth26af31b) entered disabled state
+[Sat Oct 24 18:34:20 2026] vetha631574: renamed from eth0
+[Sat Oct 24 18:34:20 2026] docker0: port 1(veth26af31b) entered disabled state
+[Sat Oct 24 18:34:20 2026] veth26af31b (unregistering): left allmulticast mode
+[Sat Oct 24 18:34:20 2026] veth26af31b (unregistering): left promiscuous mode
+[Sat Oct 24 18:34:20 2026] docker0: port 1(veth26af31b) entered disabled state
+[Sat Oct 24 18:34:26 2026] br-654364155fc1: port 2(veth5c9ed7e) entered blocking state
+[Sat Oct 24 18:34:26 2026] br-654364155fc1: port 2(veth5c9ed7e) entered disabled state
+[Sat Oct 24 18:34:26 2026] veth5c9ed7e: entered allmulticast mode
+[Sat Oct 24 18:34:26 2026] veth5c9ed7e: entered promiscuous mode
+[Sat Oct 24 18:34:26 2026] eth0: renamed from veth4a92f0c
+[Sat Oct 24 18:34:26 2026] br-654364155fc1: port 2(veth5c9ed7e) entered blocking state
+[Sat Oct 24 18:34:26 2026] br-654364155fc1: port 2(veth5c9ed7e) entered forwarding state
+[Sat Oct 24 18:34:40 2026] br-654364155fc1: port 2(veth5c9ed7e) entered disabled state
+[Sat Oct 24 18:34:40 2026] veth4a92f0c: renamed from eth0
+[Sat Oct 24 18:34:40 2026] br-654364155fc1: port 2(veth5c9ed7e) entered disabled state
+[Sat Oct 24 18:34:40 2026] veth5c9ed7e (unregistering): left allmulticast mode
+[Sat Oct 24 18:34:40 2026] veth5c9ed7e (unregistering): left promiscuous mode
+[Sat Oct 24 18:34:40 2026] br-654364155fc1: port 2(veth5c9ed7e) entered disabled state
+[Sat Oct 24 18:34:42 2026] docker0: port 1(veth91482a9) entered blocking state
+[Sat Oct 24 18:34:42 2026] docker0: port 1(veth91482a9) entered disabled state
+[Sat Oct 24 18:34:42 2026] veth91482a9: entered allmulticast mode
+[Sat Oct 24 18:34:42 2026] veth91482a9: entered promiscuous mode
+[Sat Oct 24 18:34:42 2026] eth0: renamed from vethf92e975
+[Sat Oct 24 18:34:42 2026] docker0: port 1(veth91482a9) entered blocking state
+[Sat Oct 24 18:34:42 2026] docker0: port 1(veth91482a9) entered forwarding state
+[Sat Oct 24 18:35:34 2026] br-654364155fc1: port 2(veth6285715) entered blocking state
+[Sat Oct 24 18:35:34 2026] br-654364155fc1: port 2(veth6285715) entered disabled state
+[Sat Oct 24 18:35:34 2026] veth6285715: entered allmulticast mode
+[Sat Oct 24 18:35:34 2026] veth6285715: entered promiscuous mode
+[Sat Oct 24 18:35:34 2026] eth0: renamed from vethe0fe411
+[Sat Oct 24 18:35:34 2026] br-654364155fc1: port 2(veth6285715) entered blocking state
+[Sat Oct 24 18:35:34 2026] br-654364155fc1: port 2(veth6285715) entered forwarding state
+[Sat Oct 24 18:35:47 2026] br-654364155fc1: port 2(veth6285715) entered disabled state
+[Sat Oct 24 18:35:47 2026] vethe0fe411: renamed from eth0
+[Sat Oct 24 18:35:47 2026] br-654364155fc1: port 2(veth6285715) entered disabled state
+[Sat Oct 24 18:35:47 2026] veth6285715 (unregistering): left allmulticast mode
+[Sat Oct 24 18:35:47 2026] veth6285715 (unregistering): left promiscuous mode
+[Sat Oct 24 18:35:47 2026] br-654364155fc1: port 2(veth6285715) entered disabled state
+[Sat Oct 24 18:36:43 2026] docker0: port 1(veth91482a9) entered disabled state
+[Sat Oct 24 18:36:43 2026] vethf92e975: renamed from eth0
+[Sat Oct 24 18:36:43 2026] docker0: port 1(veth91482a9) entered disabled state
+[Sat Oct 24 18:36:43 2026] veth91482a9 (unregistering): left allmulticast mode
+[Sat Oct 24 18:36:43 2026] veth91482a9 (unregistering): left promiscuous mode
+[Sat Oct 24 18:36:43 2026] docker0: port 1(veth91482a9) entered disabled state
+[Sat Oct 24 18:37:05 2026] br-654364155fc1: port 2(veth5776097) entered blocking state
+[Sat Oct 24 18:37:05 2026] br-654364155fc1: port 2(veth5776097) entered disabled state
+[Sat Oct 24 18:37:05 2026] veth5776097: entered allmulticast mode
+[Sat Oct 24 18:37:05 2026] veth5776097: entered promiscuous mode
+[Sat Oct 24 18:37:05 2026] br-654364155fc1: port 3(veth7dc3e1f) entered blocking state
+[Sat Oct 24 18:37:05 2026] br-654364155fc1: port 3(veth7dc3e1f) entered disabled state
+[Sat Oct 24 18:37:05 2026] veth7dc3e1f: entered allmulticast mode
+[Sat Oct 24 18:37:05 2026] veth7dc3e1f: entered promiscuous mode
+[Sat Oct 24 18:37:05 2026] eth0: renamed from vethece8a10
+[Sat Oct 24 18:37:05 2026] br-654364155fc1: port 2(veth5776097) entered blocking state
+[Sat Oct 24 18:37:05 2026] br-654364155fc1: port 2(veth5776097) entered forwarding state
+[Sat Oct 24 18:37:05 2026] eth0: renamed from vethed0d8d0
+[Sat Oct 24 18:37:05 2026] br-654364155fc1: port 3(veth7dc3e1f) entered blocking state
+[Sat Oct 24 18:37:05 2026] br-654364155fc1: port 3(veth7dc3e1f) entered forwarding state
+[Sat Oct 24 18:37:11 2026] br-654364155fc1: port 3(veth7dc3e1f) entered disabled state
+[Sat Oct 24 18:37:11 2026] vethed0d8d0: renamed from eth0
+[Sat Oct 24 18:37:11 2026] br-654364155fc1: port 3(veth7dc3e1f) entered disabled state
+[Sat Oct 24 18:37:11 2026] veth7dc3e1f (unregistering): left allmulticast mode
+[Sat Oct 24 18:37:11 2026] veth7dc3e1f (unregistering): left promiscuous mode
+[Sat Oct 24 18:37:11 2026] br-654364155fc1: port 3(veth7dc3e1f) entered disabled state
+[Sat Oct 24 18:37:21 2026] br-654364155fc1: port 2(veth5776097) entered disabled state
+[Sat Oct 24 18:37:21 2026] vethece8a10: renamed from eth0
+[Sat Oct 24 18:37:21 2026] br-654364155fc1: port 2(veth5776097) entered disabled state
+[Sat Oct 24 18:37:21 2026] veth5776097 (unregistering): left allmulticast mode
+[Sat Oct 24 18:37:21 2026] veth5776097 (unregistering): left promiscuous mode
+[Sat Oct 24 18:37:21 2026] br-654364155fc1: port 2(veth5776097) entered disabled state
+[Sat Oct 24 18:38:40 2026] br-654364155fc1: port 2(veth7fa3020) entered blocking state
+[Sat Oct 24 18:38:40 2026] br-654364155fc1: port 2(veth7fa3020) entered disabled state
+[Sat Oct 24 18:38:40 2026] veth7fa3020: entered allmulticast mode
+[Sat Oct 24 18:38:40 2026] veth7fa3020: entered promiscuous mode
+[Sat Oct 24 18:38:40 2026] eth0: renamed from vethb0a4f69
+[Sat Oct 24 18:38:40 2026] br-654364155fc1: port 2(veth7fa3020) entered blocking state
+[Sat Oct 24 18:38:40 2026] br-654364155fc1: port 2(veth7fa3020) entered forwarding state
+[Sat Oct 24 18:39:00 2026] br-654364155fc1: port 2(veth7fa3020) entered disabled state
+[Sat Oct 24 18:39:00 2026] vethb0a4f69: renamed from eth0
+[Sat Oct 24 18:39:01 2026] br-654364155fc1: port 2(veth7fa3020) entered disabled state
+[Sat Oct 24 18:39:01 2026] veth7fa3020 (unregistering): left allmulticast mode
+[Sat Oct 24 18:39:01 2026] veth7fa3020 (unregistering): left promiscuous mode
+[Sat Oct 24 18:39:01 2026] br-654364155fc1: port 2(veth7fa3020) entered disabled state
+[Sat Oct 24 18:50:28 2026] docker0: port 1(veth260470a) entered blocking state
+[Sat Oct 24 18:50:28 2026] docker0: port 1(veth260470a) entered disabled state
+[Sat Oct 24 18:50:28 2026] veth260470a: entered allmulticast mode
+[Sat Oct 24 18:50:28 2026] veth260470a: entered promiscuous mode
+[Sat Oct 24 18:50:28 2026] eth0: renamed from veth5eaade7
+[Sat Oct 24 18:50:28 2026] docker0: port 1(veth260470a) entered blocking state
+[Sat Oct 24 18:50:28 2026] docker0: port 1(veth260470a) entered forwarding state
+[Sat Oct 24 18:57:44 2026] veth5eaade7: renamed from eth0
+[Sat Oct 24 18:57:44 2026] docker0: port 1(veth260470a) entered disabled state
+[Sat Oct 24 18:57:44 2026] docker0: port 1(veth260470a) entered disabled state
+[Sat Oct 24 18:57:44 2026] veth260470a (unregistering): left allmulticast mode
+[Sat Oct 24 18:57:44 2026] veth260470a (unregistering): left promiscuous mode
+[Sat Oct 24 18:57:44 2026] docker0: port 1(veth260470a) entered disabled state
+[Sat Oct 24 18:59:37 2026] docker0: port 1(vethe1a55a5) entered blocking state
+[Sat Oct 24 18:59:37 2026] docker0: port 1(vethe1a55a5) entered disabled state
+[Sat Oct 24 18:59:37 2026] vethe1a55a5: entered allmulticast mode
+[Sat Oct 24 18:59:37 2026] vethe1a55a5: entered promiscuous mode
+[Sat Oct 24 18:59:37 2026] eth0: renamed from vetha75d49d
+[Sat Oct 24 18:59:37 2026] docker0: port 2(veth6aa8cb1) entered blocking state
+[Sat Oct 24 18:59:37 2026] docker0: port 2(veth6aa8cb1) entered disabled state
+[Sat Oct 24 18:59:37 2026] veth6aa8cb1: entered allmulticast mode
+[Sat Oct 24 18:59:37 2026] veth6aa8cb1: entered promiscuous mode
+[Sat Oct 24 18:59:37 2026] docker0: port 1(vethe1a55a5) entered blocking state
+[Sat Oct 24 18:59:37 2026] docker0: port 1(vethe1a55a5) entered forwarding state
+[Sat Oct 24 18:59:37 2026] eth0: renamed from veth16a7b0f
+[Sat Oct 24 18:59:37 2026] docker0: port 2(veth6aa8cb1) entered blocking state
+[Sat Oct 24 18:59:37 2026] docker0: port 2(veth6aa8cb1) entered forwarding state
+[Sat Oct 24 18:59:38 2026] docker0: port 2(veth6aa8cb1) entered disabled state
+[Sat Oct 24 18:59:38 2026] veth16a7b0f: renamed from eth0
+[Sat Oct 24 18:59:38 2026] docker0: port 2(veth6aa8cb1) entered disabled state
+[Sat Oct 24 18:59:38 2026] veth6aa8cb1 (unregistering): left allmulticast mode
+[Sat Oct 24 18:59:38 2026] veth6aa8cb1 (unregistering): left promiscuous mode
+[Sat Oct 24 18:59:38 2026] docker0: port 2(veth6aa8cb1) entered disabled state
+[Sat Oct 24 19:01:31 2026] docker0: port 1(vethe1a55a5) entered disabled state
+[Sat Oct 24 19:01:31 2026] vetha75d49d: renamed from eth0
+[Sat Oct 24 19:01:32 2026] docker0: port 1(vethe1a55a5) entered disabled state
+[Sat Oct 24 19:01:32 2026] vethe1a55a5 (unregistering): left allmulticast mode
+[Sat Oct 24 19:01:32 2026] vethe1a55a5 (unregistering): left promiscuous mode
+[Sat Oct 24 19:01:32 2026] docker0: port 1(vethe1a55a5) entered disabled state
+[Sat Oct 24 19:02:10 2026] br-654364155fc1: port 2(vetha5dfc72) entered blocking state
+[Sat Oct 24 19:02:10 2026] br-654364155fc1: port 2(vetha5dfc72) entered disabled state
+[Sat Oct 24 19:02:10 2026] vetha5dfc72: entered allmulticast mode
+[Sat Oct 24 19:02:10 2026] vetha5dfc72: entered promiscuous mode
+[Sat Oct 24 19:02:10 2026] br-654364155fc1: port 3(vethf0e1cbf) entered blocking state
+[Sat Oct 24 19:02:10 2026] br-654364155fc1: port 3(vethf0e1cbf) entered disabled state
+[Sat Oct 24 19:02:10 2026] vethf0e1cbf: entered allmulticast mode
+[Sat Oct 24 19:02:10 2026] vethf0e1cbf: entered promiscuous mode
+[Sat Oct 24 19:02:10 2026] eth0: renamed from veth3732823
+[Sat Oct 24 19:02:10 2026] eth0: renamed from veth301b538
+[Sat Oct 24 19:02:10 2026] br-654364155fc1: port 2(vetha5dfc72) entered blocking state
+[Sat Oct 24 19:02:10 2026] br-654364155fc1: port 2(vetha5dfc72) entered forwarding state
+[Sat Oct 24 19:02:10 2026] br-654364155fc1: port 3(vethf0e1cbf) entered blocking state
+[Sat Oct 24 19:02:10 2026] br-654364155fc1: port 3(vethf0e1cbf) entered forwarding state
+[Sat Oct 24 19:02:14 2026] br-654364155fc1: port 3(vethf0e1cbf) entered disabled state
+[Sat Oct 24 19:02:14 2026] veth3732823: renamed from eth0
+[Sat Oct 24 19:02:15 2026] br-654364155fc1: port 3(vethf0e1cbf) entered disabled state
+[Sat Oct 24 19:02:15 2026] vethf0e1cbf (unregistering): left allmulticast mode
+[Sat Oct 24 19:02:15 2026] vethf0e1cbf (unregistering): left promiscuous mode
+[Sat Oct 24 19:02:15 2026] br-654364155fc1: port 3(vethf0e1cbf) entered disabled state
+[Sat Oct 24 19:02:26 2026] br-654364155fc1: port 2(vetha5dfc72) entered disabled state
+[Sat Oct 24 19:02:26 2026] veth301b538: renamed from eth0
+[Sat Oct 24 19:02:26 2026] br-654364155fc1: port 2(vetha5dfc72) entered disabled state
+[Sat Oct 24 19:02:26 2026] vetha5dfc72 (unregistering): left allmulticast mode
+[Sat Oct 24 19:02:26 2026] vetha5dfc72 (unregistering): left promiscuous mode
+[Sat Oct 24 19:02:26 2026] br-654364155fc1: port 2(vetha5dfc72) entered disabled state
+[Sat Oct 24 19:17:00 2026] docker0: port 1(vethd5ca9c8) entered blocking state
+[Sat Oct 24 19:17:00 2026] docker0: port 1(vethd5ca9c8) entered disabled state
+[Sat Oct 24 19:17:00 2026] vethd5ca9c8: entered allmulticast mode
+[Sat Oct 24 19:17:00 2026] vethd5ca9c8: entered promiscuous mode
+[Sat Oct 24 19:17:00 2026] eth0: renamed from veth8d7146c
+[Sat Oct 24 19:17:00 2026] docker0: port 1(vethd5ca9c8) entered blocking state
+[Sat Oct 24 19:17:00 2026] docker0: port 1(vethd5ca9c8) entered forwarding state
+[Sat Oct 24 19:19:19 2026] docker0: port 1(vethd5ca9c8) entered disabled state
+[Sat Oct 24 19:19:19 2026] veth8d7146c: renamed from eth0
+[Sat Oct 24 19:19:19 2026] docker0: port 1(vethd5ca9c8) entered disabled state
+[Sat Oct 24 19:19:19 2026] vethd5ca9c8 (unregistering): left allmulticast mode
+[Sat Oct 24 19:19:19 2026] vethd5ca9c8 (unregistering): left promiscuous mode
+[Sat Oct 24 19:19:19 2026] docker0: port 1(vethd5ca9c8) entered disabled state
+[Sat Oct 24 19:21:26 2026] br-654364155fc1: port 2(veth78d3f78) entered blocking state
+[Sat Oct 24 19:21:26 2026] br-654364155fc1: port 2(veth78d3f78) entered disabled state
+[Sat Oct 24 19:21:26 2026] veth78d3f78: entered allmulticast mode
+[Sat Oct 24 19:21:26 2026] veth78d3f78: entered promiscuous mode
+[Sat Oct 24 19:21:26 2026] br-654364155fc1: port 3(veth2adc838) entered blocking state
+[Sat Oct 24 19:21:26 2026] br-654364155fc1: port 3(veth2adc838) entered disabled state
+[Sat Oct 24 19:21:26 2026] veth2adc838: entered allmulticast mode
+[Sat Oct 24 19:21:26 2026] veth2adc838: entered promiscuous mode
+[Sat Oct 24 19:21:26 2026] eth0: renamed from veth908980b
+[Sat Oct 24 19:21:26 2026] br-654364155fc1: port 2(veth78d3f78) entered blocking state
+[Sat Oct 24 19:21:26 2026] br-654364155fc1: port 2(veth78d3f78) entered forwarding state
+[Sat Oct 24 19:21:26 2026] eth0: renamed from vethb774ac4
+[Sat Oct 24 19:21:26 2026] br-654364155fc1: port 3(veth2adc838) entered blocking state
+[Sat Oct 24 19:21:26 2026] br-654364155fc1: port 3(veth2adc838) entered forwarding state
+[Sat Oct 24 19:21:32 2026] br-654364155fc1: port 2(veth78d3f78) entered disabled state
+[Sat Oct 24 19:21:32 2026] veth908980b: renamed from eth0
+[Sat Oct 24 19:21:32 2026] br-654364155fc1: port 2(veth78d3f78) entered disabled state
+[Sat Oct 24 19:21:32 2026] veth78d3f78 (unregistering): left allmulticast mode
+[Sat Oct 24 19:21:32 2026] veth78d3f78 (unregistering): left promiscuous mode
+[Sat Oct 24 19:21:32 2026] br-654364155fc1: port 2(veth78d3f78) entered disabled state
+[Sat Oct 24 19:21:41 2026] br-654364155fc1: port 3(veth2adc838) entered disabled state
+[Sat Oct 24 19:21:41 2026] vethb774ac4: renamed from eth0
+[Sat Oct 24 19:21:41 2026] br-654364155fc1: port 3(veth2adc838) entered disabled state
+[Sat Oct 24 19:21:41 2026] veth2adc838 (unregistering): left allmulticast mode
+[Sat Oct 24 19:21:41 2026] veth2adc838 (unregistering): left promiscuous mode
+[Sat Oct 24 19:21:41 2026] br-654364155fc1: port 3(veth2adc838) entered disabled state
+[Sat Oct 24 19:40:38 2026] docker0: port 1(veth7b2fd44) entered blocking state
+[Sat Oct 24 19:40:38 2026] docker0: port 1(veth7b2fd44) entered disabled state
+[Sat Oct 24 19:40:38 2026] veth7b2fd44: entered allmulticast mode
+[Sat Oct 24 19:40:38 2026] veth7b2fd44: entered promiscuous mode
+[Sat Oct 24 19:40:38 2026] eth0: renamed from veth98c826d
+[Sat Oct 24 19:40:38 2026] docker0: port 1(veth7b2fd44) entered blocking state
+[Sat Oct 24 19:40:38 2026] docker0: port 1(veth7b2fd44) entered forwarding state
+[Sat Oct 24 19:42:36 2026] docker0: port 1(veth7b2fd44) entered disabled state
+[Sat Oct 24 19:42:36 2026] veth98c826d: renamed from eth0
+[Sat Oct 24 19:42:36 2026] docker0: port 1(veth7b2fd44) entered disabled state
+[Sat Oct 24 19:42:36 2026] veth7b2fd44 (unregistering): left allmulticast mode
+[Sat Oct 24 19:42:36 2026] veth7b2fd44 (unregistering): left promiscuous mode
+[Sat Oct 24 19:42:36 2026] docker0: port 1(veth7b2fd44) entered disabled state
+[Sat Oct 24 19:42:42 2026] docker0: port 1(vethe7157ef) entered blocking state
+[Sat Oct 24 19:42:42 2026] docker0: port 1(vethe7157ef) entered disabled state
+[Sat Oct 24 19:42:42 2026] vethe7157ef: entered allmulticast mode
+[Sat Oct 24 19:42:42 2026] vethe7157ef: entered promiscuous mode
+[Sat Oct 24 19:42:42 2026] eth0: renamed from veth2e9e91b
+[Sat Oct 24 19:42:42 2026] docker0: port 1(vethe7157ef) entered blocking state
+[Sat Oct 24 19:42:42 2026] docker0: port 1(vethe7157ef) entered forwarding state
+[Sat Oct 24 19:45:37 2026] docker0: port 1(vethe7157ef) entered disabled state
+[Sat Oct 24 19:45:37 2026] veth2e9e91b: renamed from eth0
+[Sat Oct 24 19:45:37 2026] docker0: port 1(vethe7157ef) entered disabled state
+[Sat Oct 24 19:45:37 2026] vethe7157ef (unregistering): left allmulticast mode
+[Sat Oct 24 19:45:37 2026] vethe7157ef (unregistering): left promiscuous mode
+[Sat Oct 24 19:45:37 2026] docker0: port 1(vethe7157ef) entered disabled state
+[Sat Oct 24 19:45:46 2026] br-654364155fc1: port 2(veth4f33cab) entered blocking state
+[Sat Oct 24 19:45:46 2026] br-654364155fc1: port 2(veth4f33cab) entered disabled state
+[Sat Oct 24 19:45:46 2026] veth4f33cab: entered allmulticast mode
+[Sat Oct 24 19:45:46 2026] veth4f33cab: entered promiscuous mode
+[Sat Oct 24 19:45:46 2026] br-654364155fc1: port 3(vetha1a98f4) entered blocking state
+[Sat Oct 24 19:45:46 2026] br-654364155fc1: port 3(vetha1a98f4) entered disabled state
+[Sat Oct 24 19:45:46 2026] vetha1a98f4: entered allmulticast mode
+[Sat Oct 24 19:45:46 2026] vetha1a98f4: entered promiscuous mode
+[Sat Oct 24 19:45:46 2026] eth0: renamed from veth503c141
+[Sat Oct 24 19:45:46 2026] br-654364155fc1: port 2(veth4f33cab) entered blocking state
+[Sat Oct 24 19:45:46 2026] br-654364155fc1: port 2(veth4f33cab) entered forwarding state
+[Sat Oct 24 19:45:46 2026] eth0: renamed from vethddecca8
+[Sat Oct 24 19:45:46 2026] br-654364155fc1: port 3(vetha1a98f4) entered blocking state
+[Sat Oct 24 19:45:46 2026] br-654364155fc1: port 3(vetha1a98f4) entered forwarding state
+[Sat Oct 24 19:45:51 2026] br-654364155fc1: port 2(veth4f33cab) entered disabled state
+[Sat Oct 24 19:45:51 2026] veth503c141: renamed from eth0
+[Sat Oct 24 19:45:51 2026] br-654364155fc1: port 2(veth4f33cab) entered disabled state
+[Sat Oct 24 19:45:51 2026] veth4f33cab (unregistering): left allmulticast mode
+[Sat Oct 24 19:45:51 2026] veth4f33cab (unregistering): left promiscuous mode
+[Sat Oct 24 19:45:51 2026] br-654364155fc1: port 2(veth4f33cab) entered disabled state
+[Sat Oct 24 19:46:02 2026] br-654364155fc1: port 3(vetha1a98f4) entered disabled state
+[Sat Oct 24 19:46:02 2026] vethddecca8: renamed from eth0
+[Sat Oct 24 19:46:02 2026] br-654364155fc1: port 3(vetha1a98f4) entered disabled state
+[Sat Oct 24 19:46:02 2026] vetha1a98f4 (unregistering): left allmulticast mode
+[Sat Oct 24 19:46:02 2026] vetha1a98f4 (unregistering): left promiscuous mode
+[Sat Oct 24 19:46:02 2026] br-654364155fc1: port 3(vetha1a98f4) entered disabled state
+[Sat Oct 24 20:00:14 2026] docker0: port 1(veth8ce53bf) entered blocking state
+[Sat Oct 24 20:00:14 2026] docker0: port 1(veth8ce53bf) entered disabled state
+[Sat Oct 24 20:00:14 2026] veth8ce53bf: entered allmulticast mode
+[Sat Oct 24 20:00:14 2026] veth8ce53bf: entered promiscuous mode
+[Sat Oct 24 20:00:14 2026] eth0: renamed from vethc7a1926
+[Sat Oct 24 20:00:14 2026] docker0: port 1(veth8ce53bf) entered blocking state
+[Sat Oct 24 20:00:14 2026] docker0: port 1(veth8ce53bf) entered forwarding state
+[Sat Oct 24 20:05:47 2026] docker0: port 1(veth8ce53bf) entered disabled state
+[Sat Oct 24 20:05:47 2026] vethc7a1926: renamed from eth0
+[Sat Oct 24 20:05:47 2026] docker0: port 1(veth8ce53bf) entered disabled state
+[Sat Oct 24 20:05:47 2026] veth8ce53bf (unregistering): left allmulticast mode
+[Sat Oct 24 20:05:47 2026] veth8ce53bf (unregistering): left promiscuous mode
+[Sat Oct 24 20:05:47 2026] docker0: port 1(veth8ce53bf) entered disabled state
+[Sat Oct 24 20:06:16 2026] docker0: port 1(veth266a589) entered blocking state
+[Sat Oct 24 20:06:16 2026] docker0: port 1(veth266a589) entered disabled state
+[Sat Oct 24 20:06:16 2026] veth266a589: entered allmulticast mode
+[Sat Oct 24 20:06:16 2026] veth266a589: entered promiscuous mode
+[Sat Oct 24 20:06:16 2026] eth0: renamed from vethae71b13
+[Sat Oct 24 20:06:16 2026] docker0: port 1(veth266a589) entered blocking state
+[Sat Oct 24 20:06:16 2026] docker0: port 1(veth266a589) entered forwarding state
+[Sat Oct 24 20:09:05 2026] docker0: port 1(veth266a589) entered disabled state
+[Sat Oct 24 20:09:05 2026] vethae71b13: renamed from eth0
+[Sat Oct 24 20:09:05 2026] docker0: port 1(veth266a589) entered disabled state
+[Sat Oct 24 20:09:05 2026] veth266a589 (unregistering): left allmulticast mode
+[Sat Oct 24 20:09:05 2026] veth266a589 (unregistering): left promiscuous mode
+[Sat Oct 24 20:09:05 2026] docker0: port 1(veth266a589) entered disabled state
+[Sat Oct 24 20:10:07 2026] br-654364155fc1: port 2(vethde7048f) entered blocking state
+[Sat Oct 24 20:10:07 2026] br-654364155fc1: port 2(vethde7048f) entered disabled state
+[Sat Oct 24 20:10:07 2026] vethde7048f: entered allmulticast mode
+[Sat Oct 24 20:10:07 2026] vethde7048f: entered promiscuous mode
+[Sat Oct 24 20:10:07 2026] br-654364155fc1: port 3(veth39f3268) entered blocking state
+[Sat Oct 24 20:10:07 2026] br-654364155fc1: port 3(veth39f3268) entered disabled state
+[Sat Oct 24 20:10:07 2026] veth39f3268: entered allmulticast mode
+[Sat Oct 24 20:10:07 2026] veth39f3268: entered promiscuous mode
+[Sat Oct 24 20:10:07 2026] eth0: renamed from veth3998e35
+[Sat Oct 24 20:10:07 2026] br-654364155fc1: port 2(vethde7048f) entered blocking state
+[Sat Oct 24 20:10:07 2026] br-654364155fc1: port 2(vethde7048f) entered forwarding state
+[Sat Oct 24 20:10:07 2026] eth0: renamed from vetheab7dec
+[Sat Oct 24 20:10:07 2026] br-654364155fc1: port 3(veth39f3268) entered blocking state
+[Sat Oct 24 20:10:07 2026] br-654364155fc1: port 3(veth39f3268) entered forwarding state
+[Sat Oct 24 20:10:11 2026] br-654364155fc1: port 3(veth39f3268) entered disabled state
+[Sat Oct 24 20:10:11 2026] vetheab7dec: renamed from eth0
+[Sat Oct 24 20:10:11 2026] br-654364155fc1: port 3(veth39f3268) entered disabled state
+[Sat Oct 24 20:10:11 2026] veth39f3268 (unregistering): left allmulticast mode
+[Sat Oct 24 20:10:11 2026] veth39f3268 (unregistering): left promiscuous mode
+[Sat Oct 24 20:10:11 2026] br-654364155fc1: port 3(veth39f3268) entered disabled state
+[Sat Oct 24 20:10:21 2026] br-654364155fc1: port 2(vethde7048f) entered disabled state
+[Sat Oct 24 20:10:21 2026] veth3998e35: renamed from eth0
+[Sat Oct 24 20:10:21 2026] br-654364155fc1: port 2(vethde7048f) entered disabled state
+[Sat Oct 24 20:10:21 2026] vethde7048f (unregistering): left allmulticast mode
+[Sat Oct 24 20:10:21 2026] vethde7048f (unregistering): left promiscuous mode
+[Sat Oct 24 20:10:21 2026] br-654364155fc1: port 2(vethde7048f) entered disabled state
+[Sat Oct 24 20:19:23 2026] br-654364155fc1: port 2(vethc96501e) entered blocking state
+[Sat Oct 24 20:19:23 2026] br-654364155fc1: port 2(vethc96501e) entered disabled state
+[Sat Oct 24 20:19:23 2026] vethc96501e: entered allmulticast mode
+[Sat Oct 24 20:19:23 2026] vethc96501e: entered promiscuous mode
+[Sat Oct 24 20:19:23 2026] eth0: renamed from veth134a986
+[Sat Oct 24 20:19:23 2026] br-654364155fc1: port 2(vethc96501e) entered blocking state
+[Sat Oct 24 20:19:23 2026] br-654364155fc1: port 2(vethc96501e) entered forwarding state
+[Sat Oct 24 20:21:00 2026] docker0: port 1(vethca31d21) entered blocking state
+[Sat Oct 24 20:21:00 2026] docker0: port 1(vethca31d21) entered disabled state
+[Sat Oct 24 20:21:00 2026] vethca31d21: entered allmulticast mode
+[Sat Oct 24 20:21:00 2026] vethca31d21: entered promiscuous mode
+[Sat Oct 24 20:21:00 2026] eth0: renamed from veth4577101
+[Sat Oct 24 20:21:00 2026] docker0: port 1(vethca31d21) entered blocking state
+[Sat Oct 24 20:21:00 2026] docker0: port 1(vethca31d21) entered forwarding state
+[Sat Oct 24 20:21:18 2026] docker0: port 1(vethca31d21) entered disabled state
+[Sat Oct 24 20:21:18 2026] veth4577101: renamed from eth0
+[Sat Oct 24 20:21:18 2026] docker0: port 1(vethca31d21) entered disabled state
+[Sat Oct 24 20:21:18 2026] vethca31d21 (unregistering): left allmulticast mode
+[Sat Oct 24 20:21:18 2026] vethca31d21 (unregistering): left promiscuous mode
+[Sat Oct 24 20:21:18 2026] docker0: port 1(vethca31d21) entered disabled state
+[Sat Oct 24 20:23:08 2026] docker0: port 1(vethcee3486) entered blocking state
+[Sat Oct 24 20:23:08 2026] docker0: port 1(vethcee3486) entered disabled state
+[Sat Oct 24 20:23:08 2026] vethcee3486: entered allmulticast mode
+[Sat Oct 24 20:23:08 2026] vethcee3486: entered promiscuous mode
+[Sat Oct 24 20:23:09 2026] eth0: renamed from veth5d7cf53
+[Sat Oct 24 20:23:09 2026] docker0: port 1(vethcee3486) entered blocking state
+[Sat Oct 24 20:23:09 2026] docker0: port 1(vethcee3486) entered forwarding state
+[Sat Oct 24 20:33:49 2026] docker0: port 1(vethcee3486) entered disabled state
+[Sat Oct 24 20:33:49 2026] veth5d7cf53: renamed from eth0
+[Sat Oct 24 20:33:50 2026] docker0: port 1(vethcee3486) entered disabled state
+[Sat Oct 24 20:33:50 2026] vethcee3486 (unregistering): left allmulticast mode
+[Sat Oct 24 20:33:50 2026] vethcee3486 (unregistering): left promiscuous mode
+[Sat Oct 24 20:33:50 2026] docker0: port 1(vethcee3486) entered disabled state
+[Sat Oct 24 20:34:20 2026] br-654364155fc1: port 3(veth68e0e69) entered blocking state
+[Sat Oct 24 20:34:20 2026] br-654364155fc1: port 3(veth68e0e69) entered disabled state
+[Sat Oct 24 20:34:20 2026] veth68e0e69: entered allmulticast mode
+[Sat Oct 24 20:34:20 2026] veth68e0e69: entered promiscuous mode
+[Sat Oct 24 20:34:20 2026] br-654364155fc1: port 4(veth74c00d2) entered blocking state
+[Sat Oct 24 20:34:20 2026] br-654364155fc1: port 4(veth74c00d2) entered disabled state
+[Sat Oct 24 20:34:20 2026] veth74c00d2: entered allmulticast mode
+[Sat Oct 24 20:34:20 2026] veth74c00d2: entered promiscuous mode
+[Sat Oct 24 20:34:20 2026] eth0: renamed from vethf784b3a
+[Sat Oct 24 20:34:20 2026] br-654364155fc1: port 3(veth68e0e69) entered blocking state
+[Sat Oct 24 20:34:20 2026] br-654364155fc1: port 3(veth68e0e69) entered forwarding state
+[Sat Oct 24 20:34:20 2026] eth0: renamed from vethd4f0be1
+[Sat Oct 24 20:34:20 2026] br-654364155fc1: port 4(veth74c00d2) entered blocking state
+[Sat Oct 24 20:34:20 2026] br-654364155fc1: port 4(veth74c00d2) entered forwarding state
+[Sat Oct 24 20:34:25 2026] br-654364155fc1: port 4(veth74c00d2) entered disabled state
+[Sat Oct 24 20:34:25 2026] vethd4f0be1: renamed from eth0
+[Sat Oct 24 20:34:25 2026] br-654364155fc1: port 4(veth74c00d2) entered disabled state
+[Sat Oct 24 20:34:25 2026] veth74c00d2 (unregistering): left allmulticast mode
+[Sat Oct 24 20:34:25 2026] veth74c00d2 (unregistering): left promiscuous mode
+[Sat Oct 24 20:34:25 2026] br-654364155fc1: port 4(veth74c00d2) entered disabled state
+[Sat Oct 24 20:34:35 2026] br-654364155fc1: port 3(veth68e0e69) entered disabled state
+[Sat Oct 24 20:34:35 2026] vethf784b3a: renamed from eth0
+[Sat Oct 24 20:34:35 2026] br-654364155fc1: port 3(veth68e0e69) entered disabled state
+[Sat Oct 24 20:34:35 2026] veth68e0e69 (unregistering): left allmulticast mode
+[Sat Oct 24 20:34:35 2026] veth68e0e69 (unregistering): left promiscuous mode
+[Sat Oct 24 20:34:35 2026] br-654364155fc1: port 3(veth68e0e69) entered disabled state
+[Sat Oct 24 21:07:25 2026] docker0: port 1(vethf72b21b) entered blocking state
+[Sat Oct 24 21:07:25 2026] docker0: port 1(vethf72b21b) entered disabled state
+[Sat Oct 24 21:07:25 2026] vethf72b21b: entered allmulticast mode
+[Sat Oct 24 21:07:25 2026] vethf72b21b: entered promiscuous mode
+[Sat Oct 24 21:07:25 2026] eth0: renamed from veth80c89f9
+[Sat Oct 24 21:07:25 2026] docker0: port 1(vethf72b21b) entered blocking state
+[Sat Oct 24 21:07:25 2026] docker0: port 1(vethf72b21b) entered forwarding state
+[Sat Oct 24 21:14:33 2026] docker0: port 1(vethf72b21b) entered disabled state
+[Sat Oct 24 21:14:33 2026] veth80c89f9: renamed from eth0
+[Sat Oct 24 21:14:33 2026] docker0: port 1(vethf72b21b) entered disabled state
+[Sat Oct 24 21:14:33 2026] vethf72b21b (unregistering): left allmulticast mode
+[Sat Oct 24 21:14:33 2026] vethf72b21b (unregistering): left promiscuous mode
+[Sat Oct 24 21:14:33 2026] docker0: port 1(vethf72b21b) entered disabled state
+[Sat Oct 24 21:24:22 2026] br-654364155fc1: port 3(veth66ee520) entered blocking state
+[Sat Oct 24 21:24:22 2026] br-654364155fc1: port 3(veth66ee520) entered disabled state
+[Sat Oct 24 21:24:22 2026] veth66ee520: entered allmulticast mode
+[Sat Oct 24 21:24:22 2026] veth66ee520: entered promiscuous mode
+[Sat Oct 24 21:24:22 2026] eth0: renamed from vethc264133
+[Sat Oct 24 21:24:22 2026] br-654364155fc1: port 3(veth66ee520) entered blocking state
+[Sat Oct 24 21:24:22 2026] br-654364155fc1: port 3(veth66ee520) entered forwarding state
+[Sat Oct 24 21:24:23 2026] br-654364155fc1: port 4(veth68752de) entered blocking state
+[Sat Oct 24 21:24:23 2026] br-654364155fc1: port 4(veth68752de) entered disabled state
+[Sat Oct 24 21:24:23 2026] veth68752de: entered allmulticast mode
+[Sat Oct 24 21:24:23 2026] veth68752de: entered promiscuous mode
+[Sat Oct 24 21:24:23 2026] eth0: renamed from vethe3891f0
+[Sat Oct 24 21:24:23 2026] br-654364155fc1: port 4(veth68752de) entered blocking state
+[Sat Oct 24 21:24:23 2026] br-654364155fc1: port 4(veth68752de) entered forwarding state
+[Sat Oct 24 21:24:28 2026] br-654364155fc1: port 3(veth66ee520) entered disabled state
+[Sat Oct 24 21:24:28 2026] vethc264133: renamed from eth0
+[Sat Oct 24 21:24:28 2026] br-654364155fc1: port 3(veth66ee520) entered disabled state
+[Sat Oct 24 21:24:28 2026] veth66ee520 (unregistering): left allmulticast mode
+[Sat Oct 24 21:24:28 2026] veth66ee520 (unregistering): left promiscuous mode
+[Sat Oct 24 21:24:28 2026] br-654364155fc1: port 3(veth66ee520) entered disabled state
+[Sat Oct 24 21:24:36 2026] br-654364155fc1: port 4(veth68752de) entered disabled state
+[Sat Oct 24 21:24:36 2026] vethe3891f0: renamed from eth0
+[Sat Oct 24 21:24:37 2026] br-654364155fc1: port 4(veth68752de) entered disabled state
+[Sat Oct 24 21:24:37 2026] veth68752de (unregistering): left allmulticast mode
+[Sat Oct 24 21:24:37 2026] veth68752de (unregistering): left promiscuous mode
+[Sat Oct 24 21:24:37 2026] br-654364155fc1: port 4(veth68752de) entered disabled state
+[Sat Oct 24 21:26:21 2026] docker0: port 1(veth2b532f2) entered blocking state
+[Sat Oct 24 21:26:21 2026] docker0: port 1(veth2b532f2) entered disabled state
+[Sat Oct 24 21:26:21 2026] veth2b532f2: entered allmulticast mode
+[Sat Oct 24 21:26:21 2026] veth2b532f2: entered promiscuous mode
+[Sat Oct 24 21:26:21 2026] eth0: renamed from vethc0b85ec
+[Sat Oct 24 21:26:21 2026] docker0: port 1(veth2b532f2) entered blocking state
+[Sat Oct 24 21:26:21 2026] docker0: port 1(veth2b532f2) entered forwarding state
+[Sat Oct 24 21:26:21 2026] vethc0b85ec: renamed from eth0
+[Sat Oct 24 21:26:21 2026] docker0: port 1(veth2b532f2) entered disabled state
+[Sat Oct 24 21:26:21 2026] docker0: port 1(veth2b532f2) entered disabled state
+[Sat Oct 24 21:26:21 2026] veth2b532f2 (unregistering): left allmulticast mode
+[Sat Oct 24 21:26:21 2026] veth2b532f2 (unregistering): left promiscuous mode
+[Sat Oct 24 21:26:21 2026] docker0: port 1(veth2b532f2) entered disabled state
+[Sat Oct 24 21:26:47 2026] docker0: port 1(vethc39fac0) entered blocking state
+[Sat Oct 24 21:26:47 2026] docker0: port 1(vethc39fac0) entered disabled state
+[Sat Oct 24 21:26:47 2026] vethc39fac0: entered allmulticast mode
+[Sat Oct 24 21:26:47 2026] vethc39fac0: entered promiscuous mode
+[Sat Oct 24 21:26:47 2026] eth0: renamed from veth573168c
+[Sat Oct 24 21:26:47 2026] docker0: port 1(vethc39fac0) entered blocking state
+[Sat Oct 24 21:26:47 2026] docker0: port 1(vethc39fac0) entered forwarding state
+[Sat Oct 24 21:26:48 2026] veth573168c: renamed from eth0
+[Sat Oct 24 21:26:48 2026] docker0: port 1(vethc39fac0) entered disabled state
+[Sat Oct 24 21:26:48 2026] docker0: port 1(vethc39fac0) entered disabled state
+[Sat Oct 24 21:26:48 2026] vethc39fac0 (unregistering): left allmulticast mode
+[Sat Oct 24 21:26:48 2026] vethc39fac0 (unregistering): left promiscuous mode
+[Sat Oct 24 21:26:48 2026] docker0: port 1(vethc39fac0) entered disabled state
+[Sat Oct 24 21:27:00 2026] docker0: port 1(vethce70e6b) entered blocking state
+[Sat Oct 24 21:27:00 2026] docker0: port 1(vethce70e6b) entered disabled state
+[Sat Oct 24 21:27:00 2026] vethce70e6b: entered allmulticast mode
+[Sat Oct 24 21:27:00 2026] vethce70e6b: entered promiscuous mode
+[Sat Oct 24 21:27:00 2026] eth0: renamed from veth71febfc
+[Sat Oct 24 21:27:00 2026] docker0: port 1(vethce70e6b) entered blocking state
+[Sat Oct 24 21:27:00 2026] docker0: port 1(vethce70e6b) entered forwarding state
+[Sat Oct 24 21:46:48 2026] docker0: port 1(vethce70e6b) entered disabled state
+[Sat Oct 24 21:46:48 2026] veth71febfc: renamed from eth0
+[Sat Oct 24 21:46:48 2026] docker0: port 1(vethce70e6b) entered disabled state
+[Sat Oct 24 21:46:48 2026] vethce70e6b (unregistering): left allmulticast mode
+[Sat Oct 24 21:46:48 2026] vethce70e6b (unregistering): left promiscuous mode
+[Sat Oct 24 21:46:48 2026] docker0: port 1(vethce70e6b) entered disabled state
+[Sat Oct 24 21:48:24 2026] docker0: port 1(vethb1d3dc8) entered blocking state
+[Sat Oct 24 21:48:24 2026] docker0: port 1(vethb1d3dc8) entered disabled state
+[Sat Oct 24 21:48:24 2026] vethb1d3dc8: entered allmulticast mode
+[Sat Oct 24 21:48:24 2026] vethb1d3dc8: entered promiscuous mode
+[Sat Oct 24 21:48:24 2026] eth0: renamed from vethd105409
+[Sat Oct 24 21:48:24 2026] docker0: port 1(vethb1d3dc8) entered blocking state
+[Sat Oct 24 21:48:24 2026] docker0: port 1(vethb1d3dc8) entered forwarding state
+[Sat Oct 24 22:14:06 2026] docker0: port 1(vethb1d3dc8) entered disabled state
+[Sat Oct 24 22:14:06 2026] vethd105409: renamed from eth0
+[Sat Oct 24 22:14:07 2026] docker0: port 1(vethb1d3dc8) entered disabled state
+[Sat Oct 24 22:14:07 2026] vethb1d3dc8 (unregistering): left allmulticast mode
+[Sat Oct 24 22:14:07 2026] vethb1d3dc8 (unregistering): left promiscuous mode
+[Sat Oct 24 22:14:07 2026] docker0: port 1(vethb1d3dc8) entered disabled state
+[Sat Oct 24 22:15:33 2026] br-654364155fc1: port 3(veth9626e73) entered blocking state
+[Sat Oct 24 22:15:33 2026] br-654364155fc1: port 3(veth9626e73) entered disabled state
+[Sat Oct 24 22:15:33 2026] veth9626e73: entered allmulticast mode
+[Sat Oct 24 22:15:33 2026] veth9626e73: entered promiscuous mode
+[Sat Oct 24 22:15:33 2026] eth0: renamed from vethf035be3
+[Sat Oct 24 22:15:33 2026] br-654364155fc1: port 3(veth9626e73) entered blocking state
+[Sat Oct 24 22:15:33 2026] br-654364155fc1: port 3(veth9626e73) entered forwarding state
+[Sat Oct 24 22:15:34 2026] br-654364155fc1: port 4(veth0a32c07) entered blocking state
+[Sat Oct 24 22:15:34 2026] br-654364155fc1: port 4(veth0a32c07) entered disabled state
+[Sat Oct 24 22:15:34 2026] veth0a32c07: entered allmulticast mode
+[Sat Oct 24 22:15:34 2026] veth0a32c07: entered promiscuous mode
+[Sat Oct 24 22:15:34 2026] eth0: renamed from veth43b6d88
+[Sat Oct 24 22:15:34 2026] br-654364155fc1: port 4(veth0a32c07) entered blocking state
+[Sat Oct 24 22:15:34 2026] br-654364155fc1: port 4(veth0a32c07) entered forwarding state
+[Sat Oct 24 22:19:12 2026] br-654364155fc1: port 3(veth9626e73) entered disabled state
+[Sat Oct 24 22:19:12 2026] vethf035be3: renamed from eth0
+[Sat Oct 24 22:19:12 2026] br-654364155fc1: port 3(veth9626e73) entered disabled state
+[Sat Oct 24 22:19:12 2026] veth9626e73 (unregistering): left allmulticast mode
+[Sat Oct 24 22:19:12 2026] veth9626e73 (unregistering): left promiscuous mode
+[Sat Oct 24 22:19:12 2026] br-654364155fc1: port 3(veth9626e73) entered disabled state
+[Sat Oct 24 22:19:22 2026] br-654364155fc1: port 4(veth0a32c07) entered disabled state
+[Sat Oct 24 22:19:22 2026] veth43b6d88: renamed from eth0
+[Sat Oct 24 22:19:23 2026] br-654364155fc1: port 4(veth0a32c07) entered disabled state
+[Sat Oct 24 22:19:23 2026] veth0a32c07 (unregistering): left allmulticast mode
+[Sat Oct 24 22:19:23 2026] veth0a32c07 (unregistering): left promiscuous mode
+[Sat Oct 24 22:19:23 2026] br-654364155fc1: port 4(veth0a32c07) entered disabled state
+[Sat Oct 24 22:19:23 2026] systemd-journald[134]: Time jumped backwards, rotating.
+[Sat Oct 24 22:31:51 2026] br-654364155fc1: port 3(veth63931bf) entered blocking state
+[Sat Oct 24 22:31:51 2026] br-654364155fc1: port 3(veth63931bf) entered disabled state
+[Sat Oct 24 22:31:51 2026] veth63931bf: entered allmulticast mode
+[Sat Oct 24 22:31:51 2026] veth63931bf: entered promiscuous mode
+[Sat Oct 24 22:31:51 2026] eth0: renamed from veth37c87c8
+[Sat Oct 24 22:31:51 2026] br-654364155fc1: port 3(veth63931bf) entered blocking state
+[Sat Oct 24 22:31:51 2026] br-654364155fc1: port 3(veth63931bf) entered forwarding state
+[Sat Oct 24 22:33:01 2026] br-654364155fc1: port 3(veth63931bf) entered disabled state
+[Sat Oct 24 22:33:01 2026] veth37c87c8: renamed from eth0
+[Sat Oct 24 22:33:01 2026] br-654364155fc1: port 3(veth63931bf) entered disabled state
+[Sat Oct 24 22:33:01 2026] veth63931bf (unregistering): left allmulticast mode
+[Sat Oct 24 22:33:01 2026] veth63931bf (unregistering): left promiscuous mode
+[Sat Oct 24 22:33:01 2026] br-654364155fc1: port 3(veth63931bf) entered disabled state
+[Sat Oct 24 22:46:08 2026] docker0: port 1(vethc2b1b50) entered blocking state
+[Sat Oct 24 22:46:08 2026] docker0: port 1(vethc2b1b50) entered disabled state
+[Sat Oct 24 22:46:08 2026] vethc2b1b50: entered allmulticast mode
+[Sat Oct 24 22:46:08 2026] vethc2b1b50: entered promiscuous mode
+[Sat Oct 24 22:46:08 2026] eth0: renamed from veth93fc220
+[Sat Oct 24 22:46:08 2026] docker0: port 1(vethc2b1b50) entered blocking state
+[Sat Oct 24 22:46:08 2026] docker0: port 1(vethc2b1b50) entered forwarding state
+[Sat Oct 24 22:46:08 2026] docker0: port 1(vethc2b1b50) entered disabled state
+[Sat Oct 24 22:46:08 2026] veth93fc220: renamed from eth0
+[Sat Oct 24 22:46:08 2026] docker0: port 1(vethc2b1b50) entered disabled state
+[Sat Oct 24 22:46:08 2026] vethc2b1b50 (unregistering): left allmulticast mode
+[Sat Oct 24 22:46:08 2026] vethc2b1b50 (unregistering): left promiscuous mode
+[Sat Oct 24 22:46:08 2026] docker0: port 1(vethc2b1b50) entered disabled state
+[Sat Oct 24 22:57:36 2026] docker0: port 1(vethbec45e4) entered blocking state
+[Sat Oct 24 22:57:36 2026] docker0: port 1(vethbec45e4) entered disabled state
+[Sat Oct 24 22:57:36 2026] vethbec45e4: entered allmulticast mode
+[Sat Oct 24 22:57:36 2026] vethbec45e4: entered promiscuous mode
+[Sat Oct 24 22:57:36 2026] eth0: renamed from veth8d91f15
+[Sat Oct 24 22:57:36 2026] docker0: port 1(vethbec45e4) entered blocking state
+[Sat Oct 24 22:57:36 2026] docker0: port 1(vethbec45e4) entered forwarding state
+[Sat Oct 24 22:57:37 2026] docker0: port 1(vethbec45e4) entered disabled state
+[Sat Oct 24 22:57:37 2026] veth8d91f15: renamed from eth0
+[Sat Oct 24 22:57:37 2026] docker0: port 1(vethbec45e4) entered disabled state
+[Sat Oct 24 22:57:37 2026] vethbec45e4 (unregistering): left allmulticast mode
+[Sat Oct 24 22:57:37 2026] vethbec45e4 (unregistering): left promiscuous mode
+[Sat Oct 24 22:57:37 2026] docker0: port 1(vethbec45e4) entered disabled state
+[Sat Oct 24 22:59:56 2026] docker0: port 1(vethe9a1de9) entered blocking state
+[Sat Oct 24 22:59:56 2026] docker0: port 1(vethe9a1de9) entered disabled state
+[Sat Oct 24 22:59:56 2026] vethe9a1de9: entered allmulticast mode
+[Sat Oct 24 22:59:56 2026] vethe9a1de9: entered promiscuous mode
+[Sat Oct 24 22:59:56 2026] eth0: renamed from veth9404555
+[Sat Oct 24 22:59:56 2026] docker0: port 1(vethe9a1de9) entered blocking state
+[Sat Oct 24 22:59:56 2026] docker0: port 1(vethe9a1de9) entered forwarding state
+[Sat Oct 24 23:00:36 2026] docker0: port 1(vethe9a1de9) entered disabled state
+[Sat Oct 24 23:00:36 2026] veth9404555: renamed from eth0
+[Sat Oct 24 23:00:36 2026] docker0: port 1(vethe9a1de9) entered disabled state
+[Sat Oct 24 23:00:36 2026] vethe9a1de9 (unregistering): left allmulticast mode
+[Sat Oct 24 23:00:36 2026] vethe9a1de9 (unregistering): left promiscuous mode
+[Sat Oct 24 23:00:36 2026] docker0: port 1(vethe9a1de9) entered disabled state
+[Sat Oct 24 23:12:34 2026] docker0: port 1(vethfe95e31) entered blocking state
+[Sat Oct 24 23:12:34 2026] docker0: port 1(vethfe95e31) entered disabled state
+[Sat Oct 24 23:12:34 2026] vethfe95e31: entered allmulticast mode
+[Sat Oct 24 23:12:34 2026] vethfe95e31: entered promiscuous mode
+[Sat Oct 24 23:12:34 2026] eth0: renamed from veth3d53d57
+[Sat Oct 24 23:12:34 2026] docker0: port 1(vethfe95e31) entered blocking state
+[Sat Oct 24 23:12:34 2026] docker0: port 1(vethfe95e31) entered forwarding state
+[Sat Oct 24 23:16:02 2026] nfs: server 127.0.0.1 not responding, still trying
+[Sat Oct 24 23:16:51 2026] INFO: task native_mount::m:202000 blocked for more than 122 seconds.
+[Sat Oct 24 23:16:51 2026]       Not tainted 6.8.0-117-generic #117-Ubuntu
+[Sat Oct 24 23:16:51 2026] "echo 0 > /proc/sys/kernel/hung_task_timeout_secs" disables this message.
+[Sat Oct 24 23:16:51 2026] task:native_mount::m state:D stack:0     pid:202000 tgid:202000 ppid:201930 flags:0x00000408
+[Sat Oct 24 23:16:51 2026] Call trace:
+[Sat Oct 24 23:16:51 2026]  __switch_to+0xd8/0x120
+[Sat Oct 24 23:16:51 2026]  __schedule+0x2a4/0x788
+[Sat Oct 24 23:16:51 2026]  schedule+0x40/0x168
+[Sat Oct 24 23:16:51 2026]  fuse_set_nowrite+0xe4/0x128
+[Sat Oct 24 23:16:51 2026]  fuse_flush+0x104/0x1e8
+[Sat Oct 24 23:16:51 2026]  filp_flush+0x44/0xf0
+[Sat Oct 24 23:16:51 2026]  filp_close+0x24/0x60
+[Sat Oct 24 23:16:51 2026]  do_close_on_exec+0xfc/0x188
+[Sat Oct 24 23:16:51 2026]  begin_new_exec+0x1b4/0x418
+[Sat Oct 24 23:16:51 2026]  load_elf_binary+0x394/0xcf8
+[Sat Oct 24 23:16:51 2026]  search_binary_handler+0xdc/0x280
+[Sat Oct 24 23:16:51 2026]  exec_binprm+0x64/0x220
+[Sat Oct 24 23:16:51 2026]  bprm_execve.part.0+0x194/0x230
+[Sat Oct 24 23:16:51 2026]  bprm_execve+0x48/0x90
+[Sat Oct 24 23:16:51 2026]  do_execveat_common.isra.0+0x228/0x288
+[Sat Oct 24 23:16:51 2026]  __arm64_sys_execve+0x4c/0x90
+[Sat Oct 24 23:16:51 2026]  invoke_syscall+0x7c/0x130
+[Sat Oct 24 23:16:51 2026]  el0_svc_common.constprop.0+0x114/0x140
+[Sat Oct 24 23:16:51 2026]  do_el0_svc+0x28/0x58
+[Sat Oct 24 23:16:51 2026]  el0_svc+0x40/0x1c0
+[Sat Oct 24 23:16:51 2026]  el0t_64_sync_handler+0x148/0x158
+[Sat Oct 24 23:16:51 2026]  el0t_64_sync+0x1b0/0x1b8
+[Sat Oct 24 23:16:51 2026] INFO: task native_mount::m:202001 blocked for more than 122 seconds.
+[Sat Oct 24 23:16:51 2026]       Not tainted 6.8.0-117-generic #117-Ubuntu
+[Sat Oct 24 23:16:51 2026] "echo 0 > /proc/sys/kernel/hung_task_timeout_secs" disables this message.
+[Sat Oct 24 23:16:51 2026] task:native_mount::m state:D stack:0     pid:202001 tgid:202001 ppid:201929 flags:0x00000408
+[Sat Oct 24 23:16:51 2026] Call trace:
+[Sat Oct 24 23:16:51 2026]  __switch_to+0xd8/0x120
+[Sat Oct 24 23:16:51 2026]  __schedule+0x2a4/0x788
+[Sat Oct 24 23:16:51 2026]  schedule+0x40/0x168
+[Sat Oct 24 23:16:51 2026]  schedule_preempt_disabled+0x30/0x68
+[Sat Oct 24 23:16:51 2026]  rwsem_down_write_slowpath+0x27c/0x768
+[Sat Oct 24 23:16:51 2026]  down_write+0xcc/0xd8
+[Sat Oct 24 23:16:51 2026]  fuse_flush+0xfc/0x1e8
+[Sat Oct 24 23:16:51 2026]  filp_flush+0x44/0xf0
+[Sat Oct 24 23:16:51 2026]  filp_close+0x24/0x60
+[Sat Oct 24 23:16:51 2026]  do_close_on_exec+0xfc/0x188
+[Sat Oct 24 23:16:51 2026]  begin_new_exec+0x1b4/0x418
+[Sat Oct 24 23:16:51 2026]  load_elf_binary+0x394/0xcf8
+[Sat Oct 24 23:16:51 2026]  search_binary_handler+0xdc/0x280
+[Sat Oct 24 23:16:51 2026]  exec_binprm+0x64/0x220
+[Sat Oct 24 23:16:51 2026]  bprm_execve.part.0+0x194/0x230
+[Sat Oct 24 23:16:51 2026]  bprm_execve+0x48/0x90
+[Sat Oct 24 23:16:51 2026]  do_execveat_common.isra.0+0x228/0x288
+[Sat Oct 24 23:16:51 2026]  __arm64_sys_execve+0x4c/0x90
+[Sat Oct 24 23:16:51 2026]  invoke_syscall+0x7c/0x130
+[Sat Oct 24 23:16:51 2026]  el0_svc_common.constprop.0+0x114/0x140
+[Sat Oct 24 23:16:51 2026]  do_el0_svc+0x28/0x58
+[Sat Oct 24 23:16:51 2026]  el0_svc+0x40/0x1c0
+[Sat Oct 24 23:16:51 2026]  el0t_64_sync_handler+0x148/0x158
+[Sat Oct 24 23:16:51 2026]  el0t_64_sync+0x1b0/0x1b8
+[Sat Oct 24 23:16:51 2026] INFO: task tokio-rt-worker:202003 blocked for more than 122 seconds.
+[Sat Oct 24 23:16:51 2026]       Not tainted 6.8.0-117-generic #117-Ubuntu
+[Sat Oct 24 23:16:51 2026] "echo 0 > /proc/sys/kernel/hung_task_timeout_secs" disables this message.
+[Sat Oct 24 23:16:51 2026] task:tokio-rt-worker state:D stack:0     pid:202003 tgid:202003 ppid:202002 flags:0x00000408
+[Sat Oct 24 23:16:51 2026] Call trace:
+[Sat Oct 24 23:16:51 2026]  __switch_to+0xd8/0x120
+[Sat Oct 24 23:16:51 2026]  __schedule+0x2a4/0x788
+[Sat Oct 24 23:16:51 2026]  schedule+0x40/0x168
+[Sat Oct 24 23:16:51 2026]  schedule_preempt_disabled+0x30/0x68
+[Sat Oct 24 23:16:51 2026]  rwsem_down_write_slowpath+0x27c/0x768
+[Sat Oct 24 23:16:51 2026]  down_write+0xcc/0xd8
+[Sat Oct 24 23:16:51 2026]  fuse_flush+0xfc/0x1e8
+[Sat Oct 24 23:16:51 2026]  filp_flush+0x44/0xf0
+[Sat Oct 24 23:16:51 2026]  filp_close+0x24/0x60
+[Sat Oct 24 23:16:51 2026]  do_close_on_exec+0xfc/0x188
+[Sat Oct 24 23:16:51 2026]  begin_new_exec+0x1b4/0x418
+[Sat Oct 24 23:16:51 2026]  load_elf_binary+0x394/0xcf8
+[Sat Oct 24 23:16:51 2026]  search_binary_handler+0xdc/0x280
+[Sat Oct 24 23:16:51 2026]  exec_binprm+0x64/0x220
+[Sat Oct 24 23:16:51 2026]  bprm_execve.part.0+0x194/0x230
+[Sat Oct 24 23:16:51 2026]  bprm_execve+0x48/0x90
+[Sat Oct 24 23:16:51 2026]  do_execveat_common.isra.0+0x228/0x288
+[Sat Oct 24 23:16:51 2026]  __arm64_sys_execve+0x4c/0x90
+[Sat Oct 24 23:16:51 2026]  invoke_syscall+0x7c/0x130
+[Sat Oct 24 23:16:51 2026]  el0_svc_common.constprop.0+0x114/0x140
+[Sat Oct 24 23:16:51 2026]  do_el0_svc+0x28/0x58
+[Sat Oct 24 23:16:51 2026]  el0_svc+0x40/0x1c0
+[Sat Oct 24 23:16:51 2026]  el0t_64_sync_handler+0x148/0x158
+[Sat Oct 24 23:16:51 2026]  el0t_64_sync+0x1b0/0x1b8
+[Sat Oct 24 23:16:51 2026] INFO: task native_mount::m:202007 blocked for more than 122 seconds.
+[Sat Oct 24 23:16:51 2026]       Not tainted 6.8.0-117-generic #117-Ubuntu
+[Sat Oct 24 23:16:51 2026] "echo 0 > /proc/sys/kernel/hung_task_timeout_secs" disables this message.
+[Sat Oct 24 23:16:51 2026] task:native_mount::m state:D stack:0     pid:202007 tgid:202007 ppid:201931 flags:0x00000408
+[Sat Oct 24 23:16:51 2026] Call trace:
+[Sat Oct 24 23:16:51 2026]  __switch_to+0xd8/0x120
+[Sat Oct 24 23:16:51 2026]  __schedule+0x2a4/0x788
+[Sat Oct 24 23:16:51 2026]  schedule+0x40/0x168
+[Sat Oct 24 23:16:51 2026]  io_schedule+0x48/0x80
+[Sat Oct 24 23:16:51 2026]  folio_wait_bit_common+0x174/0x3e0
+[Sat Oct 24 23:16:51 2026]  folio_wait_bit+0x24/0x58
+[Sat Oct 24 23:16:51 2026]  folio_wait_writeback+0x5c/0xf0
+[Sat Oct 24 23:16:51 2026]  __filemap_fdatawait_range+0xb0/0x178
+[Sat Oct 24 23:16:51 2026]  filemap_write_and_wait_range+0xd0/0x118
+[Sat Oct 24 23:16:51 2026]  nfs_wb_all+0x34/0x1b8 [nfs]
+[Sat Oct 24 23:16:51 2026]  nfs_file_flush+0xac/0x110 [nfs]
+[Sat Oct 24 23:16:51 2026]  filp_flush+0x44/0xf0
+[Sat Oct 24 23:16:51 2026]  filp_close+0x24/0x60
+[Sat Oct 24 23:16:51 2026]  do_close_on_exec+0xfc/0x188
+[Sat Oct 24 23:16:51 2026]  begin_new_exec+0x1b4/0x418
+[Sat Oct 24 23:16:51 2026]  load_elf_binary+0x394/0xcf8
+[Sat Oct 24 23:16:51 2026]  search_binary_handler+0xdc/0x280
+[Sat Oct 24 23:16:51 2026]  exec_binprm+0x64/0x220
+[Sat Oct 24 23:16:51 2026]  bprm_execve.part.0+0x194/0x230
+[Sat Oct 24 23:16:51 2026]  bprm_execve+0x48/0x90
+[Sat Oct 24 23:16:51 2026]  do_execveat_common.isra.0+0x228/0x288
+[Sat Oct 24 23:16:51 2026]  __arm64_sys_execve+0x4c/0x90
+[Sat Oct 24 23:16:51 2026]  invoke_syscall+0x7c/0x130
+[Sat Oct 24 23:16:51 2026]  el0_svc_common.constprop.0+0x114/0x140
+[Sat Oct 24 23:16:51 2026]  do_el0_svc+0x28/0x58
+[Sat Oct 24 23:16:51 2026]  el0_svc+0x40/0x1c0
+[Sat Oct 24 23:16:51 2026]  el0t_64_sync_handler+0x148/0x158
+[Sat Oct 24 23:16:51 2026]  el0t_64_sync+0x1b0/0x1b8
+[Sat Oct 24 23:18:54 2026] INFO: task native_mount::m:202000 blocked for more than 245 seconds.
+[Sat Oct 24 23:18:54 2026]       Not tainted 6.8.0-117-generic #117-Ubuntu
+[Sat Oct 24 23:18:54 2026] "echo 0 > /proc/sys/kernel/hung_task_timeout_secs" disables this message.
+[Sat Oct 24 23:18:54 2026] task:native_mount::m state:D stack:0     pid:202000 tgid:202000 ppid:201930 flags:0x00000408
+[Sat Oct 24 23:18:54 2026] Call trace:
+[Sat Oct 24 23:18:54 2026]  __switch_to+0xd8/0x120
+[Sat Oct 24 23:18:54 2026]  __schedule+0x2a4/0x788
+[Sat Oct 24 23:18:54 2026]  schedule+0x40/0x168
+[Sat Oct 24 23:18:54 2026]  fuse_set_nowrite+0xe4/0x128
+[Sat Oct 24 23:18:54 2026]  fuse_flush+0x104/0x1e8
+[Sat Oct 24 23:18:54 2026]  filp_flush+0x44/0xf0
+[Sat Oct 24 23:18:54 2026]  filp_close+0x24/0x60
+[Sat Oct 24 23:18:54 2026]  do_close_on_exec+0xfc/0x188
+[Sat Oct 24 23:18:54 2026]  begin_new_exec+0x1b4/0x418
+[Sat Oct 24 23:18:54 2026]  load_elf_binary+0x394/0xcf8
+[Sat Oct 24 23:18:54 2026]  search_binary_handler+0xdc/0x280
+[Sat Oct 24 23:18:54 2026]  exec_binprm+0x64/0x220
+[Sat Oct 24 23:18:54 2026]  bprm_execve.part.0+0x194/0x230
+[Sat Oct 24 23:18:54 2026]  bprm_execve+0x48/0x90
+[Sat Oct 24 23:18:54 2026]  do_execveat_common.isra.0+0x228/0x288
+[Sat Oct 24 23:18:54 2026]  __arm64_sys_execve+0x4c/0x90
+[Sat Oct 24 23:18:54 2026]  invoke_syscall+0x7c/0x130
+[Sat Oct 24 23:18:54 2026]  el0_svc_common.constprop.0+0x114/0x140
+[Sat Oct 24 23:18:54 2026]  do_el0_svc+0x28/0x58
+[Sat Oct 24 23:18:54 2026]  el0_svc+0x40/0x1c0
+[Sat Oct 24 23:18:54 2026]  el0t_64_sync_handler+0x148/0x158
+[Sat Oct 24 23:18:54 2026]  el0t_64_sync+0x1b0/0x1b8
+[Sat Oct 24 23:18:54 2026] INFO: task native_mount::m:202001 blocked for more than 245 seconds.
+[Sat Oct 24 23:18:54 2026]       Not tainted 6.8.0-117-generic #117-Ubuntu
+[Sat Oct 24 23:18:54 2026] "echo 0 > /proc/sys/kernel/hung_task_timeout_secs" disables this message.
+[Sat Oct 24 23:18:54 2026] task:native_mount::m state:D stack:0     pid:202001 tgid:202001 ppid:201929 flags:0x00000408
+[Sat Oct 24 23:18:54 2026] Call trace:
+[Sat Oct 24 23:18:54 2026]  __switch_to+0xd8/0x120
+[Sat Oct 24 23:18:54 2026]  __schedule+0x2a4/0x788
+[Sat Oct 24 23:18:54 2026]  schedule+0x40/0x168
+[Sat Oct 24 23:18:54 2026]  schedule_preempt_disabled+0x30/0x68
+[Sat Oct 24 23:18:54 2026]  rwsem_down_write_slowpath+0x27c/0x768
+[Sat Oct 24 23:18:54 2026]  down_write+0xcc/0xd8
+[Sat Oct 24 23:18:54 2026]  fuse_flush+0xfc/0x1e8
+[Sat Oct 24 23:18:54 2026]  filp_flush+0x44/0xf0
+[Sat Oct 24 23:18:54 2026]  filp_close+0x24/0x60
+[Sat Oct 24 23:18:54 2026]  do_close_on_exec+0xfc/0x188
+[Sat Oct 24 23:18:54 2026]  begin_new_exec+0x1b4/0x418
+[Sat Oct 24 23:18:54 2026]  load_elf_binary+0x394/0xcf8
+[Sat Oct 24 23:18:54 2026]  search_binary_handler+0xdc/0x280
+[Sat Oct 24 23:18:54 2026]  exec_binprm+0x64/0x220
+[Sat Oct 24 23:18:54 2026]  bprm_execve.part.0+0x194/0x230
+[Sat Oct 24 23:18:54 2026]  bprm_execve+0x48/0x90
+[Sat Oct 24 23:18:54 2026]  do_execveat_common.isra.0+0x228/0x288
+[Sat Oct 24 23:18:54 2026]  __arm64_sys_execve+0x4c/0x90
+[Sat Oct 24 23:18:54 2026]  invoke_syscall+0x7c/0x130
+[Sat Oct 24 23:18:54 2026]  el0_svc_common.constprop.0+0x114/0x140
+[Sat Oct 24 23:18:54 2026]  do_el0_svc+0x28/0x58
+[Sat Oct 24 23:18:54 2026]  el0_svc+0x40/0x1c0
+[Sat Oct 24 23:18:54 2026]  el0t_64_sync_handler+0x148/0x158
+[Sat Oct 24 23:18:54 2026]  el0t_64_sync+0x1b0/0x1b8
+[Sat Oct 24 23:18:54 2026] INFO: task tokio-rt-worker:202003 blocked for more than 245 seconds.
+[Sat Oct 24 23:18:54 2026]       Not tainted 6.8.0-117-generic #117-Ubuntu
+[Sat Oct 24 23:18:54 2026] "echo 0 > /proc/sys/kernel/hung_task_timeout_secs" disables this message.
+[Sat Oct 24 23:18:54 2026] task:tokio-rt-worker state:D stack:0     pid:202003 tgid:202003 ppid:202002 flags:0x00000408
+[Sat Oct 24 23:18:54 2026] Call trace:
+[Sat Oct 24 23:18:54 2026]  __switch_to+0xd8/0x120
+[Sat Oct 24 23:18:54 2026]  __schedule+0x2a4/0x788
+[Sat Oct 24 23:18:54 2026]  schedule+0x40/0x168
+[Sat Oct 24 23:18:54 2026]  schedule_preempt_disabled+0x30/0x68
+[Sat Oct 24 23:18:54 2026]  rwsem_down_write_slowpath+0x27c/0x768
+[Sat Oct 24 23:18:54 2026]  down_write+0xcc/0xd8
+[Sat Oct 24 23:18:54 2026]  fuse_flush+0xfc/0x1e8
+[Sat Oct 24 23:18:54 2026]  filp_flush+0x44/0xf0
+[Sat Oct 24 23:18:54 2026]  filp_close+0x24/0x60
+[Sat Oct 24 23:18:54 2026]  do_close_on_exec+0xfc/0x188
+[Sat Oct 24 23:18:54 2026]  begin_new_exec+0x1b4/0x418
+[Sat Oct 24 23:18:54 2026]  load_elf_binary+0x394/0xcf8
+[Sat Oct 24 23:18:54 2026]  search_binary_handler+0xdc/0x280
+[Sat Oct 24 23:18:54 2026]  exec_binprm+0x64/0x220
+[Sat Oct 24 23:18:54 2026]  bprm_execve.part.0+0x194/0x230
+[Sat Oct 24 23:18:54 2026]  bprm_execve+0x48/0x90
+[Sat Oct 24 23:18:54 2026]  do_execveat_common.isra.0+0x228/0x288
+[Sat Oct 24 23:18:54 2026]  __arm64_sys_execve+0x4c/0x90
+[Sat Oct 24 23:18:54 2026]  invoke_syscall+0x7c/0x130
+[Sat Oct 24 23:18:54 2026]  el0_svc_common.constprop.0+0x114/0x140
+[Sat Oct 24 23:18:54 2026]  do_el0_svc+0x28/0x58
+[Sat Oct 24 23:18:54 2026]  el0_svc+0x40/0x1c0
+[Sat Oct 24 23:18:54 2026]  el0t_64_sync_handler+0x148/0x158
+[Sat Oct 24 23:18:54 2026]  el0t_64_sync+0x1b0/0x1b8
+[Sat Oct 24 23:18:54 2026] INFO: task native_mount::m:202007 blocked for more than 245 seconds.
+[Sat Oct 24 23:18:54 2026]       Not tainted 6.8.0-117-generic #117-Ubuntu
+[Sat Oct 24 23:18:54 2026] "echo 0 > /proc/sys/kernel/hung_task_timeout_secs" disables this message.
+[Sat Oct 24 23:18:54 2026] task:native_mount::m state:D stack:0     pid:202007 tgid:202007 ppid:201931 flags:0x00000408
+[Sat Oct 24 23:18:54 2026] Call trace:
+[Sat Oct 24 23:18:54 2026]  __switch_to+0xd8/0x120
+[Sat Oct 24 23:18:54 2026]  __schedule+0x2a4/0x788
+[Sat Oct 24 23:18:54 2026]  schedule+0x40/0x168
+[Sat Oct 24 23:18:54 2026]  io_schedule+0x48/0x80
+[Sat Oct 24 23:18:54 2026]  folio_wait_bit_common+0x174/0x3e0
+[Sat Oct 24 23:18:54 2026]  folio_wait_bit+0x24/0x58
+[Sat Oct 24 23:18:54 2026]  folio_wait_writeback+0x5c/0xf0
+[Sat Oct 24 23:18:54 2026]  __filemap_fdatawait_range+0xb0/0x178
+[Sat Oct 24 23:18:54 2026]  filemap_write_and_wait_range+0xd0/0x118
+[Sat Oct 24 23:18:54 2026]  nfs_wb_all+0x34/0x1b8 [nfs]
+[Sat Oct 24 23:18:54 2026]  nfs_file_flush+0xac/0x110 [nfs]
+[Sat Oct 24 23:18:54 2026]  filp_flush+0x44/0xf0
+[Sat Oct 24 23:18:54 2026]  filp_close+0x24/0x60
+[Sat Oct 24 23:18:54 2026]  do_close_on_exec+0xfc/0x188
+[Sat Oct 24 23:18:54 2026]  begin_new_exec+0x1b4/0x418
+[Sat Oct 24 23:18:54 2026]  load_elf_binary+0x394/0xcf8
+[Sat Oct 24 23:18:54 2026]  search_binary_handler+0xdc/0x280
+[Sat Oct 24 23:18:54 2026]  exec_binprm+0x64/0x220
+[Sat Oct 24 23:18:54 2026]  bprm_execve.part.0+0x194/0x230
+[Sat Oct 24 23:18:54 2026]  bprm_execve+0x48/0x90
+[Sat Oct 24 23:18:54 2026]  do_execveat_common.isra.0+0x228/0x288
+[Sat Oct 24 23:18:54 2026]  __arm64_sys_execve+0x4c/0x90
+[Sat Oct 24 23:18:54 2026]  invoke_syscall+0x7c/0x130
+[Sat Oct 24 23:18:54 2026]  el0_svc_common.constprop.0+0x114/0x140
+[Sat Oct 24 23:18:54 2026]  do_el0_svc+0x28/0x58
+[Sat Oct 24 23:18:54 2026]  el0_svc+0x40/0x1c0
+[Sat Oct 24 23:18:54 2026]  el0t_64_sync_handler+0x148/0x158
+[Sat Oct 24 23:18:54 2026]  el0t_64_sync+0x1b0/0x1b8
+[Sat Oct 24 23:20:57 2026] INFO: task native_mount::m:202000 blocked for more than 368 seconds.
+[Sat Oct 24 23:20:57 2026]       Not tainted 6.8.0-117-generic #117-Ubuntu
+[Sat Oct 24 23:20:57 2026] "echo 0 > /proc/sys/kernel/hung_task_timeout_secs" disables this message.
+[Sat Oct 24 23:20:57 2026] task:native_mount::m state:D stack:0     pid:202000 tgid:202000 ppid:201930 flags:0x00000408
+[Sat Oct 24 23:20:57 2026] Call trace:
+[Sat Oct 24 23:20:57 2026]  __switch_to+0xd8/0x120
+[Sat Oct 24 23:20:57 2026]  __schedule+0x2a4/0x788
+[Sat Oct 24 23:20:57 2026]  schedule+0x40/0x168
+[Sat Oct 24 23:20:57 2026]  fuse_set_nowrite+0xe4/0x128
+[Sat Oct 24 23:20:57 2026]  fuse_flush+0x104/0x1e8
+[Sat Oct 24 23:20:57 2026]  filp_flush+0x44/0xf0
+[Sat Oct 24 23:20:57 2026]  filp_close+0x24/0x60
+[Sat Oct 24 23:20:57 2026]  do_close_on_exec+0xfc/0x188
+[Sat Oct 24 23:20:57 2026]  begin_new_exec+0x1b4/0x418
+[Sat Oct 24 23:20:57 2026]  load_elf_binary+0x394/0xcf8
+[Sat Oct 24 23:20:57 2026]  search_binary_handler+0xdc/0x280
+[Sat Oct 24 23:20:57 2026]  exec_binprm+0x64/0x220
+[Sat Oct 24 23:20:57 2026]  bprm_execve.part.0+0x194/0x230
+[Sat Oct 24 23:20:57 2026]  bprm_execve+0x48/0x90
+[Sat Oct 24 23:20:57 2026]  do_execveat_common.isra.0+0x228/0x288
+[Sat Oct 24 23:20:57 2026]  __arm64_sys_execve+0x4c/0x90
+[Sat Oct 24 23:20:57 2026]  invoke_syscall+0x7c/0x130
+[Sat Oct 24 23:20:57 2026]  el0_svc_common.constprop.0+0x114/0x140
+[Sat Oct 24 23:20:57 2026]  do_el0_svc+0x28/0x58
+[Sat Oct 24 23:20:57 2026]  el0_svc+0x40/0x1c0
+[Sat Oct 24 23:20:57 2026]  el0t_64_sync_handler+0x148/0x158
+[Sat Oct 24 23:20:57 2026]  el0t_64_sync+0x1b0/0x1b8
+[Sat Oct 24 23:20:57 2026] INFO: task native_mount::m:202001 blocked for more than 368 seconds.
+[Sat Oct 24 23:20:57 2026]       Not tainted 6.8.0-117-generic #117-Ubuntu
+[Sat Oct 24 23:20:57 2026] "echo 0 > /proc/sys/kernel/hung_task_timeout_secs" disables this message.
+[Sat Oct 24 23:20:57 2026] task:native_mount::m state:D stack:0     pid:202001 tgid:202001 ppid:201929 flags:0x00000408
+[Sat Oct 24 23:20:57 2026] Call trace:
+[Sat Oct 24 23:20:57 2026]  __switch_to+0xd8/0x120
+[Sat Oct 24 23:20:57 2026]  __schedule+0x2a4/0x788
+[Sat Oct 24 23:20:57 2026]  schedule+0x40/0x168
+[Sat Oct 24 23:20:57 2026]  schedule_preempt_disabled+0x30/0x68
+[Sat Oct 24 23:20:57 2026]  rwsem_down_write_slowpath+0x27c/0x768
+[Sat Oct 24 23:20:57 2026]  down_write+0xcc/0xd8
+[Sat Oct 24 23:20:57 2026]  fuse_flush+0xfc/0x1e8
+[Sat Oct 24 23:20:57 2026]  filp_flush+0x44/0xf0
+[Sat Oct 24 23:20:57 2026]  filp_close+0x24/0x60
+[Sat Oct 24 23:20:57 2026]  do_close_on_exec+0xfc/0x188
+[Sat Oct 24 23:20:57 2026]  begin_new_exec+0x1b4/0x418
+[Sat Oct 24 23:20:57 2026]  load_elf_binary+0x394/0xcf8
+[Sat Oct 24 23:20:57 2026]  search_binary_handler+0xdc/0x280
+[Sat Oct 24 23:20:57 2026]  exec_binprm+0x64/0x220
+[Sat Oct 24 23:20:57 2026]  bprm_execve.part.0+0x194/0x230
+[Sat Oct 24 23:20:57 2026]  bprm_execve+0x48/0x90
+[Sat Oct 24 23:20:57 2026]  do_execveat_common.isra.0+0x228/0x288
+[Sat Oct 24 23:20:57 2026]  __arm64_sys_execve+0x4c/0x90
+[Sat Oct 24 23:20:57 2026]  invoke_syscall+0x7c/0x130
+[Sat Oct 24 23:20:57 2026]  el0_svc_common.constprop.0+0x114/0x140
+[Sat Oct 24 23:20:57 2026]  do_el0_svc+0x28/0x58
+[Sat Oct 24 23:20:57 2026]  el0_svc+0x40/0x1c0
+[Sat Oct 24 23:20:57 2026]  el0t_64_sync_handler+0x148/0x158
+[Sat Oct 24 23:20:57 2026]  el0t_64_sync+0x1b0/0x1b8
+[Sat Oct 24 23:20:57 2026] Future hung task reports are suppressed, see sysctl kernel.hung_task_warnings
+[Sat Oct 24 23:27:15 2026] docker0: port 2(vethfbb897b) entered blocking state
+[Sat Oct 24 23:27:15 2026] docker0: port 2(vethfbb897b) entered disabled state
+[Sat Oct 24 23:27:15 2026] vethfbb897b: entered allmulticast mode
+[Sat Oct 24 23:27:15 2026] vethfbb897b: entered promiscuous mode
+[Sat Oct 24 23:27:15 2026] eth0: renamed from veth0099390
+[Sat Oct 24 23:27:15 2026] docker0: port 2(vethfbb897b) entered blocking state
+[Sat Oct 24 23:27:15 2026] docker0: port 2(vethfbb897b) entered forwarding state
+[Sat Oct 24 23:28:02 2026] docker0: port 2(vethfbb897b) entered disabled state
+[Sat Oct 24 23:28:02 2026] veth0099390: renamed from eth0
+[Sat Oct 24 23:28:02 2026] nfs: server 127.0.0.1 not responding, still trying
+[Sat Oct 24 23:28:03 2026] docker0: port 2(vethfbb897b) entered disabled state
+[Sat Oct 24 23:28:03 2026] vethfbb897b (unregistering): left allmulticast mode
+[Sat Oct 24 23:28:03 2026] vethfbb897b (unregistering): left promiscuous mode
+[Sat Oct 24 23:28:03 2026] docker0: port 2(vethfbb897b) entered disabled state
+[Sat Oct 24 23:29:45 2026] docker0: port 2(vethc4f324b) entered blocking state
+[Sat Oct 24 23:29:45 2026] docker0: port 2(vethc4f324b) entered disabled state
+[Sat Oct 24 23:29:45 2026] vethc4f324b: entered allmulticast mode
+[Sat Oct 24 23:29:45 2026] vethc4f324b: entered promiscuous mode
+[Sat Oct 24 23:29:45 2026] eth0: renamed from veth72c80a3
+[Sat Oct 24 23:29:45 2026] docker0: port 2(vethc4f324b) entered blocking state
+[Sat Oct 24 23:29:45 2026] docker0: port 2(vethc4f324b) entered forwarding state
+[Sat Oct 24 23:30:33 2026] docker0: port 2(vethc4f324b) entered disabled state
+[Sat Oct 24 23:30:33 2026] veth72c80a3: renamed from eth0
+[Sat Oct 24 23:30:33 2026] docker0: port 2(vethc4f324b) entered disabled state
+[Sat Oct 24 23:30:33 2026] vethc4f324b (unregistering): left allmulticast mode
+[Sat Oct 24 23:30:33 2026] vethc4f324b (unregistering): left promiscuous mode
+[Sat Oct 24 23:30:33 2026] docker0: port 2(vethc4f324b) entered disabled state
+[Sat Oct 24 23:30:38 2026] docker0: port 1(vethfe95e31) entered disabled state
+[Sat Oct 24 23:30:38 2026] veth3d53d57: renamed from eth0
+[Sat Oct 24 23:30:38 2026] docker0: port 1(vethfe95e31) entered disabled state
+[Sat Oct 24 23:30:38 2026] vethfe95e31 (unregistering): left allmulticast mode
+[Sat Oct 24 23:30:38 2026] vethfe95e31 (unregistering): left promiscuous mode
+[Sat Oct 24 23:30:38 2026] docker0: port 1(vethfe95e31) entered disabled state
+[Sat Oct 24 23:31:05 2026] docker0: port 1(veth597d2dc) entered blocking state
+[Sat Oct 24 23:31:05 2026] docker0: port 1(veth597d2dc) entered disabled state
+[Sat Oct 24 23:31:05 2026] veth597d2dc: entered allmulticast mode
+[Sat Oct 24 23:31:05 2026] veth597d2dc: entered promiscuous mode
+[Sat Oct 24 23:31:05 2026] eth0: renamed from vethbe2d48b
+[Sat Oct 24 23:31:05 2026] docker0: port 1(veth597d2dc) entered blocking state
+[Sat Oct 24 23:31:05 2026] docker0: port 1(veth597d2dc) entered forwarding state
+[Sat Oct 24 23:31:40 2026] docker0: port 1(veth597d2dc) entered disabled state
+[Sat Oct 24 23:31:40 2026] vethbe2d48b: renamed from eth0
+[Sat Oct 24 23:31:40 2026] docker0: port 1(veth597d2dc) entered disabled state
+[Sat Oct 24 23:31:40 2026] veth597d2dc (unregistering): left allmulticast mode
+[Sat Oct 24 23:31:40 2026] veth597d2dc (unregistering): left promiscuous mode
+[Sat Oct 24 23:31:40 2026] docker0: port 1(veth597d2dc) entered disabled state
+[Sat Oct 24 23:32:56 2026] docker0: port 1(veth93de6e5) entered blocking state
+[Sat Oct 24 23:32:56 2026] docker0: port 1(veth93de6e5) entered disabled state
+[Sat Oct 24 23:32:56 2026] veth93de6e5: entered allmulticast mode
+[Sat Oct 24 23:32:56 2026] veth93de6e5: entered promiscuous mode
+[Sat Oct 24 23:32:56 2026] eth0: renamed from veth962c4dd
+[Sat Oct 24 23:32:56 2026] docker0: port 1(veth93de6e5) entered blocking state
+[Sat Oct 24 23:32:56 2026] docker0: port 1(veth93de6e5) entered forwarding state
+[Sat Oct 24 23:36:10 2026] docker0: port 1(veth93de6e5) entered disabled state
+[Sat Oct 24 23:36:10 2026] veth962c4dd: renamed from eth0
+[Sat Oct 24 23:36:10 2026] docker0: port 1(veth93de6e5) entered disabled state
+[Sat Oct 24 23:36:10 2026] veth93de6e5 (unregistering): left allmulticast mode
+[Sat Oct 24 23:36:10 2026] veth93de6e5 (unregistering): left promiscuous mode
+[Sat Oct 24 23:36:10 2026] docker0: port 1(veth93de6e5) entered disabled state
+[Sat Oct 24 23:37:00 2026] docker0: port 1(veth6a86041) entered blocking state
+[Sat Oct 24 23:37:00 2026] docker0: port 1(veth6a86041) entered disabled state
+[Sat Oct 24 23:37:00 2026] veth6a86041: entered allmulticast mode
+[Sat Oct 24 23:37:00 2026] veth6a86041: entered promiscuous mode
+[Sat Oct 24 23:37:00 2026] eth0: renamed from veth3fd01b9
+[Sat Oct 24 23:37:00 2026] docker0: port 1(veth6a86041) entered blocking state
+[Sat Oct 24 23:37:00 2026] docker0: port 1(veth6a86041) entered forwarding state
+[Sat Oct 24 23:37:21 2026] docker0: port 2(vethacb9083) entered blocking state
+[Sat Oct 24 23:37:21 2026] docker0: port 2(vethacb9083) entered disabled state
+[Sat Oct 24 23:37:21 2026] vethacb9083: entered allmulticast mode
+[Sat Oct 24 23:37:21 2026] vethacb9083: entered promiscuous mode
+[Sat Oct 24 23:37:22 2026] eth0: renamed from veth54c2654
+[Sat Oct 24 23:37:22 2026] docker0: port 2(vethacb9083) entered blocking state
+[Sat Oct 24 23:37:22 2026] docker0: port 2(vethacb9083) entered forwarding state

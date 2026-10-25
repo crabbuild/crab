@@ -1,0 +1,9 @@
+Traceback (most recent call last):
+  File "/e2e/probe.py", line 96, in <module>
+    run(control, action)
+  File "/e2e/probe.py", line 25, in run
+    raise RuntimeError(f'{label} failed with {result.returncode}: {result.stderr[-1800:].decode(errors="replace")}')
+RuntimeError: refresh failed with 6: error: configuration error [CRAB-E0050] in crab mount refresh: no live mount found at /mnt/mapped; run `crab mount list` to choose a mounted path
+help: Run `crab doctor` to inspect the current setup, or `crab configure` for guided repository configuration.
+docs: https://crab.build/docs/cli/reference/crab-configure
+

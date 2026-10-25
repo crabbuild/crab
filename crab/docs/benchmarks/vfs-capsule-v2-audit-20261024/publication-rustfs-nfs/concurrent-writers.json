@@ -1,0 +1,32 @@
+{
+  "writers": [
+    {
+      "bytes": 4194304,
+      "finished_ns": 28894056153310,
+      "path": "generated/worker-0.bin",
+      "sha256": "8a3a3c452e473f3672461ede2a41a56b18be8f0a722eac05dc7d9e2b6ce24f5e",
+      "started_ns": 28893899729033
+    },
+    {
+      "bytes": 4194304,
+      "finished_ns": 28894124343452,
+      "path": "generated/worker-1.bin",
+      "sha256": "0018a1ec8c39c91901dc091432aa9d2e9e5f6249b1a4562b0a9725d0c516cc35",
+      "started_ns": 28893899773071
+    },
+    {
+      "bytes": 4194304,
+      "finished_ns": 28894055910039,
+      "path": "generated/worker-2.bin",
+      "sha256": "f7ef8e9f49c4bd17a2daa60813df4056930bf1495e1ca3b317cb8ce40b2e8a11",
+      "started_ns": 28893899844898
+    },
+    {
+      "bytes": 4194304,
+      "finished_ns": 28893957276749,
+      "path": "generated/worker-3.bin",
+      "sha256": "2dbb7c91f88b0058cbafbfea6cc4422e8be8e1b17976d60158b9a428cb6ce56d",
+      "started_ns": 28893899662497
+    }
+  ]
+}

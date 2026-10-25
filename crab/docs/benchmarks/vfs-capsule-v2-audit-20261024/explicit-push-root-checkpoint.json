@@ -1,0 +1,298 @@
+{
+  "observed_at_utc": "2026-10-25T02:30:50.824834+00:00",
+  "base_commit": "33f8e6c360d922b3ab1e2c0e5115a2d200eccd97",
+  "status": "explicit Git metadata owns push staging/state; fresh remote NFS and FUSE publication/retirement probes pass; goal active",
+  "source_files_sha256": {
+    "Cargo.lock": "cbf5dfff720d799589231e861bcbc916772d828e81e598df5b59f11a9b4dabca",
+    "crab/Cargo.toml": "677a60f4f618a4c22651064d4c31072ebe0ea2cce9202cede7096365246b574f",
+    "crab/scripts/docker/run-mount-large-rustfs-smoke.sh": "03a29a8c1eb422c6790de868fa427ca475bb60efe8acd11259c3b70b888b4bcb",
+    "crab/src/auth/managed.rs": "b2ea24739e028925f8f8e6dc2b6a5b8f2202baa4c163fbf1afd6eac604566f45",
+    "crab/src/auth/mod.rs": "abc5f697db61119e27aa94d2ecab2448055a7512233d80d6500f29b49b72abbb",
+    "crab/src/cmd/doctor.rs": "7ab5a31bdb9b34c165955d9530e27d8af592634129da01fc4b491268480ea6b7",
+    "crab/src/cmd/mount.rs": "ac9ec45470f8f9a7d283f33704cc9117d33d7b2657638ccbc151ea686a962fcb",
+    "crab/src/core/error.rs": "3e5aa1a4b2c11326a0699efdc2e013c1c59ae953dc16f1016b8e55abd907f8f9",
+    "crab/src/git/remote_helper.rs": "47986a17fe7ac292d4ab588ec70ad2113767dea97e0e9da25c71b14a9a8ff1db",
+    "crab/src/replication/mod.rs": "54174f6b2a18a0ec8800cff117394b6cc51383f838287b53c68d7d6a56cdd7ef",
+    "crates/crab-read/Cargo.toml": "5526283771028683477ebaee8484de0712228c649779ed1186cb88db28116718",
+    "crates/crab-read/src/error.rs": "626b3721acf3281c8848e63fdd5290e567715ce00d2a6551a2230b2baa8ad499",
+    "crates/crab-read/src/hydrator.rs": "b281bfe4389348483c818f960440e7b5289cd2fedd950aa7809dce00733a593a",
+    "crates/crab-read/src/lib.rs": "71624bf3567f19234d2a9d4513cf7bb200ab6cc89174d4fe2f9b6c328bf8f851",
+    "crates/crab-read/src/pointer_reader.rs": "a800d4f41130e94b17eef85b765e48a649651c4b5e4f7c9a7ae0fbf31974579c",
+    "crates/crab-staging/src/file_reader.rs": "260ae5f6f04c9d6136c2b70be111a7179e11a1f8167ed415fa68ed301cfb8058",
+    "crates/crab-staging/src/file_reader/tests.rs": "2abd60596d654d384579d3b59481bee22c704e5530214a4c0192cd8f2041259d",
+    "crates/crab-staging/src/index.rs": "0646ab2d4fbaa8fa75364682405d5da27c8cca1cb3699d4626937376e2913e39",
+    "crates/crab-staging/src/lib.rs": "da901de7c9f1f43385a255f745a29541f4a6f48976b0d2f4b358b2c8de360e57",
+    "crates/crab-staging/src/push_snapshot.rs": "860b2c44aaf2f001b29447c1fa1a0f024a14fd10401cc4720ba882088527c72f",
+    "crates/crab-vfs/Cargo.toml": "0338d10ac603d5bec4b3a031bdb001b292ed5084570b42f172ab67de0a0b7a15",
+    "crates/crab-vfs/src/blob.rs": "3aca5a8c4d32fe013ea72d36d5aab569725351a09fb91cf13ac4612b84bd800b",
+    "crates/crab-vfs/src/blob/tests.rs": "0b476aa42ec81bc16f1594b020d6712e1c66d49776c0e87fc1d9aeed317a288b",
+    "crates/crab-vfs/src/clone_cache.rs": "a12e6399ee2b0ef097b64e859e8a7b2ba94b690a7c046bb26c1446e560097fec",
+    "crates/crab-vfs/src/coordinator.rs": "b0964c924aa11e431d5436b35ae94d534906db369185dc77bcdb31fb9f292347",
+    "crates/crab-vfs/src/daemon.rs": "5c5b1b67aaa4ed8ed4e9f44473f6e4cb48f01440f83e74ddf7e9660a7d990c5b",
+    "crates/crab-vfs/src/engine.rs": "ab697f021625e41d56aaec16bde3ebedbe469120657cc9aa910ce5530cf730b3",
+    "crates/crab-vfs/src/engine/open_file.rs": "f09f9674545d82cfcda5f3fb07181fd391cac35942b14df5bd9a728576a0fa33",
+    "crates/crab-vfs/src/error.rs": "d25b473433f61956513a610703338a6a04ac78f10642cd6f33cfe1729966259e",
+    "crates/crab-vfs/src/fuse.rs": "a8dfb3b2b6c443cb1c19fe5690fb3a3eb7ea1b384377a8d1c15c090319f44a96",
+    "crates/crab-vfs/src/hydration.rs": "5f1fd09a44ab32fbb26a7dbd021abaf1a6ad69716dca24b41bbd216b411dc17b",
+    "crates/crab-vfs/src/integration.rs": "144a0aea9af20323f9801585ffbf627ac6c54a73eee2529a8d28ac3f9110498b",
+    "crates/crab-vfs/src/ipc_client.rs": "713f28da1b3e87fd5fb463ea007174a94260f7c683affc1ca573db9648669a2b",
+    "crates/crab-vfs/src/ipc_server.rs": "96af7d41c6cd0f9ba624962b45ce781ce738065829751c048a1a0f6381f7c858",
+    "crates/crab-vfs/src/lib.rs": "12b4ffdb8f2f662625a6a7077b539179925a43ef94b34e003b28b581eb497a3f",
+    "crates/crab-vfs/src/memory_cache.rs": "3c06d32fb03613d2a060d33eee4505b94e3b52c8e1c116b06af56dd80e5275c3",
+    "crates/crab-vfs/src/mount_runtime.rs": "c02a7f25194c2acf3b031160d4af14e42a862dd4a073e55bdfcdf43e05c12e83",
+    "crates/crab-vfs/src/mount_runtime/tests.rs": "9183e341f6eb985f23252891ed2398bc2a768383bc9af900eb5478da168c0575",
+    "crates/crab-vfs/src/mount_runtime/tests/catalog.rs": "626b2b63fb4794ffb6b7b3ce026e18793b7e411facce5c06ff82ce5f50b58a0d",
+    "crates/crab-vfs/src/native_mount.rs": "b6df9f65614a774b6eea314ed1262d5c2451cb4d185ae8fb6155d34c8ca4b325",
+    "crates/crab-vfs/src/nfs.rs": "e58ead6025935cbd1f3f7f14f03b1ffdf6890f2c639a48c75f5e2b04a1b2e2bd",
+    "crates/crab-vfs/src/nfs_control.rs": "da7363a02c9dc552432ccfcc184c681ed3505379ce981ba7bead60692fc265ed",
+    "crates/crab-vfs/src/nfs_mount.rs": "82bfd06ba8914b4f89c3e4dc760d4c6384cb361cbfbfd5339c3cd21d50f5dc4a",
+    "crates/crab-vfs/src/overlay.rs": "6554bb4c5ace2c7c24d59e6cedd0bf418fede68cd7a03adf08570f6bf92979c0",
+    "crates/crab-vfs/src/pipeline.rs": "fcfda943f4532f93df5d89f9024c2804604759e984b224cf9ac620e58194fafe",
+    "crates/crab-vfs/src/publish.rs": "dfbf44c17b234eb0b7f28d0ebe8bd521635e002db990b5b407cd1b7ca7b5798c",
+    "crates/crab-vfs/src/refresh.rs": "b1ea61e84e9e9543a076ad1cf0f9313327e605a05da54920bccc516921ae7f63",
+    "crates/crab-vfs/src/repository.rs": "e26a1e14b7efc33b32ea209157b1ec5a7e8b06f2cf6de164718e21fc465641e5",
+    "crates/crab-vfs/src/repository/tests.rs": "b85cf954162f203e177a66bd19bf6ac843550bb4b90dc7923e9f29c41ea5697d",
+    "crates/crab-vfs/src/resolver.rs": "8ba85dab5894dff4af074089e0e170671ebda6c81466685334209d6cf52972cd",
+    "crates/crab-vfs/src/snapshot.rs": "6c89c9ed0ce9b5ecbd4bdcc67f4d0a655a4c877b0f349dbcef6a3e14278360c5",
+    "crates/crab-vfs/src/source.rs": "a6d49563b95011800eb6036de83f54aec6f9061a592c3e23207fa8532c3077e3",
+    "crates/crab-vfs/src/test_support.rs": "b3c680900dc334e27a34d3922d02a41c9231cf083ddab36840485eb2e0fb6f69",
+    "crates/crab-vfs/src/test_support/read.rs": "9eb375180f3fc6b9170c00ad312cd10df5428fdf56ef5e49d12ad0aed059c18e"
+  },
+  "change": "One canonical push_repo_root selects and canonicalizes Git common metadata. Both persisted push state and staging use it. Removed three old root helpers and cwd-first/default fallback chains. Discovery/canonicalization errors propagate.",
+  "qualification": {
+    "macos_explicit_root_regression": {
+      "passed": 1,
+      "layouts": [
+        "main",
+        "bare",
+        "linked"
+      ],
+      "cwd": "another actual repository",
+      "git_work_tree": "unset"
+    },
+    "macos_root_siblings": {
+      "passed": 8,
+      "failed": 0
+    },
+    "macos_five_fetch_mode_sibling": {
+      "passed": 1,
+      "failed": 0,
+      "cases": [
+        "promisor",
+        "full",
+        "filtered",
+        "shallow",
+        "incremental"
+      ]
+    },
+    "macos_minimal_cli_check": {
+      "exit_code": 0,
+      "warnings": 18
+    },
+    "macos_cli_lib_clippy": {
+      "exit_code": 0,
+      "warnings": 671,
+      "strict_pass": false
+    },
+    "fresh_remote_rustfs_fuse": {
+      "exit_code": 0,
+      "bytes": 4194304,
+      "full_held_path_expected_hash_match": true,
+      "clean_push_retires_staging": true,
+      "later_push_independent_eager_clone_hash_match": true
+    },
+    "fresh_remote_rustfs_nfs": {
+      "exit_code": 0,
+      "bytes": 4194304,
+      "full_held_path_expected_hash_match": true,
+      "clean_push_retires_staging": true,
+      "later_push_independent_eager_clone_hash_match": true
+    },
+    "linux_helper_module": "146 passed, one unrelated checkpoint-format assertion failed on checkpoint-15 source, before this root refactor; not rerun or claimed green for checkpoint 16",
+    "optimized_performance": false,
+    "native_macos_nfs": false
+  },
+  "intermediate_failure": "Initial root refactor selected the correct physical directory but preserved /var rather than canonical /private/var spelling on macOS. Required canonical identity assertion failed; resolver now canonicalizes selected metadata and propagates its IO error.",
+  "binary_sha256": {
+    "crab-nfs-mount": "fd91066c95f21fa711306c0db5cfa646363429539bf253f285ade71fd9a32569",
+    "git-remote-crab": "fd91066c95f21fa711306c0db5cfa646363429539bf253f285ade71fd9a32569",
+    "crab": "fd91066c95f21fa711306c0db5cfa646363429539bf253f285ade71fd9a32569",
+    "crab-cache-server": "54d947dfec6c65bc2a508a42b75a26c68be6fcdf2a27203cf1fb3f2454c00901",
+    "crab-fuse-mount": "fd91066c95f21fa711306c0db5cfa646363429539bf253f285ade71fd9a32569"
+  },
+  "dependency_contract": {
+    "git_explicit_directory": "https://git-scm.com/docs/git",
+    "git_shared_layout": "https://git-scm.com/docs/gitrepository-layout",
+    "source_sha256": {
+      "crab/src/git/discover.rs": "be6dab49910ef1a63a1745014734e71eac74d43450657185799356ca8b7bfb31",
+      "crates/crab-git/src/discover.rs": "b6277e6bf9c0e76f2992af7ad884ffbf94137e997e943f3adf278d9bbe68fdd1",
+      "crates/crab-git/src/worktree.rs": "ac1d8625146000551867ce36c2fbd9dc6fa9931d49b8d6f15df09c83c7dd7831",
+      "crates/crab-vfs/src/repository.rs": "e26a1e14b7efc33b32ea209157b1ec5a7e8b06f2cf6de164718e21fc465641e5"
+    },
+    "caller_boundary": "remote_helper::run_with_io loads/saves push state at selected shared root; open_staging_for_push joins .crab/staging to the same root; VFS publication/readers derive the same common-dir namespace"
+  },
+  "logs": {
+    "explicit-push-root-before.txt": {
+      "sha256": "0fcdd3ae687cc585f3ee516aeb7083548a570414e90d230076cf2d8f17512605"
+    },
+    "explicit-push-root-alias-after.txt": {
+      "sha256": "71d13f8e58167990e3e2e7c89642b8554ba225b922108e3eda47d12bc09ee6f2"
+    },
+    "explicit-push-root-after.txt": {
+      "sha256": "95cd38f3f4bd84fcec18d3be014acae0e063d360277c36991ebce0474b5b269c"
+    },
+    "explicit-push-root-siblings.txt": {
+      "sha256": "bf87ec2a4c978ae8ece067ed3024284d02d3ddfcff1b2cea5980e8dc7db35066"
+    },
+    "push-root-linked-sibling.txt": {
+      "sha256": "2f2f7641ef3513763a6536858a08fd17ad8c46031078504320477ae754ef6e73"
+    },
+    "push-root-minimal-cli.txt": {
+      "sha256": "1b003b7e273077d25a6b37c1a8e250c9ebdf7bc17b7ec964193f25b4b32b9bb8"
+    },
+    "push-root-cli-clippy.txt": {
+      "sha256": "23c0a183601bac6550045d0874359d3751071ce3d14ccc4b44ab9b7c020670cf"
+    },
+    "push-root-remote-fuse/staging.json": {
+      "sha256": "d13a0df35ba72a980df1c23d93d380f406aad225d25f62f3627c47d3f2906afa"
+    },
+    "push-root-remote-fuse/runner.log": {
+      "sha256": "65ea45b2116a8d0ebf18baff7ace4ee7998a08cd91cb0a92e899e60f8ad343b7"
+    },
+    "push-root-remote-fuse/probe.sh": {
+      "sha256": "a8d73a84b3da934d8975f06197b48535bacd385378b6d04768c6254e1e5d4482"
+    },
+    "push-root-remote-fuse/observation.json": {
+      "sha256": "fb0a3322675fe3d9dd60e7c293b7ae25c67937e9117975f316d39e1ef7f5b2f2"
+    },
+    "push-root-remote-fuse/clean-push.json": {
+      "sha256": "8f40e4b3c4c4504951d4d18a369d5281c21f8b3089634934105600ab359aa0fd"
+    },
+    "push-root-remote-fuse/local-commit.json": {
+      "sha256": "9212acae1ee810c1c1edfdf0cdec64fe87bc89453f76bea8b6383de12405e7d3"
+    },
+    "push-root-remote-fuse/later-push.json": {
+      "sha256": "9b33f8ab340a60d2f3c0e253c93826669f84f9934d1fea6e2b1378250c734fb0"
+    },
+    "push-root-remote-fuse/expected.sha256": {
+      "sha256": "7892c228fb54f8d407c8641283aa34a732a61857afd27b91de55c199e2357130"
+    },
+    "push-root-remote-fuse/clone.sha256": {
+      "sha256": "7892c228fb54f8d407c8641283aa34a732a61857afd27b91de55c199e2357130"
+    },
+    "push-root-remote-fuse/logs/unmount.log": {
+      "sha256": "377f42d8b54c173e89e83bbf2a128c90ba0ac111a52003a0280cb05546cf692f"
+    },
+    "push-root-remote-fuse/logs/git-init.log": {
+      "sha256": "43e1999b2c76d56759c9a5c423189a5bae495aa6a542efa77debdf03e9eae551"
+    },
+    "push-root-remote-fuse/logs/commit-seed.log": {
+      "sha256": "0005752d197e576804ca7ac1cbcdeb57c6d03a37c615ed1a93ab8afff472af6f"
+    },
+    "push-root-remote-fuse/logs/local-commit.err": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "push-root-remote-fuse/logs/later-push.err": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "push-root-remote-fuse/logs/track.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "push-root-remote-fuse/logs/push-seed.log": {
+      "sha256": "c6302a648d5a1de0e0fd2afe2e5445b8c8c2afc1b20355f048ee922dea796e4a"
+    },
+    "push-root-remote-fuse/logs/clone.log": {
+      "sha256": "3699e4ebc65bd3b8950a0c5db1b3b7d66802eb5a29d6e8c3ef73be29b2875a77"
+    },
+    "push-root-remote-fuse/logs/add.log": {
+      "sha256": "90cac4e2a4c56ad68feb7a950949c3cf2c14931122d35a0c6ef09231f2455498"
+    },
+    "push-root-remote-fuse/logs/init.log": {
+      "sha256": "07feb8d1fb78784150ff86f7d187545db2b645b3a132c0e9ffbafbbd8fd00d1a"
+    },
+    "push-root-remote-fuse/logs/mount.log": {
+      "sha256": "51a125eb4864dd11b4127d9629c1dad5edace75de0176ce31cc7623155b9456c"
+    },
+    "push-root-remote-fuse/logs/clean-push.err": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "push-root-remote-nfs/staging.json": {
+      "sha256": "d13a0df35ba72a980df1c23d93d380f406aad225d25f62f3627c47d3f2906afa"
+    },
+    "push-root-remote-nfs/runner.log": {
+      "sha256": "65ea45b2116a8d0ebf18baff7ace4ee7998a08cd91cb0a92e899e60f8ad343b7"
+    },
+    "push-root-remote-nfs/probe.sh": {
+      "sha256": "a8d73a84b3da934d8975f06197b48535bacd385378b6d04768c6254e1e5d4482"
+    },
+    "push-root-remote-nfs/observation.json": {
+      "sha256": "fb0a3322675fe3d9dd60e7c293b7ae25c67937e9117975f316d39e1ef7f5b2f2"
+    },
+    "push-root-remote-nfs/clean-push.json": {
+      "sha256": "5f60f5cb0325204ea7ba415e33e22644fa958d204af32d5869498665d95049b6"
+    },
+    "push-root-remote-nfs/local-commit.json": {
+      "sha256": "ac5ce53eaeeba417c632e6bfaa5e5401445884120a7c45f05bb1a86b7c2f30ec"
+    },
+    "push-root-remote-nfs/later-push.json": {
+      "sha256": "cc21b6732c600c1857e95409edefd3a1283a9ddb9f2e50f4eb787040d1c56d4b"
+    },
+    "push-root-remote-nfs/expected.sha256": {
+      "sha256": "7892c228fb54f8d407c8641283aa34a732a61857afd27b91de55c199e2357130"
+    },
+    "push-root-remote-nfs/clone.sha256": {
+      "sha256": "7892c228fb54f8d407c8641283aa34a732a61857afd27b91de55c199e2357130"
+    },
+    "push-root-remote-nfs/logs/unmount.log": {
+      "sha256": "377f42d8b54c173e89e83bbf2a128c90ba0ac111a52003a0280cb05546cf692f"
+    },
+    "push-root-remote-nfs/logs/git-init.log": {
+      "sha256": "43e1999b2c76d56759c9a5c423189a5bae495aa6a542efa77debdf03e9eae551"
+    },
+    "push-root-remote-nfs/logs/commit-seed.log": {
+      "sha256": "f86201208357920eaee50376b3f57f4ed2b48f434755a5ee0e01cbe837bd7825"
+    },
+    "push-root-remote-nfs/logs/local-commit.err": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "push-root-remote-nfs/logs/later-push.err": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "push-root-remote-nfs/logs/track.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "push-root-remote-nfs/logs/push-seed.log": {
+      "sha256": "032e0b01b2e5805943e02bbbc011e9ab79281308ff78109d4dd6691d75c6637d"
+    },
+    "push-root-remote-nfs/logs/clone.log": {
+      "sha256": "9b0b528144bcaabebf1d0955648f78e07edc7a0e16b8bfdf60700147769eba7a"
+    },
+    "push-root-remote-nfs/logs/add.log": {
+      "sha256": "90cac4e2a4c56ad68feb7a950949c3cf2c14931122d35a0c6ef09231f2455498"
+    },
+    "push-root-remote-nfs/logs/init.log": {
+      "sha256": "81f47dc4590969639f0e9b9e84fb4e2ad44804d39403e12b0a4d08000c16cc81"
+    },
+    "push-root-remote-nfs/logs/mount.log": {
+      "sha256": "88eb7decdf25fc08537a3024441d39ff5827ee00a5558377055485d2f68315cf"
+    },
+    "push-root-remote-nfs/logs/clean-push.err": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "push-root-provider-make-install.log": {
+      "sha256": "906ac4cfaa7cc04954fae339a4186ecdae76d1579845d8fbc2138ed74af7a23f"
+    }
+  },
+  "pending_permission": "One-line checkpoint format assertion 5 -> 9 in plans/capsule-checkpoint-assertion.patch remains unapplied, pending user exception to AGENTS.md:295. Both base writer version 9 and stale expected 5 are proved on origin/crab-v2.",
+  "open_gates": [
+    "pending checkpoint assertion exception; broad helper suite not green",
+    "startup/catalog/remote-GC ownership",
+    "unpublished base-pointer descriptors and recipe lifetime through push retirement",
+    "failed promotion preserving native content",
+    "all refresh/reset and foreground/helper/daemon/offline publication owners",
+    "crash/mixed-recipe/owned-cache migration durability",
+    "full Crab pack v1 retirement",
+    "total resource budgets and optimized all-mode/native-macOS qualification"
+  ],
+  "final_source_hashes_match": true
+}

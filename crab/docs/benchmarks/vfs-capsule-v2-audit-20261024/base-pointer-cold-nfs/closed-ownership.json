@@ -1,0 +1,9 @@
+{
+  "counts": {
+    "path_leases": 0,
+    "recipe_payload_leases": 0,
+    "chunks": 0,
+    "push_snapshots": 0
+  },
+  "pin_markers": 0
+}

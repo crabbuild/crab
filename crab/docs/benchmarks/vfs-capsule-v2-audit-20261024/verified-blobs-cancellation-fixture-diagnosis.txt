@@ -1,0 +1,48 @@
+   Compiling crab-vfs v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-vfs)
+warning: unused `tokio::sync::MutexGuard` that must be used
+  --> crates/crab-vfs/src/blob/tests.rs:47:5
+   |
+47 | /     tokio::time::timeout(std::time::Duration::from_secs(5), reader.fills.lock())
+48 | |         .await
+49 | |         .unwrap();
+   | |_________________^
+   |
+   = note: if unused the Mutex will immediately unlock
+   = note: `#[warn(unused_must_use)]` (part of `#[warn(unused)]`) on by default
+help: use `let _ = ...` to ignore the resulting value
+   |
+47 |     let _ = tokio::time::timeout(std::time::Duration::from_secs(5), reader.fills.lock())
+   |     +++++++
+
+warning: `crab-vfs` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 17.50s
+     Running unittests src/lib.rs (/Users/haipingfu/Workspace/crabbuild-target/crab-ios-02d01345-vfs/debug/deps/crab_vfs-3225d1a73e494acc)
+
+running 14 tests
+test blob::tests::odb_reader_missing_objects_dir_returns_error ... ok
+
+thread 'blob::tests::cancelled_blob_read_keeps_admission_until_blocking_work_finishes' (26712024) panicked at crates/crab-vfs/src/blob/tests.rs:41:5:
+cancelled waiter released a running fill's admission
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test blob::tests::odb_reader_read_blob_returns_correct_content ... ok
+test blob::tests::odb_reader_read_blob_range_with_offset ... ok
+test blob::tests::cancelled_blob_read_keeps_admission_until_blocking_work_finishes ... FAILED
+test blob::tests::odb_reader_read_blob_range_full ... ok
+test blob::tests::odb_reader_serves_from_cache_on_second_read ... ok
+test blob::tests::odb_reader_invalid_oid_returns_error ... ok
+test blob::tests::odb_reader_ignores_unverified_disk_blob_bytes ... ok
+test blob::tests::odb_reader_read_blob_range_past_eof ... ok
+test blob::tests::odb_reader_rejects_misnamed_loose_blob ... ok
+test blob::tests::odb_reader_missing_oid_returns_not_found ... ok
+test blob::tests::warm_blob_read_does_not_wait_for_unrelated_blocked_fill ... ok
+test blob::tests::odb_reader_promisor_uses_raw_oid_despite_replace_refs ... ok
+test blob::tests::odb_reader_promisor_fallback_ignores_new_pack_slot_pressure ... ok
+
+failures:
+
+failures:
+    blob::tests::cancelled_blob_read_keeps_admission_until_blocking_work_finishes
+
+test result: FAILED. 13 passed; 1 failed; 0 ignored; 0 measured; 592 filtered out; finished in 1.04s
+
+error: test failed, to rerun pass `-p crab-vfs --lib`

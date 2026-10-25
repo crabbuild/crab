@@ -1,0 +1,16 @@
+{
+  "mountpoint": "/mnt/mapped",
+  "backend": "fuse",
+  "source": "crab://crab/mount-large/mapped-fuse-17ad7cdd40dd4c798e45ee58b0aed696",
+  "ref": "other",
+  "head_oid": "174875d1180d612f28752c5bb7c20adb69e6749c",
+  "mode": "read-write",
+  "state": "running (PID 613)",
+  "pid": 613,
+  "overlay_dirty_count": 1,
+  "cache_size_bytes": 4325636,
+  "cache_size_human": "4.1 MB",
+  "last_refresh": "2026-10-25T07:00:04Z",
+  "last_refresh_relative": "just now",
+  "read_only": false
+}

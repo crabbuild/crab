@@ -1,0 +1,29 @@
+   Compiling crab-read v0.1.0 (/src/crates/crab-read)
+   Compiling crab-vfs v0.1.0 (/src/crates/crab-vfs)
+    Finished `test` profile [unoptimized] target(s) in 33.85s
+     Running unittests src/lib.rs (/root/Workspace/crabbuild-target/vfs-audit/target/debug/deps/crab_vfs-ee87d258c700a593)
+
+running 6 tests
+test native_mount::fuse_committed_pointer_remount ... ok
+test native_mount::fuse_readonly ... native_audit fuse=true read_only=true startup_ms=10 cold_4k_us=56716 warm_1m_us=657
+ok
+test native_mount::fuse_writable ... native_audit fuse=true read_only=false startup_ms=9 cold_4k_us=55252 warm_1m_us=1190
+
+thread 'native_mount::fuse_writable' (4968) panicked at crates/crab-vfs/src/native_mount.rs:213:5:
+native operations failed: Err(Custom { kind: NotFound, error: "read through open descriptor after rename: No such file or directory (os error 2)" })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test native_mount::nfs_committed_pointer_remount ... ok
+test native_mount::nfs_readonly ... native_audit fuse=false read_only=true startup_ms=10 cold_4k_us=48956 warm_1m_us=1272
+ok
+test native_mount::nfs_writable ... native_audit fuse=false read_only=false startup_ms=11 cold_4k_us=47039 warm_1m_us=1404
+ok
+
+failures:
+
+failures:
+    native_mount::fuse_writable
+
+test result: FAILED. 5 passed; 1 failed; 0 ignored; 0 measured; 600 filtered out; finished in 44.68s
+
+error: test failed, to rerun pass `-p crab-vfs --lib`

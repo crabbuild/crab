@@ -1,0 +1,1 @@
+127.0.0.1:/crab /e2e/run/mnt-rw-refresh nfs rw,relatime,vers=3,rsize=1048576,wsize=1048576,namlen=255,acregmin=1,acregmax=1,acdirmin=1,acdirmax=1,hard,nolock,proto=tcp,port=35945,timeo=600,retrans=2,sec=sys,mountaddr=127.0.0.1,mountvers=3,mountport=35945,mountproto=tcp,lookupcache=pos,local_lock=all,addr=127.0.0.1 0 0

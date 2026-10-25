@@ -1,0 +1,77 @@
+Mount a virtual filesystem for on-demand file access
+
+Usage: crab mount [OPTIONS] [COMMAND]
+
+Commands:
+  doctor   Diagnose mount backend readiness
+  status   Report mount state and hydration progress
+  list     List all active mounts
+  refresh  Trigger an immediate fetch + snapshot rebuild for a mount
+  switch   Switch a mount to a different branch or ref
+  clean    Remove inactive mount caches to free disk space
+  diff     Show overlay mutations for a writable mount
+  export   Export overlay mutations to a directory for inspection
+  reset    Discard local overlay mutations
+  commit   Commit overlay mutations back to the mounted repository
+  help     Print this message or the help of the given subcommand(s)
+
+Options:
+      --log-level <LOG_LEVEL>
+          Set the log verbosity level.
+          
+          Accepts any `tracing` filter directive: `error`, `warn`, `info`, `debug`, `trace`, or a module-level filter like `crab::engine=debug`. Overrides the `CRAB_LOG` env var.
+
+  -r, --repo <SOURCE>
+          Source repository — remote URL or local path.
+          
+          Remote: <crab://bucket/repo>, <s3://bucket/prefix> Local:  /path/to/local/repo, ./relative/repo
+
+  -m, --mountpoint <PATH>
+          Local path for the mount
+
+      --backend <BACKEND>
+          Mount backend to use (default: NFS when available, otherwise FUSE)
+
+          Possible values:
+          - auto: Use NFS when preflight passes, otherwise use FUSE when available
+          - nfs:  Native NFSv3 client mount backed by Crab's local NFS server
+          - fuse: Kernel FUSE mount backed by Crab's FUSE adapter
+          
+          [default: auto]
+
+      --name <NAME>
+          Human-friendly name for this mount (default: derived from repo)
+
+      --ref <BRANCH>
+          Branch or ref to mount (default: HEAD)
+
+      --foreground
+          Run in foreground (block until SIGINT) instead of backgrounding
+
+      --read-only
+          Disable writes (no overlay). All write operations return EROFS
+
+      --no-refresh
+          Disable automatic remote polling (static snapshot)
+
+      --allow-nested
+          Allow mounting inside a git or crab working tree
+
+      --clean-overlay
+          Discard existing overlay (local modifications) before mounting
+
+  -h, --help
+          Print help (see a summary with '-h')
+
+Examples:
+  # Remote mount
+  crab mount --repo crab://bucket/ml-models --mountpoint /mnt/models
+
+  # Local mount (view another branch without checkout)
+  crab mount --repo /home/user/my-repo --mountpoint /tmp/view --ref=dev
+
+  # Read-only mount with no background refresh
+  crab mount -r crab://bucket/data -m /mnt/data --read-only --no-refresh
+
+  # Foreground mode (blocks until Ctrl+C)
+  crab mount --repo ./my-repo --mountpoint /mnt/view --foreground

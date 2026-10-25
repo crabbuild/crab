@@ -1,0 +1,65 @@
+   Compiling crab-vfs v0.1.0 (/src/crates/crab-vfs)
+warning: unused variable: `mountpoint`
+   --> crates/crab-vfs/src/refresh.rs:540:13
+    |
+540 |         let mountpoint = self.mountpoint.clone();
+    |             ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_mountpoint`
+    |
+    = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused variable: `mountpoint`
+  --> crates/crab-vfs/src/mount_runtime.rs:26:9
+   |
+26 |     let mountpoint = mountpoint.to_owned();
+   |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_mountpoint`
+
+warning: unused variable: `mountpoint`
+  --> crates/crab-vfs/src/mount_runtime.rs:77:9
+   |
+77 |     let mountpoint = mountpoint.to_owned();
+   |         ^^^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_mountpoint`
+
+warning: `crab-vfs` (lib test) generated 3 warnings (run `cargo fix --lib -p crab-vfs --tests` to apply 3 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 30.14s
+     Running unittests src/lib.rs (/root/Workspace/crabbuild-target/vfs-audit/target/debug/deps/crab_vfs-3b468e2237c00c9f)
+
+running 6 tests
+test native_mount::mapped::fuse_mapped_automatic_refresh_without_msync ... 
+thread 'native_mount::mapped::fuse_mapped_automatic_refresh_without_msync' (285) panicked at crates/crab-vfs/src/native_mount/mapped.rs:179:5:
+mapped transition: waited=false, generation=1, held_generation=2, actual prefix [90, 90, 90, 90, 90, 90, 90, 90], expected prefix [66, 65, 65, 65, 65, 65, 65, 65]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+test native_mount::mapped::fuse_mapped_refresh_without_msync ... 
+thread 'native_mount::mapped::fuse_mapped_refresh_without_msync' (311) panicked at crates/crab-vfs/src/native_mount/mapped.rs:179:5:
+mapped transition: waited=false, generation=1, held_generation=2, actual prefix [90, 90, 90, 90, 90, 90, 90, 90], expected prefix [66, 65, 65, 65, 65, 65, 65, 65]
+FAILED
+test native_mount::mapped::fuse_mapped_switch_without_msync ... 
+thread 'native_mount::mapped::fuse_mapped_switch_without_msync' (338) panicked at crates/crab-vfs/src/native_mount/mapped.rs:179:5:
+mapped transition: waited=false, generation=1, held_generation=2, actual prefix [90, 90, 90, 90, 90, 90, 90, 90], expected prefix [66, 65, 65, 65, 65, 65, 65, 65]
+FAILED
+test native_mount::mapped::nfs_mapped_automatic_refresh_without_msync ... 
+thread 'native_mount::mapped::nfs_mapped_automatic_refresh_without_msync' (366) panicked at crates/crab-vfs/src/native_mount/mapped.rs:179:5:
+mapped transition: waited=false, generation=1, held_generation=2, actual prefix [66, 65, 65, 65, 65, 65, 65, 65], expected prefix [66, 65, 65, 65, 65, 65, 65, 65]
+FAILED
+test native_mount::mapped::nfs_mapped_refresh_without_msync ... 
+thread 'native_mount::mapped::nfs_mapped_refresh_without_msync' (388) panicked at crates/crab-vfs/src/native_mount/mapped.rs:179:5:
+mapped transition: waited=false, generation=1, held_generation=2, actual prefix [66, 65, 65, 65, 65, 65, 65, 65], expected prefix [66, 65, 65, 65, 65, 65, 65, 65]
+FAILED
+test native_mount::mapped::nfs_mapped_switch_without_msync ... 
+thread 'native_mount::mapped::nfs_mapped_switch_without_msync' (411) panicked at crates/crab-vfs/src/native_mount/mapped.rs:179:5:
+mapped transition: waited=false, generation=1, held_generation=2, actual prefix [66, 65, 65, 65, 65, 65, 65, 65], expected prefix [66, 65, 65, 65, 65, 65, 65, 65]
+FAILED
+
+failures:
+
+failures:
+    native_mount::mapped::fuse_mapped_automatic_refresh_without_msync
+    native_mount::mapped::fuse_mapped_refresh_without_msync
+    native_mount::mapped::fuse_mapped_switch_without_msync
+    native_mount::mapped::nfs_mapped_automatic_refresh_without_msync
+    native_mount::mapped::nfs_mapped_refresh_without_msync
+    native_mount::mapped::nfs_mapped_switch_without_msync
+
+test result: FAILED. 0 passed; 6 failed; 0 ignored; 0 measured; 642 filtered out; finished in 31.18s
+
+error: test failed, to rerun pass `-p crab-vfs --lib`

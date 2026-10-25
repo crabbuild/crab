@@ -1,0 +1,22 @@
+   Compiling crab-coordination v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-coordination)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 1.64s
+     Running unittests src/lib.rs (/Users/haipingfu/Workspace/crabbuild-target/crab-ios-02d01345-vfs/debug/deps/crab_coordination-0a3ab7d581dfdece)
+
+running 14 tests
+test gc_fence::tests::full_quarantine_fails_closed_instead_of_dropping_an_expired_holder ... ok
+test gc_fence::tests::committed_writer_release_removes_expired_rooted_claim ... ok
+test gc_fence::tests::released_fence_identity_distinguishes_domain_recreation ... ok
+test gc_fence::tests::writer_and_sweep_are_mutually_exclusive ... ok
+test gc_fence::tests::admission_refuses_exhausted_epochs_without_writing ... ok
+test gc_fence::tests::committed_writer_release_rejects_sweep_lease ... ok
+test gc_fence::tests::writer_retry_refuses_expired_or_quarantined_claims ... ok
+test gc_fence::tests::writer_retry_after_committed_acquisition_retains_one_holder ... ok
+test gc_fence::tests::renewal_and_release_are_holder_checked ... ok
+test gc_fence::tests::gc_run_reclaims_only_its_expired_sweep_incarnation ... ok
+test gc_fence::tests::renewal_and_release_refuse_recreated_or_expired_claims ... ok
+test gc_fence::tests::writer_epoch_ignores_sweeps_and_detects_writer_crossings ... ok
+test gc_fence::tests::writers_are_bounded_and_share_admission ... ok
+test gc_fence::tests::cancelled_writer_drains_without_leaving_expiry_quarantine ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 109 filtered out; finished in 4.00s
+

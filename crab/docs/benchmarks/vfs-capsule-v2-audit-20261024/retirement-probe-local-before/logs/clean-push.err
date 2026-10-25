@@ -1,0 +1,18 @@
+error: internal error [CRAB-E0099]: commit failed: internal VFS error: git push failed: remote: error: refusing to update checked out branch: refs/heads/main        
+remote: error: By default, updating the current branch in a non-bare repository        
+remote: is denied, because it will make the index and work tree inconsistent        
+remote: with what you pushed, and will require 'git reset --hard' to match        
+remote: the work tree to HEAD.        
+remote: 
+remote: You can set the 'receive.denyCurrentBranch' configuration variable        
+remote: to 'ignore' or 'warn' in the remote repository to allow pushing into        
+remote: its current branch; however, this is not recommended unless you        
+remote: arranged to update its work tree to match what you pushed in some        
+remote: other way.        
+remote: 
+remote: To squelch this message and still keep the default behaviour, set        
+remote: 'receive.denyCurrentBranch' configuration variable to 'refuse'.        
+To /e2e/run/seed
+ ! [remote rejected] main -> main (branch is currently checked out)
+error: failed to push some refs to '/e2e/run/seed'
+help: Run `crab errors CRAB-E0099` for recovery steps.

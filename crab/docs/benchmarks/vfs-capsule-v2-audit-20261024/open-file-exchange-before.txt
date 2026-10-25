@@ -1,0 +1,26 @@
+   Compiling crab-vfs v0.1.0 (/src/crates/crab-vfs)
+    Finished `test` profile [unoptimized] target(s) in 26.82s
+     Running unittests src/lib.rs (/root/Workspace/crabbuild-target/vfs-audit/target/debug/deps/crab_vfs-21ad8bed7305c3ec)
+
+running 1 test
+test native_mount::fuse_writable ... native_audit fuse=true read_only=false startup_ms=9 cold_4k_us=43309 warm_1m_us=676
+native_blob_cow fuse=true verified=true
+
+thread 'tokio-rt-worker' (63) panicked at crates/crab-vfs/src/native_mount.rs:270:13:
+assertion `left == right` failed: unsupported exchange must leave both names intact
+  left: (0, Some(17))
+ right: (-1, Some(22))
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+thread 'native_mount::fuse_writable' (40) panicked at crates/crab-vfs/src/native_mount.rs:311:25:
+called `Result::unwrap()` on an `Err` value: JoinError::Panic(Id(7), "assertion `left == right` failed: unsupported exchange must leave both names intact\n  left: (0, Some(17))\n right: (-1, Some(22))", ...)
+FAILED
+
+failures:
+
+failures:
+    native_mount::fuse_writable
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 625 filtered out; finished in 10.34s
+
+error: test failed, to rerun pass `-p crab-vfs --lib`

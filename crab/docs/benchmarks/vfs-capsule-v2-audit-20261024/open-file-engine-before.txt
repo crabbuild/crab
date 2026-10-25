@@ -1,0 +1,27 @@
+   Compiling crab-vfs v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-vfs)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 24.55s
+     Running unittests src/lib.rs (/Users/haipingfu/Workspace/crabbuild-target/crab-ios-02d01345-vfs/debug/deps/crab_vfs-0e99b10981cfec51)
+
+running 4 tests
+test engine::tests::open_file_sync_returns_the_descriptor_error ... ok
+test engine::tests::open_file_does_not_write_a_reused_path ... ok
+test engine::tests::open_file_write_survives_base_reconciliation ... FAILED
+test engine::tests::open_file_keeps_git_bytes_after_snapshot_replacement ... ok
+
+failures:
+
+---- engine::tests::open_file_write_survives_base_reconciliation stdout ----
+
+thread 'engine::tests::open_file_write_survives_base_reconciliation' (28105109) panicked at crates/crab-vfs/src/engine.rs:2602:9:
+assertion `left == right` failed
+  left: b"before"
+ right: [101, 100, 105, 116, 101, 100]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    engine::tests::open_file_write_survives_base_reconciliation
+
+test result: FAILED. 3 passed; 1 failed; 0 ignored; 0 measured; 617 filtered out; finished in 0.06s
+
+error: test failed, to rerun pass `-p crab-vfs --lib`

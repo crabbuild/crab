@@ -1,0 +1,28 @@
+   Compiling crab-vfs v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-vfs)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 18.19s
+     Running unittests src/lib.rs (/Users/haipingfu/Workspace/crabbuild-target/crab-ios-02d01345-vfs/debug/deps/crab_vfs-0e99b10981cfec51)
+
+running 15 tests
+test mount_runtime::tests::initial_pipeline_honors_requested_ref ... ok
+test mount_runtime::tests::committed_generations_are_adopted_before_pruning_live_resolver ... ok
+test mount_runtime::tests::borrowed_mount_with_remote_data_origin_preserves_staged_index ... ok
+test mount_runtime::tests::switch_normalizes_branch_names ... ok
+test mount_runtime::tests::catalog::failed_commit_adoption_preserves_open_content_and_retries_same_commit ... ok
+test mount_runtime::tests::catalog::short_branch_auto_refresh_preserves_the_selected_commit_on_remount ... ok
+test mount_runtime::tests::commit_keeps_open_inode_linked_for_later_writes ... ok
+test mount_runtime::tests::catalog::refresh_installs_captured_hintless_reader_only_after_successful_capture ... ok
+test mount_runtime::tests::borrowed_remote_data_origin_auto_refresh_preserves_source_index ... ok
+test mount_runtime::tests::catalog::inflight_pointer_read_keeps_its_captured_catalog_during_refresh ... ok
+test mount_runtime::tests::audit_local_pointer_commit_remains_readable ... ok
+test mount_runtime::tests::catalog::existing_auto_refresh_follows_the_ref_selected_by_manual_switch ... ok
+Cloning into bare repository '/var/folders/rn/k2b7mvbs2dgb__6ys6_h94pm0000gn/T/.tmpeaFWXq/remote.git'...
+done.
+Cloning into bare repository '/var/folders/rn/k2b7mvbs2dgb__6ys6_h94pm0000gn/T/.tmpeaFWXq/mount.git'...
+warning: --filter is ignored in local clones; use file:// instead.
+done.
+test mount_runtime::tests::resolve_refresh_head_fetches_remote_tracked_ref_into_mount_cache ... ok
+test mount_runtime::tests::owned_clone_of_local_source_fetches_refs_and_refreshes_only_its_index ... ok
+test mount_runtime::tests::local_refresh_and_switch_preserve_source_state ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 616 filtered out; finished in 5.42s
+

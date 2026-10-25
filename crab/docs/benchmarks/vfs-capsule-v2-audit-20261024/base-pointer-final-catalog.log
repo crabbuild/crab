@@ -1,0 +1,18 @@
+   Compiling crab-staging v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-staging)
+   Compiling crab-read v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-read)
+   Compiling crab-vfs v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-vfs)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 4m 38s
+     Running unittests src/lib.rs (/Users/haipingfu/Workspace/crabbuild-target/crab-ios-02d01345-vfs/debug/deps/crab_vfs-c7f26c69e6da29a7)
+
+running 8 tests
+test mount_runtime::tests::catalog::published_open_pointer_uses_current_catalog_after_staging_retirement ... ok
+test mount_runtime::tests::catalog::unpublished_base_pointer_handle_survives_staging_retirement ... ok
+test mount_runtime::tests::catalog::existing_auto_refresh_follows_the_ref_selected_by_manual_switch ... ok
+test mount_runtime::tests::catalog::short_branch_auto_refresh_preserves_the_selected_commit_on_remount ... ok
+test mount_runtime::tests::catalog::failed_commit_adoption_preserves_open_content_and_retries_same_commit ... ok
+test mount_runtime::tests::catalog::inflight_pointer_read_keeps_its_captured_catalog_during_refresh ... ok
+test mount_runtime::tests::catalog::refresh_installs_captured_hintless_reader_only_after_successful_capture ... ok
+test mount_runtime::tests::catalog::failed_post_commit_promotion_preserves_descriptor_and_retries ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 627 filtered out; finished in 6.57s
+

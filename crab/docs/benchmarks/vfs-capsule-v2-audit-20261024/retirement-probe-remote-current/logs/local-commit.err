@@ -1,0 +1,5 @@
+error: internal error [CRAB-E0099]: commit failed: internal VFS error: git checkout-index policy files failed: fatal: bad revision '87fdfea63bf9447f8972edc202bb1ccbdc5d5232'
+error: crab://crab/mount-large/retirement-remote-current did not send all necessary objects
+
+fatal: could not fetch 87fdfea63bf9447f8972edc202bb1ccbdc5d5232 from promisor remote
+help: Run `crab errors CRAB-E0099` for recovery steps.

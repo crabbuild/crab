@@ -1,0 +1,28 @@
+   Compiling crab-staging v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-staging)
+   Compiling crab-read v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-read)
+   Compiling crab-vfs v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-vfs)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 30.96s
+     Running unittests src/lib.rs (/Users/haipingfu/Workspace/crabbuild-target/crab-ios-02d01345-vfs/debug/deps/crab_vfs-7e2cc2722cb9a69e)
+
+running 1 test
+Initialized empty Git repository in /private/var/folders/rn/k2b7mvbs2dgb__6ys6_h94pm0000gn/T/.tmp4eaVaP/source/.git/
+[main (root-commit) 0530121] base
+ 2 files changed, 2 insertions(+)
+ create mode 100644 .gitattributes
+ create mode 100644 base.txt
+
+thread 'mount_runtime::tests::audit_local_pointer_commit_remains_readable' (26253820) panicked at crates/crab-vfs/src/mount_runtime/tests.rs:432:9:
+assertion `left == right` failed
+  left: 1
+ right: 0
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test mount_runtime::tests::audit_local_pointer_commit_remains_readable ... FAILED
+
+failures:
+
+failures:
+    mount_runtime::tests::audit_local_pointer_commit_remains_readable
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 598 filtered out; finished in 0.36s
+
+error: test failed, to rerun pass `-p crab-vfs --lib`

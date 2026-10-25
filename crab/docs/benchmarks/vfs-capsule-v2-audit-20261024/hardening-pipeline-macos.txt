@@ -1,0 +1,19 @@
+   Compiling crab-vfs v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-vfs)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 9.43s
+     Running unittests src/lib.rs (/Users/haipingfu/Workspace/crabbuild-target/crab-ios-02d01345-vfs/debug/deps/crab_vfs-ad5c539dce92b356)
+
+running 11 tests
+test pipeline::tests::select_default_clone_branch_prefers_advertised_default ... ok
+test pipeline::tests::select_default_clone_branch_uses_main_without_advertised_head ... ok
+test pipeline::tests::select_default_clone_branch_uses_master_without_main ... ok
+test pipeline::tests::select_default_clone_branch_uses_single_branch ... ok
+test pipeline::tests::select_default_clone_branch_rejects_ambiguous_remote ... ok
+test pipeline::tests::pipeline_builder_with_options ... ok
+test pipeline::tests::pipeline_config_builder_defaults ... ok
+test pipeline::tests::parse_ls_remote_heads_extracts_advertised_default ... ok
+test pipeline::tests::object_store_hydration_requires_v2_read_context ... ok
+test pipeline::tests::hydration_startup_bypasses_chunk_storage_without_touching_live_state ... ok
+test pipeline::tests::engine_setup_failure_releases_hydration_cache ... ok
+
+test result: ok. 11 passed; 0 failed; 0 ignored; 0 measured; 482 filtered out; finished in 0.11s
+

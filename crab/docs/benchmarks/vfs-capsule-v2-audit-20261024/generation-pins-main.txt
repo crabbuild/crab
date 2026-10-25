@@ -1,0 +1,8 @@
+cc2e4e25f46eeaee3cfd30025d257397c17a6049
+
+161:         self.prune_old_generations(next_gen)?;
+225:         self.prune_old_generations(next_gen)?;
+391:     /// Prune generations older than `current - 1`.
+392:     fn prune_old_generations(&self, current: i64) -> Result<()> {
+401:                 "DELETE FROM base_children_v1 WHERE generation < ?1",
+407:                 "DELETE FROM base_nodes_v1 WHERE generation < ?1",

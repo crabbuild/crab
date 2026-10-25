@@ -1,0 +1,1 @@
+{"schema_version":2,"incarnation":"01a17012-6369-7a12-9c7b-851abdd41d80","epoch":120,"writer_epoch":120,"writers":[{"holder":"pid-53-1792897834522414112-0","expires_at_backend":1792898134,"lease_secs":300},{"holder":"pid-53-1792897834522414112-0","expires_at_backend":1792898134,"lease_secs":300}],"sweep":null,"quarantine":[],"quarantine_block_until_backend":null}

@@ -1,0 +1,12 @@
+   Compiling crab-vfs v0.1.0 (/src/crates/crab-vfs)
+    Finished `test` profile [unoptimized] target(s) in 32.77s
+     Running unittests src/lib.rs (/root/Workspace/crabbuild-target/vfs-audit/target/debug/deps/crab_vfs-21ad8bed7305c3ec)
+
+running 1 test
+test native_mount::fuse_writable ... native_audit fuse=true read_only=false startup_ms=9 cold_4k_us=49805 warm_1m_us=594
+native_blob_cow fuse=true verified=true
+native_open_lifetime fuse=true rename_unlink_replacement_cow=true
+ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 625 filtered out; finished in 10.39s
+

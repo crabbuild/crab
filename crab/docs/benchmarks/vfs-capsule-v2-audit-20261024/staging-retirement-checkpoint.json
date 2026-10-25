@@ -1,0 +1,446 @@
+{
+  "observed_at_utc": "2026-10-25T01:41:02.333878+00:00",
+  "base_commit": "33f8e6c360d922b3ab1e2c0e5115a2d200eccd97",
+  "status": "committed native descriptor retirement regression repaired; fresh remote-source linked-worktree policy fetch fails; goal active",
+  "source_files_sha256": {
+    "Cargo.lock": "cbf5dfff720d799589231e861bcbc916772d828e81e598df5b59f11a9b4dabca",
+    "crab/Cargo.toml": "677a60f4f618a4c22651064d4c31072ebe0ea2cce9202cede7096365246b574f",
+    "crab/scripts/docker/run-mount-large-rustfs-smoke.sh": "03a29a8c1eb422c6790de868fa427ca475bb60efe8acd11259c3b70b888b4bcb",
+    "crab/src/auth/managed.rs": "b2ea24739e028925f8f8e6dc2b6a5b8f2202baa4c163fbf1afd6eac604566f45",
+    "crab/src/auth/mod.rs": "abc5f697db61119e27aa94d2ecab2448055a7512233d80d6500f29b49b72abbb",
+    "crab/src/cmd/doctor.rs": "7ab5a31bdb9b34c165955d9530e27d8af592634129da01fc4b491268480ea6b7",
+    "crab/src/cmd/mount.rs": "ac9ec45470f8f9a7d283f33704cc9117d33d7b2657638ccbc151ea686a962fcb",
+    "crab/src/core/error.rs": "3e5aa1a4b2c11326a0699efdc2e013c1c59ae953dc16f1016b8e55abd907f8f9",
+    "crab/src/git/remote_helper.rs": "1068054a9da47fc9f888d52372bd83aa625f02adc07ad178f192c5961a98b398",
+    "crab/src/replication/mod.rs": "54174f6b2a18a0ec8800cff117394b6cc51383f838287b53c68d7d6a56cdd7ef",
+    "crates/crab-read/Cargo.toml": "5526283771028683477ebaee8484de0712228c649779ed1186cb88db28116718",
+    "crates/crab-read/src/error.rs": "626b3721acf3281c8848e63fdd5290e567715ce00d2a6551a2230b2baa8ad499",
+    "crates/crab-read/src/hydrator.rs": "b281bfe4389348483c818f960440e7b5289cd2fedd950aa7809dce00733a593a",
+    "crates/crab-read/src/lib.rs": "71624bf3567f19234d2a9d4513cf7bb200ab6cc89174d4fe2f9b6c328bf8f851",
+    "crates/crab-read/src/pointer_reader.rs": "a800d4f41130e94b17eef85b765e48a649651c4b5e4f7c9a7ae0fbf31974579c",
+    "crates/crab-staging/src/file_reader.rs": "260ae5f6f04c9d6136c2b70be111a7179e11a1f8167ed415fa68ed301cfb8058",
+    "crates/crab-staging/src/file_reader/tests.rs": "2abd60596d654d384579d3b59481bee22c704e5530214a4c0192cd8f2041259d",
+    "crates/crab-staging/src/index.rs": "0646ab2d4fbaa8fa75364682405d5da27c8cca1cb3699d4626937376e2913e39",
+    "crates/crab-staging/src/lib.rs": "da901de7c9f1f43385a255f745a29541f4a6f48976b0d2f4b358b2c8de360e57",
+    "crates/crab-staging/src/push_snapshot.rs": "860b2c44aaf2f001b29447c1fa1a0f024a14fd10401cc4720ba882088527c72f",
+    "crates/crab-vfs/Cargo.toml": "0338d10ac603d5bec4b3a031bdb001b292ed5084570b42f172ab67de0a0b7a15",
+    "crates/crab-vfs/src/blob.rs": "3aca5a8c4d32fe013ea72d36d5aab569725351a09fb91cf13ac4612b84bd800b",
+    "crates/crab-vfs/src/blob/tests.rs": "0b476aa42ec81bc16f1594b020d6712e1c66d49776c0e87fc1d9aeed317a288b",
+    "crates/crab-vfs/src/clone_cache.rs": "a12e6399ee2b0ef097b64e859e8a7b2ba94b690a7c046bb26c1446e560097fec",
+    "crates/crab-vfs/src/coordinator.rs": "b0964c924aa11e431d5436b35ae94d534906db369185dc77bcdb31fb9f292347",
+    "crates/crab-vfs/src/daemon.rs": "5c5b1b67aaa4ed8ed4e9f44473f6e4cb48f01440f83e74ddf7e9660a7d990c5b",
+    "crates/crab-vfs/src/engine.rs": "ab697f021625e41d56aaec16bde3ebedbe469120657cc9aa910ce5530cf730b3",
+    "crates/crab-vfs/src/engine/open_file.rs": "f09f9674545d82cfcda5f3fb07181fd391cac35942b14df5bd9a728576a0fa33",
+    "crates/crab-vfs/src/error.rs": "d25b473433f61956513a610703338a6a04ac78f10642cd6f33cfe1729966259e",
+    "crates/crab-vfs/src/fuse.rs": "a8dfb3b2b6c443cb1c19fe5690fb3a3eb7ea1b384377a8d1c15c090319f44a96",
+    "crates/crab-vfs/src/hydration.rs": "5f1fd09a44ab32fbb26a7dbd021abaf1a6ad69716dca24b41bbd216b411dc17b",
+    "crates/crab-vfs/src/integration.rs": "144a0aea9af20323f9801585ffbf627ac6c54a73eee2529a8d28ac3f9110498b",
+    "crates/crab-vfs/src/ipc_client.rs": "713f28da1b3e87fd5fb463ea007174a94260f7c683affc1ca573db9648669a2b",
+    "crates/crab-vfs/src/ipc_server.rs": "96af7d41c6cd0f9ba624962b45ce781ce738065829751c048a1a0f6381f7c858",
+    "crates/crab-vfs/src/lib.rs": "12b4ffdb8f2f662625a6a7077b539179925a43ef94b34e003b28b581eb497a3f",
+    "crates/crab-vfs/src/memory_cache.rs": "3c06d32fb03613d2a060d33eee4505b94e3b52c8e1c116b06af56dd80e5275c3",
+    "crates/crab-vfs/src/mount_runtime.rs": "c02a7f25194c2acf3b031160d4af14e42a862dd4a073e55bdfcdf43e05c12e83",
+    "crates/crab-vfs/src/mount_runtime/tests.rs": "9183e341f6eb985f23252891ed2398bc2a768383bc9af900eb5478da168c0575",
+    "crates/crab-vfs/src/mount_runtime/tests/catalog.rs": "626b2b63fb4794ffb6b7b3ce026e18793b7e411facce5c06ff82ce5f50b58a0d",
+    "crates/crab-vfs/src/native_mount.rs": "b6df9f65614a774b6eea314ed1262d5c2451cb4d185ae8fb6155d34c8ca4b325",
+    "crates/crab-vfs/src/nfs.rs": "e58ead6025935cbd1f3f7f14f03b1ffdf6890f2c639a48c75f5e2b04a1b2e2bd",
+    "crates/crab-vfs/src/nfs_control.rs": "da7363a02c9dc552432ccfcc184c681ed3505379ce981ba7bead60692fc265ed",
+    "crates/crab-vfs/src/nfs_mount.rs": "82bfd06ba8914b4f89c3e4dc760d4c6384cb361cbfbfd5339c3cd21d50f5dc4a",
+    "crates/crab-vfs/src/overlay.rs": "6554bb4c5ace2c7c24d59e6cedd0bf418fede68cd7a03adf08570f6bf92979c0",
+    "crates/crab-vfs/src/pipeline.rs": "fcfda943f4532f93df5d89f9024c2804604759e984b224cf9ac620e58194fafe",
+    "crates/crab-vfs/src/publish.rs": "dfbf44c17b234eb0b7f28d0ebe8bd521635e002db990b5b407cd1b7ca7b5798c",
+    "crates/crab-vfs/src/refresh.rs": "b1ea61e84e9e9543a076ad1cf0f9313327e605a05da54920bccc516921ae7f63",
+    "crates/crab-vfs/src/repository.rs": "e26a1e14b7efc33b32ea209157b1ec5a7e8b06f2cf6de164718e21fc465641e5",
+    "crates/crab-vfs/src/repository/tests.rs": "b85cf954162f203e177a66bd19bf6ac843550bb4b90dc7923e9f29c41ea5697d",
+    "crates/crab-vfs/src/resolver.rs": "8ba85dab5894dff4af074089e0e170671ebda6c81466685334209d6cf52972cd",
+    "crates/crab-vfs/src/snapshot.rs": "6c89c9ed0ce9b5ecbd4bdcc67f4d0a655a4c877b0f349dbcef6a3e14278360c5",
+    "crates/crab-vfs/src/source.rs": "a6d49563b95011800eb6036de83f54aec6f9061a592c3e23207fa8532c3077e3",
+    "crates/crab-vfs/src/test_support.rs": "b3c680900dc334e27a34d3922d02a41c9231cf083ddab36840485eb2e0fb6f69",
+    "crates/crab-vfs/src/test_support/read.rs": "9eb375180f3fc6b9170c00ad312cd10df5428fdf56ef5e49d12ad0aed059c18e"
+  },
+  "change": "Publication bindings retain committed content identity; verified matching content resumes with the current captured read lease and current source lineage. No old reader retained by the binding.",
+  "before": {
+    "runtime": "one failed, old reader cannot find newly published hash after real local retirement",
+    "provider": "preceding installed binary returns held-write EIO after path leases 1 -> 0 and payload leases 67 -> 0",
+    "provider_binary_sha256": {
+      "crab-nfs-mount": "9dd2f9d0b502859e0042dd46b71ac36dd484f7e2d9c21b8daeb97b13a25a0bb2",
+      "git-remote-crab": "9dd2f9d0b502859e0042dd46b71ac36dd484f7e2d9c21b8daeb97b13a25a0bb2",
+      "crab": "9dd2f9d0b502859e0042dd46b71ac36dd484f7e2d9c21b8daeb97b13a25a0bb2",
+      "crab-cache-server": "54d947dfec6c65bc2a508a42b75a26c68be6fcdf2a27203cf1fb3f2454c00901",
+      "crab-fuse-mount": "9dd2f9d0b502859e0042dd46b71ac36dd484f7e2d9c21b8daeb97b13a25a0bb2"
+    }
+  },
+  "qualification": {
+    "dedicated_linux_library": {
+      "passed": 631,
+      "failed": 0,
+      "ignored": 9
+    },
+    "dedicated_linux_native": {
+      "passed": 8,
+      "failed": 0
+    },
+    "macos": "strict combined all-target Clippy; minimal/NFS-only/FUSE-only checks passed",
+    "real_rustfs_fuse": {
+      "exit_code": 0,
+      "bytes": 4194304,
+      "complete_held_path_expected_hash_match": true,
+      "clean_push_retired_recipe_leases": true,
+      "later_push_independent_eager_clone_hash_match": true
+    },
+    "real_rustfs_nfs": {
+      "exit_code": 0,
+      "bytes": 4194304,
+      "complete_held_path_expected_hash_match": true,
+      "clean_push_retired_recipe_leases": true,
+      "later_push_independent_eager_clone_hash_match": true
+    },
+    "provider_fixture_scope": "Local source, cloud hydration; mount cache origin explicitly set to Crab URL before publication. Default local-source push routing not qualified.",
+    "fresh_remote_source": {
+      "exit_code": 1,
+      "result": "required local commit fails before retirement, policy blob lazy fetch in linked publication worktree; same failure with preceding and new CLI",
+      "remains_open": true
+    },
+    "optimized_performance": false,
+    "native_macos_nfs": false
+  },
+  "binary_sha256": {
+    "crab-nfs-mount": "da7f98a13f44e5c70ea64481ea38c8876e6155b41a5b81718b19ca8391243961",
+    "git-remote-crab": "da7f98a13f44e5c70ea64481ea38c8876e6155b41a5b81718b19ca8391243961",
+    "crab": "da7f98a13f44e5c70ea64481ea38c8876e6155b41a5b81718b19ca8391243961",
+    "crab-cache-server": "54d947dfec6c65bc2a508a42b75a26c68be6fcdf2a27203cf1fb3f2454c00901",
+    "crab-fuse-mount": "da7f98a13f44e5c70ea64481ea38c8876e6155b41a5b81718b19ca8391243961"
+  },
+  "dependency_contract": {
+    "staging": "StagingPushSnapshot::commit retires captured published recipe leases; StagedFileReader retains a recipe for one operation only. Tested with real staging and encoded Capsule catalogs.",
+    "git_common_directory_next_investigation": "https://git-scm.com/docs/gitrepository-layout#Documentation/gitrepository-layout.txt-objects"
+  },
+  "logs": {
+    "open-pointer-retirement-before.txt": {
+      "sha256": "89bf92ad328654790dc4d6c7682828380da5c802ee021cd583f60e0047df69b7"
+    },
+    "open-pointer-retirement-after.txt": {
+      "sha256": "76a9b9d6234be6f2f8d5c25366069fb3707c91fbceceab612aeacae8793302de"
+    },
+    "open-pointer-retirement-clippy.txt": {
+      "sha256": "0161c75fbff9d39c687bf3c5d27f7664cc3397450655979c550e8c20f5fdbfb0"
+    },
+    "retirement-minimal.txt": {
+      "sha256": "132d8f9813fd0518ff77c1a062a2e99512c1239c3e418eef63423374de32ac3b"
+    },
+    "retirement-nfs-only.txt": {
+      "sha256": "8a2933ae25e59188be988ea6218274cb341f13d8bc4b533f57b12ececd4be8b3"
+    },
+    "retirement-fuse-only.txt": {
+      "sha256": "97584b9a4968aa806f1134a4d6c58775d28401ef8cf3a0cda9daff6c8e862402"
+    },
+    "retirement-full.log": {
+      "sha256": "e3f28eaab9c2044def6f9fa27a950c88a3220d969684a2ef62ac56dc08657dff"
+    },
+    "retirement-native.log": {
+      "sha256": "39712ed426ffcff48222ab644d1db642c333cfd0d0eb185a32e34f274c228558"
+    },
+    "retirement-probe-before/runner.log": {
+      "sha256": "7d61c58d3ed4e8bd2bc2cde5fc35e46f588fa561c8fd6c2b61d6973564d01ee8"
+    },
+    "retirement-probe-before/probe.sh": {
+      "sha256": "e34c577d7088c11bfab9391f92b05a20ec57eada82a245506b318157d1a254cf"
+    },
+    "retirement-probe-before/local-commit.json": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "retirement-probe-before/setup-binding-error.log": {
+      "sha256": "79cbe1de485aca576134029266286159806a952363cfc9d42140e19286793e3f"
+    },
+    "retirement-probe-before/logs/unmount.log": {
+      "sha256": "377f42d8b54c173e89e83bbf2a128c90ba0ac111a52003a0280cb05546cf692f"
+    },
+    "retirement-probe-before/logs/git-init.log": {
+      "sha256": "43e1999b2c76d56759c9a5c423189a5bae495aa6a542efa77debdf03e9eae551"
+    },
+    "retirement-probe-before/logs/commit-seed.log": {
+      "sha256": "8f93bd8159a0a751abb767e21c6bb034e043c0147113575765792b0fedbb43b7"
+    },
+    "retirement-probe-before/logs/local-commit.err": {
+      "sha256": "b7d692963c5d543a245f5d5a7c3771dec31e01b50045ffe542051cc88613dbc1"
+    },
+    "retirement-probe-before/logs/track.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "retirement-probe-before/logs/push-seed.log": {
+      "sha256": "1ec9e47ac6c780694e44be64b1de6a8a1eedb8d067d53f69ea36a9a662809455"
+    },
+    "retirement-probe-before/logs/add.log": {
+      "sha256": "9957444341b70b6de881859e2d6ddd382f0fd3e728eda7cf2c334d4d965fc739"
+    },
+    "retirement-probe-before/logs/init.log": {
+      "sha256": "6958b003e6753a3004060cd4f0603a2d2de2ea6faa1c5738d801ba25a61ec35c"
+    },
+    "retirement-probe-before/logs/mount.log": {
+      "sha256": "ef29e8fe2c506e78c65e57d90b08804ebf033033463d54dd7d85fe4dfc977b79"
+    },
+    "retirement-probe-local-before/runner.log": {
+      "sha256": "348132645d49f92c7fc8dbd4166a40aa83d6a5f46c66b26d49a598c20ab324b0"
+    },
+    "retirement-probe-local-before/probe.sh": {
+      "sha256": "f5ebe4bf528a24086943c6502950a517e7d53691a36aa2c6aa05922ec9a7110c"
+    },
+    "retirement-probe-local-before/clean-push.json": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "retirement-probe-local-before/local-commit.json": {
+      "sha256": "7fa0af53d8987796b1baf650d281a48a7baa71ded901e8f87931833b3460158c"
+    },
+    "retirement-probe-local-before/logs/unmount.log": {
+      "sha256": "377f42d8b54c173e89e83bbf2a128c90ba0ac111a52003a0280cb05546cf692f"
+    },
+    "retirement-probe-local-before/logs/git-init.log": {
+      "sha256": "43e1999b2c76d56759c9a5c423189a5bae495aa6a542efa77debdf03e9eae551"
+    },
+    "retirement-probe-local-before/logs/commit-seed.log": {
+      "sha256": "4275879742d42a5db37ffd46faf0552758b6ca13689e38f86ce04e4a19d9628c"
+    },
+    "retirement-probe-local-before/logs/local-commit.err": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "retirement-probe-local-before/logs/track.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "retirement-probe-local-before/logs/push-seed.log": {
+      "sha256": "537c8ebb608073b25768c189c52fb61a7edcdbea3cf5ea2d6c90a35707d904e8"
+    },
+    "retirement-probe-local-before/logs/add.log": {
+      "sha256": "beb127c9d2d20a6cd512f4f4d8ed2c77c87f358adbc1dd12573d6602b7acdd9b"
+    },
+    "retirement-probe-local-before/logs/init.log": {
+      "sha256": "6b8ac8dfb638bcc84c516a24de5a7b4c04f2af2acc48fea45e0a0a2467783b8d"
+    },
+    "retirement-probe-local-before/logs/mount.log": {
+      "sha256": "f0efff5ff31f311fe790ecad56fc9d25d294a1c68d9e746b14b42debc639d5b4"
+    },
+    "retirement-probe-local-before/logs/clean-push.err": {
+      "sha256": "9142049c886f4a26fe3280687f991ef9fdca3155b0574e2c753b239c01492aa8"
+    },
+    "retirement-probe-routed-before/staging.json": {
+      "sha256": "d13a0df35ba72a980df1c23d93d380f406aad225d25f62f3627c47d3f2906afa"
+    },
+    "retirement-probe-routed-before/runner.log": {
+      "sha256": "e614a462fdfb043fadfbaa0701e69128f9a8317d12d6ef660bea856ba2ff716a"
+    },
+    "retirement-probe-routed-before/probe.sh": {
+      "sha256": "654d4cde4114eeed153ce17a9e0b3be2a2324e8540020f5ea041445b10ad8653"
+    },
+    "retirement-probe-routed-before/clean-push.json": {
+      "sha256": "5708666c16bd336775c127110a4c3fa6c071501f9ddd52288295d6aaffcb1852"
+    },
+    "retirement-probe-routed-before/local-commit.json": {
+      "sha256": "277cdef8f2dbbda9757893c6df05adea25e40ff18e813897d29e964f360dbf23"
+    },
+    "retirement-probe-routed-before/logs/unmount.log": {
+      "sha256": "377f42d8b54c173e89e83bbf2a128c90ba0ac111a52003a0280cb05546cf692f"
+    },
+    "retirement-probe-routed-before/logs/git-init.log": {
+      "sha256": "43e1999b2c76d56759c9a5c423189a5bae495aa6a542efa77debdf03e9eae551"
+    },
+    "retirement-probe-routed-before/logs/commit-seed.log": {
+      "sha256": "5c9d11e03c779bf87216ec3473771dc714fa5694d47c46b5ddac3d7e80a4fc22"
+    },
+    "retirement-probe-routed-before/logs/local-commit.err": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "retirement-probe-routed-before/logs/track.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "retirement-probe-routed-before/logs/push-seed.log": {
+      "sha256": "c18eca20415bc4248c4bb5f6392f5be5833fb3d1ad20f1129eae3a3e6da5257d"
+    },
+    "retirement-probe-routed-before/logs/add.log": {
+      "sha256": "e64edbc2b2204cbef2db0252a03857824f3fcb1c2221270580193e5e3581f7dc"
+    },
+    "retirement-probe-routed-before/logs/init.log": {
+      "sha256": "dc77d4afa5964643eb3ab6a4e6abce3225368b01019f233f55086233bada901d"
+    },
+    "retirement-probe-routed-before/logs/mount.log": {
+      "sha256": "6e26eff08bb837443f331821e564393d3a91eaef45c51d63e6055623ebbd4871"
+    },
+    "retirement-probe-routed-before/logs/clean-push.err": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "retirement-probe-fuse/staging.json": {
+      "sha256": "d13a0df35ba72a980df1c23d93d380f406aad225d25f62f3627c47d3f2906afa"
+    },
+    "retirement-probe-fuse/runner.log": {
+      "sha256": "65ea45b2116a8d0ebf18baff7ace4ee7998a08cd91cb0a92e899e60f8ad343b7"
+    },
+    "retirement-probe-fuse/probe.sh": {
+      "sha256": "654d4cde4114eeed153ce17a9e0b3be2a2324e8540020f5ea041445b10ad8653"
+    },
+    "retirement-probe-fuse/observation.json": {
+      "sha256": "fb0a3322675fe3d9dd60e7c293b7ae25c67937e9117975f316d39e1ef7f5b2f2"
+    },
+    "retirement-probe-fuse/clean-push.json": {
+      "sha256": "f78b619e666a1c4469f4f1949b0c4afe8d2fb1b8fe105262c5a112154ae5f1dd"
+    },
+    "retirement-probe-fuse/local-commit.json": {
+      "sha256": "5791f4f332426f2ed04d137a5153faa504f815c8a720a0c807fe52e934dd6b53"
+    },
+    "retirement-probe-fuse/later-push.json": {
+      "sha256": "4a74e2c1d0afa6edb9413b32d04f5e3a7021f886ef8625c169f78cb75027dd4b"
+    },
+    "retirement-probe-fuse/expected.sha256": {
+      "sha256": "7892c228fb54f8d407c8641283aa34a732a61857afd27b91de55c199e2357130"
+    },
+    "retirement-probe-fuse/clone.sha256": {
+      "sha256": "7892c228fb54f8d407c8641283aa34a732a61857afd27b91de55c199e2357130"
+    },
+    "retirement-probe-fuse/logs/unmount.log": {
+      "sha256": "377f42d8b54c173e89e83bbf2a128c90ba0ac111a52003a0280cb05546cf692f"
+    },
+    "retirement-probe-fuse/logs/git-init.log": {
+      "sha256": "43e1999b2c76d56759c9a5c423189a5bae495aa6a542efa77debdf03e9eae551"
+    },
+    "retirement-probe-fuse/logs/commit-seed.log": {
+      "sha256": "5b51bdceeb698dee18949d2dfbbea4c1c37da67692c6cde5f9d67fdc0a026934"
+    },
+    "retirement-probe-fuse/logs/local-commit.err": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "retirement-probe-fuse/logs/later-push.err": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "retirement-probe-fuse/logs/track.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "retirement-probe-fuse/logs/push-seed.log": {
+      "sha256": "7e19143ec3019c72ae5a7ffb48aedb2ff613063a40d2f02c7e875c7159a52f63"
+    },
+    "retirement-probe-fuse/logs/clone.log": {
+      "sha256": "d9959012b4fe01f32d6e747e2550bbae7fc55568a7fb04a360d19fd6eb925ac8"
+    },
+    "retirement-probe-fuse/logs/add.log": {
+      "sha256": "c88238d50259376c6908d169726e46469a024b353cab9c742d7b9918886a00cd"
+    },
+    "retirement-probe-fuse/logs/init.log": {
+      "sha256": "6027e466813bd1eb38c048f180254f239e62cd26e917d7c722855095e1767eca"
+    },
+    "retirement-probe-fuse/logs/mount.log": {
+      "sha256": "e96d9656512ecd561cdcbd81a7267863e0c39f15a6f6f1ff7336dc058b7f75e0"
+    },
+    "retirement-probe-fuse/logs/clean-push.err": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "retirement-probe-nfs/staging.json": {
+      "sha256": "d13a0df35ba72a980df1c23d93d380f406aad225d25f62f3627c47d3f2906afa"
+    },
+    "retirement-probe-nfs/runner.log": {
+      "sha256": "65ea45b2116a8d0ebf18baff7ace4ee7998a08cd91cb0a92e899e60f8ad343b7"
+    },
+    "retirement-probe-nfs/probe.sh": {
+      "sha256": "654d4cde4114eeed153ce17a9e0b3be2a2324e8540020f5ea041445b10ad8653"
+    },
+    "retirement-probe-nfs/observation.json": {
+      "sha256": "fb0a3322675fe3d9dd60e7c293b7ae25c67937e9117975f316d39e1ef7f5b2f2"
+    },
+    "retirement-probe-nfs/clean-push.json": {
+      "sha256": "b1f20051f3a5fa99225e9cc3d92faffd138a63ce35aa08db270d7aae0376e084"
+    },
+    "retirement-probe-nfs/local-commit.json": {
+      "sha256": "1e90ba4b3b7d6842f8e9ece4bb919578b416ba16543d1df9f0e224601859d4e0"
+    },
+    "retirement-probe-nfs/later-push.json": {
+      "sha256": "c9b76cbf860bc674aa535ed4219779c497464164ae304598c10c506a82ca9ee8"
+    },
+    "retirement-probe-nfs/expected.sha256": {
+      "sha256": "7892c228fb54f8d407c8641283aa34a732a61857afd27b91de55c199e2357130"
+    },
+    "retirement-probe-nfs/clone.sha256": {
+      "sha256": "7892c228fb54f8d407c8641283aa34a732a61857afd27b91de55c199e2357130"
+    },
+    "retirement-probe-nfs/logs/unmount.log": {
+      "sha256": "377f42d8b54c173e89e83bbf2a128c90ba0ac111a52003a0280cb05546cf692f"
+    },
+    "retirement-probe-nfs/logs/git-init.log": {
+      "sha256": "43e1999b2c76d56759c9a5c423189a5bae495aa6a542efa77debdf03e9eae551"
+    },
+    "retirement-probe-nfs/logs/commit-seed.log": {
+      "sha256": "8bfb3d2073c6333b02a8851c7567e0d57d1e01dbcbd5122b3bbe91507142bb58"
+    },
+    "retirement-probe-nfs/logs/local-commit.err": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "retirement-probe-nfs/logs/later-push.err": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "retirement-probe-nfs/logs/track.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "retirement-probe-nfs/logs/push-seed.log": {
+      "sha256": "1340de81f11f53873c597687d3cfd1ab12ed9b1ceaa0bb67dc0db9eb86076968"
+    },
+    "retirement-probe-nfs/logs/clone.log": {
+      "sha256": "6426fac70c449ec11e319150ef45b8c7a4d3410a7f1a9e3bf0a5b417127d56f7"
+    },
+    "retirement-probe-nfs/logs/add.log": {
+      "sha256": "c88238d50259376c6908d169726e46469a024b353cab9c742d7b9918886a00cd"
+    },
+    "retirement-probe-nfs/logs/init.log": {
+      "sha256": "df3bad4ee70358e087e020cafccccba7d0853f505c7dee48b61efbe7c7223455"
+    },
+    "retirement-probe-nfs/logs/mount.log": {
+      "sha256": "627a3881268ac07f7b8129cc006e4d328d2f05647b6918279a2cd55da77ca4a3"
+    },
+    "retirement-probe-nfs/logs/clean-push.err": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "retirement-probe-remote-current/runner.log": {
+      "sha256": "3e5616e11210031d17ad9e7a4353e75fb7048e2ac246ee5ae5074a5627a00a57"
+    },
+    "retirement-probe-remote-current/probe.sh": {
+      "sha256": "a8d73a84b3da934d8975f06197b48535bacd385378b6d04768c6254e1e5d4482"
+    },
+    "retirement-probe-remote-current/local-commit.json": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "retirement-probe-remote-current/logs/unmount.log": {
+      "sha256": "377f42d8b54c173e89e83bbf2a128c90ba0ac111a52003a0280cb05546cf692f"
+    },
+    "retirement-probe-remote-current/logs/git-init.log": {
+      "sha256": "43e1999b2c76d56759c9a5c423189a5bae495aa6a542efa77debdf03e9eae551"
+    },
+    "retirement-probe-remote-current/logs/commit-seed.log": {
+      "sha256": "f7fe7dd19168fd611e82f16ec1c7c548454607b39f5125d61acbda4b4d9368f3"
+    },
+    "retirement-probe-remote-current/logs/local-commit.err": {
+      "sha256": "942c0d5eb2308402ffaa566e15aea268b80ef515984be1c2af0ffa06c4b5befa"
+    },
+    "retirement-probe-remote-current/logs/track.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "retirement-probe-remote-current/logs/push-seed.log": {
+      "sha256": "8678c359238e2a0e7addaea9b6499c8043ed32096f64cdb6396d3f5b28887b6b"
+    },
+    "retirement-probe-remote-current/logs/add.log": {
+      "sha256": "6eae7030c356e1e34eabc8e398f05deb430bc168d0aed3301bc5b3dd015b813e"
+    },
+    "retirement-probe-remote-current/logs/init.log": {
+      "sha256": "96b4a6568e0ba9689a9ab12d18559f608ebb2f82b662a82919a17c356e30d508"
+    },
+    "retirement-probe-remote-current/logs/mount.log": {
+      "sha256": "288a8bd2e68190e2e80955bb2d90e9c4f14699689ba6682a95b59303f4501f72"
+    },
+    "retirement-provider-make-install.log": {
+      "sha256": "eaf61efb26252c7fd0fba29a343f6612c3f3b3d2c159ef2a1e6ca76bb70cfbb8"
+    }
+  },
+  "open_gates": [
+    "fresh remote-source lazy policy-blob fetch in linked publication worktree",
+    "unpublished base-pointer descriptors and old-reader recipe lifetime through retirement",
+    "failed promotion preserving usable native content",
+    "startup/catalog/remote-GC ownership",
+    "all refresh/reset/publication owners",
+    "crash and mixed-recipe durability",
+    "full Crab pack v1 retirement",
+    "global resource budgets and optimized all-mode/native-macOS qualification"
+  ],
+  "final_source_hashes_match": true
+}

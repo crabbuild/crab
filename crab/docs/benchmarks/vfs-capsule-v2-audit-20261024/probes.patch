@@ -1,0 +1,488 @@
+diff --git a/crates/crab-vfs/src/engine.rs b/crates/crab-vfs/src/engine.rs
+index bbfcf6e027c..c545151c6d6 100644
+--- a/crates/crab-vfs/src/engine.rs
++++ b/crates/crab-vfs/src/engine.rs
+@@ -3691,6 +3691,46 @@ mod tests {
+         assert_eq!(first, second);
+     }
+ 
++    #[test]
++    fn audit_blob_cache_corruption_is_not_served() {
++        let (dir, git_dir, oid) = create_git_repo_with_blob(b"original");
++        let cache = dir.path().join("cache");
++        let reader = OdbReader::new(&git_dir, &cache).unwrap();
++        reader.read_blob(&oid).unwrap();
++        std::fs::write(cache.join(&oid), b"corrupt!").unwrap();
++        let result = reader.read_blob_range(&oid, 0, 8);
++        assert!(result.is_err() || result.unwrap().as_ref() == b"original");
++    }
++
++    #[test]
++    fn audit_blob_range_read_amplification() {
++        let content = vec![0x55; 4 * 1024 * 1024];
++        let (dir, git_dir, oid) = create_git_repo_with_blob(&content);
++        let cache = dir.path().join("cache");
++        let reader = OdbReader::new(&git_dir, &cache).unwrap();
++        reader.read_blob(&oid).unwrap();
++        for run in 0..3 {
++            let start = std::time::Instant::now();
++            for index in 0..1024 {
++                std::hint::black_box(reader.read_blob_range(&oid, index * 4096, 4096).unwrap());
++            }
++            let blob_time = start.elapsed();
++            let start = std::time::Instant::now();
++            for index in 0..1024 {
++                std::hint::black_box(
++                    read_file_range(&cache.join(&oid), index * 4096, 4096).unwrap(),
++                );
++            }
++            eprintln!(
++                "audit_blob_range run={run} served_bytes={} blob_cache_ms={} direct_range_ms={} source_bytes_per_read={} requested_bytes=4096",
++                content.len(),
++                blob_time.as_millis(),
++                start.elapsed().as_millis(),
++                content.len()
++            );
++        }
++    }
++
+     #[test]
+     fn odb_reader_promisor_fallback_ignores_new_pack_slot_pressure() {
+         let (_dir, git_dir, initial_oid) = create_git_repo_with_blob(b"initial");
+diff --git a/crates/crab-vfs/src/hydration.rs b/crates/crab-vfs/src/hydration.rs
+index fe11cddc7b4..604554f082f 100644
+--- a/crates/crab-vfs/src/hydration.rs
++++ b/crates/crab-vfs/src/hydration.rs
+@@ -2066,6 +2066,105 @@ mod tests {
+         assert!(!cached_window_complete(&path, 8).await.unwrap());
+     }
+ 
++    #[tokio::test(flavor = "multi_thread")]
++    async fn audit_warm_read_rejects_same_length_corruption() {
++        let dir = tempfile::tempdir().unwrap();
++        let payload = Bytes::from_static(b"original");
++        let stored =
++            crate::test_support::StoredPointer::new(&dir.path().join("shared"), payload.clone())
++                .await;
++        let service = window_service(dir.path(), &stored, CancellationToken::new());
++        assert_eq!(
++            service.read_range(&stored.pointer, 0, 8).await.unwrap(),
++            payload
++        );
++        let key = ReadWindowKey {
++            file_hash: stored.pointer.file_hash,
++            start: 0,
++            end: 8,
++        };
++        let path = read_window_cache_path(&dir.path().join("windows"), &key);
++        std::fs::write(&path, b"corrupt!").unwrap();
++        let result = service.read_range(&stored.pointer, 0, 8).await;
++        assert!(
++            result.is_err() || result.unwrap() == payload,
++            "warm cache returned corrupted bytes as successful data"
++        );
++    }
++
++    #[tokio::test(flavor = "multi_thread")]
++    async fn audit_window_cache_failure_does_not_break_origin_read() {
++        let dir = tempfile::tempdir().unwrap();
++        let payload = Bytes::from_static(b"original");
++        let stored =
++            crate::test_support::StoredPointer::new(&dir.path().join("shared"), payload.clone())
++                .await;
++        std::fs::write(dir.path().join("windows"), b"occupied").unwrap();
++        let service = window_service(dir.path(), &stored, CancellationToken::new());
++        assert_eq!(
++            service.read_range(&stored.pointer, 0, 8).await.unwrap(),
++            payload
++        );
++    }
++
++    #[tokio::test(flavor = "multi_thread")]
++    async fn audit_directory_prefetch_warms_canonical_data() {
++        let dir = tempfile::tempdir().unwrap();
++        let stored = crate::test_support::StoredPointer::new(
++            &dir.path().join("shared"),
++            Bytes::from_static(b"original"),
++        )
++        .await;
++        let service = window_service(dir.path(), &stored, CancellationToken::new());
++        service.prefetch_dir(vec![("model.bin".into(), stored.pointer.clone())]);
++        assert!(service.step_one(0));
++        assert!(
++            stored.xorb_body_requests() > 0,
++            "canonical directory prefetch did no data reads"
++        );
++    }
++
++    #[tokio::test(flavor = "multi_thread")]
++    async fn audit_cancelled_window_read_releases_inflight_entry() {
++        struct Gate(tokio::sync::Notify);
++        #[async_trait::async_trait]
++        impl crab_read::XorbAvailability for Gate {
++            async fn ensure_available(
++                &self,
++                _path: &object_store::path::Path,
++            ) -> crab_read::Result<()> {
++                self.0.notify_one();
++                std::future::pending().await
++            }
++        }
++        let dir = tempfile::tempdir().unwrap();
++        let mut stored = crate::test_support::StoredPointer::new(
++            &dir.path().join("shared"),
++            Bytes::from_static(b"original"),
++        )
++        .await;
++        let gate = Arc::new(Gate(tokio::sync::Notify::new()));
++        let hydrator = Arc::try_unwrap(stored.context.hydrator)
++            .ok()
++            .unwrap()
++            .with_availability(gate.clone());
++        stored.context.hydrator = Arc::new(hydrator);
++        let service = window_service(dir.path(), &stored, CancellationToken::new());
++        let read_service = service.clone();
++        let task =
++            tokio::spawn(async move { read_service.read_range(&stored.pointer, 0, 8).await });
++        tokio::time::timeout(std::time::Duration::from_secs(5), gate.0.notified())
++            .await
++            .unwrap();
++        task.abort();
++        let _ = task.await;
++        service.shutdown().await;
++        assert!(
++            service.read_range_inflight.is_empty(),
++            "cancelled read retained its window entry after shutdown"
++        );
++    }
++
+     #[test]
+     fn hydration_read_stats_snapshot_counts_cache_and_remote_pressure() {
+         let stats = HydrationReadStats::default();
+diff --git a/crates/crab-vfs/src/lib.rs b/crates/crab-vfs/src/lib.rs
+index 8dbe575dbb6..f4a79cbf72a 100644
+--- a/crates/crab-vfs/src/lib.rs
++++ b/crates/crab-vfs/src/lib.rs
+@@ -116,3 +116,6 @@ pub mod verified_set;
+ 
+ #[cfg(test)]
+ mod test_support;
++
++#[cfg(all(test, target_os = "linux", feature = "fuse", feature = "nfs"))]
++mod audit_native;
+diff --git a/crates/crab-vfs/src/mount_runtime.rs b/crates/crab-vfs/src/mount_runtime.rs
+index a77d79ee92a..de1a5bf3285 100644
+--- a/crates/crab-vfs/src/mount_runtime.rs
++++ b/crates/crab-vfs/src/mount_runtime.rs
+@@ -355,6 +355,123 @@ mod tests {
+         );
+     }
+ 
++    fn audit_source(root: &Path) -> std::path::PathBuf {
++        let source = root.join("source");
++        std::fs::create_dir_all(&source).unwrap();
++        git(&source, ["init", "-b", "main"]);
++        git(&source, ["config", "user.email", "audit@localhost"]);
++        git(&source, ["config", "user.name", "VFS audit"]);
++        std::fs::write(source.join("base.txt"), b"base").unwrap();
++        std::fs::write(source.join(".gitattributes"), b"*.bin filter=crab\n").unwrap();
++        git(&source, ["add", "."]);
++        git(&source, ["commit", "-m", "base"]);
++        source
++    }
++
++    #[tokio::test(flavor = "multi_thread")]
++    async fn audit_initial_pipeline_honors_requested_ref() {
++        let root = tempfile::tempdir().unwrap();
++        let source = audit_source(root.path());
++        git(&source, ["checkout", "-b", "other"]);
++        std::fs::write(source.join("other.txt"), b"other").unwrap();
++        git(&source, ["add", "."]);
++        git(&source, ["commit", "-m", "other"]);
++        let requested_oid = git_stdout(&source, ["rev-parse", "HEAD"]);
++        git(&source, ["checkout", "main"]);
++        let config = PipelineConfig {
++            source: source.display().to_string(),
++            git_dir: source.join(".git"),
++            ref_name: Some("refs/heads/other".into()),
++            read_only: true,
++            cache_dir: root.path().join("cache"),
++            cancel_token: CancellationToken::new(),
++        };
++        let output = MountPipelineBuilder::new(config).execute().unwrap();
++        output.hydration.shutdown().await;
++        assert_eq!(output.head_oid, requested_oid);
++    }
++
++    #[tokio::test(flavor = "multi_thread")]
++    async fn audit_readonly_local_mount_preserves_staged_index() {
++        let root = tempfile::tempdir().unwrap();
++        let source = audit_source(root.path());
++        std::fs::write(source.join("base.txt"), b"staged change").unwrap();
++        git(&source, ["add", "base.txt"]);
++        let before = git_stdout(&source, ["rev-parse", ":base.txt"]);
++        let config = PipelineConfig {
++            source: source.display().to_string(),
++            git_dir: source.join(".git"),
++            ref_name: Some("refs/heads/main".into()),
++            read_only: true,
++            cache_dir: root.path().join("cache"),
++            cancel_token: CancellationToken::new(),
++        };
++        let output = MountPipelineBuilder::new(config).execute().unwrap();
++        output.hydration.shutdown().await;
++        assert_eq!(
++            git_stdout(&source, ["rev-parse", ":base.txt"]),
++            before,
++            "read-only mount rewrote the source repository's staged version"
++        );
++    }
++
++    #[tokio::test(flavor = "multi_thread")]
++    async fn audit_local_pointer_commit_remains_readable() {
++        let root = tempfile::tempdir().unwrap();
++        let source = audit_source(root.path());
++        let stored = crate::test_support::StoredPointer::new(
++            &root.path().join("shared"),
++            bytes::Bytes::from_static(b"remote base"),
++        )
++        .await;
++        let config = PipelineConfig {
++            source: source.display().to_string(),
++            git_dir: source.join(".git"),
++            ref_name: Some("refs/heads/main".into()),
++            read_only: false,
++            cache_dir: root.path().join("cache"),
++            cancel_token: CancellationToken::new(),
++        };
++        let mut output = MountPipelineBuilder::new(config.clone())
++            .with_read_context(stored.context)
++            .execute()
++            .unwrap();
++        output.engine.create("new.bin", 0o100644).await.unwrap();
++        output
++            .engine
++            .write("new.bin", 0, b"new local bytes")
++            .await
++            .unwrap();
++        assert_eq!(
++            output.engine.read("new.bin", 0, 1024).await.unwrap(),
++            b"new local bytes".as_slice()
++        );
++        let engine = output.engine.clone();
++        let reset = engine.begin_overlay_reset().await;
++        let committed = crate::publish::commit_overlay_with_snapshot(
++            &crate::publish::OverlayCommitOptions {
++                cache_dir: config.cache_dir.clone(),
++                git_dir: config.git_dir.clone(),
++                ref_name: "refs/heads/main".into(),
++                message: "local pointer commit".into(),
++                push: false,
++            },
++            Some(&output.snapshot),
++        )
++        .unwrap();
++        adopt_published_snapshot(
++            &mut output,
++            &config.git_dir,
++            committed.commit_oid.as_deref().unwrap(),
++            "refs/heads/main",
++        )
++        .unwrap();
++        drop(reset);
++        let result = output.engine.read("new.bin", 0, 1024).await;
++        output.hydration.shutdown().await;
++        assert_eq!(result.unwrap(), b"new local bytes".as_slice());
++    }
++
+     #[test]
+     fn resolve_refresh_head_fetches_remote_tracked_ref_into_mount_cache() {
+         let dir = tempfile::tempdir().unwrap();
+diff --git a/crates/crab-vfs/src/audit_native.rs b/crates/crab-vfs/src/audit_native.rs
+new file mode 100644
+index 00000000000..9894bc72c47
+--- /dev/null
++++ b/crates/crab-vfs/src/audit_native.rs
+@@ -0,0 +1,182 @@
++use std::io::{Read, Seek, SeekFrom, Write};
++use std::path::Path;
++use std::sync::Arc;
++use std::time::Instant;
++
++use crate::pipeline::{MountPipelineBuilder, PipelineConfig};
++use tokio_util::sync::CancellationToken;
++
++fn git(source: &Path, args: &[&str]) {
++    let output = std::process::Command::new("git")
++        .arg("-C")
++        .arg(source)
++        .args(args)
++        .env_remove("GIT_DIR")
++        .env_remove("GIT_COMMON_DIR")
++        .env_remove("GIT_WORK_TREE")
++        .output()
++        .unwrap();
++    assert!(
++        output.status.success(),
++        "{}",
++        String::from_utf8_lossy(&output.stderr)
++    );
++}
++
++async fn qualify(fuse: bool, read_only: bool) {
++    assert_eq!(std::env::var("CRAB_VFS_AUDIT_NATIVE").as_deref(), Ok("1"));
++    let temp = tempfile::tempdir().unwrap();
++    let source = temp.path().join("source");
++    std::fs::create_dir(&source).unwrap();
++    git(&source, &["init", "-b", "main"]);
++    git(&source, &["config", "user.email", "audit@localhost"]);
++    git(&source, &["config", "user.name", "VFS audit"]);
++    let expected = bytes::Bytes::from(
++        (0..1024 * 1024)
++            .map(|i| (i % 251) as u8)
++            .collect::<Vec<_>>(),
++    );
++    let stored =
++        crate::test_support::StoredPointer::new(&temp.path().join("shared"), expected.clone())
++            .await;
++    std::fs::write(source.join("base.txt"), b"ordinary Git data").unwrap();
++    std::fs::write(source.join("model.bin"), stored.pointer.serialize()).unwrap();
++    std::fs::create_dir(source.join("dir")).unwrap();
++    std::fs::write(source.join("dir/nested.txt"), b"nested").unwrap();
++    std::os::unix::fs::symlink("base.txt", source.join("link")).unwrap();
++    git(&source, &["add", "."]);
++    git(&source, &["commit", "-m", "seed"]);
++    let config = PipelineConfig {
++        source: source.to_string_lossy().into_owned(),
++        git_dir: source.join(".git"),
++        ref_name: Some("refs/heads/main".into()),
++        read_only,
++        cache_dir: temp.path().join("cache"),
++        cancel_token: CancellationToken::new(),
++    };
++    let output = MountPipelineBuilder::new(config.clone())
++        .with_read_context(stored.context)
++        .execute()
++        .unwrap();
++    let mountpoint = temp.path().join("mount");
++    std::fs::create_dir(&mountpoint).unwrap();
++    let start = Instant::now();
++    let mut fuse_session = None;
++    let mut nfs_task = None;
++    let cancel = CancellationToken::new();
++    if fuse {
++        let session = crate::mount::mount(
++            &crate::mount::MountConfig {
++                mountpoint: mountpoint.clone(),
++                git_dir: config.git_dir.to_string_lossy().into_owned(),
++                write_pid: false,
++                crab_dir: temp.path().join("state"),
++                read_only,
++            },
++            Arc::clone(&output.resolver),
++            Arc::clone(&output.engine),
++            tokio::runtime::Handle::current(),
++        )
++        .unwrap();
++        fuse_session = Some(session.session.spawn().unwrap());
++    } else {
++        let session = crate::nfs_mount::mount(
++            &crate::nfs_mount::NfsMountConfig {
++                mountpoint: mountpoint.clone(),
++                git_dir: config.git_dir.to_string_lossy().into_owned(),
++                exclusive_verifiers_path: temp.path().join("verifiers.json"),
++                read_only,
++                auto_refresh_interval: None,
++                control_endpoint_override: None,
++            },
++            Arc::clone(&output.resolver),
++            Arc::clone(&output.engine),
++            None,
++        )
++        .await
++        .unwrap();
++        nfs_task = Some(tokio::spawn(crate::nfs_mount::run_until_cancelled(
++            session,
++            cancel.clone(),
++        )));
++    }
++    let startup = start.elapsed();
++    let teardown_mountpoint = mountpoint.clone();
++    let result = tokio::task::spawn_blocking(move || -> std::io::Result<()> {
++        assert_eq!(std::fs::read(mountpoint.join("base.txt"))?, b"ordinary Git data");
++        assert_eq!(std::fs::read(mountpoint.join("dir/nested.txt"))?, b"nested");
++        assert_eq!(std::fs::read(mountpoint.join("link"))?, b"ordinary Git data");
++        assert!(std::fs::read_to_string(mountpoint.join(".git"))?.starts_with("gitdir: "));
++        assert_eq!(std::fs::metadata(mountpoint.join("model.bin"))?.len(), expected.len() as u64);
++        let mut model = std::fs::File::open(mountpoint.join("model.bin"))?;
++        model.seek(SeekFrom::Start(17))?;
++        let start = Instant::now();
++        let mut range = vec![0; 4096];
++        model.read_exact(&mut range)?;
++        assert_eq!(&range, &expected[17..4113]);
++        let cold = start.elapsed();
++        let start = Instant::now();
++        model.seek(SeekFrom::Start(0))?;
++        let mut full = Vec::new();
++        model.read_to_end(&mut full)?;
++        assert_eq!(full, expected.as_ref());
++        let warm = start.elapsed();
++        let names = std::fs::read_dir(&mountpoint)?.collect::<std::io::Result<Vec<_>>>()?;
++        assert!(names.len() >= 5);
++        eprintln!("native_audit fuse={fuse} read_only={read_only} startup_ms={} cold_4k_us={} warm_1m_us={}", startup.as_millis(), cold.as_micros(), warm.as_micros());
++        if read_only {
++            assert!(std::fs::write(mountpoint.join("forbidden"), b"x").is_err());
++            return Ok(());
++        }
++        std::fs::create_dir(mountpoint.join("newdir"))?;
++        let original = mountpoint.join("newdir/created.txt");
++        let renamed = mountpoint.join("newdir/renamed.txt");
++        let mut open = std::fs::OpenOptions::new().create(true).truncate(true).read(true).write(true).open(&original)?;
++        open.write_all(b"written through mounted filesystem")?;
++        open.sync_all()?;
++        assert_eq!(std::fs::read(&original)?, b"written through mounted filesystem");
++        std::fs::rename(&original, &renamed)?;
++        assert_eq!(std::fs::read(&renamed)?, b"written through mounted filesystem");
++        open.seek(SeekFrom::Start(0))?;
++        let mut after = Vec::new();
++        open.read_to_end(&mut after).map_err(|error| std::io::Error::new(error.kind(), format!("read through open descriptor after rename: {error}")))?;
++        assert_eq!(after, b"written through mounted filesystem");
++        open.write_all(b"!")?;
++        open.sync_all()?;
++        drop(open);
++        std::fs::remove_file(&renamed)?;
++        std::fs::remove_dir(mountpoint.join("newdir"))?;
++        Ok(())
++    }).await.unwrap();
++    if let Some(session) = fuse_session {
++        tokio::task::spawn_blocking(move || {
++            crate::mount::unmount_background_session(session, &teardown_mountpoint)
++        })
++        .await
++        .unwrap()
++        .unwrap();
++    }
++    cancel.cancel();
++    if let Some(task) = nfs_task {
++        task.await.unwrap().unwrap();
++    }
++    output.hydration.shutdown().await;
++    assert!(result.is_ok(), "native operations failed: {result:?}");
++}
++
++#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
++async fn audit_native_fuse_readonly() {
++    qualify(true, true).await;
++}
++#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
++async fn audit_native_fuse_writable() {
++    qualify(true, false).await;
++}
++#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
++async fn audit_native_nfs_readonly() {
++    qualify(false, true).await;
++}
++#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
++async fn audit_native_nfs_writable() {
++    qualify(false, false).await;
++}

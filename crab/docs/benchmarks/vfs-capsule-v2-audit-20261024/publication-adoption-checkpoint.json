@@ -1,0 +1,795 @@
+{
+  "observed_at_utc": "2026-10-25T01:27:41.656828+00:00",
+  "base_commit": "33f8e6c360d922b3ab1e2c0e5115a2d200eccd97",
+  "status": "publication adoption, Linux mapped writeback and content retry regressions repaired; goal active",
+  "source_files_sha256": {
+    "Cargo.lock": "cbf5dfff720d799589231e861bcbc916772d828e81e598df5b59f11a9b4dabca",
+    "crab/Cargo.toml": "677a60f4f618a4c22651064d4c31072ebe0ea2cce9202cede7096365246b574f",
+    "crab/scripts/docker/run-mount-large-rustfs-smoke.sh": "03a29a8c1eb422c6790de868fa427ca475bb60efe8acd11259c3b70b888b4bcb",
+    "crab/src/auth/managed.rs": "b2ea24739e028925f8f8e6dc2b6a5b8f2202baa4c163fbf1afd6eac604566f45",
+    "crab/src/auth/mod.rs": "abc5f697db61119e27aa94d2ecab2448055a7512233d80d6500f29b49b72abbb",
+    "crab/src/cmd/doctor.rs": "7ab5a31bdb9b34c165955d9530e27d8af592634129da01fc4b491268480ea6b7",
+    "crab/src/cmd/mount.rs": "ac9ec45470f8f9a7d283f33704cc9117d33d7b2657638ccbc151ea686a962fcb",
+    "crab/src/core/error.rs": "3e5aa1a4b2c11326a0699efdc2e013c1c59ae953dc16f1016b8e55abd907f8f9",
+    "crab/src/git/remote_helper.rs": "1068054a9da47fc9f888d52372bd83aa625f02adc07ad178f192c5961a98b398",
+    "crab/src/replication/mod.rs": "54174f6b2a18a0ec8800cff117394b6cc51383f838287b53c68d7d6a56cdd7ef",
+    "crates/crab-read/Cargo.toml": "5526283771028683477ebaee8484de0712228c649779ed1186cb88db28116718",
+    "crates/crab-read/src/error.rs": "626b3721acf3281c8848e63fdd5290e567715ce00d2a6551a2230b2baa8ad499",
+    "crates/crab-read/src/hydrator.rs": "b281bfe4389348483c818f960440e7b5289cd2fedd950aa7809dce00733a593a",
+    "crates/crab-read/src/lib.rs": "71624bf3567f19234d2a9d4513cf7bb200ab6cc89174d4fe2f9b6c328bf8f851",
+    "crates/crab-read/src/pointer_reader.rs": "a800d4f41130e94b17eef85b765e48a649651c4b5e4f7c9a7ae0fbf31974579c",
+    "crates/crab-staging/src/file_reader.rs": "260ae5f6f04c9d6136c2b70be111a7179e11a1f8167ed415fa68ed301cfb8058",
+    "crates/crab-staging/src/file_reader/tests.rs": "2abd60596d654d384579d3b59481bee22c704e5530214a4c0192cd8f2041259d",
+    "crates/crab-staging/src/index.rs": "0646ab2d4fbaa8fa75364682405d5da27c8cca1cb3699d4626937376e2913e39",
+    "crates/crab-staging/src/lib.rs": "da901de7c9f1f43385a255f745a29541f4a6f48976b0d2f4b358b2c8de360e57",
+    "crates/crab-staging/src/push_snapshot.rs": "860b2c44aaf2f001b29447c1fa1a0f024a14fd10401cc4720ba882088527c72f",
+    "crates/crab-vfs/Cargo.toml": "0338d10ac603d5bec4b3a031bdb001b292ed5084570b42f172ab67de0a0b7a15",
+    "crates/crab-vfs/src/blob.rs": "3aca5a8c4d32fe013ea72d36d5aab569725351a09fb91cf13ac4612b84bd800b",
+    "crates/crab-vfs/src/blob/tests.rs": "0b476aa42ec81bc16f1594b020d6712e1c66d49776c0e87fc1d9aeed317a288b",
+    "crates/crab-vfs/src/clone_cache.rs": "a12e6399ee2b0ef097b64e859e8a7b2ba94b690a7c046bb26c1446e560097fec",
+    "crates/crab-vfs/src/coordinator.rs": "b0964c924aa11e431d5436b35ae94d534906db369185dc77bcdb31fb9f292347",
+    "crates/crab-vfs/src/daemon.rs": "5c5b1b67aaa4ed8ed4e9f44473f6e4cb48f01440f83e74ddf7e9660a7d990c5b",
+    "crates/crab-vfs/src/engine.rs": "ab697f021625e41d56aaec16bde3ebedbe469120657cc9aa910ce5530cf730b3",
+    "crates/crab-vfs/src/engine/open_file.rs": "5c908117b199b4aa58c3457aa67d20d5d88edc8e51873c2911a2d2a1f641b3f5",
+    "crates/crab-vfs/src/error.rs": "d25b473433f61956513a610703338a6a04ac78f10642cd6f33cfe1729966259e",
+    "crates/crab-vfs/src/fuse.rs": "a8dfb3b2b6c443cb1c19fe5690fb3a3eb7ea1b384377a8d1c15c090319f44a96",
+    "crates/crab-vfs/src/hydration.rs": "5f1fd09a44ab32fbb26a7dbd021abaf1a6ad69716dca24b41bbd216b411dc17b",
+    "crates/crab-vfs/src/integration.rs": "144a0aea9af20323f9801585ffbf627ac6c54a73eee2529a8d28ac3f9110498b",
+    "crates/crab-vfs/src/ipc_client.rs": "713f28da1b3e87fd5fb463ea007174a94260f7c683affc1ca573db9648669a2b",
+    "crates/crab-vfs/src/ipc_server.rs": "96af7d41c6cd0f9ba624962b45ce781ce738065829751c048a1a0f6381f7c858",
+    "crates/crab-vfs/src/lib.rs": "12b4ffdb8f2f662625a6a7077b539179925a43ef94b34e003b28b581eb497a3f",
+    "crates/crab-vfs/src/memory_cache.rs": "3c06d32fb03613d2a060d33eee4505b94e3b52c8e1c116b06af56dd80e5275c3",
+    "crates/crab-vfs/src/mount_runtime.rs": "c02a7f25194c2acf3b031160d4af14e42a862dd4a073e55bdfcdf43e05c12e83",
+    "crates/crab-vfs/src/mount_runtime/tests.rs": "9183e341f6eb985f23252891ed2398bc2a768383bc9af900eb5478da168c0575",
+    "crates/crab-vfs/src/mount_runtime/tests/catalog.rs": "1fe080729cd0ee08c024d3cf5da0350c38739192eaf6a974c4506f80a6113b6b",
+    "crates/crab-vfs/src/native_mount.rs": "b6df9f65614a774b6eea314ed1262d5c2451cb4d185ae8fb6155d34c8ca4b325",
+    "crates/crab-vfs/src/nfs.rs": "e58ead6025935cbd1f3f7f14f03b1ffdf6890f2c639a48c75f5e2b04a1b2e2bd",
+    "crates/crab-vfs/src/nfs_control.rs": "da7363a02c9dc552432ccfcc184c681ed3505379ce981ba7bead60692fc265ed",
+    "crates/crab-vfs/src/nfs_mount.rs": "82bfd06ba8914b4f89c3e4dc760d4c6384cb361cbfbfd5339c3cd21d50f5dc4a",
+    "crates/crab-vfs/src/overlay.rs": "6554bb4c5ace2c7c24d59e6cedd0bf418fede68cd7a03adf08570f6bf92979c0",
+    "crates/crab-vfs/src/pipeline.rs": "fcfda943f4532f93df5d89f9024c2804604759e984b224cf9ac620e58194fafe",
+    "crates/crab-vfs/src/publish.rs": "dfbf44c17b234eb0b7f28d0ebe8bd521635e002db990b5b407cd1b7ca7b5798c",
+    "crates/crab-vfs/src/refresh.rs": "b1ea61e84e9e9543a076ad1cf0f9313327e605a05da54920bccc516921ae7f63",
+    "crates/crab-vfs/src/repository.rs": "e26a1e14b7efc33b32ea209157b1ec5a7e8b06f2cf6de164718e21fc465641e5",
+    "crates/crab-vfs/src/repository/tests.rs": "b85cf954162f203e177a66bd19bf6ac843550bb4b90dc7923e9f29c41ea5697d",
+    "crates/crab-vfs/src/resolver.rs": "8ba85dab5894dff4af074089e0e170671ebda6c81466685334209d6cf52972cd",
+    "crates/crab-vfs/src/snapshot.rs": "6c89c9ed0ce9b5ecbd4bdcc67f4d0a655a4c877b0f349dbcef6a3e14278360c5",
+    "crates/crab-vfs/src/source.rs": "a6d49563b95011800eb6036de83f54aec6f9061a592c3e23207fa8532c3077e3",
+    "crates/crab-vfs/src/test_support.rs": "b3c680900dc334e27a34d3922d02a41c9231cf083ddab36840485eb2e0fb6f69",
+    "crates/crab-vfs/src/test_support/read.rs": "9eb375180f3fc6b9170c00ad312cd10df5428fdf56ef5e49d12ad0aed059c18e"
+  },
+  "qualification": {
+    "dedicated_linux_library": {
+      "passed": 630,
+      "failed": 0,
+      "ignored": 9
+    },
+    "dedicated_linux_native": {
+      "passed": 8,
+      "failed": 0
+    },
+    "rustfs_nfs": "complete scenario passed",
+    "rustfs_fuse": "complete scenario passed",
+    "held_descriptor_and_dirty_mapping": "held AFTER!, pathname AFTER!; committed BA, subsequent mapped edit BC",
+    "pointer_descriptor": "32 MiB pointer, two no-push commits, subsequent held/path prefix match (not full independent hash proof)",
+    "macos": "strict combined Clippy, CLI check, minimal/nfs/fuse checks passed; native NFS not run",
+    "optimized_performance": false
+  },
+  "binary_sha256": {
+    "crab-nfs-mount": "9dd2f9d0b502859e0042dd46b71ac36dd484f7e2d9c21b8daeb97b13a25a0bb2",
+    "git-remote-crab": "9dd2f9d0b502859e0042dd46b71ac36dd484f7e2d9c21b8daeb97b13a25a0bb2",
+    "crab": "9dd2f9d0b502859e0042dd46b71ac36dd484f7e2d9c21b8daeb97b13a25a0bb2",
+    "crab-cache-server": "54d947dfec6c65bc2a508a42b75a26c68be6fcdf2a27203cf1fb3f2454c00901",
+    "crab-fuse-mount": "9dd2f9d0b502859e0042dd46b71ac36dd484f7e2d9c21b8daeb97b13a25a0bb2"
+  },
+  "dependency_contract": {
+    "linux_syncfs": "https://man7.org/linux/man-pages/man2/syncfs.2.html",
+    "fuse_direct_io_mmap": "https://kernel.org/doc/html/latest/filesystems/fuse/fuse-io.html",
+    "kernel_source": "https://raw.githubusercontent.com/torvalds/linux/v6.8/fs/fuse/file.c",
+    "kernel_source_sha256": "e828a114d39d5731a0c91adbe50d01beac61a61fe5136a1dfb143956e41298b7",
+    "blake3": "locked 1.8.5 Hasher.update_reader streams with a 64 KiB buffer"
+  },
+  "logs": {
+    "open-commit-owner-runtime.txt": {
+      "path": "open-commit-owner-runtime.txt",
+      "sha256": "412fb39b866a642de139ffbdead0d4ebeede135a13b52597b0dba5bbbbfffbed"
+    },
+    "path-read-admission-before.txt": {
+      "path": "path-read-admission-before.txt",
+      "sha256": "54e207af5cbf9106eaa6c04667d98dd348e25e21164d5a9d60ef8a31bf863170"
+    },
+    "path-read-admission-after.txt": {
+      "path": "path-read-admission-after.txt",
+      "sha256": "c4e5941e8b86c556658c14822089643a8730aef8ea1a75acc184cd759926a970"
+    },
+    "publish-content-fingerprint-before.txt": {
+      "path": "publish-content-fingerprint-before.txt",
+      "sha256": "3a1beec9c840ec797b39a6b1daf5f5861a5b7f0e3883c0e3647f7c99e7d026c6"
+    },
+    "publication-final-clippy.txt": {
+      "path": "publication-final-clippy.txt",
+      "sha256": "b14c65b723755711234b41b5c8e0ec099607f268d443039e4d59399e983f16c6"
+    },
+    "publication-final-cli.txt": {
+      "path": "publication-final-cli.txt",
+      "sha256": "3d35e58b357bb500b65e836f0b20f3e76c6e4f869af64960ae53ca12b8f9e829"
+    },
+    "publication-final-minimal.txt": {
+      "path": "publication-final-minimal.txt",
+      "sha256": "3dbebdfe57c58e155ac8a657a434094c1504a64a2cee500df8a6e14e483660d2"
+    },
+    "publication-final-nfs-only.txt": {
+      "path": "publication-final-nfs-only.txt",
+      "sha256": "ac6347aba3bf4510f03ab3081679a82f37053a0bdfce8463390c4abfed768447"
+    },
+    "publication-final-fuse-only.txt": {
+      "path": "publication-final-fuse-only.txt",
+      "sha256": "501137d7c979eadb03cf22586138e1df1c284cff8fa2ddcaee44a995fb681a1a"
+    },
+    "mapped-commit-before.log": {
+      "path": "mapped-commit-before.log",
+      "sha256": "2d1348415c87c85330ee029a883c1809683b3e0633dc4ddfb4161e88c86d35e7"
+    },
+    "publication-final-source-full.log": {
+      "path": "publication-final-source-full.log",
+      "sha256": "1011dd32ec82690d9b36bb68ff3d372bf4b3134e31c3c77fd8d1b69a4df53684"
+    },
+    "publication-final-source-native.log": {
+      "path": "publication-final-source-native.log",
+      "sha256": "f3581e8a10b5b9f2cf2753b2339124a862d9b115a7a5bbbc866015c1e84a5c95"
+    },
+    "open-commit-owner-full.log": {
+      "path": "open-commit-owner-full.log",
+      "sha256": "daeb3c3b0cb149ebf25f77c66aa2966ce5db0d4b0ce3d624d75e3833459a9410"
+    },
+    "open-commit-owner-repaired-full.log": {
+      "path": "open-commit-owner-repaired-full.log",
+      "sha256": "ad6eaded828b714674f41626d4902d428695ca8e1a7413929842bd2c1bbcd8fe"
+    },
+    "publication-verified-full.log": {
+      "path": "publication-verified-full.log",
+      "sha256": "4383858be3e14e5325e8da42d6f0a9e4f17ff0abe4223111aceab981bcfcfb7a"
+    },
+    "publication-rustfs-fuse/ro-refresh-mounted.sha256": {
+      "sha256": "e29b31f608f36177237280e3045eb64a971838b1dbd8dc615a64e0f0dc7676e6"
+    },
+    "publication-rustfs-fuse/clone-model-link-mode.txt": {
+      "sha256": "7f7815524381b310ff5ef0995161dffd8ecea2a1b889f24242f2ec68411e47b0"
+    },
+    "publication-rustfs-fuse/rw-base-move.sha256": {
+      "sha256": "4f20decf71a0661363b5ce4b7ed2dc8a1a40f0eeb0b5fbf57d92a87acf36cebb"
+    },
+    "publication-rustfs-fuse/mount-ro-native.txt": {
+      "sha256": "1f68a28819ad7d1382c8fd2d787118636cfb60716055e360161aa2e6ba5c630a"
+    },
+    "publication-rustfs-fuse/summary.json": {
+      "sha256": "0f6a866fd0258d02c5266aa8cfae005e0d2885af83bfd7b307762d9bf073ded2"
+    },
+    "publication-rustfs-fuse/rw-export.json": {
+      "sha256": "ab0380190bbc99f2ccba759defcdd27127f90e345589b0dea2c731309eb61c53"
+    },
+    "publication-rustfs-fuse/rw-new-before-commit.sha256": {
+      "sha256": "cc9e0a3e118e282d6e94ef73fc7a8d388ef1788d6a94d39275c0c91cb6dd36cf"
+    },
+    "publication-rustfs-fuse/rw-model-before-commit.sha256": {
+      "sha256": "2a1c733d2d5ac93aa1ca875b94273e792d2546a2819e5860651c2f2fffdab2ee"
+    },
+    "publication-rustfs-fuse/rw-sparse-before-commit.sha256": {
+      "sha256": "8726ce2acdb612531fda85d72a3b8dcb81a1732b9fa8d79b2d159017b027f9e4"
+    },
+    "publication-rustfs-fuse/rw-commit-push-failure.json": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "publication-rustfs-fuse/clone-base-move-pointer.txt": {
+      "sha256": "bb937de66556050a1f2bbab1c305a43305afc00ae9e1fbf1820a273756592f5f"
+    },
+    "publication-rustfs-fuse/delete-me.sha256": {
+      "sha256": "4f20decf71a0661363b5ce4b7ed2dc8a1a40f0eeb0b5fbf57d92a87acf36cebb"
+    },
+    "publication-rustfs-fuse/clone-auto-refresh.sha256": {
+      "sha256": "7028f17a95a925ac8caee6683a22726dcd25085f60080169142b64387bbbef64"
+    },
+    "publication-rustfs-fuse/clone-sparse-extend-mode.txt": {
+      "sha256": "a60204c55c7c4137a3090cfdc78123e253b46c8da3fd5c2e66027dc5b987429f"
+    },
+    "publication-rustfs-fuse/clone-new-large-mode.txt": {
+      "sha256": "a60204c55c7c4137a3090cfdc78123e253b46c8da3fd5c2e66027dc5b987429f"
+    },
+    "publication-rustfs-fuse/runner.log": {
+      "sha256": "dfae223085c95485aa45a32dfbf18e509d3ca3e61152fdb866ffa2f39616bbe5"
+    },
+    "publication-rustfs-fuse/export-new-large.sha256": {
+      "sha256": "cc9e0a3e118e282d6e94ef73fc7a8d388ef1788d6a94d39275c0c91cb6dd36cf"
+    },
+    "publication-rustfs-fuse/clone-sparse-extend-pointer.txt": {
+      "sha256": "98d56272f62f80f112c59e160d4bf06b8423ace8db43f783354c9477aa40085f"
+    },
+    "publication-rustfs-fuse/clone-model-pointer.txt": {
+      "sha256": "6407a006851b8df7e98526226b35bc4ceb516cc327f218339d5e957043067107"
+    },
+    "publication-rustfs-fuse/ro-model.sha256": {
+      "sha256": "4f20decf71a0661363b5ce4b7ed2dc8a1a40f0eeb0b5fbf57d92a87acf36cebb"
+    },
+    "publication-rustfs-fuse/scenario.sh": {
+      "sha256": "950837f0cc41a7bfa850f582bb03fa0e8ce1ed3e6979c4bd9dd34008ea09155c"
+    },
+    "publication-rustfs-fuse/reset-model.sha256": {
+      "sha256": "4f20decf71a0661363b5ce4b7ed2dc8a1a40f0eeb0b5fbf57d92a87acf36cebb"
+    },
+    "publication-rustfs-fuse/export-base-move.sha256": {
+      "sha256": "4f20decf71a0661363b5ce4b7ed2dc8a1a40f0eeb0b5fbf57d92a87acf36cebb"
+    },
+    "publication-rustfs-fuse/crab-nfs-mount-version.txt": {
+      "sha256": "70e8c0058c393e98af26d619d715ab958e621ddf4dc8af01915f0ed9fccdd4d3"
+    },
+    "publication-rustfs-fuse/rw-diff-after-commit.json": {
+      "sha256": "31cdbef3faae450c7a45c5fef6edca65aefb759cf846c0cccb22596a469e5771"
+    },
+    "publication-rustfs-fuse/clone-base-move-mode.txt": {
+      "sha256": "85379d1402f6807e4b231d05eb9dad0461e7cde59b86a3c7175294045ae0895d"
+    },
+    "publication-rustfs-fuse/seed-pointer.txt": {
+      "sha256": "bb937de66556050a1f2bbab1c305a43305afc00ae9e1fbf1820a273756592f5f"
+    },
+    "publication-rustfs-fuse/local-ref-before-push-failure.txt": {
+      "sha256": "dbc50a2ba6c7c112051a6449af32e7a3eac48161c7e6ad193fba844a08fb72f9"
+    },
+    "publication-rustfs-fuse/rw-diff-after-push-failure.json": {
+      "sha256": "3b13c16dfab58bbd5033871e369f2a6f0dd7a44b49121afb896a6417705e3210"
+    },
+    "publication-rustfs-fuse/auto-refresh-mounted.sha256": {
+      "sha256": "7028f17a95a925ac8caee6683a22726dcd25085f60080169142b64387bbbef64"
+    },
+    "publication-rustfs-fuse/mount-doctor.json": {
+      "sha256": "c003d29ff7a9304a42080048ebc87e6c5f2c47011a59aef9856381bf65e0f402"
+    },
+    "publication-rustfs-fuse/crab-version.txt": {
+      "sha256": "70e8c0058c393e98af26d619d715ab958e621ddf4dc8af01915f0ed9fccdd4d3"
+    },
+    "publication-rustfs-fuse/clone-renamed-dir-note.txt": {
+      "sha256": "4a4e837bbe6befb195cfa229634abf1300da99e94644d0566c44088db1ade006"
+    },
+    "publication-rustfs-fuse/clone-sparse-extend.sha256": {
+      "sha256": "8726ce2acdb612531fda85d72a3b8dcb81a1732b9fa8d79b2d159017b027f9e4"
+    },
+    "publication-rustfs-fuse/rw-diff.json": {
+      "sha256": "72a36904d96aace14d14f6489164905b7e371ad3aaa3618ce0f88ef70dfffe56"
+    },
+    "publication-rustfs-fuse/local-ref-after-push-failure.txt": {
+      "sha256": "dbc50a2ba6c7c112051a6449af32e7a3eac48161c7e6ad193fba844a08fb72f9"
+    },
+    "publication-rustfs-fuse/expected-new-large.sha256": {
+      "sha256": "cc9e0a3e118e282d6e94ef73fc7a8d388ef1788d6a94d39275c0c91cb6dd36cf"
+    },
+    "publication-rustfs-fuse/base-move.sha256": {
+      "sha256": "4f20decf71a0661363b5ce4b7ed2dc8a1a40f0eeb0b5fbf57d92a87acf36cebb"
+    },
+    "publication-rustfs-fuse/clone-new-large-pointer.txt": {
+      "sha256": "0a9079d8fd86edeee988b8f3c868b5c7607a2f3ee607ae77e817198b0536cb5c"
+    },
+    "publication-rustfs-fuse/mount-rw-refresh-native.txt": {
+      "sha256": "9af0f462591517343dff1052ed5799b836f61c11cd6b888cc8e0818d2962e391"
+    },
+    "publication-rustfs-fuse/export-sparse-extend.sha256": {
+      "sha256": "8726ce2acdb612531fda85d72a3b8dcb81a1732b9fa8d79b2d159017b027f9e4"
+    },
+    "publication-rustfs-fuse/clone-model-mode.txt": {
+      "sha256": "a60204c55c7c4137a3090cfdc78123e253b46c8da3fd5c2e66027dc5b987429f"
+    },
+    "publication-rustfs-fuse/clone-base-move.sha256": {
+      "sha256": "4f20decf71a0661363b5ce4b7ed2dc8a1a40f0eeb0b5fbf57d92a87acf36cebb"
+    },
+    "publication-rustfs-fuse/seed-model.sha256": {
+      "sha256": "4f20decf71a0661363b5ce4b7ed2dc8a1a40f0eeb0b5fbf57d92a87acf36cebb"
+    },
+    "publication-rustfs-fuse/reset-diff-after.json": {
+      "sha256": "84acc3f27aeb6e2e3a384cc451e1b113597cc42747afa2a2d21a454dc3d8fc14"
+    },
+    "publication-rustfs-fuse/ro-refresh.sha256": {
+      "sha256": "e29b31f608f36177237280e3045eb64a971838b1dbd8dc615a64e0f0dc7676e6"
+    },
+    "publication-rustfs-fuse/remount-auto-refresh.sha256": {
+      "sha256": "7028f17a95a925ac8caee6683a22726dcd25085f60080169142b64387bbbef64"
+    },
+    "publication-rustfs-fuse/reset-diff-before.json": {
+      "sha256": "66b42d15a01cd7511f345a29136e8774e709a7388bc609ce31cb226ce2ab0c5b"
+    },
+    "publication-rustfs-fuse/rw-commit.json": {
+      "sha256": "a18b9e4981fd0e1b68d98b30bfe30a9ac4299838a1ca34b79bced766d58c5437"
+    },
+    "publication-rustfs-fuse/expected-model.sha256": {
+      "sha256": "2a1c733d2d5ac93aa1ca875b94273e792d2546a2819e5860651c2f2fffdab2ee"
+    },
+    "publication-rustfs-fuse/clone-model.sha256": {
+      "sha256": "2a1c733d2d5ac93aa1ca875b94273e792d2546a2819e5860651c2f2fffdab2ee"
+    },
+    "publication-rustfs-fuse/auto-refresh.sha256": {
+      "sha256": "7028f17a95a925ac8caee6683a22726dcd25085f60080169142b64387bbbef64"
+    },
+    "publication-rustfs-fuse/reset-delete-me.sha256": {
+      "sha256": "4f20decf71a0661363b5ce4b7ed2dc8a1a40f0eeb0b5fbf57d92a87acf36cebb"
+    },
+    "publication-rustfs-fuse/timings.env": {
+      "sha256": "002d56525cf6756a582cf9bf265a9c701c3a6cfdbfe644a41cf7782d0c7964c2"
+    },
+    "publication-rustfs-fuse/expected-sparse-extend.sha256": {
+      "sha256": "8726ce2acdb612531fda85d72a3b8dcb81a1732b9fa8d79b2d159017b027f9e4"
+    },
+    "publication-rustfs-fuse/clone-new-large.sha256": {
+      "sha256": "cc9e0a3e118e282d6e94ef73fc7a8d388ef1788d6a94d39275c0c91cb6dd36cf"
+    },
+    "publication-rustfs-fuse/mount-rw-native.txt": {
+      "sha256": "f55868fbc952bc8178f52fecf46aae4e636acda200ae6519dc302adac6e22aef"
+    },
+    "publication-rustfs-fuse/rw-status-dirty.json": {
+      "sha256": "b7a8282fd2a48da1c6c10b2ffb08ba8ee8f3e0e91519527725bf053ab010114b"
+    },
+    "publication-rustfs-fuse/concurrent-writers.json": {
+      "sha256": "356cac33a63a741c9917592177ba7e74278d233ced70957dfccf3ccadd4dc5bf"
+    },
+    "publication-rustfs-fuse/reset.json": {
+      "sha256": "3671380490587c425fb8542e6d0d6117cbcc877092028b486c2f5f1164f913b7"
+    },
+    "publication-rustfs-fuse/mount-nfs-path.txt": {
+      "sha256": "35b9af7416c0db50b786561617f22e6cfc8791154d99654fc3d83261040bab44"
+    },
+    "publication-rustfs-fuse/export-model.sha256": {
+      "sha256": "2a1c733d2d5ac93aa1ca875b94273e792d2546a2819e5860651c2f2fffdab2ee"
+    },
+    "publication-rustfs-fuse/clone-ro-refresh.sha256": {
+      "sha256": "e29b31f608f36177237280e3045eb64a971838b1dbd8dc615a64e0f0dc7676e6"
+    },
+    "publication-rustfs-fuse/logs/crab-add-seed.log": {
+      "sha256": "b4d8d2c5ebb68134954a5c75bbf1cd7db78f21ffcf5c5e8e5bcf3d7d05e1f87d"
+    },
+    "publication-rustfs-fuse/logs/git-commit-ro-refresh.log": {
+      "sha256": "c2862dd3ebcdf0f3f25b0555498aa1315608035d005c27ba6bf617d690ebc101"
+    },
+    "publication-rustfs-fuse/logs/crab-push-auto-refresh.err": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "publication-rustfs-fuse/logs/ro-write-attempt.log": {
+      "sha256": "3070472bf598ebc98d1ea8773ddc6d3d93fd20e862ba909893004229da5e456c"
+    },
+    "publication-rustfs-fuse/logs/crab-init.log": {
+      "sha256": "244bd96ac5425e0334db25724690446e76e9e5dedba684948ab04458c1050a24"
+    },
+    "publication-rustfs-fuse/logs/unmount-ro-explicit.log": {
+      "sha256": "0783df1ac940324bc236f87fe33a34a6b47562cf14abc9dd23d660c99d928e87"
+    },
+    "publication-rustfs-fuse/logs/crab-push-seed.json": {
+      "sha256": "b24093f85760c3769a7e51050c621d241709f6688d7b931da59eeda9c3be6541"
+    },
+    "publication-rustfs-fuse/logs/crab-push-ro-refresh.err": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "publication-rustfs-fuse/logs/rw-commit-push-failure.err": {
+      "sha256": "c52c855045700b305d4e03d5c7eacb785267df787db55500bdee24b3b7aafe59"
+    },
+    "publication-rustfs-fuse/logs/git-init.log": {
+      "sha256": "43e1999b2c76d56759c9a5c423189a5bae495aa6a542efa77debdf03e9eae551"
+    },
+    "publication-rustfs-fuse/logs/unmount-rw-explicit.log": {
+      "sha256": "da1bbdf6344d668c193c33cfc63140f19ccca71b2bc50c77fa6b1cd8efab3293"
+    },
+    "publication-rustfs-fuse/logs/unmount-rw.log": {
+      "sha256": "76071f02123c2439a15d5f99ec8aa709fe2c360584a85e0ffc602070a13317bf"
+    },
+    "publication-rustfs-fuse/logs/unmount-rw-refresh-explicit.log": {
+      "sha256": "f6e856ab1ca661c62ebe55b62a6d1f29812ea72935f958983bc78dd5f7bb3319"
+    },
+    "publication-rustfs-fuse/logs/crab-push-seed.err": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "publication-rustfs-fuse/logs/crab-add-auto-refresh.log": {
+      "sha256": "d2865df998a61e094c0368cbc352c85f01268cbbffea47963f0fc4b63aeb0265"
+    },
+    "publication-rustfs-fuse/logs/crab-clone.log": {
+      "sha256": "c3de2e303959557b9532bf0a6733e626c9008fb196caf7636b24b84f2f5776aa"
+    },
+    "publication-rustfs-fuse/logs/mount-rw-refresh.log": {
+      "sha256": "73ee8219136c233341dca22eed65d01beb1bc5bdc833df2af7bb17ba378292f7"
+    },
+    "publication-rustfs-fuse/logs/crab-track.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "publication-rustfs-fuse/logs/rw-commit.err": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "publication-rustfs-fuse/logs/crab-push-ro-refresh.json": {
+      "sha256": "29f67db73c9de17015c7aa03671b043cf2395a9136f70f897bc7a25e04d2126e"
+    },
+    "publication-rustfs-fuse/logs/mount-ro.log": {
+      "sha256": "371ea8937b631680d78c5bd6056574d9350179b1bc6e29122b0d00acdf909e45"
+    },
+    "publication-rustfs-fuse/logs/crab-push-auto-refresh.json": {
+      "sha256": "31b14fe24c058b936fec693deea4c475dd429b1445e46e38aebb8ae5549b4d2d"
+    },
+    "publication-rustfs-fuse/logs/git-commit-seed.log": {
+      "sha256": "8900730da379a39dbddb122d7cb3919c91ad2d3c69aa8786210add5eb25467a1"
+    },
+    "publication-rustfs-fuse/logs/git-commit-auto-refresh.log": {
+      "sha256": "c04ab759745aa38afdf6aee8d8aee6ccf6b86463c7bc9239a30193892d1c9bbe"
+    },
+    "publication-rustfs-fuse/logs/mount-rw.log": {
+      "sha256": "961c1129bc716a05ee78606fd93d7b92302f975a933abafdbc59ab8ba49cbf09"
+    },
+    "publication-rustfs-fuse/logs/mount-ro-refresh.log": {
+      "sha256": "4409c6e59b6ccf8df2852f54d5368213134b53a78e8c843cbdb96bcf7cc7d2ff"
+    },
+    "publication-rustfs-fuse/logs/crab-add-ro-refresh.log": {
+      "sha256": "48486af66232086df11d183a91e036057e260bc51b567fcf18162c7fd2069b68"
+    },
+    "publication-rustfs-fuse/logs/unmount-rw-refresh.log": {
+      "sha256": "0b325b93ee5cec1db97dfd1bcb77c4c0ae132a870fde37855c2934c78751bc81"
+    },
+    "publication-rustfs-fuse/logs/unmount-ro.log": {
+      "sha256": "f351022b4146edd9a813de17a39d9de1ede1fdcf3a5a315d437aaf8b4acdcd51"
+    },
+    "publication-rustfs-fuse/logs/ro-commit-attempt.log": {
+      "sha256": "8e4c8464fb913338185863c685280b5e8c773b37de0e909da76bb5cea3080474"
+    },
+    "publication-rustfs-fuse/logs/mount-help.txt": {
+      "sha256": "9dd470d6920a8b3864ccc3e1a4749eba424d198d840af6e38906665772c394e3"
+    },
+    "publication-rustfs-nfs/ro-refresh-mounted.sha256": {
+      "sha256": "e29b31f608f36177237280e3045eb64a971838b1dbd8dc615a64e0f0dc7676e6"
+    },
+    "publication-rustfs-nfs/clone-model-link-mode.txt": {
+      "sha256": "7f7815524381b310ff5ef0995161dffd8ecea2a1b889f24242f2ec68411e47b0"
+    },
+    "publication-rustfs-nfs/rw-base-move.sha256": {
+      "sha256": "4f20decf71a0661363b5ce4b7ed2dc8a1a40f0eeb0b5fbf57d92a87acf36cebb"
+    },
+    "publication-rustfs-nfs/mount-ro-native.txt": {
+      "sha256": "db9432aa3c474f5cee2f3bd99a44f3f77ece21fc5d9eb9051fb3c86c9c84f60a"
+    },
+    "publication-rustfs-nfs/summary.json": {
+      "sha256": "e680bf48d5a97d7f71409b8c8a37f301f937e60720a68ae3c82628478388033b"
+    },
+    "publication-rustfs-nfs/rw-export.json": {
+      "sha256": "f01e047aa06d0f28da71f37991578f0e6ee34daa1e4ecb215695831efa790821"
+    },
+    "publication-rustfs-nfs/rw-new-before-commit.sha256": {
+      "sha256": "cc9e0a3e118e282d6e94ef73fc7a8d388ef1788d6a94d39275c0c91cb6dd36cf"
+    },
+    "publication-rustfs-nfs/rw-model-before-commit.sha256": {
+      "sha256": "2a1c733d2d5ac93aa1ca875b94273e792d2546a2819e5860651c2f2fffdab2ee"
+    },
+    "publication-rustfs-nfs/rw-sparse-before-commit.sha256": {
+      "sha256": "8726ce2acdb612531fda85d72a3b8dcb81a1732b9fa8d79b2d159017b027f9e4"
+    },
+    "publication-rustfs-nfs/rw-commit-push-failure.json": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "publication-rustfs-nfs/clone-base-move-pointer.txt": {
+      "sha256": "bb937de66556050a1f2bbab1c305a43305afc00ae9e1fbf1820a273756592f5f"
+    },
+    "publication-rustfs-nfs/delete-me.sha256": {
+      "sha256": "4f20decf71a0661363b5ce4b7ed2dc8a1a40f0eeb0b5fbf57d92a87acf36cebb"
+    },
+    "publication-rustfs-nfs/clone-auto-refresh.sha256": {
+      "sha256": "7028f17a95a925ac8caee6683a22726dcd25085f60080169142b64387bbbef64"
+    },
+    "publication-rustfs-nfs/clone-sparse-extend-mode.txt": {
+      "sha256": "a60204c55c7c4137a3090cfdc78123e253b46c8da3fd5c2e66027dc5b987429f"
+    },
+    "publication-rustfs-nfs/clone-new-large-mode.txt": {
+      "sha256": "a60204c55c7c4137a3090cfdc78123e253b46c8da3fd5c2e66027dc5b987429f"
+    },
+    "publication-rustfs-nfs/runner.log": {
+      "sha256": "97463ea6a75ad2fd41a3366e68258a5938eff408057234fae7de64abd368a034"
+    },
+    "publication-rustfs-nfs/export-new-large.sha256": {
+      "sha256": "cc9e0a3e118e282d6e94ef73fc7a8d388ef1788d6a94d39275c0c91cb6dd36cf"
+    },
+    "publication-rustfs-nfs/clone-sparse-extend-pointer.txt": {
+      "sha256": "98d56272f62f80f112c59e160d4bf06b8423ace8db43f783354c9477aa40085f"
+    },
+    "publication-rustfs-nfs/clone-model-pointer.txt": {
+      "sha256": "6407a006851b8df7e98526226b35bc4ceb516cc327f218339d5e957043067107"
+    },
+    "publication-rustfs-nfs/ro-model.sha256": {
+      "sha256": "4f20decf71a0661363b5ce4b7ed2dc8a1a40f0eeb0b5fbf57d92a87acf36cebb"
+    },
+    "publication-rustfs-nfs/scenario.sh": {
+      "sha256": "d8a60edf05e4f9937544c4bbb9ff0c64aa3d36e16d2161195b7a4c2db518e92a"
+    },
+    "publication-rustfs-nfs/reset-model.sha256": {
+      "sha256": "4f20decf71a0661363b5ce4b7ed2dc8a1a40f0eeb0b5fbf57d92a87acf36cebb"
+    },
+    "publication-rustfs-nfs/export-base-move.sha256": {
+      "sha256": "4f20decf71a0661363b5ce4b7ed2dc8a1a40f0eeb0b5fbf57d92a87acf36cebb"
+    },
+    "publication-rustfs-nfs/crab-nfs-mount-version.txt": {
+      "sha256": "70e8c0058c393e98af26d619d715ab958e621ddf4dc8af01915f0ed9fccdd4d3"
+    },
+    "publication-rustfs-nfs/rw-diff-after-commit.json": {
+      "sha256": "6003cd7b6f734cafa85dd75680fdab0d1e8d414f1cf594f5c235774e9aeb9889"
+    },
+    "publication-rustfs-nfs/clone-base-move-mode.txt": {
+      "sha256": "85379d1402f6807e4b231d05eb9dad0461e7cde59b86a3c7175294045ae0895d"
+    },
+    "publication-rustfs-nfs/seed-pointer.txt": {
+      "sha256": "bb937de66556050a1f2bbab1c305a43305afc00ae9e1fbf1820a273756592f5f"
+    },
+    "publication-rustfs-nfs/local-ref-before-push-failure.txt": {
+      "sha256": "b23fd8cf39ae09c2a311daf21a4a6324e4b5b8ab723df437d0f7a090940a56d7"
+    },
+    "publication-rustfs-nfs/rw-diff-after-push-failure.json": {
+      "sha256": "ce6ec483e7a01f0b5d5be10bc36ee6485e55aeee730704b60892ed7484216aaa"
+    },
+    "publication-rustfs-nfs/auto-refresh-mounted.sha256": {
+      "sha256": "7028f17a95a925ac8caee6683a22726dcd25085f60080169142b64387bbbef64"
+    },
+    "publication-rustfs-nfs/mount-doctor.json": {
+      "sha256": "e4fc0a279f8808ae9ccf4736d1fc176d43e80f0eaf298107455b739664708057"
+    },
+    "publication-rustfs-nfs/crab-version.txt": {
+      "sha256": "70e8c0058c393e98af26d619d715ab958e621ddf4dc8af01915f0ed9fccdd4d3"
+    },
+    "publication-rustfs-nfs/clone-renamed-dir-note.txt": {
+      "sha256": "4a4e837bbe6befb195cfa229634abf1300da99e94644d0566c44088db1ade006"
+    },
+    "publication-rustfs-nfs/clone-sparse-extend.sha256": {
+      "sha256": "8726ce2acdb612531fda85d72a3b8dcb81a1732b9fa8d79b2d159017b027f9e4"
+    },
+    "publication-rustfs-nfs/rw-diff.json": {
+      "sha256": "6c5473d9677257aaded3f6a011ea7098a20b09d0c25850f34c36e54ca51a256b"
+    },
+    "publication-rustfs-nfs/local-ref-after-push-failure.txt": {
+      "sha256": "b23fd8cf39ae09c2a311daf21a4a6324e4b5b8ab723df437d0f7a090940a56d7"
+    },
+    "publication-rustfs-nfs/expected-new-large.sha256": {
+      "sha256": "cc9e0a3e118e282d6e94ef73fc7a8d388ef1788d6a94d39275c0c91cb6dd36cf"
+    },
+    "publication-rustfs-nfs/base-move.sha256": {
+      "sha256": "4f20decf71a0661363b5ce4b7ed2dc8a1a40f0eeb0b5fbf57d92a87acf36cebb"
+    },
+    "publication-rustfs-nfs/clone-new-large-pointer.txt": {
+      "sha256": "0a9079d8fd86edeee988b8f3c868b5c7607a2f3ee607ae77e817198b0536cb5c"
+    },
+    "publication-rustfs-nfs/mount-rw-refresh-native.txt": {
+      "sha256": "01a356815ac8aaa5da06c12813428524eebf94f708cbed3764d63689e977e8d1"
+    },
+    "publication-rustfs-nfs/export-sparse-extend.sha256": {
+      "sha256": "8726ce2acdb612531fda85d72a3b8dcb81a1732b9fa8d79b2d159017b027f9e4"
+    },
+    "publication-rustfs-nfs/clone-model-mode.txt": {
+      "sha256": "a60204c55c7c4137a3090cfdc78123e253b46c8da3fd5c2e66027dc5b987429f"
+    },
+    "publication-rustfs-nfs/clone-base-move.sha256": {
+      "sha256": "4f20decf71a0661363b5ce4b7ed2dc8a1a40f0eeb0b5fbf57d92a87acf36cebb"
+    },
+    "publication-rustfs-nfs/seed-model.sha256": {
+      "sha256": "4f20decf71a0661363b5ce4b7ed2dc8a1a40f0eeb0b5fbf57d92a87acf36cebb"
+    },
+    "publication-rustfs-nfs/reset-diff-after.json": {
+      "sha256": "9f2865c5bfa31f711ee9e6c6c10ff5ecf6a858cce0a5a4701a9257e56acc756e"
+    },
+    "publication-rustfs-nfs/ro-refresh.sha256": {
+      "sha256": "e29b31f608f36177237280e3045eb64a971838b1dbd8dc615a64e0f0dc7676e6"
+    },
+    "publication-rustfs-nfs/remount-auto-refresh.sha256": {
+      "sha256": "7028f17a95a925ac8caee6683a22726dcd25085f60080169142b64387bbbef64"
+    },
+    "publication-rustfs-nfs/reset-diff-before.json": {
+      "sha256": "fa4d18c4a64f0ae87b83dd975e99bab77cae446f72f0533c26909206258b1332"
+    },
+    "publication-rustfs-nfs/rw-commit.json": {
+      "sha256": "77f7a9a243c34a2fb0eef20e8531ea5263edbba71f37ed87f88f2da9294cc420"
+    },
+    "publication-rustfs-nfs/expected-model.sha256": {
+      "sha256": "2a1c733d2d5ac93aa1ca875b94273e792d2546a2819e5860651c2f2fffdab2ee"
+    },
+    "publication-rustfs-nfs/clone-model.sha256": {
+      "sha256": "2a1c733d2d5ac93aa1ca875b94273e792d2546a2819e5860651c2f2fffdab2ee"
+    },
+    "publication-rustfs-nfs/auto-refresh.sha256": {
+      "sha256": "7028f17a95a925ac8caee6683a22726dcd25085f60080169142b64387bbbef64"
+    },
+    "publication-rustfs-nfs/reset-delete-me.sha256": {
+      "sha256": "4f20decf71a0661363b5ce4b7ed2dc8a1a40f0eeb0b5fbf57d92a87acf36cebb"
+    },
+    "publication-rustfs-nfs/timings.env": {
+      "sha256": "efc4ee20029089726067bb092ced4047ee393a41ec5c357b1b50932646f2c179"
+    },
+    "publication-rustfs-nfs/expected-sparse-extend.sha256": {
+      "sha256": "8726ce2acdb612531fda85d72a3b8dcb81a1732b9fa8d79b2d159017b027f9e4"
+    },
+    "publication-rustfs-nfs/clone-new-large.sha256": {
+      "sha256": "cc9e0a3e118e282d6e94ef73fc7a8d388ef1788d6a94d39275c0c91cb6dd36cf"
+    },
+    "publication-rustfs-nfs/mount-rw-native.txt": {
+      "sha256": "e2dda598f423d6131930829dca73c06acddf3ab931d4e1b140eaeb4cbc3ac2c3"
+    },
+    "publication-rustfs-nfs/rw-status-dirty.json": {
+      "sha256": "c0b4510e9bbccbc6cb653634cf257f5ff856f5a220cca1cf3f2309ad393e39fc"
+    },
+    "publication-rustfs-nfs/concurrent-writers.json": {
+      "sha256": "8666075c9fb7867ada185363015430931cd0341e21c5883f985392092e9af16a"
+    },
+    "publication-rustfs-nfs/reset.json": {
+      "sha256": "093c62025641f9252c5ae42a984f431c38fdb0c2ff5a55c80323c32b197d84e9"
+    },
+    "publication-rustfs-nfs/mount-nfs-path.txt": {
+      "sha256": "35b9af7416c0db50b786561617f22e6cfc8791154d99654fc3d83261040bab44"
+    },
+    "publication-rustfs-nfs/export-model.sha256": {
+      "sha256": "2a1c733d2d5ac93aa1ca875b94273e792d2546a2819e5860651c2f2fffdab2ee"
+    },
+    "publication-rustfs-nfs/clone-ro-refresh.sha256": {
+      "sha256": "e29b31f608f36177237280e3045eb64a971838b1dbd8dc615a64e0f0dc7676e6"
+    },
+    "publication-rustfs-nfs/logs/crab-add-seed.log": {
+      "sha256": "b4d8d2c5ebb68134954a5c75bbf1cd7db78f21ffcf5c5e8e5bcf3d7d05e1f87d"
+    },
+    "publication-rustfs-nfs/logs/git-commit-ro-refresh.log": {
+      "sha256": "3a51cbeca5d9b8ec961428c2045b9957c97902b887a31bec3b184bdae12b0c01"
+    },
+    "publication-rustfs-nfs/logs/crab-push-auto-refresh.err": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "publication-rustfs-nfs/logs/ro-write-attempt.log": {
+      "sha256": "3070472bf598ebc98d1ea8773ddc6d3d93fd20e862ba909893004229da5e456c"
+    },
+    "publication-rustfs-nfs/logs/crab-init.log": {
+      "sha256": "b02af56400d4ccf2f8fc9ea887a84e15175d8bf518f952522eb7ece3ece46705"
+    },
+    "publication-rustfs-nfs/logs/unmount-ro-explicit.log": {
+      "sha256": "0783df1ac940324bc236f87fe33a34a6b47562cf14abc9dd23d660c99d928e87"
+    },
+    "publication-rustfs-nfs/logs/crab-push-seed.json": {
+      "sha256": "72c9336bc0397f9f0f342dad7eebb05ede698fd32b17cf6263ef01aa6e613d65"
+    },
+    "publication-rustfs-nfs/logs/crab-push-ro-refresh.err": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "publication-rustfs-nfs/logs/rw-commit-push-failure.err": {
+      "sha256": "0fcc1ccb28d9e55a452075a8c19835ccfc29746c76874393aea4e71bad54de0f"
+    },
+    "publication-rustfs-nfs/logs/git-init.log": {
+      "sha256": "43e1999b2c76d56759c9a5c423189a5bae495aa6a542efa77debdf03e9eae551"
+    },
+    "publication-rustfs-nfs/logs/unmount-rw-explicit.log": {
+      "sha256": "da1bbdf6344d668c193c33cfc63140f19ccca71b2bc50c77fa6b1cd8efab3293"
+    },
+    "publication-rustfs-nfs/logs/unmount-rw.log": {
+      "sha256": "76071f02123c2439a15d5f99ec8aa709fe2c360584a85e0ffc602070a13317bf"
+    },
+    "publication-rustfs-nfs/logs/unmount-rw-refresh-explicit.log": {
+      "sha256": "f6e856ab1ca661c62ebe55b62a6d1f29812ea72935f958983bc78dd5f7bb3319"
+    },
+    "publication-rustfs-nfs/logs/crab-push-seed.err": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "publication-rustfs-nfs/logs/crab-add-auto-refresh.log": {
+      "sha256": "13a48bae51f6af88a3e411d591df7d0774a22cc50361bdaa2b157c4d06d7f7c2"
+    },
+    "publication-rustfs-nfs/logs/crab-clone.log": {
+      "sha256": "4d9d9eab0f7be2b8e783480b18fe878cbbba843650d42253067dd9619f639666"
+    },
+    "publication-rustfs-nfs/logs/mount-rw-refresh.log": {
+      "sha256": "2b4007cf99d2ea1a18272ae5778382b77341004aa9113a2532b448fbd3062704"
+    },
+    "publication-rustfs-nfs/logs/crab-track.log": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "publication-rustfs-nfs/logs/rw-commit.err": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "publication-rustfs-nfs/logs/crab-push-ro-refresh.json": {
+      "sha256": "07223becc2477aeb2df80ad9f23c4d53e82373a63792d962f474e7030353ca1b"
+    },
+    "publication-rustfs-nfs/logs/mount-ro.log": {
+      "sha256": "5de06649c0bc3a96cf2a8ca788cab8d697bdd2a739db475c6bb4e9c7bf3726ae"
+    },
+    "publication-rustfs-nfs/logs/crab-push-auto-refresh.json": {
+      "sha256": "14f8e4f0fdfb1e1c076386a237e53d7ee236ab22af053069d7b24a694e71ce2b"
+    },
+    "publication-rustfs-nfs/logs/git-commit-seed.log": {
+      "sha256": "17e7305c92f05e86b5005ae4fdba419cb50ed36b8c21528f1f2b2cc2b29b418e"
+    },
+    "publication-rustfs-nfs/logs/git-commit-auto-refresh.log": {
+      "sha256": "10d13e435fa343f9daf852e76b9df175f7b690be961ea650625fec3e24671fef"
+    },
+    "publication-rustfs-nfs/logs/mount-rw.log": {
+      "sha256": "787b34b7396cba227d6ed462ad5d3dcc2302303cee9667865c8901f8375f180e"
+    },
+    "publication-rustfs-nfs/logs/mount-ro-refresh.log": {
+      "sha256": "91fc3751f62f88ce21c7d3ef8c1b671a8c89c1e23987d30df3c3b3fab3d32856"
+    },
+    "publication-rustfs-nfs/logs/crab-add-ro-refresh.log": {
+      "sha256": "1c7e0d2cc248db347ab1588d6d8fa625ece535436f4190b969edcdf48042bbd1"
+    },
+    "publication-rustfs-nfs/logs/unmount-rw-refresh.log": {
+      "sha256": "0b325b93ee5cec1db97dfd1bcb77c4c0ae132a870fde37855c2934c78751bc81"
+    },
+    "publication-rustfs-nfs/logs/unmount-ro.log": {
+      "sha256": "f351022b4146edd9a813de17a39d9de1ede1fdcf3a5a315d437aaf8b4acdcd51"
+    },
+    "publication-rustfs-nfs/logs/ro-commit-attempt.log": {
+      "sha256": "8e4c8464fb913338185863c685280b5e8c773b37de0e909da76bb5cea3080474"
+    },
+    "publication-rustfs-nfs/logs/mount-help.txt": {
+      "sha256": "9dd470d6920a8b3864ccc3e1a4749eba424d198d840af6e38906665772c394e3"
+    },
+    "publication-commit-probe/diff.json": {
+      "sha256": "ff7fe3b03d48b8fc38227599ebafd649d43a8820bb5e7909eb24da674099f9d5"
+    },
+    "publication-commit-probe/runner.log": {
+      "sha256": "1efba0ce8588ec11cb0842e4428b79a04c31d055a7bb12af73ecb0f50bf19c51"
+    },
+    "publication-commit-probe/probe.sh": {
+      "sha256": "66aac6994d63060d6e4e7231bfad9dec9abb018ca467d57f6d8f53828a8be9f8"
+    },
+    "publication-commit-probe/observation.json": {
+      "sha256": "14668dd9b8424ab3bfb30bdbfafc83b07b759dbfcba45ccc83413631077c4a33"
+    },
+    "publication-commit-probe/commit.json": {
+      "sha256": "ec22fe8fb08ad0065934533aac17b10c9d4dce717f72f199312b8fa75704df16"
+    },
+    "publication-commit-probe/mmap-observation.json": {
+      "sha256": "060974000a35d6d247361e1efd0b4f7addf552a11e04552aa8612e757055b4e8"
+    },
+    "publication-commit-probe/mapped-commit.json": {
+      "sha256": "4e8a4235b0f9222631e72a4b83a3368df84ee908c0a6acb867905de9e47b4d69"
+    },
+    "publication-commit-probe/mapped-observation.json": {
+      "sha256": "a5fe4477a9dbdeb9838000ec49bbfb8812350db4d9ee5aa4979b8370e3c9ffc7"
+    },
+    "publication-commit-probe/logs/unmount.log": {
+      "sha256": "377f42d8b54c173e89e83bbf2a128c90ba0ac111a52003a0280cb05546cf692f"
+    },
+    "publication-commit-probe/logs/mapped-commit.err": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "publication-commit-probe/logs/commit.err": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "publication-commit-probe/logs/mount.log": {
+      "sha256": "8d6fc78c2c4651455df34df7d929beb6cbd7988bcda11f90234b3728d84b98f2"
+    },
+    "publication-pointer-probe/runner.log": {
+      "sha256": "69b5d1e51a5a9c1efd9c52b813011e68565eb539e7c5740f804bb12dadf4508e"
+    },
+    "publication-pointer-probe/probe.sh": {
+      "sha256": "6656b0baa3d43cb337514e221b67e9a76a26b0f8fd9821671c9a145364e5dd58"
+    },
+    "publication-pointer-probe/observation.json": {
+      "sha256": "1abfa3bf31f9d8209ba3dc34f13b9b127448efb732c3d300a361e4d9d5dbee0b"
+    },
+    "publication-pointer-probe/commit-1.json": {
+      "sha256": "b5df1355ac5d57bdd98fb7cdf459c057d154b4194c03e78409663a44d1170a23"
+    },
+    "publication-pointer-probe/commit-0.json": {
+      "sha256": "288f064e1568b8fd2925bb17df321f7908f7268913753c060773fbe22a60822f"
+    },
+    "publication-pointer-probe/logs/unmount.log": {
+      "sha256": "377f42d8b54c173e89e83bbf2a128c90ba0ac111a52003a0280cb05546cf692f"
+    },
+    "publication-pointer-probe/logs/mount.log": {
+      "sha256": "34b8850c2fddec88cafd9ec6047d96a95f151e593500130d4cfe279adf24ec64"
+    },
+    "publication-pointer-probe/logs/commit-1.err": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "publication-pointer-probe/logs/commit-0.err": {
+      "sha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "publication-provider-make-install.log": {
+      "sha256": "97ff573aba53b2a930c3378206ac4d7965a3f353a2a1795bb0f6511109f38829"
+    }
+  },
+  "intermediate_failures": "open-commit-owner-full: introduced read-only install (11); repaired-full: exposed path-read stale lease (1); verified-full: directory fingerprint admission (1). Final-source runs supersede all three. mapped-commit-before and content-fingerprint-before reproduce the required behavior failures.",
+  "open_gates": [
+    "coherent startup and remote-GC retention",
+    "all publication/refresh/reset owners",
+    "clean push and staging retirement with active descriptors",
+    "crash, mixed-recipe, later-push durability",
+    "full Crab pack v1 retirement",
+    "total resource admission and optimized performance",
+    "macOS native NFS"
+  ],
+  "final_source_hashes_match": true
+}

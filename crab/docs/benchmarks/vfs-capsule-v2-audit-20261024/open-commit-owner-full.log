@@ -1,0 +1,724 @@
+   Compiling crab-vfs v0.1.0 (/src/crates/crab-vfs)
+    Finished `test` profile [unoptimized] target(s) in 27.68s
+     Running unittests src/lib.rs (/root/Workspace/crabbuild-target/vfs-audit/target/debug/deps/crab_vfs-21ad8bed7305c3ec)
+
+running 638 tests
+test blob::tests::odb_reader_missing_objects_dir_returns_error ... ok
+test blob::tests::odb_reader_invalid_oid_returns_error ... ok
+test blob::tests::odb_reader_ignores_unverified_disk_blob_bytes ... ok
+test blob::tests::odb_reader_missing_oid_returns_not_found ... ok
+test blob::tests::cancelled_blob_read_keeps_admission_until_blocking_work_finishes ... ok
+test blob::tests::odb_reader_read_blob_range_full ... ok
+test blob::tests::odb_reader_read_blob_range_past_eof ... ok
+test blob::tests::odb_reader_read_blob_range_with_offset ... ok
+test blob::tests::odb_reader_read_blob_returns_correct_content ... ok
+test blob::tests::odb_reader_serves_from_cache_on_second_read ... ok
+test blob::tests::odb_warm_ranges_do_not_reload_entire_blob ... ignored, requires an isolated process for /proc/self/io byte accounting
+test blob::tests::odb_reader_promisor_uses_raw_oid_despite_replace_refs ... ok
+test blob::tests::odb_reader_rejects_misnamed_loose_blob ... ok
+test chunk_cache::tests::conflicting_live_budget_bypasses_only_the_second_vfs_cache ... ok
+test blob::tests::shutdown_closes_cold_blob_admission_and_preserves_cached_bytes ... ok
+test chunk_cache::tests::current_thread_runtime_bypasses_sync_cache_without_panicking ... ok
+test chunk_cache::tests::get_returns_none_on_miss ... ok
+test blob::tests::warm_blob_read_does_not_wait_for_unrelated_blocked_fill ... ok
+test chunk_cache::tests::contains_reflects_state ... ok
+test chunk_cache::tests::private_creation_ignores_permissive_umask ... ok
+test chunk_cache::tests::persistence_across_reopen ... ok
+test chunk_cache::tests::shared_singleton_for_same_directory ... ok
+test chunk_cache::tests::unavailable_storage_is_non_storing_and_preserves_outside_state ... ok
+test chunk_cache::tests::put_and_get_round_trip ... ok
+test clone_cache::tests::cache_dir_uses_home_and_hash ... ok
+test clone_cache::tests::different_urls_different_hashes ... ok
+test chunk_cache::tests::put_is_idempotent ... ok
+test clone_cache::tests::hash_deterministic_known_value ... ok
+test clone_cache::tests::hash_is_12_hex_chars ... ok
+test clone_cache::tests::mount_cache_lock_for_legacy_crab_dir_stays_inside_crab_dir ... ok
+test clone_cache::tests::mount_cache_lock_rejects_second_holder_until_released ... ok
+test clone_cache::tests::normalization_lowercases_scheme ... ok
+test clone_cache::tests::normalization_trims_trailing_slashes ... ok
+test clone_cache::tests::mount_cache_lock_uses_sibling_lock_dir_without_creating_cache ... ok
+test clone_cache::tests::normalization_trims_whitespace ... ok
+test clone_cache::tests::normalize_multiple_trailing_slashes ... ok
+test clone_cache::tests::normalize_no_scheme ... ok
+test clone_cache::tests::normalize_preserves_path_case ... ok
+test clone_cache::tests::same_url_same_hash ... ok
+test coordinator::tests::coordinator_child_cancel_token_linked ... ok
+test coordinator::tests::coordinator_cleans_stale_socket_only_after_lock ... ok
+test coordinator::tests::coordinator_config_paths ... ok
+test coordinator::tests::is_coordinator_running_false_for_dead_pid ... ok
+test coordinator::tests::is_coordinator_running_false_when_no_pid ... ok
+test coordinator::tests::coordinator_start_and_shutdown ... ok
+test coordinator::tests::is_coordinator_running_true_for_current_process ... ok
+test coordinator::tests::lock_acquisition_fails_when_held ... ok
+test coordinator::tests::lock_acquisition_succeeds ... ok
+test coordinator::tests::pending_mount_prevents_idle_shutdown_until_released ... ok
+test coordinator::tests::mount_reservation_blocks_same_mountpoint_and_starting_cache ... ok
+test coordinator::tests::pid_file_write_and_read ... ok
+test coordinator::tests::unavailable_cache_does_not_strand_coordinator_ownership ... ok
+test chunk_cache::tests::valid_record_checksum_does_not_authorize_wrong_chunk_bytes ... ok
+test daemon::tests::computed_paths_derives_all_paths ... ok
+test daemon::tests::daemon_nfs_control_endpoint_is_private_and_removable ... ok
+test coordinator::tests::shared_resources_and_ref_counting ... ok
+test daemon::tests::daemon_remove_nonexistent_repo ... ok
+test daemon::tests::daemon_service_lifecycle ... ok
+test daemon::tests::daemon_set_refresh ... ok
+test daemon::tests::daemon_startup_preserves_unavailable_cache_and_keeps_registry_usable ... ok
+test daemon::tests::backend_setup_failure_does_not_start_daemon_hydration_workers ... ok
+test daemon::tests::is_mounted_returns_false_for_nonexistent_path ... ok
+test daemon::tests::mount_failure_backoff_caps_at_max ... ok
+test daemon::tests::mount_failure_backoff_doubles ... ok
+test daemon::tests::mount_failure_can_retry_after_elapsed ... ok
+test daemon::tests::mount_failure_cannot_retry_before_elapsed ... ok
+test daemon::tests::read_persisted_status_counts_delete_only_overlay ... ok
+test daemon::tests::read_persisted_status_reads_overlay_dirty_count ... ok
+test daemon::tests::read_persisted_status_reads_snapshot_state ... ok
+test daemon::tests::read_persisted_status_returns_stopped_for_empty_state ... ok
+test daemon::tests::registry_add_and_get ... ok
+test daemon::tests::registry_add_is_upsert ... ok
+test daemon::tests::registry_enable_disable ... ok
+test daemon::tests::registry_enable_nonexistent ... ok
+test daemon::tests::registry_get_nonexistent ... ok
+test daemon::tests::daemon_status_includes_backend_enabled_and_read_only ... ok
+test daemon::tests::registry_list_repos_sorted ... ok
+test daemon::tests::registry_migration_adds_new_columns ... ok
+test daemon::tests::registry_read_only_flag ... ok
+test daemon::tests::registry_remove ... ok
+test daemon::tests::registry_remove_nonexistent ... ok
+test daemon::tests::registry_round_trips_nfs_backend ... ok
+test daemon::tests::registry_set_refresh_interval ... ok
+test daemon::tests::registry_set_refresh_nonexistent ... ok
+test daemon::tests::registry_stores_redacted_url ... ok
+test daemon::tests::resolve_head_reads_detached_head ... ok
+test daemon::tests::resolve_head_reads_symbolic_ref ... ok
+test daemon::tests::sync_repos_skips_disabled ... ok
+test daemon::tests::timestamp_serialization_rejects_unrepresentable_dates ... ok
+test daemon::tests::tracked_branch_ref_accepts_branch_names_and_full_refs ... ok
+test daemonize::tests::daemonize_result_daemon_construction ... ok
+test daemonize::tests::daemonize_result_parent_construction ... ok
+test daemonize::tests::daemonize_result_variants_not_equal ... ok
+test daemonize::tests::pipe_failed_signal_protocol ... ok
+test daemonize::tests::pipe_ready_signal_protocol ... ok
+test daemonize::tests::ready_and_failed_bytes_are_distinct ... ok
+test daemonize::tests::wait_for_readiness_fails_on_closed_pipe ... ok
+test daemonize::tests::wait_for_readiness_fails_on_failed_byte ... ok
+test daemonize::tests::wait_for_readiness_succeeds_on_ready_byte ... ok
+test daemon::tests::teardown_joins_owned_background_tasks ... ok
+test engine::tests::base_blob_read_lease_uses_oid_identity ... ok
+test engine::tests::base_pointer_read_lease_uses_content_identity ... ok
+test daemonize::tests::wait_for_readiness_times_out ... ok
+test engine::tests::cached_read_lease_stales_after_concurrent_remove ... ok
+test engine::tests::cached_read_lease_stales_after_concurrent_rename ... ok
+test engine::tests::base_read_lease_stales_after_overlay_promotion ... ok
+test engine::tests::cached_read_lease_stales_after_concurrent_truncate ... ok
+test engine::tests::cached_read_lease_stales_after_concurrent_write ... ok
+test engine::tests::cancelled_control_waiter_retains_transition_until_owned_work_finishes ... ok
+test engine::tests::cancelled_pointer_promotion_discards_output_before_retry ... ok
+test engine::tests::concurrent_first_writes_promote_base_file_once ... ok
+test engine::tests::empty_base_file_read_lease_has_zero_size_identity ... ok
+test engine::tests::late_blob_classification_preserves_newer_snapshot_metadata ... ok
+test engine::tests::mutation_locks_include_all_ancestors ... ok
+test engine::tests::odb_promotion_uses_verified_bytes_through_copy_completion ... ok
+test engine::tests::open_file_access_upgrade_rejects_replaced_backing ... ok
+test engine::tests::open_file_base_reads_count_attempts ... ok
+test engine::tests::exact_attributes_keep_one_generation_during_concurrent_swaps ... ok
+test engine::tests::open_file_does_not_write_a_reused_path ... ok
+test engine::tests::open_file_sync_returns_the_descriptor_error ... ok
+test blob::tests::odb_reader_promisor_fallback_ignores_new_pack_slot_pressure ... ok
+test engine::tests::open_file_keeps_git_bytes_after_snapshot_replacement ... ok
+test engine::tests::open_file_write_survives_base_reconciliation ... ok
+test engine::tests::overlay_invalidation_events_compact_to_full_reset_when_map_fills ... ok
+test engine::tests::overlay_file_read_lease_uses_overlay_identity ... ok
+test engine::tests::overlay_reset_rejects_mutation_started_during_reset ... ok
+test engine::tests::read_file_range_full_file ... ok
+test engine::tests::read_file_range_missing_file ... ok
+test engine::tests::read_file_range_offset_past_eof ... ok
+test engine::tests::read_file_range_partial ... ok
+test engine::tests::read_file_range_with_offset ... ok
+test engine::tests::read_metrics_classify_per_lease_read_patterns ... ok
+test engine::tests::read_pattern_keeps_repeated_and_random_reads_unspeculative ... ok
+test engine::tests::read_pattern_prefetches_one_strided_target_window ... ok
+test engine::tests::read_pattern_prefetches_sequential_next_window ... ok
+test engine::tests::overlay_read_lease_stales_after_write ... ok
+test engine::tests::rename_locks_intersect_descendant_mutations ... ok
+test engine::tests::publication_freeze_rejects_content_changes_before_file_io ... ok
+test engine::tests::rename_base_directory_records_metadata_without_promoting_children ... ok
+test engine::tests::saturating_u32_overflow ... ok
+test engine::tests::saturating_u32_within_range ... ok
+test engine::tests::rmdir_rejects_non_empty_base_directory ... ok
+test engine::tests::rename_no_replace_preserves_both_existing_files ... ok
+test engine::tests::source_cache_evicts_stale_generation_on_open ... ok
+test daemon::tests::force_fetch_updates_daemon_clone_and_preserves_unpublished_commits ... ok
+test engine::tests::set_mode_promotes_base_file ... ok
+test engine::tests::set_mtime_promotes_base_file ... ok
+test engine::tests::source_cache_invalidates_renamed_subtree_without_dropping_sibling ... ok
+test engine::tests::stale_read_lease_errors_are_retryable ... ok
+test engine::tests::source_cache_invalidates_after_overlay_mutation ... ok
+test engine::tests::source_cache_reuses_read_lease_state_across_opens ... ok
+test engine::tests::source_cache_keeps_unrelated_read_source_after_overlay_mutation ... ok
+test engine::tests::unknown_pointer_blob_is_classified_before_direct_read ... ok
+test engine::tests::vfs_invalidation_events_drive_cache_and_metrics ... ok
+test fuse::tests::final_inflight_handle_releases_forgotten_inode ... ok
+test fuse::tests::forgetting_replaced_inode_preserves_replacement_mapping ... ok
+test fuse::tests::handle_is_valid_only_for_its_open_inode ... ok
+test fuse::tests::inode_rename_updates_descendant_paths ... ok
+test fuse::tests::invalidation_index_targets_cached_nested_entry ... ok
+test fuse::tests::invalidation_index_targets_negative_nested_entry ... ok
+test fuse::tests::only_read_capable_open_flags_preopen_read_lease ... ok
+test fuse::tests::open_truncate_requires_writable_access ... ok
+test fuse::tests::read_only_open_uses_default_cache_flags ... ok
+test fuse::tests::write_capable_open_uses_direct_io ... ok
+test hydration::tests::assemble_exact_chunk_boundaries ... ok
+test hydration::tests::assemble_multi_chunk ... ok
+test hydration::tests::assemble_single_chunk_partial ... ok
+test engine::tests::truncate_zero_pointer_base_file_skips_hydration ... ok
+test hydration::tests::cancelled_service_rejects_read_window_prefetch ... ok
+test hydration::tests::cancelled_window_read_releases_inflight_entry ... ok
+test hydration::tests::chunk_completion_releases_all_registered_readers ... ok
+test hydration::tests::completed_chunk_fetch_does_not_wait_for_another_notification ... ok
+test hydration::tests::disposable_window_directory_cannot_break_origin_reads ... ok
+test hydration::tests::hydration_read_stats_snapshot_counts_cache_and_remote_pressure ... ok
+test hydration::tests::next_read_window_advances_after_current_cache_window ... ok
+test hydration::tests::next_read_window_stops_at_eof ... ok
+test hydration::tests::prefetch_next_read_window_skips_without_pointer_reader ... ok
+test hydration::tests::priority_binary_ml_files ... ok
+test hydration::tests::priority_bootstrap_manifests ... ok
+test hydration::tests::priority_code_files ... ok
+test hydration::tests::priority_explicit_read_is_zero ... ok
+test hydration::tests::priority_nearby_text_default ... ok
+test hydration::tests::priority_nested_paths ... ok
+test hydration::tests::read_window_aligns_to_cache_window ... ok
+test hydration::tests::read_window_empty_for_zero_size_or_eof ... ok
+test hydration::tests::read_window_expands_when_request_exceeds_default_window ... ok
+test hydration::tests::read_window_prefetch_claims_compact_when_key_set_fills ... ok
+test hydration::tests::read_window_prefetch_claims_each_window_once_until_failure ... ok
+test hydration::tests::read_window_truncates_last_window_at_file_size ... ok
+test hydration::tests::select_chunks_empty_range ... ok
+test hydration::tests::select_chunks_single_chunk_covers_range ... ok
+test hydration::tests::select_chunks_skips_non_overlapping ... ok
+test hydration::tests::select_chunks_spans_multiple ... ok
+test engine::tests::write_after_truncate_zero_pointer_base_file_uses_empty_overlay ... ok
+test hydration::tests::shutdown_serializes_with_worker_startup_and_rejects_late_queue_work ... ok
+test engine::tests::truncate_to_zero_keeps_local_ownership_after_reconciliation ... ok
+test hydration::tests::shutdown_rejects_unseen_prefetch_without_cancelling_foreground ... ok
+test hydration::tests::task_ordering_fifo_within_same_priority ... ok
+test hydration::tests::task_ordering_lower_priority_number_first ... ok
+test hydration::tests::tiny_verified_windows_cannot_grow_entry_metadata_without_bound ... ok
+test hydration::tests::store_backed_xorb_fetcher_reads_warmed_local_xorb_range ... ok
+test hydration::tests::shutdown_waits_for_admitted_prefetch_and_preserves_foreground_reads ... ok
+test hydration::tests::worker_pool_starts_once_and_shutdown_releases_service_ownership ... ok
+test ipc_client::tests::client_connect_fails_on_missing_socket ... ok
+test hydration::tests::verified_windows_evict_least_recently_used_bytes_within_budget ... ok
+test hydration::tests::warm_pointer_reads_ignore_disposable_window_files ... ok
+test ipc_client::tests::client_invalid_response_closes_connection ... ok
+test ipc_client::tests::client_send_and_receive ... ok
+test ipc_client::tests::connect_or_spawn_leaves_socket_cleanup_to_coordinator ... ok
+test ipc_client::tests::connect_or_spawn_preserves_connection_path_errors ... ok
+test ipc_client::tests::connect_or_spawn_refuses_to_remove_regular_file ... ok
+test ipc_client::tests::client_interrupted_exchange_closes_connection ... ok
+test ipc_client::tests::default_socket_path_contains_daemon_sock ... ok
+test ipc_client::tests::ipc_client_error_converts_to_crab_error ... ok
+test ipc_client::tests::ipc_client_error_display ... ok
+test ipc_client::tests::parse_error_response ... ok
+test ipc_client::tests::parse_list_response ... ok
+test ipc_client::tests::parse_mount_response ... ok
+test ipc_client::tests::parse_status_response ... ok
+test ipc_client::tests::parse_success_response ... ok
+test ipc_client::tests::serialize_commit_overlay_request_for_ipc ... ok
+test ipc_client::tests::serialize_diff_overlay_request_for_ipc ... ok
+test ipc_client::tests::serialize_invalidate_request_for_ipc ... ok
+test ipc_client::tests::serialize_list_request_for_ipc ... ok
+test ipc_client::tests::serialize_mount_request_for_ipc ... ok
+test ipc_client::tests::serialize_refresh_request_for_ipc ... ok
+test ipc_client::tests::serialize_reset_overlay_request_for_ipc ... ok
+test ipc_client::tests::serialize_status_request_for_ipc ... ok
+test ipc_client::tests::serialize_switch_ref_request_for_ipc ... ok
+test ipc_client::tests::serialize_unmount_request_for_ipc ... ok
+test ipc_server::tests::deserialize_commit_overlay_request ... ok
+test ipc_server::tests::deserialize_diff_overlay_request ... ok
+test ipc_server::tests::deserialize_health_request ... ok
+test ipc_server::tests::deserialize_invalidate_request ... ok
+test ipc_server::tests::deserialize_list_request ... ok
+test ipc_server::tests::deserialize_mount_request ... ok
+test ipc_server::tests::deserialize_mount_request_default_ref ... ok
+test ipc_server::tests::deserialize_ping_request ... ok
+test ipc_server::tests::deserialize_refresh_request ... ok
+test ipc_server::tests::deserialize_reset_overlay_request ... ok
+test ipc_server::tests::deserialize_shutdown_request ... ok
+test ipc_server::tests::deserialize_status_request ... ok
+test ipc_server::tests::deserialize_switch_ref_request ... ok
+test ipc_server::tests::deserialize_unmount_request ... ok
+test ipc_server::tests::health_response_roundtrip ... ok
+test ipc_server::tests::ipc_server_bound_hook_runs_after_socket_bind ... ok
+test ipc_server::tests::ipc_server_accepts_and_responds ... ok
+test ipc_server::tests::ipc_server_handles_concurrent_connections ... ok
+test ipc_server::tests::ipc_server_ping_and_health_handlers ... ok
+test ipc_server::tests::ipc_server_idle_timeout ... ok
+test ipc_server::tests::ping_response_roundtrip ... ok
+test ipc_server::tests::roundtrip_all_request_types ... ok
+test ipc_server::tests::serialize_error_response ... ok
+test ipc_server::tests::serialize_health_response ... ok
+test ipc_server::tests::serialize_list_response ... ok
+test ipc_server::tests::serialize_mount_request ... ok
+test ipc_server::tests::serialize_mount_response ... ok
+test ipc_server::tests::serialize_ping_response ... ok
+test ipc_server::tests::serialize_status_response ... ok
+test ipc_server::tests::serialize_success_response ... ok
+test mount::tests::mount_config_allows_auto_unmount_off_macos ... ok
+test mount::tests::mount_options_set_access_mode ... ok
+test mount::tests::mount_options_use_auto_unmount_off_macos ... ok
+test mount::tests::pid_file_path_is_correct ... ok
+test mount::tests::pid_file_roundtrip ... ok
+test mount::tests::remove_pid_file_nonexistent_is_noop ... ok
+test mount_control::tests::backend_names_match_registry_values ... ok
+test mount_control::tests::list_keeps_registry_entries_when_live_probe_fails ... ok
+test mount_control::tests::nfs_context_ignores_non_nfs_registry_entries ... ok
+test mount_control::tests::nfs_context_uses_registry_backend_and_endpoint ... ok
+test ipc_client::tests::client_deadline_includes_stalled_write ... ok
+test mount_control::tests::nfs_control_list_refreshes_live_registry_entries ... ok
+test ipc_server::tests::ipc_server_shutdown_cancels_token ... ok
+test mount_control::tests::normalize_preserves_missing_paths ... ok
+test mount_control::tests::nfs_control_refresh_and_switch_route_to_helper_endpoint ... ok
+test mount_control::tests::upsert_list_entry_preserves_registry_metadata ... ok
+test mount_control::tests::nfs_control_status_and_shutdown_route_through_registry_endpoint ... ok
+test mount_control::tests::persisted_list_reads_registry_entries ... ok
+test mount_runtime::tests::borrowed_remote_data_origin_auto_refresh_preserves_source_index ... ok
+test mount_runtime::tests::borrowed_mount_with_remote_data_origin_preserves_staged_index ... ok
+test hydration::tests::canonical_ranges_survive_unavailable_chunk_storage_and_reuse_warm_bytes ... ok
+test mount_runtime::tests::catalog::failed_commit_adoption_preserves_open_content_and_retries_same_commit ... ok
+test mount_runtime::tests::catalog::inflight_pointer_read_keeps_its_captured_catalog_during_refresh ... ok
+test mount_runtime::tests::audit_local_pointer_commit_remains_readable ... ok
+test mount_runtime::tests::catalog::existing_auto_refresh_follows_the_ref_selected_by_manual_switch ... ok
+test mount_runtime::tests::catalog::refresh_installs_captured_hintless_reader_only_after_successful_capture ... ok
+test mount_runtime::tests::initial_pipeline_honors_requested_ref ... ok
+test mount_runtime::tests::catalog::short_branch_auto_refresh_preserves_the_selected_commit_on_remount ... ok
+test mount_runtime::tests::committed_generations_are_adopted_before_pruning_live_resolver ... ok
+test mount_runtime::tests::commit_keeps_open_inode_linked_for_later_writes ... ok
+test mount_runtime::tests::switch_normalizes_branch_names ... ok
+test mounts_registry::tests::add_entry_appends ... ok
+test mounts_registry::tests::add_entry_creates_file ... ok
+test mounts_registry::tests::add_entry_replaces_same_mountpoint ... ok
+test mounts_registry::tests::add_entry_writes_private_registry_permissions ... ok
+test mounts_registry::tests::derive_name_from_local_path ... ok
+test mounts_registry::tests::derive_name_from_remote_url ... ok
+test mounts_registry::tests::deserialize_from_expected_json ... ok
+test mounts_registry::tests::format_epoch ... ok
+test mounts_registry::tests::format_known_timestamp ... ok
+test mounts_registry::tests::format_timestamp_rejects_out_of_range_seconds ... ok
+test mounts_registry::tests::list_entries_with_lock ... ok
+test mounts_registry::tests::now_iso8601_format ... ok
+test mounts_registry::tests::read_entries_empty_file ... ok
+test mounts_registry::tests::read_entries_nonexistent_file ... ok
+test mounts_registry::tests::remove_entry_by_mountpoint ... ok
+test mounts_registry::tests::remove_entry_by_pid_works ... ok
+test mounts_registry::tests::remove_entry_not_found ... ok
+test mounts_registry::tests::serialize_deserialize_roundtrip ... ok
+test mounts_registry::tests::serialize_matches_expected_schema ... ok
+test native_mount::fuse_committed_pointer_remount ... ignored, requires a dedicated Linux environment with native FUSE/NFS mount privileges
+test native_mount::fuse_mapped_commit_without_msync ... ignored, requires a dedicated Linux environment with native FUSE/NFS mount privileges
+test native_mount::fuse_readonly ... ignored, requires a dedicated Linux environment with native FUSE/NFS mount privileges
+test native_mount::fuse_writable ... ignored, requires a dedicated Linux environment with native FUSE/NFS mount privileges
+test native_mount::nfs_committed_pointer_remount ... ignored, requires a dedicated Linux environment with native FUSE/NFS mount privileges
+test native_mount::nfs_mapped_commit_without_msync ... ignored, requires a dedicated Linux environment with native FUSE/NFS mount privileges
+test native_mount::nfs_readonly ... ignored, requires a dedicated Linux environment with native FUSE/NFS mount privileges
+test native_mount::nfs_writable ... ignored, requires a dedicated Linux environment with native FUSE/NFS mount privileges
+test nfs::tests::exclusive_verifier_hex_round_trips ... ok
+test nfs::tests::id_table_moves_and_removes_exclusive_verifiers ... ok
+test nfs::tests::id_table_persists_exclusive_create_verifiers ... ok
+test nfs::tests::id_table_record_exclusive_create_preserves_state_when_persist_fails ... ok
+test nfs::tests::id_table_remove_exclusive_verifier_preserves_state_when_persist_fails ... ok
+test nfs::tests::id_table_remove_preserves_state_when_verifier_persist_fails ... ok
+test nfs::tests::id_table_remove_reports_removed_subtree_ids ... ok
+test nfs::tests::id_table_rename_drops_replaced_subtree_ids ... ok
+test nfs::tests::id_table_rename_preserves_state_when_verifier_persist_fails ... ok
+test nfs::tests::id_table_renames_subtree_without_changing_ids ... ok
+test nfs::tests::nfs_child_name_rejects_dot_entries ... ok
+test nfs::tests::nfs_commit_allows_synthetic_gitfile_without_sync_attempt ... ok
+Cloning into bare repository '/root/Workspace/crabbuild-target/vfs-audit/run/.tmppgoJH4/remote.git'...
+test nfs::tests::nfs_commit_rejects_directory_handles_without_sync_attempt ... ok
+test nfs::tests::nfs_create_rejects_long_name_before_overlay_or_journal_mutation ... ok
+done.
+test nfs::tests::nfs_create_syncs_new_file_once ... ok
+Cloning into bare repository '/root/Workspace/crabbuild-target/vfs-audit/run/.tmppgoJH4/mount.git'...
+test nfs::tests::nfs_create_under_file_parent_does_not_mutate_overlay_or_journal ... ok
+warning: --filter is ignored in local clones; use file:// instead.
+test nfs::tests::nfs_created_path_sync_failure_stays_pending ... ok
+test nfs::tests::nfs_directory_page_cache_compacts_invalidation_versions_when_bounded ... ok
+test nfs::tests::nfs_directory_page_cache_evicts_lru_entries ... ok
+test nfs::tests::nfs_directory_page_cache_invalidates_renamed_subtree_without_dropping_sibling ... ok
+test nfs::tests::nfs_directory_page_cache_keeps_unrelated_directory_after_path_invalidation ... ok
+test nfs::tests::nfs_directory_page_cache_tracks_hits_misses_and_stale_generation ... ok
+done.
+test nfs::tests::nfs_exclusive_create_syncs_and_clears_journal_before_reply ... ok
+test nfs::tests::nfs_exclusive_create_under_file_parent_does_not_record_verifier ... ok
+test nfs::tests::nfs_failed_remove_keeps_derived_protocol_state_unchanged ... ok
+test nfs::tests::nfs_failed_rename_keeps_derived_protocol_state_unchanged ... ok
+test nfs::tests::nfs_fsinfo_reports_crab_metadata_precision ... ok
+test nfs::tests::nfs_getattr_reports_pointer_size_without_hydration ... ok
+test nfs::tests::nfs_lookup_rejects_child_lookup_under_file_handle ... ok
+test nfs::tests::nfs_name_rejects_nul_and_oversized_components ... ok
+test nfs::tests::nfs_name_rejects_slashes_and_non_utf8 ... ok
+test nfs::tests::nfs_prefetch_paths_include_regular_files_only ... ok
+test nfs::tests::nfs_protocol_stats_snapshot_reports_read_and_directory_pressure ... ok
+test nfs::tests::nfs_read_eof_detects_exact_boundary_for_known_size ... ok
+test nfs::tests::nfs_read_eof_uses_short_read_for_unknown_size ... ok
+test nfs::tests::nfs_read_rejects_non_regular_nodes ... ok
+test nfs::tests::nfs_read_retries_stale_pooled_lease_once ... ok
+test nfs::tests::nfs_readdirplus_omits_placeholder_size_for_unknown_git_blob ... ok
+test nfs::tests::nfs_readdirplus_pages_large_directories_without_truncation ... ok
+test nfs::tests::nfs_readdirplus_rejects_synthetic_gitfile_as_notdir ... ok
+test nfs::tests::nfs_readdirplus_reports_synthetic_gitfile_without_prefetch ... ok
+test nfs::tests::nfs_readlink_rejects_synthetic_gitfile_as_not_symlink ... ok
+test nfs::tests::nfs_remove_clears_derived_protocol_state_after_engine_mutation ... ok
+test nfs::tests::nfs_rename_into_file_parent_keeps_source_unchanged ... ok
+test nfs::tests::nfs_rename_moves_derived_protocol_state_after_engine_mutation ... ok
+test nfs::tests::nfs_setattr_accepts_atime_changes_as_noatime ... ok
+test nfs::tests::nfs_setattr_atime_is_a_noop_without_overlay_or_journal_mutation ... ok
+test nfs::tests::nfs_setattr_metadata_allows_non_regular_nodes ... ok
+test nfs::tests::nfs_setattr_size_requires_regular_file ... ok
+test nfs::tests::nfs_stable_write_syncs_and_clears_journal_before_reply ... ok
+test nfs::tests::nfs_symlink_applies_mtime_and_syncs_once_before_reply ... ok
+test nfs::tests::nfs_symlink_rejects_long_target_before_overlay_or_journal_mutation ... ok
+test nfs::tests::nfs_symlink_rejects_size_attr_before_overlay_create ... ok
+test nfs::tests::nfs_symlink_target_rejects_empty_nul_non_utf8_and_oversized_paths ... ok
+test nfs::tests::nfs_unstable_write_stays_pending_until_commit ... ok
+test nfs::tests::nfs_write_journal_follows_rename_and_remove_subtrees ... ok
+test nfs::tests::nfs_write_journal_snapshot_reports_pending_state ... ok
+test nfs::tests::nfs_write_journal_sync_all_clears_successful_shutdown_drain ... ok
+test nfs::tests::nfs_write_journal_sync_all_retains_failures_and_continues_shutdown_drain ... ok
+test nfs::tests::nfs_write_journal_tracks_stability_and_sync_errors ... ok
+test nfs::tests::nfs_write_rejects_non_regular_nodes_with_protocol_inval ... ok
+test nfs::tests::path_absence_check_propagates_resolver_errors ... ok
+test nfs::tests::readdirplus_cursor_resumes_from_cookie_path ... ok
+test nfs::tests::synthetic_gitfile_is_not_a_mutable_child ... ok
+test nfs_control::tests::control_probe_creates_private_unix_socket_directory ... ok
+test nfs_control::tests::control_probe_rejects_active_unix_socket ... ok
+test nfs_control::tests::control_probe_rejects_occupied_tcp_endpoint ... ok
+test nfs_control::tests::control_probe_replaces_empty_unix_placeholder_before_bind ... ok
+test nfs_control::tests::control_probe_replaces_stale_unix_socket_before_bind ... ok
+test nfs_control::tests::control_request_uses_snake_case_tag ... ok
+test mount_runtime::tests::resolve_refresh_head_fetches_remote_tracked_ref_into_mount_cache ... ok
+test nfs_control::tests::control_server_reports_status_accepts_shutdown_and_removes_socket ... ok
+test nfs_control::tests::endpoint_for_mountpoint_accepts_parent_control_endpoint_override ... ok
+test nfs_control::tests::endpoint_for_mountpoint_is_deterministic_unix_socket ... ok
+test nfs_control::tests::endpoint_for_mountpoint_rejects_invalid_control_endpoint_override ... ok
+test nfs_control::tests::endpoint_for_mountpoint_stays_short_for_deep_mountpoints ... ok
+test nfs_control::tests::generation_cache_invalidation_clears_protocol_read_leases ... ok
+test nfs_control::tests::control_response_timeout_closes_connection ... ok
+test nfs_control::tests::tcp_control_server_requires_token_and_accepts_shutdown ... ok
+test nfs_control::tests::tcp_endpoint_errors_redact_control_token ... ok
+test nfs_control::tests::tcp_endpoint_for_mountpoint_uses_stable_loopback_port_and_random_token ... ok
+test nfs_control::tests::tcp_endpoint_parser_rejects_missing_token_and_non_loopback ... ok
+test mount_runtime::tests::owned_clone_of_local_source_fetches_refs_and_refreshes_only_its_index ... ok
+test nfs_control::tests::tcp_control_deadline_includes_stalled_writes ... ok
+test nfs_mount::tests::aborted_listener_is_not_joined_twice ... ok
+test nfs_mount::tests::cancellation_joins_listener_task ... ok
+test nfs_mount::tests::completed_listener_is_not_joined_twice ... ok
+test nfs_mount::tests::linux_mount_error_hint_explains_permission_denial ... ok
+test nfs_mount::tests::linux_mount_field_decoder_leaves_invalid_escapes_literal ... ok
+test nfs_mount::tests::linux_mounts_parser_decodes_escaped_mountpoint_fields ... ok
+test nfs_mount::tests::linux_mounts_parser_matches_exact_mountpoint ... ok
+test nfs_mount::tests::listen_addr_matches_os_client_port_contract ... ok
+test nfs_mount::tests::listener_error_survives_cleanup ... ok
+test nfs_mount::tests::nfs_preflight_blocks_non_loopback_endpoint ... ok
+test nfs_mount::tests::nfs_preflight_requires_existing_directory_mountpoint ... ok
+test nfs_mount::tests::nfs_preflight_summary_lists_actionable_blockers ... ok
+test nfs_mount::tests::windows_drive_target_parser_requires_explicit_drive ... ok
+test nfs_mount::tests::windows_mount_options_match_client_for_nfs_contract ... ok
+test nfs_mount::tests::windows_mount_output_parser_matches_nfs_drive_entry ... ok
+test nfs_mount::tests::windows_port_validation_requires_portmapper_port ... ok
+test nfs_mount::tests::cancellation_waits_for_admitted_auto_refresh ... ok
+test overlay::tests::clean_deletes_db_and_upper_dir ... ok
+test overlay::tests::create_and_get ... ok
+test overlay::tests::create_file_stores_empty_source_oid ... ok
+test overlay::tests::create_symlink_records_symlink_metadata ... ok
+test overlay::tests::descriptor_mutation_records_actual_file_size_and_mtime ... ok
+test nfs_control::tests::unix_control_deadline_includes_stalled_writes ... ok
+test overlay::tests::dirty_count ... ok
+test overlay::tests::dirty_paths_includes_base_delete_markers ... ok
+test overlay::tests::dropped_overlay_guards_unlock_even_with_a_duplicated_descriptor ... ok
+test overlay::tests::dirty_paths_returns_sorted_changed_paths ... ok
+test overlay::tests::independent_overlay_mutations_share_the_publish_lease ... ok
+test overlay::tests::list_by_prefix_returns_children ... ok
+test overlay::tests::metadata_consistency_after_create ... ok
+test overlay::tests::metadata_consistency_after_mkdir ... ok
+test overlay::tests::metadata_consistency_after_promote ... ok
+test overlay::tests::metadata_consistency_after_remove ... ok
+test overlay::tests::metadata_consistency_after_rename ... ok
+test overlay::tests::mkdir_and_rmdir ... ok
+test overlay::tests::metadata_consistency_after_write ... ok
+test overlay::tests::freeze_waits_for_in_flight_mutations_across_store_handles ... ok
+test overlay::tests::open_preserves_unreferenced_files ... ok
+test overlay::tests::orphan_cleanup_deletes_unreferenced_files ... ok
+test overlay::tests::overlay_persistence_across_reopen ... ok
+test overlay::tests::path_normalization ... ok
+test overlay::tests::persistence_with_reconcile_preserves_valid_modifications ... ok
+test overlay::tests::promote_stores_source_oid_in_db ... ok
+test overlay::tests::promote_without_source_oid_stores_empty ... ok
+test overlay::tests::read_dirty_state_missing_db_does_not_create_parent ... ok
+test overlay::tests::promote_writes_content ... ok
+test overlay::tests::read_dirty_state_reports_sorted_paths ... ok
+test overlay::tests::reconcile_oid_aware_keeps_matching_modify ... ok
+test overlay::tests::reconcile_preserves_modify_without_source_lineage ... ok
+test overlay::tests::reconcile_race_safe_delete_guards_source_oid ... ok
+test overlay::tests::reconcile_preserves_overlay_only_rename_after_reopen ... ok
+test overlay::tests::reconcile_removes_stale_entries ... ok
+test overlay::tests::remove_discards_overlay_only_file ... ok
+test overlay::tests::remove_discards_overlay_only_symlink ... ok
+test overlay::tests::remove_discards_renamed_overlay_only_file ... ok
+test overlay::tests::rename_directory_moves_descendant_entries ... ok
+test overlay::tests::rename_overlay_only_file_preserves_create_kind ... ok
+test overlay::tests::rename_overlay_only_file_overwrites_destination_and_preserves_create_kind ... ok
+test overlay::tests::set_mode_updates_entry_and_backing_permissions ... ok
+test overlay::tests::schema_migration_adds_columns_on_open ... ok
+test overlay::tests::set_mtime_updates_entry ... ok
+test overlay::tests::unlink_base_file_inserts_whiteout_without_promotion ... ok
+test overlay::tests::write_after_unlink_and_create ... ok
+test overlay::tests::write_and_read_back ... ok
+test overlay::tests::write_at_offset ... ok
+test overlay::tests::write_to_missing_file_returns_not_found ... ok
+test pipeline::tests::missing_borrowed_git_metadata_is_never_cloned ... ok
+test pipeline::tests::object_store_hydration_requires_v2_read_context ... ok
+test pipeline::tests::pipeline_builder_with_options ... ok
+test pipeline::tests::pipeline_config_builder_defaults ... ok
+test publish::tests::apply_records_skips_precomputed_crab_overlay_files ... ok
+test pipeline::tests::hydration_startup_bypasses_chunk_storage_without_touching_live_state ... ok
+test pipeline::tests::disposable_blob_cache_path_does_not_block_preparation ... ok
+test publish::tests::commit_overlay_does_not_checkout_unchanged_base_files ... FAILED
+test publish::tests::commit_overlay_moves_base_directory_without_overlay_upload ... FAILED
+test publish::tests::commit_overlay_creates_commit_updates_snapshot_and_cleans_overlay ... FAILED
+test publish::tests::commit_overlay_push_failure_keeps_local_ref_retryable ... FAILED
+test publish::tests::commit_overlay_preserves_renamed_directory_children ... FAILED
+test publish::tests::commit_overlay_preserves_symlink_entry ... FAILED
+test publish::tests::commit_overlay_recovers_recorded_pushed_transaction_and_cleans_overlay ... FAILED
+test publish::tests::commit_overlay_records_precommit_failure_and_preserves_overlay ... ok
+test publish::tests::commit_overlay_pushes_existing_local_commit_when_overlay_is_clean ... FAILED
+test publish::tests::commit_overlay_rejects_recorded_publish_when_overlay_changed_before_retry ... ok
+test publish::tests::commit_overlay_rejects_moved_base_ref_and_keeps_overlay ... ok
+test publish::tests::commit_overlay_respects_base_gitignore_without_full_checkout ... FAILED
+test publish::tests::commit_overlay_writes_crab_tracked_file_as_pointer_and_stages_chunks ... FAILED
+test publish::tests::export_overlay_copies_backing_files_and_deletion_manifest ... ok
+test publish::tests::export_overlay_from_view_copies_metadata_base_rename ... ok
+test publish::tests::export_overlay_preserves_executable_permissions ... ok
+test publish::tests::export_overlay_preserves_symlink_entries ... ok
+test publish::tests::frozen_overlay_rejects_writes_until_guard_drops ... ok
+test publish::tests::inspect_and_export_overlay_ignore_macos_appledouble_sidecars ... ok
+test publish::tests::inspect_overlay_reports_all_change_kinds_and_estimated_upload ... ok
+test publish::tests::overlay_changes_git_attributes_detects_root_and_nested_attrs ... ok
+test publish::tests::commit_overlay_skips_create_then_delete_noop ... ok
+test publish::tests::reset_overlay_clears_an_open_store_view ... ok
+test publish::tests::reset_overlay_clears_entries_and_upper_dir ... ok
+test publish::tests::commit_overlay_streams_stable_crab_file_from_overlay_backing ... FAILED
+test read_lease_pool::tests::explicit_evict_removes_entry_even_while_pin_is_alive ... ok
+test read_lease_pool::tests::insert_evicts_least_recent_unpinned_entry ... ok
+test read_lease_pool::tests::invalidate_all_removes_cached_entries_even_while_pinned ... ok
+test read_lease_pool::tests::memory_budget_evicts_unpinned_entries ... ok
+test read_lease_pool::tests::pin_miss_does_not_insert ... ok
+test read_lease_pool::tests::pin_reuses_existing_lease ... ok
+test read_lease_pool::tests::pinned_entries_can_temporarily_overflow_then_shrink_on_unpin ... ok
+test read_lease_pool::tests::retired_pin_does_not_unpin_reinserted_entry ... ok
+test read_lease_pool::tests::snapshot_reports_runtime_counters_and_pins ... ok
+test refresh::tests::backoff_caps_at_max ... ok
+test refresh::tests::backoff_doubles_on_failure ... ok
+test refresh::tests::backoff_independent_per_instance ... ok
+test refresh::tests::backoff_resets_on_success ... ok
+test publish::tests::update_published_ref_aligns_after_successful_push_local_race ... ok
+test refresh::tests::conflict_detection_finds_overlapping_changes ... ok
+test refresh::tests::conflict_detection_ignores_deleted_overlay ... ok
+test refresh::tests::diff_detects_added_file ... ok
+test refresh::tests::diff_detects_modified_file ... ok
+test refresh::tests::diff_detects_removed_file ... ok
+test refresh::tests::commit_time_from_oid_reads_commit_timestamp ... ok
+test refresh::tests::diff_empty_when_identical ... ok
+test publish::tests::update_unpushed_ref_rejects_local_race ... ok
+test refresh::tests::noop_remote_ref_fetcher_returns_no_ref ... ok
+test refresh::tests::redact_url_handles_malformed ... ok
+test refresh::tests::redact_url_preserves_no_creds ... ok
+test refresh::tests::redact_url_preserves_path_and_scheme ... ok
+test refresh::tests::redact_url_strips_token ... ok
+test refresh::tests::redact_url_strips_user_pass ... ok
+test refresh::tests::git_remote_ref_fetcher_returns_none_for_missing_ref ... ok
+test refresh::tests::watcher_detects_branch_advance ... ok
+test refresh::tests::watcher_detects_head_change ... ok
+test refresh::tests::watcher_handles_detached_head ... ok
+test refresh::tests::watcher_tracks_linked_worktree_and_detached_head ... ok
+test refresh::tests::watcher_tracks_selected_branch_through_packing ... ok
+test repository::tests::cached_clone_fetches_requested_branch_without_losing_local_commits ... ok
+test repository::tests::classify_auth_401 ... ok
+test repository::tests::classify_auth_permission_denied ... ok
+test repository::tests::classify_network_connection_refused ... ok
+test repository::tests::classify_network_resolve ... ok
+test repository::tests::classify_not_git_repo ... ok
+test repository::tests::classify_remote_not_found ... ok
+test repository::tests::classify_unknown_error_falls_through ... ok
+test refresh::tests::git_remote_ref_fetcher_preserves_unpushed_local_branch ... ok
+test repository::tests::clone_default_selects_a_sole_branch_when_remote_head_is_missing ... ok
+test repository::tests::clone_ignores_ambient_git_repository_context ... ok
+test refresh::tests::refresh_service_remote_poll_fetches_and_swaps_generation ... ok
+test repository::tests::ensure_clone_detects_existing_bare_repo ... ok
+test repository::tests::ensure_clone_attempts_fresh_clone_when_no_head ... ok
+test repository::tests::clone_publishes_into_an_existing_empty_destination ... ok
+test repository::tests::parse_auth_error_message ... ok
+test repository::tests::parse_ls_remote_heads_extracts_advertised_default ... ok
+test repository::tests::parse_network_error_message ... ok
+test repository::tests::parse_not_found_message ... ok
+test repository::tests::parse_unknown_preserves_stderr ... ok
+test repository::tests::select_default_clone_branch_prefers_advertised_default ... ok
+test repository::tests::select_default_clone_branch_rejects_ambiguous_remote ... ok
+test repository::tests::select_default_clone_branch_uses_main_without_advertised_head ... ok
+test repository::tests::select_default_clone_branch_uses_master_without_main ... ok
+test repository::tests::select_default_clone_branch_uses_single_branch ... ok
+test resolver::tests::captured_view_retains_nodes_and_children_until_last_owner_exits ... ok
+test resolver::tests::clean_path_strips_slashes ... ok
+test resolver::tests::dir_with_existing_perms_gets_at_least_755 ... ok
+test resolver::tests::dir_with_zero_perms_gets_755 ... ok
+test resolver::tests::executable_file_preserves_exec_bit ... ok
+test resolver::tests::file_with_existing_perms_gets_at_least_644 ... ok
+test resolver::tests::file_with_zero_perms_gets_644 ... ok
+test resolver::tests::getattr_base_file_uses_commit_time ... ok
+test resolver::tests::getattr_overlay_uses_overlay_mtime ... ok
+test resolver::tests::getattr_preserves_unknown_blob_size_for_exact_lookup ... ok
+test resolver::tests::immediate_child_at_root ... ok
+test resolver::tests::immediate_child_in_subdir ... ok
+test resolver::tests::immediate_child_no_match ... ok
+test resolver::tests::live_resolver_retains_its_tree_across_new_publications ... ok
+test resolver::tests::overlay_create_appears_in_readdir ... ok
+test resolver::tests::overlay_deletion_hides_base ... ok
+test resolver::tests::overlay_deletion_hides_in_readdir ... ok
+test resolver::tests::overlay_file_preserves_exact_permission_bits ... ok
+test resolver::tests::overlay_takes_precedence_over_base ... ok
+test resolver::tests::readdir_hides_macos_appledouble_sidecars ... ok
+test resolver::tests::readdir_page_advances_across_overlay_deletion_runs ... ok
+test resolver::tests::readdir_returns_immediate_children ... ok
+test resolver::tests::resolve_existing_file ... ok
+test resolver::tests::resolve_missing_file_returns_not_found ... ok
+test resolver::tests::resolve_strips_leading_slash ... ok
+test resolver::tests::resolved_node_base_accessors ... ok
+test resolver::tests::resolved_node_overlay_accessors ... ok
+test resolver::tests::symlink_always_gets_120777 ... ok
+test resolver::tests::unavailable_generation_does_not_replace_live_view ... ok
+test snapshot::tests::base_node_dir_round_trip ... ok
+test snapshot::tests::base_node_file_round_trip ... ok
+test snapshot::tests::base_node_pointer_round_trip ... ok
+test snapshot::tests::base_node_symlink_round_trip ... ok
+test snapshot::tests::build_snapshot_errors_on_missing_objects ... ok
+test repository::tests::failed_clone_does_not_publish_partial_git_metadata ... ok
+test snapshot::tests::empty_store_has_no_generation ... ok
+test snapshot::tests::list_children_page_uses_name_cursor ... ok
+test snapshot::tests::list_children_root ... ok
+test snapshot::tests::list_children_subdir ... ok
+test snapshot::tests::multiple_generations_and_prune ... ok
+test repository::tests::failed_clone_preserves_preexisting_destination ... ok
+test snapshot::tests::build_snapshot_on_real_repo ... ok
+test snapshot::tests::pointer_node_stored_and_retrieved ... ok
+test snapshot::tests::publish_and_query_generation ... ok
+test snapshot::tests::update_node_from_blob_missing_node_returns_classification ... ok
+test snapshot::tests::update_node_from_blob_backfills_ordinary_blob_size ... ok
+test source::tests::canonical_input_resolves_client_relative_paths ... ok
+test source::tests::parse_absolute_path_is_local ... ok
+test source::tests::parse_az_url_is_remote ... ok
+test source::tests::parse_case_insensitive_scheme ... ok
+test source::tests::parse_crab_url_is_remote ... ok
+test source::tests::parse_empty_input_errors ... ok
+test source::tests::parse_gs_url_is_remote ... ok
+test source::tests::parse_relative_path_is_local ... ok
+test source::tests::parse_s3_url_is_remote ... ok
+test source::tests::parse_whitespace_only_errors ... ok
+test source::tests::validate_local_bare_repo ... ok
+test source::tests::validate_local_no_git_errors ... ok
+test snapshot::tests::update_node_from_blob_records_pointer_logical_size ... ok
+test source::tests::validate_local_standard_repo ... ok
+test source::tests::validate_remote_az_url ... ok
+test source::tests::validate_remote_bucket_only_errors ... ok
+test source::tests::validate_remote_crab_url ... ok
+test source::tests::validate_remote_gs_url ... ok
+test source::tests::validate_local_worktree_git_file ... ok
+test source::tests::validate_remote_missing_bucket_errors ... ok
+test source::tests::validate_remote_missing_prefix_errors ... ok
+test source::tests::validate_remote_missing_separator_errors ... ok
+test snapshot::tests::update_node_from_blob_wrong_generation_is_noop ... ok
+test source::tests::validate_remote_normalizes_bucket_case ... ok
+test source::tests::validate_remote_s3_url ... ok
+test source::tests::validate_remote_strips_trailing_slashes ... ok
+test source::tests::validate_remote_unsupported_scheme_errors ... ok
+test verified_set::tests::duplicate_insert_is_idempotent ... ok
+test verified_set::tests::fifo_eviction_when_full ... ok
+test verified_set::tests::default_uses_million_capacity ... ok
+test verified_set::tests::size_never_exceeds_capacity ... ok
+test verified_set::tests::insert_and_contains ... ok
+test mount_runtime::tests::local_refresh_and_switch_preserve_source_state ... ok
+
+failures:
+
+---- publish::tests::commit_overlay_does_not_checkout_unchanged_base_files stdout ----
+
+thread 'publish::tests::commit_overlay_does_not_checkout_unchanged_base_files' (1696) panicked at crates/crab-vfs/src/publish.rs:2377:10:
+called `Result::unwrap()` on an `Err` value: Internal("snapshot SQLite error: attempt to write a readonly database")
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+---- publish::tests::commit_overlay_moves_base_directory_without_overlay_upload stdout ----
+
+thread 'publish::tests::commit_overlay_moves_base_directory_without_overlay_upload' (1704) panicked at crates/crab-vfs/src/publish.rs:2835:10:
+called `Result::unwrap()` on an `Err` value: Internal("snapshot SQLite error: attempt to write a readonly database")
+
+---- publish::tests::commit_overlay_creates_commit_updates_snapshot_and_cleans_overlay stdout ----
+
+thread 'publish::tests::commit_overlay_creates_commit_updates_snapshot_and_cleans_overlay' (1694) panicked at crates/crab-vfs/src/publish.rs:2242:10:
+called `Result::unwrap()` on an `Err` value: Internal("snapshot SQLite error: attempt to write a readonly database")
+
+---- publish::tests::commit_overlay_push_failure_keeps_local_ref_retryable stdout ----
+
+thread 'publish::tests::commit_overlay_push_failure_keeps_local_ref_retryable' (1833) panicked at crates/crab-vfs/src/publish.rs:2494:10:
+called `Result::unwrap()` on an `Err` value: Internal("snapshot SQLite error: attempt to write a readonly database")
+
+---- publish::tests::commit_overlay_preserves_renamed_directory_children stdout ----
+
+thread 'publish::tests::commit_overlay_preserves_renamed_directory_children' (1761) panicked at crates/crab-vfs/src/publish.rs:2743:10:
+called `Result::unwrap()` on an `Err` value: Internal("snapshot SQLite error: attempt to write a readonly database")
+
+---- publish::tests::commit_overlay_preserves_symlink_entry stdout ----
+
+thread 'publish::tests::commit_overlay_preserves_symlink_entry' (1806) panicked at crates/crab-vfs/src/publish.rs:3019:10:
+called `Result::unwrap()` on an `Err` value: Internal("snapshot SQLite error: attempt to write a readonly database")
+
+---- publish::tests::commit_overlay_recovers_recorded_pushed_transaction_and_cleans_overlay stdout ----
+
+thread 'publish::tests::commit_overlay_recovers_recorded_pushed_transaction_and_cleans_overlay' (1951) panicked at crates/crab-vfs/src/publish.rs:2586:10:
+called `Result::unwrap()` on an `Err` value: Internal("snapshot SQLite error: attempt to write a readonly database")
+
+---- publish::tests::commit_overlay_pushes_existing_local_commit_when_overlay_is_clean stdout ----
+
+thread 'publish::tests::commit_overlay_pushes_existing_local_commit_when_overlay_is_clean' (1898) panicked at crates/crab-vfs/src/publish.rs:2309:10:
+called `Result::unwrap()` on an `Err` value: Internal("snapshot SQLite error: attempt to write a readonly database")
+
+---- publish::tests::commit_overlay_respects_base_gitignore_without_full_checkout stdout ----
+
+thread 'publish::tests::commit_overlay_respects_base_gitignore_without_full_checkout' (2031) panicked at crates/crab-vfs/src/publish.rs:2416:10:
+called `Result::unwrap()` on an `Err` value: Internal("snapshot SQLite error: attempt to write a readonly database")
+
+---- publish::tests::commit_overlay_writes_crab_tracked_file_as_pointer_and_stages_chunks stdout ----
+
+thread 'publish::tests::commit_overlay_writes_crab_tracked_file_as_pointer_and_stages_chunks' (2151) panicked at crates/crab-vfs/src/publish.rs:2885:10:
+called `Result::unwrap()` on an `Err` value: Internal("snapshot SQLite error: attempt to write a readonly database")
+
+---- publish::tests::commit_overlay_streams_stable_crab_file_from_overlay_backing stdout ----
+
+thread 'publish::tests::commit_overlay_streams_stable_crab_file_from_overlay_backing' (2107) panicked at crates/crab-vfs/src/publish.rs:2962:10:
+called `Result::unwrap()` on an `Err` value: Internal("snapshot SQLite error: attempt to write a readonly database")
+
+
+failures:
+    publish::tests::commit_overlay_creates_commit_updates_snapshot_and_cleans_overlay
+    publish::tests::commit_overlay_does_not_checkout_unchanged_base_files
+    publish::tests::commit_overlay_moves_base_directory_without_overlay_upload
+    publish::tests::commit_overlay_preserves_renamed_directory_children
+    publish::tests::commit_overlay_preserves_symlink_entry
+    publish::tests::commit_overlay_push_failure_keeps_local_ref_retryable
+    publish::tests::commit_overlay_pushes_existing_local_commit_when_overlay_is_clean
+    publish::tests::commit_overlay_recovers_recorded_pushed_transaction_and_cleans_overlay
+    publish::tests::commit_overlay_respects_base_gitignore_without_full_checkout
+    publish::tests::commit_overlay_streams_stable_crab_file_from_overlay_backing
+    publish::tests::commit_overlay_writes_crab_tracked_file_as_pointer_and_stages_chunks
+
+test result: FAILED. 618 passed; 11 failed; 9 ignored; 0 measured; 0 filtered out; finished in 13.80s
+
+error: test failed, to rerun pass `-p crab-vfs --lib`

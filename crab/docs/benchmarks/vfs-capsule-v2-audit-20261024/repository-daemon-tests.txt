@@ -1,0 +1,45 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.27s
+     Running unittests src/lib.rs (/Users/haipingfu/Workspace/crabbuild-target/crab-ios-02d01345-vfs/debug/deps/crab_vfs-ad5c539dce92b356)
+
+running 38 tests
+test daemon::tests::mount_failure_backoff_doubles ... ok
+test daemon::tests::mount_failure_backoff_caps_at_max ... ok
+test daemon::tests::mount_failure_can_retry_after_elapsed ... ok
+test daemon::tests::mount_failure_cannot_retry_before_elapsed ... ok
+test daemon::tests::computed_paths_derives_all_paths ... ok
+test daemon::tests::daemon_nfs_control_endpoint_is_private_and_removable ... ok
+test daemon::tests::is_mounted_returns_false_for_nonexistent_path ... ok
+test daemon::tests::read_persisted_status_returns_stopped_for_empty_state ... ok
+test daemon::tests::daemon_remove_nonexistent_repo ... ok
+test daemon::tests::read_persisted_status_reads_snapshot_state ... ok
+test daemon::tests::registry_add_and_get ... ok
+test daemon::tests::registry_add_is_upsert ... ok
+test daemon::tests::daemon_startup_preserves_unavailable_cache_and_keeps_registry_usable ... ok
+test daemon::tests::read_persisted_status_reads_overlay_dirty_count ... ok
+test daemon::tests::daemon_service_lifecycle ... ok
+test daemon::tests::daemon_set_refresh ... ok
+test daemon::tests::read_persisted_status_counts_delete_only_overlay ... ok
+test daemon::tests::registry_enable_nonexistent ... ok
+test daemon::tests::registry_list_repos_sorted ... ok
+test daemon::tests::registry_get_nonexistent ... ok
+test daemon::tests::registry_enable_disable ... ok
+test daemon::tests::resolve_head_reads_detached_head ... ok
+test daemon::tests::resolve_head_reads_symbolic_ref ... ok
+test daemon::tests::registry_read_only_flag ... ok
+test daemon::tests::registry_migration_adds_new_columns ... ok
+test daemon::tests::timestamp_serialization_rejects_unrepresentable_dates ... ok
+test daemon::tests::tracked_branch_ref_accepts_branch_names_and_full_refs ... ok
+test daemon::tests::registry_remove_nonexistent ... ok
+test daemon::tests::registry_round_trips_nfs_backend ... ok
+test daemon::tests::registry_remove ... ok
+test daemon::tests::registry_set_refresh_interval ... ok
+test daemon::tests::registry_set_refresh_nonexistent ... ok
+test daemon::tests::registry_stores_redacted_url ... ok
+test daemon::tests::sync_repos_skips_disabled ... ok
+test daemon::tests::teardown_joins_owned_background_tasks ... ok
+test daemon::tests::daemon_status_includes_backend_enabled_and_read_only ... ok
+test daemon::tests::engine_setup_failure_does_not_start_daemon_hydration_workers ... ok
+test daemon::tests::force_fetch_updates_daemon_clone_and_preserves_unpublished_commits ... ok
+
+test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 462 filtered out; finished in 0.77s
+

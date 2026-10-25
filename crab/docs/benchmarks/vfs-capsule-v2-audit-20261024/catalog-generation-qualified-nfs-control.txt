@@ -1,0 +1,26 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.71s
+     Running unittests src/lib.rs (/Users/haipingfu/Workspace/crabbuild-target/crab-ios-02d01345-vfs/debug/deps/crab_vfs-0e99b10981cfec51)
+
+running 19 tests
+test nfs_control::tests::control_request_uses_snake_case_tag ... ok
+test nfs_control::tests::control_server_reports_status_accepts_shutdown_and_removes_socket ... ok
+test nfs_control::tests::control_probe_replaces_empty_unix_placeholder_before_bind ... ok
+test nfs_control::tests::control_probe_creates_private_unix_socket_directory ... ok
+test nfs_control::tests::control_probe_rejects_active_unix_socket ... ok
+test nfs_control::tests::generation_cache_invalidation_clears_protocol_read_leases ... ok
+test nfs_control::tests::endpoint_for_mountpoint_accepts_parent_control_endpoint_override ... ok
+test nfs_control::tests::tcp_endpoint_parser_rejects_missing_token_and_non_loopback ... ok
+test nfs_control::tests::endpoint_for_mountpoint_rejects_invalid_control_endpoint_override ... ok
+test nfs_control::tests::tcp_endpoint_errors_redact_control_token ... ok
+test nfs_control::tests::control_probe_rejects_occupied_tcp_endpoint ... ok
+test nfs_control::tests::unix_control_deadline_includes_stalled_writes ... ok
+test nfs_control::tests::control_response_timeout_closes_connection ... ok
+test nfs_control::tests::endpoint_for_mountpoint_stays_short_for_deep_mountpoints ... ok
+test nfs_control::tests::endpoint_for_mountpoint_is_deterministic_unix_socket ... ok
+test nfs_control::tests::tcp_control_server_requires_token_and_accepts_shutdown ... ok
+test nfs_control::tests::tcp_control_deadline_includes_stalled_writes ... ok
+test nfs_control::tests::tcp_endpoint_for_mountpoint_uses_stable_loopback_port_and_random_token ... ok
+test nfs_control::tests::control_probe_replaces_stale_unix_socket_before_bind ... ok
+
+test result: ok. 19 passed; 0 failed; 0 ignored; 0 measured; 597 filtered out; finished in 0.97s
+

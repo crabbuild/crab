@@ -1,0 +1,6 @@
+Traceback (most recent call last):
+  File "<stdin>", line 26, in <module>
+  File "<stdin>", line 10, in commit
+  File "/usr/lib/python3.11/subprocess.py", line 502, in check_returncode
+    raise CalledProcessError(self.returncode, self.args, self.stdout,
+subprocess.CalledProcessError: Command '['crab', 'mount', 'commit', '--mountpoint', '/e2e/run/mount', '--message', 'clean-push', '--json', '--push']' returned non-zero exit status 9.

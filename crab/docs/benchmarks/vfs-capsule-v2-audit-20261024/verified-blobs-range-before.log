@@ -1,0 +1,20 @@
+   Compiling crab-vfs v0.1.0 (/src/crates/crab-vfs)
+    Finished `test` profile [unoptimized] target(s) in 28.11s
+     Running unittests src/lib.rs (/root/Workspace/crabbuild-target/vfs-audit/target/debug/deps/crab_vfs-ee87d258c700a593)
+
+running 1 test
+test engine::tests::odb_warm_ranges_do_not_reload_entire_blob ... odb_range_probe logical_bytes=4194304 userspace_read_bytes=4294967401 elapsed_us=1453536
+
+thread 'engine::tests::odb_warm_ranges_do_not_reload_entire_blob' (49) panicked at crates/crab-vfs/src/engine.rs:3764:9:
+warm 4 KiB reads reloaded 4294967401 bytes for a 4 MiB blob
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+FAILED
+
+failures:
+
+failures:
+    engine::tests::odb_warm_ranges_do_not_reload_entire_blob
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 609 filtered out; finished in 1.55s
+
+error: test failed, to rerun pass `-p crab-vfs --lib`

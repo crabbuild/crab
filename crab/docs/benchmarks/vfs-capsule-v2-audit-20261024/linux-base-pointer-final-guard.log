@@ -1,0 +1,19 @@
+   Compiling uuid v1.24.0
+   Compiling xet-core-structures v1.6.0
+   Compiling xet-client v1.6.0
+   Compiling xet-data v1.6.0
+   Compiling crab-xet v0.1.0 (/src/crates/crab-xet)
+   Compiling crab-diff v0.1.0 (/src/crates/crab-diff)
+   Compiling crab-staging v0.1.0 (/src/crates/crab-staging)
+    Finished `test` profile [unoptimized] target(s) in 48.70s
+     Running tests/push_snapshot_guard.rs (/root/Workspace/crabbuild-target/vfs-audit/target/debug/deps/push_snapshot_guard-ba84091e002117da)
+
+running 5 tests
+test local_commit_failure_releases_marker_and_preserves_original_lease ... ok
+test dropped_snapshot_keeps_delegated_payload_and_clears_its_reader ... ok
+test committed_snapshot_preserves_active_native_owner_of_shared_payload ... ok
+test sibling_reader_defers_retirement_until_exclusive_maintenance ... ok
+test task_abort_drops_snapshot_without_retiring_unpublished_lease ... ok
+
+test result: ok. 5 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out; finished in 0.17s
+

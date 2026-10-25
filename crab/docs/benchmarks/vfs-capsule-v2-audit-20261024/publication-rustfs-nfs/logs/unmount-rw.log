@@ -1,0 +1,5 @@
+error: internal error [CRAB-E0099]: force-unmount failed: fusermount3: fusermount3: failed to unmount /e2e/run/mnt-rw: Invalid argument
+; fusermount: fusermount: failed to unmount /e2e/run/mnt-rw: Invalid argument
+; umount: umount: /e2e/run/mnt-rw: not mounted.
+
+help: Run `crab errors CRAB-E0099` for recovery steps.

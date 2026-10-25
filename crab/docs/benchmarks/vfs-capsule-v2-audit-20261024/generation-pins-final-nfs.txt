@@ -1,0 +1,71 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.78s
+     Running unittests src/lib.rs (/Users/haipingfu/Workspace/crabbuild-target/crab-ios-02d01345-vfs/debug/deps/crab_vfs-3225d1a73e494acc)
+
+running 64 tests
+test nfs::tests::exclusive_verifier_hex_round_trips ... ok
+test nfs::tests::nfs_child_name_rejects_dot_entries ... ok
+test nfs::tests::id_table_remove_reports_removed_subtree_ids ... ok
+test nfs::tests::id_table_renames_subtree_without_changing_ids ... ok
+test nfs::tests::id_table_rename_drops_replaced_subtree_ids ... ok
+test nfs::tests::id_table_moves_and_removes_exclusive_verifiers ... ok
+test nfs::tests::nfs_directory_page_cache_compacts_invalidation_versions_when_bounded ... ok
+test nfs::tests::nfs_directory_page_cache_evicts_lru_entries ... ok
+test nfs::tests::nfs_directory_page_cache_invalidates_renamed_subtree_without_dropping_sibling ... ok
+test nfs::tests::nfs_directory_page_cache_keeps_unrelated_directory_after_path_invalidation ... ok
+test nfs::tests::nfs_directory_page_cache_tracks_hits_misses_and_stale_generation ... ok
+test nfs::tests::id_table_remove_exclusive_verifier_preserves_state_when_persist_fails ... ok
+test nfs::tests::id_table_rename_preserves_state_when_verifier_persist_fails ... ok
+test nfs::tests::id_table_remove_preserves_state_when_verifier_persist_fails ... ok
+test nfs::tests::id_table_record_exclusive_create_preserves_state_when_persist_fails ... ok
+test nfs::tests::id_table_persists_exclusive_create_verifiers ... ok
+test nfs::tests::nfs_create_rejects_long_name_before_overlay_or_journal_mutation ... ok
+test nfs::tests::nfs_created_path_sync_failure_stays_pending ... ok
+test nfs::tests::nfs_name_rejects_nul_and_oversized_components ... ok
+test nfs::tests::nfs_name_rejects_slashes_and_non_utf8 ... ok
+test nfs::tests::nfs_prefetch_paths_include_regular_files_only ... ok
+test nfs::tests::nfs_protocol_stats_snapshot_reports_read_and_directory_pressure ... ok
+test nfs::tests::nfs_read_eof_detects_exact_boundary_for_known_size ... ok
+test nfs::tests::nfs_read_eof_uses_short_read_for_unknown_size ... ok
+test nfs::tests::nfs_read_rejects_non_regular_nodes ... ok
+test nfs::tests::nfs_commit_allows_synthetic_gitfile_without_sync_attempt ... ok
+test nfs::tests::nfs_commit_rejects_directory_handles_without_sync_attempt ... ok
+test nfs::tests::nfs_create_under_file_parent_does_not_mutate_overlay_or_journal ... ok
+test nfs::tests::nfs_fsinfo_reports_crab_metadata_precision ... ok
+test nfs::tests::nfs_exclusive_create_syncs_and_clears_journal_before_reply ... ok
+test nfs::tests::nfs_getattr_reports_pointer_size_without_hydration ... ok
+test nfs::tests::nfs_exclusive_create_under_file_parent_does_not_record_verifier ... ok
+test nfs::tests::nfs_create_syncs_new_file_once ... ok
+test nfs::tests::nfs_failed_rename_keeps_derived_protocol_state_unchanged ... ok
+test nfs::tests::nfs_setattr_accepts_atime_changes_as_noatime ... ok
+test nfs::tests::nfs_failed_remove_keeps_derived_protocol_state_unchanged ... ok
+test nfs::tests::nfs_setattr_metadata_allows_non_regular_nodes ... ok
+test nfs::tests::nfs_setattr_size_requires_regular_file ... ok
+test nfs::tests::nfs_lookup_rejects_child_lookup_under_file_handle ... ok
+test nfs::tests::nfs_read_retries_stale_pooled_lease_once ... ok
+test nfs::tests::nfs_readdirplus_omits_placeholder_size_for_unknown_git_blob ... ok
+test nfs::tests::nfs_symlink_rejects_long_target_before_overlay_or_journal_mutation ... ok
+test nfs::tests::nfs_symlink_target_rejects_empty_nul_non_utf8_and_oversized_paths ... ok
+test nfs::tests::nfs_readdirplus_rejects_synthetic_gitfile_as_notdir ... ok
+test nfs::tests::nfs_write_journal_follows_rename_and_remove_subtrees ... ok
+test nfs::tests::nfs_write_journal_snapshot_reports_pending_state ... ok
+test nfs::tests::nfs_readlink_rejects_synthetic_gitfile_as_not_symlink ... ok
+test nfs::tests::nfs_setattr_atime_is_a_noop_without_overlay_or_journal_mutation ... ok
+test nfs::tests::nfs_write_journal_tracks_stability_and_sync_errors ... ok
+test nfs::tests::nfs_write_rejects_non_regular_nodes_with_protocol_inval ... ok
+test nfs::tests::path_absence_check_propagates_resolver_errors ... ok
+test nfs::tests::readdirplus_cursor_resumes_from_cookie_path ... ok
+test nfs::tests::synthetic_gitfile_is_not_a_mutable_child ... ok
+test nfs::tests::nfs_rename_into_file_parent_keeps_source_unchanged ... ok
+test nfs::tests::nfs_readdirplus_reports_synthetic_gitfile_without_prefetch ... ok
+test nfs::tests::nfs_remove_clears_derived_protocol_state_after_engine_mutation ... ok
+test nfs::tests::nfs_symlink_applies_mtime_and_syncs_once_before_reply ... ok
+test nfs::tests::nfs_stable_write_syncs_and_clears_journal_before_reply ... ok
+test nfs::tests::nfs_write_journal_sync_all_clears_successful_shutdown_drain ... ok
+test nfs::tests::nfs_rename_moves_derived_protocol_state_after_engine_mutation ... ok
+test nfs::tests::nfs_write_journal_sync_all_retains_failures_and_continues_shutdown_drain ... ok
+test nfs::tests::nfs_symlink_rejects_size_attr_before_overlay_create ... ok
+test nfs::tests::nfs_unstable_write_stays_pending_until_commit ... ok
+test nfs::tests::nfs_readdirplus_pages_large_directories_without_truncation ... ok
+
+test result: ok. 64 passed; 0 failed; 0 ignored; 0 measured; 549 filtered out; finished in 0.11s
+

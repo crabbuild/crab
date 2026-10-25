@@ -1,0 +1,432 @@
+ Downloading crates ...
+  Downloaded anstyle v1.0.14
+  Downloaded aead v0.5.2
+  Downloaded anstyle-parse v1.0.0
+  Downloaded anstream v1.0.0
+  Downloaded anstyle-query v1.1.5
+  Downloaded ahash v0.7.8
+  Downloaded atoi v2.0.0
+  Downloaded arrow-data v55.2.0
+  Downloaded arrow-schema v55.2.0
+  Downloaded arrow-buffer v55.2.0
+  Downloaded arrow-select v55.2.0
+  Downloaded arrow-ipc v55.2.0
+  Downloaded arrow-cast v55.2.0
+  Downloaded arrow-array v55.2.0
+  Downloaded bitvec v1.0.1
+  Downloaded borsh v1.6.1
+  Downloaded borsh-derive v1.6.1
+  Downloaded bumpalo v3.20.2
+  Downloaded bytecheck v0.6.12
+  Downloaded bytecheck_derive v0.6.12
+  Downloaded bytesize v2.3.1
+  Downloaded chacha20 v0.9.1
+  Downloaded chacha20poly1305 v0.10.1
+  Downloaded clap_derive v4.6.1
+  Downloaded clru v0.6.3
+  Downloaded cipher v0.4.4
+  Downloaded clap_lex v1.1.0
+  Downloaded clap_builder v4.6.0
+  Downloaded clap_complete v4.6.5
+  Downloaded clap v4.6.1
+  Downloaded colorchoice v1.0.5
+  Downloaded console v0.15.11
+  Downloaded const-random v0.1.18
+  Downloaded const-random-macro v0.1.16
+  Downloaded crunchy v0.2.4
+  Downloaded encoding_rs v0.8.35
+  Downloaded fixedbitset v0.4.2
+  Downloaded funty v2.0.0
+  Downloaded gix v0.83.0
+  Downloaded gix-archive v0.32.0
+  Downloaded gix-blame v0.13.0
+  Downloaded gix-command v0.9.0
+  Downloaded gix-config v0.56.0
+  Downloaded gix-config-value v0.18.0
+  Downloaded gix-credentials v0.38.0
+  Downloaded gix-dir v0.25.0
+  Downloaded gix-filter v0.30.0
+  Downloaded gix-fsck v0.21.0
+  Downloaded gix-mailmap v0.33.1
+  Downloaded gix-negotiate v0.31.0
+  Downloaded gix-merge v0.16.0
+  Downloaded gix-pathspec v0.18.0
+  Downloaded gix-protocol v0.61.0
+  Downloaded gix-prompt v0.15.0
+  Downloaded gix-refspec v0.41.0
+  Downloaded gix-revision v0.45.0
+  Downloaded gix-shallow v0.12.0
+  Downloaded gix-submodule v0.30.0
+  Downloaded gix-status v0.30.0
+  Downloaded gix-transport v0.57.0
+  Downloaded gix-worktree v0.52.0
+  Downloaded gix-worktree-state v0.30.0
+  Downloaded gix-worktree-stream v0.32.0
+  Downloaded half v2.7.1
+  Downloaded hashbrown v0.12.3
+  Downloaded heck v0.5.0
+  Downloaded httpdate v1.0.3
+  Downloaded human_format v1.2.1
+  Downloaded inout v0.1.4
+  Downloaded integer-encoding v3.0.4
+  Downloaded io-close v0.3.7
+  Downloaded is_terminal_polyfill v1.70.2
+  Downloaded lexical-core v1.0.6
+  Downloaded lexical-util v1.0.7
+  Downloaded lexical-write-integer v1.0.6
+  Downloaded lexical-write-float v1.0.6
+  Downloaded lexical-parse-float v1.0.6
+  Downloaded lexical-parse-integer v1.0.6
+  Downloaded libm v0.2.16
+  Downloaded lz4_flex v0.11.6
+  Downloaded maybe-async v0.2.10
+  Downloaded num v0.4.3
+  Downloaded num-bigint v0.4.6
+  Downloaded num-complex v0.4.6
+  Downloaded num-integer v0.1.46
+  Downloaded num-iter v0.1.45
+  Downloaded num-rational v0.4.2
+  Downloaded opaque-debug v0.3.1
+  Downloaded ordered-float v2.10.1
+  Downloaded parquet v55.2.0
+  Downloaded petgraph v0.6.5
+  Downloaded poly1305 v0.8.0
+  Downloaded process-wrap v10.0.0
+  Downloaded ptr_meta v0.1.4
+  Downloaded ptr_meta_derive v0.1.4
+  Downloaded quick-xml v0.37.5
+  Downloaded radium v0.7.0
+  Downloaded rand v0.8.6
+  Downloaded rand_chacha v0.3.1
+  Downloaded rand_core v0.6.4
+  Downloaded regex-lite v0.1.9
+  Downloaded rend v0.4.2
+  Downloaded rkyv v0.7.46
+  Downloaded rkyv_derive v0.7.46
+  Downloaded seahash v4.1.0
+  Downloaded self-replace v1.5.0
+  Downloaded seq-macro v0.3.6
+  Downloaded shell-words v1.1.1
+  Downloaded signal-hook v0.4.4
+  Downloaded simdutf8 v0.1.5
+  Downloaded snap v1.1.1
+  Downloaded strsim v0.11.1
+  Downloaded syn v1.0.109
+  Downloaded tap v1.0.1
+  Downloaded tar v0.4.45
+  Downloaded thrift v0.17.0
+  Downloaded tiny-keccak v2.0.2
+  Downloaded uluru v3.1.0
+  Downloaded universal-hash v0.5.1
+  Downloaded unicode-width v0.2.2
+  Downloaded utf8parse v0.2.2
+  Downloaded utoipa v5.5.0
+  Downloaded utoipa-gen v5.5.0
+  Downloaded wyz v0.5.1
+  Downloaded xattr v1.6.1
+  Downloaded zip v6.0.0
+  Downloaded zopfli v0.8.3
+   Compiling rand_core v0.6.4
+   Compiling unicode-normalization v0.1.25
+   Compiling libm v0.2.16
+   Compiling human_format v1.2.1
+   Compiling crypto-common v0.1.7
+   Compiling bytesize v2.3.1
+   Compiling gix-utils v0.3.3
+   Compiling digest v0.10.7
+   Compiling prodash v31.0.0
+   Compiling num-traits v0.2.19
+   Compiling gix-error v0.2.4
+   Compiling gix-features v0.48.0
+   Compiling rustix v1.1.4
+   Compiling byteorder v1.5.0
+   Compiling tokio v1.53.1
+   Compiling hash32 v0.3.1
+   Compiling heapless v0.8.0
+   Compiling ahash v0.8.12
+   Compiling faster-hex v0.10.0
+   Compiling sha1 v0.10.6
+   Compiling sha1-checked v0.10.0
+   Compiling indexmap v2.14.0
+   Compiling gix-date v0.15.5
+   Compiling gix-hash v0.25.0
+   Compiling gix-actor v0.41.1
+   Compiling tempfile v3.27.0
+   Compiling gix-hashtable v0.15.0
+   Compiling hashbrown v0.14.5
+   Compiling gix-object v0.60.0
+   Compiling gix-fs v0.21.1
+   Compiling gix-chunk v0.7.2
+   Compiling signal-hook v0.4.4
+   Compiling chrono v0.4.45
+   Compiling tokio-util v0.7.18
+   Compiling gix-commitgraph v0.37.0
+   Compiling gix-quote v0.7.2
+   Compiling tower v0.5.3
+   Compiling h2 v0.4.19
+   Compiling gix-revwalk v0.31.0
+   Compiling tokio-rustls v0.26.4
+   Compiling dashmap v6.1.0
+   Compiling gix-glob v0.26.0
+   Compiling arrayvec v0.7.6
+   Compiling gix-tempfile v23.0.0
+   Compiling tower-http v0.6.8
+   Compiling shell-words v1.1.1
+   Compiling gix-command v0.9.0
+   Compiling gix-lock v23.0.1
+   Compiling gix-attributes v0.33.0
+   Compiling gix-traverse v0.57.0
+   Compiling gix-config-value v0.18.0
+   Compiling hyper v1.11.1
+   Compiling gix-packetline v0.21.3
+   Compiling blake3 v1.8.5
+   Compiling deranged v0.5.8
+   Compiling gix-bitmap v0.3.2
+   Compiling nix v0.31.3
+   Compiling gix-index v0.51.0
+   Compiling hyper-util v0.1.20
+   Compiling time v0.3.47
+   Compiling encoding_rs v0.8.35
+   Compiling gix-filter v0.30.0
+   Compiling gix-ignore v0.21.0
+   Compiling hyper-rustls v0.27.9
+   Compiling gix-worktree v0.52.0
+   Compiling reqwest v0.13.3
+   Compiling gix-pathspec v0.18.0
+   Compiling crc-fast v1.10.0
+   Compiling gix-ref v0.63.0
+   Compiling md-5 v0.11.0
+   Compiling tracing-appender v0.2.5
+   Compiling gix-diff v0.63.0
+   Compiling xet-runtime v1.6.0
+   Compiling object_store v0.14.1
+   Compiling approx v0.5.1
+   Compiling statrs v0.18.0
+   Compiling reqwest-middleware v0.5.1
+   Compiling gix-discover v0.51.0
+   Compiling reqwest v0.12.28
+   Compiling uluru v3.1.0
+   Compiling tokio-retry v0.3.1
+   Compiling fs4 v0.13.1
+   Compiling clru v0.6.3
+   Compiling xet-core-structures v1.6.0
+   Compiling simd-adler32 v0.3.9
+   Compiling gix-pack v0.70.0
+   Compiling xet-client v1.6.0
+   Compiling miniz_oxide v0.8.9
+   Compiling gix-odb v0.80.0
+   Compiling foyer-tokio v0.22.3
+   Compiling hashlink v0.9.1
+   Compiling num-integer v0.1.46
+   Compiling toml_edit v0.22.27
+   Compiling rusqlite v0.31.0
+   Compiling crab-storage v0.1.0 (/src/crates/crab-storage)
+   Compiling foyer-common v0.22.3
+   Compiling flate2 v1.1.9
+   Compiling rust_decimal v1.41.0
+   Compiling foyer-memory v0.22.3
+   Compiling toml v0.8.23
+   Compiling xet-data v1.6.0
+   Compiling num-bigint v0.4.6
+   Compiling serde_yaml v0.9.34+deprecated
+   Compiling sha2 v0.10.9
+   Compiling crab-git v0.1.0 (/src/crates/crab-git)
+   Compiling slatedb-common v0.15.0
+   Compiling num-rational v0.4.2
+   Compiling foyer-storage v0.22.3
+   Compiling num-iter v0.1.45
+   Compiling num-complex v0.4.6
+   Compiling duration-str v0.11.3
+   Compiling crab-xet v0.1.0 (/src/crates/crab-xet)
+   Compiling foyer v0.22.3
+   Compiling num v0.4.3
+   Compiling figment v0.10.19
+   Compiling slatedb-txn-obj v0.15.0
+   Compiling fail-parallel v0.6.0
+   Compiling backon v1.6.0
+   Compiling half v2.7.1
+   Compiling lexical-util v1.0.7
+   Compiling slatedb v0.15.0
+   Compiling arrow-buffer v55.2.0
+   Compiling inout v0.1.4
+   Compiling arrow-schema v55.2.0
+   Compiling cipher v0.4.4
+   Compiling arrow-data v55.2.0
+   Compiling uuid v1.24.0
+   Compiling crab-coordination v0.1.0 (/src/crates/crab-coordination)
+   Compiling universal-hash v0.5.1
+   Compiling utf8parse v0.2.2
+   Compiling opaque-debug v0.3.1
+   Compiling poly1305 v0.8.0
+   Compiling anstyle-parse v1.0.0
+   Compiling arrow-array v55.2.0
+   Compiling utoipa-gen v5.5.0
+   Compiling chacha20 v0.9.1
+   Compiling lexical-parse-integer v1.0.6
+   Compiling lexical-write-integer v1.0.6
+   Compiling crab-diff v0.1.0 (/src/crates/crab-diff)
+   Compiling crab-cache v0.1.0 (/src/crates/crab-cache)
+   Compiling gix-revision v0.45.0
+   Compiling aead v0.5.2
+   Compiling anstyle-query v1.1.5
+   Compiling anstyle v1.0.14
+   Compiling colorchoice v1.0.5
+   Compiling is_terminal_polyfill v1.70.2
+   Compiling anstream v1.0.0
+   Compiling crab-cache-store v0.1.0 (/src/crates/crab-cache-store)
+   Compiling chacha20poly1305 v0.10.1
+   Compiling gix-refspec v0.41.0
+   Compiling crab-staging v0.1.0 (/src/crates/crab-staging)
+   Compiling utoipa v5.5.0
+   Compiling lexical-write-float v1.0.6
+   Compiling lexical-parse-float v1.0.6
+   Compiling crab-lfs v0.1.0 (/src/crates/crab-lfs)
+   Compiling gix-prompt v0.15.0
+   Compiling strsim v0.11.1
+   Compiling snap v1.1.1
+   Compiling heck v0.5.0
+   Compiling clap_lex v1.1.0
+   Compiling clap_derive v4.6.1
+   Compiling clap_builder v4.6.0
+   Compiling crab-metadata v0.1.0 (/src/crates/crab-metadata)
+   Compiling gix-credentials v0.38.0
+   Compiling lexical-core v1.0.6
+   Compiling crab-auth v0.1.0 (/src/crates/crab-auth)
+   Compiling arrow-select v55.2.0
+   Compiling gix-dir v0.25.0
+   Compiling gix-transport v0.57.0
+   Compiling gix-config v0.56.0
+   Compiling gix-worktree-stream v0.32.0
+   Compiling gix-shallow v0.12.0
+   Compiling gix-negotiate v0.31.0
+   Compiling atoi v2.0.0
+   Compiling ordered-float v2.10.1
+   Compiling maybe-async v0.2.10
+   Compiling io-close v0.3.7
+   Compiling bumpalo v3.20.2
+   Compiling integer-encoding v3.0.4
+   Compiling fixedbitset v0.4.2
+   Compiling thrift v0.17.0
+   Compiling petgraph v0.6.5
+   Compiling zopfli v0.8.3
+   Compiling crab-remote-git v0.1.0 (/src/crates/crab-remote-git)
+   Compiling gix-worktree-state v0.30.0
+   Compiling arrow-cast v55.2.0
+   Compiling gix-protocol v0.61.0
+   Compiling gix-submodule v0.30.0
+   Compiling gix-archive v0.32.0
+   Compiling gix-status v0.30.0
+   Compiling crab v1.2.4 (/src/crab)
+   Compiling clap v4.6.1
+   Compiling nfs3_server v0.11.0
+   Compiling arrow-ipc v55.2.0
+   Compiling crab-read v0.1.0 (/src/crates/crab-read)
+   Compiling crab-write v0.1.0 (/src/crates/crab-write)
+   Compiling gix-blame v0.13.0
+   Compiling lz4_flex v0.11.6
+   Compiling gix-mailmap v0.33.1
+   Compiling xattr v1.6.1
+   Compiling unicode-width v0.2.2
+   Compiling seq-macro v0.3.6
+   Compiling console v0.15.11
+   Compiling parquet v55.2.0
+   Compiling tar v0.4.45
+   Compiling gix v0.83.0
+   Compiling clap_complete v4.6.5
+warning: crab@1.2.4: crab build.rs: could not resolve git sha, using "unknown" (is git installed and is this a git checkout?)
+   Compiling crab-vfs v0.1.0 (/src/crates/crab-vfs)
+   Compiling crab-remote v0.1.0 (/src/crates/crab-remote)
+   Compiling crab-workflow v0.1.0 (/src/crates/crab-workflow)
+   Compiling zip v6.0.0
+   Compiling crab-auth-store v0.1.0 (/src/crates/crab-auth-store)
+   Compiling process-wrap v10.0.0
+   Compiling gix-fsck v0.21.0
+   Compiling self-replace v1.5.0
+   Compiling quick-xml v0.37.5
+   Compiling regex-lite v0.1.9
+warning: unused import: `std::fmt`
+ --> crab/src/replication/mod.rs:9:5
+  |
+9 | use std::fmt;
+  |     ^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `tracing::warn`
+  --> crab/src/storage/head_class.rs:57:5
+   |
+57 | use tracing::warn;
+   |     ^^^^^^^^^^^^^
+
+warning: unused variable: `rel_path`
+    --> crab/src/cmd/add.rs:2768:10
+     |
+2768 |     for (rel_path, abs_path) in selected_dirs {
+     |          ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_rel_path`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `run_yaml_single_stage` is never used
+    --> crab/src/cmd/run.rs:1348:10
+     |
+1348 | async fn run_yaml_single_stage(
+     |          ^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `preview_stage_cache_hit` is never used
+    --> crab/src/cmd/run.rs:3618:4
+     |
+3618 | fn preview_stage_cache_hit(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `object_relative_key` is never used
+   --> crab/src/import/versions.rs:536:4
+    |
+536 | fn object_relative_key(prefix: &str, full_key: &str) -> Option<String> {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `snapshot_records_at` is never used
+   --> crab/src/import/versions.rs:548:4
+    |
+548 | fn snapshot_records_at(records: Vec<VersionRecord>, at: i64) -> Vec<VersionRecord> {
+    |    ^^^^^^^^^^^^^^^^^^^
+
+warning: function `is_newer_snapshot_record` is never used
+   --> crab/src/import/versions.rs:568:4
+    |
+568 | fn is_newer_snapshot_record(candidate: &VersionRecord, existing: &VersionRecord) -> bool {
+    |    ^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `control_plane_backend_initialization_failed` is never used
+    --> crab/src/replication/mod.rs:2150:4
+     |
+2150 | fn control_plane_backend_initialization_failed(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `gcs_pair_policy_state` is never used
+    --> crab/src/replication/mod.rs:5754:4
+     |
+5754 | fn gcs_pair_policy_state(
+     |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_coordinator_gc_snapshot_admission` is never used
+    --> crab/src/replication/mod.rs:7440:4
+     |
+7440 | fn validate_coordinator_gc_snapshot_admission(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `coordinator_gc_snapshot_status_error` is never used
+    --> crab/src/replication/mod.rs:7470:4
+     |
+7470 | fn coordinator_gc_snapshot_status_error(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `aws_region` is never used
+   --> crab/src/tier/runtime.rs:159:4
+    |
+159 | fn aws_region(config: &Config) -> String {
+    |    ^^^^^^^^^^
+
+warning: `crab` (lib) generated 13 warnings (run `cargo fix --lib -p crab` to apply 3 suggestions)
+    Finished `dev` profile [unoptimized] target(s) in 5m 11s

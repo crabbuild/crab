@@ -1,0 +1,1 @@
+/e2e/run/mnt-rw-refresh crab fuse.crab rw,nosuid,nodev,noatime,user_id=0,group_id=0,default_permissions,allow_other

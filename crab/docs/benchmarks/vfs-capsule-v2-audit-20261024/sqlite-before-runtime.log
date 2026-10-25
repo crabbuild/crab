@@ -1,0 +1,3 @@
+sqlite_version=3.45.0
+unsigned_limits=checked
+statement_cache=working

@@ -1,0 +1,23 @@
+   Compiling crab-vfs v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-vfs)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 16.90s
+     Running unittests src/lib.rs (/Users/haipingfu/Workspace/crabbuild-target/crab-ios-02d01345-vfs/debug/deps/crab_vfs-3225d1a73e494acc)
+
+running 15 tests
+test blob::tests::odb_reader_missing_objects_dir_returns_error ... ok
+test blob::tests::odb_reader_read_blob_range_with_offset ... ok
+test blob::tests::odb_reader_ignores_unverified_disk_blob_bytes ... ok
+test blob::tests::odb_reader_serves_from_cache_on_second_read ... ok
+test blob::tests::odb_reader_read_blob_range_past_eof ... ok
+test blob::tests::odb_reader_invalid_oid_returns_error ... ok
+test blob::tests::odb_reader_read_blob_returns_correct_content ... ok
+test blob::tests::odb_reader_read_blob_range_full ... ok
+test blob::tests::cancelled_blob_read_keeps_admission_until_blocking_work_finishes ... ok
+test blob::tests::odb_reader_missing_oid_returns_not_found ... ok
+test blob::tests::odb_reader_rejects_misnamed_loose_blob ... ok
+test blob::tests::shutdown_closes_cold_blob_admission_and_preserves_cached_bytes ... ok
+test blob::tests::warm_blob_read_does_not_wait_for_unrelated_blocked_fill ... ok
+test blob::tests::odb_reader_promisor_uses_raw_oid_despite_replace_refs ... ok
+test blob::tests::odb_reader_promisor_fallback_ignores_new_pack_slot_pressure ... ok
+
+test result: ok. 15 passed; 0 failed; 0 ignored; 0 measured; 592 filtered out; finished in 0.90s
+

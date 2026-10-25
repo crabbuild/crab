@@ -1,0 +1,3 @@
+error: configuration error [CRAB-E0050] in crab mount commit: cannot commit overlay for a read-only mount
+help: Run `crab doctor` to inspect the current setup, or `crab configure` for guided repository configuration.
+docs: https://crab.build/docs/cli/reference/crab-configure

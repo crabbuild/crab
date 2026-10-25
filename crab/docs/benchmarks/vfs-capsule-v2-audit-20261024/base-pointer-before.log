@@ -1,0 +1,23 @@
+   Compiling crab-read v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-read)
+   Compiling crab-vfs v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-vfs)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 29.46s
+     Running unittests src/lib.rs (/Users/haipingfu/Workspace/crabbuild-target/crab-ios-02d01345-vfs/debug/deps/crab_vfs-0e99b10981cfec51)
+
+running 1 test
+
+thread 'mount_runtime::tests::catalog::unpublished_base_pointer_handle_survives_staging_retirement' (29534547) panicked at crates/crab-vfs/src/mount_runtime/tests/catalog.rs:196:19:
+called `Result::unwrap()` on an `Err` value: Read(Reconstruction { file_hash: "c15751b93985398a907f876aca96aaeeae04b127f47d9ac16783776c362f0591", source: ReconstructionError { upstream: ClientError(InternalError(Internal error: not found: file_index:c15751b93985398a907f876aca96aaeeae04b127f47d9ac16783776c362f0591
+
+Caused by:
+    not found: file_index:c15751b93985398a907f876aca96aaeeae04b127f47d9ac16783776c362f0591)), read: Some(InternalError(not found: file_index:c15751b93985398a907f876aca96aaeeae04b127f47d9ac16783776c362f0591)), writer: None } })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test mount_runtime::tests::catalog::unpublished_base_pointer_handle_survives_staging_retirement ... FAILED
+
+failures:
+
+failures:
+    mount_runtime::tests::catalog::unpublished_base_pointer_handle_survives_staging_retirement
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 634 filtered out; finished in 0.40s
+
+error: test failed, to rerun pass `-p crab-vfs --lib`

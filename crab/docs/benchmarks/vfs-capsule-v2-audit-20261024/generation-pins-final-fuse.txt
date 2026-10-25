@@ -1,0 +1,15 @@
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.30s
+     Running unittests src/lib.rs (/Users/haipingfu/Workspace/crabbuild-target/crab-ios-02d01345-vfs/debug/deps/crab_vfs-3225d1a73e494acc)
+
+running 8 tests
+test fuse::tests::only_read_capable_open_flags_preopen_read_lease ... ok
+test fuse::tests::open_truncate_requires_writable_access ... ok
+test fuse::tests::read_only_open_uses_default_cache_flags ... ok
+test fuse::tests::write_capable_open_uses_direct_io ... ok
+test fuse::tests::file_handles_store_replace_and_clear_read_leases ... ok
+test fuse::tests::invalidation_index_targets_negative_nested_entry ... ok
+test fuse::tests::invalidation_index_targets_cached_nested_entry ... ok
+test fuse::tests::inode_rename_updates_descendant_paths ... ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 605 filtered out; finished in 0.00s
+

@@ -1,0 +1,3 @@
+error: configuration error [CRAB-E0050] in crab mount refresh: no live mount found at /mnt/mapped; run `crab mount list` to choose a mounted path
+help: Run `crab doctor` to inspect the current setup, or `crab configure` for guided repository configuration.
+docs: https://crab.build/docs/cli/reference/crab-configure

@@ -1,0 +1,13 @@
+{
+  "source_files_sha256": {
+    "crab/src/replication/mod.rs": "c5b702ee6d86c5e789cad4922b8bde051aa156dfb01bd7b11db11fb526f11949",
+    "crates/crab-read/src/lib.rs": "797e69cc7fc82b97afee10c9042891d5b9706c5c3efa6a427fef717ff07ef924",
+    "crates/crab-read/src/selection.rs": "906bc2b5351ba513f27db62b7de15dab54ad2a73a005d460c6d16c2048f84df6",
+    "crates/crab-coordination/src/gc_fence.rs": "a5a77b00ea31602a0be292efa8ce044a3fa111ce411fb52266d9dacfd78a0fcb",
+    "crates/crab-coordination/src/push_lock.rs": "aea6966334869c973ff6f0c92ebdab2fbebcbcfc0c494da45ba1de6c690e2755"
+  },
+  "pre_fence_binary_sha256": "3689b4e81aef7348e7cc311caffa169b0c69ce6f71626c4da417349a5bf4fa17",
+  "rustfs_corrupt_fence_path": ".crab/locks/internal/gc-fence/state",
+  "reproduced_error": "duplicate writer fence holder",
+  "wire_cause": "not conclusively distinguished between holder collision and committed conditional-write retry; both causes are addressed"
+}

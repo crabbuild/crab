@@ -1,0 +1,25 @@
+    Finished `test` profile [unoptimized] target(s) in 1.66s
+     Running unittests src/lib.rs (/root/Workspace/crabbuild-target/vfs-audit/target/debug/deps/crab_vfs-21ad8bed7305c3ec)
+
+running 8 tests
+test native_mount::fuse_committed_pointer_remount ... ok
+test native_mount::fuse_mapped_commit_without_msync ... ok
+test native_mount::fuse_readonly ... native_audit fuse=true read_only=true startup_ms=195 cold_4k_us=953438 warm_1m_us=24832
+ok
+test native_mount::fuse_writable ... native_audit fuse=true read_only=false startup_ms=30 cold_4k_us=363597 warm_1m_us=2087
+native_mmap fuse=true shared_read_write_coherent=true
+native_blob_cow fuse=true verified=true
+native_open_lifetime fuse=true rename_unlink_replacement_cow=true
+ok
+test native_mount::nfs_committed_pointer_remount ... ok
+test native_mount::nfs_mapped_commit_without_msync ... ok
+test native_mount::nfs_readonly ... native_audit fuse=false read_only=true startup_ms=15 cold_4k_us=59297 warm_1m_us=2079
+ok
+test native_mount::nfs_writable ... native_audit fuse=false read_only=false startup_ms=14 cold_4k_us=54912 warm_1m_us=1551
+native_mmap fuse=false shared_read_write_coherent=true
+native_blob_cow fuse=false verified=true
+native_open_lifetime fuse=false rename_unlink_replacement_cow=true
+ok
+
+test result: ok. 8 passed; 0 failed; 0 ignored; 0 measured; 633 filtered out; finished in 60.66s
+

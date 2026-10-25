@@ -1,0 +1,15 @@
+   Compiling uuid v1.24.0
+   Compiling xet-core-structures v1.6.0
+   Compiling xet-client v1.6.0
+   Compiling xet-data v1.6.0
+   Compiling crab-xet v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-xet)
+   Compiling crab-diff v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-diff)
+   Compiling crab-staging v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-staging)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 23.92s
+     Running unittests src/lib.rs (/Users/haipingfu/Workspace/crabbuild-target/crab-ios-02d01345-vfs/debug/deps/crab_staging-c829f0fb85581605)
+
+running 1 test
+test file_reader::tests::lifetime_pin_preserves_reads_through_retirement_and_exclusive_maintenance ... ok
+
+test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 254 filtered out; finished in 0.49s
+

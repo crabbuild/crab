@@ -1,0 +1,44 @@
+   Compiling crab-vfs v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-vfs)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 10.95s
+     Running unittests src/lib.rs (/Users/haipingfu/Workspace/crabbuild-target/crab-ios-02d01345-vfs/debug/deps/crab_vfs-7e2cc2722cb9a69e)
+
+running 14 tests
+test engine::tests::odb_reader_missing_objects_dir_returns_error ... ok
+test engine::tests::odb_reader_read_blob_returns_correct_content ... ok
+test engine::tests::odb_reader_caches_blob_on_disk ... ok
+test engine::tests::odb_reader_read_blob_range_past_eof ... ok
+
+thread 'engine::tests::odb_reader_ignores_unverified_disk_blob_bytes' (26594943) panicked at crates/crab-vfs/src/engine.rs:3701:9:
+assertion `left == right` failed
+  left: [120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120, 120]
+ right: [118, 101, 114, 105, 102, 105, 101, 100, 32, 71, 105, 116, 32, 98, 108, 111, 98]
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test engine::tests::odb_reader_read_blob_range_with_offset ... ok
+test engine::tests::odb_reader_invalid_oid_returns_error ... ok
+test engine::tests::odb_reader_creates_cache_dir_if_missing ... ok
+test engine::tests::odb_reader_ignores_unverified_disk_blob_bytes ... FAILED
+test engine::tests::odb_reader_read_blob_range_full ... ok
+
+thread 'engine::tests::odb_reader_rejects_misnamed_loose_blob' (26595015) panicked at crates/crab-vfs/src/engine.rs:3712:49:
+called `Result::unwrap()` on an `Err` value: Os { code: 13, kind: PermissionDenied, message: "Permission denied" }
+
+thread 'engine::tests::odb_promotion_uses_verified_bytes_through_copy_completion' (26594940) panicked at crates/crab-vfs/src/engine.rs:3734:9:
+assertion `left == right` failed
+  left: [88, 88, 88, 33, 88, 88, 88, 88, 88, 88]
+ right: [97, 98, 99, 33, 101, 102, 103, 104, 105, 106]
+test engine::tests::odb_reader_rejects_misnamed_loose_blob ... FAILED
+test engine::tests::odb_reader_missing_oid_returns_not_found ... ok
+test engine::tests::odb_promotion_uses_verified_bytes_through_copy_completion ... FAILED
+test engine::tests::odb_reader_serves_from_cache_on_second_read ... ok
+test engine::tests::odb_reader_promisor_fallback_ignores_new_pack_slot_pressure ... ok
+
+failures:
+
+failures:
+    engine::tests::odb_promotion_uses_verified_bytes_through_copy_completion
+    engine::tests::odb_reader_ignores_unverified_disk_blob_bytes
+    engine::tests::odb_reader_rejects_misnamed_loose_blob
+
+test result: FAILED. 11 passed; 3 failed; 0 ignored; 0 measured; 591 filtered out; finished in 1.06s
+
+error: test failed, to rerun pass `-p crab-vfs --lib`

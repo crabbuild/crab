@@ -1,0 +1,431 @@
+ Downloading crates ...
+  Downloaded bytecount v0.6.9
+  Downloaded bit-set v0.5.3
+  Downloaded bit-vec v0.6.3
+  Downloaded console v0.16.3
+  Downloaded fancy-regex v0.13.0
+  Downloaded fraction v0.15.4
+  Downloaded insta v1.47.2
+  Downloaded iso8601 v0.6.3
+  Downloaded jsonschema v0.18.3
+  Downloaded nom v8.0.0
+  Downloaded num-cmp v0.1.0
+  Downloaded similar v2.7.0
+   Compiling serde_core v1.0.228
+   Compiling regex-automata v0.4.14
+   Compiling ahash v0.8.12
+   Compiling time-macros v0.2.27
+   Compiling mixtrics v0.2.3
+   Compiling bit-vec v0.6.3
+   Compiling metrics-util v0.19.1
+   Compiling bit-set v0.5.3
+   Compiling nom v8.0.0
+   Compiling bstr v1.12.1
+   Compiling serde v1.0.228
+   Compiling bytes v1.11.1
+   Compiling gix-validate v0.11.1
+   Compiling gix-path v0.12.0
+   Compiling gix-utils v0.3.3
+   Compiling tokio v1.53.1
+   Compiling gix-error v0.2.4
+   Compiling gix-features v0.48.0
+   Compiling indexmap v2.14.0
+   Compiling http v1.5.0
+   Compiling gix-hash v0.25.0
+   Compiling gix-date v0.15.5
+   Compiling serde_json v1.0.151
+   Compiling http-body v1.0.1
+   Compiling gix-actor v0.41.1
+   Compiling gix-hashtable v0.15.0
+   Compiling hashbrown v0.14.5
+   Compiling gix-object v0.60.0
+   Compiling http-body-util v0.1.3
+   Compiling gix-fs v0.21.1
+   Compiling gix-chunk v0.7.2
+   Compiling chrono v0.4.45
+   Compiling gix-commitgraph v0.37.0
+   Compiling gix-quote v0.7.2
+   Compiling dashmap v6.1.0
+   Compiling gix-revwalk v0.31.0
+   Compiling tokio-util v0.7.18
+   Compiling tokio-rustls v0.26.4
+   Compiling gix-glob v0.26.0
+   Compiling gix-tempfile v23.0.0
+   Compiling h2 v0.4.19
+   Compiling tower v0.5.3
+   Compiling gix-lock v23.0.1
+   Compiling gix-attributes v0.33.0
+   Compiling gix-command v0.9.0
+   Compiling tower-http v0.6.8
+   Compiling gix-traverse v0.57.0
+   Compiling gix-config-value v0.18.0
+   Compiling deranged v0.5.8
+   Compiling serde_urlencoded v0.7.1
+   Compiling gix-packetline v0.21.3
+   Compiling gix-bitmap v0.3.2
+   Compiling uuid v1.24.0
+   Compiling gix-index v0.51.0
+   Compiling time v0.3.47
+   Compiling gix-filter v0.30.0
+   Compiling hyper v1.11.1
+   Compiling gix-ignore v0.21.0
+   Compiling schemars v0.8.22
+   Compiling gix-pathspec v0.18.0
+   Compiling gix-worktree v0.52.0
+   Compiling quick-xml v0.41.0
+   Compiling tracing-serde v0.2.0
+   Compiling matchers v0.2.0
+   Compiling hyper-util v0.1.20
+   Compiling tracing-subscriber v0.3.23
+   Compiling crab-types v0.1.0 (/src/crates/crab-types)
+   Compiling gix-ref v0.63.0
+   Compiling regex v1.12.3
+   Compiling hyper-rustls v0.27.9
+   Compiling tracing-appender v0.2.5
+   Compiling reqwest v0.13.3
+   Compiling gix-imara-diff v0.2.3
+   Compiling shellexpand v3.1.2
+   Compiling reqwest v0.12.28
+   Compiling gix-diff v0.63.0
+   Compiling tokio-retry v0.3.1
+   Compiling gix-url v0.36.0
+   Compiling gix-discover v0.51.0
+   Compiling gix-pack v0.70.0
+   Compiling object_store v0.14.1
+   Compiling xet-runtime v1.6.0
+   Compiling reqwest-middleware v0.5.1
+   Compiling hashlink v0.9.1
+   Compiling toml_datetime v0.6.11
+   Compiling serde_spanned v0.6.9
+   Compiling toml_edit v0.22.27
+   Compiling rusqlite v0.31.0
+   Compiling xet-core-structures v1.6.0
+   Compiling gix-odb v0.80.0
+   Compiling foyer-tokio v0.22.3
+   Compiling bincode v1.3.3
+   Compiling foyer-common v0.22.3
+   Compiling xet-client v1.6.0
+   Compiling toml v0.8.23
+   Compiling serde_yaml v0.9.34+deprecated
+   Compiling foyer-memory v0.22.3
+   Compiling crab-storage v0.1.0 (/src/crates/crab-storage)
+   Compiling foyer-storage v0.22.3
+   Compiling slatedb-common v0.15.0
+   Compiling crab-git v0.1.0 (/src/crates/crab-git)
+   Compiling rust_decimal v1.41.0
+   Compiling slatedb-txn-obj v0.15.0
+   Compiling duration-str v0.11.3
+   Compiling foyer v0.22.3
+   Compiling figment v0.10.19
+   Compiling xet-data v1.6.0
+   Compiling backon v1.6.0
+   Compiling fail-parallel v0.6.0
+   Compiling ulid v1.2.1
+   Compiling slatedb v0.15.0
+   Compiling arrow-buffer v55.2.0
+   Compiling arrow-data v55.2.0
+   Compiling crab-coordination v0.1.0 (/src/crates/crab-coordination)
+   Compiling crab-xet v0.1.0 (/src/crates/crab-xet)
+   Compiling crab-cache v0.1.0 (/src/crates/crab-cache)
+   Compiling crab-diff v0.1.0 (/src/crates/crab-diff)
+   Compiling arrow-array v55.2.0
+   Compiling gix-revision v0.45.0
+   Compiling globset v0.4.18
+   Compiling crab-cache-store v0.1.0 (/src/crates/crab-cache-store)
+   Compiling gix-refspec v0.41.0
+   Compiling crab-staging v0.1.0 (/src/crates/crab-staging)
+   Compiling crab-lfs v0.1.0 (/src/crates/crab-lfs)
+   Compiling gix-prompt v0.15.0
+   Compiling utoipa v5.5.0
+   Compiling gix-credentials v0.38.0
+   Compiling arrow-select v55.2.0
+   Compiling crab-auth v0.1.0 (/src/crates/crab-auth)
+   Compiling gix-dir v0.25.0
+   Compiling gix-transport v0.57.0
+   Compiling gix-config v0.56.0
+   Compiling gix-worktree-stream v0.32.0
+   Compiling gix-shallow v0.12.0
+   Compiling gix-negotiate v0.31.0
+   Compiling fs-err v3.3.0
+   Compiling axum-core v0.5.6
+   Compiling serde_path_to_error v0.1.20
+   Compiling petgraph v0.6.5
+   Compiling axum v0.8.9
+   Compiling rusty-fork v0.3.1
+   Compiling crab-metadata v0.1.0 (/src/crates/crab-metadata)
+   Compiling gix-worktree-state v0.30.0
+   Compiling gix-protocol v0.61.0
+   Compiling axum-server v0.8.0
+   Compiling gix-archive v0.32.0
+   Compiling gix-submodule v0.30.0
+   Compiling gix-status v0.30.0
+   Compiling arrow-cast v55.2.0
+   Compiling arrow-ipc v55.2.0
+   Compiling gix-blame v0.13.0
+   Compiling metrics-exporter-prometheus v0.16.2
+   Compiling nfs3_server v0.11.0
+   Compiling gix-mailmap v0.33.1
+   Compiling iso8601 v0.6.3
+   Compiling fancy-regex v0.13.0
+   Compiling fraction v0.15.4
+   Compiling console v0.16.3
+   Compiling bytecount v0.6.9
+   Compiling similar v2.7.0
+   Compiling num-cmp v0.1.0
+   Compiling proptest v1.11.0
+   Compiling jsonschema v0.18.3
+   Compiling insta v1.47.2
+   Compiling parquet v55.2.0
+   Compiling crab-remote-git v0.1.0 (/src/crates/crab-remote-git)
+   Compiling crab-cache-server v1.2.4 (/src/crates/crab-cache-server)
+   Compiling crab-read v0.1.0 (/src/crates/crab-read)
+   Compiling crab-write v0.1.0 (/src/crates/crab-write)
+warning: crab@1.2.4: crab build.rs: could not resolve git sha, using "unknown" (is git installed and is this a git checkout?)
+   Compiling gix v0.83.0
+   Compiling zip v6.0.0
+   Compiling crab-workflow v0.1.0 (/src/crates/crab-workflow)
+   Compiling crab-auth-store v0.1.0 (/src/crates/crab-auth-store)
+   Compiling gix-fsck v0.21.0
+   Compiling process-wrap v10.0.0
+   Compiling quick-xml v0.37.5
+   Compiling crab-vfs v0.1.0 (/src/crates/crab-vfs)
+   Compiling crab-remote v0.1.0 (/src/crates/crab-remote)
+   Compiling crab v1.2.4 (/src/crab)
+warning: unused import: `std::fmt`
+ --> crab/src/replication/mod.rs:9:5
+  |
+9 | use std::fmt;
+  |     ^^^^^^^^
+  |
+  = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `tracing::warn`
+  --> crab/src/storage/head_class.rs:57:5
+   |
+57 | use tracing::warn;
+   |     ^^^^^^^^^^^^^
+
+warning: unused variable: `rel_path`
+    --> crab/src/cmd/add.rs:2768:10
+     |
+2768 |     for (rel_path, abs_path) in selected_dirs {
+     |          ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_rel_path`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `run_yaml_single_stage` is never used
+    --> crab/src/cmd/run.rs:1348:10
+     |
+1348 | async fn run_yaml_single_stage(
+     |          ^^^^^^^^^^^^^^^^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `preview_stage_cache_hit` is never used
+    --> crab/src/cmd/run.rs:3618:4
+     |
+3618 | fn preview_stage_cache_hit(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `control_plane_backend_initialization_failed` is never used
+    --> crab/src/replication/mod.rs:2150:4
+     |
+2150 | fn control_plane_backend_initialization_failed(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `gcs_pair_policy_state` is never used
+    --> crab/src/replication/mod.rs:5754:4
+     |
+5754 | fn gcs_pair_policy_state(
+     |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_coordinator_gc_snapshot_admission` is never used
+    --> crab/src/replication/mod.rs:7440:4
+     |
+7440 | fn validate_coordinator_gc_snapshot_admission(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `coordinator_gc_snapshot_status_error` is never used
+    --> crab/src/replication/mod.rs:7470:4
+     |
+7470 | fn coordinator_gc_snapshot_status_error(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `aws_region` is never used
+   --> crab/src/tier/runtime.rs:159:4
+    |
+159 | fn aws_region(config: &Config) -> String {
+    |    ^^^^^^^^^^
+
+warning: `crab` (lib test) generated 10 warnings (run `cargo fix --lib -p crab --tests` to apply 3 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 6m 39s
+     Running unittests src/lib.rs (/root/Workspace/crabbuild-target/vfs-audit/target/debug/deps/crab-587da4e09e946b3d)
+
+running 147 tests
+test git::remote_helper::tests::atomic_batch_aborts_valid_refs_for_parse_time_rejection ... ok
+test git::remote_helper::tests::cancelled_batch_read_stops_before_waiting_for_input ... ok
+test git::remote_helper::tests::cancelled_store_setup_fails_session_without_protocol_success ... ok
+test git::remote_helper::tests::capabilities_response ... ok
+test git::remote_helper::tests::capabilities_with_commit_graph ... ok
+test git::remote_helper::tests::capabilities_without_commit_graph ... ok
+test git::remote_helper::tests::capsule_promisor_fetch_installs_the_authorized_object ... ok
+test git::remote_helper::tests::capsule_promisor_fetch_rejects_hidden_ref_objects_before_installation ... ok
+test git::remote_helper::tests::capsule_shallow_planning_does_not_inflate_proven_blob_leaves ... ok
+test git::remote_helper::tests::classic_capsule_empty_shallow_selectors_install_nothing ... ok
+test git::remote_helper::tests::classic_capsule_fetch_releases_one_reader_slot_on_success_and_failure ... ok
+test git::remote_helper::tests::classic_capsule_filtered_fetch_preserves_promises_and_shallow_boundary ... ok
+test git::remote_helper::tests::classic_capsule_full_fetch_does_not_install_hidden_tag_objects ... ok
+test git::remote_helper::tests::classic_capsule_shallow_excludes_visible_ref_ancestry ... ok
+test git::remote_helper::tests::classic_capsule_shallow_fetch_deepens_and_unshallows ... ok
+test git::remote_helper::tests::classic_capsule_shallow_since_keeps_newer_commits ... ok
+test git::remote_helper::tests::direct_read_without_replicas_uses_resolved_primary_store ... ok
+test git::remote_helper::tests::dry_run_option_is_reversible_and_rejects_invalid_values ... ok
+test git::remote_helper::tests::dry_run_preserves_atomic_parse_rejection ... ok
+test git::remote_helper::tests::dry_run_previews_without_remote_state_or_auth_preparation ... ok
+test git::remote_helper::tests::eof_with_no_commands_returns_ok ... ok
+test git::remote_helper::tests::fetch_allow_any_sha_in_want_bypasses_validation ... ok
+test git::remote_helper::tests::fetch_batch_accepts_refs_from_selected_replica_manifest ... ok
+test git::remote_helper::tests::fetch_batch_collected_until_blank_line ... ok
+test git::remote_helper::tests::fetch_batch_selector_failure_uses_primary_root_policy ... ok
+test git::remote_helper::tests::fetch_entry_display ... ok
+test git::remote_helper::tests::fetch_mixed_batch_preserves_per_entry_outcomes ... ok
+test git::remote_helper::tests::fetch_non_tip_sha_rejected_not_at_tip_when_only_tip_allowed ... ok
+test git::remote_helper::tests::fetch_options_combined_depth_and_filter ... ok
+test git::remote_helper::tests::fetch_options_default_has_no_constraints ... ok
+test git::remote_helper::tests::fetch_options_depth_only_has_constraints ... ok
+test git::remote_helper::tests::fetch_options_filter_only_has_constraints ... ok
+test git::remote_helper::tests::fetch_reachable_sha_accepted_when_reachable_allowed ... ok
+test git::remote_helper::tests::fetch_tip_sha_accepted_when_tip_policy_in_effect ... ok
+test git::remote_helper::tests::fetch_unreachable_sha_rejected_when_reachable_allowed ... ok
+test git::remote_helper::tests::filter_list_for_push_false_preserves_head_symref ... ok
+test git::remote_helper::tests::filter_list_for_push_no_head_is_noop ... ok
+test git::remote_helper::tests::filter_list_for_push_omits_head_symref ... ok
+test git::remote_helper::tests::filter_list_for_push_omits_peeled_tag_pseudo_refs ... ok
+test git::remote_helper::tests::filter_spec_display ... ok
+test git::remote_helper::tests::format_list_output_empty ... ok
+test git::remote_helper::tests::format_list_output_refs_only_no_head ... ok
+test git::remote_helper::tests::format_list_output_with_head_and_refs ... ok
+test git::remote_helper::tests::format_push_response_all_ok ... ok
+test git::remote_helper::tests::format_push_response_empty_batch ... ok
+test git::remote_helper::tests::format_push_response_error_reason_included ... ok
+test git::remote_helper::tests::format_push_response_keeps_failure_detail_on_one_protocol_line ... ok
+test git::remote_helper::tests::format_push_response_missing_outcome_treated_as_error ... ok
+test git::remote_helper::tests::format_push_response_mixed_ok_and_error ... ok
+test git::remote_helper::tests::format_push_response_preserves_spec_order ... ok
+test git::remote_helper::tests::format_push_response_preserves_transient_tag ... ok
+test git::remote_helper::tests::helper_exit_closes_its_owned_git_runtime ... ok
+test git::remote_helper::tests::helper_fetch_preserves_existing_checkout_config ... ok
+test git::remote_helper::tests::helper_fetch_seeds_lazy_checkout_when_config_missing ... ok
+test git::remote_helper::tests::helper_native_push_config_does_not_treat_fetch_followtags_as_push_mode ... ok
+test git::remote_helper::tests::helper_options_default_atomic_is_false ... ok
+test git::remote_helper::tests::helper_options_default_followtags_is_false ... ok
+test git::remote_helper::tests::helper_options_defaults ... ok
+test git::remote_helper::tests::internal_agent_rebase_override_only_enables_ref_filtering ... ok
+test git::remote_helper::tests::internal_bool_value_accepts_only_truthy_values ... ok
+test git::remote_helper::tests::legacy_filtered_fetch_fails_before_store_selection ... ok
+test git::remote_helper::tests::legacy_filtered_promisor_fetch_reaches_store_boundary ... ok
+test git::remote_helper::tests::linked_worktree_fetches_install_shared_state ... ok
+test git::remote_helper::tests::list_advertisement_preserves_non_not_found_store_error ... ok
+test git::remote_helper::tests::list_advertisement_rejects_corrupt_manifest ... ok
+test git::remote_helper::tests::list_advertisement_rejects_missing_manifest ... ok
+test git::remote_helper::tests::list_for_push_batch_skips_replica_selector ... ok
+test git::remote_helper::tests::list_for_push_reads_write_authoritative_refs ... ok
+test git::remote_helper::tests::list_for_push_returns_empty_stub ... ok
+test git::remote_helper::tests::list_returns_correct_refs_from_manifest ... ok
+test git::remote_helper::tests::list_returns_empty_stub ... ok
+test git::remote_helper::tests::list_session_does_not_open_a_damaged_staging_index ... ok
+test git::remote_helper::tests::multi_command_session ... ok
+test git::remote_helper::tests::multi_push_batch ... ok
+test git::remote_helper::tests::option_atomic_false_clears_flag_and_replies_ok ... ok
+test git::remote_helper::tests::option_atomic_invalid_value_replies_error ... ok
+test git::remote_helper::tests::option_atomic_true_sets_flag_and_replies_ok ... ok
+test git::remote_helper::tests::option_check_connectivity_controls_acknowledgement ... ok
+test git::remote_helper::tests::option_check_connectivity_rejects_invalid_boolean ... ok
+test git::remote_helper::tests::option_deepen_relative_rejects_invalid_boolean ... ok
+test git::remote_helper::tests::option_deepen_relative_sets_fetch_options ... ok
+test git::remote_helper::tests::option_depth_accepted ... ok
+test git::remote_helper::tests::option_depth_invalid_value_errors ... ok
+test git::remote_helper::tests::option_depth_sets_fetch_options ... ok
+test git::remote_helper::tests::option_filter_blob_none_is_supported ... ok
+test git::remote_helper::tests::option_filter_retains_canonical_filter_without_changing_legacy_options ... ok
+test git::remote_helper::tests::option_filter_unsupported_spec ... ok
+test git::remote_helper::tests::option_followtags_false_clears_flag_and_replies_ok ... ok
+test git::remote_helper::tests::option_followtags_invalid_value_replies_error ... ok
+test git::remote_helper::tests::option_followtags_true_sets_flag_and_replies_ok ... ok
+test git::remote_helper::tests::option_include_tag_uses_the_same_tag_inclusion_contract ... ok
+test git::remote_helper::tests::option_progress_false ... ok
+test git::remote_helper::tests::option_progress_true ... ok
+test git::remote_helper::tests::option_shallow_since_normalizes_git_dates_and_quoting ... ok
+test git::remote_helper::tests::option_unknown_yields_unsupported ... ok
+test git::remote_helper::tests::option_update_shallow_accepts_booleans_and_rejects_other_values ... ok
+test git::remote_helper::tests::option_verbosity ... ok
+test git::remote_helper::tests::parse_fetch_command ... ok
+test git::remote_helper::tests::parse_head_symref_develop ... ok
+test git::remote_helper::tests::parse_head_symref_feature_branch ... ok
+test git::remote_helper::tests::parse_head_symref_main ... ok
+test git::remote_helper::tests::parse_head_symref_rejects_bare_sha ... ok
+test git::remote_helper::tests::parse_head_symref_rejects_empty ... ok
+test git::remote_helper::tests::parse_head_symref_rejects_invalid_utf8 ... ok
+test git::remote_helper::tests::parse_head_symref_rejects_missing_prefix ... ok
+test git::remote_helper::tests::parse_head_symref_rejects_non_refs_target ... ok
+test git::remote_helper::tests::parse_head_symref_without_trailing_newline ... ok
+test git::remote_helper::tests::parse_malformed_fetch_errors ... ok
+test git::remote_helper::tests::parse_malformed_push_errors ... ok
+test git::remote_helper::tests::parse_option_command ... ok
+test git::remote_helper::tests::parse_push_command_force ... ok
+test git::remote_helper::tests::parse_push_command_no_force ... ok
+test git::remote_helper::tests::parse_unknown_command_errors ... ok
+test git::remote_helper::tests::promisor_sidecar_install_is_atomic_and_idempotent ... ok
+test git::remote_helper::tests::protocol_session_store_failure_returns_error_without_success ... ok
+test git::remote_helper::tests::protocol_v2_cache_facade_reads_from_selected_store ... ok
+test git::remote_helper::tests::protocol_v2_capability_preserves_complete_pack_fetch ... ok
+test git::remote_helper::tests::protocol_v2_read_store_is_selected_once_and_pinned ... ok
+test git::remote_helper::tests::push_batch_emits_ok_per_ref ... ok
+test git::remote_helper::tests::push_batch_honors_dispatch_cancellation_token ... ok
+test git::remote_helper::tests::push_delete_refspec ... ok
+test git::remote_helper::tests::push_dispatch_publishes_and_hydrates_staged_pointer_through_v2 ... FAILED
+test git::remote_helper::tests::push_force_parsed_correctly ... ok
+test git::remote_helper::tests::push_result_event_includes_active_active_commit_metadata ... ok
+test git::remote_helper::tests::push_spec_display ... ok
+test git::remote_helper::tests::push_staging_root_uses_shared_staging_from_nested_cwd ... ok
+test git::remote_helper::tests::push_state_repo_root_uses_repo_root_from_nested_cwd ... ok
+test git::remote_helper::tests::raw_object_fetches_cannot_be_mixed_with_ref_fetches ... ok
+test git::remote_helper::tests::raw_object_policy_distinguishes_user_wants_from_promisor_recovery ... ok
+test git::remote_helper::tests::read_only_list_batch_uses_selected_replica_refs ... ok
+test git::remote_helper::tests::ref_lease_option_reaches_native_push_and_rejects_conflicting_repeat ... ok
+test git::remote_helper::tests::ref_lease_parses_absence_existing_and_git_quoted_names ... ok
+test git::remote_helper::tests::ref_lease_rejects_malformed_values ... ok
+test git::remote_helper::tests::remote_fetch_store_rejects_missing_empty_and_corrupt_pack_index ... ok
+test git::remote_helper::tests::remote_fetch_store_uses_the_admitted_manifest_snapshot ... ok
+test git::remote_helper::tests::remote_helper_config_uses_git_dir_when_cwd_is_outside_worktree ... ok
+test git::remote_helper::tests::repo_root_from_absolute_git_dir_returns_parent ... ok
+test git::remote_helper::tests::repo_root_from_linked_worktree_private_git_dir_returns_linked_root ... Preparing worktree (detached HEAD 23081cf)
+HEAD is now at 23081cf init
+ok
+test git::remote_helper::tests::repo_root_from_nonexistent_relative_git_dir_falls_back_to_cwd ... ok
+test git::remote_helper::tests::repo_root_from_relative_git_dir_does_not_return_empty ... ok
+test git::remote_helper::tests::resolved_protocol_session_pushes_lists_and_fetches_real_refs ... ok
+test git::remote_helper::tests::scoped_managed_list_skips_direct_replica_selection ... ok
+test git::remote_helper::tests::shallow_selectors_are_accepted_without_degrading_to_full_fetch ... ok
+test git::remote_helper::tests::stateless_connect_dispatches_before_protocol_payload ... ok
+test git::remote_helper::tests::supported_filter_does_not_change_depth_constraint ... ok
+test git::remote_helper::tests::unsupported_filter_cannot_reuse_an_earlier_supported_filter ... ok
+test git::remote_helper::tests::unsupported_stateless_connect_returns_protocol_fallback ... ok
+
+failures:
+
+---- git::remote_helper::tests::push_dispatch_publishes_and_hydrates_staged_pointer_through_v2 stdout ----
+
+thread 'git::remote_helper::tests::push_dispatch_publishes_and_hydrates_staged_pointer_through_v2' (3245) panicked at crab/src/git/remote_helper.rs:6269:9:
+assertion `left == right` failed
+  left: 9
+ right: 5
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+
+
+failures:
+    git::remote_helper::tests::push_dispatch_publishes_and_hydrates_staged_pointer_through_v2
+
+test result: FAILED. 146 passed; 1 failed; 0 ignored; 0 measured; 4185 filtered out; finished in 34.70s
+
+error: test failed, to rerun pass `-p crab --lib`

@@ -1,0 +1,26 @@
+   Compiling crab-vfs v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-vfs)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 13.54s
+     Running unittests src/lib.rs (/Users/haipingfu/Workspace/crabbuild-target/crab-ios-02d01345-vfs/debug/deps/crab_vfs-7e2cc2722cb9a69e)
+
+running 2 tests
+
+thread 'hydration::tests::disposable_window_directory_cannot_break_origin_reads' (26412044) panicked at crates/crab-vfs/src/hydration.rs:1801:27:
+called `Result::unwrap()` on an `Err` value: Io(Os { code: 20, kind: NotADirectory, message: "Not a directory" })
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test hydration::tests::disposable_window_directory_cannot_break_origin_reads ... FAILED
+
+thread 'hydration::tests::warm_pointer_reads_ignore_disposable_window_files' (26412045) panicked at crates/crab-vfs/src/hydration.rs:1785:9:
+assertion `left == right` failed
+  left: b"xxxxxxxxxxxxxxxxxxxxxxxx"
+ right: b"verified pointer content"
+test hydration::tests::warm_pointer_reads_ignore_disposable_window_files ... FAILED
+
+failures:
+
+failures:
+    hydration::tests::disposable_window_directory_cannot_break_origin_reads
+    hydration::tests::warm_pointer_reads_ignore_disposable_window_files
+
+test result: FAILED. 0 passed; 2 failed; 0 ignored; 0 measured; 599 filtered out; finished in 0.05s
+
+error: test failed, to rerun pass `-p crab-vfs --lib`

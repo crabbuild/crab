@@ -1,0 +1,17 @@
+
+Welcome to Crab — serverless Git for large files.
+
+  Get to your first push:
+    1. Create a cloud bucket/container and sign in to its provider
+    2. crab configure <provider://bucket/repository>
+    3. crab ship . -m 'Initial commit'
+
+  Joining an existing repository?  crab clone <remote>
+  Setup not working?              crab doctor
+
+  Guide: https://crab.build/docs/cli/getting-started/first-repository
+
+Mounted at /e2e/run/mount
+  PID: 19
+  HEAD: 508cb8f51af93bfb4fbb4c6c977d7de4d214c6ed
+Use `crab unmount --mountpoint /e2e/run/mount` to stop.

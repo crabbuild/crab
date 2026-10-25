@@ -1,0 +1,19 @@
+   Compiling crab-vfs v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-vfs)
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 12.58s
+     Running unittests src/lib.rs (/Users/haipingfu/Workspace/crabbuild-target/crab-ios-02d01345-vfs/debug/deps/crab_vfs-ad5c539dce92b356)
+
+running 1 test
+
+thread 'hydration::tests::cancelled_window_read_releases_inflight_entry' (25385509) panicked at crates/crab-vfs/src/hydration.rs:2104:9:
+cancelled read retained its window entry after shutdown
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test hydration::tests::cancelled_window_read_releases_inflight_entry ... FAILED
+
+failures:
+
+failures:
+    hydration::tests::cancelled_window_read_releases_inflight_entry
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 493 filtered out; finished in 0.01s
+
+error: test failed, to rerun pass `-p crab-vfs --lib`

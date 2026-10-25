@@ -1,0 +1,33 @@
+warning: function `get_state_in_tx` is never used
+   --> crates/crab-vfs/src/snapshot.rs:536:4
+    |
+536 | fn get_state_in_tx(tx: &rusqlite::Transaction<'_>, key: &str) -> Result<Option<String>> {
+    |    ^^^^^^^^^^^^^^^
+    |
+    = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: `crab-vfs` (lib test) generated 1 warning
+    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.31s
+     Running unittests src/lib.rs (/Users/haipingfu/Workspace/crabbuild-target/crab-ios-02d01345-vfs/debug/deps/crab_vfs-3225d1a73e494acc)
+
+running 17 tests
+test snapshot::tests::base_node_dir_round_trip ... ok
+test snapshot::tests::base_node_symlink_round_trip ... ok
+test snapshot::tests::base_node_file_round_trip ... ok
+test snapshot::tests::base_node_pointer_round_trip ... ok
+test snapshot::tests::build_snapshot_errors_on_missing_objects ... ok
+test snapshot::tests::list_children_root ... ok
+test snapshot::tests::update_node_from_blob_missing_node_returns_classification ... ok
+test snapshot::tests::list_children_subdir ... ok
+test snapshot::tests::update_node_from_blob_backfills_ordinary_blob_size ... ok
+test snapshot::tests::publish_and_query_generation ... ok
+test snapshot::tests::empty_store_has_no_generation ... ok
+test snapshot::tests::pointer_node_stored_and_retrieved ... ok
+test snapshot::tests::list_children_page_uses_name_cursor ... ok
+test snapshot::tests::update_node_from_blob_records_pointer_logical_size ... ok
+test snapshot::tests::update_node_from_blob_wrong_generation_is_noop ... ok
+test snapshot::tests::multiple_generations_and_prune ... ok
+test snapshot::tests::build_snapshot_on_real_repo ... ok
+
+test result: ok. 17 passed; 0 failed; 0 ignored; 0 measured; 596 filtered out; finished in 0.10s
+

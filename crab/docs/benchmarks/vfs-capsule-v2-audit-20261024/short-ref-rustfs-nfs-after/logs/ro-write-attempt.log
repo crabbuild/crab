@@ -1,0 +1,9 @@
+Traceback (most recent call last):
+  File "<stdin>", line 2, in <module>
+  File "/usr/lib/python3.11/pathlib.py", line 1068, in write_bytes
+    with self.open(mode='wb') as f:
+         ^^^^^^^^^^^^^^^^^^^^
+  File "/usr/lib/python3.11/pathlib.py", line 1045, in open
+    return io.open(self, mode, buffering, encoding, errors, newline)
+           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+OSError: [Errno 30] Read-only file system: '/e2e/run/mnt-ro/models/should-fail.bin'
