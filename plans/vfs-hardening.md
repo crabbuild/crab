@@ -1938,6 +1938,75 @@ ownership before the mutation gate. A repository-wide walk would undermine lazy
 mounting; the targeted msync experiment is a mechanism probe, not proof of a
 complete production design. Linux's qualified syncfs path is unchanged.
 
+## Thirty-second checkpoint: serving-process NFS registration
+
+The previous native probe found a mounted foreground NFS server whose direct
+status socket worked while CLI discovery returned no owner. Registration now
+belongs to `run_mount_with_new_cli`'s serving process, shared by foreground and
+background-helper invocations. `NfsMountedSession::control_endpoint` supplies the
+actual endpoint; generating another endpoint would change the Windows TCP token.
+The launcher waits for the serving record and conditionally attaches log metadata.
+It no longer creates or replaces that record. Registry cleanup and log attachment
+use the same mountpoint/PID/start-time/endpoint identity under the Unix file lock;
+a ref/view update does not replace the owner.
+
+Registration failure cancels and drains the mounted session. On normal teardown,
+the CLI removes only its own record after native detachment and engine drain,
+while retaining cache admission. The launcher runs as an owned Tokio task,
+observes cancellation and retains its child through startup/error cleanup. Unix
+cleanup first sends SIGINT to its unreaped child and waits for cooperative exit.
+The pre-existing eventual forced-termination policy remains after the grace
+period; stuck cleanup is not qualified by these cooperative probes and remains
+an explicit lifecycle gate. The [standard-library Child contract](https://doc.rust-lang.org/std/process/struct.Child.html)
+requires explicit exit/reaping; dropping Child does not terminate it. Locked
+Tokio 1.53.1 `runtime/task/join.rs` confirms that dropping a JoinHandle detaches
+its task, so losing the startup waiter cannot drop its child handle early.
+
+Proof on the unchanged Rust sources:
+
+- Linux passes all 136 CLI mount tests; macOS NFS-only passes 120. Both pass all
+  21 registry tests and strict all-target VFS Clippy. The six CLI owner tests
+  cover canonical source preservation, remote source, waiting for registration,
+  conditional log attachment, replacement rejection and graceful child reaping.
+  Extracted tests are the flat sibling `mount_nfs_registration_tests.rs`.
+- Make installs distinct NFS-only CLI/NFS helper and combined FUSE helper roles
+  on both platforms. Native macOS NFS passes foreground RW, foreground RO and
+  background RW with real Git bytes. Each live status identifies the serving
+  PID; foreground appears in list, concurrent cache reuse is rejected, and
+  write/fsync → diff → export → no-push commit preserves bytes. Read-only
+  rejects native writes and overlay diff. Both remount modes retain the
+  unpublished committed note; control unmount and SIGINT remove only the owned
+  registry record without forced cleanup.
+- Dedicated Linux repeats that matrix against the existing Capsule/RustFS
+  repository, verifying its original 10 MiB by SHA-256 plus the new local note.
+  A fresh independent eager clone verifies the original 10 MiB, has no local
+  note and passes Git fsck. The no-push note remains local.
+- A task-only native-mount wrapper captures the real Linux mount table before
+  injecting registry admission failure. The CLI rejects startup, detaches and
+  permits immediate reuse of the same cache. Another wrapper holds the native
+  mount command after attachment; SIGINT to the launcher cancels startup, drains
+  the helper and permits the same recovery. Neither uses forced cleanup.
+- Initial Linux harness mountpoints were under a fixture volume containing a
+  Git root, so the existing nesting guard correctly rejected them before mount.
+  Moving mountpoints under `/mnt` makes the intended probes reachable without
+  a product change or an allow-nested exception. NFS-only CLI library Clippy
+  completes with 651 broad repository warnings, including pre-existing large
+  futures in mount preparation; strict whole-CLI cleanliness is not claimed.
+
+Local `nfs-owner/source-manifest.json` binds 1,523 Rust source/manifest/Makefile
+hashes to the installed artifacts and retained evidence; raw evidence remains
+outside the PR. No dependency, lockfile, serialized format or runtime setting is
+added. Production LOC grows to own registration/error cleanup in the serving
+process and startup child lifetime in the launcher, plus the atomic log update;
+this replaces parent-only publication rather than adding discovery fallbacks.
+
+Sibling boundaries remain explicit: daemon NFS persists a private endpoint and
+uses its own control/runtime owner; coordinator FUSE uses coordinator inventory.
+Neither calls the CLI registrar. Foreground FUSE still needs its own discovery
+and control proof. This checkpoint does not close macOS mapped writeback,
+stalled shutdown, daemon/private admission, full generation/GC retention,
+stored pack-v1 retirement or optimized data-plane performance.
+
 ## Remaining priority order
 
 The helper-layout gap and live read-only inspection leak are closed by the
@@ -1949,8 +2018,9 @@ mounted-path re-entry. Next prove concurrent reset/commit, teardown/admission an
 lost-owner behavior across remaining owners, qualify a waiting native macOS NFS
 barrier, and finish all stored pack-v1 authority removal. Preserve the shared
 process-spanning freeze and never retry an uncertain live operation offline.
-Checkpoint-31 confirms foreground NFS discovery and dirty mapped-write gaps on
-the current native macOS helper; address those concrete failures before signoff.
+Checkpoint-32 repairs CLI foreground NFS discovery and qualifies cooperative
+foreground/helper teardown. Native macOS mapped-write draining, stalled cleanup
+and the remaining product owners still block signoff.
 
 1. **Correctness: coherent Git/Capsule generations.** Atomically install selected
    Git state, pinned catalog and read service for startup, refresh, switch and

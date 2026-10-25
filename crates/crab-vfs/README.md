@@ -56,6 +56,14 @@ policy-blob fetches from the linked worktree used by overlay publication.
 Mounting and refresh are lifecycle operations performed outside the pipeline so a
 daemon, coordinator, or foreground CLI can own cancellation.
 
+CLI NFS mounts register their serving process in both foreground and helper
+mode. Registration uses the session's actual endpoint, including its TCP token.
+The background launcher waits for that owner and attaches logs conditionally;
+it never publishes a second owner. Failed registration drains the native session.
+The serving CLI removes only its own record after detachment and engine drain,
+while it still holds the cache lease. Daemon/private discovery and foreground
+FUSE control admission remain separate qualification gates.
+
 The resolver captures one retained snapshot view for lookup, attributes and
 directory paging. Generation, commit timestamp, selected ref and captured pointer
 reader install together. Base read

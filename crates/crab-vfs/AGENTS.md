@@ -134,6 +134,11 @@ mount/control owners consume the pipeline output separately.
   removal. Single/batch callers propagate live-control errors; only a helper
   confirmed dead before sending may select stale cleanup. Sources: `nfs_control.rs`,
   `clone_cache.rs`, `mounts_registry.rs`, and `crab/src/cmd/mount.rs`.
+- CLI NFS foreground/helper registration belongs to the serving process and uses
+  its actual session endpoint. Registration failure drains that session. The
+  launcher only attaches logs to the matching owner; cleanup follows native
+  detachment and engine drain while cache admission remains held. Sources:
+  `mounts_registry.rs`, `nfs_mount.rs`, and `crab/src/cmd/mount.rs`.
 - Batch controls use strict owner inventory, not optional status enrichment.
   Coordinator discovery failures cannot become an empty list. A listed live
   owner disappearing must fail before stale/PID cleanup. Sources:

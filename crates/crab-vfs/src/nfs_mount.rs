@@ -153,6 +153,11 @@ pub struct NfsMountedSession {
 }
 
 impl NfsMountedSession {
+    /// Return the endpoint selected for this serving process.
+    pub fn control_endpoint(&self) -> Option<&str> {
+        self.control_endpoint.as_deref()
+    }
+
     pub fn runtime_snapshot(&self) -> NfsRuntimeSnapshot {
         NfsRuntimeSnapshot {
             read_leases: self.read_leases.snapshot(),

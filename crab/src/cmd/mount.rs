@@ -575,7 +575,7 @@ pub async fn run_mount_with_new_cli(mut opts: NewMountOpts) -> Result<()> {
 
     #[cfg(feature = "nfs")]
     if !opts.foreground && backend == ResolvedMountBackend::Nfs {
-        return spawn_nfs_background(&opts, &mountpoint).await;
+        return spawn_nfs_background(opts, mountpoint).await;
     }
 
     // Parse the source.
@@ -669,13 +669,30 @@ pub async fn run_mount_with_new_cli(mut opts: NewMountOpts) -> Result<()> {
                         output,
                         config: pipeline_config.clone(),
                     };
+                    let registry_path = crate::vfs::mounts_registry::registry_path()?;
                     let mounted =
                         nfs_mount::mount(&config, resolver, engine, Some(runtime)).await?;
-
-                    println!("Mounted via NFS at {}", mountpoint.display());
-                    println!("Press Ctrl+C to unmount.");
-
-                    nfs_mount::run_until_cancelled(mounted, opts.cancel).await?;
+                    let endpoint = mounted.control_endpoint().map(str::to_owned);
+                    let registration =
+                        register_nfs_mount(&registry_path, &opts, &mountpoint, endpoint);
+                    if registration.is_ok() {
+                        println!("Mounted via NFS at {}", mountpoint.display());
+                        println!("Press Ctrl+C to unmount.");
+                    } else {
+                        // Registry admission is part of startup. Drain the actual
+                        // session on failure instead of abandoning a mounted server.
+                        opts.cancel.cancel();
+                    }
+                    let result = nfs_mount::run_until_cancelled(mounted, opts.cancel).await;
+                    if let Ok(owner) = &registration
+                        && !nfs_mount::is_mounted(&mountpoint)
+                    {
+                        // The serving process has drained; cache admission remains
+                        // held by this CLI through owner-conditional registry cleanup.
+                        crate::vfs::mounts_registry::remove_owned_entry(&registry_path, owner)?;
+                    }
+                    result?;
+                    registration?;
                     println!("Unmounted.");
                 }
                 #[cfg(not(feature = "nfs"))]
@@ -1550,97 +1567,176 @@ fn indent_multiline_detail(detail: &str) -> String {
 }
 
 #[cfg(feature = "nfs")]
-async fn spawn_nfs_background(opts: &NewMountOpts, mountpoint: &Path) -> Result<()> {
-    let helper = resolve_nfs_background_helper(opts.backend)?;
-    let log_path = nfs_background_log_path(mountpoint)?;
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&log_path)
-        .map_err(CrabError::Io)?;
-    let stderr_log = log.try_clone().map_err(CrabError::Io)?;
-    let mut command = std::process::Command::new(helper);
-    let control_endpoint = crate::vfs::nfs_control::fresh_endpoint_for_mountpoint(mountpoint)?;
-    if let Some(endpoint) = control_endpoint.as_deref() {
-        command.env(crate::vfs::nfs_control::CONTROL_ENDPOINT_ENV, endpoint);
-    }
-    command
-        .arg("mount")
-        .arg("--backend")
-        .arg("nfs")
-        .arg("--foreground")
-        .arg("--repo")
-        .arg(&opts.repo)
-        .arg("--mountpoint")
-        .arg(mountpoint);
-    if let Some(git_ref) = &opts.git_ref {
-        command.arg("--ref").arg(git_ref);
-    }
-    if opts.read_only {
-        command.arg("--read-only");
-    }
-    if opts.no_refresh {
-        command.arg("--no-refresh");
-    }
-    if opts.allow_nested {
-        command.arg("--allow-nested");
-    }
-    if let Some(name) = &opts.name {
-        command.arg("--name").arg(name);
-    }
-    command
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::from(log))
-        .stderr(std::process::Stdio::from(stderr_log));
-    let mut child = command.spawn().map_err(CrabError::Io)?;
-    let pid = child.id();
-    let started_at = std::time::Instant::now();
-    while started_at.elapsed() < NFS_BACKGROUND_STARTUP_TIMEOUT {
-        if crate::vfs::nfs_mount::is_mounted(mountpoint)
-            && nfs_background_control_ready(control_endpoint.as_deref()).await
-        {
-            if let Err(error) = register_nfs_background_mount(
-                opts,
-                mountpoint,
-                pid,
-                &log_path,
-                control_endpoint.clone(),
-            ) {
-                warn!(error = %error, "failed to register NFS mount");
-            }
-            println!(
-                "Mounted via NFS at {} (pid {}). Logs: {}",
-                mountpoint.display(),
-                pid,
-                log_path.display()
-            );
-            return Ok(());
+async fn spawn_nfs_background(opts: NewMountOpts, mountpoint: PathBuf) -> Result<()> {
+    // The owned launch task retains its child through admission or cleanup even
+    // if the requesting caller stops waiting during startup.
+    let task = tokio::spawn(async move {
+        let helper = resolve_nfs_background_helper(opts.backend)?;
+        let registry_path = crate::vfs::mounts_registry::registry_path()?;
+        let log_path = nfs_background_log_path(&mountpoint)?;
+        let log = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&log_path)
+            .map_err(CrabError::Io)?;
+        let stderr_log = log.try_clone().map_err(CrabError::Io)?;
+        let mut command = std::process::Command::new(helper);
+        let control_endpoint = crate::vfs::nfs_control::fresh_endpoint_for_mountpoint(&mountpoint)?;
+        if let Some(endpoint) = control_endpoint.as_deref() {
+            command.env(crate::vfs::nfs_control::CONTROL_ENDPOINT_ENV, endpoint);
         }
-        if let Some(status) = child.try_wait().map_err(CrabError::Io)? {
-            let preflight_hint = nfs_background_startup_failure_hint(mountpoint);
-            return Err(CrabError::Internal(format!(
-                "NFS mount helper exited before mounting {}: {status}. See {}{}",
+        command
+            .arg("mount")
+            .arg("--backend")
+            .arg("nfs")
+            .arg("--foreground")
+            .arg("--repo")
+            .arg(&opts.repo)
+            .arg("--mountpoint")
+            .arg(&mountpoint);
+        if let Some(git_ref) = &opts.git_ref {
+            command.arg("--ref").arg(git_ref);
+        }
+        if opts.read_only {
+            command.arg("--read-only");
+        }
+        if opts.no_refresh {
+            command.arg("--no-refresh");
+        }
+        if opts.allow_nested {
+            command.arg("--allow-nested");
+        }
+        if let Some(name) = &opts.name {
+            command.arg("--name").arg(name);
+        }
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::from(log))
+            .stderr(std::process::Stdio::from(stderr_log));
+        let mut child = command.spawn().map_err(CrabError::Io)?;
+        let pid = child.id();
+        let started_at = std::time::Instant::now();
+        let startup = async {
+            while started_at.elapsed() < NFS_BACKGROUND_STARTUP_TIMEOUT {
+                if opts.cancel.is_cancelled() {
+                    return Err(CrabError::Cancelled);
+                }
+                if crate::vfs::nfs_mount::is_mounted(&mountpoint)
+                    && nfs_background_control_ready(control_endpoint.as_deref()).await
+                    && attach_nfs_helper_log(
+                        &registry_path,
+                        &mountpoint,
+                        pid,
+                        control_endpoint.as_deref(),
+                        &log_path,
+                    )?
+                {
+                    println!(
+                        "Mounted via NFS at {} (pid {}). Logs: {}",
+                        mountpoint.display(),
+                        pid,
+                        log_path.display()
+                    );
+                    return Ok(());
+                }
+                if let Some(status) = child.try_wait().map_err(CrabError::Io)? {
+                    let preflight_hint = nfs_background_startup_failure_hint(&mountpoint);
+                    return Err(CrabError::Internal(format!(
+                        "NFS mount helper exited before mounting {}: {status}. See {}{}",
+                        mountpoint.display(),
+                        log_path.display(),
+                        preflight_hint
+                    )));
+                }
+                tokio::time::sleep(Duration::from_millis(100)).await;
+            }
+            let preflight_hint = nfs_background_startup_failure_hint(&mountpoint);
+            Err(CrabError::Internal(format!(
+                "timed out after {}s waiting for NFS mount helper to mount {}. See {}{}",
+                NFS_BACKGROUND_STARTUP_TIMEOUT.as_secs(),
                 mountpoint.display(),
                 log_path.display(),
                 preflight_hint
-            )));
+            )))
         }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
-    }
+        .await;
+        if startup.is_err() {
+            stop_failed_nfs_helper(&mut child, control_endpoint.as_deref()).await?;
+        }
+        startup
+    });
+    task.await.map_err(crate::vfs::error::VfsError::ReadTask)?
+}
 
-    if let Err(error) = child.kill() {
-        warn!(pid, error = %error, "failed to terminate timed-out NFS mount helper");
+#[cfg(feature = "nfs")]
+fn attach_nfs_helper_log(
+    registry_path: &Path,
+    mountpoint: &Path,
+    pid: u32,
+    endpoint: Option<&str>,
+    log_path: &Path,
+) -> Result<bool> {
+    use crate::vfs::mounts_registry;
+
+    let mountpoint = mountpoint.display().to_string();
+    let Some(owner) = mounts_registry::list_entries(registry_path)?
+        .into_iter()
+        .find(|entry| {
+            entry.mountpoint == mountpoint
+                && entry.pid == pid
+                && entry.backend.as_deref() == Some("nfs")
+                && entry.control_endpoint.as_deref() == endpoint
+        })
+    else {
+        return Ok(false);
+    };
+    if !mounts_registry::set_owned_log_path(registry_path, &owner, log_path)? {
+        return Err(CrabError::Internal(
+            "NFS mount owner changed while attaching helper logs".into(),
+        ));
     }
-    let _ = child.wait();
-    let preflight_hint = nfs_background_startup_failure_hint(mountpoint);
-    Err(CrabError::Internal(format!(
-        "timed out after {}s waiting for NFS mount helper to mount {}. See {}{}",
-        NFS_BACKGROUND_STARTUP_TIMEOUT.as_secs(),
-        mountpoint.display(),
-        log_path.display(),
-        preflight_hint
-    )))
+    Ok(true)
+}
+
+#[cfg(feature = "nfs")]
+async fn stop_failed_nfs_helper(
+    child: &mut std::process::Child,
+    endpoint: Option<&str>,
+) -> Result<()> {
+    if child.try_wait()?.is_some() {
+        return Ok(());
+    }
+    #[cfg(unix)]
+    {
+        let pid = child.id();
+        // This unreaped child retains its PID. SIGINT lets the serving owner
+        // detach its kernel client and drain before releasing cache admission.
+        // SAFETY: kill targets only the live child retained by this launch task.
+        if unsafe { libc::kill(pid as libc::pid_t, libc::SIGINT) } != 0 {
+            return Err(std::io::Error::last_os_error().into());
+        }
+        let _ = endpoint;
+    }
+    #[cfg(not(unix))]
+    if let Some(endpoint) = endpoint
+        && let Ok(status) = crate::vfs::nfs_control::status(endpoint).await
+        && status.pid == child.id()
+    {
+        let _ = crate::vfs::nfs_control::shutdown(endpoint).await;
+    }
+    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+    while tokio::time::Instant::now() < deadline {
+        if child.try_wait()?.is_some() {
+            return Ok(());
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    // Retain the existing hard startup deadline only after graceful shutdown
+    // has had a chance to run. Reaping is required even after forced termination.
+    child.kill()?;
+    child.wait()?;
+    Ok(())
 }
 
 #[cfg(feature = "nfs")]
@@ -1745,16 +1841,14 @@ fn nfs_background_preflight_failure_hint(
 }
 
 #[cfg(feature = "nfs")]
-fn register_nfs_background_mount(
+fn register_nfs_mount(
+    registry_path: &Path,
     opts: &NewMountOpts,
     mountpoint: &Path,
-    pid: u32,
-    log_path: &Path,
     control_endpoint: Option<String>,
-) -> Result<()> {
+) -> Result<crate::vfs::mounts_registry::MountEntry> {
     use crate::vfs::mounts_registry::{self, MountEntry};
 
-    let registry_path = mounts_registry::registry_path()?;
     // The source was normalized before helper startup. Recording a live mount
     // must not fail merely because its source path disappeared in the meantime.
     let source = opts.repo.clone();
@@ -1776,15 +1870,16 @@ fn register_nfs_background_mount(
         mountpoint: mountpoint.display().to_string(),
         source,
         git_ref,
-        pid,
+        pid: std::process::id(),
         start_time: mounts_registry::now_iso8601()?,
         read_only: opts.read_only,
         name,
         backend: Some("nfs".to_owned()),
-        log_path: Some(log_path.display().to_string()),
+        log_path: None,
         control_endpoint,
     };
-    Ok(mounts_registry::add_entry(&registry_path, entry)?)
+    mounts_registry::add_entry(registry_path, entry.clone())?;
+    Ok(entry)
 }
 
 #[cfg(feature = "nfs")]
@@ -7156,126 +7251,9 @@ mod mount_overlay_context_tests {
     }
 }
 
-#[cfg(test)]
-#[cfg(feature = "nfs")]
-#[allow(clippy::unwrap_used, reason = "test assertions")]
-mod nfs_mount_registration_tests {
-    use super::*;
-    use crate::test::git_repo::GIT_DIR_MUTEX;
-    use crate::vfs::mounts_registry;
-
-    struct CurrentDirGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
-        original: PathBuf,
-    }
-
-    impl CurrentDirGuard {
-        fn set(path: &Path) -> Self {
-            let lock = GIT_DIR_MUTEX
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            let original = std::env::current_dir().unwrap();
-            std::env::set_current_dir(path).unwrap();
-            Self {
-                _lock: lock,
-                original,
-            }
-        }
-    }
-
-    impl Drop for CurrentDirGuard {
-        fn drop(&mut self) {
-            std::env::set_current_dir(&self.original).unwrap();
-        }
-    }
-
-    fn opts(repo: &str, mountpoint: PathBuf) -> NewMountOpts {
-        NewMountOpts {
-            repo: repo.to_owned(),
-            mountpoint,
-            backend: MountBackend::Nfs,
-            git_ref: None,
-            foreground: false,
-            read_only: false,
-            no_refresh: false,
-            allow_nested: false,
-            name: None,
-            cancel: tokio_util::sync::CancellationToken::new(),
-        }
-    }
-
-    #[test]
-    fn background_registration_retains_canonical_source_after_it_disappears() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = tmp.path().join("repo");
-        std::fs::create_dir_all(repo.join(".git")).unwrap();
-        let mountpoint = tmp.path().join("view");
-        let log_path = tmp.path().join("nfs.log");
-        let control_endpoint = Some("tcp:127.0.0.1:50000?token=parent-secret".to_owned());
-        std::fs::create_dir_all(&mountpoint).unwrap();
-        let _cwd = CurrentDirGuard::set(tmp.path());
-        let _home = set_test_home(tmp.path());
-
-        let source = crate::vfs::source::MountSource::canonical_input("./repo").unwrap();
-        let canonical_repo = std::fs::canonicalize(&repo).unwrap();
-        // The CLI normalizes before helper startup; registry publication must
-        // retain that identity even if the source disappears while starting.
-        std::fs::remove_dir_all(&repo).unwrap();
-        register_nfs_background_mount(
-            &opts(&source, mountpoint.clone()),
-            &mountpoint,
-            12345,
-            &log_path,
-            control_endpoint.clone(),
-        )
-        .unwrap();
-
-        let entries =
-            mounts_registry::read_entries(&mounts_registry::registry_path().unwrap()).unwrap();
-
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].source, canonical_repo.display().to_string());
-        assert_eq!(entries[0].name, "repo");
-        assert_eq!(entries[0].backend.as_deref(), Some("nfs"));
-        assert_eq!(
-            entries[0].log_path.as_deref(),
-            Some(log_path.to_string_lossy().as_ref())
-        );
-        assert_eq!(entries[0].control_endpoint, control_endpoint);
-    }
-
-    #[test]
-    fn background_registration_preserves_remote_source() {
-        let tmp = tempfile::tempdir().unwrap();
-        let _home = set_test_home(tmp.path());
-        let mountpoint = tmp.path().join("view");
-        let log_path = tmp.path().join("nfs.log");
-        let control_endpoint = Some("tcp:127.0.0.1:50001?token=parent-secret".to_owned());
-        std::fs::create_dir_all(&mountpoint).unwrap();
-
-        register_nfs_background_mount(
-            &opts("crab://bucket/repo", mountpoint.clone()),
-            &mountpoint,
-            12345,
-            &log_path,
-            control_endpoint.clone(),
-        )
-        .unwrap();
-
-        let entries =
-            mounts_registry::read_entries(&mounts_registry::registry_path().unwrap()).unwrap();
-
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].source, "crab://bucket/repo");
-        assert_eq!(entries[0].name, "repo");
-        assert_eq!(entries[0].backend.as_deref(), Some("nfs"));
-        assert_eq!(
-            entries[0].log_path.as_deref(),
-            Some(log_path.to_string_lossy().as_ref())
-        );
-        assert_eq!(entries[0].control_endpoint, control_endpoint);
-    }
-}
+#[cfg(all(test, feature = "nfs"))]
+#[path = "mount_nfs_registration_tests.rs"]
+mod nfs_mount_registration_tests;
 
 #[cfg(test)]
 #[cfg(any(feature = "fuse", feature = "nfs"))]

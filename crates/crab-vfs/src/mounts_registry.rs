@@ -54,6 +54,15 @@ pub struct MountEntry {
     pub control_endpoint: Option<String>,
 }
 
+impl MountEntry {
+    fn same_owner(&self, other: &Self) -> bool {
+        self.mountpoint == other.mountpoint
+            && self.pid == other.pid
+            && self.start_time == other.start_time
+            && self.control_endpoint == other.control_endpoint
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Registry path
 // ---------------------------------------------------------------------------
@@ -279,15 +288,22 @@ pub fn remove_owned_entry(path: &Path, owner: &MountEntry) -> Result<bool> {
     let original_len = entries.len();
     // A new helper can reuse the mountpoint while an old shutdown is draining.
     // Ref and other view metadata may change without changing the live owner.
-    entries.retain(|entry| {
-        entry.mountpoint != owner.mountpoint
-            || entry.pid != owner.pid
-            || entry.start_time != owner.start_time
-            || entry.control_endpoint != owner.control_endpoint
-    });
+    entries.retain(|entry| !entry.same_owner(owner));
     if entries.len() == original_len {
         return Ok(false);
     }
+    write_entries(path, &entries)?;
+    Ok(true)
+}
+
+/// Attach helper logs only while the captured mount owner still matches.
+pub fn set_owned_log_path(path: &Path, owner: &MountEntry, log_path: &Path) -> Result<bool> {
+    let _lock = acquire_lock(path)?;
+    let mut entries = read_entries(path)?;
+    let Some(entry) = entries.iter_mut().find(|entry| entry.same_owner(owner)) else {
+        return Ok(false);
+    };
+    entry.log_path = Some(log_path.display().to_string());
     write_entries(path, &entries)?;
     Ok(true)
 }
@@ -550,6 +566,32 @@ mod tests {
         add_entry(&path, switched).unwrap();
         assert!(remove_owned_entry(&path, &owner).unwrap());
         assert!(list_entries(&path).unwrap().is_empty());
+    }
+
+    #[test]
+    fn log_attachment_preserves_view_updates_and_rejects_replaced_owners() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("mounts.json");
+        let log = tmp.path().join("helper.log");
+        let owner = sample_entry("/mnt/a", 100);
+        for field in ["pid", "start_time", "control_endpoint"] {
+            let mut replacement = owner.clone();
+            match field {
+                "pid" => replacement.pid += 1,
+                "start_time" => replacement.start_time.push('1'),
+                _ => replacement.control_endpoint = Some("unix:/new-owner.sock".into()),
+            }
+            add_entry(&path, replacement.clone()).unwrap();
+            assert!(!set_owned_log_path(&path, &owner, &log).unwrap(), "{field}");
+            assert_eq!(list_entries(&path).unwrap(), vec![replacement], "{field}");
+        }
+        let mut switched = owner.clone();
+        switched.git_ref = "refs/heads/other".into();
+        add_entry(&path, switched.clone()).unwrap();
+        assert!(set_owned_log_path(&path, &owner, &log).unwrap());
+        switched.log_path = Some(log.display().to_string());
+        assert_eq!(list_entries(&path).unwrap(), vec![switched]);
+        assert!(remove_owned_entry(&path, &owner).unwrap());
     }
 
     #[test]

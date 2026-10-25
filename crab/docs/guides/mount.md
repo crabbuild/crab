@@ -146,6 +146,9 @@ With `--foreground`, the CLI itself becomes the mount process. It blocks until
 you press Ctrl+C. Useful for debugging, one-off browsing, or when you don't
 want a persistent coordinator.
 
+Foreground NFS mounts appear in `crab mount list` and accept status, overlay,
+commit, and unmount commands from another terminal.
+
 ```bash
 crab mount --repo crab://bucket/repo --mountpoint /mnt/view --foreground
 # Blocks here until Ctrl+C
