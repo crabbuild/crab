@@ -1,2 +1,0 @@
-    Checking crab-vfs v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-vfs)
-    Finished `dev` profile [unoptimized + debuginfo] target(s) in 2.65s

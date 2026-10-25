@@ -1,6 +1,0 @@
-{
-  "before_advice": 0,
-  "before_read": 0,
-  "after_read": 1024,
-  "file_pages": 1024
-}

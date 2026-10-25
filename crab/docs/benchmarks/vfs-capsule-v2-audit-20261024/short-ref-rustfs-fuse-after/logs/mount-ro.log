@@ -1,4 +1,0 @@
-Mounted at /e2e/run/mnt-ro
-  PID: 231
-  HEAD: 5d3cb0c34af22008ebdab534a1092d47b907626a
-Use `crab unmount --mountpoint /e2e/run/mnt-ro` to stop.

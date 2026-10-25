@@ -1,5 +1,0 @@
-error: internal error [CRAB-E0099]: internal VFS error: git push failed: {"timestamp":"2026-10-25T02:02:40.572302Z","level":"ERROR","fields":{"message":"push pipeline failed","error":"pointer has no staged chunks [CRAB-E0086]: 1 of 1 pushed pointer(s) lack local staging entries (first missing: file 3f8f4a68305d66f086634c7e4f226ebe6caba06418ff8b8d252069f2ee00f888, size 4194304); re-stage with `crab add <path>` so the clean filter records chunk offsets before pushing"},"target":"crab::git::remote_helper"}
-To crab://crab/mount-large/linked-remote-nfs
- ! [remote rejected] main -> main (internal (internal error: pointer has no staged chunks [CRAB-E0086]: 1 of 1 pushed pointer(s) lack local staging entries (first missing: file 3f8f4a68305d66f086634c7e4f226ebe6caba06418ff8b8d252069f2ee00f888, size 4194304); re-stage with `crab add <path>` so the clean filter records chunk offsets before pushing))
-error: failed to push some refs to 'crab://crab/mount-large/linked-remote-nfs'
-help: Run `crab errors CRAB-E0099` for recovery steps.

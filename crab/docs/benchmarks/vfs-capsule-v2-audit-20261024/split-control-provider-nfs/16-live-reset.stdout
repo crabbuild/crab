@@ -1,1 +1,0 @@
-{"schema":"mount.reset","version":"1.0","timestamp":"2026-10-25T08:00:06.193Z","data":{"mountpoint":"/mnt/mapped","cache_dir":"/root/.crab/mounts/repos/6aa683354252","diff":{"changes":[{"path":"control-reset.tmp","kind":"create","size_bytes":17,"mode":420,"has_backing_file":true}],"estimated_upload_bytes":17,"deletion_count":0}}}

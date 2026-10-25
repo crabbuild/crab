@@ -1,5 +1,0 @@
-{"backend": "fuse", "exit": 0, "still_mounted": true, "stdout": "No active mounts.\n"}
-Traceback (most recent call last):
-  File "/e2e/batch-audit.py", line 38, in <module>
-    assert not finding['still_mounted'],'unmount --all omitted the live coordinator mount'
-AssertionError: unmount --all omitted the live coordinator mount

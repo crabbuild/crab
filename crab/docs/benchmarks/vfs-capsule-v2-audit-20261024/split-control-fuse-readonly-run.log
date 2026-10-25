@@ -1,7 +1,0 @@
-Traceback (most recent call last):
-  File "/e2e/readonly.py", line 36, in <module>
-    run(['crab','mount','diff','--mountpoint',str(mount),'--json'],'diff')
-  File "/e2e/readonly.py", line 18, in run
-    assert (result.returncode==0)==expected,(label,result.returncode,result.stderr[-1500:])
-           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-AssertionError: ('diff', 9, b'error: internal error [CRAB-E0099]: diff failed: diff failed: forbidden: read-only mount: /mnt/readonly\nhelp: Run `crab errors CRAB-E0099` for recovery steps.\n')

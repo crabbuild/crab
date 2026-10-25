@@ -1,4 +1,0 @@
-{"action": "refresh", "branch": "main", "bytes": 4194304, "expected_sha256": "5b591037b62427f37495e282791f4d6eeda415eae334fabaa436e12c187e81bb", "clone_sha256": "5b591037b62427f37495e282791f4d6eeda415eae334fabaa436e12c187e81bb"}
-{"action": "switch", "branch": "other", "bytes": 4194304, "expected_sha256": "5e31cc2daa805fe402d1443b17d1bde289242f308b5dc2792b04d8333a06c8d3", "clone_sha256": "5e31cc2daa805fe402d1443b17d1bde289242f308b5dc2792b04d8333a06c8d3"}
-{"action": "automatic", "branch": "other", "bytes": 4194304, "expected_sha256": "5b591037b62427f37495e282791f4d6eeda415eae334fabaa436e12c187e81bb", "clone_sha256": "5b591037b62427f37495e282791f4d6eeda415eae334fabaa436e12c187e81bb"}
-mapped_transition_provider_e2e=ok

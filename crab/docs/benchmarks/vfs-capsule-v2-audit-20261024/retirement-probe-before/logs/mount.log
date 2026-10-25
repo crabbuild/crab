@@ -1,4 +1,0 @@
-Mounted at /e2e/run/mount
-  PID: 101
-  HEAD: f1e791effc6368e6de7bf40f96b0fbb6927be61c
-Use `crab unmount --mountpoint /e2e/run/mount` to stop.

@@ -1,7 +1,0 @@
-[main (root-commit) 468a7ef] seed large model
- 5 files changed, 16 insertions(+)
- create mode 100644 .gitattributes
- create mode 100644 archive/base-move.bin
- create mode 100644 crab.toml
- create mode 100644 models/delete-me.bin
- create mode 100644 models/model.bin

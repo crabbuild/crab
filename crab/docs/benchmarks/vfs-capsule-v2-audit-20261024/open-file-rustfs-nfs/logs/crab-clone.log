@@ -1,6 +1,0 @@
-Cloning into '/e2e/run/clone'...
-{"schema":"clone.event","version":"1.0","timestamp":"2026-10-25T00:03:49.384Z","type":"progress","data":{"operation":"cloning","current":0,"total":0,"bytes":0,"total_bytes":0,"rate_bytes_per_sec":0.0}}
-{"schema":"perf.phase","version":"1.0","timestamp":"2026-10-25T00:03:49.705Z","type":"event","data":{"operation":"clone","phase":"pack_fetch","elapsed_ms":318,"bytes_in":0,"bytes_out":0,"item_count":1,"peak_rss_bytes":39333888}}
-{"schema":"perf.phase","version":"1.0","timestamp":"2026-10-25T00:03:54.044Z","type":"event","data":{"operation":"clone","phase":"checkout","elapsed_ms":4312,"bytes_in":0,"bytes_out":0,"item_count":1,"peak_rss_bytes":29655040}}
-{"schema":"perf.phase","version":"1.0","timestamp":"2026-10-25T00:03:54.119Z","type":"event","data":{"operation":"clone","phase":"hydration","elapsed_ms":58,"bytes_in":0,"bytes_out":0,"item_count":1,"peak_rss_bytes":58548224}}
-{"schema":"clone.event","version":"1.0","timestamp":"2026-10-25T00:03:54.120Z","type":"result","data":{"url":"crab://crab/mount-large/open-file-nfs","directory":"/e2e/run/clone","branch":"main","lazy":false,"duration_ms":4736}}

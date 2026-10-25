@@ -1,8 +1,0 @@
-error: internal error [CRAB-E0099]: commit failed: internal VFS error: git push failed: To crab://crab/mount-large/catalog-fuse
- ! [rejected]        c4871581a0a92acb352080447672dcb2b80c2510 -> main (non-fast-forward)
-error: failed to push some refs to 'crab://crab/mount-large/catalog-fuse'
-hint: Updates were rejected because a pushed branch tip is behind its remote
-hint: counterpart. Check out this branch and integrate the remote changes
-hint: (e.g. 'git pull ...') before pushing again.
-hint: See the 'Note about fast-forwards' in 'git push --help' for details.
-help: Run `crab errors CRAB-E0099` for recovery steps.

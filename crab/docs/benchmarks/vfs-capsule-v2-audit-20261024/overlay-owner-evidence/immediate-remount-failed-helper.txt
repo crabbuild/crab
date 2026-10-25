@@ -1,3 +1,0 @@
-error: configuration error [CRAB-E0050] in crab mount: mount cache is already in use at /root/.crab/mounts/repos/6aa683354252; unmount the active mount before starting another mount for this repository
-help: Run `crab doctor` to inspect the current setup, or `crab configure` for guided repository configuration.
-docs: https://crab.build/docs/cli/reference/crab-configure

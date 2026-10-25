@@ -1,4 +1,0 @@
-{"staging_before": {"path_leases": 1, "recipe_payload_leases": 67, "chunks": 0}, "staging_after": {"path_leases": 0, "recipe_payload_leases": 0, "chunks": 0}}
-Traceback (most recent call last):
-  File "<stdin>", line 30, in <module>
-OSError: [Errno 5] Input/output error

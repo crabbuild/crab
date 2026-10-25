@@ -1,9 +1,0 @@
-   Compiling crab-vfs v0.1.0 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crates/crab-vfs)
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 19.06s
-     Running unittests src/lib.rs (/Users/haipingfu/Workspace/crabbuild-target/crab-ios-02d01345-vfs/debug/deps/crab_vfs-ad5c539dce92b356)
-
-running 1 test
-test hydration::tests::cancelled_window_read_releases_inflight_entry ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 493 filtered out; finished in 0.01s
-

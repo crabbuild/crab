@@ -1,5 +1,0 @@
-{"round": 0, "readonly": false, "exit": 0, "still_mounted": {"nfs": false, "fuse": true}, "stdout": "Unmounted /mnt/mixed-nfs.\nUnmounted 1 mount(s).\n"}
-Traceback (most recent call last):
-  File "/e2e/mixed-provider.py", line 47, in <module>
-    assert not any(finding['still_mounted'].values()),'batch omitted a live backend owner'
-AssertionError: batch omitted a live backend owner

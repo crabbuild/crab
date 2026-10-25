@@ -1,3 +1,0 @@
-{"staging_before": {"path_leases": 1, "recipe_payload_leases": 67, "chunks": 0, "push_snapshots": 1}, "staging_after": {"path_leases": 0, "recipe_payload_leases": 67, "chunks": 0, "push_snapshots": 1}}
-{"held_sha256": "a64e9469aa0cc63dbab1445b8843706921c4303bf293a0745a8a45b83fdb210e", "path_sha256": "a64e9469aa0cc63dbab1445b8843706921c4303bf293a0745a8a45b83fdb210e", "expected_sha256": "a64e9469aa0cc63dbab1445b8843706921c4303bf293a0745a8a45b83fdb210e"}
-base_pointer_retirement_e2e=ok

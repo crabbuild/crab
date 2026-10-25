@@ -1,8 +1,0 @@
-{
-  "backend": "fuse",
-  "remote": "crab://crab/mount-large/mapped-fuse-d2a1e7265f3c4a52a8b951a00c6c5a73",
-  "main_cli_controls": true,
-  "write_rejected": true,
-  "commit_rejected": true,
-  "refresh_switch_hashes_match": true
-}

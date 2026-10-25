@@ -1,1 +1,0 @@
-/e2e/run/mnt-ro crab fuse.crab ro,nosuid,nodev,noatime,user_id=0,group_id=0,default_permissions,allow_other

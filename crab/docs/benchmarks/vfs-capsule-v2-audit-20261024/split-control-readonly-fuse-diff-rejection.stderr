@@ -1,2 +1,0 @@
-error: internal error [CRAB-E0099]: diff failed: diff failed: forbidden: read-only mount: /mnt/readonly
-help: Run `crab errors CRAB-E0099` for recovery steps.

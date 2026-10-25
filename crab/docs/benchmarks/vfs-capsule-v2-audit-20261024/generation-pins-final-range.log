@@ -1,9 +1,0 @@
-    Finished `test` profile [unoptimized] target(s) in 1.18s
-     Running unittests src/lib.rs (/root/Workspace/crabbuild-target/vfs-audit/target/debug/deps/crab_vfs-335e2bb9740dce4f)
-
-running 1 test
-test blob::tests::odb_warm_ranges_do_not_reload_entire_blob ... odb_range_probe logical_bytes=4194304 userspace_read_bytes=105 elapsed_us=1388
-ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 617 filtered out; finished in 0.18s
-

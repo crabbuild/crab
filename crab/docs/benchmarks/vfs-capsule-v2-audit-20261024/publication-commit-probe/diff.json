@@ -1,1 +1,0 @@
-{"schema":"mount.diff","version":"1.0","timestamp":"2026-10-25T01:03:33.410Z","data":{"mountpoint":"/e2e/run/mount","cache_dir":"/root/.crab/mounts/repos/40aa34d49f6a","diff":{"changes":[{"path":"open-through-commit.txt","kind":"modify","size_bytes":6,"mode":33188,"has_backing_file":true}],"estimated_upload_bytes":6,"deletion_count":0}}}

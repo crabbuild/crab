@@ -1,8 +1,0 @@
-    Finished `test` profile [unoptimized + debuginfo] target(s) in 0.74s
-     Running unittests src/lib.rs (/Users/haipingfu/Workspace/crabbuild-target/crab-ios-02d01345-vfs/debug/deps/crab_vfs-0e99b10981cfec51)
-
-running 1 test
-test engine::tests::path_read_reacquires_a_lease_invalidated_before_io ... ok
-
-test result: ok. 1 passed; 0 failed; 0 ignored; 0 measured; 631 filtered out; finished in 0.15s
-
