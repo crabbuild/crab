@@ -96,6 +96,8 @@ pub struct NfsControlResponse {
     pub commit_result: Option<crate::publish::OverlayCommitResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -268,7 +270,7 @@ pub struct NfsWriteJournalPathStatus {
 }
 
 impl NfsControlResponse {
-    fn ok() -> Self {
+    fn shutdown_ok(cache_dir: Option<PathBuf>) -> Self {
         Self {
             ok: true,
             error: None,
@@ -276,6 +278,7 @@ impl NfsControlResponse {
             update: None,
             overlay_diff: None,
             commit_result: None,
+            cache_dir,
             pid: None,
         }
     }
@@ -288,6 +291,7 @@ impl NfsControlResponse {
             update: None,
             overlay_diff: None,
             commit_result: None,
+            cache_dir: None,
             pid: None,
         }
     }
@@ -300,6 +304,7 @@ impl NfsControlResponse {
             update: None,
             overlay_diff: None,
             commit_result: None,
+            cache_dir: None,
             pid: Some(std::process::id()),
         }
     }
@@ -312,6 +317,7 @@ impl NfsControlResponse {
             update: None,
             overlay_diff: None,
             commit_result: None,
+            cache_dir: None,
             pid: Some(std::process::id()),
         }
     }
@@ -324,6 +330,7 @@ impl NfsControlResponse {
             update: Some(update),
             overlay_diff: None,
             commit_result: None,
+            cache_dir: None,
             pid: Some(std::process::id()),
         }
     }
@@ -336,6 +343,7 @@ impl NfsControlResponse {
             update: None,
             overlay_diff: Some(diff),
             commit_result: None,
+            cache_dir: None,
             pid: Some(std::process::id()),
         }
     }
@@ -348,6 +356,7 @@ impl NfsControlResponse {
             update: None,
             overlay_diff: None,
             commit_result: Some(result),
+            cache_dir: None,
             pid: Some(std::process::id()),
         }
     }
@@ -1041,8 +1050,20 @@ async fn dispatch_request(
             }
         }
         NfsControlRequest::Shutdown => {
-            cancel.cancel();
-            NfsControlResponse::ok()
+            let cache_dir = state
+                .runtime
+                .as_ref()
+                .map(|runtime| {
+                    lock_runtime(runtime).map(|runtime| runtime.config.cache_dir.clone())
+                })
+                .transpose();
+            match cache_dir {
+                Ok(cache_dir) => {
+                    cancel.cancel();
+                    NfsControlResponse::shutdown_ok(cache_dir)
+                }
+                Err(error) => NfsControlResponse::err(error.to_string()),
+            }
         }
     }
 }
@@ -1312,10 +1333,11 @@ pub async fn ping(endpoint: &str) -> Result<()> {
     ))
 }
 
-pub async fn shutdown(endpoint: &str) -> Result<()> {
+/// Request shutdown and return the running helper's cache identity when present.
+pub async fn shutdown(endpoint: &str) -> Result<Option<PathBuf>> {
     let response = request(endpoint, &NfsControlRequest::Shutdown).await?;
     if response.ok {
-        return Ok(());
+        return Ok(response.cache_dir);
     }
     Err(CrabError::Internal(response.error.unwrap_or_else(|| {
         "NFS control shutdown failed".to_owned()

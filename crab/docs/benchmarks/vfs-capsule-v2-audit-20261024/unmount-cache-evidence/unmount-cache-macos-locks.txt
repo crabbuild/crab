@@ -1,0 +1,20 @@
+    Finished `test` profile [unoptimized] target(s) in 3.68s
+     Running unittests src/lib.rs (/Users/haipingfu/Workspace/crabbuild-target/crab-ios-02d01345-vfs/debug/deps/crab_vfs-a83e992940fb17ec)
+
+running 14 tests
+test clone_cache::tests::normalize_no_scheme ... ok
+test clone_cache::tests::normalize_multiple_trailing_slashes ... ok
+test clone_cache::tests::normalize_preserves_path_case ... ok
+test clone_cache::tests::mount_cache_lock_for_legacy_crab_dir_stays_inside_crab_dir ... ok
+test clone_cache::tests::same_url_same_hash ... ok
+test clone_cache::tests::normalization_trims_trailing_slashes ... ok
+test clone_cache::tests::different_urls_different_hashes ... ok
+test clone_cache::tests::hash_deterministic_known_value ... ok
+test clone_cache::tests::normalization_lowercases_scheme ... ok
+test clone_cache::tests::normalization_trims_whitespace ... ok
+test clone_cache::tests::cache_dir_uses_home_and_hash ... ok
+test clone_cache::tests::hash_is_12_hex_chars ... ok
+test clone_cache::tests::mount_cache_lock_uses_sibling_lock_dir_without_creating_cache ... ok
+test clone_cache::tests::mount_cache_lock_rejects_second_holder_until_released ... ok
+
+test result: ok. 14 passed; 0 failed; 0 ignored; 0 measured; 626 filtered out; finished in 0.01s

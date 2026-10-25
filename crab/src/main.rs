@@ -5220,7 +5220,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                 let _span = tracing::info_span!("unmount", path = %mp.display()).entered();
                 #[cfg(any(feature = "fuse", feature = "nfs"))]
                 {
-                    if let Ok(true) = crab::cmd::mount::try_mount_control_unmount(mp).await {
+                    if crab::cmd::mount::try_mount_control_unmount(mp).await? {
                         return Ok(ExitCode::SUCCESS);
                     }
                 }

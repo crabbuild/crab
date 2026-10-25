@@ -1,0 +1,26 @@
+    Finished `test` profile [unoptimized] target(s) in 2.93s
+     Running unittests src/lib.rs (/Users/haipingfu/Workspace/crabbuild-target/crab-ios-02d01345-vfs/debug/deps/crab_vfs-a83e992940fb17ec)
+
+running 20 tests
+test mounts_registry::tests::format_known_timestamp ... ok
+test mounts_registry::tests::derive_name_from_local_path ... ok
+test mounts_registry::tests::now_iso8601_format ... ok
+test mounts_registry::tests::format_epoch ... ok
+test mounts_registry::tests::derive_name_from_remote_url ... ok
+test mounts_registry::tests::format_timestamp_rejects_out_of_range_seconds ... ok
+test mounts_registry::tests::read_entries_empty_file ... ok
+test mounts_registry::tests::read_entries_nonexistent_file ... ok
+test mounts_registry::tests::serialize_matches_expected_schema ... ok
+test mounts_registry::tests::deserialize_from_expected_json ... ok
+test mounts_registry::tests::serialize_deserialize_roundtrip ... ok
+test mounts_registry::tests::add_entry_creates_file ... ok
+test mounts_registry::tests::remove_entry_not_found ... ok
+test mounts_registry::tests::list_entries_with_lock ... ok
+test mounts_registry::tests::add_entry_replaces_same_mountpoint ... ok
+test mounts_registry::tests::add_entry_writes_private_registry_permissions ... ok
+test mounts_registry::tests::add_entry_appends ... ok
+test mounts_registry::tests::remove_entry_by_mountpoint ... ok
+test mounts_registry::tests::remove_entry_by_pid_works ... ok
+test mounts_registry::tests::owner_cleanup_preserves_replacements_and_ignores_ref_changes ... ok
+
+test result: ok. 20 passed; 0 failed; 0 ignored; 0 measured; 620 filtered out; finished in 0.04s

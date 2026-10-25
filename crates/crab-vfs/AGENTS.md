@@ -123,6 +123,11 @@ mount/control owners consume the pipeline output separately.
   epochs or invalidate open readers. Keep the cross-process freeze through the
   metadata read. Never redirect a known owner's failed exchange to saved state.
   Sources: `mount_control.rs`, `mount_runtime.rs`, both backend control owners.
+- NFS helper unmount completion requires kernel detachment and the live owner's
+  cache lease. Retain the acquired lease through owner-conditional registry
+  removal. Single/batch callers propagate live-control errors; only a helper
+  confirmed dead before sending may select stale cleanup. Sources: `nfs_control.rs`,
+  `clone_cache.rs`, `mounts_registry.rs`, and `crab/src/cmd/mount.rs`.
 - NFS control deadlines cover connect/write/read on a request-owned socket.
   Timeout closes that socket; it does not roll back a helper mutation. Do not
   retry an uncertain commit. Source: `crates/crab-vfs/src/nfs_control.rs`.

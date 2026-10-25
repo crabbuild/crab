@@ -1,0 +1,11 @@
+{"backend": "fuse", "cycle": 0, "rw_ro_immediate_remount": true, "cache_handoff_assertions": 2}
+{"backend": "fuse", "cycle": 1, "rw_ro_immediate_remount": true, "cache_handoff_assertions": 4}
+{"backend": "fuse", "cycle": 2, "rw_ro_immediate_remount": true, "cache_handoff_assertions": 6}
+{"backend": "fuse", "cycle": 3, "rw_ro_immediate_remount": true, "cache_handoff_assertions": 8}
+{"backend": "fuse", "cycle": 4, "rw_ro_immediate_remount": true, "cache_handoff_assertions": 10}
+{"backend": "fuse", "cycle": 5, "rw_ro_immediate_remount": true, "cache_handoff_assertions": 12}
+{"backend": "fuse", "cycle": 6, "rw_ro_immediate_remount": true, "cache_handoff_assertions": 14}
+{"backend": "fuse", "cycle": 7, "rw_ro_immediate_remount": true, "cache_handoff_assertions": 16}
+{"backend": "fuse", "cycle": 8, "rw_ro_immediate_remount": true, "cache_handoff_assertions": 18}
+{"backend": "fuse", "cycle": 9, "rw_ro_immediate_remount": true, "cache_handoff_assertions": 20}
+rapid_remount_cache_handoff=ok fuse

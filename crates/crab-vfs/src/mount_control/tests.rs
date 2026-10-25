@@ -268,12 +268,61 @@ fn nfs_control_status_and_shutdown_route_through_registry_endpoint() {
 
     runtime.block_on(async {
         let cancel = CancellationToken::new();
-        let handle = crate::nfs_control::spawn_server(
-            Some(endpoint.clone()),
-            nfs_control_state(&mountpoint, false),
-            cancel.clone(),
-        )
-        .unwrap();
+        let source = tmp.path().join("source");
+        std::fs::create_dir(&source).unwrap();
+        for args in [
+            vec!["init", "-b", "main"],
+            vec![
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "seed",
+            ],
+        ] {
+            let result = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&source)
+                .args(args)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_COMMON_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+        let config = crate::pipeline::PipelineConfig {
+            source: source.display().to_string(),
+            git_dir: source.join(".git"),
+            git_metadata: crate::pipeline::GitMetadataOwnership::Borrowed,
+            ref_name: Some("refs/heads/main".into()),
+            read_only: false,
+            cache_dir: tmp.path().join("actual-live-cache"),
+            cancel_token: CancellationToken::new(),
+        };
+        let output = crate::pipeline::MountPipelineBuilder::new(config.clone())
+            .execute()
+            .unwrap();
+        let engine = Arc::clone(&output.engine);
+        let mut state = nfs_control_state(&mountpoint, false);
+        state.engine = Some(Arc::clone(&engine));
+        state.runtime = Some(Arc::new(std::sync::Mutex::new(
+            crate::nfs_control::NfsMountRuntime {
+                output,
+                config: config.clone(),
+            },
+        )));
+        let handle =
+            crate::nfs_control::spawn_server(Some(endpoint.clone()), state, cancel.clone())
+                .unwrap();
 
         let status = wait_for_nfs_status(&mountpoint).await;
 
@@ -294,19 +343,18 @@ fn nfs_control_status_and_shutdown_route_through_registry_endpoint() {
 
         let shutdown = shutdown(&mountpoint).await.unwrap().unwrap();
 
-        assert_eq!(shutdown.backend, MountControlBackend::Nfs);
-        assert_eq!(shutdown.mountpoint, mountpoint);
-        assert_eq!(
-            shutdown.mountpoint_str,
-            shutdown.mountpoint.display().to_string()
-        );
-        assert_eq!(
-            shutdown.registry_path.as_deref(),
-            Some(registry_path.as_path())
-        );
-        assert_eq!(shutdown.pid, Some(123));
+        let (context, cache_dir) = match shutdown {
+            MountControlShutdown::Nfs { context, cache_dir } => (context, cache_dir),
+            #[cfg(unix)]
+            MountControlShutdown::Fuse { .. } => panic!("expected NFS shutdown"),
+        };
+        assert_eq!(context.mountpoint, mountpoint);
+        assert_eq!(context.registry_path, registry_path);
+        assert_eq!(context.entry.pid, 123);
+        assert_eq!(cache_dir, config.cache_dir);
         assert!(cancel.is_cancelled());
         handle.await.unwrap().unwrap();
+        engine.shutdown_background().await;
     });
 }
 
@@ -393,7 +441,13 @@ fn nfs_control_refresh_and_switch_route_to_helper_endpoint() {
         assert!(switch_error.contains("NFS control switch unavailable"));
         assert!(!cancel.is_cancelled());
 
-        crate::nfs_control::shutdown(&endpoint).await.unwrap();
+        let shutdown_error = shutdown(&mountpoint).await.unwrap_err();
+        assert!(
+            shutdown_error
+                .to_string()
+                .contains("missing live cache identity")
+        );
+        assert!(cancel.is_cancelled());
         handle.await.unwrap().unwrap();
     });
 }
@@ -515,7 +569,7 @@ fn unix_controls_reach_fuse_without_linking_the_server() {
         assert!(rejected.to_string().contains("publication refused"));
         assert!(inspect_overlay(&mountpoint).await.unwrap().is_some());
         assert!(reset_overlay(&mountpoint).await.unwrap().is_some());
-        assert_eq!(shutdown(&mountpoint).await.unwrap().unwrap().backend, MountControlBackend::Fuse);
+        assert!(matches!(shutdown(&mountpoint).await.unwrap().unwrap(), MountControlShutdown::Fuse { .. }));
         server.abort();
         let _ = server.await;
     });

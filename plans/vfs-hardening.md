@@ -1534,13 +1534,83 @@ avoid kernel re-entry while holding the gate/freeze, preserve symlink/directory
 semantics, and reject outputs overlapping the live mount or its private cache.
 No second pointer reconstruction implementation or offline retry is acceptable.
 
+## Twenty-fifth checkpoint: NFS cache ownership handoff
+
+The original immediate-remount RustFS failure remains the reproduction: NFS
+unmount succeeds while its helper still holds the mutable cache lease. A new
+CLI regression with an explicitly held live cache fails before this repair.
+The helper now returns its actual cache identity on accepted shutdown. Completion
+requires kernel detachment plus acquiring that cache's existing exclusive lease;
+the CLI holds it through owner-conditional registry removal. PID exit is not a
+substitute: a zombie may still answer the liveness probe. Replacement PID/start
+identity/control endpoint is preserved, while a ref switch does not change the
+owner. No mount retry, arbitrary post-unmount delay, cache-path reconstruction,
+error-string parsing, dependency override or new configuration was added.
+
+Caller review also found single and batch unmount swallowing live-control errors
+and selecting PID termination. The retained installed-binary fault probe proves
+both paths terminate the test owner after an explicit shutdown rejection, masking
+the original error. Both callers now propagate live errors. Only an NFS helper
+confirmed dead before an exchange may select stale cleanup; accepted/uncertain
+shutdown cannot authorize force termination. Helpers do not write FUSE PID files,
+so live NFS cleanup no longer removes them. Typed backend shutdown resources
+replace the previous optional-field combinations.
+
+Sibling ownership: FUSE coordinator unmount already awaits the removed session,
+then drains the engine before dropping its cache guard. Daemon teardown awaits
+its backend and engine before releasing its separately owned runtime cache lease.
+This repair concerns registered helper controls; direct daemon/private-endpoint
+and native NFS child-task completion still require separate all-mode proof.
+
+Linux passes 638 VFS library tests, strict combined all-target VFS Clippy,
+and a FUSE-only check on the final typed control shape. The earlier pass also
+runs all 16 native probes; engine/native lifetime code is unchanged by the final
+enum boxing. Both Linux and macOS pass all 16 CLI unmount tests on final sources.
+macOS additionally passes 12 control, 14 cache and 20 registry tests plus strict
+combined-feature VFS Clippy. One new macOS fixture initially used a temporary
+path alias instead of the canonical registered path; that failed attempt is
+retained and is not product proof.
+
+Make installs final NFS-only main/NFS-helper and combined FUSE-helper roles. Each
+backend completes ten immediate writable → read-only cycles against RustFS,
+with retained writable bytes, read-only inspection rejection and twenty immediate
+nonblocking cache-lease assertions: forty mounted transitions and forty lease
+checks total. The probe has no lease-ready wait or retry. The installed new CLI
+also preserves the owner PID and registry after rejected single/batch controls,
+and exposes the original error. The previous installed CLI terminates that test
+owner and masks the error. No performance-throughput claim is made.
+
+The initial GNU-linker install was deliberately stopped after a final production
+cleanup edit invalidated its source snapshot; it is not qualification. The final
+Make install uses the already-qualified bundled linker, without a dependency
+patch or target cleanup. External targets remain per-worktree/platform. The
+main CLI slice retains 14 existing warnings; full CLI/strict whole-CLI claims
+remain excluded. Final source, installed binaries, probes and outputs are bound
+by `unmount-cache-checkpoint.json` and adjacent retained evidence.
+
+Non-test growth owns the live cache receipt, typed shutdown resources and atomic
+owner-conditional registry cleanup. It removes guessed completion, invalid
+optional shutdown states and force fallback after live errors. The existing
+flock nonblocking contract is retained: contention is typed absence, other I/O
+failures propagate. The SDK's macOS flock man page and actual Linux/macOS lock
+regressions supply dependency-contract proof.
+
+A new sibling diagnostic proves `unmount --all` omits coordinator-only FUSE
+mounts: the installed pre-repair main CLI returns success with "No active mounts"
+while the kernel view remains mounted; explicit single unmount then cleans it.
+The batch routine enumerates only `mounts_registry`, despite the shared control
+list already merging coordinator owners. Retain this failing gate. Canonical
+all-owner batch discovery and disappearance/error semantics are the next repair,
+before export ownership; they are not fixed by cache-lease completion.
+
 ## Remaining priority order
 
 The helper-layout gap and live read-only inspection leak are closed by the
-installed-role proofs. First repair the confirmed NFS unmount/cache handoff:
-unmount currently succeeds before its helper releases mutable cache ownership,
-so an immediate mode switch can fail. Then complete live export materialization
-ownership and prove concurrent reset/commit plus lost-owner behavior. Preserve
+installed-role proofs. The checkpoint-25 installed-role cycles close the
+reproduced Linux NFS unmount/cache handoff gap. Next repair batch unmount
+discovery of coordinator-only FUSE mounts (confirmed omitted by the native
+diagnostic), complete live export materialization ownership, and prove
+concurrent reset/commit plus lost-owner behavior. Preserve
 the existing process-spanning export freeze. Do not add an offline retry after
 an uncertain live operation.
 
@@ -1602,6 +1672,13 @@ increasing metadata or read concurrency. Qualify an ordinary workspace upgrade
 with all seven direct consumers and their enabled feature slices. Audit SQL
 integer conversions against upstream ToSql/FromSql contracts before changing
 callers. No dependency override or vendored patch is authorized.
+
+The current `clone_cache` non-Unix lock helper is a pre-existing no-op. The
+checkpoint-25 cache-ownership proof applies to Unix; Windows NFS handoff is not
+qualified. Replace that no-op with actual OS locking rather than preserving it.
+The workspace MSRV is 1.97, so inspect the standard library's cross-platform
+File locking contracts before selecting another dependency or FFI. Require
+Windows exclusivity/teardown proof in its dedicated environment.
 
 Correctness gates precede tuning. Generation, cache and descriptor ownership
 also determine which performance optimizations are safe. The full hardening

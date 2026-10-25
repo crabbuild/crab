@@ -62,17 +62,20 @@ pub struct MountControlUpdate {
     pub head_ref: Option<String>,
 }
 
+/// Resources needed to finish an accepted backend shutdown.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MountControlShutdown {
-    pub backend: MountControlBackend,
-    pub mountpoint: PathBuf,
-    pub mountpoint_str: String,
-    pub registry_path: Option<PathBuf>,
-    pub pid: Option<u32>,
+pub enum MountControlShutdown {
+    #[cfg(feature = "nfs")]
+    Nfs {
+        context: Box<NfsMountControlContext>,
+        cache_dir: PathBuf,
+    },
+    #[cfg(unix)]
+    Fuse { mountpoint: PathBuf },
 }
 
 #[cfg(feature = "nfs")]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NfsMountControlContext {
     pub mountpoint: PathBuf,
     pub mountpoint_str: String,
@@ -462,13 +465,14 @@ pub async fn reset_overlay(path: &Path) -> Result<Option<crate::publish::Overlay
 pub async fn shutdown(path: &Path) -> Result<Option<MountControlShutdown>> {
     #[cfg(feature = "nfs")]
     if let Some(context) = nfs_context(path)? {
-        crate::nfs_control::shutdown(&context.endpoint).await?;
-        return Ok(Some(MountControlShutdown {
-            backend: MountControlBackend::Nfs,
-            mountpoint: context.mountpoint,
-            mountpoint_str: context.mountpoint_str,
-            registry_path: Some(context.registry_path),
-            pid: Some(context.entry.pid),
+        let cache_dir = crate::nfs_control::shutdown(&context.endpoint)
+            .await?
+            .ok_or_else(|| {
+                CrabError::Internal("NFS shutdown response missing live cache identity".into())
+            })?;
+        return Ok(Some(MountControlShutdown::Nfs {
+            context: Box::new(context),
+            cache_dir,
         }));
     }
 
@@ -487,13 +491,7 @@ pub async fn shutdown(path: &Path) -> Result<Option<MountControlShutdown>> {
             std::time::Duration::from_mins(2),
         )
         .await?;
-        return Ok(Some(MountControlShutdown {
-            backend: MountControlBackend::Fuse,
-            mountpoint,
-            mountpoint_str,
-            registry_path: None,
-            pid: None,
-        }));
+        return Ok(Some(MountControlShutdown::Fuse { mountpoint }));
     }
 
     #[cfg(not(unix))]

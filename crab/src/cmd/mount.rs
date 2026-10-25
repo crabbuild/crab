@@ -2538,62 +2538,65 @@ pub fn run_unmount(path: &Path) -> Result<()> {
 
 #[cfg(any(feature = "fuse", feature = "nfs"))]
 pub async fn try_mount_control_unmount(path: &Path) -> Result<bool> {
+    #[cfg(feature = "nfs")]
+    if let Some(context) = crate::vfs::mount_control::nfs_context(path)?
+        && !is_pid_alive(context.entry.pid)
+    {
+        // A confirmed dead helper has no live exchange to preserve. Classify
+        // stale cleanup before sending; an uncertain live shutdown must fail.
+        return Ok(false);
+    }
     let Some(shutdown) = crate::vfs::mount_control::shutdown(path).await? else {
         return Ok(false);
     };
 
-    match shutdown.backend {
-        crate::vfs::mount_control::MountControlBackend::Nfs => {
-            #[cfg(feature = "nfs")]
-            {
-                let Some(registry_path) = shutdown.registry_path else {
-                    return Err(CrabError::Internal(
-                        "NFS mount control shutdown missing registry path".into(),
-                    ));
-                };
-                let Some(pid) = shutdown.pid else {
-                    return Err(CrabError::Internal(
-                        "NFS mount control shutdown missing helper PID".into(),
-                    ));
-                };
-                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-                while tokio::time::Instant::now() < deadline {
-                    let mounted = crate::vfs::nfs_mount::is_mounted(&shutdown.mountpoint);
-                    if nfs_shutdown_complete(is_pid_alive(pid), mounted, &shutdown.mountpoint)? {
-                        crate::vfs::mounts_registry::remove_entry(
-                            &registry_path,
-                            &shutdown.mountpoint_str,
-                        )?;
-                        clean_pid_file(&find_crab_dir(&shutdown.mountpoint));
-                        println!("Unmounted {}.", shutdown.mountpoint.display());
-                        return Ok(true);
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    match shutdown {
+        #[cfg(feature = "nfs")]
+        crate::vfs::mount_control::MountControlShutdown::Nfs { context, cache_dir } => {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            while tokio::time::Instant::now() < deadline {
+                let mounted = crate::vfs::nfs_mount::is_mounted(&context.mountpoint);
+                if let Some(_cache_guard) = nfs_shutdown_cache_guard(
+                    is_pid_alive(context.entry.pid),
+                    mounted,
+                    &context.mountpoint,
+                    &cache_dir,
+                )? {
+                    // Retain cache ownership through registry cleanup so a new
+                    // mount cannot acquire this cache before cleanup finishes.
+                    crate::vfs::mounts_registry::remove_owned_entry(
+                        &context.registry_path,
+                        &context.entry,
+                    )?;
+                    println!("Unmounted {}.", context.mountpoint.display());
+                    return Ok(true);
                 }
-
-                Err(CrabError::Internal(format!(
-                    "NFS helper accepted shutdown for {} but did not unmount within 10s",
-                    shutdown.mountpoint.display()
-                )))
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            #[cfg(not(feature = "nfs"))]
-            {
-                Err(CrabError::Internal(
-                    "NFS mount control returned without NFS support".into(),
-                ))
-            }
+            Err(CrabError::Internal(format!(
+                "NFS helper accepted shutdown for {} but did not unmount and release its cache within 10s",
+                context.mountpoint.display()
+            )))
         }
-        crate::vfs::mount_control::MountControlBackend::Fuse => {
-            println!("Unmounted {}.", shutdown.mountpoint.display());
+        #[cfg(unix)]
+        crate::vfs::mount_control::MountControlShutdown::Fuse { mountpoint } => {
+            println!("Unmounted {}.", mountpoint.display());
             Ok(true)
         }
     }
 }
 
 #[cfg(feature = "nfs")]
-fn nfs_shutdown_complete(pid_alive: bool, mounted: bool, mountpoint: &Path) -> Result<bool> {
+fn nfs_shutdown_cache_guard(
+    pid_alive: bool,
+    mounted: bool,
+    mountpoint: &Path,
+    cache_dir: &Path,
+) -> Result<Option<crate::vfs::clone_cache::MountCacheLock>> {
     if !mounted {
-        return Ok(true);
+        return Ok(crate::vfs::clone_cache::MountCacheLock::try_acquire(
+            cache_dir,
+        )?);
     }
     if !pid_alive {
         return Err(CrabError::Internal(format!(
@@ -2601,7 +2604,7 @@ fn nfs_shutdown_complete(pid_alive: bool, mounted: bool, mountpoint: &Path) -> R
             mountpoint.display()
         )));
     }
-    Ok(false)
+    Ok(None)
 }
 
 #[cfg(any(feature = "fuse", feature = "nfs"))]
@@ -2707,8 +2710,11 @@ fn unmount_registry_entry(
         println!("Cleaned up stale mount at {}.", entry.mountpoint);
     }
 
-    clean_pid_file(&find_crab_dir(mountpoint));
-    crate::vfs::mounts_registry::remove_entry(registry_path, &entry.mountpoint)?;
+    if crate::vfs::mounts_registry::remove_owned_entry(registry_path, entry)?
+        && entry.backend.as_deref() != Some("nfs")
+    {
+        clean_pid_file(&find_crab_dir(mountpoint));
+    }
     Ok(true)
 }
 
@@ -2742,19 +2748,9 @@ pub async fn run_unmount_all_live_or_persisted() -> Result<()> {
     let mut unmounted = 0u32;
     for entry in &entries {
         let mountpoint = Path::new(&entry.mountpoint);
-        match try_mount_control_unmount(mountpoint).await {
-            Ok(true) => {
-                unmounted += 1;
-                continue;
-            }
-            Ok(false) => {}
-            Err(error) => {
-                warn!(
-                    mountpoint = %entry.mountpoint,
-                    error = %error,
-                    "live mount-control unmount failed, falling back"
-                );
-            }
+        if try_mount_control_unmount(mountpoint).await? {
+            unmounted += 1;
+            continue;
         }
 
         if unmount_registry_entry(&registry_path, entry)? {
@@ -6304,6 +6300,50 @@ mod unmount_tests {
 
     #[cfg(feature = "nfs")]
     fn nfs_control_state(mountpoint: &Path) -> crate::vfs::nfs_control::NfsControlState {
+        let root = mountpoint.parent().unwrap();
+        let source = root.join("control-source");
+        for args in [
+            vec!["init", "-b", "main"],
+            vec![
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "seed",
+            ],
+        ] {
+            std::fs::create_dir_all(&source).unwrap();
+            let result = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&source)
+                .args(args)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_COMMON_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+        let config = crate::vfs::pipeline::PipelineConfig {
+            source: source.display().to_string(),
+            git_dir: source.join(".git"),
+            git_metadata: crate::vfs::pipeline::GitMetadataOwnership::Borrowed,
+            ref_name: Some("refs/heads/main".into()),
+            read_only: true,
+            cache_dir: root.join("live-cache"),
+            cancel_token: tokio_util::sync::CancellationToken::new(),
+        };
+        let output = crate::vfs::pipeline::MountPipelineBuilder::new(config.clone())
+            .execute()
+            .unwrap();
         crate::vfs::nfs_control::NfsControlState {
             mountpoint: mountpoint.to_path_buf(),
             read_only: true,
@@ -6311,10 +6351,131 @@ mod unmount_tests {
             directory_pages: crate::vfs::nfs::NfsDirectoryPageCache::new(4, 4096),
             write_journal: std::sync::Arc::new(crate::vfs::nfs::NfsWriteJournal::new()),
             protocol_stats: std::sync::Arc::new(crate::vfs::nfs::NfsProtocolStats::new()),
-            engine: None,
-            runtime: None,
+            engine: Some(std::sync::Arc::clone(&output.engine)),
+            runtime: Some(std::sync::Arc::new(std::sync::Mutex::new(
+                crate::vfs::nfs_control::NfsMountRuntime { output, config },
+            ))),
             lifecycle: crate::vfs::nfs_control::NfsMountLifecycleStatus::default(),
         }
+    }
+
+    #[cfg(all(feature = "nfs", unix))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unmount_waits_for_live_cache_lease() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let _env_lock = crate::test::git_repo::GIT_DIR_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = set_test_home(tmp.path());
+        let mountpoint = tmp.path().join("view");
+        std::fs::create_dir(&mountpoint).unwrap();
+        let mountpoint = normalize_unmount_path(&mountpoint);
+        let cache_dir = tmp.path().join("actual-live-cache");
+        let cache_lock = crate::vfs::clone_cache::MountCacheLock::acquire(&cache_dir).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("tcp:{}?token=cache-handoff", listener.local_addr().unwrap());
+        let registry_path = mounts_registry::registry_path().unwrap();
+        let entry = sample_nfs_entry(&mountpoint.display().to_string(), &endpoint);
+        mounts_registry::add_entry(&registry_path, entry.clone()).unwrap();
+        let response = serde_json::json!({"ok": true, "cache_dir": cache_dir}).to_string() + "\n";
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (reader, mut writer) = stream.into_split();
+            let mut lines = BufReader::new(reader).lines();
+            let request: serde_json::Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(request["op"], "shutdown");
+            writer.write_all(response.as_bytes()).await.unwrap();
+        });
+        let mut unmount = tokio::spawn(async move { try_mount_control_unmount(&mountpoint).await });
+        peer.await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), &mut unmount)
+                .await
+                .is_err(),
+            "unmount returned while its live cache was still owned"
+        );
+        assert_eq!(
+            mounts_registry::list_entries(&registry_path).unwrap(),
+            vec![entry]
+        );
+        drop(cache_lock);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), unmount)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+        );
+        assert!(
+            mounts_registry::list_entries(&registry_path)
+                .unwrap()
+                .is_empty()
+        );
+        crate::vfs::clone_cache::MountCacheLock::acquire(&cache_dir).unwrap();
+    }
+
+    #[cfg(all(feature = "nfs", unix))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn batch_unmount_preserves_live_owner_after_control_failure() {
+        let _env_lock = crate::test::git_repo::GIT_DIR_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = set_test_home(tmp.path());
+        let mountpoint = tmp.path().join("view");
+        std::fs::create_dir(&mountpoint).unwrap();
+        let mountpoint = normalize_unmount_path(&mountpoint);
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let registry_path = mounts_registry::registry_path().unwrap();
+        let mut entry = sample_nfs_entry(
+            &mountpoint.display().to_string(),
+            &free_tcp_control_endpoint(),
+        );
+        entry.pid = child.id();
+        mounts_registry::add_entry(&registry_path, entry.clone()).unwrap();
+        let result = run_unmount_all_live_or_persisted().await;
+        let alive = child.try_wait().unwrap().is_none();
+        let entries = mounts_registry::list_entries(&registry_path).unwrap();
+        let _ = child.kill();
+        child.wait().unwrap();
+        assert!(result.is_err());
+        assert!(
+            alive,
+            "failed live control must not terminate its persisted PID"
+        );
+        assert_eq!(entries, vec![entry]);
+    }
+
+    #[cfg(feature = "nfs")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn confirmed_dead_nfs_helper_uses_stale_cleanup() {
+        let _env_lock = crate::test::git_repo::GIT_DIR_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = set_test_home(tmp.path());
+        let mountpoint = tmp.path().join("view");
+        std::fs::create_dir(&mountpoint).unwrap();
+        let mountpoint = normalize_unmount_path(&mountpoint);
+        let registry_path = mounts_registry::registry_path().unwrap();
+        let mut entry = sample_nfs_entry(
+            &mountpoint.display().to_string(),
+            "unix:/missing/control.sock",
+        );
+        entry.pid = 4_000_000_000;
+        mounts_registry::add_entry(&registry_path, entry).unwrap();
+        assert!(!try_mount_control_unmount(&mountpoint).await.unwrap());
+        run_unmount(&mountpoint).unwrap();
+        assert!(
+            mounts_registry::list_entries(&registry_path)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// A PID of 0 is never alive (it's the kernel).
@@ -6335,22 +6496,28 @@ mod unmount_tests {
 
     #[test]
     #[cfg(feature = "nfs")]
-    fn nfs_shutdown_requires_kernel_mount_to_disappear() {
-        let mountpoint = Path::new("/mnt/crab");
-
-        assert!(nfs_shutdown_complete(true, false, mountpoint).unwrap());
-        assert!(!nfs_shutdown_complete(true, true, mountpoint).unwrap());
-        assert!(nfs_shutdown_complete(false, true, mountpoint).is_err());
-    }
-
-    #[test]
-    fn linux_force_unmount_falls_back_to_plain_umount() {
-        let programs = linux_unmount_commands()
-            .iter()
-            .map(|command| command.program)
-            .collect::<Vec<_>>();
-
-        assert_eq!(programs, vec!["fusermount3", "fusermount", "umount"]);
+    fn nfs_shutdown_requires_kernel_detachment_and_cache_ownership() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mountpoint = tmp.path().join("view");
+        let cache_dir = tmp.path().join("cache");
+        let lock = crate::vfs::clone_cache::MountCacheLock::acquire(&cache_dir).unwrap();
+        assert!(
+            nfs_shutdown_cache_guard(true, false, &mountpoint, &cache_dir)
+                .unwrap()
+                .is_none()
+        );
+        drop(lock);
+        assert!(
+            nfs_shutdown_cache_guard(true, false, &mountpoint, &cache_dir)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            nfs_shutdown_cache_guard(true, true, &mountpoint, &cache_dir)
+                .unwrap()
+                .is_none()
+        );
+        assert!(nfs_shutdown_cache_guard(false, true, &mountpoint, &cache_dir).is_err());
     }
 
     /// run_unmount removes the registry entry for a stale mount.
@@ -6405,6 +6572,9 @@ mod unmount_tests {
     #[test]
     #[cfg(feature = "nfs")]
     fn background_nfs_readiness_waits_for_control_endpoint() {
+        let _env_lock = crate::test::git_repo::GIT_DIR_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().unwrap();
         let mountpoint = tmp.path().join("view");
         let endpoint = free_tcp_control_endpoint();
@@ -6418,9 +6588,11 @@ mod unmount_tests {
             assert!(!nfs_background_control_ready(Some(&endpoint)).await);
 
             let cancel = tokio_util::sync::CancellationToken::new();
+            let state = nfs_control_state(&mountpoint);
+            let engine = state.engine.clone().unwrap();
             let handle = crate::vfs::nfs_control::spawn_server(
                 Some(endpoint.clone()),
-                nfs_control_state(&mountpoint),
+                state,
                 cancel.clone(),
             )
             .unwrap();
@@ -6437,6 +6609,7 @@ mod unmount_tests {
 
             crate::vfs::nfs_control::shutdown(&endpoint).await.unwrap();
             handle.await.unwrap().unwrap();
+            engine.shutdown_background().await;
         });
     }
 
@@ -6463,9 +6636,11 @@ mod unmount_tests {
 
         runtime.block_on(async {
             let cancel = tokio_util::sync::CancellationToken::new();
+            let state = nfs_control_state(&mountpoint);
+            let engine = state.engine.clone().unwrap();
             let handle = crate::vfs::nfs_control::spawn_server(
                 Some(endpoint.clone()),
-                nfs_control_state(&mountpoint),
+                state,
                 cancel.clone(),
             )
             .unwrap();
@@ -6481,6 +6656,7 @@ mod unmount_tests {
 
             assert!(cancel.is_cancelled());
             handle.await.unwrap().unwrap();
+            engine.shutdown_background().await;
         });
 
         let entries = mounts_registry::list_entries(&registry_path).unwrap();

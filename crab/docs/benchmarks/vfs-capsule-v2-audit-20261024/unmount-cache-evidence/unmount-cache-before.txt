@@ -1,0 +1,106 @@
+   Compiling crab v1.2.4 (/Users/haipingfu/.codex-workspaces/worktrees/ios-02d01345-abf9-472f-8933-2c62e87fc719/Crab/crab)
+warning: unused import: `std::time::Duration`
+  --> crab/src/cmd/coordinator.rs:10:5
+   |
+10 | use std::time::Duration;
+   |     ^^^^^^^^^^^^^^^^^^^
+   |
+   = note: `#[warn(unused_imports)]` (part of `#[warn(unused)]`) on by default
+
+warning: unused import: `std::fmt`
+ --> crab/src/replication/mod.rs:9:5
+  |
+9 | use std::fmt;
+  |     ^^^^^^^^
+
+warning: unused import: `tracing::warn`
+  --> crab/src/storage/head_class.rs:57:5
+   |
+57 | use tracing::warn;
+   |     ^^^^^^^^^^^^^
+
+warning: unused variable: `rel_path`
+    --> crab/src/cmd/add.rs:2768:10
+     |
+2768 |     for (rel_path, abs_path) in selected_dirs {
+     |          ^^^^^^^^ help: if this is intentional, prefix it with an underscore: `_rel_path`
+     |
+     = note: `#[warn(unused_variables)]` (part of `#[warn(unused)]`) on by default
+
+warning: field `prefix` is never read
+    --> crab/src/cmd/fsck_store.rs:1389:5
+     |
+1387 | pub struct StoreRepairer {
+     |            ------------- field in this struct
+1388 |     store: Store,
+1389 |     prefix: String,
+     |     ^^^^^^
+     |
+     = note: `#[warn(dead_code)]` (part of `#[warn(unused)]`) on by default
+
+warning: function `run_yaml_single_stage` is never used
+    --> crab/src/cmd/run.rs:1348:10
+     |
+1348 | async fn run_yaml_single_stage(
+     |          ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `preview_stage_cache_hit` is never used
+    --> crab/src/cmd/run.rs:3618:4
+     |
+3618 | fn preview_stage_cache_hit(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `control_plane_backend_initialization_failed` is never used
+    --> crab/src/replication/mod.rs:2149:4
+     |
+2149 | fn control_plane_backend_initialization_failed(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `gcs_pair_policy_state` is never used
+    --> crab/src/replication/mod.rs:5753:4
+     |
+5753 | fn gcs_pair_policy_state(
+     |    ^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `validate_coordinator_gc_snapshot_admission` is never used
+    --> crab/src/replication/mod.rs:7439:4
+     |
+7439 | fn validate_coordinator_gc_snapshot_admission(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `coordinator_gc_snapshot_status_error` is never used
+    --> crab/src/replication/mod.rs:7469:4
+     |
+7469 | fn coordinator_gc_snapshot_status_error(
+     |    ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+warning: function `aws_region` is never used
+   --> crab/src/tier/runtime.rs:159:4
+    |
+159 | fn aws_region(config: &Config) -> String {
+    |    ^^^^^^^^^^
+
+warning: linker stderr: ld: __eh_frame section too large (max 16MB) to encode dwarf unwind offsets in compact unwind table, performance of exception handling might be affected
+  |
+  = note: `#[warn(linker_messages)]` on by default
+
+warning: `crab` (lib test) generated 13 warnings (run `cargo fix --lib -p crab --tests` to apply 4 suggestions)
+    Finished `test` profile [unoptimized] target(s) in 42.22s
+     Running unittests src/lib.rs (/Users/haipingfu/Workspace/crabbuild-target/crab-ios-02d01345-vfs/debug/deps/crab-796133789632e187)
+
+running 1 test
+Unmounted /private/var/folders/rn/k2b7mvbs2dgb__6ys6_h94pm0000gn/T/.tmpKbm1q3/view.
+
+thread 'cmd::mount::unmount_tests::unmount_waits_for_live_cache_lease' (32314759) panicked at crab/src/cmd/mount.rs:6350:9:
+unmount returned while its live cache was still owned
+note: run with `RUST_BACKTRACE=1` environment variable to display a backtrace
+test cmd::mount::unmount_tests::unmount_waits_for_live_cache_lease ... FAILED
+
+failures:
+
+failures:
+    cmd::mount::unmount_tests::unmount_waits_for_live_cache_lease
+
+test result: FAILED. 0 passed; 1 failed; 0 ignored; 0 measured; 4316 filtered out; finished in 0.05s
+
+error: test failed, to rerun pass `-p crab --lib`

@@ -241,6 +241,21 @@ Its throughput is not directly comparable with older kernel-cached runs.
 | Ref/snapshot refresh | Coordinator, daemon, or interactive NFS runtime | Cancel polling and await the task, including any admitted blocking Git/snapshot work |
 | NFS server and control | NFS mount runtime | Backend teardown controls these separately from hydration |
 
+The NFS helper reports its actual cache identity when accepting shutdown. CLI
+unmount succeeds only after the kernel mount disappears and it acquires that
+cache's exclusive lease. The CLI retains the lease through conditional registry
+cleanup; a replacement owner at the same mountpoint is preserved. Neither PID
+exit nor kernel detachment alone proves cache-backed work has finished. NFS
+helpers do not write the FUSE PID file, so their live cleanup does not remove it.
+Single and batch unmount propagate live-control failures. A confirmed dead NFS
+helper is classified before any exchange and may use stale-mount cleanup;
+uncertain live shutdown cannot authorize force termination or a second operation.
+The coordinator already awaits FUSE unmount and engine drain before releasing
+its cache guard; daemon teardown separately owns its runtime cache lease.
+The current cache-lock helper enforces exclusivity on Unix. Its non-Unix branch
+is still a no-op; Windows cache ownership and handoff require a real OS lock and
+separate qualification. Linux/macOS lease proof does not cover that branch.
+
 The daemon starts hydration and refresh tasks only when installing them into a
 successfully mounted runtime. Engine or backend setup failure therefore starts
 no such workers. Native backend tasks have their own cleanup boundaries.

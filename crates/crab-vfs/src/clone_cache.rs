@@ -81,6 +81,17 @@ pub struct MountCacheLock {
 
 impl MountCacheLock {
     pub fn acquire(cache_dir: &Path) -> Result<Self> {
+        Self::try_acquire(cache_dir)?.ok_or_else(|| CrabError::Configuration {
+            key: format!(
+                "mount cache is already in use at {}; unmount the active mount before starting another mount for this repository",
+                cache_dir.display()
+            ),
+            origin: "crab mount".into(),
+        })
+    }
+
+    /// Acquire mutable cache ownership, returning None while another owner holds it.
+    pub fn try_acquire(cache_dir: &Path) -> Result<Option<Self>> {
         let path = mount_cache_lock_path(cache_dir);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(CrabError::Io)?;
@@ -93,9 +104,10 @@ impl MountCacheLock {
             .open(&path)
             .map_err(CrabError::Io)?;
 
-        lock_mount_cache_file(&file, cache_dir, &path)?;
-
-        Ok(Self { _file: file })
+        if !lock_mount_cache_file(&file, cache_dir, &path)? {
+            return Ok(None);
+        }
+        Ok(Some(Self { _file: file }))
     }
 }
 
@@ -119,23 +131,17 @@ fn mount_cache_lock_path(cache_dir: &Path) -> PathBuf {
 }
 
 #[cfg(unix)]
-fn lock_mount_cache_file(file: &File, cache_dir: &Path, lock_path: &Path) -> Result<()> {
+fn lock_mount_cache_file(file: &File, cache_dir: &Path, lock_path: &Path) -> Result<bool> {
     let fd = file.as_raw_fd();
     // SAFETY: flock with LOCK_EX|LOCK_NB on a valid file descriptor is safe.
     let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
     if ret == 0 {
-        return Ok(());
+        return Ok(true);
     }
 
     let error = std::io::Error::last_os_error();
     if error.kind() == std::io::ErrorKind::WouldBlock {
-        return Err(CrabError::Configuration {
-            key: format!(
-                "mount cache is already in use at {}; unmount the active mount before starting another mount for this repository",
-                cache_dir.display()
-            ),
-            origin: "crab mount".into(),
-        });
+        return Ok(false);
     }
 
     Err(CrabError::Io(std::io::Error::new(
@@ -149,8 +155,8 @@ fn lock_mount_cache_file(file: &File, cache_dir: &Path, lock_path: &Path) -> Res
 }
 
 #[cfg(not(unix))]
-fn lock_mount_cache_file(_file: &File, _cache_dir: &Path, _lock_path: &Path) -> Result<()> {
-    Ok(())
+fn lock_mount_cache_file(_file: &File, _cache_dir: &Path, _lock_path: &Path) -> Result<bool> {
+    Ok(true)
 }
 
 /// Resolve the user's home directory.
@@ -321,6 +327,7 @@ mod tests {
         let cache_dir = tmp.path().join("repos").join("repo-cache");
 
         let lock = MountCacheLock::acquire(&cache_dir).unwrap();
+        assert!(MountCacheLock::try_acquire(&cache_dir).unwrap().is_none());
         let conflict = MountCacheLock::acquire(&cache_dir).unwrap_err();
         assert!(
             conflict
@@ -331,6 +338,9 @@ mod tests {
 
         drop(lock);
 
+        let handoff = MountCacheLock::try_acquire(&cache_dir).unwrap().unwrap();
+        assert!(MountCacheLock::try_acquire(&cache_dir).unwrap().is_none());
+        drop(handoff);
         MountCacheLock::acquire(&cache_dir).unwrap();
     }
 }

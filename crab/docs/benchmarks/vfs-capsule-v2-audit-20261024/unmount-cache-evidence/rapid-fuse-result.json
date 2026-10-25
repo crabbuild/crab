@@ -1,0 +1,66 @@
+{
+  "backend": "fuse",
+  "cycles": 10,
+  "checks": [
+    {
+      "cache_free_at_unmount_return": true
+    },
+    {
+      "cache_free_at_unmount_return": true
+    },
+    {
+      "cache_free_at_unmount_return": true
+    },
+    {
+      "cache_free_at_unmount_return": true
+    },
+    {
+      "cache_free_at_unmount_return": true
+    },
+    {
+      "cache_free_at_unmount_return": true
+    },
+    {
+      "cache_free_at_unmount_return": true
+    },
+    {
+      "cache_free_at_unmount_return": true
+    },
+    {
+      "cache_free_at_unmount_return": true
+    },
+    {
+      "cache_free_at_unmount_return": true
+    },
+    {
+      "cache_free_at_unmount_return": true
+    },
+    {
+      "cache_free_at_unmount_return": true
+    },
+    {
+      "cache_free_at_unmount_return": true
+    },
+    {
+      "cache_free_at_unmount_return": true
+    },
+    {
+      "cache_free_at_unmount_return": true
+    },
+    {
+      "cache_free_at_unmount_return": true
+    },
+    {
+      "cache_free_at_unmount_return": true
+    },
+    {
+      "cache_free_at_unmount_return": true
+    },
+    {
+      "cache_free_at_unmount_return": true
+    },
+    {
+      "cache_free_at_unmount_return": true
+    }
+  ]
+}

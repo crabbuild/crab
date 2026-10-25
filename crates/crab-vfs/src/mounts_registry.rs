@@ -272,6 +272,26 @@ pub fn remove_entry(path: &Path, mountpoint: &str) -> Result<bool> {
     Ok(true)
 }
 
+/// Remove a mount entry only if its original owner still matches.
+pub fn remove_owned_entry(path: &Path, owner: &MountEntry) -> Result<bool> {
+    let _lock = acquire_lock(path)?;
+    let mut entries = read_entries(path)?;
+    let original_len = entries.len();
+    // A new helper can reuse the mountpoint while an old shutdown is draining.
+    // Ref and other view metadata may change without changing the live owner.
+    entries.retain(|entry| {
+        entry.mountpoint != owner.mountpoint
+            || entry.pid != owner.pid
+            || entry.start_time != owner.start_time
+            || entry.control_endpoint != owner.control_endpoint
+    });
+    if entries.len() == original_len {
+        return Ok(false);
+    }
+    write_entries(path, &entries)?;
+    Ok(true)
+}
+
 /// Remove a mount entry by PID.
 ///
 /// Returns `true` if an entry was removed, `false` if not found.
@@ -507,6 +527,29 @@ mod tests {
         let entries = read_entries(&path).unwrap();
         assert_eq!(entries.len(), 1);
         assert_eq!(entries[0].mountpoint, "/mnt/b");
+    }
+
+    #[test]
+    fn owner_cleanup_preserves_replacements_and_ignores_ref_changes() {
+        let tmp = tempfile::tempdir().unwrap();
+        let path = tmp.path().join("mounts.json");
+        let owner = sample_entry("/mnt/a", 100);
+        for field in ["pid", "start_time", "control_endpoint"] {
+            let mut replacement = owner.clone();
+            match field {
+                "pid" => replacement.pid += 1,
+                "start_time" => replacement.start_time.push('1'),
+                _ => replacement.control_endpoint = Some("unix:/new-owner.sock".into()),
+            }
+            add_entry(&path, replacement.clone()).unwrap();
+            assert!(!remove_owned_entry(&path, &owner).unwrap(), "{field}");
+            assert_eq!(list_entries(&path).unwrap(), vec![replacement], "{field}");
+        }
+        let mut switched = owner.clone();
+        switched.git_ref = "refs/heads/other".into();
+        add_entry(&path, switched).unwrap();
+        assert!(remove_owned_entry(&path, &owner).unwrap());
+        assert!(list_entries(&path).unwrap().is_empty());
     }
 
     #[test]

@@ -1,0 +1,11 @@
+{"backend": "nfs", "cycle": 0, "rw_ro_immediate_remount": true, "cache_handoff_assertions": 2}
+{"backend": "nfs", "cycle": 1, "rw_ro_immediate_remount": true, "cache_handoff_assertions": 4}
+{"backend": "nfs", "cycle": 2, "rw_ro_immediate_remount": true, "cache_handoff_assertions": 6}
+{"backend": "nfs", "cycle": 3, "rw_ro_immediate_remount": true, "cache_handoff_assertions": 8}
+{"backend": "nfs", "cycle": 4, "rw_ro_immediate_remount": true, "cache_handoff_assertions": 10}
+{"backend": "nfs", "cycle": 5, "rw_ro_immediate_remount": true, "cache_handoff_assertions": 12}
+{"backend": "nfs", "cycle": 6, "rw_ro_immediate_remount": true, "cache_handoff_assertions": 14}
+{"backend": "nfs", "cycle": 7, "rw_ro_immediate_remount": true, "cache_handoff_assertions": 16}
+{"backend": "nfs", "cycle": 8, "rw_ro_immediate_remount": true, "cache_handoff_assertions": 18}
+{"backend": "nfs", "cycle": 9, "rw_ro_immediate_remount": true, "cache_handoff_assertions": 20}
+rapid_remount_cache_handoff=ok nfs
