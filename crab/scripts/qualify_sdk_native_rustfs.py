@@ -126,10 +126,12 @@ def fixture_environment(work: Path, output: Path, endpoint: str, bucket: str,
     return environment
 
 
-def rustfs_work_parent(output: Path) -> Path:
-    # RustFS adds bucket, key, and metadata components below its data root;
-    # keep Windows object paths short enough for filesystem cleanup to succeed.
-    return output.parent.parent if os.name == "nt" else output.parent
+def rustfs_work_location(output: Path) -> tuple[Path, str, str]:
+    # Deep RustFS recovery keys fail during Windows cleanup unless the fixture
+    # leaves enough path budget for the object's metadata files.
+    if os.name == "nt":
+        return output.parent.parent, "r", "d"
+    return output.parent, "rfs-", "data"
 
 
 def aws(environment: dict[str, str], *arguments: str) -> dict:
@@ -250,7 +252,8 @@ def main() -> None:
     executable, asset, digest = install_rustfs(output / "tools")
     report = {"release": RELEASE, "asset": asset, "sha256": digest, "preflight": "not_started",
               "terminal_state": "failed", "cleanup": "not_started"}
-    with tempfile.TemporaryDirectory(prefix="rfs-", dir=rustfs_work_parent(output)) as temporary:
+    parent, prefix, data_name = rustfs_work_location(output)
+    with tempfile.TemporaryDirectory(prefix=prefix, dir=parent) as temporary:
         work = Path(temporary)
         with socket.socket() as listener:
             listener.bind(("127.0.0.1", 0))
@@ -264,7 +267,7 @@ def main() -> None:
                               "RUSTFS_SECRET_KEY": environment["AWS_SECRET_ACCESS_KEY"],
                               "RUST_LOG": "warn,rustfs_ecstore=debug",
                               "RUSTFS_CONSOLE_ENABLE": "false"}
-        data = work / "data"
+        data = work / data_name
         data.mkdir()
         qualified = False
         with (work / "server.log").open("w") as log:
