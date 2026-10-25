@@ -1145,7 +1145,7 @@ enum OptimizeCmd {
     Plan(crab::cmd::optimize::OptimizePlanArgs),
     /// Apply the combined cost optimization workflow.
     Apply(crab::cmd::optimize::OptimizeApplyArgs),
-    /// Rewrite content-addressed xorbs for the selected size/grouping profile.
+    /// Rewrite Xorb layout in an authenticated Capsule repository.
     Xorbs(crab::cmd::optimize::xorbs::OptimizeXorbsArgs),
     /// Consolidate remote Git pack files.
     Packs {

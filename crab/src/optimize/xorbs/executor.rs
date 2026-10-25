@@ -86,8 +86,8 @@ pub async fn execute(
     profile: &Profile,
     config: &ExecutorConfig,
     cancel: &CancellationToken,
-    store: Option<&Store>,
-    router: Option<&StoreLayout>,
+    store: &Store,
+    router: &StoreLayout,
     restore_orchestrator: Option<&RestoreOrchestrator>,
 ) -> Result<ExecutorOutcome> {
     let start = Instant::now();
@@ -121,28 +121,20 @@ pub async fn execute(
         let last = rows.last().map(|row| row.src_xorb.clone()).ok_or_else(|| {
             CrabError::Internal("pending journal page unexpectedly empty".to_owned())
         })?;
-        let result = match store {
-            Some(store) => {
-                let router = router.ok_or_else(|| CrabError::Configuration {
-                    key: "xorb optimization executor".to_owned(),
-                    origin: "a store layout is required with remote storage".to_owned(),
-                })?;
-                process_batch(
-                    journal,
-                    run_id,
-                    &rows,
-                    profile,
-                    config,
-                    compression,
-                    store,
-                    router,
-                    restore_orchestrator,
-                    cancel,
-                )
-                .await?
-            }
-            None => mark_batch_without_store(journal, run_id, &rows, cancel)?,
-        };
+        let result = process_batch(
+            journal,
+            run_id,
+            &rows,
+            profile,
+            config,
+            compression,
+            store,
+            router,
+            restore_orchestrator,
+            cancel,
+        )
+        .await?;
+
         total.merge(result);
         after = last;
     }
@@ -193,26 +185,6 @@ impl BatchResult {
             self.corrupt_omitted = self.corrupt_omitted.saturating_add(1);
         }
     }
-}
-
-fn mark_batch_without_store(
-    journal: &OptimizeXorbsJournal,
-    run_id: &str,
-    rows: &[SourceRow],
-    cancel: &CancellationToken,
-) -> Result<BatchResult> {
-    let mut completions = Vec::with_capacity(rows.len());
-    for row in rows {
-        check_cancelled(cancel)?;
-        completions.push((row.src_xorb.clone(), "[]".to_owned()));
-    }
-    check_cancelled(cancel)?;
-    journal.complete_sources(run_id, &completions)?;
-    Ok(BatchResult {
-        processed: rows.len() as u64,
-        done: rows.len() as u64,
-        ..BatchResult::default()
-    })
 }
 
 #[derive(Debug)]
@@ -602,34 +574,13 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn execute_with_no_store_marks_pending_as_done() {
-        let dir = tempfile::tempdir().unwrap();
-        let journal = OptimizeXorbsJournal::open(&dir.path().join("journal.db")).unwrap();
-        journal.start_run("run", "{}").unwrap();
-        journal.insert_source("run", "xorb-a").unwrap();
-        journal.insert_source("run", "xorb-b").unwrap();
-        let outcome = execute(
-            &journal,
-            "run",
-            &Profile::code(),
-            &ExecutorConfig::default(),
-            &CancellationToken::new(),
-            None,
-            None,
-            None,
-        )
-        .await
-        .unwrap();
-        assert_eq!(outcome.sources_done, 2);
-        assert_eq!(journal.count_by_status("run").unwrap().pending, 0);
-    }
-
-    #[tokio::test]
     async fn execute_cancellation_stops_before_first_page() {
         let dir = tempfile::tempdir().unwrap();
         let journal = OptimizeXorbsJournal::open(&dir.path().join("journal.db")).unwrap();
         journal.start_run("run", "{}").unwrap();
         journal.insert_source("run", "xorb-a").unwrap();
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store.clone(), "org/cancelled".to_owned());
         let cancel = CancellationToken::new();
         cancel.cancel();
         let result = execute(
@@ -638,8 +589,8 @@ mod tests {
             &Profile::code(),
             &ExecutorConfig::default(),
             &cancel,
-            None,
-            None,
+            &store,
+            &router,
             None,
         )
         .await;

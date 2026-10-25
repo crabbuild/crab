@@ -38,7 +38,6 @@ use crate::storage::StoreLayout;
 use crate::storage::head_class::head_with_class;
 use crate::storage::store::Store;
 use crate::tier::audit_shim::{self, AuditOp};
-use crab_storage::{content_hash_from_path, global_content_prefix};
 
 const OPTIMIZE_XORBS_AUTH_OPERATION: &str = "optimize-xorbs";
 const OPTIMIZE_XORBS_OPERATION: &str = "optimize xorbs";
@@ -54,25 +53,29 @@ const MAX_CAPSULE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 async fn try_build_store(
     cfg: &Config,
     cancel: &CancellationToken,
-) -> Result<(Store, crate::git::url::CrabUrl)> {
+) -> Result<(
+    Store,
+    crate::git::url::CrabUrl,
+    crab_metadata::capsule_protocol::RootSnapshot,
+)> {
     let cwd = std::env::current_dir()?;
     let url = crate::core::project_config::ProjectConfig::remote_url(&cwd)?;
     let parsed = crate::git::url::CrabUrl::parse(&url)?;
-    let store = crate::auth::build_repository_url_store(
+    let (store, root) = crate::auth::build_repository_url_store_with_root(
         cfg,
         &parsed,
         OPTIMIZE_XORBS_AUTH_OPERATION,
         cancel,
     )
     .await?;
-    Ok((store, parsed))
+    Ok((store, parsed, root))
 }
 
 // ---------------------------------------------------------------------------
 // CLI arguments (used by main.rs)
 // ---------------------------------------------------------------------------
 
-/// Arguments for `crab optimize xorbs`.
+/// Optimize a rooted Capsule repository; journal controls remain local.
 #[derive(Debug, clap::Parser)]
 pub struct OptimizeXorbsArgs {
     /// Named xorb optimization profile: `ml`, `dataset`, `code`, or a custom name.
@@ -224,9 +227,9 @@ pub async fn run(args: &OptimizeXorbsArgs, cfg: &Config, cancel: &CancellationTo
 
     // Handle --dry-run.
     if args.dry_run {
-        let (store, parsed) = try_build_store(cfg, cancel).await?;
+        let (store, parsed, root) = try_build_store(cfg, cancel).await?;
         let router = StoreLayout::new(store.clone(), parsed.repo_path);
-        let sources = enumerate_sources(&store, &router, cancel).await?;
+        let sources = enumerate_sources(&store, &router, root, cancel).await?;
         let (profile_name, profile) = resolve_profile(args, cfg, Some(&sources))?;
         info!(profile = %profile_name, "resolved xorb optimization profile");
         run_dry_run(
@@ -329,6 +332,7 @@ fn resolve_profile(
 async fn enumerate_sources(
     store: &Store,
     router: &StoreLayout,
+    root: crab_metadata::capsule_protocol::RootSnapshot,
     cancel: &CancellationToken,
 ) -> Result<Vec<SourceXorbMeta>> {
     if cancel.is_cancelled() {
@@ -337,52 +341,16 @@ async fn enumerate_sources(
 
     let capsule_layout =
         crab_storage::StoreLayout::new(store.as_storage().clone(), router.repo_prefix().to_owned());
-    match crab_metadata::capsule_protocol::load_root(&capsule_layout).await {
-        Ok(root) => {
-            let view = crab_read::capsule_protocol::open_view_from_root_with_control(
-                &capsule_layout,
-                root,
-                crab_read::capsule_protocol::CapsuleReadLimits {
-                    max_capsule_bytes: MAX_CAPSULE_BYTES,
-                    max_frontier_bytes: MAX_CAPSULE_BYTES,
-                },
-            )
-            .await?;
-            return enumerate_capsule_sources(store, &capsule_layout, &view, cancel).await;
-        }
-        Err(crab_metadata::error::MetadataError::Storage {
-            source: crab_storage::StorageError::NotFound { .. },
-        }) => {}
-        Err(error) => return Err(error.into()),
-    }
-
-    let prefix = global_content_prefix(router.global_prefix(), "xorbs");
-    let objects = store.list_prefix(&prefix).await?;
-    let mut sources = Vec::with_capacity(objects.len());
-
-    for object in objects {
-        if cancel.is_cancelled() {
-            return Err(CrabError::Cancelled);
-        }
-
-        let key = object.location.to_string();
-        let hash =
-            content_hash_from_path(&key, "xorbs").ok_or_else(|| CrabError::Configuration {
-                key: format!("remote xorb key {key}"),
-                origin: "expected a canonical two-hex-fan-out xorb key".to_string(),
-            })?;
-
-        let head = head_with_class(store, &object.location).await?;
-        sources.push(SourceXorbMeta {
-            hash: hash.to_string(),
-            size_bytes: object.size,
-            storage_class: head.class.to_string(),
-            is_archive: head.class.is_archive_class(),
-        });
-    }
-
-    sources.sort_unstable_by(|left, right| left.hash.cmp(&right.hash));
-    Ok(sources)
+    let view = crab_read::capsule_protocol::open_view_from_root_with_control(
+        &capsule_layout,
+        root,
+        crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: MAX_CAPSULE_BYTES,
+            max_frontier_bytes: MAX_CAPSULE_BYTES,
+        },
+    )
+    .await?;
+    enumerate_capsule_sources(store, &capsule_layout, &view, cancel).await
 }
 
 async fn enumerate_capsule_sources(
@@ -549,25 +517,14 @@ async fn run_apply(
     let crab_dir = crab_dir_from_journal_path(journal_path)?;
     executor::check_gc_not_running(crab_dir)?;
 
-    // Open journal (acquires exclusive lock).
-    let journal = OptimizeXorbsJournal::open(journal_path)?;
-
-    let recorded_run = if args.resume {
-        Some(
-            journal
-                .active_run()?
-                .ok_or_else(|| CrabError::Configuration {
-                    key: "--resume".to_string(),
-                    origin: "no active xorb optimization run to resume".to_string(),
-                })?,
-        )
-    } else {
-        None
-    };
-
-    let (store, parsed) = try_build_store(cfg, cancel).await?;
+    let (store, parsed, root) = try_build_store(cfg, cancel).await?;
     let router = StoreLayout::new(store.clone(), parsed.repo_path.clone());
-    let gc_writer = crate::maintenance::GcWriterLeases::acquire(
+    let capsule_layout =
+        crab_storage::StoreLayout::new(store.as_storage().clone(), router.repo_prefix().to_owned());
+    // Resume bypasses enumeration. The store builder's admitted root must
+    // precede journal creation, and fresh planning reuses that exact snapshot.
+    check_cancelled(cancel)?;
+    let writer = crate::maintenance::RepositoryMaintenanceLease::acquire(
         &store,
         router.global_prefix(),
         router.repo_prefix(),
@@ -575,185 +532,203 @@ async fn run_apply(
     )
     .await?;
     let operation = async {
-        let sources = if recorded_run.is_none() {
-        enumerate_sources(&store, &router, cancel).await?
-    } else {
-        Vec::new()
-    };
-
-    let (run_id, profile_name, profile) = if let Some(run) = recorded_run {
-        let recorded_profile = Profile::from_json(&run.profile)?;
-        let profile_name = if let Some(name) = args.profile.as_deref() {
-            let requested = Profile::from_name(name, &cfg.optimize.xorbs)?;
-            if requested != recorded_profile {
-                return Err(CrabError::Configuration {
-                    key: "--profile".to_string(),
-                    origin: "resume profile does not match the profile recorded in the journal"
-                        .to_string(),
-                });
-            }
-            name.to_string()
+        let journal = OptimizeXorbsJournal::open(journal_path)?;
+        let recorded_run = if args.resume {
+            Some(journal.active_run()?.ok_or_else(|| CrabError::Configuration {
+                key: "--resume".to_owned(),
+                origin: "no active xorb optimization run to resume".to_owned(),
+            })?)
         } else {
-            profile_label(&recorded_profile)
+            None
         };
-        reconcile::prepare_resume(&journal, &run, &store, &router, cancel).await?;
-        info!(run_id = %run.run_id, profile = %profile_name, "resuming xorb optimization run");
-        (run.run_id, profile_name, recorded_profile)
-    } else {
-        let (profile_name, profile) = resolve_profile(args, cfg, Some(&sources))?;
-        let run_id = uuid::Uuid::now_v7().to_string();
-        journal.start_run(&run_id, &profile.to_json())?;
-        for source in &sources {
-            journal.insert_source(&run_id, &source.hash)?;
-        }
-        info!(run_id = %run_id, profile = %profile_name, sources = sources.len(), "started new xorb optimization run");
-        (run_id, profile_name, profile)
-    };
+        let sources = if recorded_run.is_none() {
+            let view = crab_read::capsule_protocol::open_view_from_root_with_control(
+                &capsule_layout,
+                root,
+                crab_read::capsule_protocol::CapsuleReadLimits {
+                    max_capsule_bytes: MAX_CAPSULE_BYTES,
+                    max_frontier_bytes: MAX_CAPSULE_BYTES,
+                },
+            ).await?;
+            enumerate_capsule_sources(&store, &capsule_layout, &view, cancel).await?
+        } else {
+            Vec::new()
+        };
 
-    // Execute the pipeline.
-    let exec_cfg = ExecutorConfig {
-        include_cold: args.include_cold,
-        restore_tier: args
-            .restore_tier
-            .clone()
-            .unwrap_or_else(|| cfg.tier.restore_tier.clone()),
-        output_class,
-        ..ExecutorConfig::default()
-    };
-
-    // Record the optimization boundary before any source rewrite begins.
-    audit_shim::record(
-        AuditOp::OptimizeXorbsStart,
-        &serde_json::json!({
-            "run_id": run_id,
-            "profile": profile_name,
-            "include_cold": exec_cfg.include_cold,
-            "output_class": exec_cfg.output_class,
-        }),
-    );
-
-    let restore_orchestrator = if args.include_cold && cfg.tier.enabled {
-        let mut options = crate::tier::runtime::restore_options_from_config(cfg)?;
-        if let Some(tier) = &args.restore_tier {
-            options.tier = crate::tier::runtime::parse_restore_tier(tier)?;
-        }
-        let backend = crate::tier::runtime::build_restore_backend(cfg, &parsed).await?;
-        Some(Arc::new(
-            crate::tier::restore::RestoreOrchestrator::with_options(
-                backend,
-                cfg.tier.restore_max_concurrency,
-                Duration::from_secs(cfg.tier.restore_timeout_secs),
-                options,
-            ),
-        ))
-    } else {
-        None
-    };
-
-    let outcome = executor::execute(
-        &journal,
-        &run_id,
-        &profile,
-        &exec_cfg,
-        cancel,
-        Some(&store),
-        Some(&router),
-        restore_orchestrator.as_deref(),
-    )
-    .await?;
-
-    // Reconcile.
-    let reconcile_outcome = reconcile::finalize(
-        &journal,
-        &run_id,
-        Some(&store),
-        Some(&router),
-        cfg,
-        cancel,
-    )
-    .await?;
-
-    let counts = journal.count_by_status(&run_id)?;
-    if counts.pending > 0 || counts.staged > 0 {
-        return Err(CrabError::Configuration {
-            key: "xorb optimization run pending sources".to_string(),
-            origin: format!(
-                "{} source(s) remain incomplete; rerun with --resume",
-                counts.pending + counts.staged
-            ),
-        });
-    }
-
-    // Complete the run.
-    journal.complete_run(&run_id)?;
-
-    // Finalization is auditable only after reconciliation succeeds.
-    audit_shim::record(
-        AuditOp::OptimizeXorbsFinalize,
-        &serde_json::json!({
-            "run_id": run_id,
-            "profile": profile_name,
-            "sources_done": outcome.sources_done,
-            "sources_corrupt": outcome.sources_corrupt,
-            "entries_updated": reconcile_outcome.entries_updated,
-            "cas_attempts": reconcile_outcome.cas_attempts,
-        }),
-    );
-
-    let elapsed = start.elapsed();
-
-    // Emit summary.
-    let summary = OptimizeXorbsSummary {
-        run_id: run_id.clone(),
-        profile: profile_name.clone(),
-        counts: OptimizeXorbsCounts {
-            done: counts.done,
-            corrupt: counts.corrupt,
-            skipped: counts.skipped,
-            pending: counts.pending + counts.staged,
-        },
-        bytes_read: outcome.bytes_read,
-        bytes_written: outcome.bytes_written,
-        elapsed_ms: elapsed.as_millis() as u64,
-        corrupt_list: outcome.corrupt_list.clone(),
-        corrupt_list_omitted: outcome.corrupt_list_omitted,
-    };
-
-    match output_mode {
-        OutputMode::Json => {
-            emit_json(OPTIMIZE_XORBS_EVENT_SCHEMA, "1.0", &summary)?;
-        }
-        OutputMode::Jsonl => {
-            let stdout = std::io::stdout();
-            let mut stream = JsonlStream::new(OPTIMIZE_XORBS_EVENT_SCHEMA, "1.0", stdout.lock());
-            stream.emit_result(&summary)?;
-        }
-        OutputMode::Text => {
-            println!("Xorb optimization complete:");
-            println!("  Run ID: {}", summary.run_id);
-            println!("  Profile: {}", summary.profile);
-            println!("  Done: {}", summary.counts.done);
-            println!("  Corrupt: {}", summary.counts.corrupt);
-            println!("  Skipped: {}", summary.counts.skipped);
-            println!("  Bytes read: {}", summary.bytes_read);
-            println!("  Bytes written: {}", summary.bytes_written);
-            println!("  Duration: {}ms", summary.elapsed_ms);
-            if !summary.corrupt_list.is_empty() {
-                println!("  Corrupt sources:");
-                for xorb in &summary.corrupt_list {
-                    println!("    - {xorb}");
+        let (run_id, profile_name, profile) = if let Some(run) = recorded_run {
+            let recorded_profile = Profile::from_json(&run.profile)?;
+            let profile_name = if let Some(name) = args.profile.as_deref() {
+                let requested = Profile::from_name(name, &cfg.optimize.xorbs)?;
+                if requested != recorded_profile {
+                    return Err(CrabError::Configuration {
+                        key: "--profile".to_string(),
+                        origin: "resume profile does not match the profile recorded in the journal"
+                            .to_string(),
+                    });
                 }
-                println!("  Recommendation: run `crab fsck` to investigate.");
+                name.to_string()
+            } else {
+                profile_label(&recorded_profile)
+            };
+            reconcile::prepare_resume(&journal, &run, &store, &router, cancel).await?;
+            info!(run_id = %run.run_id, profile = %profile_name, "resuming xorb optimization run");
+            (run.run_id, profile_name, recorded_profile)
+        } else {
+            let (profile_name, profile) = resolve_profile(args, cfg, Some(&sources))?;
+            let run_id = uuid::Uuid::now_v7().to_string();
+            journal.start_run(&run_id, &profile.to_json())?;
+            for source in &sources {
+                journal.insert_source(&run_id, &source.hash)?;
+            }
+            info!(run_id = %run_id, profile = %profile_name, sources = sources.len(), "started new xorb optimization run");
+            (run_id, profile_name, profile)
+        };
+
+        // Execute the pipeline.
+        let exec_cfg = ExecutorConfig {
+            include_cold: args.include_cold,
+            restore_tier: args
+                .restore_tier
+                .clone()
+                .unwrap_or_else(|| cfg.tier.restore_tier.clone()),
+            output_class,
+            ..ExecutorConfig::default()
+        };
+
+        // Record the optimization boundary before any source rewrite begins.
+        audit_shim::record(
+            AuditOp::OptimizeXorbsStart,
+            &serde_json::json!({
+                "run_id": run_id,
+                "profile": profile_name,
+                "include_cold": exec_cfg.include_cold,
+                "output_class": exec_cfg.output_class,
+            }),
+        );
+
+        let restore_orchestrator = if args.include_cold && cfg.tier.enabled {
+            let mut options = crate::tier::runtime::restore_options_from_config(cfg)?;
+            if let Some(tier) = &args.restore_tier {
+                options.tier = crate::tier::runtime::parse_restore_tier(tier)?;
+            }
+            let backend = crate::tier::runtime::build_restore_backend(cfg, &parsed).await?;
+            Some(Arc::new(
+                crate::tier::restore::RestoreOrchestrator::with_options(
+                    backend,
+                    cfg.tier.restore_max_concurrency,
+                    Duration::from_secs(cfg.tier.restore_timeout_secs),
+                    options,
+                ),
+            ))
+        } else {
+            None
+        };
+
+        let outcome = executor::execute(
+            &journal,
+            &run_id,
+            &profile,
+            &exec_cfg,
+            cancel,
+            &store,
+            &router,
+            restore_orchestrator.as_deref(),
+        )
+        .await?;
+
+        // Reconcile.
+        let reconcile_outcome = reconcile::finalize(
+            &journal,
+            &run_id,
+            &store,
+            &router,
+            cancel,
+        )
+        .await?;
+
+        let counts = journal.count_by_status(&run_id)?;
+        if counts.pending > 0 || counts.staged > 0 {
+            return Err(CrabError::Configuration {
+                key: "xorb optimization run pending sources".to_string(),
+                origin: format!(
+                    "{} source(s) remain incomplete; rerun with --resume",
+                    counts.pending + counts.staged
+                ),
+            });
+        }
+
+        // Complete the run.
+        journal.complete_run(&run_id)?;
+
+        // Finalization is auditable only after reconciliation succeeds.
+        audit_shim::record(
+            AuditOp::OptimizeXorbsFinalize,
+            &serde_json::json!({
+                "run_id": run_id,
+                "profile": profile_name,
+                "sources_done": outcome.sources_done,
+                "sources_corrupt": outcome.sources_corrupt,
+                "entries_updated": reconcile_outcome.entries_updated,
+                "cas_attempts": reconcile_outcome.cas_attempts,
+            }),
+        );
+
+        let elapsed = start.elapsed();
+
+        // Emit summary.
+        let summary = OptimizeXorbsSummary {
+            run_id: run_id.clone(),
+            profile: profile_name.clone(),
+            counts: OptimizeXorbsCounts {
+                done: counts.done,
+                corrupt: counts.corrupt,
+                skipped: counts.skipped,
+                pending: counts.pending + counts.staged,
+            },
+            bytes_read: outcome.bytes_read,
+            bytes_written: outcome.bytes_written,
+            elapsed_ms: elapsed.as_millis() as u64,
+            corrupt_list: outcome.corrupt_list.clone(),
+            corrupt_list_omitted: outcome.corrupt_list_omitted,
+        };
+
+        match output_mode {
+            OutputMode::Json => {
+                emit_json(OPTIMIZE_XORBS_EVENT_SCHEMA, "1.0", &summary)?;
+            }
+            OutputMode::Jsonl => {
+                let stdout = std::io::stdout();
+                let mut stream = JsonlStream::new(OPTIMIZE_XORBS_EVENT_SCHEMA, "1.0", stdout.lock());
+                stream.emit_result(&summary)?;
+            }
+            OutputMode::Text => {
+                println!("Xorb optimization complete:");
+                println!("  Run ID: {}", summary.run_id);
+                println!("  Profile: {}", summary.profile);
+                println!("  Done: {}", summary.counts.done);
+                println!("  Corrupt: {}", summary.counts.corrupt);
+                println!("  Skipped: {}", summary.counts.skipped);
+                println!("  Bytes read: {}", summary.bytes_read);
+                println!("  Bytes written: {}", summary.bytes_written);
+                println!("  Duration: {}ms", summary.elapsed_ms);
+                if !summary.corrupt_list.is_empty() {
+                    println!("  Corrupt sources:");
+                    for xorb in &summary.corrupt_list {
+                        println!("    - {xorb}");
+                    }
+                    println!("  Recommendation: run `crab fsck` to investigate.");
+                }
             }
         }
-    }
 
         Ok(())
     }
     .await;
-    let release = gc_writer.release().await;
+    let release = writer.release().await;
     match (operation, release) {
-        (Ok(()), Ok(())) => Ok(()),
+        // The run is complete and its summary is visible. A late cancellation
+        // reported after both fences release cannot reject that completed work.
+        (Ok(()), Ok(()) | Err(CrabError::Cancelled)) => Ok(()),
         (Err(error), _) | (Ok(()), Err(error)) => Err(error),
     }
 }
@@ -807,185 +782,5 @@ fn normalize_output_class(provider: crate::tier::provider::Provider, raw: &str) 
 }
 
 #[cfg(test)]
-mod tests {
-    use super::{crab_dir_from_journal_path, enumerate_sources, normalize_output_class};
-    use crate::core::error::CrabError;
-    use crate::storage::{Store, StoreLayout};
-    use bytes::Bytes;
-    use object_store::memory::InMemory;
-    use std::sync::Arc;
-    use tokio_util::sync::CancellationToken;
-
-    #[test]
-    fn nested_journal_path_resolves_crab_directory() {
-        let path = std::path::Path::new("/repo/.crab/optimize/xorbs/journal.db");
-
-        assert_eq!(
-            crab_dir_from_journal_path(path).unwrap(),
-            std::path::Path::new("/repo/.crab")
-        );
-    }
-
-    #[test]
-    fn output_classes_are_canonicalized_for_each_provider() {
-        use crate::tier::provider::Provider;
-
-        assert_eq!(
-            normalize_output_class(Provider::S3, "standard-ia").unwrap(),
-            "STANDARD_IA"
-        );
-        assert_eq!(
-            normalize_output_class(Provider::Gcs, "nearline").unwrap(),
-            "NEARLINE"
-        );
-        assert_eq!(
-            normalize_output_class(Provider::Azure, "standard").unwrap(),
-            "Hot"
-        );
-    }
-
-    #[test]
-    fn output_class_rejects_cross_provider_values() {
-        let error = normalize_output_class(crate::tier::provider::Provider::Gcs, "STANDARD_IA")
-            .unwrap_err();
-
-        assert!(matches!(error, CrabError::Configuration { .. }));
-    }
-
-    #[tokio::test]
-    async fn capsule_source_enumeration_ignores_foreign_global_xorbs() {
-        let store = Store::new(Arc::new(InMemory::new()));
-        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
-        let layout = crab_storage::StoreLayout::new(
-            store.as_storage().clone(),
-            router.repo_prefix().to_owned(),
-        );
-        let root =
-            crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
-                .await
-                .unwrap();
-        let selected = crab_xet::hash::MerkleHash::from([2_u64; 4]);
-        let foreign = crab_xet::hash::MerkleHash::from([3_u64; 4]);
-        let shard = crab_xet::hash::MerkleHash::from([4_u64; 4]);
-        let file = crab_xet::hash::MerkleHash::from([5_u64; 4]);
-        store
-            .put(
-                &layout.xorb_path(&selected),
-                Bytes::from_static(b"selected"),
-            )
-            .await
-            .unwrap();
-        store
-            .put(&layout.xorb_path(&foreign), Bytes::from_static(b"foreign"))
-            .await
-            .unwrap();
-        let mut catalog = crab_metadata::capsule_protocol::PointerCatalog::new();
-        catalog
-            .insert_xorb(
-                selected.hex(),
-                crab_metadata::capsule_protocol::XorbCatalogEntry::new(
-                    8,
-                    "6".repeat(64),
-                    vec![crab_metadata::capsule_protocol::XorbChunkEntry::new(
-                        "7".repeat(64),
-                        8,
-                    )],
-                ),
-            )
-            .unwrap();
-        catalog
-            .insert_shard(
-                shard.hex(),
-                crab_metadata::capsule_protocol::ShardCatalogEntry::new(1, vec![selected.hex()]),
-            )
-            .unwrap();
-        catalog
-            .insert_file(
-                file.hex(),
-                crab_metadata::capsule_protocol::FileCatalogEntry::new(8, shard.hex()),
-            )
-            .unwrap();
-        let pack = crab_metadata::capsule_protocol::CapsuleGitPack::new(
-            Bytes::from_static(b"pack"),
-            Bytes::from_static(b"index"),
-            Bytes::from_static(b"reverse"),
-            Bytes::from_static(b"locator"),
-            "8".repeat(40),
-            1,
-        )
-        .unwrap();
-        let tip = "9".repeat(40);
-        let transaction = crab_metadata::capsule_protocol::CapsuleTransaction::new(
-            root.record().digest(),
-            vec![crab_metadata::capsule_protocol::CapsuleRefEdit::new(
-                "refs/heads/main",
-                None,
-                Some(tip.clone()),
-                None,
-            )],
-        )
-        .unwrap();
-        let visibility = crab_metadata::capsule_protocol::CapsuleVisibilityDelta::new(
-            std::collections::BTreeMap::from([(
-                "refs/heads/main".to_owned(),
-                crab_metadata::git_visibility::GitVisibilityEdit::from_replacement_objects(
-                    None,
-                    tip.clone(),
-                    vec![tip],
-                ),
-            )]),
-        )
-        .unwrap();
-        let capsule = crab_metadata::capsule_protocol::Capsule::build(
-            &transaction,
-            vec![pack],
-            vec![
-                crab_metadata::capsule_protocol::CapsuleSection::new(
-                    crab_metadata::capsule_protocol::CapsuleSectionKind::CatalogDelta,
-                    catalog.encode_delta().unwrap(),
-                ),
-                crab_metadata::capsule_protocol::CapsuleSection::new(
-                    crab_metadata::capsule_protocol::CapsuleSectionKind::VisibilityDelta,
-                    visibility.encode().unwrap(),
-                ),
-            ],
-        )
-        .unwrap();
-        crab_write::capsule_protocol::publish(&layout, root, &transaction, &capsule)
-            .await
-            .unwrap();
-
-        let sources = enumerate_sources(&store, &router, &CancellationToken::new())
-            .await
-            .unwrap();
-
-        assert_eq!(sources.len(), 1);
-        assert_eq!(sources[0].hash, selected.hex());
-    }
-
-    #[tokio::test]
-    async fn corrupt_capsule_root_never_falls_back_to_global_xorb_listing() {
-        let store = Store::new(Arc::new(InMemory::new()));
-        let router = StoreLayout::new(store.clone(), "org/corrupt".to_owned());
-        let layout = crab_storage::StoreLayout::new(
-            store.as_storage().clone(),
-            router.repo_prefix().to_owned(),
-        );
-        store
-            .put(
-                &layout.capsule_root_path(),
-                Bytes::from_static(b"corrupt root"),
-            )
-            .await
-            .unwrap();
-        let foreign = crab_xet::hash::MerkleHash::from([10_u64; 4]);
-        store
-            .put(&layout.xorb_path(&foreign), Bytes::from_static(b"foreign"))
-            .await
-            .unwrap();
-
-        let result = enumerate_sources(&store, &router, &CancellationToken::new()).await;
-
-        assert!(result.is_err());
-    }
-}
+#[path = "xorbs_tests.rs"]
+mod tests;

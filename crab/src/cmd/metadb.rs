@@ -2871,14 +2871,6 @@ async fn close_rebuild_guard<T>(guard: MetaDbGuard, result: Result<T>) -> Result
     }
 }
 
-/// Counts for generation-pinned rows written before a candidate manifest is visible.
-#[derive(Debug, Clone, Copy)]
-pub(crate) struct CandidateShardIndexPublication {
-    pub(crate) gc_registry_generation: u64,
-    pub(crate) file_entries_written: u64,
-    pub(crate) chunk_entries_written: u64,
-}
-
 /// Write the immutable receipt proving that a manifest's derived indexes are complete.
 pub(crate) async fn write_generation_index_receipt(
     store: &crate::storage::store::Store,
@@ -2948,116 +2940,6 @@ pub(crate) async fn write_generation_index_receipt(
         }
         Err(error) => Err(error),
     }
-}
-
-/// Publish generation-bound file/chunk rows before exposing a candidate shard set.
-pub(crate) async fn publish_candidate_shard_indexes(
-    store: &crate::storage::store::Store,
-    repo_prefix: &str,
-    candidate: &crab_metadata::manifests::Manifest,
-    shard_hashes: &[String],
-    config: &Config,
-    cancel: &CancellationToken,
-) -> Result<CandidateShardIndexPublication> {
-    if candidate.generation == 0 || candidate.shard_index_hash.is_empty() {
-        return Err(CrabError::Internal(
-            "candidate shard indexes require a non-zero manifest anchor".to_owned(),
-        ));
-    }
-    let metadb = build_metadb(
-        Arc::clone(store.inner()),
-        repo_prefix.to_owned(),
-        &store.bucket_identity(),
-        false,
-        config,
-    );
-    let guard = MetaDbGuard::new(metadb);
-    let result = publish_candidate_shard_indexes_with_guard(
-        store,
-        repo_prefix,
-        candidate,
-        shard_hashes,
-        &guard,
-        cancel,
-    )
-    .await;
-    close_rebuild_guard(guard, result).await
-}
-
-async fn publish_candidate_shard_indexes_with_guard(
-    store: &crate::storage::store::Store,
-    repo_prefix: &str,
-    candidate: &crab_metadata::manifests::Manifest,
-    shard_hashes: &[String],
-    guard: &MetaDbGuard,
-    cancel: &CancellationToken,
-) -> Result<CandidateShardIndexPublication> {
-    check_cancelled(cancel)?;
-    let storage = store.as_storage();
-    let router = crab_storage::StoreLayout::new(storage.clone(), repo_prefix.to_owned());
-    let shard_index_hash = MerkleHash::from_hex(&candidate.shard_index_hash).map_err(|error| {
-        CrabError::Internal(format!("candidate shard-index hash invalid: {error}"))
-    })?;
-    let gc_registry_generation = crab_metadata::ref_registry::union_register_repo_shards(
-        storage,
-        &router,
-        shard_hashes.to_vec(),
-    )
-    .await?;
-    check_cancelled(cancel)?;
-    let file_store = guard.file_index().await?;
-    let chunk_store = guard.chunk_index().await?;
-    let mut file_entries_written = 0_u64;
-    let mut chunk_entries_written = 0_u64;
-    let mut verified_xorb = None;
-    let workspace = create_shard_scan_workspace()?;
-
-    for shard_hash_hex in shard_hashes {
-        check_cancelled(cancel)?;
-        let shard_hash =
-            MerkleHash::from_hex(shard_hash_hex).map_err(|error| CrabError::CorruptObject {
-                path: router.shard_path(shard_hash_hex).to_string(),
-                reason: format!("candidate shard hash is invalid: {error}"),
-            })?;
-        let shard_path = router.shard_path(shard_hash_hex);
-        let spool = download_and_spool_shard(
-            storage,
-            &shard_path,
-            shard_hash,
-            workspace.path(),
-            true,
-            true,
-            cancel,
-        )
-        .await?;
-        let (files, chunks) = replay_spooled_shard(
-            &spool,
-            storage,
-            &router,
-            repo_prefix,
-            shard_hash,
-            candidate.generation,
-            shard_index_hash,
-            gc_registry_generation,
-            Some(&file_store),
-            Some(&chunk_store),
-            guard,
-            cancel,
-            &mut verified_xorb,
-        )
-        .await?;
-        file_entries_written = file_entries_written
-            .checked_add(files)
-            .ok_or_else(|| CrabError::Internal("candidate file count overflow".to_owned()))?;
-        chunk_entries_written = chunk_entries_written
-            .checked_add(chunks)
-            .ok_or_else(|| CrabError::Internal("candidate chunk count overflow".to_owned()))?;
-    }
-    Ok(CandidateShardIndexPublication {
-        gc_registry_generation,
-        file_entries_written,
-        chunk_entries_written,
-    })
 }
 
 /// Inner rebuild driver. Kept separate so tests can feed a tempdir-

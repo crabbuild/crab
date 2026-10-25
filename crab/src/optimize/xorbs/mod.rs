@@ -14,7 +14,7 @@
 //!   wall-clock, API cost).
 //! - [`executor`] — streaming source-xorb → dest-xorb pipeline.
 //! - [`journal`] — WAL-mode SQLite journal for crash-safe resume.
-//! - [`reconcile`] — atomic capsule-catalog or legacy-manifest reconciliation.
+//! - [`reconcile`] — atomic Capsule-catalog reconciliation.
 
 pub mod executor;
 pub mod inference;

@@ -1811,6 +1811,74 @@ raw evidence stays outside the PR. The implementation removes the alternate
 publisher rather than adding a fallback or migration reader. Other pack-v1
 owners, macOS waiting writeback and optimized data-plane performance remain open.
 
+## Thirtieth checkpoint: Capsule-only Xorb optimization
+
+The located vertical slice is `OptimizeCmd::Xorbs` → CLI `run` / `run_apply` →
+executor → reconciliation → exact-view checkpoint publication. The configured
+repository store builder already requires a v2 root. Previously apply opened the
+SQLite journal before calling that builder, and resume opened it before looking
+for an active run. Real RustFS baseline probes confirm both rootless operations
+created a journal before rejection; dry-run already rejected without one.
+
+The internal source enumerator still had a missing-root global inventory path,
+and reconciliation still had a manifest publisher. Both are removed together.
+Planning now consumes the root returned by authenticated store admission instead
+of rereading mutable latest. Apply/resume establish that admission before journal
+creation and retain the repository maintenance lease, both GC writer fences and
+owned journal through completion. Execution and finalization require actual
+store/layout references; the no-store path that marked rows done is removed.
+Finalization requires the root even with no completed mappings, keeps only
+selected catalog files, verifies replacement dependencies and publishes only the
+Capsule checkpoint. A completed run retains success when fence release reports
+late cancellation. Non-cancellation cleanup errors still propagate.
+
+The removed manifest publisher was the sole caller of candidate shard-index
+publication. Its newly orphaned result type and two functions are deleted from
+`crab/src/cmd/metadb.rs`; shared rebuild/receipt helpers still used by other
+located owners remain for their separate retirement. Local journal schema-v1
+partial-page repair is the [released v1.2.4 local durability
+contract](https://github.com/crabbuild/crab/blob/v1.2.4/crab/src/optimize/xorbs/journal.rs#L43),
+separate from stored pack-v1 authority, and remains behind mandatory rooted
+admission.
+
+Tests are flat siblings `xorbs_tests.rs` and `reconcile_tests.rs`. Before removal,
+the missing-root enumerator regression did not receive a root error and empty
+reconciliation reported success. The narrowed enumerator now requires an admitted
+root argument; its canonical empty-view regression checks no latest-root reread
+or foreign inventory access. Reconciliation tests both empty/completed mappings
+and cancellation immediately after the committed root PUT. All 70 optimization
+unit/integration tests pass on macOS NFS and Linux NFS/FUSE. NFS-only CLI library
+Clippy completes with 651 warnings across the broad surface; strict whole-CLI
+lint cleanliness is not claimed. Formatting and the diff whitespace check pass.
+
+Make installs the final NFS-only main/helper and combined FUSE-helper roles.
+Real RustFS checks reject rootless dry-run/apply/resume without a journal or any
+provider key/ETag mutation; offline profile/abort/confirmed-drop controls remain
+local. The rooted plan selects exactly its two Xorbs. A task-only proxy forwards
+the checkpoint PUT to RustFS, receives success, withholds the response, sends
+SIGINT and waits for the CLI signal acknowledgement before delivering the PUT
+response. The command exits successfully, with both source rows done, and the
+format-9 checkpoint is visible.
+
+Clearing only the task journal's completion timestamp models the post-commit
+local completion window. Resume completes it without writing payload bytes or
+changing the committed root. This is a simulated journal window, not a physical
+crash/power-loss qualification. The first probe incorrectly retained a Python
+SQLite connection and hit the expected exclusive-lock rejection. After closing
+that harness-owned connection according to the [Python connection context-manager
+contract](https://docs.python.org/3.11/library/sqlite3.html#how-to-use-the-connection-context-manager),
+verification continued from the already committed
+state; no root rollback or source change was used to make it pass.
+
+With both original task-created Xorbs temporarily withheld, independent fresh
+clones and cold-cache native NFS/FUSE mounts reproduce all 10 MiB by SHA-256 and
+pass native Git fsck. Both source bodies/metadata are restored and reread exactly.
+The repository has no legacy manifest, shard-list inventory or generation
+receipt. Local `xorbs-v2/source-manifest.json` binds all 1,532 Rust source/manifest
+files, unchanged through qualification, to the Make-installed artifacts and
+retained logs. Raw evidence remains outside the PR. This debug run does not
+qualify optimized throughput, tail latency or all mount modes.
+
 ## Remaining priority order
 
 The helper-layout gap and live read-only inspection leak are closed by the
@@ -1938,6 +2006,11 @@ Completed admission boundaries:
   Its shard-list reader/publisher and optional unauthenticated file selection
   are removed. Input shards remain immutable GC inputs; catalog replacement
   verifies exact file coverage and complete dependencies before root CAS.
+- Xorb optimization removes internal root-missing global inventory and manifest
+  publication. The CLI retains its admitted root before journal creation and
+  source planning; reconciliation requires a root even for empty mappings.
+  Execution/finalization no longer have no-store success paths. Both old remote
+  publishers and their newly orphaned candidate-index helpers are gone.
 
 Remaining located storage-authority boundaries:
 
@@ -1951,9 +2024,6 @@ Remaining located storage-authority boundaries:
 - `crates/crab-s3-gateway/src/repository.rs`: missing-root detection selects
   legacy catalog and generation maintenance at both background owners. Require
   Capsule authority across the scheduling, read-view and checkpoint callers.
-- `crab/src/cmd/optimize/xorbs.rs::enumerate_sources`: missing roots fall through
-  to global xorb listing rather than the authenticated Capsule inventory. Audit
-  rewrite planning/finalization and dry-run consumers together.
 - `crab/src/cmd/lfs/push.rs::load_remote_ref_tips`: missing roots still read
   manifest refs. Preserve fresh empty-prefix behavior through canonical v2
   initialization, without retaining manifest-only admission.
