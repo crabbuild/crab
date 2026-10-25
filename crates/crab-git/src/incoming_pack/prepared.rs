@@ -491,8 +491,8 @@ impl IncomingPack {
                     )?;
                 }
                 None => {
-                    let source =
-                        ObjectHashReader::new(decoded.reader(object)?, object.kind, object.size);
+                    // The reader checks a verified buffer binding before hash elision.
+                    let source = ObjectHashReader::new(decoded.reader(object)?, object);
                     let source = write_compressed(
                         source,
                         compression,
@@ -506,7 +506,7 @@ impl IncomingPack {
                     if source.inner.remaining() != 0 {
                         return Err(PreparePackError::Mismatch("truncated object spool"));
                     }
-                    if source.object_id() != object.oid {
+                    if source.object_id().is_some_and(|oid| oid != object.oid) {
                         return Err(PreparePackError::Mismatch("indexed object identities"));
                     }
                 }
@@ -581,11 +581,21 @@ fn generated_bytes<'a>(
     objects: &'a BTreeMap<ObjectId, bytes::Bytes>,
     object: &super::IncomingObject,
 ) -> Result<&'a [u8]> {
-    objects
+    let bytes = objects
         .get(&object.oid)
         .filter(|bytes| bytes.len() == object.size)
-        .map(AsRef::as_ref)
-        .ok_or(PreparePackError::Mismatch("generated object size"))
+        .ok_or(PreparePackError::Mismatch("generated object size"))?;
+    // The verified clone keeps the allocation alive. Immutable Bytes with the
+    // same start and length are exactly the bytes bound to the checked Git ID;
+    // replacing the payload must fail even if its decoded size is unchanged.
+    if let Some(verified) = &object.verified_data
+        && (verified.as_ptr() != bytes.as_ptr() || verified.len() != bytes.len())
+    {
+        return Err(PreparePackError::Mismatch(
+            "generated object identity binding",
+        ));
+    }
+    Ok(bytes)
 }
 
 #[derive(Clone, Copy)]
@@ -718,7 +728,13 @@ fn read_object_bytes<'a>(
     // Generated inputs already own their bounded decoded bytes. Borrow them for
     // delta construction; untrusted quarantines keep their file-backed bounds.
     let bytes = match decoded {
-        DecodedObjects::Generated(objects) => Cow::Borrowed(generated_bytes(objects, object)?),
+        DecodedObjects::Generated(objects) => {
+            let bytes = generated_bytes(objects, object)?;
+            if object.verified_data.is_some() {
+                return Ok(Cow::Borrowed(bytes));
+            }
+            Cow::Borrowed(bytes)
+        }
         DecodedObjects::Spool(file) => {
             let mut bytes = Vec::new();
             bytes.try_reserve_exact(object.size).map_err(|source| {
@@ -741,25 +757,33 @@ fn read_object_bytes<'a>(
 
 struct ObjectHashReader<R> {
     inner: R,
-    hash: Sha1,
+    hash: Option<Sha1>,
 }
 
 impl<R> ObjectHashReader<R> {
-    fn new(inner: R, kind: gix_object::Kind, size: usize) -> Self {
-        let mut hash = Sha1::new();
-        hash.update(gix_object::encode::loose_header(kind, size as u64));
+    fn new(inner: R, object: &super::IncomingObject) -> Self {
+        let hash = object.verified_data.is_none().then(|| {
+            let mut hash = Sha1::new();
+            hash.update(gix_object::encode::loose_header(
+                object.kind,
+                object.size as u64,
+            ));
+            hash
+        });
         Self { inner, hash }
     }
 
-    fn object_id(self) -> ObjectId {
-        ObjectId::Sha1(self.hash.finalize().into())
+    fn object_id(self) -> Option<ObjectId> {
+        self.hash.map(|hash| ObjectId::Sha1(hash.finalize().into()))
     }
 }
 
 impl<R: Read> Read for ObjectHashReader<R> {
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         let count = self.inner.read(buffer)?;
-        self.hash.update(&buffer[..count]);
+        if let Some(hash) = &mut self.hash {
+            hash.update(&buffer[..count]);
+        }
         Ok(count)
     }
 }

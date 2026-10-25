@@ -1846,6 +1846,7 @@ async fn build_batch(
     batches_since_checkpoint: usize,
     mutations: &[Mutation],
 ) -> Result<BuiltBatch> {
+    let started = Instant::now();
     let mut tree_state = MutableTree::new(snapshot, warm_tree);
     let mut parent = original_parent;
     let mut outcomes = Vec::with_capacity(mutations.len());
@@ -1912,6 +1913,12 @@ async fn build_batch(
     } else {
         next_checkpoint
     };
+    tracing::info!(
+        phase = "build",
+        commits = commits.len(),
+        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+        "Git mutation phase completed"
+    );
     Ok(BuiltBatch {
         outcomes,
         commits,
@@ -3578,9 +3585,7 @@ fn append_only_entries<'a>(
     for edit in edits {
         let replacement = edit.replacement.as_ref()?;
         if replacement.filename.as_slice() != edit.name
-            || existing
-                .iter()
-                .any(|entry| entry.filename.as_slice() == edit.name)
+            || entry_index(existing, &edit.name).is_some()
         {
             return None;
         }
@@ -4319,6 +4324,37 @@ mod tests {
         assert!(!append_only);
         assert!(ancestors.is_empty());
         assert!(bases.is_empty());
+    }
+
+    #[test]
+    fn append_detection_rejects_replacements_in_git_tree_order() {
+        let original = ["name", "name.ext"].map(|name| tree::Entry {
+            mode: tree::EntryKind::Blob.into(),
+            filename: name.into(),
+            oid: ObjectId::empty_blob(gix_hash::Kind::Sha1),
+        });
+        for (name, kind, expected) in [
+            ("z-added", Some(tree::EntryKind::Blob), true),
+            ("z-added", Some(tree::EntryKind::Tree), true),
+            ("earlier", Some(tree::EntryKind::Blob), false),
+            ("name", Some(tree::EntryKind::Tree), false),
+            ("name.ext", Some(tree::EntryKind::Blob), false),
+            ("name", None, false),
+        ] {
+            let edit = TreeEntryEdit {
+                name: name.as_bytes().to_vec(),
+                replacement: kind.map(|kind| tree::Entry {
+                    mode: kind.into(),
+                    filename: name.into(),
+                    oid: ObjectId::empty_blob(gix_hash::Kind::Sha1),
+                }),
+            };
+            assert_eq!(
+                append_only_entries(&original, &[edit]).is_some(),
+                expected,
+                "{name}: {kind:?}"
+            );
+        }
     }
 
     #[test]

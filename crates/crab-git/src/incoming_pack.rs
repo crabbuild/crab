@@ -155,13 +155,26 @@ pub enum IncomingPackError {
 }
 
 /// Verified object identity, kind, and decoded size.
-#[derive(Clone, Debug)]
+#[derive(Clone)]
 pub struct IncomingObject {
     pub oid: ObjectId,
     pub kind: Kind,
     pub size: usize,
     offset: u64,
     prefix_delta_base: Option<ObjectId>,
+    verified_data: Option<Bytes>,
+}
+
+impl std::fmt::Debug for IncomingObject {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("IncomingObject")
+            .field("oid", &self.oid)
+            .field("kind", &self.kind)
+            .field("size", &self.size)
+            .field("offset", &self.offset)
+            .field("prefix_delta_base", &self.prefix_delta_base)
+            .finish_non_exhaustive()
+    }
 }
 
 /// Verified objects retained in owned buffers or private scratch until dropped.
@@ -216,7 +229,7 @@ impl IncomingPack {
     /// Retain verified generated objects without rehashing immutable owned bytes.
     ///
     /// Enforces the same resource bounds as [`Self::from_generated_objects`].
-    /// Preparation still independently checks every identity before encoding.
+    /// Preparation checks the retained immutable buffer binding before encoding.
     pub fn from_verified_objects<C>(
         objects: impl IntoIterator<Item = GeneratedObject>,
         directory: &Path,
@@ -260,8 +273,9 @@ impl IncomingPack {
             if data.len() > limits.max_object_bytes {
                 return Err(IncomingPackError::Limit("object size"));
             }
-            // Only GeneratedObject's private fields supply a precomputed identity.
-            // Raw public inputs are hashed here; preparation rechecks both sources.
+            // Retain the allocation that was collision-checked by GeneratedObject.
+            // Preparation can verify its immutable buffer binding without rehashing.
+            let verified_data = oid.map(|_| data.clone());
             let oid = oid.unwrap_or_else(|| object_id(kind, &data));
             if stored.contains_key(&oid) {
                 continue;
@@ -282,6 +296,7 @@ impl IncomingPack {
                     size: data.len(),
                     offset,
                     prefix_delta_base,
+                    verified_data,
                 },
             );
             generated.insert(oid, data);
@@ -591,6 +606,7 @@ impl<C: Fn() -> bool> Quarantine<C> {
             size: data.len(),
             offset,
             prefix_delta_base: None,
+            verified_data: None,
         };
         self.objects.insert(oid, object.clone());
         Ok(Resolved { object, depth })
