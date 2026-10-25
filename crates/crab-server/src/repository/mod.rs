@@ -290,6 +290,7 @@ impl Repository {
                 options,
                 2 * 1024 * 1024 * 1024,
                 cancellation,
+                None,
             )
             .await?;
         Ok((view, repository))
@@ -383,6 +384,7 @@ impl Repository {
                 options,
                 2 * 1024 * 1024 * 1024,
                 cancellation,
+                None,
             )
             .await?;
         Ok(PinnedRepository {

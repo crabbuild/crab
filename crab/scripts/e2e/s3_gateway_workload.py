@@ -170,6 +170,18 @@ def _parse_endpoint(endpoint: Endpoint) -> urllib.parse.SplitResult:
     return parsed
 
 
+def _open_connection(
+    endpoint: Endpoint, timeout: float
+) -> http.client.HTTPConnection:
+    parsed = _parse_endpoint(endpoint)
+    connection_type = (
+        http.client.HTTPSConnection
+        if parsed.scheme == "https"
+        else http.client.HTTPConnection
+    )
+    return connection_type(parsed.hostname, parsed.port, timeout=timeout)
+
+
 def _request(
     endpoint: Endpoint,
     method: str,
@@ -177,6 +189,7 @@ def _request(
     query: Iterable[tuple[str, str]] = (),
     body: bytes = b"",
     timeout: float = 30.0,
+    connection: http.client.HTTPConnection | None = None,
 ) -> tuple[RequestResult, bytes]:
     parsed = _parse_endpoint(endpoint)
     query_text = _canonical_query(query)
@@ -204,27 +217,21 @@ def _request(
     )
     wire_headers = {name.title(): value for name, value in signed.items()}
     target = path + (f"?{query_text}" if query_text else "")
-    connection_type = (
-        http.client.HTTPSConnection
-        if parsed.scheme == "https"
-        else http.client.HTTPConnection
-    )
+    owns_connection = connection is None
+    connection = connection or _open_connection(endpoint, timeout)
     started = time.monotonic()
     try:
-        connection = connection_type(parsed.hostname, parsed.port, timeout=timeout)
-        try:
-            connection.request(method, target, body=body or None, headers=wire_headers)
-            response = connection.getresponse()
-            response_body = response.read(MAX_RESPONSE_BYTES + 1)
-            if len(response_body) > MAX_RESPONSE_BYTES:
-                response_body = response_body[:MAX_RESPONSE_BYTES]
-            result = RequestResult(
-                status=response.status,
-                latency_ms=(time.monotonic() - started) * 1000.0,
-            )
-            return result, response_body
-        finally:
+        connection.request(method, target, body=body or None, headers=wire_headers)
+        response = connection.getresponse()
+        response_body = response.read(MAX_RESPONSE_BYTES + 1)
+        if len(response_body) > MAX_RESPONSE_BYTES:
+            response_body = response_body[:MAX_RESPONSE_BYTES]
             connection.close()
+        result = RequestResult(
+            status=response.status,
+            latency_ms=(time.monotonic() - started) * 1000.0,
+        )
+        return result, response_body
     except (OSError, http.client.HTTPException, ValueError) as error:
         return (
             RequestResult(
@@ -234,6 +241,9 @@ def _request(
             ),
             b"",
         )
+    finally:
+        if owns_connection:
+            connection.close()
 
 
 def _payload(writer: int, sequence: int, size: int) -> bytes:
@@ -254,34 +264,41 @@ def _put_worker(
 ) -> WorkloadStats:
     stats = WorkloadStats()
     sequence = 0
-    while time.monotonic() < deadline:
-        key = f"{prefix}/writer-{writer:02d}/object-{sequence:08d}"
-        result, _ = _request(
-            endpoint,
-            "PUT",
-            key,
-            body=_payload(writer, sequence, object_bytes),
-            timeout=timeout,
-        )
-        completed = time.monotonic()
-        window = stats.windows.setdefault(
-            int((completed - started) / window_seconds), WindowStats()
-        )
-        stats.requests += 1
-        stats.latencies_ms.append(result.latency_ms)
-        window.requests += 1
-        window.latencies_ms.append(result.latency_ms)
-        if result.status is not None and 200 <= result.status < 300:
-            stats.acknowledged += 1
-            stats.acknowledged_keys.add(key)
-            window.acknowledged += 1
-        elif result.status is None:
-            stats.errors[result.error or "transport"] += 1
-            window.errors[result.error or "transport"] += 1
-        else:
-            stats.errors[f"http_{result.status}"] += 1
-            window.errors[f"http_{result.status}"] += 1
-        sequence += 1
+    connection = _open_connection(endpoint, timeout)
+    try:
+        while time.monotonic() < deadline:
+            key = f"{prefix}/writer-{writer:02d}/object-{sequence:08d}"
+            result, _ = _request(
+                endpoint,
+                "PUT",
+                key,
+                body=_payload(writer, sequence, object_bytes),
+                timeout=timeout,
+                connection=connection,
+            )
+            completed = time.monotonic()
+            window = stats.windows.setdefault(
+                int((completed - started) / window_seconds), WindowStats()
+            )
+            stats.requests += 1
+            stats.latencies_ms.append(result.latency_ms)
+            window.requests += 1
+            window.latencies_ms.append(result.latency_ms)
+            if result.status is not None and 200 <= result.status < 300:
+                stats.acknowledged += 1
+                stats.acknowledged_keys.add(key)
+                window.acknowledged += 1
+            elif result.status is None:
+                stats.errors[result.error or "transport"] += 1
+                window.errors[result.error or "transport"] += 1
+                connection.close()
+                connection = _open_connection(endpoint, timeout)
+            else:
+                stats.errors[f"http_{result.status}"] += 1
+                window.errors[f"http_{result.status}"] += 1
+            sequence += 1
+    finally:
+        connection.close()
     return stats
 
 

@@ -163,6 +163,35 @@ pub async fn read_capsule_plan_intent(
     Ok(intent)
 }
 
+/// Read historical commitment without repairing markers or terminal receipts.
+///
+/// Missing or uncommitted evidence returns `None`; current refs never establish
+/// an outcome. Corrupt or mismatched durable evidence remains an error.
+pub async fn read_capsule_plan_receipt(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    plan_id: &str,
+) -> Result<Option<CapsulePlanReceipt>> {
+    validate_content_hash(plan_id, "plan id", "capsule plan receipt")?;
+    let receipt = match read_optional(store, &router.capsule_plan_receipt_path(plan_id)).await? {
+        Some(receipt) => receipt,
+        None => match read_capsule_plan_intent(store, router, plan_id).await? {
+            Some(intent) => intent,
+            None => return Ok(None),
+        },
+    };
+    validate(router, &receipt)?;
+    if receipt.plan_id() != plan_id {
+        return Err(corrupt(
+            "capsule plan receipt",
+            "object key differs from plan identity",
+        ));
+    }
+    Ok(read_committed_record(store, router, &receipt)
+        .await?
+        .map(|_| receipt))
+}
+
 /// Resolve historical commitment and repair a missing terminal receipt.
 pub async fn resolve_capsule_plan_receipt(
     store: &Store,
@@ -213,29 +242,59 @@ async fn commit_is_visible(
     router: &StoreLayout<Store>,
     receipt: &CapsulePlanReceipt,
 ) -> Result<bool> {
-    let path = router.capsule_transaction_path(receipt.committed_activation_id());
-    let (body, _) = match store
-        .get_with_etag_bounded(&path, super::MAX_CAPSULE_TRANSACTION_RECORD_BYTES)
-        .await
-    {
-        Ok(value) => value,
-        Err(StorageError::NotFound { .. }) => return Ok(false),
-        Err(error) => return Err(error.into()),
-    };
-    let record = CapsuleTransactionRecord::decode(&body)?;
-    if record.activation_id() != receipt.committed_activation_id()
-        || record.transaction_id() != receipt.transaction.id()?
-    {
-        return Err(corrupt(
-            path.as_ref(),
-            "transaction record does not match its plan intent",
-        ));
-    }
-    if record.status() != CapsuleTransactionStatus::Committed {
+    let Some((record, body)) = read_committed_record(store, router, receipt).await? else {
         return Ok(false);
-    }
+    };
     ensure_commit_marker(store, router, &record, body).await?;
     Ok(true)
+}
+
+async fn read_committed_record(
+    store: &Store,
+    router: &StoreLayout<Store>,
+    receipt: &CapsulePlanReceipt,
+) -> Result<Option<(CapsuleTransactionRecord, Bytes)>> {
+    // Immutable commitment survives coordinator retirement. A still-present
+    // committed coordinator also proves success when its marker reply was lost.
+    for (path, immutable) in [
+        (
+            router.capsule_committed_transaction_path(receipt.committed_activation_id()),
+            true,
+        ),
+        (
+            router.capsule_transaction_path(receipt.committed_activation_id()),
+            false,
+        ),
+    ] {
+        let (body, _) = match store
+            .get_with_etag_bounded(&path, super::MAX_CAPSULE_TRANSACTION_RECORD_BYTES)
+            .await
+        {
+            Ok(value) => value,
+            Err(StorageError::NotFound { .. }) => continue,
+            Err(error) => return Err(error.into()),
+        };
+        let record = CapsuleTransactionRecord::decode(&body)?;
+        if record.activation_id() != receipt.committed_activation_id()
+            || record.transaction_id() != receipt.transaction.id()?
+        {
+            return Err(corrupt(
+                path.as_ref(),
+                "transaction record does not match its plan intent",
+            ));
+        }
+        if record.status() == CapsuleTransactionStatus::Committed {
+            return Ok(Some((record, body)));
+        }
+        if immutable {
+            return Err(corrupt(
+                path.as_ref(),
+                "immutable commit marker is not committed",
+            ));
+        }
+        return Ok(None);
+    }
+    Ok(None)
 }
 
 async fn ensure_commit_marker(
@@ -333,6 +392,12 @@ async fn write_exact(
     let body = serde_json::to_vec(receipt)
         .map(Bytes::from)
         .map_err(|error| MetadataError::Internal(format!("serialize capsule plan: {error}")))?;
+    if body.len() as u64 > MAX_CAPSULE_PLAN_BYTES {
+        return Err(MetadataError::CapsulePlanSize {
+            bytes: body.len() as u64,
+            maximum: MAX_CAPSULE_PLAN_BYTES,
+        });
+    }
     match store.create_strict(path, body.clone()).await {
         Ok(()) => Ok(()),
         Err(StorageError::StateConflict { .. }) => {
@@ -356,5 +421,143 @@ fn corrupt(path: &str, reason: impl Into<String>) -> MetadataError {
     MetadataError::CorruptObject {
         path: path.to_owned(),
         reason: reason.into(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::sync::Arc;
+
+    async fn fixture() -> (Store, StoreLayout<Store>, CapsulePlanReceipt) {
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let layout = StoreLayout::new(store.clone(), "repository".to_owned());
+        let transaction = CapsuleTransaction::for_plan(
+            &"a".repeat(64),
+            &"b".repeat(64),
+            vec![super::super::CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some("1".repeat(40)),
+                None,
+            )],
+        )
+        .unwrap();
+        let intent = prepare_capsule_plan(&store, &layout, &transaction, &"c".repeat(64))
+            .await
+            .unwrap();
+        (store, layout, intent)
+    }
+
+    #[tokio::test]
+    async fn oversized_intent_is_rejected_before_it_becomes_durable() {
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let layout = StoreLayout::new(store.clone(), "repository".to_owned());
+        let transaction = CapsuleTransaction::for_plan(
+            &"a".repeat(64),
+            &"b".repeat(64),
+            (0..600)
+                .map(|index| {
+                    super::super::CapsuleRefEdit::new(
+                        format!("refs/tags/{index}-{}", "x".repeat(128)),
+                        None,
+                        Some("1".repeat(40)),
+                        None,
+                    )
+                })
+                .collect(),
+        )
+        .unwrap();
+        let result = prepare_capsule_plan(&store, &layout, &transaction, &"c".repeat(64)).await;
+        assert!(
+            matches!(result, Err(MetadataError::CapsulePlanSize { .. }))
+                && store
+                    .list_prefix(&object_store::path::Path::from("repository"))
+                    .await
+                    .unwrap()
+                    .is_empty()
+        );
+    }
+
+    #[tokio::test]
+    async fn read_only_recovery_proves_commitment_without_repairing_objects() {
+        for immutable in [false, true] {
+            for terminal in [0, 1, 2] {
+                let (store, layout, intent) = fixture().await;
+                let mut expected = intent.clone();
+                if terminal == 2 {
+                    expected.committed_activation_id = Some("d".repeat(64));
+                }
+                let record = CapsuleTransactionRecord::preparing(
+                    expected.committed_activation_id().to_owned(),
+                    intent.transaction().id().unwrap(),
+                )
+                .unwrap()
+                .commit()
+                .unwrap();
+                let path = if immutable {
+                    layout.capsule_committed_transaction_path(record.activation_id())
+                } else {
+                    layout.capsule_transaction_path(record.activation_id())
+                };
+                store
+                    .put_overwrite(&path, record.encode().unwrap())
+                    .await
+                    .unwrap();
+                if terminal != 0 {
+                    write_exact(
+                        &store,
+                        &layout.capsule_plan_receipt_path(intent.plan_id()),
+                        &expected,
+                    )
+                    .await
+                    .unwrap();
+                }
+                let before = store.list_prefix(&layout.repo_path("")).await.unwrap();
+                let recovered = read_capsule_plan_receipt(&store, &layout, intent.plan_id())
+                    .await
+                    .unwrap();
+                let after = store.list_prefix(&layout.repo_path("")).await.unwrap();
+                assert_eq!(
+                    (recovered, after),
+                    (Some(expected), before),
+                    "immutable={immutable}, terminal={terminal}"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn uncommitted_plans_remain_indeterminate_without_writes() {
+        for status in [
+            None,
+            Some(CapsuleTransactionStatus::Preparing),
+            Some(CapsuleTransactionStatus::Aborted),
+        ] {
+            let (store, layout, intent) = fixture().await;
+            if let Some(status) = status {
+                let mut record = CapsuleTransactionRecord::preparing(
+                    intent.activation_id().to_owned(),
+                    intent.transaction().id().unwrap(),
+                )
+                .unwrap();
+                if status == CapsuleTransactionStatus::Aborted {
+                    record = record.abort().unwrap();
+                }
+                store
+                    .put_overwrite(
+                        &layout.capsule_transaction_path(record.activation_id()),
+                        record.encode().unwrap(),
+                    )
+                    .await
+                    .unwrap();
+            }
+            let before = store.list_prefix(&layout.repo_path("")).await.unwrap();
+            let recovered = read_capsule_plan_receipt(&store, &layout, intent.plan_id())
+                .await
+                .unwrap();
+            let after = store.list_prefix(&layout.repo_path("")).await.unwrap();
+            assert_eq!((recovered, after), (None, before), "{status:?}");
+        }
     }
 }

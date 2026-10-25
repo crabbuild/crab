@@ -15,6 +15,9 @@ pub enum MetadataError {
     /// A constructed path-state index cannot be admitted by its intended reader.
     #[error("path-state index uses {bytes} encoded bytes, exceeding its {maximum}-byte limit")]
     PathStateSize { bytes: u64, maximum: u64 },
+    /// A native publication receipt cannot be admitted by its bounded reader.
+    #[error("capsule plan uses {bytes} encoded bytes, exceeding its {maximum}-byte limit")]
+    CapsulePlanSize { bytes: u64, maximum: u64 },
     /// A locally constructed capsule-protocol record violates its wire contract.
     #[error("invalid capsule-protocol {record}: {reason}")]
     CapsuleContract {

@@ -213,7 +213,8 @@ async fn fixed_pointer_publication_and_hydration_keep_unrelated_history_cold() {
                             layout.clone(),
                             crab_remote_git::RepositoryIdentity::new("memory", "selected-publication", 1).unwrap(),
                             reader_runtime, crab_remote_git::RepositoryOptions::default(), LIMIT, &cancel,
-                        ).await?;
+None,
+).await?;
                         let (oid, pack) = blob_pack(&pointer);
                         let path = directory.path().join("incoming.pack");
                         std::fs::write(&path, pack.pack_bytes())?;

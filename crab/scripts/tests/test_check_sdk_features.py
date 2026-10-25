@@ -13,9 +13,16 @@ spec.loader.exec_module(module)
 
 
 class FeatureBoundaryTests(unittest.TestCase):
+    def test_metadata_capture_is_available_without_hydration(self):
+        self.assertEqual(
+            module.violations("remote", {"remote"},
+                              {"crab-sdk", "crab-read", "crab-storage", "crab-remote-git"}),
+            ([], []),
+        )
+
     def test_forbidden_dependencies_and_missing_owners_are_detected(self):
         for profile, extra in [("default", "tokio"), ("default", "crab-storage"),
-                               ("remote", "crab-read"), ("remote-content", "crab-vfs"),
+                               ("remote", "crab-cache"), ("remote-content", "crab-vfs"),
                                ("remote-content", "crab-server"), ("remote", "crab"),
                                ("write", "crab"), ("write", "crab-auth-server")]:
             with self.subTest(profile=profile, extra=extra):

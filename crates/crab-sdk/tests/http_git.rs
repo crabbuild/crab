@@ -1,6 +1,8 @@
 #![cfg(feature = "local")]
 
 mod local_support;
+#[path = "http_git/native_crab.rs"]
+mod native_crab;
 
 use std::io::{Read, Write};
 use std::net::{SocketAddr, TcpListener, TcpStream};
@@ -39,16 +41,14 @@ impl GitHttpServer {
         let stop = Arc::new(AtomicBool::new(false));
         let worker_stop = Arc::clone(&stop);
         let thread = std::thread::spawn(move || {
-            let mut offline = false;
             while !worker_stop.load(Ordering::Acquire) {
                 match listener.accept() {
                     Ok((stream, _)) if worker_stop.load(Ordering::Acquire) => {
                         drop(stream);
                         break;
                     }
-                    Ok((stream, _)) if offline => drop(stream),
                     Ok((stream, _)) => {
-                        offline = serve_request(stream, &project_root, &git, lose_receive_ack);
+                        serve_request(stream, &project_root, &git, lose_receive_ack);
                     }
                     Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => {
                         std::thread::sleep(Duration::from_millis(5));
@@ -79,12 +79,7 @@ impl Drop for GitHttpServer {
     }
 }
 
-fn serve_request(
-    mut stream: TcpStream,
-    project_root: &Path,
-    git: &Path,
-    lose_receive_ack: bool,
-) -> bool {
+fn serve_request(mut stream: TcpStream, project_root: &Path, git: &Path, lose_receive_ack: bool) {
     // macOS inherits O_NONBLOCK from the listener on accepted sockets. The
     // request parser is deliberately blocking, so normalize both platforms.
     stream.set_nonblocking(false).unwrap();
@@ -123,7 +118,7 @@ fn serve_request(
             &[],
             &output.stderr,
         );
-        return false;
+        return;
     }
     let (header_bytes, response_body) = split_headers(&output.stdout);
     let header_text = std::str::from_utf8(header_bytes).unwrap();
@@ -141,7 +136,6 @@ fn serve_request(
     if !lose_ack {
         write_response(&mut stream, &status, &response_headers, response_body);
     }
-    lose_ack
 }
 
 fn read_request(
@@ -303,6 +297,53 @@ fn seeded_sha256_remote(root: &Path) {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn empty_http_repository_can_be_cloned_and_published() {
+    let _serial = HTTP_TESTS.lock().await;
+    let fixture = tempfile::tempdir().unwrap();
+    let git = git_path();
+    run(
+        &git,
+        fixture.path(),
+        &["init", "--bare", "--initial-branch=main", "remote.git"],
+    );
+    run(
+        &git,
+        fixture.path(),
+        &["--git-dir=remote.git", "config", "http.receivepack", "true"],
+    );
+    let server = GitHttpServer::start(fixture.path().to_owned(), git.clone());
+    let store = tempfile::tempdir().unwrap();
+    let sdk = client(store.path(), fixture.path());
+    let checkout = fixture.path().join("checkout");
+    let repository = sdk
+        .clone_local(
+            RepositoryLocator::http(&server.url()).unwrap(),
+            &checkout,
+            CloneOptions::default(),
+        )
+        .await
+        .unwrap();
+    let local = repository.local().unwrap();
+    // Older Git servers do not advertise unborn HEAD; use Git's selected branch.
+    let branch = run(&git, &checkout, &["symbolic-ref", "HEAD"]);
+    let target = commit(&git, &checkout, "file.txt", "first");
+    let outcome = local
+        .prepare_push(PushOptions::current_branch())
+        .await
+        .unwrap()
+        .execute()
+        .await
+        .unwrap();
+    let actual = run(
+        &git,
+        fixture.path(),
+        &["--git-dir=remote.git", "rev-parse", &branch],
+    );
+    sdk.close().await.unwrap();
+    assert!(matches!(outcome, LocalPushOutcome::TransportCommitted { .. }) && actual == target);
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn native_http_round_trip() {
     let _serial = HTTP_TESTS.lock().await;
     let fixture = tempfile::tempdir().unwrap();
@@ -368,7 +409,31 @@ async fn clone_hydration_precedence_matches_committed_project_config() {
     );
     let server = GitHttpServer::start(fixture.path().to_owned(), git_path());
     let store = tempfile::tempdir().unwrap();
-    let sdk = client(store.path(), fixture.path());
+    let real_crab = cfg!(unix)
+        .then(|| std::env::var_os("CRAB_SDK_TEST_CRAB_BIN"))
+        .flatten();
+    #[cfg(unix)]
+    let mocked = real_crab.is_none();
+    let sdk = if let Some(crab) = real_crab {
+        crab_sdk::Client::builder()
+            .direct_store(crab_sdk::storage::DirectStoreOptions::filesystem(store.path()).unwrap())
+            .local(crab_sdk::local::Options::new(
+                crab_sdk::local::Tools::new(git_path(), PathBuf::from(crab)).unwrap(),
+            ))
+            .build()
+            .unwrap()
+    } else {
+        client(store.path(), fixture.path())
+    };
+
+    #[cfg(unix)]
+    if mocked {
+        std::fs::write(
+            fixture.path().join("crab fixture.enable-hydrate"),
+            b"enabled",
+        )
+        .unwrap();
+    }
 
     let configured = fixture.path().join("configured-hydration");
     sdk.clone_local(
@@ -377,12 +442,20 @@ async fn clone_hydration_precedence_matches_committed_project_config() {
         CloneOptions::default(),
     )
     .await
-    .unwrap();
+    .unwrap_or_else(|error| panic!("configured HTTP clone: {}", native_crab::failure(&error)));
     assert!(
         std::fs::read_to_string(configured.join(".crab/local.toml"))
             .unwrap()
             .contains("lazy = false")
     );
+    #[cfg(unix)]
+    if mocked {
+        assert_eq!(
+            std::fs::read_to_string(fixture.path().join("crab fixture.hydrate")).unwrap(),
+            "--json\n--all\n"
+        );
+        std::fs::remove_file(fixture.path().join("crab fixture.hydrate")).unwrap();
+    }
 
     let overridden = fixture.path().join("explicit-hydration");
     sdk.clone_local(
@@ -391,20 +464,17 @@ async fn clone_hydration_precedence_matches_committed_project_config() {
         CloneOptions::default().lazy(),
     )
     .await
-    .unwrap();
+    .unwrap_or_else(|error| panic!("explicit HTTP clone: {}", native_crab::failure(&error)));
     assert!(
         std::fs::read_to_string(overridden.join(".crab/local.toml"))
             .unwrap()
             .contains("lazy = true")
     );
+    #[cfg(unix)]
+    assert!(!fixture.path().join("crab fixture.hydrate").exists());
 
     #[cfg(unix)]
     {
-        std::fs::write(
-            fixture.path().join("crab fixture.enable-hydrate"),
-            b"enabled",
-        )
-        .unwrap();
         commit(
             &git_path(),
             &fixture.path().join("seed"),
@@ -423,16 +493,18 @@ async fn clone_hydration_precedence_matches_committed_project_config() {
             CloneOptions::default(),
         )
         .await
-        .unwrap();
+        .unwrap_or_else(|error| panic!("patterned HTTP clone: {}", native_crab::failure(&error)));
         assert!(
             std::fs::read_to_string(patterned.join(".crab/local.toml"))
                 .unwrap()
                 .contains("lazy = true")
         );
-        assert_eq!(
-            std::fs::read_to_string(fixture.path().join("crab fixture.hydrate")).unwrap(),
-            "--json\n--\nmodels/**\n-leading\n"
-        );
+        if mocked {
+            assert_eq!(
+                std::fs::read_to_string(fixture.path().join("crab fixture.hydrate")).unwrap(),
+                "--json\n--\nmodels/**\n-leading\n"
+            );
+        }
     }
     sdk.close().await.unwrap();
 }
@@ -485,7 +557,7 @@ async fn server_force_rejection_is_typed() {
 async fn lost_acknowledgement_is_indeterminate() {
     let _serial = HTTP_TESTS.lock().await;
     let fixture = tempfile::tempdir().unwrap();
-    let (remote, _first) = seeded_remote(fixture.path(), false);
+    let (remote, first) = seeded_remote(fixture.path(), false);
     let server = GitHttpServer::start_with_lost_ack(fixture.path().to_owned(), git_path(), true);
     let store = tempfile::tempdir().unwrap();
     let sdk = client(store.path(), fixture.path());
@@ -512,7 +584,13 @@ async fn lost_acknowledgement_is_indeterminate() {
         .execute()
         .await
         .unwrap();
-    assert!(matches!(outcome, LocalPushOutcome::Indeterminate { .. }));
+    let LocalPushOutcome::Indeterminate { recovery } = outcome else {
+        panic!("lost acknowledgement must remain indeterminate: {outcome:?}");
+    };
+    assert!(matches!(
+        sdk.reconcile_local_push(recovery.clone()).await.unwrap(),
+        LocalPushOutcome::Indeterminate { .. }
+    ));
     assert_eq!(
         run(
             &git_path(),
@@ -525,6 +603,37 @@ async fn lost_acknowledgement_is_indeterminate() {
             ],
         ),
         target
+    );
+    // An ABA back to the prepared value must not make resume replay the push.
+    run(
+        &git_path(),
+        fixture.path(),
+        &[
+            "--git-dir",
+            remote.to_str().unwrap(),
+            "update-ref",
+            "refs/heads/main",
+            &first,
+        ],
+    );
+    assert!(matches!(
+        sdk.resume_local_push(recovery, fixture.path().join("recovery"))
+            .await
+            .unwrap(),
+        LocalPushOutcome::Indeterminate { .. }
+    ));
+    assert_eq!(
+        run(
+            &git_path(),
+            fixture.path(),
+            &[
+                "--git-dir",
+                remote.to_str().unwrap(),
+                "rev-parse",
+                "refs/heads/main"
+            ]
+        ),
+        first
     );
     sdk.close().await.unwrap();
 }
@@ -547,7 +656,12 @@ async fn sha256_http_contract() {
         .await
         .err()
         .unwrap();
-    assert_eq!(error.kind(), ErrorKind::UnsupportedCapability);
+    assert_eq!(
+        error.kind(),
+        ErrorKind::UnsupportedCapability,
+        "{:?}",
+        std::error::Error::source(&error).map(ToString::to_string)
+    );
     assert!(!checkout.exists());
     sdk.close().await.unwrap();
 }

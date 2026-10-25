@@ -619,6 +619,7 @@ async fn attribution_restart_reuses_the_verified_thirty_two_commit_checkpoint() 
             server.options,
             2 * 1024 * 1024 * 1024,
             &CancellationToken::new(),
+            None,
         )
         .await
         .unwrap();
@@ -666,6 +667,7 @@ async fn superseded_partial_graph_does_not_authorize_retained_history() {
             server.options,
             2 * 1024 * 1024 * 1024,
             &CancellationToken::new(),
+            None,
         )
         .await
         .unwrap();

@@ -16,6 +16,64 @@ pub(crate) fn remote_error(source: crab_remote_git::Error) -> Error {
     }
 }
 
+pub(crate) fn read_error(source: crab_read::ReadError) -> Error {
+    let mut kind = ErrorKind::Io;
+    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(&source);
+    while let Some(error) = current {
+        if let Some(error) = error.downcast_ref::<crab_remote_git::Error>() {
+            kind = self::kind(error);
+            break;
+        }
+        if let Some(error) = error.downcast_ref::<crab_metadata::error::MetadataError>() {
+            kind = metadata_kind(error);
+            break;
+        }
+        if let Some(error) = error.downcast_ref::<crab_storage::StorageError>() {
+            kind = storage_kind(error);
+            break;
+        }
+        #[cfg(feature = "content")]
+        if matches!(
+            error.downcast_ref::<crab_cache_store::CacheStoreError>(),
+            Some(crab_cache_store::CacheStoreError::OriginIntegrity { .. })
+        ) {
+            kind = ErrorKind::Corruption;
+            break;
+        }
+        if let Some(error) = error.downcast_ref::<crab_read::ReadError>() {
+            use crab_read::ReadError as R;
+            let category = match error {
+                R::Cancelled => Some(ErrorKind::Cancelled),
+                R::Pointer(_)
+                | R::CorruptObject { .. }
+                | R::HashMismatch { .. }
+                | R::IncompleteShardReconstruction { .. } => Some(ErrorKind::Corruption),
+                R::CapsuleReadLimit { .. } => Some(ErrorKind::LimitExceeded),
+                R::IncompleteCatalogView | R::GitPack(_) => Some(ErrorKind::Corruption),
+                R::NotFound { .. } => Some(ErrorKind::NotFound),
+                R::UnauthorizedObject => Some(ErrorKind::Authorization),
+                R::Configuration { .. } => Some(ErrorKind::InvalidInput),
+                _ => None,
+            };
+            if let Some(category) = category {
+                kind = category;
+                break;
+            }
+        }
+        // std::io::Error::source skips its boxed payload. Inspect that payload
+        // so the bridge's typed cancellation survives the writer-error boundary.
+        current = error
+            .downcast_ref::<std::io::Error>()
+            .and_then(|error| {
+                error
+                    .get_ref()
+                    .map(|source| source as &(dyn std::error::Error + 'static))
+            })
+            .or_else(|| error.source());
+    }
+    Error::with_source(kind, "repository read failed", source)
+}
+
 pub(crate) fn consumer_error(source: Error) -> crab_remote_git::Error {
     crab_remote_git::Error::Consumer {
         source: Box::new(source),
@@ -101,8 +159,13 @@ pub(crate) fn metadata_kind(error: &crab_metadata::error::MetadataError) -> Erro
     match error {
         #[cfg(any(feature = "content", feature = "write"))]
         E::FileLookupLimit { .. } => ErrorKind::LimitExceeded,
+        E::CapsulePlanSize { .. } => ErrorKind::LimitExceeded,
         E::Storage { source } => storage_kind(source),
-        E::CorruptObject { .. } => ErrorKind::Corruption,
+        E::CorruptObject { .. }
+        | E::BrowseIndexRecord { .. }
+        | E::GitObjectIndexRecord { .. }
+        | E::PointerCatalogRecord { .. }
+        | E::CapsuleVisibilityRecord { .. } => ErrorKind::Corruption,
         E::Io { source } if source.kind() == std::io::ErrorKind::InvalidData => {
             ErrorKind::Corruption
         }

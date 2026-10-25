@@ -155,7 +155,9 @@ impl Client {
             .map(Repository::from_local)
     }
 
-    /// Resume an unattempted local push or reconcile its historical attempt.
+    /// Resume a native capsule push or reconcile its historical attempt.
+    ///
+    /// Saved Git transport tokens remain indeterminate and are never replayed.
     #[cfg(feature = "local")]
     pub fn resume_local_push(
         &self,

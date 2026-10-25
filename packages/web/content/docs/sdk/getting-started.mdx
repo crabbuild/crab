@@ -4,6 +4,11 @@
 local Git worktrees. Every existing repository opens through one method and
 returns the same `Repository` facade.
 
+The SDK uses native crab-v2 capsule repositories. `v2/root` is the only storage
+authority; v1-only repositories require explicit migration before SDK access.
+Initialization creates or adopts a native root and does not convert a legacy
+prefix.
+
 ## Features
 
 The crate has no default features. Select only the task namespaces your
@@ -19,12 +24,13 @@ application uses:
 
 ```toml
 [dependencies]
-crab-sdk = { version = "0.1", features = ["remote", "content"] }
+crab-sdk = { git = "https://github.com/crabbuild/crab", rev = "<COMMIT>", default-features = false, features = ["remote", "content"] }
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
-The package is in preview. Use the version shipped with the matching Crab
-release.
+The package is unpublished. Replace `<COMMIT>` with an audited commit from the
+crab-v2 branch. GCS, Azure and managed service capabilities remain preview until
+their credentialed qualification gates pass.
 
 ## Open a direct remote
 

@@ -45,7 +45,9 @@ def stats(*, count: int, latency: float = 10.0) -> WORKLOAD.WorkloadStats:
 class S3GatewayWorkloadTests(unittest.TestCase):
     def test_live_http_workload_proves_acknowledged_keys_are_listed(self) -> None:
         class Handler(BaseHTTPRequestHandler):
+            protocol_version = "HTTP/1.1"
             objects: dict[str, set[str]] = {"gateway": set(), "baseline": set()}
+            connection_requests: dict[tuple[str, int], int] = {}
             lock = threading.Lock()
 
             def do_PUT(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
@@ -57,7 +59,11 @@ class S3GatewayWorkloadTests(unittest.TestCase):
                     self.objects.setdefault(bucket, set()).add(
                         urllib.parse.unquote(encoded_key)
                     )
+                    self.connection_requests[self.client_address] = (
+                        self.connection_requests.get(self.client_address, 0) + 1
+                    )
                 self.send_response(200)
+                self.send_header("Content-Length", "0")
                 self.end_headers()
 
             def do_GET(self) -> None:  # noqa: N802 - BaseHTTPRequestHandler API
@@ -112,6 +118,7 @@ class S3GatewayWorkloadTests(unittest.TestCase):
             self.assertEqual(result.missing_acknowledgements, 0)
             self.assertEqual(result.unexpected_keys, 0)
             self.assertEqual(result.duplicate_list_entries, 0)
+        self.assertGreater(max(Handler.connection_requests.values()), 1)
 
     def test_query_and_path_encoding_are_sigv4_canonical(self) -> None:
         self.assertEqual(

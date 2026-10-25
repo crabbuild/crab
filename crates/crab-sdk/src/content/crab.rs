@@ -8,7 +8,7 @@ use crab_storage::{Store, StoreLayout};
 use tokio::sync::{OnceCell, mpsc, oneshot};
 use tokio_util::sync::CancellationToken;
 
-use crate::remote_error::{consumer_error, metadata_kind, storage_kind};
+use crate::remote_error::{consumer_error, metadata_kind, read_error};
 use crate::{Error, ErrorKind, ReadOptions, Result};
 
 /// Explicit cache directory and finite retention budget for Crab reconstruction.
@@ -44,8 +44,7 @@ pub(crate) struct ContentRuntime {
     pub(crate) layout: StoreLayout<Store>,
     cache: Option<ContentCache>,
     namespace: String,
-    shard_index_hash: String,
-    generation: u64,
+    catalog: Arc<crab_metadata::capsule_protocol::PointerCatalogLookup>,
     hydrator: OnceCell<crab_read::ShardHydrator>,
 }
 
@@ -54,8 +53,7 @@ impl ContentRuntime {
         cache: Option<ContentCache>,
         layout: StoreLayout<Store>,
         namespace: &str,
-        shard_index_hash: String,
-        generation: u64,
+        catalog: crab_metadata::capsule_protocol::PointerCatalogLookup,
     ) -> Self {
         let mut hash = blake3::Hasher::new();
         hash.update(namespace.as_bytes());
@@ -63,8 +61,7 @@ impl ContentRuntime {
         Self {
             layout,
             cache,
-            shard_index_hash,
-            generation,
+            catalog: Arc::new(catalog),
             namespace: hash.finalize().to_hex().to_string(),
             hydrator: OnceCell::new(),
         }
@@ -143,16 +140,15 @@ impl ContentRuntime {
             .map_err(consumer_error)?
             .clone()
             .with_read_admission(operation.read_admission());
-        let limits = options.read_limits();
-        let lookup = hydrator.file_index_lookup(
-            self.shard_index_hash.clone(),
-            self.generation,
-            crab_metadata::file_index_lookup::FileIndexLookupLimits {
-                max_files: usize::try_from(limits.max_logical_objects).unwrap_or(usize::MAX),
-                max_shard_visits: usize::try_from(limits.max_entries).unwrap_or(usize::MAX),
-                max_shard_bytes: limits.max_fetched_bytes,
-                max_recipe_entries: usize::try_from(limits.max_entries).unwrap_or(usize::MAX),
-            },
+        let lookup = crab_metadata::file_index_lookup::SharedFileIndexLookup::for_pointer_catalog(
+            StoreLayout::new(
+                self.layout
+                    .store()
+                    .clone()
+                    .with_read_admission(operation.read_admission()),
+                self.layout.repo_prefix().to_owned(),
+            ),
+            Arc::clone(&self.catalog),
         );
         let writer = ChannelWriter {
             send,
@@ -239,57 +235,6 @@ fn cancelled_write() -> std::io::Error {
         std::io::ErrorKind::BrokenPipe,
         crab_read::ReadError::Cancelled,
     )
-}
-
-fn read_error(source: crab_read::ReadError) -> Error {
-    let mut kind = ErrorKind::Io;
-    let mut current: Option<&(dyn std::error::Error + 'static)> = Some(&source);
-    while let Some(error) = current {
-        if let Some(error) = error.downcast_ref::<crab_metadata::error::MetadataError>() {
-            kind = metadata_kind(error);
-            break;
-        }
-        if let Some(error) = error.downcast_ref::<crab_storage::StorageError>() {
-            kind = storage_kind(error);
-            break;
-        }
-        if matches!(
-            error.downcast_ref::<crab_cache_store::CacheStoreError>(),
-            Some(crab_cache_store::CacheStoreError::OriginIntegrity { .. })
-        ) {
-            kind = ErrorKind::Corruption;
-            break;
-        }
-        if let Some(error) = error.downcast_ref::<crab_read::ReadError>() {
-            use crab_read::ReadError as R;
-            let category = match error {
-                R::Cancelled => Some(ErrorKind::Cancelled),
-                R::Pointer(_)
-                | R::CorruptObject { .. }
-                | R::HashMismatch { .. }
-                | R::IncompleteShardReconstruction { .. } => Some(ErrorKind::Corruption),
-                R::NotFound { .. } => Some(ErrorKind::NotFound),
-                R::UnauthorizedObject => Some(ErrorKind::Authorization),
-                R::Configuration { .. } => Some(ErrorKind::InvalidInput),
-                _ => None,
-            };
-            if let Some(category) = category {
-                kind = category;
-                break;
-            }
-        }
-        // std::io::Error::source skips its boxed payload. Inspect that payload
-        // so the bridge's typed cancellation survives the writer-error boundary.
-        current = error
-            .downcast_ref::<std::io::Error>()
-            .and_then(|error| {
-                error
-                    .get_ref()
-                    .map(|source| source as &(dyn std::error::Error + 'static))
-            })
-            .or_else(|| error.source());
-    }
-    Error::with_source(kind, "Crab content reconstruction failed", source)
 }
 
 #[cfg(test)]

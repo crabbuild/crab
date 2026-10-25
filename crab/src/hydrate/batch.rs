@@ -132,7 +132,7 @@ pub async fn hydrate_batch(
 
     // Step 2: Resolve file_hash → shard_hash for each pending file.
     // Use shard-hint fast path when available, then batch all file-index
-    // fallbacks through one read-only MetaDb session.
+    // fallbacks through one captured native catalog session.
     let mut shard_groups: HashMap<MerkleHash, Vec<usize>> = HashMap::new();
     let mut file_index_fallbacks: Vec<(usize, MerkleHash)> = Vec::new();
 
@@ -374,9 +374,7 @@ async fn try_shard_hint(
     None
 }
 
-/// Look up `file_hash → shard_hash` values via the per-repo `file_index_db`.
-///
-/// Uses one read-only MetaDb session for the whole fallback set.
+/// Resolve file bindings through one captured native catalog for the batch.
 async fn resolve_file_index_batch(
     store: &CachingStore,
     router: &StoreLayout,

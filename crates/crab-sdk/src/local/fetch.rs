@@ -4,7 +4,7 @@ use std::path::Path;
 use serde::{Deserialize, Serialize};
 
 use super::{FetchDepth, FetchOptions, FetchOutcome, local_error, transfer_error};
-use crate::{Error, ErrorKind, RepositoryLocator, Result};
+use crate::{Error, ErrorKind, Result};
 
 #[path = "fetch/recovery.rs"]
 mod recovery;
@@ -34,23 +34,29 @@ struct FetchIntent {
 
 pub(super) async fn fetch_locked(
     state: &crate::client::ClientState,
-    locator: Option<RepositoryLocator>,
     tools: &crab_remote::local::LocalTools,
     root: &Path,
     git_dir: &Path,
     common_dir: &Path,
     options: &FetchOptions,
+    operation: &crate::OperationOptions,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<FetchOutcome> {
     recover_fetch_intent(tools, root, git_dir, common_dir, cancel).await?;
+    // Resolve under the local lease: remote selection and URL rewrites may have
+    // changed since open, and fetch must never read a different repository.
+    let locator =
+        super::discover_locator(state, tools, root, &options.remote, false, cancel).await?;
     if let Some(locator) = locator {
         let resolved = state.resolve_repository(&locator, cancel).await?;
-        let layout =
-            crab_storage::StoreLayout::new(resolved.store.clone(), resolved.prefix.clone());
+        let layout = crab_storage::StoreLayout::new(
+            state.admitted_store(&resolved.store, operation, cancel)?,
+            resolved.prefix.clone(),
+        );
         let snapshot = crab_remote::transfer::fetch_snapshot(
-            &resolved.store,
             &layout,
-            &common_dir.join("objects").join("pack"),
+            common_dir,
+            operation.owner_limits().max_fetched_bytes,
             cancel,
         )
         .await

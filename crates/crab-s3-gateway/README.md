@@ -224,12 +224,14 @@ bytes and offsets count toward the existing warm-state memory limit.
 Caller-proven predecessor relationships delta-compress
 successive generated tree versions inside a batch. Across packs, warm state
 retains a verified full-tree anchor by immutable Git object ID, so successive
-batches do not extend the previous batch's delta chain. After 64 reused batches,
-the next generated tree refreshes the full anchor; otherwise each append would
-retransmit all entries added since an increasingly stale base. Anchor bytes count
-toward the warm-state budget. A cold process, a missing anchor, depth eight
-within a batch, or a target that is already an ancestor of the proposed base
-emits a new full base. The checksummed kind sidecar records
+batches do not extend the previous batch's delta chain. Each anchor's first
+refresh happens after a stable 1-to-64-batch phase derived from its object ID,
+so directories do not all re-encode their full anchors together; later refreshes
+stay 64 batches apart. This bounds entries retransmitted since an increasingly
+stale base while spreading refresh work across writes. Anchor bytes count toward
+the warm-state budget. A cold process, a missing anchor, depth eight within a
+batch, or a target that is already an ancestor of the proposed base emits a new
+full base. The checksummed kind sidecar records
 each external base so catalog and fallback readers select an acyclic physical
 representation when the same Git object exists in more than one pack.
 

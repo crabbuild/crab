@@ -194,48 +194,57 @@ pub(super) async fn verify_limits(
     options: crab_sdk::storage::DirectStoreOptions,
     cache: &std::path::Path,
 ) {
-    std::fs::create_dir(cache).unwrap();
-    let client = crab_sdk::Client::builder()
-        .direct_store(options)
-        .content_cache(crab_sdk::storage::ContentCache::new(cache, 4 * 1024 * 1024).unwrap())
-        .build()
-        .unwrap();
-    let repository = client
-        .open(crab_sdk::OpenOptions::remote(
-            crab_sdk::RepositoryLocator::new("repository").unwrap(),
-        ))
-        .await
-        .unwrap();
-    let snapshot = repository
-        .remote()
-        .unwrap()
-        .snapshot(crab_sdk::Revision::branch("main").unwrap())
-        .await
-        .unwrap();
-    for limits in [
-        crab_sdk::operation::ReadLimits {
-            max_fetched_bytes: 1,
-            ..Default::default()
-        },
-        crab_sdk::operation::ReadLimits {
-            max_storage_requests: 1,
-            ..Default::default()
-        },
+    // A failed byte-limited read can retain a verified shard. Use separate cold
+    // caches so request admission still covers both shard and xorb origin work.
+    for (name, limits) in [
+        (
+            "bytes",
+            crab_sdk::operation::ReadLimits {
+                max_fetched_bytes: 1,
+                ..Default::default()
+            },
+        ),
+        (
+            "requests",
+            crab_sdk::operation::ReadLimits {
+                max_storage_requests: 1,
+                ..Default::default()
+            },
+        ),
     ] {
+        let cache = cache.join(name);
+        std::fs::create_dir_all(&cache).unwrap();
+        let client = crab_sdk::Client::builder()
+            .direct_store(options.clone())
+            .content_cache(crab_sdk::storage::ContentCache::new(&cache, 4 * 1024 * 1024).unwrap())
+            .build()
+            .unwrap();
+        let repository = client
+            .open(crab_sdk::OpenOptions::remote(
+                crab_sdk::RepositoryLocator::new("repository").unwrap(),
+            ))
+            .await
+            .unwrap();
+        let snapshot = repository
+            .remote()
+            .unwrap()
+            .snapshot(crab_sdk::Revision::branch("main").unwrap())
+            .await
+            .unwrap();
         super::ranges::verify_hydration_limit(
             &snapshot,
             GitPath::new(b"z-crab".to_vec()).unwrap(),
             ReadOptions::default().with_limits(limits).unwrap(),
         )
         .await;
+        let mut stream = snapshot
+            .open_file(GitPath::new(b"z-crab".to_vec()).unwrap())
+            .await
+            .unwrap();
+        while stream.next().await.unwrap().is_some() {}
+        stream.close().await.unwrap();
+        client.close().await.unwrap();
     }
-    let mut stream = snapshot
-        .open_file(GitPath::new(b"z-crab".to_vec()).unwrap())
-        .await
-        .unwrap();
-    while stream.next().await.unwrap().is_some() {}
-    stream.close().await.unwrap();
-    client.close().await.unwrap();
 }
 
 pub(super) async fn verify_pinned_lookup(snapshot: &Snapshot, original: &[u8]) {

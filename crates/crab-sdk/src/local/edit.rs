@@ -540,11 +540,11 @@ impl LocalRepository {
         options: PullOptions,
         operation: OperationOptions,
     ) -> Result<PullOutcome> {
+        let read_options = operation.clone();
         let tools = self.tools()?.clone();
         let root = self.root.clone();
         let common = self.common_dir.clone();
         let git_dir = self.git_dir.clone();
-        let locator = self.locator.clone();
         let state = self.client.0.clone();
         let trusted = self.client.0.local_execution_policy.is_trusted();
         self.client
@@ -567,12 +567,12 @@ impl LocalRepository {
                 };
                 super::fetch::fetch_locked(
                     &state,
-                    locator,
                     &tools.owner,
                     &root,
                     &git_dir,
                     &common,
                     &fetch,
+                    &read_options,
                     &cancel,
                 )
                 .await?;

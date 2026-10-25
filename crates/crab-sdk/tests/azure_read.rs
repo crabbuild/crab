@@ -42,28 +42,31 @@ async fn explicit_azure_requests_ignore_environment_and_report_missing_repositor
         let endpoint = format!("http://{}", listener.local_addr().unwrap());
         let server = tokio::spawn(async move {
             tokio::time::timeout(std::time::Duration::from_secs(15), async {
-                let mut requests = Vec::new();
-                for missing in [false, true] {
-                    let (mut stream, _) = listener.accept().await.unwrap();
-                    let mut request = Vec::new();
-                    while !request.ends_with(b"\r\n\r\n") {
-                        request.push(stream.read_u8().await.unwrap());
-                        assert!(request.len() < 16 * 1024);
-                    }
-                    let request = String::from_utf8(request).unwrap();
-                    let (status, body) = if missing {
-                        assert!(request.starts_with("GET /container/missing/"));
-                        ("404 Not Found", "")
-                    } else {
-                        assert!(request.starts_with("GET /container?"));
-                        assert!(request.lines().next().unwrap().contains("comp=list"));
-                        ("200 OK", "<EnumerationResults><Blobs/><NextMarker/></EnumerationResults>")
-                    };
-                    let response = format!("HTTP/1.1 {status}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len());
-                    stream.write_all(response.as_bytes()).await.unwrap();
-                    requests.push(request);
+                let (mut stream, _) = listener.accept().await.unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    request.push(stream.read_u8().await.unwrap());
+                    assert!(request.len() < 16 * 1024);
                 }
-                requests
+                let request = String::from_utf8(request).unwrap();
+                let target = request
+                    .lines()
+                    .next()
+                    .unwrap()
+                    .split_whitespace()
+                    .nth(1)
+                    .unwrap();
+                // Native absence is established by the sole authority GET;
+                // opening must not enumerate the container or probe v1 keys.
+                assert!(request.starts_with("GET "));
+                assert_eq!(target.split('?').next(), Some("/container/missing/v2/root"));
+                stream
+                    .write_all(
+                        b"HTTP/1.1 404 Not Found\r\nContent-Length: 0\r\nConnection: close\r\n\r\n",
+                    )
+                    .await
+                    .unwrap();
+                vec![request]
             })
             .await
             .unwrap()

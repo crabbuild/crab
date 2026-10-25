@@ -101,25 +101,30 @@ async fn fixture(
         names,
         LEASE_TTL,
         &cancel,
-        |holders, cancel| {
+        |_holders, cancel| {
             let layout = &layout;
             async move {
-                let snapshot = crab_metadata::manifest_store::read_repository_snapshot(
-                    &client.0.store,
-                    layout,
-                )
-                .await?;
-                let repository = open(
-                    client,
-                    layout,
-                    locator,
-                    &OperationOptions::default(),
-                    &cancel,
-                )
-                .await?;
-                let prepared = crab_remote::prepare::prepare(
+                let captured = client
+                    .0
+                    .capture_repository(locator, &OperationOptions::default(), &cancel)
+                    .await?;
+                let repository = captured.repository;
+                let visibility = captured
+                    .capsule
+                    .git_visibility_index()
+                    .await
+                    .map_err(crate::remote_error::read_error)?;
+                let pack_limits = crab_git::incoming_pack::ReceiveLimits {
+                    max_pack_bytes: 4 * 1024 * 1024,
+                    max_objects: 1024,
+                    max_object_bytes: 1024 * 1024,
+                    max_inflated_bytes: 4 * 1024 * 1024,
+                    max_delta_depth: 128,
+                };
+                let prepared = crab_remote::prepare::prepare_capsule(
                     repository,
-                    directory.path().to_owned(),
+                    visibility,
+                    crab_git::incoming_pack::ScratchSpace::new(directory.path(), pack_limits),
                     Some(BufReader::new(std::fs::File::open(path)?)),
                     updates,
                     BTreeMap::new(),
@@ -132,13 +137,7 @@ async fn fixture(
                             max_object_bytes: 1024 * 1024,
                             max_read_bytes: 4 * 1024 * 1024,
                         },
-                        pack: crab_git::incoming_pack::ReceiveLimits {
-                            max_pack_bytes: 4 * 1024 * 1024,
-                            max_objects: 1024,
-                            max_object_bytes: 1024 * 1024,
-                            max_inflated_bytes: 4 * 1024 * 1024,
-                            max_delta_depth: 128,
-                        },
+                        pack: pack_limits,
                         policy: |_: &str| crab_git::receive_plan::RefPolicy {
                             allow_delete: true,
                             allow_non_fast_forward: false,
@@ -147,31 +146,18 @@ async fn fixture(
                 )
                 .await?;
                 let artifacts = prepared
-                    .upload(
-                        &snapshot,
+                    .upload_capsule(
+                        &captured.capsule,
                         dependency_limits(Default::default()),
-                        &holders,
                         &cancel,
                     )
                     .await?;
                 assert!(matches!(
-                    artifacts
-                        .commit(
-                            None,
-                            crab_write::journal::CommitOptions::new(LEASE_TTL, &cancel)
-                        )
-                        .await?,
-                    CommitOutcome::Committed(_)
+                    artifacts.commit(None, LEASE_TTL, &cancel).await?,
+                    crab_remote::prepare::CapsuleCommitOutcome::Committed { .. }
                 ));
                 Ok::<_, Failure>(
-                    readiness(
-                        client,
-                        layout,
-                        locator,
-                        &OperationOptions::default(),
-                        &cancel,
-                    )
-                    .await,
+                    readiness(client, locator, &OperationOptions::default(), &cancel).await,
                 )
             }
         },
@@ -212,6 +198,7 @@ pub(super) fn memory_client() -> Client {
 #[test]
 fn recovery_downloads_are_admitted_as_one_aggregate_budget() {
     let content = crate::mutation::ContentBinding {
+        lfs: Vec::new(),
         xorbs: vec![crate::mutation::ContentArtifactBinding {
             protocol_hash: [1; 32],
             body_hash: [2; 32],
@@ -241,6 +228,47 @@ fn recovery_downloads_are_admitted_as_one_aggregate_budget() {
     let error = validate_recovery_budget(&input, Some(&content), limits).unwrap_err();
 
     assert_eq!(error.kind(), ErrorKind::LimitExceeded);
+}
+
+#[test]
+fn recovery_lfs_payloads_share_entry_request_and_byte_budgets() {
+    let content = crate::mutation::ContentBinding {
+        xorbs: Vec::new(),
+        shards: Vec::new(),
+        files: Vec::new(),
+        lfs: [6, 5]
+            .into_iter()
+            .enumerate()
+            .map(|(index, size)| crate::mutation::ContentArtifactBinding {
+                protocol_hash: [index as u8; 32],
+                body_hash: [3; 32],
+                size,
+            })
+            .collect(),
+    };
+    let input = PackInput::Staged {
+        pack_id: "a".repeat(64),
+        plan_id: "b".repeat(64),
+        size: 2,
+    };
+    for limits in [
+        crate::ReadLimits {
+            max_fetched_bytes: 12,
+            ..Default::default()
+        },
+        crate::ReadLimits {
+            max_storage_requests: 2,
+            ..Default::default()
+        },
+        crate::ReadLimits {
+            max_entries: 1,
+            ..Default::default()
+        },
+    ] {
+        assert!(
+            matches!(validate_recovery_budget(&input, Some(&content), limits), Err(error) if error.kind() == ErrorKind::LimitExceeded)
+        );
+    }
 }
 
 #[tokio::test]
@@ -756,7 +784,7 @@ async fn recovered_hydrated_content_rejects_a_changed_xorb_without_moving_refs()
         client.0.store.clone(),
         locator.direct_prefix().unwrap().to_owned(),
     );
-    let path = layout.ref_journal_recovery_xorb_path(
+    let path = layout.capsule_plan_recovery_xorb_path(
         token.plan_id(),
         &crab_xet::hash::MerkleHash::from(xorb.protocol_hash),
     );
@@ -820,25 +848,28 @@ async fn resume_never_replays_an_unresolved_prior_intent() {
         client.0.store.clone(),
         locator.direct_prefix().unwrap().to_owned(),
     );
-    let intent = crab_metadata::plan_receipt::PlanIntent {
-        version: 1,
-        repo_prefix: locator.direct_prefix().unwrap().to_owned(),
-        plan_id: token.plan_id().to_owned(),
-        attempt: 1,
-        commit: crab_metadata::plan_receipt::PlanCommit::RefJournal {
-            transaction_id: "a".repeat(64),
-            dependency_digest: "b".repeat(64),
-        },
-    };
-    client
-        .0
-        .store
-        .put(
-            &layout.ref_journal_plan_intent_path(token.plan_id(), 1),
-            bytes::Bytes::from(serde_json::to_vec(&intent).unwrap()),
-        )
+    let root = crab_metadata::capsule_protocol::load_root(&layout)
         .await
         .unwrap();
+    let transaction = crab_metadata::capsule_protocol::CapsuleTransaction::for_plan(
+        root.record().digest(),
+        token.plan_id(),
+        vec![crab_metadata::capsule_protocol::CapsuleRefEdit::new(
+            "refs/tags/uncertain",
+            None,
+            Some(tip.to_string()),
+            None,
+        )],
+    )
+    .unwrap();
+    crab_metadata::capsule_protocol::prepare_capsule_plan(
+        &client.0.store,
+        &layout,
+        &transaction,
+        &"a".repeat(64),
+    )
+    .await
+    .unwrap();
     let outcome = client
         .resume_mutation(
             token.clone(),
@@ -969,7 +1000,7 @@ async fn concurrent_execution_of_one_token_never_replays() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn readiness_respects_selected_read_limits_without_losing_commitment() {
+async fn read_admission_respects_the_publication_boundary() {
     for during_execution in [true, false] {
         let client = memory_client();
         let locator = RepositoryLocator::new("repository").unwrap();
@@ -995,7 +1026,20 @@ async fn readiness_respects_selected_read_limits_without_losing_commitment() {
             })
             .unwrap();
         let outcome = if during_execution {
-            prepared.execute().with_options(limited).await.unwrap()
+            let result = prepared.execute().with_options(limited).await;
+            let refs = repo.refresh().await.unwrap().refs().await.unwrap();
+            let published = refs
+                .entries()
+                .iter()
+                .any(|reference| reference.name() == "refs/tags/budget");
+            client.close().await.unwrap();
+            // Native capture precedes upload and must fit admission. Only a
+            // readiness failure after commitment may return Committed/Pending.
+            assert!(
+                matches!(result, Err(error) if error.kind() == ErrorKind::LimitExceeded)
+                    && !published
+            );
+            continue;
         } else {
             assert!(matches!(
                 prepared.execute().await.unwrap(),
@@ -1125,9 +1169,15 @@ async fn ref_batches_rustfs_recover_without_git_after_restart() {
                 )
                 .await
                 .unwrap();
-            // Persist before crossing the journal marker; a new process gets only this token.
+            // Persist before crossing native publication; a new process gets only this token.
             std::fs::write(&saved, prepared.recovery_token().to_json().unwrap()).unwrap();
-            std::fs::File::open(&saved).unwrap().sync_all().unwrap();
+            // Windows FlushFileBuffers requires a writable handle.
+            std::fs::OpenOptions::new()
+                .write(true)
+                .open(&saved)
+                .unwrap()
+                .sync_all()
+                .unwrap();
             drop(prepared);
         } else if phase == "execute" {
             let token =
@@ -1137,7 +1187,7 @@ async fn ref_batches_rustfs_recover_without_git_after_restart() {
             else {
                 panic!("expected direct commitment")
             };
-            assert_eq!(readiness, Readiness::Pending);
+            assert!(matches!(readiness, Readiness::Ready { .. }));
             std::fs::write(scratch.join("transaction"), receipt.transaction_id()).unwrap();
         } else if phase == "advance" {
             let repo = client
@@ -1173,15 +1223,26 @@ async fn ref_batches_rustfs_recover_without_git_after_restart() {
                 }
             ));
         } else {
+            let options = if phase == "pending" {
+                OperationOptions::default()
+                    .with_limits(crate::ReadLimits {
+                        max_storage_requests: 1,
+                        ..Default::default()
+                    })
+                    .unwrap()
+            } else {
+                OperationOptions::default()
+            };
             if phase == "pending" {
                 assert_eq!(
                     client
                         .open(crate::OpenOptions::remote(locator.clone()))
+                        .with_options(options.clone())
                         .await
                         .err()
                         .unwrap()
                         .kind(),
-                    ErrorKind::Indexing
+                    ErrorKind::LimitExceeded
                 );
             } else {
                 let refs = client
@@ -1205,6 +1266,7 @@ async fn ref_batches_rustfs_recover_without_git_after_restart() {
                 assert!(matches!(
                     client
                         .resume_remote(token.clone(), scratch.join("absent"))
+                        .with_options(options.clone())
                         .await
                         .unwrap(),
                     MutationOutcome::Committed {
@@ -1213,8 +1275,11 @@ async fn ref_batches_rustfs_recover_without_git_after_restart() {
                     }
                 ));
             }
-            let MutationOutcome::Committed { receipt, readiness } =
-                client.reconcile_remote(token).await.unwrap()
+            let MutationOutcome::Committed { receipt, readiness } = client
+                .reconcile_remote(token)
+                .with_options(options)
+                .await
+                .unwrap()
             else {
                 panic!("saved token must prove the historical commit")
             };
@@ -1255,46 +1320,61 @@ async fn ref_batches_rustfs_recover_without_git_after_restart() {
     };
     run("initialize");
     fixture(&client, &locator, scratch.path()).await;
-    let layout = crab_storage::StoreLayout::new(client.0.store.clone(), prefix);
-    let owner = crab_coordination::PushLock::acquire_internal(
-        client.0.store.inner(),
-        layout.repo_prefix(),
-        crab_coordination::GIT_GENERATION_OWNER_RESOURCE,
-        Duration::from_secs(300),
-    )
-    .await
-    .unwrap();
     run("prepare");
     run("execute");
     run("pending");
-    owner.release().await.unwrap();
+    run("advance");
+    let layout = crab_storage::StoreLayout::new(client.0.store.clone(), prefix);
     let cancel = CancellationToken::new();
-    let ready = publication::with_leases(
+    let checkpoint = publication::with_leases(
         &client.0.store,
         &layout,
         Vec::<String>::new(),
         LEASE_TTL,
         &cancel,
         |_, cancel| {
-            let (client, layout, locator) = (&client, &layout, &locator);
+            let layout = &layout;
             async move {
-                Ok::<_, Failure>(
-                    readiness(
-                        client,
-                        layout,
-                        locator,
-                        &OperationOptions::default(),
-                        &cancel,
-                    )
-                    .await,
+                crab_remote::checkpoint::publish_capsule_checkpoint(
+                    layout,
+                    1,
+                    16 * 1024 * 1024,
+                    &cancel,
                 )
+                .await
+                .map_err(|source| {
+                    Failure::Sdk(Error::with_source(
+                        ErrorKind::Io,
+                        "native recovery checkpoint failed",
+                        source,
+                    ))
+                })
             }
         },
     )
     .await
     .unwrap();
-    assert!(matches!(ready, Readiness::Ready { .. }));
-    run("advance");
+    assert!(checkpoint.published);
+    let token = RecoveryToken::from_json(
+        &std::fs::read_to_string(scratch.path().join("recovery.json")).unwrap(),
+    )
+    .unwrap();
+    let receipt = crab_metadata::capsule_protocol::read_capsule_plan_receipt(
+        &client.0.store,
+        &layout,
+        token.plan_id(),
+    )
+    .await
+    .unwrap()
+    .unwrap();
+    // Compaction can retire a mutable coordinator. Historical SDK proof must
+    // survive from the immutable committed activation in a fresh process.
+    client
+        .0
+        .store
+        .delete(&layout.capsule_transaction_path(receipt.committed_activation_id()))
+        .await
+        .unwrap();
     run("historical");
     client.close().await.unwrap();
 }

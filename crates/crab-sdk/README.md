@@ -56,6 +56,21 @@ crab-sdk = { git = "https://github.com/crabbuild/crab", rev = "<COMMIT>", defaul
 crab-sdk = { git = "https://github.com/crabbuild/crab", rev = "<COMMIT>", default-features = false, features = ["local", "managed"] }
 ```
 
+## Repository protocol
+
+The SDK targets native crab-v2 capsule repositories. A verified `v2/root`
+is the sole repository authority. Legacy v1 manifests are never used as an
+alternate authority, including when native metadata is corrupt. V1-only
+repositories require an explicit migration outside normal SDK opening; SDK
+initialization creates or adopts a native capsule root without converting an
+existing prefix. Matching native browse indexes accelerate reads when available;
+opening never repairs them or ignores corruption in a current descriptor.
+
+Remote recovery tokens use version 6; local push tokens use version 4. Tokens
+from the previous SDK protocol must be prepared again. Git LFS and Crab pointer
+file formats retain their existing version markers; those do not select the
+repository storage protocol.
+
 ## Remote repositories
 
 Direct remote access talks to S3, GCS, or Azure object storage and does not
@@ -108,7 +123,9 @@ file edits, commit creation, atomic ref updates, and result handling.
 ## Local repositories
 
 Enable `local` and provide absolute paths to compatible Git and Crab
-executables. Opening a local repository does not contact its remote.
+executables. Crab must advertise the `git-forward` capability so nested calls
+use the selected Git installation, including its wrapper and support files.
+Opening a local repository does not contact its remote.
 
 ```rust,no_run
 use crab_sdk::local::{Options as LocalOptions, Tools};
@@ -144,6 +161,17 @@ Use `Client::clone_local` to create a worktree. The local interface provides
 snapshot, fetch, status, stage, commit, checkout, pull, conflict
 continue/abort, hydrate, dehydrate, prefetch, and prepared push operations.
 Repository hooks and executable Git drivers are disabled by default.
+The validated Crab executable handles both Crab and LFS filters. Eager clones
+finish hydration in private staging before exposing the destination; missing
+content fails the clone. Lazy clones retain both pointer formats. Direct and
+managed clones keep their content location in private local settings when no
+committed project configuration exists. HTTP content clones need the committed
+direct-storage URL and matching bucket credentials.
+Local stage/commit/push also publishes newly staged LFS payloads. Preparation
+freezes verified bytes and binds them into the recovery token; resume can use
+durable native recovery objects after the local LFS cache is removed. Dry-run
+creates no remote objects. Protected publication keeps payloads staged until
+the service verifies and promotes the complete dependency set.
 
 ## Managed repositories
 
@@ -206,8 +234,12 @@ response. Persist their family-specific recovery tokens and recover with:
 - `Client::resume_remote` or `Client::reconcile_remote`
 - `Client::resume_local_push` or `Client::reconcile_local_push`
 
-The SDK never infers an indeterminate result from current refs and never
-replays a mutation implicitly.
+Native capsule recovery reads durable plan evidence and never infers historical
+success from current refs. Git transport tokens cannot prove whether execution
+was attempted: resume and reconciliation remain indeterminate and never replay.
+Execute the original prepared Git handle for a fresh attempt. Unchanged native
+pushes revalidate their source, placement and current remote refs without writing.
+A saved token cannot enable trusted execution on an untrusted client.
 
 ## Errors and shutdown
 

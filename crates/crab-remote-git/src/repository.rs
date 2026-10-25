@@ -317,6 +317,13 @@ impl OperationContext {
     }
 }
 
+#[derive(Default)]
+struct SnapshotOpen {
+    lookup_catalog_identity: Option<GitObjectCatalogIdentity>,
+    lookup_sources: SnapshotLookupSources,
+    read_admission: Option<Arc<dyn crab_storage::ReadAdmission>>,
+}
+
 impl RemoteGitRepository {
     /// Open an immutable repository view from a validated metadata snapshot.
     ///
@@ -339,8 +346,7 @@ impl RemoteGitRepository {
             runtime,
             options,
             cancellation,
-            None,
-            SnapshotLookupSources::default(),
+            SnapshotOpen::default(),
         )
         .await
     }
@@ -358,6 +364,7 @@ impl RemoteGitRepository {
         options: RepositoryOptions,
         lookup_sources: SnapshotLookupSources,
         cancellation: &CancellationToken,
+        opening_admission: Option<Arc<dyn crab_storage::ReadAdmission>>,
     ) -> Result<Self> {
         Self::from_snapshot_parts(
             layout,
@@ -366,8 +373,11 @@ impl RemoteGitRepository {
             runtime,
             options,
             cancellation,
-            None,
-            lookup_sources,
+            SnapshotOpen {
+                lookup_sources,
+                read_admission: opening_admission,
+                ..Default::default()
+            },
         )
         .await
     }
@@ -402,8 +412,11 @@ impl RemoteGitRepository {
             runtime,
             options,
             cancellation,
-            catalog_identity,
-            lookup_sources,
+            SnapshotOpen {
+                lookup_catalog_identity: catalog_identity,
+                lookup_sources,
+                ..Default::default()
+            },
         )
         .await
     }
@@ -415,9 +428,13 @@ impl RemoteGitRepository {
         runtime: Arc<RemoteGitRuntime>,
         options: RepositoryOptions,
         cancellation: &CancellationToken,
-        lookup_catalog_identity: Option<GitObjectCatalogIdentity>,
-        lookup_sources: SnapshotLookupSources,
+        opening: SnapshotOpen,
     ) -> Result<Self> {
+        let SnapshotOpen {
+            lookup_catalog_identity,
+            lookup_sources,
+            read_admission,
+        } = opening;
         RepositoryOptions::new(options.object_limits(), options.operation_limits())?;
         check_cancelled(cancellation)?;
         check_cancelled(&runtime.background_cancellation())?;
@@ -434,6 +451,10 @@ impl RemoteGitRepository {
                 maximum: options.operation_limits().max_entries,
             });
         }
+        let opening_budget = read_admission.map(|admission| {
+            crate::budget::OperationBudget::new(options.operation_limits(), runtime.clone())
+                .with_parent_read_admission(admission)
+        });
         // Journal commits can change inventory without incrementing the base
         // generation. In particular, an old cached miss must not hide a new pack.
         identity.snapshot_digest = Some(Arc::from(snapshot.digest()?));
@@ -485,7 +506,7 @@ impl RemoteGitRepository {
         .with_graph(
             manifest.commit_graph_hash.as_deref(),
             cancellation,
-            None,
+            opening_budget,
             false,
         )
         .await

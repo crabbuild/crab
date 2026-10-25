@@ -6,7 +6,7 @@ use std::{
     time::Duration,
 };
 
-use crab_remote::publication::{self, CommitOutcome};
+use crab_remote::publication;
 use tokio_util::sync::CancellationToken;
 
 use super::{Client, RemoteRepository};
@@ -18,7 +18,7 @@ use crate::{
 mod commit;
 mod failure;
 pub(crate) mod native_content;
-use failure::Failure;
+pub(crate) use failure::Failure;
 
 #[cfg(test)]
 mod tests;
@@ -102,126 +102,112 @@ async fn execute_mutation(
     let readiness_options = options.clone();
     let caller = client.clone();
     caller
-            .0
-            .operations
-            .run_mutation(options, move |cancel| async move {
-                let locator = token.locator()?;
-                let layout = crab_storage::StoreLayout::new(
-                    client.0.store.clone(),
-                    locator.direct_prefix()?.to_owned(),
-                );
-                let result = publication::with_plan(
-                    &client.0.store,
-                    &layout,
-                    token.plan_id(),
-                    LEASE_TTL,
-                    &cancel,
-                    |cancel| {
-                        let client = &client;
-                        let layout = &layout;
-                        let token = &token;
-                        let readiness_options = &readiness_options;
-                        async move {
-                            let (prepared, directories) = match input {
-                                ExecutionInput::Prepared(files) => *files,
-                                ExecutionInput::Resume(scratch) => {
-                                    let (prepared, directory) = prepare_saved_batch(
-                                        client,
-                                        token,
-                                        scratch,
-                                        readiness_options,
+        .0
+        .operations
+        .run_mutation(options, move |cancel| async move {
+            let locator = token.locator()?;
+            let layout = crab_storage::StoreLayout::new(
+                client.0.store.clone(),
+                locator.direct_prefix()?.to_owned(),
+            );
+            let result = publication::with_capsule_plan(
+                &client.0.store,
+                &layout,
+                token.plan_id(),
+                LEASE_TTL,
+                &cancel,
+                |cancel| {
+                    let client = &client;
+                    let layout = &layout;
+                    let token = &token;
+                    let readiness_options = &readiness_options;
+                    async move {
+                        let (prepared, directories) = match input {
+                            ExecutionInput::Prepared(files) => *files,
+                            ExecutionInput::Resume(scratch) => {
+                                let (prepared, directory) = prepare_saved_batch(
+                                    client,
+                                    token,
+                                    scratch,
+                                    readiness_options,
+                                    &cancel,
+                                )
+                                .await?;
+                                (prepared, vec![directory])
+                            }
+                        };
+                        let names = token
+                            .batch()
+                            .edits()
+                            .iter()
+                            .map(|edit| edit.name().to_owned());
+                        let result = publication::with_leases(
+                            &client.0.store,
+                            layout,
+                            names,
+                            LEASE_TTL,
+                            &cancel,
+                            |_holders, cancel| async move {
+                                let capture = client
+                                    .0
+                                    .capture_repository(&locator, readiness_options, &cancel)
+                                    .await?;
+                                let artifacts = prepared
+                                    .upload_capsule(
+                                        &capture.capsule,
+                                        dependency_limits(limits),
                                         &cancel,
                                     )
                                     .await?;
-                                    (prepared, vec![directory])
-                                }
-                            };
-                            let names = token
-                                .batch()
-                                .edits()
-                                .iter()
-                                .map(|edit| edit.name().to_owned());
-                            let result = publication::with_leases(
-                                &client.0.store,
-                                layout,
-                                names,
-                                LEASE_TTL,
-                                &cancel,
-                                |holders, cancel| async move {
-                                    // Snapshot reads precede any publication attempt and own no
-                                    // sessions. Cancel them inside the scopes that drain leases.
-                                    let snapshot = tokio::select! {
-                                        biased;
-                                        () = cancel.cancelled() => return Err(Failure::Publication(publication::Error::Cancelled)),
-                                        result = crab_metadata::manifest_store::read_repository_snapshot(&client.0.store, layout) => result?,
-                                    };
-                                    let artifacts = prepared
-                                        .upload(
-                                            &snapshot,
-                                            dependency_limits(limits),
-                                            &holders,
-                                            &cancel,
-                                        )
-                                        .await?;
-                                    // HEAD may remain unborn for a tag-only repository. Select only
-                                    // a branch when its former symbolic target was removed.
-                                    let refs = prepared.plan().refs();
-                                    let head = if refs.is_empty()
-                                        || refs.contains_key(&snapshot.manifest.head)
-                                    {
-                                        None
-                                    } else {
-                                        refs.keys()
-                                            .find(|name| name.starts_with("refs/heads/"))
-                                            .cloned()
-                                    };
-                                    let options =
-                                        crab_write::journal::CommitOptions::new(LEASE_TTL, &cancel)
-                                            .with_plan(token.plan_id());
-                                    let outcome = artifacts.commit(head, options).await?;
-                                    let outcome = match outcome {
-                                        CommitOutcome::Indeterminate { .. } => {
-                                            MutationOutcome::Indeterminate {
+                                let outcome = artifacts
+                                    .commit(Some(token.plan_id()), LEASE_TTL, &cancel)
+                                    .await?;
+                                let outcome = match outcome {
+                                    crab_remote::prepare::CapsuleCommitOutcome::Indeterminate {
+                                        ..
+                                    } => MutationOutcome::Indeterminate {
+                                        recovery: token.clone(),
+                                    },
+                                    crab_remote::prepare::CapsuleCommitOutcome::Committed {
+                                        transaction_id,
+                                    } => {
+                                        let readiness =
+                                            readiness(client, &locator, readiness_options, &cancel)
+                                                .await;
+                                        MutationOutcome::Committed {
+                                            receipt: CommitReceipt {
                                                 recovery: token.clone(),
-                                            }
+                                                transaction_id,
+                                            },
+                                            readiness,
                                         }
-                                        CommitOutcome::Committed(committed) => {
-                                            let readiness =
-                                                readiness(client, layout, &locator, readiness_options, &cancel).await;
-                                            MutationOutcome::Committed {
-                                                receipt: CommitReceipt {
-                                                    recovery: token.clone(),
-                                                    transaction_id: committed.transaction_id,
-                                                },
-                                                readiness,
-                                            }
-                                        }
-                                    };
-                                    Ok::<_, Failure>(outcome)
-                                },
-                            )
-                            .await;
-                            // Preparation files outlive artifact borrows and ref/GC lease cleanup.
-                            drop(directories);
-                            result
-                        }
-                    },
-                )
-                .await;
-                match result {
-                    Ok(outcome) => Ok(outcome),
-                    Err(Failure::Metadata(
-                        crab_metadata::error::MetadataError::PlanAlreadyAttempted { .. },
-                    )) => reconcile(&client, token, &readiness_options, &cancel).await,
-                    Err(failure) if failure.rejected() => Ok(MutationOutcome::Rejected {
-                        reasons: vec![RefRejection {
-                            source: failure.into(),
-                        }],
-                    }),
-                    Err(failure) => Err(failure.into()),
-                }
-            })
-            .await
+                                    }
+                                };
+                                Ok::<_, Failure>(outcome)
+                            },
+                        )
+                        .await;
+                        // Preparation files outlive artifact borrows and ref/GC lease cleanup.
+                        drop(directories);
+                        result
+                    }
+                },
+            )
+            .await;
+            match result {
+                Ok(outcome) => Ok(outcome),
+                Err(Failure::Metadata(
+                    crab_metadata::error::MetadataError::PlanAlreadyAttempted { .. },
+                )) => reconcile(&client, token, &readiness_options, &cancel).await,
+                Err(failure) if failure.rejected() => Ok(MutationOutcome::Rejected {
+                    reasons: vec![RefRejection {
+                        source: failure.into(),
+                    }],
+                }),
+                Err(failure) => Err(failure.into()),
+            }
+        })
+        .await
 }
 
 #[cfg(feature = "managed")]
@@ -556,17 +542,19 @@ pub(super) async fn finish_preparation(
         let prepared = prepared
             .with_staging_layout(layout.clone())
             .map_err(Failure::from)?;
-        let snapshot = crab_metadata::manifest_store::read_repository_snapshot(&store, &layout)
+        let root = crab_metadata::capsule_protocol::load_root(&layout)
             .await
             .map_err(Failure::from)?;
-        if snapshot.manifest.generation != managed_push.prepared.base_manifest_generation
-            || snapshot.manifest_etag != managed_push.prepared.base_manifest_etag
-        {
-            return Err(Error::new(
-                ErrorKind::Conflict,
-                "managed repository changed during protected preparation",
-            ));
-        }
+        let capsule = crab_read::capsule_protocol::open_git_view_from_root(
+            &layout,
+            root,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: options.owner_limits().max_fetched_bytes,
+                max_frontier_bytes: options.owner_limits().max_fetched_bytes,
+            },
+        )
+        .await
+        .map_err(crate::remote_error::read_error)?;
         let finalize = crab_auth::managed::PushFinalizeRequest {
             schema_version: managed_push.request.schema_version,
             repository_id: managed_push.request.repository_id,
@@ -592,12 +580,7 @@ pub(super) async fn finish_preparation(
             finalize,
         )?;
         let artifacts = prepared
-            .upload(
-                &snapshot,
-                dependency_limits(options.read_limits()),
-                &BTreeMap::new(),
-                cancel,
-            )
+            .upload_capsule(&capsule, dependency_limits(options.read_limits()), cancel)
             .await
             .map_err(Failure::from)?;
         artifacts
@@ -710,27 +693,17 @@ async fn prepare_batch(
         .await
         .map_err(Failure::from)?
         .map_err(Failure::from)?;
-    let resolved = client.0.resolve_repository(locator, cancel).await?;
-    let layout = crab_storage::StoreLayout::new(resolved.store.clone(), resolved.prefix.clone());
-    let identity = crab_remote_git::RepositoryIdentity::new(
-        resolved.namespace,
-        resolved.prefix,
-        resolved.placement,
-    )
-    .map_err(crate::remote_error::remote_error)?;
-    let repository_options =
-        crab_remote_git::RepositoryOptions::new(Default::default(), options.owner_limits())
-            .map_err(crate::remote_error::remote_error)?;
-    let repository = crab_remote_git::RemoteGitRepository::open(
-        resolved.store,
-        layout.clone(),
-        identity,
-        client.0.git.clone(),
-        repository_options,
-        cancel,
-    )
-    .await
-    .map_err(crate::remote_error::remote_error)?;
+    let captured = client
+        .0
+        .capture_repository(locator, options, cancel)
+        .await?;
+    let layout = crab_storage::StoreLayout::new(captured.resolved.store, captured.resolved.prefix);
+    let visibility = captured
+        .capsule
+        .git_visibility_index()
+        .await
+        .map_err(crate::remote_error::read_error)?;
+    let repository = captured.repository;
     let policy = batch.policy();
     let updates = batch
         .edits()
@@ -752,7 +725,7 @@ async fn prepare_batch(
             plan_id,
         } => {
             let path = directory.path().join("recovery.pack");
-            let remote_path = layout.ref_journal_recovery_pack_path(&plan_id);
+            let remote_path = layout.capsule_plan_recovery_pack_path(&plan_id);
             tokio::select! {
                 biased;
                 () = cancel.cancelled() => return Err(Error::new(ErrorKind::Cancelled, "mutation recovery cancelled")),
@@ -785,9 +758,17 @@ async fn prepare_batch(
     )
     .unwrap_or(usize::MAX);
     let max_objects = u32::try_from(bounds.max_logical_objects).unwrap_or(u32::MAX);
-    let mut prepared = crab_remote::prepare::prepare(
+    let pack_limits = crab_git::incoming_pack::ReceiveLimits {
+        max_pack_bytes: bounds.max_fetched_bytes,
+        max_objects,
+        max_object_bytes,
+        max_inflated_bytes: bounds.max_inflated_bytes,
+        max_delta_depth: 128,
+    };
+    let mut prepared = crab_remote::prepare::prepare_capsule(
         repository,
-        directory.path().to_owned(),
+        visibility,
+        crab_git::incoming_pack::ScratchSpace::new(directory.path(), pack_limits),
         input,
         updates,
         BTreeMap::new(),
@@ -800,13 +781,7 @@ async fn prepare_batch(
                 max_object_bytes,
                 max_read_bytes: bounds.max_fetched_bytes,
             },
-            pack: crab_git::incoming_pack::ReceiveLimits {
-                max_pack_bytes: bounds.max_fetched_bytes,
-                max_objects,
-                max_object_bytes,
-                max_inflated_bytes: bounds.max_inflated_bytes,
-                max_delta_depth: 128,
-            },
+            pack: pack_limits,
             policy: move |_: &str| crab_git::receive_plan::RefPolicy {
                 allow_delete: true,
                 allow_non_fast_forward: matches!(policy, WritePolicy::ForceWithLease),
@@ -842,7 +817,7 @@ async fn prepare_batch(
                 "recovery-xorb-{}",
                 crab_xet::hash::MerkleHash::from(artifact.protocol_hash).hex()
             ));
-            let remote = layout.ref_journal_recovery_xorb_path(
+            let remote = layout.capsule_plan_recovery_xorb_path(
                 plan_id,
                 &crab_xet::hash::MerkleHash::from(artifact.protocol_hash),
             );
@@ -860,7 +835,7 @@ async fn prepare_batch(
                 "recovery-shard-{}",
                 crab_xet::hash::MerkleHash::from(artifact.protocol_hash).hex()
             ));
-            let remote = layout.ref_journal_recovery_shard_path(
+            let remote = layout.capsule_plan_recovery_shard_path(
                 plan_id,
                 &crab_xet::hash::MerkleHash::from(artifact.protocol_hash),
             );
@@ -872,25 +847,50 @@ async fn prepare_batch(
                 path,
             ));
         }
-        let prepared_content = crab_remote::prepare::PreparedContent::new(
-            xorb_artifacts,
-            shard_artifacts,
-            content
-                .files
-                .iter()
-                .map(|file| {
-                    crab_remote::prepare::ContentFile::new(
-                        file.file_hash,
-                        file.size,
-                        file.shard_hash,
-                    )
-                })
-                .collect(),
-            bounds.max_fetched_bytes,
-            cancel,
-        )
-        .await
-        .map_err(Failure::from)?;
+        let mut lfs_artifacts = Vec::with_capacity(content.lfs.len());
+        for artifact in &content.lfs {
+            let oid = crab_git::lfs_pointer::hex_encode(&artifact.protocol_hash);
+            let path = directory.path().join(format!("recovery-lfs-{oid}"));
+            let remote = layout.capsule_plan_recovery_lfs_path(plan_id, &oid);
+            recover_artifact(client, &remote, &path, artifact.size, cancel).await?;
+            lfs_artifacts.push(crab_remote::prepare::ContentArtifact::new(
+                artifact.protocol_hash,
+                artifact.body_hash,
+                artifact.size,
+                path,
+            ));
+        }
+        let prepared_content = if content.files.is_empty() {
+            crab_remote::prepare::PreparedContent::from_lfs(lfs_artifacts, bounds.max_fetched_bytes)
+                .map_err(Failure::from)?
+        } else {
+            let prepared_content = crab_remote::prepare::PreparedContent::new(
+                xorb_artifacts,
+                shard_artifacts,
+                content
+                    .files
+                    .iter()
+                    .map(|file| {
+                        crab_remote::prepare::ContentFile::new(
+                            file.file_hash,
+                            file.size,
+                            file.shard_hash,
+                        )
+                    })
+                    .collect(),
+                bounds.max_fetched_bytes,
+                cancel,
+            )
+            .await
+            .map_err(Failure::from)?;
+            if lfs_artifacts.is_empty() {
+                prepared_content
+            } else {
+                prepared_content
+                    .with_lfs(lfs_artifacts, bounds.max_fetched_bytes)
+                    .map_err(Failure::from)?
+            }
+        };
         prepared = prepared
             .attach_content(prepared_content)
             .map_err(Failure::from)?;
@@ -914,6 +914,7 @@ fn validate_recovery_budget(
             .xorbs
             .len()
             .checked_add(content.shards.len())
+            .and_then(|count| count.checked_add(content.lfs.len()))
             .ok_or_else(|| {
                 Error::new(ErrorKind::LimitExceeded, "recovery artifact count overflow")
             })?;
@@ -922,15 +923,25 @@ fn validate_recovery_budget(
             .ok_or_else(|| {
                 Error::new(ErrorKind::LimitExceeded, "recovery request count overflow")
             })?;
+        let entries = content
+            .files
+            .len()
+            .checked_add(content.lfs.len())
+            .ok_or_else(|| Error::new(ErrorKind::LimitExceeded, "recovery entry count overflow"))?;
         if u64::try_from(artifact_count).unwrap_or(u64::MAX) > bounds.max_logical_objects
-            || u64::try_from(content.files.len()).unwrap_or(u64::MAX) > bounds.max_entries
+            || u64::try_from(entries).unwrap_or(u64::MAX) > bounds.max_entries
         {
             return Err(Error::new(
                 ErrorKind::LimitExceeded,
                 "recovery content count exceeds operation limits",
             ));
         }
-        for artifact in content.xorbs.iter().chain(&content.shards) {
+        for artifact in content
+            .xorbs
+            .iter()
+            .chain(&content.shards)
+            .chain(&content.lfs)
+        {
             fetched_bytes = fetched_bytes.checked_add(artifact.size).ok_or_else(|| {
                 Error::new(ErrorKind::LimitExceeded, "recovery byte count overflow")
             })?;
@@ -1007,7 +1018,7 @@ impl Client {
         .await
     }
 
-    /// Create or adopt canonical metadata roots for one direct repository prefix.
+    /// Create or adopt the native capsule root for one direct repository prefix.
     ///
     /// HEAD must be a fully qualified branch. Existing valid roots are adopted
     /// without changing HEAD or refs; incompatible nonempty prefixes are rejected.
@@ -1033,13 +1044,19 @@ impl Client {
                         state.store.clone(),
                         locator.direct_prefix()?.to_owned(),
                     );
-                    // Initialization owns only idempotent conditional root creates,
-                    // never leases or database sessions. Dropping an interrupted
-                    // request is safe; a later call adopts any completed creates.
+                    if !head.starts_with("refs/heads/") {
+                        return Err(Error::new(ErrorKind::InvalidInput, "initial HEAD must name a branch"));
+                    }
+                    crab_git::refname::validate_push_refname(&head).map_err(|source| {
+                        Error::with_source(ErrorKind::InvalidInput, "invalid initial HEAD", source)
+                    })?;
+                    let repository_id = blake3::hash(uuid::Uuid::now_v7().as_bytes()).to_hex().to_string();
+                    // The native root is the only initialization boundary. A
+                    // repeated request adopts a completed conditional create.
                     tokio::select! {
                         biased;
                         () = cancel.cancelled() => Err(Error::new(ErrorKind::Cancelled, "initialization cancelled")),
-                        result = crab_write::initialize::initialize_repository(&state.store, &layout, &head) => result.map_err(|error| Failure::Write(error).into()),
+                        result = crab_write::capsule_protocol::initialize(&layout, &repository_id, &head) => result.map(|_| ()).map_err(|error| Failure::Write(error).into()),
                     }
                 }).await
             })
@@ -1101,7 +1118,7 @@ async fn reconcile(
     let receipt = tokio::select! {
         biased;
         () = cancel.cancelled() => return Err(Error::new(ErrorKind::Cancelled, "reconciliation cancelled")),
-        result = crab_metadata::plan_receipt::read_plan_receipt(&client.0.store, &layout, token.plan_id()) => match result {
+        result = crab_metadata::capsule_protocol::read_capsule_plan_receipt(&client.0.store, &layout, token.plan_id()) => match result {
             // Missing historical objects cannot distinguish an interrupted attempt
             // from committed evidence removed outside the retention contract.
             Err(crab_metadata::error::MetadataError::Storage {
@@ -1113,16 +1130,13 @@ async fn reconcile(
     let Some(receipt) = receipt else {
         return Ok(MutationOutcome::Indeterminate { recovery: token });
     };
-    let crab_metadata::plan_receipt::PlanCommit::RefJournal { transaction_id, .. } = receipt.commit
-    else {
-        return Err(Error::new(
-            ErrorKind::Corruption,
-            "ref token has a different commit authority",
-        ));
-    };
+    let transaction_id = receipt
+        .transaction()
+        .id()
+        .map_err(crate::mutation::metadata_error)?;
     // Readiness is optional evidence after proven commitment. A failed read must
     // retain that commitment, and reconciliation never starts catalog repair.
-    let readiness = match open(client, &layout, &locator, options, cancel).await {
+    let readiness = match open(client, &locator, options, cancel).await {
         Ok(repository) => Readiness::Ready {
             generation: repository.generation(),
         },
@@ -1139,69 +1153,28 @@ async fn reconcile(
 
 async fn open(
     client: &Client,
-    layout: &crab_storage::StoreLayout<crab_storage::Store>,
     locator: &RepositoryLocator,
     options: &OperationOptions,
     cancel: &CancellationToken,
 ) -> Result<crab_remote_git::RemoteGitRepository> {
-    let identity = crab_remote_git::RepositoryIdentity::new(
-        client.0.namespace.clone(),
-        locator.direct_prefix()?.to_owned(),
-        1,
-    )
-    .map_err(crate::remote_error::remote_error)?;
-    let options =
-        crab_remote_git::RepositoryOptions::new(Default::default(), options.owner_limits())
-            .map_err(crate::remote_error::remote_error)?;
-    crab_remote_git::RemoteGitRepository::open(
-        client.0.store.clone(),
-        layout.clone(),
-        identity,
-        client.0.git.clone(),
-        options,
-        cancel,
-    )
-    .await
-    .map_err(crate::remote_error::remote_error)
+    Ok(client
+        .0
+        .capture_repository(locator, options, cancel)
+        .await?
+        .repository)
 }
 
 async fn readiness(
     client: &Client,
-    layout: &crab_storage::StoreLayout<crab_storage::Store>,
     locator: &RepositoryLocator,
     options: &OperationOptions,
     cancel: &CancellationToken,
 ) -> Readiness {
-    let result = publication::finish_committed(publication::with_internal_lease(
-        &client.0.store,
-        layout,
-        crab_coordination::GIT_GENERATION_OWNER_RESOURCE,
-        LEASE_TTL,
-        cancel,
-        |cancel| async move {
-            // Catalog maintenance has a large future. Keep it off each enclosing
-            // lease/operation frame so default Tokio stacks can publish safely.
-            let manifest = Box::pin(crab_write::generation::make_readable(
-                &client.0.store,
-                layout,
-                LEASE_TTL,
-                None,
-                &cancel,
-            ))
-            .await?;
-            if manifest.is_none() {
-                return Ok::<_, Failure>(Readiness::Pending);
-            }
-            let repository = open(client, layout, locator, options, &cancel).await?;
-            Ok(Readiness::Ready {
-                generation: repository.generation(),
-            })
+    match open(client, locator, options, cancel).await {
+        Ok(repository) => Readiness::Ready {
+            generation: repository.generation(),
         },
-    ))
-    .await;
-    match result {
-        publication::Readiness::Ready { generation } => generation,
-        publication::Readiness::Pending => Readiness::Pending,
+        Err(_) => Readiness::Pending,
     }
 }
 

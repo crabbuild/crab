@@ -4,6 +4,8 @@ use tokio::io::AsyncRead;
 
 use crate::{EntryMode, Error, ErrorKind, GitPath, ObjectId, RepositoryLocator, Result};
 
+const RECOVERY_TOKEN_VERSION: u32 = 6;
+
 const MAX_TOKEN_BYTES: usize = 1024 * 1024;
 pub(crate) const MAX_REF_UPDATES: usize = 1024;
 pub(crate) const MAX_GIT_OBJECT_BYTES: u64 = 64 * 1024 * 1024;
@@ -537,6 +539,7 @@ pub(crate) struct ContentBinding {
     pub(crate) xorbs: Vec<ContentArtifactBinding>,
     pub(crate) shards: Vec<ContentArtifactBinding>,
     pub(crate) files: Vec<ContentFileBinding>,
+    pub(crate) lfs: Vec<ContentArtifactBinding>,
 }
 
 impl ContentBinding {
@@ -549,6 +552,7 @@ impl ContentBinding {
         Self {
             xorbs: content.xorbs().iter().map(artifact).collect(),
             shards: content.shards().iter().map(artifact).collect(),
+            lfs: content.lfs().iter().map(artifact).collect(),
             files: content
                 .files()
                 .iter()
@@ -574,17 +578,27 @@ impl ContentBinding {
             .map(|artifact| artifact.protocol_hash)
             .collect::<std::collections::BTreeSet<_>>();
         let mut files = std::collections::BTreeSet::new();
-        if (self.xorbs.is_empty() && self.files.iter().any(|file| file.size != 0))
-            || self.shards.is_empty()
-            || self.files.is_empty()
-            || !valid_artifacts(&self.xorbs)
-            || !valid_artifacts(&self.shards)
-            || self
-                .files
-                .iter()
-                .any(|file| !files.insert(file.file_hash) || !shards.contains(&file.shard_hash))
+        let has_xet = !self.files.is_empty() || !self.xorbs.is_empty() || !self.shards.is_empty();
+        if has_xet
+            && ((self.xorbs.is_empty() && self.files.iter().any(|file| file.size != 0))
+                || self.shards.is_empty()
+                || self.files.is_empty()
+                || !valid_artifacts(&self.xorbs)
+                || !valid_artifacts(&self.shards)
+                || self.files.iter().any(|file| {
+                    !files.insert(file.file_hash) || !shards.contains(&file.shard_hash)
+                }))
         {
             return Err(invalid("recovery token contains invalid prepared content"));
+        }
+        let mut lfs = std::collections::BTreeSet::new();
+        if (!has_xet && self.lfs.is_empty())
+            || self
+                .lfs
+                .iter()
+                .any(|object| !lfs.insert(object.protocol_hash))
+        {
+            return Err(invalid("recovery token contains invalid LFS content"));
         }
         Ok(())
     }
@@ -703,12 +717,16 @@ impl RecoveryToken {
             commit: commit.map(|oid| oid.to_string()),
         };
         request.validate(&backend)?;
-        let digest = crab_metadata::receipts::publication_request_digest(&(&backend, &request))
-            .map_err(metadata_error)?;
+        let digest = crab_metadata::receipts::publication_request_digest(&(
+            RECOVERY_TOKEN_VERSION,
+            &backend,
+            &request,
+        ))
+        .map_err(metadata_error)?;
         let nonce = *uuid::Uuid::now_v7().as_bytes();
         let plan = crab_metadata::receipts::publication_plan_id(&digest, &nonce);
         let token = Self(TokenBinding {
-            version: 4,
+            version: RECOVERY_TOKEN_VERSION,
             backend,
             operation_nonce: nonce,
             request,
@@ -748,12 +766,16 @@ impl RecoveryToken {
             commit: commit.map(|oid| oid.to_string()),
         };
         request.validate(&backend)?;
-        let digest = crab_metadata::receipts::publication_request_digest(&(&backend, &request))
-            .map_err(metadata_error)?;
+        let digest = crab_metadata::receipts::publication_request_digest(&(
+            RECOVERY_TOKEN_VERSION,
+            &backend,
+            &request,
+        ))
+        .map_err(metadata_error)?;
         let nonce = *uuid::Uuid::now_v7().as_bytes();
         let plan = crab_metadata::receipts::publication_plan_id(&digest, &nonce);
         let token = Self(TokenBinding {
-            version: 4,
+            version: RECOVERY_TOKEN_VERSION,
             backend,
             operation_nonce: nonce,
             request,
@@ -781,7 +803,7 @@ impl RecoveryToken {
         let binding: TokenBinding = serde_json::from_str(json).map_err(|source| {
             Error::with_source(ErrorKind::InvalidInput, "invalid recovery token", source)
         })?;
-        if binding.version != 4 {
+        if binding.version != RECOVERY_TOKEN_VERSION {
             return Err(Error::new(
                 ErrorKind::UnsupportedCapability,
                 "unsupported recovery token version or backend",
@@ -795,6 +817,7 @@ impl RecoveryToken {
         }
         binding.request.validate(&binding.backend)?;
         let digest = crab_metadata::receipts::publication_request_digest(&(
+            RECOVERY_TOKEN_VERSION,
             &binding.backend,
             &binding.request,
         ))
@@ -881,7 +904,7 @@ impl CommitReceipt {
     pub fn recovery_token(&self) -> &RecoveryToken {
         &self.recovery
     }
-    /// Return the immutable direct journal transaction or managed push identity.
+    /// Return the immutable native activation or managed push identity.
     #[must_use]
     pub fn transaction_id(&self) -> &str {
         &self.transaction_id
@@ -1011,6 +1034,30 @@ mod tests {
             None,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn recovery_rejects_legacy_protocol_tokens_even_after_version_relabeling() {
+        let token = token();
+        let mut binding: serde_json::Value =
+            serde_json::from_str(&token.to_json().unwrap()).unwrap();
+        binding["version"] = 4.into();
+        assert!(RecoveryToken::from_json(&binding.to_string()).is_err());
+        binding["version"] = RECOVERY_TOKEN_VERSION.into();
+        let old_digest = crab_metadata::receipts::publication_request_digest(&(
+            &token.0.backend,
+            &token.0.request,
+        ))
+        .unwrap();
+        binding["request_digest"] = serde_json::to_value(old_digest).unwrap();
+        binding["plan_id"] = blake3::Hash::from(crab_metadata::receipts::publication_plan_id(
+            &old_digest,
+            &token.0.operation_nonce,
+        ))
+        .to_hex()
+        .to_string()
+        .into();
+        assert!(RecoveryToken::from_json(&binding.to_string()).is_err());
     }
 
     #[test]

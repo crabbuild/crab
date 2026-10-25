@@ -74,15 +74,15 @@ historical documentation describes a retired implementation.
 | File content | `crates/crab-read/src/lib.rs`; CLI hydration and protected receive | Share verified reconstruction; raw Git blobs and hydrated content are separate APIs |
 | Content ranges | `crates/crab-read/src/hydrator.rs`; VFS range readers and CLI hydration facade | Existing range helper buffers the requested range and creates its own cancellation token; add shared bounded streaming with caller-owned cancellation for SDK streams |
 | LFS streaming | `crates/crab-lfs/src/object_store.rs` `get_verified_stream_at`; HTTP LFS download | The current helper attempts a verification-receipt write, then opens another read; SDK reads need a read-only owner path and proof that delivered bytes match the verified object version |
-| Ref publication | `crates/crab-write/src/journal.rs`, `generation.rs`; CLI push and HTTP receive; `tests/journal.rs`, `tests/generation.rs`, `tests/catalog.rs` | Journal commit does not itself own all locks, validation, or read readiness |
-| Attribution | `crates/crab-metadata/src/plan_receipt.rs`; mirror publication and GC | Reuse durable intent/receipt mechanics; current ref equality is not historical commit proof |
+| Ref publication | `crates/crab-write/src/capsule_protocol.rs`; `crates/crab-remote/src/prepare/capsule.rs` and `publication.rs`; CLI and protected receive | Native commit still requires caller authorization, shared leases/fences, dependency proof and read readiness |
+| Attribution | `crates/crab-metadata/src/capsule_protocol/plan.rs`; native publication, recovery and checkpoint | Read immutable commitment evidence without repair; current ref equality is not historical commit proof |
 | Direct transfer | `crab/src/git/fetch.rs`, `push.rs`, `push_native.rs`, `upload_pack_wire.rs`; remote helper and import | Extract orchestration with callers in the same phase; wrapping CLI argument structs is insufficient |
 | Local workflow | `crab/src/cmd/clone.rs`, `pull.rs`, `add.rs`; `crab/src/git/process.rs`; `crab/tests/e2e_add_commit_push.rs` | Extract reusable worktree services and owned subprocess handling |
 | Filters | `crab/src/cmd/init.rs` `DRIVER_CONFIG`; `crab/src/git/worktree_hydration.rs` | Full local mode needs a compatible executable and shared configuration |
 | Managed access | `crates/crab-git/src/url.rs`; `crates/crab-auth-store/src/managed_repository.rs`; `crates/crab-auth/src/managed/client.rs` | Preserve direct/managed classification, grants, prepare/finalize, and lifecycle endpoints |
 | Protected writer | `crates/crab-auth-server/src/receive/workflow.rs` | Final authorization and publication remain server responsibilities |
 | HTTP receive | `crates/crab-server/src/git/receive/publish.rs`; `receive_tests.rs`, `receive_fault_tests.rs` | Share publication mechanics while retaining HTTP policy; current server rejects forced updates |
-| Release | Supporting crate manifests use `publish = false`; workspace dependencies use paths | Publish the dependency closure deliberately before publishing the SDK |
+| Release | Supporting crate manifests are publishable; exact sibling versions retain workspace paths for development | Verify packaged consumers and publish the dependency closure deliberately before publishing the SDK |
 
 Existing tests establish starting points, not SDK proof. Every acceptance test
 below enters through the new public SDK API where that API exists.
@@ -124,7 +124,7 @@ implementation types, and server state. Re-export an existing Crab value type
 only after documenting its semver support obligation. `bytes::Bytes`, Tokio
 `AsyncRead`, and standard Rust path/time types are permitted public dependencies.
 
-`crab-write` retains journal/catalog mechanisms. `crab-remote::publication`
+`crab-write` retains native capsule/catalog mechanisms. `crab-remote::publication`
 owns leases, fences, verified object preparation, commit coordination, and
 outcome recovery. It accepts caller policy through a narrow admission boundary.
 HTTP authorization, branch protection, sessions, and application state remain
@@ -330,18 +330,19 @@ The canonical execution order is:
    ref snapshot under those leases.
 3. Recheck expected OIDs and caller policy. Verify incoming Git connectivity,
    pointer dependencies, exact object IDs, and complete reconstruction terms.
-4. Flush staged xorbs; upload immutable content, shards, packs and visibility
-   evidence before journal publication. Preserve bounded streaming/backpressure.
+4. Flush staged xorbs; upload immutable content and shards, then encode Git packs,
+   visibility and catalog deltas in a native capsule. Preserve bounded streaming/backpressure.
 5. Revalidate authorization/policy where the authority can change, expected
    state and lease health. Commit through `crab-write` and its namespace lease.
-6. Record/reconcile the durable commit binding. Under generation ownership and
-   GC fences, call `make_readable` if requested; reopen the read generation.
+6. Record/reconcile the native durable plan binding, then capture the committed
+   capsule view to prove read readiness without repairing derived indexes.
 7. Drain catalog sessions, workers, heartbeats and every acquired lease. Cleanup
    failure cannot turn a known committed mutation into a rejection.
 
 The SDK defaults to waiting for read readiness within the operation budget.
-Read-only open never runs repair or writes storage. It returns `Indexing` until
-a writer or authorized maintenance operation makes the catalog ready.
+Read-only open never runs repair or writes storage. `v2/root` is its only authority;
+missing or corrupt native metadata never falls through to a v1 manifest. Native
+capsule visibility supports reads without the legacy mutable locator database.
 
 ### Outcomes
 
@@ -364,35 +365,28 @@ known commit returns `Committed { readiness: Pending }`. A lost marker response
 without sufficient evidence returns `Indeterminate`. In an atomic request, a
 policy/validation rejection rejects the whole batch.
 
-Direct requests bind their request digest and a fresh operation nonce into a
-plan ID and reuse existing plan-intent/receipt mechanics. Generalize the internal
-Rust names currently prefixed `MirrorPlan` while preserving persisted keys and
-version-1 fields. All mirror, CLI, managed, HTTP, and GC consumers must move in
-the same phase. Add a renewable operation lease before ref leases for concurrent
-execution of the same plan; reuse the coordination lease mechanism. A different
-payload cannot reuse a token. An unresolved prior attempt blocks replay.
+Direct requests bind the protocol token version, repository placement, ordered ref
+edits, expected OIDs, content identities and write policy into a canonical request
+digest. A fresh UUIDv7 nonce makes the plan ID unique. Native SDK recovery tokens
+use version 6; v1 tokens, including relabeled tokens carrying old digests, are
+rejected. Existing pointer-file formats and managed HTTP API schema versions are
+separate contracts and do not select the repository storage protocol.
 
-The request digest covers repository placement, ordered ref edits, expected
-OIDs, commit/object identities, content digests, and write policy. Encode it
-canonically with a versioned, domain-separated digest owned by `crab-metadata`.
-The metadata encoding sorts JSON object keys recursively and preserves array
-order, with separate versioned Blake3 domains for the request and nonce-bound
-plan identity. Mirror plan files use format 2 with a retained operation nonce;
-persisted intent and receipt formats remain version 1. The public token is a
-recovery handle, not an authorization credential.
+The SDK acquires a renewable plan lease before its ref leases and GC fences.
+Native attempts and terminal receipts live under `v2/plans/<id>/`; normalized
+recovery packs, shards, xorbs and LFS payloads live under that plan's `recovery/` prefix. An
+unresolved prior attempt blocks replay. Native GC currently enumerates capsule,
+checkpoint, catalog, history and derived-index roots; it does not sweep the plan
+prefix. Reclamation of unattempted recovery artifacts needs a separate retention
+policy before those artifacts can be collected.
 
-`reconcile` validates the bound receipt or historical commit evidence through
-the owner crate. It may repair a missing receipt only with write authority.
-Add a read-only receipt lookup beside the existing repairing resolver. Missing
-evidence, a compacted marker, moved refs, or equal current OIDs never proves
-rejection or historical success by itself. Return `Indeterminate` when proof is
-insufficient; never infer rejection from `Option::None` in today's resolver.
-`Client::reconcile_remote` also accepts the saved token directly: restarted
-clients must not need a readable repository handle when remote `Client::open`
-returns `Indexing`.
-The repository method additionally verifies the handle's repository binding.
-Preserve intents, receipts, and their proof roots under the existing GC contract;
-phase 2 must prove retention across compaction, restart, and GC before writes ship.
+Reconciliation uses `read_capsule_plan_receipt`: immutable terminal or intent
+binding plus the matching durable committed activation proves success. It does
+not repair missing receipt objects or infer history from current ref equality.
+Missing, preparing or aborted activation evidence remains `Indeterminate`.
+`Client::reconcile_remote` accepts a saved token without opening a readable
+repository first. The administrative repairing resolver remains with its shared
+metadata owner and is not used by the SDK.
 
 SDK 1.0 does not promise unconditional exactly-once execution or unlimited
 historical reconciliation. It promises no automatic replay of an uncertain
@@ -412,7 +406,15 @@ acknowledgement proves that response's commit outcome; a lost response remains
 Indeterminate and cannot be repaired by comparing current OIDs. Its recovery
 token records attempted refs and request identity for diagnosis, without
 promising historical attribution. Do not expose direct-plan replay semantics
-on a native Git endpoint. Read readiness is Pending until independently proven.
+on a native Git endpoint. Saved Git push tokens remain indeterminate through
+both resume and reconcile; only the original prepared handle starts a fresh
+attempt. Explicit complete porcelain rejection can prove failure, while remote
+failure and cancellation after invocation remain indeterminate. The client's
+execution policy bounds trust even for a token prepared by a trusted client.
+Unchanged native pushes bind local source, push URL and storage placement;
+execution and recovery revalidate current refs without claiming a historical
+plan receipt or writing remote state. Read readiness is Pending until
+independently proven.
 
 ## 6. Local workflow and executable contract
 
@@ -423,6 +425,9 @@ format versions, and product build identity. Reject incompatible capabilities
 before changing a repository. Product version strings alone are insufficient.
 Git minimum is 2.30.9, matching the existing compatibility matrix; use only
 commands available at that minimum and test it alongside current Git.
+The executable must advertise `git-forward`: private child discovery forwards
+to the exact selected Git path without moving installation wrappers. Its
+internal target binding is scoped to child processes, not user configuration.
 
 Extract `crab/src/git/process.rs` into the local feature of `crab-remote`.
 Pass argv without a shell, explicitly set repository paths, bound diagnostics,
@@ -506,7 +511,7 @@ not implicitly fetch, merge, rebase, stage, or commit.
 ## 7. Management and authorization
 
 `initialize_remote` targets one direct repository prefix and uses
-`crab_write::initialize::initialize_repository`. Existing valid initialization
+`crab_write::capsule_protocol::initialize`. Existing valid initialization
 is adopted according to that owner contract; incompatible/nonempty prefixes
 fail without destructive conversion. It never creates a bucket.
 
@@ -645,15 +650,16 @@ Acceptance:
 
 ### Phase 2 — Shared publication and recovery
 
-Context: journal commit exists, but complete lifecycle and durable attribution
-are caller responsibilities. Prerequisite: phase 1.
+Context: native capsule commit exists, but complete lifecycle and durable
+attribution require shared owners and caller authorization. Prerequisite: phase 1.
 
 Work: add `crab-remote` publication feature; extract shared validation/lifecycle
 from CLI and HTTP callers; generalize existing plan attribution as specified in
 section 5. Add read-only reconciliation, operation serialization, readiness
 results and owned cleanup. Update CLI/mirror/HTTP callers and metadata/GC tests
 together. Protected receive retains its authorization boundary and consumes
-only mechanics appropriate to its existing manifest authority.
+the native capsule authority while retaining server-owned verification and
+canonical promotion.
 
 Acceptance:
 

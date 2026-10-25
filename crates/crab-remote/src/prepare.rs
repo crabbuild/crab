@@ -45,6 +45,8 @@ pub enum Error {
     Content(String),
     #[error("prepared content is corrupt")]
     ContentFormat(#[source] crab_xet::error::XetError),
+    #[error("protected publication plan encoding failed")]
+    Serialization(#[source] serde_json::Error),
     #[error("incoming pack rejected")]
     Pack(#[from] incoming_pack::IncomingPackError),
     #[error("incoming graph rejected")]
@@ -94,7 +96,7 @@ pub struct Prepared {
     updates: Vec<RefUpdate>,
 }
 
-/// One immutable xorb or shard prepared on local scratch storage.
+/// One immutable content artifact prepared on local scratch storage.
 #[derive(Clone, Debug)]
 pub struct ContentArtifact {
     pub(crate) protocol_hash: [u8; 32],
@@ -205,6 +207,7 @@ pub struct PreparedContent {
     pub(crate) xorbs: Vec<ContentArtifact>,
     pub(crate) shards: Vec<ContentArtifact>,
     pub(crate) files: Vec<ContentFile>,
+    pub(crate) lfs: Vec<ContentArtifact>,
     catalog: PointerCatalog,
 }
 
@@ -405,8 +408,62 @@ impl PreparedContent {
             xorbs,
             shards,
             files,
+            lfs: Vec::new(),
             catalog,
         })
+    }
+
+    /// Prepare LFS payloads without introducing a Crab catalog delta.
+    pub fn from_lfs(objects: Vec<ContentArtifact>, maximum_artifact_bytes: u64) -> Result<Self> {
+        Self {
+            xorbs: Vec::new(),
+            shards: Vec::new(),
+            files: Vec::new(),
+            lfs: Vec::new(),
+            catalog: PointerCatalog::new(),
+        }
+        .with_lfs(objects, maximum_artifact_bytes)
+    }
+
+    /// Bind verified LFS snapshots within the same total artifact budget.
+    ///
+    /// LFS protocol hashes are SHA-256 OIDs; body hashes bind the exact recovery
+    /// bytes with Blake3. Publication independently checks SHA-256 and size.
+    pub fn with_lfs(
+        mut self,
+        objects: Vec<ContentArtifact>,
+        maximum_artifact_bytes: u64,
+    ) -> Result<Self> {
+        let mut identities = std::collections::BTreeSet::new();
+        if !self.lfs.is_empty()
+            || objects.is_empty()
+            || objects
+                .iter()
+                .any(|object| !identities.insert(object.protocol_hash))
+        {
+            return Err(Error::Request(
+                "prepared LFS identities are empty or duplicated",
+            ));
+        }
+        let total = self
+            .xorbs
+            .iter()
+            .chain(&self.shards)
+            .chain(&objects)
+            .try_fold(0u64, |total, object| total.checked_add(object.size));
+        if total.is_none_or(|total| total > maximum_artifact_bytes) {
+            return Err(Error::Dependency(Box::new(
+                crab_read::dependency_proof::DependencyProofError::Limit("prepared artifact bytes"),
+            )));
+        }
+        self.lfs = objects;
+        Ok(self)
+    }
+
+    /// Return LFS payload snapshots bound to this publication.
+    #[must_use]
+    pub fn lfs(&self) -> &[ContentArtifact] {
+        &self.lfs
     }
 
     #[must_use]
@@ -551,7 +608,12 @@ impl Prepared {
             objects = objects.saturating_add(u64::from(pack.object_count()));
         }
         if let Some(content) = &self.content {
-            for artifact in content.xorbs.iter().chain(&content.shards) {
+            for artifact in content
+                .xorbs
+                .iter()
+                .chain(&content.shards)
+                .chain(&content.lfs)
+            {
                 bytes = bytes.saturating_add(artifact.size);
                 objects = objects.saturating_add(1);
             }
@@ -566,7 +628,7 @@ impl Prepared {
         self.content.as_ref()
     }
 
-    /// Bind locally validated Crab-native content to pointer dependencies.
+    /// Bind locally validated Crab and LFS content to pointer dependencies.
     pub fn attach_content(mut self, content: PreparedContent) -> Result<Self> {
         let files = content
             .files
@@ -597,6 +659,30 @@ impl Prepared {
                 "prepared content is not reachable from the ref update",
             ));
         }
+        let lfs = content
+            .lfs
+            .iter()
+            .map(|object| (object.protocol_hash, object.size))
+            .collect::<BTreeMap<_, _>>();
+        let mut used = std::collections::BTreeSet::new();
+        for dependency in self.plan.pointers() {
+            let crab_git::pointer_detect::PointerKind::Lfs(pointer) = &dependency.pointer else {
+                continue;
+            };
+            if let Some(size) = lfs.get(&pointer.oid) {
+                if *size != pointer.size {
+                    return Err(Error::Request(
+                        "prepared LFS size differs from its Git pointer",
+                    ));
+                }
+                used.insert(pointer.oid);
+            }
+        }
+        if used.len() != lfs.len() {
+            return Err(Error::Request(
+                "prepared LFS object is not reachable from the ref update",
+            ));
+        }
         self.content = Some(content);
         Ok(self)
     }
@@ -624,7 +710,7 @@ impl Prepared {
         Ok(self)
     }
 
-    /// Stage the normalized pack under one durable journal recovery root.
+    /// Stage the normalized pack under one durable native capsule recovery root.
     ///
     /// This creates no ref, journal, visibility, or manifest entry. It makes a
     /// prepared mutation recoverable after its private scratch files disappear.
@@ -641,11 +727,36 @@ impl Prepared {
             return Err(Error::Request("invalid recovery plan identity"));
         }
         if let Some(content) = &self.content {
+            for object in &content.lfs {
+                let oid = crab_git::lfs_pointer::hex_encode(&object.protocol_hash);
+                let path = self.layout.capsule_plan_recovery_lfs_path(plan_id, &oid);
+                // S3 multipart completion needs a part. Empty LFS payloads use
+                // the same verified bytes through one ordinary object write.
+                if object.size == 0 {
+                    self.layout
+                        .store()
+                        .put(&path, object.read_verified(0, cancel).await?)
+                        .await?;
+                    continue;
+                }
+                self.layout
+                    .store()
+                    .put_multipart_file_retry(
+                        &path,
+                        &object.path,
+                        object.size,
+                        object.body_hash,
+                        8 * 1024 * 1024,
+                        cancel,
+                        None,
+                    )
+                    .await?;
+            }
             for xorb in &content.xorbs {
                 self.layout
                     .store()
                     .put_multipart_file_retry(
-                        &self.layout.ref_journal_recovery_xorb_path(
+                        &self.layout.capsule_plan_recovery_xorb_path(
                             plan_id,
                             &crab_xet::hash::MerkleHash::from(xorb.protocol_hash),
                         ),
@@ -662,7 +773,7 @@ impl Prepared {
                 self.layout
                     .store()
                     .put_multipart_file_retry(
-                        &self.layout.ref_journal_recovery_shard_path(
+                        &self.layout.capsule_plan_recovery_shard_path(
                             plan_id,
                             &crab_xet::hash::MerkleHash::from(shard.protocol_hash),
                         ),
@@ -685,7 +796,7 @@ impl Prepared {
         self.layout
             .store()
             .put_multipart_file_retry(
-                &self.layout.ref_journal_recovery_pack_path(plan_id),
+                &self.layout.capsule_plan_recovery_pack_path(plan_id),
                 pack.pack_path(),
                 binding.size(),
                 *pack.content_hash().as_bytes(),
@@ -695,6 +806,48 @@ impl Prepared {
             )
             .await?;
         Ok(Some(binding))
+    }
+
+    async fn upload_lfs(&self, cancel: &CancellationToken) -> Result<()> {
+        let Some(content) = &self.content else {
+            return Ok(());
+        };
+        let store =
+            crab_lfs::LfsObjectStore::new(self.layout.store().clone(), self.layout.repo_prefix());
+        let mut objects = content
+            .lfs
+            .iter()
+            .map(|object| (object.protocol_hash, object))
+            .collect::<BTreeMap<_, _>>();
+        for dependency in self.plan.pointers() {
+            let crab_git::pointer_detect::PointerKind::Lfs(pointer) = &dependency.pointer else {
+                continue;
+            };
+            let Some(object) = objects.remove(&pointer.oid) else {
+                continue;
+            };
+            if cancel.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+            // S3/GCS cannot abort a multipart upload on drop. Drain this admitted
+            // object through completion or cleanup before honoring cancellation;
+            // dropping its future would lose the known session and orphan parts.
+            store
+                .put_stream_with_size(&object.protocol_hash, Some(object.size), &object.path)
+                .await
+                .map_err(|source| {
+                    Error::Dependency(Box::new(
+                        crab_read::dependency_proof::DependencyProofError::Lfs {
+                            blob: dependency.blob,
+                            source,
+                        },
+                    ))
+                })?;
+            if cancel.is_cancelled() {
+                return Err(Error::Cancelled);
+            }
+        }
+        Ok(())
     }
 
     /// Upload the validated pack and visibility evidence before journal commitment.
@@ -731,6 +884,7 @@ impl Prepared {
                     .collect::<std::collections::BTreeSet<_>>()
             })
             .unwrap_or_default();
+        self.upload_lfs(cancel).await?;
         crab_read::dependency_proof::verify_dependencies_except_crab(
             layout,
             snapshot,

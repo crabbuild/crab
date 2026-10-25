@@ -403,10 +403,11 @@ async fn capsule_catalog_selects_and_verifies_crab_content() {
             shard_hint: Some([9; 32]),
         }),
     };
-    verify_capsule_dependencies_except_crab(
+    verify_capsule_dependencies_except_prepared(
         &layout,
         &catalog,
         &[dependency],
+        &BTreeSet::new(),
         &BTreeSet::new(),
         limits(),
         &CancellationToken::new(),
@@ -432,10 +433,11 @@ async fn capsule_catalog_rejects_missing_content_before_origin_reads() {
             shard_hint: Some([8; 32]),
         }),
     };
-    let result = verify_capsule_dependencies_except_crab(
+    let result = verify_capsule_dependencies_except_prepared(
         &layout,
         &PointerCatalog::new(),
         &[dependency],
+        &BTreeSet::new(),
         &BTreeSet::new(),
         limits(),
         &CancellationToken::new(),

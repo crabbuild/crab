@@ -54,13 +54,7 @@ async fn sdk_explicit_s3_ignores_conflicting_environment() {
             .as_nanos()
     );
     let layout = crab_storage::StoreLayout::new(store.clone(), prefix.clone());
-    crab_metadata::manifest_store::create_manifest(
-        &store,
-        &layout,
-        &crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main"),
-    )
-    .await
-    .unwrap();
+    native_empty_root(&layout).await;
     let path = object_store::path::Path::from(prefix.clone());
     let before = store
         .inner()
@@ -106,7 +100,7 @@ async fn sdk_explicit_s3_ignores_conflicting_environment() {
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 #[ignore = "requires CRAB_SDK_TEST_S3_BUCKET and provider credentials for a dedicated test bucket"]
-async fn sdk_s3_read_preserves_empty_manifest() {
+async fn sdk_s3_read_preserves_empty_capsule_root() {
     let bucket = std::env::var("CRAB_SDK_TEST_S3_BUCKET").unwrap();
     let prefix = format!(
         "sdk-read-{}-{}",
@@ -120,10 +114,7 @@ async fn sdk_s3_read_preserves_empty_manifest() {
         crab_storage::build_static_env_store(&bucket, crab_storage::StorageProviderKind::S3)
             .unwrap();
     let layout = crab_storage::StoreLayout::new(store.clone(), prefix.clone());
-    let manifest = crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main");
-    crab_metadata::manifest_store::create_manifest(&store, &layout, &manifest)
-        .await
-        .unwrap();
+    native_empty_root(&layout).await;
     let path = object_store::path::Path::from(prefix.clone());
     let inventory = || async {
         let mut objects = store
@@ -169,4 +160,15 @@ async fn sdk_s3_read_preserves_empty_manifest() {
         (Some("refs/heads/main"), 0, ErrorKind::NotFound)
     );
     assert_eq!(before, after);
+}
+
+async fn native_empty_root(layout: &crab_storage::StoreLayout<crab_storage::Store>) {
+    use crab_metadata::capsule_protocol::{RepositoryRoot, RootRecord, create_root};
+    create_root(
+        layout,
+        RootRecord::encode(RepositoryRoot::initial(&"1".repeat(64), "refs/heads/main").unwrap())
+            .unwrap(),
+    )
+    .await
+    .unwrap();
 }

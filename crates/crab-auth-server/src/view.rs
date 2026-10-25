@@ -8,7 +8,7 @@ use crab_cache_store::{CacheConfig, CachingStore};
 use crab_git::{CrabUrl, lfs_pointer::LfsPointer, verify_pack_sha1};
 use crab_lfs::LfsObjectStore;
 use crab_metadata::{
-    file_index_lookup::resolve_file_hash_to_shard,
+    file_index_lookup::SharedFileIndexLookup,
     manifest_store,
     manifests::{BulkData, Manifest, PackManifestEntry, compact_pack_index, compact_shard_index},
     pack_metadata::PackMetadata,
@@ -55,6 +55,7 @@ struct SourceViewIdentity {
     protocol: ViewProtocol,
     generation: u64,
     digest: String,
+    lookup: SharedFileIndexLookup,
 }
 
 async fn read_manifest(store: &Store, router: &StoreLayout) -> Result<(Manifest, String)> {
@@ -84,7 +85,10 @@ async fn read_source_view_identity(router: &StoreLayout) -> Result<SourceViewIde
                 },
             )
             .await?;
+            let catalog = view.pointer_catalog_lookup(router, 2 * 1024 * 1024 * 1024)?;
+            let lookup = SharedFileIndexLookup::for_pointer_catalog(router.clone(), catalog);
             Ok(SourceViewIdentity {
+                lookup,
                 protocol: ViewProtocol::Capsule,
                 generation: view.root().root().generation(),
                 digest: view.state_digest(),
@@ -94,7 +98,11 @@ async fn read_source_view_identity(router: &StoreLayout) -> Result<SourceViewIde
             source: crab_storage::StorageError::NotFound { .. },
         }) => {
             let snapshot = read_repository_snapshot(router.store(), router).await?;
+            // Released standalone view helpers accept explicit manifest sessions.
+            // Pin that authority here; native current lookup must never revive it.
+            let lookup = SharedFileIndexLookup::from_snapshot(router.clone(), &snapshot)?;
             Ok(SourceViewIdentity {
+                lookup,
                 protocol: ViewProtocol::Manifest,
                 generation: snapshot.manifest.generation,
                 digest: snapshot.journal.state_digest,
@@ -260,74 +268,88 @@ pub async fn materialize_view_with_store_and_credentials(
     let parsed = CrabUrl::parse(repo_url).map_err(AuthServerError::from)?;
     let source_router = StoreLayout::new(store.clone(), parsed.repo_path.clone());
     let source = read_source_view_identity(&source_router).await?;
-    if matches!(source.protocol, ViewProtocol::Manifest) {
-        crab_metadata::layout_descriptor::read_canonical_layout(&store, &source_router).await?;
-    }
-    let repo_prefix = view_prefix(
-        &parsed.repo_path,
-        scope_hash,
-        source.protocol,
-        source.generation,
-        &source.digest,
-    );
-    let global_prefix = format!("{repo_prefix}/.crab");
-    let output = ViewOutput {
-        repo_prefix: repo_prefix.clone(),
-        global_prefix,
-        source_repo: parsed.repo_path.clone(),
-        scope_hash: scope_hash.to_ascii_lowercase(),
-        source_generation: source.generation,
-        source_manifest_hash: source.digest.clone(),
-        cache_hit: false,
-    };
-
-    let view_router = StoreLayout::new(store.clone(), repo_prefix.clone());
-    let cached = match source.protocol {
-        ViewProtocol::Manifest => read_manifest(&store, &view_router).await.map(|_| ()),
-        ViewProtocol::Capsule => verify_capsule_view_ready(&view_router, &source.digest).await,
-    };
-    match cached {
-        Ok(()) => {
-            crab_metadata::layout_descriptor::read_canonical_layout(&store, &view_router).await?;
-            verify_existing_view(
-                &parsed.bucket,
-                &repo_prefix,
-                &store,
-                &parsed.repo_path,
-                git_credentials.as_ref(),
-            )
-            .await?;
-            return Ok(ViewOutput {
-                cache_hit: true,
-                ..output
-            });
+    let result = async {
+        if matches!(source.protocol, ViewProtocol::Manifest) {
+            crab_metadata::layout_descriptor::read_canonical_layout(&store, &source_router).await?;
         }
-        Err(AuthServerError::NotFound { .. }) => {}
-        Err(error) => return Err(error),
-    }
+        let repo_prefix = view_prefix(
+            &parsed.repo_path,
+            scope_hash,
+            source.protocol,
+            source.generation,
+            &source.digest,
+        );
+        let global_prefix = format!("{repo_prefix}/.crab");
+        let output = ViewOutput {
+            repo_prefix: repo_prefix.clone(),
+            global_prefix,
+            source_repo: parsed.repo_path.clone(),
+            scope_hash: scope_hash.to_ascii_lowercase(),
+            source_generation: source.generation,
+            source_manifest_hash: source.digest.clone(),
+            cache_hit: false,
+        };
 
-    build_filtered_view(
-        repo_url,
-        &parsed.repo_path,
-        &repo_prefix,
-        &source,
-        &store,
-        &include,
-        &deny,
-        git_credentials.as_ref(),
-    )
-    .await?;
-    match source.protocol {
-        ViewProtocol::Manifest => {
-            read_manifest(&store, &view_router)
-                .await
-                .map_err(|e| AuthServerError::AuthFailed {
-                    path: format!("filtered view push did not produce a manifest: {e}"),
+        let view_router = StoreLayout::new(store.clone(), repo_prefix.clone());
+        let cached = match source.protocol {
+            ViewProtocol::Manifest => read_manifest(&store, &view_router).await.map(|_| ()),
+            ViewProtocol::Capsule => verify_capsule_view_ready(&view_router, &source.digest).await,
+        };
+        match cached {
+            Ok(()) => {
+                crab_metadata::layout_descriptor::read_canonical_layout(&store, &view_router)
+                    .await?;
+                verify_existing_view(
+                    &parsed.bucket,
+                    &repo_prefix,
+                    &store,
+                    &parsed.repo_path,
+                    git_credentials.as_ref(),
+                    source.protocol,
+                )
+                .await?;
+                return Ok(ViewOutput {
+                    cache_hit: true,
+                    ..output
+                });
+            }
+            Err(AuthServerError::NotFound { .. }) => {}
+            Err(error) => return Err(error),
+        }
+
+        build_filtered_view(
+            repo_url,
+            &parsed.repo_path,
+            &repo_prefix,
+            &source,
+            &store,
+            &include,
+            &deny,
+            git_credentials.as_ref(),
+        )
+        .await?;
+        match source.protocol {
+            ViewProtocol::Manifest => {
+                read_manifest(&store, &view_router).await.map_err(|e| {
+                    AuthServerError::AuthFailed {
+                        path: format!("filtered view push did not produce a manifest: {e}"),
+                    }
                 })?;
+            }
+            ViewProtocol::Capsule => {
+                verify_capsule_view_ready(&view_router, &source.digest).await?
+            }
         }
-        ViewProtocol::Capsule => verify_capsule_view_ready(&view_router, &source.digest).await?,
-    }
 
+        Ok(output)
+    }
+    .await;
+    let close = source.lookup.close().await;
+    if let (Err(_), Err(error)) = (&result, &close) {
+        tracing::warn!(%error, "view failed; source lookup cleanup also failed");
+    }
+    let output = result?;
+    close?;
     Ok(output)
 }
 
@@ -351,7 +373,8 @@ async fn build_filtered_view(
     git_credentials: Option<&ViewS3Credentials>,
 ) -> Result<()> {
     let workspace = ViewGitWorkspace::create(source_url, include, deny, git_credentials)?;
-    let hydrator = source_hydrator(store.clone(), source_repo, workspace.temp_path())?;
+    let hydrator = source_hydrator(store.clone(), source_repo, workspace.temp_path())?
+        .with_file_index_lookup(source.lookup.clone());
     let mut repacker = ViewCrabRepacker::new(hydrator);
     materialize_crab_pointers_in_fast_export(
         workspace.export_stream(),
@@ -386,7 +409,14 @@ async fn build_filtered_view(
             .await?;
         }
     }
-    verify_filtered_view_content(workspace.filtered_git(), store, source_repo, repo_prefix).await
+    verify_filtered_view_content(
+        workspace.filtered_git(),
+        store,
+        source_repo,
+        repo_prefix,
+        source.protocol,
+    )
+    .await
 }
 
 fn source_hydrator(store: Store, source_repo: &str, temp_dir: &Path) -> Result<ShardHydrator> {
@@ -404,12 +434,13 @@ async fn verify_existing_view(
     store: &Store,
     source_repo: &str,
     git_credentials: Option<&ViewS3Credentials>,
+    protocol: ViewProtocol,
 ) -> Result<()> {
     let temp = tempfile::tempdir()?;
     let view_git = temp.path().join("view.git");
     let view_url = format!("crab://{bucket}/{repo_prefix}");
     clone_bare(&view_url, &view_git, git_credentials)?;
-    verify_filtered_view_content(&view_git, store, source_repo, repo_prefix).await
+    verify_filtered_view_content(&view_git, store, source_repo, repo_prefix, protocol).await
 }
 
 async fn verify_filtered_view_content(
@@ -417,9 +448,10 @@ async fn verify_filtered_view_content(
     store: &Store,
     source_repo: &str,
     repo_prefix: &str,
+    protocol: ViewProtocol,
 ) -> Result<()> {
     let scan = scan_reachable_pointers(filtered_git)?;
-    verify_crab_pointers_backed_by_view(store, repo_prefix, &scan.crab_pointers).await?;
+    verify_crab_pointers_backed_by_view(store, repo_prefix, &scan.crab_pointers, protocol).await?;
     copy_lfs_objects(store.clone(), source_repo, repo_prefix, &scan.lfs_pointers).await
 }
 
@@ -427,46 +459,66 @@ async fn verify_crab_pointers_backed_by_view(
     store: &Store,
     repo_prefix: &str,
     pointers: &[Pointer],
+    protocol: ViewProtocol,
 ) -> Result<()> {
     if pointers.is_empty() {
         return Ok(());
     }
 
     let router = view_store_layout(store, repo_prefix);
-    let mut seen = HashSet::new();
-    for pointer in pointers {
-        let file_hash = MerkleHash::from(pointer.file_hash);
-        if !seen.insert(file_hash) {
-            continue;
+    let lookup = match protocol {
+        ViewProtocol::Capsule => {
+            SharedFileIndexLookup::new_for_storage(store, router.repo_prefix())
         }
-        let shard_hash =
-            resolve_file_hash_to_shard(Arc::clone(store.inner()), router.repo_prefix(), &file_hash)
-                .await?
-                .ok_or_else(|| AuthServerError::AuthFailed {
-                    path: format!(
-                        "filtered ACL view pointer {} has no view-local file-index entry",
-                        file_hash.hex()
-                    ),
-                })?;
-        let (shard_bytes, _) = store
-            .get_with_etag_bounded(&router.shard_path(&shard_hash), MAX_SHARD_SIZE_BYTES as u64)
-            .await?;
-        let shard = ShardReader::from_bytes(shard_bytes, shard_hash);
-        let file_info =
-            shard
-                .get_file_info(&file_hash)?
-                .ok_or_else(|| AuthServerError::AuthFailed {
-                    path: format!(
-                        "filtered ACL view shard {} does not cover pointer {}",
-                        shard_hash.hex(),
-                        file_hash.hex()
-                    ),
-                })?;
-        for segment in &file_info.segments {
-            store.head(&router.xorb_path(&segment.xorb_hash)).await?;
+        ViewProtocol::Manifest => {
+            let snapshot = read_repository_snapshot(store, &router).await?;
+            SharedFileIndexLookup::from_snapshot(router.clone(), &snapshot)?
         }
+    };
+    let result = async {
+        let mut seen = HashSet::new();
+        for pointer in pointers {
+            let file_hash = MerkleHash::from(pointer.file_hash);
+            if !seen.insert(file_hash) {
+                continue;
+            }
+            let shard_hash =
+                lookup
+                    .lookup(&file_hash)
+                    .await?
+                    .ok_or_else(|| AuthServerError::AuthFailed {
+                        path: format!(
+                            "filtered ACL view pointer {} has no view-local file-index entry",
+                            file_hash.hex()
+                        ),
+                    })?;
+            let (shard_bytes, _) = store
+                .get_with_etag_bounded(&router.shard_path(&shard_hash), MAX_SHARD_SIZE_BYTES as u64)
+                .await?;
+            let shard = ShardReader::from_bytes(shard_bytes, shard_hash);
+            let file_info =
+                shard
+                    .get_file_info(&file_hash)?
+                    .ok_or_else(|| AuthServerError::AuthFailed {
+                        path: format!(
+                            "filtered ACL view shard {} does not cover pointer {}",
+                            shard_hash.hex(),
+                            file_hash.hex()
+                        ),
+                    })?;
+            for segment in &file_info.segments {
+                store.head(&router.xorb_path(&segment.xorb_hash)).await?;
+            }
+        }
+        Ok::<_, AuthServerError>(())
     }
-    Ok(())
+    .await;
+    let close = lookup.close().await;
+    if let (Err(_), Err(error)) = (&result, &close) {
+        tracing::warn!(%error, "view validation failed; lookup cleanup also failed");
+    }
+    result?;
+    close.map_err(AuthServerError::from)
 }
 
 async fn verify_crab_pointers_backed_by_uploaded_view(
@@ -1069,15 +1121,12 @@ mod tests {
         )
         .unwrap();
 
+        let source = read_source_view_identity(&source_router).await.unwrap();
         build_filtered_view(
             path_str(&source_bare).unwrap(),
             source_repo,
             view_prefix,
-            &SourceViewIdentity {
-                protocol: ViewProtocol::Manifest,
-                generation: 1,
-                digest: "source-state".to_owned(),
-            },
+            &source,
             &store,
             &["src/**".to_owned()],
             &["secret/**".to_owned()],
@@ -1085,6 +1134,7 @@ mod tests {
         )
         .await
         .unwrap();
+        source.lookup.close().await.unwrap();
 
         let view_router = view_store_layout(&store, view_prefix);
         let (manifest, _) = read_manifest(&store, &view_router).await.unwrap();
@@ -1244,15 +1294,25 @@ mod tests {
                 .await
                 .is_ok()
         );
-        verify_crab_pointers_backed_by_view(&store, view_prefix, std::slice::from_ref(&pointer))
-            .await
-            .unwrap();
+        verify_crab_pointers_backed_by_view(
+            &store,
+            view_prefix,
+            std::slice::from_ref(&pointer),
+            ViewProtocol::Manifest,
+        )
+        .await
+        .unwrap();
         let cache = Arc::new(crab_cache::LocalCache::new(
             temp.path().join("view-read-cache"),
         ));
         let caching =
             CachingStore::new_with_local_cache(store, CacheConfig::default(), cache).unwrap();
+        let snapshot = read_repository_snapshot(caching.origin(), &view_router)
+            .await
+            .unwrap();
+        let lookup = SharedFileIndexLookup::from_snapshot(view_router.clone(), &snapshot).unwrap();
         let reader = crab_read::ReadRuntimeBuilder::new(caching, view_router, 2)
+            .with_file_index_lookup(lookup.clone())
             .build()
             .unwrap();
         assert_eq!(
@@ -1262,6 +1322,7 @@ mod tests {
                 .unwrap(),
             content
         );
+        lookup.close().await.unwrap();
     }
 
     #[tokio::test]

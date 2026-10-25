@@ -37,7 +37,7 @@ fn failure(error: &crab_sdk::Error) -> String {
 fn live_client(scratch: &Path) -> (Client, RepositoryLocator) {
     let bucket = required("CRAB_SDK_TEST_S3_BUCKET");
     let endpoint = required("AWS_ENDPOINT_URL_S3");
-    let options = S3Options::new(
+    let mut options = S3Options::new(
         &bucket,
         &required("AWS_REGION"),
         &required("AWS_ACCESS_KEY_ID"),
@@ -45,6 +45,13 @@ fn live_client(scratch: &Path) -> (Client, RepositoryLocator) {
     )
     .unwrap()
     .with_endpoint(&endpoint);
+    // Child environments retain only the credentials bound to this explicit
+    // store, including the session scope of temporary AWS credentials.
+    if let Ok(token) = std::env::var("AWS_SESSION_TOKEN")
+        && !token.is_empty()
+    {
+        options = options.with_session_token(&token).unwrap();
+    }
     let cache = scratch.join("cache");
     std::fs::create_dir(&cache).unwrap();
     let client = Client::builder()
@@ -73,7 +80,9 @@ async fn initial_commit(client: &Client, locator: &RepositoryLocator, scratch: &
         .initialize_remote(locator.clone(), "refs/heads/main")
         .await
         .unwrap_or_else(|error| panic!("{}", failure(&error)));
-    let attributes = b"*.bin filter=crab diff=crab merge=crab -text\n".to_vec();
+    let attributes =
+        b"*.bin filter=crab diff=crab merge=crab -text\n*.lfs filter=lfs diff=lfs merge=lfs -text\n"
+            .to_vec();
     let project = format!(
         "version = 1\n[remote]\nurl = \"crab://{}/{}\"\n",
         required("CRAB_SDK_TEST_S3_BUCKET"),
@@ -175,6 +184,11 @@ async fn advance_remote(
 }
 
 async fn cleanup(locator: &RepositoryLocator) {
+    // Native RustFS qualification removes its private data directory after the suite;
+    // keep per-repository deletion for external buckets, where that data is durable.
+    if std::env::var("CRAB_SDK_TEST_S3_CLEANUP").ok().as_deref() == Some("fixture") {
+        return;
+    }
     let bucket = required("CRAB_SDK_TEST_S3_BUCKET");
     let store =
         crab_storage::build_static_env_store(&bucket, crab_storage::StorageProviderKind::S3)
@@ -263,8 +277,14 @@ async fn stage_commit_push_round_trip() {
     let large_size = 1024 * 1024 * 1024;
     std::fs::write(checkout.join("README.md"), b"updated locally\n").unwrap();
     let large_digest = write_large_fixture(&checkout.join("large.bin"), large_size);
+    let lfs_size = 32 * 1024 * 1024;
+    let lfs_digest = write_large_fixture(&checkout.join("large.lfs"), lfs_size);
     local
-        .stage(vec!["README.md".into(), "large.bin".into()])
+        .stage(vec![
+            "README.md".into(),
+            "large.bin".into(),
+            "large.lfs".into(),
+        ])
         .await
         .unwrap();
     let identity = self::identity();
@@ -276,6 +296,17 @@ async fn stage_commit_push_round_trip() {
         .await
         .unwrap();
     let git = PathBuf::from(required("CRAB_SDK_TEST_GIT_BIN"));
+    let lfs_pointer = std::process::Command::new(&git)
+        .current_dir(&checkout)
+        .args(["show", "HEAD:large.lfs"])
+        .output()
+        .unwrap();
+    assert!(lfs_pointer.status.success());
+    assert!(
+        lfs_pointer
+            .stdout
+            .starts_with(b"version https://git-lfs.github.com/spec/v1\n")
+    );
     let tag = std::process::Command::new(&git)
         .current_dir(&checkout)
         .args(["tag", "sdk-round-trip"])
@@ -295,7 +326,10 @@ async fn stage_commit_push_round_trip() {
         .await
         .unwrap();
     let persisted = prepared.recovery_token().to_json().unwrap();
-    let pushed = prepared.execute().await.unwrap();
+    let pushed = prepared
+        .execute()
+        .await
+        .unwrap_or_else(|error| panic!("local round-trip push: {}", failure(&error)));
     assert!(
         matches!(pushed, LocalPushOutcome::Committed { .. }),
         "unexpected push outcome: {pushed:?}"
@@ -341,6 +375,10 @@ async fn stage_commit_push_round_trip() {
     assert_eq!(
         file_digest(&verified.join("large.bin")),
         (large_size, large_digest)
+    );
+    assert_eq!(
+        file_digest(&verified.join("large.lfs")),
+        (lfs_size, lfs_digest)
     );
     let status = cloned.status().await.unwrap();
     assert!(
@@ -565,6 +603,36 @@ async fn fetch_checkout_and_pull_round_trip() {
         .unwrap();
     assert!(matches!(pulled, PullOutcome::Updated { head, .. } if head == fifth));
     assert_eq!(git_output(&["rev-parse", "HEAD"]), fifth.to_string());
+
+    let before_unchanged = stored_objects(&locator).await;
+    let unchanged = local
+        .prepare_push(
+            PushOptions::current_branch()
+                .with_remote("upstream")
+                .unwrap(),
+        )
+        .await
+        .unwrap();
+    let token = crab_sdk::local::PushRecoveryToken::from_json(
+        &unchanged.recovery_token().to_json().unwrap(),
+    )
+    .unwrap();
+    assert!(matches!(
+        unchanged.execute().await.unwrap(),
+        LocalPushOutcome::TransportCommitted { .. }
+    ));
+    assert!(matches!(
+        client
+            .resume_local_push(token.clone(), scratch.path().join("resume"))
+            .await
+            .unwrap(),
+        LocalPushOutcome::TransportCommitted { .. }
+    ));
+    assert!(matches!(
+        client.reconcile_local_push(token).await.unwrap(),
+        LocalPushOutcome::TransportCommitted { .. }
+    ));
+    assert_eq!(stored_objects(&locator).await, before_unchanged);
 
     let linked = scratch.path().join("linked");
     let linked_text = linked.to_str().unwrap();

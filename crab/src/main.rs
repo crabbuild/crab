@@ -21,7 +21,7 @@
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 #![warn(clippy::perf, clippy::pedantic)]
 
-use std::ffi::OsString;
+use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::sync::Arc;
@@ -2599,6 +2599,16 @@ fn sync_gitattributes_from_track(root: &Path, patterns: &[String]) {
 }
 
 fn main() -> ExitCode {
+    let argv0 = std::env::args_os().next().unwrap_or_default();
+    if Path::new(&argv0).file_stem() == Some(OsStr::new("git")) {
+        return match forward_selected_git() {
+            Ok(code) => code,
+            Err(error) => {
+                eprintln!("cannot invoke selected Git: {error}");
+                ExitCode::FAILURE
+            }
+        };
+    }
     // Load .env files so credentials and config (AWS_ACCESS_KEY_ID,
     // AWS_ENDPOINT_URL, CRAB_STORAGE_PROVIDER, etc.) are available
     // without requiring the user to manually `source .env` in every
@@ -2643,7 +2653,6 @@ fn main() -> ExitCode {
     // via CancellationToken can run first.
     gix_tempfile::signal::setup(gix_tempfile::signal::handler::Mode::DeleteTempfilesOnTermination);
 
-    let argv0 = std::env::args_os().next().unwrap_or_default();
     let stem = Path::new(&argv0)
         .file_stem()
         .and_then(|s| s.to_str())
@@ -2704,6 +2713,33 @@ fn main() -> ExitCode {
             }
             ExitCode::from(err.exit_code())
         }
+    }
+}
+
+fn forward_selected_git() -> std::io::Result<ExitCode> {
+    let executable = std::env::var_os(crab_remote::local::GIT_EXECUTABLE_ENV)
+        .ok_or_else(|| std::io::Error::other("selected Git executable is missing"))?;
+    // Run before dotenv, logging and CLI dispatch: Git owns all three streams
+    // and must inherit the SDK's exact credential and execution-policy scope.
+    let mut command = std::process::Command::new(executable);
+    command
+        .args(std::env::args_os().skip(1))
+        .stdin(std::process::Stdio::inherit())
+        .stdout(std::process::Stdio::inherit())
+        .stderr(std::process::Stdio::inherit());
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt as _;
+        Err(command.exec())
+    }
+    #[cfg(windows)]
+    {
+        // The SDK launcher owns the Windows job; Git inherits that ownership.
+        // Keeping forwarding synchronous avoids a second runtime per Git call.
+        let status = command.status()?;
+        Ok(ExitCode::from(
+            u8::try_from(status.code().unwrap_or(1)).unwrap_or(1),
+        ))
     }
 }
 

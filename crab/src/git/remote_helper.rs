@@ -3533,6 +3533,7 @@ async fn capsule_git_repository(
         options,
         capsule_fetch_maximum(config),
         cancel,
+        None,
     )
     .await
     .map_err(Into::into)
@@ -5424,6 +5425,7 @@ mod tests {
                 options,
                 64 * 1024 * 1024,
                 &cancellation,
+                None,
             )
             .await
             .expect("open bounded capsule reader");

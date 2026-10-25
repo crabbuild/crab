@@ -212,9 +212,10 @@ object identities, base identities and pack checksums remain verified.
 
 `prepare_with_external_delta_bases` may instead encode a bounded
 REF delta when the caller supplies the decoded base, its immutable object ID,
-kind, and verified prior depth. Preparation recomputes the base identity and
-falls back to a full entry for unknown, mismatched, over-depth, oversized, or
-unprofitable candidates.
+kind, and verified prior depth. Raw base identities are recomputed during
+preparation; a base retained from `GeneratedObject` carries its immutable
+identity proof across packs. Preparation falls back to a full entry for unknown,
+mismatched, over-depth, oversized, or unprofitable candidates.
 
 Such a prepared pack depends on the surrounding object
 database; a native Git transfer must materialize that closure or repair the thin

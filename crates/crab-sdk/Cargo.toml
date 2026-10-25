@@ -14,12 +14,12 @@ all-features = true
 
 [features]
 default = []
-remote = ["dep:tokio", "dep:tokio-util", "dep:crab-remote-git", "dep:crab-storage", "dep:crab-metadata", "dep:object_store", "dep:blake3"]
-write = ["remote", "dep:crab-remote", "crab-remote/publication", "dep:crab-write", "dep:crab-coordination", "dep:crab-git", "dep:crab-read", "dep:crab-lfs", "dep:crab-staging", "dep:crab-xet", "crab-xet/chunker", "dep:crab-types", "dep:serde", "dep:serde_json", "dep:uuid", "dep:tempfile", "dep:gix-object"]
+remote = ["dep:crab-read", "dep:tokio", "dep:tokio-util", "dep:crab-remote-git", "dep:crab-storage", "dep:crab-metadata", "dep:object_store", "dep:blake3"]
+write = ["remote", "crab-read/hydration", "dep:crab-remote", "crab-remote/publication", "dep:crab-write", "dep:crab-coordination", "dep:crab-git", "dep:crab-lfs", "dep:crab-staging", "dep:crab-xet", "crab-xet/chunker", "dep:crab-types", "dep:serde", "dep:serde_json", "dep:uuid", "dep:tempfile", "dep:gix-object"]
 local = ["write", "content", "crab-remote/local", "dep:dunce", "dep:toml"]
 managed = ["remote", "dep:crab-auth", "dep:crab-auth-store", "dep:crab-git", "dep:uuid"]
 
-content = ["remote", "crab-metadata/file-index-reader", "dep:crab-lfs", "dep:crab-git", "dep:futures-util", "dep:crab-read", "dep:crab-cache", "dep:crab-cache-store", "dep:crab-types"]
+content = ["remote", "crab-read/hydration", "crab-metadata/file-index-reader", "dep:crab-lfs", "dep:crab-git", "dep:futures-util", "dep:crab-cache", "dep:crab-cache-store", "dep:crab-types"]
 
 [dependencies]
 crab-remote = { workspace = true, optional = true }

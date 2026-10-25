@@ -1,5 +1,7 @@
 #![cfg(feature = "local")]
 
+use std::error::Error as _;
+
 use crab_sdk::local::{
     CheckoutOptions, CommitOptions as LocalCommitOptions, ExecutionPolicy as LocalExecutionPolicy,
     PushOptions, PushOutcome as LocalPushOutcome,
@@ -18,6 +20,75 @@ fn install_failing_checkout_hook(repository: &std::path::Path) {
         use std::os::unix::fs::PermissionsExt as _;
         std::fs::set_permissions(&hook, std::fs::Permissions::from_mode(0o755)).unwrap();
     }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+#[cfg(unix)]
+async fn close_drains_pipes_after_the_selected_git_parent_exits() {
+    use std::future::IntoFuture as _;
+    use std::os::unix::fs::PermissionsExt as _;
+
+    let scratch = tempfile::tempdir().unwrap();
+    let store = tempfile::tempdir().unwrap();
+    let git = git_path();
+    let wrapper = scratch.path().join("selected-git");
+    let executable = git.to_str().unwrap().replace('\'', "'\\''");
+    std::fs::write(
+        &wrapper,
+        format!("#!/bin/sh\nif [ \"$1\" = status ]; then\n  sleep 120 &\n  printf '%s %s' \"$$\" \"$!\" > \"$0.started\"\n  exit 0\nfi\nexec '{executable}' \"$@\"\n"),
+    )
+    .unwrap();
+    std::fs::set_permissions(&wrapper, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let tools =
+        crab_sdk::local::Tools::new(&wrapper, local_support::fake_crab(scratch.path())).unwrap();
+    let sdk = crab_sdk::Client::builder()
+        .direct_store(crab_sdk::storage::DirectStoreOptions::filesystem(store.path()).unwrap())
+        .local(crab_sdk::local::Options::new(tools))
+        .build()
+        .unwrap();
+    let checkout = scratch.path().join("checkout");
+    std::fs::create_dir(&checkout).unwrap();
+    run(&git, &checkout, &["init", "--initial-branch=main"]);
+    let repository = sdk
+        .open(crab_sdk::OpenOptions::local(&checkout))
+        .await
+        .unwrap();
+    let mut status = Box::pin(repository.local().unwrap().status().into_future());
+    let started = wrapper.with_file_name("selected-git.started");
+    let pids = tokio::select! {
+        result = &mut status => panic!("status completed before close: {result:?}"),
+        pids = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+            while !started.exists() {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            let pids = std::fs::read_to_string(started).unwrap();
+            let parent = pids.split_whitespace().next().unwrap();
+            while tokio::process::Command::new("/bin/kill")
+                .args(["-0", parent])
+                .output()
+                .await
+                .unwrap()
+                .status
+                .success()
+            {
+                tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+            }
+            pids
+        }) => pids.unwrap(),
+    };
+    let closed = tokio::time::timeout(std::time::Duration::from_secs(3), sdk.close()).await;
+    if closed.is_err() {
+        // Reclaim only recorded fixture processes if shutdown regresses; their
+        // inherited pipes would otherwise keep the SDK worker alive.
+        for pid in pids.split_whitespace() {
+            let _ = std::process::Command::new("/bin/kill")
+                .args(["-KILL", pid])
+                .output();
+        }
+        let _ = sdk.close().await;
+    }
+    let status = status.await;
+    assert!(matches!(closed, Ok(Ok(()))) && status.unwrap_err().kind() == ErrorKind::Cancelled);
 }
 
 #[tokio::test(flavor = "multi_thread")]
@@ -61,7 +132,15 @@ async fn dry_run_creates_no_remote_objects() {
                 .dry_run(true),
         )
         .await
-        .unwrap();
+        .unwrap_or_else(|error| {
+            let mut message = error.to_string();
+            let mut source = error.source();
+            while let Some(error) = source {
+                message.push_str(&format!(": {error}"));
+                source = error.source();
+            }
+            panic!("{message}");
+        });
     let outcome = prepared.execute().await.unwrap();
 
     assert!(matches!(outcome, LocalPushOutcome::DryRun { .. }));
@@ -344,4 +423,100 @@ async fn cli_and_sdk_share_staging() {
         "file.txt"
     );
     sdk.close().await.unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn explicit_credentials_are_scoped_to_all_local_children() {
+    for endpoint in ["", "http://127.0.0.1:1"] {
+        let result = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", "scoped_credentials_child"])
+            .env("CRAB_SDK_SCOPE_CHILD", "1")
+            .env("CRAB_SDK_SCOPE_ENDPOINT", endpoint)
+            .env("AWS_ACCESS_KEY_ID", "ambient-key")
+            .env("AWS_SECRET_ACCESS_KEY", "ambient-secret")
+            .env("AWS_SESSION_TOKEN", "ambient-session")
+            .env("AWS_ENDPOINT_URL", "http://ambient.invalid")
+            .env("AWS_ENDPOINT_URL_S3", "http://ambient.invalid")
+            .env("AWS_ALLOW_HTTP", "false")
+            .output()
+            .unwrap();
+        assert!(
+            result.status.success(),
+            "{}",
+            String::from_utf8_lossy(&result.stderr)
+        );
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn scoped_credentials_child() {
+    use std::os::unix::fs::PermissionsExt as _;
+    if std::env::var("CRAB_SDK_SCOPE_CHILD").as_deref() != Ok("1") {
+        return;
+    }
+    let scratch = tempfile::tempdir().unwrap();
+    let repository = scratch.path().join("checkout");
+    std::fs::create_dir(&repository).unwrap();
+    let git = git_path();
+    run(&git, &repository, &["init", "-b", "main"]);
+    commit(&git, &repository, "file.txt", "initial");
+    let endpoint = std::env::var("CRAB_SDK_SCOPE_ENDPOINT").unwrap();
+    let check = "[ \"$AWS_ACCESS_KEY_ID\" = sdk-key ] && [ \"$AWS_SECRET_ACCESS_KEY\" = sdk-secret ] && [ -z \"${AWS_SESSION_TOKEN+x}\" ] && [ \"${AWS_ENDPOINT_URL-}\" = \"$CRAB_SDK_SCOPE_ENDPOINT\" ] && [ \"${AWS_ENDPOINT_URL_S3-}\" = \"$CRAB_SDK_SCOPE_ENDPOINT\" ] || exit 93\n";
+    let git_wrapper = scratch.path().join("git-observer");
+    let real_git = git.to_str().unwrap().replace('\'', "'\\''");
+    std::fs::write(
+        &git_wrapper,
+        format!("#!/bin/sh\n{check}exec '{real_git}' \"$@\"\n"),
+    )
+    .unwrap();
+    let crab = scratch.path().join("crab-observer");
+    std::fs::write(
+        &crab,
+        format!(
+            "#!/bin/sh\n{check}if [ \"$1\" = sdk-capabilities ]; then printf '%s\\n' '{}'; fi\n",
+            crab_remote::local::CURRENT_CAPABILITIES_JSON
+        ),
+    )
+    .unwrap();
+    for path in [&git_wrapper, &crab] {
+        std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755)).unwrap();
+    }
+    let mut s3 =
+        crab_sdk::storage::S3Options::new("bucket", "us-east-1", "sdk-key", "sdk-secret").unwrap();
+    if !endpoint.is_empty() {
+        s3 = s3.with_endpoint(&endpoint);
+    }
+    let sdk = crab_sdk::Client::builder()
+        .direct_store(crab_sdk::storage::DirectStoreOptions::s3(s3))
+        .local(crab_sdk::local::Options::new(
+            crab_sdk::local::Tools::new(&git_wrapper, &crab).unwrap(),
+        ))
+        .build()
+        .unwrap();
+    let handle = sdk
+        .open(crab_sdk::OpenOptions::local(&repository))
+        .await
+        .unwrap();
+    let local = handle.local().unwrap();
+    local.hydrate(vec!["file.txt".into()]).await.unwrap();
+    local.dehydrate(vec!["file.txt".into()]).await.unwrap();
+    local
+        .prefetch_content(vec!["file.txt".into()])
+        .await
+        .unwrap();
+    local
+        .checkout("main", CheckoutOptions::default())
+        .await
+        .unwrap();
+    sdk.close().await.unwrap();
+    assert_eq!(
+        std::env::var("AWS_SESSION_TOKEN").unwrap(),
+        "ambient-session"
+    );
+    assert_eq!(
+        std::env::var("AWS_ENDPOINT_URL").unwrap(),
+        "http://ambient.invalid"
+    );
 }

@@ -1,6 +1,9 @@
 use crab_storage::StorageError;
+#[cfg(feature = "hydration")]
 use std::sync::{Arc, OnceLock};
+#[cfg(feature = "hydration")]
 use xet_client::ClientError;
+#[cfg(feature = "hydration")]
 use xet_data::file_reconstruction::FileReconstructionError;
 
 pub type Result<T> = std::result::Result<T, ReadError>;
@@ -11,9 +14,11 @@ pub enum ReadError {
     #[error("pointer parse failed")]
     Pointer(#[from] crab_types::pointer::PointerParseError),
 
+    #[cfg(feature = "hydration")]
     #[error("cache error")]
     Cache(#[from] crab_cache::CacheError),
 
+    #[cfg(feature = "hydration")]
     #[error("cache store error")]
     CacheStore(#[from] crab_cache_store::CacheStoreError),
 
@@ -32,9 +37,11 @@ pub enum ReadError {
     #[error("Git pack installation failed: {0}")]
     GitPack(#[from] crab_git::pack::PackError),
 
+    #[cfg(feature = "hydration")]
     #[error("LFS dependency verification failed")]
     Lfs(#[from] crab_lfs::LfsError),
 
+    #[cfg(feature = "hydration")]
     #[error("xet data-plane error")]
     Xet(#[from] crab_xet::error::XetError),
 
@@ -46,9 +53,11 @@ pub enum ReadError {
     #[error("replica readiness task failed: {0}")]
     ReadinessTask(#[source] tokio::task::JoinError),
 
+    #[cfg(feature = "hydration")]
     #[error("xet runtime error: {0}")]
     Runtime(#[from] xet_runtime::RuntimeError),
 
+    #[cfg(feature = "hydration")]
     #[error("file reconstruction failed for {file_hash}: {source}")]
     Reconstruction {
         file_hash: String,
@@ -105,6 +114,7 @@ pub enum ReadError {
 }
 
 /// Reconstruction failure with the pinned Xet dependency's nested sources exposed.
+#[cfg(feature = "hydration")]
 #[derive(Debug)]
 pub struct ReconstructionError {
     upstream: FileReconstructionError,
@@ -112,6 +122,7 @@ pub struct ReconstructionError {
     writer: Option<Arc<std::io::Error>>,
 }
 
+#[cfg(feature = "hydration")]
 impl From<FileReconstructionError> for ReconstructionError {
     fn from(upstream: FileReconstructionError) -> Self {
         Self {
@@ -124,12 +135,14 @@ impl From<FileReconstructionError> for ReconstructionError {
 
 // Only terminal adapter failures enter this operation-local state. Advisory
 // hint/cache failures that recover must never become the operation's cause.
+#[cfg(feature = "hydration")]
 #[derive(Default)]
 pub(crate) struct OperationFailures {
     read: OnceLock<Arc<ClientError>>,
     writer: OnceLock<Arc<std::io::Error>>,
 }
 
+#[cfg(feature = "hydration")]
 impl OperationFailures {
     pub(crate) fn read_error(&self, error: ClientError) -> ClientError {
         let error = Arc::new(error);
@@ -156,21 +169,25 @@ impl OperationFailures {
     }
 }
 
+#[cfg(feature = "hydration")]
 #[derive(Debug)]
 struct SharedClientFailure(Arc<ClientError>);
 
+#[cfg(feature = "hydration")]
 impl std::fmt::Display for SharedClientFailure {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         std::fmt::Display::fmt(&self.0, formatter)
     }
 }
 
+#[cfg(feature = "hydration")]
 impl std::error::Error for SharedClientFailure {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         Some(client_source(&self.0))
     }
 }
 
+#[cfg(feature = "hydration")]
 fn client_source(error: &ClientError) -> &(dyn std::error::Error + 'static) {
     match error {
         ClientError::InternalError(source) => source.as_ref(),
@@ -178,6 +195,7 @@ fn client_source(error: &ClientError) -> &(dyn std::error::Error + 'static) {
     }
 }
 
+#[cfg(feature = "hydration")]
 impl ReconstructionError {
     pub(crate) fn has_writer_error(&self) -> bool {
         self.writer.is_some() || matches!(self.upstream, FileReconstructionError::IoError(_))
@@ -202,6 +220,7 @@ impl ReconstructionError {
     }
 }
 
+#[cfg(feature = "hydration")]
 impl std::fmt::Display for ReconstructionError {
     fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         if let Some(writer) = &self.writer {
@@ -216,6 +235,7 @@ impl std::fmt::Display for ReconstructionError {
     }
 }
 
+#[cfg(feature = "hydration")]
 impl std::error::Error for ReconstructionError {
     fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
         // A completed destination failure is never reclassified as a retryable
@@ -255,6 +275,7 @@ impl ReadError {
 
     /// Return whether reconstruction failed while creating, writing, or flushing its destination.
     #[must_use]
+    #[cfg(feature = "hydration")]
     pub fn is_destination_io(&self) -> bool {
         matches!(self, Self::Io(_))
             || matches!(
@@ -264,7 +285,7 @@ impl ReadError {
     }
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "hydration"))]
 mod tests {
     use super::*;
     use std::error::Error;

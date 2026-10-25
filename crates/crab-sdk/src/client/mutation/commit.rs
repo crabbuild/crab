@@ -393,27 +393,11 @@ async fn build_pack(
     options: &OperationOptions,
     cancel: &CancellationToken,
 ) -> Result<(ObjectId, PathBuf)> {
-    let resolved = client.0.resolve_repository(locator, cancel).await?;
-    let layout = crab_storage::StoreLayout::new(resolved.store.clone(), resolved.prefix.clone());
-    let identity = crab_remote_git::RepositoryIdentity::new(
-        resolved.namespace,
-        resolved.prefix,
-        resolved.placement,
-    )
-    .map_err(crate::remote_error::remote_error)?;
-    let repository_options =
-        crab_remote_git::RepositoryOptions::new(Default::default(), options.owner_limits())
-            .map_err(crate::remote_error::remote_error)?;
-    let repository = crab_remote_git::RemoteGitRepository::open(
-        resolved.store,
-        layout,
-        identity,
-        client.0.git.clone(),
-        repository_options,
-        cancel,
-    )
-    .await
-    .map_err(crate::remote_error::remote_error)?;
+    let repository = client
+        .0
+        .capture_repository(locator, options, cancel)
+        .await?
+        .repository;
     let operation = repository
         .operation(crab_remote_git::OperationKind::Repository, cancel)
         .await

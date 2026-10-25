@@ -244,6 +244,7 @@ async fn native_capsule_install_repairs_uncheckpointed_delta_chains_and_reuses_c
                 crab_remote_git::RepositoryOptions::default(),
                 LIMIT,
                 &cancel,
+                None,
             )
             .await
             .unwrap();

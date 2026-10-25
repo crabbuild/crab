@@ -11,7 +11,7 @@ axum = { version = "0.8", default-features = false, features = ["http1", "json",
 bytes = { workspace = true }
 blake3 = { workspace = true }
 clap = { version = "4", features = ["derive"] }
-crab-read = { workspace = true }
+crab-read = { workspace = true, features = ["hydration"] }
 cellar = { workspace = true }
 crab-lfs = { workspace = true }
 crab-git = { workspace = true }

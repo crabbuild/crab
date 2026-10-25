@@ -6,6 +6,8 @@ Root `AGENTS.md` and `crates/AGENTS.md` apply. Read
 ## Purpose and ownership
 
 Owns LFS object layout, SHA-256 byte verification, receipts, and file-lock storage. crab-git owns pointer parsing; CLI/server layers own protocol and authorization.
+`src/local.rs` also owns local payload paths, storage override precedence and
+verified preparation snapshots shared by CLI and SDK callers.
 
 ## Read first
 
@@ -45,6 +47,9 @@ shared-lock fix reaches HTTP but does not automatically reach that CLI surface.
 - Route full and final partial upload parts through the same admission helper;
   the EOF tail must not exceed the four-part queue bound.
   Source: `crates/crab-lfs/src/object_store.rs`.
+- Multipart uploads begin and complete through `crab_storage::Store`, which
+  routes protected writes and records their verified size and Blake3 inventory.
+  Calling the raw origin handle bypasses staging and can expose unpublished data.
 - Keep declared SHA-256 identity and size verification together; presence or a matching path alone does not prove object bytes.
   Source: `crates/crab-lfs/src/object_store.rs`.
 - Fresh origin verification differs from receipt-aware reads and replica fallback; callers needing publication proof must retain the origin-only boundary.

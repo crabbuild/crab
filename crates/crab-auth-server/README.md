@@ -46,7 +46,11 @@ each capture and applies the candidate delta.
 File-only deltas can reference historical filtered artifacts; source-first
 file selection and immutable descriptor conflicts remain enforced.
 
-Prepare reads only ref authority. Git workspace intake combines captured packs and
+Prepare reads only ref authority. A present native `v2/root` takes precedence
+over legacy metadata, matching verification and scoped-view selection. Corrupt
+native authority is rejected without creating a legacy session.
+
+Git workspace intake combines captured packs and
 candidate packs under the existing byte and external-delta checks, including
 checkpoint-backed views. Physical shard/xorb verification and copy-before-ref
 publication remain unchanged.
@@ -55,6 +59,11 @@ publication remain unchanged.
 and `--deny-path` rules, a scope hash, and a source repository URL. It builds
 the view's Git workspace and Crab metadata and reports the resulting prefixes,
 source generation, and cache status.
+
+Native source hydration pins the catalog captured with the source view. The
+standalone manifest helper shipped in `v1.2.4` retains explicit captured-snapshot
+hydration; current-state lookup and SDK repository opening never select it.
+Both paths share lookup cleanup across successful builds, cache hits and errors.
 
 View repacking verifies source bytes into an operation-owned anonymous file,
 then chunks them incrementally off the async runtime. Cancellation propagates

@@ -55,6 +55,7 @@ pub async fn qualify(
                     options,
                     2 * 1024 * 1024 * 1024,
                     &cancel,
+                    None,
                 )
                 .await?)
         })

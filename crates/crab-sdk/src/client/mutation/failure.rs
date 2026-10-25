@@ -1,7 +1,7 @@
 use crate::{Error, ErrorKind};
 
 #[derive(Debug, thiserror::Error)]
-pub(super) enum Failure {
+pub(crate) enum Failure {
     #[error("SDK publication failed")]
     Sdk(#[from] Error),
     #[error("publication admission failed")]
@@ -26,10 +26,14 @@ impl Failure {
                 | Self::Write(
                     crab_write::WriteError::RefChanged { .. }
                         | crab_write::WriteError::Namespace(_)
+                        | crab_write::WriteError::CapsuleRootChanged { .. }
+                        | crab_write::WriteError::CapsuleRefEpochChanged { .. }
                 )
                 | Self::Prepare(crab_remote::prepare::Error::Write(
                     crab_write::WriteError::RefChanged { .. }
                         | crab_write::WriteError::Namespace(_)
+                        | crab_write::WriteError::CapsuleRootChanged { .. }
+                        | crab_write::WriteError::CapsuleRefEpochChanged { .. }
                 ))
         )
     }
@@ -39,6 +43,9 @@ impl From<Failure> for Error {
     fn from(source: Failure) -> Self {
         let source = match source {
             Failure::Sdk(error) => return error,
+            Failure::Prepare(crab_remote::prepare::Error::CapsuleRead(error)) => {
+                return crate::remote_error::read_error(error);
+            }
             Failure::Prepare(crab_remote::prepare::Error::Remote(error)) => {
                 return crate::remote_error::remote_error(error);
             }
@@ -111,7 +118,10 @@ fn write_kind(source: &crab_write::WriteError) -> ErrorKind {
         W::InitialHead { .. } => ErrorKind::InvalidInput,
         W::CorruptObject { .. } => ErrorKind::Corruption,
         W::Cancelled => ErrorKind::Cancelled,
-        W::RefChanged { .. } | W::Namespace(_) => ErrorKind::Conflict,
+        W::RefChanged { .. }
+        | W::Namespace(_)
+        | W::CapsuleRootChanged { .. }
+        | W::CapsuleRefEpochChanged { .. } => ErrorKind::Conflict,
         W::Metadata(source) => crate::remote_error::metadata_kind(source),
         W::Storage(source) => crate::remote_error::storage_kind(source),
         W::VisibilityUnavailable { .. } => ErrorKind::Indexing,

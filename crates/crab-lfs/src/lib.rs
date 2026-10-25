@@ -5,6 +5,7 @@
 //! output, transfer-agent protocol handling, and lifecycle commands stay in
 //! higher crates.
 
+pub mod local;
 pub mod lock;
 pub mod object_store;
 mod read_session;

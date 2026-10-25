@@ -92,7 +92,6 @@ impl OperationOptions {
         limits
     }
 
-    #[cfg(any(feature = "write", feature = "managed"))]
     pub(crate) fn with_owner_deadline(mut self) -> Result<Self> {
         let deadline = Instant::now()
             .checked_add(self.owner_limits().max_duration)

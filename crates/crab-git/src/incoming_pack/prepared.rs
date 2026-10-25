@@ -45,23 +45,40 @@ pub enum PreparePackError {
 }
 
 /// Verified logical base for one generated cross-pack REF_DELTA entry.
+///
+/// `identity_verified` is set only when the immutable bytes came from a
+/// [`super::GeneratedObject`]; raw bytes are checked when the pack is prepared.
 #[derive(Clone, Debug)]
 pub struct ExternalDeltaBase {
     oid: ObjectId,
     kind: gix_object::Kind,
-    data: Vec<u8>,
+    data: bytes::Bytes,
     depth: u32,
+    identity_verified: bool,
 }
 
 impl ExternalDeltaBase {
-    /// Bind decoded base bytes and their known delta depth to an object identity.
+    /// Retain raw decoded bytes and their known delta depth for preparation-time verification.
     #[must_use]
     pub fn new(oid: ObjectId, kind: gix_object::Kind, data: Vec<u8>, depth: u32) -> Self {
         Self {
             oid,
             kind,
-            data,
+            data: data.into(),
             depth,
+            identity_verified: false,
+        }
+    }
+
+    /// Retain an immutable generated object whose identity is already bound to its bytes.
+    #[must_use]
+    pub fn from_generated_object(object: super::GeneratedObject, depth: u32) -> Self {
+        Self {
+            oid: object.oid,
+            kind: object.kind,
+            data: object.data,
+            depth,
+            identity_verified: true,
         }
     }
 }
@@ -217,9 +234,10 @@ impl IncomingPack {
 
     /// Prepares a pack with bounded in-pack OFS_DELTA and cross-pack REF_DELTA entries.
     ///
-    /// External bases are accepted only when their kind, decoded bytes, identity,
-    /// and known depth match the requested relationship. The resulting pack may
-    /// require those base object IDs from the surrounding Git object database.
+    /// Raw external bases have their identity checked during preparation. A base
+    /// retained from [`super::GeneratedObject`] carries that immutable identity
+    /// proof across packs. The resulting pack may require those base object IDs
+    /// from the surrounding Git object database.
     /// All target identities and standard sidecars remain independently checked.
     pub fn prepare_with_external_delta_bases(
         &self,
@@ -667,12 +685,12 @@ fn prepare_delta(
             || base.kind != object.kind
             || base.data.len() > max_delta_object_bytes
             || base.depth >= max_delta_depth
-            || object_id(base.kind, &base.data) != base.oid
+            || (!base.identity_verified && object_id(base.kind, &base.data) != base.oid)
         {
             return Ok(None);
         }
         (
-            Cow::Borrowed(base.data.as_slice()),
+            Cow::Borrowed(base.data.as_ref()),
             PreparedDeltaBase::Oid(base.oid),
             base.depth,
         )
@@ -694,7 +712,6 @@ fn read_object_bytes<'a>(
 ) -> Result<Cow<'a, [u8]>> {
     // Generated inputs already own their bounded decoded bytes. Borrow them for
     // delta construction; untrusted quarantines keep their file-backed bounds.
-    // Both sources still undergo the same identity check before encoding.
     let bytes = match decoded {
         DecodedObjects::Generated(objects) => Cow::Borrowed(generated_bytes(objects, object)?),
         DecodedObjects::Spool(file) => {

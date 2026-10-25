@@ -130,12 +130,7 @@ impl StagedObject {
 /// Returns the standard local object path beneath `.git/lfs`.
 #[must_use]
 pub(crate) fn object_path(lfs_dir: &Path, oid: &[u8; 32]) -> PathBuf {
-    let hex = hex_encode(oid);
-    lfs_dir
-        .join("objects")
-        .join(&hex[..2])
-        .join(&hex[2..4])
-        .join(hex)
+    crab_lfs::local::object_path(lfs_dir, oid)
 }
 
 /// Reads and verifies a cached object against both pointer fields.

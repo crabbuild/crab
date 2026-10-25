@@ -368,6 +368,7 @@ impl ReadViewCache {
                         options,
                         MAX_CAPSULE_READ_BYTES,
                         cancel,
+                        None,
                     )
                     .await?;
                 let view = Arc::new(ReadView {

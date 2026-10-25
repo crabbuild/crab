@@ -1816,7 +1816,7 @@ CELL_RUNTIME_SERVER_COMPONENT_FIELDS = frozenset(
 )
 WORKSPACE_DEPENDENCY_POLICY = {
     "crab-remote": {
-        "normal": {"crab-auth", "crab-coordination", "crab-git", "crab-metadata", "crab-read", "crab-remote-git", "crab-storage", "crab-write", "crab-xet"},
+        "normal": {"crab-auth", "crab-coordination", "crab-git", "crab-lfs", "crab-metadata", "crab-read", "crab-remote-git", "crab-storage", "crab-write", "crab-xet"},
         # Checkpoint cancellation fixtures need storage's test-only fault hooks.
         "dev": {"crab-cache", "crab-cache-store", "crab-storage"},
     },

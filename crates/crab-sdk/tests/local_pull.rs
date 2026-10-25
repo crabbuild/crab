@@ -6,7 +6,7 @@ use crab_sdk::local::{
 use crab_sdk::{ErrorKind, RepositoryLocator};
 
 #[path = "local_support/direct.rs"]
-mod direct_support;
+pub mod direct_support;
 mod local_support;
 use direct_support::direct_remote;
 use local_support::{client, commit, git_path, run};
@@ -66,7 +66,7 @@ async fn open_preserves_stale_integration_until_the_next_pull() {
     let git_dir = std::path::PathBuf::from(run(
         &fixture.git,
         &fixture.checkout,
-        &["rev-parse", "--path-format=absolute", "--git-dir"],
+        &["rev-parse", "--absolute-git-dir"],
     ));
     let head = run(&fixture.git, &fixture.checkout, &["rev-parse", "HEAD"]);
     let intent = serde_json::json!({
@@ -202,7 +202,7 @@ async fn merge_and_rebase_resume_conflicts() {
     let git_dir = std::path::PathBuf::from(run(
         &fixture.git,
         &fixture.checkout,
-        &["rev-parse", "--path-format=absolute", "--git-dir"],
+        &["rev-parse", "--absolute-git-dir"],
     ));
     let intent_path = git_dir.join("crab-sdk-integration-v1.json");
     let intent = std::fs::read(&intent_path).unwrap();
@@ -354,9 +354,11 @@ async fn hydration_failure_reports_new_head() {
     let fixture = fixture();
     let remote = commit(&fixture.git, &fixture.source, "remote.txt", "remote");
     run(&fixture.git, &fixture.source, &["push", "origin", "main"]);
+    // Ordinary files defer provider setup. Fail URL validation instead, so the
+    // real executable exercises this error independently of cloud credentials.
     std::fs::write(
         fixture.checkout.join("crab.toml"),
-        b"version = 1\n[remote]\nurl = \"crab://bucket/repository\"\n",
+        b"version = 1\n[remote]\nurl = \"crab://\"\n",
     )
     .unwrap();
     let sdk = client(fixture.store.path(), fixture.scratch.path());
