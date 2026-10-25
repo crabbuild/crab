@@ -92,6 +92,11 @@ performs no WAL checkpoint. A known owner disappearing must return an error,
 rather than redirecting the command to private saved state. The CLI no longer
 polls repeated equal summaries as a substitute for owning this read boundary.
 
+Export requires a new destination directory with an existing parent, outside
+the mounted view and private cache. Canonical parent checks reject symlink
+aliases before locking or writing; existing output trees cannot overwrite
+unpublished backing bytes.
+
 Export preflight uses this live inspection boundary. Export materialization still
 uses its existing process-spanning freeze and mounted-view reads for metadata-only
 base renames. Its full generation/control ownership remains a separate gate;

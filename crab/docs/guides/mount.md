@@ -306,6 +306,10 @@ crab mount commit --mountpoint /mnt/models -m "Update generated artifacts" --pus
 crab mount reset --mountpoint /mnt/models --overlay --yes
 ```
 
+Export requires a new destination directory outside the mount and its cache,
+with an existing parent directory. Existing destinations are rejected to prevent
+symlinks or aliases from overwriting unpublished source bytes.
+
 `crab mount commit` freezes overlay writes while it snapshots the overlay,
 checks that the mounted base ref has not moved, creates a Git commit, refreshes
 the mounted snapshot, and clears the overlay after a successful local commit.

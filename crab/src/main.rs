@@ -1761,7 +1761,7 @@ enum MountCmd {
         /// Path to the mounted filesystem.
         #[arg(long, short = 'm', value_name = "PATH", default_value = ".")]
         mountpoint: std::path::PathBuf,
-        /// Destination directory.
+        /// New directory outside the mount and its cache; parent must exist.
         #[arg(long, value_name = "PATH")]
         to: std::path::PathBuf,
         /// Output as JSON object.

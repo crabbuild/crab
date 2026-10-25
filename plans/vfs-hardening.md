@@ -1659,11 +1659,46 @@ or concurrent coordinator teardown/cancellation. `take_mount` removes a handle
 before asynchronous cleanup; reservation/idle-shutdown ownership needs its own
 controlled native concurrency probe before a verdict.
 
+## Twenty-seventh checkpoint: exports cannot overwrite their source
+
+Real RustFS-backed NFS and FUSE mounts reproduced source destruction with the
+installed checkpoint-26 roles: exporting to the overlay upper directory returned
+success while truncating 32 unpublished bytes to zero. The same regression fails
+on macOS against the shared export function. The cause is source/destination
+aliasing, consistent with Rust's documented
+[`fs::copy` contract](https://doc.rust-lang.org/std/fs/fn.copy.html).
+
+Both export entry points share destination admission before any overlay freeze
+or output write. The destination must be a new directory outside the cache and,
+when available, mounted view; its parent must already exist. Canonical parent
+resolution rejects symlink aliases. `create_dir` rejects existing trees, avoiding
+pre-existing child symlinks that could overwrite source bytes. This deliberately
+replaces merging into an arbitrary existing directory. CLI help and mount docs
+state the new rule. One private helper owns this policy for both entry points;
+no protocol fields, dependencies or configuration were added.
+
+Proof: 31 Linux publish tests, eight macOS export tests, strict VFS Clippy on both
+platforms, and Make-installed native NFS/FUSE runs pass. Each installed backend
+rejects the backing directory, cache descendant, mounted view, cache alias and
+existing output while preserving source bytes. A normal export verifies regular
+files, nested directories, an overlay rename and symlink target. Linux source
+inputs match the pre-build manifest across 1,517 Rust sources/manifests. Local
+`export-safety/checkpoint.json` binds inputs, binary hashes and before/after
+results; raw evidence remains outside the PR.
+
+This closes destination aliasing, not export's full generation/control lifetime.
+Metadata-only base renames still read through the mounted view under the private
+export freeze. Move materialization into the live owner with canonical read and
+whole-file staging pins; qualify concurrent writes, refresh, retirement and
+cancellation before treating live export ownership as complete. Optimized
+performance, native macOS NFS and full stored pack-v1 retirement remain open.
+
 ## Remaining priority order
 
 The helper-layout gap and live read-only inspection leak are closed by the
 installed-role proofs. Checkpoint-25 closes the reproduced Linux NFS cache
-handoff gap, and checkpoint-26 closes coordinator-only/mixed batch discovery.
+handoff gap, checkpoint-26 closes coordinator-only/mixed batch discovery,
+and checkpoint-27 prevents export destinations from overwriting source bytes.
 Next complete live export materialization ownership, then prove concurrent
 reset/commit, teardown/admission and lost-owner behavior across the remaining
 owners. Preserve the existing process-spanning export freeze. Do not add an

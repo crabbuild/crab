@@ -160,8 +160,8 @@ fn export_overlay_with_view(
     destination: &Path,
     view_root: Option<&Path>,
 ) -> Result<OverlayDiff> {
+    let destination = prepare_export_destination(paths, destination, view_root)?;
     if !paths.db_path.exists() {
-        std::fs::create_dir_all(destination)?;
         return Ok(empty_diff());
     }
 
@@ -169,8 +169,6 @@ fn export_overlay_with_view(
     let _freeze = store.freeze_writes()?;
     let all_records = store.records()?;
     let records = publishable_records(&all_records);
-    std::fs::create_dir_all(destination)?;
-
     let mut deletion_manifest = Vec::new();
     for record in &records {
         let kind = change_kind(record.kind);
@@ -179,13 +177,13 @@ fn export_overlay_with_view(
                 deletion_manifest.push(record.path.clone());
             }
             OverlayChangeKind::Mkdir => {
-                std::fs::create_dir_all(safe_join(destination, &record.path)?)?;
+                std::fs::create_dir_all(safe_join(&destination, &record.path)?)?;
             }
             OverlayChangeKind::Symlink => {
                 let Some(backing) = &record.backing_path else {
                     continue;
                 };
-                materialize_symlink(backing, &safe_join(destination, &record.path)?)?;
+                materialize_symlink(backing, &safe_join(&destination, &record.path)?)?;
             }
             OverlayChangeKind::Create | OverlayChangeKind::Modify | OverlayChangeKind::Rename => {
                 if is_metadata_base_rename(record) {
@@ -195,13 +193,13 @@ fn export_overlay_with_view(
                             record.path
                         )));
                     };
-                    export_from_mounted_view(record, view_root, destination)?;
+                    export_from_mounted_view(record, view_root, &destination)?;
                     continue;
                 }
                 let Some(backing) = &record.backing_path else {
                     continue;
                 };
-                let target = safe_join(destination, &record.path)?;
+                let target = safe_join(&destination, &record.path)?;
                 if let Some(parent) = target.parent() {
                     std::fs::create_dir_all(parent)?;
                 }
@@ -218,6 +216,40 @@ fn export_overlay_with_view(
     }
 
     Ok(diff_from_records(&records))
+}
+
+fn prepare_export_destination(
+    paths: &OverlayPaths,
+    destination: &Path,
+    view_root: Option<&Path>,
+) -> Result<PathBuf> {
+    let name = destination
+        .file_name()
+        .ok_or_else(|| CrabError::Configuration {
+            key: "export destination must name a new directory".into(),
+            origin: "crab mount export".into(),
+        })?;
+    let parent = destination
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty());
+    let destination = std::fs::canonicalize(parent.unwrap_or_else(|| Path::new(".")))?.join(name);
+    for protected in [Some(paths.cache_dir.as_path()), view_root]
+        .into_iter()
+        .flatten()
+    {
+        let protected = std::fs::canonicalize(protected)?;
+        if destination.starts_with(&protected) || protected.starts_with(&destination) {
+            return Err(CrabError::Configuration {
+                key: "export destination must be outside the mount and its cache".into(),
+                origin: "crab mount export".into(),
+            });
+        }
+    }
+    // Never merge into an existing tree: a destination symlink could alias
+    // unpublished backing bytes. Reject before taking any overlay freeze or
+    // writing through the mounted view, whose callbacks need that same freeze.
+    std::fs::create_dir(&destination)?;
+    Ok(destination)
 }
 
 fn export_from_mounted_view(
@@ -1981,6 +2013,78 @@ mod tests {
         );
         assert!(!export_dir.join("._new.txt").exists());
         assert!(!export_dir.join("nested/._other.txt").exists());
+    }
+
+    #[test]
+    fn export_overlay_rejects_its_own_backing_directory() {
+        let (_dir, paths, store) = temp_overlay();
+        store.create_file("retained.txt", 0o100_644).unwrap();
+        store
+            .write_file("retained.txt", 0, b"unpublished bytes")
+            .unwrap();
+
+        let result = export_overlay(&paths, &paths.upper_dir);
+
+        assert_eq!(
+            std::fs::read(paths.upper_dir.join("retained.txt")).unwrap(),
+            b"unpublished bytes"
+        );
+        assert!(
+            result.is_err(),
+            "export must reject its own source directory"
+        );
+    }
+
+    #[test]
+    fn export_overlay_from_view_rejects_destination_in_the_view() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = OverlayPaths::from_cache_dir(&dir.path().join("cache"));
+        let store = OverlayStore::open(&paths.db_path, &paths.upper_dir).unwrap();
+        store.create_file("retained.txt", 0o100_644).unwrap();
+        store
+            .write_file("retained.txt", 0, b"unpublished bytes")
+            .unwrap();
+        let view = dir.path().join("view");
+        std::fs::create_dir(&view).unwrap();
+        let destination = view.join("export");
+
+        let result = export_overlay_from_view(&paths, &destination, &view);
+
+        assert!(
+            !destination.exists(),
+            "rejection must precede writes into the mounted view"
+        );
+        assert!(result.is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn export_overlay_rejects_symlink_aliases_without_mutating_sources() {
+        let dir = tempfile::tempdir().unwrap();
+        let paths = OverlayPaths::from_cache_dir(&dir.path().join("cache"));
+        let store = OverlayStore::open(&paths.db_path, &paths.upper_dir).unwrap();
+        store.create_file("retained.txt", 0o100_644).unwrap();
+        store
+            .write_file("retained.txt", 0, b"unpublished bytes")
+            .unwrap();
+        let alias = dir.path().join("cache-alias");
+        std::os::unix::fs::symlink(&paths.cache_dir, &alias).unwrap();
+        let existing = dir.path().join("existing");
+        std::fs::create_dir(&existing).unwrap();
+        std::os::unix::fs::symlink(
+            paths.upper_dir.join("retained.txt"),
+            existing.join("retained.txt"),
+        )
+        .unwrap();
+
+        for destination in [alias.join("export"), existing] {
+            assert!(export_overlay(&paths, &destination).is_err());
+            assert_eq!(
+                std::fs::read(paths.upper_dir.join("retained.txt")).unwrap(),
+                b"unpublished bytes"
+            );
+        }
+        assert!(!paths.cache_dir.join("export").exists());
     }
 
     #[test]
