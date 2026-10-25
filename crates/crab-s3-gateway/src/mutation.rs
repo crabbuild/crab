@@ -2602,13 +2602,14 @@ struct DirectoryState {
 }
 
 struct TreeEncoding {
-    bytes: Vec<u8>,
+    bytes: Bytes,
     offsets: Vec<usize>,
+    allocated_bytes: usize,
 }
 
 impl TreeEncoding {
     fn new(entries: &[tree::Entry]) -> Self {
-        let mut encoded = Self {
+        let mut encoded = TreeEncodingBuilder {
             bytes: Vec::new(),
             offsets: Vec::with_capacity(entries.len() + 1),
         };
@@ -2616,15 +2617,30 @@ impl TreeEncoding {
             encoded.push(entry);
         }
         encoded.offsets.push(encoded.bytes.len());
-        encoded
+        encoded.finish()
     }
 
+    fn estimated_bytes(&self) -> usize {
+        self.allocated_bytes.saturating_add(
+            self.offsets
+                .capacity()
+                .saturating_mul(std::mem::size_of::<usize>()),
+        )
+    }
+}
+
+struct TreeEncodingBuilder {
+    bytes: Vec<u8>,
+    offsets: Vec<usize>,
+}
+
+impl TreeEncodingBuilder {
     fn push(&mut self, entry: &tree::Entry) {
         self.offsets.push(self.bytes.len());
         append_tree_entry(&mut self.bytes, entry);
     }
 
-    fn extend(&mut self, original: &Self, range: std::ops::Range<usize>) {
+    fn extend(&mut self, original: &TreeEncoding, range: std::ops::Range<usize>) {
         let start = original.offsets[range.start];
         let end = original.offsets[range.end];
         let offset = self.bytes.len();
@@ -2636,12 +2652,13 @@ impl TreeEncoding {
         self.bytes.extend_from_slice(&original.bytes[start..end]);
     }
 
-    fn estimated_bytes(&self) -> usize {
-        self.bytes.capacity().saturating_add(
-            self.offsets
-                .capacity()
-                .saturating_mul(std::mem::size_of::<usize>()),
-        )
+    fn finish(self) -> TreeEncoding {
+        let allocated_bytes = self.bytes.capacity();
+        TreeEncoding {
+            bytes: Bytes::from(self.bytes),
+            offsets: self.offsets,
+            allocated_bytes,
+        }
     }
 }
 
@@ -3562,7 +3579,7 @@ fn encode_tree_with_edits(
                 + 2
         })
         .sum::<usize>();
-    let mut encoding = TreeEncoding {
+    let mut encoding = TreeEncodingBuilder {
         bytes: Vec::with_capacity(old.encoding.bytes.len() + added_bytes),
         offsets: Vec::with_capacity(old.entries.len() + edits.len() + 1),
     };
@@ -3580,6 +3597,8 @@ fn encode_tree_with_edits(
     }
     encoding.extend(&old.encoding, cursor..old.entries.len());
     encoding.offsets.push(encoding.bytes.len());
+    let encoding = encoding.finish();
+    // Bytes clones share this immutable tree buffer with the warm encoding.
     let object = GeneratedObject::new(Kind::Tree, encoding.bytes.clone())?;
     let oid = object.oid();
     objects.push(object.clone());
@@ -3614,7 +3633,7 @@ fn encode_tree_with_edits(
 
 #[cfg(test)]
 fn encode_tree(entries: &[tree::Entry]) -> Vec<u8> {
-    TreeEncoding::new(entries).bytes
+    TreeEncoding::new(entries).bytes.to_vec()
 }
 
 fn append_tree_entry(bytes: &mut Vec<u8>, entry: &tree::Entry) {
