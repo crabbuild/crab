@@ -1373,8 +1373,10 @@ now import the protocol module. Transport errors preserve their source chain.
 
 The fresh Linux NFS-only Unix peer regression passes all 11 control tests,
 including a rejected publication. Fresh macOS NFS-only compilation and formatting
-pass. Make has built the combined-feature macOS CLI; the distinct role install
-is continuing. Exact installed-binary/provider qualification of this checkpoint is
+pass. Make completes the distinct-feature macOS CLI/helper/cache-server install
+using the external debug target and task-specific prefix. The CLI retains its
+13 feature-slice warnings; the macOS linker also warns about the large debug
+unwind section. No optimized performance claim follows from this build. Exact installed-binary/provider qualification of this checkpoint is
 pending; checkpoint-21 helper-only proof does not qualify it. Historical logs
 remain retained. At this checkpoint the external build directory was absent;
 fresh Linux/macOS build directories were created on the mounted Workspace volume.
@@ -1382,8 +1384,10 @@ The task-owned VM and RustFS services were retained. No prior binary was reused.
 Two broad Linux attempts pass 633 tests and fail two Git fixtures because Cargo
 starts their executable below the source mount's host-only linked-worktree
 pointer. Changing Cargo's own working directory does not change test cwd. A
-rerun executes the exact newly built test binary from the isolated ext4 fixture
-directory; source/tests are unchanged. Retain both failed harness runs.
+final rerun executes the exact newly built test binary from the isolated ext4
+fixture directory: 635 tests and all 14 native probes pass. Strict combined-feature
+all-target Linux Clippy passes. Source/tests are unchanged; both failed harness
+runs remain retained.
 
 `origin/crab-v2` advanced from the audited base to `9cc0fdab60a` (SDK/Capsule PR
 #629). Its read-feature and metadata contracts overlap this patch. The first PR

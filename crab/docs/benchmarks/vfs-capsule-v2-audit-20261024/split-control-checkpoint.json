@@ -18,13 +18,23 @@
   "verified": {
     "linux_nfs_only_control_tests": 11,
     "macos_nfs_only_compile": true,
-    "format": true
+    "format": true,
+    "linux_combined_tests": 635,
+    "linux_native_tests": 14,
+    "linux_combined_all_targets_strict_clippy": true,
+    "macos_distinct_role_make_install": true
   },
   "pending": [
     "latest crab-v2 integration",
-    "fresh combined/native final run",
     "distinct installed main CLI FUSE controls with RustFS",
     "all-mode and optimized performance qualification"
   ],
-  "full_goal_complete": false
+  "full_goal_complete": false,
+  "macos_installed_binary_sha256": {
+    "crab": "3661c445b2c82448eb0cceb9f178d6f3196064aa6f342b5c3b8489eba0601b89",
+    "crab-fuse-mount": "e5707d907d9faaaf4ab314d015419d47248c0b13da6f8770bc9f1795b00c35f1",
+    "crab-nfs-mount": "3661c445b2c82448eb0cceb9f178d6f3196064aa6f342b5c3b8489eba0601b89",
+    "crab-cache-server": "ba4502a7731b58fe656f334bc4a43f91f15b80d1fc239bd46bb7d1495067ae9e",
+    "git-remote-crab": "3661c445b2c82448eb0cceb9f178d6f3196064aa6f342b5c3b8489eba0601b89"
+  }
 }
