@@ -2650,6 +2650,14 @@ impl TreeEncoding {
 struct TreeDeltaAnchor {
     object: GeneratedObject,
     reused_batches: u32,
+    reuse_limit: u32,
+}
+
+fn generated_tree_anchor_reuse_limit(oid: ObjectId, had_anchor: bool) -> u32 {
+    if had_anchor {
+        return GENERATED_TREE_ANCHOR_REUSE_BATCHES;
+    }
+    u32::from(oid.as_bytes()[0]) % GENERATED_TREE_ANCHOR_REUSE_BATCHES + 1
 }
 
 struct GeneratedAttributeBlob {
@@ -2698,6 +2706,7 @@ impl WarmTree {
             })?;
             let previous_provenance = estimated_tree_provenance_bytes(directory);
             if depth == 0 {
+                let had_anchor = directory.delta_anchor.is_some();
                 // Reuse a verified full entry across batches; chaining each new
                 // tip forces repeated full copies of growing directories.
                 let object = directory.pending_object.take().ok_or_else(|| {
@@ -2709,10 +2718,12 @@ impl WarmTree {
                     )
                     .into());
                 }
+                let reuse_limit = generated_tree_anchor_reuse_limit(oid, had_anchor);
                 directory.delta_anchor = (object.data().len() <= MAX_GENERATED_TREE_DELTA_BYTES)
                     .then_some(TreeDeltaAnchor {
                         object,
                         reused_batches: 0,
+                        reuse_limit,
                     });
                 directory.delta_ancestors = Vec::new();
             } else {
@@ -3582,7 +3593,7 @@ fn encode_tree_with_edits(
         // Renew it periodically while keeping cross-pack delta depth at one.
         old.delta_anchor
             .as_ref()
-            .filter(|anchor| anchor.reused_batches < GENERATED_TREE_ANCHOR_REUSE_BATCHES)
+            .filter(|anchor| anchor.reused_batches < anchor.reuse_limit)
             .map(|anchor| (anchor.object.oid(), Some(anchor.object.clone())))
     };
     if let Some((base, external)) = candidate
@@ -4004,6 +4015,7 @@ mod tests {
             delta_anchor: Some(TreeDeltaAnchor {
                 object: GeneratedObject::new(Kind::Tree, encode_tree(&original)).unwrap(),
                 reused_batches: 0,
+                reuse_limit: GENERATED_TREE_ANCHOR_REUSE_BATCHES,
             }),
             pending_object: None,
             delta_ancestors: Vec::new(),
@@ -4042,6 +4054,26 @@ mod tests {
         encode_tree_with_edits(&warm.directories[&path], &[edit], &mut objects, &mut bases)
             .unwrap();
         assert!(bases.is_empty());
+    }
+
+    #[test]
+    fn generated_tree_anchor_refresh_phases_are_stable_and_bounded() {
+        assert_eq!(
+            generated_tree_anchor_reuse_limit(ObjectId::from([0; 20]), false),
+            1
+        );
+        assert_eq!(
+            generated_tree_anchor_reuse_limit(ObjectId::from([1; 20]), false),
+            2
+        );
+        assert_eq!(
+            generated_tree_anchor_reuse_limit(ObjectId::from([63; 20]), false),
+            GENERATED_TREE_ANCHOR_REUSE_BATCHES
+        );
+        assert_eq!(
+            generated_tree_anchor_reuse_limit(ObjectId::from([0; 20]), true),
+            GENERATED_TREE_ANCHOR_REUSE_BATCHES
+        );
     }
 
     #[test]
@@ -4097,6 +4129,11 @@ mod tests {
         let anchor = state.delta_anchor.as_ref().unwrap();
         assert_eq!(anchor.object.oid(), oid);
         assert_eq!(anchor.object.data(), encode_tree(&entries));
+        assert_eq!(anchor.reused_batches, 0);
+        assert_eq!(
+            anchor.reuse_limit,
+            generated_tree_anchor_reuse_limit(oid, false)
+        );
         assert!(state.pending_object.is_none());
         assert_eq!(
             tree.estimated_bytes,
