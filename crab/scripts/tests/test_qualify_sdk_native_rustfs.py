@@ -109,9 +109,10 @@ class NativeRustfsTests(unittest.TestCase):
                 {name: value for name, value in environment.items()
                  if name in {"AWS_PROFILE", "AWS_SESSION_TOKEN", "AWS_WEB_IDENTITY_TOKEN_FILE",
                              "AWS_ROLE_ARN", "RUSTFS_ACCESS_KEY", "AWS_ENDPOINT_URL_S3",
-                             "CRAB_SDK_TEST_S3_BUCKET"}},
+                             "CRAB_SDK_TEST_S3_BUCKET", "CRAB_SDK_TEST_S3_CLEANUP"}},
                 {"AWS_ENDPOINT_URL_S3": "http://127.0.0.1:12345",
-                 "CRAB_SDK_TEST_S3_BUCKET": "owned-fixture"},
+                 "CRAB_SDK_TEST_S3_BUCKET": "owned-fixture",
+                 "CRAB_SDK_TEST_S3_CLEANUP": "fixture"},
             )
 
     def test_corrupt_cached_release_is_rejected_before_extraction(self):

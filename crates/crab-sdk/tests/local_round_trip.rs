@@ -184,6 +184,11 @@ async fn advance_remote(
 }
 
 async fn cleanup(locator: &RepositoryLocator) {
+    // Native RustFS qualification removes its private data directory after the suite;
+    // keep per-repository deletion for external buckets, where that data is durable.
+    if std::env::var("CRAB_SDK_TEST_S3_CLEANUP").ok().as_deref() == Some("fixture") {
+        return;
+    }
     let bucket = required("CRAB_SDK_TEST_S3_BUCKET");
     let store =
         crab_storage::build_static_env_store(&bucket, crab_storage::StorageProviderKind::S3)
