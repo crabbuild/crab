@@ -12,19 +12,23 @@ use std::sync::{Arc, Mutex};
 
 use bytes::Bytes;
 use dashmap::DashMap;
-use gix_hash::ObjectId;
-use gix_object::Find;
 use tokio::sync::OwnedRwLockWriteGuard;
 use tokio::sync::{
     Mutex as AsyncMutex, OwnedMutexGuard, OwnedRwLockReadGuard, RwLock as AsyncRwLock,
 };
 use tracing::{debug, trace, warn};
 
+use crate::blob::OdbReader;
 use crate::core::error::{CrabError, Result};
 use crate::hydration::{HydrationReadStatsSnapshot, HydrationService};
-use crate::resolver::{FuseResolver, OverlayEntry, ResolvedNode};
+use crate::resolver::{FuseResolver, OverlayEntry, ResolvedNode, SnapshotView};
 use crate::snapshot::{BaseNode, NodeType, SnapshotStore};
 use crab_types::pointer::{Pointer, hex_encode, is_pointer};
+
+#[cfg(feature = "fuse")]
+mod open_file;
+#[cfg(feature = "fuse")]
+pub(crate) use open_file::VfsOpenFile;
 
 // ---------------------------------------------------------------------------
 // OverlayWriter trait
@@ -84,8 +88,15 @@ pub trait OverlayWriter: Send + Sync {
     /// Update permission bits of an overlay entry.
     fn set_mode(&self, path: &str, mode: u32) -> Result<()>;
 
-    /// Update the size and modification time of an overlay entry.
-    fn update_size_and_mtime(&self, path: &str, size: u64, mtime_ns: i64) -> Result<()>;
+    /// Mutate descriptor content and record its metadata under one publication lease.
+    /// A detached file has no path and must not create overlay metadata.
+    fn mutate_content(
+        &self,
+        path: Option<&str>,
+        file: &std::fs::File,
+        mtime_ns: i64,
+        mutation: &mut dyn FnMut(&std::fs::File) -> Result<()>,
+    ) -> Result<()>;
 
     /// Record an overlay entry after the backing file has already been
     /// written to disk (e.g. by streaming promotion). Unlike `promote`,
@@ -101,10 +112,6 @@ pub trait OverlayWriter: Send + Sync {
 
     /// Return the final backing file path for a given overlay path.
     fn backing_path_for(&self, path: &str) -> PathBuf;
-
-    /// Return the temporary backing file path (`.tmp` suffix) for
-    /// atomic-rename promotion.
-    fn backing_tmp_path_for(&self, path: &str) -> PathBuf;
 
     /// Create a symlink in the overlay.
     fn create_symlink(&self, path: &str, target: &str, mode: u32) -> Result<OverlayEntry>;
@@ -129,282 +136,6 @@ pub struct BaseRenameEntry {
     pub mode: u32,
     pub size: u64,
     pub source_oid: Option<String>,
-}
-
-// ---------------------------------------------------------------------------
-// OdbReader — small-file blob reads from git pack files
-// ---------------------------------------------------------------------------
-
-/// Maximum blob size supported via ODB reads (100 MiB).
-const MAX_ODB_BLOB_SIZE: usize = 100 * 1024 * 1024;
-/// Warning threshold for the best-effort on-disk ODB blob cache (1 GiB).
-const ODB_BLOB_CACHE_WARN_THRESHOLD: u64 = 1_073_741_824;
-
-/// Reads small-file blobs from the git ODB (pack files + loose objects).
-///
-/// Caches hydrated blobs on disk at `{blob_cache_dir}/{oid}` to avoid
-/// repeated ODB lookups. The cache is a simple file-per-blob layout
-/// matching artifact-fs's `BlobCacheDir` pattern.
-///
-/// # Cache size
-///
-/// There is currently no size cap on `blob_cache_dir` — every unique
-/// blob read through the FUSE mount is cached indefinitely, including
-/// across mount/unmount cycles. The cache is content-addressed so
-/// reusing it is always safe, but for long-lived mounts on large
-/// repositories it can grow to several GB. Operators should run
-/// `crab cache clean` (or a cron job on the cache directory)
-/// periodically to keep it bounded. [`OdbReader::cache_size`] reports
-/// current usage.
-pub struct OdbReader {
-    /// The Arc-backed handle is `Send`; the mutex serializes its per-handle
-    /// decode cache so both NFS tasks and FUSE threads can share it safely.
-    odb: Mutex<gix_odb::HandleArc>,
-    blob_cache_dir: PathBuf,
-    /// Path to the git directory (for `git cat-file` fallback in blobless clones).
-    git_dir: PathBuf,
-}
-
-impl std::fmt::Debug for OdbReader {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.debug_struct("OdbReader")
-            .field("blob_cache_dir", &self.blob_cache_dir)
-            .finish_non_exhaustive()
-    }
-}
-
-impl OdbReader {
-    /// Open the git ODB at `{git_dir}/objects` and prepare the blob cache.
-    pub fn new(git_dir: &Path, blob_cache_dir: &Path) -> Result<Self> {
-        let objects_dir = git_dir.join("objects");
-        if !objects_dir.is_dir() {
-            return Err(CrabError::Io(std::io::Error::new(
-                std::io::ErrorKind::NotFound,
-                format!("git objects directory not found: {}", objects_dir.display()),
-            )));
-        }
-
-        let open_odb_error = |error| {
-            CrabError::Internal(format!(
-                "failed to open git ODB at {}: {error}",
-                objects_dir.display()
-            ))
-        };
-        let odb = gix_odb::at(&objects_dir).map_err(&open_odb_error)?;
-        let mut odb = odb.into_arc().map_err(open_odb_error)?;
-        // Partial-clone reads fetch missing blobs into new packs. The gix slot
-        // map is fixed at open, so use the git fallback instead of refreshing
-        // until an unbounded sequence of promisor packs exhausts that map.
-        odb.refresh_never();
-
-        std::fs::create_dir_all(blob_cache_dir)?;
-
-        Ok(Self {
-            odb: Mutex::new(odb),
-            blob_cache_dir: blob_cache_dir.to_owned(),
-            git_dir: git_dir.to_owned(),
-        })
-    }
-
-    /// Read a blob by OID hex string.
-    ///
-    /// Returns cached content if available, otherwise reads from the ODB
-    /// and caches the result on disk.
-    pub fn read_blob(&self, oid_hex: &str) -> Result<Bytes> {
-        let cache_path = self.blob_cache_dir.join(oid_hex);
-
-        // Cache hit — read from disk.
-        if cache_path.is_file() {
-            trace!(oid = oid_hex, "ODB blob cache hit");
-            let data = std::fs::read(&cache_path).map_err(|e| {
-                CrabError::Io(std::io::Error::new(
-                    e.kind(),
-                    format!("failed to read blob cache {}: {e}", cache_path.display()),
-                ))
-            })?;
-            return Ok(Bytes::from(data));
-        }
-
-        // Cache miss — read from ODB.
-        let oid = ObjectId::from_hex(oid_hex.as_bytes())
-            .map_err(|e| CrabError::Internal(format!("invalid OID {oid_hex}: {e}")))?;
-
-        let mut buf = Vec::new();
-        let odb = self
-            .odb
-            .lock()
-            .map_err(|e| CrabError::Internal(format!("ODB mutex poisoned: {e}")))?;
-        let data = odb
-            .try_find(&oid, &mut buf)
-            .map_err(|e| CrabError::Internal(format!("ODB read failed for {oid_hex}: {e}")))?;
-        drop(odb);
-
-        let Some(data) = data else {
-            // Blob not in local ODB — try fetching via `git cat-file` which
-            // triggers partial-clone's on-demand fetch from the remote.
-            drop(buf);
-            return self.fetch_blob_via_git(&oid, oid_hex, &cache_path);
-        };
-
-        if data.kind != gix_object::Kind::Blob {
-            return Err(CrabError::Internal(format!(
-                "OID {oid_hex} is a {}, not a blob",
-                data.kind
-            )));
-        }
-
-        if data.data.len() > MAX_ODB_BLOB_SIZE {
-            return Err(CrabError::Internal(format!(
-                "blob {oid_hex} exceeds 100 MiB limit ({} bytes)",
-                data.data.len()
-            )));
-        }
-
-        let blob_bytes = data.data.to_vec();
-
-        // Write to cache. Use write-to-tmp + rename for atomicity.
-        if let Err(e) = write_blob_cache(&cache_path, &blob_bytes) {
-            warn!(
-                oid = oid_hex,
-                error = %e,
-                "failed to write blob cache (non-fatal)"
-            );
-        } else {
-            trace!(oid = oid_hex, size = blob_bytes.len(), "cached ODB blob");
-            // Warn if cache exceeds 1 GiB — no eviction is implemented yet.
-            let cache_size = self.cache_size();
-            if cache_size > ODB_BLOB_CACHE_WARN_THRESHOLD {
-                warn!(
-                    cache_size_mb = cache_size / 1_048_576,
-                    threshold_mb = ODB_BLOB_CACHE_WARN_THRESHOLD / 1_048_576,
-                    "ODB blob cache exceeded warning threshold; consider running `crab cache clean`"
-                );
-            }
-        }
-
-        Ok(Bytes::from(blob_bytes))
-    }
-
-    /// Return the on-disk cache path for a blob OID.
-    ///
-    /// The blob may or may not exist at this path yet. Call `read_blob`
-    /// first to ensure it's cached, then use this path for file-to-file
-    /// copy during streaming promotion.
-    pub fn blob_cache_path(&self, oid_hex: &str) -> PathBuf {
-        self.blob_cache_dir.join(oid_hex)
-    }
-
-    /// Return the total size (bytes) of the blob cache directory.
-    ///
-    /// Callers (e.g., daemon housekeeping) can use this to decide when
-    /// to clean up the cache. Returns 0 on I/O errors rather than
-    /// propagating them — a best-effort metric.
-    pub fn cache_size(&self) -> u64 {
-        let mut total: u64 = 0;
-        if let Ok(entries) = std::fs::read_dir(&self.blob_cache_dir) {
-            for entry in entries.flatten() {
-                if let Ok(meta) = entry.metadata()
-                    && meta.is_file()
-                {
-                    total += meta.len();
-                }
-            }
-        }
-        total
-    }
-
-    /// Read a byte range from a blob (for FUSE read calls).
-    ///
-    /// Reads the full blob (from cache or ODB), then returns the
-    /// requested slice. Returns empty bytes if `offset` is past EOF.
-    pub fn read_blob_range(&self, oid_hex: &str, offset: u64, size: u32) -> Result<Bytes> {
-        let blob = self.read_blob(oid_hex)?;
-        let blob_len = blob.len() as u64;
-
-        if offset >= blob_len {
-            return Ok(Bytes::new());
-        }
-
-        let start = offset as usize;
-        let available = (blob_len - offset).min(u64::from(size)) as usize;
-        Ok(blob.slice(start..start + available))
-    }
-
-    /// Fetch a blob via `git cat-file` for blobless/partial clones.
-    ///
-    /// Git's partial-clone mechanism fetches missing objects on demand
-    /// when accessed through porcelain/plumbing commands. This shells
-    /// out to `git cat-file blob <oid>` with `GIT_DIR` set, which
-    /// triggers the fetch-object hook to download the blob from the
-    /// remote promisor.
-    fn fetch_blob_via_git(
-        &self,
-        _oid: &ObjectId,
-        oid_hex: &str,
-        cache_path: &Path,
-    ) -> Result<Bytes> {
-        debug!(
-            oid = oid_hex,
-            "blob not in local ODB, fetching via git cat-file"
-        );
-
-        let output = std::process::Command::new("git")
-            .args(["cat-file", "blob", oid_hex])
-            .env("GIT_DIR", &self.git_dir)
-            .output()
-            .map_err(|e| {
-                CrabError::Internal(format!("failed to spawn git cat-file for {oid_hex}: {e}"))
-            })?;
-
-        if !output.status.success() {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            return Err(CrabError::NotFound {
-                path: format!("blob {oid_hex} (git cat-file failed: {stderr})"),
-            });
-        }
-
-        let blob_bytes = output.stdout;
-
-        if blob_bytes.len() > MAX_ODB_BLOB_SIZE {
-            return Err(CrabError::Internal(format!(
-                "blob {oid_hex} exceeds 100 MiB limit ({} bytes)",
-                blob_bytes.len()
-            )));
-        }
-
-        // Cache the fetched blob for subsequent reads.
-        if let Err(e) = write_blob_cache(cache_path, &blob_bytes) {
-            warn!(
-                oid = oid_hex,
-                error = %e,
-                "failed to write blob cache after git fetch (non-fatal)"
-            );
-        } else {
-            trace!(
-                oid = oid_hex,
-                size = blob_bytes.len(),
-                "cached fetched blob"
-            );
-        }
-
-        Ok(Bytes::from(blob_bytes))
-    }
-}
-
-/// Atomically write blob content to the cache via a temp file + rename.
-fn write_blob_cache(cache_path: &Path, data: &[u8]) -> Result<()> {
-    let parent = cache_path
-        .parent()
-        .ok_or_else(|| CrabError::Internal("blob cache path has no parent".into()))?;
-
-    let tmp = tempfile::NamedTempFile::new_in(parent)?;
-    std::fs::write(tmp.path(), data)?;
-    tmp.persist(cache_path).map_err(|e| {
-        CrabError::Io(std::io::Error::other(format!(
-            "failed to persist blob cache: {e}"
-        )))
-    })?;
-    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -615,14 +346,21 @@ pub struct VfsReadLease {
     key: ReadSourceKey,
     source: Arc<ReadSource>,
     pattern: Arc<ReadPatternState>,
+    // A lease can outlive publication and the source cache that first held it.
+    _snapshot_view: Option<Arc<SnapshotView>>,
 }
 
 impl VfsReadLease {
-    fn new(key: ReadSourceKey, source: ReadSource) -> Self {
+    fn new(
+        key: ReadSourceKey,
+        source: ReadSource,
+        snapshot_view: Option<Arc<SnapshotView>>,
+    ) -> Self {
         Self {
             key,
             source: Arc::new(source),
             pattern: Arc::new(ReadPatternState::default()),
+            _snapshot_view: snapshot_view,
         }
     }
 
@@ -664,7 +402,7 @@ impl VfsReadLease {
 
     #[cfg(test)]
     pub fn for_test(key: ReadSourceKey) -> Self {
-        Self::new(key, ReadSource::BaseEmpty)
+        Self::new(key, ReadSource::BaseEmpty, None)
     }
 }
 
@@ -1088,7 +826,7 @@ pub struct VfsEngine {
     hydration: Arc<HydrationService>,
     /// ODB reader for small-file blobs stored in git packs.
     /// `None` in tests without a real git directory.
-    odb_reader: Option<OdbReader>,
+    odb_reader: Option<Arc<OdbReader>>,
     /// Snapshot store for size-backfill after hydration.
     /// `None` in tests without a real snapshot store.
     snapshot: Option<Arc<SnapshotStore>>,
@@ -1108,6 +846,13 @@ pub struct VfsEngine {
     overlay_subtree_versions: DashMap<String, u64>,
     read_metrics: VfsReadMetrics,
     read_source_cache: VfsReadSourceCache,
+    control_accepting: Mutex<bool>,
+    control_tasks: tokio_util::task::TaskTracker,
+    control_permits: Arc<tokio::sync::Semaphore>,
+    #[cfg(all(test, target_os = "linux", feature = "fuse", feature = "nfs"))]
+    writeback_pause: Mutex<std::sync::Weak<crate::test_support::writeback::State>>,
+    #[cfg(feature = "fuse")]
+    open_files: open_file::OpenFileRegistry,
 }
 
 struct OverlayLockSet {
@@ -1150,7 +895,7 @@ impl VfsEngine {
             resolver,
             overlay,
             hydration,
-            odb_reader,
+            odb_reader: odb_reader.map(Arc::new),
             snapshot,
             overlay_locks: DashMap::new(),
             overlay_reset_gate: Arc::new(AsyncRwLock::new(())),
@@ -1160,6 +905,13 @@ impl VfsEngine {
             overlay_path_versions: DashMap::new(),
             overlay_subtree_versions: DashMap::new(),
             read_metrics: VfsReadMetrics::default(),
+            control_accepting: Mutex::new(true),
+            control_tasks: tokio_util::task::TaskTracker::new(),
+            control_permits: Arc::new(tokio::sync::Semaphore::new(1)),
+            #[cfg(all(test, target_os = "linux", feature = "fuse", feature = "nfs"))]
+            writeback_pause: Mutex::new(std::sync::Weak::new()),
+            #[cfg(feature = "fuse")]
+            open_files: open_file::OpenFileRegistry::default(),
             read_source_cache: VfsReadSourceCache::new(
                 DEFAULT_READ_SOURCE_CACHE_MAX_ENTRIES,
                 DEFAULT_READ_SOURCE_CACHE_MAX_ESTIMATED_BYTES,
@@ -1215,12 +967,65 @@ impl VfsEngine {
         });
     }
 
-    /// Finish owned background hydration after backend requests have stopped.
+    pub(crate) async fn run_control<T: Send + 'static>(
+        self: &Arc<Self>,
+        operation: impl std::future::Future<Output = Result<T>> + Send + 'static,
+    ) -> Result<T> {
+        let permit = Arc::clone(&self.control_permits)
+            .acquire_owned()
+            .await
+            .map_err(|_| CrabError::Cancelled)?;
+        #[cfg(all(test, target_os = "linux", feature = "fuse", feature = "nfs"))]
+        self.observe_control_start();
+        let task = {
+            let accepting = self
+                .control_accepting
+                .lock()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            if !*accepting {
+                return Err(CrabError::Cancelled);
+            }
+            // The tracked task owns its guards and blocking jobs. Dropping the
+            // caller's waiter cannot release a transition while mutation continues.
+            self.control_tasks.spawn(async move {
+                let _permit = permit;
+                operation.await
+            })
+        };
+        task.await.map_err(CrabError::ReadTask)?
+    }
+
+    /// Drain admitted Git reads/copies and hydration after backend requests stop.
     ///
-    /// Foreground requests remain owned by the backend. This waits for queued
-    /// workers and admitted prefetch, including their in-progress cache writes.
+    /// Foreground requests remain owned by the backend. Abandoned blocking work,
+    /// queued workers and admitted prefetch retain ownership through completion.
     pub async fn shutdown_background(&self) {
+        self.close_control_admission();
+        self.control_tasks.wait().await;
+        self.request_shutdown();
+        if let Some(reader) = &self.odb_reader {
+            reader.shutdown().await;
+        }
         self.hydration.shutdown().await;
+    }
+
+    /// Close read admission and request worker shutdown without waiting for completion.
+    pub fn request_shutdown(&self) {
+        self.close_control_admission();
+        if let Some(reader) = &self.odb_reader {
+            reader.request_shutdown();
+        }
+        self.hydration.request_shutdown();
+    }
+
+    fn close_control_admission(&self) {
+        let mut accepting = self
+            .control_accepting
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *accepting = false;
+        self.control_permits.close();
+        self.control_tasks.close();
     }
 
     /// Snapshot hydration read counters for mount diagnostics.
@@ -1228,29 +1033,35 @@ impl VfsEngine {
         self.hydration.read_stats_snapshot()
     }
 
-    /// Resolve an exact file size, hydrating an unknown Git blob if needed.
-    pub fn exact_file_size(&self, path: &str) -> Result<u64> {
-        match self.resolver.resolve_path(path)? {
-            ResolvedNode::Overlay(entry) => Ok(entry.size),
+    /// Resolve exact attributes from one retained snapshot view.
+    pub fn getattr(&self, path: &str) -> Result<(u32, u64, NodeType, i64)> {
+        let view = self.resolver.capture_view();
+        let node = match self.resolver.resolve_path_in(&view, path)? {
             ResolvedNode::Base(base) => {
-                let base = self.classify_unknown_base_node(path, base)?;
-                if let Some(pointer) = base.pointer {
-                    return Ok(pointer.size);
-                }
-                if base.size != 0 || base.node_type != NodeType::File {
-                    return Ok(base.size);
-                }
-                if base.object_oid.is_some() && self.odb_reader.is_none() {
+                let base = self.classify_unknown_base_node(view.generation, path, base)?;
+                if base.pointer.is_none()
+                    && base.size == 0
+                    && base.node_type == NodeType::File
+                    && base.object_oid.is_some()
+                    && self.odb_reader.is_none()
+                {
                     return Err(CrabError::Internal(format!(
                         "no ODB reader configured for size lookup of {path}"
                     )));
                 }
-                Ok(base.size)
+                ResolvedNode::Base(base)
             }
-        }
+            node @ ResolvedNode::Overlay(_) => node,
+        };
+        Ok(view.attributes(&node))
     }
 
-    fn classify_unknown_base_node(&self, path: &str, mut base: BaseNode) -> Result<BaseNode> {
+    fn classify_unknown_base_node(
+        &self,
+        generation: i64,
+        path: &str,
+        mut base: BaseNode,
+    ) -> Result<BaseNode> {
         if base.node_type != NodeType::File
             || base.size != 0
             || base.pointer.is_some()
@@ -1268,7 +1079,7 @@ impl VfsEngine {
         };
         let blob = reader.read_blob(oid)?;
         let (size, pointer) = if let Some(snapshot) = &self.snapshot {
-            snapshot.update_node_from_blob(self.resolver.generation(), path, &blob)?
+            snapshot.update_node_from_blob(generation, path, &blob)?
         } else if is_pointer(&blob) {
             let pointer = Pointer::parse(&blob).map_err(|error| {
                 CrabError::Internal(format!("invalid Crab pointer at {path}: {error}"))
@@ -1335,10 +1146,11 @@ impl VfsEngine {
     }
 
     fn open_read_uncached(&self, path: String) -> Result<VfsReadLease> {
+        let view = self.resolver.capture_view();
         if let Some(ref ov) = self.overlay
             && let Some(backing) = ov.get_backing_path(&path)
         {
-            let node = self.resolver.resolve_path(&path)?;
+            let node = self.resolver.resolve_path_in(&view, &path)?;
             let ResolvedNode::Overlay(entry) = node else {
                 return Err(CrabError::Internal(format!(
                     "overlay backing exists for non-overlay path {path}"
@@ -1352,17 +1164,16 @@ impl VfsEngine {
                 mtime_ns: entry.mtime_ns,
             };
             let source = ReadSource::OverlayFile { path, backing };
-            return Ok(VfsReadLease::new(key, source));
+            return Ok(VfsReadLease::new(key, source, None));
         }
 
-        let node = self.resolver.resolve_path(&path)?;
+        let node = self.resolver.resolve_path_in(&view, &path)?;
         ensure_readable_file(node.node_type(), &path)?;
-        let generation = self.resolver.generation();
         let overlay_version = self.overlay_view_version_for_path(&path);
         match node {
             ResolvedNode::Base(base) => {
-                let base = self.classify_unknown_base_node(&path, base)?;
-                Ok(self.open_base_read(path, generation, overlay_version, base))
+                let base = self.classify_unknown_base_node(view.generation, &path, base)?;
+                Ok(self.open_base_read(path, view, overlay_version, base))
             }
             ResolvedNode::Overlay(_) => {
                 warn!(
@@ -1377,6 +1188,7 @@ impl VfsEngine {
                         mtime_ns: 0,
                     },
                     ReadSource::BaseEmpty,
+                    None,
                 ))
             }
         }
@@ -1385,10 +1197,11 @@ impl VfsEngine {
     fn open_base_read(
         &self,
         path: String,
-        generation: i64,
+        view: Arc<SnapshotView>,
         overlay_version: u64,
         base: BaseNode,
     ) -> VfsReadLease {
+        let generation = view.generation;
         if let Some(pointer) = base.pointer {
             let key = ReadSourceKey::BasePointer {
                 generation,
@@ -1397,7 +1210,7 @@ impl VfsEngine {
                 size: pointer.size,
             };
             let source = ReadSource::BasePointer { path, pointer };
-            return VfsReadLease::new(key, source);
+            return VfsReadLease::new(key, source, Some(view));
         }
 
         if let Some(oid) = base.object_oid {
@@ -1409,7 +1222,7 @@ impl VfsEngine {
                 known_size,
             };
             let source = ReadSource::BaseBlob { path, oid };
-            return VfsReadLease::new(key, source);
+            return VfsReadLease::new(key, source, Some(view));
         }
 
         VfsReadLease::new(
@@ -1419,6 +1232,7 @@ impl VfsEngine {
                 path,
             },
             ReadSource::BaseEmpty,
+            Some(view),
         )
     }
 
@@ -1427,14 +1241,32 @@ impl VfsEngine {
     /// Overlay files are read from their local backing file. Base files
     /// are hydrated on demand via the hydration service (chunk-level).
     pub async fn read(&self, path: &str, offset: u64, size: u32) -> Result<Bytes> {
-        let lease = self.open_read(path)?;
-        self.read_at(&lease, offset, size).await
+        loop {
+            let lease = self.open_read(path)?;
+            match self.read_at(&lease, offset, size).await {
+                Err(error) if Self::is_stale_read_lease_error(&error) => {
+                    // A path read owns admission, so reacquire if refresh won
+                    // before I/O. Explicit lease callers keep the stale error.
+                    tokio::task::yield_now().await;
+                }
+                result => return result,
+            }
+        }
     }
 
     /// Read bytes from a previously opened VFS read lease.
     pub async fn read_at(&self, lease: &VfsReadLease, offset: u64, size: u32) -> Result<Bytes> {
         self.read_metrics.record_read_at_call();
         self.validate_read_lease(lease)?;
+        self.read_captured_at(lease, offset, size).await
+    }
+
+    async fn read_captured_at(
+        &self,
+        lease: &VfsReadLease,
+        offset: u64,
+        size: u32,
+    ) -> Result<Bytes> {
         let source_kind = lease.source.kind();
         let read_decision = lease.record_read_pattern(offset, size);
         let read_class = read_decision.class;
@@ -1442,11 +1274,18 @@ impl VfsEngine {
         let result = match lease.source.as_ref() {
             ReadSource::BasePointer { path, pointer } => {
                 trace!(path, offset, size, "hydrating base file (pointer)");
-                let result = self.hydration.read_range(pointer, offset, size).await;
+                let hydration = lease
+                    ._snapshot_view
+                    .as_ref()
+                    .and_then(|view| view.hydration.as_ref())
+                    .ok_or_else(|| {
+                        CrabError::Internal("pointer read view has no hydration service".into())
+                    })?;
+                let result = hydration.read_range(pointer, offset, size).await;
                 if result.is_ok() {
                     prefetch = read_decision
                         .prefetch
-                        .map(|prefetch| (pointer.clone(), prefetch));
+                        .map(|prefetch| (Arc::clone(hydration), pointer.clone(), prefetch));
                 }
                 result
             }
@@ -1463,7 +1302,7 @@ impl VfsEngine {
                     size,
                     "reading small file from ODB"
                 );
-                let data = reader.read_blob_range(oid, offset, size)?;
+                let data = reader.read_blob_range(oid, offset, size).await?;
                 Ok(data)
             }
             ReadSource::BaseEmpty => Ok(Bytes::new()),
@@ -1476,14 +1315,13 @@ impl VfsEngine {
             self.read_metrics
                 .record_read_success(source_kind, read_class, bytes.len());
         }
-        if let Some((pointer, prefetch)) = prefetch {
+        if let Some((hydration, pointer, prefetch)) = prefetch {
             match prefetch {
                 AdaptivePrefetch::NextWindow => {
-                    self.hydration
-                        .prefetch_next_read_window(pointer, offset, size);
+                    hydration.prefetch_next_read_window(pointer, offset, size);
                 }
                 AdaptivePrefetch::TargetWindow { offset, size } => {
-                    self.hydration.prefetch_read_window(pointer, offset, size);
+                    hydration.prefetch_read_window(pointer, offset, size);
                 }
             }
         }
@@ -1538,6 +1376,8 @@ impl VfsEngine {
     /// writing. Returns the number of bytes written.
     pub async fn write(&self, path: &str, offset: u64, data: &[u8]) -> Result<usize> {
         let ov = self.require_overlay()?;
+        #[cfg(all(test, target_os = "linux", feature = "fuse", feature = "nfs"))]
+        self.pause_writeback().await?;
         let mutation = self.begin_overlay_mutation().await?;
         let lock_set = self.overlay_locks_for(mutation_lock_paths(path));
         let guards = self.acquire_overlay_locks(&lock_set).await;
@@ -1651,15 +1491,21 @@ impl VfsEngine {
 
     /// Rename a file or directory in the overlay.
     pub async fn rename(&self, old_path: &str, new_path: &str) -> Result<()> {
+        self.rename_entry(old_path, new_path, true).await
+    }
+
+    #[cfg(feature = "fuse")]
+    pub(crate) async fn rename_no_replace(&self, old_path: &str, new_path: &str) -> Result<()> {
+        self.rename_entry(old_path, new_path, false).await
+    }
+
+    async fn rename_entry(&self, old_path: &str, new_path: &str, replace: bool) -> Result<()> {
         let ov = self.require_overlay()?;
         let mutation = self.begin_overlay_mutation().await?;
         debug!(old_path, new_path, "rename");
         let old_path = clean_lock_path(old_path);
         let new_path = clean_lock_path(new_path);
 
-        if old_path == new_path {
-            return Ok(());
-        }
         if is_descendant_path(&new_path, &old_path) {
             return Err(CrabError::Forbidden {
                 path: format!("cannot rename directory into itself: {old_path} -> {new_path}"),
@@ -1669,10 +1515,26 @@ impl VfsEngine {
         let lock_set = self.overlay_locks_for(rename_lock_paths(&old_path, &new_path));
         let guards = self.acquire_overlay_locks(&lock_set).await;
         let result = async {
-            let node = self.resolver.resolve_path(&old_path)?;
+            let view = self.resolver.capture_view();
+            let node = self.resolver.resolve_path_in(&view, &old_path)?;
+            // Destination admission shares mutation/path locks with publication
+            // and all engine writers; checking in FUSE alone would race refresh.
+            if !replace {
+                match self.resolver.resolve_path_in(&view, &new_path) {
+                    Ok(_) => {
+                        return Err(std::io::Error::from(std::io::ErrorKind::AlreadyExists).into());
+                    }
+                    Err(CrabError::NotFound { .. }) => {}
+                    Err(error) => return Err(error),
+                }
+            }
+            if old_path == new_path {
+                return Ok(());
+            }
             match node {
                 ResolvedNode::Base(base) => {
-                    let entries = self.base_rename_entries(&base, &old_path, &new_path)?;
+                    let entries =
+                        self.base_rename_entries(view.generation, &base, &old_path, &new_path)?;
                     ov.rename_base_subtree(&entries)
                 }
                 ResolvedNode::Overlay(_) => ov.rename(&old_path, &new_path),
@@ -1756,9 +1618,11 @@ impl VfsEngine {
                 .get_backing_path(path)
                 .ok_or_else(|| CrabError::NotFound { path: path.into() })?;
             let file = std::fs::File::options().write(true).open(&backing)?;
-            file.set_len(new_size)?;
             let now_ns = now_nanos();
-            ov.update_size_and_mtime(path, new_size, now_ns)?;
+            ov.mutate_content(Some(path), &file, now_ns, &mut |file| {
+                file.set_len(new_size)?;
+                Ok(())
+            })?;
             Ok(())
         }
         .await;
@@ -1800,16 +1664,20 @@ impl VfsEngine {
     /// pointer (skipping non-pointer files) and delegates to the hydration
     /// service's `prefetch_dir`.
     pub fn prefetch_dir(&self, paths: &[String]) -> Result<()> {
+        let view = self.resolver.capture_view();
         let mut to_prefetch = Vec::new();
         for path in paths {
-            if let Ok(ResolvedNode::Base(base)) = self.resolver.resolve_path(path)
+            if let Ok(ResolvedNode::Base(base)) = self.resolver.resolve_path_in(&view, path)
                 && let Some(pointer) = base.pointer
             {
                 to_prefetch.push((path.clone(), pointer));
             }
         }
         if !to_prefetch.is_empty() {
-            self.hydration.prefetch_dir(to_prefetch);
+            let hydration = view.hydration.as_ref().ok_or_else(|| {
+                CrabError::Internal("prefetch view has no hydration service".into())
+            })?;
+            hydration.prefetch_dir(to_prefetch);
         }
         Ok(())
     }
@@ -1858,9 +1726,10 @@ impl VfsEngine {
             return Ok(());
         }
 
-        let node = self.resolver.resolve_path(path)?;
+        let view = self.resolver.capture_view();
+        let node = self.resolver.resolve_path_in(&view, path)?;
         match node {
-            ResolvedNode::Base(base) => self.promote_base_to_overlay(&base, path, ov).await,
+            ResolvedNode::Base(base) => self.promote_base_to_overlay(&view, &base, path, ov).await,
             ResolvedNode::Overlay(_) => Ok(()),
         }
     }
@@ -1874,9 +1743,10 @@ impl VfsEngine {
             return Ok(());
         }
 
-        let node = self.resolver.resolve_path(path)?;
+        let view = self.resolver.capture_view();
+        let node = self.resolver.resolve_path_in(&view, path)?;
         match node {
-            ResolvedNode::Base(base) => self.promote_base_to_overlay(&base, path, ov).await,
+            ResolvedNode::Base(base) => self.promote_base_to_overlay(&view, &base, path, ov).await,
             ResolvedNode::Overlay(entry) if entry.node_type == NodeType::Dir => Ok(()),
             ResolvedNode::Overlay(_) => Err(CrabError::NotFound { path: path.into() }),
         }
@@ -1960,6 +1830,46 @@ impl VfsEngine {
         Ok(OverlayMutationGuard { _guard: guard })
     }
 
+    #[cfg(all(test, target_os = "linux", feature = "fuse", feature = "nfs"))]
+    pub(crate) fn pause_next_writeback(&self) -> crate::test_support::writeback::Pause {
+        let pause = crate::test_support::writeback::Pause::new();
+        *self
+            .writeback_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = Arc::downgrade(&pause.state);
+        pause
+    }
+
+    #[cfg(all(test, target_os = "linux", feature = "fuse", feature = "nfs"))]
+    async fn pause_writeback(&self) -> Result<()> {
+        let pause = self
+            .writeback_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .upgrade();
+        if let Some(pause) = pause {
+            pause.wait().await?;
+        }
+        Ok(())
+    }
+
+    #[cfg(all(test, target_os = "linux", feature = "fuse", feature = "nfs"))]
+    fn observe_control_start(&self) {
+        if let Some(pause) = self
+            .writeback_pause
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .upgrade()
+        {
+            pause.control_started.notify_one();
+        }
+    }
+
+    #[cfg(feature = "fuse")]
+    pub(crate) async fn namespace_read(&self) -> OwnedRwLockReadGuard<()> {
+        self.overlay_reset_gate.clone().read_owned().await
+    }
+
     pub async fn begin_overlay_reset(&self) -> OverlayResetGuard<'_> {
         let guard = self.overlay_reset_gate.clone().write_owned().await;
         let previous = self.overlay_reset_epoch.fetch_add(1, Ordering::AcqRel);
@@ -1976,11 +1886,12 @@ impl VfsEngine {
     /// Promote a base snapshot node into the overlay.
     async fn promote_base_to_overlay(
         &self,
+        view: &SnapshotView,
         base: &BaseNode,
         path: &str,
         ov: &dyn OverlayWriter,
     ) -> Result<()> {
-        let base = self.classify_unknown_base_node(path, base.clone())?;
+        let base = self.classify_unknown_base_node(view.generation, path, base.clone())?;
         match base.node_type {
             NodeType::Dir => {
                 // Directories don't need content promotion.
@@ -1996,7 +1907,13 @@ impl VfsEngine {
                         size = pointer.size,
                         "promoting pointer-backed file via streaming"
                     );
+                    let hydration = view.hydration.as_ref().ok_or_else(|| {
+                        CrabError::Internal(
+                            "pointer promotion view has no hydration service".into(),
+                        )
+                    })?;
                     self.promote_pointer_streaming(
+                        hydration,
                         path,
                         pointer,
                         base.mode,
@@ -2005,14 +1922,11 @@ impl VfsEngine {
                     )
                     .await
                 } else if let Some(ref oid) = base.object_oid {
-                    // Small file in git packs — file-to-file copy from blob cache.
+                    // Ordinary Git content uses the same verified bytes as range reads.
                     if let Some(ref reader) = self.odb_reader {
-                        debug!(
-                            path,
-                            oid = oid.as_str(),
-                            "promoting small file from blob cache"
-                        );
-                        self.promote_from_blob_cache(path, oid, base.mode, reader, ov)
+                        debug!(path, oid = oid.as_str(), "promoting verified Git blob");
+                        self.promote_from_blob(path, oid, base.mode, reader, ov)
+                            .await
                     } else {
                         Err(CrabError::Internal(format!(
                             "no ODB reader configured for small-file promotion of {path}"
@@ -2041,13 +1955,15 @@ impl VfsEngine {
             return Err(CrabError::NotFound { path: path.into() });
         }
 
-        let source_oid = base_source_oid(base);
-        ov.promote(path, base.mode, &[], source_oid.as_deref())?;
+        // Truncation creates locally owned content, not a disposable copy of
+        // the old base. Record ownership atomically with the empty promotion.
+        ov.promote(path, base.mode, &[], None)?;
         Ok(())
     }
 
     fn base_rename_entries(
         &self,
+        generation: i64,
         base: &BaseNode,
         old_path: &str,
         new_path: &str,
@@ -2060,7 +1976,6 @@ impl VfsEngine {
         let snapshot = self.snapshot.as_ref().ok_or_else(|| {
             CrabError::Internal("base directory rename requires a snapshot store".into())
         })?;
-        let generation = self.resolver.generation();
         let mut stack = vec![(old_path.to_owned(), new_path.to_owned())];
         while let Some((old_parent, new_parent)) = stack.pop() {
             for child in snapshot.list_children(generation, &old_parent)? {
@@ -2089,105 +2004,54 @@ impl VfsEngine {
     /// large pointer-tracked files (10 GB+).
     async fn promote_pointer_streaming(
         &self,
+        hydration: &Arc<HydrationService>,
         path: &str,
         pointer: &crab_types::pointer::Pointer,
         mode: u32,
         source_oid: Option<&str>,
         ov: &dyn OverlayWriter,
     ) -> Result<()> {
-        let backing_tmp = ov.backing_tmp_path_for(path);
         let backing_final = ov.backing_path_for(path);
-
-        if let Some(parent) = backing_tmp.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        match self
-            .hydration
-            .reconstruct_to_path(pointer, &backing_tmp)
-            .await
+        let mut temporary = promotion_file(&backing_final)?;
+        if let Some(size) = hydration
+            .reconstruct_to_path(pointer, temporary.path())
+            .await?
         {
-            Ok(Some(size)) => {
-                if let Err(e) = std::fs::rename(&backing_tmp, &backing_final) {
-                    let _ = std::fs::remove_file(&backing_tmp);
-                    return Err(e.into());
-                }
-                ov.promote_from_file(path, mode, size, source_oid)?;
-                return Ok(());
-            }
-            Ok(None) => {}
-            Err(e) => {
-                let _ = std::fs::remove_file(&backing_tmp);
-                return Err(e);
-            }
+            temporary
+                .persist(&backing_final)
+                .map_err(|error| CrabError::Io(error.error))?;
+            ov.promote_from_file(path, mode, size, source_oid)?;
+            return Ok(());
         }
-
-        let terms = self.hydration.resolve_terms(pointer)?;
-
-        // Create parent dirs and open temp file.
-        let mut file = std::fs::File::create(&backing_tmp)?;
-
-        // Stream chunks sequentially to disk.
+        let terms = hydration.resolve_terms(pointer)?;
         for term in &terms {
-            let chunk = self.hydration.fetch_chunk(term).await?;
-            std::io::Write::write_all(&mut file, &chunk)?;
+            let chunk = hydration.fetch_chunk(term).await?;
+            std::io::Write::write_all(temporary.as_file_mut(), &chunk)?;
         }
-        file.sync_all()?;
-        drop(file);
-
-        // Atomic rename.
-        std::fs::rename(&backing_tmp, &backing_final)?;
-
-        // Record in overlay DB.
+        temporary.as_file().sync_all()?;
+        temporary
+            .persist(&backing_final)
+            .map_err(|error| CrabError::Io(error.error))?;
         ov.promote_from_file(path, mode, pointer.size, source_oid)?;
         Ok(())
     }
 
-    /// Copy a small file from the ODB blob cache directly to the overlay
-    /// backing file via `std::io::copy`, avoiding a full in-memory buffer.
-    ///
-    /// Ensures the blob is cached on disk first (via `read_blob`), then
-    /// copies file-to-file.
-    #[expect(
-        clippy::unused_self,
-        reason = "method logically belongs to engine's promotion pipeline"
-    )]
-    fn promote_from_blob_cache(
+    async fn promote_from_blob(
         &self,
         path: &str,
         oid: &str,
         mode: u32,
-        reader: &OdbReader,
+        reader: &Arc<OdbReader>,
         ov: &dyn OverlayWriter,
     ) -> Result<()> {
-        // Ensure the blob is in the on-disk cache.
-        reader.read_blob(oid)?;
-
-        let cache_path = reader.blob_cache_path(oid);
-        let backing_tmp = ov.backing_tmp_path_for(path);
         let backing_final = ov.backing_path_for(path);
-
-        // Create parent dirs.
-        if let Some(parent) = backing_tmp.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
-
-        // File-to-file copy via std::io::copy.
-        let mut src = std::fs::File::open(&cache_path).map_err(|e| {
-            CrabError::Io(std::io::Error::new(
-                e.kind(),
-                format!("failed to open blob cache {}: {e}", cache_path.display()),
-            ))
-        })?;
-        let mut dst = std::fs::File::create(&backing_tmp)?;
-        let size = std::io::copy(&mut src, &mut dst)?;
-        dst.sync_all()?;
-        drop(dst);
-
-        // Atomic rename.
-        std::fs::rename(&backing_tmp, &backing_final)?;
-
-        // Record in overlay DB.
+        let temporary = promotion_file(&backing_final)?;
+        let (temporary, size) = reader.copy_blob(oid, temporary).await?;
+        // Publish without another await: cancellation cannot leave a visible
+        // backing file between its installation and overlay metadata recording.
+        temporary
+            .persist(&backing_final)
+            .map_err(|error| CrabError::Io(error.error))?;
         ov.promote_from_file(path, mode, size, Some(oid))?;
         Ok(())
     }
@@ -2334,6 +2198,16 @@ impl VfsEngine {
 ///
 /// Returns up to `size` bytes starting at `offset`. If the file is shorter
 /// than `offset + size`, returns whatever is available past `offset`.
+fn promotion_file(backing_final: &Path) -> Result<tempfile::NamedTempFile> {
+    let parent = backing_final
+        .parent()
+        .ok_or_else(|| CrabError::Internal("overlay backing path has no parent".into()))?;
+    std::fs::create_dir_all(parent)?;
+    // A cancelled writer can still own pending I/O. Unique temporary paths
+    // prevent its late writes from touching a later promotion of the same file.
+    Ok(tempfile::NamedTempFile::new_in(parent)?)
+}
+
 fn read_file_range(path: &Path, offset: u64, size: u32) -> Result<Bytes> {
     use std::io::{Read, Seek, SeekFrom};
 
@@ -2474,6 +2348,7 @@ mod tests {
     use crate::data_plane::{FileIndexResolver, ReconstructionTerm, ShardLoader, XorbFetcher};
     use crate::overlay::OverlayStore;
     use crate::resolver::OverlayLookup;
+    use crate::test_support::{create_git_repo_with_blob, write_git_blob};
     use crate::verified_set::VerifiedSet;
     use std::ops::Range;
     use std::sync::atomic::{AtomicUsize, Ordering};
@@ -2601,8 +2476,14 @@ mod tests {
             self.store.set_mode(path, mode)
         }
 
-        fn update_size_and_mtime(&self, path: &str, size: u64, mtime_ns: i64) -> Result<()> {
-            self.store.update_size_and_mtime(path, size, mtime_ns)
+        fn mutate_content(
+            &self,
+            path: Option<&str>,
+            file: &std::fs::File,
+            mtime_ns: i64,
+            mutation: &mut dyn FnMut(&std::fs::File) -> Result<()>,
+        ) -> Result<()> {
+            self.store.mutate_content(path, file, mtime_ns, mutation)
         }
 
         fn promote_from_file(
@@ -2618,10 +2499,6 @@ mod tests {
 
         fn backing_path_for(&self, path: &str) -> PathBuf {
             self.store.backing_path_for(path)
-        }
-
-        fn backing_tmp_path_for(&self, path: &str) -> PathBuf {
-            self.store.backing_tmp_path_for(path)
         }
 
         fn create_symlink(&self, path: &str, target: &str, mode: u32) -> Result<OverlayEntry> {
@@ -2664,12 +2541,6 @@ mod tests {
         ));
         let overlay_lookup: Arc<dyn OverlayLookup> = overlay.clone();
         let overlay_writer: Arc<dyn OverlayWriter> = overlay.clone();
-        let resolver = Arc::new(FuseResolver::new(
-            Arc::clone(&snapshot),
-            Some(overlay_lookup),
-            1,
-            0,
-        ));
         let cache_dir = tempfile::tempdir().unwrap();
         let cache = Arc::new(
             crate::ChunkCache::open(cache_dir.path().join("chunks"), Some(1024 * 1024)).unwrap(),
@@ -2681,9 +2552,19 @@ mod tests {
             Arc::new(NoopShardLoader),
             Arc::new(NoopXorbFetcher),
             None,
-            None,
             Some(1),
             CancellationToken::new(),
+        );
+        let resolver = Arc::new(
+            FuseResolver::new(
+                Arc::clone(&snapshot),
+                Some(overlay_lookup),
+                1,
+                0,
+                Some(Arc::clone(&hydration)),
+                None,
+            )
+            .unwrap(),
         );
         let engine = Arc::new(VfsEngine::new(
             resolver,
@@ -2699,6 +2580,345 @@ mod tests {
             _root: root,
             _cache: cache_dir,
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn path_read_reacquires_a_lease_invalidated_before_io() {
+        let fixture = test_engine_with_base_file("empty.txt");
+        let stop = Arc::new(std::sync::atomic::AtomicBool::new(false));
+        let start = Arc::new(std::sync::Barrier::new(2));
+        let writer = {
+            let engine = Arc::clone(&fixture.engine);
+            let stop = Arc::clone(&stop);
+            let start = Arc::clone(&start);
+            std::thread::spawn(move || {
+                start.wait();
+                while !stop.load(Ordering::Acquire) {
+                    engine.invalidate_overlay_path("empty.txt");
+                    std::thread::yield_now();
+                }
+            })
+        };
+        start.wait();
+        let mut failure = None;
+        for _ in 0..1000 {
+            if let Err(error) = fixture.engine.read("empty.txt", 0, 10).await {
+                failure = Some(error);
+                break;
+            }
+        }
+        stop.store(true, Ordering::Release);
+        writer.join().unwrap();
+        assert!(
+            failure.is_none(),
+            "path read exposed its internal lease race: {failure:?}"
+        );
+    }
+
+    #[cfg(feature = "fuse")]
+    #[tokio::test]
+    async fn open_file_base_reads_count_attempts() {
+        let fixture = test_engine_with_base_file("empty.txt");
+        let held = fixture
+            .engine
+            .open_file("empty.txt", true, false)
+            .await
+            .unwrap();
+        fixture.engine.read_open_file(&held, 0, 10).await.unwrap();
+        let metrics = fixture.engine.read_metrics_snapshot();
+        assert_eq!((metrics.read_at_calls, metrics.base_empty.reads), (1, 1));
+    }
+
+    #[cfg(feature = "fuse")]
+    #[tokio::test]
+    async fn truncate_to_zero_keeps_local_ownership_after_reconciliation() {
+        for descriptor in [false, true] {
+            let (_odb, git_dir, oid) = create_git_repo_with_blob(b"before");
+            let mut fixture = test_engine_with_nodes(vec![BaseNode {
+                path: "file.txt".into(),
+                node_type: NodeType::File,
+                mode: 0o100_644,
+                object_oid: Some(oid),
+                pointer: None,
+                size: 0,
+            }]);
+            Arc::get_mut(&mut fixture.engine).unwrap().odb_reader =
+                Some(Arc::new(OdbReader::new(&git_dir).unwrap()));
+            if descriptor {
+                let mut held = fixture
+                    .engine
+                    .open_file("file.txt", true, true)
+                    .await
+                    .unwrap();
+                fixture
+                    .engine
+                    .truncate_open_file(&mut held, Some("file.txt"), 0)
+                    .await
+                    .unwrap();
+            } else {
+                fixture.engine.truncate("file.txt", 0).await.unwrap();
+            }
+            fixture.overlay.store.reconcile(|_| None).unwrap();
+            assert!(
+                fixture
+                    .engine
+                    .read("file.txt", 0, 100)
+                    .await
+                    .unwrap()
+                    .is_empty(),
+                "descriptor={descriptor}"
+            );
+        }
+    }
+
+    #[cfg(feature = "fuse")]
+    #[tokio::test]
+    async fn open_file_access_upgrade_rejects_replaced_backing() {
+        let fixture = test_engine_with_base_file("base.txt");
+        fixture.engine.create("held.txt", 0o100_644).await.unwrap();
+        fixture.engine.write("held.txt", 0, b"old").await.unwrap();
+        let mut held = fixture
+            .engine
+            .open_file("held.txt", true, false)
+            .await
+            .unwrap();
+        fixture.engine.unlink("held.txt").await.unwrap();
+        fixture.engine.create("held.txt", 0o100_644).await.unwrap();
+        assert!(matches!(
+            held.enable_access(&fixture.engine, Some("held.txt"), true, true)
+                .await,
+            Err(CrabError::NotFound { .. })
+        ));
+        assert_eq!(
+            fixture.engine.read_open_file(&held, 0, 100).await.unwrap(),
+            b"old".as_slice()
+        );
+    }
+
+    #[cfg(feature = "fuse")]
+    #[tokio::test]
+    async fn rename_no_replace_preserves_both_existing_files() {
+        let fixture = test_engine_with_base_file("base.txt");
+        for (path, content) in [
+            ("from.txt", b"source".as_slice()),
+            ("to.txt", b"target".as_slice()),
+        ] {
+            fixture.engine.create(path, 0o100_644).await.unwrap();
+            fixture.engine.write(path, 0, content).await.unwrap();
+        }
+        assert!(
+            matches!(fixture.engine.rename_no_replace("from.txt", "to.txt").await,
+            Err(CrabError::Io(error)) if error.kind() == std::io::ErrorKind::AlreadyExists)
+        );
+        assert_eq!(
+            (
+                fixture.engine.read("from.txt", 0, 100).await.unwrap(),
+                fixture.engine.read("to.txt", 0, 100).await.unwrap()
+            ),
+            (Bytes::from_static(b"source"), Bytes::from_static(b"target"))
+        );
+        fixture
+            .engine
+            .rename_no_replace("from.txt", "absent.txt")
+            .await
+            .unwrap();
+        assert_eq!(
+            fixture.engine.read("absent.txt", 0, 100).await.unwrap(),
+            b"source".as_slice()
+        );
+    }
+
+    #[cfg(feature = "fuse")]
+    #[tokio::test]
+    async fn open_file_does_not_write_a_reused_path() {
+        let fixture = test_engine_with_base_file("base.txt");
+        fixture.engine.create("held.txt", 0o100_644).await.unwrap();
+        fixture.engine.write("held.txt", 0, b"old").await.unwrap();
+        let mut held = fixture
+            .engine
+            .open_file("held.txt", true, true)
+            .await
+            .unwrap();
+        fixture.engine.unlink("held.txt").await.unwrap();
+        fixture.engine.create("held.txt", 0o100_644).await.unwrap();
+        fixture.engine.write("held.txt", 0, b"new").await.unwrap();
+        fixture
+            .engine
+            .write_open_file(&mut held, Some("held.txt"), 0, b"OLD")
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                fixture.engine.read_open_file(&held, 0, 100).await.unwrap(),
+                fixture.engine.read("held.txt", 0, 100).await.unwrap()
+            ),
+            (Bytes::from_static(b"OLD"), Bytes::from_static(b"new")),
+        );
+    }
+
+    #[cfg(feature = "fuse")]
+    #[tokio::test]
+    async fn open_file_keeps_git_bytes_after_snapshot_replacement() {
+        let (_odb, git_dir, old_oid) = create_git_repo_with_blob(b"old");
+        let new_oid = write_git_blob(&git_dir, b"new longer bytes");
+        let node = BaseNode {
+            path: "file.txt".into(),
+            node_type: NodeType::File,
+            mode: 0o100_644,
+            object_oid: Some(old_oid),
+            pointer: None,
+            size: 0,
+        };
+        let mut fixture = test_engine_with_nodes(vec![node.clone()]);
+        Arc::get_mut(&mut fixture.engine).unwrap().odb_reader =
+            Some(Arc::new(OdbReader::new(&git_dir).unwrap()));
+        let mut held = fixture
+            .engine
+            .open_file("file.txt", true, true)
+            .await
+            .unwrap();
+        fixture
+            .engine
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .publish_generation(
+                "next",
+                "refs/heads/main",
+                &[BaseNode {
+                    object_oid: Some(new_oid),
+                    ..node
+                }],
+            )
+            .unwrap();
+        fixture
+            .engine
+            .resolver
+            .set_generation(2, 0, Some(Arc::clone(&fixture.engine.hydration)), None)
+            .unwrap();
+        assert_eq!(
+            fixture.engine.read_open_file(&held, 0, 100).await.unwrap(),
+            b"old".as_slice()
+        );
+        fixture
+            .engine
+            .write_open_file(&mut held, Some("file.txt"), 0, b"OLD")
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                fixture.engine.read_open_file(&held, 0, 100).await.unwrap(),
+                fixture.engine.read("file.txt", 0, 100).await.unwrap()
+            ),
+            (
+                Bytes::from_static(b"OLD"),
+                Bytes::from_static(b"new longer bytes")
+            ),
+        );
+    }
+
+    #[cfg(feature = "fuse")]
+    #[tokio::test]
+    async fn open_file_write_survives_base_reconciliation() {
+        let (_odb, git_dir, oid) = create_git_repo_with_blob(b"before");
+        let mut fixture = test_engine_with_nodes(vec![BaseNode {
+            path: "file.txt".into(),
+            node_type: NodeType::File,
+            mode: 0o100_644,
+            object_oid: Some(oid),
+            pointer: None,
+            size: 0,
+        }]);
+        Arc::get_mut(&mut fixture.engine).unwrap().odb_reader =
+            Some(Arc::new(OdbReader::new(&git_dir).unwrap()));
+        let mut held = fixture
+            .engine
+            .open_file("file.txt", true, true)
+            .await
+            .unwrap();
+        fixture
+            .engine
+            .write_open_file(&mut held, Some("file.txt"), 0, b"edited")
+            .await
+            .unwrap();
+        fixture.overlay.store.reconcile(|_| None).unwrap();
+        assert_eq!(
+            fixture.engine.read("file.txt", 0, 100).await.unwrap(),
+            b"edited".as_slice()
+        );
+    }
+
+    #[cfg(feature = "fuse")]
+    #[tokio::test]
+    async fn publication_freeze_rejects_content_changes_before_file_io() {
+        for operation in 0..3 {
+            let fixture = test_engine_with_base_file("base.txt");
+            fixture.engine.create("held.txt", 0o100_644).await.unwrap();
+            fixture
+                .engine
+                .write("held.txt", 0, b"before")
+                .await
+                .unwrap();
+            let mut held = fixture
+                .engine
+                .open_file("held.txt", true, true)
+                .await
+                .unwrap();
+            let backing = fixture.overlay.get_backing_path("held.txt").unwrap();
+            let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+            let (release_tx, release_rx) = std::sync::mpsc::channel::<()>();
+            let overlay = OverlayStore::open(
+                &fixture._root.path().join("overlay.db"),
+                &fixture._root.path().join("upper"),
+            )
+            .unwrap();
+            let freezer = std::thread::spawn(move || {
+                let _freeze = overlay.freeze_writes().unwrap();
+                ready_tx.send(()).unwrap();
+                let _ = release_rx.recv();
+            });
+            ready_rx.recv_timeout(Duration::from_secs(5)).unwrap();
+            let result = match operation {
+                0 => fixture
+                    .engine
+                    .write_open_file(&mut held, Some("held.txt"), 0, b"WRONG!")
+                    .await
+                    .map(|_| ()),
+                1 => {
+                    fixture
+                        .engine
+                        .truncate_open_file(&mut held, Some("held.txt"), 0)
+                        .await
+                }
+                _ => fixture.engine.truncate("held.txt", 0).await,
+            };
+            drop(release_tx);
+            freezer.join().unwrap();
+            assert_eq!(
+                (result.is_err(), std::fs::read(&backing).unwrap()),
+                (true, b"before".to_vec()),
+                "operation={operation}"
+            );
+        }
+    }
+
+    #[cfg(feature = "fuse")]
+    #[tokio::test]
+    async fn open_file_sync_returns_the_descriptor_error() {
+        let fixture = test_engine_with_base_file("base.txt");
+        fixture.engine.create("fault.txt", 0o100_644).await.unwrap();
+        let backing = fixture.overlay.get_backing_path("fault.txt").unwrap();
+        std::fs::remove_file(&backing).unwrap();
+        std::os::unix::fs::symlink("/dev/null", &backing).unwrap();
+        let held = fixture
+            .engine
+            .open_file("fault.txt", true, false)
+            .await
+            .unwrap();
+        assert!(matches!(
+            fixture.engine.sync_open_file(&held, false),
+            Err(CrabError::Io(_))
+        ));
     }
 
     // --- read_file_range tests ---
@@ -2726,6 +2946,46 @@ mod tests {
 
         assert!(rename_locks.contains("models"));
         assert!(write_locks.contains("models"));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancelled_control_waiter_retains_transition_until_owned_work_finishes() {
+        let fixture = test_engine_with_base_file("file.txt");
+        let engine = Arc::clone(&fixture.engine);
+        let entered = Arc::new(tokio::sync::Notify::new());
+        let release = Arc::new(tokio::sync::Notify::new());
+        let notify = Arc::clone(&entered);
+        let resume = Arc::clone(&release);
+        let owner = Arc::clone(&engine);
+        let caller = tokio::spawn(async move {
+            engine
+                .run_control(async move {
+                    let _reset = owner.begin_overlay_reset().await;
+                    notify.notify_one();
+                    resume.notified().await;
+                    Ok(())
+                })
+                .await
+        });
+        entered.notified().await;
+        caller.abort();
+        let _ = caller.await;
+        assert!(
+            tokio::time::timeout(
+                Duration::from_millis(10),
+                fixture.engine.shutdown_background()
+            )
+            .await
+            .is_err()
+        );
+        assert!(matches!(
+            fixture.engine.run_control(async { Ok(()) }).await,
+            Err(CrabError::Cancelled)
+        ));
+        release.notify_one();
+        tokio::time::timeout(Duration::from_secs(5), fixture.engine.shutdown_background())
+            .await
+            .unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
@@ -2854,7 +3114,7 @@ mod tests {
             size: 64 * 1024 * 1024,
             shard_hint: Some([4; 32]),
         };
-        let (odb_root, git_dir, oid) = create_git_repo_with_blob(&pointer.serialize());
+        let (_odb_root, git_dir, oid) = create_git_repo_with_blob(&pointer.serialize());
         let mut fixture = test_engine_with_nodes(vec![BaseNode {
             path: "model.bin".to_owned(),
             node_type: NodeType::File,
@@ -2863,8 +3123,8 @@ mod tests {
             pointer: None,
             size: 0,
         }]);
-        let reader = OdbReader::new(&git_dir, &odb_root.path().join("blob-cache")).unwrap();
-        Arc::get_mut(&mut fixture.engine).unwrap().odb_reader = Some(reader);
+        let reader = OdbReader::new(&git_dir).unwrap();
+        Arc::get_mut(&mut fixture.engine).unwrap().odb_reader = Some(Arc::new(reader));
 
         let lease = fixture.engine.open_read("model.bin").unwrap();
 
@@ -3264,7 +3524,18 @@ mod tests {
         let fixture = test_engine_with_base_file("empty.txt");
 
         fixture.engine.open_read("empty.txt").unwrap();
-        fixture.engine.resolver.set_generation(2);
+        fixture
+            .engine
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .publish_generation("next", "refs/heads/main", &[])
+            .unwrap();
+        fixture
+            .engine
+            .resolver
+            .set_generation(2, 0, Some(Arc::clone(&fixture.engine.hydration)), None)
+            .unwrap();
         let Err(err) = fixture.engine.open_read("empty.txt") else {
             panic!("stale generation unexpectedly opened a cached read lease");
         };
@@ -3607,206 +3878,223 @@ mod tests {
         assert_eq!(saturating_u32(u64::MAX), u32::MAX);
     }
 
-    // --- OdbReader tests ---
-
-    /// Create a bare git repo and write a blob, returning (tmpdir, git_dir, oid_hex).
-    fn create_git_repo_with_blob(content: &[u8]) -> (tempfile::TempDir, PathBuf, String) {
-        let dir = tempfile::tempdir().unwrap();
-        let git_dir = dir.path().join("test.git");
-
-        // git init --bare
-        let output = std::process::Command::new("git")
-            .args(["init", "--bare"])
-            .arg(&git_dir)
-            .output()
+    #[test]
+    fn exact_attributes_keep_one_generation_during_concurrent_swaps() {
+        let (_root, git_dir, old_oid) = create_git_repo_with_blob(b"old");
+        let new_oid = write_git_blob(&git_dir, b"new longer bytes");
+        let node = BaseNode {
+            path: "file.txt".into(),
+            node_type: NodeType::File,
+            mode: 0o100_644,
+            object_oid: Some(old_oid),
+            pointer: None,
+            size: 0,
+        };
+        let mut fixture = test_engine_with_nodes(vec![node.clone()]);
+        Arc::get_mut(&mut fixture.engine).unwrap().odb_reader =
+            Some(Arc::new(OdbReader::new(&git_dir).unwrap()));
+        fixture
+            .engine
+            .resolver
+            .set_generation(1, 100, Some(Arc::clone(&fixture.engine.hydration)), None)
             .unwrap();
-        assert!(output.status.success(), "git init failed");
-
-        let oid_hex = write_git_blob(&git_dir, content);
-        (dir, git_dir, oid_hex)
-    }
-
-    fn write_git_blob(git_dir: &Path, content: &[u8]) -> String {
-        let output = std::process::Command::new("git")
-            .args(["hash-object", "-w", "--stdin"])
-            .env("GIT_DIR", git_dir)
-            .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
-            .spawn()
-            .and_then(|mut child| {
-                use std::io::Write;
-                child.stdin.take().unwrap().write_all(content).unwrap();
-                child.wait_with_output()
-            })
+        let _first_view = fixture.engine.resolver.capture_view();
+        fixture
+            .engine
+            .snapshot
+            .as_ref()
+            .unwrap()
+            .publish_generation(
+                "next",
+                "refs/heads/main",
+                &[BaseNode {
+                    object_oid: Some(new_oid),
+                    ..node
+                }],
+            )
             .unwrap();
-        assert!(output.status.success(), "git hash-object failed");
-        String::from_utf8(output.stdout).unwrap().trim().to_owned()
-    }
-
-    #[test]
-    fn odb_reader_read_blob_returns_correct_content() {
-        let content = b"hello from the ODB";
-        let (_dir, git_dir, oid_hex) = create_git_repo_with_blob(content);
-        let cache_dir = _dir.path().join("blob_cache");
-
-        let reader = OdbReader::new(&git_dir, &cache_dir).unwrap();
-        let data = reader.read_blob(&oid_hex).unwrap();
-        assert_eq!(&data[..], content);
-    }
-
-    #[test]
-    fn odb_reader_caches_blob_on_disk() {
-        let content = b"cached blob content";
-        let (_dir, git_dir, oid_hex) = create_git_repo_with_blob(content);
-        let cache_dir = _dir.path().join("blob_cache");
-
-        let reader = OdbReader::new(&git_dir, &cache_dir).unwrap();
-
-        // First read — populates cache.
-        let data = reader.read_blob(&oid_hex).unwrap();
-        assert_eq!(&data[..], content);
-
-        // Verify cache file exists with correct content.
-        let cache_path = cache_dir.join(&oid_hex);
-        assert!(cache_path.is_file());
-        let cached = std::fs::read(&cache_path).unwrap();
-        assert_eq!(cached, content);
-    }
-
-    #[test]
-    fn odb_reader_serves_from_cache_on_second_read() {
-        let content = b"read me twice";
-        let (_dir, git_dir, oid_hex) = create_git_repo_with_blob(content);
-        let cache_dir = _dir.path().join("blob_cache");
-
-        let reader = OdbReader::new(&git_dir, &cache_dir).unwrap();
-
-        // First read — from ODB.
-        let first = reader.read_blob(&oid_hex).unwrap();
-        assert_eq!(&first[..], content);
-
-        // Second read — from cache (same result).
-        let second = reader.read_blob(&oid_hex).unwrap();
-        assert_eq!(&second[..], content);
-        assert_eq!(first, second);
-    }
-
-    #[test]
-    fn odb_reader_promisor_fallback_ignores_new_pack_slot_pressure() {
-        let (_dir, git_dir, initial_oid) = create_git_repo_with_blob(b"initial");
-        let cache_dir = _dir.path().join("blob_cache");
-        let reader = OdbReader::new(&git_dir, &cache_dir).unwrap();
-
-        assert_eq!(&reader.read_blob(&initial_oid).unwrap()[..], b"initial");
-
-        let pack_prefix = git_dir.join("objects/pack/pack");
-        let mut last = None;
-        for index in 0..33 {
-            let content = format!("promisor blob {index}");
-            let oid = write_git_blob(&git_dir, content.as_bytes());
-            let mut child = std::process::Command::new("git")
-                .arg("pack-objects")
-                .arg(&pack_prefix)
-                .env("GIT_DIR", &git_dir)
-                .stdin(std::process::Stdio::piped())
-                .stdout(std::process::Stdio::null())
-                .spawn()
-                .unwrap();
-            use std::io::Write;
-            writeln!(child.stdin.take().unwrap(), "{oid}").unwrap();
-            assert!(child.wait().unwrap().success(), "git pack-objects failed");
-            last = Some((oid, content));
+        fixture
+            .engine
+            .resolver
+            .set_generation(2, 200, Some(Arc::clone(&fixture.engine.hydration)), None)
+            .unwrap();
+        let _second_view = fixture.engine.resolver.capture_view();
+        let resolver = Arc::clone(&fixture.engine.resolver);
+        let hydration = Arc::clone(&fixture.engine.hydration);
+        let ready = Arc::new(std::sync::Barrier::new(2));
+        let writer_ready = Arc::clone(&ready);
+        let writer = std::thread::spawn(move || {
+            writer_ready.wait();
+            for _ in 0..5_000 {
+                resolver
+                    .set_generation(1, 100, Some(Arc::clone(&hydration)), None)
+                    .unwrap();
+                resolver
+                    .set_generation(2, 200, Some(Arc::clone(&hydration)), None)
+                    .unwrap();
+            }
+        });
+        ready.wait();
+        for _ in 0..5_000 {
+            let (_, size, _, timestamp) = fixture.engine.getattr("file.txt").unwrap();
+            assert!(matches!((size, timestamp), (3, 100) | (16, 200)));
         }
-        assert!(
-            std::process::Command::new("git")
-                .arg("prune-packed")
-                .env("GIT_DIR", &git_dir)
-                .status()
+        writer.join().unwrap();
+    }
+
+    #[test]
+    fn late_blob_classification_preserves_newer_snapshot_metadata() {
+        let (_root, git_dir, old_oid) = create_git_repo_with_blob(b"old");
+        let new_oid = write_git_blob(&git_dir, b"new longer bytes");
+        let old_node = BaseNode {
+            path: "file.txt".into(),
+            node_type: NodeType::File,
+            mode: 0o100_644,
+            object_oid: Some(old_oid),
+            pointer: None,
+            size: 0,
+        };
+        let mut fixture = test_engine_with_nodes(vec![old_node.clone()]);
+        Arc::get_mut(&mut fixture.engine).unwrap().odb_reader =
+            Some(Arc::new(OdbReader::new(&git_dir).unwrap()));
+        let snapshot = fixture.engine.snapshot.as_ref().unwrap();
+        snapshot
+            .publish_generation(
+                "next",
+                "refs/heads/main",
+                &[BaseNode {
+                    object_oid: Some(new_oid),
+                    ..old_node.clone()
+                }],
+            )
+            .unwrap();
+        fixture
+            .engine
+            .resolver
+            .set_generation(2, 2, Some(Arc::clone(&fixture.engine.hydration)), None)
+            .unwrap();
+        fixture
+            .engine
+            .classify_unknown_base_node(1, "file.txt", old_node)
+            .unwrap();
+        assert_eq!(snapshot.get_node(2, "file.txt").unwrap().unwrap().size, 0);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn odb_promotion_uses_verified_bytes_through_copy_completion() {
+        let (root, git_dir, oid) = create_git_repo_with_blob(b"abcdefghij");
+        let cache = root.path().join("blob_cache");
+        let reader = OdbReader::new(&git_dir).unwrap();
+        reader.read_blob(&oid).unwrap();
+        std::fs::create_dir_all(&cache).unwrap();
+        std::fs::write(cache.join(&oid), b"XXXXXXXXXX").unwrap();
+        let mut fixture = test_engine_with_nodes(vec![BaseNode {
+            path: "file.txt".into(),
+            node_type: NodeType::File,
+            mode: 0o100_644,
+            object_oid: Some(oid),
+            pointer: None,
+            size: 10,
+        }]);
+        Arc::get_mut(&mut fixture.engine).unwrap().odb_reader = Some(Arc::new(reader));
+        fixture.engine.write("file.txt", 3, b"!").await.unwrap();
+        assert_eq!(
+            fixture
+                .engine
+                .read("file.txt", 0, 20)
+                .await
                 .unwrap()
-                .success(),
-            "git prune-packed failed"
+                .as_ref(),
+            b"abc!efghij"
         );
-
-        let (oid, content) = last.unwrap();
-        assert_eq!(&reader.read_blob(&oid).unwrap()[..], content.as_bytes());
     }
 
-    #[test]
-    fn odb_reader_read_blob_range_full() {
-        let content = b"abcdefghij";
-        let (_dir, git_dir, oid_hex) = create_git_repo_with_blob(content);
-        let cache_dir = _dir.path().join("blob_cache");
-
-        let reader = OdbReader::new(&git_dir, &cache_dir).unwrap();
-        let data = reader.read_blob_range(&oid_hex, 0, 100).unwrap();
-        assert_eq!(&data[..], content);
-    }
-
-    #[test]
-    fn odb_reader_read_blob_range_with_offset() {
-        let content = b"abcdefghij";
-        let (_dir, git_dir, oid_hex) = create_git_repo_with_blob(content);
-        let cache_dir = _dir.path().join("blob_cache");
-
-        let reader = OdbReader::new(&git_dir, &cache_dir).unwrap();
-        let data = reader.read_blob_range(&oid_hex, 3, 4).unwrap();
-        assert_eq!(&data[..], b"defg");
-    }
-
-    #[test]
-    fn odb_reader_read_blob_range_past_eof() {
-        let content = b"short";
-        let (_dir, git_dir, oid_hex) = create_git_repo_with_blob(content);
-        let cache_dir = _dir.path().join("blob_cache");
-
-        let reader = OdbReader::new(&git_dir, &cache_dir).unwrap();
-        let data = reader.read_blob_range(&oid_hex, 100, 10).unwrap();
-        assert!(data.is_empty());
-    }
-
-    #[test]
-    fn odb_reader_missing_oid_returns_not_found() {
-        let (_dir, git_dir, _oid_hex) = create_git_repo_with_blob(b"x");
-        let cache_dir = _dir.path().join("blob_cache");
-
-        let reader = OdbReader::new(&git_dir, &cache_dir).unwrap();
-        let err = reader
-            .read_blob("0000000000000000000000000000000000000000")
-            .unwrap_err();
-        assert!(matches!(err, CrabError::NotFound { .. }));
-    }
-
-    #[test]
-    fn odb_reader_invalid_oid_returns_error() {
-        let (_dir, git_dir, _oid_hex) = create_git_repo_with_blob(b"x");
-        let cache_dir = _dir.path().join("blob_cache");
-
-        let reader = OdbReader::new(&git_dir, &cache_dir).unwrap();
-        let err = reader.read_blob("not-a-valid-hex-oid").unwrap_err();
-        assert!(matches!(err, CrabError::Internal(_)));
-    }
-
-    #[test]
-    fn odb_reader_missing_objects_dir_returns_error() {
-        let dir = tempfile::tempdir().unwrap();
-        let fake_git_dir = dir.path().join("nonexistent.git");
-        let cache_dir = dir.path().join("blob_cache");
-
-        let err = OdbReader::new(&fake_git_dir, &cache_dir).unwrap_err();
-        assert!(matches!(err, CrabError::Io(_)));
-    }
-
-    #[test]
-    fn odb_reader_creates_cache_dir_if_missing() {
-        let content = b"auto-create cache dir";
-        let (_dir, git_dir, oid_hex) = create_git_repo_with_blob(content);
-        let cache_dir = _dir.path().join("deep").join("nested").join("cache");
-
-        assert!(!cache_dir.exists());
-        let reader = OdbReader::new(&git_dir, &cache_dir).unwrap();
-        assert!(cache_dir.is_dir());
-
-        let data = reader.read_blob(&oid_hex).unwrap();
-        assert_eq!(&data[..], content);
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancelled_pointer_promotion_discards_output_before_retry() {
+        struct Gate {
+            first: std::sync::atomic::AtomicBool,
+            entered: tokio::sync::Notify,
+            release: tokio::sync::Notify,
+        }
+        #[async_trait::async_trait]
+        impl crab_read::XorbAvailability for Gate {
+            async fn ensure_available(
+                &self,
+                _path: &object_store::path::Path,
+            ) -> crab_read::Result<()> {
+                if self.first.swap(false, Ordering::AcqRel) {
+                    self.entered.notify_one();
+                    self.release.notified().await;
+                }
+                Ok(())
+            }
+        }
+        let root = tempfile::tempdir().unwrap();
+        let stored = crate::test_support::StoredPointer::new(
+            &root.path().join("shared"),
+            Bytes::from_static(b"remote pointer bytes"),
+        )
+        .await;
+        let gate = Arc::new(Gate {
+            first: std::sync::atomic::AtomicBool::new(true),
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let hydrator = stored
+            .context
+            .hydrator
+            .as_ref()
+            .clone()
+            .with_availability(gate.clone());
+        let hydration = crate::pipeline::create_hydration(
+            Arc::new(crate::ChunkCache::open(root.path().join("chunks"), None).unwrap()),
+            Arc::new(VerifiedSet::default()),
+            CancellationToken::new(),
+            Some(stored.context.store_layout),
+            Some(Arc::new(hydrator)),
+            None,
+        )
+        .unwrap();
+        let mut fixture = test_engine_with_nodes(vec![BaseNode {
+            path: "file.bin".into(),
+            node_type: NodeType::File,
+            mode: 0o100_644,
+            object_oid: None,
+            pointer: Some(stored.pointer.clone()),
+            size: stored.pointer.size,
+        }]);
+        fixture
+            .engine
+            .resolver
+            .set_generation(1, 0, Some(Arc::clone(&hydration)), None)
+            .unwrap();
+        Arc::get_mut(&mut fixture.engine).unwrap().hydration = hydration;
+        let active = Arc::clone(&fixture.engine);
+        let write = tokio::spawn(async move { active.write("file.bin", 0, b"R").await });
+        tokio::time::timeout(Duration::from_secs(5), gate.entered.notified())
+            .await
+            .unwrap();
+        write.abort();
+        let _ = write.await;
+        let final_path = fixture.overlay.backing_path_for("file.bin");
+        assert!(
+            std::fs::read_dir(final_path.parent().unwrap())
+                .unwrap()
+                .next()
+                .is_none()
+        );
+        // Let any abandoned source future finish while a new promotion starts.
+        gate.release.notify_one();
+        fixture.engine.write("file.bin", 0, b"R").await.unwrap();
+        assert_eq!(
+            fixture
+                .engine
+                .read("file.bin", 0, 100)
+                .await
+                .unwrap()
+                .as_ref(),
+            b"Remote pointer bytes"
+        );
+        fixture.engine.shutdown_background().await;
     }
 }

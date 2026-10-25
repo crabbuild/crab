@@ -38,6 +38,10 @@ Trace one path: `crates/crab-write/src/generation.rs` → `while_renewing` in
 
 - Check both Unix expiry and monotonic renewal-deadline arithmetic. Reject unrepresentable durations before storage access; retain fresh expiry calculation on each renewal attempt.
   Source: `crates/crab-coordination/src/push_lock.rs`.
+- GC writer acquisition retries refresh their active claim without duplicate
+  holders or a new writer epoch. Expired/quarantined claims remain lost. Holder
+  IDs need entropy across hosts and PID namespaces; never repair malformed state
+  by deduplicating holders. Sources: `gc_fence.rs` and `push_lock.rs` in this crate.
 
 ## Features and platform
 

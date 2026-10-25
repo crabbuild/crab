@@ -11,6 +11,10 @@ pub type Result<T> = std::result::Result<T, ReadError>;
 /// Errors from read-side reconstruction and hydration.
 #[derive(thiserror::Error, Debug)]
 pub enum ReadError {
+    #[cfg(feature = "local-staging")]
+    #[error("local staging read failed")]
+    Staging(#[source] crab_staging::StagingError),
+
     #[error("pointer parse failed")]
     Pointer(#[from] crab_types::pointer::PointerParseError),
 
@@ -111,6 +115,16 @@ pub enum ReadError {
 
     #[error("{0}")]
     Internal(String),
+}
+
+#[cfg(feature = "local-staging")]
+impl From<crab_staging::StagingError> for ReadError {
+    fn from(source: crab_staging::StagingError) -> Self {
+        match source {
+            crab_staging::StagingError::Cancelled => Self::Cancelled,
+            source => Self::Staging(source),
+        }
+    }
 }
 
 /// Reconstruction failure with the pinned Xet dependency's nested sources exposed.

@@ -257,7 +257,7 @@ proptest! {
 // a non-negative uptime value.
 
 #[cfg(feature = "fuse")]
-use crab::vfs::ipc_server::IpcResponse;
+use crab::vfs::ipc_protocol::IpcResponse;
 
 #[cfg(feature = "fuse")]
 proptest! {

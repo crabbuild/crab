@@ -247,18 +247,60 @@ pub fn reset_overlay_store(store: &OverlayStore) -> Result<OverlayDiff> {
 }
 
 pub fn commit_overlay(options: &OverlayCommitOptions) -> Result<OverlayCommitResult> {
-    commit_overlay_with_snapshot(options, None)
+    let snapshot_path = options.cache_dir.join("snapshot.sqlite");
+    let mut view = OfflineCommitView {
+        snapshot: snapshot_path.exists().then_some(snapshot_path),
+    };
+    commit_overlay_with_view(options, &mut view)
 }
 
-pub fn commit_overlay_with_snapshot(
+pub(crate) trait CommitView {
+    fn head_oid(&self) -> Result<Option<String>>;
+    fn install(
+        &mut self,
+        options: &OverlayCommitOptions,
+        oid: &str,
+        records: &[OverlayRecord],
+    ) -> Result<()>;
+}
+
+struct OfflineCommitView {
+    snapshot: Option<PathBuf>,
+}
+
+impl CommitView for OfflineCommitView {
+    fn head_oid(&self) -> Result<Option<String>> {
+        self.snapshot
+            .as_ref()
+            .map(|path| SnapshotStore::open_existing(path)?.head_oid())
+            .transpose()
+            .map(Option::flatten)
+    }
+
+    fn install(
+        &mut self,
+        options: &OverlayCommitOptions,
+        oid: &str,
+        _records: &[OverlayRecord],
+    ) -> Result<()> {
+        if let Some(path) = &self.snapshot {
+            let snapshot = SnapshotStore::open_or_create(path)?;
+            snapshot.publish_generation_from_git(&options.git_dir, oid, &options.ref_name)?;
+        }
+        Ok(())
+    }
+}
+
+pub(crate) fn commit_overlay_with_view(
     options: &OverlayCommitOptions,
-    snapshot: Option<&SnapshotStore>,
+    view: &mut dyn CommitView,
 ) -> Result<OverlayCommitResult> {
     let paths = OverlayPaths::from_cache_dir(&options.cache_dir);
     let transaction_id = transaction_id();
     if !paths.db_path.exists() {
         if options.push {
             let commit_oid = push_current_ref(options)?;
+            view.install(options, &commit_oid, &[])?;
             return Ok(OverlayCommitResult {
                 transaction_id,
                 commit_oid: Some(commit_oid),
@@ -281,15 +323,12 @@ pub fn commit_overlay_with_snapshot(
     let all_records = store.records()?;
     let records = publishable_records(&all_records);
     let diff = diff_from_records(&records);
-    let overlay_fingerprint = overlay_records_fingerprint(&records);
+    let overlay_fingerprint = overlay_records_fingerprint(&records)?;
     let mut transaction = PublishTransaction {
         id: transaction_id.clone(),
         status: "started".to_owned(),
         ref_name: options.ref_name.clone(),
-        base_oid: match snapshot {
-            Some(snapshot) => snapshot.head_oid()?,
-            None => read_base_oid(&options.cache_dir)?,
-        },
+        base_oid: view.head_oid()?,
         commit_oid: None,
         pushed: false,
         error: None,
@@ -313,6 +352,7 @@ pub fn commit_overlay_with_snapshot(
                 })?;
                 transaction.commit_oid = Some(commit_oid.clone());
                 transaction.pushed = true;
+                view.install(options, &commit_oid, &records)?;
                 set_transaction_status(&mut transaction, "pushed_cleaned");
                 write_transaction(&options.cache_dir, &transaction)?;
                 return Ok(OverlayCommitResult {
@@ -334,34 +374,33 @@ pub fn commit_overlay_with_snapshot(
             });
         }
 
-        if let Some(base_oid) = transaction.base_oid.clone() {
-            let current_oid = rev_parse(&options.git_dir, &options.ref_name)?;
-            if current_oid != base_oid {
-                if let Some(result) = try_finalize_recorded_publish(
-                    &options.cache_dir,
-                    &paths,
-                    &options.git_dir,
-                    &options.ref_name,
-                    &current_oid,
-                    &overlay_fingerprint,
-                    &diff,
-                    snapshot,
-                )? {
-                    set_transaction_status(&mut transaction, "recovered_existing");
-                    transaction.commit_oid.clone_from(&result.commit_oid);
-                    transaction.pushed = result.pushed;
-                    write_transaction(&options.cache_dir, &transaction)?;
-                    return Ok(result);
-                }
-                set_transaction_status(&mut transaction, "failed");
-                transaction.error = Some(format!(
-                    "base ref moved from {base_oid} to {current_oid}; refresh or remount before committing overlay changes"
-                ));
-                write_transaction(&options.cache_dir, &transaction)?;
-                return Err(CrabError::Internal(
-                    transaction.error.clone().unwrap_or_default(),
-                ));
-            }
+        let current_oid = rev_parse(&options.git_dir, &options.ref_name)?;
+        if let Some(result) = try_finalize_recorded_publish(
+            options,
+            &paths,
+            &current_oid,
+            &overlay_fingerprint,
+            &diff,
+            &records,
+            view,
+        )? {
+            set_transaction_status(&mut transaction, "recovered_existing");
+            transaction.commit_oid.clone_from(&result.commit_oid);
+            transaction.pushed = result.pushed;
+            write_transaction(&options.cache_dir, &transaction)?;
+            return Ok(result);
+        }
+        if let Some(base_oid) = transaction.base_oid.as_deref()
+            && current_oid != base_oid
+        {
+            transaction.error = Some(format!(
+                "base ref moved from {base_oid} to {current_oid}; refresh or remount before committing overlay changes"
+            ));
+            set_transaction_status(&mut transaction, "failed");
+            write_transaction(&options.cache_dir, &transaction)?;
+            return Err(CrabError::Internal(
+                transaction.error.clone().unwrap_or_default(),
+            ));
         }
 
         let mut worktree = PublishWorktree::create(&options.git_dir)?;
@@ -565,13 +604,7 @@ pub fn commit_overlay_with_snapshot(
             write_transaction(&options.cache_dir, &transaction)?;
         }
 
-        if let Err(err) = finalize_committed_overlay(
-            &paths,
-            &options.git_dir,
-            &commit_oid,
-            &options.ref_name,
-            snapshot,
-        ) {
+        if let Err(err) = finalize_committed_overlay(&paths, options, &commit_oid, &records, view) {
             set_transaction_status(&mut transaction, "failed");
             transaction.error = Some(err.to_string());
             write_transaction(&options.cache_dir, &transaction)?;
@@ -639,19 +672,19 @@ fn set_transaction_status(transaction: &mut PublishTransaction, status: &str) {
 }
 
 fn try_finalize_recorded_publish(
-    cache_dir: &Path,
+    options: &OverlayCommitOptions,
     paths: &OverlayPaths,
-    git_dir: &Path,
-    ref_name: &str,
     current_oid: &str,
     overlay_fingerprint: &[String],
     diff: &OverlayDiff,
-    snapshot: Option<&SnapshotStore>,
+    records: &[OverlayRecord],
+    view: &mut dyn CommitView,
 ) -> Result<Option<OverlayCommitResult>> {
+    let cache_dir = &options.cache_dir;
     let mut transactions = read_publish_transactions(cache_dir)?;
     transactions.sort_by(|left, right| right.id.cmp(&left.id));
     let Some(mut transaction) = transactions.into_iter().find(|transaction| {
-        transaction.ref_name == ref_name
+        transaction.ref_name == options.ref_name
             && transaction.commit_oid.as_deref() == Some(current_oid)
             && !transaction.overlay_fingerprint.is_empty()
             && transaction.overlay_fingerprint == overlay_fingerprint
@@ -663,7 +696,7 @@ fn try_finalize_recorded_publish(
         return Ok(None);
     };
 
-    if let Err(err) = finalize_committed_overlay(paths, git_dir, current_oid, ref_name, snapshot) {
+    if let Err(err) = finalize_committed_overlay(paths, options, current_oid, records, view) {
         set_transaction_status(&mut transaction, "failed");
         transaction.error = Some(err.to_string());
         write_transaction(cache_dir, &transaction)?;
@@ -715,16 +748,15 @@ fn read_publish_transactions(cache_dir: &Path) -> Result<Vec<PublishTransaction>
     Ok(transactions)
 }
 
-fn overlay_records_fingerprint(records: &[OverlayRecord]) -> Vec<String> {
+fn overlay_records_fingerprint(records: &[OverlayRecord]) -> Result<Vec<String>> {
     let mut entries = records
         .iter()
         .map(|record| {
-            let backing = record
-                .backing_path
-                .as_ref()
-                .map(|path| format!("{}\0{}", path.display(), backing_file_fingerprint(path)))
-                .unwrap_or_default();
-            format!(
+            let backing = match &record.backing_path {
+                Some(path) => format!("{}\0{}", path.display(), backing_file_fingerprint(path)?),
+                None => String::new(),
+            };
+            Ok(format!(
                 "{}\0{}\0{}\0{}\0{}\0{}\0{}",
                 record.path,
                 change_kind(record.kind),
@@ -733,40 +765,32 @@ fn overlay_records_fingerprint(records: &[OverlayRecord]) -> Vec<String> {
                 record.size,
                 record.mtime_ns,
                 backing
-            )
+            ))
         })
-        .collect::<Vec<_>>();
+        .collect::<Result<Vec<_>>>()?;
     entries.sort();
-    entries
+    Ok(entries)
 }
 
-fn backing_file_fingerprint(path: &Path) -> String {
-    match std::fs::symlink_metadata(path) {
-        Ok(metadata) => {
-            let file_type = metadata.file_type();
-            let kind = if file_type.is_symlink() {
-                "symlink"
-            } else if file_type.is_file() {
-                "file"
-            } else if file_type.is_dir() {
-                "dir"
-            } else {
-                "other"
-            };
-            let modified = metadata
-                .modified()
-                .map_or_else(|err| format!("modified:{:?}", err.kind()), system_time_ns);
-            format!("{kind}:{}:{modified}", metadata.len())
-        }
-        Err(err) => format!("missing:{:?}", err.kind()),
+fn backing_file_fingerprint(path: &Path) -> Result<String> {
+    let metadata = std::fs::symlink_metadata(path)?;
+    if metadata.is_dir() {
+        // Directory records create namespace entries; apply_records copies each
+        // tracked child separately. Their own fingerprints cover all byte data.
+        return Ok("dir".into());
     }
-}
-
-fn system_time_ns(time: SystemTime) -> String {
-    match time.duration_since(UNIX_EPOCH) {
-        Ok(duration) => duration.as_nanos().to_string(),
-        Err(err) => format!("-{}", err.duration().as_nanos()),
+    if !metadata.is_file() {
+        return Err(CrabError::CorruptObject {
+            path: path.display().to_string(),
+            reason: "overlay backing is not a regular file".into(),
+        });
     }
+    // Retry may retire these bytes without staging them again. Size and mtime
+    // cannot prove they still match the prior publication; hash under the freeze
+    // lease so an interrupted metadata update cannot hide newer content.
+    let mut hash = blake3::Hasher::new();
+    hash.update_reader(std::fs::File::open(path)?)?;
+    Ok(format!("file:{}:{}", metadata.len(), hash.finalize()))
 }
 
 fn diff_from_records(records: &[OverlayRecord]) -> OverlayDiff {
@@ -1423,7 +1447,7 @@ fn stage_crab_overlay_files(
 ) -> Result<Vec<DirectPointerEntry>> {
     let files = files.to_vec();
     let worktree = worktree.to_path_buf();
-    let staging_root = publish_staging_root(git_dir)?;
+    let staging_root = crate::repository::staging_root_for_git_dir(git_dir)?;
     block_on_publish_runtime(async move {
         let staging = StagingArea::open_blocking_default(staging_root.clone())
             .await
@@ -1489,7 +1513,7 @@ fn mark_staged_pointer_entries_published(
     git_dir: &Path,
     entries: &[DirectPointerEntry],
 ) -> Result<()> {
-    let staging_root = publish_staging_root(git_dir)?;
+    let staging_root = crate::repository::staging_root_for_git_dir(git_dir)?;
     let batch_ids = entries
         .iter()
         .map(|entry| entry.batch_id.clone())
@@ -1500,7 +1524,7 @@ fn mark_staged_pointer_entries_published(
             .map_err(CrabError::from)?;
         for batch_id in &batch_ids {
             staging
-                .mark_batch_published(batch_id)
+                .mark_batch_history_published(batch_id)
                 .map_err(CrabError::from)?;
         }
         Ok(())
@@ -1508,7 +1532,7 @@ fn mark_staged_pointer_entries_published(
 }
 
 fn rollback_staged_pointer_entries(git_dir: &Path, entries: &[DirectPointerEntry]) -> Result<()> {
-    let staging_root = publish_staging_root(git_dir)?;
+    let staging_root = crate::repository::staging_root_for_git_dir(git_dir)?;
     let batch_ids = entries
         .iter()
         .map(|entry| entry.batch_id.clone())
@@ -1525,17 +1549,6 @@ fn rollback_staged_pointer_entries(git_dir: &Path, entries: &[DirectPointerEntry
         }
         Ok(())
     })
-}
-
-fn publish_staging_root(git_dir: &Path) -> Result<PathBuf> {
-    let common_dir = crab_git::discover::resolve_common_dir(git_dir);
-    let repo_root = common_dir.parent().ok_or_else(|| {
-        CrabError::Internal(format!(
-            "git common directory has no parent: {}",
-            common_dir.display()
-        ))
-    })?;
-    Ok(repo_root.join(".crab").join("staging"))
 }
 
 fn block_on_publish_runtime<F, T>(future: F) -> Result<T>
@@ -1674,18 +1687,14 @@ fn worktree_file_is_executable(_abs_path: &Path) -> bool {
 
 fn finalize_committed_overlay(
     paths: &OverlayPaths,
-    git_dir: &Path,
+    options: &OverlayCommitOptions,
     commit_oid: &str,
-    ref_name: &str,
-    live_snapshot: Option<&SnapshotStore>,
+    records: &[OverlayRecord],
+    view: &mut dyn CommitView,
 ) -> Result<()> {
-    let snapshot_db = paths.cache_dir.join("snapshot.sqlite");
-    if let Some(snapshot) = live_snapshot {
-        snapshot.publish_generation_from_git(git_dir, commit_oid, ref_name)?;
-    } else if snapshot_db.exists() {
-        let snapshot = SnapshotStore::open_or_create(&snapshot_db)?;
-        snapshot.publish_generation_from_git(git_dir, commit_oid, ref_name)?;
-    }
+    // Adoption may authenticate remote metadata or install a new read view.
+    // Keep the frozen backing files intact until that owner accepts the commit.
+    view.install(options, commit_oid, records)?;
     clear_committed_overlay(paths)?;
     Ok(())
 }
@@ -1726,15 +1735,6 @@ fn safe_join(root: &Path, rel: &str) -> Result<PathBuf> {
         }
     }
     Ok(out)
-}
-
-fn read_base_oid(cache_dir: &Path) -> Result<Option<String>> {
-    let snapshot_db = cache_dir.join("snapshot.sqlite");
-    if !snapshot_db.exists() {
-        return Ok(None);
-    }
-    let store = SnapshotStore::open_existing(&snapshot_db)?;
-    store.head_oid()
 }
 
 fn rev_parse(git_dir: &Path, rev: &str) -> Result<String> {
@@ -2605,62 +2605,80 @@ mod tests {
 
     #[test]
     fn commit_overlay_rejects_recorded_publish_when_overlay_changed_before_retry() {
-        let fixture = GitFixture::new();
-        let cache_dir = fixture.root.path().join("cache");
-        let paths = OverlayPaths::from_cache_dir(&cache_dir);
-        let snapshot = SnapshotStore::open_or_create(&cache_dir.join("snapshot.sqlite")).unwrap();
-        snapshot
-            .publish_generation(&fixture.base_oid, "refs/heads/main", &[])
-            .unwrap();
-        let store = OverlayStore::open(&paths.db_path, &paths.upper_dir).unwrap();
-        store.create_file("new.txt", 0o100_644).unwrap();
-        store.write_file("new.txt", 0, b"overlay content").unwrap();
-        let records = store.records().unwrap();
+        for same_stats in [false, true] {
+            let fixture = GitFixture::new();
+            let cache_dir = fixture.root.path().join("cache");
+            let paths = OverlayPaths::from_cache_dir(&cache_dir);
+            let snapshot =
+                SnapshotStore::open_or_create(&cache_dir.join("snapshot.sqlite")).unwrap();
+            snapshot
+                .publish_generation(&fixture.base_oid, "refs/heads/main", &[])
+                .unwrap();
+            let store = OverlayStore::open(&paths.db_path, &paths.upper_dir).unwrap();
+            store.create_file("new.txt", 0o100_644).unwrap();
+            store.write_file("new.txt", 0, b"overlay content").unwrap();
+            let records = store.records().unwrap();
 
-        std::fs::write(fixture.worktree.join("new.txt"), "overlay content").unwrap();
-        git_in(&fixture.worktree, ["add", "new.txt"]);
-        git_in(
-            &fixture.worktree,
-            ["commit", "-m", "already published overlay"],
-        );
-        git_in(
-            &fixture.worktree,
-            [
-                "push",
-                fixture.bare_git_dir.to_str().unwrap(),
-                "HEAD:refs/heads/main",
-            ],
-        );
-        let commit_oid = git_in_stdout(&fixture.worktree, ["rev-parse", "HEAD"]);
-        write_recorded_publish_transaction(
-            &cache_dir,
-            &fixture.base_oid,
-            &commit_oid,
-            true,
-            &records,
-        );
-        store.create_file("later.txt", 0o100_644).unwrap();
-        store.write_file("later.txt", 0, b"later change").unwrap();
+            std::fs::write(fixture.worktree.join("new.txt"), "overlay content").unwrap();
+            git_in(&fixture.worktree, ["add", "new.txt"]);
+            git_in(
+                &fixture.worktree,
+                ["commit", "-m", "already published overlay"],
+            );
+            git_in(
+                &fixture.worktree,
+                [
+                    "push",
+                    fixture.bare_git_dir.to_str().unwrap(),
+                    "HEAD:refs/heads/main",
+                ],
+            );
+            let commit_oid = git_in_stdout(&fixture.worktree, ["rev-parse", "HEAD"]);
+            write_recorded_publish_transaction(
+                &cache_dir,
+                &fixture.base_oid,
+                &commit_oid,
+                true,
+                &records,
+            );
+            if same_stats {
+                let backing = store.get_backing_path("new.txt").unwrap();
+                let modified = std::fs::metadata(&backing).unwrap().modified().unwrap();
+                std::fs::write(&backing, b"OVERLAY CONTENT").unwrap();
+                std::fs::File::options()
+                    .write(true)
+                    .open(backing)
+                    .unwrap()
+                    .set_modified(modified)
+                    .unwrap();
+            } else {
+                store.create_file("later.txt", 0o100_644).unwrap();
+                store.write_file("later.txt", 0, b"later change").unwrap();
+            }
 
-        let err = commit_overlay(&OverlayCommitOptions {
-            cache_dir,
-            git_dir: fixture.bare_git_dir.clone(),
-            ref_name: "refs/heads/main".to_owned(),
-            message: "publish changed overlay retry".to_owned(),
-            push: true,
-        })
-        .unwrap_err();
+            let err = commit_overlay(&OverlayCommitOptions {
+                cache_dir,
+                git_dir: fixture.bare_git_dir.clone(),
+                ref_name: "refs/heads/main".to_owned(),
+                message: "publish changed overlay retry".to_owned(),
+                push: true,
+            })
+            .unwrap_err();
 
-        assert!(err.to_string().contains("base ref moved"));
-        assert_eq!(inspect_overlay(&paths).unwrap().changes.len(), 2);
-        assert_eq!(
-            SnapshotStore::open_or_create(&paths.cache_dir.join("snapshot.sqlite"))
-                .unwrap()
-                .head_oid()
-                .unwrap()
-                .as_deref(),
-            Some(fixture.base_oid.as_str())
-        );
+            assert!(err.to_string().contains("base ref moved"));
+            assert_eq!(
+                inspect_overlay(&paths).unwrap().changes.len(),
+                if same_stats { 1 } else { 2 }
+            );
+            assert_eq!(
+                SnapshotStore::open_or_create(&paths.cache_dir.join("snapshot.sqlite"))
+                    .unwrap()
+                    .head_oid()
+                    .unwrap()
+                    .as_deref(),
+                Some(fixture.base_oid.as_str())
+            );
+        }
     }
 
     #[test]
@@ -2892,7 +2910,8 @@ mod tests {
             Some("100755")
         );
 
-        let staging_root = publish_staging_root(&fixture.bare_git_dir).unwrap();
+        let staging_root =
+            crate::repository::staging_root_for_git_dir(&fixture.bare_git_dir).unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let (published_recipe, staged_chunks) = rt.block_on(async {
             let staging = crab_staging::StagingAreaReadOnly::open(staging_root)
@@ -2968,7 +2987,8 @@ mod tests {
             Some("100755")
         );
 
-        let staging_root = publish_staging_root(&fixture.bare_git_dir).unwrap();
+        let staging_root =
+            crate::repository::staging_root_for_git_dir(&fixture.bare_git_dir).unwrap();
         let rt = tokio::runtime::Runtime::new().unwrap();
         let staged_chunks = rt.block_on(async {
             let staging = crab_staging::StagingAreaReadOnly::open(staging_root)
@@ -3140,7 +3160,7 @@ mod tests {
             commit_oid: Some(commit_oid.to_owned()),
             pushed,
             error: Some("cleanup failed".to_owned()),
-            overlay_fingerprint: overlay_records_fingerprint(records),
+            overlay_fingerprint: overlay_records_fingerprint(records).unwrap(),
         };
         write_transaction(cache_dir, &transaction).unwrap();
         id

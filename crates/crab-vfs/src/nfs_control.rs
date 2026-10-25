@@ -1043,6 +1043,21 @@ async fn dispatch_request(
 }
 
 async fn reset_overlay_runtime(state: &NfsControlState) -> Result<crate::publish::OverlayDiff> {
+    let engine = Arc::clone(
+        state
+            .engine
+            .as_ref()
+            .ok_or_else(|| CrabError::Internal("NFS reset engine unavailable".into()))?,
+    );
+    let state = state.clone();
+    engine
+        .run_control(async move { reset_overlay_runtime_owned(&state).await })
+        .await
+}
+
+async fn reset_overlay_runtime_owned(
+    state: &NfsControlState,
+) -> Result<crate::publish::OverlayDiff> {
     if state.read_only {
         return Err(CrabError::Forbidden {
             path: format!("read-only mount: {}", state.mountpoint.display()),
@@ -1056,15 +1071,12 @@ async fn reset_overlay_runtime(state: &NfsControlState) -> Result<crate::publish
         .engine
         .as_ref()
         .ok_or_else(|| CrabError::Internal("NFS control reset engine unavailable".into()))?;
-    let _reset = engine.begin_overlay_reset().await;
+    let _reset = crate::mount_runtime::begin_mount_update(engine, &state.mountpoint).await?;
     state.write_journal.sync_all(engine)?;
-    let overlay =
-        {
-            let runtime = lock_runtime(runtime)?;
-            runtime.output.overlay.clone().ok_or_else(|| {
-                CrabError::Internal("NFS control reset overlay unavailable".into())
-            })?
-        };
+    let (output, _) = snapshot_runtime(runtime).await?;
+    let overlay = output
+        .overlay
+        .ok_or_else(|| CrabError::Internal("NFS control reset overlay unavailable".into()))?;
     let diff = tokio::task::spawn_blocking(move || crate::publish::reset_overlay_store(&overlay))
         .await
         .map_err(|error| CrabError::Internal(format!("NFS reset task failed: {error}")))??;
@@ -1073,6 +1085,23 @@ async fn reset_overlay_runtime(state: &NfsControlState) -> Result<crate::publish
 }
 
 async fn commit_runtime(
+    state: &NfsControlState,
+    message: String,
+    push: bool,
+) -> Result<crate::publish::OverlayCommitResult> {
+    let engine = Arc::clone(
+        state
+            .engine
+            .as_ref()
+            .ok_or_else(|| CrabError::Internal("NFS commit engine unavailable".into()))?,
+    );
+    let state = state.clone();
+    engine
+        .run_control(async move { commit_runtime_owned(&state, message, push).await })
+        .await
+}
+
+async fn commit_runtime_owned(
     state: &NfsControlState,
     message: String,
     push: bool,
@@ -1091,39 +1120,15 @@ async fn commit_runtime(
         .as_ref()
         .ok_or_else(|| CrabError::Internal("NFS control commit engine unavailable".into()))?;
     let engine = Arc::clone(engine);
-    let _reset = engine.begin_overlay_reset().await;
+    let reset = crate::mount_runtime::begin_mount_update(&engine, &state.mountpoint).await?;
     state.write_journal.sync_all(&engine)?;
-    let runtime = Arc::clone(runtime);
-    let result = tokio::task::spawn_blocking(move || {
-        let mut runtime = lock_runtime(&runtime)?;
-        let head_ref = runtime.output.head_ref.clone();
-        let result = crate::publish::commit_overlay_with_snapshot(
-            &crate::publish::OverlayCommitOptions {
-                cache_dir: runtime.config.cache_dir.clone(),
-                git_dir: runtime.config.git_dir.clone(),
-                ref_name: head_ref.clone(),
-                message,
-                push,
-            },
-            Some(runtime.output.snapshot.as_ref()),
-        )?;
-        if let Some(head_oid) = result.commit_oid.as_deref() {
-            let git_dir = runtime.config.git_dir.clone();
-            if let Err(error) = crate::mount_runtime::adopt_published_snapshot(
-                &mut runtime.output,
-                &git_dir,
-                head_oid,
-                &head_ref,
-            ) {
-                return Err(CrabError::Internal(format!(
-                    "commit {head_oid} succeeded but live mount adoption failed: {error}; run `crab mount refresh`"
-                )));
-            }
-        }
-        Ok::<crate::publish::OverlayCommitResult, CrabError>(result)
-    })
-    .await
-    .map_err(|error| CrabError::Internal(format!("NFS commit task failed: {error}")))??;
+    let (mut output, config) = snapshot_runtime(runtime).await?;
+    let result =
+        crate::mount_runtime::commit_mount_runtime(&mut output, &config, &reset, message, push)
+            .await?;
+    if result.commit_oid.is_some() {
+        lock_runtime(runtime)?.output = output;
+    }
 
     if result.commit_oid.is_some() {
         invalidate_generation_caches(&state.read_leases, &state.directory_pages);
@@ -1136,25 +1141,20 @@ async fn refresh_runtime(state: &NfsControlState) -> Result<NfsControlUpdate> {
         .runtime
         .as_ref()
         .ok_or_else(|| CrabError::Internal("NFS control refresh unavailable".into()))?;
-    let mountpoint = state.mountpoint.clone();
-    let read_leases = Arc::clone(&state.read_leases);
-    let directory_pages = Arc::clone(&state.directory_pages);
-    let runtime = Arc::clone(runtime);
-    tokio::task::spawn_blocking(move || {
-        let mut runtime = lock_runtime(&runtime)?;
-        let config = runtime.config.clone();
-        let update =
-            crate::mount_runtime::refresh_mount_runtime(&mut runtime.output, &config, &mountpoint)?;
-        invalidate_generation_caches(&read_leases, &directory_pages);
-        Ok(NfsControlUpdate {
-            mountpoint: mountpoint.display().to_string(),
-            head_oid: update.head_oid,
-            head_ref: update.head_ref,
-            generation: update.generation,
-        })
+    let (mut output, config) = snapshot_runtime(runtime).await?;
+    let update =
+        crate::mount_runtime::refresh_mount_runtime(&mut output, &config, &state.mountpoint)
+            .await?;
+    if output.resolver.generation() == update.generation {
+        lock_runtime(runtime)?.output = output;
+    }
+    invalidate_generation_caches(&state.read_leases, &state.directory_pages);
+    Ok(NfsControlUpdate {
+        mountpoint: state.mountpoint.display().to_string(),
+        head_oid: update.head_oid,
+        head_ref: update.head_ref,
+        generation: update.generation,
     })
-    .await
-    .map_err(|error| CrabError::Internal(format!("NFS refresh task failed: {error}")))?
 }
 
 pub(crate) fn spawn_auto_refresh(
@@ -1185,30 +1185,26 @@ async fn switch_runtime(state: &NfsControlState, new_ref: String) -> Result<NfsC
         .runtime
         .as_ref()
         .ok_or_else(|| CrabError::Internal("NFS control switch unavailable".into()))?;
-    let mountpoint = state.mountpoint.clone();
-    let read_leases = Arc::clone(&state.read_leases);
-    let directory_pages = Arc::clone(&state.directory_pages);
-    let runtime = Arc::clone(runtime);
-    tokio::task::spawn_blocking(move || {
-        let mut runtime = lock_runtime(&runtime)?;
-        let mut config = runtime.config.clone();
-        let update = crate::mount_runtime::switch_mount_runtime(
-            &mut runtime.output,
-            &mut config,
-            &mountpoint,
-            &new_ref,
-        )?;
+    let (mut output, mut config) = snapshot_runtime(runtime).await?;
+    let update = crate::mount_runtime::switch_mount_runtime(
+        &mut output,
+        &mut config,
+        &state.mountpoint,
+        &new_ref,
+    )
+    .await?;
+    if output.resolver.generation() == update.generation {
+        let mut runtime = lock_runtime(runtime)?;
+        runtime.output = output;
         runtime.config = config;
-        invalidate_generation_caches(&read_leases, &directory_pages);
-        Ok(NfsControlUpdate {
-            mountpoint: mountpoint.display().to_string(),
-            head_oid: update.head_oid,
-            head_ref: update.head_ref,
-            generation: update.generation,
-        })
+    }
+    invalidate_generation_caches(&state.read_leases, &state.directory_pages);
+    Ok(NfsControlUpdate {
+        mountpoint: state.mountpoint.display().to_string(),
+        head_oid: update.head_oid,
+        head_ref: update.head_ref,
+        generation: update.generation,
     })
-    .await
-    .map_err(|error| CrabError::Internal(format!("NFS switch task failed: {error}")))?
 }
 
 fn invalidate_generation_caches(
@@ -1222,12 +1218,26 @@ fn invalidate_generation_caches(
     directory_pages.invalidate_all();
 }
 
+async fn snapshot_runtime(
+    runtime: &Arc<Mutex<NfsMountRuntime>>,
+) -> Result<(PipelineOutput, PipelineConfig)> {
+    let runtime = Arc::clone(runtime);
+    // A contended synchronous runtime lock must not occupy a Tokio worker;
+    // teardown needs that worker to cancel and join the admitted operation.
+    tokio::task::spawn_blocking(move || {
+        let runtime = lock_runtime(&runtime)?;
+        Ok((runtime.output.clone(), runtime.config.clone()))
+    })
+    .await
+    .map_err(CrabError::ReadTask)?
+}
+
 fn runtime_head(runtime: &Arc<Mutex<NfsMountRuntime>>) -> Result<(Option<String>, Option<String>)> {
     let runtime = lock_runtime(runtime)?;
-    Ok((
-        Some(runtime.output.head_oid.clone()),
-        Some(runtime.output.head_ref.clone()),
-    ))
+    Ok(match runtime.output.resolver.head() {
+        Some((oid, selected_ref)) => (Some(oid), Some(selected_ref)),
+        None => (None, None),
+    })
 }
 
 fn lock_runtime(
@@ -1642,10 +1652,33 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn control_probe_replaces_stale_unix_socket_before_bind() {
+        const CHILD_ROOT: &str = "CRAB_VFS_TEST_STALE_SOCKET_CHILD";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let listener =
+                std::os::unix::net::UnixListener::bind(PathBuf::from(root).join("stale.sock"))
+                    .unwrap();
+            drop(listener);
+            return;
+        }
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("stale.sock");
-        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
-        drop(listener);
+        // Concurrent Git fixtures may fork while a listener is open, retaining
+        // its fd until exec. Create the stale socket in an isolated process so
+        // successful exit proves every listening descriptor has closed.
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "nfs_control::tests::control_probe_replaces_stale_unix_socket_before_bind",
+                "--nocapture",
+            ])
+            .env(CHILD_ROOT, tmp.path())
+            .output()
+            .unwrap();
+        assert!(
+            child.status.success() && path.exists(),
+            "stale socket setup: {}",
+            String::from_utf8_lossy(&child.stderr)
+        );
         let endpoint = format!("unix:{}", path.display());
 
         probe_endpoint_available(Some(&endpoint)).unwrap();

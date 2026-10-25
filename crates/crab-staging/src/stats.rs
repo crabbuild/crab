@@ -67,7 +67,7 @@ pub struct StagingCleanStats {
     pub bytes_reclaimed: u64,
     /// Total dead chunks removed.
     pub chunks_reclaimed: u64,
-    /// Number of stale `push-{uuid}.inflight` markers removed.
+    /// Number of stale push and recipe-pin markers removed.
     pub stale_markers_removed: u64,
 }
 

@@ -11,6 +11,7 @@ description = "Read and hydration orchestration for Crab repositories."
 [features]
 default = ["hydration"]
 hydration = ["dep:crab-cache", "dep:crab-cache-store", "dep:crab-diff", "dep:crab-lfs", "dep:globset", "dep:gix-packetline", "dep:gix-ignore", "dep:xet-client", "dep:xet-data", "dep:xet-runtime", "crab-metadata/file-index-reader"]
+local-staging = ["hydration", "dep:crab-staging"]
 
 [lib]
 name = "crab_read"
@@ -28,6 +29,7 @@ crab-git = { workspace = true }
 crab-lfs = { workspace = true, optional = true }
 crab-metadata = { workspace = true, features = ["storage"] }
 crab-remote-git = { workspace = true }
+crab-staging = { workspace = true, optional = true }
 crab-storage = { workspace = true }
 crab-types = { workspace = true }
 crab-xet = { workspace = true }

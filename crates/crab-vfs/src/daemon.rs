@@ -26,17 +26,18 @@ use tracing::{debug, error, info, warn};
 
 use crate::ChunkCache;
 use crate::StoreLayout;
+use crate::blob::OdbReader;
 use crate::clone_cache::MountCacheLock;
 use crate::core::error::{CrabError, Result};
-use crate::engine::{OdbReader, VfsEngine};
+use crate::engine::VfsEngine;
 use crate::hydration::HydrationService;
 use crate::integration::{MountReadResolver, NoopMountReadResolver};
 #[cfg(feature = "fuse")]
 use crate::mount::MountConfig;
 use crate::overlay::OverlayStore;
-use crate::refresh::{
-    GitRemoteRefFetcher, RefreshConfig, RefreshService, redact_url, run_read_tree_head,
-};
+use crate::refresh::{RefreshConfig, RefreshService};
+use crate::repository::refresh_mount_index;
+use crate::repository::{GitRemoteRefFetcher, redact_url};
 use crate::resolver::{FuseResolver, OverlayLookup};
 use crate::snapshot::SnapshotStore;
 use crate::verified_set::VerifiedSet;
@@ -142,7 +143,6 @@ impl RepoConfig {
         let repo_dir = daemon_root.join("repos").join(&self.name);
         let git_dir = repo_dir.join(".git");
         let overlay_dir = repo_dir.join("overlay/upper");
-        let blob_cache_dir = daemon_root.join("cache/blobs").join(&self.name);
         let meta_db_path = repo_dir.join("snapshot.sqlite");
         let overlay_db_path = repo_dir.join("overlay.db");
         let control_endpoint_path = repo_dir.join("nfs-control-endpoint");
@@ -152,7 +152,6 @@ impl RepoConfig {
             repo_dir,
             git_dir,
             overlay_dir,
-            blob_cache_dir,
             meta_db_path,
             overlay_db_path,
             control_endpoint_path,
@@ -170,8 +169,6 @@ pub struct ComputedPaths {
     pub git_dir: PathBuf,
     /// Path to the overlay upper directory.
     pub overlay_dir: PathBuf,
-    /// Path to the blob cache directory.
-    pub blob_cache_dir: PathBuf,
     /// Path to the snapshot SQLite database.
     pub meta_db_path: PathBuf,
     /// Path to the overlay SQLite database.
@@ -226,8 +223,8 @@ struct RepoRuntime {
     snapshot: Option<Arc<SnapshotStore>>,
     /// Overlay store (SQLite + upper dir).
     overlay: Option<Arc<OverlayStore>>,
-    /// Owns queue workers and read-window prefetch through teardown.
-    hydration: Option<Arc<crate::hydration::HydrationService>>,
+    /// Owns pointer workers and admitted Git reads through teardown.
+    engine: Option<Arc<VfsEngine>>,
     /// VFS resolver.
     resolver: Option<Arc<FuseResolver>>,
     /// Backend-specific mounted session.
@@ -789,7 +786,7 @@ impl DaemonService {
             head_oid: None,
             snapshot: None,
             overlay: None,
-            hydration: None,
+            engine: None,
             resolver: None,
             mount_session: None,
             watcher_handle: None,
@@ -850,50 +847,18 @@ impl DaemonService {
         paths: &ComputedPaths,
         repo_cancel: &CancellationToken,
     ) -> Result<()> {
-        // Step 1: Blobless clone (if git dir doesn't exist yet).
-        if !paths.git_dir.exists() {
-            info!(step = "clone", "cloning repository (blobless)");
-            // SHELLOUT: delegating full clone to `git clone`.
-            // Gitoxide's `gix::clone` exists but re-implementing
-            // crab's blobless partial-clone flow against it
-            // would be materially more code than keeping the
-            // shellout; the Keep table in `requirements.md`
-            // (Per-Site Decision Matrix) covers this site.
-
-            // Ensure the parent directory (repo_dir) exists so git can
-            // create the bare clone inside it at `git_dir`.
-            std::fs::create_dir_all(&paths.repo_dir)?;
-
-            let output = std::process::Command::new("git")
-                .args([
-                    "clone",
-                    "--bare",
-                    "--filter=blob:none",
-                    "--single-branch",
-                    "--branch",
-                    &config.branch,
-                    &config.remote,
-                    &paths.git_dir.to_string_lossy(),
-                ])
-                .output()
-                .map_err(|e| {
-                    error!(step = "clone", error = %e, "failed to spawn git clone");
-                    CrabError::Io(e)
-                })?;
-
-            if !output.status.success() {
-                let stderr = String::from_utf8_lossy(&output.stderr);
-                let redacted_err = redact_url(stderr.trim());
-                error!(step = "clone", error = %redacted_err, "blobless clone failed");
-                return Err(CrabError::Internal(format!(
-                    "blobless clone failed: {redacted_err}"
-                )));
-            }
-        }
+        // Daemon clones use the same selected-ref preparation as standalone
+        // mounts; a cached clone may not contain the newly configured branch.
+        crate::repository::ensure_blobless_clone(
+            &config.remote,
+            Some(&config.branch),
+            &paths.git_dir,
+        )?;
 
         // Step 2: Resolve HEAD → (oid, ref).
         info!(step = "resolve_head", "resolving HEAD");
-        let (head_oid, head_ref) = crate::pipeline::resolve_head(&paths.git_dir)?;
+        let (head_oid, head_ref) =
+            crate::repository::resolve_mount_ref(&paths.git_dir, Some(&config.branch))?;
         debug!(step = "resolve_head", oid = %head_oid, ref_name = %head_ref);
 
         // Step 3: Open snapshot store and build initial generation.
@@ -949,9 +914,12 @@ impl DaemonService {
             Some(ov)
         };
 
-        // Step 6: Run git read-tree HEAD.
-        info!(step = "read_tree", "running git read-tree HEAD");
-        run_read_tree_head(&paths.git_dir);
+        // Step 6: Populate the daemon-owned index from the selected revision.
+        refresh_mount_index(
+            &paths.git_dir,
+            Some(&paths.git_dir.join("index")),
+            &head_oid,
+        )?;
 
         // Step 7: Create hydration service with shared cache.
         info!(step = "hydration", "preparing hydration service");
@@ -965,10 +933,9 @@ impl DaemonService {
         let store_layout = read_context
             .as_ref()
             .map(|context| context.store_layout.clone());
-        let read_hydrator = read_context.map(|context| context.hydrator);
-        let read_range_cache_dir = store_layout
+        let read_hydrator = read_context
             .as_ref()
-            .map(|_| paths.repo_dir.join("read_ranges"));
+            .map(|context| Arc::clone(&context.hydrator));
         let verified = Arc::new(VerifiedSet::default());
         let hydration = crate::pipeline::create_hydration(
             Arc::clone(&self.cache),
@@ -976,43 +943,57 @@ impl DaemonService {
             repo_cancel.clone(),
             store_layout,
             read_hydrator,
-            read_range_cache_dir,
+            Some(crate::repository::staging_root_for_git_dir(&paths.git_dir)?),
         )?;
+        // Step 8: Create ODB reader.
+        let odb_reader = OdbReader::new(&paths.git_dir).map_err(|e| {
+            error!(step = "odb_reader", error = %e, "failed to create ODB reader");
+            e
+        })?;
+
+        // Step 9: Create resolver (snapshot + overlay).
+        info!(step = "resolver", "creating VFS resolver");
+        let commit_time =
+            crate::repository::commit_time_from_oid(&paths.git_dir, &head_oid).unwrap_or(0);
+        let overlay_lookup: Option<Arc<dyn OverlayLookup>> = overlay
+            .as_ref()
+            .map(|ov| Arc::clone(ov) as Arc<dyn OverlayLookup>);
+        let resolver = Arc::new(FuseResolver::new(
+            Arc::clone(&snapshot),
+            overlay_lookup,
+            generation,
+            commit_time,
+            Some(Arc::clone(&hydration)),
+            Some(head_ref.clone()),
+        )?);
+
+        // Step 10: Create engine (resolver + overlay + hydration + ODB reader).
+        info!(step = "engine", "creating VFS engine");
+        let overlay_writer: Option<Arc<dyn crate::engine::OverlayWriter>> = overlay
+            .as_ref()
+            .map(|ov| Arc::clone(ov) as Arc<dyn crate::engine::OverlayWriter>);
+        let engine = Arc::new(VfsEngine::new(
+            Arc::clone(&resolver),
+            overlay_writer,
+            Arc::clone(&hydration),
+            Some(odb_reader),
+            Some(Arc::clone(&snapshot)),
+        ));
+
         let result = async {
-            // Step 8: Create ODB reader.
-            let odb_reader = OdbReader::new(&paths.git_dir, &paths.blob_cache_dir).map_err(|e| {
-                error!(step = "odb_reader", error = %e, "failed to create ODB reader");
-                e
-            })?;
-
-            // Step 9: Create resolver (snapshot + overlay).
-            info!(step = "resolver", "creating VFS resolver");
-            let commit_time = crate::pipeline::commit_time_from_head(&paths.git_dir).unwrap_or(0);
-            let overlay_lookup: Option<Arc<dyn OverlayLookup>> = overlay
-                .as_ref()
-                .map(|ov| Arc::clone(ov) as Arc<dyn OverlayLookup>);
-            let resolver = Arc::new(FuseResolver::new(
-                Arc::clone(&snapshot),
-                overlay_lookup,
-                generation,
-                commit_time,
-            ));
-
-            // Step 10: Create engine (resolver + overlay + hydration + ODB reader).
-            info!(step = "engine", "creating VFS engine");
-            let overlay_writer: Option<Arc<dyn crate::engine::OverlayWriter>> = overlay
-                .as_ref()
-                .map(|ov| Arc::clone(ov) as Arc<dyn crate::engine::OverlayWriter>);
-            let engine = Arc::new(VfsEngine::new(
-                Arc::clone(&resolver),
-                overlay_writer,
-                Arc::clone(&hydration),
-                Some(odb_reader),
-                Some(Arc::clone(&snapshot)),
-            ));
-
             // Step 11: Mount the configured filesystem backend.
             std::fs::create_dir_all(&paths.mount_path)?;
+            let pipeline_config = crate::pipeline::PipelineConfig {
+                source: config.remote.clone(), git_dir: paths.git_dir.clone(),
+                git_metadata: crate::pipeline::GitMetadataOwnership::Mount,
+                ref_name: Some(head_ref.clone()), read_only: config.read_only,
+                cache_dir: paths.repo_dir.clone(), cancel_token: repo_cancel.clone(),
+            };
+            let pipeline_output = crate::pipeline::PipelineOutput {
+                resolver: Arc::clone(&resolver), engine: Arc::clone(&engine), hydration: Arc::clone(&hydration),
+                snapshot: Arc::clone(&snapshot), overlay: overlay.clone(), head_oid: head_oid.clone(),
+                head_ref: head_ref.clone(), generation, read_context: read_context.clone(),
+            };
             let mount_session = match config.backend {
                 DaemonMountBackend::Fuse => {
                     #[cfg(feature = "fuse")]
@@ -1068,24 +1049,7 @@ impl DaemonService {
                         crate::nfs_mount::preflight_for_config(&mount_config).ensure_ready()?;
                         persist_nfs_control_endpoint(paths, control_endpoint.as_deref())?;
                         let control_runtime = crate::nfs_control::NfsMountRuntime {
-                            output: crate::pipeline::PipelineOutput {
-                                resolver: Arc::clone(&resolver),
-                                engine: Arc::clone(&engine),
-                                hydration: Arc::clone(&hydration),
-                                snapshot: Arc::clone(&snapshot),
-                                overlay: overlay.as_ref().map(Arc::clone),
-                                head_oid: head_oid.clone(),
-                                head_ref: head_ref.clone(),
-                                generation,
-                            },
-                            config: crate::pipeline::PipelineConfig {
-                                source: config.remote.clone(),
-                                git_dir: paths.git_dir.clone(),
-                                ref_name: Some(head_ref.clone()),
-                                read_only: config.read_only,
-                                cache_dir: paths.repo_dir.clone(),
-                                cancel_token: repo_cancel.clone(),
-                            },
+                            output: pipeline_output.clone(), config: pipeline_config.clone(),
                         };
                         let mounted = crate::nfs_mount::mount(
                             &mount_config,
@@ -1129,16 +1093,16 @@ impl DaemonService {
                     remote_poll_interval: Duration::from_secs(config.refresh_interval_secs),
                     local_poll_interval: Duration::from_millis(500),
                     git_dir: paths.git_dir.clone(),
-                    tracked_ref: Some(tracked_branch_ref(&config.branch)),
                 };
 
                 let fetcher = Arc::new(GitRemoteRefFetcher::new(paths.git_dir.clone()));
                 let refresh_svc = Arc::new(RefreshService::new(
-                    Arc::clone(&resolver),
-                    Arc::clone(&snapshot),
+                    &pipeline_output,
+                    &paths.mount_path,
                     Arc::clone(ov),
                     fetcher,
                     refresh_config,
+                    pipeline_config.clone(),
                     repo_cancel.clone(),
                 ));
 
@@ -1158,7 +1122,7 @@ impl DaemonService {
                     // No fallible setup or await may separate spawning from ownership.
                     // Failed preparation must not leave detached cache users behind.
                     hydration.spawn_workers();
-                    rt.hydration = Some(Arc::clone(&hydration));
+                    rt.engine = Some(Arc::clone(&engine));
                     rt.resolver = Some(resolver);
                     rt.mount_session = mount_session.take();
                     rt.refresh_handle =
@@ -1185,7 +1149,7 @@ impl DaemonService {
         }
         .await;
         if result.is_err() {
-            hydration.shutdown().await;
+            engine.shutdown_background().await;
         }
         result
     }
@@ -1218,8 +1182,8 @@ impl DaemonService {
             None => Ok(()),
         };
 
-        if let Some(hydration) = rt.hydration.take() {
-            hydration.shutdown().await;
+        if let Some(engine) = rt.engine.take() {
+            engine.shutdown_background().await;
         }
         debug!(name = %name, "background hydration stopped");
 
@@ -1466,38 +1430,14 @@ impl DaemonService {
         let paths = config.computed_paths(&self.root);
         let git_dir = paths.git_dir;
         let ref_name = tracked_branch_ref(&config.branch);
-        let refspec = format!("+{ref_name}:{ref_name}");
-
         info!(name = %name, remote = %redacted, "force-fetching");
-
-        // SHELLOUT: delegating fetch to `git fetch origin`.
-        // `gix-protocol` does fetch but re-implementing
-        // crab's multi-remote fetch-all loop on top of it is
-        // more code than the shellout; same Keep-table rationale
-        // as the clone above.
-        let output = std::process::Command::new("git")
-            .args(["fetch", "origin", &refspec])
-            .env("GIT_DIR", &git_dir)
-            .env_remove("GIT_WORK_TREE")
-            .env_remove("GIT_COMMON_DIR")
-            .output()
-            .map_err(CrabError::Io)?;
-
-        if output.status.success() {
-            info!(name = %name, "force-fetch succeeded");
-            let mut running = self.running.write().await;
-            if let Some(_rt) = running.get_mut(name) {
-                // Re-read HEAD after fetch.
-                run_read_tree_head(&git_dir);
-            }
-        } else {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            let redacted_err = redact_url(stderr.trim());
-            warn!(name = %name, error = %redacted_err, "force-fetch failed");
-            return Err(CrabError::Internal(format!(
-                "git fetch failed for '{name}': {redacted_err}"
-            )));
-        }
+        tokio::task::spawn_blocking(move || {
+            crate::repository::fetch_mount_ref(&git_dir, &ref_name)
+        })
+        .await
+        .map_err(|error| CrabError::Internal(format!("daemon fetch task failed: {error}")))??;
+        // Snapshot publication owns index replacement. Fetch only updates the
+        // selected ref; forcing the local branch here would lose unpushed commits.
 
         Ok(())
     }
@@ -1720,7 +1660,7 @@ pub fn is_mounted(path: &Path) -> bool {
 
     #[cfg(target_os = "linux")]
     {
-        std::fs::read_to_string("/proc/mounts").map_or(false, |s| s.contains(path_str.as_ref()))
+        std::fs::read_to_string("/proc/mounts").is_ok_and(|s| s.contains(path_str.as_ref()))
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -1959,7 +1899,6 @@ fn create_stub_hydration(
         Arc::new(StubShardLoader),
         xorb_fetcher,
         None,
-        None,
         Some(2), // reduced concurrency for stub
         cancel,
     )
@@ -2144,6 +2083,10 @@ mod tests {
         .unwrap();
         hydration.spawn_workers();
         let hydration_observer = Arc::downgrade(&hydration);
+        let snapshot =
+            Arc::new(SnapshotStore::open_or_create(&dir.path().join("snapshot.sqlite")).unwrap());
+        let resolver = Arc::new(FuseResolver::new(snapshot, None, 0, 0, None, None).unwrap());
+        let engine = Arc::new(VfsEngine::new(resolver, None, hydration, None, None));
         let repo_cancel = CancellationToken::new();
         let refresh_cancel = repo_cancel.clone();
         let refresh_guard = Arc::clone(&ownership);
@@ -2157,7 +2100,7 @@ mod tests {
             head_oid: None,
             snapshot: None,
             overlay: None,
-            hydration: Some(hydration),
+            engine: Some(engine),
             resolver: None,
             mount_session: None,
             watcher_handle: Some(spawn()),
@@ -2380,13 +2323,14 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn engine_setup_failure_does_not_start_daemon_hydration_workers() {
+    async fn backend_setup_failure_does_not_start_daemon_hydration_workers() {
         let dir = tempfile::tempdir().unwrap();
         let daemon =
             DaemonService::new(dir.path().join("daemon"), CancellationToken::new()).unwrap();
         let mut config = sample_config("setup-failure");
         config.remote = dir.path().join("source").to_string_lossy().into_owned();
         config.read_only = true;
+        config.mount_root = dir.path().join("mounts").to_string_lossy().into_owned();
         let paths = config.computed_paths(&daemon.root);
         std::fs::create_dir_all(&paths.git_dir).unwrap();
         git(&paths.git_dir, ["init", "--bare", "-b", "main"]);
@@ -2408,8 +2352,22 @@ mod tests {
             &paths.git_dir,
             ["update-ref", "refs/heads/main", commit.trim()],
         );
-        std::fs::create_dir_all(paths.blob_cache_dir.parent().unwrap()).unwrap();
-        std::fs::write(&paths.blob_cache_dir, b"not a directory").unwrap();
+        // Cached startup now fetches before hydration; provide the real origin
+        // that a prepared daemon clone owns, rather than an unconfigured bare ODB.
+        git_in(
+            dir.path(),
+            [
+                "clone",
+                "--bare",
+                paths.git_dir.to_str().unwrap(),
+                &config.remote,
+            ],
+        );
+        git(&paths.git_dir, ["remote", "add", "origin", &config.remote]);
+        // The removed blob-cache directory is no longer a setup dependency.
+        // Fail backend preparation after engine creation but before mounting.
+        std::fs::create_dir_all(paths.mount_path.parent().unwrap()).unwrap();
+        std::fs::write(&paths.mount_path, b"not a directory").unwrap();
         let owners = Arc::strong_count(&daemon.cache);
 
         let result = daemon
@@ -2424,7 +2382,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn force_fetch_uses_daemon_repo_git_dir() {
+    async fn force_fetch_updates_daemon_clone_and_preserves_unpublished_commits() {
         let dir = tempfile::tempdir().unwrap();
         let source = dir.path().join("source");
         let remote = dir.path().join("remote.git");
@@ -2474,6 +2432,35 @@ mod tests {
             git_stdout(&paths.git_dir, ["rev-parse", "refs/heads/main"]),
             git_stdout(&source, ["rev-parse", "HEAD"])
         );
+        git(
+            &paths.git_dir,
+            ["config", "user.email", "daemon-test@crab.local"],
+        );
+        git(&paths.git_dir, ["config", "user.name", "daemon test"]);
+        let local_oid = git_stdout(
+            &paths.git_dir,
+            [
+                "commit-tree",
+                "main^{tree}",
+                "-p",
+                "main",
+                "-m",
+                "unpublished",
+            ],
+        );
+        git(
+            &paths.git_dir,
+            ["update-ref", "refs/heads/main", &local_oid],
+        );
+        for diverged in [false, true] {
+            if diverged {
+                std::fs::write(source.join("file.txt"), "remote advanced again").unwrap();
+                git(&source, ["commit", "-am", "remote advance"]);
+                git(&source, ["push", remote.to_str().unwrap(), "main"]);
+            }
+            daemon.force_fetch("repo-a").await.unwrap();
+            assert_eq!(git_stdout(&paths.git_dir, ["rev-parse", "main"]), local_oid);
+        }
         assert!(paths.git_dir.join("FETCH_HEAD").exists());
         assert!(!mount_root.join("repo-a/.git").exists());
     }
@@ -2663,10 +2650,6 @@ mod tests {
         assert_eq!(
             paths.overlay_dir,
             PathBuf::from("/tmp/daemon/repos/my-repo/overlay/upper")
-        );
-        assert_eq!(
-            paths.blob_cache_dir,
-            PathBuf::from("/tmp/daemon/cache/blobs/my-repo")
         );
         assert_eq!(
             paths.meta_db_path,

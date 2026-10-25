@@ -8,7 +8,8 @@
 //! │   ├── {id:016x}.seg …
 //! ├── index.db            `SQLite` WAL mode
 //! ├── lockfile
-//! └── push-{uuid}.inflight
+//! ├── push-{id}.inflight
+//! └── pin-{id}.inflight
 //! ```
 //!
 //! Chunks are appended to segment files and indexed in `SQLite`. Pre-release
@@ -16,7 +17,7 @@
 //!
 //! # Concurrency
 //!
-//! Two lock layers protect the staging area:
+//! Three lock layers protect the staging area:
 //!
 //! 1. **Advisory flock** on `lockfile` — process-level mutual exclusion.
 //!    Writers acquire `LOCK_EX` (exclusive); readers acquire `LOCK_SH`
@@ -27,6 +28,11 @@
 //! 2. **In-process locks** — the index (`std::sync::Mutex<Index>`) and
 //!    writer (`tokio::sync::Mutex<SegmentWriter>`) protect concurrent
 //!    access within a single `StagingArea` instance.
+//!
+//! 3. **Recipe lifetime locks** on ready `pin-{id}.inflight` markers retain
+//!    captured recipe ownership without holding `lockfile`. Maintenance checks
+//!    the marker's OS lock rather than a namespace-local diagnostic PID.
+//!    Reading payload bytes still requires ordinary shared staging admission.
 //!
 //! The crate-level `#![deny(clippy::await_holding_lock)]` enforces that
 //! no `std::sync::Mutex` is held across `.await`. The index
@@ -41,6 +47,7 @@ mod add_push_plan;
 mod coalesced_read;
 pub mod config;
 pub mod error;
+mod file_reader;
 mod index;
 pub mod metrics;
 pub mod multipart_resume;
@@ -71,6 +78,7 @@ mod prop_torn_tail_recovery;
 pub use coalesced_read::CoalescedChunkReadPlan;
 pub use config::StagingConfig;
 pub use error::{Result, StagingError};
+pub use file_reader::{StagedFilePin, StagedFileReader};
 pub use metrics::StagingMetrics;
 pub use push_snapshot::StagingPushSnapshot;
 pub use stats::{
@@ -195,39 +203,20 @@ pub struct UnresolvedPublicationIntentEntry {
     pub previous_index_state: String,
 }
 
-fn new_staging_batch_id() -> StagingBatchId {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    use std::time::{SystemTime, UNIX_EPOCH};
-
-    static NEXT_BATCH: AtomicU64 = AtomicU64::new(0);
-    let sequence = NEXT_BATCH.fetch_add(1, Ordering::Relaxed);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .map_or(0, |duration| duration.as_nanos());
+fn new_staging_owner_id(domain: &[u8]) -> String {
+    // Journal ownership must remain distinct across hosts and PID namespaces.
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"crab staging batch v1\0");
-    hasher.update(&std::process::id().to_le_bytes());
-    hasher.update(&nanos.to_le_bytes());
-    hasher.update(&sequence.to_le_bytes());
-    StagingBatchId(hasher.finalize().to_hex().to_string())
+    hasher.update(domain);
+    hasher.update(uuid::Uuid::now_v7().as_bytes());
+    hasher.finalize().to_hex().to_string()
+}
+
+fn new_staging_batch_id() -> StagingBatchId {
+    StagingBatchId(new_staging_owner_id(b"crab staging batch v1\0"))
 }
 
 fn new_publication_intent_id() -> PublicationIntentId {
-    use std::sync::atomic::{AtomicU64, Ordering};
-
-    static NEXT_INTENT: AtomicU64 = AtomicU64::new(0);
-    let sequence = NEXT_INTENT.fetch_add(1, Ordering::Relaxed);
-    let mut hasher = blake3::Hasher::new();
-    hasher.update(b"crab publication intent v1\0");
-    hasher.update(&std::process::id().to_le_bytes());
-    hasher.update(
-        &std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map_or(0, |duration| duration.as_nanos())
-            .to_le_bytes(),
-    );
-    hasher.update(&sequence.to_le_bytes());
-    PublicationIntentId(hasher.finalize().to_hex().to_string())
+    PublicationIntentId(new_staging_owner_id(b"crab publication intent v1\0"))
 }
 
 fn new_add_preparation_id() -> AddPreparationId {
@@ -450,6 +439,10 @@ fn inflight_marker_path(root: &Path, push_id: &str) -> PathBuf {
     root.join(format!("push-{push_id}.inflight"))
 }
 
+fn read_pin_marker_path(root: &Path, id: &str) -> PathBuf {
+    root.join(format!("pin-{id}.inflight"))
+}
+
 fn is_retirement_marker(id: &str) -> bool {
     id.starts_with(RETIREMENT_MARKER_PREFIX)
 }
@@ -461,6 +454,7 @@ fn retirement_marker_id(push_id: &str) -> String {
 struct InflightMarker {
     id: String,
     path: PathBuf,
+    read_pin: bool,
 }
 
 fn marker_payload(id: &str) -> String {
@@ -496,14 +490,39 @@ fn write_inflight_marker(root: &Path, id: &str) -> Result<()> {
     Ok(())
 }
 
-fn marker_pid(marker: &InflightMarker) -> Option<u32> {
-    let raw = std::fs::read_to_string(&marker.path).ok()?;
-    let payload_id = raw.lines().find_map(|line| line.strip_prefix("id="))?;
-    if payload_id != marker.id {
-        return None;
+fn marker_pid(marker: &InflightMarker) -> Result<Option<u32>> {
+    let raw = match std::fs::read_to_string(&marker.path) {
+        Ok(raw) => raw,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+        Err(error) => return Err(error.into()),
+    };
+    let payload_id = raw.lines().find_map(|line| line.strip_prefix("id="));
+    if payload_id != Some(marker.id.as_str()) {
+        return Ok(None);
     }
-    raw.lines()
-        .find_map(|line| line.strip_prefix("pid=")?.parse().ok())
+    Ok(raw
+        .lines()
+        .find_map(|line| line.strip_prefix("pid=")?.parse().ok()))
+}
+
+fn marker_is_active(marker: &InflightMarker) -> Result<bool> {
+    if !marker.read_pin {
+        return Ok(marker_pid(marker)?.is_some_and(pid_is_alive));
+    }
+    let file = match std::fs::OpenOptions::new()
+        .read(true)
+        .write(true)
+        .open(&marker.path)
+    {
+        Ok(file) => file,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
+        Err(error) => return Err(error.into()),
+    };
+    match try_flock(&file, StagingLockKind::Exclusive) {
+        Ok(()) => Ok(false),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock => Ok(true),
+        Err(error) => Err(error.into()),
+    }
 }
 
 fn list_inflight_markers(root: &Path) -> Result<Vec<InflightMarker>> {
@@ -517,12 +536,18 @@ fn list_inflight_markers(root: &Path) -> Result<Vec<InflightMarker>> {
         let entry = entry?;
         let name = entry.file_name();
         let name = name.to_string_lossy();
-        if let Some(rest) = name.strip_prefix("push-")
-            && let Some(id) = rest.strip_suffix(".inflight")
-        {
+        let (rest, read_pin) = if let Some(rest) = name.strip_prefix("push-") {
+            (rest, false)
+        } else if let Some(rest) = name.strip_prefix("pin-") {
+            (rest, true)
+        } else {
+            continue;
+        };
+        if let Some(id) = rest.strip_suffix(".inflight") {
             markers.push(InflightMarker {
                 id: id.to_string(),
                 path: entry.path(),
+                read_pin,
             });
         }
     }
@@ -532,6 +557,14 @@ fn list_inflight_markers(root: &Path) -> Result<Vec<InflightMarker>> {
 fn list_inflight_ids(root: &Path) -> Result<Vec<String>> {
     Ok(list_inflight_markers(root)?
         .into_iter()
+        .map(|marker| marker.id)
+        .collect())
+}
+
+fn blocking_inflight_ids(root: &Path) -> Result<Vec<String>> {
+    Ok(list_inflight_markers(root)?
+        .into_iter()
+        .filter(|marker| !marker.read_pin)
         .map(|marker| marker.id)
         .collect())
 }
@@ -576,7 +609,7 @@ fn begin_retirement_marker(
     let path = inflight_marker_path(root, &marker_id);
     write_inflight_marker(root, &marker_id)?;
 
-    let has_other_inflight = list_inflight_ids(root)?
+    let has_other_inflight = blocking_inflight_ids(root)?
         .iter()
         .any(|id| id != push_id && !is_retirement_marker(id));
 
@@ -591,12 +624,17 @@ fn begin_retirement_marker(
 fn prune_stale_inflight_markers(root: &Path) -> Result<Vec<String>> {
     let mut removed = Vec::new();
     for marker in list_inflight_markers(root)? {
-        let should_remove = marker_pid(&marker).is_none_or(|pid| !pid_is_alive(pid));
-        if should_remove {
-            clear_push_inflight_marker(root, &marker.id)?;
-            if !is_retirement_marker(&marker.id) {
-                removed.push(marker.id);
-            }
+        if marker_is_active(&marker)? {
+            continue;
+        }
+        // A capture can atomically move from its broad marker to a ready pin.
+        // Only an actual unlink retires the journal; a vanished old name must
+        // not discard the still-live pin now holding that identity.
+        match std::fs::remove_file(&marker.path) {
+            Ok(()) if !is_retirement_marker(&marker.id) => removed.push(marker.id),
+            Ok(()) => {}
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+            Err(error) => return Err(error.into()),
         }
     }
     Ok(removed)
@@ -2010,7 +2048,11 @@ impl StagingArea {
     /// the lock, [`StagingError::StagingCorrupt`] if the on-disk layout
     /// is invalid, or [`StagingError::Io`] on filesystem failure.
     pub async fn open(root: PathBuf) -> Result<Self> {
-        let staging = Self::open_with_lock(root, LockAcquisition::NonBlocking)?;
+        let staging = tokio::task::spawn_blocking(move || {
+            Self::open_with_lock(root, LockAcquisition::NonBlocking)
+        })
+        .await
+        .map_err(|source| StagingError::Io(std::io::Error::other(source)))??;
         complete_recipe_payload_validation(&staging.root, &staging.index, &staging.readers).await?;
         Ok(staging)
     }
@@ -3224,18 +3266,27 @@ impl StagingArea {
     /// Returns [`StagingError::Internal`] on `SQLite` failure or
     /// [`StagingError::Io`] on filesystem failure.
     pub fn clean(&self) -> Result<StagingCleanStats> {
-        // 1. The exclusive staging lock proves no push reader is alive. Clear
-        // stale markers, discard failed snapshots, complete any post-CAS
-        // retirement, and only then remove snapshot journals. Immutable
-        // snapshot recipe pins preserve superseded payloads until this point.
-        let inflight = self.list_inflight()?;
+        // Exclusive byte admission excludes push readers, while ready recipe
+        // pins retain metadata without that global lock. Preserve live pins;
+        // compaction and recovery keep their canonical payload inventory.
+        let mut active_pins = HashSet::new();
         let mut stale_markers_removed: u64 = 0;
-        for id in &inflight {
-            self.clear_push_inflight(id)?;
-            stale_markers_removed += 1;
+        for marker in list_inflight_markers(&self.root)? {
+            if marker.read_pin && marker_is_active(&marker)? {
+                active_pins.insert(marker.id);
+                continue;
+            }
+            match std::fs::remove_file(marker.path) {
+                Ok(()) => stale_markers_removed += 1,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => {}
+                Err(error) => return Err(error.into()),
+            }
         }
         let snapshots = lock_index(&self.index)?.push_snapshot_states()?;
         for (snapshot_id, state) in snapshots {
+            if active_pins.contains(&snapshot_id) {
+                continue;
+            }
             if state == "open" {
                 self.discard_open_push_snapshot(&snapshot_id)?;
                 continue;
@@ -3294,7 +3345,7 @@ impl StagingArea {
     /// [`StagingError::Io`] on filesystem failure.
     pub async fn clean_abandoned(&self, force: bool) -> Result<(u64, u64, u64)> {
         if !force {
-            let inflight = self.list_inflight()?;
+            let inflight = blocking_inflight_ids(&self.root)?;
             if !inflight.is_empty() {
                 return Err(StagingError::StagingCorrupt(format!(
                     "clean_abandoned refused: {} push(es) inflight. \
@@ -3456,7 +3507,7 @@ impl StagingArea {
     /// When `force` is false, refuses to run if push-inflight markers exist.
     fn compact_sync(&self, force: bool) -> Result<CompactionStats> {
         if !force {
-            let inflight = self.list_inflight()?;
+            let inflight = blocking_inflight_ids(&self.root)?;
             if !inflight.is_empty() {
                 debug!(
                     inflight_count = inflight.len(),
@@ -4068,6 +4119,17 @@ impl StagingAreaReadOnly {
     /// Mark a staged batch published after the Git index commit.
     pub fn mark_batch_published(&self, batch_id: &StagingBatchId) -> Result<()> {
         let unleased = lock_index(&self.index)?.mark_batch_published(batch_id.as_str())?;
+        remove_indexed_files(&self.root, &self.index, &unleased)?;
+        Ok(())
+    }
+
+    /// Publish a single-file batch under a distinct unpushed-history owner.
+    ///
+    /// Later path publications cannot supersede this version. Published batches
+    /// cannot be rolled back; push snapshots retire them after remote publication.
+    /// Active native/delegated handoffs must finish through their original owner.
+    pub fn mark_batch_history_published(&self, batch_id: &StagingBatchId) -> Result<()> {
+        let unleased = lock_index(&self.index)?.mark_batch_history_published(batch_id.as_str())?;
         remove_indexed_files(&self.root, &self.index, &unleased)?;
         Ok(())
     }

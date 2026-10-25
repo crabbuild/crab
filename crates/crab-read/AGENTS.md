@@ -33,6 +33,8 @@ For object download changes continue into `crates/crab-read/src/store_client.rs`
 
 ## Invariants
 
+- Replica readiness requires authenticated Capsule roots and exact captured
+  views. A missing root never selects a legacy manifest/index readiness path.
 - Requests naming hidden refs remain rejected even when arbitrary wants are enabled. This does not imply that the same SHA is denied under every other name; inspect policy and advertisement together.
   Source: `crates/crab-read/src/fetch_admission.rs`.
 - `verify_captured_installed_pointer_bytes` proves reachable Git/Crab/LFS bytes
@@ -63,7 +65,16 @@ For object download changes continue into `crates/crab-read/src/store_client.rs`
 
 ## Features and platform
 
-Default `hydration` enables dependency proofs, cache/index integration and verified reconstruction. Without default features, only capsule metadata capture, Git views and base errors are available. Test both profiles. Hydration fixtures cannot prove live replica selection or mounted read behavior; qualify those affected consumers separately.
+Default `hydration` enables dependency proofs, cache/index integration and
+verified reconstruction. Without default features, only capsule metadata capture,
+Git views and base errors are available. Test both profiles.
+`local-staging` adds `PointerReader` and its staging dependency and implies
+`hydration`; remote-only consumers retain their dependency boundary.
+`PointerReader::pin_file` lets open-file owners retain an unpublished recipe
+without retaining global staging admission. It shares canonical source selection;
+a local pin never replaces authenticated captured remote ownership.
+Hydration fixtures cannot prove live replica selection or mounted read behavior;
+qualify those affected consumers separately.
 
 ## Verification
 

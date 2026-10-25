@@ -541,8 +541,6 @@ struct SessionCache {
     capsule_view: Option<crab_read::capsule_protocol::CapsuleRepositoryView>,
     /// Payload-free primary ref state retained from `list for-push`.
     capsule_ref_view: Option<crab_read::capsule_protocol::CapsuleRefView>,
-    /// A separately validated canonical-v1 repository uses its existing reader.
-    legacy_v1: bool,
     metrics: Arc<Metrics>,
     persisted_metrics: MetricsSummary,
 }
@@ -555,7 +553,6 @@ impl SessionCache {
             capsule_root: None,
             capsule_view: None,
             capsule_ref_view: None,
-            legacy_v1: false,
             metrics: Arc::new(Metrics::new()),
             persisted_metrics: MetricsSummary::zeroed(),
         }
@@ -760,10 +757,9 @@ pub async fn run_remote_helper(
         };
 
     // Load push state for incremental walk (used by native push pipeline).
-    let repo_root = push_state_repo_root();
+    let repo_root = push_repo_root()?;
     let mut cache = SessionCache::new(config);
-    cache.legacy_v1 = resolved.capsule_root.is_none();
-    cache.capsule_root = resolved.capsule_root;
+    cache.capsule_root = Some(resolved.capsule_root);
     let context = RemoteHelperContext {
         store: resolved.store,
         prefix: resolved.repository_prefix,
@@ -1027,36 +1023,17 @@ async fn load_replica_discovery_for_session(
 }
 
 async fn open_staging_for_push() -> Result<PushStaging> {
-    let Some(root) = push_staging_root() else {
-        return Ok(PushStaging::Missing);
-    };
-    PushStaging::open(root).await
+    PushStaging::open(push_repo_root()?.join(".crab").join("staging")).await
 }
 
-fn push_staging_root() -> Option<std::path::PathBuf> {
-    crate::git::worktree::WorktreeContext::resolve()
-        .ok()
-        .map(|ctx| ctx.shared_staging_dir())
-        .or_else(|| super::discover::resolve_crab_dir().map(|dir| dir.join("staging")))
-        .or_else(|| {
-            let git_dir = super::discover::discover_git_dir().ok()?;
-            shared_staging_dir_from_git_dir(&git_dir)
-        })
-}
-
-fn shared_staging_dir_from_git_dir(git_dir: &std::path::Path) -> Option<std::path::PathBuf> {
-    let common_dir = super::discover::resolve_common_dir(git_dir);
-    let repo_root = common_dir.parent()?;
-    Some(repo_root.join(".crab").join("staging"))
-}
-
-fn push_state_repo_root() -> std::path::PathBuf {
-    crate::git::worktree::WorktreeContext::resolve()
-        .ok()
-        .map(|ctx| ctx.main_worktree_root)
-        .or_else(super::discover::resolve_main_worktree_root)
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_default()
+fn push_repo_root() -> Result<std::path::PathBuf> {
+    // Git can provide GIT_DIR alone while cwd belongs to another repository.
+    // Both staging and push state must follow the selected shared metadata.
+    let common_dir = super::discover::discover_common_git_dir()?.canonicalize()?;
+    common_dir
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .ok_or_else(|| CrabError::Protocol("Git common directory has no parent".into()))
 }
 
 /// Read commands until a blank line, returning the collected batch.
@@ -1420,16 +1397,12 @@ async fn dispatch_capabilities<W: tokio::io::AsyncWrite + Unpin>(
     _cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     tracing::debug!("responding to capabilities");
-    // The terminal upload-pack wire serves both authenticated capsule roots
-    // and verified legacy manifests. Advertising it for legacy repositories
-    // preserves clone/fetch without pretending the legacy store is v2.
-    //
     // A new clone does not have a local object base. The classic
     // remote-helper fetch contract can install authenticated layered packs
     // directly. Filter and shallow options arrive after capabilities, so the
     // classic path must also honor them through the canonical planner.
     let mut v2_ready = true;
-    if !cache.legacy_v1 && local_git_object_store_is_empty() {
+    if local_git_object_store_is_empty() {
         let layout = crab_storage::StoreLayout::with_global_prefix(
             store.as_storage().clone(),
             router.repo_prefix().to_owned(),
@@ -1463,7 +1436,7 @@ async fn dispatch_capabilities<W: tokio::io::AsyncWrite + Unpin>(
 }
 
 fn local_git_object_store_is_empty() -> bool {
-    let Ok(git_dir) = super::discover::discover_git_dir() else {
+    let Ok(git_dir) = super::discover::discover_common_git_dir() else {
         return false;
     };
     let objects = git_dir.join("objects");
@@ -1551,13 +1524,7 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
         Batch::List { for_push } => {
             tracing::debug!(for_push, "list requested");
             let output = if let Some(s) = store {
-                if cache.legacy_v1 {
-                    let cfg = cache.config();
-                    let (read_store, router) =
-                        read_store_for_list_batch(s, prefix, remote_url, cfg, *for_push, cancel)
-                            .await;
-                    read_remote_refs(&read_store, &router, &cfg.transfer_hide_refs).await?
-                } else if *for_push {
+                if *for_push {
                     let hidden_ref_patterns = cache.config().transfer_hide_refs.clone();
                     let (output, view) = match cache.capsule_ref_view.take() {
                         Some(view) => {
@@ -2306,7 +2273,6 @@ pub fn format_capabilities(has_commit_graph: bool) -> String {
 
 /// Build the remote-helper capability response, including the terminal
 /// upload-pack wire when the selected repository has a verified read path.
-/// Legacy manifests use the same wire with their own snapshot authority.
 pub fn format_capabilities_with_v2(has_commit_graph: bool, v2_ready: bool) -> String {
     let mut caps = String::from("fetch\npush\noption\ncheck-connectivity\n");
     if has_commit_graph {
@@ -2322,42 +2288,15 @@ pub fn format_capabilities_with_v2(has_commit_graph: bool, v2_ready: bool) -> St
     caps
 }
 
-/// Read refs from the compacted manifest plus committed journal overlay.
+#[cfg(test)]
 async fn read_remote_refs(
     store: &crate::storage::store::Store,
     router: &StoreLayout,
     hidden_ref_patterns: &[String],
 ) -> Result<ListOutput> {
-    read_remote_refs_with_snapshot(store, router, hidden_ref_patterns, None)
+    read_remote_refs_payload_free_with_snapshot(store, router, hidden_ref_patterns, None)
         .await
         .map(|(output, _)| output)
-}
-
-async fn read_remote_refs_with_snapshot(
-    store: &crate::storage::store::Store,
-    router: &StoreLayout,
-    hidden_ref_patterns: &[String],
-    root: Option<crab_metadata::capsule_protocol::RootSnapshot>,
-) -> Result<(
-    ListOutput,
-    crab_read::capsule_protocol::CapsuleRepositoryView,
-)> {
-    let layout = crab_storage::StoreLayout::with_global_prefix(
-        store.as_storage().clone(),
-        router.repo_prefix().to_owned(),
-        router.global_prefix().to_owned(),
-    );
-    let limits = crab_read::capsule_protocol::CapsuleReadLimits {
-        max_capsule_bytes: u64::MAX,
-        max_frontier_bytes: u64::MAX,
-    };
-    let view = match root {
-        Some(root) => {
-            crab_read::capsule_protocol::open_view_from_root(&layout, root, limits).await?
-        }
-        None => crab_read::capsule_protocol::open_view(&layout, limits).await?,
-    };
-    Ok((list_output_from_view(&view, hidden_ref_patterns), view))
 }
 
 async fn read_remote_refs_payload_free_with_snapshot(
@@ -2396,36 +2335,6 @@ async fn read_remote_refs_for_push_with_snapshot(
     };
     let view = crab_read::capsule_protocol::open_ref_view_from_root(&layout, root).await?;
     Ok((list_output_from_ref_view(&view, hidden_ref_patterns), view))
-}
-
-fn list_output_from_view(
-    view: &crab_read::capsule_protocol::CapsuleRepositoryView,
-    hidden_ref_patterns: &[String],
-) -> ListOutput {
-    let root = view.root().root();
-    let advertisement = crab_read::capsule_ref_advertisement(view, hidden_ref_patterns);
-
-    let refs = advertisement
-        .refs
-        .into_iter()
-        .map(|entry| RefEntry {
-            sha: entry.sha,
-            ref_name: entry.ref_name,
-            peeled: entry.peeled,
-        })
-        .collect();
-
-    tracing::debug!(
-        ref_count = view.refs().len(),
-        generation = root.generation(),
-        head_symref = ?advertisement.head_symref,
-        "read remote refs from capsule-protocol root"
-    );
-
-    ListOutput {
-        refs,
-        head_symref: advertisement.head_symref,
-    }
 }
 
 fn list_output_from_ref_view(
@@ -2924,7 +2833,9 @@ async fn fetch_capsule_packs(
 ) -> Result<FetchBatchResult> {
     let maximum = capsule_fetch_maximum(config);
     let git_dir_started = std::time::Instant::now();
-    let git_dir = super::discover::discover_git_dir()?;
+    // Fetch owns shared objects, config and shallow state. A linked worktree's
+    // private Git directory would hide installed packs from Git and its siblings.
+    let git_dir = super::discover::discover_common_git_dir()?;
     let git_dir_discovery_ms = git_dir_started.elapsed().as_millis() as u64;
     let haves_started = std::time::Instant::now();
     let haves = local_fetch_have_tips(&git_dir)?;
@@ -3581,7 +3492,7 @@ async fn fetch_capsule_constrained_pack(
         .iter()
         .map(|reference| reference.ref_name.clone())
         .collect::<Vec<_>>();
-    let git_dir = super::discover::discover_git_dir()?;
+    let git_dir = super::discover::discover_common_git_dir()?;
     let existing_shallow = crate::git::shallow::read_shallow_file(&git_dir)
         .await?
         .into_iter()
@@ -3790,7 +3701,7 @@ async fn fetch_capsule_promisor_objects(
         lazy_fetch_latency_ms = started.elapsed().as_millis() as u64,
         "capsule-protocol promisor pack generated"
     );
-    let git_dir = super::discover::discover_git_dir()?;
+    let git_dir = super::discover::discover_common_git_dir()?;
     let pack_dir = git_dir.join("objects").join("pack");
     let canonical_name = format!("promisor-{}", pack.checksum_hex());
     let pack_was_present = pack_dir
@@ -4280,30 +4191,6 @@ mod tests {
             env!("CARGO_PKG_VERSION")
         );
         assert_eq!(output, expected);
-    }
-
-    #[tokio::test]
-    async fn legacy_repository_capabilities_advertise_compatible_terminal_wire() {
-        let push_state_root = tempfile::tempdir().expect("push state tempdir");
-        let store = crate::storage::store::Store::new(std::sync::Arc::new(
-            object_store::memory::InMemory::new(),
-        ));
-        initialize_test_remote(&store, "remote-helper-legacy-capabilities").await;
-        let mut context = test_context(
-            store,
-            "remote-helper-legacy-capabilities",
-            push_state_root.path().to_path_buf(),
-        );
-        context.cache.legacy_v1 = true;
-        let (output, result) = run_with_context(
-            "capabilities\n",
-            context,
-            tokio_util::sync::CancellationToken::new(),
-        )
-        .await;
-
-        result.expect("legacy capabilities response");
-        assert!(output.lines().any(|line| line == "stateless-connect"));
     }
 
     #[tokio::test]
@@ -5823,6 +5710,94 @@ mod tests {
                 ),
                 (false, false),
                 "{selector} must fail before pack installation or shallow publication"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn linked_worktree_fetches_install_shared_state() {
+        let (source, store, router, commits, _) = capsule_history_fixture().await;
+        let tip = commits.last().unwrap();
+        let blob = String::from_utf8(run_git(source.path(), &["rev-parse", "HEAD:history.txt"]))
+            .unwrap()
+            .trim()
+            .to_owned();
+        for mode in ["promisor", "full", "filtered", "shallow", "incremental"] {
+            let target = tempfile::tempdir().unwrap();
+            run_git(target.path(), &["init", "-q", "-b", "main"]);
+            run_git(
+                target.path(),
+                &[
+                    "-c",
+                    "user.name=Crab Tests",
+                    "-c",
+                    "user.email=tests@crab.invalid",
+                    "commit",
+                    "-q",
+                    "--allow-empty",
+                    "-m",
+                    "local base",
+                ],
+            );
+            if mode == "incremental" {
+                let refspec = format!("{}:refs/remotes/origin/main", commits[0]);
+                run_git(
+                    target.path(),
+                    &["fetch", source.path().to_str().unwrap(), &refspec],
+                );
+            }
+            run_git(target.path(), &["checkout", "--detach"]);
+            run_git(target.path(), &["branch", "-D", "main"]);
+            let linked = target.path().join("linked");
+            run_git(
+                target.path(),
+                &["worktree", "add", "--detach", linked.to_str().unwrap()],
+            );
+            let private = std::path::PathBuf::from(
+                String::from_utf8(run_git(&linked, &["rev-parse", "--absolute-git-dir"]))
+                    .unwrap()
+                    .trim(),
+            );
+            let _guard = GitEnvCwdGuard::set(&linked, &private, &linked);
+            let context = test_context(
+                store.clone(),
+                router.repo_prefix(),
+                target.path().join("push-state"),
+            );
+            let input = match mode {
+                "promisor" => format!("option filter blob:none\nfetch {blob} {blob}\n\n"),
+                "filtered" => format!("option filter blob:none\nfetch {tip} refs/heads/main\n\n"),
+                "shallow" => format!("option depth 1\nfetch {tip} refs/heads/main\n\n"),
+                _ => format!("fetch {tip} refs/heads/main\n\n"),
+            };
+            let (_, result) =
+                run_with_context(&input, context, tokio_util::sync::CancellationToken::new()).await;
+            result.unwrap_or_else(|error| panic!("{mode} fetch failed: {error}"));
+            let wanted = if mode == "promisor" { &blob } else { tip };
+            let expected = run_git(source.path(), &["cat-file", "-p", wanted]);
+            let boundary = crate::git::shallow::read_shallow_file(&target.path().join(".git"))
+                .await
+                .unwrap();
+            assert_eq!(
+                (
+                    run_git(&linked, &["cat-file", "-p", wanted]),
+                    run_git(target.path(), &["cat-file", "-p", wanted]),
+                    private.join("objects").exists(),
+                    private.join("shallow").exists(),
+                    boundary,
+                ),
+                (
+                    expected.clone(),
+                    expected,
+                    false,
+                    false,
+                    if mode == "shallow" {
+                        vec![tip.clone()]
+                    } else {
+                        vec![]
+                    },
+                ),
+                "{mode} must publish shared state visible to both worktrees",
             );
         }
     }
@@ -8342,33 +8317,58 @@ mod tests {
     }
 
     #[test]
-    fn push_state_repo_root_uses_repo_root_from_nested_cwd() {
-        let _git_env = CleanGitEnvGuard::new();
-        let tmp = tempfile::tempdir().unwrap();
-        let status = std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(tmp.path())
-            .status()
-            .expect("run git init");
-        assert!(status.success());
-
-        let nested = tmp.path().join("src/deep");
-        std::fs::create_dir_all(&nested).unwrap();
-
-        let saved_cwd = std::env::current_dir().ok();
-        std::env::set_current_dir(&nested).unwrap();
-        let root = push_state_repo_root().canonicalize().unwrap();
-        let expected = tmp.path().canonicalize().unwrap();
-
-        if let Some(cwd) = saved_cwd {
-            let _ = std::env::set_current_dir(cwd);
+    fn explicit_git_dir_selects_push_roots_over_unrelated_cwd() {
+        let unrelated = tempfile::tempdir().unwrap();
+        run_git(unrelated.path(), &["init", "-q"]);
+        for kind in ["main", "bare", "linked"] {
+            let target = tempfile::tempdir().unwrap();
+            let mut git_dir = target.path().join(".git");
+            if kind == "bare" {
+                run_git(target.path(), &["init", "--bare", "-q", ".git"]);
+            } else {
+                run_git(target.path(), &["init", "-q"]);
+            }
+            if kind == "linked" {
+                run_git(
+                    target.path(),
+                    &[
+                        "-c",
+                        "user.name=Crab Tests",
+                        "-c",
+                        "user.email=tests@crab.invalid",
+                        "commit",
+                        "-q",
+                        "--allow-empty",
+                        "-m",
+                        "base",
+                    ],
+                );
+                let linked = target.path().join("linked");
+                run_git(
+                    target.path(),
+                    &["worktree", "add", "--detach", linked.to_str().unwrap()],
+                );
+                git_dir = std::path::PathBuf::from(
+                    String::from_utf8(run_git(&linked, &["rev-parse", "--absolute-git-dir"]))
+                        .unwrap()
+                        .trim(),
+                );
+            }
+            let expected = target.path().canonicalize().unwrap();
+            let _guard = GitEnvCwdGuard::set(unrelated.path(), &git_dir, target.path());
+            // SAFETY: the guard holds GIT_DIR_MUTEX and restores this variable.
+            // Native Git can supply GIT_DIR alone when the publisher uses --git-dir.
+            unsafe { std::env::remove_var("GIT_WORK_TREE") };
+            assert_eq!(
+                push_repo_root().unwrap(),
+                expected,
+                "{kind}: explicit Git metadata owns both push roots",
+            );
         }
-
-        assert_eq!(root, expected);
     }
 
     #[test]
-    fn push_staging_root_uses_shared_staging_from_nested_cwd() {
+    fn push_repo_root_uses_repo_root_from_nested_cwd() {
         let _git_env = CleanGitEnvGuard::new();
         let tmp = tempfile::tempdir().unwrap();
         let status = std::process::Command::new("git")
@@ -8383,8 +8383,8 @@ mod tests {
 
         let saved_cwd = std::env::current_dir().ok();
         std::env::set_current_dir(&nested).unwrap();
-        let root = push_staging_root().unwrap();
-        let expected = tmp.path().canonicalize().unwrap().join(".crab/staging");
+        let root = push_repo_root().unwrap().canonicalize().unwrap();
+        let expected = tmp.path().canonicalize().unwrap();
 
         if let Some(cwd) = saved_cwd {
             let _ = std::env::set_current_dir(cwd);

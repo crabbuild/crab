@@ -1096,6 +1096,7 @@ impl From<crab_read::upload_pack_wire::WireError> for CrabError {
 impl From<crab_read::ReadError> for CrabError {
     fn from(error: crab_read::ReadError) -> Self {
         match error {
+            crab_read::ReadError::Staging(source) => Self::from(source),
             crab_read::ReadError::Pointer(source) => Self::from(source),
             crab_read::ReadError::Cache(source) => Self::from(source),
             crab_read::ReadError::CacheStore(source) => Self::from(source),
@@ -1212,6 +1213,10 @@ impl From<crab_vfs::VfsError> for CrabError {
             crab_vfs::VfsError::Read(source) => Self::from(source),
             crab_vfs::VfsError::Staging(source) => Self::from(source),
             crab_vfs::VfsError::Storage(source) => Self::from(source),
+            crab_vfs::VfsError::GitRef(source) => Self::Io(std::io::Error::other(source)),
+            source @ (crab_vfs::VfsError::GitObject { .. } | crab_vfs::VfsError::ReadTask(_)) => {
+                Self::Io(std::io::Error::other(source))
+            }
             crab_vfs::VfsError::Url(source) => Self::from(source),
             crab_vfs::VfsError::Pointer(source) => Self::from(source),
             source @ (crab_vfs::VfsError::Database(_) | crab_vfs::VfsError::Json(_)) => {

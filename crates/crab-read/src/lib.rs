@@ -14,6 +14,8 @@ mod hydrator;
 mod integrity;
 #[cfg(feature = "hydration")]
 pub mod pointer_proof;
+#[cfg(feature = "local-staging")]
+mod pointer_reader;
 #[cfg(feature = "hydration")]
 mod ref_advertisement;
 #[cfg(feature = "hydration")]
@@ -38,6 +40,8 @@ pub use fetch_admission::{
 pub use hydrator::{ReadRuntimeBuilder, ReadStoreLayout, ReconstructionStream, ShardHydrator};
 #[cfg(feature = "hydration")]
 pub use integrity::{verify_catalog_file_recipe, verify_origin_recipe};
+#[cfg(feature = "local-staging")]
+pub use pointer_reader::{PointerRead, PointerReader};
 #[cfg(feature = "hydration")]
 pub use ref_advertisement::{
     ManifestRefAdvertisement, ManifestRefEntry, capsule_ref_advertisement,
@@ -49,8 +53,8 @@ pub use selection::{
     ReadReplicaProbeResult, ReadReplicaReadiness, ReadReplicaSelection, ReadRoutingPolicy,
     ReadSource, ReadStoreChoice, ReadStoreSelection, ReadStoreTarget, ReadinessCheckOptions,
     ReadinessProbeStats, ReadyReadReplica, check_capsule_read_replica_readiness,
-    check_legacy_read_replica_readiness, select_read_replicas, select_read_store_choice,
-    select_ready_read_replica, verify_capsule_pointer_catalog_objects,
+    select_read_replicas, select_read_store_choice, select_ready_read_replica,
+    verify_capsule_pointer_catalog_objects,
 };
 #[cfg(feature = "hydration")]
 pub use store_client::{ReadMetrics, StoreClient, XorbAvailability};

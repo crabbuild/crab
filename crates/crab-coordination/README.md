@@ -47,6 +47,12 @@ its holder with a direct CAS and does not need the backend-clock probes that
 protect abandoned uploads with quarantine. Error and cancellation paths must
 continue using ordinary release.
 
+GC writer acquisition retries refresh an already-installed active claim without
+adding another holder or advancing writer history. Expired and quarantined claims
+remain lost. Generated holder IDs retain a diagnostic PID and use UUID entropy
+across hosts and container namespaces; PIDs and wall clocks alone are insufficient.
+Malformed stored fence state remains an error and is never silently repaired.
+
 ### Lease lifecycle
 
 `while_renewing` borrows a `PushLock` and polls work alongside lease renewal.

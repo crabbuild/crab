@@ -1,9 +1,9 @@
 //! Mount source detection: determines whether a user-provided input
 //! refers to a remote repository (cloud-backed) or a local git repo.
 //!
-//! The [`MountSource`] enum is the first decision point in the mount
-//! pipeline — it tells downstream code whether to perform a blobless
-//! clone (remote) or use the local `.git` directory directly (local).
+//! [`MountSource`] identifies the origin. Pipeline metadata ownership separately
+//! controls Git mutations: some modes clone local sources, while others borrow
+//! local metadata and hydrate data from a remote origin.
 
 use std::path::{Path, PathBuf};
 
@@ -77,6 +77,22 @@ impl MountSource {
 
         debug!(path = %abs_path.display(), "detected local mount source");
         Ok(MountSource::Local { path: abs_path })
+    }
+
+    /// Normalize a mount source before sending it to a process with another working directory.
+    pub fn canonical_input(input: &str) -> Result<String> {
+        match Self::parse(input)? {
+            Self::Remote { url } => Ok(url),
+            Self::Local { path } => {
+                let path = std::fs::canonicalize(path)?;
+                path.to_str()
+                    .map(str::to_owned)
+                    .ok_or_else(|| CrabError::Configuration {
+                        key: "mount source path is not UTF-8".into(),
+                        origin: "crab mount".into(),
+                    })
+            }
+        }
     }
 
     /// Validate a local mount source.
@@ -178,6 +194,19 @@ fn resolve_gitdir_file(git_file: &Path) -> Result<PathBuf> {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn canonical_input_resolves_client_relative_paths() {
+        assert_eq!(
+            MountSource::canonical_input(".").unwrap(),
+            std::env::current_dir()
+                .unwrap()
+                .canonicalize()
+                .unwrap()
+                .to_str()
+                .unwrap()
+        );
+    }
 
     // --- MountSource::parse ---
 

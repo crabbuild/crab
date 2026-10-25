@@ -535,10 +535,11 @@ pub struct NewMountOpts {
 /// builds the pipeline config, and executes the mount. Handles both
 /// local and remote sources.
 #[cfg(any(feature = "fuse", feature = "nfs"))]
-pub async fn run_mount_with_new_cli(opts: NewMountOpts) -> Result<()> {
+pub async fn run_mount_with_new_cli(mut opts: NewMountOpts) -> Result<()> {
     use crate::vfs::pipeline::MountPipelineBuilder;
     use crate::vfs::source::MountSource;
 
+    opts.repo = MountSource::canonical_input(&opts.repo)?;
     let initial_backend = resolve_mount_backend(opts.backend)?;
 
     // Resolve and validate the mountpoint.
@@ -642,7 +643,7 @@ pub async fn run_mount_with_new_cli(opts: NewMountOpts) -> Result<()> {
         "mount pipeline ready"
     );
 
-    let hydration = std::sync::Arc::clone(&output.hydration);
+    let engine = std::sync::Arc::clone(&output.engine);
     let result = async {
         match backend {
             ResolvedMountBackend::Nfs => {
@@ -733,7 +734,7 @@ pub async fn run_mount_with_new_cli(opts: NewMountOpts) -> Result<()> {
         Ok(())
     }
     .await;
-    hydration.shutdown().await;
+    engine.shutdown_background().await;
     result
 }
 
@@ -1758,7 +1759,9 @@ fn register_nfs_background_mount(
     use crate::vfs::mounts_registry::{self, MountEntry};
 
     let registry_path = mounts_registry::registry_path()?;
-    let source = normalized_mount_source_for_registry(&opts.repo)?;
+    // The source was normalized before helper startup. Recording a live mount
+    // must not fail merely because its source path disappeared in the meantime.
+    let source = opts.repo.clone();
     let git_ref = opts.git_ref.as_deref().map_or_else(
         || "HEAD".to_owned(),
         |git_ref| {
@@ -1786,17 +1789,6 @@ fn register_nfs_background_mount(
         control_endpoint,
     };
     Ok(mounts_registry::add_entry(&registry_path, entry)?)
-}
-
-#[cfg(feature = "nfs")]
-fn normalized_mount_source_for_registry(source: &str) -> Result<String> {
-    match crate::vfs::source::MountSource::parse(source)? {
-        crate::vfs::source::MountSource::Remote { url } => Ok(url),
-        crate::vfs::source::MountSource::Local { path } => {
-            let canonical = std::fs::canonicalize(path).map_err(CrabError::Io)?;
-            Ok(canonical.display().to_string())
-        }
-    }
 }
 
 #[cfg(feature = "nfs")]
@@ -1933,6 +1925,7 @@ async fn build_local_pipeline_config(
     let config = PipelineConfig {
         source: abs_path.display().to_string(),
         git_dir,
+        git_metadata: crate::vfs::pipeline::GitMetadataOwnership::Borrowed,
         ref_name,
         read_only,
         cache_dir: cache_dir.clone(),
@@ -1971,8 +1964,9 @@ async fn build_remote_pipeline_config(
     Option<crate::vfs::MountReadContext>,
     crate::vfs::clone_cache::MountCacheLock,
 )> {
-    use crate::vfs::clone_cache::{MountCacheLock, cache_dir_for_url, ensure_blobless_clone};
+    use crate::vfs::clone_cache::{MountCacheLock, cache_dir_for_url};
     use crate::vfs::pipeline::PipelineConfig;
+    use crate::vfs::repository::ensure_blobless_clone;
     use crate::vfs::source::MountSource;
 
     // Validate the remote URL format.
@@ -1986,7 +1980,7 @@ async fn build_remote_pipeline_config(
     let git_dir = ensure_blobless_clone(url, ref_name, &cache_dir)?;
 
     info!(
-        url = %crate::vfs::refresh::redact_url(url),
+        url = %crate::vfs::repository::redact_url(url),
         cache_dir = %cache_dir.display(),
         "remote clone ready"
     );
@@ -2002,6 +1996,7 @@ async fn build_remote_pipeline_config(
     let config = PipelineConfig {
         source: url.to_owned(),
         git_dir,
+        git_metadata: crate::vfs::pipeline::GitMetadataOwnership::Mount,
         ref_name: ref_name_owned,
         read_only,
         cache_dir: cache_dir.clone(),
@@ -2065,46 +2060,6 @@ async fn resolve_mount_read_context_from_remote_url(
             crate::storage::StoreLayout::new(resolved.store, resolved.repository_prefix)
         }
     };
-    let read_layout = crab_storage::StoreLayout::with_global_prefix(
-        layout.store().as_storage().clone(),
-        layout.repo_prefix().to_owned(),
-        layout.global_prefix().to_owned(),
-    );
-    let pinned_lookup = match crab_metadata::capsule_protocol::load_root(&read_layout).await {
-        Ok(root) => {
-            let maximum = if config.uploadpack_max_egress_bytes == 0 {
-                u64::MAX
-            } else {
-                config.uploadpack_max_egress_bytes
-            };
-            // The mount needs captured catalog roots, not complete checkpoint bodies.
-            // Keep pages cold until hydration requests their dependency closure.
-            let view = crab_read::capsule_protocol::open_git_view_from_root(
-                &read_layout,
-                root,
-                crab_read::capsule_protocol::CapsuleReadLimits {
-                    max_capsule_bytes: maximum,
-                    max_frontier_bytes: maximum,
-                },
-            )
-            .await
-            .ok()?;
-            let catalog = view.pointer_catalog_lookup(&read_layout, maximum).ok()?;
-            Some(
-                crab_metadata::file_index_lookup::SharedFileIndexLookup::for_pointer_catalog(
-                    read_layout.clone(),
-                    catalog,
-                ),
-            )
-        }
-        Err(crab_metadata::error::MetadataError::Storage {
-            source: crab_storage::StorageError::NotFound { .. },
-        }) => None,
-        Err(error) => {
-            warn!(error = %error, "v2 mount read view could not be authenticated");
-            return None;
-        }
-    };
     let restore_availability = crate::cmd::hydrate_restore::build_restore_availability(
         &config,
         layout.store(),
@@ -2113,7 +2068,7 @@ async fn resolve_mount_read_context_from_remote_url(
     )
     .await
     .ok()?;
-    build_mount_read_context(&config, layout, pinned_lookup, restore_availability)
+    build_mount_read_context(&config, layout, restore_availability).await
 }
 
 #[cfg(any(feature = "fuse", feature = "nfs"))]
@@ -2158,10 +2113,9 @@ where
 }
 
 #[cfg(any(feature = "fuse", feature = "nfs"))]
-fn build_mount_read_context(
+async fn build_mount_read_context(
     config: &crate::core::config::Config,
     layout: crate::storage::StoreLayout,
-    pinned_lookup: Option<crab_metadata::file_index_lookup::SharedFileIndexLookup>,
     restore_availability: Option<std::sync::Arc<dyn crab_read::XorbAvailability>>,
 ) -> Option<crate::vfs::MountReadContext> {
     let origin = layout.store().as_storage().clone();
@@ -2172,19 +2126,64 @@ fn build_mount_read_context(
     );
     let caching_store = crab_cache_store::CachingStore::new(origin, &config.cache).ok()?;
     let hydrator = crate::read::build_shared_hydrator(caching_store, layout, config).ok()?;
-    let hydrator = match pinned_lookup {
-        Some(lookup) => hydrator.with_file_index_lookup(lookup),
-        None => hydrator,
-    };
     let hydrator = match restore_availability {
         Some(availability) => hydrator.with_availability(availability),
         None => hydrator,
     };
 
+    let catalog = std::sync::Arc::new(CrabMountCatalogCapture {
+        base: hydrator,
+        layout: store_layout.clone(),
+        maximum: if config.uploadpack_max_egress_bytes == 0 {
+            u64::MAX
+        } else {
+            config.uploadpack_max_egress_bytes
+        },
+    });
+    let hydrator = crate::vfs::MountCatalogCapture::capture(catalog.as_ref())
+        .await
+        .ok()?;
     Some(crate::vfs::MountReadContext {
         store_layout,
-        hydrator: std::sync::Arc::new(hydrator),
+        hydrator,
+        catalog,
     })
+}
+
+#[cfg(any(feature = "fuse", feature = "nfs"))]
+struct CrabMountCatalogCapture {
+    base: crab_read::ShardHydrator,
+    layout: crab_storage::StoreLayout<crab_storage::Store>,
+    maximum: u64,
+}
+
+#[cfg(any(feature = "fuse", feature = "nfs"))]
+#[async_trait::async_trait]
+impl crate::vfs::MountCatalogCapture for CrabMountCatalogCapture {
+    async fn capture(&self) -> crate::vfs::Result<std::sync::Arc<crab_read::ShardHydrator>> {
+        let root = crab_metadata::capsule_protocol::load_root(&self.layout)
+            .await
+            .map_err(crab_read::ReadError::from)?;
+        // Capture catalog roots once per transition. Cloning the base shares
+        // cache, download and buffer admission across old and new read views.
+        let view = crab_read::capsule_protocol::open_git_view_from_root(
+            &self.layout,
+            root,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: self.maximum,
+                max_frontier_bytes: self.maximum,
+            },
+        )
+        .await?;
+        let catalog = view.pointer_catalog_lookup(&self.layout, self.maximum)?;
+        let lookup = crab_metadata::file_index_lookup::SharedFileIndexLookup::for_pointer_catalog(
+            self.layout.clone(),
+            catalog,
+        );
+        Ok(std::sync::Arc::new(
+            self.base.clone().with_file_index_lookup(lookup),
+        ))
+    }
 }
 
 #[cfg(any(feature = "fuse", feature = "nfs"))]
@@ -2198,7 +2197,14 @@ impl crate::vfs::MountReadResolver for CrabMountReadResolver {
         &self,
         remote: &str,
     ) -> crate::vfs::Result<Option<crate::vfs::MountReadContext>> {
-        Ok(resolve_mount_read_context_from_remote_url(remote).await)
+        match crate::vfs::source::MountSource::parse(remote)? {
+            crate::vfs::source::MountSource::Remote { url } => {
+                Ok(resolve_mount_read_context_from_remote_url(&url).await)
+            }
+            crate::vfs::source::MountSource::Local { path } => {
+                Ok(resolve_mount_read_context_from_local_repo(&path.join(".crab")).await)
+            }
+        }
     }
 }
 
@@ -2403,6 +2409,7 @@ async fn build_mount_components(
     let config = PipelineConfig {
         source,
         git_dir: git_dir.clone(),
+        git_metadata: crate::vfs::pipeline::GitMetadataOwnership::Borrowed,
         ref_name,
         read_only: false,
         cache_dir: crab_dir.to_path_buf(),
@@ -3631,36 +3638,6 @@ pub async fn run_mount_reset(path: &Path, overlay: bool, yes: bool, json: bool) 
     Ok(())
 }
 
-#[cfg(feature = "fuse")]
-async fn drain_live_overlay_reset(context: &MountOverlayContext) -> Result<()> {
-    const CLEAN_DRAIN_PASSES: usize = 2;
-    const MAX_DRAIN_PASSES: usize = 6;
-
-    let mut clean_passes = 0;
-    for pass in 1..=MAX_DRAIN_PASSES {
-        flush_mount_writes(&context.mountpoint_path)?;
-        let diff = crate::vfs::ipc_client::try_ipc_reset_overlay(&context.mountpoint).await?;
-        if diff.changes.is_empty() {
-            clean_passes += 1;
-            if clean_passes >= CLEAN_DRAIN_PASSES {
-                return Ok(());
-            }
-            continue;
-        }
-        clean_passes = 0;
-        debug!(
-            mountpoint = %context.mountpoint,
-            pass,
-            changes = diff.changes.len(),
-            "discarded delayed FUSE writes after overlay reset"
-        );
-    }
-
-    Err(CrabError::Internal(
-        "overlay reset did not quiesce delayed FUSE writes".into(),
-    ))
-}
-
 #[cfg(any(feature = "fuse", feature = "nfs"))]
 async fn reset_overlay_for_context(
     context: &MountOverlayContext,
@@ -3668,22 +3645,14 @@ async fn reset_overlay_for_context(
     if let Some(diff) = crate::vfs::mount_control::reset_overlay(&context.mountpoint_path).await? {
         return Ok(diff);
     }
-
-    #[cfg(feature = "fuse")]
-    {
-        match crate::vfs::ipc_client::try_ipc_reset_overlay(&context.mountpoint).await {
-            Ok(diff) => {
-                drain_live_overlay_reset(context).await?;
-                return Ok(diff);
-            }
-            Err(e) if context.invalidate_via_ipc => return Err(e.into()),
-            Err(_) => {}
-        }
+    // Losing a live owner cannot authorize mutating its backing database offline.
+    if context.invalidate_via_ipc {
+        return Err(CrabError::Configuration {
+            key: "live mount control disappeared before reset".into(),
+            origin: "crab mount reset".into(),
+        });
     }
-
-    let diff = crate::vfs::publish::reset_overlay(&context.overlay_paths)?;
-    invalidate_after_overlay_reset(context, &diff).await?;
-    Ok(diff)
+    Ok(crate::vfs::publish::reset_overlay(&context.overlay_paths)?)
 }
 
 #[cfg(any(feature = "fuse", feature = "nfs"))]
@@ -3696,10 +3665,17 @@ pub async fn run_mount_commit(path: &Path, message: &str, push: bool, json: bool
         });
     }
     let _ = stable_overlay_diff(&context).await?;
-    let (result, committed_via_live_control) =
+    let result =
         if let Some(result) = crate::vfs::mount_control::commit(path, message, push).await? {
-            (result, true)
+            result
         } else {
+            // A lost/uncertain live operation must not become a second offline commit.
+            if context.invalidate_via_ipc {
+                return Err(CrabError::Configuration {
+                    key: "live mount control disappeared before commit".into(),
+                    origin: "crab mount commit".into(),
+                });
+            }
             let git_dir = context
                 .git_dir
                 .clone()
@@ -3715,23 +3691,14 @@ pub async fn run_mount_commit(path: &Path, message: &str, push: bool, json: bool
                     origin: "crab mount commit".into(),
                 })?;
 
-            (
-                crate::vfs::publish::commit_overlay(&crate::vfs::publish::OverlayCommitOptions {
-                    cache_dir: context.overlay_paths.cache_dir.clone(),
-                    git_dir,
-                    ref_name,
-                    message: message.to_owned(),
-                    push,
-                })?,
-                false,
-            )
+            crate::vfs::publish::commit_overlay(&crate::vfs::publish::OverlayCommitOptions {
+                cache_dir: context.overlay_paths.cache_dir.clone(),
+                git_dir,
+                ref_name,
+                message: message.to_owned(),
+                push,
+            })?
         };
-    #[cfg(feature = "fuse")]
-    if !committed_via_live_control && context.invalidate_via_ipc && result.overlay_cleaned {
-        drain_live_overlay_reset(&context).await?;
-    }
-    #[cfg(not(feature = "fuse"))]
-    let _ = committed_via_live_control;
 
     if json {
         emit_json(
@@ -3794,11 +3761,11 @@ async fn overlay_diff_once(
 ) -> Result<crate::vfs::publish::OverlayDiff> {
     flush_mount_writes(&context.mountpoint_path)?;
     if context.invalidate_via_ipc {
-        #[cfg(feature = "fuse")]
+        #[cfg(unix)]
         return Ok(crate::vfs::ipc_client::try_ipc_overlay_diff(&context.mountpoint).await?);
-        #[cfg(not(feature = "fuse"))]
+        #[cfg(not(unix))]
         return Err(CrabError::Internal(
-            "mount IPC requested but FUSE IPC support is not compiled".into(),
+            "Unix mount control is unavailable on this platform".into(),
         ));
     }
     Ok(crate::vfs::publish::inspect_overlay(
@@ -3866,33 +3833,6 @@ struct MountOverlayContext {
     invalidate_via_ipc: bool,
 }
 
-#[cfg(feature = "fuse")]
-async fn invalidate_after_overlay_reset(
-    context: &MountOverlayContext,
-    diff: &crate::vfs::publish::OverlayDiff,
-) -> Result<()> {
-    if !context.invalidate_via_ipc {
-        return Ok(());
-    }
-    let paths = diff
-        .changes
-        .iter()
-        .map(|change| change.path.clone())
-        .collect::<Vec<_>>();
-    if paths.is_empty() {
-        return Ok(());
-    }
-    Ok(crate::vfs::ipc_client::try_ipc_invalidate(&context.mountpoint, paths).await?)
-}
-
-#[cfg(all(not(feature = "fuse"), feature = "nfs"))]
-async fn invalidate_after_overlay_reset(
-    _context: &MountOverlayContext,
-    _diff: &crate::vfs::publish::OverlayDiff,
-) -> Result<()> {
-    Ok(())
-}
-
 #[cfg(any(feature = "fuse", feature = "nfs"))]
 async fn resolve_mount_overlay_context(path: &Path) -> Result<MountOverlayContext> {
     let mountpoint = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
@@ -3905,11 +3845,8 @@ async fn resolve_mount_overlay_context(path: &Path) -> Result<MountOverlayContex
         return mount_context_from_entry(entry.clone(), false, mountpoint_str, &mountpoint);
     }
 
-    #[cfg(feature = "fuse")]
-    {
-        if let Some(status) = ipc_status_for_mountpoint(&mountpoint_str).await {
-            return mount_context_from_ipc_status(status);
-        }
+    if let Some(status) = crate::vfs::mount_control::status(&mountpoint).await? {
+        return mount_context_from_control_status(status);
     }
 
     let is_dot_path = path.as_os_str() == ".";
@@ -3975,37 +3912,27 @@ fn mount_context_from_entry(
     })
 }
 
-#[cfg(feature = "fuse")]
-fn mount_context_from_ipc_status(
-    status: crate::vfs::ipc_server::MountStatus,
+#[cfg(any(feature = "fuse", feature = "nfs"))]
+fn mount_context_from_control_status(
+    status: crate::vfs::mount_control::MountControlStatus,
 ) -> Result<MountOverlayContext> {
-    let cache_dir = cache_dir_for_mount_source(&status.remote)?;
-    let git_dir = git_dir_for_mount_source(&status.remote, &cache_dir)?;
-    let mountpoint_path = PathBuf::from(&status.mountpoint);
+    let source = status
+        .source
+        .ok_or_else(|| CrabError::Internal("live mount status missing source".into()))?;
+    let ref_name = status
+        .head_ref
+        .ok_or_else(|| CrabError::Internal("live mount status missing ref".into()))?;
+    let cache_dir = cache_dir_for_mount_source(&source)?;
+    let git_dir = git_dir_for_mount_source(&source, &cache_dir)?;
     Ok(MountOverlayContext {
-        mountpoint: status.mountpoint,
-        mountpoint_path,
+        mountpoint: status.mountpoint.display().to_string(),
+        mountpoint_path: status.mountpoint,
         overlay_paths: crate::vfs::publish::OverlayPaths::from_cache_dir(&cache_dir),
         git_dir: Some(git_dir),
-        ref_name: Some(status.r#ref),
+        ref_name: Some(ref_name),
         read_only: status.read_only,
-        invalidate_via_ipc: true,
+        invalidate_via_ipc: status.backend == crate::vfs::mount_control::MountControlBackend::Fuse,
     })
-}
-
-#[cfg(feature = "fuse")]
-async fn ipc_status_for_mountpoint(
-    mountpoint: &str,
-) -> Option<crate::vfs::ipc_server::MountStatus> {
-    let socket_path = crate::vfs::ipc_client::default_socket_path().ok()?;
-    let mut client = crate::vfs::ipc_client::IpcClient::connect(&socket_path)
-        .await
-        .ok()?;
-    let request = crate::vfs::ipc_server::IpcRequest::Status {
-        mountpoint: mountpoint.to_owned(),
-    };
-    let response = client.send(&request).await.ok()?;
-    response.ok.then_some(response.status).flatten()
 }
 
 #[cfg(any(feature = "fuse", feature = "nfs"))]
@@ -5045,7 +4972,7 @@ fn run_daemon_add_repo(
     let config = RepoConfig {
         name: name.to_owned(),
         remote: remote.to_owned(),
-        remote_redacted: crate::vfs::refresh::redact_url(remote),
+        remote_redacted: crate::vfs::repository::redact_url(remote),
         branch: branch.to_owned(),
         mount_root: mount_root.to_owned(),
         refresh_interval_secs: 30,
@@ -6957,7 +6884,7 @@ mod mount_list_tests {
 }
 
 #[cfg(test)]
-#[cfg(all(feature = "fuse", unix))]
+#[cfg(all(any(feature = "fuse", feature = "nfs"), unix))]
 #[allow(clippy::unwrap_used, reason = "test assertions")]
 mod mount_overlay_context_tests {
     use std::sync::{
@@ -7008,8 +6935,8 @@ mod mount_overlay_context_tests {
             let (reader, mut writer) = stream.into_split();
             let mut lines = BufReader::new(reader).lines();
             let _ = lines.next_line().await;
-            let response = crate::vfs::ipc_server::IpcResponse::status_ok(
-                crate::vfs::ipc_server::MountStatus {
+            let response = crate::vfs::ipc_protocol::IpcResponse::status_ok(
+                crate::vfs::ipc_protocol::MountStatus {
                     mountpoint: mountpoint_str,
                     remote: "crab://bucket/stale-fuse-repo".to_owned(),
                     r#ref: "refs/heads/stale".to_owned(),

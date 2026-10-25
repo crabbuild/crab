@@ -2506,6 +2506,7 @@ dependencies = [
  "crab-lfs",
  "crab-metadata",
  "crab-remote-git",
+ "crab-staging",
  "crab-storage",
  "crab-types",
  "crab-xet",
@@ -2777,6 +2778,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -2820,6 +2822,7 @@ dependencies = [
  "crab-cache",
  "crab-cache-store",
  "crab-git",
+ "crab-metadata",
  "crab-read",
  "crab-staging",
  "crab-storage",
@@ -2833,6 +2836,7 @@ dependencies = [
  "gix-odb",
  "gix-traverse",
  "libc",
+ "lru 0.12.5",
  "nfs3_server",
  "nfs3_types",
  "nix 0.29.0",

@@ -130,6 +130,17 @@ pub struct ShardHydrator {
 }
 
 impl ShardHydrator {
+    #[cfg(feature = "local-staging")]
+    pub(crate) async fn captured_shard(&self, pointer: &Pointer) -> Result<Option<MerkleHash>> {
+        let Some(lookup) = &self.file_index_lookup else {
+            return Ok(None);
+        };
+        lookup
+            .lookup(&MerkleHash::from(pointer.file_hash))
+            .await
+            .map_err(Into::into)
+    }
+
     /// Scope origin admission while sharing cache, download and buffer budgets.
     #[must_use]
     pub fn with_read_admission(mut self, admission: Arc<dyn crab_storage::ReadAdmission>) -> Self {
@@ -203,8 +214,22 @@ impl ShardHydrator {
 
     /// Reconstruct a pointer into `dest` and verify its whole-file hash.
     pub async fn reconstruct_to_path(&self, ptr: &Pointer, dest: &std::path::Path) -> Result<u64> {
+        self.reconstruct_to_path_with_cancel(ptr, dest, &CancellationToken::new())
+            .await
+    }
+
+    pub(crate) async fn reconstruct_to_path_with_cancel(
+        &self,
+        ptr: &Pointer,
+        dest: &std::path::Path,
+        cancel: &CancellationToken,
+    ) -> Result<u64> {
+        if cancel.is_cancelled() {
+            return Err(ReadError::Cancelled);
+        }
         let file = std::fs::File::create(dest)?;
-        self.reconstruct_to_writer(ptr, file).await
+        self.reconstruct_to_writer_with_cancel(ptr, file, None, cancel)
+            .await
     }
 
     /// Reconstruct `[start, end)` into `dest` without buffering the selected range.
@@ -399,19 +424,23 @@ impl ShardHydrator {
             return Ok(Vec::new());
         }
 
-        let buffer = ReconstructionBuffer::new(end - start)?;
-        let file_hash = MerkleHash::from(ptr.file_hash);
         let cancel = CancellationToken::new();
         let _cancel_on_drop = cancel.clone().drop_guard();
+        self.reconstruct_range_with_cancel(&ptr, start..end, &cancel)
+            .await
+    }
+
+    pub(crate) async fn reconstruct_range_with_cancel(
+        &self,
+        ptr: &Pointer,
+        range: std::ops::Range<u64>,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<u8>> {
+        let buffer = ReconstructionBuffer::new(range.end - range.start)?;
+        let file_hash = MerkleHash::from(ptr.file_hash);
 
         let outcome = self
-            .reconstruct_range_to_writer_with_cancel(
-                &ptr,
-                start..end,
-                buffer.writer(),
-                None,
-                &cancel,
-            )
+            .reconstruct_range_to_writer_with_cancel(ptr, range, buffer.writer(), None, cancel)
             .await
             .map(|_| ());
         buffer.finish(outcome, &file_hash)
@@ -1307,6 +1336,25 @@ mod tests {
                 .unwrap(),
             expected
         );
+        #[cfg(feature = "local-staging")]
+        {
+            let unavailable = directory.path().join("unavailable-staging");
+            std::fs::write(&unavailable, b"not a staging directory").unwrap();
+            let reader = crate::PointerReader::new(Some(Arc::new(hydrator)), Some(unavailable));
+            assert_eq!(
+                reader
+                    .read_range(
+                        &pointer,
+                        0..pointer.size,
+                        &tokio_util::sync::CancellationToken::new()
+                    )
+                    .await
+                    .unwrap()
+                    .bytes
+                    .as_ref(),
+                expected
+            );
+        }
     }
 
     #[tokio::test]

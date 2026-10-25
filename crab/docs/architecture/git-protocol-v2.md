@@ -65,11 +65,14 @@ authorization boundary and is not part of the bucket-only deployment promise.
 
 ### Fetch and discovery
 
-The helper advertises `stateless-connect` only after it can open a single
-manifest generation with matching pack-index, locator, and all-object
-visibility coverage. Verified legacy v1 manifests use this same terminal wire
-with `capsule_root` absent; that transport compatibility does not create or
-select a v2 authority. The session supports:
+Repository discovery requires an authenticated Capsule v2 root. A Crab pack v1
+layout or manifest cannot substitute for that authority. Replica readiness also
+requires primary and replica Capsule views, including when reusing readiness
+cache entries; missing roots never select manifest/index probing. Initialized
+empty Capsule repositories remain valid. Classic Git helper
+fetch commands remain available for authenticated layered cold clones; Git's
+wire protocol version is independent of Crab's stored repository format.
+The session supports:
 
 - protocol-v2 capability advertisement;
 - `ls-refs` with ref prefixes, symrefs, peeled tags, unborn HEAD, and hidden
@@ -218,6 +221,14 @@ view, authorizes the OID against visible-ref closure, generates the selected
 pack, and uses Git's standard pack layout with an atomically installed
 `.promisor` sidecar; it does not invent a second repository configuration or
 object format.
+
+Complete, incremental, filtered, shallow and promised-object fetches resolve
+the common Git directory before installation. Linked worktrees share its object
+database, pack-install lock, configuration and shallow boundary; their private
+Git directories retain worktree-specific index and HEAD state. This also applies
+to lazy policy-file reads from a VFS publication worktree.
+Push staging and incremental state derive their shared root from that selected
+metadata too, including GIT_DIR-only invocations from another repository.
 
 Rollback qualification accepts one of two explicit outcomes from the
 immediately prior Crab binary: it services an authorized promised raw OID with

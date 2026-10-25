@@ -14,7 +14,8 @@ use tokio::sync::Mutex;
 
 use crab::vfs::coordinator::{Coordinator, CoordinatorConfig};
 use crab::vfs::ipc_client::IpcClient;
-use crab::vfs::ipc_server::{IpcRequest, IpcServer};
+use crab::vfs::ipc_protocol::IpcRequest;
+use crab::vfs::ipc_server::IpcServer;
 
 // ---------------------------------------------------------------------------
 // Helpers

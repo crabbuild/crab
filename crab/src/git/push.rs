@@ -3418,7 +3418,7 @@ pub enum PushRejectReason {
     /// The ref name is malformed.
     BadRefname(String),
     /// The push lock was held by another pusher. `holder` identifies
-    /// the competing session (usually `pid-{pid}-{ts}`) so scripts
+    /// the competing session (usually `pid-{pid}-{uuid}`) so scripts
     /// can distinguish retries from truly stuck locks;
     /// `ttl_remaining_secs` is the number of seconds until the lease
     /// expires so clients can back off for at least that long. A

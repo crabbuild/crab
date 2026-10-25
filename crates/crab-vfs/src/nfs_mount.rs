@@ -911,8 +911,7 @@ pub fn is_mounted(mountpoint: &Path) -> bool {
     #[cfg(target_os = "linux")]
     {
         std::fs::read_to_string("/proc/mounts")
-            .map(|mounts| linux_mounts_contains(&mounts, mountpoint))
-            .unwrap_or(false)
+            .is_ok_and(|mounts| linux_mounts_contains(&mounts, mountpoint))
     }
 
     #[cfg(target_os = "macos")]
@@ -1088,12 +1087,10 @@ mod tests {
         let snapshot = Arc::new(
             crate::snapshot::SnapshotStore::open_or_create(&root.join("snapshot.db")).unwrap(),
         );
-        let resolver = Arc::new(crate::resolver::FuseResolver::new(
-            Arc::clone(&snapshot),
-            None,
-            0,
-            0,
-        ));
+        let resolver = Arc::new(
+            crate::resolver::FuseResolver::new(Arc::clone(&snapshot), None, 0, 0, None, None)
+                .unwrap(),
+        );
         let cache = Arc::new(crate::ChunkCache::open(root.join("chunks"), None).unwrap());
         let hydration = crate::pipeline::create_hydration(
             cache,
@@ -1140,10 +1137,12 @@ mod tests {
                     head_oid: String::new(),
                     head_ref: "refs/heads/main".into(),
                     generation: 0,
+                    read_context: None,
                 },
                 config: crate::pipeline::PipelineConfig {
                     source: root.display().to_string(),
                     git_dir: root.join("missing.git"),
+                    git_metadata: crate::pipeline::GitMetadataOwnership::Borrowed,
                     ref_name: None,
                     read_only: true,
                     cache_dir: root.to_owned(),

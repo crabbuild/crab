@@ -22,8 +22,7 @@ use tokio_util::sync::CancellationToken;
 
 use crab_read::{
     ReadReplicaCandidate, ReadReplicaFallback, ReadReplicaProbeResult, ReadStoreChoice,
-    ReadStoreTarget, check_capsule_read_replica_readiness, check_legacy_read_replica_readiness,
-    select_read_store_choice,
+    ReadStoreTarget, check_capsule_read_replica_readiness, select_read_store_choice,
 };
 pub use crab_read::{ReadRoutingPolicy, ReadSource, ReadinessCheckOptions};
 
@@ -8543,19 +8542,10 @@ async fn validate_read_replica_store(store: &Store, router: &StoreLayout) -> Res
         router.repo_prefix().to_owned(),
         router.global_prefix().to_owned(),
     );
-    match crab_metadata::capsule_protocol::load_root(&layout).await {
-        Ok(_) => Ok(()),
-        Err(crab_metadata::error::MetadataError::Storage {
-            source: crab_storage::StorageError::NotFound { .. },
-        }) => {
-            // Before cutover, v1 replicas have no capsule root. Revalidate the
-            // manifest instead of rejecting a healthy legacy read target.
-            crate::metadata::manifest::read_manifest(store, router)
-                .await
-                .map(|_| ())
-        }
-        Err(error) => Err(error.into()),
-    }
+    crab_metadata::capsule_protocol::load_root(&layout)
+        .await
+        .map(|_| ())
+        .map_err(Into::into)
 }
 
 struct SelectedReadReplicaStore {
@@ -9052,117 +9042,7 @@ async fn replica_readiness(
         max_capsule_bytes: 2 * 1024 * 1024 * 1024,
         max_frontier_bytes: 2 * 1024 * 1024 * 1024,
     };
-    let primary_root = match crab_metadata::capsule_protocol::load_root(&primary_read_router).await
-    {
-        Ok(root) => Some(root),
-        Err(crab_metadata::error::MetadataError::Storage {
-            source: crab_storage::StorageError::NotFound { .. },
-        }) => None,
-        Err(error) => return Err(error.into()),
-    };
-    let Some(primary_root) = primary_root else {
-        // A repository without v2 authority is still a supported v1 read
-        // target. Keep its manifest/index readiness contract until cutover.
-        let readiness = check_legacy_read_replica_readiness(
-            primary_store.as_storage(),
-            &primary_read_router,
-            replica_store.as_storage(),
-            &replica_read_router,
-            options,
-        )
-        .await?;
-        let Some(primary_state_digest) = readiness.primary_state_digest.as_deref() else {
-            return Err(CrabError::Configuration {
-                key: "replication.readiness".into(),
-                origin: "legacy readiness omitted its manifest state token".into(),
-            });
-        };
-        let primary_generation = readiness.primary_generation;
-        let replica_prefix = replica_router.repo_prefix();
-        let now_ms = now_unix_ms();
-        if let Some(cache_age_ms) = readiness_cache_hit(
-            replica,
-            replica_prefix,
-            primary_generation,
-            primary_state_digest,
-            now_ms,
-            options,
-        ) {
-            return Ok(ReplicaStatus {
-                name: replica.name.clone(),
-                provider: replica.provider,
-                url: replica.url.clone(),
-                region: replica.region.clone(),
-                backfill_required: replica.backfill,
-                read_enabled: replica.read,
-                primary_generation: Some(primary_generation),
-                replica_generation: Some(primary_generation),
-                ready: true,
-                lag_generations: Some(0),
-                last_fallback_reason: None,
-                last_fallback_class: None,
-                last_fallback_at_ms: None,
-                last_fallback_operation: None,
-                fallback_count: 0,
-                primary_fallback_bytes: 0,
-                last_selected_at_ms: None,
-                last_selected_operation: None,
-                selected_count: 0,
-                readiness_cache_hit: true,
-                readiness_cache_age_ms: Some(cache_age_ms),
-                readiness_check_latency_ms: Some(elapsed_ms(started)),
-                readiness_object_probe_count: 0,
-                readiness_object_read_count: 0,
-            });
-        }
-        if let Some(reason) = readiness.reason {
-            return Ok(status_with_readiness_stats(
-                status_with_reason(
-                    replica,
-                    Some(readiness.primary_generation),
-                    readiness.replica_generation,
-                    reason,
-                ),
-                started,
-                readiness.stats,
-            ));
-        }
-        if options.max_object_probes.is_none() {
-            write_readiness_cache(
-                replica,
-                replica_prefix,
-                primary_generation,
-                primary_state_digest,
-                now_ms,
-            );
-        }
-        return Ok(ReplicaStatus {
-            name: replica.name.clone(),
-            provider: replica.provider,
-            url: replica.url.clone(),
-            region: replica.region.clone(),
-            backfill_required: replica.backfill,
-            read_enabled: replica.read,
-            primary_generation: Some(primary_generation),
-            replica_generation: readiness.replica_generation,
-            ready: true,
-            lag_generations: readiness.lag_generations,
-            last_fallback_reason: None,
-            last_fallback_class: None,
-            last_fallback_at_ms: None,
-            last_fallback_operation: None,
-            fallback_count: 0,
-            primary_fallback_bytes: 0,
-            last_selected_at_ms: None,
-            last_selected_operation: None,
-            selected_count: 0,
-            readiness_cache_hit: false,
-            readiness_cache_age_ms: None,
-            readiness_check_latency_ms: Some(elapsed_ms(started)),
-            readiness_object_probe_count: readiness.stats.object_probe_count,
-            readiness_object_read_count: readiness.stats.object_read_count,
-        });
-    };
+    let primary_root = crab_metadata::capsule_protocol::load_root(&primary_read_router).await?;
     let primary_view = crab_read::capsule_protocol::open_view_from_root(
         &primary_read_router,
         primary_root,
@@ -9909,10 +9789,7 @@ mod tests {
         PutMultipartOptions, PutOptions, PutPayload, PutResult,
     };
 
-    use crate::metadata::manifest::{
-        Manifest, PackManifestEntry, compact_pack_index, create_manifest,
-    };
-    use crate::metadata::segmented;
+    use crate::metadata::manifest::{Manifest, create_manifest};
     use crab_coordination::write_coordinator::{
         CoordinatorCheckState, CoordinatorControlPlaneCheck, CoordinatorControlPlaneStatus,
         ManagedCoordinatorProvider,
@@ -13417,12 +13294,12 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct HeadFailingInMemory {
+    struct ReadFailingInMemory {
         inner: Arc<InMemory>,
         fail_contains: String,
     }
 
-    impl HeadFailingInMemory {
+    impl ReadFailingInMemory {
         fn new(fail_contains: &str) -> Self {
             Self {
                 inner: Arc::new(InMemory::new()),
@@ -13437,22 +13314,22 @@ mod tests {
         }
     }
 
-    impl fmt::Debug for HeadFailingInMemory {
+    impl fmt::Debug for ReadFailingInMemory {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.debug_struct("HeadFailingInMemory")
+            f.debug_struct("ReadFailingInMemory")
                 .field("fail_contains", &self.fail_contains)
                 .finish()
         }
     }
 
-    impl fmt::Display for HeadFailingInMemory {
+    impl fmt::Display for ReadFailingInMemory {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.write_str("HeadFailingInMemory")
+            f.write_str("ReadFailingInMemory")
         }
     }
 
     #[async_trait]
-    impl ObjectStore for HeadFailingInMemory {
+    impl ObjectStore for ReadFailingInMemory {
         async fn put_opts(
             &self,
             location: &ObjectPath,
@@ -13475,7 +13352,7 @@ mod tests {
             location: &ObjectPath,
             options: GetOptions,
         ) -> object_store::Result<GetResult> {
-            if options.head && location.as_ref().contains(&self.fail_contains) {
+            if location.as_ref().contains(&self.fail_contains) {
                 return Err(Self::injected_error());
             }
             self.inner.get_opts(location, options).await
@@ -13613,11 +13490,11 @@ mod tests {
         (store, router)
     }
 
-    fn head_failing_memory_store_with_layout(
+    fn read_failing_memory_store_with_layout(
         repo_prefix: &str,
         fail_contains: &str,
     ) -> (Store, StoreLayout) {
-        let store = Store::new(Arc::new(HeadFailingInMemory::new(fail_contains)));
+        let store = Store::new(Arc::new(ReadFailingInMemory::new(fail_contains)));
         let router = StoreLayout::new(store.clone(), repo_prefix.to_owned());
         (store, router)
     }
@@ -13636,13 +13513,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_replica_validation_accepts_legacy_manifest_without_capsule_root() {
+    async fn readiness_rejects_primary_without_capsule_root() {
+        for legacy_manifest in [true, false] {
+            let (primary, primary_router) = memory_store_with_layout("org/repo");
+            let (replica, replica_router) = memory_store_with_layout("org/repo");
+            if legacy_manifest {
+                for (store, router) in [(&primary, &primary_router), (&replica, &replica_router)] {
+                    write_test_manifest(store, router, &test_manifest(7)).await;
+                }
+            }
+            let result = replica_readiness(
+                &primary,
+                &primary_router,
+                &replica,
+                &replica_router,
+                &test_replica(),
+                ReadinessCheckOptions::deep(),
+            )
+            .await;
+            assert!(
+                matches!(result, Err(CrabError::NotFound { ref path })
+                    if path == primary_router.capsule_root_path().as_ref()),
+                "legacy_manifest={legacy_manifest}: {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn read_replica_validation_rejects_manifest_without_capsule_root() {
         let (store, router) = memory_store_with_layout("org/repo");
         write_test_manifest(&store, &router, &test_manifest(7)).await;
 
-        validate_read_replica_store(&store, &router)
-            .await
-            .expect("legacy manifest validates a pre-cutover replica");
+        assert!(matches!(
+            validate_read_replica_store(&store, &router).await,
+            Err(CrabError::NotFound { .. })
+        ));
     }
 
     #[tokio::test]
@@ -13660,103 +13565,64 @@ mod tests {
         assert!(validate_read_replica_store(&store, &router).await.is_err());
     }
 
-    async fn write_pack_generation(
-        store: &Store,
-        router: &StoreLayout,
-        generation: u64,
-        pack_id: &str,
-        include_pack_index: bool,
-        include_pack_object: bool,
-        include_pack_metadata: bool,
-    ) -> Manifest {
-        let pack = test_pack_entry(pack_id);
-        let (pack_index_hash, _index, pack_write) =
-            compact_pack_index(generation, std::slice::from_ref(&pack)).expect("build pack index");
-        let mut manifest = test_manifest(generation);
-        manifest.pack_index_hash = pack_index_hash;
-        manifest.seal_git_validation();
-        write_test_manifest(store, router, &manifest).await;
-        if include_pack_index {
-            segmented::upload_write(store, router, &pack_write)
-                .await
-                .expect("upload pack index");
-        }
-        if include_pack_object {
+    async fn write_capsule_generation(store: &Store, router: &StoreLayout, include_xorb: bool) {
+        use crab_metadata::capsule_protocol::{
+            CapsuleSection, CapsuleSectionKind, PointerCatalog, XorbCatalogEntry, XorbChunkEntry,
+        };
+        use crab_xet::xorb::{
+            builder::{RunId, XorbBuilder},
+            format::Chunk,
+        };
+        let base = initialize_capsule_repository(store, router).await;
+        let chunk = Chunk::new(Bytes::from_static(b"replicated payload"));
+        let mut builder = XorbBuilder::new();
+        builder.push(&chunk, RunId(0)).unwrap();
+        let xorb = builder.finalize().unwrap().pop().unwrap();
+        let mut catalog = PointerCatalog::new();
+        catalog
+            .insert_xorb(
+                xorb.hash.hex(),
+                XorbCatalogEntry::new(
+                    xorb.bytes.len() as u64,
+                    blake3::hash(&xorb.bytes).to_hex().to_string(),
+                    vec![XorbChunkEntry::new(
+                        chunk.hash.hex(),
+                        chunk.data.len() as u32,
+                    )],
+                ),
+            )
+            .unwrap();
+        if include_xorb {
             store
-                .put(
-                    &router.pack_path(&pack.pack_id),
-                    Bytes::from_static(b"pack"),
-                )
+                .put(&router.xorb_path(&xorb.hash), xorb.bytes)
                 .await
-                .expect("upload pack object");
+                .unwrap();
         }
-        if include_pack_metadata {
-            store
-                .put(
-                    &router.pack_metadata_path(&pack.pack_id),
-                    Bytes::from_static(b"meta"),
-                )
-                .await
-                .expect("upload pack metadata");
-        }
-        manifest
-    }
-
-    fn test_pack_entry(pack_id: &str) -> PackManifestEntry {
-        let pack_id = canonical_test_pack_id(pack_id);
-        PackManifestEntry {
-            pack_id: pack_id.clone(),
-            size: 42,
-            content_hash: pack_id,
-            ref_tips: vec!["b".repeat(40)],
-            object_count: 1,
-        }
-    }
-
-    fn canonical_test_pack_id(label: &str) -> String {
-        if label.len() == 64 && label.chars().all(|ch| ch.is_ascii_hexdigit()) {
-            label.to_owned()
-        } else {
-            blake3::hash(label.as_bytes()).to_hex().to_string()
-        }
+        let sections = vec![CapsuleSection::new(
+            CapsuleSectionKind::CatalogDelta,
+            catalog.encode_delta().unwrap(),
+        )];
+        publish_capsule_ref(store, router, base, sections).await;
     }
 
     #[tokio::test]
     async fn read_resolver_uses_ready_replica_for_user_read_operations() {
         let _cache = isolated_replica_cache();
-        for (generation, operation, slug) in [
-            (40, "clone:shard-sync", "clone"),
-            (41, "fetch", "fetch"),
-            (42, "hydrate", "hydrate"),
-            (43, "mount", "mount"),
-            (44, "sdk-read", "sdk-read"),
-            (45, "smudge", "smudge"),
+        for (operation, slug) in [
+            ("clone:shard-sync", "clone"),
+            ("fetch", "fetch"),
+            ("hydrate", "hydrate"),
+            ("mount", "mount"),
+            ("sdk-read", "sdk-read"),
+            ("smudge", "smudge"),
         ] {
             let (primary_store, primary_router) = memory_store_with_layout("org/repo");
             let (replica_store, replica_router) = memory_store_with_layout("org/repo");
             let replica = named_test_replica(&format!("ready-{slug}"));
             clear_replica_test_cache(&replica);
             let replicas = vec![replica.clone()];
-            write_pack_generation(
-                &primary_store,
-                &primary_router,
-                generation,
-                "ready",
-                true,
-                true,
-                true,
-            )
-            .await;
-            write_pack_generation(
-                &replica_store,
-                &replica_router,
-                generation,
-                "ready",
-                true,
-                true,
-                true,
-            )
-            .await;
+            write_capsule_generation(&primary_store, &primary_router, true).await;
+            write_capsule_generation(&replica_store, &replica_router, true).await;
             replica_store
                 .put(
                     &replica_router.repo_path("packs/replica-only"),
@@ -13842,18 +13708,9 @@ mod tests {
         clear_replica_test_cache(&east);
         clear_replica_test_cache(&west);
         let replicas = vec![east.clone(), west.clone()];
-        write_pack_generation(
-            &primary_store,
-            &primary_router,
-            45,
-            "policy",
-            true,
-            true,
-            true,
-        )
-        .await;
-        write_pack_generation(&east_store, &east_router, 45, "policy", true, true, true).await;
-        write_pack_generation(&west_store, &west_router, 45, "policy", true, true, true).await;
+        write_capsule_generation(&primary_store, &primary_router, true).await;
+        write_capsule_generation(&east_store, &east_router, true).await;
+        write_capsule_generation(&west_store, &west_router, true).await;
         east_store
             .put(
                 &east_router.repo_path("packs/replica-policy"),
@@ -14135,41 +13992,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_resolver_falls_back_when_replica_manifest_precedes_pack_objects() {
+    async fn read_resolver_falls_back_when_replica_catalog_precedes_payload_objects() {
         let _cache = isolated_replica_cache();
-        for (generation, operation, slug) in [
-            (50, "clone:shard-sync", "clone"),
-            (51, "fetch", "fetch"),
-            (52, "hydrate", "hydrate"),
-            (53, "mount", "mount"),
-            (54, "sdk-read", "sdk-read"),
-            (55, "smudge", "smudge"),
+        for (operation, slug) in [
+            ("clone:shard-sync", "clone"),
+            ("fetch", "fetch"),
+            ("hydrate", "hydrate"),
+            ("mount", "mount"),
+            ("sdk-read", "sdk-read"),
+            ("smudge", "smudge"),
         ] {
             let (primary_store, primary_router) = memory_store_with_layout("org/repo");
             let (replica_store, replica_router) = memory_store_with_layout("org/repo");
             let replica = named_test_replica(&format!("delayed-{slug}"));
             clear_replica_test_cache(&replica);
             let replicas = vec![replica.clone()];
-            write_pack_generation(
-                &primary_store,
-                &primary_router,
-                generation,
-                "delayed",
-                true,
-                true,
-                true,
-            )
-            .await;
-            write_pack_generation(
-                &replica_store,
-                &replica_router,
-                generation,
-                "delayed",
-                true,
-                false,
-                false,
-            )
-            .await;
+            write_capsule_generation(&primary_store, &primary_router, true).await;
+            write_capsule_generation(&replica_store, &replica_router, false).await;
             primary_store
                 .put(
                     &primary_router.repo_path("packs/primary-only"),
@@ -14266,42 +14105,23 @@ mod tests {
     #[tokio::test]
     async fn read_resolver_falls_back_when_replica_readiness_probe_fails() {
         let _cache = isolated_replica_cache();
-        for (generation, operation, slug) in [
-            (60, "clone:shard-sync", "clone"),
-            (61, "fetch", "fetch"),
-            (62, "hydrate", "hydrate"),
-            (63, "mount", "mount"),
-            (64, "sdk-read", "sdk-read"),
-            (65, "smudge", "smudge"),
+        for (operation, slug) in [
+            ("clone:shard-sync", "clone"),
+            ("fetch", "fetch"),
+            ("hydrate", "hydrate"),
+            ("mount", "mount"),
+            ("sdk-read", "sdk-read"),
+            ("smudge", "smudge"),
         ] {
             let (primary_store, primary_router) = memory_store_with_layout("org/repo");
-            let flaky_pack_id = canonical_test_pack_id("flaky");
-            let fail_contains = format!("pack-{flaky_pack_id}.pack");
+            let fail_contains = "/xorbs/";
             let (replica_store, replica_router) =
-                head_failing_memory_store_with_layout("org/repo", &fail_contains);
+                read_failing_memory_store_with_layout("org/repo", fail_contains);
             let replica = named_test_replica(&format!("probe-failed-{slug}"));
             clear_replica_test_cache(&replica);
             let replicas = vec![replica.clone()];
-            write_pack_generation(
-                &primary_store,
-                &primary_router,
-                generation,
-                &flaky_pack_id,
-                true,
-                true,
-                true,
-            )
-            .await;
-            write_pack_generation(
-                &replica_store,
-                &replica_router,
-                generation,
-                &flaky_pack_id,
-                true,
-                true,
-                true,
-            )
-            .await;
+            write_capsule_generation(&primary_store, &primary_router, true).await;
+            write_capsule_generation(&replica_store, &replica_router, true).await;
             primary_store
                 .put(
                     &primary_router.repo_path("packs/primary-probe-fallback"),
@@ -14406,6 +14226,7 @@ mod tests {
         store: &Store,
         router: &StoreLayout,
         base: crab_write::capsule_protocol::RootSnapshot,
+        sections: Vec<crab_metadata::capsule_protocol::CapsuleSection>,
     ) {
         let transaction = crab_metadata::capsule_protocol::CapsuleTransaction::for_plan(
             base.record().digest(),
@@ -14419,7 +14240,7 @@ mod tests {
         )
         .expect("build capsule transaction");
         let capsule =
-            crab_metadata::capsule_protocol::Capsule::build(&transaction, Vec::new(), Vec::new())
+            crab_metadata::capsule_protocol::Capsule::build(&transaction, Vec::new(), sections)
                 .expect("build capsule");
         crab_write::capsule_protocol::publish(
             &capsule_layout(store, router),
@@ -14437,8 +14258,8 @@ mod tests {
         let (replica_store, replica_router) = memory_store_with_layout("org/repo");
         let primary_root = initialize_capsule_repository(&primary_store, &primary_router).await;
         let replica_root = initialize_capsule_repository(&replica_store, &replica_router).await;
-        publish_capsule_ref(&primary_store, &primary_router, primary_root).await;
-        publish_capsule_ref(&replica_store, &replica_router, replica_root).await;
+        publish_capsule_ref(&primary_store, &primary_router, primary_root, Vec::new()).await;
+        publish_capsule_ref(&replica_store, &replica_router, replica_root, Vec::new()).await;
 
         let status = replica_readiness(
             &primary_store,
@@ -14489,7 +14310,7 @@ mod tests {
         assert!(cached.ready);
         assert!(cached.readiness_cache_hit);
 
-        publish_capsule_ref(&primary_store, &primary_router, primary_root).await;
+        publish_capsule_ref(&primary_store, &primary_router, primary_root, Vec::new()).await;
         let changed = replica_readiness(
             &primary_store,
             &primary_router,
@@ -14532,7 +14353,7 @@ mod tests {
         .expect("initial readiness check");
         assert!(initial.ready);
 
-        publish_capsule_ref(&replica_store, &replica_router, replica_root).await;
+        publish_capsule_ref(&replica_store, &replica_router, replica_root, Vec::new()).await;
         let cached = replica_readiness(
             &primary_store,
             &primary_router,

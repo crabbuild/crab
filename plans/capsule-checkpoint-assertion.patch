@@ -1,0 +1,11 @@
+--- a/crab/src/git/remote_helper.rs
++++ b/crab/src/git/remote_helper.rs
+@@ -6273,7 +6273,7 @@
+                 .checkpoint()
+                 .unwrap()
+                 .format(),
+-            5
++            9
+         );
+         let repeated = crate::cmd::repack::run_repack_from_root(
+             &store,

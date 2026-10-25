@@ -522,6 +522,25 @@ impl OverlayStore {
             .map_or(0, |d| d.as_nanos() as i64)
     }
 
+    fn record_content_change(
+        conn: &Connection,
+        path: &str,
+        size: u64,
+        mtime_ns: i64,
+    ) -> Result<()> {
+        // A promoted copy may be discarded when its base changes. Once content
+        // is edited, the overlay owns it; retaining base lineage would let
+        // refresh silently remove unpublished bytes.
+        conn.execute(
+            "UPDATE overlay_entries SET size_bytes = ?1, mtime_unix_ns = ?2,
+             kind = CASE WHEN kind = 'create' THEN 'create' ELSE 'modify' END,
+             source_oid = '', base_path = '' WHERE path = ?3",
+            params![size as i64, mtime_ns, path],
+        )
+        .map_err(map_sqlite_err)?;
+        Ok(())
+    }
+
     /// Upsert an overlay entry into the database.
     fn upsert_entry(
         conn: &Connection,
@@ -938,14 +957,14 @@ impl OverlayWriter for OverlayStore {
         let path = clean_path(path);
 
         // Phase 1: query the entry (hold lock briefly, then release).
-        let (entry_mode, entry_kind, entry_mtime) = {
+        let (entry_kind, entry_mtime) = {
             let db = self.db.lock().map_err(|_| lock_poisoned())?;
             let entry = Self::query_entry(&db, &path)?
                 .ok_or_else(|| CrabError::NotFound { path: path.clone() })?;
             if entry.is_deleted() {
                 return Err(CrabError::NotFound { path });
             }
-            (entry.mode, entry.kind, entry.mtime_ns)
+            (entry.kind, entry.mtime_ns)
         };
 
         // Phase 2: file I/O without holding the lock.
@@ -963,12 +982,6 @@ impl OverlayWriter for OverlayStore {
         let metadata = file.metadata()?;
         let new_size = metadata.len();
         let now = Self::now_ns();
-
-        let kind = if entry_kind == OverlayKind::Create {
-            "create"
-        } else {
-            "modify"
-        };
 
         // Phase 3: update metadata (hold lock briefly). Re-query the entry
         // first to guard against a concurrent delete or modify race between
@@ -990,16 +1003,7 @@ impl OverlayWriter for OverlayStore {
                 }
                 _ => { /* entry unchanged, safe to update */ }
             }
-            Self::upsert_entry(
-                &db,
-                &path,
-                kind,
-                Some(&backing.to_string_lossy()),
-                entry_mode,
-                new_size,
-                now,
-                EntryLineage::default(),
-            )?;
+            Self::record_content_change(&db, &path, new_size, now)?;
         }
 
         trace!(path = %path, offset, written = n, new_size, "overlay write_file");
@@ -1412,16 +1416,40 @@ impl OverlayWriter for OverlayStore {
         Ok(())
     }
 
-    fn update_size_and_mtime(&self, path: &str, size: u64, mtime_ns: i64) -> Result<()> {
+    fn mutate_content(
+        &self,
+        path: Option<&str>,
+        file: &File,
+        mtime_ns: i64,
+        mutation: &mut dyn FnMut(&File) -> Result<()>,
+    ) -> Result<()> {
         let _write = self.begin_write()?;
-        let path = clean_path(path);
-        let db = self.db.lock().map_err(|_| lock_poisoned())?;
-        db.execute(
-            "UPDATE overlay_entries SET size_bytes = ?1, mtime_unix_ns = ?2 WHERE path = ?3",
-            params![size as i64, mtime_ns, path],
-        )
-        .map_err(map_sqlite_err)?;
-        trace!(path = %path, size, mtime_ns, "overlay update_size_and_mtime");
+        let path = path.map(clean_path);
+        if let Some(path) = &path {
+            let backing = self
+                .get_backing_path(path)
+                .ok_or_else(|| CrabError::NotFound { path: path.clone() })?;
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::MetadataExt;
+                let current = std::fs::metadata(backing)?;
+                let captured = file.metadata()?;
+                if current.dev() != captured.dev() || current.ino() != captured.ino() {
+                    return Err(CrabError::NotFound { path: path.clone() });
+                }
+            }
+            #[cfg(not(unix))]
+            let _ = backing;
+        }
+        // Admission precedes native file I/O and remains held through metadata.
+        // Checking only at the SQL update would let a rejected write change
+        // bytes while another process publishes its frozen overlay records.
+        mutation(file)?;
+        if let Some(path) = path {
+            let size = file.metadata()?.len();
+            let db = self.db.lock().map_err(|_| lock_poisoned())?;
+            Self::record_content_change(&db, &path, size, mtime_ns)?;
+        }
         Ok(())
     }
 
@@ -1468,10 +1496,6 @@ impl OverlayWriter for OverlayStore {
 
     fn backing_path_for(&self, path: &str) -> PathBuf {
         self.backing_path(&clean_path(path))
-    }
-
-    fn backing_tmp_path_for(&self, path: &str) -> PathBuf {
-        self.backing_path(&clean_path(path)).with_extension("tmp")
     }
 }
 
@@ -2696,12 +2720,17 @@ mod tests {
     }
 
     #[test]
-    fn metadata_consistency_after_update_size_and_mtime() {
+    fn descriptor_mutation_records_actual_file_size_and_mtime() {
         let (_dir, store) = temp_store();
 
         store.create_file("meta.txt", 0o100_644).unwrap();
+        let backing = store.get_backing_path("meta.txt").unwrap();
+        let file = File::options().write(true).open(backing).unwrap();
         store
-            .update_size_and_mtime("meta.txt", 42, 999_000_000)
+            .mutate_content(Some("meta.txt"), &file, 999_000_000, &mut |file| {
+                file.set_len(42)?;
+                Ok(())
+            })
             .unwrap();
 
         let entry = OverlayLookup::get(&store, "meta.txt").unwrap();

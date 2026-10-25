@@ -46,6 +46,12 @@ Replica selection reports readiness, generations, fallbacks, and routing
 choices so callers can distinguish an unavailable replica from a corrupt
 object.
 
+Replica readiness requires authenticated Capsule roots and matching captured
+views. A manifest-only Crab pack v1 repository cannot supply readiness authority;
+there is no legacy manifest/index probe. An initialized empty Capsule repository
+remains a valid view. Deep checks verify the external payloads named by its
+captured catalog before selecting the replica.
+
 ### Captured Git views
 
 `capsule_protocol::open_git_view_from_root` captures complete refs and catalog
@@ -101,6 +107,21 @@ Pinned hydration and remote-mount setup pass captured paged catalog roots into
 metadata's shared file lookup. A lookup loads only its selected file dependency
 closure, preserving the captured publication order and immutable descriptor
 checks. It never substitutes a later catalog or mutable file-index session.
+
+The opt-in `local-staging` feature supplies `PointerReader` for writable mounts.
+Published files stay on their captured remote catalog. Files outside that
+capture can read retained local recipes, including committed versions not yet
+pushed. Range reads verify selected chunks and coverage; full reconstruction
+also verifies the file hash. Local recipe corruption remains an error, and
+staging admission cannot shadow a file already owned by the captured catalog.
+This does not recapture catalogs during refresh; the mount still owns coherent
+Git/catalog generation transitions and the lifetime of captured roots.
+
+`PointerReader::pin_file` applies that same source selection for open-file
+lifetime. A staged source transfers a recipe pin without retaining staging's
+global shared lock; a captured remote source needs no local pin. The caller
+retains the returned pin until the open file closes or successfully acquires
+native backing. This local ownership does not retain remote objects against GC.
 
 `install_git_packs_with_candidates_from_store` combines a captured view's
 origin-backed packs with verified candidate capsules. Candidates participate

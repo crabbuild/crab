@@ -7,9 +7,9 @@
 //! Generations enable atomic snapshot swaps: a new generation is published
 //! while the old one remains readable until pruned.
 
-use std::collections::VecDeque;
+use std::collections::{BTreeMap, VecDeque};
 use std::path::Path;
-use std::sync::{Mutex, MutexGuard};
+use std::sync::{Arc, Mutex, MutexGuard};
 
 use gix_hash::ObjectId;
 use gix_object::bstr::{BStr, BString, ByteSlice};
@@ -61,6 +61,27 @@ pub struct BaseNode {
 /// Snapshot store backed by SQLite.
 pub struct SnapshotStore {
     conn: Mutex<Connection>,
+    pins: Arc<Mutex<BTreeMap<i64, usize>>>,
+}
+
+pub(crate) struct SnapshotPin {
+    generation: i64,
+    pins: Arc<Mutex<BTreeMap<i64, usize>>>,
+}
+
+impl Drop for SnapshotPin {
+    fn drop(&mut self) {
+        let mut pins = self
+            .pins
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        if let Some(count) = pins.get_mut(&self.generation) {
+            *count -= 1;
+            if *count == 0 {
+                pins.remove(&self.generation);
+            }
+        }
+    }
 }
 
 impl SnapshotStore {
@@ -78,6 +99,7 @@ impl SnapshotStore {
 
         let store = Self {
             conn: Mutex::new(conn),
+            pins: Arc::default(),
         };
         Ok(store)
     }
@@ -90,14 +112,49 @@ impl SnapshotStore {
             .map_err(map_sqlite_err)?;
         Ok(Self {
             conn: Mutex::new(conn),
+            pins: Arc::default(),
         })
+    }
+
+    pub(crate) fn pin_generation(
+        &self,
+        generation: i64,
+    ) -> Result<(SnapshotPin, Option<(String, String)>)> {
+        // The mount owner must share this store with every live publisher.
+        // Register while holding the connection so pruning cannot pass admission.
+        let conn = self.connection()?;
+        let head = conn
+            .query_row(
+                "SELECT head_oid, ref_name FROM generations_v1 WHERE generation = ?1",
+                params![generation],
+                |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)),
+            )
+            .optional()
+            .map_err(map_sqlite_err)?;
+        if head.is_none() && (generation != 0 || generation_from_connection(&conn)?.is_some()) {
+            return Err(CrabError::Internal(format!(
+                "snapshot generation {generation} is unavailable"
+            )));
+        }
+        let mut pins = self
+            .pins
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        *pins.entry(generation).or_default() += 1;
+        Ok((
+            SnapshotPin {
+                generation,
+                pins: Arc::clone(&self.pins),
+            },
+            head,
+        ))
     }
 
     /// Atomically publish a new generation of the base tree.
     ///
     /// Inserts all `nodes` under the next generation number, updates the
     /// HEAD OID and ref name in the state table, and prunes old generations
-    /// (keeping current and previous).
+    /// (keeping current, previous and pinned generations).
     pub fn publish_generation(
         &self,
         head_oid: &str,
@@ -106,17 +163,10 @@ impl SnapshotStore {
     ) -> Result<()> {
         let mut conn = self.connection()?;
         let tx = conn.transaction().map_err(map_sqlite_err)?;
-        let next_gen = {
-            let current = get_state_in_tx(&tx, STATE_GENERATION)?
-                .map(|value| {
-                    value
-                        .parse::<i64>()
-                        .map_err(|e| CrabError::Internal(format!("bad generation value: {e}")))
-                })
-                .transpose()?
-                .unwrap_or(0);
-            current + 1
-        };
+        let next_gen = generation_from_connection(&tx)?
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| CrabError::Internal("snapshot generation exhausted".into()))?;
 
         {
             let mut node_stmt = tx
@@ -143,6 +193,11 @@ impl SnapshotStore {
             }
         }
 
+        tx.execute(
+            "INSERT INTO generations_v1 (generation, head_oid, ref_name) VALUES (?1, ?2, ?3)",
+            params![next_gen, head_oid, ref_name],
+        )
+        .map_err(map_sqlite_err)?;
         set_state_in_tx(&tx, STATE_HEAD_OID, head_oid)?;
         set_state_in_tx(&tx, STATE_REF_NAME, ref_name)?;
         set_state_in_tx(&tx, STATE_GENERATION, &next_gen.to_string())?;
@@ -157,7 +212,7 @@ impl SnapshotStore {
             "published snapshot generation"
         );
 
-        // Prune old generations (keep current and previous).
+        // Retain live views as well as the current and previous generations.
         self.prune_old_generations(next_gen)?;
 
         Ok(())
@@ -172,17 +227,10 @@ impl SnapshotStore {
     ) -> Result<usize> {
         let mut conn = self.connection()?;
         let tx = conn.transaction().map_err(map_sqlite_err)?;
-        let next_gen = {
-            let current = get_state_in_tx(&tx, STATE_GENERATION)?
-                .map(|value| {
-                    value
-                        .parse::<i64>()
-                        .map_err(|e| CrabError::Internal(format!("bad generation value: {e}")))
-                })
-                .transpose()?
-                .unwrap_or(0);
-            current + 1
-        };
+        let next_gen = generation_from_connection(&tx)?
+            .unwrap_or(0)
+            .checked_add(1)
+            .ok_or_else(|| CrabError::Internal("snapshot generation exhausted".into()))?;
         let mut node_count = 0usize;
 
         {
@@ -212,6 +260,11 @@ impl SnapshotStore {
             })?;
         }
 
+        tx.execute(
+            "INSERT INTO generations_v1 (generation, head_oid, ref_name) VALUES (?1, ?2, ?3)",
+            params![next_gen, head_oid, ref_name],
+        )
+        .map_err(map_sqlite_err)?;
         set_state_in_tx(&tx, STATE_HEAD_OID, head_oid)?;
         set_state_in_tx(&tx, STATE_REF_NAME, ref_name)?;
         set_state_in_tx(&tx, STATE_GENERATION, &next_gen.to_string())?;
@@ -300,13 +353,8 @@ impl SnapshotStore {
     /// Return the current generation number, or `None` if no generation
     /// has been published yet.
     pub fn current_generation(&self) -> Result<Option<i64>> {
-        self.get_state(STATE_GENERATION)?
-            .map(|value| {
-                value
-                    .parse()
-                    .map_err(|e| CrabError::Internal(format!("bad generation value: {e}")))
-            })
-            .transpose()
+        let conn = self.connection()?;
+        generation_from_connection(&conn)
     }
 
     /// Return the stored HEAD OID, if any.
@@ -388,26 +436,53 @@ impl SnapshotStore {
         .map_err(map_sqlite_err)
     }
 
-    /// Prune generations older than `current - 1`.
+    /// Prune unpinned generations older than `current - 1`.
     fn prune_old_generations(&self, current: i64) -> Result<()> {
         let keep_min = current.saturating_sub(1);
         if keep_min <= 0 {
             return Ok(());
         }
 
-        let conn = self.connection()?;
-        let children_pruned = conn
-            .execute(
-                "DELETE FROM base_children_v1 WHERE generation < ?1",
-                params![keep_min],
+        let mut conn = self.connection()?;
+        let pins = self
+            .pins
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tx = conn.transaction().map_err(map_sqlite_err)?;
+        let mut children_pruned = 0;
+        let mut nodes_pruned = 0;
+        let mut lower = 0;
+        // Delete indexed gaps between pins, never scanning a pinned tree's rows
+        // on each refresh. Dropped pins become reclaimable on the next publish.
+        for upper in pins
+            .range(..keep_min)
+            .map(|(&generation, _)| generation)
+            .chain(std::iter::once(keep_min))
+        {
+            if lower >= upper {
+                lower = upper.saturating_add(1);
+                continue;
+            }
+            children_pruned += tx
+                .execute(
+                    "DELETE FROM base_children_v1 WHERE generation >= ?1 AND generation < ?2",
+                    params![lower, upper],
+                )
+                .map_err(map_sqlite_err)?;
+            nodes_pruned += tx
+                .execute(
+                    "DELETE FROM base_nodes_v1 WHERE generation >= ?1 AND generation < ?2",
+                    params![lower, upper],
+                )
+                .map_err(map_sqlite_err)?;
+            tx.execute(
+                "DELETE FROM generations_v1 WHERE generation >= ?1 AND generation < ?2",
+                params![lower, upper],
             )
             .map_err(map_sqlite_err)?;
-        let nodes_pruned = conn
-            .execute(
-                "DELETE FROM base_nodes_v1 WHERE generation < ?1",
-                params![keep_min],
-            )
-            .map_err(map_sqlite_err)?;
+            lower = upper.saturating_add(1);
+        }
+        tx.commit().map_err(map_sqlite_err)?;
         if nodes_pruned > 0 || children_pruned > 0 {
             debug!(
                 nodes_pruned,
@@ -417,6 +492,22 @@ impl SnapshotStore {
 
         Ok(())
     }
+}
+
+fn generation_from_connection(conn: &Connection) -> Result<Option<i64>> {
+    conn.query_row(
+        "SELECT value FROM state_v1 WHERE key = ?1",
+        params![STATE_GENERATION],
+        |row| row.get::<_, String>(0),
+    )
+    .optional()
+    .map_err(map_sqlite_err)?
+    .map(|value| {
+        value
+            .parse()
+            .map_err(|error| CrabError::Internal(format!("bad generation value: {error}")))
+    })
+    .transpose()
 }
 
 fn open_snapshot_db(path: &Path) -> Result<Connection> {
@@ -450,6 +541,12 @@ fn initialize_snapshot_schema(conn: &Connection) -> Result<()> {
             PRIMARY KEY (generation, path)
         ) WITHOUT ROWID;
 
+        CREATE TABLE IF NOT EXISTS generations_v1 (
+            generation INTEGER PRIMARY KEY NOT NULL,
+            head_oid TEXT NOT NULL,
+            ref_name TEXT NOT NULL
+        );
+
         CREATE TABLE IF NOT EXISTS state_v1 (
             key TEXT PRIMARY KEY NOT NULL,
             value TEXT NOT NULL
@@ -464,16 +561,6 @@ fn initialize_snapshot_schema(conn: &Connection) -> Result<()> {
         ) WITHOUT ROWID;
         ",
     )
-    .map_err(map_sqlite_err)
-}
-
-fn get_state_in_tx(tx: &rusqlite::Transaction<'_>, key: &str) -> Result<Option<String>> {
-    tx.query_row(
-        "SELECT value FROM state_v1 WHERE key = ?1",
-        params![key],
-        |row| row.get(0),
-    )
-    .optional()
     .map_err(map_sqlite_err)
 }
 
@@ -555,7 +642,7 @@ fn walk_snapshot(
     head_oid_hex: &str,
     mut visit_node: impl FnMut(BaseNode) -> Result<()>,
 ) -> Result<()> {
-    let objects_dir = git_dir.join("objects");
+    let objects_dir = crab_git::discover::resolve_common_dir(git_dir).join("objects");
     if !objects_dir.is_dir() {
         return Err(CrabError::Io(std::io::Error::new(
             std::io::ErrorKind::NotFound,

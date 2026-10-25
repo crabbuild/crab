@@ -112,6 +112,36 @@ Drop clears the reader marker and discards an uncommitted snapshot when no
 sibling reader prevents cleanup. Deferred journals remain for exclusive
 maintenance; native and uncaptured leases remain owned throughout.
 
+Mounted commits publish single-file batches with
+`StagingAreaReadOnly::mark_batch_history_published`. Their distinct history
+owners preserve earlier unpushed versions instead of replacing a worktree path
+head. Publication is transactional, rejects active native/delegated handoffs,
+and preserves the existing prohibition on rolling back published batches.
+Push snapshots retire these owners after confirmed remote publication.
+
+`StagedFileReader` captures a retained recipe and fences concurrent push
+retirement for one read operation. It locates recipe pages by byte range and
+uses the bounded coalesced reader, opening each selected prepared source once
+per operation. Returned ranges verify chunk identities and coverage; complete
+files additionally verify their BLAKE3 hash. Reads require local authority for
+the selected terms. Its temporary pin journal is removed even while sibling
+readers remain active; payload reclamation belongs to push or exclusive
+maintenance. Shared-open filesystem/index admission runs off the Tokio worker.
+
+`StagedFileReader::into_pin` transfers the captured recipe into a
+`StagedFilePin` for an open unpublished file. It retains a metadata connection
+and an individually locked ready marker, releasing ordinary shared staging
+admission. Writers and confirmed push retirement can proceed while the file
+remains open. Read snapshots retain recipe metadata without capturing path
+leases or granting publication authority. Later reads reacquire shared staging
+admission and verify bytes through the same recipe reader.
+
+Maintenance preserves a ready pin while its OS lock is held, including across
+PID namespaces. Dropping the pin releases its journal and marker; physical
+payload reclamation stays with maintenance. Interrupted cleanup is recoverable
+after the marker lock is released. Ownership IDs retain their opaque 64-hex
+shape and use UUID entropy rather than process-local PID/clock counters.
+
 ### Bounded residual reads
 
 The coalesced residual reader uses `CoalescedChunkReadPlan::read_next_bounded` after all

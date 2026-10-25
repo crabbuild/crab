@@ -315,7 +315,7 @@ async fn run_start(_foreground: bool) -> Result<ExitCode> {
 async fn run_stop() -> Result<ExitCode> {
     use crate::vfs::coordinator::{CoordinatorConfig, read_daemon_pid};
     use crate::vfs::ipc_client::IpcClient;
-    use crate::vfs::ipc_server::IpcRequest;
+    use crate::vfs::ipc_protocol::IpcRequest;
 
     let config = CoordinatorConfig::default_config()?;
     let socket_path = config.socket_path();
@@ -391,7 +391,7 @@ async fn run_stop() -> Result<ExitCode> {
 async fn run_status(json: bool) -> Result<ExitCode> {
     use crate::vfs::coordinator::CoordinatorConfig;
     use crate::vfs::ipc_client::IpcClient;
-    use crate::vfs::ipc_server::IpcRequest;
+    use crate::vfs::ipc_protocol::IpcRequest;
 
     let config = CoordinatorConfig::default_config()?;
     let socket_path = config.socket_path();

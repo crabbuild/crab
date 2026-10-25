@@ -1,13 +1,19 @@
 use std::sync::Arc;
 
-use crate::{Result, StagingAreaReadOnly, recipe::FileRecipe};
+use crate::{Result, StagedFilePin, StagingAreaReadOnly, lock_index, recipe::FileRecipe};
+
+enum SnapshotKind {
+    Push,
+    Read,
+}
 
 /// Own one push reader's marker and exact immutable recipe snapshot.
 #[must_use = "retain the snapshot through remote publication"]
 pub struct StagingPushSnapshot {
     staging: Arc<StagingAreaReadOnly>,
     push_id: String,
-    committed: bool,
+    cleanup_on_drop: bool,
+    kind: SnapshotKind,
 }
 
 impl StagingPushSnapshot {
@@ -16,10 +22,23 @@ impl StagingPushSnapshot {
     /// The caller must supply a unique push ID.
     /// Failure or drop preserves their original leases; another reader can defer cleanup.
     pub fn begin(staging: Arc<StagingAreaReadOnly>, push_id: String) -> Result<Self> {
+        Self::begin_kind(staging, push_id, SnapshotKind::Push)
+    }
+
+    pub(crate) fn begin_read(staging: Arc<StagingAreaReadOnly>, read_id: String) -> Result<Self> {
+        Self::begin_kind(staging, read_id, SnapshotKind::Read)
+    }
+
+    fn begin_kind(
+        staging: Arc<StagingAreaReadOnly>,
+        push_id: String,
+        kind: SnapshotKind,
+    ) -> Result<Self> {
         let snapshot = Self {
             staging,
             push_id,
-            committed: false,
+            cleanup_on_drop: true,
+            kind,
         };
         snapshot.staging.mark_push_inflight(&snapshot.push_id)?;
         Ok(snapshot)
@@ -27,7 +46,18 @@ impl StagingPushSnapshot {
 
     /// Pin published/delegated recipes selected from verified Git pointers.
     pub fn capture(&self, recipes: &[FileRecipe]) -> Result<()> {
-        self.staging.create_push_snapshot(&self.push_id, recipes)
+        match self.kind {
+            SnapshotKind::Push => self.staging.create_push_snapshot(&self.push_id, recipes),
+            SnapshotKind::Read => {
+                lock_index(&self.staging.index)?.create_read_snapshot(&self.push_id, recipes)
+            }
+        }
+    }
+
+    pub(crate) fn into_read_pin(mut self) -> Result<StagedFilePin> {
+        let pin = StagedFilePin::from_snapshot(&self.staging, &self.push_id)?;
+        self.cleanup_on_drop = false;
+        Ok(pin)
     }
 
     /// Record confirmed remote publication and retire only captured local owners.
@@ -37,7 +67,7 @@ impl StagingPushSnapshot {
     pub fn commit(mut self) -> Result<()> {
         // Remote commit is already authoritative. Even if the local transition
         // fails, Drop must retain its journal rather than treat it as a failed push.
-        self.committed = true;
+        self.cleanup_on_drop = false;
         self.staging.commit_push_snapshot(&self.push_id)?;
         let Some(_retirement) = self.staging.begin_retirement(&self.push_id)? else {
             return Ok(());
@@ -50,11 +80,16 @@ impl StagingPushSnapshot {
 
 impl Drop for StagingPushSnapshot {
     fn drop(&mut self) {
-        if !self.committed {
+        if self.cleanup_on_drop {
             let discard = (|| -> Result<()> {
                 // A sibling may still read a version this snapshot alone pins.
                 // Exclusive maintenance consumes the journal if cleanup is deferred.
-                if let Some(_retirement) = self.staging.begin_retirement(&self.push_id)? {
+                if matches!(self.kind, SnapshotKind::Read) {
+                    // A file read only pins existing owners. Drop its temporary
+                    // journal even while sibling readers are active; payload
+                    // reclamation stays with push/exclusive staging maintenance.
+                    self.staging.remove_push_snapshot(&self.push_id)?;
+                } else if let Some(_retirement) = self.staging.begin_retirement(&self.push_id)? {
                     self.staging.discard_open_push_snapshot_now(&self.push_id)?;
                 }
                 Ok(())
