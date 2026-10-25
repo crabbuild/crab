@@ -1753,6 +1753,64 @@ completed without a restart. macOS still uses its existing non-waiting sync
 request: native macOS NFS and a waiting barrier remain a separate required gate.
 Full stored pack-v1 retirement and release performance qualification remain open.
 
+## Twenty-ninth checkpoint: Capsule-only shard compaction
+
+Source boundary: both CLI spellings call `run_compact_command`, then
+`run_compact_with_cancel` in `crab/src/cmd/compact.rs`. It loads one required
+Capsule root before maintenance admission and passes that snapshot to the read
+view. Missing-root apply and dry-run no longer read or publish shard lists.
+The previous implementation accepted the rootless fixture and performed 15 PUTs
+plus one multipart upload; the regression now proves zero writes, zero multipart
+uploads and no shard-list read.
+
+Compaction selects only authenticated file identities. The locked Xet 1.6.0
+`merge_shards` contract may move private inputs, so temporary directories and GC
+admission remain owned until its blocking job finishes. Bloom trailers are
+verified as part of the stored hash and stripped only from private native merge
+inputs. Filtering rebuilds exact file/xorb dependencies, and replacement catalog
+construction rejects missing or repeated files. Restoring the old empty-output
+shortcut reproduced false success with two claimed files absent from all shards;
+the regression now rejects corruption without changing the root.
+
+Cancellation is checked before checkpoint publication. The owner awaits CAS
+resolution and cleanup rather than dropping the publication future. A provider
+hook cancelling immediately after root PUT reproduced `Cancelled` after a real
+commit; the new regression preserves that known success after both fences have
+released. Other release errors remain errors; ambiguous provider outcomes and
+all sibling maintenance commands are not newly qualified by this change.
+
+Tests live in flat `crab/src/cmd/compact_tests.rs`. Fourteen compaction tests and
+the complete remote-helper staged-pointer/incremental/repack/remote-reuse case
+pass on macOS. The latter requires checkpoint format 9 and real published
+placement proofs; its default-stack dispatch shape matches the production
+heap-pinned entry point. One FUSE-only CLI test now awaits the writeback API
+instead of trying to unwrap its future. The background-registration test now
+calls the same source normalizer as CLI admission and verifies that later source
+disappearance cannot invalidate registry publication. Linux passes the same 14
+compaction tests and remote-reuse case plus 103 selected mount tests; macOS passes
+87 selected mount tests. NFS-only CLI library Clippy completes with 656 warnings
+across the existing broad surface; no warning points at the changed compaction
+module. Strict whole-CLI lint cleanliness is not claimed.
+
+Make installs distinct NFS-only main/helper and combined FUSE-helper roles. A
+real task-owned RustFS fixture publishes separate 4 MiB and 6 MiB files in two
+pushes, yielding two source shards. The old binary accepts its rootless shard-list
+fixture in dry-run. Both current compaction CLI spellings reject rootless apply
+and dry-run without changing any provider key/ETag; both rooted dry-runs preserve
+the root. Apply publishes checkpoint format 9 and retains its input shards.
+Temporarily withholding only those two task-created inputs proves independent
+fresh clones and cold-cache native NFS/FUSE mounted reads resolve the replacement
+catalog and reproduce every byte by independent SHA-256. Inputs are restored
+and re-read exactly afterward. This is compaction/read qualification, not a
+production GC grace-period proof or a complete legacy-repository fixture.
+
+Local `compact-v2/source-manifest.json` binds 1,530 Rust sources/manifests to the
+Make-installed artifacts and retained provider/test logs. Sources remain byte-
+identical through qualification. No dependency/lockfile changes or overrides;
+raw evidence stays outside the PR. The implementation removes the alternate
+publisher rather than adding a fallback or migration reader. Other pack-v1
+owners, macOS waiting writeback and optimized data-plane performance remain open.
+
 ## Remaining priority order
 
 The helper-layout gap and live read-only inspection leak are closed by the
@@ -1824,12 +1882,14 @@ with all seven direct consumers and their enabled feature slices. Audit SQL
 integer conversions against upstream ToSql/FromSql contracts before changing
 callers. No dependency override or vendored patch is authorized.
 
-The deferred expected-format patch changes an ordinary inline Rust integration
-assertion, not a baseline/inventory/snapshot file. Re-audit that assertion against
-Capsule's canonical checkpoint writer and decoder during protocol retirement;
-do not treat its literal 5 as a valid current production contract or assume
-it is the stored pack-v1 protocol merely because it is an old format number.
-No permission flow or source change follows from this note alone.
+The checkpoint integration assertion now follows the canonical writer and decoder:
+format 9 (`CRBCKP09`), not the stale inline literal 5. This is ordinary current-
+contract test maintenance, not a protected baseline update or a stored pack-v1
+compatibility decision. Its old unapplied patch is removed. The positive remote-
+only consumer now loads published Capsule placement/proof identities instead of
+inventing IDs and deleting its only local payload copy. Production rejects those
+invented IDs as stale; tracing confirmed all 13 were rejected. The test heap-pins
+batch dispatch as production does, and passes on macOS's default test stack.
 
 The current `clone_cache` non-Unix lock helper is a pre-existing no-op. The
 checkpoint-25 cache-ownership proof applies to Unix; Windows NFS handoff is not
@@ -1873,11 +1933,14 @@ Completed admission boundaries:
   removes `replica_readiness`'s no-root fallback and the shared legacy checker,
   including its export and private manifest/index/object walkers.
 - Protocol/read documentation now states mandatory rooted Capsule admission.
+- Shard compaction (`crab compact` and `crab optimize shards`) now requires a
+  Capsule root before acquiring maintenance admission, in apply and dry-run.
+  Its shard-list reader/publisher and optional unauthenticated file selection
+  are removed. Input shards remain immutable GC inputs; catalog replacement
+  verifies exact file coverage and complete dependencies before root CAS.
 
 Remaining located storage-authority boundaries:
 
-- `crab/src/cmd/compact.rs`: missing roots still dispatch to
-  `run_legacy_compact_inner`; remove that path and qualify Capsule compaction.
 - SDK `initialize_remote` was changed upstream in #629 to canonical Capsule
   initialization. The exported old initializer in
   `crates/crab-write/src/initialize.rs` and its legacy fixtures still need removal

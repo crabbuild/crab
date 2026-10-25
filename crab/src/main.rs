@@ -415,7 +415,7 @@ enum Cmd {
         #[arg(long, conflicts_with = "json")]
         jsonl: bool,
     },
-    /// Compact shards: merge small shards into fewer large ones.
+    /// Compact shards from an authenticated Capsule repository.
     Compact {
         /// Repo prefix (e.g. `org/models`).
         #[arg(long)]
@@ -1159,7 +1159,7 @@ enum OptimizeCmd {
         #[arg(long, conflicts_with = "json")]
         jsonl: bool,
     },
-    /// Compact metadata shards into fewer larger shards.
+    /// Compact authenticated Capsule metadata shards.
     Shards {
         /// Repo prefix (e.g. `org/models`).
         #[arg(long)]
