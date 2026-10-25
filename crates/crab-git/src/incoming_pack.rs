@@ -66,6 +66,7 @@ pub struct GeneratedObject {
     oid: ObjectId,
     kind: Kind,
     data: Bytes,
+    prefix_delta_base: Option<ObjectId>,
 }
 
 impl GeneratedObject {
@@ -76,7 +77,29 @@ impl GeneratedObject {
     ) -> std::result::Result<Self, gix_hash::hasher::Error> {
         let data = data.into();
         let oid = gix_object::compute_hash(gix_hash::Kind::Sha1, kind, &data)?;
-        Ok(Self { oid, kind, data })
+        Ok(Self {
+            oid,
+            kind,
+            data,
+            prefix_delta_base: None,
+        })
+    }
+
+    /// Construct an object by extending a verified object's bytes with a suffix.
+    pub fn append(
+        base: &Self,
+        suffix: &[u8],
+    ) -> std::result::Result<Self, gix_hash::hasher::Error> {
+        let mut data = bytes::BytesMut::with_capacity(base.data.len() + suffix.len());
+        data.extend_from_slice(&base.data);
+        data.extend_from_slice(suffix);
+        let oid = gix_object::compute_hash(gix_hash::Kind::Sha1, base.kind, &data)?;
+        Ok(Self {
+            oid,
+            kind: base.kind,
+            data: data.freeze(),
+            prefix_delta_base: Some(base.oid),
+        })
     }
 
     /// Returns the identity bound to these bytes.
@@ -95,6 +118,12 @@ impl GeneratedObject {
     #[must_use]
     pub fn data(&self) -> &[u8] {
         &self.data
+    }
+
+    /// Clones the immutable object buffer without copying its bytes.
+    #[must_use]
+    pub fn shared_data(&self) -> Bytes {
+        self.data.clone()
     }
 }
 
@@ -132,6 +161,7 @@ pub struct IncomingObject {
     pub kind: Kind,
     pub size: usize,
     offset: u64,
+    prefix_delta_base: Option<ObjectId>,
 }
 
 /// Verified objects retained in owned buffers or private scratch until dropped.
@@ -176,7 +206,7 @@ impl IncomingPack {
         Self::retain_generated_objects(
             objects
                 .into_iter()
-                .map(|(kind, data)| (kind, data.into(), None)),
+                .map(|(kind, data)| (kind, data.into(), None, None)),
             directory,
             limits,
             cancelled,
@@ -197,9 +227,14 @@ impl IncomingPack {
         C: Fn() -> bool,
     {
         Self::retain_generated_objects(
-            objects
-                .into_iter()
-                .map(|object| (object.kind, object.data, Some(object.oid))),
+            objects.into_iter().map(|object| {
+                (
+                    object.kind,
+                    object.data,
+                    Some(object.oid),
+                    object.prefix_delta_base,
+                )
+            }),
             directory,
             limits,
             cancelled,
@@ -207,7 +242,7 @@ impl IncomingPack {
     }
 
     fn retain_generated_objects<C>(
-        objects: impl IntoIterator<Item = (Kind, Bytes, Option<ObjectId>)>,
+        objects: impl IntoIterator<Item = (Kind, Bytes, Option<ObjectId>, Option<ObjectId>)>,
         directory: &Path,
         limits: ReceiveLimits,
         cancelled: C,
@@ -220,7 +255,7 @@ impl IncomingPack {
         let mut generated = BTreeMap::new();
         let mut stored = BTreeMap::new();
         let mut decoded_bytes = 0_u64;
-        for (kind, data, oid) in objects {
+        for (kind, data, oid, prefix_delta_base) in objects {
             check(&cancelled)?;
             if data.len() > limits.max_object_bytes {
                 return Err(IncomingPackError::Limit("object size"));
@@ -246,6 +281,7 @@ impl IncomingPack {
                     kind,
                     size: data.len(),
                     offset,
+                    prefix_delta_base,
                 },
             );
             generated.insert(oid, data);
@@ -554,6 +590,7 @@ impl<C: Fn() -> bool> Quarantine<C> {
             kind,
             size: data.len(),
             offset,
+            prefix_delta_base: None,
         };
         self.objects.insert(oid, object.clone());
         Ok(Resolved { object, depth })

@@ -696,7 +696,12 @@ fn prepare_delta(
         )
     };
     let object_bytes = read_object_bytes(decoded, object)?;
-    let Some(bytes) = prefix_suffix_delta(&base_bytes, &object_bytes)? else {
+    let encoded = if object.prefix_delta_base == Some(*base_oid) {
+        append_prefix_delta(base_bytes.len(), &object_bytes)?
+    } else {
+        prefix_suffix_delta(&base_bytes, &object_bytes)?
+    };
+    let Some(bytes) = encoded else {
         return Ok(None);
     };
     Ok(Some(PreparedDelta {
@@ -812,6 +817,32 @@ fn prefix_suffix_delta(base: &[u8], target: &[u8]) -> Result<Option<Vec<u8>>> {
     append_delta_copy(0, prefix, &mut delta)?;
     append_delta_insert(literal, &mut delta);
     append_delta_copy(base.len().saturating_sub(suffix), suffix, &mut delta)?;
+    if delta.len().saturating_add(16) >= target.len() {
+        return Ok(None);
+    }
+    Ok(Some(delta))
+}
+
+fn append_prefix_delta(base_bytes: usize, target: &[u8]) -> Result<Option<Vec<u8>>> {
+    if base_bytes > target.len() {
+        return Ok(None);
+    }
+    let suffix = &target[base_bytes..];
+    let capacity = suffix
+        .len()
+        .saturating_add(suffix.len().div_ceil(127))
+        .saturating_add(64);
+    let mut delta = Vec::new();
+    delta
+        .try_reserve_exact(capacity)
+        .map_err(|source| PreparePackError::Allocation {
+            requested: capacity,
+            source,
+        })?;
+    encode_delta_size(base_bytes, &mut delta);
+    encode_delta_size(target.len(), &mut delta);
+    append_delta_copy(0, base_bytes, &mut delta)?;
+    append_delta_insert(suffix, &mut delta);
     if delta.len().saturating_add(16) >= target.len() {
         return Ok(None);
     }
