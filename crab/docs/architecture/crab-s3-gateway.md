@@ -796,13 +796,18 @@ completion is always isolated with its durable publication plan. The owner loads
 one immutable starting view, evaluates conditions sequentially against an
 in-memory evolving tree and attribute manifest, and builds one commit per
 successful state change. It deduplicates the generated objects into one pack,
+preparing independent append-only leaf trees on a process-wide CPU bound.
+Prepared tree reuse requires the same verified base identity and exact suffix
+bytes; conditions and commits remain FIFO, and unused preparation expires with
+the batch. Full tree identities remain collision checked, and immutable verified
+buffers avoid repeated full hashing during pack preparation. The owner
 spools those trusted objects once before producing the canonical pack and
 checksummed standard sidecars, encodes caller-proven successive tree versions
 as bounded OFS deltas within a batch and REF deltas across warm batches, and
 uploads the pack with every commit-bound attribute delta and one visibility
 proof, then acquires the ref lease. Cross-pack bases are explicit immutable Git
-object IDs. Preparation accepts them only with decoded bytes and a verified
-prior depth, recomputes their identities, and emits a full entry after a cold
+object IDs. Preparation accepts them only with collision-checked decoded bytes
+and a verified prior depth, and emits a full entry after a cold
 start, unknown depth, or depth eight. Crab readers resolve those IDs across
 canonical packs. Repack preserves the complete object universe even when a base
 moves into a replacement pack, fetch materializes external dependencies into a

@@ -25,6 +25,9 @@ use crate::{
     repository::CapsuleFrontier,
 };
 
+mod tree_appends;
+use tree_appends::PreparedAppends;
+
 const LOCK_TTL: Duration = Duration::from_secs(300);
 const REF_LOCK_TTL: Duration = Duration::from_secs(30);
 const MAX_GENERATED_PACK_BYTES: u64 = 512 * 1024 * 1024;
@@ -1848,6 +1851,7 @@ async fn build_batch(
 ) -> Result<BuiltBatch> {
     let started = Instant::now();
     let mut tree_state = MutableTree::new(snapshot, warm_tree);
+    tree_state.prepared_appends = tree_appends::prepare(&tree_state, mutations).await?;
     let mut parent = original_parent;
     let mut outcomes = Vec::with_capacity(mutations.len());
     let mut commits = Vec::with_capacity(mutations.len());
@@ -2779,6 +2783,7 @@ struct MutableTree {
     directories: HashMap<Vec<u8>, DirectoryState>,
     generated_attribute_blobs: HashMap<Vec<u8>, GeneratedAttributeBlob>,
     estimated_bytes: usize,
+    prepared_appends: PreparedAppends,
 }
 
 impl MutableTree {
@@ -2800,10 +2805,12 @@ impl MutableTree {
             directories,
             generated_attribute_blobs,
             estimated_bytes,
+            prepared_appends: PreparedAppends::default(),
         }
     }
 
     fn into_warm(self) -> WarmTree {
+        // Retain only applied edits; unused speculative objects expire with the batch.
         WarmTree {
             root_oid: self.root_oid,
             directories: self.directories,
@@ -3090,7 +3097,10 @@ async fn build_commit(
             attributes,
             condition: _,
         } => {
-            let object = GeneratedObject::new(Kind::Blob, bytes.clone())?;
+            let object = match tree_state.prepared_appends.blob(&bytes) {
+                Some(object) => object,
+                None => GeneratedObject::new(Kind::Blob, bytes.clone())?,
+            };
             let oid = object.oid();
             let digest = md5::Md5::digest(&bytes);
             let logical_size = attributes.logical_size.unwrap_or(bytes.len() as u64);
@@ -3211,8 +3221,13 @@ async fn build_commit(
         } else if depth > 0 && empty {
             (None, Vec::new(), None, None, false)
         } else {
-            let (oid, ancestors, encoding, object, append_only) =
-                encode_tree_with_edits(state, &entries, &mut objects, &mut tree_delta_bases)?;
+            let (oid, ancestors, encoding, object, append_only) = encode_tree_with_edits(
+                state,
+                &entries,
+                &mut objects,
+                &mut tree_delta_bases,
+                &tree_state.prepared_appends,
+            )?;
             (
                 Some(oid),
                 ancestors,
@@ -3612,6 +3627,7 @@ fn encode_appended_tree(
     old: &DirectoryState,
     appended: &[&tree::Entry],
     base: &GeneratedObject,
+    prepared: &PreparedAppends,
 ) -> Result<(TreeEncoding, GeneratedObject)> {
     let inherited_suffix = old
         .encoding
@@ -3633,7 +3649,11 @@ fn encode_appended_tree(
         next_offset = next_offset.saturating_add(encoded_tree_entry_bytes(entry));
     }
     offsets.push(next_offset);
-    let object = GeneratedObject::append(base, &suffix)?;
+    let suffix = Bytes::from(suffix);
+    let object = match prepared.tree(base.oid(), &suffix) {
+        Some(object) => object,
+        None => GeneratedObject::append(base, &suffix)?,
+    };
     if object.data().len() != next_offset {
         return Err(std::io::Error::other("appended tree encoding length diverged").into());
     }
@@ -3650,6 +3670,7 @@ fn encode_tree_with_edits(
     edits: &[TreeEntryEdit],
     objects: &mut Vec<GeneratedObject>,
     delta_bases: &mut Vec<TreeDeltaBase>,
+    prepared: &PreparedAppends,
 ) -> Result<(ObjectId, Vec<ObjectId>, TreeEncoding, GeneratedObject, bool)> {
     let appended_entries = append_only_entries(&old.entries, edits);
     let append_only = appended_entries.is_some();
@@ -3683,7 +3704,7 @@ fn encode_tree_with_edits(
     let (encoding, object) = if let Some((base, appended)) = append_base {
         // Appending from an identity-bound prefix lets pack preparation emit the
         // exact Git delta directly without comparing both complete tree buffers.
-        encode_appended_tree(old, appended, base)?
+        encode_appended_tree(old, appended, base, prepared)?
     } else {
         let added_bytes = edits
             .iter()
@@ -3925,6 +3946,7 @@ mod tests {
             &[],
             &mut objects,
             &mut delta_bases,
+            &PreparedAppends::default(),
         )
         .unwrap();
 
@@ -4010,6 +4032,7 @@ mod tests {
             &edits,
             &mut objects,
             &mut delta_bases,
+            &PreparedAppends::default(),
         )
         .unwrap();
 
@@ -4097,6 +4120,7 @@ mod tests {
                     &edits,
                     &mut objects,
                     &mut Vec::new(),
+                    &PreparedAppends::default(),
                 )
                 .unwrap();
             assert_eq!(objects[0].data(), expected, "round {round}");
@@ -4163,6 +4187,7 @@ mod tests {
             std::slice::from_ref(&edit),
             &mut objects,
             &mut bases,
+            &PreparedAppends::default(),
         )
         .unwrap();
 
@@ -4195,8 +4220,14 @@ mod tests {
         assert_eq!(warm.estimated_bytes(), estimated_bytes - provenance_bytes);
         let mut objects = Vec::new();
         let mut bases = Vec::new();
-        encode_tree_with_edits(&warm.directories[&path], &[edit], &mut objects, &mut bases)
-            .unwrap();
+        encode_tree_with_edits(
+            &warm.directories[&path],
+            &[edit],
+            &mut objects,
+            &mut bases,
+            &PreparedAppends::default(),
+        )
+        .unwrap();
         assert!(bases.is_empty());
     }
 
@@ -4317,8 +4348,14 @@ mod tests {
         let mut objects = Vec::new();
         let mut bases = Vec::new();
 
-        let (oid, ancestors, _, _, append_only) =
-            encode_tree_with_edits(&state, &[edit], &mut objects, &mut bases).unwrap();
+        let (oid, ancestors, _, _, append_only) = encode_tree_with_edits(
+            &state,
+            &[edit],
+            &mut objects,
+            &mut bases,
+            &PreparedAppends::default(),
+        )
+        .unwrap();
 
         assert_eq!(oid, target_oid);
         assert!(!append_only);

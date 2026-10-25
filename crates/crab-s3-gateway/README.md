@@ -189,6 +189,11 @@ Compatible same-branch
 requests wait up to 10 ms for a bounded batch of at most 32 requests or 32 MiB
 of Git payload. Their conditions are evaluated in FIFO order, their commits form
 one parent chain, and their Git objects share one pack and publication.
+Independent append-only leaf updates may prepare collision-checked blob and
+tree identities concurrently, bounded by available CPUs across the process.
+Reuse requires the original blob buffer or the exact tree base and suffix;
+FIFO conditions and edits remain serialized, and unused results expire with
+the batch.
 Cold preparation pins one repository view and gives each mutation its own
 read-operation budget. An over-budget request returns `SlowDown` without spending
 its neighbors' allowances; failed reads publish no commit. Locator close or
@@ -204,8 +209,9 @@ round trips without allowing a busy branch to exclude GC indefinitely.
 ### Generated packs
 
 Trusted generated objects retain their bounded, already-owned decoded buffers
-through canonical pack and sidecar preparation. Preparation independently checks
-object identities without writing and rereading a decoded scratch copy. Untrusted
+through canonical pack and sidecar preparation. Preparation reuses an identity
+only while the original immutable buffer and length match; other inputs are
+hashed without writing and rereading a decoded scratch copy. Untrusted
 wire packs retain the shared quarantine spool and verification path.
 The canonical writer uses fast zlib compression for trees to reduce growing
 directory latency; blobs retain default compression and all output limits apply.
@@ -218,8 +224,8 @@ runtime. Acknowledging a batch does not transfer its cleanup to runtime teardown
 
 Warm directories retain canonical encoded bytes and entry offsets. Path edits
 copy unchanged byte ranges and encode only changed entries, while complete tree
-identities and prepared pack contents remain independently verified. The encoded
-bytes and offsets count toward the existing warm-state memory limit.
+identities remain collision checked and prepared pack checksums remain verified.
+The encoded bytes and offsets count toward the existing warm-state memory limit.
 
 Caller-proven predecessor relationships delta-compress
 successive generated tree versions inside a batch. Across packs, warm state
