@@ -1879,6 +1879,65 @@ files, unchanged through qualification, to the Make-installed artifacts and
 retained logs. Raw evidence remains outside the PR. This debug run does not
 qualify optimized throughput, tail latency or all mount modes.
 
+## Thirty-first checkpoint: native macOS writeback and owner discovery
+
+This checkpoint diagnoses two current-head failures; it does not repair them.
+Make installs the NFS-only CLI/helper, combined-feature FUSE helper and cache
+server from `dbf040fd024`. A retained manifest verifies 1,522 Rust source,
+manifest and Makefile hashes remained unchanged through installation and probes.
+The native client is macOS 26.5.2 / Darwin 25.5.0. Fixtures are ordinary local Git
+repositories on the mounted Workspace volume; this is not RustFS or performance
+qualification. Raw logs, scripts and artifact hashes remain outside the PR.
+
+The registered-helper probe explicitly requires successful CLI live NFS status
+before dirtying an 8 KiB file through a separate process's shared mapping. That
+process holds its mapping without msync or close. The live `mount diff` returns
+zero changes, and a read-only query of the actual helper overlay finds no backing
+file. Darwin `fsync_volume_np(fd, SYNC_VOLUME_WAIT)` returns zero in about 14 us
+without changing that result. Per-file fsync also returns without draining it.
+A second process maps the same file read-only and calls libc `msync(MS_SYNC)`
+without reading its pages; the backing file then contains the changed byte and
+live diff reports the modification. After the client dirties a second byte,
+client msync makes that byte visible too. A real no-push mounted commit preserves
+all 8 KiB byte-for-byte in Git, Git fsck passes, and ordinary helper unmount
+completes without forced cleanup.
+
+The first external read-only mapping experiment accidentally used Python's
+`mmap.flush`, which does not issue msync for an ACCESS_READ mapping. That invalid
+negative was replaced with the explicit libc call above. Initial CLI parsing
+also assumed one JSON shape for status and diff; the final probe follows their
+actual distinct contracts. Those harness failures are retained, not product
+regressions or evidence against msync.
+
+Dependency proof explains why a volume-sync substitution is insufficient.
+[Apple Libc's wrapper](https://github.com/apple-oss-distributions/Libc/blob/main/gen/sync_volume_np.c)
+returns an error number directly and restores errno; a native invalid-fd probe
+returns EBADF while errno remains zero. [Apple NFS's sync callback](https://github.com/apple-oss-distributions/NFS/blob/main/kext/nfs_vfsops.c)
+skips nodes with no dirty NFS buffers, busy writers or an active flush. Its
+[per-file fsync](https://github.com/apple-oss-distributions/NFS/blob/main/kext/nfs_vnops.c)
+calls nfs_flush. [XNU's volume-sync owner](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/vfs/vfs_syscalls.c)
+does not propagate the VFS sync result. These public upstream sources are not a
+claim that every line matches this installed Darwin build; the native probe
+establishes the observed failure on this host.
+
+A separate current-head foreground probe proves native reads and a direct NFS
+status response from the exact foreground PID. CLI `mount status --live-only`
+still exits 6, and CLI diff selects the source's saved `.crab` directory. The
+entry-point/owner trace is `run_mount_with_new_cli` → NFS mount/control server,
+while `mount_control::nfs_context` requires a registry entry. Only
+`spawn_nfs_background` registers the product mount. The foreground helper then
+exits zero and detaches normally. No direct/offline commit was attempted.
+
+Next repair foreground NFS discovery at the product ownership boundary, including
+registry admission failure, startup races, owner-conditional removal and cache
+lease lifetime. Do not add socket-guessing fallback. Check daemon and foreground
+FUSE siblings separately: a live server alone does not prove CLI controls.
+The macOS writeback repair additionally needs stable identities for client-read
+files, rename/unlink/replacement coverage, error propagation and cancellation
+ownership before the mutation gate. A repository-wide walk would undermine lazy
+mounting; the targeted msync experiment is a mechanism probe, not proof of a
+complete production design. Linux's qualified syncfs path is unchanged.
+
 ## Remaining priority order
 
 The helper-layout gap and live read-only inspection leak are closed by the
@@ -1890,6 +1949,8 @@ mounted-path re-entry. Next prove concurrent reset/commit, teardown/admission an
 lost-owner behavior across remaining owners, qualify a waiting native macOS NFS
 barrier, and finish all stored pack-v1 authority removal. Preserve the shared
 process-spanning freeze and never retry an uncertain live operation offline.
+Checkpoint-31 confirms foreground NFS discovery and dirty mapped-write gaps on
+the current native macOS helper; address those concrete failures before signoff.
 
 1. **Correctness: coherent Git/Capsule generations.** Atomically install selected
    Git state, pinned catalog and read service for startup, refresh, switch and

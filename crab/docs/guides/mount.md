@@ -324,6 +324,12 @@ to the same path or intersecting directory subtree are serialized. Commit,
 export, and reset drain in-flight mutations before taking a stable overlay
 snapshot.
 
+On macOS NFS, synchronize writable memory mappings with `msync(MS_SYNC)` before
+running overlay diff, export, commit, reset, refresh, or switch. The current
+writeback request can leave mapped changes in the client cache, so a live diff
+can report no changes until the application synchronizes its mapping. A waiting
+volume sync or ordinary file fsync does not close this gap.
+
 For large crab-tracked files, commit streams overlay file content directly into
 Crab staging when `.gitattributes` is stable, then writes pointer files into the
 Git index. If `.gitattributes` changed in the overlay, commit first materializes

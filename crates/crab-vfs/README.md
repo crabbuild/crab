@@ -100,8 +100,13 @@ unpublished backing bytes.
 Live export is one owned control operation. The helper validates its actual
 cache/mount boundaries, runs the platform writeback step, then holds mutation
 exclusion and the process-spanning freeze through materialization. Linux waits
-for syncfs; macOS still needs a qualified waiting barrier. Metadata-only renames
-read captured engine leases directly; they never re-enter the mounted filesystem.
+for syncfs. Native macOS NFS qualification confirms that the current global sync
+request can leave a client's dirty shared mapping outside the overlay. Neither
+`fsync_volume_np(..., SYNC_VOLUME_WAIT)` nor per-file fsync drained that mapping;
+explicit `msync(MS_SYNC)` did. Applications must synchronize writable mappings
+before live controls until a drain that retains file identity is qualified.
+Metadata-only renames read captured engine leases directly; they never re-enter
+the mounted filesystem.
 Pointer copies retain a whole-file staging pin, shared with FUSE descriptor opens,
 until copying finishes. Inspection/export preserve reader epochs and open leases.
 Caller cancellation cannot release their owned blocking work. Saved backing-file
