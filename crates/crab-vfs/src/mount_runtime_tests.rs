@@ -629,6 +629,7 @@ async fn committed_generations_are_adopted_before_pruning_live_resolver() {
     assert_eq!(names, ["base.txt", "first.txt", "second.txt"]);
 }
 
+#[path = "mount_runtime_catalog_tests.rs"]
 mod catalog;
 
 #[tokio::test(flavor = "multi_thread")]

@@ -128,7 +128,7 @@ performance matrix remain required, not deferred acceptance criteria.
 
 `repository.rs` now owns cloning, default selection, ref fetching/reconciliation,
 commit peeling and owned-index replacement. Its tests live in
-`repository/tests.rs`; `clone_cache` retains cache naming and lock ownership.
+`repository_tests.rs`; `clone_cache` retains cache naming and lock ownership.
 Pipeline and daemon clone implementations delegate to this owner. Standalone
 cached clones select refs missing from their original single-branch clone, and
 daemon startup does the same before capturing its read context. Daemon force-fetch
@@ -240,7 +240,7 @@ remote data origin and staged local content. The owned-local-clone sibling
 fetches a branch absent from its initial clone, observes a subsequent source-ref
 advance through automatic polling, updates its own index and preserves the
 source index. Missing borrowed metadata fails without creating a replacement.
-Runtime tests moved into `mount_runtime/tests.rs` to keep the production module
+Runtime tests moved into `mount_runtime_tests.rs` to keep the production module
 small; the existing failing unpublished-pointer test remains enabled.
 
 Dependency contract: Git's `read-tree` writes the selected index, and the

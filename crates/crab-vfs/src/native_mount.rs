@@ -580,4 +580,5 @@ async fn nfs_committed_pointer_remount() {
     committed_pointer_remount(false).await;
 }
 
+#[path = "native_mount_mapped_tests.rs"]
 mod mapped;

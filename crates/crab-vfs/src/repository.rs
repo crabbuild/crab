@@ -691,4 +691,5 @@ pub(crate) fn staging_root_for_git_dir(git_dir: &Path) -> Result<PathBuf> {
 }
 
 #[cfg(test)]
+#[path = "repository_tests.rs"]
 mod tests;

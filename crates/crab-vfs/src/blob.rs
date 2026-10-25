@@ -289,4 +289,5 @@ impl Drop for BlobChild {
 
 #[cfg(test)]
 #[expect(clippy::unwrap_used, reason = "test fixture setup and assertions")]
+#[path = "blob_tests.rs"]
 mod tests;

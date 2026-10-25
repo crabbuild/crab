@@ -2808,6 +2808,7 @@ pub async fn run_unmount_all_live_or_persisted() -> Result<()> {
 }
 
 #[cfg(all(test, unix, any(feature = "fuse", feature = "nfs")))]
+#[path = "mount_batch_unmount_tests.rs"]
 mod batch_unmount_tests;
 
 fn normalize_unmount_path(path: &Path) -> PathBuf {

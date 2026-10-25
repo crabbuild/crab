@@ -345,4 +345,5 @@ impl StagedFileReader {
     clippy::unwrap_used,
     reason = "staging reader test setup and assertions"
 )]
+#[path = "file_reader_tests.rs"]
 mod tests;

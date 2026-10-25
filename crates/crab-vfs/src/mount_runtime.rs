@@ -446,4 +446,5 @@ fn resolve_refresh_head(
     clippy::unwrap_used,
     reason = "test setup and assertions fail on unexpected errors"
 )]
+#[path = "mount_runtime_tests.rs"]
 mod tests;

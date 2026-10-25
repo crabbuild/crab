@@ -611,4 +611,5 @@ async fn send_fuse_request_with_timeout(
 }
 
 #[cfg(test)]
+#[path = "mount_control_tests.rs"]
 mod tests;
