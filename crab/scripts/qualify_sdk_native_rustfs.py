@@ -140,12 +140,7 @@ def aws(environment: dict[str, str], *arguments: str) -> dict:
     return json.loads(result.stdout or "{}")
 
 
-def preflight_backend(
-    environment: dict[str, str],
-    work: Path,
-    bucket: str,
-    retain_bucket_anchor: bool = False,
-) -> None:
+def preflight_backend(environment: dict[str, str], work: Path, bucket: str) -> None:
     body = work / "probe-body"
     received = work / "probe-received"
     content = b"SDK storage contract probe\n"
@@ -184,10 +179,9 @@ def preflight_backend(
             "--key", retained, str(received))
         if received.read_bytes() != content:
             raise RuntimeError("fixture backend changed a retained sibling")
-    if not retain_bucket_anchor:
-        aws(environment, "s3api", "delete-object", "--bucket", bucket, "--key", retained)
-        if aws(environment, "s3api", "list-objects-v2", "--bucket", bucket).get("Contents"):
-            raise RuntimeError("fixture backend retained deleted probe objects")
+    aws(environment, "s3api", "delete-object", "--bucket", bucket, "--key", retained)
+    if aws(environment, "s3api", "list-objects-v2", "--bucket", bucket).get("Contents"):
+        raise RuntimeError("fixture backend retained deleted probe objects")
 
 
 def qualify(output: Path, tests: dict[str, Path], environment: dict[str, str],
@@ -256,7 +250,8 @@ def main() -> None:
             listener.bind(("127.0.0.1", 0))
             port = listener.getsockname()[1]
         endpoint = f"http://127.0.0.1:{port}"
-        bucket = f"sdk-{secrets.token_hex(8)}"
+        # Keep RustFS's Windows bucket/key/metadata paths below MAX_PATH.
+        bucket = "sdk"
         environment = fixture_environment(work, output, endpoint, bucket, git, crab, target)
         server_environment = {**environment,
                               "RUSTFS_ACCESS_KEY": environment["AWS_ACCESS_KEY_ID"],
@@ -285,9 +280,7 @@ def main() -> None:
                         time.sleep(1)
                 aws(environment, "s3api", "create-bucket", "--bucket", bucket)
                 report["preflight"] = "failed"
-                preflight_backend(
-                    environment, work, bucket, retain_bucket_anchor=os.name == "nt"
-                )
+                preflight_backend(environment, work, bucket)
                 report["preflight"] = "passed"
                 qualify(output, tests, environment, args.toolchain, git, crab)
                 qualified = True

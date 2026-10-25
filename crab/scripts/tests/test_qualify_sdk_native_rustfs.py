@@ -15,7 +15,7 @@ SPEC.loader.exec_module(RUNNER)
 
 
 class NativeRustfsTests(unittest.TestCase):
-    def test_preflight_preserves_windows_bucket_anchor(self):
+    def test_preflight_verifies_single_and_bulk_deletion(self):
         with tempfile.TemporaryDirectory() as directory:
             body = b"SDK storage contract probe\n"
             deleted = []
@@ -40,11 +40,15 @@ class NativeRustfsTests(unittest.TestCase):
                 return {}
 
             with patch.object(RUNNER, "aws", side_effect=response):
-                RUNNER.preflight_backend(
-                    {}, Path(directory), "owned-fixture", retain_bucket_anchor=True
-                )
+                RUNNER.preflight_backend({}, Path(directory), "owned-fixture")
 
-            self.assertNotIn("qualification/backend-probe/retained", deleted)
+            self.assertCountEqual(deleted, [
+                "qualification/backend-probe/retained",
+                "qualification/backend-probe/False/False",
+                "qualification/backend-probe/False/True",
+                "qualification/backend-probe/True/False",
+                "qualification/backend-probe/True/True",
+            ])
 
     def test_bulk_delete_per_key_errors_and_missing_acknowledgements_fail(self):
         for result in ({"Errors": [{"Code": "ServiceUnavailable"}]}, {}):
