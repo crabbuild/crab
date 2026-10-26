@@ -1012,6 +1012,66 @@ fn raw_external_delta_base_with_wrong_identity_falls_back_to_full_object() {
 }
 
 #[test]
+fn appended_generated_object_uses_its_verified_prefix_for_external_delta() {
+    use std::sync::atomic::AtomicBool;
+
+    let temp = tempfile::tempdir().unwrap();
+    let base = GeneratedObject::new(Kind::Blob, vec![b'x'; 64 * 1024]).unwrap();
+    let target = GeneratedObject::append(&base, b"suffix").unwrap();
+    let target_oid = target.oid();
+    assert_eq!(target.data(), [base.data(), b"suffix"].concat());
+    assert_eq!(target.prefix_delta_base, Some(base.oid()));
+
+    let accepted =
+        IncomingPack::from_verified_objects([target.clone()], temp.path(), limits(), || false)
+            .unwrap();
+    let flag = AtomicBool::new(false);
+    let full = accepted
+        .prepare(temp.path(), 16 * 1024 * 1024, &flag)
+        .unwrap()
+        .unwrap();
+    let delta = accepted
+        .prepare_with_external_delta_bases(
+            temp.path(),
+            16 * 1024 * 1024,
+            &flag,
+            &BTreeMap::from([(target_oid, base.oid())]),
+            &BTreeMap::from([(
+                target_oid,
+                ExternalDeltaBase::from_generated_object(base.clone(), 0),
+            )]),
+            8,
+            1024 * 1024,
+        )
+        .unwrap()
+        .unwrap();
+
+    assert!(delta.size() < full.size());
+    assert_eq!(delta.delta_depth(&target_oid), Some(1));
+    assert_eq!(delta.external_delta_count(), 1);
+    let client = tempfile::tempdir_in(temp.path()).unwrap();
+    git(client.path(), &["init", "--bare", "-q"], b"");
+    git(
+        client.path(),
+        &["hash-object", "-w", "-t", "blob", "--stdin"],
+        base.data(),
+    );
+    git(
+        client.path(),
+        &["index-pack", "--fix-thin", "--stdin"],
+        &std::fs::read(delta.pack_path()).unwrap(),
+    );
+    assert_eq!(
+        git(
+            client.path(),
+            &["cat-file", "blob", &target_oid.to_string()],
+            b""
+        ),
+        target.data()
+    );
+}
+
+#[test]
 fn prepared_artifacts_are_deterministic_and_empty_packs_need_no_artifacts() {
     use std::sync::atomic::AtomicBool;
     let temp = tempfile::tempdir().unwrap();

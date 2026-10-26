@@ -25,6 +25,9 @@ use crate::{
     repository::CapsuleFrontier,
 };
 
+mod tree_appends;
+use tree_appends::PreparedAppends;
+
 const LOCK_TTL: Duration = Duration::from_secs(300);
 const REF_LOCK_TTL: Duration = Duration::from_secs(30);
 const MAX_GENERATED_PACK_BYTES: u64 = 512 * 1024 * 1024;
@@ -1846,7 +1849,9 @@ async fn build_batch(
     batches_since_checkpoint: usize,
     mutations: &[Mutation],
 ) -> Result<BuiltBatch> {
+    let started = Instant::now();
     let mut tree_state = MutableTree::new(snapshot, warm_tree);
+    tree_state.prepared_appends = tree_appends::prepare(&tree_state, mutations).await?;
     let mut parent = original_parent;
     let mut outcomes = Vec::with_capacity(mutations.len());
     let mut commits = Vec::with_capacity(mutations.len());
@@ -1912,6 +1917,12 @@ async fn build_batch(
     } else {
         next_checkpoint
     };
+    tracing::info!(
+        phase = "build",
+        commits = commits.len(),
+        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+        "Git mutation phase completed"
+    );
     Ok(BuiltBatch {
         outcomes,
         commits,
@@ -2588,6 +2599,7 @@ struct DirectoryEdit {
     encoding: Option<TreeEncoding>,
     generated_object: Option<GeneratedObject>,
     generated: bool,
+    append_only: bool,
     delta_ancestors: Vec<ObjectId>,
 }
 
@@ -2599,6 +2611,8 @@ struct DirectoryState {
     pending_object: Option<GeneratedObject>,
     delta_ancestors: Vec<ObjectId>,
     generated_in_batch: bool,
+    // Remains true only while the current tree bytes preserve the anchor as a prefix.
+    append_only_since_anchor: bool,
 }
 
 struct TreeEncoding {
@@ -2706,6 +2720,7 @@ impl WarmTree {
             directory.pending_object = None;
             directory.delta_ancestors = Vec::new();
             directory.generated_in_batch = false;
+            directory.append_only_since_anchor = false;
         }
     }
 
@@ -2742,11 +2757,14 @@ impl WarmTree {
                         reused_batches: 0,
                         reuse_limit,
                     });
+                directory.append_only_since_anchor = directory.delta_anchor.is_some();
                 directory.delta_ancestors = Vec::new();
             } else {
                 directory.pending_object = None;
                 if let Some(anchor) = &mut directory.delta_anchor {
                     anchor.reused_batches = anchor.reused_batches.saturating_add(1);
+                } else {
+                    directory.append_only_since_anchor = false;
                 }
             }
             directory.generated_in_batch = false;
@@ -2765,6 +2783,7 @@ struct MutableTree {
     directories: HashMap<Vec<u8>, DirectoryState>,
     generated_attribute_blobs: HashMap<Vec<u8>, GeneratedAttributeBlob>,
     estimated_bytes: usize,
+    prepared_appends: PreparedAppends,
 }
 
 impl MutableTree {
@@ -2786,10 +2805,12 @@ impl MutableTree {
             directories,
             generated_attribute_blobs,
             estimated_bytes,
+            prepared_appends: PreparedAppends::default(),
         }
     }
 
     fn into_warm(self) -> WarmTree {
+        // Retain only applied edits; unused speculative objects expire with the batch.
         WarmTree {
             root_oid: self.root_oid,
             directories: self.directories,
@@ -2829,6 +2850,7 @@ impl MutableTree {
                     pending_object: None,
                     delta_ancestors: Vec::new(),
                     generated_in_batch: false,
+                    append_only_since_anchor: false,
                 };
                 self.estimated_bytes = self
                     .estimated_bytes
@@ -2908,7 +2930,9 @@ impl MutableTree {
                 state.pending_object = None;
                 state.delta_ancestors = Vec::new();
                 state.generated_in_batch = false;
+                state.append_only_since_anchor = false;
             } else if edit.generated {
+                state.append_only_since_anchor &= edit.append_only;
                 state.pending_object = edit.generated_object;
                 state.delta_ancestors = edit.delta_ancestors;
                 state.generated_in_batch = true;
@@ -3073,7 +3097,10 @@ async fn build_commit(
             attributes,
             condition: _,
         } => {
-            let object = GeneratedObject::new(Kind::Blob, bytes.clone())?;
+            let object = match tree_state.prepared_appends.blob(&bytes) {
+                Some(object) => object,
+                None => GeneratedObject::new(Kind::Blob, bytes.clone())?,
+            };
             let oid = object.oid();
             let digest = md5::Md5::digest(&bytes);
             let logical_size = attributes.logical_size.unwrap_or(bytes.len() as u64);
@@ -3189,14 +3216,25 @@ async fn build_commit(
             .ok_or_else(|| std::io::Error::other("mutation directory state disappeared"))?;
         let changed = tree_entries_changed(&state.entries, &entries);
         let empty = tree_entry_count_after_edits(&state.entries, &entries) == 0;
-        let (oid, delta_ancestors, encoding, generated_object) = if !changed {
-            (state.oid, Vec::new(), None, None)
+        let (oid, delta_ancestors, encoding, generated_object, append_only) = if !changed {
+            (state.oid, Vec::new(), None, None, false)
         } else if depth > 0 && empty {
-            (None, Vec::new(), None, None)
+            (None, Vec::new(), None, None, false)
         } else {
-            let (oid, ancestors, encoding, object) =
-                encode_tree_with_edits(state, &entries, &mut objects, &mut tree_delta_bases)?;
-            (Some(oid), ancestors, Some(encoding), Some(object))
+            let (oid, ancestors, encoding, object, append_only) = encode_tree_with_edits(
+                state,
+                &entries,
+                &mut objects,
+                &mut tree_delta_bases,
+                &tree_state.prepared_appends,
+            )?;
+            (
+                Some(oid),
+                ancestors,
+                Some(encoding),
+                Some(object),
+                append_only,
+            )
         };
         directory_edits.push(DirectoryEdit {
             path: paths[depth].clone(),
@@ -3205,6 +3243,7 @@ async fn build_commit(
             encoding,
             generated_object,
             generated: changed && !(depth > 0 && empty),
+            append_only,
             delta_ancestors,
         });
         if depth == 0 {
@@ -3550,12 +3589,91 @@ fn generated_attribute_update(
     }
 }
 
+fn append_only_entries<'a>(
+    existing: &[tree::Entry],
+    edits: &'a [TreeEntryEdit],
+) -> Option<Vec<&'a tree::Entry>> {
+    if edits.is_empty() {
+        return None;
+    }
+    let mut appended = Vec::with_capacity(edits.len());
+    for edit in edits {
+        let replacement = edit.replacement.as_ref()?;
+        if replacement.filename.as_slice() != edit.name
+            || entry_index(existing, &edit.name).is_some()
+        {
+            return None;
+        }
+        appended.push(replacement);
+    }
+    appended.sort_unstable();
+    if appended
+        .windows(2)
+        .any(|entries| entries[0].filename == entries[1].filename)
+        || existing
+            .last()
+            .is_some_and(|last| appended.first().is_some_and(|first| *first <= last))
+    {
+        return None;
+    }
+    Some(appended)
+}
+
+fn encoded_tree_entry_bytes(entry: &tree::Entry) -> usize {
+    entry.mode.as_bytes(&mut [0; 6]).len() + entry.filename.len() + entry.oid.as_bytes().len() + 2
+}
+
+fn encode_appended_tree(
+    old: &DirectoryState,
+    appended: &[&tree::Entry],
+    base: &GeneratedObject,
+    prepared: &PreparedAppends,
+) -> Result<(TreeEncoding, GeneratedObject)> {
+    let inherited_suffix = old
+        .encoding
+        .bytes
+        .get(base.data().len()..)
+        .ok_or_else(|| std::io::Error::other("tree delta base exceeds current encoding"))?;
+    let appended_bytes = appended
+        .iter()
+        .map(|entry| encoded_tree_entry_bytes(entry))
+        .sum::<usize>();
+    let mut suffix = Vec::with_capacity(inherited_suffix.len().saturating_add(appended_bytes));
+    suffix.extend_from_slice(inherited_suffix);
+    let mut next_offset = old.encoding.bytes.len();
+    let mut offsets = Vec::with_capacity(old.entries.len() + appended.len() + 1);
+    offsets.extend_from_slice(&old.encoding.offsets[..old.entries.len()]);
+    for entry in appended {
+        offsets.push(next_offset);
+        append_tree_entry(&mut suffix, entry);
+        next_offset = next_offset.saturating_add(encoded_tree_entry_bytes(entry));
+    }
+    offsets.push(next_offset);
+    let suffix = Bytes::from(suffix);
+    let object = match prepared.tree(base.oid(), &suffix) {
+        Some(object) => object,
+        None => GeneratedObject::append(base, &suffix)?,
+    };
+    if object.data().len() != next_offset {
+        return Err(std::io::Error::other("appended tree encoding length diverged").into());
+    }
+    let encoding = TreeEncoding {
+        bytes: object.shared_data(),
+        offsets,
+        allocated_bytes: object.data().len(),
+    };
+    Ok((encoding, object))
+}
+
 fn encode_tree_with_edits(
     old: &DirectoryState,
     edits: &[TreeEntryEdit],
     objects: &mut Vec<GeneratedObject>,
     delta_bases: &mut Vec<TreeDeltaBase>,
-) -> Result<(ObjectId, Vec<ObjectId>, TreeEncoding, GeneratedObject)> {
+    prepared: &PreparedAppends,
+) -> Result<(ObjectId, Vec<ObjectId>, TreeEncoding, GeneratedObject, bool)> {
+    let appended_entries = append_only_entries(&old.entries, edits);
+    let append_only = appended_entries.is_some();
     let mut changes = BTreeMap::<usize, (bool, Vec<&tree::Entry>)>::new();
     for edit in edits {
         if let Some(index) = entry_index(&old.entries, &edit.name) {
@@ -3569,37 +3687,51 @@ fn encode_tree_with_edits(
             changes.entry(index).or_default().1.push(replacement);
         }
     }
-    let added_bytes = edits
-        .iter()
-        .filter_map(|edit| edit.replacement.as_ref())
-        .map(|entry| {
-            entry.mode.as_bytes(&mut [0; 6]).len()
-                + entry.filename.len()
-                + entry.oid.as_bytes().len()
-                + 2
-        })
-        .sum::<usize>();
-    let mut encoding = TreeEncodingBuilder {
-        bytes: Vec::with_capacity(old.encoding.bytes.len() + added_bytes),
-        offsets: Vec::with_capacity(old.entries.len() + edits.len() + 1),
-    };
-    // Preserve canonical unchanged byte ranges instead of serializing every
-    // sibling for each path-local edit. Offsets move with the same committed
-    // entry edits; the complete resulting object is still hashed and verified.
-    let mut cursor = 0;
-    for (index, (remove, mut replacements)) in changes {
-        encoding.extend(&old.encoding, cursor..index);
-        replacements.sort_unstable();
-        for replacement in replacements {
-            encoding.push(replacement);
+    let append_base = if let Some(entries) = &appended_entries {
+        if old.generated_in_batch {
+            old.pending_object
+                .as_ref()
+                .filter(|object| Some(object.oid()) == old.oid)
+        } else if old.append_only_since_anchor {
+            old.delta_anchor.as_ref().map(|anchor| &anchor.object)
+        } else {
+            None
         }
-        cursor = index + usize::from(remove);
-    }
-    encoding.extend(&old.encoding, cursor..old.entries.len());
-    encoding.offsets.push(encoding.bytes.len());
-    let encoding = encoding.finish();
-    // Bytes clones share this immutable tree buffer with the warm encoding.
-    let object = GeneratedObject::new(Kind::Tree, encoding.bytes.clone())?;
+        .map(|base| (base, entries.as_slice()))
+    } else {
+        None
+    };
+    let (encoding, object) = if let Some((base, appended)) = append_base {
+        // Appending from an identity-bound prefix lets pack preparation emit the
+        // exact Git delta directly without comparing both complete tree buffers.
+        encode_appended_tree(old, appended, base, prepared)?
+    } else {
+        let added_bytes = edits
+            .iter()
+            .filter_map(|edit| edit.replacement.as_ref())
+            .map(encoded_tree_entry_bytes)
+            .sum::<usize>();
+        let mut encoding = TreeEncodingBuilder {
+            bytes: Vec::with_capacity(old.encoding.bytes.len() + added_bytes),
+            offsets: Vec::with_capacity(old.entries.len() + edits.len() + 1),
+        };
+        // Preserve canonical unchanged byte ranges instead of serializing every
+        // sibling for each path-local edit.
+        let mut cursor = 0;
+        for (index, (remove, mut replacements)) in changes {
+            encoding.extend(&old.encoding, cursor..index);
+            replacements.sort_unstable();
+            for replacement in replacements {
+                encoding.push(replacement);
+            }
+            cursor = index + usize::from(remove);
+        }
+        encoding.extend(&old.encoding, cursor..old.entries.len());
+        encoding.offsets.push(encoding.bytes.len());
+        let encoding = encoding.finish();
+        let object = GeneratedObject::new(Kind::Tree, encoding.bytes.clone())?;
+        (encoding, object)
+    };
     let oid = object.oid();
     objects.push(object.clone());
     let mut delta_ancestors = Vec::new();
@@ -3628,7 +3760,7 @@ fn encode_tree_with_edits(
             external,
         });
     }
-    Ok((oid, delta_ancestors, encoding, object))
+    Ok((oid, delta_ancestors, encoding, object, append_only))
 }
 
 #[cfg(test)]
@@ -3800,7 +3932,7 @@ mod tests {
         let mut objects = Vec::new();
         let mut delta_bases = Vec::new();
 
-        let (oid, ancestors, _, _) = encode_tree_with_edits(
+        let (oid, ancestors, _, _, _) = encode_tree_with_edits(
             &DirectoryState {
                 oid: None,
                 entries: entries.clone(),
@@ -3809,10 +3941,12 @@ mod tests {
                 pending_object: None,
                 delta_ancestors: Vec::new(),
                 generated_in_batch: false,
+                append_only_since_anchor: false,
             },
             &[],
             &mut objects,
             &mut delta_bases,
+            &PreparedAppends::default(),
         )
         .unwrap();
 
@@ -3884,7 +4018,7 @@ mod tests {
         let mut objects = Vec::new();
         let mut delta_bases = Vec::new();
 
-        let (oid, ancestors, _, _) = encode_tree_with_edits(
+        let (oid, ancestors, _, _, _) = encode_tree_with_edits(
             &DirectoryState {
                 oid: Some(ObjectId::from([9; 20])),
                 entries: original.clone(),
@@ -3893,10 +4027,12 @@ mod tests {
                 pending_object: None,
                 delta_ancestors: Vec::new(),
                 generated_in_batch: true,
+                append_only_since_anchor: false,
             },
             &edits,
             &mut objects,
             &mut delta_bases,
+            &PreparedAppends::default(),
         )
         .unwrap();
 
@@ -3941,6 +4077,7 @@ mod tests {
             pending_object: None,
             delta_ancestors: Vec::new(),
             generated_in_batch: false,
+            append_only_since_anchor: false,
         };
         let mut tree_state = MutableTree::new(
             None,
@@ -3977,13 +4114,15 @@ mod tests {
             .write_to(&mut expected)
             .unwrap();
             let mut objects = Vec::new();
-            let (oid, delta_ancestors, encoding, generated_object) = encode_tree_with_edits(
-                &tree_state.directories[&Vec::new()],
-                &edits,
-                &mut objects,
-                &mut Vec::new(),
-            )
-            .unwrap();
+            let (oid, delta_ancestors, encoding, generated_object, append_only) =
+                encode_tree_with_edits(
+                    &tree_state.directories[&Vec::new()],
+                    &edits,
+                    &mut objects,
+                    &mut Vec::new(),
+                    &PreparedAppends::default(),
+                )
+                .unwrap();
             assert_eq!(objects[0].data(), expected, "round {round}");
             tree_state
                 .commit(
@@ -3994,6 +4133,7 @@ mod tests {
                         encoding: Some(encoding),
                         generated_object: Some(generated_object),
                         generated: true,
+                        append_only,
                         delta_ancestors,
                     }],
                     None,
@@ -4017,10 +4157,10 @@ mod tests {
             oid: ObjectId::from([1; 20]),
         }];
         let edit = TreeEntryEdit {
-            name: b"added".to_vec(),
+            name: b"z-added".to_vec(),
             replacement: Some(tree::Entry {
                 mode: tree::EntryKind::Blob.into(),
-                filename: BString::from("added"),
+                filename: BString::from("z-added"),
                 oid: ObjectId::from([2; 20]),
             }),
         };
@@ -4039,13 +4179,15 @@ mod tests {
             pending_object: None,
             delta_ancestors: Vec::new(),
             generated_in_batch: false,
+            append_only_since_anchor: true,
         };
 
-        let (target, ancestors, _, _) = encode_tree_with_edits(
+        let (target, ancestors, encoding, object, append_only) = encode_tree_with_edits(
             &state,
             std::slice::from_ref(&edit),
             &mut objects,
             &mut bases,
+            &PreparedAppends::default(),
         )
         .unwrap();
 
@@ -4056,6 +4198,14 @@ mod tests {
         assert_eq!(external.oid(), old_oid);
         assert_eq!(external.data(), encode_tree(&original));
         assert_eq!(ancestors, vec![old_oid]);
+        assert!(append_only);
+        let mut expected_entries = original.clone();
+        expected_entries.push(edit.replacement.clone().unwrap());
+        expected_entries.sort_unstable();
+        let expected = encode_tree(&expected_entries);
+        assert_eq!(encoding.bytes.as_ref(), expected.as_slice());
+        assert_eq!(object.data(), expected);
+        assert_eq!(object.oid(), target);
 
         let path = b"directory".to_vec();
         let estimated_bytes = estimated_directory_bytes(&path, &state);
@@ -4070,8 +4220,14 @@ mod tests {
         assert_eq!(warm.estimated_bytes(), estimated_bytes - provenance_bytes);
         let mut objects = Vec::new();
         let mut bases = Vec::new();
-        encode_tree_with_edits(&warm.directories[&path], &[edit], &mut objects, &mut bases)
-            .unwrap();
+        encode_tree_with_edits(
+            &warm.directories[&path],
+            &[edit],
+            &mut objects,
+            &mut bases,
+            &PreparedAppends::default(),
+        )
+        .unwrap();
         assert!(bases.is_empty());
     }
 
@@ -4115,6 +4271,7 @@ mod tests {
             pending_object: Some(object.clone()),
             delta_ancestors: Vec::new(),
             generated_in_batch: true,
+            append_only_since_anchor: false,
         };
         let path = Vec::new();
         let estimated_bytes = estimated_directory_bytes(&path, &state);
@@ -4168,15 +4325,21 @@ mod tests {
             oid: ObjectId::from([1; 20]),
         }];
         let target_oid = object_id(Kind::Tree, &encode_tree(&original)).unwrap();
-        let base_oid = ObjectId::from([9; 20]);
+        let base_entries = vec![tree::Entry {
+            mode: tree::EntryKind::Blob.into(),
+            filename: BString::from("existing"),
+            oid: ObjectId::from([9; 20]),
+        }];
+        let base_oid = object_id(Kind::Tree, &encode_tree(&base_entries)).unwrap();
         let state = DirectoryState {
             oid: Some(base_oid),
-            entries: Vec::new(),
-            encoding: TreeEncoding::new(&[]),
+            entries: base_entries.clone(),
+            encoding: TreeEncoding::new(&base_entries),
             delta_anchor: None,
             pending_object: None,
             delta_ancestors: vec![target_oid],
             generated_in_batch: true,
+            append_only_since_anchor: false,
         };
         let edit = TreeEntryEdit {
             name: b"existing".to_vec(),
@@ -4185,12 +4348,50 @@ mod tests {
         let mut objects = Vec::new();
         let mut bases = Vec::new();
 
-        let (oid, ancestors, _, _) =
-            encode_tree_with_edits(&state, &[edit], &mut objects, &mut bases).unwrap();
+        let (oid, ancestors, _, _, append_only) = encode_tree_with_edits(
+            &state,
+            &[edit],
+            &mut objects,
+            &mut bases,
+            &PreparedAppends::default(),
+        )
+        .unwrap();
 
         assert_eq!(oid, target_oid);
+        assert!(!append_only);
         assert!(ancestors.is_empty());
         assert!(bases.is_empty());
+    }
+
+    #[test]
+    fn append_detection_rejects_replacements_in_git_tree_order() {
+        let original = ["name", "name.ext"].map(|name| tree::Entry {
+            mode: tree::EntryKind::Blob.into(),
+            filename: name.into(),
+            oid: ObjectId::empty_blob(gix_hash::Kind::Sha1),
+        });
+        for (name, kind, expected) in [
+            ("z-added", Some(tree::EntryKind::Blob), true),
+            ("z-added", Some(tree::EntryKind::Tree), true),
+            ("earlier", Some(tree::EntryKind::Blob), false),
+            ("name", Some(tree::EntryKind::Tree), false),
+            ("name.ext", Some(tree::EntryKind::Blob), false),
+            ("name", None, false),
+        ] {
+            let edit = TreeEntryEdit {
+                name: name.as_bytes().to_vec(),
+                replacement: kind.map(|kind| tree::Entry {
+                    mode: kind.into(),
+                    filename: name.into(),
+                    oid: ObjectId::empty_blob(gix_hash::Kind::Sha1),
+                }),
+            };
+            assert_eq!(
+                append_only_entries(&original, &[edit]).is_some(),
+                expected,
+                "{name}: {kind:?}"
+            );
+        }
     }
 
     #[test]

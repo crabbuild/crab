@@ -191,8 +191,10 @@ these objects without recomputing their identities. The published tuple-based
 `from_generated_objects` entry point computes identities before using the same
 bounded collector. Both check count,
 individual size, aggregate decoded bytes, and cancellation without writing and
-rereading an object spool. Preparation borrows these bytes for deltas and streams
-full entries through the same identity checks as quarantined input. `prepare`
+rereading an object spool. Preparation retains a shared immutable buffer binding
+for each verified object and rejects replaced or resized buffers before encoding,
+without repeating its collision-checked hash. Raw generated objects and quarantined
+input retain their preparation-time hash checks. `prepare`
 remains mandatory and produces the same independently readable canonical pack
 and checksummed standard sidecars. Untrusted network packs retain their bounded
 file-backed quarantine.
@@ -206,9 +208,11 @@ eligible object size, falls back to full entries when a base is absent or a
 delta is not smaller, and records pack offsets and entry CRCs during the one
 bounded write.
 
-Delta encoding scans common prefixes and suffixes in blocks and sizes its
-buffer from changed bytes. Reconstruction retains exact Git delta semantics;
-object identities, base identities and pack checksums remain verified.
+Objects constructed with `GeneratedObject::append` retain their verified prefix
+relationship for direct delta encoding. Other deltas discover common prefixes
+and suffixes in blocks and size their buffers from changed bytes. Reconstruction
+retains exact Git delta semantics; object identities, base identities and pack
+checksums remain verified.
 
 `prepare_with_external_delta_bases` may instead encode a bounded
 REF delta when the caller supplies the decoded base, its immutable object ID,
