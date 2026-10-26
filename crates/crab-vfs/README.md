@@ -79,6 +79,12 @@ policy-blob fetches from the linked worktree used by overlay publication.
 Mounting and refresh are lifecycle operations performed outside the pipeline so a
 daemon, coordinator, or foreground CLI can own cancellation.
 
+Mounted publication passes explicit Git-directory authority to the normal
+remote helper. Helper configuration, metrics and audit output follow that
+selected repository, including when a FUSE coordinator runs from `/`. Relative
+performance paths use its shared state root; absolute overrides remain explicit.
+Unrelated working-directory project files cannot override repository settings.
+
 CLI NFS mounts register their serving process in both foreground and helper
 mode. Registration uses the session's actual endpoint, including its TCP token.
 The background launcher waits for that owner and attaches logs conditionally;

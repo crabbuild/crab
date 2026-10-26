@@ -11,7 +11,7 @@ Baseline: `origin/crab-v2` at `33f8e6c360d922b3ab1e2c0e5115a2d200eccd97`.
 Working branch: `codex/vfs-hardening`. PR:
 https://github.com/crabbuild/crab/pull/630 (base `crab-v2`). Follow-up hardening
 remains active. The PR is rebased onto `877b832b396`; final source and
-installed-role evidence is recorded through checkpoint 44.
+installed-role evidence is recorded through checkpoint 45.
 
 Baseline evidence and reproductions:
 `crab/docs/benchmarks/vfs-capsule-v2-audit-20261024.md` and its adjacent evidence
@@ -2906,6 +2906,97 @@ make the sequence pass. Remote LFS verification reuse, actual payload-retirement
 pins and the full lifecycle/format/performance matrix remain open. The goal is
 active, not achieved.
 
+## Checkpoint 45 — repository-owned helper configuration and telemetry
+
+The checkpoint-44 sequential native failure is repaired. The old installed
+helper completes LFS publication, then its managed FUSE later-push control creates
+`/.crab/perf-state.json`, its lock and `audit/events.jsonl`. The next mount
+correctly refuses a nested repository. Reproduction survived restarting the
+same dedicated Colima instance; no marker deletion or admission bypass is used
+in final qualification.
+
+Two focused regressions fail before repair: actual Capsule push writes metrics
+and audit state into an unrelated cwd instead of the selected Git owner; malformed
+`crab.toml` in that unrelated cwd also prevents configuration resolution despite
+valid selected-repository settings. Final Linux qualification additionally catches
+an existing atomic rejection test opening staging outside Git before reporting a
+known parse-time failure. Its assertion is unchanged; source admission is fixed.
+
+- Reuse the captured shared Git state root in `RemoteHelperContext` for metrics,
+  audit and existing push state. Relative performance paths join that owner;
+  explicit absolute paths remain absolute. The installed Rust standard-library
+  `Path::join` contract explicitly replaces the prefix for an absolute argument.
+  Existing metric deltas and best-effort telemetry error policy remain intact.
+- Resolve configuration once through the canonical selected-Git-directory
+  resolver. Delete the duplicate cwd project overlay and swallowed discovery
+  alternative. The canonical resolver already merges repository/worktree project
+  settings; unrelated cwd files cannot fail or override that merge.
+- Admission rejects actual pushes without a captured local owner. Parse-only
+  rejection batches need no local telemetry. An atomic batch with a rejected
+  sibling now avoids store, staging and push-auth preparation before reporting
+  its known rejection; admitted sessions retain audit behavior. Existing
+  protected-push atomic enforcement and dry-run outcomes remain intact.
+
+Evidence map: native mounted publication supplies explicit Git metadata to the
+normal remote helper; `run_remote_helper` captures the owner,
+`run_remote_helper_loop` carries it, and `dispatch_batch` uses the existing
+`record_push_audit_event` / `SessionCache::persist_pending_metrics` boundaries.
+Canonical configuration, Git discovery/common-directory resolution, metric
+persistence, audit append, CLI push, release and replica callers were inspected.
+Sibling CLI push/release/replica paths already anchor audit state explicitly.
+Both current `origin/main` and `origin/crab-v2` retain the relative helper paths
+and duplicate cwd overlay. Five new inline tests cover selected configuration,
+relative/absolute/disabled metrics with accumulated deltas, parse-only/atomic
+rejection, missing owner and real Capsule publication from unrelated cwd.
+
+Is this the best bounded fix? Ownership already exists at helper admission, so
+passing that owner to telemetry and using canonical configuration removes the
+second discovery path. Changing daemon cwd, bypassing nested-mount validation or
+adding another config/env option would leave ownership ambiguous. Production
+Rust grows by five lines; test fixtures stop passing an unused push-state borrow.
+No dependency, serialized format, config option, alias or fallback is added.
+
+Final-source qualification:
+
+- Dedicated Linux: **450 CLI tests** (152 helper, 137 config, 22 metrics,
+  138 mount and one audit), **675 VFS tests** and all **18 native NFS/FUSE tests**
+  pass. macOS: all **152 helper tests** pass. Minimal CLI checks pass on both.
+- Regular combined NFS/FUSE CLI Clippy completes on both platforms with warnings
+  (656 macOS / 657 Linux). All 29 helper warnings point to unchanged primary
+  source lines against checkpoint-44; that mapping is not a baseline build or
+  strict whole-CLI cleanliness proof. No lint suppression or baseline changes.
+- Make installs finish before native proof. In one fresh Linux container the
+  original, unmodified publication flow runs on NFS/FUSE, then the original
+  ignored-content flow runs on NFS/FUSE with no cleanup between flows. No root
+  marker is created; ordinary detach, coordinator exit/state cleanup and
+  independent eager-clone/hash checks pass.
+- Enhanced Linux NFS/FUSE and macOS NFS publication additionally select valid
+  Git metadata from a cwd with malformed project config, verify relative/custom
+  metrics and audit at the selected owner, and remount after later push in that
+  same working directory. All three historical 6 MiB payloads, held descriptors,
+  132-byte committed pointer, no-push remount and strict Git fsck pass.
+  Ignored-content retention passes on macOS NFS; the 32 MiB local multiwindow
+  read/remount flow passes again on both Linux adapters. No forced detach.
+- Hash binding verifies **1,558 source/build inputs** unchanged and all four
+  installed roles unchanged before/after qualification on each platform.
+  External telemetry qualification reports retain the source manifest, failing
+  reproductions, final test logs and native result JSON. No raw evidence enters
+  the PR.
+
+The dedicated VM disk was increased from 40 to 80 GiB after reaching 2.4 GiB
+free. Only this task's RustFS containers and Colima instance were stopped and
+restarted; storage data, network and endpoint were retained. The unrelated VM
+was untouched. All 2,156 excluded raw benchmark files remain outside Git;
+tests stay inline/flat, with no feature module plus nested tests directory.
+
+Next: remove remaining stored pack-v1 authority, starting with shared legacy
+initialization and its CLI publication consumers, then protected receive and
+maintenance/GC/replication dispatch. Search real callers before removing exports;
+valid v1 refusal fixtures must keep proving authoritative rejection. Current Git
+LFS and Crab pointer spec/v1 formats are separate contracts and remain supported.
+Remote LFS proof reuse, actual payload-retirement pins, all-mode lifecycle/crash
+qualification and optimized performance remain open. The goal stays active.
+
 ## Remaining priority order
 
 The helper-layout gap and live read-only inspection leak are closed by the
@@ -2928,12 +3019,13 @@ reproduced foreground FUSE PID/detach failures and makes shared native queries
 error-aware. Early preparation, concurrent managed owners, target identity and
 the macOS mapping barrier still require proof before claiming teardown complete.
 
-Immediate correctness priority: checkpoint-44 reproduces managed FUSE later
-push writing telemetry under `/.crab`, blocking subsequent native mounts. Fix
-repository-owned telemetry path resolution and rerun the sequential flow without
-removing its marker or bypassing admission. Checkpoints 42/43 repair canonical LFS
-publication and ignored-byte retention; checkpoint-44 reduces local verification
-amplification with bounded block proofs. Remote proof reuse, LFS generation
+Checkpoint-45 closes the reproduced helper configuration/telemetry ownership
+failure and qualifies the original sequential publication → next-mount flow on
+Linux NFS/FUSE without marker deletion or admission bypass. Immediate format
+priority: retire shared legacy initialization and remaining CLI, protected
+receive, metadb/GC and maintenance/replication stored pack-v1 dispatch.
+Checkpoints 42/43 repair canonical LFS publication and ignored-byte retention;
+checkpoint-44 reduces local verification amplification with bounded block proofs. Remote proof reuse, LFS generation
 transitions, payload retirement and crash recovery remain open. Checkpoint-40 closes managed runtime-worker starvation;
 engine-drain cancellation and replacement-target races still need native proof. Preserve these ownership/read
 boundaries before widening concurrency. Git LFS is a current content type and

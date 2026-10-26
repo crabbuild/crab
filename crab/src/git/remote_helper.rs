@@ -415,8 +415,12 @@ enum Batch {
     Push(Vec<PushItem>),
 }
 
-fn batch_requires_repository(batch: &Batch) -> bool {
-    !matches!(batch, Batch::Push(items) if items.iter().all(|item| matches!(item, PushItem::Rejected { .. })))
+fn batch_requires_repository(batch: &Batch, options: &HelperOptions) -> bool {
+    // An atomic parse rejection cannot publish siblings. It must not acquire
+    // store, staging or auth state merely to report that known rejection.
+    !matches!(batch, Batch::Push(items) if
+        items.iter().all(|item| matches!(item, PushItem::Rejected { .. }))
+        || (options.atomic && items.iter().any(|item| matches!(item, PushItem::Rejected { .. }))))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -562,13 +566,14 @@ impl SessionCache {
         &self.config
     }
 
-    fn persist_pending_metrics(&mut self) -> Result<()> {
+    fn persist_pending_metrics(&mut self, repo_root: &std::path::Path) -> Result<()> {
         if !self.config.perf_persist {
             return Ok(());
         }
         let current = self.metrics.snapshot().summary();
         let delta = current.delta_since(&self.persisted_metrics);
-        persist_metrics_delta(std::path::Path::new(&self.config.perf_path), &delta)?;
+        let path = repo_root.join(&self.config.perf_path);
+        persist_metrics_delta(&path, &delta)?;
         self.persisted_metrics = current;
         Ok(())
     }
@@ -578,23 +583,9 @@ fn resolve_remote_helper_config() -> Result<crate::core::config::Config> {
     // Git may launch a nested promisor helper while a push is still running.
     // That helper can start outside the worktree, so resolve the shared repo
     // config from Git's explicit directory instead of trusting its cwd.
-    let repo_root = super::discover::discover_git_dir()
-        .ok()
-        .map(|git_dir| repo_root_from_git_dir(&git_dir));
-    let mut config = repo_root.as_deref().map_or_else(
-        crate::core::config::Config::resolve_local,
-        crate::core::config::Config::resolve_for_repo,
-    )?;
-    if let Ok(cwd) = std::env::current_dir()
-        && let Some(project) = crate::core::project_config::ProjectConfig::load_for_repo(&cwd)?
-    {
-        if config.remote_url.is_none() {
-            config.remote_url = Some(project.remote.url.clone());
-        }
-        if let Some(replication) = project.replication {
-            config.replication = Some(replication);
-        }
-    }
+    let git_dir = super::discover::discover_git_dir()?;
+    let repo_root = repo_root_from_git_dir(&git_dir);
+    let mut config = crate::core::config::Config::resolve_for_repo(&repo_root)?;
     apply_internal_remote_helper_overrides(&mut config);
     Ok(config)
 }
@@ -686,7 +677,6 @@ pub async fn run_remote_helper(
     let mut options = HelperOptions::default();
     let mut line_buf = String::new();
     let mut preflight_cache = SessionCache::new(config.clone());
-    let mut preflight_push_state = PushState::default();
     let first_repository_batch = loop {
         let Some(batch) = read_batch(
             &mut reader,
@@ -699,7 +689,7 @@ pub async fn run_remote_helper(
         else {
             return Ok(());
         };
-        if batch_requires_repository(&batch) {
+        if batch_requires_repository(&batch, &options) {
             break batch;
         }
         Box::pin(dispatch_batch(
@@ -711,7 +701,7 @@ pub async fn run_remote_helper(
             "",
             &mut preflight_cache,
             remote_name,
-            &mut preflight_push_state,
+            None,
             progress_mode,
             jsonl_stderr_stream.as_ref(),
             Some(invocation_url.as_str()),
@@ -765,7 +755,7 @@ pub async fn run_remote_helper(
         prefix: resolved.repository_prefix,
         cache,
         push_state: PushState::load(&repo_root),
-        push_state_repo_root: repo_root,
+        repo_root,
         progress_mode,
         jsonl_stderr_stream,
         invocation_url,
@@ -792,7 +782,7 @@ struct RemoteHelperContext {
     prefix: String,
     cache: SessionCache,
     push_state: PushState,
-    push_state_repo_root: std::path::PathBuf,
+    repo_root: std::path::PathBuf,
     progress_mode: OutputMode,
     jsonl_stderr_stream: Option<Arc<Mutex<JsonlStream<Stderr>>>>,
     invocation_url: String,
@@ -842,8 +832,8 @@ where
             store,
             prefix,
             mut cache,
-            mut push_state,
-            push_state_repo_root,
+            push_state,
+            repo_root,
             progress_mode,
             jsonl_stderr_stream,
             invocation_url,
@@ -869,7 +859,7 @@ where
                     .await?
                     else {
                         // Save push state on clean exit.
-                        if let Err(e) = push_state.save(&push_state_repo_root) {
+                        if let Err(e) = push_state.save(&repo_root) {
                             tracing::warn!(error = %e, "failed to save push state");
                         }
                         return Ok(());
@@ -931,7 +921,7 @@ where
                     writer.flush().await?;
                     Ok(())
                 };
-                if let Err(error) = push_state.save(&push_state_repo_root) {
+                if let Err(error) = push_state.save(&repo_root) {
                     tracing::warn!(error = %error, "failed to save push state");
                 }
                 return result;
@@ -952,7 +942,10 @@ where
             }
             // Fetch/list never need local staging. Open one reader per push batch
             // so a damaged local index cannot block reads or retain a session lock.
-            let staging = if matches!(batch, Batch::Push(_)) && !options.dry_run {
+            let staging = if matches!(batch, Batch::Push(_))
+                && !options.dry_run
+                && batch_requires_repository(&batch, &options)
+            {
                 open_staging_for_push().await?
             } else {
                 PushStaging::Missing
@@ -966,7 +959,7 @@ where
                 &prefix,
                 &mut cache,
                 remote_name,
-                &mut push_state,
+                Some(&repo_root),
                 progress_mode,
                 jsonl_stderr_stream.as_ref(),
                 Some(invocation_url.as_str()),
@@ -1497,7 +1490,7 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
     prefix: &str,
     cache: &mut SessionCache,
     _remote_name: &str,
-    _push_state: &mut PushState,
+    repo_root: Option<&std::path::Path>,
     progress_mode: OutputMode,
     jsonl_stderr_stream: Option<&Arc<Mutex<JsonlStream<Stderr>>>>,
     remote_url: Option<&str>,
@@ -1685,11 +1678,17 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                     return Ok(());
                 }
 
+                // Parse-only rejections need no repository. Every actual push
+                // must carry its captured owner before setup can write any state.
+                let requires_repository = batch_requires_repository(batch, options);
+                if requires_repository && repo_root.is_none() {
+                    return Err(CrabError::Protocol(
+                        "push batch has no local repository owner".into(),
+                    ));
+                }
                 let config = cache.config().clone();
                 let mut base_config = PushConfig::from_config(&config);
-                let mut push_setup_error = if specs.is_empty() {
-                    None
-                } else {
+                let mut push_setup_error = if requires_repository {
                     configure_active_active_push_coordinator(
                         &config,
                         remote_url,
@@ -1698,6 +1697,8 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                     )
                     .await
                     .err()
+                } else {
+                    None
                 };
                 let mut native_config = native_push_config_for_helper(
                     base_config,
@@ -1706,7 +1707,7 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                     jsonl_stderr_stream,
                 );
                 let mut push_store = store.cloned();
-                if !specs.is_empty() && push_setup_error.is_none() {
+                if requires_repository && push_setup_error.is_none() {
                     if let Some(repository) = managed_repository {
                         match store {
                             Some(read_store) => {
@@ -1854,19 +1855,23 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                         .outcomes
                         .insert(dst, RefPushOutcome::Rejected(reason));
                 }
-                if let Err(err) = record_push_audit_event(
-                    &default_log_path(),
-                    remote_url,
-                    prefix,
-                    &ordered_specs,
-                    &result,
-                    None,
-                ) {
-                    warn!(%err, "failed to append push audit event");
-                }
-
-                if let Err(error) = cache.persist_pending_metrics() {
-                    warn!(%error, "failed to persist performance counters");
+                if let Some(repo_root) = repo_root {
+                    // Daemon helpers may run from /. Telemetry belongs to the
+                    // same selected repository as local state, never that cwd.
+                    let audit_path = repo_root.join(default_log_path());
+                    if let Err(err) = record_push_audit_event(
+                        &audit_path,
+                        remote_url,
+                        prefix,
+                        &ordered_specs,
+                        &result,
+                        None,
+                    ) {
+                        warn!(%err, "failed to append push audit event");
+                    }
+                    if let Err(error) = cache.persist_pending_metrics(repo_root) {
+                        warn!(%error, "failed to persist performance counters");
+                    }
                 }
 
                 let response = format_push_response(&result, &ordered_specs);
@@ -4034,14 +4039,14 @@ mod tests {
     fn test_context(
         store: crate::storage::store::Store,
         prefix: &str,
-        push_state_repo_root: std::path::PathBuf,
+        repo_root: std::path::PathBuf,
     ) -> RemoteHelperContext {
         RemoteHelperContext {
             store,
             prefix: prefix.to_owned(),
             cache: SessionCache::new(crate::core::config::Config::default()),
             push_state: PushState::default(),
-            push_state_repo_root,
+            repo_root,
             progress_mode: OutputMode::Text,
             jsonl_stderr_stream: None,
             invocation_url: format!("crab://bucket/{prefix}"),
@@ -4131,6 +4136,174 @@ mod tests {
             run_with_context(input, context, tokio_util::sync::CancellationToken::new()).await;
         result.expect("remote helper protocol session");
         output
+    }
+
+    #[test]
+    fn helper_config_does_not_read_an_unrelated_cwd_project() {
+        let temporary = tempfile::tempdir().unwrap();
+        let selected = temporary.path().join("selected");
+        let unrelated = temporary.path().join("unrelated");
+        std::fs::create_dir_all(&selected).unwrap();
+        std::fs::create_dir_all(&unrelated).unwrap();
+        run_git(&selected, &["init", "-q"]);
+        std::fs::create_dir_all(selected.join(".crab")).unwrap();
+        std::fs::write(
+            selected.join(".crab/local.toml"),
+            "[uploadpack]\nallowReachableSHA1InWant = true\n",
+        )
+        .unwrap();
+        std::fs::write(unrelated.join("crab.toml"), "invalid = [").unwrap();
+        let git_dir = selected.join(".git");
+        let _guard = GitEnvCwdGuard::set(&unrelated, &git_dir, &selected);
+        let config = resolve_remote_helper_config().unwrap();
+        assert!(config.uploadpack_allow_reachable_sha_in_want);
+    }
+
+    #[test]
+    fn metrics_paths_preserve_repository_relative_and_absolute_configuration() {
+        let temporary = tempfile::tempdir().unwrap();
+        let owner = temporary.path().join("selected");
+        let absolute = temporary.path().join("absolute.json");
+        for (path, enabled) in [
+            ("metrics/state.json".to_owned(), true),
+            (absolute.to_str().unwrap().to_owned(), true),
+            ("disabled/state.json".to_owned(), false),
+        ] {
+            let config = crate::core::config::Config {
+                perf_path: path.clone(),
+                perf_persist: enabled,
+                ..Default::default()
+            };
+            let mut cache = SessionCache::new(config);
+            cache.metrics.add_bytes_uploaded(7);
+            cache.persist_pending_metrics(&owner).unwrap();
+            cache.metrics.add_bytes_uploaded(5);
+            cache.persist_pending_metrics(&owner).unwrap();
+            let output = owner.join(path);
+            let actual = output.exists().then(|| {
+                crate::core::metrics::load_metrics_summary(&output)
+                    .unwrap()
+                    .bytes_uploaded
+            });
+            assert_eq!(actual, enabled.then_some(12));
+        }
+    }
+
+    #[tokio::test]
+    async fn parse_only_rejection_does_not_create_cwd_telemetry() {
+        let temporary = tempfile::tempdir().unwrap();
+        let _guard = GitEnvCwdGuard::set(
+            temporary.path(),
+            &temporary.path().join(".git"),
+            temporary.path(),
+        );
+        for (input, atomic_abort) in [
+            ("push refs/tags/v1^{}:refs/tags/v1^{}\n\n", false),
+            (
+                "option atomic true\npush refs/heads/main:refs/heads/main\npush refs/tags/v1^{}:refs/tags/v1^{}\n\n",
+                true,
+            ),
+        ] {
+            let (writer, mut read) = duplex(64 * 1024);
+            let io = DuplexIo {
+                reader: BufReader::new(Cursor::new(input.as_bytes().to_vec())),
+                writer,
+            };
+            let url = test_url();
+            let helper = Box::pin(run_remote_helper(
+                "origin",
+                &url,
+                io,
+                tokio_util::sync::CancellationToken::new(),
+            ));
+            let mut bytes = Vec::new();
+            let (result, received) = tokio::join!(helper, read.read_to_end(&mut bytes));
+            result.unwrap();
+            received.unwrap();
+            let output = String::from_utf8(bytes).unwrap();
+            assert_eq!(
+                (
+                    output.contains("bad-refname"),
+                    output.contains("atomic-abort"),
+                    temporary.path().join(".crab").exists()
+                ),
+                (true, atomic_abort, false)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn actual_push_requires_a_captured_repository_owner() {
+        let batch = Batch::Push(vec![PushItem::Spec(PushSpec {
+            force: false,
+            src: "refs/heads/main".into(),
+            dst: "refs/heads/main".into(),
+        })]);
+        let mut cache = SessionCache::new(crate::core::config::Config::default());
+        let mut writer = Vec::new();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let result = dispatch_batch(
+            &batch,
+            &HelperOptions::default(),
+            &mut writer,
+            None,
+            &PushStaging::Missing,
+            "",
+            &mut cache,
+            "origin",
+            None,
+            OutputMode::Text,
+            None,
+            None,
+            None,
+            None,
+            &cancel,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(CrabError::Protocol(message)) if message == "push batch has no local repository owner")
+                && writer.is_empty()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn push_telemetry_stays_with_the_selected_repository() {
+        let temporary = tempfile::tempdir().unwrap();
+        let selected = temporary.path().join("selected");
+        let unrelated = temporary.path().join("unrelated");
+        std::fs::create_dir_all(&selected).unwrap();
+        std::fs::create_dir_all(&unrelated).unwrap();
+        run_git(&selected, &["init", "-q", "-b", "main"]);
+        run_git(
+            &selected,
+            &["config", "user.email", "audit@example.invalid"],
+        );
+        run_git(&selected, &["config", "user.name", "Telemetry test"]);
+        std::fs::write(selected.join("base.txt"), b"selected repository bytes").unwrap();
+        run_git(&selected, &["add", "."]);
+        run_git(&selected, &["commit", "-qm", "seed"]);
+        let git_dir = selected.join(".git");
+        let _guard = GitEnvCwdGuard::set(&unrelated, &git_dir, &selected);
+        let store =
+            crate::storage::store::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        initialize_test_remote(&store, "telemetry-owner").await;
+        let context = test_context(store, "telemetry-owner", selected.clone());
+        let (output, result) = Box::pin(run_with_context(
+            "push refs/heads/main:refs/heads/main\n\n",
+            context,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await;
+        result.unwrap();
+        assert_eq!(
+            (
+                output,
+                selected.join(".crab/perf-state.json").is_file(),
+                selected.join(default_log_path()).is_file(),
+                unrelated.join(".crab").exists()
+            ),
+            ("ok refs/heads/main\n\n".to_owned(), true, true, false),
+        );
     }
 
     #[tokio::test]
@@ -5908,7 +6081,7 @@ mod tests {
     async fn push_batch_honors_dispatch_cancellation_token() {
         let _guard = GitWorktreeGuard::new();
         let mut cache = SessionCache::new(crate::core::config::Config::default());
-        let mut push_state = PushState::default();
+        let repo_root = TEST_GIT_REPO.git_dir.parent().unwrap();
         let cancel = tokio_util::sync::CancellationToken::new();
         cancel.cancel();
         let batch = Batch::Push(vec![PushItem::Spec(PushSpec {
@@ -5930,7 +6103,7 @@ mod tests {
             "remote-helper-cancel",
             &mut cache,
             "origin",
-            &mut push_state,
+            Some(repo_root),
             OutputMode::Text,
             None,
             Some("crab://bucket/remote-helper-cancel"),
@@ -6070,7 +6243,6 @@ mod tests {
         config.metadb.chunk_index.local_path =
             Some(tmp.path().join("metadb-cache/chunk-index.sqlite"));
         let mut cache = SessionCache::new(config);
-        let mut push_state = PushState::default();
         let cancel = tokio_util::sync::CancellationToken::new();
         let mut writer = Vec::new();
         let batch = Batch::Push(vec![PushItem::Spec(PushSpec {
@@ -6088,7 +6260,7 @@ mod tests {
             "remote-helper-dispatch",
             &mut cache,
             "origin",
-            &mut push_state,
+            Some(&repo),
             OutputMode::Text,
             None,
             Some("crab://bucket/remote-helper-dispatch"),
@@ -6175,7 +6347,7 @@ mod tests {
             "remote-helper-dispatch",
             &mut cache,
             "origin",
-            &mut push_state,
+            Some(&repo),
             OutputMode::Text,
             None,
             Some("crab://bucket/remote-helper-dispatch"),
@@ -6407,7 +6579,6 @@ mod tests {
         consumer_config.metadb.chunk_index.local_path =
             Some(tmp.path().join("consumer-metadb/chunk-index.sqlite"));
         let mut consumer_cache = SessionCache::new(consumer_config);
-        let mut consumer_push_state = PushState::default();
         let mut consumer_writer = Vec::new();
         Box::pin(dispatch_batch(
             &batch,
@@ -6418,7 +6589,7 @@ mod tests {
             "remote-helper-cold-consumer",
             &mut consumer_cache,
             "origin",
-            &mut consumer_push_state,
+            Some(&consumer),
             OutputMode::Text,
             None,
             Some("crab://bucket/remote-helper-cold-consumer"),
