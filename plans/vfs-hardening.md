@@ -11,7 +11,7 @@ Baseline: `origin/crab-v2` at `33f8e6c360d922b3ab1e2c0e5115a2d200eccd97`.
 Working branch: `codex/vfs-hardening`. PR:
 https://github.com/crabbuild/crab/pull/630 (base `crab-v2`). Follow-up hardening
 remains active. The PR is rebased onto `877b832b396`; final source and
-installed-role evidence is recorded through checkpoint 43.
+installed-role evidence is recorded through checkpoint 44.
 
 Baseline evidence and reproductions:
 `crab/docs/benchmarks/vfs-capsule-v2-audit-20261024.md` and its adjacent evidence
@@ -2802,6 +2802,110 @@ open. Next: bound LFS verification reuse and measure local/origin amplification
 without trusting mutable cache metadata; retain source/session ownership through
 cancellation and payload retirement. The full hardening goal remains active.
 
+## Checkpoint 44 — bounded local LFS block verification reuse
+
+Checkpoint-43's matched native diagnostic measured 128 MiB of local object reads
+for a 32 MiB sequential payload on both Linux backends. Four cold 8 MiB windows
+each repeated whole-object SHA-256 verification. Metadata/mtime caching cannot
+safely remove those reads because a local content-addressed pathname is mutable.
+A new source-incarnation regression fails before this repair: after one verified
+read, replacing the pathname redirects the next range to different bytes.
+
+`LfsReadSession::read_local_range` now owns canonical local reads. Its first
+selection verifies complete SHA-256 and exact size while deriving BLAKE3 proofs
+for 1 MiB blocks. It retains the opened file and those proofs; later ranges read
+and verify every covered block before returning owned bytes. The per-source
+mutex protects that descriptor's seek position and serializes initial
+verification. Replacement/unlink cannot redirect a retained source, and changed
+size or covered-block content fails. No timestamp or pathname is byte authority.
+
+The per-session cache retains at most 128 sources and 8 MiB of block hashes.
+Admission accounts for a proof before allocation; active claims cannot be
+evicted into duplicate verifiers. Reads whose proofs cannot fit still perform
+full SHA-256 verification without retaining them. Four process-wide verification
+permits bound active blocking readers; jobs retain admission after future
+cancellation. Close rejects new jobs, clears retained sources and drains admitted
+work. A failing range clears its proof for a fresh later repair; it does not
+select remote in that failing call. This bounded cache is not a durable LFS
+GC-root or an open-file lifetime pin across eviction.
+
+The former free `local::read_range` implementation is deleted. Its only
+production caller, `PointerReader`, uses the session-owned API directly. The
+free API was introduced on this untagged branch at checkpoint-41; no release tag
+contains that commit. There is no compatibility wrapper or second local reader.
+SDK remote LFS streams continue using the same tracked session lifecycle, with
+no new local policy or dependency edge.
+
+Evidence map and best-fix assessment:
+
+| Surface | Entry / owner | Caller / callee / sibling contract | Proof |
+| --- | --- | --- | --- |
+| Local byte authority | VFS hydration → PointerReader → LfsReadSession | Full SHA-256 authenticates block proofs; pinned BLAKE3 1.8.7 Hash is 32 bytes; private File/Seek position stays under its entry mutex | Incarnation replacement, changed covered block outside requested bytes, boundary/tail repair and existing complete-source rejection tests |
+| Retention/admission | Session state/cache and existing global verification permits | Active claims survive cache pressure; close serializes with tracked-job admission | Proof-byte capacity/live-claim test, 129-source eviction/unlink/close test, existing detached-job drain test |
+| Remote distinction | PointerReader local selection and shared hydrator | Only open-time absence selects captured remote; selected corruption remains failure | New VFS regression verifies one local window, corrupts a later block and rejects its new-window read despite valid remote bytes; fresh repair succeeds |
+| Both native adapters | Shared hydration/session owner | Foreground NFS and managed FUSE share canonical local verification; view changes share the mount state | Exact 32 MiB multiwindow reads plus retained descriptor/publication/remount/clone flows on real Capsule/RustFS |
+| Main/base | origin/main cc2e4e25f46; origin/crab-v2 877b832b396 | Neither has current VFS LFS payload integration; preceding d5cd0de66d9 repeats full local hashes | Matched preceding-head byte-count trace and failing new source-incarnation regression retained |
+
+This is the best bounded fix because canonical LFS ownership supplies reusable
+proofs to all VFS adapters without teaching VFS a second integrity algorithm or
+copying whole payloads into another disk cache. New production LOC supplies that
+proof index, source retention and bounded admission; the old scan is removed and
+existing verification assertions remain intact. Requested output buffers and
+other sessions are separate resources; no whole-process RSS ceiling is claimed.
+
+Final-source proof:
+
+- Linux: 69 LFS tests, 237 read-library tests, 675 VFS tests and all 18 native
+  NFS/FUSE tests pass. All 42 hydration tests pass, including the new corrupt
+  later-block/valid-remote rejection. Both platforms pass strict all-target
+  Clippy for LFS/read/VFS, minimal read/VFS checks, FUSE-only VFS checks and format.
+- macOS: all 69 LFS tests plus 85 selected VFS publication/hydration/catalog tests
+  pass. An initial existing linked-worktree assertion compares symlink aliases
+  under default `/var` TMPDIR; canonical Workspace TMPDIR passes unchanged.
+  No assertion/baseline was weakened. Review also caught local output allocation
+  before open-time absence: a missing object with a large range returned OOM
+  rather than absence. Its new regression fails first; allocation now follows
+  source selection, so remote-only reads do not allocate/discard local output.
+- Both platforms use fresh Make-installed four-role artifacts. Native Linux
+  NFS/FUSE and macOS NFS pass 32 MiB local no-push commit/remount/multiwindow hashes,
+  the preceding 6 MiB two-commit/later-push/independent-clone flow with all three
+  historical LFS payloads, and isolated ignored-content retention/policy/clone
+  flows. Pointer types/sizes/LFS SHA-256, strict Git fsck and normal detach pass.
+- Matched Linux read tracing measures **56 MiB** for 32 MiB returned on each
+  backend, versus 128 MiB before: **4× → 1.75×**, a 56.25% reduction in local
+  bytes. The first full verification returns its requested range, then three
+  remaining windows read their proven blocks. Warm client reads add zero local
+  object reads. Instrumented debug timings are about 1.68/1.63 seconds versus
+  4.36/4.41 seconds before; these single samples with client caching enabled do
+  not qualify optimized throughput, physical disk I/O, tail latency or RSS.
+- Final binding checks cover 1,558 source/build inputs and unchanged installed
+  role sets. An initial manifest preceded rustfmt by two seconds for one file;
+  its final hash is corrected, and fresh FUSE/NFS builds on both platforms confirm
+  all affected libraries/binaries are current without recompilation. No
+  dependency/version/configuration change,
+  raw benchmark inclusion or nested feature/tests.rs layout is introduced.
+  One macOS replay started before the final Make install completed; it is excluded
+  from final-source native evidence and repeated after installation/hashing.
+
+The sequential native driver exposes a separate reproducible correctness gate:
+managed FUSE's later push creates `/.crab/perf-state.json`, its lock and
+`audit/events.jsonl`. A subsequent mount then correctly rejects its target as
+inside a repository because the root now has a `.crab` marker. Both publication
+flows themselves finish with correct clones and normal detach; the next startup
+fails. An isolated retention container passes both backends. A second sequence
+reproduces the root marker, and per-command snapshots localize its first
+appearance to managed FUSE's later-push control. These failures remain recorded;
+a passing isolated fixture does not close the combined-flow gate.
+
+Next investigate remote-helper telemetry defaults/configuration and Git-directory
+propagation from the daemon's cwd. `Config::perf_path` defaults to a relative
+`.crab/perf-state.json`; remote-helper persistence consumes it unchanged. Its
+audit append uses the cwd-relative `default_log_path()` directly. Repository
+configuration discovery alone does not rebase these paths. Do not bypass nested-mount validation or delete the marker to
+make the sequence pass. Remote LFS verification reuse, actual payload-retirement
+pins and the full lifecycle/format/performance matrix remain open. The goal is
+active, not achieved.
+
 ## Remaining priority order
 
 The helper-layout gap and live read-only inspection leak are closed by the
@@ -2824,11 +2928,13 @@ reproduced foreground FUSE PID/detach failures and makes shared native queries
 error-aware. Early preparation, concurrent managed owners, target identity and
 the macOS mapping barrier still require proof before claiming teardown complete.
 
-Immediate content priority: checkpoint-42 repairs canonical LFS publication;
-checkpoint-43 repairs ignored-byte retention and shared publication scope through
-adoption, retry and remount. Bound whole-object verification reuse and measure
-local/origin amplification next. LFS generation transitions, payload retirement
-and crash recovery remain open. Checkpoint-40 closes managed runtime-worker starvation;
+Immediate correctness priority: checkpoint-44 reproduces managed FUSE later
+push writing telemetry under `/.crab`, blocking subsequent native mounts. Fix
+repository-owned telemetry path resolution and rerun the sequential flow without
+removing its marker or bypassing admission. Checkpoints 42/43 repair canonical LFS
+publication and ignored-byte retention; checkpoint-44 reduces local verification
+amplification with bounded block proofs. Remote proof reuse, LFS generation
+transitions, payload retirement and crash recovery remain open. Checkpoint-40 closes managed runtime-worker starvation;
 engine-drain cancellation and replacement-target races still need native proof. Preserve these ownership/read
 boundaries before widening concurrency. Git LFS is a current content type and
 must not be deleted as pack-v1 compatibility.

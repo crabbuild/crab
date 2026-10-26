@@ -76,7 +76,9 @@ a local pin never replaces authenticated captured remote ownership.
 `PointerReader` accepts resolved local LFS storage separately from Crab staging.
 Its LFS range path selects the captured remote only for absent local payloads;
 selected local corruption and I/O errors fail. Callers own an `LfsReadSession`
-and drain it after outstanding read futures finish/drop. Remote LFS shares
+whose local source cache retains bounded authenticated block proofs and opened
+files; it never trusts timestamps or reopens a retained pathname. Drain it after
+outstanding read futures finish/drop. Remote LFS shares
 buffer/download admission with reconstruction and consumes verified stream EOF.
 Hydration fixtures cannot prove live replica selection or mounted read behavior;
 qualify those affected consumers separately.

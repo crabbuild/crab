@@ -225,91 +225,6 @@ pub fn storage_from_git(git_dir: &Path) -> std::io::Result<PathBuf> {
     Ok(storage_dir(&common, configured.as_deref()))
 }
 
-/// Read a bounded range only after verifying the complete local payload in the same pass.
-/// Returns absence only when opening the object fails with `NotFound`.
-/// The session retains verification admission if the awaiting future is dropped.
-pub async fn read_range(
-    storage: &Path,
-    oid: &[u8; 32],
-    size: u64,
-    range: std::ops::Range<u64>,
-    cancel: &CancellationToken,
-    session: &crate::LfsReadSession,
-) -> crate::Result<Option<bytes::Bytes>> {
-    if range.start > range.end || range.end > size {
-        return Err(std::io::Error::new(
-            std::io::ErrorKind::InvalidInput,
-            "local LFS read range exceeds its declared size",
-        )
-        .into());
-    }
-    let permit = tokio::select! {
-        biased;
-        () = cancel.cancelled() => return Err(std::io::Error::new(
-            std::io::ErrorKind::Interrupted, "local LFS verification cancelled",
-        ).into()),
-        result = crate::object_store::origin::verification_permit() => result?,
-    };
-    let storage = storage.to_owned();
-    let oid = *oid;
-    let cancel = cancel.clone();
-    session
-        .spawn_blocking(move || {
-            use std::io::Read;
-            let _permit = permit;
-            let source = object_path(&storage, &oid);
-            let mut input = match std::fs::File::open(source) {
-                Ok(input) => input,
-                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
-                Err(error) => return Err(error.into()),
-            };
-            let corrupt = || crate::LfsError::ObjectCorrupt {
-                oid: crab_git::lfs_pointer::hex_encode(&oid),
-            };
-            let capacity =
-                usize::try_from(range.end - range.start).map_err(std::io::Error::other)?;
-            let mut bytes = Vec::new();
-            bytes
-                .try_reserve_exact(capacity)
-                .map_err(|source| std::io::Error::new(std::io::ErrorKind::OutOfMemory, source))?;
-            let mut hasher = Sha256::new();
-            let mut offset = 0u64;
-            let mut buffer = [0; 64 * 1024];
-            loop {
-                if cancel.is_cancelled() {
-                    return Err(std::io::Error::new(
-                        std::io::ErrorKind::Interrupted,
-                        "local LFS verification cancelled",
-                    )
-                    .into());
-                }
-                let count = input.read(&mut buffer)?;
-                if count == 0 {
-                    break;
-                }
-                let end = offset
-                    .checked_add(count as u64)
-                    .filter(|end| *end <= size)
-                    .ok_or_else(corrupt)?;
-                hasher.update(&buffer[..count]);
-                let start = range.start.max(offset);
-                let selected_end = range.end.min(end);
-                if start < selected_end {
-                    bytes.extend_from_slice(
-                        &buffer[(start - offset) as usize..(selected_end - offset) as usize],
-                    );
-                }
-                offset = end;
-            }
-            if offset != size || hasher.finalize().as_slice() != oid || bytes.len() != capacity {
-                return Err(corrupt());
-            }
-            Ok(Some(bytes::Bytes::from(bytes)))
-        })?
-        .await
-        .map_err(std::io::Error::other)?
-}
-
 /// Failure to freeze a local payload for publication.
 #[derive(Debug, thiserror::Error)]
 pub enum SnapshotError {
@@ -398,15 +313,9 @@ mod tests {
             (b"abcdef".as_slice(), 7, false),
         ] {
             std::fs::write(&path, body).unwrap();
-            let result = read_range(
-                root.path(),
-                &oid,
-                declared,
-                1..3,
-                &CancellationToken::new(),
-                &session,
-            )
-            .await;
+            let result = session
+                .read_local_range(root.path(), &oid, declared, 1..3, &CancellationToken::new())
+                .await;
             if valid {
                 assert_eq!(result.unwrap().unwrap(), b"bc".as_slice());
             } else {
@@ -417,17 +326,49 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn verified_local_ranges_retain_the_opened_incarnation() {
+        let root = tempfile::tempdir().unwrap();
+        let body = vec![b'a'; 2 * 1024 * 1024];
+        let oid: [u8; 32] = Sha256::digest(&body).into();
+        let path = object_path(root.path(), &oid);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &body).unwrap();
+        let session = crate::LfsReadSession::default();
+        let cancel = CancellationToken::new();
+        session
+            .read_local_range(root.path(), &oid, body.len() as u64, 0..1, &cancel)
+            .await
+            .unwrap();
+        std::fs::rename(&path, root.path().join("retired")).unwrap();
+        std::fs::write(&path, vec![b'X'; body.len()]).unwrap();
+        let next = session
+            .read_local_range(
+                root.path(),
+                &oid,
+                body.len() as u64,
+                1024 * 1024..1024 * 1024 + 4,
+                &cancel,
+            )
+            .await;
+        session.close().await;
+        assert_eq!(next.unwrap().unwrap(), b"aaaa".as_slice());
+    }
+
+    #[tokio::test]
     async fn local_absence_differs_from_unreadable_object() {
         let root = tempfile::tempdir().unwrap();
         let session = crate::LfsReadSession::default();
         let cancel = CancellationToken::new();
-        let missing = read_range(root.path(), &[0; 32], 3, 0..1, &cancel, &session)
+        let missing = session
+            .read_local_range(root.path(), &[0; 32], 3, 0..1, &cancel)
             .await
             .unwrap();
         assert!(missing.is_none());
         let path = object_path(root.path(), &[0; 32]);
         std::fs::create_dir_all(&path).unwrap();
-        let invalid = read_range(root.path(), &[0; 32], 3, 0..1, &cancel, &session).await;
+        let invalid = session
+            .read_local_range(root.path(), &[0; 32], 3, 0..1, &cancel)
+            .await;
         session.close().await;
         assert!(invalid.is_err());
     }

@@ -165,7 +165,7 @@ impl PointerReader {
             let local = tokio::select! {
                 biased;
                 () = cancel.cancelled() => return Err(ReadError::Cancelled),
-                result = crab_lfs::local::read_range(storage, &pointer.oid, pointer.size, range.clone(), cancel, session) => result?,
+                result = session.read_local_range(storage, &pointer.oid, pointer.size, range.clone(), cancel) => result?,
             };
             if let Some(bytes) = local {
                 return Ok(PointerRead {

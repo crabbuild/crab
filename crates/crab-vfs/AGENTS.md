@@ -48,7 +48,9 @@ mount/control owners consume the pipeline output separately.
 - External Git content uses `blob::FilePointer` for Crab or LFS identity. Resolve
   local LFS storage settings during preparation/capture, never inside a data
   callback. Canonical LFS streams must reach verified EOF before caching bytes;
-  shutdown drains their shared `LfsReadSession`. Extensions requiring smudge fail.
+  shutdown drains their shared `LfsReadSession`. Local reuse retains opened files
+  and bounded block proofs derived from full SHA-256 verification; each later
+  range proves its covered blocks. Extensions requiring smudge fail.
 - Cached read windows retain integrity checks; corruption must not be served merely because the byte length matches.
   Source: `crates/crab-vfs/src/hydration.rs`.
 - Mounted publication owns both Crab and LFS pointer creation. Resolve effective

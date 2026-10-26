@@ -28,10 +28,13 @@ window cache. COW streams these same windows to owned backing storage. Shared
 shutdown drains admitted LFS verification jobs before releasing cache ownership.
 
 LFS extensions require a smudge implementation and are rejected explicitly.
-Cold local windows currently hash the complete payload, and remote partial reads
-can do the same when no validator receipt exists. Bounded verification reuse,
-origin amplification, LFS refresh and payload retirement remain
-qualification priorities. Git LFS `spec/v1` is a current pointer format,
+Cold local windows reuse session-owned block proofs after complete initial
+SHA-256 verification. Later ranges verify covered blocks through the retained
+file descriptor, with at most 128 sources/8 MiB of block hashes per session.
+Selected local corruption remains an error. Remote partial reads can still hash
+the complete payload when no validator receipt exists. Remote proof reuse,
+origin amplification, LFS refresh and payload retirement remain qualification
+priorities. Git LFS `spec/v1` is a current pointer format,
 independent of retired Crab pack-v1 storage authority.
 
 ## Architecture

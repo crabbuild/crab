@@ -1621,6 +1621,54 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn verified_local_lfs_blocks_reject_later_corruption_before_remote_selection() {
+        use sha2::{Digest, Sha256};
+        let root = tempfile::tempdir().unwrap();
+        let stored = crate::test_support::StoredPointer::new(
+            &root.path().join("shared"),
+            Bytes::from_static(b"Crab seed"),
+        )
+        .await;
+        let content = vec![b'q'; READ_THROUGH_WINDOW_SIZE as usize + 128];
+        let pointer = crab_git::LfsPointer {
+            oid: Sha256::digest(&content).into(),
+            size: content.len() as u64,
+            extensions: Vec::new(),
+        };
+        let layout = &stored.context.store_layout;
+        crab_lfs::LfsObjectStore::new(layout.store().clone(), layout.repo_prefix())
+            .put(&pointer.oid, Bytes::copy_from_slice(&content))
+            .await
+            .unwrap();
+        let storage = root.path().join("local-lfs");
+        let path = crab_lfs::local::object_path(&storage, &pointer.oid);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &content).unwrap();
+        let service = window_service(root.path(), &stored, CancellationToken::new()).for_reader(
+            Arc::new(crab_read::PointerReader::new(
+                Some(stored.context.hydrator.clone()),
+                None,
+                Some(storage),
+            )),
+        );
+        let selected = FilePointer::Lfs(pointer);
+        service.read_range(&selected, 0, 32).await.unwrap();
+        let mut changed = content.clone();
+        changed[READ_THROUGH_WINDOW_SIZE as usize + 64] = b'X';
+        std::fs::write(&path, changed).unwrap();
+        let corrupt = service
+            .read_range(&selected, READ_THROUGH_WINDOW_SIZE, 32)
+            .await;
+        std::fs::write(path, &content).unwrap();
+        let repaired = service
+            .read_range(&selected, READ_THROUGH_WINDOW_SIZE, 32)
+            .await
+            .unwrap();
+        service.shutdown().await;
+        assert!(corrupt.is_err() && repaired == Bytes::from_static(&[b'q'; 32]));
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn chunk_completion_releases_all_registered_readers() {
         use std::future::Future;
         use std::task::Poll;
