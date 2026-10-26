@@ -2782,6 +2782,20 @@ Final-source proof:
   Replica Enterprise Gates, HTTP server container and large-repository RustFS
   success. Other runs remain queued/in progress; new-head CI is still required.
 
+The next-priority diagnostic measures local LFS amplification on these same
+installed Linux roles. A fresh 32 MiB no-push LFS payload is committed, normally
+unmounted/remounted, then read sequentially with 1 MiB client reads. A temporary
+external libc-read interposer counts successful reads of local `lfs/objects`
+files only during the client intervals. Both foreground NFS and managed FUSE
+read 128 MiB in 2,048 calls for 32 MiB returned: 4× local-file amplification.
+The source agrees: four cold 8 MiB windows each verify the entire 32 MiB object.
+The warm client pass performs zero additional local object reads. Client caching
+is enabled; this does not isolate userspace cache hits or physical disk I/O.
+Instrumentation and debug builds perturb timing, so no optimized throughput or
+latency claim follows. Both mounts detach normally; the interposer and raw logs
+remain outside the repository. Bounded verified ownership, rather than trusting
+mutable file metadata, is the immediate optimization target.
+
 Ignored-content loss/unintended publication is repaired in these qualified
 flows. Full crash recovery, other mount owners and optimized performance remain
 open. Next: bound LFS verification reuse and measure local/origin amplification
