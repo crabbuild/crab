@@ -11,7 +11,7 @@ Baseline: `origin/crab-v2` at `33f8e6c360d922b3ab1e2c0e5115a2d200eccd97`.
 Working branch: `codex/vfs-hardening`. PR:
 https://github.com/crabbuild/crab/pull/630 (base `crab-v2`). Follow-up hardening
 remains active. The PR is rebased onto `877b832b396`; final source and
-installed-role evidence is recorded through checkpoint 42.
+installed-role evidence is recorded through checkpoint 43.
 
 Baseline evidence and reproductions:
 `crab/docs/benchmarks/vfs-capsule-v2-audit-20261024.md` and its adjacent evidence
@@ -2707,6 +2707,87 @@ records; retain excluded backing bytes through adoption, recovery and remount.
 Do not repair only LFS filtering and thereby turn unintended publication into
 silent byte deletion. The full PR remains unqualified and the goal remains active.
 
+## Checkpoint 43 — retain content outside Git publication scope
+
+The checkpoint-42 native failure and a new inline publisher regression fail
+before this repair. Ordinary ignored bytes are discarded by blanket cleanup;
+direct Crab/LFS pointer staging bypasses Git ignore selection. Filtering pointer
+staging alone would convert unintended publication into silent byte loss.
+
+Publication now prepares effective `.gitignore` and `.gitattributes` changes,
+then plans one selected record set before any content staging. Git's
+[`check-ignore` contract](https://git-scm.com/docs/git-check-ignore) excludes
+tracked files from ignore results, preserving tracked edits even when patterns
+match. Nested rules, negation and repository-local excludes remain Git-owned.
+Empty directories and directories containing only ignored children stay local.
+The existing disposable AppleDouble policy remains unchanged.
+
+Only selected records enter staging, live adoption, returned commit diff and
+cleanup. `OverlayStore::clear_paths` retires selected rows transactionally,
+checks remaining backing references and removes directories nonrecursively;
+retained child bytes cannot be swept with a committed parent. The publisher
+uses its original freeze-owning store. `overlay_cleaned` remains false while
+ignored or empty-directory rows remain. An ignored-only commit returns no new
+commit and retains bytes; a later overlay policy edit can include and publish them.
+Explicit reset remains the separate full-discard operation.
+
+Recovery journals record the committed path scope before commit creation.
+The content fingerprint includes that scope and the whole frozen mutation set.
+An existing retry regression caught an initial implementation that fingerprinted
+only selected records: it could acknowledge an older commit despite added writes.
+The source now preserves the existing rejection; its assertion is unchanged.
+New regressions preserve ignored bytes after failed adoption/retry and refuse
+missing or redirected cleanup scope. Recovery does not infer scope from old
+journals or add a compatibility reader.
+
+Evidence map and best-fix assessment:
+
+| Changed surface | Entry / owner | Caller / callee and siblings | Proof |
+| --- | --- | --- | --- |
+| Selection and policy | `commit_overlay_with_view` under publish freeze | Live `commit_mount_runtime` and offline `commit_overlay`; Git policy preparation → shared ordinary/Crab/LFS routing | Inline table covers all three content types; tracked edits, nested negation, repository excludes and ignored-only no-op |
+| Adoption and cleanup | Publisher → `CommitView` → `OverlayStore::clear_paths` | Live open-file capture/adoption receives selected records; snapshot install precedes row/backing retirement | Failed adoption/retry and scope corruption regressions; native held ignored descriptors remain readable/writable |
+| Namespace retention | Shared overlay store, both adapters | Deepest-first nonrecursive cleanup; remaining backing references retain ownership | Empty directory, symlink and ignored child under committed directory survive commit/remount |
+| Current main/base | `origin/main` cc2e4e25f46 and `origin/crab-v2` 877b832b396 | Both filter only `run_git_add` and clear the full overlay after publication | Original native failure and failing regression preserved; main/base source inspected |
+
+This is the best bounded fix because one publisher-owned selection governs all
+content types and all live/offline callers. Adapter-specific filtering or a
+pointer-only patch would leave the shared cleanup/adoption defect reachable.
+Production LOC grows to supply selective transactional retirement and recorded
+recovery ownership; five inline regressions account for most added lines.
+No dependency/configuration surface is added.
+
+Final-source proof:
+
+- Dedicated Linux: 674 VFS tests, all 18 native NFS/FUSE tests and all 138 CLI
+  mount-control tests pass. All 39 publisher tests pass, including five additions.
+- macOS: 147 selected publisher/overlay/hydration/snapshot tests pass. Both
+  platforms pass strict combined-feature all-target VFS Clippy, minimal and
+  FUSE-only checks, formatting and fresh Make installation.
+- Real Capsule/RustFS on Linux foreground NFS/managed FUSE and macOS foreground
+  NFS: ordinary/Crab/LFS selected versus ignored data, held ignored descriptor
+  read/write/fsync, retained empty directory/symlink/mixed-directory child,
+  no-push remount, ignored-only no-op, overlay `.gitignore` edit, later push,
+  independent eager clone and strict Git fsck all pass. Small committed pointer
+  types/sizes and exact LFS pointer SHA-256 are checked separately from hydrated
+  bytes. Every owner detaches normally; FUSE last-unmount coordinator exit and
+  state cleanup pass. No forced cleanup occurs.
+- Eager clone emits an existing warning when its LFS pass sees already hydrated
+  payload bytes; committed pointers, cloned bytes and Git integrity still verify.
+  Two initial macOS harness starts failed on fixture-directory setup before any
+  repository or mount operation. The final typed proof uses fresh output/input.
+- All 1,558 captured source/build inputs and both four-role installed artifact
+  sets remain unchanged through qualification. All 2,156 raw audit files remain
+  preserved/excluded; no nested `feature/tests.rs` layout is introduced.
+- Preceding head 02c8f451df0 CI now reports NFS Mount Evidence, GC qualification,
+  Replica Enterprise Gates, HTTP server container and large-repository RustFS
+  success. Other runs remain queued/in progress; new-head CI is still required.
+
+Ignored-content loss/unintended publication is repaired in these qualified
+flows. Full crash recovery, other mount owners and optimized performance remain
+open. Next: bound LFS verification reuse and measure local/origin amplification
+without trusting mutable cache metadata; retain source/session ownership through
+cancellation and payload retirement. The full hardening goal remains active.
+
 ## Remaining priority order
 
 The helper-layout gap and live read-only inspection leak are closed by the
@@ -2729,13 +2810,11 @@ reproduced foreground FUSE PID/detach failures and makes shared native queries
 error-aware. Early preparation, concurrent managed owners, target identity and
 the macOS mapping barrier still require proof before claiming teardown complete.
 
-Immediate content priority: checkpoint-42 repairs canonical LFS publication,
-no-push/remount/later-push and independent clone. The new native ignore-policy
-probe proves ignored ordinary bytes are discarded and ignored LFS bytes are
-published unexpectedly. Fix shared committed/retained scope, including recovery
-and open descriptors, before publication signoff. Then bound whole-object
-verification reuse and measure local/origin amplification. LFS generation
-transitions and payload retirement remain open. Checkpoint-40 closes managed runtime-worker starvation;
+Immediate content priority: checkpoint-42 repairs canonical LFS publication;
+checkpoint-43 repairs ignored-byte retention and shared publication scope through
+adoption, retry and remount. Bound whole-object verification reuse and measure
+local/origin amplification next. LFS generation transitions, payload retirement
+and crash recovery remain open. Checkpoint-40 closes managed runtime-worker starvation;
 engine-drain cancellation and replacement-target races still need native proof. Preserve these ownership/read
 boundaries before widening concurrency. Git LFS is a current content type and
 must not be deleted as pack-v1 compatibility.
@@ -2817,7 +2896,7 @@ Windows exclusivity/teardown proof in its dedicated environment.
 
 Correctness gates precede tuning. Generation, cache and descriptor ownership
 also determine which performance optimizations are safe. The full hardening
-goal remains active; the qualified checkpoint is published in draft PR #630.
+goal remains active; the qualified checkpoint is published in open PR #630.
 
 ## Resource and format decisions
 

@@ -95,6 +95,8 @@ struct PublishTransaction {
     error: Option<String>,
     #[serde(default)]
     overlay_fingerprint: Vec<String>,
+    // Scope is recorded before commit creation; recovery may retire only these paths.
+    published_paths: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone)]
@@ -384,7 +386,6 @@ pub(crate) fn commit_overlay_with_view(
     let all_records = store.records()?;
     let records = publishable_records(&all_records);
     let diff = diff_from_records(&records);
-    let overlay_fingerprint = overlay_records_fingerprint(&records)?;
     let mut transaction = PublishTransaction {
         id: transaction_id.clone(),
         status: "started".to_owned(),
@@ -393,10 +394,9 @@ pub(crate) fn commit_overlay_with_view(
         commit_oid: None,
         pushed: false,
         error: None,
-        overlay_fingerprint: overlay_fingerprint.clone(),
+        overlay_fingerprint: Vec::new(),
+        published_paths: None,
     };
-    write_transaction(&options.cache_dir, &transaction)?;
-
     let result = (|| {
         if records.is_empty() {
             let cleaned_ignored = if all_records.is_empty() {
@@ -436,19 +436,9 @@ pub(crate) fn commit_overlay_with_view(
         }
 
         let current_oid = rev_parse(&options.git_dir, &options.ref_name)?;
-        if let Some(result) = try_finalize_recorded_publish(
-            options,
-            &paths,
-            &current_oid,
-            &overlay_fingerprint,
-            &diff,
-            &records,
-            view,
-        )? {
-            set_transaction_status(&mut transaction, "recovered_existing");
-            transaction.commit_oid.clone_from(&result.commit_oid);
-            transaction.pushed = result.pushed;
-            write_transaction(&options.cache_dir, &transaction)?;
+        if let Some(result) =
+            try_finalize_recorded_publish(options, &store, &current_oid, &records, view)?
+        {
             return Ok(result);
         }
         if let Some(base_oid) = transaction.base_oid.as_deref()
@@ -464,6 +454,7 @@ pub(crate) fn commit_overlay_with_view(
             ));
         }
 
+        write_transaction(&options.cache_dir, &transaction)?;
         let mut worktree = PublishWorktree::create(&options.git_dir)?;
         let base = transaction
             .base_oid
@@ -501,25 +492,55 @@ pub(crate) fn commit_overlay_with_view(
 
         let applied_base_renames = apply_metadata_base_renames(&records, worktree.path())?;
         materialize_git_policy_files(worktree.path())?;
-        if overlay_changes_git_attributes(&records) {
-            let attribute_records = records
+        if overlay_changes_git_policy(&records) {
+            let policy_records = records
                 .iter()
-                .filter(|record| is_git_attributes_path(&record.path))
+                .filter(|record| is_git_policy_path(&record.path))
                 .cloned()
                 .collect::<Vec<_>>();
             apply_records(
-                &attribute_records,
+                &policy_records,
                 worktree.path(),
                 &std::collections::HashSet::new(),
                 &applied_base_renames,
             )?;
-            run_git_add(
-                worktree.path(),
-                &attribute_records,
-                &[],
-                &applied_base_renames,
-            )?;
+            let policy_records = select_committed_records(worktree.path(), &policy_records)?;
+            run_git_add(worktree.path(), &policy_records, &[], &applied_base_renames)?;
         }
+        let committed = select_committed_records(worktree.path(), &records)?;
+        let published_paths = committed
+            .iter()
+            .map(|record| record.path.clone())
+            .collect::<Vec<_>>();
+        transaction.published_paths = Some(published_paths.clone());
+        write_transaction(&options.cache_dir, &transaction)?;
+        let diff = diff_from_records(&committed);
+        if committed.is_empty() {
+            let commit_oid = if options.push {
+                let oid = push_current_ref(options)?;
+                view.install(options, &oid, &[])?;
+                Some(oid)
+            } else {
+                None
+            };
+            let overlay_cleaned = clear_committed_overlay(&store, &[])?;
+            transaction.commit_oid.clone_from(&commit_oid);
+            transaction.pushed = options.push;
+            set_transaction_status(&mut transaction, "retained");
+            write_transaction(&options.cache_dir, &transaction)?;
+            return Ok(OverlayCommitResult {
+                transaction_id,
+                commit_oid,
+                pushed: options.push,
+                overlay_cleaned,
+                diff,
+            });
+        }
+        // Recovery acknowledges the same frozen mutation set, not an older
+        // partial commit while newer pending writes remain unreported.
+        transaction.overlay_fingerprint = overlay_records_fingerprint(&records, &published_paths)?;
+        write_transaction(&options.cache_dir, &transaction)?;
+        let records = committed;
         let pointer_files = pointer_overlay_files(&records, worktree.path())?;
         let skipped_pointer_paths = pointer_files
             .iter()
@@ -670,12 +691,8 @@ pub(crate) fn commit_overlay_with_view(
             write_transaction(&options.cache_dir, &transaction)?;
         }
 
-        if let Err(err) = finalize_committed_overlay(&paths, options, &commit_oid, &records, view) {
-            set_transaction_status(&mut transaction, "failed");
-            transaction.error = Some(err.to_string());
-            write_transaction(&options.cache_dir, &transaction)?;
-            return Err(err);
-        }
+        let overlay_cleaned =
+            finalize_committed_overlay(&store, options, &commit_oid, &records, view)?;
         let final_status = if transaction.pushed {
             "pushed_cleaned"
         } else {
@@ -688,7 +705,7 @@ pub(crate) fn commit_overlay_with_view(
             transaction_id,
             commit_oid: Some(commit_oid),
             pushed: transaction.pushed,
-            overlay_cleaned: true,
+            overlay_cleaned,
             diff,
         })
     })();
@@ -739,52 +756,66 @@ fn set_transaction_status(transaction: &mut PublishTransaction, status: &str) {
 
 fn try_finalize_recorded_publish(
     options: &OverlayCommitOptions,
-    paths: &OverlayPaths,
+    store: &OverlayStore,
     current_oid: &str,
-    overlay_fingerprint: &[String],
-    diff: &OverlayDiff,
     records: &[OverlayRecord],
     view: &mut dyn CommitView,
 ) -> Result<Option<OverlayCommitResult>> {
     let cache_dir = &options.cache_dir;
     let mut transactions = read_publish_transactions(cache_dir)?;
     transactions.sort_by(|left, right| right.id.cmp(&left.id));
-    let Some(mut transaction) = transactions.into_iter().find(|transaction| {
-        transaction.ref_name == options.ref_name
-            && transaction.commit_oid.as_deref() == Some(current_oid)
-            && !transaction.overlay_fingerprint.is_empty()
-            && transaction.overlay_fingerprint == overlay_fingerprint
-            && !matches!(
+    for mut transaction in transactions {
+        if transaction.ref_name != options.ref_name
+            || transaction.commit_oid.as_deref() != Some(current_oid)
+            || transaction.overlay_fingerprint.is_empty()
+            || matches!(
                 transaction.status.as_str(),
                 "committed_cleaned" | "pushed_cleaned"
             )
-    }) else {
-        return Ok(None);
-    };
-
-    if let Err(err) = finalize_committed_overlay(paths, options, current_oid, records, view) {
-        set_transaction_status(&mut transaction, "failed");
-        transaction.error = Some(err.to_string());
+        {
+            continue;
+        }
+        let published_paths =
+            transaction
+                .published_paths
+                .as_ref()
+                .ok_or_else(|| CrabError::CorruptObject {
+                    path: transaction.id.clone(),
+                    reason: "recorded publication has no committed path scope".into(),
+                })?;
+        let scope = published_paths
+            .iter()
+            .collect::<std::collections::HashSet<_>>();
+        let committed = records
+            .iter()
+            .filter(|record| scope.contains(&record.path))
+            .cloned()
+            .collect::<Vec<_>>();
+        if committed.len() != scope.len()
+            || overlay_records_fingerprint(records, published_paths)?
+                != transaction.overlay_fingerprint
+        {
+            continue;
+        }
+        let overlay_cleaned =
+            finalize_committed_overlay(store, options, current_oid, &committed, view)?;
+        let final_status = if transaction.pushed {
+            "pushed_cleaned"
+        } else {
+            "committed_cleaned"
+        };
+        set_transaction_status(&mut transaction, final_status);
+        transaction.error = None;
         write_transaction(cache_dir, &transaction)?;
-        return Err(err);
+        return Ok(Some(OverlayCommitResult {
+            transaction_id: transaction.id,
+            commit_oid: Some(current_oid.to_owned()),
+            pushed: transaction.pushed,
+            overlay_cleaned,
+            diff: diff_from_records(&committed),
+        }));
     }
-
-    let final_status = if transaction.pushed {
-        "pushed_cleaned"
-    } else {
-        "committed_cleaned"
-    };
-    set_transaction_status(&mut transaction, final_status);
-    transaction.error = None;
-    write_transaction(cache_dir, &transaction)?;
-
-    Ok(Some(OverlayCommitResult {
-        transaction_id: transaction.id,
-        commit_oid: Some(current_oid.to_owned()),
-        pushed: transaction.pushed,
-        overlay_cleaned: true,
-        diff: diff.clone(),
-    }))
+    Ok(None)
 }
 
 fn read_publish_transactions(cache_dir: &Path) -> Result<Vec<PublishTransaction>> {
@@ -814,7 +845,10 @@ fn read_publish_transactions(cache_dir: &Path) -> Result<Vec<PublishTransaction>
     Ok(transactions)
 }
 
-fn overlay_records_fingerprint(records: &[OverlayRecord]) -> Result<Vec<String>> {
+fn overlay_records_fingerprint(
+    records: &[OverlayRecord],
+    published_paths: &[String],
+) -> Result<Vec<String>> {
     let mut entries = records
         .iter()
         .map(|record| {
@@ -834,6 +868,12 @@ fn overlay_records_fingerprint(records: &[OverlayRecord]) -> Result<Vec<String>>
             ))
         })
         .collect::<Result<Vec<_>>>()?;
+    // Cleanup scope is part of the proof: changing a valid path list must not
+    // redirect recovery to retire bytes that the recorded transaction excluded.
+    entries.push(format!(
+        "scope:{}",
+        blake3::hash(&serde_json::to_vec(published_paths)?)
+    ));
     entries.sort();
     Ok(entries)
 }
@@ -1242,6 +1282,55 @@ fn create_platform_symlink(_link_target: &str, _path: &Path) -> Result<()> {
     })
 }
 
+fn select_committed_records(
+    worktree: &Path,
+    records: &[OverlayRecord],
+) -> Result<Vec<OverlayRecord>> {
+    if records.is_empty() {
+        return Ok(Vec::new());
+    }
+    let paths: std::collections::BTreeSet<_> = records
+        .iter()
+        .filter(|record| record.kind != OverlayKind::Mkdir)
+        .map(|record| record.path.clone())
+        .collect();
+    if paths.is_empty() {
+        return Ok(Vec::new());
+    }
+    let ignored = git_ignored_paths(worktree, &paths)?;
+    let mut committed = records
+        .iter()
+        .filter(|record| {
+            record.kind != OverlayKind::Mkdir
+                && (record.kind == OverlayKind::Delete || !ignored.contains(&record.path))
+        })
+        .cloned()
+        .collect::<Vec<_>>();
+    let mut directories = std::collections::HashSet::new();
+    for record in &committed {
+        if record.kind == OverlayKind::Delete {
+            continue;
+        }
+        let mut path = record.path.as_str();
+        while let Some((parent, _)) = path.rsplit_once('/') {
+            directories.insert(parent.to_owned());
+            path = parent;
+        }
+    }
+    // Git cannot publish empty directories. Keep their overlay rows, including
+    // parents whose only children are ignored, so those namespaces survive remount.
+    committed.extend(
+        records
+            .iter()
+            .filter(|record| {
+                record.kind == OverlayKind::Mkdir && directories.contains(&record.path)
+            })
+            .cloned(),
+    );
+    committed.sort_by(|left, right| left.path.cmp(&right.path));
+    Ok(committed)
+}
+
 fn pointer_overlay_files(
     records: &[crate::overlay::OverlayRecord],
     worktree: &Path,
@@ -1273,18 +1362,18 @@ fn pointer_overlay_files(
     Ok(files)
 }
 
-fn overlay_changes_git_attributes(records: &[crate::overlay::OverlayRecord]) -> bool {
+fn overlay_changes_git_policy(records: &[crate::overlay::OverlayRecord]) -> bool {
     records.iter().any(|record| {
-        is_git_attributes_path(&record.path)
-            || record
-                .base_path
-                .as_deref()
-                .is_some_and(is_git_attributes_path)
+        is_git_policy_path(&record.path)
+            || record.base_path.as_deref().is_some_and(is_git_policy_path)
     })
 }
 
-fn is_git_attributes_path(path: &str) -> bool {
-    path == ".gitattributes" || path.ends_with("/.gitattributes")
+fn is_git_policy_path(path: &str) -> bool {
+    matches!(
+        path.rsplit('/').next(),
+        Some(".gitattributes" | ".gitignore")
+    )
 }
 
 fn git_pointer_filters(
@@ -1393,12 +1482,6 @@ fn run_git_add(
     if paths.is_empty() {
         return Ok(());
     }
-    let ignored = git_ignored_paths(worktree, &paths)?;
-    paths.retain(|path| !ignored.contains(path));
-    if paths.is_empty() {
-        return Ok(());
-    }
-
     let mut child = Command::new("git")
         .arg("-C")
         .arg(worktree)
@@ -1789,27 +1872,33 @@ fn worktree_file_is_executable(_abs_path: &Path) -> bool {
 }
 
 fn finalize_committed_overlay(
-    paths: &OverlayPaths,
+    store: &OverlayStore,
     options: &OverlayCommitOptions,
     commit_oid: &str,
     records: &[OverlayRecord],
     view: &mut dyn CommitView,
-) -> Result<()> {
-    // Adoption may authenticate remote metadata or install a new read view.
-    // Keep the frozen backing files intact until that owner accepts the commit.
+) -> Result<bool> {
+    // Only committed incarnations may acquire publication bindings. Retained
+    // files still own their backing paths and must never be adopted as Git data.
     view.install(options, commit_oid, records)?;
-    clear_committed_overlay(paths)?;
-    Ok(())
+    clear_committed_overlay(store, records)
 }
 
-fn clear_committed_overlay(paths: &OverlayPaths) -> Result<()> {
-    if paths.db_path.exists() {
-        let store = OverlayStore::open(&paths.db_path, &paths.upper_dir)?;
-        store.clear()?;
-        return Ok(());
-    }
-
-    OverlayStore::clean(&paths.db_path, &paths.upper_dir)
+fn clear_committed_overlay(store: &OverlayStore, records: &[OverlayRecord]) -> Result<bool> {
+    let committed = records
+        .iter()
+        .map(|record| record.path.as_str())
+        .collect::<std::collections::HashSet<_>>();
+    let retired = store
+        .records()?
+        .into_iter()
+        .filter(|record| {
+            committed.contains(record.path.as_str()) || is_macos_appledouble_path(&record.path)
+        })
+        .map(|record| record.path)
+        .collect();
+    store.clear_paths(&retired)?;
+    Ok(store.dirty_count()? == 0)
 }
 
 fn change_kind(kind: OverlayKind) -> OverlayChangeKind {
@@ -2302,7 +2391,7 @@ mod tests {
     }
 
     #[test]
-    fn overlay_changes_git_attributes_detects_root_and_nested_attrs() {
+    fn overlay_changes_git_policy_detects_root_and_nested_attrs() {
         let (_dir, _paths, store) = temp_overlay();
         store
             .create_file("models/.gitattributes", 0o100_644)
@@ -2311,7 +2400,7 @@ mod tests {
             .write_file("models/.gitattributes", 0, b"*.bin filter=crab\n")
             .unwrap();
 
-        assert!(overlay_changes_git_attributes(&store.records().unwrap()));
+        assert!(overlay_changes_git_policy(&store.records().unwrap()));
     }
 
     #[test]
@@ -2506,6 +2595,265 @@ mod tests {
         .unwrap();
 
         assert!(!marker.exists());
+    }
+
+    #[test]
+    fn overlay_ignore_edits_retain_local_namespaces_and_keep_tracked_edits() {
+        let fixture = GitFixture::new();
+        let cache_dir = fixture.root.path().join("cache");
+        let paths = OverlayPaths::from_cache_dir(&cache_dir);
+        let store = OverlayStore::open(&paths.db_path, &paths.upper_dir).unwrap();
+        for path in ["empty", "local", "pending"] {
+            store.mkdir(path, 0o040_755).unwrap();
+        }
+        for (path, bytes) in [
+            (
+                ".gitignore",
+                b"base.txt\nlocal/\npending/*\n!pending/keep.txt\n".as_slice(),
+            ),
+            ("base.txt", b"tracked edit".as_slice()),
+            ("local/secret.bin", b"local bytes".as_slice()),
+            ("pending/ignored.txt", b"ignored bytes".as_slice()),
+            ("pending/keep.txt", b"committed bytes".as_slice()),
+        ] {
+            store.create_file(path, 0o100_644).unwrap();
+            store.write_file(path, 0, bytes).unwrap();
+        }
+        let options = OverlayCommitOptions {
+            cache_dir,
+            git_dir: fixture.bare_git_dir.clone(),
+            ref_name: "refs/heads/main".into(),
+            message: "policy edit".into(),
+            push: false,
+        };
+        let first = commit_overlay(&options).unwrap();
+        let before = rev_parse(&fixture.bare_git_dir, "refs/heads/main").unwrap();
+        let second = commit_overlay(&options).unwrap();
+        let reopened = OverlayStore::open(&paths.db_path, &paths.upper_dir).unwrap();
+        assert_eq!(
+            (
+                first.overlay_cleaned,
+                second.commit_oid,
+                reopened.dirty_paths().unwrap(),
+                std::fs::read(paths.upper_dir.join("local/secret.bin")).unwrap(),
+                std::fs::read(paths.upper_dir.join("pending/ignored.txt")).unwrap(),
+                git_stdout_bytes(&fixture.bare_git_dir, ["show", "refs/heads/main:base.txt"]),
+                rev_parse(&fixture.bare_git_dir, "refs/heads/main").unwrap()
+            ),
+            (
+                false,
+                None,
+                vec![
+                    "empty".to_owned(),
+                    "local".to_owned(),
+                    "local/secret.bin".to_owned(),
+                    "pending/ignored.txt".to_owned()
+                ],
+                b"local bytes".to_vec(),
+                b"ignored bytes".to_vec(),
+                b"tracked edit".to_vec(),
+                before
+            )
+        );
+    }
+
+    #[test]
+    fn ignored_only_commit_preserves_bytes_without_creating_a_commit() {
+        let fixture = GitFixture::new();
+        let cache_dir = fixture.root.path().join("cache");
+        let paths = OverlayPaths::from_cache_dir(&cache_dir);
+        let store = OverlayStore::open(&paths.db_path, &paths.upper_dir).unwrap();
+        // Repository-local excludes also apply without any tracked .gitignore.
+        std::fs::write(fixture.bare_git_dir.join("info/exclude"), "ignored.bin\n").unwrap();
+        store.create_file("ignored.bin", 0o100_644).unwrap();
+        store
+            .write_file("ignored.bin", 0, b"private bytes")
+            .unwrap();
+        let result = commit_overlay(&OverlayCommitOptions {
+            cache_dir,
+            git_dir: fixture.bare_git_dir.clone(),
+            ref_name: "refs/heads/main".into(),
+            message: "nothing selected".into(),
+            push: false,
+        })
+        .unwrap();
+        assert_eq!(
+            (
+                result.commit_oid,
+                result.diff.changes.len(),
+                result.overlay_cleaned,
+                std::fs::read(paths.upper_dir.join("ignored.bin")).unwrap()
+            ),
+            (None, 0, false, b"private bytes".to_vec())
+        );
+    }
+
+    #[test]
+    fn failed_adoption_retry_retires_only_the_recorded_committed_scope() {
+        struct RejectView {
+            base: String,
+            seen: Vec<String>,
+        }
+        impl CommitView for RejectView {
+            fn head_oid(&self) -> Result<Option<String>> {
+                Ok(Some(self.base.clone()))
+            }
+            fn install(
+                &mut self,
+                _: &OverlayCommitOptions,
+                _: &str,
+                records: &[OverlayRecord],
+            ) -> Result<()> {
+                self.seen = records.iter().map(|record| record.path.clone()).collect();
+                Err(CrabError::Internal("injected adoption failure".into()))
+            }
+        }
+        let fixture = GitFixture::new();
+        std::fs::write(fixture.bare_git_dir.join("info/exclude"), "ignored.bin\n").unwrap();
+        let cache_dir = fixture.root.path().join("cache");
+        let paths = OverlayPaths::from_cache_dir(&cache_dir);
+        let snapshot = SnapshotStore::open_or_create(&cache_dir.join("snapshot.sqlite")).unwrap();
+        snapshot
+            .publish_generation(&fixture.base_oid, "refs/heads/main", &[])
+            .unwrap();
+        let store = OverlayStore::open(&paths.db_path, &paths.upper_dir).unwrap();
+        for path in ["ignored.bin", "included.txt"] {
+            store.create_file(path, 0o100_644).unwrap();
+            store.write_file(path, 0, b"retained bytes").unwrap();
+        }
+        let options = OverlayCommitOptions {
+            cache_dir,
+            git_dir: fixture.bare_git_dir.clone(),
+            ref_name: "refs/heads/main".into(),
+            message: "adoption scope".into(),
+            push: false,
+        };
+        let mut view = RejectView {
+            base: fixture.base_oid.clone(),
+            seen: Vec::new(),
+        };
+        assert!(commit_overlay_with_view(&options, &mut view).is_err());
+        let first = rev_parse(&fixture.bare_git_dir, "refs/heads/main").unwrap();
+        let mut recorded = read_publish_transactions(&options.cache_dir)
+            .unwrap()
+            .into_iter()
+            .find(|transaction| transaction.commit_oid.as_deref() == Some(first.as_str()))
+            .unwrap();
+        let correct_scope = recorded.published_paths.clone();
+        recorded.published_paths = Some(vec!["ignored.bin".into()]);
+        write_transaction(&options.cache_dir, &recorded).unwrap();
+        assert!(
+            commit_overlay(&options).is_err()
+                && paths.upper_dir.join("included.txt").exists()
+                && paths.upper_dir.join("ignored.bin").exists()
+        );
+        recorded.published_paths = correct_scope;
+        write_transaction(&options.cache_dir, &recorded).unwrap();
+        let retry = commit_overlay(&options).unwrap();
+        assert_eq!(
+            (
+                view.seen,
+                retry.commit_oid,
+                store.dirty_paths().unwrap(),
+                std::fs::read(paths.upper_dir.join("ignored.bin")).unwrap()
+            ),
+            (
+                vec!["included.txt".to_owned()],
+                Some(first),
+                vec!["ignored.bin".to_owned()],
+                b"retained bytes".to_vec()
+            )
+        );
+    }
+
+    #[test]
+    fn recorded_publication_without_scope_cannot_retire_backing_bytes() {
+        let fixture = GitFixture::new();
+        let cache_dir = fixture.root.path().join("cache");
+        let paths = OverlayPaths::from_cache_dir(&cache_dir);
+        let store = OverlayStore::open(&paths.db_path, &paths.upper_dir).unwrap();
+        store.create_file("pending.txt", 0o100_644).unwrap();
+        store
+            .write_file("pending.txt", 0, b"must remain local")
+            .unwrap();
+        let id = write_recorded_publish_transaction(
+            &cache_dir,
+            &fixture.base_oid,
+            &fixture.base_oid,
+            false,
+            &store.records().unwrap(),
+        );
+        let mut transaction = read_publish_transactions(&cache_dir).unwrap().remove(0);
+        transaction.published_paths = None;
+        write_transaction(&cache_dir, &transaction).unwrap();
+        let result = commit_overlay(&OverlayCommitOptions {
+            cache_dir,
+            git_dir: fixture.bare_git_dir,
+            ref_name: "refs/heads/main".into(),
+            message: "unknown cleanup scope".into(),
+            push: false,
+        });
+        assert!(
+            matches!(result, Err(CrabError::CorruptObject { path, .. }) if path == id)
+                && std::fs::read(paths.upper_dir.join("pending.txt")).unwrap()
+                    == b"must remain local"
+        );
+    }
+
+    #[test]
+    fn publication_retains_ignored_bytes_for_all_content_types() {
+        for filter in [None, Some("crab"), Some("lfs")] {
+            let fixture = GitFixture::new();
+            std::fs::write(fixture.worktree.join(".gitignore"), "ignored.bin\n").unwrap();
+            if let Some(filter) = filter {
+                std::fs::write(
+                    fixture.worktree.join(".gitattributes"),
+                    format!("*.bin filter={filter} -text\n"),
+                )
+                .unwrap();
+            }
+            git_in(&fixture.worktree, ["add", "."]);
+            git_in(&fixture.worktree, ["commit", "-m", "policy"]);
+            git_in(
+                &fixture.worktree,
+                [
+                    "push",
+                    fixture.bare_git_dir.to_str().unwrap(),
+                    "HEAD:refs/heads/main",
+                ],
+            );
+            let cache_dir = fixture.root.path().join("cache");
+            let paths = OverlayPaths::from_cache_dir(&cache_dir);
+            let store = OverlayStore::open(&paths.db_path, &paths.upper_dir).unwrap();
+            for path in ["ignored.bin", "included.txt"] {
+                store.create_file(path, 0o100_644).unwrap();
+                store.write_file(path, 0, b"user bytes").unwrap();
+            }
+            let result = commit_overlay(&OverlayCommitOptions {
+                cache_dir,
+                git_dir: fixture.bare_git_dir.clone(),
+                ref_name: "refs/heads/main".into(),
+                message: "retain ignored content".into(),
+                push: false,
+            })
+            .unwrap();
+            let retained = store.records().unwrap();
+            assert_eq!(
+                (
+                    git_tree_contains(&fixture.bare_git_dir, "refs/heads/main", "ignored.bin"),
+                    retained.iter().map(|r| r.path.as_str()).collect::<Vec<_>>(),
+                    std::fs::read(paths.upper_dir.join("ignored.bin")).ok(),
+                    result.overlay_cleaned
+                ),
+                (
+                    false,
+                    vec!["ignored.bin"],
+                    Some(b"user bytes".to_vec()),
+                    false
+                ),
+                "filter {filter:?}"
+            );
+        }
     }
 
     #[test]
@@ -3394,6 +3742,10 @@ mod tests {
     ) -> String {
         let suffix = commit_oid.chars().take(12).collect::<String>();
         let id = format!("publish-recorded-{suffix}");
+        let published_paths = records
+            .iter()
+            .map(|record| record.path.clone())
+            .collect::<Vec<_>>();
         let transaction = PublishTransaction {
             id: id.clone(),
             status: if pushed {
@@ -3406,7 +3758,8 @@ mod tests {
             commit_oid: Some(commit_oid.to_owned()),
             pushed,
             error: Some("cleanup failed".to_owned()),
-            overlay_fingerprint: overlay_records_fingerprint(records).unwrap(),
+            overlay_fingerprint: overlay_records_fingerprint(records, &published_paths).unwrap(),
+            published_paths: Some(published_paths),
         };
         write_transaction(cache_dir, &transaction).unwrap();
         id

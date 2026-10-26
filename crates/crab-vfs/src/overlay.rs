@@ -235,6 +235,67 @@ impl OverlayStore {
         Ok(())
     }
 
+    /// Retire selected rows and backing files while the caller holds the publish freeze.
+    pub(crate) fn clear_paths(&self, paths: &std::collections::HashSet<String>) -> Result<()> {
+        if paths.is_empty() {
+            return Ok(());
+        }
+        let retired = self
+            .records()?
+            .into_iter()
+            .filter(|record| paths.contains(&record.path))
+            .collect::<Vec<_>>();
+        let db = self.db.lock().map_err(|_| lock_poisoned())?;
+        let tx = db.unchecked_transaction()?;
+        {
+            let mut delete = tx.prepare("DELETE FROM overlay_entries WHERE path = ?1")?;
+            for record in &retired {
+                delete.execute(params![record.path])?;
+            }
+        }
+        let mut backing = Vec::new();
+        for record in retired {
+            if let Some(path) = record.backing_path {
+                let referenced: bool = tx.query_row(
+                    "SELECT EXISTS(SELECT 1 FROM overlay_entries WHERE backing_path = ?1)",
+                    params![path.to_string_lossy()],
+                    |row| row.get(0),
+                )?;
+                if !referenced {
+                    backing.push(path);
+                }
+            }
+        }
+        tx.commit()?;
+        checkpoint_wal(&db)?;
+        drop(db);
+        backing.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+        for path in backing {
+            let metadata = match std::fs::symlink_metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => continue,
+                Err(error) => return Err(error.into()),
+            };
+            let result = if metadata.is_dir() && !metadata.file_type().is_symlink() {
+                // A retired directory may still contain retained children. Never
+                // recursively sweep it: their rows and bytes remain authoritative.
+                std::fs::remove_dir(&path)
+            } else {
+                std::fs::remove_file(&path)
+            };
+            match result {
+                Ok(()) => {}
+                Err(error)
+                    if matches!(
+                        error.kind(),
+                        std::io::ErrorKind::NotFound | std::io::ErrorKind::DirectoryNotEmpty
+                    ) => {}
+                Err(error) => return Err(error.into()),
+            }
+        }
+        Ok(())
+    }
+
     fn clear_entries(&self) -> Result<()> {
         let db = self.db.lock().map_err(|_| lock_poisoned())?;
         db.execute("DELETE FROM overlay_entries", [])

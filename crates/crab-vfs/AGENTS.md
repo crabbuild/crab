@@ -56,6 +56,11 @@ mount/control owners consume the pipeline output separately.
   crab-lfs before publishing pointer/index/ref state. Do not depend on optional
   Git filter executables or mutate borrowed filter settings. Unsupported LFS
   extensions preserve overlay/ref state. Normal push owns remote LFS durability.
+- Publication plans one Git-selected scope before ordinary/Crab/LFS staging.
+  Adopt and retire only those records; retain ignored backing bytes and empty
+  namespaces. Bind recovery scope to the full frozen content fingerprint so
+  newer writes cannot be acknowledged as an older partial commit. Explicit reset
+  remains the separate full-discard boundary. Source: `publish.rs`, `overlay.rs`.
 - Publication and reads derive the same staging namespace through
   `repository::staging_root_for_git_dir`. Mounted versions keep distinct history
   owners; a later local commit must not retire earlier unpushed bytes.

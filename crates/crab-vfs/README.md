@@ -170,6 +170,16 @@ adapter bypasses current-thread Tokio runtimes, where `block_in_place` would
 panic. Whole-pointer reconstruction continues through the configured
 `crab-read` runtime and its decoded-range cache.
 
+Publication applies Git ignore selection once, before ordinary, Crab or LFS
+staging. Ignored files retain their overlay records and backing bytes, including
+open descriptors and remounts; Git-tracked edits still publish. Empty directories
+remain local because Git has no directory objects. Overlay `.gitignore` edits
+participate in the same selection, so newly included content can publish later.
+Adoption and cleanup receive only the committed path scope. Recovery binds that
+scope to the entire frozen mutation set and content; changed writes cannot be
+acknowledged as an older commit. `overlay_cleaned` remains false while retained
+records exist. Explicit reset continues to discard all overlay changes.
+
 Writable LFS publication resolves effective Git attributes from the prepared
 index, including nested rules and attribute edits. It streams LFS backing bytes
 directly through `crab-lfs::local::ObjectWriter` and installs the payload before
