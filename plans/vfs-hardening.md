@@ -11,7 +11,7 @@ Baseline: `origin/crab-v2` at `33f8e6c360d922b3ab1e2c0e5115a2d200eccd97`.
 Working branch: `codex/vfs-hardening`. PR:
 https://github.com/crabbuild/crab/pull/630 (base `crab-v2`). Follow-up hardening
 remains active. The PR is rebased onto `877b832b396`; final source and
-installed-role evidence is recorded through checkpoint 48.
+installed-role evidence is recorded through checkpoint 49.
 
 Baseline evidence and reproductions:
 `crab/docs/benchmarks/vfs-capsule-v2-audit-20261024.md` and its adjacent evidence
@@ -3254,6 +3254,89 @@ file. The raw benchmark directory stays excluded. Immediate format priority move
 to shared remote/CLI legacy producers, metadb/GC and maintenance/replication.
 All-mode lifecycle, payload/crash ownership and optimized performance remain open.
 
+## Checkpoint 49 — one shared Capsule preparation path
+
+Remove the unused shared manifest `prepare`, `Prepared::upload`, `Artifacts`
+journal commit and protected-plan staging API. Fold the existing Capsule entry
+point into its implementation without changing its caller signature. Delete the
+catalog/materialized visibility switch and ordinal branch; keep the former
+materialized visibility behavior as the sole path. Captured ref closure bounds,
+visibility replacement when borrowing another ref, verified thin-base reads,
+normalized pack preparation, cancellation observation and awaited reader closure
+remain intact. Indexed Git kinds are optional under `GraphSource`; absent kinds
+still require a verified visible-body read, never locator-only authorization.
+
+Current SDK callers already use `prepare_capsule` → `upload_capsule` →
+`CapsuleArtifacts`, including protected schema-3 staging. No current workspace
+caller uses the removed APIs. Keep `ProtectedPushPlan` temporarily at its actual
+owner boundary: the older CLI publisher still constructs that DTO and calls the
+separate journal helpers. This checkpoint does not claim to retire that producer.
+Normal remote-helper push already selects `capsule_push::run`; its current chunk
+planner still lives in `push.rs`, so deleting that module wholesale would break
+the native path.
+
+Evidence map and best-fix check:
+
+| Surface | Proof |
+| --- | --- |
+| Entry/caller | Full shared preparation module, public exports and all workspace consumers searched/read; SDK mutation and its tests select captured Capsule preparation |
+| Owner | Shared remote orchestration owns quarantine/graph/visibility preparation. Caller retains the authenticated capture, scratch, ref leases and GC fences through awaited completion |
+| Callee | Capsule upload validates reader/capture identity and dependencies before publication; blocking preparation retains `operation.finish` error composition and drains its cancellation watcher. `GraphSource` optional-kind contract and remote reader placement identity read |
+| Siblings | Direct SDK write/write-content, auth helpers, CLI/gateway/server dependency edges checked. Only the old CLI still needs the manifest-plan DTO/journal helpers. Current Capsule chunk planning is explicitly retained |
+| Main/base | Fresh `origin/main` `cc2e4e25f46` and `origin/crab-v2` `877b832b396` both expose the removed manifest APIs; the native callers on this branch already use Capsule |
+| Is this the best fix? | Yes for the unused shared producer: delete its entire API and alternate proof instead of a runtime flag, error wrapper or renamed compatibility path. Actual old CLI orchestration and initializer remain explicit next work |
+
+Qualification on both Linux and macOS:
+
+- **107 remote tests** pass: 32 library, 13 publication, 14 preparation and 48
+  checkpoint. The two normally ignored live preparation tests are also run
+  explicitly against the dedicated RustFS bucket: native content reconstruction
+  and ref visibility after source ref/local source deletion both pass. This is
+  S3-compatible qualification, not live AWS proof.
+- SDK write has **49 passes / one ignored**; write-content has **52 passes / one
+  ignored**. Auth has **75 passes**, none ignored. Strict all-target remote and
+  both SDK-profile Clippy pass; minimal remote/SDK checks and SDK all-feature,
+  all-target checks pass. No test assertion or baseline is weakened.
+- An external API probe compiles before removal (exit zero) and fails afterward
+  on the removed `prepare`/`Artifacts` exports (exit one). This proves API removal,
+  not runtime refusal of an old repository. No synthetic repo test is added.
+- Four fresh client/helper roles per platform are installed through `make
+  install`, with every Cargo target and Make artifact lookup on the per-worktree
+  Workspace volume. Formatting passes. Regular CLI builds have warnings; strict
+  whole-CLI/workspace cleanliness is not claimed.
+- An external producer exercises the actual shared API with ref/GC leases,
+  captured Git readers, real Git pack input, content attachment, upload and
+  proven commit outcome. Fresh publication is followed by an incremental commit
+  against nonempty captured visibility; both return distinct committed
+  transactions. The second input requests `--thin`; external delta presence is
+  not separately asserted. Runtime shutdown and lease cleanup are awaited.
+- That published source mounts on **Linux foreground NFS/FUSE and macOS
+  foreground NFS**. Ordinary Git, Crab and LFS files are each **6 MiB**; complete
+  hashes and boundary/middle ranges match. Read-only writes return EROFS, NFS live
+  status reports read-only, ordinary SIGINT detaches and owner exit is zero.
+  No legacy layout/manifest is created; no force cleanup or admission bypass.
+- All **1,557 source/build hashes** still match the tested source. Five artifacts
+  per platform are identical before/after native qualification: four fresh
+  Make-installed roles plus the external producer. No auth helper subprocess is
+  claimed by this shared-API qualification; preceding receive/view proof remains
+  recorded at its own checkpoint.
+
+The first external fixture compile accidentally included an unused legacy helper;
+that harness-only compile failure is retained. The first native attempts stopped
+before publication because the harness passed Capsule generation zero as the
+reader placement generation. The dependency rejects zero placement; the corrected
+fixture uses placement one for its single immutable placement, separately from
+Capsule generation. Both corrected full runs pass; production validation is
+unchanged. Raw failures and final evidence remain external under
+`remote-capsule-only/` and `linux/remote-capsule-only/`.
+
+Rust source shrinks by **559 lines**. No tests are added/removed, no dependency or
+lockfile changes, no new config or test files. All 2,156 raw benchmark files remain
+preserved and excluded from Git/PR. Debug correctness evidence does not establish
+optimized throughput, tail latency, RSS or all-mode lifecycle behavior. Next:
+retire the actual old CLI orchestration/manifest initializer, then metadb/GC and
+maintenance/replication authority. The full hardening goal remains active.
+
 ## Remaining priority order
 
 The helper-layout gap and live read-only inspection leak are closed by the
@@ -3281,8 +3364,8 @@ failure and qualifies the original sequential publication → next-mount flow on
 Linux NFS/FUSE without marker deletion or admission bypass. Checkpoint-46 removes shared manifest-only repository initialization. Immediate
 format priority: checkpoint-47 retires protected receive's linked legacy paths.
 Checkpoint-48 retires standalone auth view's manifest fallback/publisher and binds
-its Git/pointer reads to one capture. Next retire the shared remote/CLI
-publisher/fixture initializer, metadb/GC and
+its Git/pointer reads to one capture. Checkpoint-49 retires the unused shared manifest preparation/upload/commit APIs.
+Next retire the actual old CLI publisher/fixture initializer, metadb/GC and
 maintenance/replication stored pack-v1 dispatch.
 Checkpoints 42/43 repair canonical LFS publication and ignored-byte retention;
 checkpoint-44 reduces local verification amplification with bounded block proofs. Remote proof reuse, LFS generation
@@ -3418,9 +3501,10 @@ Remaining located storage-authority boundaries:
   initialization. Checkpoint-46 removes the exported old initializer and updates
   valid refusal fixtures without retaining a compatibility wrapper.
 - Checkpoints 47/48 remove manifest authority from protected receive and standalone
-  auth view, including their old producers. Shared remote/CLI publication still
-  exposes legacy staging and manifest initialization; retire their actual caller
-  paths next rather than deleting manifest-shaped native projections by name.
+  auth view, including their old producers. Checkpoint 49 removes the unused shared manifest preparation/upload/commit APIs.
+  The actual old CLI publisher still owns journal helpers, a plan DTO and manifest
+  initialization; retire that owner next rather than deleting manifest-shaped
+  native projections by name.
 - Gateway read/write, listing, checkpoint ordering, completion recovery and
   maintenance now require Capsule authority at checkpoint-38. No production
   gateway caller selects the old initializer, manifest/journal reader/publisher

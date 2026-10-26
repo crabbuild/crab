@@ -94,6 +94,15 @@ later ref-head updates instead of rescanning them for CLI statistics.
 
 ## Capsule preparation and publication
 
+`prepare_capsule` is the incoming-graph preparation entry point. Its Git reader
+and visibility proof must come from the same captured Capsule view; the caller
+retains that capture, scratch space, ref leases and GC fences through completion.
+Manifest preparation, `Prepared::upload`, the journal `Artifacts::commit` and its
+protected-plan staging API are removed without wrappers. Current SDK consumers
+use `upload_capsule` and `CapsuleArtifacts` for direct and protected publication.
+The older CLI publisher still uses separate journal helpers and the manifest
+plan type; retiring that owner remains work.
+
 Capsule preparation resolves outgoing pointer files and only the prepared
 shard/xorb identities against a captured paged catalog. Ordinary Git and LFS-only
 uploads do not read historical Xet catalog pages. Selected dependencies retain
