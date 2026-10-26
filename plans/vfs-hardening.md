@@ -11,7 +11,7 @@ Baseline: `origin/crab-v2` at `33f8e6c360d922b3ab1e2c0e5115a2d200eccd97`.
 Working branch: `codex/vfs-hardening`. PR:
 https://github.com/crabbuild/crab/pull/630 (base `crab-v2`). Follow-up hardening
 remains active. The PR is rebased onto `877b832b396`; final source and
-installed-role evidence is recorded through checkpoint 46.
+installed-role evidence is recorded through checkpoint 47.
 
 Baseline evidence and reproductions:
 `crab/docs/benchmarks/vfs-capsule-v2-audit-20261024.md` and its adjacent evidence
@@ -3077,6 +3077,87 @@ and shared payload verification that current Capsule publication still needs.
 The broader lifecycle, crash/pin ownership and optimized performance gates remain
 open. This checkpoint is progress, not completion of the goal.
 
+## Checkpoint 47 — Capsule-only protected receive
+
+Protected prepare, verify and commit require a valid Capsule root. Delete
+manifest fallback, plan schemas 1/2, prepare-record schema 1, manifest verification
+evidence and the manifest finalizer. Receive now has one typed Capsule plan path;
+current plan schema 3 and prepare/evidence schema 2 stay unchanged. Admission
+validates the plan and active-active options before acquiring writer fences.
+The commit operation still drains before releasing either fence; cleanup failure
+after known publication remains repair work rather than a false rejection.
+
+Four regressions establish the boundary. Before repair, valid layout/manifest-only
+repositories reached prepare, verify and commit, with respectively 1, 0 and 8
+observed writes. Schemas 1/2 parsed, and a manifest-only prepare record authorized
+recovery. After initial path removal, commit still acquired fences for schemas
+1/2: 8 observed writes each. Final tests reject all these inputs, with zero writes
+for rootless entry points and retired-plan commit admission. Existing unknown-
+field, request-limit, evidence-replacement and staged-byte checks target current
+Capsule inputs rather than preserving removed manifest internals.
+
+Delete the legacy Git receive workspace, stored-pack intake and metadata
+publisher. Surviving graph verification and source-commit synthesis are free
+functions shared by current scoped/unscoped candidates. Filtered visibility is
+proved before source packs become available; physical pack presence still does
+not grant read authority. Current intake remains the bounded shared Capsule
+installer, using authenticated descriptors and content-addressed filenames.
+
+Evidence map and best-fix check:
+
+| Surface | Proof |
+| --- | --- |
+| Entry and owner | Real `crab-auth-receive` process → public prepare/verify/commit → `ReceiveContext`; full workflow/session/Git-workspace paths read |
+| Caller | CLI `finalize_capsule_push` and SDK mutation → shared `CapsuleArtifacts::stage_protected_plan` already produce plan schema 3; removed exports have no remaining workspace consumers |
+| Callee | `load_root` verifies Capsule authority; captured ref view binds prepare identity; canonical pack installer verifies bounded incoming/base packs; promotion rereads and hashes staged bytes before immutable writes |
+| Siblings | Standalone auth view still selects/publishes manifest authority and uses retained locator/visibility mechanics. Its retirement is explicit next work; no duplicate replacement was extracted |
+| Independent formats | Physical shard GC closures remain consumed by CLI GC repair; their schema 1 and the Xet SH01 trailer are current payload contracts. Git LFS/pointer spec/v1 is independent of stored pack-v1 authority |
+| Main/base | Freshly fetched `origin/main` `cc2e4e25f46` still uses legacy layout admission; `origin/crab-v2` `877b832b396` selects native root with a manifest fallback and accepts plan schemas 1/2 |
+| Is this the best fix? | Yes for receive: remove the obsolete orchestrator/producer and retain the captured Capsule path. Additional flags or rejection wrappers would preserve dead authority. View, CLI/shared remote producers and maintenance must be retired at their actual owners |
+
+Final qualification:
+
+- Linux and macOS: all **77 auth-helper library tests** pass, none ignored.
+  Both actual helper binaries build; strict `--all-targets -- -D warnings`
+  Clippy passes on both platforms. All 11 helper packaging checks pass.
+- Actual prepare → verify → commit processes publish ordinary Git, **6 MiB
+  Crab** and **6 MiB LFS** content to the task's RustFS bucket. Immutable receipt
+  exists and no legacy repository authority is created. Actual processes reject
+  valid manifest-only repositories, legacy plans and legacy prepare records;
+  refusal preserves the legacy fixture's bytes, ETags and object count.
+- In each final platform run the fresh helper publication feeds the unchanged
+  Make-installed client roles: native Linux foreground NFS and FUSE, and macOS
+  foreground NFS. All three files return exact sizes, complete hashes and random
+  ranges. Writes are refused; normal detach and owner exit zero follow. NFS
+  status remains live. No force cleanup or admission bypass is used.
+- Hash binding verifies **1,557 source/build inputs** and identical seven-artifact
+  before/after sets per platform: four installed client roles, both fresh helper
+  binaries and the external qualification producer. Client sources do not depend
+  on auth-server and are unchanged from checkpoint 46. Helpers run directly from
+  their Cargo build outputs; no product binary is copied or manually installed.
+- One initial harness run published successfully, then incorrectly reused a
+  push ID for two negative plans. Immutable-plan enforcement refused replacement.
+  Failure evidence is preserved; unique session IDs make the full replay pass.
+  This is a harness correction, not a product-policy bypass.
+
+Evidence stays on the external workspace volume under
+`protected-capsule-only/` and `linux/protected-capsule-only/`: before failures,
+source hashes, build/test/lint logs, actual process logs, artifact bindings and
+native results. These are debug correctness proofs, not optimized throughput,
+p95/p99, RSS or full HTTP-service qualification. Post-cleanup binary retry,
+active-active infrastructure and all-mode cancellation still need dedicated proof.
+
+Rust source shrinks by 4,520 lines including obsolete tests; source before the
+inline test modules shrinks by 3,272 lines. No
+dependency, lockfile or config change; no new/nested test file. The existing
+scoped guide and README document the native contract and explicit view gap.
+All 2,156 excluded raw evidence files remain preserved and untracked.
+
+Immediate priority: standalone auth view's manifest fallback and publisher, then
+remaining shared remote/CLI producers, metadb/GC and maintenance/replication
+authority. The lifecycle, crash/pin and optimized performance gates below remain
+open. The goal remains active.
+
 ## Remaining priority order
 
 The helper-layout gap and live read-only inspection leak are closed by the
@@ -3102,8 +3183,9 @@ the macOS mapping barrier still require proof before claiming teardown complete.
 Checkpoint-45 closes the reproduced helper configuration/telemetry ownership
 failure and qualifies the original sequential publication → next-mount flow on
 Linux NFS/FUSE without marker deletion or admission bypass. Checkpoint-46 removes shared manifest-only repository initialization. Immediate
-format priority: retire protected receive's v1 layout/prepare/plan/commit paths,
-then the remaining CLI publisher/fixture initializer, metadb/GC and
+format priority: checkpoint-47 retires protected receive's linked legacy paths.
+Next retire standalone auth view's manifest fallback/publisher, then the shared
+remote/CLI publisher/fixture initializer, metadb/GC and
 maintenance/replication stored pack-v1 dispatch.
 Checkpoints 42/43 repair canonical LFS publication and ignored-byte retention;
 checkpoint-44 reduces local verification amplification with bounded block proofs. Remote proof reuse, LFS generation
@@ -3236,12 +3318,11 @@ Completed admission boundaries:
 Remaining located storage-authority boundaries:
 
 - SDK `initialize_remote` was changed upstream in #629 to canonical Capsule
-  initialization. The exported old initializer in
-  `crates/crab-write/src/initialize.rs` and its legacy fixtures still need removal
-  after the gateway retirement; no current production SDK or gateway caller remains.
-- `crates/crab-auth-server/src/receive.rs`: manifest-based protected push plans
-  accept schemas 1/2 beside the separate Capsule plan. Audit routing, preparation,
-  finalization and recovery contracts before deleting those storage-authority paths.
+  initialization. Checkpoint-46 removes the exported old initializer and updates
+  valid refusal fixtures without retaining a compatibility wrapper.
+- Checkpoint-47 removes manifest authority from protected receive. Standalone
+  `crates/crab-auth-server/src/view.rs` still has `ViewProtocol::Manifest`, source
+  authority fallback and legacy publication; retire these together next.
 - Gateway read/write, listing, checkpoint ordering, completion recovery and
   maintenance now require Capsule authority at checkpoint-38. No production
   gateway caller selects the old initializer, manifest/journal reader/publisher

@@ -10,8 +10,8 @@ Owns JSON-speaking protected receive and path-scoped view helper binaries. It is
 ## Read first
 
 1. `crates/crab-auth-server/src/lib.rs` — helper modules and error boundary.
-2. `crates/crab-auth-server/src/receive.rs` — `ProtectedPushPlan / commit_service_metadata`: prepare/verify/commit orchestration.
-3. `crates/crab-auth-server/src/receive/git_workspace.rs` — `materialize_source_push / verify_source_push`: pack installation and Git validation.
+2. `crates/crab-auth-server/src/receive.rs` — `ProtectedCapsulePushPlan / validate_protected_capsule_plan_shape`: native admission and payload checks.
+3. `crates/crab-auth-server/src/receive/git_workspace.rs` — `materialize_capsule_source_push / verify_capsule_git_candidate`: captured pack intake and Git validation.
 4. `crates/crab-auth-server/src/view.rs` — `materialize_view_with_store`: scoped source materialization.
 5. `crates/crab-auth-server/src/doctor.rs` — `git_version`: native Git capability checks.
 
@@ -30,6 +30,10 @@ operations in `crates/crab-auth-server/src/receive/git_workspace.rs`.
 
 ## Invariants
 
+- Receive requires Capsule authority for prepare, verify and commit. Admit the
+  typed native plan before writer fences; reject retired plan and prepare-record
+  schemas without selecting manifest authority. Keep current GC shard closures.
+  Sources: `receive/session.rs`, `receive/workflow.rs`, `receive.rs`.
 - Keep prepare, verify, and commit boundaries explicit; commit must use verified state and expected ref changes rather than trusting uploaded bytes.
   Source: `crates/crab-auth-server/src/receive.rs`.
 - Read-path authorization and denied paths must remain part of view construction; do not reuse an unscoped view merely because its source generation matches.

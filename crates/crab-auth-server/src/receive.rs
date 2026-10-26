@@ -6,56 +6,39 @@ use std::path::Path;
 use std::process::Command;
 use std::sync::Arc;
 
-use crab_auth::{
-    PushRefUpdate, normalize_optional_oid, validate_push_ref_update, validate_push_ref_updates,
-};
+use crab_auth::{PushRefUpdate, validate_push_ref_update, validate_push_ref_updates};
 use crab_coordination::active_active::{
     self as coordination_active_active, ActiveActiveReplicationConfig,
 };
 use crab_git::normalize_repository_prefix;
 use crab_metadata::{
-    manifests::{
-        Manifest, PackManifestEntry, parse_pack_segment_entries, validate_manifest_payload,
-    },
-    pack_metadata::{
-        parse_pack_metadata, serialize_pack_metadata_bounded, validate_pack_metadata_for_entry,
-    },
+    manifests::{Manifest, PackManifestEntry},
     receipts::{
-        CommittedChunkReceipt, GenerationIndexReceipt, OriginReceipt, RECEIPT_SCHEMA_VERSION,
-        generation_file_index_digest, generation_git_object_locator_digest,
+        GenerationIndexReceipt, RECEIPT_SCHEMA_VERSION, generation_git_object_locator_digest,
     },
     ref_registry::ActiveActiveCoordinatorRegistration,
-    remote_index::{RemoteIndexConfig, RemoteIndexWriter},
-    segmented::{self, SegmentIndex, SegmentKind},
-    segmented_store,
-    value_codec::CommittedFileRecord,
 };
-use crab_staging::shard_replay::{REPLAY_BATCH_ENTRIES, ShardReplaySpool};
 use crab_storage::{
     StagedWrite, StorageError, StorageProviderKind, Store, StoreLayout,
     canonical_global_content_path, content_hash_from_path,
 };
-use crab_types::time::now_rfc3339_millis;
 use crab_xet::hash::{MerkleHash, compute_data_hash};
 use crab_xet::shard::{MDBShardInfo, ShardReader};
-use crab_xet::xorb::format::FOOTER_SIZE;
-use crab_xet::xorb::parser::{XorbParser, xorb_payload_digest_from_footer};
+use crab_xet::xorb::parser::XorbParser;
 use object_store::path::Path as ObjectPath;
 use serde::{Deserialize, Serialize};
 
-pub use crab_remote::protected::{ProtectedCapsulePushPlan, ProtectedPushPlan};
+pub use crab_remote::protected::ProtectedCapsulePushPlan;
 
 use crate::error::{AuthServerError, Result};
 
 mod capsule;
 mod capsule_dependencies;
-mod finalize;
 mod git_workspace;
 mod session;
 mod workflow;
 
-pub use finalize::{ReceiveManifestCommit, commit_receive_manifest};
-pub use session::{BaseState, ReceiveContext};
+pub use session::ReceiveContext;
 pub use workflow::{
     PreparedReceive, VerifiedReceive, commit_receive, prepare_receive, verify_receive,
 };
@@ -100,16 +83,6 @@ pub struct ActiveActiveReceiveConfig {
     pub writer: String,
 }
 
-/// Source-repository materialization produced from a protected view push.
-#[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
-#[serde(deny_unknown_fields)]
-pub struct MaterializedSourcePush {
-    pub ref_updates: Vec<PushRefUpdate>,
-    pub packs: Vec<PackManifestEntry>,
-    pub peeled_refs: BTreeMap<String, String>,
-    pub(crate) git_visibility: MaterializedGitVisibility,
-}
-
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) enum MaterializedGitVisibility {
@@ -131,92 +104,6 @@ pub struct PushPrepareRecord {
     pub view_ref_updates: Vec<PushRefUpdate>,
     pub source_ref_updates: Vec<PushRefUpdate>,
     pub view_scope: Option<PreparedViewScope>,
-}
-
-pub fn validate_protected_dependency_receipt(plan: &ProtectedPushPlan) -> Result<()> {
-    let receipt = plan.push_commit_receipt.as_ref().ok_or_else(|| {
-        invalid("protected push plan is missing its base-bound dependency receipt")
-    })?;
-    let base_generation = plan.base_manifest_generation.unwrap_or(0);
-    receipt
-        .validate_base(base_generation, plan.base_manifest_etag.as_deref())
-        .map_err(AuthServerError::from)?;
-    let shard_index_hash = if plan.candidate_manifest.shard_index_hash.is_empty() {
-        [0; 32]
-    } else {
-        merkle_hash_from_hex(
-            &plan.candidate_manifest.shard_index_hash,
-            "protected candidate shard-index hash",
-        )?
-        .into()
-    };
-    let pack_index_hash = if plan.candidate_manifest.pack_index_hash.is_empty() {
-        [0; 32]
-    } else {
-        merkle_hash_from_hex(
-            &plan.candidate_manifest.pack_index_hash,
-            "protected candidate pack-index hash",
-        )?
-        .into()
-    };
-    let protected_updates = plan
-        .ref_updates
-        .iter()
-        .map(|update| {
-            (
-                update.ref_name.clone(),
-                update.old_oid.clone(),
-                update.new_oid.clone(),
-            )
-        })
-        .collect::<Vec<_>>();
-    let ref_edit_digest = crab_metadata::receipts::protected_ref_edit_digest(&protected_updates);
-    let connectivity_digest = crab_metadata::receipts::protected_connectivity_digest(
-        &plan
-            .ref_updates
-            .iter()
-            .map(|update| update.new_oid.clone())
-            .collect::<Vec<_>>(),
-    );
-    if receipt.attempt_id != plan.push_id
-        || receipt.candidate_shard_index_hash != shard_index_hash
-        || receipt.candidate_pack_index_hash != pack_index_hash
-        || receipt.ref_edit_digest != ref_edit_digest
-        || receipt.connectivity_digest != connectivity_digest
-        || receipt.gc_registry_generation != 0
-    {
-        return Err(invalid(
-            "protected push dependency receipt does not bind the plan base and candidate indexes",
-        ));
-    }
-    Ok(())
-}
-
-pub async fn validate_protected_shard_set_receipt(
-    store: &Store,
-    router: &StoreLayout<Store>,
-    plan: &ProtectedPushPlan,
-) -> Result<()> {
-    let receipt = plan.push_commit_receipt.as_ref().ok_or_else(|| {
-        invalid("protected push plan is missing its base-bound dependency receipt")
-    })?;
-    let shards = if plan.candidate_manifest.shard_index_hash.is_empty() {
-        Vec::new()
-    } else {
-        crab_metadata::manifest_store::read_bulk_shard_list(
-            store,
-            router,
-            &plan.candidate_manifest.shard_index_hash,
-        )
-        .await?
-    };
-    let digest = crab_metadata::receipts::committed_shard_set_digest(&shards);
-    if receipt.shard_set_digest != digest {
-        return Err(invalid(
-            "protected push dependency receipt does not bind the candidate shard set",
-        ));
-    }
-    Ok(())
 }
 
 /// Prepared protected-view scope carried into a receive operation.
@@ -306,109 +193,6 @@ pub fn validate_prepared_ref_updates(updates: &[PushRefUpdate]) -> Result<()> {
         return Err(invalid("prepare record contains too many ref updates"));
     }
     validate_push_ref_updates(updates).map_err(|error| invalid(error.to_string()))
-}
-
-/// Validates the protected-push plan shape before expensive object checks.
-pub fn validate_push_plan_shape(
-    plan: &ProtectedPushPlan,
-    repo_prefix: &str,
-    push_id: &str,
-) -> Result<()> {
-    match (plan.schema_version, plan.mirror_plan_id.as_deref()) {
-        (1, None) => {}
-        (2, Some(plan_id)) => validate_hash_component(plan_id, "mirror plan id")?,
-        (1, Some(_)) | (2, None) => {
-            return Err(invalid(
-                "push-plan schema_version does not match its mirror plan identity",
-            ));
-        }
-        _ => return Err(invalid("unsupported push-plan schema_version")),
-    }
-    if plan.repo_prefix != repo_prefix {
-        return Err(invalid("push-plan repo_prefix does not match repo_url"));
-    }
-    if plan.push_id != push_id {
-        return Err(invalid("push-plan push_id does not match request"));
-    }
-    let expected_prefix = format!("{repo_prefix}/staging/{push_id}/");
-    if plan.upload_prefix.trim_matches('/') != expected_prefix.trim_matches('/') {
-        return Err(invalid("push-plan upload_prefix does not match push_id"));
-    }
-    if plan.ref_updates.is_empty() {
-        return Err(invalid("protected push requires at least one ref update"));
-    }
-    if plan.ref_updates.len() > MAX_PUSH_REF_UPDATES {
-        return Err(invalid("push-plan contains too many ref updates"));
-    }
-    if plan.staged_objects.len() > MAX_PUSH_STAGED_OBJECTS {
-        return Err(invalid("push-plan contains too many staged objects"));
-    }
-    validate_push_ref_updates(&plan.ref_updates).map_err(|error| invalid(error.to_string()))
-}
-
-/// Validates the candidate manifest delta described by a protected-push plan.
-pub fn validate_candidate_manifest_shape(
-    plan: &ProtectedPushPlan,
-    repo_prefix: &str,
-) -> Result<()> {
-    let candidate = &plan.candidate_manifest;
-    validate_manifest_payload(candidate)?;
-    if candidate.generation == 0 {
-        return Err(invalid("candidate manifest generation must be non-zero"));
-    }
-
-    let mut expected_refs = BTreeMap::new();
-    for update in &plan.ref_updates {
-        expected_refs.insert(update.ref_name.clone(), update.new_oid.clone());
-    }
-    if candidate.refs != expected_refs {
-        return Err(invalid(
-            "candidate manifest refs differ from staged ref updates",
-        ));
-    }
-
-    if candidate.pusher.is_some()
-        || candidate.commit_graph_hash.is_some()
-        || candidate.path_state_hash.is_some()
-        || candidate.ref_registry_hash.is_some()
-    {
-        return Err(invalid(
-            "candidate delta manifest contains unsupported metadata",
-        ));
-    }
-
-    if !candidate.peeled_refs.is_empty() {
-        return Err(invalid(
-            "candidate delta manifest cannot contain peeled refs",
-        ));
-    }
-
-    let staged_keys: BTreeSet<&str> = plan
-        .staged_objects
-        .iter()
-        .map(|object| object.canonical_key.as_str())
-        .collect();
-    validate_candidate_index_hash(
-        repo_prefix,
-        "shard",
-        &candidate.shard_index_hash,
-        &staged_keys,
-    )?;
-    validate_candidate_index_hash(
-        repo_prefix,
-        "pack",
-        &candidate.pack_index_hash,
-        &staged_keys,
-    )
-}
-
-/// Validates staged-object paths and duplicate protection for a protected-push plan.
-pub fn validate_staged_object_shapes(
-    plan: &ProtectedPushPlan,
-    repo_prefix: &str,
-    push_id: &str,
-) -> Result<()> {
-    validate_staged_write_shapes(&plan.staged_objects, repo_prefix, push_id)
 }
 
 /// Validates the bounded identity and staged-object shape of a v2 push plan.
@@ -519,133 +303,9 @@ pub async fn read_verified_staged_object(
     object: &StagedWrite,
 ) -> Result<bytes::Bytes> {
     let path = ObjectPath::from(object.staged_key.clone());
-    let maximum = if is_pack_metadata_key(&object.canonical_key) {
-        object
-            .size
-            .min(crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES)
-    } else {
-        object.size
-    };
-    let (bytes, _) = store.get_with_etag_bounded(&path, maximum).await?;
+    let (bytes, _) = store.get_with_etag_bounded(&path, object.size).await?;
     validate_staged_object_bytes(object, &bytes)?;
     Ok(bytes)
-}
-
-fn is_pack_metadata_key(key: &str) -> bool {
-    key.rsplit('/')
-        .next()
-        .is_some_and(|name| name.starts_with("pack-") && name.ends_with(".meta"))
-        && key.contains("/packs/")
-}
-
-async fn existing_pack_metadata_is_oversized(store: &Store, path: &ObjectPath) -> bool {
-    match store.head(path).await {
-        Ok(meta) => meta.size > crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES,
-        Err(error) => {
-            tracing::debug!(
-                path = %path,
-                error = %error,
-                "could not confirm oversized pack metadata during receive fallback"
-            );
-            false
-        }
-    }
-}
-
-async fn promote_pack_metadata_union(
-    store: &Store,
-    canonical: &ObjectPath,
-    staged_bytes: bytes::Bytes,
-) -> Result<()> {
-    let staged = parse_pack_metadata(&staged_bytes, canonical.as_ref())?;
-    let mut requested = staged.ref_tips.iter().cloned().collect::<BTreeSet<_>>();
-    for _ in 0..64 {
-        match store
-            .get_with_etag_bounded(
-                canonical,
-                crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES,
-            )
-            .await
-        {
-            Ok((body, etag)) => {
-                let mut existing = parse_pack_metadata(&body, canonical.as_ref())?;
-                if existing.pack_id != staged.pack_id
-                    || existing.object_count != staged.object_count
-                {
-                    return Err(invalid(
-                        "canonical pack metadata conflicts with staged pack identity",
-                    ));
-                }
-                let before = existing.ref_tips.iter().cloned().collect::<BTreeSet<_>>();
-                if before.is_empty() && !staged.ref_tips.is_empty() {
-                    // An empty hint may be a deliberate legacy fallback after
-                    // a previous union exceeded the bound. It cannot be
-                    // enriched without proving the complete ref-tip set again.
-                    return Ok(());
-                }
-                requested.extend(before.iter().cloned());
-                if requested == before {
-                    return Ok(());
-                }
-                existing.ref_tips = requested.iter().cloned().collect();
-                let Some(body) = serialize_pack_metadata_bounded(&existing)? else {
-                    tracing::warn!(
-                        path = %canonical,
-                        maximum_bytes = crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES,
-                        "pack metadata ref-tip union exceeded its bound; retaining legacy hint"
-                    );
-                    return Ok(());
-                };
-                match store
-                    .update(canonical, bytes::Bytes::from(body), etag)
-                    .await
-                {
-                    Ok(_) => return Ok(()),
-                    Err(StorageError::StateConflict { .. }) => continue,
-                    Err(error) => return Err(error.into()),
-                }
-            }
-            Err(StorageError::NotFound { .. }) => {
-                let mut metadata = staged.clone();
-                metadata.ref_tips = requested.iter().cloned().collect();
-                let body = serialize_pack_metadata_bounded(&metadata)?
-                    .ok_or_else(|| invalid("pack metadata hint exceeded its size bound"))?;
-                match store
-                    .create_strict(canonical, bytes::Bytes::from(body))
-                    .await
-                {
-                    Ok(()) => return Ok(()),
-                    Err(StorageError::StateConflict { .. }) => continue,
-                    Err(error) => return Err(error.into()),
-                }
-            }
-            Err(error) => {
-                if matches!(&error, StorageError::CorruptObject { .. })
-                    && existing_pack_metadata_is_oversized(store, canonical).await
-                {
-                    tracing::warn!(
-                        path = %canonical,
-                        maximum_bytes = crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES,
-                        "existing oversized pack metadata is treated as a legacy hint"
-                    );
-                    return Ok(());
-                }
-                return Err(error.into());
-            }
-        }
-    }
-    Err(AuthServerError::CasConflict {
-        path: canonical.to_string(),
-        expected_etag: None,
-    })
-}
-
-/// Promotes verified staged objects to their immutable canonical locations.
-///
-/// Callers must first run [`validate_staged_object_shapes`]. Staged bytes are
-/// re-read and revalidated immediately before the canonical write.
-pub async fn promote_staged_objects(store: &Store, plan: &ProtectedPushPlan) -> Result<()> {
-    promote_staged_writes(store, &plan.staged_objects).await
 }
 
 pub(super) async fn promote_staged_writes(
@@ -655,16 +315,12 @@ pub(super) async fn promote_staged_writes(
     for object in staged_objects {
         let canonical = ObjectPath::from(object.canonical_key.clone());
         let bytes = read_verified_staged_object(store, object).await?;
-        if is_pack_metadata_key(&object.canonical_key) {
-            promote_pack_metadata_union(store, &canonical, bytes).await?;
-        } else {
-            let shard_body = content_hash_from_path(&object.canonical_key, "shards")
-                .is_some()
-                .then(|| bytes.clone());
-            store.put(&canonical, bytes).await?;
-            if let Some(shard_body) = shard_body {
-                publish_protected_shard_closure(store, &object.canonical_key, &shard_body).await?;
-            }
+        let shard_body = content_hash_from_path(&object.canonical_key, "shards")
+            .is_some()
+            .then(|| bytes.clone());
+        store.put(&canonical, bytes).await?;
+        if let Some(shard_body) = shard_body {
+            publish_protected_shard_closure(store, &object.canonical_key, &shard_body).await?;
         }
     }
     Ok(())
@@ -758,76 +414,6 @@ async fn publish_protected_shard_closure(
     }
 }
 
-/// Validates candidate segmented metadata and every staged object reference.
-pub async fn validate_candidate_metadata(
-    store: &Store,
-    router: &StoreLayout<Store>,
-    plan: &ProtectedPushPlan,
-) -> Result<()> {
-    let mut referenced_keys = BTreeSet::new();
-    validate_segmented_index(
-        store,
-        router,
-        SegmentKind::Shard,
-        &plan.candidate_manifest.shard_index_hash,
-        plan,
-        &mut referenced_keys,
-    )
-    .await?;
-    validate_segmented_index(
-        store,
-        router,
-        SegmentKind::Pack,
-        &plan.candidate_manifest.pack_index_hash,
-        plan,
-        &mut referenced_keys,
-    )
-    .await?;
-    validate_staged_objects_are_referenced(plan, &referenced_keys)
-}
-
-/// Reads a staged segmented metadata index from the plan.
-pub async fn read_staged_segment_index(
-    store: &Store,
-    router: &StoreLayout<Store>,
-    kind: SegmentKind,
-    hash: &str,
-    plan: &ProtectedPushPlan,
-) -> Result<SegmentIndex> {
-    let index_path = router.repo_path(&segmented::index_relative_path(kind, hash));
-    let canonical_key = index_path.as_ref().to_owned();
-    let bytes = read_staged_object_bytes(store, plan, &canonical_key).await?;
-    Ok(segmented::parse_segment_index(&bytes, &canonical_key)?)
-}
-
-/// Reads required staged object bytes for a canonical key in the plan.
-pub async fn read_staged_object_bytes(
-    store: &Store,
-    plan: &ProtectedPushPlan,
-    canonical_key: &str,
-) -> Result<Vec<u8>> {
-    read_optional_staged_object_bytes(store, plan, canonical_key)
-        .await?
-        .ok_or_else(|| invalid(format!("required staged object missing: {canonical_key}")))
-}
-
-/// Reads optional staged object bytes for a canonical key in the plan.
-pub async fn read_optional_staged_object_bytes(
-    store: &Store,
-    plan: &ProtectedPushPlan,
-    canonical_key: &str,
-) -> Result<Option<Vec<u8>>> {
-    let Some(object) = plan
-        .staged_objects
-        .iter()
-        .find(|object| object.canonical_key == canonical_key)
-    else {
-        return Ok(None);
-    };
-    let bytes = read_verified_staged_object(store, object).await?;
-    Ok(Some(bytes.to_vec()))
-}
-
 /// Returns strict xorb references declared by a staged shard object.
 pub fn strict_xorb_references_from_shard(
     bytes: &[u8],
@@ -865,7 +451,7 @@ pub fn strict_xorb_references_from_shard(
     Ok(refs)
 }
 
-/// Removes the optional canonical v1 bloom trailer before xet MDB parsing.
+/// Removes the optional shard bloom trailer before Xet MDB parsing.
 #[must_use]
 pub fn strip_shard_bloom_trailer(data: &[u8]) -> &[u8] {
     if data.len() >= SHARD_V1_TRAILER_SIZE && &data[data.len() - 4..] == SHARD_V1_MAGIC {
@@ -878,32 +464,6 @@ pub fn strip_shard_bloom_trailer(data: &[u8]) -> &[u8] {
         }
     }
     data
-}
-
-/// Builds a prepared protected-push session record from the current source manifest.
-pub fn build_prepare_record(
-    repo_prefix: &str,
-    push_id: &str,
-    base: (&Manifest, &str),
-    view_ref_updates: Vec<PushRefUpdate>,
-    view_scope: Option<PreparedViewScope>,
-) -> Result<PushPrepareRecord> {
-    validate_prepared_ref_updates(&view_ref_updates)?;
-    if let Some(scope) = view_scope.as_ref() {
-        validate_prepared_view_scope(scope, repo_prefix)?;
-    }
-    let source_ref_updates = source_ref_updates_for(base.0, &view_ref_updates)?;
-    Ok(PushPrepareRecord {
-        schema_version: 1,
-        repo_prefix: repo_prefix.to_owned(),
-        push_id: push_id.to_owned(),
-        source_manifest_generation: base.0.generation,
-        source_manifest_etag: base.1.to_owned(),
-        source_root_digest: None,
-        view_ref_updates,
-        source_ref_updates,
-        view_scope,
-    })
 }
 
 /// Builds a prepared session record from one authenticated capsule view.
@@ -937,37 +497,27 @@ pub fn build_capsule_prepare_record(
     })
 }
 
-/// Validates a prepared protected-push session record loaded from storage.
+/// Validates a captured Capsule prepare record before verification or recovery.
 pub fn validate_prepare_record_shape(
     record: &PushPrepareRecord,
     repo_prefix: &str,
     push_id: &str,
 ) -> Result<()> {
-    match record.schema_version {
-        1 if record.source_manifest_etag.trim().is_empty()
-            || record.source_root_digest.is_some() =>
-        {
-            return Err(invalid(
-                "manifest prepare record has invalid source identity",
-            ));
-        }
-        2 => {
-            if !record.source_manifest_etag.is_empty() {
-                return Err(invalid(
-                    "capsule prepare record cannot contain a manifest etag",
-                ));
-            }
-            validate_hash_component(
-                record
-                    .source_root_digest
-                    .as_deref()
-                    .ok_or_else(|| invalid("capsule prepare record is missing its root digest"))?,
-                "source root digest",
-            )?;
-        }
-        1 => {}
-        _ => return Err(invalid("unsupported prepare record schema_version")),
+    if record.schema_version != 2 {
+        return Err(invalid("unsupported prepare record schema_version"));
     }
+    if !record.source_manifest_etag.is_empty() {
+        return Err(invalid(
+            "capsule prepare record cannot contain a manifest etag",
+        ));
+    }
+    validate_hash_component(
+        record
+            .source_root_digest
+            .as_deref()
+            .ok_or_else(|| invalid("capsule prepare record is missing its root digest"))?,
+        "source root digest",
+    )?;
     if record.repo_prefix != repo_prefix {
         return Err(invalid(
             "prepare record repo_prefix does not match repo_url",
@@ -1014,14 +564,6 @@ pub fn validate_prepared_view_scope(
     validate_hash_component(&scope.scope_hash, "prepared view scope_hash")
 }
 
-/// Maps authorized view ref updates onto source-repository ref updates.
-pub fn source_ref_updates_for(
-    base: &Manifest,
-    ref_updates: &[PushRefUpdate],
-) -> Result<Vec<PushRefUpdate>> {
-    source_ref_updates_for_refs(&base.refs, ref_updates)
-}
-
 fn source_ref_updates_for_refs(
     refs: &BTreeMap<String, String>,
     ref_updates: &[PushRefUpdate],
@@ -1044,31 +586,6 @@ fn source_ref_updates_for_refs(
         });
     }
     Ok(updates)
-}
-
-/// Replays a prepared source-ref mapping against a candidate push plan.
-pub fn source_ref_updates_from_prepare(
-    record: &PushPrepareRecord,
-    base: &Manifest,
-    plan_ref_updates: &[PushRefUpdate],
-) -> Result<Vec<PushRefUpdate>> {
-    if record.view_ref_updates != plan_ref_updates {
-        return Err(conflict("staged ref updates do not match prepare record"));
-    }
-    for update in &record.source_ref_updates {
-        let current = base.refs.get(&update.ref_name);
-        if let Some(current) = current {
-            validate_sha1(current, "source ref oid")?;
-        }
-        let current = current.map(|oid| oid.to_ascii_lowercase());
-        if current != normalize_optional_oid(update.old_oid.as_deref()) {
-            return Err(conflict(format!(
-                "source ref changed since prepare: {}",
-                update.ref_name
-            )));
-        }
-    }
-    Ok(record.source_ref_updates.clone())
 }
 
 /// Returns the ref names from validated ref updates in order.
@@ -1099,56 +616,6 @@ pub fn validate_hash_component(value: &str, field: &str) -> Result<()> {
         return Err(invalid(format!("{field} must be 64 hex characters")));
     }
     Ok(())
-}
-
-/// Returns `None` for empty strings without trimming meaningful hash values.
-#[must_use]
-pub fn non_empty(value: &str) -> Option<&str> {
-    if value.is_empty() { None } else { Some(value) }
-}
-
-/// Computes path evidence for protected-push authorization.
-pub async fn compute_changed_paths(
-    store: &Store,
-    router: &StoreLayout<Store>,
-    repo_prefix: &str,
-    plan: &ProtectedPushPlan,
-    ref_updates: &[PushRefUpdate],
-    prepare: Option<&PushPrepareRecord>,
-) -> Result<Vec<String>> {
-    git_workspace::compute_changed_paths(store, router, repo_prefix, plan, ref_updates, prepare)
-        .await
-}
-
-/// Materializes authorized view ref updates into source-repository commits.
-pub async fn materialize_source_push(
-    store: &Store,
-    router: &StoreLayout<Store>,
-    repo_prefix: &str,
-    base: Option<&Manifest>,
-    plan: &ProtectedPushPlan,
-    source_updates: &[PushRefUpdate],
-    prepare: &PushPrepareRecord,
-) -> Result<MaterializedSourcePush> {
-    git_workspace::materialize_source_push(
-        store,
-        router,
-        repo_prefix,
-        base,
-        plan,
-        source_updates,
-        prepare,
-    )
-    .await
-}
-
-/// Installs the current repository manifest's packs into an initialized Git dir.
-pub async fn install_base_packs(
-    store: &Store,
-    router: &StoreLayout<Store>,
-    git_dir: &Path,
-) -> Result<()> {
-    git_workspace::install_base_packs(store, router, git_dir).await
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1314,142 +781,6 @@ fn sha1_hex(oid: &[u8; 20]) -> String {
         output.push(HEX[(byte & 0x0f) as usize] as char);
     }
     output
-}
-
-/// Publishes service metadata indexes for staged shard terms.
-pub async fn commit_service_metadata(
-    store: &Store,
-    router: &StoreLayout<Store>,
-    plan: &ProtectedPushPlan,
-    manifest: &Manifest,
-    gc_registry_generation: u64,
-) -> Result<[u8; 32]> {
-    let shard_index_hash = if manifest.shard_index_hash.is_empty() {
-        MerkleHash::default()
-    } else {
-        merkle_hash_from_hex(&manifest.shard_index_hash, "committed shard-index hash")?
-    };
-    let digest = generation_file_index_digest(shard_index_hash.into());
-    let Some(candidate_hash) = non_empty(&plan.candidate_manifest.shard_index_hash) else {
-        return Ok(digest);
-    };
-    let index =
-        read_staged_segment_index(store, router, SegmentKind::Shard, candidate_hash, plan).await?;
-
-    let config = RemoteIndexConfig::for_repo_with_global_prefix(
-        router.repo_prefix(),
-        router.global_prefix(),
-    );
-    // Prepare fallible local resources before opening writers so an I/O error
-    // cannot bypass the explicit close boundary below.
-    let workspace = tempfile::tempdir()?;
-    let writer = RemoteIndexWriter::open(Arc::clone(store.inner()), &config, true, true).await?;
-    let operation = async {
-        for segment in index.segments {
-            let segment_path = router.repo_path(&segment.path);
-            let segment_key = segment_path.as_ref().to_owned();
-            let bytes = read_staged_object_bytes(store, plan, &segment_key).await?;
-            let entries = segmented::parse_shard_segment_entries(&segment, &bytes, &segment_key)?;
-            for entry in entries {
-                let shard_hash = merkle_hash_from_hex(&entry.shard_hash, "shard segment entry")?;
-                let shard_bytes = read_shard_bytes(store, router, plan, &shard_hash).await?;
-                let workspace_path = workspace.path().to_owned();
-                let spool = tokio::task::spawn_blocking(move || {
-                    ShardReplaySpool::from_reader_in(
-                        Cursor::new(shard_bytes),
-                        &workspace_path,
-                        shard_hash,
-                        true,
-                        true,
-                    )
-                })
-                .await
-                .map_err(|error| {
-                    AuthServerError::Internal(format!("shard replay worker failed: {error}"))
-                })??;
-
-                let mut after_id = 0_i64;
-                loop {
-                    let rows = spool.file_batch(after_id, REPLAY_BATCH_ENTRIES)?;
-                    if rows.is_empty() {
-                        break;
-                    }
-                    let entries = rows
-                        .into_iter()
-                        .map(|row| {
-                            after_id = row.id;
-                            (
-                                row.file_hash,
-                                CommittedFileRecord {
-                                    recipe_hash: row.recipe_hash,
-                                    shard_hash,
-                                    committed_generation: manifest.generation,
-                                    shard_index_hash,
-                                },
-                            )
-                        })
-                        .collect::<Vec<_>>();
-                    writer.write_entries(&entries, &[]).await?;
-                }
-
-                let mut origins: HashMap<MerkleHash, OriginReceipt> = HashMap::new();
-                let mut after_id = 0_i64;
-                loop {
-                    let rows = spool.chunk_batch(after_id, REPLAY_BATCH_ENTRIES)?;
-                    if rows.is_empty() {
-                        break;
-                    }
-                    let mut entries = Vec::with_capacity(rows.len());
-                    for row in rows {
-                        after_id = row.id;
-                        let origin = if let Some(origin) = origins.get(&row.xorb_hash) {
-                            origin.clone()
-                        } else {
-                            let xorb_key = router.xorb_path(&row.xorb_hash).as_ref().to_owned();
-                            let xorb_path = ObjectPath::from(xorb_key.as_str());
-                            let meta = store.head(&xorb_path).await?;
-                            let payload_digest =
-                                read_xorb_payload_digest(store, &xorb_path, meta.size).await?;
-                            let origin = OriginReceipt::new(
-                                "canonical-origin".to_owned(),
-                                xorb_key,
-                                row.xorb_hash.into(),
-                                payload_digest,
-                                meta.size,
-                                meta.e_tag,
-                                meta.version,
-                            );
-                            origins.insert(row.xorb_hash, origin.clone());
-                            origin
-                        };
-                        entries.push((
-                            row.chunk_hash,
-                            CommittedChunkReceipt {
-                                schema_version: RECEIPT_SCHEMA_VERSION,
-                                chunk_hash: row.chunk_hash.into(),
-                                xorb_hash: row.xorb_hash.into(),
-                                chunk_index: row.chunk_index,
-                                uncompressed_size: row.uncompressed_size,
-                                origin,
-                                source_repo_prefix: router.repo_prefix().to_owned(),
-                                source_shard_hash: shard_hash.into(),
-                                committed_generation: manifest.generation,
-                                shard_index_hash: shard_index_hash.into(),
-                                gc_registry_generation,
-                            },
-                        ));
-                    }
-                    writer.write_entries(&[], &entries).await?;
-                }
-            }
-        }
-        Ok::<_, AuthServerError>(())
-    }
-    .await;
-    let close_result = writer.close().await;
-    operation?;
-    close_result?;
-    Ok(digest)
 }
 
 async fn while_renewing_git_locator_lock<T>(
@@ -1622,12 +953,6 @@ async fn load_service_pack_kind_metadata(
         AuthServerError::Internal(format!("Git object-kind metadata worker failed: {error}"))
     })??;
     Ok(Some(map))
-}
-
-#[derive(Clone, Copy)]
-enum NewPackLocatorSource {
-    PackBody,
-    VerifiedIndexes,
 }
 
 async fn derive_service_locator_evidence(
@@ -1895,12 +1220,12 @@ async fn write_service_locator_evidence(
     Ok(())
 }
 
-async fn commit_service_git_locators_with_source(
+/// Publishes Git object locators for a standalone manifest view.
+pub(crate) async fn commit_service_git_locators(
     store: &Store,
     router: &StoreLayout<Store>,
     manifest: &Manifest,
     packs: &[PackManifestEntry],
-    source: NewPackLocatorSource,
 ) -> Result<[u8; 32]> {
     let pack_index_hash = if manifest.pack_index_hash.is_empty() {
         MerkleHash::default()
@@ -1909,14 +1234,7 @@ async fn commit_service_git_locators_with_source(
     };
     let mut derived = Vec::with_capacity(packs.len());
     for pack in packs {
-        derived.push(match source {
-            NewPackLocatorSource::PackBody => {
-                derive_service_locator_evidence(store, router, pack).await?
-            }
-            NewPackLocatorSource::VerifiedIndexes => {
-                download_service_locator_evidence(store, router, pack).await?
-            }
-        });
+        derived.push(derive_service_locator_evidence(store, router, pack).await?);
     }
 
     let mut lock = crab_coordination::PushLock::acquire_internal_default(
@@ -2070,39 +1388,6 @@ async fn commit_service_git_locators_with_source(
     Ok(generation_git_object_locator_digest(pack_index_hash.into()))
 }
 
-/// Publish exact Git object locators by indexing each new pack body.
-pub async fn commit_service_git_locators(
-    store: &Store,
-    router: &StoreLayout<Store>,
-    manifest: &Manifest,
-    packs: &[PackManifestEntry],
-) -> Result<[u8; 32]> {
-    commit_service_git_locators_with_source(
-        store,
-        router,
-        manifest,
-        packs,
-        NewPackLocatorSource::PackBody,
-    )
-    .await
-}
-
-pub(crate) async fn commit_service_git_locators_from_verified_indexes(
-    store: &Store,
-    router: &StoreLayout<Store>,
-    manifest: &Manifest,
-    packs: &[PackManifestEntry],
-) -> Result<[u8; 32]> {
-    commit_service_git_locators_with_source(
-        store,
-        router,
-        manifest,
-        packs,
-        NewPackLocatorSource::VerifiedIndexes,
-    )
-    .await
-}
-
 /// Write the post-CAS receipt only after both acceleration indexes commit.
 pub async fn write_service_generation_index_receipt(
     store: &Store,
@@ -2162,223 +1447,6 @@ pub async fn write_service_generation_index_receipt(
     }
 }
 
-/// Builds the source-repository manifest for a verified protected push.
-pub async fn build_service_candidate_manifest(
-    store: &Store,
-    router: &StoreLayout<Store>,
-    base: Option<&Manifest>,
-    plan: &ProtectedPushPlan,
-    materialized: &MaterializedSourcePush,
-) -> Result<Manifest> {
-    let generation = base.map_or(1, |manifest| manifest.generation.saturating_add(1));
-    let mut manifest = base.map_or_else(
-        || Manifest::default_for_repo(&plan.candidate_manifest.head),
-        Clone::clone,
-    );
-
-    manifest.generation = generation;
-    manifest.created_at = now_rfc3339_millis()?;
-    manifest.session_id = uuid::Uuid::now_v7().to_string();
-    for update in &materialized.ref_updates {
-        manifest
-            .refs
-            .insert(update.ref_name.clone(), update.new_oid.clone());
-    }
-    if !manifest.refs.contains_key(&manifest.head) {
-        let candidate = &plan.candidate_manifest.head;
-        let branch =
-            if candidate.starts_with("refs/heads/") && manifest.refs.contains_key(candidate) {
-                Some(candidate)
-            } else {
-                manifest
-                    .refs
-                    .keys()
-                    .find(|name| name.starts_with("refs/heads/"))
-            };
-        if let Some(branch) = branch {
-            manifest.head = branch.clone();
-        }
-    }
-    manifest.peeled_refs = materialized.peeled_refs.clone();
-    manifest.shard_index_hash = build_service_segment_index(
-        store,
-        router,
-        SegmentKind::Shard,
-        base.and_then(|manifest| non_empty(&manifest.shard_index_hash)),
-        non_empty(&plan.candidate_manifest.shard_index_hash),
-        generation,
-        plan,
-    )
-    .await?;
-    manifest.pack_index_hash = build_service_pack_index(
-        store,
-        router,
-        base.and_then(|manifest| non_empty(&manifest.pack_index_hash)),
-        non_empty(&plan.candidate_manifest.pack_index_hash),
-        generation,
-        plan,
-        &materialized.packs,
-    )
-    .await?;
-    // Protected receive validates the staged workspace and dependency receipt
-    // before this candidate reaches the service-owned commit workflow.
-    manifest.seal_git_validation();
-    Ok(manifest)
-}
-
-async fn read_xorb_payload_digest(
-    store: &Store,
-    path: &ObjectPath,
-    object_size: u64,
-) -> Result<[u8; 32]> {
-    let footer_size =
-        u64::try_from(FOOTER_SIZE).map_err(|_| invalid("xorb footer size overflows u64"))?;
-    if object_size < footer_size {
-        return Err(AuthServerError::CorruptObject {
-            path: path.to_string(),
-            reason: "xorb is too small for its footer".to_owned(),
-        });
-    }
-    let footer = store
-        .range_get(path, object_size - footer_size..object_size)
-        .await?;
-    let data_len = usize::try_from(object_size).map_err(|_| AuthServerError::CorruptObject {
-        path: path.to_string(),
-        reason: "xorb size does not fit this platform".to_owned(),
-    })?;
-    xorb_payload_digest_from_footer(data_len, &footer).map_err(|error| {
-        AuthServerError::CorruptObject {
-            path: path.to_string(),
-            reason: format!("invalid xorb footer: {error}"),
-        }
-    })
-}
-
-async fn read_shard_bytes(
-    store: &Store,
-    router: &StoreLayout<Store>,
-    plan: &ProtectedPushPlan,
-    shard_hash: &MerkleHash,
-) -> Result<Vec<u8>> {
-    let key = router.shard_path(shard_hash).as_ref().to_owned();
-    if let Some(bytes) = read_optional_staged_object_bytes(store, plan, &key).await? {
-        return Ok(bytes);
-    }
-    let (bytes, _) = store.get_with_etag(&ObjectPath::from(key)).await?;
-    Ok(bytes.to_vec())
-}
-
-async fn build_service_segment_index(
-    store: &Store,
-    router: &StoreLayout<Store>,
-    kind: SegmentKind,
-    base_hash: Option<&str>,
-    delta_hash: Option<&str>,
-    generation: u64,
-    plan: &ProtectedPushPlan,
-) -> Result<String> {
-    let base = match base_hash {
-        Some(hash) => segmented_store::read_index(store, router, kind, hash)
-            .await
-            .map_err(AuthServerError::from)?,
-        None => SegmentIndex::default(),
-    };
-    let Some(delta_hash) = delta_hash else {
-        return Ok(base_hash.unwrap_or_default().to_owned());
-    };
-    let delta = read_staged_segment_index(store, router, kind, delta_hash, plan).await?;
-    if delta.segments.is_empty() {
-        return Ok(base_hash.unwrap_or_default().to_owned());
-    }
-
-    let mut combined = base;
-    for segment in delta.segments {
-        if segment.snapshot {
-            return Err(invalid(format!(
-                "protected push does not allow {} metadata compaction",
-                kind.as_str()
-            )));
-        }
-        combined = segmented::append_segment(
-            combined,
-            segmented::SegmentRef {
-                generation,
-                snapshot: false,
-                ..segment
-            },
-        );
-    }
-    combined.generation = generation;
-    let index = segmented::build_index_object(kind, combined)?;
-    segmented_store::upload_if_absent(
-        store,
-        router,
-        &segmented::index_relative_path(kind, &index.hash),
-        &index.bytes,
-    )
-    .await
-    .map_err(AuthServerError::from)?;
-    Ok(index.hash)
-}
-
-async fn build_service_pack_index(
-    store: &Store,
-    router: &StoreLayout<Store>,
-    base_hash: Option<&str>,
-    delta_hash: Option<&str>,
-    generation: u64,
-    plan: &ProtectedPushPlan,
-    extra_packs: &[PackManifestEntry],
-) -> Result<String> {
-    let mut combined = match base_hash {
-        Some(hash) => segmented_store::read_index(store, router, SegmentKind::Pack, hash)
-            .await
-            .map_err(AuthServerError::from)?,
-        None => SegmentIndex::default(),
-    };
-    if let Some(delta_hash) = delta_hash {
-        let delta =
-            read_staged_segment_index(store, router, SegmentKind::Pack, delta_hash, plan).await?;
-        for segment in delta.segments {
-            if segment.snapshot {
-                return Err(invalid(
-                    "protected push does not allow pack metadata compaction",
-                ));
-            }
-            combined = segmented::append_segment(
-                combined,
-                segmented::SegmentRef {
-                    generation,
-                    snapshot: false,
-                    ..segment
-                },
-            );
-        }
-    }
-    if !extra_packs.is_empty() {
-        let segment = segmented::build_segment(SegmentKind::Pack, generation, false, extra_packs)?
-            .ok_or_else(|| invalid("pack metadata segment builder returned empty"))?;
-        segmented_store::upload_if_absent(store, router, &segment.reference.path, &segment.bytes)
-            .await
-            .map_err(AuthServerError::from)?;
-        combined = segmented::append_segment(combined, segment.reference);
-    }
-    if combined.segments.is_empty() {
-        return Ok(base_hash.unwrap_or_default().to_owned());
-    }
-    combined.generation = generation;
-    let index = segmented::build_index_object(SegmentKind::Pack, combined)?;
-    segmented_store::upload_if_absent(
-        store,
-        router,
-        &segmented::index_relative_path(SegmentKind::Pack, &index.hash),
-        &index.bytes,
-    )
-    .await
-    .map_err(AuthServerError::from)?;
-    Ok(index.hash)
-}
-
 fn xorb_hash_from_key(key: &str) -> Result<MerkleHash> {
     let hash = content_hash_from_path(key, "xorbs")
         .ok_or_else(|| invalid(format!("unsupported xorb canonical key: {key}")))?;
@@ -2387,239 +1455,6 @@ fn xorb_hash_from_key(key: &str) -> Result<MerkleHash> {
 
 fn merkle_hash_from_hex(value: &str, label: &str) -> Result<MerkleHash> {
     MerkleHash::from_hex(value).map_err(|e| invalid(format!("invalid {label}: {e}")))
-}
-
-fn validate_candidate_index_hash(
-    repo_prefix: &str,
-    kind: &str,
-    hash: &str,
-    staged_keys: &BTreeSet<&str>,
-) -> Result<()> {
-    if hash.is_empty() {
-        return Ok(());
-    }
-    let key = format!("{repo_prefix}/metadata/{kind}/indexes/{hash}.json");
-    if staged_keys.contains(key.as_str()) {
-        return Ok(());
-    }
-    Err(invalid(format!(
-        "candidate manifest {kind} index hash is neither current nor staged"
-    )))
-}
-
-async fn validate_segmented_index(
-    store: &Store,
-    router: &StoreLayout<Store>,
-    kind: SegmentKind,
-    candidate_hash: &str,
-    plan: &ProtectedPushPlan,
-    referenced_keys: &mut BTreeSet<String>,
-) -> Result<()> {
-    if candidate_hash.is_empty() {
-        return Ok(());
-    }
-    validate_hash_component(candidate_hash, "candidate segment index hash")?;
-
-    let index_path = router.repo_path(&segmented::index_relative_path(kind, candidate_hash));
-    let index_key = index_path.as_ref().to_owned();
-    referenced_keys.insert(index_key.clone());
-    let candidate = read_staged_segment_index(store, router, kind, candidate_hash, plan).await?;
-    segmented::validate_segment_index_shape(kind, &candidate)?;
-
-    let base = SegmentIndex::default();
-    segmented::validate_segment_index_shape(kind, &base)?;
-    segmented::validate_append_only_index(kind, &base, &candidate)?;
-
-    let base_len = base.segments.len();
-    let new_segments = &candidate.segments[base_len..];
-    if !new_segments.is_empty() && candidate.generation != plan.candidate_manifest.generation {
-        return Err(invalid(format!(
-            "{} metadata index generation does not match candidate manifest",
-            kind.as_str()
-        )));
-    }
-    for segment in new_segments {
-        if segment.generation != plan.candidate_manifest.generation {
-            return Err(invalid(format!(
-                "{} metadata segment generation does not match candidate manifest",
-                kind.as_str()
-            )));
-        }
-        if segment.snapshot {
-            return Err(invalid(format!(
-                "protected push does not allow {} metadata compaction",
-                kind.as_str()
-            )));
-        }
-        let segment_path = router.repo_path(&segment.path);
-        let canonical_key = segment_path.as_ref().to_owned();
-        referenced_keys.insert(canonical_key.clone());
-        let bytes = read_staged_object_bytes(store, plan, &canonical_key).await?;
-        if bytes.len() as u64 != segment.bytes {
-            return Err(invalid(format!(
-                "{} metadata segment byte count mismatch",
-                kind.as_str()
-            )));
-        }
-        match kind {
-            SegmentKind::Shard => {
-                let entries =
-                    segmented::parse_shard_segment_entries(segment, &bytes, &canonical_key)?;
-                for entry in entries {
-                    let key = router.shard_path(&entry.shard_hash).as_ref().to_owned();
-                    referenced_keys.insert(key.clone());
-                    if let Some(bytes) =
-                        read_optional_staged_object_bytes(store, plan, &key).await?
-                    {
-                        for (relative_xorb_key, expected_chunks) in
-                            strict_xorb_references_from_shard(&bytes)?
-                        {
-                            let xorb_hash = xorb_hash_from_key(&relative_xorb_key)?;
-                            let xorb_key = router.xorb_path(&xorb_hash).as_ref().to_owned();
-                            referenced_keys.insert(xorb_key.clone());
-                            if let Some(xorb_bytes) =
-                                read_optional_staged_object_bytes(store, plan, &xorb_key).await?
-                            {
-                                validate_staged_xorb(&xorb_key, &xorb_bytes, &expected_chunks)?;
-                            } else {
-                                let (xorb_bytes, _) = store
-                                    .get_with_etag(&ObjectPath::from(xorb_key.clone()))
-                                    .await?;
-                                validate_staged_xorb(&xorb_key, &xorb_bytes, &expected_chunks)?;
-                            }
-                        }
-                    } else {
-                        require_existing_object(store, &key).await?;
-                    }
-                }
-            }
-            SegmentKind::Pack => {
-                let entries = parse_pack_segment_entries(segment, &bytes, &canonical_key)?;
-                for entry in entries {
-                    let pack_key = router.pack_path(&entry.pack_id).as_ref().to_owned();
-                    referenced_keys.insert(pack_key.clone());
-                    require_staged_or_existing_object(store, plan, &pack_key).await?;
-                    let meta_key = router
-                        .pack_metadata_path(&entry.pack_id)
-                        .as_ref()
-                        .to_owned();
-                    referenced_keys.insert(meta_key.clone());
-                    validate_optional_pack_metadata(store, plan, &meta_key, &entry).await?;
-                    let kind_key = router
-                        .pack_kind_metadata_path(&entry.pack_id)
-                        .as_ref()
-                        .to_owned();
-                    if let Some(bytes) =
-                        read_optional_staged_object_bytes(store, plan, &kind_key).await?
-                    {
-                        referenced_keys.insert(kind_key.clone());
-                        validate_optional_pack_kind_metadata(
-                            store, router, plan, &kind_key, &bytes, &entry,
-                        )
-                        .await?;
-                    }
-                }
-            }
-        }
-    }
-
-    Ok(())
-}
-
-fn validate_staged_objects_are_referenced(
-    plan: &ProtectedPushPlan,
-    referenced_keys: &BTreeSet<String>,
-) -> Result<()> {
-    for object in &plan.staged_objects {
-        if !referenced_keys.contains(&object.canonical_key) {
-            return Err(invalid(format!(
-                "staged object is not referenced by candidate metadata: {}",
-                object.canonical_key
-            )));
-        }
-    }
-    Ok(())
-}
-
-async fn validate_optional_pack_metadata(
-    store: &Store,
-    plan: &ProtectedPushPlan,
-    canonical_key: &str,
-    pack: &PackManifestEntry,
-) -> Result<()> {
-    let Some(bytes) = read_optional_staged_object_bytes(store, plan, canonical_key).await? else {
-        return Ok(());
-    };
-    let metadata = parse_pack_metadata(&bytes, canonical_key)?;
-    validate_pack_metadata_for_entry(&metadata, pack)?;
-    Ok(())
-}
-
-async fn validate_optional_pack_kind_metadata(
-    store: &Store,
-    router: &StoreLayout<Store>,
-    plan: &ProtectedPushPlan,
-    canonical_key: &str,
-    bytes: &[u8],
-    pack: &PackManifestEntry,
-) -> Result<()> {
-    let canonical_pack_key = router.pack_path(&pack.pack_id).as_ref().to_owned();
-    let pack_path = if let Some(object) = plan
-        .staged_objects
-        .iter()
-        .find(|object| object.canonical_key == canonical_pack_key)
-    {
-        if object.size != pack.size {
-            return Err(invalid("staged pack size does not match pack metadata"));
-        }
-        object.staged_key.clone()
-    } else {
-        canonical_pack_key
-    };
-    let pack_checksum = if pack.size < 20 {
-        return Err(invalid(format!(
-            "pack is too short for kind metadata validation: {canonical_key}"
-        )));
-    } else {
-        let trailer = store
-            .range_get(&ObjectPath::from(pack_path), pack.size - 20..pack.size)
-            .await?;
-        gix_hash::ObjectId::from(
-            <[u8; 20]>::try_from(trailer.as_ref())
-                .map_err(|_| invalid("pack trailer is not 20 bytes"))?,
-        )
-    };
-    crab_git::pack_locator::validate_pack_kind_metadata(bytes, pack_checksum, pack.object_count)
-        .map_err(crab_git::pack::PackError::from)?;
-    Ok(())
-}
-
-async fn require_staged_or_existing_object(
-    store: &Store,
-    plan: &ProtectedPushPlan,
-    canonical_key: &str,
-) -> Result<()> {
-    if plan
-        .staged_objects
-        .iter()
-        .any(|object| object.canonical_key == canonical_key)
-    {
-        return Ok(());
-    }
-    require_existing_object(store, canonical_key).await
-}
-
-async fn require_existing_object(store: &Store, canonical_key: &str) -> Result<()> {
-    match store
-        .head(&ObjectPath::from(canonical_key.to_owned()))
-        .await
-    {
-        Ok(_) => Ok(()),
-        Err(StorageError::NotFound { .. }) => Err(invalid(format!(
-            "metadata references missing canonical object: {canonical_key}"
-        ))),
-        Err(e) => Err(e.into()),
-    }
 }
 
 /// Validates staged xorb bytes against shard-declared chunk metadata.
@@ -2717,8 +1552,6 @@ fn is_allowed_global_key(key: &str) -> bool {
 
 fn is_allowed_repo_key(relative: &str) -> bool {
     is_allowed_global_key(relative)
-        || is_allowed_pack_key(relative)
-        || is_allowed_metadata_key(relative)
         || is_allowed_capsule_key(relative)
         || is_allowed_lfs_key(relative)
 }
@@ -2752,34 +1585,6 @@ fn is_allowed_lfs_key(relative: &str) -> bool {
         && validate_hash_component(oid, "LFS object id").is_ok()
 }
 
-fn is_allowed_pack_key(relative: &str) -> bool {
-    let Some(rest) = relative.strip_prefix("packs/pack-") else {
-        return false;
-    };
-    [".pack", ".meta", ".kinds"].iter().any(|suffix| {
-        rest.strip_suffix(suffix)
-            .is_some_and(|hash| validate_hash_component(hash, "pack hash").is_ok())
-    })
-}
-
-fn is_allowed_metadata_key(relative: &str) -> bool {
-    for kind in ["pack", "shard"] {
-        let segment_prefix = format!("metadata/{kind}/segments/");
-        if let Some(name) = relative.strip_prefix(&segment_prefix) {
-            return name.strip_suffix(".jsonl").is_some_and(|hash| {
-                validate_hash_component(hash, "metadata segment hash").is_ok()
-            });
-        }
-        let index_prefix = format!("metadata/{kind}/indexes/");
-        if let Some(name) = relative.strip_prefix(&index_prefix) {
-            return name
-                .strip_suffix(".json")
-                .is_some_and(|hash| validate_hash_component(hash, "metadata index hash").is_ok());
-        }
-    }
-    false
-}
-
 fn validate_key_content_hash(key: &str, actual_blake3: &str) -> Result<()> {
     if let Some(expected) = expected_blake3_from_key(key)
         && expected != actual_blake3
@@ -2792,28 +1597,9 @@ fn validate_key_content_hash(key: &str, actual_blake3: &str) -> Result<()> {
 }
 
 fn expected_blake3_from_key(key: &str) -> Option<&str> {
-    if let Some(hash) = key.split_once("/v2/capsules/").map(|(_, rest)| rest)
-        && let Some((partition, hash)) = hash.split_once('/')
-        && hash.starts_with(partition)
-    {
-        return Some(hash);
-    }
-    if let Some(rest) = key.rsplit_once("/pack-").map(|(_, rest)| rest) {
-        return rest.strip_suffix(".pack");
-    }
-    for marker in [
-        "/metadata/pack/segments/",
-        "/metadata/pack/indexes/",
-        "/metadata/shard/segments/",
-        "/metadata/shard/indexes/",
-    ] {
-        if let Some(hash) = key.split_once(marker).map(|(_, rest)| rest) {
-            return hash
-                .strip_suffix(".jsonl")
-                .or_else(|| hash.strip_suffix(".json"));
-        }
-    }
-    None
+    let rest = key.split_once("/v2/capsules/")?.1;
+    let (partition, hash) = rest.split_once('/')?;
+    hash.starts_with(partition).then_some(hash)
 }
 
 fn invalid(message: impl Into<String>) -> AuthServerError {
@@ -2832,12 +1618,7 @@ fn conflict(message: impl Into<String>) -> AuthServerError {
 mod tests {
     use super::*;
     use bytes::Bytes;
-    use crab_metadata::file_index_lookup::FileIndexLookupSession;
-    use crab_metadata::pack_metadata::PackMetadata;
-    use crab_metadata::receipts::PushCommitReceipt;
-    use crab_metadata::remote_index::read_chunk_index_entry;
-    use crab_metadata::segmented::ShardSegmentEntry;
-    use crab_storage::{StorageError, repo_pack_metadata_path};
+    use crab_storage::StorageError;
     use object_store::memory::InMemory;
     use std::sync::Arc;
 
@@ -2902,28 +1683,6 @@ mod tests {
         manifest.pack_index_hash = hash('d');
         manifest.seal_git_validation();
         manifest
-    }
-
-    fn push_plan() -> ProtectedPushPlan {
-        ProtectedPushPlan {
-            schema_version: 1,
-            mirror_plan_id: None,
-            repo_prefix: "org/repo".to_owned(),
-            push_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
-            upload_prefix: "org/repo/staging/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/".to_owned(),
-            base_manifest_generation: Some(4),
-            base_manifest_etag: Some("etag-1".to_owned()),
-            ref_updates: vec![ref_update(Some(oid('1')), oid('2'))],
-            candidate_manifest: candidate_manifest(),
-            push_commit_receipt: None,
-            staged_objects: vec![
-                staged_object(format!(
-                    "org/repo/metadata/shard/indexes/{}.json",
-                    hash('c')
-                )),
-                staged_object(format!("org/repo/metadata/pack/indexes/{}.json", hash('d'))),
-            ],
-        }
     }
 
     fn capsule_push_plan() -> ProtectedCapsulePushPlan {
@@ -3018,28 +1777,6 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn service_candidate_preserves_unborn_head_for_tag_only_updates() -> Result<()> {
-        let store = store();
-        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
-        let mut plan = push_plan();
-        plan.candidate_manifest = Manifest::default_for_repo("refs/heads/unborn");
-        let materialized = MaterializedSourcePush {
-            ref_updates: vec![PushRefUpdate {
-                ref_name: "refs/tags/v1".into(),
-                old_oid: None,
-                new_oid: oid('2'),
-            }],
-            packs: vec![],
-            peeled_refs: BTreeMap::new(),
-            git_visibility: MaterializedGitVisibility::Exact(BTreeMap::new()),
-        };
-        let manifest =
-            build_service_candidate_manifest(&store, &router, None, &plan, &materialized).await?;
-        assert_eq!(manifest.head, "refs/heads/unborn");
-        Ok(())
-    }
-
-    #[tokio::test]
     async fn materialized_visibility_must_match_candidate_manifest() {
         let store = store();
         let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
@@ -3060,59 +1797,6 @@ mod tests {
                 .await,
             Err(StorageError::NotFound { .. })
         ));
-    }
-
-    #[test]
-    fn protected_dependency_receipt_is_required_and_candidate_bound() {
-        let mut plan = push_plan();
-        assert!(validate_protected_dependency_receipt(&plan).is_err());
-        let parse = |value: &str| {
-            <[u8; 32]>::from(MerkleHash::from_hex(value).expect("candidate index hash"))
-        };
-        let protected_updates = plan
-            .ref_updates
-            .iter()
-            .map(|update| {
-                (
-                    update.ref_name.clone(),
-                    update.old_oid.clone(),
-                    update.new_oid.clone(),
-                )
-            })
-            .collect::<Vec<_>>();
-        plan.push_commit_receipt = Some(PushCommitReceipt {
-            schema_version: RECEIPT_SCHEMA_VERSION,
-            attempt_id: plan.push_id.clone(),
-            base_generation: 4,
-            base_etag: Some("etag-1".to_owned()),
-            ref_edit_digest: crab_metadata::receipts::protected_ref_edit_digest(&protected_updates),
-            git_object_set_digest: [2; 32],
-            file_recipe_set_digest: [3; 32],
-            xorb_proof_digest: [4; 32],
-            shard_set_digest: [5; 32],
-            candidate_pack_index_hash: parse(&plan.candidate_manifest.pack_index_hash),
-            candidate_shard_index_hash: parse(&plan.candidate_manifest.shard_index_hash),
-            gc_registry_generation: 0,
-            connectivity_digest: crab_metadata::receipts::protected_connectivity_digest(&[plan
-                .ref_updates[0]
-                .new_oid
-                .clone()]),
-            plan_digest: [7; 32],
-        });
-
-        validate_protected_dependency_receipt(&plan).expect("valid protected receipt");
-        let original_new_oid = plan.ref_updates[0].new_oid.clone();
-        plan.ref_updates[0].new_oid = oid('3');
-        assert!(
-            validate_protected_dependency_receipt(&plan).is_err(),
-            "receipt must bind the exact protected ref edits"
-        );
-        plan.ref_updates[0].new_oid = original_new_oid;
-        plan.push_commit_receipt
-            .as_mut()
-            .expect("receipt")
-            .candidate_shard_index_hash = [9; 32];
-        assert!(validate_protected_dependency_receipt(&plan).is_err());
     }
 
     fn active_active_replication() -> ActiveActiveReplicationConfig {
@@ -3215,7 +1899,7 @@ mod tests {
 
     #[test]
     fn push_plan_shape_rejects_excessive_ref_updates() {
-        let mut plan = push_plan();
+        let mut plan = capsule_push_plan();
         plan.ref_updates = (0..=MAX_PUSH_REF_UPDATES)
             .map(|idx| PushRefUpdate {
                 ref_name: format!("refs/heads/branch-{idx}"),
@@ -3224,23 +1908,16 @@ mod tests {
             })
             .collect();
 
-        let err = validate_push_plan_shape(&plan, "org/repo", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-            .expect_err("oversized ref update list must be rejected");
+        let err = validate_protected_capsule_plan_shape(
+            &plan,
+            "org/repo",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+        .expect_err("oversized ref update list must be rejected");
 
         assert!(
             err.to_string().contains("too many ref updates"),
             "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn push_plan_shape_accepts_version_two_with_a_mirror_plan_identity() {
-        let mut plan = push_plan();
-        plan.schema_version = 2;
-        plan.mirror_plan_id = Some("a".repeat(64));
-
-        assert!(
-            validate_push_plan_shape(&plan, "org/repo", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb").is_ok()
         );
     }
 
@@ -3270,25 +1947,18 @@ mod tests {
     }
 
     #[test]
-    fn push_plan_shape_rejects_mirror_identity_in_version_one() {
-        let mut plan = push_plan();
-        plan.mirror_plan_id = Some("a".repeat(64));
-
-        let error = validate_push_plan_shape(&plan, "org/repo", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-            .unwrap_err();
-
-        assert!(error.to_string().contains("schema_version"));
-    }
-
-    #[test]
     fn push_plan_shape_rejects_excessive_staged_object_list() {
-        let mut plan = push_plan();
+        let mut plan = capsule_push_plan();
         plan.staged_objects = (0..=MAX_PUSH_STAGED_OBJECTS)
             .map(|idx| staged_object(format!("org/repo/packs/pack-{}-{idx}.pack", hash('a'))))
             .collect();
 
-        let err = validate_push_plan_shape(&plan, "org/repo", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-            .expect_err("oversized staged object list must be rejected");
+        let err = validate_protected_capsule_plan_shape(
+            &plan,
+            "org/repo",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+        .expect_err("oversized staged object list must be rejected");
 
         assert!(
             err.to_string().contains("too many staged objects"),
@@ -3298,13 +1968,14 @@ mod tests {
 
     #[test]
     fn push_plan_rejects_unknown_top_level_fields() {
-        let mut value = serde_json::to_value(push_plan()).expect("push plan should serialize");
+        let mut value =
+            serde_json::to_value(capsule_push_plan()).expect("push plan should serialize");
         value
             .as_object_mut()
             .expect("push plan should serialize as object")
             .insert("legacy_mode".to_owned(), serde_json::json!(true));
 
-        let err = serde_json::from_value::<ProtectedPushPlan>(value)
+        let err = serde_json::from_value::<ProtectedCapsulePushPlan>(value)
             .expect_err("unknown push-plan fields must be rejected");
 
         assert!(
@@ -3315,13 +1986,14 @@ mod tests {
 
     #[test]
     fn push_plan_rejects_unknown_ref_update_fields() {
-        let mut value = serde_json::to_value(push_plan()).expect("push plan should serialize");
+        let mut value =
+            serde_json::to_value(capsule_push_plan()).expect("push plan should serialize");
         value["ref_updates"][0]
             .as_object_mut()
             .expect("ref update should serialize as object")
             .insert("force".to_owned(), serde_json::json!(true));
 
-        let err = serde_json::from_value::<ProtectedPushPlan>(value)
+        let err = serde_json::from_value::<ProtectedCapsulePushPlan>(value)
             .expect_err("unknown ref update fields must be rejected");
 
         assert!(
@@ -3332,13 +2004,14 @@ mod tests {
 
     #[test]
     fn push_plan_rejects_unknown_staged_object_fields() {
-        let mut value = serde_json::to_value(push_plan()).expect("push plan should serialize");
+        let mut value =
+            serde_json::to_value(capsule_push_plan()).expect("push plan should serialize");
         value["staged_objects"][0]
             .as_object_mut()
             .expect("staged object should serialize as object")
             .insert("canonical_write".to_owned(), serde_json::json!(true));
 
-        let err = serde_json::from_value::<ProtectedPushPlan>(value)
+        let err = serde_json::from_value::<ProtectedCapsulePushPlan>(value)
             .expect_err("unknown staged object fields must be rejected");
 
         assert!(
@@ -3348,70 +2021,8 @@ mod tests {
     }
 
     #[test]
-    fn candidate_manifest_must_match_ref_updates() {
-        let mut plan = push_plan();
-        plan.candidate_manifest
-            .refs
-            .insert("refs/heads/other".to_owned(), oid('9'));
-        plan.candidate_manifest.seal_git_validation();
-
-        let err = validate_candidate_manifest_shape(&plan, "org/repo")
-            .expect_err("candidate manifest must match ref updates");
-
-        assert!(
-            err.to_string().contains("refs differ"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn candidate_manifest_rejects_unstaged_index_hashes() {
-        let mut plan = push_plan();
-        plan.candidate_manifest.pack_index_hash = hash('9');
-        plan.candidate_manifest.seal_git_validation();
-        plan.staged_objects
-            .retain(|object| !object.canonical_key.contains("/metadata/pack/indexes/"));
-
-        let err = validate_candidate_manifest_shape(&plan, "org/repo")
-            .expect_err("unstaged index hash must be rejected");
-
-        assert!(
-            err.to_string().contains("neither current nor staged"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn candidate_delta_manifest_allows_empty_index_hash() -> Result<()> {
-        let mut plan = push_plan();
-        plan.candidate_manifest.pack_index_hash.clear();
-        plan.candidate_manifest.seal_git_validation();
-
-        validate_candidate_manifest_shape(&plan, "org/repo")
-    }
-
-    #[test]
-    fn candidate_manifest_rejects_service_owned_metadata_changes() {
-        let mut plan = push_plan();
-        plan.candidate_manifest.commit_graph_hash = Some(hash('9'));
-
-        let err = validate_candidate_manifest_shape(&plan, "org/repo")
-            .expect_err("service-owned metadata changes must be rejected");
-
-        assert!(
-            err.to_string().contains("unsupported metadata"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[test]
-    fn candidate_manifest_accepts_staged_updates() -> Result<()> {
-        validate_candidate_manifest_shape(&push_plan(), "org/repo")
-    }
-
-    #[test]
     fn staged_object_shapes_reject_duplicate_canonical_keys() {
-        let mut plan = push_plan();
+        let mut plan = capsule_push_plan();
         let duplicate = plan
             .staged_objects
             .first()
@@ -3419,9 +2030,12 @@ mod tests {
             .clone();
         plan.staged_objects.push(duplicate);
 
-        let err =
-            validate_staged_object_shapes(&plan, "org/repo", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-                .expect_err("duplicate canonical key must be rejected");
+        let err = validate_staged_write_shapes(
+            &plan.staged_objects,
+            "org/repo",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+        .expect_err("duplicate canonical key must be rejected");
 
         assert!(
             err.to_string().contains("duplicate canonical"),
@@ -3431,13 +2045,16 @@ mod tests {
 
     #[test]
     fn staged_object_shapes_reject_wrong_staging_prefix() {
-        let mut plan = push_plan();
+        let mut plan = capsule_push_plan();
         plan.staged_objects[0].staged_key =
-            "org/repo/staging/other/objects/org/repo/packs/pack-bad.pack".to_owned();
+            "org/repo/staging/other/objects/org/repo/v2/capsules/aa/bad".to_owned();
 
-        let err =
-            validate_staged_object_shapes(&plan, "org/repo", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")
-                .expect_err("staged object path must match push id");
+        let err = validate_staged_write_shapes(
+            &plan.staged_objects,
+            "org/repo",
+            "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb",
+        )
+        .expect_err("staged object path must match push id");
 
         assert!(
             err.to_string().contains("path does not match"),
@@ -3453,13 +2070,7 @@ mod tests {
             format!(".crab/shards/bb/{}", hash('b')),
             format!("{repo}/.crab/xorbs/aa/{}", hash('a')),
             format!("{repo}/.crab/shards/bb/{}", hash('b')),
-            format!("{repo}/packs/pack-{}.pack", hash('c')),
-            format!("{repo}/packs/pack-{}.meta", hash('c')),
-            format!("{repo}/packs/pack-{}.kinds", hash('c')),
-            format!("{repo}/metadata/pack/segments/{}.jsonl", hash('d')),
-            format!("{repo}/metadata/pack/indexes/{}.json", hash('e')),
-            format!("{repo}/metadata/shard/segments/{}.jsonl", hash('f')),
-            format!("{repo}/metadata/shard/indexes/{}.json", hash('1')),
+            format!("{repo}/v2/capsules/aa/{}", hash('a')),
         ] {
             assert!(
                 validate_canonical_key(repo, &key).is_ok(),
@@ -3473,6 +2084,13 @@ mod tests {
         let repo = "org/repo";
         for key in [
             "other/repo/packs/pack-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.pack".to_owned(),
+            format!("{repo}/packs/pack-{}.pack", hash('c')),
+            format!("{repo}/packs/pack-{}.meta", hash('c')),
+            format!("{repo}/packs/pack-{}.kinds", hash('c')),
+            format!("{repo}/metadata/pack/segments/{}.jsonl", hash('d')),
+            format!("{repo}/metadata/pack/indexes/{}.json", hash('e')),
+            format!("{repo}/metadata/shard/segments/{}.jsonl", hash('f')),
+            format!("{repo}/metadata/shard/indexes/{}.json", hash('1')),
             format!("{repo}/manifest"),
             format!("{repo}/refs/heads/main"),
             format!("{repo}/locks/main"),
@@ -3500,7 +2118,10 @@ mod tests {
     fn staged_object_bytes_bind_content_addressed_keys() -> Result<()> {
         let bytes = b"pack bytes";
         let actual = blake3_hex(bytes);
-        let object = staged_object_for_bytes(format!("org/repo/packs/pack-{actual}.pack"), bytes);
+        let object = staged_object_for_bytes(
+            format!("org/repo/v2/capsules/{}/{actual}", &actual[..2]),
+            bytes,
+        );
 
         validate_staged_object_bytes(&object, bytes)
     }
@@ -3509,7 +2130,7 @@ mod tests {
     fn staged_object_bytes_reject_content_addressed_mismatch() {
         let bytes = b"pack bytes";
         let object =
-            staged_object_for_bytes(format!("org/repo/packs/pack-{}.pack", hash('a')), bytes);
+            staged_object_for_bytes(format!("org/repo/v2/capsules/aa/{}", hash('a')), bytes);
 
         let err = validate_staged_object_bytes(&object, bytes)
             .expect_err("pack key must match staged content hash");
@@ -3567,82 +2188,6 @@ mod tests {
         Ok((key, xorb.bytes, expected_chunks, shard_bytes))
     }
 
-    type FileShardReference = (
-        MerkleHash,
-        MerkleHash,
-        Vec<u8>,
-        MerkleHash,
-        Bytes,
-        Vec<ExpectedXorbChunk>,
-    );
-
-    fn test_file_shard_reference() -> Result<FileShardReference> {
-        use crab_xet::shard::{
-            FileDataSequenceEntry, FileDataSequenceHeader, MDBFileInfo, MDBXorbInfo, ShardWriter,
-            XorbChunkSequenceEntry, XorbChunkSequenceHeader,
-        };
-        use crab_xet::xorb::builder::{RunId, XorbBuilder};
-        use crab_xet::xorb::format::Chunk;
-
-        let chunk = Chunk::new(Bytes::from_static(b"enterprise service metadata payload"));
-        let mut builder = XorbBuilder::new();
-        builder.push(&chunk, RunId(0))?;
-        let xorb = builder
-            .finalize()?
-            .into_iter()
-            .next()
-            .ok_or_else(|| invalid("test xorb was not finalized"))?;
-
-        let mut byte_offset = 0u32;
-        let mut entries = Vec::with_capacity(xorb.placements.len());
-        for placement in &xorb.placements {
-            entries.push(XorbChunkSequenceEntry::new(
-                placement.chunk_hash,
-                placement.uncompressed_size,
-                byte_offset,
-            ));
-            byte_offset = byte_offset
-                .checked_add(placement.uncompressed_size)
-                .ok_or_else(|| invalid("test xorb size overflow"))?;
-        }
-
-        let file_hash = MerkleHash::from([42, 42, 42, 42]);
-        let mut writer = ShardWriter::new();
-        writer.add_xorb(Arc::new(MDBXorbInfo {
-            metadata: XorbChunkSequenceHeader::new(xorb.hash, entries.len(), byte_offset),
-            chunks: entries.clone(),
-        }))?;
-        writer.add_file(MDBFileInfo {
-            metadata: FileDataSequenceHeader::new(file_hash, 1u32, false, false),
-            segments: vec![FileDataSequenceEntry::new(
-                xorb.hash,
-                byte_offset,
-                0u32,
-                u32::try_from(entries.len())
-                    .map_err(|_| invalid("test xorb entry count overflows u32"))?,
-            )],
-            verification: vec![],
-            metadata_ext: None,
-        })?;
-        let (shard_bytes, shard_hash) = writer.finalize()?;
-
-        let xorb_key = canonical_global_content_path("xorbs", &xorb.hash.hex()).to_string();
-        let refs = strict_xorb_references_from_shard(&shard_bytes)?;
-        let expected_chunks = refs
-            .get(&xorb_key)
-            .cloned()
-            .ok_or_else(|| invalid("test shard did not reference test xorb"))?;
-
-        Ok((
-            file_hash,
-            shard_hash,
-            shard_bytes,
-            xorb.hash,
-            xorb.bytes,
-            expected_chunks,
-        ))
-    }
-
     #[test]
     fn strict_shard_parse_reports_referenced_xorbs() -> Result<()> {
         let (key, xorb_bytes, expected_chunks, shard_bytes) = test_xorb_reference()?;
@@ -3684,353 +2229,15 @@ mod tests {
         Ok(())
     }
 
-    #[test]
-    fn staged_object_reference_check_rejects_unreferenced_object() {
-        let plan = push_plan();
-        let referenced_keys = BTreeSet::from([plan.staged_objects[0].canonical_key.clone()]);
-
-        let err = validate_staged_objects_are_referenced(&plan, &referenced_keys)
-            .expect_err("unreferenced staged object must be rejected before promotion");
-
-        assert!(
-            err.to_string().contains("not referenced"),
-            "unexpected error: {err}"
-        );
-    }
-
-    #[tokio::test]
-    async fn candidate_metadata_accepts_appended_pack_index() -> Result<()> {
-        let store = store();
-        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
-        let base_index = SegmentIndex::default();
-        let base_index_object =
-            segmented::build_index_object(SegmentKind::Pack, base_index.clone())?;
-        store
-            .put_exact(
-                &router.repo_path(&segmented::index_relative_path(
-                    SegmentKind::Pack,
-                    &base_index_object.hash,
-                )),
-                Bytes::from(base_index_object.bytes.clone()),
-            )
-            .await?;
-
-        let pack_bytes = b"pack".to_vec();
-        let pack_id = blake3_hex(&pack_bytes);
-        let pack = PackManifestEntry {
-            pack_id: pack_id.clone(),
-            size: pack_bytes.len() as u64,
-            content_hash: pack_id.clone(),
-            ref_tips: vec![oid('2')],
-            object_count: 1,
-        };
-        let segment = segmented::build_segment(SegmentKind::Pack, 1, false, &[pack])?
-            .ok_or_else(|| invalid("test segment missing"))?;
-        let candidate_index = segmented::append_segment(base_index, segment.reference.clone());
-        let candidate_index_object =
-            segmented::build_index_object(SegmentKind::Pack, candidate_index)?;
-
-        let segment_key = router
-            .repo_path(&segment.reference.path)
-            .as_ref()
-            .to_owned();
-        let index_key = router
-            .repo_path(&segmented::index_relative_path(
-                SegmentKind::Pack,
-                &candidate_index_object.hash,
-            ))
-            .as_ref()
-            .to_owned();
-        let pack_key = format!("org/repo/packs/pack-{pack_id}.pack");
-        let pack_metadata = PackMetadata {
-            pack_id: pack_id.clone(),
-            ref_tips: vec![oid('2')],
-            object_count: 1,
-        };
-        let pack_metadata_bytes = serde_json::to_vec(&pack_metadata)
-            .map_err(|e| AuthServerError::Internal(format!("test pack metadata: {e}")))?;
-        let pack_metadata_key = format!("org/repo/packs/pack-{pack_id}.meta");
-
-        let segment_object = staged_object_for_bytes(segment_key, &segment.bytes);
-        let index_object = staged_object_for_bytes(index_key, &candidate_index_object.bytes);
-        let pack_object = staged_object_for_bytes(pack_key, &pack_bytes);
-        let pack_metadata_object = staged_object_for_bytes(pack_metadata_key, &pack_metadata_bytes);
-        put_staged(&store, &segment_object, Bytes::from(segment.bytes)).await?;
-        put_staged(
-            &store,
-            &index_object,
-            Bytes::from(candidate_index_object.bytes),
-        )
-        .await?;
-        put_staged(&store, &pack_object, Bytes::from(pack_bytes)).await?;
-        put_staged(
-            &store,
-            &pack_metadata_object,
-            Bytes::from(pack_metadata_bytes),
-        )
-        .await?;
-
-        let mut candidate = candidate_manifest();
-        candidate.shard_index_hash.clear();
-        candidate.pack_index_hash = candidate_index_object.hash;
-
-        let plan = ProtectedPushPlan {
-            schema_version: 1,
-            mirror_plan_id: None,
-            repo_prefix: "org/repo".to_owned(),
-            push_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
-            upload_prefix: "org/repo/staging/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/".to_owned(),
-            base_manifest_generation: None,
-            base_manifest_etag: None,
-            ref_updates: vec![ref_update(Some(oid('1')), oid('2'))],
-            candidate_manifest: candidate,
-            push_commit_receipt: None,
-            staged_objects: vec![
-                segment_object,
-                index_object,
-                pack_object,
-                pack_metadata_object,
-            ],
-        };
-
-        validate_staged_object_shapes(&plan, "org/repo", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")?;
-        validate_candidate_metadata(&store, &router, &plan).await
-    }
-
-    #[tokio::test]
-    async fn commit_service_metadata_publishes_file_and_chunk_indexes() -> Result<()> {
-        let store = store();
-        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
-        crab_metadata::layout_descriptor::ensure_canonical_layout(&store, &router).await?;
-        let (file_hash, shard_hash, shard_bytes, xorb_hash, xorb_bytes, expected_chunks) =
-            test_file_shard_reference()?;
-        let shard_entry = ShardSegmentEntry {
-            shard_hash: shard_hash.hex(),
-            size: shard_bytes.len() as u64,
-        };
-        let segment = segmented::build_segment(SegmentKind::Shard, 1, false, &[shard_entry])?
-            .ok_or_else(|| invalid("test shard segment missing"))?;
-        let index = segmented::append_segment(SegmentIndex::default(), segment.reference.clone());
-        let index_object = segmented::build_index_object(SegmentKind::Shard, index)?;
-
-        let segment_key = router
-            .repo_path(&segment.reference.path)
-            .as_ref()
-            .to_owned();
-        let index_key = router
-            .repo_path(&segmented::index_relative_path(
-                SegmentKind::Shard,
-                &index_object.hash,
-            ))
-            .as_ref()
-            .to_owned();
-        let shard_key = router.shard_path(&shard_hash).as_ref().to_owned();
-        let xorb_key = router.xorb_path(&xorb_hash).as_ref().to_owned();
-
-        let segment_object = staged_object_for_bytes(segment_key, &segment.bytes);
-        let index_object_staged = staged_object_for_bytes(index_key, &index_object.bytes);
-        let shard_object = staged_object_for_bytes(shard_key, &shard_bytes);
-        let xorb_object = staged_object_for_bytes(xorb_key, &xorb_bytes);
-        put_staged(&store, &segment_object, Bytes::from(segment.bytes)).await?;
-        put_staged(
-            &store,
-            &index_object_staged,
-            Bytes::from(index_object.bytes),
-        )
-        .await?;
-        put_staged(&store, &shard_object, Bytes::from(shard_bytes)).await?;
-        put_staged(&store, &xorb_object, xorb_bytes).await?;
-
-        let mut candidate = candidate_manifest();
-        candidate.shard_index_hash = index_object.hash;
-        candidate.pack_index_hash.clear();
-        candidate.seal_git_validation();
-        let plan = ProtectedPushPlan {
-            schema_version: 1,
-            mirror_plan_id: None,
-            repo_prefix: "org/repo".to_owned(),
-            push_id: "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb".to_owned(),
-            upload_prefix: "org/repo/staging/bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb/".to_owned(),
-            base_manifest_generation: None,
-            base_manifest_etag: None,
-            ref_updates: vec![ref_update(Some(oid('1')), oid('2'))],
-            candidate_manifest: candidate,
-            push_commit_receipt: None,
-            staged_objects: vec![
-                segment_object,
-                index_object_staged,
-                shard_object,
-                xorb_object,
-            ],
-        };
-
-        validate_staged_object_shapes(&plan, "org/repo", "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb")?;
-        for object in &plan.staged_objects {
-            read_verified_staged_object(&store, object).await?;
-        }
-        validate_candidate_metadata(&store, &router, &plan).await?;
-        promote_staged_objects(&store, &plan).await?;
-        let mut committed_manifest = plan.candidate_manifest.clone();
-        committed_manifest.generation = 1;
-        crab_metadata::manifest_store::create_manifest(&store, &router, &committed_manifest)
-            .await?;
-        commit_service_metadata(&store, &router, &plan, &committed_manifest, 1).await?;
-
-        let snapshot =
-            crab_metadata::manifest_store::read_repository_snapshot(&store, &router).await?;
-        let session = FileIndexLookupSession::open_from_snapshot(router.clone(), &snapshot).await?;
-        let found = session.lookup(&file_hash).await?;
-        session.close().await?;
-        assert_eq!(found, Some(shard_hash));
-        let first_chunk = expected_chunks
-            .first()
-            .ok_or_else(|| invalid("test shard had no chunk entries"))?;
-        let config = RemoteIndexConfig::for_repo("org/repo");
-        let stored = read_chunk_index_entry(Arc::clone(store.inner()), &config, &first_chunk.hash)
-            .await?
-            .ok_or_else(|| invalid("chunk index entry missing"))?;
-        assert_eq!(stored.xorb_hash, xorb_hash);
-        assert_eq!(stored.chunk_index, first_chunk.index);
-        assert_eq!(stored.uncompressed_size, first_chunk.uncompressed_size);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn service_workspace_failure_precedes_metadata_writes() -> Result<()> {
-        if !crate::test_support::unavailable_workspace_child(
-            "receive::tests::service_workspace_failure_precedes_metadata_writes",
-        ) {
-            return Ok(());
-        }
-        let store = store();
-        let router = StoreLayout::new(store.clone(), "org/repo".to_owned());
-        let index = segmented::build_index_object(SegmentKind::Shard, SegmentIndex::default())?;
-        let index_key = router
-            .repo_path(&segmented::index_relative_path(
-                SegmentKind::Shard,
-                &index.hash,
-            ))
-            .to_string();
-        let object = staged_object_for_bytes(index_key, &index.bytes);
-        put_staged(&store, &object, Bytes::from(index.bytes)).await?;
-        let mut plan = push_plan();
-        plan.candidate_manifest.shard_index_hash = index.hash;
-        plan.staged_objects = vec![object];
-        let before = store.list_prefix(&ObjectPath::from("")).await?;
-        let result =
-            commit_service_metadata(&store, &router, &plan, &plan.candidate_manifest, 1).await;
-        assert!(matches!(result, Err(AuthServerError::Io(_))), "{result:?}");
-        assert_eq!(store.list_prefix(&ObjectPath::from("")).await?, before);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn pack_metadata_sidecar_must_match_pack_entry() -> Result<()> {
-        let store = store();
-        let pack = PackManifestEntry {
-            pack_id: hash('a'),
-            size: 4,
-            content_hash: hash('a'),
-            ref_tips: vec![oid('2')],
-            object_count: 1,
-        };
-        let metadata = PackMetadata {
-            pack_id: hash('b'),
-            ref_tips: vec![oid('2')],
-            object_count: 1,
-        };
-        let bytes = serde_json::to_vec(&metadata)
-            .map_err(|e| AuthServerError::Internal(format!("test pack metadata: {e}")))?;
-        let key = repo_pack_metadata_path("org/repo", &pack.pack_id)
-            .as_ref()
-            .to_owned();
-        let object = staged_object_for_bytes(key.clone(), &bytes);
-        put_staged(&store, &object, Bytes::from(bytes)).await?;
-        let mut plan = push_plan();
-        plan.staged_objects = vec![object];
-
-        let err = validate_optional_pack_metadata(&store, &plan, &key, &pack)
-            .await
-            .expect_err("pack metadata sidecar must match the referenced pack entry");
-
-        assert!(
-            err.to_string().contains("pack_id does not match"),
-            "unexpected error: {err}"
-        );
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn promote_pack_metadata_keeps_oversized_existing_hint_legacy() -> Result<()> {
-        let store = store();
-        let pack_id = hash('a');
-        let path = repo_pack_metadata_path("org/repo", &pack_id);
-        let existing = Bytes::from(vec![
-            b' ';
-            usize::try_from(
-                crab_metadata::pack_metadata::MAX_PACK_METADATA_BYTES + 1
-            )
-            .map_err(|_| invalid(
-                "test metadata size does not fit usize"
-            ))?
-        ]);
-        store.put(&path, existing.clone()).await?;
-
-        let staged = PackMetadata {
-            pack_id,
-            ref_tips: vec![oid('2')],
-            object_count: 1,
-        };
-        let staged_bytes = serde_json::to_vec(&staged)
-            .map_err(|error| AuthServerError::Internal(format!("test pack metadata: {error}")))?;
-
-        promote_pack_metadata_union(&store, &path, Bytes::from(staged_bytes)).await?;
-
-        let (body, _) = store.get_with_etag(&path).await?;
-        assert_eq!(body, existing);
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn promote_pack_metadata_does_not_enrich_empty_legacy_hint() -> Result<()> {
-        let store = store();
-        let pack_id = hash('a');
-        let path = repo_pack_metadata_path("org/repo", &pack_id);
-        let existing = PackMetadata {
-            pack_id: pack_id.clone(),
-            ref_tips: Vec::new(),
-            object_count: 1,
-        };
-        let existing_bytes = serde_json::to_vec(&existing)
-            .map_err(|error| AuthServerError::Internal(format!("test pack metadata: {error}")))?;
-        store
-            .put(&path, Bytes::from(existing_bytes.clone()))
-            .await?;
-
-        let staged = PackMetadata {
-            pack_id,
-            ref_tips: vec![oid('2')],
-            object_count: 1,
-        };
-        let staged_bytes = serde_json::to_vec(&staged)
-            .map_err(|error| AuthServerError::Internal(format!("test pack metadata: {error}")))?;
-
-        promote_pack_metadata_union(&store, &path, Bytes::from(staged_bytes)).await?;
-
-        let (body, _) = store.get_with_etag(&path).await?;
-        assert_eq!(body, existing_bytes);
-        Ok(())
-    }
-
     #[tokio::test]
     async fn promote_staged_objects_revalidates_staged_bytes_before_canonical_write() -> Result<()>
     {
         let store = store();
         let original = Bytes::from_static(b"pack");
         let pack_id = blake3_hex(&original);
-        let canonical_key = format!("org/repo/packs/pack-{pack_id}.pack");
+        let canonical_key = format!("org/repo/v2/capsules/{}/{pack_id}", &pack_id[..2]);
         let object = staged_object_for_bytes(canonical_key.clone(), &original);
-        let mut plan = push_plan();
+        let mut plan = capsule_push_plan();
         plan.staged_objects = vec![object.clone()];
 
         put_staged(&store, &object, original).await?;
@@ -4044,7 +2251,7 @@ mod tests {
             )
             .await?;
 
-        let err = promote_staged_objects(&store, &plan)
+        let err = promote_staged_writes(&store, &plan.staged_objects)
             .await
             .expect_err("tampered staged object must not be promoted");
         assert!(
@@ -4063,7 +2270,7 @@ mod tests {
     async fn read_verified_staged_object_rejects_an_oversized_provider_body() -> Result<()> {
         let store = store();
         let object = staged_object_for_bytes(
-            "org/repo/packs/pack-aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa.pack"
+            "org/repo/v2/capsules/aa/aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"
                 .to_owned(),
             b"pack",
         );
@@ -4082,17 +2289,17 @@ mod tests {
         let store = store();
         let original = Bytes::from_static(b"pack");
         let pack_id = blake3_hex(&original);
-        let canonical_key = format!("org/repo/packs/pack-{pack_id}.pack");
+        let canonical_key = format!("org/repo/v2/capsules/{}/{pack_id}", &pack_id[..2]);
         let canonical_path = ObjectPath::from(canonical_key.clone());
         let object = staged_object_for_bytes(canonical_key, &original);
-        let mut plan = push_plan();
+        let mut plan = capsule_push_plan();
         plan.staged_objects = vec![object.clone()];
 
         let existing = Bytes::from_static(b"different-pack");
         store.put(&canonical_path, existing.clone()).await?;
         put_staged(&store, &object, original).await?;
 
-        let err = promote_staged_objects(&store, &plan)
+        let err = promote_staged_writes(&store, &plan.staged_objects)
             .await
             .expect_err("promotion must not overwrite immutable canonical content");
         assert!(
@@ -4104,117 +2311,11 @@ mod tests {
         Ok(())
     }
 
-    #[tokio::test]
-    async fn promote_staged_pack_metadata_unions_existing_ref_tips() -> Result<()> {
-        let store = store();
-        let pack_id = hash('a');
-        let canonical_key = format!("org/repo/packs/pack-{pack_id}.meta");
-        let canonical_path = ObjectPath::from(canonical_key.clone());
-        let existing = PackMetadata {
-            pack_id: pack_id.clone(),
-            ref_tips: vec![oid('1')],
-            object_count: 3,
-        };
-        store
-            .put(
-                &canonical_path,
-                Bytes::from(serde_json::to_vec(&existing).map_err(|error| {
-                    AuthServerError::Internal(format!("existing metadata serialize: {error}"))
-                })?),
-            )
-            .await?;
-        let staged = PackMetadata {
-            pack_id,
-            ref_tips: vec![oid('2')],
-            object_count: 3,
-        };
-        let staged_bytes = Bytes::from(serde_json::to_vec(&staged).map_err(|error| {
-            AuthServerError::Internal(format!("staged metadata serialize: {error}"))
-        })?);
-        let object = staged_object_for_bytes(canonical_key, &staged_bytes);
-        put_staged(&store, &object, staged_bytes).await?;
-        let mut plan = push_plan();
-        plan.staged_objects = vec![object];
-
-        promote_staged_objects(&store, &plan).await?;
-
-        let (body, _) = store.get_with_etag(&canonical_path).await?;
-        let merged = parse_pack_metadata(&body, canonical_path.as_ref())?;
-        assert_eq!(merged.ref_tips, vec![oid('1'), oid('2')]);
-        Ok(())
-    }
-
-    #[test]
-    fn prepare_record_maps_view_refs_to_source_manifest_refs() -> Result<()> {
-        let mut base = Manifest::default_for_repo("refs/heads/main");
-        base.generation = 12;
-        base.refs.insert("refs/heads/main".to_owned(), oid('A'));
-        let view_updates = vec![ref_update(Some(oid('1')), oid('B'))];
-
-        let record = build_prepare_record(
-            "org/repo",
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            (&base, "etag-12"),
-            view_updates.clone(),
-            None,
-        )?;
-
-        assert_eq!(record.source_manifest_generation, 12);
-        assert_eq!(record.source_manifest_etag, "etag-12");
-        assert_eq!(record.view_ref_updates, view_updates);
-        assert_eq!(
-            record.source_ref_updates,
-            vec![ref_update(Some(oid('a')), oid('b'))]
-        );
-        validate_prepare_record_shape(&record, "org/repo", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa")?;
-        Ok(())
-    }
-
-    #[test]
-    fn source_ref_updates_accept_case_insensitive_old_oid() -> Result<()> {
-        let mut base = Manifest::default_for_repo("refs/heads/main");
-        base.refs.insert("refs/heads/main".to_owned(), oid('1'));
-        let updates = vec![ref_update(Some(oid('1').to_ascii_uppercase()), oid('2'))];
-
-        let source_updates = source_ref_updates_for(&base, &updates)?;
-
-        assert_eq!(
-            source_updates[0].old_oid.as_deref(),
-            Some(oid('1').as_str())
-        );
-        Ok(())
-    }
-
-    #[test]
-    fn prepare_record_replay_rejects_moved_source_ref() -> Result<()> {
-        let mut base = Manifest::default_for_repo("refs/heads/main");
-        base.refs.insert("refs/heads/main".to_owned(), oid('1'));
-        let view_updates = vec![ref_update(Some(oid('a')), oid('2'))];
-        let record = build_prepare_record(
-            "org/repo",
-            "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa",
-            (&base, "etag-1"),
-            view_updates.clone(),
-            None,
-        )?;
-
-        let mut moved = base;
-        moved.refs.insert("refs/heads/main".to_owned(), oid('3'));
-        let err = source_ref_updates_from_prepare(&record, &moved, &view_updates)
-            .expect_err("moved source ref should reject prepare replay");
-
-        assert!(
-            matches!(err, AuthServerError::CasConflict { .. }),
-            "expected CAS conflict, got {err:?}"
-        );
-        Ok(())
-    }
-
     #[test]
     fn prepared_view_scope_requires_normalized_source_repo() {
         let scope = PreparedViewScope {
-            repo_prefix: "org/repo/acl-views/v1/aaaaaaaa/1-deadbeef".to_owned(),
-            global_prefix: "org/repo/acl-views/v1/aaaaaaaa/1-deadbeef/.crab".to_owned(),
+            repo_prefix: "org/repo/acl-views/v2/aaaaaaaa/1-deadbeef".to_owned(),
+            global_prefix: "org/repo/acl-views/v2/aaaaaaaa/1-deadbeef/.crab".to_owned(),
             source_repo: "org/repo/".to_owned(),
             scope_hash: hash('a'),
         };
@@ -4228,7 +2329,7 @@ mod tests {
     #[test]
     fn prepared_view_scope_requires_view_global_prefix() {
         let scope = PreparedViewScope {
-            repo_prefix: "org/repo/acl-views/v1/aaaaaaaa/1-deadbeef".to_owned(),
+            repo_prefix: "org/repo/acl-views/v2/aaaaaaaa/1-deadbeef".to_owned(),
             global_prefix: "org/repo/.crab".to_owned(),
             source_repo: "org/repo".to_owned(),
             scope_hash: hash('a'),

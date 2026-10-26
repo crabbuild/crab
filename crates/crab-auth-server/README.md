@@ -9,7 +9,7 @@ service or another orchestrator can invoke.
 
 Protected pushes need more than ordinary object uploads. The service must
 validate the requested ref changes, verify every staged object and dependency,
-materialize metadata, coordinate the final manifest/ref commit, and clean up
+bind pointer dependencies, coordinate Capsule/ref-head publication, and clean up
 temporary state. Path-scoped views need the inverse operation: expose only
 authorized Git paths while preserving a valid filtered repository.
 
@@ -21,34 +21,37 @@ becoming trusted to perform authorization or finalization themselves.
 ```text
 crab-auth-receive                         crab-auth-view
         │                                         │
- prepare protected session                 resolve source manifest
+ prepare protected session                 capture source authority
         │                                         │
  verify staged objects + Git state          filter authorized paths
         │                                         │
- coordinate manifest/ref CAS                materialize/repack view
+ coordinate Capsule/ref-head CAS                materialize/repack view
         │                                         │
  commit + cleanup                           JSON result
 ```
 
 `crab-auth-receive` uses `ReceiveContext` and the receive workflow to validate
-ref updates, staged Xet/Git objects, manifests, indexes, receipts, and
-active-active options. Its `Prepare`, `Verify`, and `Commit` commands make the
-publish boundary explicit; commit requires the verified plan digest.
+ref updates, staged Git/Xet/LFS objects, captured pointer catalogs, receipts
+and active-active options. `Prepare`, `Verify` and `Commit` require Capsule root
+authority; a missing or corrupt root fails closed before session or fence writes.
+Only Capsule push-plan schema 3 and Capsule prepare/evidence schema 2 are admitted.
+Manifest plan schemas 1/2 and manifest-only prepare records are rejected. Commit
+admits the typed plan before writer fences and requires the verified plan digest.
 
 Capsule receive captures source and filtered Git/catalog views separately.
 Before source materialization, scoped candidates are verified using only the
 filtered view and incoming packs. Newly reachable Git objects must be visible
 under that capture or supplied by the candidate; retained physical objects do
-not grant access. Both receive paths share the graph/visibility verifier.
+not grant access. Unscoped and scoped candidates share the graph/visibility verifier.
 
 Receive then queries pointer files and candidate shard/xorb identities under
 each capture and applies the candidate delta.
 File-only deltas can reference historical filtered artifacts; source-first
 file selection and immutable descriptor conflicts remain enforced.
 
-Prepare reads only ref authority. A present native `v2/root` takes precedence
-over legacy metadata, matching verification and scoped-view selection. Corrupt
-native authority is rejected without creating a legacy session.
+Prepare reads native ref authority and captures its root identity with the
+requested updates. Verification and recovery require that Capsule session record;
+legacy metadata cannot authorize a new or recovered receive session.
 
 Git workspace intake combines captured packs and
 candidate packs under the existing byte and external-delta checks, including
@@ -61,9 +64,10 @@ the view's Git workspace and Crab metadata and reports the resulting prefixes,
 source generation, and cache status.
 
 Native source hydration pins the catalog captured with the source view. The
-standalone manifest helper shipped in `v1.2.4` retains explicit captured-snapshot
-hydration; current-state lookup and SDK repository opening never select it.
-Both paths share lookup cleanup across successful builds, cache hits and errors.
+standalone view helper still retains a manifest fallback and publication path;
+retiring that separate path remains work. Current-state lookup and SDK repository
+opening never select it. Both view paths share lookup cleanup across successful
+builds, cache hits and errors.
 
 View repacking verifies source bytes into an operation-owned anonymous file,
 then chunks them incrementally off the async runtime. Cancellation propagates

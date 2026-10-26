@@ -409,7 +409,6 @@ pub(super) async fn verify_capsule_candidate(
                     return Err(conflict("capsule base root differs from prepare record"));
                 }
                 let (changed_paths, pointers) = verify_capsule_git_candidate(
-                    ctx.store(),
                     ctx.router(),
                     &source_view,
                     candidate,

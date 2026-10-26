@@ -2,15 +2,12 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use crab_auth::PushRefUpdate;
 use crab_git::RepositoryUrl;
-use crab_metadata::{manifest_store, manifests::Manifest};
 use crab_storage::{StorageError, Store, StoreLayout, build_static_env_store};
 use object_store::path::Path as ObjectPath;
 
 use super::{
-    PreparedViewScope, ProtectedCapsulePushPlan, ProtectedPushPlan, PushPrepareRecord,
-    build_capsule_prepare_record, build_prepare_record, invalid, read_verified_staged_object,
-    receive_provider, validate_prepare_record_shape, validate_push_id,
-    validate_staged_object_shapes,
+    PreparedViewScope, ProtectedCapsulePushPlan, PushPrepareRecord, build_capsule_prepare_record,
+    invalid, receive_provider, validate_prepare_record_shape, validate_push_id,
 };
 use crate::error::{AuthServerError, Result};
 
@@ -24,19 +21,6 @@ pub struct ReceiveContext {
     repo_prefix: String,
     push_id: String,
     max_push_plan_bytes: u64,
-}
-
-/// Source manifest state observed by a receive session.
-pub struct BaseState {
-    manifest: Manifest,
-    etag: String,
-}
-
-/// Typed protected-push plan selected by its explicit schema version.
-#[derive(Debug)]
-pub enum ProtectedReceivePlan {
-    Manifest(Box<ProtectedPushPlan>),
-    Capsule(ProtectedCapsulePushPlan),
 }
 
 impl ReceiveContext {
@@ -109,19 +93,11 @@ impl ReceiveContext {
         &self.push_id
     }
 
-    pub(crate) async fn validate_layout(&self) -> Result<()> {
-        match crab_metadata::capsule_protocol::load_root(&self.router).await {
-            Ok(_) => Ok(()),
-            Err(crab_metadata::error::MetadataError::Storage {
-                source: StorageError::NotFound { .. },
-            }) => {
-                crab_metadata::layout_descriptor::read_canonical_layout(&self.store, &self.router)
-                    .await
-                    .map(|_| ())
-                    .map_err(AuthServerError::from)
-            }
-            Err(error) => Err(error.into()),
-        }
+    pub(crate) async fn validate_root(&self) -> Result<()> {
+        crab_metadata::capsule_protocol::load_root(&self.router)
+            .await
+            .map(|_| ())
+            .map_err(Into::into)
     }
 
     async fn read_plan_body(&self) -> Result<bytes::Bytes> {
@@ -140,63 +116,20 @@ impl ReceiveContext {
         Ok(body)
     }
 
-    pub async fn read_plan_document(&self) -> Result<ProtectedReceivePlan> {
+    pub(crate) async fn read_plan_document(&self) -> Result<ProtectedCapsulePushPlan> {
         #[derive(serde::Deserialize)]
         struct PlanHeader {
             schema_version: u32,
         }
-
         let body = self.read_plan_body().await?;
         let header: PlanHeader = serde_json::from_slice(&body)
             .map_err(|e| invalid(format!("invalid push-plan JSON: {e}")))?;
-        match header.schema_version {
-            1 | 2 => serde_json::from_slice(&body)
-                .map(Box::new)
-                .map(ProtectedReceivePlan::Manifest)
-                .map_err(|e| invalid(format!("invalid push-plan JSON: {e}"))),
-            crab_remote::protected::PROTECTED_CAPSULE_PUSH_PLAN_SCHEMA_VERSION => {
-                serde_json::from_slice(&body)
-                    .map(ProtectedReceivePlan::Capsule)
-                    .map_err(|e| invalid(format!("invalid push-plan JSON: {e}")))
-            }
-            _ => Err(invalid("unsupported push-plan schema_version")),
+        if header.schema_version
+            != crab_remote::protected::PROTECTED_CAPSULE_PUSH_PLAN_SCHEMA_VERSION
+        {
+            return Err(invalid("unsupported push-plan schema_version"));
         }
-    }
-
-    pub async fn read_plan(&self) -> Result<ProtectedPushPlan> {
-        match self.read_plan_document().await? {
-            ProtectedReceivePlan::Manifest(plan) => Ok(*plan),
-            ProtectedReceivePlan::Capsule(_) => Err(invalid(
-                "capsule push-plan requires protocol-v2 verification",
-            )),
-        }
-    }
-
-    pub fn verified_plan_digest(
-        &self,
-        plan: &ProtectedPushPlan,
-        base: &BaseState,
-    ) -> Result<String> {
-        let bytes = serde_json::to_vec_pretty(plan)
-            .map_err(|e| AuthServerError::Internal(format!("push-plan serialize: {e}")))?;
-        let mut hasher = blake3::Hasher::new();
-        hasher.update(&bytes);
-        hasher.update(b"\nsource-generation:");
-        hasher.update(base.manifest.generation.to_string().as_bytes());
-        hasher.update(b"\nsource-etag:");
-        hasher.update(base.etag.as_bytes());
-        Ok(hasher.finalize().to_hex().to_string())
-    }
-
-    pub async fn read_base_state(&self) -> Result<BaseState> {
-        match read_manifest(&self.store, &self.router).await {
-            Ok((manifest, etag)) => Ok(BaseState { manifest, etag }),
-            Err(AuthServerError::NotFound { path }) => Err(AuthServerError::CorruptObject {
-                path,
-                reason: "canonical v1 manifest is missing; initialize or reset the repository with `crab init` before protected push".to_owned(),
-            }),
-            Err(e) => Err(e),
-        }
+        serde_json::from_slice(&body).map_err(|e| invalid(format!("invalid push-plan JSON: {e}")))
     }
 
     pub async fn write_prepare_record(
@@ -204,44 +137,19 @@ impl ReceiveContext {
         view_ref_updates: Vec<PushRefUpdate>,
         view_scope: Option<PreparedViewScope>,
     ) -> Result<PushPrepareRecord> {
-        // Verification and scoped views select native authority first. Preparing
-        // a manifest session for the same repository makes capsule finalization fail.
-        let record = match crab_metadata::capsule_protocol::load_root(&self.router).await {
-            Ok(root) => {
-                let view = crab_read::capsule_protocol::open_ref_view_from_root(&self.router, root)
-                    .await?;
-                build_capsule_prepare_record(
-                    &self.repo_prefix,
-                    &self.push_id,
-                    view.root_snapshot().record().root().generation(),
-                    view.root_snapshot().record().digest(),
-                    view.refs(),
-                    view_ref_updates,
-                    view_scope,
-                )?
-            }
-            Err(crab_metadata::error::MetadataError::Storage {
-                source: StorageError::NotFound { .. },
-            }) => {
-                let (manifest, etag) = read_manifest(&self.store, &self.router).await.map_err(|error| {
-                    match error {
-                        AuthServerError::NotFound { path } => AuthServerError::CorruptObject {
-                            path,
-                            reason: "repository has neither a protocol-v2 root nor a canonical v1 manifest; initialize or reset it with `crab init` before protected push".to_owned(),
-                        },
-                        other => other,
-                    }
-                })?;
-                build_prepare_record(
-                    &self.repo_prefix,
-                    &self.push_id,
-                    (&manifest, &etag),
-                    view_ref_updates,
-                    view_scope,
-                )?
-            }
-            Err(error) => return Err(error.into()),
-        };
+        // Capture only native ref authority before persisting a session; a
+        // missing or corrupt root must not authorize legacy metadata or writes.
+        let root = crab_metadata::capsule_protocol::load_root(&self.router).await?;
+        let view = crab_read::capsule_protocol::open_ref_view_from_root(&self.router, root).await?;
+        let record = build_capsule_prepare_record(
+            &self.repo_prefix,
+            &self.push_id,
+            view.root_snapshot().record().root().generation(),
+            view.root_snapshot().record().digest(),
+            view.refs(),
+            view_ref_updates,
+            view_scope,
+        )?;
         let bytes = serde_json::to_vec_pretty(&record)
             .map_err(|e| AuthServerError::Internal(format!("prepare record serialize: {e}")))?;
         self.store
@@ -291,14 +199,6 @@ impl ReceiveContext {
         }
         let (body, _) = self.store.get_with_etag(&path).await?;
         Ok(body)
-    }
-
-    pub async fn validate_staged_objects(&self, plan: &ProtectedPushPlan) -> Result<()> {
-        validate_staged_object_shapes(plan, &self.repo_prefix, &self.push_id)?;
-        for object in &plan.staged_objects {
-            read_verified_staged_object(&self.store, object).await?;
-        }
-        Ok(())
     }
 
     pub async fn cleanup_staging(&self) -> Result<()> {
@@ -374,22 +274,6 @@ impl ReceiveContext {
     }
 }
 
-impl BaseState {
-    pub fn manifest(&self) -> &Manifest {
-        &self.manifest
-    }
-
-    pub fn etag(&self) -> &str {
-        &self.etag
-    }
-}
-
-async fn read_manifest(store: &Store, router: &StoreLayout<Store>) -> Result<(Manifest, String)> {
-    manifest_store::read_manifest(store, router)
-        .await
-        .map_err(AuthServerError::from)
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -398,10 +282,31 @@ mod tests {
     use object_store::memory::InMemory;
 
     use super::*;
-    use crab_storage::StagedWrite;
+    use crab_metadata::{manifest_store, manifests::Manifest};
 
     const PUSH_ID: &str = "bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb";
     const TEST_MAX_PUSH_PLAN_BYTES: u64 = 1024;
+
+    use crab_storage::{StorageObservation, StorageObserver, StorageOperation};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[derive(Default)]
+    struct Writes(AtomicU64);
+
+    impl StorageObserver for Writes {
+        fn started(&self, operation: StorageOperation) {
+            if !matches!(
+                operation,
+                StorageOperation::Get
+                    | StorageOperation::Head
+                    | StorageOperation::Range
+                    | StorageOperation::List
+            ) {
+                self.0.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        fn finished(&self, _: StorageObservation) {}
+    }
 
     fn hash(ch: char) -> String {
         std::iter::repeat_n(ch, 64).collect()
@@ -411,10 +316,6 @@ mod tests {
         std::iter::repeat_n(ch, 40).collect()
     }
 
-    fn blake3_hex(bytes: &[u8]) -> String {
-        blake3::hash(bytes).to_hex().to_string()
-    }
-
     fn context() -> ReceiveContext {
         ReceiveContext::from_store(
             Store::new(Arc::new(InMemory::new())),
@@ -422,6 +323,152 @@ mod tests {
             PUSH_ID.to_owned(),
         )
         .with_max_push_plan_bytes(TEST_MAX_PUSH_PLAN_BYTES)
+    }
+
+    #[tokio::test]
+    async fn legacy_repository_receive_rejects_before_any_write() -> Result<()> {
+        let mut outcomes = Vec::new();
+        for operation in ["prepare", "verify", "commit"] {
+            let store = Store::new(Arc::new(InMemory::new()));
+            let layout = StoreLayout::new(store.clone(), "org/repo".to_owned());
+            crab_metadata::layout_descriptor::ensure_canonical_layout(&store, &layout).await?;
+            manifest_store::create_manifest(
+                &store,
+                &layout,
+                &Manifest::default_for_repo("refs/heads/main"),
+            )
+            .await?;
+            let writes = Arc::new(Writes::default());
+            let observed = store.with_storage_observer(writes.clone());
+            let ctx =
+                ReceiveContext::from_store(observed, "org/repo".to_owned(), PUSH_ID.to_owned());
+            let result = match operation {
+                "prepare" => super::super::prepare_receive(
+                    &ctx,
+                    vec![PushRefUpdate {
+                        ref_name: "refs/heads/main".to_owned(),
+                        old_oid: None,
+                        new_oid: oid('2'),
+                    }],
+                    None,
+                )
+                .await
+                .map(|_| ()),
+                "verify" => super::super::verify_receive(&ctx).await.map(|_| ()),
+                _ => super::super::commit_receive(&ctx, "crab://bucket/org/repo", &hash('1'), None)
+                    .await
+                    .map(|_| ()),
+            };
+            let refused = matches!(result, Err(AuthServerError::NotFound { ref path }) if path == layout.capsule_root_path().as_ref());
+            outcomes.push((refused, writes.0.load(Ordering::Relaxed)));
+        }
+        assert_eq!(outcomes, [(true, 0); 3]);
+        Ok(())
+    }
+
+    fn legacy_plan(schema_version: u32) -> crab_remote::protected::ProtectedPushPlan {
+        let mut manifest = Manifest::default_for_repo("refs/heads/main");
+        manifest.generation = 1;
+        manifest.refs.insert("refs/heads/main".to_owned(), oid('2'));
+        manifest.seal_git_validation();
+        crab_remote::protected::ProtectedPushPlan {
+            schema_version,
+            mirror_plan_id: (schema_version == 2).then(|| "a".repeat(32)),
+            repo_prefix: "org/repo".to_owned(),
+            push_id: PUSH_ID.to_owned(),
+            upload_prefix: format!("org/repo/staging/{PUSH_ID}/"),
+            base_manifest_generation: None,
+            base_manifest_etag: None,
+            ref_updates: vec![PushRefUpdate {
+                ref_name: "refs/heads/main".to_owned(),
+                old_oid: None,
+                new_oid: oid('2'),
+            }],
+            candidate_manifest: manifest,
+            push_commit_receipt: None,
+            staged_objects: Vec::new(),
+        }
+    }
+
+    #[tokio::test]
+    async fn legacy_plan_schemas_are_rejected() -> Result<()> {
+        let ctx = context();
+        let mut outcomes = Vec::new();
+        for schema_version in [1, 2] {
+            let plan = legacy_plan(schema_version);
+            ctx.store()
+                .put_overwrite(
+                    &ObjectPath::from(format!("org/repo/staging/{PUSH_ID}/push-plan.json")),
+                    Bytes::from(serde_json::to_vec(&plan).unwrap()),
+                )
+                .await?;
+            outcomes.push(ctx.read_plan_document().await.is_err());
+        }
+        assert_eq!(outcomes, [true, true]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn legacy_plan_admission_precedes_writer_fences() -> Result<()> {
+        let mut outcomes = Vec::new();
+        for schema in [1, 2] {
+            let store = Store::new(Arc::new(InMemory::new()));
+            let layout = StoreLayout::new(store.clone(), "org/repo".to_owned());
+            crab_write::capsule_protocol::initialize(&layout, &hash('a'), "refs/heads/main")
+                .await?;
+            let path = layout.repo_path(&format!("staging/{PUSH_ID}/push-plan.json"));
+            store
+                .put_exact(
+                    &path,
+                    Bytes::from(serde_json::to_vec(&legacy_plan(schema)).unwrap()),
+                )
+                .await?;
+            let writes = Arc::new(Writes::default());
+            let ctx = ReceiveContext::from_store(
+                store.with_storage_observer(writes.clone()),
+                "org/repo".to_owned(),
+                PUSH_ID.to_owned(),
+            );
+            let result =
+                super::super::commit_receive(&ctx, "crab://bucket/org/repo", &hash('1'), None)
+                    .await;
+            let refused = matches!(result, Err(AuthServerError::Configuration {ref origin, ..}) if origin.contains("unsupported push-plan schema_version"));
+            outcomes.push((refused, writes.0.load(Ordering::Relaxed)));
+        }
+        assert_eq!(outcomes, [(true, 0); 2]);
+        Ok(())
+    }
+
+    #[tokio::test]
+    async fn legacy_prepare_record_cannot_authorize_recovery() -> Result<()> {
+        let ctx = context();
+        let record = PushPrepareRecord {
+            schema_version: 1,
+            repo_prefix: "org/repo".to_owned(),
+            push_id: PUSH_ID.to_owned(),
+            source_manifest_generation: 0,
+            source_manifest_etag: "verified-v1-etag".to_owned(),
+            source_root_digest: None,
+            view_ref_updates: vec![PushRefUpdate {
+                ref_name: "refs/heads/main".to_owned(),
+                old_oid: None,
+                new_oid: oid('2'),
+            }],
+            source_ref_updates: vec![PushRefUpdate {
+                ref_name: "refs/heads/main".to_owned(),
+                old_oid: None,
+                new_oid: oid('2'),
+            }],
+            view_scope: None,
+        };
+        ctx.store()
+            .put_exact(
+                &ctx.prepare_record_path(),
+                Bytes::from(serde_json::to_vec(&record).unwrap()),
+            )
+            .await?;
+        assert!(ctx.read_prepare_record().await.is_err());
+        Ok(())
     }
 
     #[test]
@@ -437,50 +484,6 @@ mod tests {
             context.router().xorb_path(&hash('a')).as_ref(),
             format!("org/repo/.crab/xorbs/aa/{}", hash('a'))
         );
-    }
-
-    fn staged_object(canonical_key: String, bytes: &[u8]) -> StagedWrite {
-        StagedWrite {
-            staged_key: format!("org/repo/staging/{PUSH_ID}/objects/{canonical_key}"),
-            canonical_key,
-            blake3: blake3_hex(bytes),
-            size: bytes.len() as u64,
-        }
-    }
-
-    async fn put_staged(ctx: &ReceiveContext, object: &StagedWrite, bytes: &[u8]) -> Result<()> {
-        ctx.store()
-            .put_exact(
-                &ObjectPath::from(object.staged_key.clone()),
-                Bytes::copy_from_slice(bytes),
-            )
-            .await
-            .map_err(AuthServerError::from)
-    }
-
-    fn plan_with_staged_object(object: StagedWrite) -> ProtectedPushPlan {
-        let mut candidate_manifest = Manifest::default_for_repo("refs/heads/main");
-        candidate_manifest
-            .refs
-            .insert("refs/heads/main".to_owned(), oid('2'));
-
-        ProtectedPushPlan {
-            schema_version: 1,
-            mirror_plan_id: None,
-            repo_prefix: "org/repo".to_owned(),
-            push_id: PUSH_ID.to_owned(),
-            upload_prefix: format!("org/repo/staging/{PUSH_ID}/"),
-            base_manifest_generation: None,
-            base_manifest_etag: None,
-            ref_updates: vec![PushRefUpdate {
-                ref_name: "refs/heads/main".to_owned(),
-                old_oid: Some(oid('1')),
-                new_oid: oid('2'),
-            }],
-            candidate_manifest,
-            push_commit_receipt: None,
-            staged_objects: vec![object],
-        }
     }
 
     #[test]
@@ -513,7 +516,7 @@ mod tests {
             .await?;
 
         let err = ctx
-            .read_plan()
+            .read_plan_document()
             .await
             .expect_err("oversized push plan must be rejected before JSON parsing");
 
@@ -551,9 +554,7 @@ mod tests {
             )
             .await?;
 
-        let ProtectedReceivePlan::Capsule(actual) = ctx.read_plan_document().await? else {
-            panic!("capsule schema must select the capsule plan");
-        };
+        let actual = ctx.read_plan_document().await?;
 
         assert_eq!(actual, plan);
         Ok(())
@@ -584,7 +585,7 @@ mod tests {
             )?,
         )?;
         crab_metadata::capsule_protocol::create_root(ctx.router(), root.clone()).await?;
-        ctx.validate_layout()
+        ctx.validate_root()
             .await
             .expect("v2 receive sessions do not require a legacy layout descriptor");
 
@@ -660,27 +661,6 @@ mod tests {
             };
             assert!(correct, "native={valid_native}, legacy={valid_legacy}");
         }
-        Ok(())
-    }
-
-    #[tokio::test]
-    async fn validate_staged_objects_rejects_mismatched_content_addressed_key() -> Result<()> {
-        let ctx = context();
-        let bytes = b"pack bytes";
-        let object = staged_object(format!("org/repo/packs/pack-{}.pack", hash('a')), bytes);
-        put_staged(&ctx, &object, bytes).await?;
-        let plan = plan_with_staged_object(object);
-
-        let err = ctx
-            .validate_staged_objects(&plan)
-            .await
-            .expect_err("content-addressed staged object key must match staged bytes");
-
-        assert!(
-            err.to_string()
-                .contains("content-addressed staged object hash mismatch"),
-            "unexpected error: {err}"
-        );
         Ok(())
     }
 }
