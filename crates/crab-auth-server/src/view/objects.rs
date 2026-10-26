@@ -5,12 +5,6 @@ use bytes::Bytes;
 use crab_metadata::capsule_protocol::{
     FileCatalogEntry, PointerCatalog, ShardCatalogEntry, XorbCatalogEntry, XorbChunkEntry,
 };
-use crab_metadata::receipts::{
-    CommittedChunkReceipt, OriginReceipt, RECEIPT_SCHEMA_VERSION, generation_file_index_digest,
-};
-use crab_metadata::remote_index::{RemoteIndexConfig, RemoteIndexWriter};
-use crab_metadata::value_codec::CommittedFileRecord;
-use crab_staging::shard_replay::{REPLAY_BATCH_ENTRIES, ShardReplaySpool};
 use crab_storage::{Store, StoreLayout, content_hash_from_path};
 use crab_xet::hash::MerkleHash;
 use crab_xet::reconstruction::{ChunkPlacementMap, build_file_terms};
@@ -30,9 +24,6 @@ struct ViewShardPlan {
 
 pub(super) struct UploadedViewCrabObjects {
     pub shard_hashes: Vec<String>,
-    shards: Vec<(Vec<u8>, MerkleHash)>,
-    placement: ChunkPlacementMap,
-    payload_digests: HashMap<MerkleHash, [u8; 32]>,
     catalog: PointerCatalog,
 }
 
@@ -64,13 +55,6 @@ pub(super) async fn upload_view_crab_objects(
 
     Ok(UploadedViewCrabObjects {
         shard_hashes: plan.shards.iter().map(|(_, hash)| hash.hex()).collect(),
-        shards: plan.shards,
-        placement,
-        payload_digests: objects
-            .xorbs
-            .iter()
-            .map(|xorb| (xorb.hash, xorb.payload_digest))
-            .collect(),
         catalog,
     })
 }
@@ -269,165 +253,6 @@ fn build_view_shards_with_session(
     })
 }
 
-pub(super) async fn commit_view_metadb(
-    store: &Store,
-    router: &StoreLayout<Store>,
-    uploaded: &UploadedViewCrabObjects,
-    manifest: &crab_metadata::manifests::Manifest,
-    gc_registry_generation: u64,
-) -> Result<[u8; 32]> {
-    let shard_index_hash = MerkleHash::from_hex(&manifest.shard_index_hash)
-        .map_err(|error| AuthServerError::Internal(format!("invalid view shard index: {error}")))?;
-    let config = RemoteIndexConfig::for_repo_with_global_prefix(
-        router.repo_prefix(),
-        router.global_prefix(),
-    );
-    let digest = generation_file_index_digest(shard_index_hash.into());
-    // Prepare fallible local resources before opening writers so an I/O error
-    // cannot bypass the explicit close boundary below.
-    let workspace = tempfile::tempdir()?;
-    let writer = RemoteIndexWriter::open(Arc::clone(store.inner()), &config, true, true).await?;
-    let operation = async {
-        let mut origins: HashMap<MerkleHash, OriginReceipt> = HashMap::new();
-        let mut seen_chunks = HashSet::new();
-        for (bytes, shard_hash) in &uploaded.shards {
-            let spool = ShardReplaySpool::from_reader_in(
-                std::io::Cursor::new(bytes),
-                workspace.path(),
-                *shard_hash,
-                true,
-                true,
-            )?;
-            let mut after_id = 0_i64;
-            loop {
-                let rows = spool.file_batch(after_id, REPLAY_BATCH_ENTRIES)?;
-                if rows.is_empty() {
-                    break;
-                }
-                let entries = rows
-                    .into_iter()
-                    .map(|row| {
-                        after_id = row.id;
-                        (
-                            row.file_hash,
-                            CommittedFileRecord {
-                                recipe_hash: row.recipe_hash,
-                                shard_hash: *shard_hash,
-                                committed_generation: manifest.generation,
-                                shard_index_hash,
-                            },
-                        )
-                    })
-                    .collect::<Vec<_>>();
-                writer.write_entries(&entries, &[]).await?;
-            }
-
-            let mut after_id = 0_i64;
-            loop {
-                let rows = spool.chunk_batch(after_id, REPLAY_BATCH_ENTRIES)?;
-                if rows.is_empty() {
-                    break;
-                }
-                let mut entries = Vec::with_capacity(rows.len());
-                for row in rows {
-                    after_id = row.id;
-                    if !seen_chunks.insert(row.chunk_hash) {
-                        continue;
-                    }
-                    let placement = uploaded.placement.get(&row.chunk_hash).ok_or_else(|| {
-                        AuthServerError::IncompleteShardReconstruction {
-                            file_hash: String::new(),
-                            path: None,
-                            uncovered_chunks: 1,
-                            example_chunk_hash: row.chunk_hash.hex(),
-                            example_chunk_index: row.chunk_index,
-                        }
-                    })?;
-                    if placement.xorb_hash != row.xorb_hash
-                        || placement.chunk_index != row.chunk_index
-                        || placement.uncompressed_size != row.uncompressed_size
-                    {
-                        return Err(AuthServerError::CorruptObject {
-                            path: format!("view shard {}", shard_hash.hex()),
-                            reason: format!(
-                                "chunk {} placement differs from uploaded xorb",
-                                row.chunk_hash.hex()
-                            ),
-                        });
-                    }
-                    let origin = if let Some(origin) = origins.get(&row.xorb_hash) {
-                        origin.clone()
-                    } else {
-                        let path = router.xorb_path(&row.xorb_hash);
-                        let meta = store.head(&path).await?;
-                        let payload_digest = uploaded
-                            .payload_digests
-                            .get(&row.xorb_hash)
-                            .copied()
-                            .ok_or_else(|| {
-                                AuthServerError::Internal(format!(
-                                    "missing payload digest for view xorb {}",
-                                    row.xorb_hash.hex()
-                                ))
-                            })?;
-                        let origin = OriginReceipt::new(
-                            "canonical-origin".to_owned(),
-                            path.to_string(),
-                            row.xorb_hash.into(),
-                            payload_digest,
-                            meta.size,
-                            meta.e_tag,
-                            meta.version,
-                        );
-                        origins.insert(row.xorb_hash, origin.clone());
-                        origin
-                    };
-                    entries.push((
-                        row.chunk_hash,
-                        CommittedChunkReceipt {
-                            schema_version: RECEIPT_SCHEMA_VERSION,
-                            chunk_hash: row.chunk_hash.into(),
-                            xorb_hash: row.xorb_hash.into(),
-                            chunk_index: row.chunk_index,
-                            uncompressed_size: row.uncompressed_size,
-                            origin,
-                            source_repo_prefix: router.repo_prefix().to_owned(),
-                            source_shard_hash: (*shard_hash).into(),
-                            committed_generation: manifest.generation,
-                            shard_index_hash: shard_index_hash.into(),
-                            gc_registry_generation,
-                        },
-                    ));
-                }
-                writer.write_entries(&[], &entries).await?;
-            }
-        }
-        if seen_chunks.len() != uploaded.placement.len() {
-            let missing = uploaded
-                .placement
-                .keys()
-                .find(|hash| !seen_chunks.contains(hash))
-                .copied()
-                .ok_or_else(|| {
-                    AuthServerError::Internal("view chunk coverage count mismatch".to_owned())
-                })?;
-            return Err(AuthServerError::IncompleteShardReconstruction {
-                file_hash: String::new(),
-                path: None,
-                uncovered_chunks: (uploaded.placement.len() - seen_chunks.len()) as u64,
-                example_chunk_hash: missing.hex(),
-                example_chunk_index: uploaded.placement[&missing].chunk_index,
-            });
-        }
-        Ok::<_, AuthServerError>(())
-    }
-    .await;
-    let close_result = writer.close().await;
-    operation?;
-    close_result?;
-    Ok(digest)
-}
-
 #[cfg(test)]
 mod tests {
     use std::sync::Arc;
@@ -441,42 +266,10 @@ mod tests {
     use super::*;
 
     #[tokio::test]
-    async fn view_workspace_failure_precedes_metadata_writes() {
-        if !crate::test_support::unavailable_workspace_child(
-            "view::objects::tests::view_workspace_failure_precedes_metadata_writes",
-        ) {
-            return;
-        }
-        let store = Store::new(Arc::new(InMemory::new()));
-        let router = super::super::view_store_layout(&store, "org/repo/acl-views/v1/scope/view");
-        let uploaded = UploadedViewCrabObjects {
-            shard_hashes: Vec::new(),
-            shards: Vec::new(),
-            placement: ChunkPlacementMap::new(),
-            payload_digests: HashMap::new(),
-            catalog: PointerCatalog::new(),
-        };
-        let mut manifest = crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main");
-        manifest.shard_index_hash = "a".repeat(64);
-        let result = commit_view_metadb(&store, &router, &uploaded, &manifest, 1).await;
-        assert!(matches!(result, Err(AuthServerError::Io(_))), "{result:?}");
-        assert!(
-            store
-                .list_prefix(&ObjectPath::from(""))
-                .await
-                .unwrap()
-                .is_empty()
-        );
-    }
-
-    #[tokio::test]
     async fn upload_view_crab_objects_uses_view_local_global_prefix() {
         let store = Store::new(Arc::new(InMemory::new()));
-        let repo_prefix = "org/repo/acl-views/v1/scope/view";
+        let repo_prefix = "org/repo/acl-views/v2/scope/view";
         let router = super::super::view_store_layout(&store, repo_prefix);
-        crab_metadata::layout_descriptor::ensure_canonical_layout(&store, &router)
-            .await
-            .unwrap();
         let content = b"allowed bytes that stay behind a view-local pointer".to_vec();
         let file_hash = MerkleHash::from(*blake3::hash(&content).as_bytes());
 
@@ -528,50 +321,25 @@ mod tests {
                 .await,
             Err(crab_storage::StorageError::NotFound { .. })
         ));
-        let (shard_index_hash, _, shard_index) =
-            crab_metadata::manifests::compact_shard_index(1, &uploaded.shard_hashes).unwrap();
-        crab_metadata::manifest_store::upload_segmented_bulk(
-            &store,
-            &router,
-            &crab_metadata::manifests::BulkData {
-                shard_index,
-                pack_index: crab_metadata::segmented::SegmentWrite::default(),
-            },
-        )
-        .await
-        .unwrap();
-        let mut manifest = crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main");
-        manifest.generation = 1;
-        manifest.shard_index_hash = shard_index_hash;
-        manifest.seal_git_validation();
-        crab_metadata::manifest_store::create_manifest(&store, &router, &manifest)
-            .await
-            .unwrap();
-        commit_view_metadb(&store, &router, &uploaded, &manifest, 1)
-            .await
-            .unwrap();
         let pointer = Pointer {
             file_hash: file_hash.into(),
             size: content.len() as u64,
             shard_hint: None,
         };
-        super::super::verify_crab_pointers_backed_by_view(
+        super::super::verify_crab_pointers_backed_by_uploaded_view(
             &store,
-            repo_prefix,
+            &router,
+            &uploaded.shard_hashes,
             &[pointer],
-            super::super::ViewProtocol::Manifest,
         )
         .await
         .unwrap();
     }
 
-    #[tokio::test]
-    async fn view_shard_forced_partitions_commit_metadb_dependency_closed() {
+    #[test]
+    fn view_shard_partitions_preserve_file_and_xorb_coverage() {
         use crab_xet::xorb::format::Chunk;
 
-        let store = Store::new(Arc::new(InMemory::new()));
-        let repo_prefix = "org/repo/acl-views/v1/scope/partitioned";
-        let router = super::super::view_store_layout(&store, repo_prefix);
         let first = Chunk::new(Bytes::from_static(b"partitioned view first"));
         let second = Chunk::new(Bytes::from_static(b"partitioned view second"));
         let mut builder = XorbBuilder::new();
@@ -607,50 +375,13 @@ mod tests {
             assert_eq!(recipes.len(), 1);
         }
 
-        for xorb in &xorbs {
-            store
-                .put(&router.xorb_path(&xorb.hash), xorb.bytes.clone())
-                .await
-                .unwrap();
-        }
-        for (bytes, hash) in &plan.shards {
-            store
-                .put(&router.shard_path(hash), Bytes::from(bytes.clone()))
-                .await
-                .unwrap();
-        }
-        let uploaded = UploadedViewCrabObjects {
-            shard_hashes: plan.shards.iter().map(|(_, hash)| hash.hex()).collect(),
-            shards: plan.shards,
-            placement,
-            payload_digests: xorbs
-                .iter()
-                .map(|xorb| (xorb.hash, xorb.payload_digest))
-                .collect(),
-            catalog: PointerCatalog::new(),
-        };
-        let (shard_index_hash, _, shard_index) =
-            crab_metadata::manifests::compact_shard_index(1, &uploaded.shard_hashes).unwrap();
-        crab_metadata::manifest_store::upload_segmented_bulk(
-            &store,
-            &router,
-            &crab_metadata::manifests::BulkData {
-                shard_index,
-                pack_index: crab_metadata::segmented::SegmentWrite::default(),
-            },
-        )
-        .await
-        .unwrap();
-        let mut manifest = crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main");
-        manifest.generation = 1;
-        manifest.shard_index_hash = shard_index_hash;
-        manifest.seal_git_validation();
-        crab_metadata::manifest_store::create_manifest(&store, &router, &manifest)
-            .await
-            .unwrap();
-
-        commit_view_metadb(&store, &router, &uploaded, &manifest, 1)
-            .await
-            .expect("commit forced protected-view partitions");
+        let objects = ViewCrabObjects { files, xorbs };
+        let catalog = build_pointer_catalog(&objects, &plan).unwrap();
+        assert_eq!(catalog.files().len(), 2);
+        assert_eq!(catalog.shards().len(), 2);
+        assert_eq!(catalog.xorbs().len(), 1);
+        catalog
+            .encode()
+            .expect("partitioned catalog must retain complete dependencies");
     }
 }

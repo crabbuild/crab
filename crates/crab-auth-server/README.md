@@ -59,15 +59,25 @@ checkpoint-backed views. Physical shard/xorb verification and copy-before-ref
 publication remain unchanged.
 
 `crab-auth-view` materializes a filtered view using repeated `--read-path`
-and `--deny-path` rules, a scope hash, and a source repository URL. It builds
-the view's Git workspace and Crab metadata and reports the resulting prefixes,
-source generation, and cache status.
+and `--deny-path` rules, a scope hash, and a source repository URL. Rules are
+repository-relative path patterns, including literal filenames. Source admission
+requires Capsule authority; manifest-only sources are refused before publication.
+The helper reports the resulting prefixes, captured source generation/digest,
+and cache status. The JSON field `source_manifest_hash` carries that Capsule state
+digest; its name does not select legacy authority.
 
-Native source hydration pins the catalog captured with the source view. The
-standalone view helper still retains a manifest fallback and publication path;
-retiring that separate path remains work. Current-state lookup and SDK repository
-opening never select it. Both view paths share lookup cleanup across successful
-builds, cache hits and errors.
+Git packs, refs and pointer recipes come from the same captured Capsule view.
+The helper installs verified packs directly from its caller-owned store rather
+than cloning mutable remote state or issuing separate Git-child credentials.
+Captured Git pack intake is bounded to 2 GiB, using the shared installer; an
+oversized capture returns an error instead of starting an unbounded clone.
+The unused credential DTO/alternate Rust entry point are removed; callers supply
+their authorized store through `materialize_view_with_store`. Generated views
+publish native catalogs and a readiness record. Cache hits verify that native
+view and its local payload dependencies without requiring legacy layout metadata
+or repairing missing LFS objects from the source. Lookup cleanup runs after
+successful builds, cache hits and errors. GC retention during construction and
+resource limits still require separate qualification.
 
 View repacking verifies source bytes into an operation-owned anonymous file,
 then chunks them incrementally off the async runtime. Cancellation propagates

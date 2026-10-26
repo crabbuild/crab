@@ -7,7 +7,8 @@ use std::process::{Command, Stdio};
 use crate::error::{AuthServerError, Result};
 #[cfg(test)]
 use crate::git_pointer_scan::scan_reachable_pointers;
-use crate::view::ViewS3Credentials;
+use crab_read::capsule_protocol::CapsuleRepositoryView;
+use crab_storage::{Store, StoreLayout};
 
 pub(super) struct ViewGitWorkspace {
     temp: tempfile::TempDir,
@@ -18,11 +19,11 @@ pub(super) struct ViewGitWorkspace {
 }
 
 impl ViewGitWorkspace {
-    pub(super) fn create(
-        source_url: &str,
+    pub(super) async fn create(
+        router: &StoreLayout<Store>,
+        view: &CapsuleRepositoryView,
         include: &[String],
         deny: &[String],
-        credentials: Option<&ViewS3Credentials>,
     ) -> Result<Self> {
         let temp = tempfile::tempdir()?;
         let source_git = temp.path().join("source.git");
@@ -30,11 +31,7 @@ impl ViewGitWorkspace {
         let export_stream = temp.path().join("view.fast-export");
         let repacked_stream = temp.path().join("view.repacked.fast-export");
 
-        run_git_with_credentials(
-            ["clone", "--bare", source_url, path_str(&source_git)?],
-            None,
-            credentials,
-        )?;
+        materialize_bare(router, view, &source_git).await?;
         run_git(["init", "--bare", path_str(&filtered_git)?], None)?;
         export_filtered_history(&source_git, &export_stream, include, deny)?;
 
@@ -84,15 +81,38 @@ impl ViewGitWorkspace {
     }
 }
 
-pub(super) fn clone_bare(
-    source_url: &str,
+pub(super) async fn materialize_bare(
+    router: &StoreLayout<Store>,
+    view: &CapsuleRepositoryView,
     target: &Path,
-    credentials: Option<&ViewS3Credentials>,
 ) -> Result<()> {
-    run_git_with_credentials(
-        ["clone", "--bare", source_url, path_str(target)?],
+    crab_git::initialize_bare_git_dir(target)?;
+    crab_read::capsule_protocol::install_git_packs_from_store(
+        view,
+        router,
+        target,
+        2 * 1024 * 1024 * 1024,
         None,
-        credentials,
+        &tokio_util::sync::CancellationToken::new(),
+    )
+    .await?;
+    // Install only captured refs after verified pack intake. Mutable remote
+    // discovery must not mix later Git history with an earlier pointer catalog.
+    for (name, oid) in view.refs() {
+        run_git(
+            ["--git-dir", path_str(target)?, "update-ref", name, oid],
+            None,
+        )?;
+    }
+    run_git(
+        [
+            "--git-dir",
+            path_str(target)?,
+            "symbolic-ref",
+            "HEAD",
+            view.head(),
+        ],
+        None,
     )
 }
 
@@ -296,8 +316,10 @@ fn export_filtered_history(
         "--all".to_owned(),
         "--".to_owned(),
     ];
-    args.extend(include.iter().cloned());
-    args.extend(deny.iter().map(|path| format!(":(exclude){path}")));
+    // Explicit root-relative pathspecs avoid revision/path ambiguity for literal
+    // filenames when exporting a bare workspace from an unrelated directory.
+    args.extend(include.iter().map(|path| format!(":(top){path}")));
+    args.extend(deny.iter().map(|path| format!(":(top,exclude){path}")));
     run_git_owned(args, None, Some(Stdio::from(file)), None)
 }
 
@@ -350,14 +372,6 @@ fn preserve_visible_head(source_git: &Path, filtered_git: &Path) -> Result<()> {
     Ok(())
 }
 
-pub(super) fn count_pack_objects(pack: &[u8]) -> u64 {
-    if pack.len() >= 12 && &pack[0..4] == b"PACK" {
-        u32::from_be_bytes([pack[8], pack[9], pack[10], pack[11]]) as u64
-    } else {
-        0
-    }
-}
-
 pub(super) fn path_str(path: &Path) -> Result<&str> {
     path.to_str()
         .ok_or_else(|| AuthServerError::Internal("path is not valid UTF-8".to_owned()))
@@ -373,38 +387,6 @@ where
         None,
         None,
     )
-}
-
-fn run_git_with_credentials<'a, I>(
-    args: I,
-    cwd: Option<&Path>,
-    credentials: Option<&ViewS3Credentials>,
-) -> Result<()>
-where
-    I: IntoIterator<Item = &'a str>,
-{
-    let mut command = Command::new("git");
-    command.args(args);
-    if let Some(cwd) = cwd {
-        command.current_dir(cwd);
-    }
-    if let Some(credentials) = credentials {
-        credentials.apply(&mut command);
-    }
-    let output = command
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped())
-        .output()
-        .map_err(|error| AuthServerError::Internal(format!("failed to run git: {error}")))?;
-    if !output.status.success() {
-        return Err(AuthServerError::AuthFailed {
-            path: format!(
-                "git command failed: {}",
-                String::from_utf8_lossy(&output.stderr).trim()
-            ),
-        });
-    }
-    Ok(())
 }
 
 pub(super) fn run_git_capture<'a, I>(args: I, cwd: Option<&Path>) -> Result<String>

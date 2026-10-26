@@ -11,7 +11,7 @@ Baseline: `origin/crab-v2` at `33f8e6c360d922b3ab1e2c0e5115a2d200eccd97`.
 Working branch: `codex/vfs-hardening`. PR:
 https://github.com/crabbuild/crab/pull/630 (base `crab-v2`). Follow-up hardening
 remains active. The PR is rebased onto `877b832b396`; final source and
-installed-role evidence is recorded through checkpoint 47.
+installed-role evidence is recorded through checkpoint 48.
 
 Baseline evidence and reproductions:
 `crab/docs/benchmarks/vfs-capsule-v2-audit-20261024.md` and its adjacent evidence
@@ -3158,6 +3158,102 @@ remaining shared remote/CLI producers, metadb/GC and maintenance/replication
 authority. The lifecycle, crash/pin and optimized performance gates below remain
 open. The goal remains active.
 
+## Checkpoint 48 — captured Capsule views and native cache hits
+
+Retire standalone view's manifest source fallback, protocol enum and publisher.
+Delete its segmented inventories, metadb/chunk receipts, stored-pack sidecars,
+locator/visibility publisher and generation-receipt helpers. These had no remaining
+current receive consumer after checkpoint 47. Keep native pointer catalogs,
+view-local shard/xorb storage, the physical GC registry and shared Git peeling.
+
+Two before proofs establish the failures. A valid descriptor/manifest-only source
+was accepted by source-view admission; the new negative regression fails on that
+acceptance. The actual macOS helper built a rooted Capsule view, then its second
+materialization failed on the nonexistent legacy `layout` object. Native view
+publication intentionally creates no such descriptor. Cache hits now verify the
+native readiness/root and view-local dependencies, without selecting old metadata.
+
+Git state and pointer recipes now use one captured `CapsuleRepositoryView`.
+The workspace installs authenticated packs through the shared store installer,
+then installs only captured refs and HEAD. It no longer clones mutable latest
+history. The selected origin layout also reaches hydration unchanged. The unused
+`ViewS3Credentials` and alternate credential-taking Rust entry point are removed;
+every current consumer uses the subprocess helper or caller-owned store. The
+strict seven-field JSON output stays unchanged, including the current field name
+`source_manifest_hash` carrying the Capsule state digest.
+
+The public build/cache-hit test exposed literal `allowed.txt` failing bare Git
+export from an unrelated cwd. Direct Git reproductions confirm that failure and
+that explicit `:(top)` paths work. Export now uses root-relative include/exclude
+pathspecs; wildcard semantics stay intact. This follows Git's documented
+[pathspec contract](https://git-scm.com/docs/gitglossary#def_pathspec) and
+[fast-export interface](https://git-scm.com/docs/git-fast-export). The original
+literal-path assertions remain unchanged after the source repair.
+
+Evidence map and best-fix check:
+
+| Surface | Proof |
+| --- | --- |
+| Entry/caller | Real `crab-auth-view materialize`; Python `SubprocessViewHelper.materialize` parses the same output and supplies authorized include/deny rules. Full helper, caller, service scope validation and wire-field definitions read |
+| Owner | `materialize_view_with_store` admits the native capture before publication; lookup cleanup is awaited on build, cache-hit and error paths |
+| Callee | Shared `install_git_packs_from_store` verifies origin-backed packs, external-delta order and bounded intake; 2 GiB view intake is documented. Captured catalog lookup never opens mutable latest metadata |
+| Siblings | Current receive already uses captured native Git verification and does not call the deleted locator/metadb producers. SDK mutation stages Capsule plan schema 3; shared remote/CLI legacy producers remain separate next work |
+| Formats | Native view readiness schema 1, GC closures, Xet shard encodings and pointer/LFS spec/v1 are current independent contracts; they are retained |
+| Main/base | Fresh `origin/main` `cc2e4e25f46` uses manifest-only view authority; `origin/crab-v2` `877b832b396` retains native/manifest dispatch and the incorrect cached-view layout requirement |
+| Is this the best fix? | Yes for view authority: remove the old producer and use the existing captured store path for Git and content. Adding an empty descriptor, clone retry or manifest fallback would preserve the authority split and leave cache identity races |
+
+Tests preserve the filtered content/history assertions using native publication
+and reconstruction. Removing the source root after capture still permits exact
+filtered Git and Crab reconstruction, proving those reads do not reopen latest
+authority. Forced shard partition tests retain complete file/xorb catalog coverage.
+Three obsolete manifest-only tests disappear with their producers; one native
+admission regression is added. The unused process-global workspace override
+harness is deleted after strict Clippy identifies its last caller as removed.
+
+Final qualification:
+
+- **75 current library tests** pass on Linux and macOS, none ignored. Both actual
+  helper binaries build; strict all-target Clippy passes on both platforms. The
+  macOS test build/run is repeated after removing the unused test harness. All
+  11 packaging checks, formatting and diff checks pass.
+- Real helper processes on both platforms publish to RustFS, then materialize
+  wildcard, literal-filename and deny-path views. Each first build and second
+  cache hit succeeds. Canonical captured-store readers reconstruct exact ordinary
+  bytes and **6 MiB Crab / 6 MiB LFS** payloads; denied history/content is absent
+  from the filtered Git object database. No legacy layout/manifest is created.
+- The actual Python `SubprocessViewHelper` caller passes initial build/cache-hit
+  with literal include and deny rules on both platforms. The exact macOS request
+  that originally failed on `layout` now reuses that existing native view.
+- A separate actual-helper error probe removes one qualification-owned view LFS
+  object. Cache-hit verification errors and leaves it absent, despite the source
+  payload remaining available. Explicit restoration of the fixture payload makes
+  the cache hit pass again. This qualifies refusal, not an automatic repair path.
+- Each final platform sequence binds real receive → RustFS → view reads plus
+  native source mounts: Linux foreground NFS/FUSE and macOS foreground NFS return
+  exact complete/range reads, reject writes, detach normally and exit zero.
+  Valid legacy-source refusal preserves fixture bytes, ETags and object counts.
+  No force cleanup or admission bypass is used.
+- Hash binding covers **1,557 source/build inputs** and identical seven-artifact
+  before/after sets per platform. Actual Python-caller hashes match the qualified
+  helpers. Four client roles remain Make-installed checkpoint-46 artifacts;
+  client sources have no auth-server dependency and are unchanged. Both helpers
+  run directly from fresh Cargo outputs. No product binary is manually copied.
+
+Evidence is external under `view-capsule-only/` and `linux/view-capsule-only/`.
+An initial external probe compile lacked an LFS-pointer error conversion and
+stopped before runtime; the corrected probe uses source-preserving conversion.
+No full HTTP authorization service, scoped native-view mount, GC retention or
+optimized performance signoff is implied by canonical store reconstruction of
+generated views. Initial view publication still has separate LFS publication and
+post-publication copy/verification calls; measure that amplification before
+consolidating ownership or claiming performance improvement.
+
+Rust source shrinks by **1,735 lines**; source before inline test modules shrinks
+by **1,458 lines**. No dependency, lockfile, config option, wire schema or new test
+file. The raw benchmark directory stays excluded. Immediate format priority moves
+to shared remote/CLI legacy producers, metadb/GC and maintenance/replication.
+All-mode lifecycle, payload/crash ownership and optimized performance remain open.
+
 ## Remaining priority order
 
 The helper-layout gap and live read-only inspection leak are closed by the
@@ -3184,8 +3280,9 @@ Checkpoint-45 closes the reproduced helper configuration/telemetry ownership
 failure and qualifies the original sequential publication → next-mount flow on
 Linux NFS/FUSE without marker deletion or admission bypass. Checkpoint-46 removes shared manifest-only repository initialization. Immediate
 format priority: checkpoint-47 retires protected receive's linked legacy paths.
-Next retire standalone auth view's manifest fallback/publisher, then the shared
-remote/CLI publisher/fixture initializer, metadb/GC and
+Checkpoint-48 retires standalone auth view's manifest fallback/publisher and binds
+its Git/pointer reads to one capture. Next retire the shared remote/CLI
+publisher/fixture initializer, metadb/GC and
 maintenance/replication stored pack-v1 dispatch.
 Checkpoints 42/43 repair canonical LFS publication and ignored-byte retention;
 checkpoint-44 reduces local verification amplification with bounded block proofs. Remote proof reuse, LFS generation
@@ -3320,9 +3417,10 @@ Remaining located storage-authority boundaries:
 - SDK `initialize_remote` was changed upstream in #629 to canonical Capsule
   initialization. Checkpoint-46 removes the exported old initializer and updates
   valid refusal fixtures without retaining a compatibility wrapper.
-- Checkpoint-47 removes manifest authority from protected receive. Standalone
-  `crates/crab-auth-server/src/view.rs` still has `ViewProtocol::Manifest`, source
-  authority fallback and legacy publication; retire these together next.
+- Checkpoints 47/48 remove manifest authority from protected receive and standalone
+  auth view, including their old producers. Shared remote/CLI publication still
+  exposes legacy staging and manifest initialization; retire their actual caller
+  paths next rather than deleting manifest-shaped native projections by name.
 - Gateway read/write, listing, checkpoint ordering, completion recovery and
   maintenance now require Capsule authority at checkpoint-38. No production
   gateway caller selects the old initializer, manifest/journal reader/publisher

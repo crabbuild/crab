@@ -38,6 +38,10 @@ operations in `crates/crab-auth-server/src/receive/git_workspace.rs`.
   Source: `crates/crab-auth-server/src/receive.rs`.
 - Read-path authorization and denied paths must remain part of view construction; do not reuse an unscoped view merely because its source generation matches.
   Source: `crates/crab-auth-server/src/view.rs`.
+- View source admission and publication require Capsule authority. Install Git
+  packs/refs and pointer recipes from the same capture, using the caller's store;
+  never clone mutable latest history or require a legacy layout on cache hits.
+  Sources: `view.rs`, `view/git_workspace.rs`, `view/capsule.rs`.
 - Protected commit drains its operation before releasing GC fences. Propagate
   the fence token into capsule namespace/preparation work, and check again before
   visibility. Once committed, a fence-release error is repair work, not rejection.
