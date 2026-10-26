@@ -11,7 +11,7 @@ Baseline: `origin/crab-v2` at `33f8e6c360d922b3ab1e2c0e5115a2d200eccd97`.
 Working branch: `codex/vfs-hardening`. PR:
 https://github.com/crabbuild/crab/pull/630 (base `crab-v2`). Follow-up hardening
 remains active. The PR is rebased onto `877b832b396`; final source and
-installed-role evidence is recorded at checkpoints 39 and 40.
+installed-role evidence is recorded through checkpoint 41.
 
 Baseline evidence and reproductions:
 `crab/docs/benchmarks/vfs-capsule-v2-audit-20261024.md` and its adjacent evidence
@@ -2545,6 +2545,86 @@ changes are made, and the 2,156 excluded raw audit files remain preserved.
 Target identity, asynchronous engine-drain cancellation, synchronous Drop drain,
 macOS mapped writes and the other all-mode/resource gates remain open.
 
+## Checkpoint 41 — canonical LFS payload reads
+
+The failing native regression establishes the user-visible gap on both Linux
+adapters: stat returns 132 pointer bytes instead of the declared 6 MiB payload.
+Current `origin/main` (`cc2e4e25f46`) and `origin/crab-v2` (`877b832b396`) both
+classify Crab pointers only in snapshot/late-blob paths. Git LFS is a current
+content type; its pointer version does not select Crab pack-v1 storage.
+
+VFS snapshots and late classification now share typed Crab/LFS content identity.
+The read-window key includes the hash family, preventing identical 32-byte
+addresses from crossing SHA-256/BLAKE3 authority. Snapshot serialization retains
+pointer text and reconstructs the variant through the canonical classifier.
+Existing Git source OIDs remain the lineage authority; pointer hashes are no
+longer invented as substitute Git OIDs in fixture-only missing-OID nodes.
+
+`crab-read::PointerReader` accepts resolved local LFS storage. It selects the
+captured remote runtime only when opening the local payload reports absence.
+Local corruption, malformed configuration and I/O failures remain errors.
+`crab-lfs::local` verifies exact size and full SHA-256 in one bounded-memory pass,
+retaining only the requested range. Its worker owns the existing process-wide
+verification permit and registers with the shared read session. Remote LFS
+uses canonical verified streams and existing reconstruction buffer/download
+admission; EOF verification precedes immutable window insertion. LFS COW streams
+those same windows into owned backing storage. No second cloud object reader,
+new setting, dependency version, or additional override is introduced.
+
+The first repaired FUSE run exposed an actual read-path deadlock: spawning Git
+configuration resolution from the callback left its child waiting on FUSE while
+the read owner waited for the child. Configuration is now resolved during
+preparation/capture, outside callbacks. The deadlocked diagnostic required an
+exact-child SIGKILL and abort of its identified task FUSE connection; it remains
+a failed run and is excluded from normal-cleanup claims. The final NFS/FUSE
+regressions pass size, tail/full SHA-256, COW write/fsync and held-descriptor
+rename/unlink checks with ordinary teardown. LFS extensions are explicitly
+unsupported because their stored hash/size describe transformed bytes requiring
+smudge; exposing those bytes as normal file contents would be incorrect.
+
+Evidence map:
+
+| Surface | Caller / owner | Callee / dependency contract | Proof |
+| --- | --- | --- | --- |
+| Snapshot and late blob | Pipeline/daemon and engine attributes/open | `FilePointer`, canonical `crab_git::classify`, snapshot encoding | Real Git native stat plus LFS serialization/extension tests; Crab regressions unchanged |
+| Canonical range | Both native adapters → engine lease → HydrationService | `PointerReader` → local verified range or captured ShardHydrator → `LfsObjectStore::get_stream_with_session` | Native exact ranges/COW, 64 LFS tests and 237 read tests |
+| Integrity/cache | Shared HydrationState across captured readers | Typed cache identity; full stream EOF and immutable cache ownership | Warm LFS followed by a Crab pointer with identical hash bytes must fail; corrupt local source cannot select valid remote; same-length/out-of-range corruption and size mismatches fail |
+| Storage settings | Pipeline and daemon preparation; runtime capture sibling | Git config includes, existing environment precedence, common Git directory | Real included config and linked-worktree fixture; reads spawn no Git |
+| Cleanup | Engine/hydration shutdown | Shared LfsReadSession tracks blocking SHA jobs and drains them before cache release | Existing detached-verification/session test; all native owners detach normally |
+| Publication | Overlay publisher → Git add | Configured Git filter driver | New native diagnostic fails without LFS clean configuration; follow-up required |
+
+Final-source proof:
+
+- Dedicated Linux: 64 LFS, 237 read, 666 VFS and 138 CLI mount tests pass.
+  All 18 native adapter tests pass. Strict all-target Clippy covers all three
+  changed libraries with local staging and both backends; minimal and FUSE-only
+  checks pass. macOS passes the same strict library Clippy and 85 selected
+  snapshot/late-classification/hydration/pipeline/runtime tests.
+- Fresh Make-installed Linux NFS/FUSE and macOS NFS pass the original real
+  Capsule/RustFS gateway fixture: exact ordinary and 6 MiB LFS hashes, copy and
+  multipart-overwrite bytes, read-only refusal, exit zero and kernel detachment.
+  No forced cleanup is used in these final probes.
+- Both platforms repeat native NFS foreground RW/RO and helper RW flows using
+  fresh local Git inputs: write/fsync, diff/export/no-push commit, remount,
+  cache exclusion, idle-control closure, registry/socket/lease cleanup.
+- Evidence binds 1,558 source/build inputs and both installed role sets, unchanged
+  through final qualification. Only an existing workspace `crab-lfs` dependency
+  edge is added to VFS; Cargo.lock has no version/source/override changes.
+  New production surface supplies typed identity, local verification and canonical
+  read admission; fixture conversions and regressions account for remaining
+  growth. Tests remain inline or flat siblings; all 2,156 raw audit files stay
+  preserved and excluded from the PR.
+
+The next native publication probe is an explicit failure, not an accepted
+baseline: a fresh mount clone without an LFS clean driver preserves COW/commit
+adoption bytes but commits a 6 MiB Git blob instead of an LFS pointer. The probe
+does not push and detaches normally. Fix driver/publication ownership and prove
+no-push/remount/later-push/independent clone before claiming writable LFS support.
+Cold local windows rehash the whole payload; remote partial reads may do the
+same without a validator receipt. Bounded verification reuse, large-file origin
+amplification, LFS generation changes and payload retirement remain required.
+The full PR and all-mode performance goal remain unqualified.
+
 ## Remaining priority order
 
 The helper-layout gap and live read-only inspection leak are closed by the
@@ -2567,10 +2647,12 @@ reproduced foreground FUSE PID/detach failures and makes shared native queries
 error-aware. Early preparation, concurrent managed owners, target identity and
 the macOS mapping barrier still require proof before claiming teardown complete.
 
-Immediate content gap: mounted Git LFS files remain pointer text on both
-adapters. Reuse canonical LFS integrity/range/session ownership rather than
-creating a second object reader; qualify snapshot/late-blob attributes, COW and
-generation transitions. Checkpoint-40 closes managed runtime-worker starvation;
+Immediate content priority: checkpoint-41 repairs mounted LFS sizing, verified
+reads and native COW. The native publication diagnostic now proves missing clean
+driver configuration commits full payloads into Git. Fix that owner boundary,
+then qualify no-push/remount/later push and independent clone. Bound whole-object
+verification reuse before claiming efficient large-file ranges. LFS generation
+transitions and payload retirement remain open. Checkpoint-40 closes managed runtime-worker starvation;
 engine-drain cancellation and replacement-target races still need native proof. Preserve these ownership/read
 boundaries before widening concurrency. Git LFS is a current content type and
 must not be deleted as pack-v1 compatibility.
@@ -2709,7 +2791,8 @@ Remaining located storage-authority boundaries:
   maintenance now require Capsule authority at checkpoint-38. No production
   gateway caller selects the old initializer, manifest/journal reader/publisher
   or legacy catalog scheduler. Valid-v1 refusal and signed canonical operations
-  pass on RustFS; native VFS LFS hydration remains an explicit separate gap.
+  pass on RustFS; native VFS LFS reads are repaired at checkpoint-41; LFS publication and
+  optimized verification reuse remain separate gaps.
 - LFS pre-push ref discovery now requires a Capsule root; its missing-root
   manifest/empty-base fallback is removed at checkpoint-35. First and incremental
   real Git hook publication plus an independent eager clone pass on RustFS.

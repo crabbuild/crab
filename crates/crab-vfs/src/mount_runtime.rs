@@ -114,9 +114,14 @@ pub(crate) async fn capture_hydration(
     };
     let remote = context.catalog.capture().await?;
     let staging = crate::repository::staging_root_for_git_dir(git_dir)?;
+    let git_dir = git_dir.to_owned();
+    let storage = tokio::task::spawn_blocking(move || crab_lfs::local::storage_from_git(&git_dir))
+        .await
+        .map_err(CrabError::ReadTask)??;
     Ok(template.for_reader(Arc::new(crab_read::PointerReader::new(
         Some(remote),
         Some(staging),
+        Some(storage),
     ))))
 }
 

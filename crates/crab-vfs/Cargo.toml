@@ -23,6 +23,7 @@ bytes = { workspace = true }
 crab-cache = { workspace = true, features = ["local-cache", "xet-chunk-cache"] }
 crab-cache-store = { workspace = true }
 crab-git = { workspace = true }
+crab-lfs = { workspace = true }
 crab-read = { workspace = true, features = ["local-staging"] }
 crab-staging = { workspace = true }
 crab-storage = { workspace = true }

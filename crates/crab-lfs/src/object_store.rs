@@ -9,7 +9,7 @@ use std::ops::Range;
 use std::path::Path as StdPath;
 use std::pin::Pin;
 
-mod origin;
+pub(crate) mod origin;
 #[cfg(test)]
 mod stream_tests;
 

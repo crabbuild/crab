@@ -948,6 +948,7 @@ impl DaemonService {
             store_layout,
             read_hydrator,
             Some(crate::repository::staging_root_for_git_dir(&paths.git_dir)?),
+            Some(paths.git_dir.clone()),
         )?;
         // Step 8: Create ODB reader.
         let odb_reader = OdbReader::new(&paths.git_dir).map_err(|e| {
@@ -2081,6 +2082,7 @@ mod tests {
             Arc::clone(&service.cache),
             Arc::new(VerifiedSet::default()),
             CancellationToken::new(),
+            None,
             None,
             None,
             None,

@@ -21,6 +21,7 @@ pub struct PointerRead {
 pub struct PointerReader {
     remote: Option<Arc<ShardHydrator>>,
     staging_root: Option<PathBuf>,
+    lfs_storage: Option<PathBuf>,
 }
 
 enum PointerSource {
@@ -29,12 +30,17 @@ enum PointerSource {
 }
 
 impl PointerReader {
-    /// Bind a repository's staging namespace and its optional captured remote view.
+    /// Bind staging, an optional captured remote view, and resolved local LFS storage.
     #[must_use]
-    pub fn new(remote: Option<Arc<ShardHydrator>>, staging_root: Option<PathBuf>) -> Self {
+    pub fn new(
+        remote: Option<Arc<ShardHydrator>>,
+        staging_root: Option<PathBuf>,
+        lfs_storage: Option<PathBuf>,
+    ) -> Self {
         Self {
             remote,
             staging_root,
+            lfs_storage,
         }
     }
 
@@ -121,6 +127,66 @@ impl PointerReader {
                     .await
             }
         }
+    }
+
+    /// Read verified stored LFS bytes from local ownership or the captured remote.
+    /// Local corruption and I/O failures never select another source.
+    pub async fn read_lfs_range(
+        &self,
+        pointer: &crab_git::LfsPointer,
+        range: Range<u64>,
+        cancel: &CancellationToken,
+        session: &crab_lfs::LfsReadSession,
+    ) -> Result<PointerRead> {
+        if cancel.is_cancelled() {
+            return Err(ReadError::Cancelled);
+        }
+        if !pointer.extensions.is_empty() {
+            return Err(ReadError::Configuration {
+                key: "LFS extensions require a smudge implementation".into(),
+                origin: "pointer range read".into(),
+            });
+        }
+        if range.start > range.end {
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::InvalidInput,
+                "invalid LFS read range",
+            )
+            .into());
+        }
+        let range = range.start.min(pointer.size)..range.end.min(pointer.size);
+        if range.is_empty() {
+            return Ok(PointerRead {
+                bytes: Bytes::new(),
+                from_store: false,
+            });
+        }
+        if let Some(storage) = &self.lfs_storage {
+            let local = tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(ReadError::Cancelled),
+                result = crab_lfs::local::read_range(storage, &pointer.oid, pointer.size, range.clone(), cancel, session) => result?,
+            };
+            if let Some(bytes) = local {
+                return Ok(PointerRead {
+                    bytes,
+                    from_store: false,
+                });
+            }
+        }
+        let remote = self.remote.as_ref().ok_or_else(|| ReadError::NotFound {
+            path: format!(
+                "LFS content {}",
+                crab_git::lfs_pointer::hex_encode(&pointer.oid)
+            ),
+        })?;
+        let bytes = remote
+            .read_lfs_range(pointer, range, cancel, session)
+            .await?;
+        Ok(PointerRead {
+            bytes,
+            from_store: true,
+        })
     }
 
     async fn source(&self, pointer: &Pointer) -> Result<PointerSource> {

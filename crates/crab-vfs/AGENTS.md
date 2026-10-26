@@ -45,6 +45,10 @@ mount/control owners consume the pipeline output separately.
   accompany borrowed local metadata; a local path may feed an owned clone.
   Neither URL syntax nor Git's bare flag proves index/ref ownership.
   Sources: `pipeline.rs` and `mount_runtime.rs` under `crates/crab-vfs/src/`.
+- External Git content uses `blob::FilePointer` for Crab or LFS identity. Resolve
+  local LFS storage settings during preparation/capture, never inside a data
+  callback. Canonical LFS streams must reach verified EOF before caching bytes;
+  shutdown drains their shared `LfsReadSession`. Extensions requiring smudge fail.
 - Cached read windows retain integrity checks; corruption must not be served merely because the byte length matches.
   Source: `crates/crab-vfs/src/hydration.rs`.
 - Publication and reads derive the same staging namespace through

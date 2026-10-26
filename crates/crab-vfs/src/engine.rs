@@ -19,11 +19,11 @@ use tokio::sync::{
 use tracing::{debug, trace, warn};
 
 use crate::blob::OdbReader;
+use crate::blob::{FilePointer, PointerIdentity};
 use crate::core::error::{CrabError, Result};
 use crate::hydration::{HydrationReadStatsSnapshot, HydrationService};
 use crate::resolver::{FuseResolver, OverlayEntry, ResolvedNode, SnapshotView};
 use crate::snapshot::{BaseNode, NodeType, SnapshotStore};
-use crab_types::pointer::{Pointer, hex_encode, is_pointer};
 
 #[cfg(feature = "fuse")]
 mod open_file;
@@ -155,7 +155,7 @@ pub enum ReadSourceKey {
     BasePointer {
         generation: i64,
         overlay_version: u64,
-        file_hash: [u8; 32],
+        file_hash: PointerIdentity,
         size: u64,
     },
     BaseBlob {
@@ -422,7 +422,7 @@ impl VfsReadLease {
 
 #[derive(Debug)]
 enum ReadSource {
-    BasePointer { path: String, pointer: Pointer },
+    BasePointer { path: String, pointer: FilePointer },
     BaseBlob { path: String, oid: String },
     BaseEmpty,
     OverlayFile { path: String, backing: PathBuf },
@@ -819,7 +819,7 @@ fn read_source_key_heap_bytes(key: &ReadSourceKey) -> usize {
 
 fn read_source_heap_bytes(source: &ReadSource) -> usize {
     match source {
-        ReadSource::BasePointer { path, .. } => path.len() + std::mem::size_of::<Pointer>(),
+        ReadSource::BasePointer { path, .. } => path.len() + std::mem::size_of::<FilePointer>(),
         ReadSource::BaseBlob { path, oid, .. } => path.len() + oid.len(),
         ReadSource::BaseEmpty => 0,
         ReadSource::OverlayFile { path, backing } => {
@@ -1098,13 +1098,8 @@ impl VfsEngine {
         let blob = reader.read_blob(oid)?;
         let (size, pointer) = if let Some(snapshot) = &self.snapshot {
             snapshot.update_node_from_blob(generation, path, &blob)?
-        } else if is_pointer(&blob) {
-            let pointer = Pointer::parse(&blob).map_err(|error| {
-                CrabError::Internal(format!("invalid Crab pointer at {path}: {error}"))
-            })?;
-            (pointer.size, Some(pointer))
         } else {
-            (blob.len() as u64, None)
+            crate::snapshot::classify_blob(&blob)?
         };
         base.size = size;
         base.pointer = pointer;
@@ -1224,8 +1219,8 @@ impl VfsEngine {
             let key = ReadSourceKey::BasePointer {
                 generation,
                 overlay_version,
-                file_hash: pointer.file_hash,
-                size: pointer.size,
+                file_hash: pointer.identity(),
+                size: pointer.size(),
             };
             let source = ReadSource::BasePointer { path, pointer };
             return VfsReadLease::new(key, source, Some(view));
@@ -1708,7 +1703,7 @@ impl VfsEngine {
         let mut to_prefetch = Vec::new();
         for path in paths {
             if let Ok(ResolvedNode::Base(base)) = self.resolver.resolve_path_in(&view, path)
-                && let Some(pointer) = base.pointer
+                && let Some(FilePointer::Crab(pointer)) = base.pointer
             {
                 to_prefetch.push((path.clone(), pointer));
             }
@@ -1948,7 +1943,7 @@ impl VfsEngine {
                     let source_oid = base_source_oid(&base);
                     debug!(
                         path,
-                        size = pointer.size,
+                        size = pointer.size(),
                         "promoting pointer-backed file via streaming"
                     );
                     let hydration = view.hydration.as_ref().ok_or_else(|| {
@@ -2050,7 +2045,7 @@ impl VfsEngine {
         &self,
         hydration: &Arc<HydrationService>,
         path: &str,
-        pointer: &crab_types::pointer::Pointer,
+        pointer: &FilePointer,
         mode: u32,
         source_oid: Option<&str>,
         ov: &dyn OverlayWriter,
@@ -2067,6 +2062,11 @@ impl VfsEngine {
             ov.promote_from_file(path, mode, size, source_oid)?;
             return Ok(());
         }
+        let FilePointer::Crab(pointer) = pointer else {
+            return Err(CrabError::Internal(
+                "LFS pointer has no configured reader".into(),
+            ));
+        };
         let terms = hydration.resolve_terms(pointer)?;
         for term in &terms {
             let chunk = hydration.fetch_chunk(term).await?;
@@ -2360,12 +2360,7 @@ fn base_rename_entry(base: &BaseNode, old_path: &str, new_path: &str) -> BaseRen
 }
 
 fn base_source_oid(base: &BaseNode) -> Option<String> {
-    if let Some(oid) = &base.object_oid {
-        return Some(oid.clone());
-    }
-    base.pointer
-        .as_ref()
-        .map(|pointer| hex_encode(&pointer.file_hash))
+    base.object_oid.clone()
 }
 
 fn ensure_readable_file(node_type: NodeType, path: &str) -> Result<()> {
@@ -3133,7 +3128,7 @@ mod tests {
             node_type: NodeType::File,
             mode: 0o100_644,
             object_oid: Some("pointer-blob-oid".to_owned()),
-            pointer: Some(pointer.clone()),
+            pointer: Some(crate::blob::FilePointer::Crab(pointer.clone())),
             size: pointer.size,
         }]);
 
@@ -3144,7 +3139,7 @@ mod tests {
             &ReadSourceKey::BasePointer {
                 generation: 1,
                 overlay_version: 0,
-                file_hash: pointer.file_hash,
+                file_hash: crate::blob::PointerIdentity::Crab(pointer.file_hash),
                 size: pointer.size,
             }
         );
@@ -3177,7 +3172,7 @@ mod tests {
             &ReadSourceKey::BasePointer {
                 generation: 1,
                 overlay_version: 0,
-                file_hash: pointer.file_hash,
+                file_hash: crate::blob::PointerIdentity::Crab(pointer.file_hash),
                 size: pointer.size,
             }
         );
@@ -3189,7 +3184,7 @@ mod tests {
             .get_node(1, "model.bin")
             .unwrap()
             .unwrap();
-        assert_eq!(classified.pointer, Some(pointer));
+        assert_eq!(classified.pointer, Some(pointer.into()));
     }
 
     #[test]
@@ -3760,11 +3755,13 @@ mod tests {
             node_type: NodeType::File,
             mode: 0o100_644,
             object_oid: Some("pointer-blob-oid".to_owned()),
-            pointer: Some(crab_types::pointer::Pointer {
-                file_hash: [42; 32],
-                size: 8 * 1024 * 1024 * 1024,
-                shard_hint: None,
-            }),
+            pointer: Some(crate::blob::FilePointer::Crab(
+                crab_types::pointer::Pointer {
+                    file_hash: [42; 32],
+                    size: 8 * 1024 * 1024 * 1024,
+                    shard_hint: None,
+                },
+            )),
             size: 8 * 1024 * 1024 * 1024,
         }]);
 
@@ -3795,11 +3792,13 @@ mod tests {
             node_type: NodeType::File,
             mode: 0o100_644,
             object_oid: None,
-            pointer: Some(crab_types::pointer::Pointer {
-                file_hash: [7; 32],
-                size: 4 * 1024 * 1024 * 1024,
-                shard_hint: None,
-            }),
+            pointer: Some(crate::blob::FilePointer::Crab(
+                crab_types::pointer::Pointer {
+                    file_hash: [7; 32],
+                    size: 4 * 1024 * 1024 * 1024,
+                    shard_hint: None,
+                },
+            )),
             size: 4 * 1024 * 1024 * 1024,
         }]);
 
@@ -4097,6 +4096,7 @@ mod tests {
             Some(stored.context.store_layout),
             Some(Arc::new(hydrator)),
             None,
+            None,
         )
         .unwrap();
         let mut fixture = test_engine_with_nodes(vec![BaseNode {
@@ -4104,7 +4104,7 @@ mod tests {
             node_type: NodeType::File,
             mode: 0o100_644,
             object_oid: None,
-            pointer: Some(stored.pointer.clone()),
+            pointer: Some(crate::blob::FilePointer::Crab(stored.pointer.clone())),
             size: stored.pointer.size,
         }]);
         fixture

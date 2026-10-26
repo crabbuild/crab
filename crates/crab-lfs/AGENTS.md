@@ -50,6 +50,10 @@ shared-lock fix reaches HTTP but does not automatically reach that CLI surface.
 - Multipart uploads begin and complete through `crab_storage::Store`, which
   routes protected writes and records their verified size and Blake3 inventory.
   Calling the raw origin handle bypasses staging and can expose unpublished data.
+- Local range reads verify the complete source in one bounded-memory pass before
+  returning the selected bytes. Only object-open absence may select a remote;
+  corruption and I/O errors remain failures. Resolve Git settings outside data
+  callbacks. Tracked jobs retain global verification admission after cancellation.
 - Keep declared SHA-256 identity and size verification together; presence or a matching path alone does not prove object bytes.
   Source: `crates/crab-lfs/src/object_store.rs`.
 - Fresh origin verification differs from receipt-aware reads and replica fallback; callers needing publication proof must retain the origin-only boundary.

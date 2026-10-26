@@ -37,6 +37,133 @@ pub fn object_path(storage: &Path, oid: &[u8; 32]) -> PathBuf {
         .join(hex)
 }
 
+/// Resolve the local object directory using Git settings and the existing environment override.
+pub fn storage_from_git(git_dir: &Path) -> std::io::Result<PathBuf> {
+    let mut values = [None, None];
+    for (key, value) in ["lfs.storage", "lfs.lfsdir"].into_iter().zip(&mut values) {
+        let output = std::process::Command::new("git")
+            .arg("--git-dir")
+            .arg(git_dir)
+            .args(["config", "--includes", "--null", "--get", key])
+            .env_remove("GIT_DIR")
+            .env_remove("GIT_COMMON_DIR")
+            .env_remove("GIT_WORK_TREE")
+            .env_remove("GIT_INDEX_FILE")
+            .output()?;
+        if output.status.code() == Some(1) {
+            continue;
+        }
+        if !output.status.success() {
+            return Err(std::io::Error::other(format!(
+                "Git LFS storage configuration failed: {}",
+                output.status
+            )));
+        }
+        let text = String::from_utf8(output.stdout)
+            .map_err(|source| std::io::Error::new(std::io::ErrorKind::InvalidData, source))?;
+        let text = text.strip_suffix('\0').ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "invalid Git config framing",
+            )
+        })?;
+        *value = Some(text.to_owned());
+    }
+    let environment = std::env::var("GIT_LFS_DIR").ok();
+    let configured = storage_override(
+        values[0].as_deref(),
+        values[1].as_deref(),
+        environment.as_deref(),
+    );
+    let common = crab_git::discover::resolve_common_dir(git_dir);
+    Ok(storage_dir(&common, configured.as_deref()))
+}
+
+/// Read a bounded range only after verifying the complete local payload in the same pass.
+/// Returns absence only when opening the object fails with `NotFound`.
+/// The session retains verification admission if the awaiting future is dropped.
+pub async fn read_range(
+    storage: &Path,
+    oid: &[u8; 32],
+    size: u64,
+    range: std::ops::Range<u64>,
+    cancel: &CancellationToken,
+    session: &crate::LfsReadSession,
+) -> crate::Result<Option<bytes::Bytes>> {
+    if range.start > range.end || range.end > size {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "local LFS read range exceeds its declared size",
+        )
+        .into());
+    }
+    let permit = tokio::select! {
+        biased;
+        () = cancel.cancelled() => return Err(std::io::Error::new(
+            std::io::ErrorKind::Interrupted, "local LFS verification cancelled",
+        ).into()),
+        result = crate::object_store::origin::verification_permit() => result?,
+    };
+    let storage = storage.to_owned();
+    let oid = *oid;
+    let cancel = cancel.clone();
+    session
+        .spawn_blocking(move || {
+            use std::io::Read;
+            let _permit = permit;
+            let source = object_path(&storage, &oid);
+            let mut input = match std::fs::File::open(source) {
+                Ok(input) => input,
+                Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(None),
+                Err(error) => return Err(error.into()),
+            };
+            let corrupt = || crate::LfsError::ObjectCorrupt {
+                oid: crab_git::lfs_pointer::hex_encode(&oid),
+            };
+            let capacity =
+                usize::try_from(range.end - range.start).map_err(std::io::Error::other)?;
+            let mut bytes = Vec::new();
+            bytes
+                .try_reserve_exact(capacity)
+                .map_err(|source| std::io::Error::new(std::io::ErrorKind::OutOfMemory, source))?;
+            let mut hasher = Sha256::new();
+            let mut offset = 0u64;
+            let mut buffer = [0; 64 * 1024];
+            loop {
+                if cancel.is_cancelled() {
+                    return Err(std::io::Error::new(
+                        std::io::ErrorKind::Interrupted,
+                        "local LFS verification cancelled",
+                    )
+                    .into());
+                }
+                let count = input.read(&mut buffer)?;
+                if count == 0 {
+                    break;
+                }
+                let end = offset
+                    .checked_add(count as u64)
+                    .filter(|end| *end <= size)
+                    .ok_or_else(corrupt)?;
+                hasher.update(&buffer[..count]);
+                let start = range.start.max(offset);
+                let selected_end = range.end.min(end);
+                if start < selected_end {
+                    bytes.extend_from_slice(
+                        &buffer[(start - offset) as usize..(selected_end - offset) as usize],
+                    );
+                }
+                offset = end;
+            }
+            if offset != size || hasher.finalize().as_slice() != oid || bytes.len() != capacity {
+                return Err(corrupt());
+            }
+            Ok(Some(bytes::Bytes::from(bytes)))
+        })?
+        .await
+        .map_err(std::io::Error::other)?
+}
+
 /// Failure to freeze a local payload for publication.
 #[derive(Debug, thiserror::Error)]
 pub enum SnapshotError {
@@ -109,6 +236,100 @@ fn corrupt(oid: &[u8; 32]) -> SnapshotError {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[tokio::test]
+    async fn range_verifies_bytes_outside_the_requested_window() {
+        let root = tempfile::tempdir().unwrap();
+        let oid: [u8; 32] = Sha256::digest(b"abcdef").into();
+        let path = object_path(root.path(), &oid);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let session = crate::LfsReadSession::default();
+        for (body, declared, valid) in [
+            (b"abcdef".as_slice(), 6, true),
+            (b"abcdeX".as_slice(), 6, false),
+            (b"abcde".as_slice(), 6, false),
+            (b"abcdefg".as_slice(), 6, false),
+            (b"abcdef".as_slice(), 7, false),
+        ] {
+            std::fs::write(&path, body).unwrap();
+            let result = read_range(
+                root.path(),
+                &oid,
+                declared,
+                1..3,
+                &CancellationToken::new(),
+                &session,
+            )
+            .await;
+            if valid {
+                assert_eq!(result.unwrap().unwrap(), b"bc".as_slice());
+            } else {
+                assert!(matches!(result, Err(crate::LfsError::ObjectCorrupt { .. })));
+            }
+        }
+        session.close().await;
+    }
+
+    #[tokio::test]
+    async fn local_absence_differs_from_unreadable_object() {
+        let root = tempfile::tempdir().unwrap();
+        let session = crate::LfsReadSession::default();
+        let cancel = CancellationToken::new();
+        let missing = read_range(root.path(), &[0; 32], 3, 0..1, &cancel, &session)
+            .await
+            .unwrap();
+        assert!(missing.is_none());
+        let path = object_path(root.path(), &[0; 32]);
+        std::fs::create_dir_all(&path).unwrap();
+        let invalid = read_range(root.path(), &[0; 32], 3, 0..1, &cancel, &session).await;
+        session.close().await;
+        assert!(invalid.is_err());
+    }
+
+    #[test]
+    fn git_storage_selection_includes_linked_worktree_configuration() {
+        let root = tempfile::tempdir().unwrap();
+        let source = root.path().join("source");
+        let linked = root.path().join("linked");
+        let git = |args: &[&str]| {
+            let result = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&source)
+                .args(args)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_COMMON_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        };
+        std::fs::create_dir(&source).unwrap();
+        git(&["init", "-b", "main"]);
+        git(&[
+            "-c",
+            "user.name=Test",
+            "-c",
+            "user.email=test@example.invalid",
+            "commit",
+            "--allow-empty",
+            "-m",
+            "base",
+        ]);
+        let include = root.path().join("included.config");
+        std::fs::write(&include, "[lfs]\n storage = payloads\n").unwrap();
+        git(&["config", "include.path", include.to_str().unwrap()]);
+        git(&["worktree", "add", "-b", "linked", linked.to_str().unwrap()]);
+        let git_dir = source.join(".git/worktrees/linked");
+        assert_eq!(
+            storage_from_git(&git_dir).unwrap(),
+            source.join(".git/payloads")
+        );
+    }
 
     #[tokio::test]
     async fn snapshot_binds_owned_bytes_and_rejects_corruption() {

@@ -408,6 +408,7 @@ impl MountPipelineBuilder {
             Some(crate::repository::staging_root_for_git_dir(
                 &self.config.git_dir,
             )?),
+            Some(self.config.git_dir.clone()),
         )
     }
 
@@ -570,6 +571,7 @@ pub fn create_hydration(
     store_layout: Option<StoreLayout>,
     read_hydrator: Option<Arc<crab_read::ShardHydrator>>,
     staging_root: Option<PathBuf>,
+    git_dir: Option<PathBuf>,
 ) -> Result<Arc<HydrationService>> {
     if store_layout.is_some() && read_hydrator.is_none() {
         return Err(CrabError::Configuration {
@@ -586,14 +588,25 @@ pub fn create_hydration(
         None => Arc::new(StubXorbFetcher),
     };
 
+    // Git subprocesses must finish before callbacks start: spawning from a read
+    // can close inherited client descriptors and re-enter the locked FUSE inode.
+    let lfs_storage = git_dir
+        .as_deref()
+        .map(crab_lfs::local::storage_from_git)
+        .transpose()?;
     Ok(HydrationService::new(
         cache,
         verified,
         Arc::new(StubFileIndexResolver),
         Arc::new(StubShardLoader),
         xorb_fetcher,
-        (read_hydrator.is_some() || staging_root.is_some())
-            .then(|| Arc::new(crab_read::PointerReader::new(read_hydrator, staging_root))),
+        (read_hydrator.is_some() || staging_root.is_some() || lfs_storage.is_some()).then(|| {
+            Arc::new(crab_read::PointerReader::new(
+                read_hydrator,
+                staging_root,
+                lfs_storage,
+            ))
+        }),
         Some(2),
         cancel,
     ))
@@ -758,7 +771,14 @@ mod tests {
         // Shutdown is a detach request; a busy native mount still needs cold bytes.
         cancel.cancel();
         assert_eq!(
-            service.read_range(&stored.pointer, 0, 1024).await.unwrap(),
+            service
+                .read_range(
+                    &crate::blob::FilePointer::Crab(stored.pointer.clone()),
+                    0,
+                    1024
+                )
+                .await
+                .unwrap(),
             content
         );
         assert_eq!(stored.xorb_body_requests(), 1);
@@ -842,6 +862,7 @@ mod tests {
             Arc::new(VerifiedSet::default()),
             CancellationToken::new(),
             Some(layout),
+            None,
             None,
             None,
         )

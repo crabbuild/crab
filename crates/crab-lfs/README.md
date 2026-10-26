@@ -35,6 +35,14 @@ out of memory.
 `local` shares local payload paths and storage-key precedence with CLI and SDK
 callers. Its preparation snapshots verify SHA-256 and exact size while copying
 into caller-owned scratch, then return the Blake3 digest for durable recovery.
+Its local range API hashes the complete source in one bounded-memory pass,
+retaining only the requested range and returning bytes after exact-size/SHA-256
+verification. Only object-open `NotFound` returns absence. Other I/O or integrity
+failures remain errors. Callers resolve Git storage settings before serving
+callbacks and share the process-wide verification admission and tracked read
+session. Each cold range currently repeats full hashing; it is not an optimized
+local random-read index or a payload-retirement pin.
+
 Streaming uploads use the storage facade for multipart start and completion;
 protected writes stay under their staging prefix and enter the verified object
 inventory only after successful completion. Empty payloads use an ordinary

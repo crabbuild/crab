@@ -3155,7 +3155,7 @@ mod tests {
                 node_type: NodeType::File,
                 mode: 0o100_644,
                 object_oid: Some("pointer-blob-oid".to_owned()),
-                pointer: Some(pointer.clone()),
+                pointer: Some(crate::blob::FilePointer::Crab(pointer.clone())),
                 size: pointer.size,
             },
         ]);

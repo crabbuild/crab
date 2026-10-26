@@ -1141,6 +1141,7 @@ mod tests {
             None,
             None,
             None,
+            None,
         )
         .unwrap();
         let engine = Arc::new(VfsEngine::new(

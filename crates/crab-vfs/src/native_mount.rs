@@ -448,6 +448,94 @@ async fn qualify(fuse: bool, read_only: bool) {
     assert!(result.is_ok(), "native operations failed: {result:?}");
 }
 
+async fn qualify_lfs(fuse: bool) {
+    use sha2::{Digest, Sha256};
+
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    git(&source, &["init", "-b", "main"]);
+    git(&source, &["config", "user.name", "VFS audit"]);
+    git(&source, &["config", "user.email", "audit@example.invalid"]);
+    let expected = bytes::Bytes::from(
+        (0..6 * 1024 * 1024)
+            .map(|index| (index % 251) as u8)
+            .collect::<Vec<_>>(),
+    );
+    let pointer = crab_git::LfsPointer {
+        oid: Sha256::digest(&expected).into(),
+        size: expected.len() as u64,
+        extensions: Vec::new(),
+    };
+    std::fs::write(source.join("large.bin"), pointer.serialize()).unwrap();
+    git(&source, &["add", "."]);
+    git(&source, &["commit", "-m", "LFS pointer"]);
+    let stored = crate::test_support::StoredPointer::new(
+        &root.path().join("shared"),
+        bytes::Bytes::from_static(b"catalog seed"),
+    )
+    .await;
+    let layout = &stored.context.store_layout;
+    crab_lfs::LfsObjectStore::new(layout.store().clone(), layout.repo_prefix())
+        .put(&pointer.oid, expected.clone())
+        .await
+        .unwrap();
+    let config = PipelineConfig {
+        source: source.display().to_string(),
+        git_dir: source.join(".git"),
+        git_metadata: crate::pipeline::GitMetadataOwnership::Borrowed,
+        ref_name: Some("refs/heads/main".into()),
+        read_only: false,
+        cache_dir: root.path().join("cache"),
+        cancel_token: CancellationToken::new(),
+    };
+    let output = MountPipelineBuilder::new(config.clone())
+        .with_read_context(stored.context)
+        .execute()
+        .unwrap();
+    let mountpoint = root.path().join("mount");
+    std::fs::create_dir(&mountpoint).unwrap();
+    let mounted = NativeMount::start(fuse, &config, &output, &mountpoint).await;
+    let result = tokio::task::spawn_blocking(move || {
+        let path = mountpoint.join("large.bin");
+        assert_eq!(std::fs::metadata(&path).unwrap().len(), pointer.size);
+        let mut tail = std::fs::File::open(&path).unwrap();
+        tail.seek(SeekFrom::Start(pointer.size - 64)).unwrap();
+        let mut bytes = [0; 64];
+        tail.read_exact(&mut bytes).unwrap();
+        assert_eq!(&bytes, &expected[expected.len() - 64..]);
+        assert_eq!(
+            Sha256::digest(std::fs::read(&path).unwrap()).as_slice(),
+            pointer.oid
+        );
+        let mut file = std::fs::OpenOptions::new()
+            .read(true)
+            .write(true)
+            .open(&path)
+            .unwrap();
+        file.seek(SeekFrom::Start(1024)).unwrap();
+        file.write_all(b"changed LFS content").unwrap();
+        file.sync_all().unwrap();
+        let mut modified = expected.to_vec();
+        modified[1024..1043].copy_from_slice(b"changed LFS content");
+        assert_eq!(
+            Sha256::digest(std::fs::read(&path).unwrap()),
+            Sha256::digest(&modified)
+        );
+        let renamed = mountpoint.join("renamed.bin");
+        std::fs::rename(&path, &renamed).unwrap();
+        std::fs::remove_file(&renamed).unwrap();
+        file.seek(SeekFrom::Start(1024)).unwrap();
+        let mut changed = [0; 19];
+        file.read_exact(&mut changed).unwrap();
+        assert_eq!(&changed, b"changed LFS content");
+    })
+    .await;
+    mounted.stop().await;
+    output.engine.shutdown_background().await;
+    result.unwrap();
+}
+
 async fn qualify_mapped_commit(fuse: bool) {
     let root = tempfile::tempdir().unwrap();
     let source = root.path().join("source");
@@ -523,6 +611,18 @@ async fn qualify_mapped_commit(fuse: bool) {
 #[ignore = "requires a dedicated Linux environment with native FUSE/NFS mount privileges"]
 async fn fuse_mapped_commit_without_msync() {
     qualify_mapped_commit(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires a dedicated Linux environment with native FUSE/NFS mount privileges"]
+async fn fuse_lfs_content_and_cow() {
+    qualify_lfs(true).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires a dedicated Linux environment with native FUSE/NFS mount privileges"]
+async fn nfs_lfs_content_and_cow() {
+    qualify_lfs(false).await;
 }
 
 #[tokio::test(flavor = "multi_thread", worker_threads = 4)]

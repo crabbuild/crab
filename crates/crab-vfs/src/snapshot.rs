@@ -17,8 +17,11 @@ use gix_object::{Find, FindExt};
 use rusqlite::{Connection, ErrorCode, OptionalExtension, params};
 use tracing::{debug, info};
 
+use crate::blob::FilePointer;
 use crate::core::error::{CrabError, Result};
-use crab_types::pointer::{MAX_POINTER_SIZE, Pointer, is_pointer};
+use crab_types::pointer::MAX_POINTER_SIZE;
+#[cfg(test)]
+use crab_types::pointer::Pointer;
 
 pub const SNAPSHOT_DB_FILE: &str = "snapshot.sqlite";
 
@@ -52,8 +55,8 @@ pub struct BaseNode {
     pub mode: u32,
     /// Git blob OID as hex string (for small files stored in packs).
     pub object_oid: Option<String>,
-    /// Crab pointer (for large files tracked by crab).
-    pub pointer: Option<Pointer>,
+    /// External Crab or Git LFS content named by the Git blob.
+    pub pointer: Option<FilePointer>,
     /// Original file size in bytes.
     pub size: u64,
 }
@@ -377,8 +380,8 @@ impl SnapshotStore {
         generation: i64,
         path: &str,
         blob: &[u8],
-    ) -> Result<(u64, Option<Pointer>)> {
-        let (size, pointer) = classify_blob(path, blob)?;
+    ) -> Result<(u64, Option<FilePointer>)> {
+        let (size, pointer) = classify_blob(blob)?;
         let mut conn = self.connection()?;
         let tx = conn.transaction().map_err(map_sqlite_err)?;
         let existing = tx
@@ -734,8 +737,9 @@ where
 
     let mut size = header.size();
     let mut pointer = None;
-    if size <= MAX_POINTER_SIZE as u64 {
-        let mut blob_buf = Vec::with_capacity(MAX_POINTER_SIZE);
+    if size <= MAX_POINTER_SIZE.max(crab_git::lfs_pointer::MAX_LFS_POINTER_SIZE) as u64 {
+        let mut blob_buf =
+            Vec::with_capacity(MAX_POINTER_SIZE.max(crab_git::lfs_pointer::MAX_LFS_POINTER_SIZE));
         let data = odb
             .try_find(&oid, &mut blob_buf)
             .map_err(|e| CrabError::Internal(format!("failed to read blob {oid_hex}: {e}")))?
@@ -747,7 +751,7 @@ where
                 "tree entry {path} references non-blob object {oid_hex}"
             )));
         }
-        (size, pointer) = classify_blob(&path, data.data)?;
+        (size, pointer) = classify_blob(data.data)?;
     }
 
     Ok(Some(BaseNode {
@@ -760,13 +764,12 @@ where
     }))
 }
 
-fn classify_blob(path: &str, blob: &[u8]) -> Result<(u64, Option<Pointer>)> {
-    if !is_pointer(blob) {
-        return Ok((blob.len() as u64, None));
-    }
-    let pointer = Pointer::parse(blob)
-        .map_err(|error| CrabError::Internal(format!("invalid Crab pointer at {path}: {error}")))?;
-    Ok((pointer.size, Some(pointer)))
+pub(crate) fn classify_blob(blob: &[u8]) -> Result<(u64, Option<FilePointer>)> {
+    let pointer = FilePointer::classify(blob)?;
+    let size = pointer
+        .as_ref()
+        .map_or(blob.len() as u64, FilePointer::size);
+    Ok((size, pointer))
 }
 
 struct SnapshotTreeVisitor<F> {
@@ -1009,7 +1012,12 @@ fn deserialize_base_node(data: &[u8]) -> Result<BaseNode> {
         if pos + ptr_len > data.len() {
             return Err(err());
         }
-        let ptr = Pointer::parse(&data[pos..pos + ptr_len])?;
+        let ptr = FilePointer::classify(&data[pos..pos + ptr_len])?.ok_or_else(|| {
+            CrabError::CorruptObject {
+                path: SNAPSHOT_DB_NAME.into(),
+                reason: "invalid stored file pointer".into(),
+            }
+        })?;
         Some(ptr)
     } else {
         None
@@ -1032,6 +1040,38 @@ fn deserialize_base_node(data: &[u8]) -> Result<BaseNode> {
 )]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lfs_classification_and_snapshot_round_trip_preserve_payload_identity() {
+        let pointer = crab_git::LfsPointer {
+            oid: [9; 32],
+            size: 6 * 1024 * 1024,
+            extensions: Vec::new(),
+        };
+        let (size, classified) = classify_blob(&pointer.serialize()).unwrap();
+        let node = BaseNode {
+            path: "large.bin".into(),
+            node_type: NodeType::File,
+            mode: 0o100_644,
+            object_oid: Some("a".repeat(40)),
+            pointer: classified,
+            size,
+        };
+        let decoded = deserialize_base_node(&serialize_base_node(&node)).unwrap();
+        assert_eq!(
+            (decoded.size, decoded.pointer),
+            (pointer.size, Some(FilePointer::Lfs(pointer)))
+        );
+    }
+
+    #[test]
+    fn lfs_extensions_fail_before_exposing_transformed_object_bytes() {
+        let pointer = b"version https://git-lfs.github.com/spec/v1\next-0-test sha256:0000000000000000000000000000000000000000000000000000000000000000\noid sha256:1111111111111111111111111111111111111111111111111111111111111111\nsize 6\n";
+        assert!(matches!(
+            classify_blob(pointer),
+            Err(CrabError::Configuration { .. })
+        ));
+    }
 
     fn sample_pointer() -> Pointer {
         let mut h = [0u8; 32];
@@ -1075,7 +1115,7 @@ mod tests {
             node_type: NodeType::File,
             mode: 0o100_644,
             object_oid: Some("deadbeef".to_owned()),
-            pointer: Some(ptr),
+            pointer: Some(crate::blob::FilePointer::Crab(ptr)),
             size,
         }
     }
@@ -1331,9 +1371,9 @@ mod tests {
         let result = store.update_node_from_blob(1, "model.bin", &blob).unwrap();
 
         let after = store.get_node(1, "model.bin").unwrap().unwrap();
-        assert_eq!(result, (pointer.size, Some(pointer.clone())));
+        assert_eq!(result, (pointer.size, Some(pointer.clone().into())));
         assert_eq!(after.size, pointer.size);
-        assert_eq!(after.pointer, Some(pointer));
+        assert_eq!(after.pointer, Some(pointer.into()));
     }
 
     #[test]

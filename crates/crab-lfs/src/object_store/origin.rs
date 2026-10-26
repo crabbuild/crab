@@ -6,15 +6,19 @@ use super::*;
 
 static VERIFICATIONS: LazyLock<Arc<Semaphore>> = LazyLock::new(|| Arc::new(Semaphore::new(4)));
 
+pub(crate) async fn verification_permit() -> std::io::Result<tokio::sync::OwnedSemaphorePermit> {
+    Arc::clone(&VERIFICATIONS)
+        .acquire_owned()
+        .await
+        .map_err(std::io::Error::other)
+}
+
 pub(super) async fn hash_delivery_chunk(
     mut hasher: Sha256,
     chunk: Bytes,
     session: Option<&LfsReadSession>,
 ) -> Result<(Sha256, Bytes)> {
-    let permit = Arc::clone(&VERIFICATIONS)
-        .acquire_owned()
-        .await
-        .map_err(std::io::Error::other)?;
+    let permit = verification_permit().await?;
     // Delivery owns one chunk at a time. The blocking worker retains hashing
     // admission even if its consumer disconnects while the job is running.
     spawn_hash(session, move || {
@@ -36,12 +40,7 @@ pub(super) async fn inspect(
 ) -> Result<ExistingObject> {
     // Acquire before opening the body; each detached hash job shares ownership
     // so cancellation cannot admit replacement buffers before that job exits.
-    let permit = Arc::new(
-        Arc::clone(&VERIFICATIONS)
-            .acquire_owned()
-            .await
-            .map_err(std::io::Error::other)?,
-    );
+    let permit = Arc::new(verification_permit().await?);
     let (meta, range, mut stream) = match store.get_stream(path, None).await {
         Ok(result) => result,
         Err(StorageError::NotFound { .. }) => return Ok(ExistingObject::Missing),

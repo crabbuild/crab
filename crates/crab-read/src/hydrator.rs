@@ -131,6 +131,54 @@ pub struct ShardHydrator {
 
 impl ShardHydrator {
     #[cfg(feature = "local-staging")]
+    pub(crate) async fn read_lfs_range(
+        &self,
+        pointer: &crab_git::LfsPointer,
+        range: std::ops::Range<u64>,
+        cancel: &CancellationToken,
+        session: &crab_lfs::LfsReadSession,
+    ) -> Result<bytes::Bytes> {
+        use futures_util::StreamExt;
+
+        // Xet also admits buffered output before a connection. Keep that order
+        // so mixed LFS/Crab reads cannot hold each other's admission in a cycle.
+        let _buffer = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(ReadError::Cancelled),
+            result = self.buffer_semaphore.acquire_many(range.end - range.start) => result.map_err(std::io::Error::other)?,
+        };
+        let _download = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(ReadError::Cancelled),
+            result = self.concurrency.acquire_connection_permit() => result.map_err(std::io::Error::other)?,
+        };
+        let store =
+            crab_lfs::LfsObjectStore::new(self.router.store().clone(), self.router.repo_prefix());
+        let read = async {
+            let (_, _, mut stream) = store
+                .get_stream_with_session(&pointer.oid, pointer.size, Some(range.clone()), session)
+                .await?;
+            let expected =
+                usize::try_from(range.end - range.start).map_err(std::io::Error::other)?;
+            let mut bytes = Vec::new();
+            bytes
+                .try_reserve_exact(expected)
+                .map_err(|source| std::io::Error::new(std::io::ErrorKind::OutOfMemory, source))?;
+            // Integrity includes stream EOF; no range enters the VFS cache
+            // while a later verification error can still revoke its bytes.
+            while let Some(chunk) = stream.next().await {
+                bytes.extend_from_slice(&chunk?);
+            }
+            Ok(bytes::Bytes::from(bytes))
+        };
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => Err(ReadError::Cancelled),
+            result = read => result,
+        }
+    }
+
+    #[cfg(feature = "local-staging")]
     pub(crate) async fn captured_shard(&self, pointer: &Pointer) -> Result<Option<MerkleHash>> {
         let Some(lookup) = &self.file_index_lookup else {
             return Ok(None);
@@ -1340,7 +1388,8 @@ mod tests {
         {
             let unavailable = directory.path().join("unavailable-staging");
             std::fs::write(&unavailable, b"not a staging directory").unwrap();
-            let reader = crate::PointerReader::new(Some(Arc::new(hydrator)), Some(unavailable));
+            let reader =
+                crate::PointerReader::new(Some(Arc::new(hydrator)), Some(unavailable), None);
             assert_eq!(
                 reader
                     .read_range(

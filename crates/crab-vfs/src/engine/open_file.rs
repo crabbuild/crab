@@ -563,6 +563,11 @@ impl VfsEngine {
                         .await?
                         .is_none()
                     {
+                        let crate::blob::FilePointer::Crab(pointer) = pointer else {
+                            return Err(CrabError::Internal(
+                                "LFS pointer has no configured reader".into(),
+                            ));
+                        };
                         for term in hydration.resolve_terms(pointer)? {
                             let bytes = hydration.fetch_chunk(&term).await?;
                             std::io::Write::write_all(temporary.as_file_mut(), &bytes)?;
@@ -621,7 +626,7 @@ fn same_content(first: &ReadSource, second: &ReadSource) -> bool {
         (
             ReadSource::BasePointer { pointer: a, .. },
             ReadSource::BasePointer { pointer: b, .. },
-        ) => a.file_hash == b.file_hash && a.size == b.size,
+        ) => a.identity() == b.identity() && a.size() == b.size(),
         (ReadSource::BaseBlob { oid: a, .. }, ReadSource::BaseBlob { oid: b, .. }) => a == b,
         (ReadSource::BaseEmpty, ReadSource::BaseEmpty) => true,
         _ => false,

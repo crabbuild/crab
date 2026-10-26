@@ -179,6 +179,15 @@ Cancellation/drop stops pending write attempts. This is not a persistence
 promise when caching is unavailable, over budget, or concurrently evicted,
 nor an aggregate filesystem-latency bound.
 
+`PointerReader` also accepts a resolved local LFS storage directory. Its LFS
+range API verifies local payloads through `crab-lfs::local` and uses the captured
+remote runtime only when opening the local object reports absence. Corruption,
+configuration and I/O errors remain failures. Extensions requiring smudge are
+unsupported. Resolve Git settings outside filesystem callbacks; reads never
+spawn Git. Remote reads share reconstruction buffer/download admission and
+consume canonical verified streams through EOF. Callers supply an
+`LfsReadSession` and drain it after outstanding read futures finish or drop.
+
 ### Errors and output ownership
 
 `ReadError::Reconstruction` retains Xet's failure and the operation's first

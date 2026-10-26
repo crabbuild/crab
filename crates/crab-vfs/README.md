@@ -14,11 +14,25 @@ write overlay semantics, background hydration, cancellation, refresh, and
 consistent read-after-write behavior. This crate owns that integration rather
 than putting filesystem lifecycle policy into the storage or Xet layers.
 
-Git LFS pointer blobs currently remain ordinary Git bytes in mounted views.
-A real gateway/RustFS probe returns a 132-byte pointer through NFS and FUSE while
-S3 GET returns its exact 6 MiB object. LFS hydration is an open VFS correctness
-gate; the Git LFS `spec/v1` marker is independent of the retired Crab pack-v1
-storage authority.
+Git LFS pointer blobs expose their declared payload size and verified content.
+Snapshot walking and late blob classification share one typed content identity;
+Crab BLAKE3 and LFS SHA-256 addresses cannot share a read-window entry. Ordinary
+Git bytes retain their existing object-ID verification.
+
+LFS reads use canonical `crab-read`/`crab-lfs` verification. A selected local
+payload must pass complete SHA-256 and exact-size verification; only absence
+selects the captured remote store. Git storage configuration is resolved before
+native callbacks start, including common-directory and existing storage overrides.
+Remote streams must reach verified EOF before their bytes enter the immutable
+window cache. COW streams these same windows to owned backing storage. Shared
+shutdown drains admitted LFS verification jobs before releasing cache ownership.
+
+LFS extensions require a smudge implementation and are rejected explicitly.
+Cold local windows currently hash the complete payload, and remote partial reads
+can do the same when no validator receipt exists. Bounded verification reuse,
+origin amplification, LFS publication/refresh and payload retirement remain
+qualification priorities. Git LFS `spec/v1` is a current pointer format,
+independent of retired Crab pack-v1 storage authority.
 
 ## Architecture
 

@@ -11,6 +11,84 @@ use gix_object::{Find, FindHeader};
 use crate::core::error::{CrabError, Result};
 use crate::memory_cache::MemoryCache;
 
+/// Captured external content named by a committed Git pointer blob.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum FilePointer {
+    Crab(crab_types::pointer::Pointer),
+    Lfs(crab_git::LfsPointer),
+}
+
+/// Content address including its hash algorithm.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub enum PointerIdentity {
+    Crab([u8; 32]),
+    Lfs([u8; 32]),
+}
+
+impl std::fmt::Display for PointerIdentity {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        let (kind, hash) = match self {
+            Self::Crab(hash) => ("crab", hash),
+            Self::Lfs(hash) => ("lfs", hash),
+        };
+        write!(
+            formatter,
+            "{kind}:{}",
+            crab_types::pointer::hex_encode(hash)
+        )
+    }
+}
+
+impl From<crab_types::pointer::Pointer> for FilePointer {
+    fn from(pointer: crab_types::pointer::Pointer) -> Self {
+        Self::Crab(pointer)
+    }
+}
+
+impl FilePointer {
+    pub(crate) fn classify(bytes: &[u8]) -> Result<Option<Self>> {
+        if crab_types::pointer::is_pointer(bytes) {
+            return crab_types::pointer::Pointer::parse(bytes)
+                .map(Self::Crab)
+                .map(Some)
+                .map_err(Into::into);
+        }
+        let crab_git::PointerKind::Lfs(pointer) = crab_git::classify(bytes) else {
+            return Ok(None);
+        };
+        if !pointer.extensions.is_empty() {
+            // The stored object's hash and size describe transformed bytes.
+            // Exposing them without the extension's smudge would corrupt the view.
+            return Err(CrabError::Configuration {
+                key: "Git LFS pointer extensions are not supported by VFS".into(),
+                origin: "file content classification".into(),
+            });
+        }
+        Ok(Some(Self::Lfs(pointer)))
+    }
+
+    pub(crate) fn size(&self) -> u64 {
+        match self {
+            Self::Crab(pointer) => pointer.size,
+            Self::Lfs(pointer) => pointer.size,
+        }
+    }
+
+    pub(crate) fn identity(&self) -> PointerIdentity {
+        match self {
+            Self::Crab(pointer) => PointerIdentity::Crab(pointer.file_hash),
+            Self::Lfs(pointer) => PointerIdentity::Lfs(pointer.oid),
+        }
+    }
+
+    pub(crate) fn serialize(&self) -> Vec<u8> {
+        match self {
+            Self::Crab(pointer) => pointer.serialize(),
+            Self::Lfs(pointer) => pointer.serialize(),
+        }
+    }
+}
+
 const MAX_BLOB_SIZE: usize = 100 * 1024 * 1024;
 const CACHE_BYTES: usize = 128 * 1024 * 1024;
 const CACHE_ENTRIES: usize = 4096;

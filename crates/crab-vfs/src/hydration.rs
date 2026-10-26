@@ -26,6 +26,7 @@ use tracing::{Instrument, debug, trace, warn};
 
 use crate::ChunkCache;
 use crate::StoreLayout;
+use crate::blob::{FilePointer, PointerIdentity};
 use crate::core::error::{CrabError, Result};
 use crate::data_plane::{FileIndexResolver, ReconstructionTerm, ShardLoader, XorbFetcher};
 use crate::memory_cache::MemoryCache;
@@ -115,7 +116,7 @@ struct InflightEntry {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct ReadWindowKey {
-    file_hash: [u8; 32],
+    file_hash: PointerIdentity,
     start: u64,
     end: u64,
 }
@@ -324,6 +325,7 @@ struct HydrationState {
     background_tasks: TaskTracker,
     /// Stops background queue workers without cancelling foreground reads.
     background_cancel: CancellationToken,
+    lfs_session: crab_lfs::LfsReadSession,
 }
 
 impl std::fmt::Debug for HydrationService {
@@ -376,6 +378,7 @@ impl HydrationService {
                 cancel,
                 background_state: Mutex::new(BackgroundState::Ready),
                 background_tasks: TaskTracker::new(),
+                lfs_session: crab_lfs::LfsReadSession::default(),
             }),
         })
     }
@@ -442,6 +445,7 @@ impl HydrationService {
     pub async fn shutdown(&self) {
         self.request_shutdown();
         self.state.background_tasks.wait().await;
+        self.state.lfs_session.close().await;
     }
 
     /// Enqueue background hydration unless shutdown has closed admission.
@@ -479,27 +483,27 @@ impl HydrationService {
     /// Opportunistically cache the next read-through window after a sequential read.
     pub fn prefetch_next_read_window(
         self: &Arc<Self>,
-        pointer: Pointer,
+        pointer: FilePointer,
         offset: u64,
         size: u32,
     ) -> bool {
-        let window = next_read_window_for_range(pointer.size, offset, size);
+        let window = next_read_window_for_range(pointer.size(), offset, size);
         self.prefetch_read_window_for(pointer, window)
     }
 
     pub fn prefetch_read_window(
         self: &Arc<Self>,
-        pointer: Pointer,
+        pointer: FilePointer,
         offset: u64,
         size: u32,
     ) -> bool {
-        let window = read_window_for_range(pointer.size, offset, size);
+        let window = read_window_for_range(pointer.size(), offset, size);
         self.prefetch_read_window_for(pointer, window)
     }
 
     fn prefetch_read_window_for(
         self: &Arc<Self>,
-        pointer: Pointer,
+        pointer: FilePointer,
         window: Option<ReadWindow>,
     ) -> bool {
         self.state.read_stats.record_read_window_prefetch_request();
@@ -518,7 +522,7 @@ impl HydrationService {
         };
 
         let key = ReadWindowKey {
-            file_hash: pointer.file_hash,
+            file_hash: pointer.identity(),
             start: window.window_start,
             end: window.window_end,
         };
@@ -589,13 +593,13 @@ impl HydrationService {
     /// 2. Map byte range `[offset, offset+size)` to chunk indices
     /// 3. For each chunk: cache → inflight → fetch via Range GET
     /// 4. Assemble requested byte range from chunk data, trim to exact range
-    pub async fn read_range(&self, pointer: &Pointer, offset: u64, size: u32) -> Result<Bytes> {
+    pub async fn read_range(&self, pointer: &FilePointer, offset: u64, size: u32) -> Result<Bytes> {
         self.state.read_stats.record_read_range_request(size);
         let span = tracing::debug_span!(
             "hydration_read_range",
             offset,
             size,
-            file_size = pointer.size,
+            file_size = pointer.size(),
         );
 
         let result = async move {
@@ -605,6 +609,12 @@ impl HydrationService {
                     .await;
             }
 
+            let FilePointer::Crab(pointer) = pointer else {
+                return Err(CrabError::Configuration {
+                    key: "LFS content has no configured reader".into(),
+                    origin: "VFS hydration".into(),
+                });
+            };
             let terms = self.resolve_terms(pointer)?;
 
             if terms.is_empty() {
@@ -660,15 +670,17 @@ impl HydrationService {
     async fn read_range_via_hydrator(
         &self,
         hydrator: &crab_read::PointerReader,
-        pointer: &Pointer,
+        pointer: &FilePointer,
         offset: u64,
         size: u32,
     ) -> Result<Bytes> {
-        let Some(window) = read_window_for_range(pointer.size, offset, size) else {
+        let Some(window) = read_window_for_range(pointer.size(), offset, size) else {
             return Ok(Bytes::new());
         };
 
-        if !hydrator.has_remote() {
+        if let FilePointer::Crab(pointer) = pointer
+            && !hydrator.has_remote()
+        {
             // Local staging already supports bounded chunk ranges. Expanding a
             // small read to a remote-size window adds avoidable local I/O.
             return Ok(hydrator
@@ -682,7 +694,7 @@ impl HydrationService {
         }
 
         let key = ReadWindowKey {
-            file_hash: pointer.file_hash,
+            file_hash: pointer.identity(),
             start: window.window_start,
             end: window.window_end,
         };
@@ -697,7 +709,7 @@ impl HydrationService {
     async fn read_verified_window(
         &self,
         hydrator: &crab_read::PointerReader,
-        pointer: &Pointer,
+        pointer: &FilePointer,
         key: &ReadWindowKey,
     ) -> Result<Bytes> {
         if let Some(bytes) = self.cached_read_window(key) {
@@ -719,14 +731,28 @@ impl HydrationService {
         if self.state.cancel.is_cancelled() {
             return Err(CrabError::Cancelled);
         }
-        let read = hydrator
-            .read_range(pointer, key.start..key.end, &self.state.cancel)
-            .await?;
+        let read = match pointer {
+            FilePointer::Crab(pointer) => {
+                hydrator
+                    .read_range(pointer, key.start..key.end, &self.state.cancel)
+                    .await?
+            }
+            FilePointer::Lfs(pointer) => {
+                hydrator
+                    .read_lfs_range(
+                        pointer,
+                        key.start..key.end,
+                        &self.state.cancel,
+                        &self.state.lfs_session,
+                    )
+                    .await?
+            }
+        };
         let expected_len = usize::try_from(key.end - key.start)
             .map_err(|_| CrabError::Internal("read window is too large".into()))?;
         if read.bytes.len() != expected_len {
             return Err(CrabError::CorruptObject {
-                path: format!("read window {}", hex_encode(&key.file_hash)),
+                path: format!("read window {}", key.file_hash),
                 reason: format!("expected {expected_len} bytes, got {}", read.bytes.len()),
             });
         }
@@ -753,10 +779,13 @@ impl HydrationService {
 
     pub(crate) async fn pin_file(
         &self,
-        pointer: &Pointer,
+        pointer: &FilePointer,
     ) -> Result<Option<crab_staging::StagedFilePin>> {
         match &self.pointer_reader {
-            Some(reader) => reader.pin_file(pointer).await.map_err(Into::into),
+            Some(reader) => match pointer {
+                FilePointer::Crab(pointer) => reader.pin_file(pointer).await.map_err(Into::into),
+                FilePointer::Lfs(_) => Ok(None),
+            },
             None => Ok(None),
         }
     }
@@ -764,14 +793,37 @@ impl HydrationService {
     /// Reconstruct a complete pointer-backed file to `dest`.
     ///
     /// Returns `Ok(None)` when the legacy term-based path must be used.
-    pub async fn reconstruct_to_path(&self, pointer: &Pointer, dest: &Path) -> Result<Option<u64>> {
+    pub async fn reconstruct_to_path(
+        &self,
+        pointer: &FilePointer,
+        dest: &Path,
+    ) -> Result<Option<u64>> {
         let Some(hydrator) = &self.pointer_reader else {
             return Ok(None);
         };
-        let bytes = hydrator
-            .reconstruct_to_path(pointer, dest, &self.state.cancel)
-            .await?;
-        Ok(Some(bytes))
+        if let FilePointer::Crab(pointer) = pointer {
+            let bytes = hydrator
+                .reconstruct_to_path(pointer, dest, &self.state.cancel)
+                .await?;
+            return Ok(Some(bytes));
+        }
+        use tokio::io::AsyncWriteExt;
+        let mut output = tokio::fs::File::create(dest).await?;
+        let mut offset = 0;
+        while offset < pointer.size() {
+            let size = (pointer.size() - offset).min(READ_THROUGH_WINDOW_SIZE) as u32;
+            let bytes = self.read_range(pointer, offset, size).await?;
+            if bytes.is_empty() {
+                return Err(CrabError::CorruptObject {
+                    path: pointer.identity().to_string(),
+                    reason: "pointer content ended before its declared size".into(),
+                });
+            }
+            output.write_all(&bytes).await?;
+            offset += bytes.len() as u64;
+        }
+        output.sync_all().await?;
+        Ok(Some(offset))
     }
 
     // -----------------------------------------------------------------------
@@ -1493,6 +1545,82 @@ mod tests {
     use object_store::memory::InMemory;
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn lfs_windows_cannot_authorize_a_crab_pointer_with_the_same_hash_bytes() {
+        use sha2::{Digest, Sha256};
+        let root = tempfile::tempdir().unwrap();
+        let stored = crate::test_support::StoredPointer::new(
+            &root.path().join("shared"),
+            Bytes::from_static(b"Crab catalog seed"),
+        )
+        .await;
+        let content = Bytes::from_static(b"verified LFS bytes");
+        let lfs = crab_git::LfsPointer {
+            oid: Sha256::digest(&content).into(),
+            size: content.len() as u64,
+            extensions: Vec::new(),
+        };
+        let layout = &stored.context.store_layout;
+        crab_lfs::LfsObjectStore::new(layout.store().clone(), layout.repo_prefix())
+            .put(&lfs.oid, content.clone())
+            .await
+            .unwrap();
+        let service = window_service(root.path(), &stored, CancellationToken::new());
+        let actual = service
+            .read_range(&FilePointer::Lfs(lfs.clone()), 0, 1024)
+            .await
+            .unwrap();
+        assert_eq!(actual, content);
+        let crab = Pointer {
+            file_hash: lfs.oid,
+            size: lfs.size,
+            shard_hint: None,
+        };
+        let crossed = service.read_range(&FilePointer::Crab(crab), 0, 1024).await;
+        service.shutdown().await;
+        assert!(crossed.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn local_lfs_corruption_is_not_hidden_by_a_valid_remote() {
+        use sha2::{Digest, Sha256};
+        let root = tempfile::tempdir().unwrap();
+        let stored = crate::test_support::StoredPointer::new(
+            &root.path().join("shared"),
+            Bytes::from_static(b"Crab catalog seed"),
+        )
+        .await;
+        let content = Bytes::from_static(b"verified LFS bytes");
+        let pointer = crab_git::LfsPointer {
+            oid: Sha256::digest(&content).into(),
+            size: content.len() as u64,
+            extensions: Vec::new(),
+        };
+        let layout = &stored.context.store_layout;
+        crab_lfs::LfsObjectStore::new(layout.store().clone(), layout.repo_prefix())
+            .put(&pointer.oid, content.clone())
+            .await
+            .unwrap();
+        let storage = root.path().join("local-lfs");
+        let path = crab_lfs::local::object_path(&storage, &pointer.oid);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, vec![b'X'; content.len()]).unwrap();
+        let service = window_service(root.path(), &stored, CancellationToken::new()).for_reader(
+            Arc::new(crab_read::PointerReader::new(
+                Some(stored.context.hydrator.clone()),
+                None,
+                Some(storage),
+            )),
+        );
+        let selected = FilePointer::Lfs(pointer);
+        let corrupt = service.read_range(&selected, 0, 1024).await;
+        assert!(corrupt.is_err());
+        std::fs::remove_file(path).unwrap();
+        let remote = service.read_range(&selected, 0, 1024).await;
+        service.shutdown().await;
+        assert_eq!(remote.unwrap(), content);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn chunk_completion_releases_all_registered_readers() {
         use std::future::Future;
         use std::task::Poll;
@@ -1547,13 +1675,17 @@ mod tests {
                 .await;
         let service = window_service(tmp.path(), &stored, CancellationToken::new());
         let key = ReadWindowKey {
-            file_hash: stored.pointer.file_hash,
+            file_hash: crate::blob::PointerIdentity::Crab(stored.pointer.file_hash),
             start: 0,
             end: stored.pointer.size,
         };
         let (claim, _) = ReadWindowClaim::new(&service.state.read_range_inflight, key);
         let held = claim.lock.lock().await;
-        assert!(service.prefetch_read_window(stored.pointer.clone(), 0, 4));
+        assert!(service.prefetch_read_window(
+            crate::blob::FilePointer::Crab(stored.pointer.clone()),
+            0,
+            4
+        ));
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(10), service.shutdown())
                 .await
@@ -1580,7 +1712,14 @@ mod tests {
         // stopping background work must not cancel a remaining foreground read.
         stored.origin.block_body_reads_for(&stored.xorb_path);
         assert_eq!(
-            service.read_range(&stored.pointer, 0, 1024).await.unwrap(),
+            service
+                .read_range(
+                    &crate::blob::FilePointer::Crab(stored.pointer.clone()),
+                    0,
+                    1024
+                )
+                .await
+                .unwrap(),
             payload
         );
         assert!(service.state.background_tasks.is_empty());
@@ -1644,10 +1783,21 @@ mod tests {
         let cancel = CancellationToken::new();
         let service = window_service(tmp.path(), &stored, cancel.clone());
         service.shutdown().await;
-        assert!(!service.prefetch_read_window(stored.pointer.clone(), 0, 4));
+        assert!(!service.prefetch_read_window(
+            crate::blob::FilePointer::Crab(stored.pointer.clone()),
+            0,
+            4
+        ));
         assert!(!cancel.is_cancelled());
         assert_eq!(
-            service.read_range(&stored.pointer, 0, 10).await.unwrap(),
+            service
+                .read_range(
+                    &crate::blob::FilePointer::Crab(stored.pointer.clone()),
+                    0,
+                    10
+                )
+                .await
+                .unwrap(),
             Bytes::from_static(b"foreground")
         );
     }
@@ -1664,6 +1814,7 @@ mod tests {
             Some(stored.context.store_layout.clone()),
             Some(stored.context.hydrator.clone()),
             None,
+            None,
         )
         .unwrap()
     }
@@ -1677,7 +1828,14 @@ mod tests {
                 .await;
         let service = window_service(tmp.path(), &stored, CancellationToken::new());
         assert_eq!(
-            service.read_range(&stored.pointer, 0, 1024).await.unwrap(),
+            service
+                .read_range(
+                    &crate::blob::FilePointer::Crab(stored.pointer.clone()),
+                    0,
+                    1024
+                )
+                .await
+                .unwrap(),
             payload
         );
         let hash = hex_encode(&stored.pointer.file_hash);
@@ -1691,7 +1849,13 @@ mod tests {
         // Previous mounts can leave mutable window files behind. Their names
         // and lengths cannot authorize bytes for a content-addressed pointer.
         std::fs::write(&stale, vec![b'x'; payload.len()]).unwrap();
-        let actual = service.read_range(&stored.pointer, 0, 1024).await;
+        let actual = service
+            .read_range(
+                &crate::blob::FilePointer::Crab(stored.pointer.clone()),
+                0,
+                1024,
+            )
+            .await;
         service.shutdown().await;
         assert_eq!(actual.unwrap(), payload);
     }
@@ -1705,7 +1869,13 @@ mod tests {
                 .await;
         std::fs::write(tmp.path().join("windows"), b"preserve this file").unwrap();
         let service = window_service(tmp.path(), &stored, CancellationToken::new());
-        let actual = service.read_range(&stored.pointer, 0, 1024).await;
+        let actual = service
+            .read_range(
+                &crate::blob::FilePointer::Crab(stored.pointer.clone()),
+                0,
+                1024,
+            )
+            .await;
         service.shutdown().await;
         assert_eq!(actual.unwrap(), payload);
         assert_eq!(
@@ -1725,7 +1895,11 @@ mod tests {
         let cancel = CancellationToken::new();
         let service = window_service(tmp.path(), &stored, cancel.clone());
         cancel.cancel();
-        assert!(!service.prefetch_read_window(stored.pointer.clone(), 0, 4));
+        assert!(!service.prefetch_read_window(
+            crate::blob::FilePointer::Crab(stored.pointer.clone()),
+            0,
+            4
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1752,6 +1926,7 @@ mod tests {
                 Some(stored.context.store_layout.clone()),
                 Some(stored.context.hydrator.clone()),
                 None,
+                None,
             )
             .unwrap();
 
@@ -1759,7 +1934,11 @@ mod tests {
             // include cold chunks even when its xorb was previously fetched.
             assert_eq!(
                 service
-                    .read_range(&stored.pointer, 0, content.len() as u32)
+                    .read_range(
+                        &crate::blob::FilePointer::Crab(stored.pointer.clone()),
+                        0,
+                        content.len() as u32
+                    )
                     .await
                     .unwrap(),
                 content
@@ -1779,7 +1958,11 @@ mod tests {
             ] {
                 let end = (offset + u64::from(size)).min(stored.pointer.size);
                 let bytes = service
-                    .read_range(&stored.pointer, offset, size)
+                    .read_range(
+                        &crate::blob::FilePointer::Crab(stored.pointer.clone()),
+                        offset,
+                        size,
+                    )
                     .await
                     .unwrap();
                 assert_eq!(bytes, content.slice(offset as usize..end as usize));
@@ -1792,7 +1975,7 @@ mod tests {
     #[test]
     fn verified_windows_evict_least_recently_used_bytes_within_budget() {
         let key = |index| ReadWindowKey {
-            file_hash: [index; 32],
+            file_hash: crate::blob::PointerIdentity::Crab([index; 32]),
             start: 0,
             end: READ_THROUGH_WINDOW_SIZE,
         };
@@ -1819,7 +2002,7 @@ mod tests {
         for start in 0..MAX_READ_WINDOW_ENTRIES as u64 + 17 {
             cache.insert(
                 ReadWindowKey {
-                    file_hash: [0; 32],
+                    file_hash: crate::blob::PointerIdentity::Crab([0; 32]),
                     start,
                     end: start + 1,
                 },
@@ -2149,8 +2332,15 @@ mod tests {
         stored.context.hydrator = Arc::new(hydrator);
         let service = window_service(dir.path(), &stored, CancellationToken::new());
         let read_service = service.clone();
-        let task =
-            tokio::spawn(async move { read_service.read_range(&stored.pointer, 0, 8).await });
+        let task = tokio::spawn(async move {
+            read_service
+                .read_range(
+                    &crate::blob::FilePointer::Crab(stored.pointer.clone()),
+                    0,
+                    8,
+                )
+                .await
+        });
         tokio::time::timeout(std::time::Duration::from_secs(5), gate.0.notified())
             .await
             .unwrap();
@@ -2206,7 +2396,11 @@ mod tests {
         let mut pointer = test_pointer();
         pointer.size = READ_THROUGH_WINDOW_SIZE * 2;
 
-        assert!(!service.prefetch_next_read_window(pointer, 0, 4096));
+        assert!(!service.prefetch_next_read_window(
+            crate::blob::FilePointer::Crab(pointer),
+            0,
+            4096
+        ));
 
         let snapshot = service.read_stats_snapshot();
         assert_eq!(snapshot.read_window_prefetch_requests, 1);
@@ -2218,7 +2412,7 @@ mod tests {
     fn read_window_prefetch_claims_each_window_once_until_failure() {
         let (_cache_dir, service) = test_service_without_pointer_reader();
         let key = ReadWindowKey {
-            file_hash: [0xAB; 32],
+            file_hash: crate::blob::PointerIdentity::Crab([0xAB; 32]),
             start: READ_THROUGH_WINDOW_SIZE,
             end: READ_THROUGH_WINDOW_SIZE * 2,
         };
@@ -2237,7 +2431,7 @@ mod tests {
 
         for i in 0..=MAX_READ_WINDOW_PREFETCH_KEYS {
             let key = ReadWindowKey {
-                file_hash: [0xCD; 32],
+                file_hash: crate::blob::PointerIdentity::Crab([0xCD; 32]),
                 start: i as u64 * READ_THROUGH_WINDOW_SIZE,
                 end: (i as u64 + 1) * READ_THROUGH_WINDOW_SIZE,
             };
