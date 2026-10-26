@@ -2321,6 +2321,87 @@ is removed, and the user guide explains waiting for busy clients during startup
 cleanup. This closes the reproduced serving-stage launcher failures, not every
 early-preparation interruption or uncertain mount-presence query.
 
+## Thirty-eighth checkpoint: Capsule-only S3 gateway authority
+
+The gateway's explicit initializer already creates Capsule roots, but its reads,
+publication, ref revalidation, completion receipts, listing acceleration,
+attribute checkpoint ordering and both maintenance schedulers still selected
+stored pack-v1 authority when the root was absent. A new regression on the
+previous source accepts both read and write against a valid manifest-only
+repository. Its failing baseline is retained; the first compile attempt exposed
+an incorrect test-fixture `Store::get` call, corrected to the actual
+`get_with_etag` API before recording that baseline.
+
+The gateway now requires the canonical root for Git reads and publication.
+The protocol/artifact enums, manifest/journal publisher, fallback reader,
+periodic v1 catalog scheduler, its unused owner fields and legacy-specific
+maintenance tests are removed. Read views keep only the authenticated Capsule
+state digest and a definite frontier map. Publication retains the same ref
+lease, global/repository GC fences, expected-parent retry, Capsule intent/receipt
+and confirmed-publication boundary. Completion recovery resolves Capsule
+receipts, so an overwritten completed upload still recovers its historical
+commit without publishing again. Attribute/listing paths no longer consult a
+v1 manifest. Idle maintenance calls the shared root-pinned Capsule owner
+directly; foreground count/byte admission remains canonical.
+
+All positive gateway fixtures now initialize Capsule authority. The two real
+v1 initialization calls left in its repository tests construct negative cases;
+the receipt-negative assertion proves no v1 receipt is created. S3 attribute
+schema versions, S3 SigV2/ListObjects wire APIs, Git pack/index formats and Git
+LFS `spec/v1` are separate contracts, not stored Crab pack-v1 authority.
+The shared exported legacy initializer and CLI/receive/metadb dispatch still
+need removal; this is gateway retirement, not complete protocol retirement.
+
+Proof:
+
+- Dedicated Linux: all 203 gateway library tests and the binary logging/filter
+  test pass; strict all-target Clippy and an executable build pass. Existing
+  lease-loss, concurrent writers, batching/history, conditions, cross-pack
+  deltas, native roll-up, frozen multipart recovery and attribute tests run on
+  the canonical fixtures. A strengthened assertion initially forgot the
+  coordinator's source-preserving `Batch(Arc<Error>)` wrapper; the final assertion
+  checks the actual nested missing-root error. No source error was flattened.
+- Real RustFS, unchanged AWS CLI 2.17.14 with signed requests: explicit and
+  repeated initialization; exact ordinary and 6 MiB LFS GET, range GET, HEAD,
+  COPY, complete listing, two-part upload, completion and exact readback. An
+  overwrite followed by identical completion retry preserves the newer bytes.
+  The listing harness initially omitted the generated `.gitattributes` file;
+  corrected expectations preserve the intended Git LFS tracking contract.
+- A valid v1-only remote fixture uses the real unchanged metadata constructors
+  for its manifest and layout. Explicit initialization refuses it; signed GET,
+  PUT and listing fail, readiness reports 503, and both original objects remain
+  byte-identical. Rejected PUT still enters the existing GC coordination
+  boundary: its persisted state/clock remain, with no writer, sweep or quarantine
+  holders after release. A repeated harness assertion expecting only two keys
+  was invalid after that probe; original data identity and fence release are
+  checked directly instead. Current `origin/main` still has manifest authority; the
+  checkpoint removes the gateway's optional-root switch rather than changing
+  S3 request/auth defaults.
+- The serving gateway handles one SIGINT and exits zero after drain. The running
+  legacy-rejection process and final build hash to the same executable. Raw
+  evidence, source/build inputs and actual executable hashes stay external.
+
+The native cross-interface probe also found two existing VFS gaps. Linux and
+macOS NFS expose the exact 132-byte committed Git LFS pointer for the gateway's
+6 MiB object; S3 returns the correct full object. Ordinary file, copy and later
+multipart-overwrite bytes match. Snapshot/late-blob classification recognizes
+only Crab pointers, confirming the missing LFS hydration path. This is not
+stale Capsule state and must not be disguised as successful full-content
+interoperability. The original expected-byte failures are retained.
+Linux foreground FUSE also reads those ordinary/pointer bytes, but the first
+SIGINT leaves its native mount attached for thirty seconds. The external
+harness mistakenly sends another SIGINT during failed cleanup; the existing
+second-signal handler forces exit. That diagnostic is a failure, not native
+teardown proof. Fix the harness to avoid duplicate cancellation and repair
+foreground FUSE owner cancellation next; then add canonical VFS LFS hydration
+with range/integrity/COW/generation and resource qualification.
+
+This checkpoint deletes substantially more non-test code than it adds. No new
+settings, dependency changes, wire aliases, compatibility readers or test-file
+layout patterns are introduced. Documentation follows the single Capsule path;
+raw benchmark files remain excluded. All-mode correctness and performance
+signoff remain open.
+
 ## Remaining priority order
 
 The helper-layout gap and live read-only inspection leak are closed by the
@@ -2341,6 +2422,11 @@ lifetime. Checkpoint-37 closes reproduced serving-stage startup cancellation,
 duplicate group signals and late-readiness admission. Early preparation,
 error-aware mount-presence decisions, daemon/private owners and the macOS mapping
 barrier still require proof before claiming teardown complete.
+
+Immediate reproduced gates: foreground FUSE does not complete shutdown after
+one global cancellation signal; mounted Git LFS files remain pointer text on
+both adapters. Repair these owner/read boundaries before widening concurrency.
+Git LFS is a current content type and must not be deleted as pack-v1 compatibility.
 
 1. **Correctness: coherent Git/Capsule generations.** Atomically install selected
    Git state, pinned catalog and read service for startup, refresh, switch and
@@ -2399,7 +2485,7 @@ Close the checkpoint-20 bundled SQLite WAL-reset dependency gate before
 increasing metadata or read concurrency. Qualify an ordinary workspace upgrade
 with all seven direct consumers and their enabled feature slices. Audit SQL
 integer conversions against upstream ToSql/FromSql contracts before changing
-callers. No dependency override or vendored patch is authorized.
+callers. No SQLite dependency override or vendored patch is authorized.
 
 The checkpoint integration assertion now follows the canonical writer and decoder:
 format 9 (`CRBCKP09`), not the stale inline literal 5. This is ordinary current-
@@ -2468,13 +2554,15 @@ Remaining located storage-authority boundaries:
 - SDK `initialize_remote` was changed upstream in #629 to canonical Capsule
   initialization. The exported old initializer in
   `crates/crab-write/src/initialize.rs` and its legacy fixtures still need removal
-  alongside gateway authority; no current production SDK caller remains.
+  after the gateway retirement; no current production SDK or gateway caller remains.
 - `crates/crab-auth-server/src/receive.rs`: manifest-based protected push plans
   accept schemas 1/2 beside the separate Capsule plan. Audit routing, preparation,
   finalization and recovery contracts before deleting those storage-authority paths.
-- `crates/crab-s3-gateway/src/repository.rs`: missing-root detection selects
-  legacy catalog and generation maintenance at both background owners. Require
-  Capsule authority across the scheduling, read-view and checkpoint callers.
+- Gateway read/write, listing, checkpoint ordering, completion recovery and
+  maintenance now require Capsule authority at checkpoint-38. No production
+  gateway caller selects the old initializer, manifest/journal reader/publisher
+  or legacy catalog scheduler. Valid-v1 refusal and signed canonical operations
+  pass on RustFS; native VFS LFS hydration remains an explicit separate gap.
 - LFS pre-push ref discovery now requires a Capsule root; its missing-root
   manifest/empty-base fallback is removed at checkpoint-35. First and incremental
   real Git hook publication plus an independent eager clone pass on RustFS.

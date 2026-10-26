@@ -211,9 +211,9 @@ multi-value write/delete validators are rejected.
 ## Listings and continuation
 
 Listings use the same ref namespace as object reads, including reachable complete
-commit IDs. The complete-attribute namespace index captures native v2 ref heads
-when a v2 root exists; only repositories without that root consult the legacy
-manifest/journal. Corrupt native authority fails closed.
+commit IDs. The complete-attribute namespace index captures native Capsule ref heads. A
+verified Capsule root is required; missing or corrupt roots fail closed without
+consulting stored pack-v1 manifests or journals.
 
 Keys are ordered by their complete UTF-8 byte representation, including the
 encoded ref prefix. `delimiter=/` groups each subtree once and counts a common
@@ -289,7 +289,7 @@ transitions expired Open sessions to Aborted, retries cleanup for terminal
 sessions, and reclaims an expired slot and payload prefix when a process died
 between capacity acquisition and session publication. For Completing sessions,
 the gateway persists the planned ETag and checksums before mutation and derives a
-deterministic ref-journal publication-plan ID from the upload ID. The reconciler
+deterministic Capsule publication-plan ID from the upload ID. The reconciler
 transitions to Completed when that plan's immutable commit evidence proves
 publication, including after a later write replaces the object. Current
 Git-bound upload ID, ETag, logical size, selected parts, and user attributes are
@@ -433,31 +433,27 @@ a missing or stale slot, so readers replay immutable deltas. A superseded slot h
 the same fallback; malformed checkpoint content fails closed. A manifest
 above the existing 32 MiB manifest bound skips checkpointing without failing the
 mutation, and another checkpoint attempt follows after 64 publication batches.
-Deltas and the ref journal stay
+Attribute deltas and the Capsule ref transaction stay
 authoritative. The process cache and any SlateDB-derived catalog are neither
 authoritative nor required for recovery. If the complete delta ancestry proves
 that the branch began empty and every commit came from the gateway, the
 checkpoint also forms a sorted S3 namespace index. `ListObjects` binds it to the
-current journal-projected ref and pages it without opening the Git catalog. Any
+current Capsule-projected ref and pages it without opening the Git catalog. Any
 missing delta, legacy checkpoint, or Git-authored ancestor removes that proof and
 requires canonical Git-tree listing. A pinned warm manifest already known to be
 partial selects that listing without first replaying remote attribute history.
 Once a batch is drained, its worker is
 owned by the gateway rather than the HTTP request that won local admission, so
 one disconnected caller cannot cancel the remaining accepted mutations.
-Each batch advances the local publication epoch, including batches that reuse
-one worker's GC fences. Every 64 epochs, one coalesced background worker folds active
-ref-journal transactions into the object-store manifest and advances exact-object
-catalog coverage under the generation-owner and GC-writer fences, even when writes
-remain continuous. Read views bind the newest catalog whose immutable pack
-inventory is proven to be a subset of their pinned snapshot and search the
-remaining pack tail for newer objects. Their combined coverage is exhaustive, so
-a combined miss is definitive; complete pack-index scans remain only when no
-catalog inventory can be proven as a subset or the derived catalog cannot open.
-Full commit-graph work still waits
-for a five-second quiet window.
-Maintenance failure never changes an already acknowledged mutation and the next
-cadence retries from durable journal state.
+Each batch advances the local write epoch, including batches that reuse a
+worker's GC fences. Foreground Capsule checkpoint admission applies before
+another append at the native roll-up window or physical-frontier byte limit.
+After a five-second quiet window, a single owner performs shared root-pinned
+checkpoint and physical pack maintenance. New writes cancel only scheduled
+maintenance; a running pass drains and observes later epochs before stopping.
+Maintenance failure never changes an acknowledged mutation. Reads, writes,
+completion recovery and attribute checkpoints use Capsule authority; no gateway
+path reads or publishes a stored pack-v1 manifest/journal.
 
 The temporary-storage requirement is proportional to each in-progress request
 body, copied range, or non-streaming source assembly, not to a Crab/Xet GET or a

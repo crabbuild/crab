@@ -10,7 +10,7 @@ use std::{
 use bytes::Bytes;
 use crab_coordination::{GcFenceHeartbeat, GcFenceLease, PushLock};
 use crab_git::incoming_pack::GeneratedObject;
-use crab_metadata::{git_visibility, manifests::PackManifestEntry, ref_journal::RefJournalEdit};
+use crab_metadata::git_visibility;
 use crab_remote_git::{EntryMode, OperationKind, RemoteGitRepository};
 use gix_hash::ObjectId;
 use gix_object::{Kind, bstr::BString, tree};
@@ -31,7 +31,6 @@ use tree_appends::PreparedAppends;
 const LOCK_TTL: Duration = Duration::from_secs(300);
 const REF_LOCK_TTL: Duration = Duration::from_secs(30);
 const MAX_GENERATED_PACK_BYTES: u64 = 512 * 1024 * 1024;
-const GENERATED_PACK_SINGLE_PUT_MAX_BYTES: u64 = 8 * 1024 * 1024;
 const PACK_SCRATCH_BASE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_QUEUED_WRITES_PER_REF: usize = 64;
 const MAX_TRACKED_REFS: usize = 256;
@@ -404,9 +403,9 @@ impl Coordinator {
                                 break;
                             }
                         };
-                        // Retaining GC fences still adds one pack per batch.
-                        // Count each batch so catalog refresh cannot lag by the
-                        // burst length and exhaust foreground read budgets.
+                        // Count each publication during retained-fence bursts so a
+                        // running maintenance owner observes later writes and
+                        // schedules another pass instead of missing that work.
                         repository.maintenance.record_batch();
                         if batch
                             .first()
@@ -435,17 +434,9 @@ impl Coordinator {
             }
         }
         let idle_maintenance = repository.maintenance.finish(cancel);
-        crate::repository::schedule_catalog_maintenance(
-            repository,
-            cancel,
-            repository.maintenance.current_epoch(),
-            &context.tasks,
-        );
         if let Some((epoch, maintenance_cancel)) = idle_maintenance {
             crate::repository::schedule_readability(
                 repository,
-                context.runtime,
-                context.options,
                 maintenance_cancel,
                 epoch,
                 &context.tasks,
@@ -1157,7 +1148,6 @@ impl WriteAdmission {
 }
 
 struct RefLease {
-    holder: String,
     stop: CancellationToken,
     worker: tokio::task::JoinHandle<std::result::Result<(), crab_coordination::CoordinationError>>,
 }
@@ -1240,7 +1230,6 @@ impl RefLease {
                 Err(error) => return Err(error.into()),
             }
         };
-        let holder = lock.holder().to_owned();
         let stop = CancellationToken::new();
         let stopped = stop.clone();
         let cancel = cancel.clone();
@@ -1252,11 +1241,7 @@ impl RefLease {
             .await;
             result.and(lock.release().await)
         });
-        Ok(Self {
-            holder,
-            stop,
-            worker,
-        })
+        Ok(Self { stop, worker })
     }
 
     async fn release(self) {
@@ -1298,70 +1283,40 @@ async fn apply_admitted(
             .await?,
         );
     };
-    let protocol = publication_protocol(repository).await?;
-    if let Some(outcome) = resolved_completion_plan(repository, &completion_plan, &protocol).await?
-    {
+    crab_metadata::capsule_protocol::load_root(&repository.layout).await?;
+    if let Some(outcome) = resolved_completion_plan(repository, &completion_plan).await? {
         return Ok(outcome);
     }
     let executing_plan_id = completion_plan.id.clone();
-    let result = match protocol {
-        PublicationProtocol::Legacy => {
-            crab_remote::publication::with_plan(
-                &repository.store,
-                &repository.layout,
-                &completion_plan.id,
-                LOCK_TTL,
-                cancel,
-                |scoped| async move {
-                    apply_with_gc_fences(
-                        repository,
-                        runtime,
-                        options,
-                        vec![mutation],
-                        ApplyRequest {
-                            plan_id: Some(&executing_plan_id),
-                            ..request
-                        },
-                        &scoped,
-                    )
-                    .await
-                    .and_then(take_single_result)
+    let result = crab_remote::publication::with_capsule_plan(
+        &repository.store,
+        &repository.layout,
+        &completion_plan.id,
+        LOCK_TTL,
+        cancel,
+        |scoped| async move {
+            apply_with_gc_fences(
+                repository,
+                runtime,
+                options,
+                vec![mutation],
+                ApplyRequest {
+                    plan_id: Some(&executing_plan_id),
+                    ..request
                 },
+                &scoped,
             )
             .await
-        }
-        PublicationProtocol::Capsule(_) => {
-            crab_remote::publication::with_capsule_plan(
-                &repository.store,
-                &repository.layout,
-                &completion_plan.id,
-                LOCK_TTL,
-                cancel,
-                |scoped| async move {
-                    apply_with_gc_fences(
-                        repository,
-                        runtime,
-                        options,
-                        vec![mutation],
-                        ApplyRequest {
-                            plan_id: Some(&executing_plan_id),
-                            ..request
-                        },
-                        &scoped,
-                    )
-                    .await
-                    .and_then(take_single_result)
-                },
-            )
-            .await
-        }
-    };
+            .and_then(take_single_result)
+        },
+    )
+    .await;
     match result {
         Err(
             error @ Error::Metadata(crab_metadata::error::MetadataError::PlanAlreadyAttempted {
                 ..
             }),
-        ) => resolved_completion_plan(repository, &completion_plan, &protocol)
+        ) => resolved_completion_plan(repository, &completion_plan)
             .await?
             .ok_or(error),
         result => result,
@@ -1397,45 +1352,17 @@ struct CompletionPlan {
     etag: Option<String>,
 }
 
-#[derive(Clone)]
-enum PublicationProtocol {
-    Legacy,
-    Capsule(Box<crab_metadata::capsule_protocol::RootSnapshot>),
-}
-
-async fn publication_protocol(repository: &Repository) -> Result<PublicationProtocol> {
-    match crab_metadata::capsule_protocol::load_root(&repository.layout).await {
-        Ok(root) => Ok(PublicationProtocol::Capsule(Box::new(root))),
-        Err(crab_metadata::error::MetadataError::Storage {
-            source: crab_storage::StorageError::NotFound { .. },
-        }) => Ok(PublicationProtocol::Legacy),
-        Err(error) => Err(error.into()),
-    }
-}
-
 async fn resolved_completion_plan(
     repository: &Repository,
     plan: &CompletionPlan,
-    protocol: &PublicationProtocol,
 ) -> Result<Option<Outcome>> {
-    let committed = match protocol {
-        PublicationProtocol::Legacy => crab_metadata::plan_receipt::resolve_plan_receipt(
-            &repository.store,
-            &repository.layout,
-            &plan.id,
-        )
-        .await?
-        .is_some(),
-        PublicationProtocol::Capsule(_) => {
-            crab_metadata::capsule_protocol::resolve_capsule_plan_receipt(
-                &repository.store,
-                &repository.layout,
-                &plan.id,
-            )
-            .await?
-            .is_some()
-        }
-    };
+    let committed = crab_metadata::capsule_protocol::resolve_capsule_plan_receipt(
+        &repository.store,
+        &repository.layout,
+        &plan.id,
+    )
+    .await?
+    .is_some();
     Ok(committed.then(|| Outcome {
         etag: plan.etag.clone(),
     }))
@@ -1520,7 +1447,6 @@ async fn apply_with_fences(
         let published = publish_prepared(
             repository,
             request.branch,
-            &lease.holder,
             publication,
             request.plan_id,
             cancel,
@@ -1543,9 +1469,7 @@ async fn apply_with_fences(
                         prepared.tree,
                         prepared.batches_since_checkpoint,
                         prepared.capsule_frontier.map(|mut frontier| {
-                            if let Some(bytes) = frontier_bytes {
-                                frontier.bytes = bytes;
-                            }
+                            frontier.bytes = frontier_bytes;
                             frontier
                         }),
                     );
@@ -1567,17 +1491,8 @@ async fn apply_with_fences(
 
 struct UploadedMutation {
     parent: Option<ObjectId>,
-    expected_transaction: Option<String>,
     commit: ObjectId,
-    artifacts: UploadedArtifacts,
-}
-
-enum UploadedArtifacts {
-    Legacy {
-        pack: PackManifestEntry,
-        evidence_hash: String,
-    },
-    Capsule(Box<CapsuleMutationArtifacts>),
+    artifacts: Box<CapsuleMutationArtifacts>,
 }
 
 struct CapsuleMutationArtifacts {
@@ -1611,7 +1526,7 @@ struct BuiltBatch {
 }
 
 enum Publish {
-    Committed(String, Option<u64>),
+    Committed(String, u64),
     Reprepare,
 }
 
@@ -1623,19 +1538,18 @@ async fn prepare_and_upload_batch(
     request: ApplyRequest<'_>,
     cancel: &CancellationToken,
 ) -> Result<PreparedBatch> {
-    let mut protocol = publication_protocol(repository).await?;
+    let mut base = Box::new(crab_metadata::capsule_protocol::load_root(&repository.layout).await?);
     let mut cached = request.state.and_then(BranchState::take_latest);
-    let mut current_view =
-        if cached.is_none() && matches!(&protocol, PublicationProtocol::Capsule(_)) {
-            Some(
-                repository
-                    .read_views
-                    .current(repository, Arc::clone(&runtime), options, cancel)
-                    .await?,
-            )
-        } else {
-            None
-        };
+    let mut current_view = if cached.is_none() {
+        Some(
+            repository
+                .read_views
+                .current(repository, Arc::clone(&runtime), options, cancel)
+                .await?,
+        )
+    } else {
+        None
+    };
     // Restarted and evicted writers must admit the same frontier as warm ones;
     // otherwise their first large upload can exceed the read budget.
     let frontier = cached
@@ -1644,7 +1558,7 @@ async fn prepare_and_upload_batch(
         .or_else(|| {
             current_view
                 .as_ref()
-                .and_then(|view| view.capsule_frontier(request.branch))
+                .map(|view| view.capsule_frontier(request.branch))
         });
     if frontier.is_some_and(|frontier| {
         frontier.count >= FOREGROUND_CAPSULE_THRESHOLD || frontier.bytes >= FOREGROUND_CAPSULE_BYTES
@@ -1660,12 +1574,12 @@ async fn prepare_and_upload_batch(
         .await?;
         repository.read_views.invalidate().await;
         current_view = None;
-        protocol = publication_protocol(repository).await?;
-        cached = match (cached, &protocol) {
-            (Some(mut cached), PublicationProtocol::Capsule(root)) => {
+        base = Box::new(crab_metadata::capsule_protocol::load_root(&repository.layout).await?);
+        cached = match cached {
+            Some(mut cached) => {
                 let view = crab_read::capsule_protocol::open_view_from_root_with_layered_control(
                     &repository.layout,
-                    (**root).clone(),
+                    (*base).clone(),
                     crab_read::capsule_protocol::CapsuleReadLimits {
                         max_capsule_bytes: MAX_CAPSULE_READ_BYTES,
                         max_frontier_bytes: MAX_CAPSULE_READ_BYTES,
@@ -1686,7 +1600,7 @@ async fn prepare_and_upload_batch(
                     None
                 }
             }
-            _ => None,
+            None => None,
         };
     }
     if let Some(cached) = cached {
@@ -1710,7 +1624,7 @@ async fn prepare_and_upload_batch(
                     BatchUpload {
                         branch: request.branch,
                         expected_transaction: cached.transaction,
-                        protocol,
+                        base,
                         capsule_frontier: cached.capsule_frontier,
                         requires_revalidation: true,
                         cancel,
@@ -1723,36 +1637,17 @@ async fn prepare_and_upload_batch(
             Err(error) => return Err(error),
         }
     }
-    let (branch_exists, capsule_frontier, current_view) = match &protocol {
-        PublicationProtocol::Legacy => (
-            crab_metadata::manifest_store::read_repository_snapshot(
-                &repository.store,
-                &repository.layout,
-            )
-            .await?
-            .journal
-            .refs
-            .contains_key(request.branch),
-            None,
-            None,
-        ),
-        PublicationProtocol::Capsule(_) => {
-            let view = match current_view {
-                Some(view) => view,
-                None => {
-                    repository
-                        .read_views
-                        .current(repository, Arc::clone(&runtime), options, cancel)
-                        .await?
-                }
-            };
-            (
-                view.remote().refs().find(request.branch).is_some(),
-                view.capsule_frontier(request.branch),
-                Some(view),
-            )
+    let view = match current_view {
+        Some(view) => view,
+        None => {
+            repository
+                .read_views
+                .current(repository, Arc::clone(&runtime), options, cancel)
+                .await?
         }
     };
+    let branch_exists = view.remote().refs().find(request.branch).is_some();
+    let capsule_frontier = Some(view.capsule_frontier(request.branch));
     if !branch_exists {
         // An unborn branch has no Git objects to reconstruct. Publication
         // rechecks absence under the ref lease, so avoid opening the
@@ -1773,7 +1668,7 @@ async fn prepare_and_upload_batch(
             BatchUpload {
                 branch: request.branch,
                 expected_transaction: None,
-                protocol,
+                base,
                 capsule_frontier,
                 requires_revalidation: false,
                 cancel,
@@ -1782,15 +1677,6 @@ async fn prepare_and_upload_batch(
         )
         .await;
     }
-    let view = match current_view {
-        Some(view) => view,
-        None => {
-            repository
-                .read_views
-                .current(repository, runtime, options, cancel)
-                .await?
-        }
-    };
     let original_parent = view
         .remote()
         .refs()
@@ -1830,7 +1716,7 @@ async fn prepare_and_upload_batch(
         BatchUpload {
             branch: request.branch,
             expected_transaction: None,
-            protocol,
+            base,
             capsule_frontier,
             requires_revalidation: false,
             cancel,
@@ -1942,7 +1828,7 @@ async fn upload_batch(
     let BatchUpload {
         branch,
         expected_transaction,
-        protocol,
+        base,
         capsule_frontier,
         requires_revalidation,
         cancel,
@@ -1979,8 +1865,7 @@ async fn upload_batch(
         &mut tree,
         ArtifactUpload {
             branch,
-            expected_transaction: expected_transaction.clone(),
-            protocol,
+            base,
             checkpoint,
             cancel,
             metrics,
@@ -2011,47 +1896,24 @@ async fn prepared_parent_is_current(
     expected_tip: Option<ObjectId>,
     expected_transaction: Option<&str>,
 ) -> Result<bool> {
-    if let PublicationProtocol::Capsule(root) = publication_protocol(repository).await? {
-        let view = crab_read::capsule_protocol::open_view_from_root_with_control(
-            &repository.layout,
-            *root,
-            crab_read::capsule_protocol::CapsuleReadLimits {
-                max_capsule_bytes: MAX_CAPSULE_READ_BYTES,
-                max_frontier_bytes: MAX_CAPSULE_READ_BYTES,
-            },
-        )
-        .await?;
-        if let Some(expected_transaction) = expected_transaction {
-            return Ok(view
-                .visible_ref_transactions()
-                .get(branch)
-                .is_some_and(|current| current == expected_transaction));
-        }
-        let current = view
-            .refs()
-            .get(branch)
-            .map(|oid| oid.parse::<ObjectId>())
-            .transpose()
-            .map_err(|_| std::io::Error::other("repository ref contains an invalid object ID"))?;
-        return Ok(current == expected_tip);
-    }
-    if let Some(expected_transaction) = expected_transaction {
-        let head = crab_metadata::ref_journal::read_ref_head(
-            &repository.store,
-            &repository.layout,
-            branch,
-        )
-        .await?;
-        return Ok(head.visible_transaction.as_deref() == Some(expected_transaction));
-    }
-    let snapshot = crab_metadata::manifest_store::read_repository_snapshot(
-        &repository.store,
+    let root = crab_metadata::capsule_protocol::load_root(&repository.layout).await?;
+    let view = crab_read::capsule_protocol::open_view_from_root_with_control(
         &repository.layout,
+        root,
+        crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: MAX_CAPSULE_READ_BYTES,
+            max_frontier_bytes: MAX_CAPSULE_READ_BYTES,
+        },
     )
     .await?;
-    let current = snapshot
-        .journal
-        .refs
+    if let Some(expected_transaction) = expected_transaction {
+        return Ok(view
+            .visible_ref_transactions()
+            .get(branch)
+            .is_some_and(|current| current == expected_transaction));
+    }
+    let current = view
+        .refs()
         .get(branch)
         .map(|oid| oid.parse::<ObjectId>())
         .transpose()
@@ -2062,7 +1924,7 @@ async fn prepared_parent_is_current(
 struct BatchUpload<'a> {
     branch: &'a str,
     expected_transaction: Option<String>,
-    protocol: PublicationProtocol,
+    base: Box<crab_metadata::capsule_protocol::RootSnapshot>,
     capsule_frontier: Option<CapsuleFrontier>,
     requires_revalidation: bool,
     cancel: &'a CancellationToken,
@@ -2071,8 +1933,7 @@ struct BatchUpload<'a> {
 
 struct ArtifactUpload<'a> {
     branch: &'a str,
-    expected_transaction: Option<String>,
-    protocol: PublicationProtocol,
+    base: Box<crab_metadata::capsule_protocol::RootSnapshot>,
     checkpoint: bool,
     cancel: &'a CancellationToken,
     metrics: &'a Metrics,
@@ -2086,8 +1947,7 @@ async fn upload_built_batch(
 ) -> Result<UploadedMutation> {
     let ArtifactUpload {
         branch,
-        expected_transaction,
-        protocol,
+        base,
         checkpoint,
         cancel,
         metrics,
@@ -2227,7 +2087,6 @@ async fn upload_built_batch(
         // conservative pre-write claim while ownership metrics remain live.
         drop(capacity);
         check_cancelled(cancel)?;
-        let pack_id = pack.content_hash().to_hex().to_string();
         let evidence = match parent {
             Some(parent) => git_visibility::GitVisibilityEdit::from_delta_objects(
                 Some(parent.to_string()),
@@ -2241,113 +2100,39 @@ async fn upload_built_batch(
                 visible_objects,
             ),
         };
-        let artifacts = match protocol {
-            PublicationProtocol::Legacy => {
-                let pack_upload = async {
-                    let path = repository.layout.pack_path(&pack_id);
-                    if pack.size() <= GENERATED_PACK_SINGLE_PUT_MAX_BYTES {
-                        check_cancelled(cancel)?;
-                        repository
-                            .store
-                            .put_exact(&path, tokio::fs::read(pack.pack_path()).await?.into())
-                            .await?;
-                    } else {
-                        repository
-                            .store
-                            .put_multipart_file_retry(
-                                &path,
-                                pack.pack_path(),
-                                pack.size(),
-                                *pack.content_hash().as_bytes(),
-                                GENERATED_PACK_SINGLE_PUT_MAX_BYTES as usize,
-                                cancel,
-                                None,
-                            )
-                            .await?;
-                    }
-                    Ok::<(), Error>(())
-                };
-                let sidecar_upload = |source: &std::path::Path, target| {
-                    let source = source.to_owned();
-                    async move {
-                        check_cancelled(cancel)?;
-                        repository
-                            .store
-                            .put_exact(&target, tokio::fs::read(source).await?.into())
-                            .await?;
-                        Ok::<(), Error>(())
-                    }
-                };
-                let evidence_upload = async {
-                    git_visibility::upload_edit(&repository.store, &repository.layout, &evidence)
-                        .await
-                        .map_err(Error::from)
-                };
-                let (_, _, _, _, evidence_hash) = tokio::try_join!(
-                    pack_upload,
-                    sidecar_upload(
-                        pack.index_path(),
-                        repository.layout.pack_index_path(&pack_id)
-                    ),
-                    sidecar_upload(
-                        pack.reverse_path(),
-                        repository.layout.pack_reverse_index_path(&pack_id)
-                    ),
-                    sidecar_upload(
-                        pack.kinds_path(),
-                        repository.layout.pack_kind_metadata_path(&pack_id)
-                    ),
-                    evidence_upload,
-                )?;
-                UploadedArtifacts::Legacy {
-                    pack: PackManifestEntry {
-                        pack_id: pack_id.clone(),
-                        content_hash: pack_id,
-                        size: pack.size(),
-                        object_count: pack.object_count().into(),
-                        ref_tips: vec![final_commit.to_string()],
-                    },
-                    evidence_hash,
-                }
-            }
-            PublicationProtocol::Capsule(base) => {
-                let read = |path: &std::path::Path| {
-                    let path = path.to_owned();
-                    async move { tokio::fs::read(path).await.map_err(Error::from) }
-                };
-                let (pack_bytes, index, reverse_index, locator) = tokio::try_join!(
-                    read(pack.pack_path()),
-                    read(pack.index_path()),
-                    read(pack.reverse_path()),
-                    read(pack.kinds_path()),
-                )?;
-                // Match native Git publication: readers and checkpoints resolve
-                // declared cross-pack bases from the pinned repository view.
-                let external_delta_bases = pack
-                    .external_delta_bases()
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect();
-                UploadedArtifacts::Capsule(Box::new(CapsuleMutationArtifacts {
-                    base: *base,
-                    pack:
-                        crab_metadata::capsule_protocol::CapsuleGitPack::new_with_external_delta_bases(
-                            Bytes::from(pack_bytes),
-                            Bytes::from(index),
-                            Bytes::from(reverse_index),
-                            Bytes::from(locator),
-                            pack.git_sha1().to_string(),
-                            u64::from(pack.object_count()),
-                            external_delta_bases,
-                        )?,
-                    visibility: evidence,
-                }))
-            }
+        let read = |path: &std::path::Path| {
+            let path = path.to_owned();
+            async move { tokio::fs::read(path).await.map_err(Error::from) }
         };
+        let (pack_bytes, index, reverse_index, locator) = tokio::try_join!(
+            read(pack.pack_path()),
+            read(pack.index_path()),
+            read(pack.reverse_path()),
+            read(pack.kinds_path()),
+        )?;
+        // Match native Git publication: readers and checkpoints resolve
+        // declared cross-pack bases from the pinned repository view.
+        let external_delta_bases = pack
+            .external_delta_bases()
+            .iter()
+            .map(ToString::to_string)
+            .collect();
+        let artifacts = Box::new(CapsuleMutationArtifacts {
+            base: *base,
+            pack: crab_metadata::capsule_protocol::CapsuleGitPack::new_with_external_delta_bases(
+                Bytes::from(pack_bytes),
+                Bytes::from(index),
+                Bytes::from(reverse_index),
+                Bytes::from(locator),
+                pack.git_sha1().to_string(),
+                u64::from(pack.object_count()),
+                external_delta_bases,
+            )?,
+            visibility: evidence,
+        });
         check_cancelled(cancel)?;
         let uploaded = UploadedMutation {
             parent,
-            expected_transaction,
             commit: final_commit,
             artifacts,
         };
@@ -2382,163 +2167,94 @@ fn pack_scratch_reservation(objects: &[GeneratedObject]) -> u64 {
 async fn publish_prepared(
     repository: &Repository,
     branch: &str,
-    holder: &str,
     prepared: &UploadedMutation,
     plan_id: Option<&str>,
     cancel: &CancellationToken,
 ) -> Result<Publish> {
     check_cancelled(cancel)?;
-    if let UploadedArtifacts::Capsule(artifacts) = &prepared.artifacts {
-        let CapsuleMutationArtifacts {
-            base,
-            pack,
-            visibility,
-        } = artifacts.as_ref();
-        let edit = crab_metadata::capsule_protocol::CapsuleRefEdit::new(
-            branch,
-            prepared.parent.map(|oid| oid.to_string()),
-            Some(prepared.commit.to_string()),
-            None,
-        );
-        let transaction = match plan_id {
-            Some(plan_id) => crab_metadata::capsule_protocol::CapsuleTransaction::for_plan(
-                base.record().digest(),
-                plan_id,
-                vec![edit],
-            )?,
-            None => crab_metadata::capsule_protocol::CapsuleTransaction::new(
-                base.record().digest(),
-                vec![edit],
-            )?,
-        };
-        let transaction_id = transaction.id()?;
-        let visibility = crab_metadata::capsule_protocol::CapsuleVisibilityDelta::new(
-            BTreeMap::from([(branch.to_owned(), visibility.clone())]),
-        )?;
-        let capsule = crab_metadata::capsule_protocol::Capsule::build(
-            &transaction,
-            vec![pack.clone()],
-            vec![crab_metadata::capsule_protocol::CapsuleSection::new(
-                crab_metadata::capsule_protocol::CapsuleSectionKind::VisibilityDelta,
-                visibility.encode()?,
-            )],
-        )?;
-        let published = if prepared.parent.is_none() {
-            let layout = repository.layout.clone();
-            let commit_layout = layout.clone();
-            let base = base.clone();
-            let names = vec![branch.to_owned()];
-            crab_write::with_ref_namespaces(
-                layout.store(),
-                &layout,
-                &names,
-                LOCK_TTL,
-                cancel,
-                move |scoped| async move {
-                    if scoped.is_cancelled() {
-                        return Err(Error::Cancelled);
-                    }
-                    crab_write::capsule_protocol::validate_ref_namespace(
-                        &commit_layout,
-                        base.record().root(),
-                        transaction.edits(),
-                    )
-                    .await?;
-                    publish_capsule_with_frontier_bytes(
-                        &commit_layout,
-                        base,
-                        &transaction,
-                        &capsule,
-                        branch,
-                        &scoped,
-                    )
-                    .await
-                },
-            )
-            .await
-        } else {
-            publish_capsule_with_frontier_bytes(
-                &repository.layout,
-                base.clone(),
-                &transaction,
-                &capsule,
-                branch,
-                cancel,
-            )
-            .await
-        };
-        return match published {
-            Ok(bytes) => Ok(Publish::Committed(transaction_id, Some(bytes))),
-            Err(Error::Write(crab_write::WriteError::RefChanged { .. })) => Ok(Publish::Reprepare),
-            Err(error) => Err(error),
-        };
-    }
-    let UploadedArtifacts::Legacy {
+    let CapsuleMutationArtifacts {
+        base,
         pack,
-        evidence_hash,
-    } = &prepared.artifacts
-    else {
-        return Err(std::io::Error::other("mutation publication protocol changed").into());
+        visibility,
+    } = prepared.artifacts.as_ref();
+    let edit = crab_metadata::capsule_protocol::CapsuleRefEdit::new(
+        branch,
+        prepared.parent.map(|oid| oid.to_string()),
+        Some(prepared.commit.to_string()),
+        None,
+    );
+    let transaction = match plan_id {
+        Some(plan_id) => crab_metadata::capsule_protocol::CapsuleTransaction::for_plan(
+            base.record().digest(),
+            plan_id,
+            vec![edit],
+        )?,
+        None => crab_metadata::capsule_protocol::CapsuleTransaction::new(
+            base.record().digest(),
+            vec![edit],
+        )?,
     };
-    let options = crab_write::journal::CommitOptions::new(LOCK_TTL, cancel);
-    let options = match plan_id {
-        Some(plan_id) => options.with_plan(plan_id),
-        None => options,
-    };
-    let edit = RefJournalEdit {
-        ref_name: branch.to_owned(),
-        old_oid: prepared.parent.map(|oid| oid.to_string()),
-        new_oid: Some(prepared.commit.to_string()),
-        peeled_oid: None,
-        lock_holder: Some(holder.to_owned()),
-        visibility_evidence_hash: Some(evidence_hash.clone()),
-    };
-    let committed = if let (Some(expected), Some(_)) =
-        (prepared.expected_transaction.as_deref(), prepared.parent)
-    {
-        crab_write::journal::commit_existing_ref_edit(
-            &repository.store,
-            &repository.layout,
-            expected,
-            edit,
-            vec![pack.clone()],
-            options,
+    let transaction_id = transaction.id()?;
+    let visibility = crab_metadata::capsule_protocol::CapsuleVisibilityDelta::new(BTreeMap::from(
+        [(branch.to_owned(), visibility.clone())],
+    ))?;
+    let capsule = crab_metadata::capsule_protocol::Capsule::build(
+        &transaction,
+        vec![pack.clone()],
+        vec![crab_metadata::capsule_protocol::CapsuleSection::new(
+            crab_metadata::capsule_protocol::CapsuleSectionKind::VisibilityDelta,
+            visibility.encode()?,
+        )],
+    )?;
+    let published = if prepared.parent.is_none() {
+        let layout = repository.layout.clone();
+        let commit_layout = layout.clone();
+        let base = base.clone();
+        let names = vec![branch.to_owned()];
+        crab_write::with_ref_namespaces(
+            layout.store(),
+            &layout,
+            &names,
+            LOCK_TTL,
+            cancel,
+            move |scoped| async move {
+                if scoped.is_cancelled() {
+                    return Err(Error::Cancelled);
+                }
+                crab_write::capsule_protocol::validate_ref_namespace(
+                    &commit_layout,
+                    base.record().root(),
+                    transaction.edits(),
+                )
+                .await?;
+                publish_capsule_with_frontier_bytes(
+                    &commit_layout,
+                    base,
+                    &transaction,
+                    &capsule,
+                    branch,
+                    &scoped,
+                )
+                .await
+            },
         )
         .await
     } else {
-        let snapshot = crab_metadata::manifest_store::read_repository_snapshot(
-            &repository.store,
+        publish_capsule_with_frontier_bytes(
             &repository.layout,
-        )
-        .await?;
-        let current = snapshot
-            .journal
-            .refs
-            .get(branch)
-            .map(|oid| oid.parse::<ObjectId>())
-            .transpose()
-            .map_err(|_| std::io::Error::other("repository ref contains an invalid object ID"))?;
-        if current != prepared.parent {
-            return Ok(Publish::Reprepare);
-        }
-        crab_write::journal::commit_edits(
-            &repository.store,
-            &repository.layout,
-            &snapshot,
-            vec![edit],
-            prepared.parent.is_none().then(|| branch.to_owned()),
-            vec![pack.clone()],
-            vec![],
-            options,
+            base.clone(),
+            &transaction,
+            &capsule,
+            branch,
+            cancel,
         )
         .await
     };
-    let committed = match committed {
-        Ok(committed) => committed,
-        Err(crab_write::WriteError::RefChanged { .. }) => return Ok(Publish::Reprepare),
-        Err(error) => return Err(error.into()),
-    };
-    Ok(Publish::Committed(committed.transaction_id, None))
+    match published {
+        Ok(bytes) => Ok(Publish::Committed(transaction_id, bytes)),
+        Err(Error::Write(crab_write::WriteError::RefChanged { .. })) => Ok(Publish::Reprepare),
+        Err(error) => Err(error),
+    }
 }
 
 async fn publish_capsule_with_frontier_bytes(
@@ -4511,14 +4227,6 @@ mod tests {
         drop(second);
     }
 
-    async fn fixture() -> (
-        Repository,
-        Arc<crab_remote_git::RemoteGitRuntime>,
-        CancellationToken,
-    ) {
-        fixture_with_protocol(false).await
-    }
-
     #[tokio::test]
     async fn known_partial_namespace_does_not_replay_history_before_git_listing() {
         let (repository, runtime, cancel) = capsule_fixture().await;
@@ -4572,32 +4280,12 @@ mod tests {
         Arc<crab_remote_git::RemoteGitRuntime>,
         CancellationToken,
     ) {
-        fixture_with_protocol(true).await
-    }
-
-    async fn fixture_with_protocol(
-        capsule: bool,
-    ) -> (
-        Repository,
-        Arc<crab_remote_git::RemoteGitRuntime>,
-        CancellationToken,
-    ) {
         let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
-        let prefix = if capsule {
-            "s3-capsule-test"
-        } else {
-            "s3-test"
-        };
+        let prefix = "s3-capsule-test";
         let layout = crab_storage::StoreLayout::new(store.clone(), prefix.to_owned());
-        if capsule {
-            crab_write::capsule_protocol::initialize(&layout, &"a".repeat(64), "refs/heads/main")
-                .await
-                .unwrap();
-        } else {
-            crab_write::initialize::initialize_repository(&store, &layout, "refs/heads/main")
-                .await
-                .unwrap();
-        }
+        crab_write::capsule_protocol::initialize(&layout, &"a".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
         let repository = Repository::new(
             RepositoryConfig {
                 name: "repo".to_owned(),
@@ -4623,6 +4311,20 @@ mod tests {
             Arc::new(crab_remote_git::RemoteGitRuntime::default()),
             CancellationToken::new(),
         )
+    }
+
+    async fn capsule_view(
+        repository: &Repository,
+    ) -> crab_read::capsule_protocol::CapsuleRepositoryView {
+        crab_read::capsule_protocol::open_view(
+            &repository.layout,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: MAX_CAPSULE_READ_BYTES,
+                max_frontier_bytes: MAX_CAPSULE_READ_BYTES,
+            },
+        )
+        .await
+        .unwrap()
     }
 
     pub(super) async fn read(
@@ -5080,143 +4782,6 @@ mod tests {
         runtime.shutdown().await;
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn sustained_write_maintenance_bounds_the_journal_and_advances_catalog() {
-        let (repository, runtime, cancel) = fixture().await;
-        let coordinator = Coordinator::new(
-            Arc::clone(&runtime),
-            crab_remote_git::RepositoryOptions::default(),
-            cancel.clone(),
-            Metrics::new().unwrap(),
-        );
-        coordinated_put(&coordinator, &repository, &cancel, "object", b"value").await;
-        let before = crab_metadata::manifest_store::read_repository_snapshot(
-            &repository.store,
-            &repository.layout,
-        )
-        .await
-        .unwrap();
-        assert_eq!(before.journal.transactions.len(), 1);
-
-        crate::repository::schedule_catalog_maintenance(
-            &repository,
-            &cancel,
-            64,
-            &coordinator.tasks,
-        );
-        tokio::time::timeout(Duration::from_secs(5), async {
-            loop {
-                let snapshot = crab_metadata::manifest_store::read_repository_snapshot(
-                    &repository.store,
-                    &repository.layout,
-                )
-                .await
-                .unwrap();
-                if snapshot.journal.transactions.is_empty()
-                    && !repository.maintenance.catalog_maintenance_is_running()
-                {
-                    break;
-                }
-                tokio::time::sleep(Duration::from_millis(10)).await;
-            }
-        })
-        .await
-        .unwrap();
-        let read_view = repository
-            .read_views
-            .current(
-                &repository,
-                Arc::clone(&runtime),
-                crab_remote_git::RepositoryOptions::default(),
-                &cancel,
-            )
-            .await
-            .unwrap();
-        assert!(
-            read_view
-                .remote()
-                .catalog_visibility_available(&cancel)
-                .await
-                .unwrap()
-        );
-        assert_eq!(
-            read(&repository, Arc::clone(&runtime), &cancel, "object").await,
-            Bytes::from_static(b"value")
-        );
-        coordinator.shutdown().await;
-        runtime.shutdown().await;
-    }
-
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn warm_existing_ref_publication_does_not_scan_repository_manifest() {
-        let (repository, runtime, cancel) = fixture().await;
-        let coordinator = Coordinator::new(
-            Arc::clone(&runtime),
-            crab_remote_git::RepositoryOptions::default(),
-            cancel.clone(),
-            Metrics::new().unwrap(),
-        );
-        let manifest_lock = PushLock::acquire_internal(
-            repository.store.inner(),
-            repository.layout.repo_prefix(),
-            crab_coordination::GIT_MANIFEST_RESOURCE,
-            LOCK_TTL,
-        )
-        .await
-        .unwrap();
-        coordinated_put(&coordinator, &repository, &cancel, "first.txt", b"first").await;
-        let first = crab_metadata::ref_journal::read_ref_head(
-            &repository.store,
-            &repository.layout,
-            "refs/heads/main",
-        )
-        .await
-        .unwrap()
-        .visible_transaction
-        .unwrap();
-        let manifest_path = repository.layout.manifest_path();
-        let (manifest, _) = repository
-            .store
-            .get_with_etag(&manifest_path)
-            .await
-            .unwrap();
-        repository
-            .store
-            .put_overwrite(&manifest_path, Bytes::from_static(b"{"))
-            .await
-            .unwrap();
-
-        coordinated_put(&coordinator, &repository, &cancel, "second.txt", b"second").await;
-        let second = crab_metadata::ref_journal::read_ref_head(
-            &repository.store,
-            &repository.layout,
-            "refs/heads/main",
-        )
-        .await
-        .unwrap()
-        .visible_transaction
-        .unwrap();
-        let transaction = crab_metadata::ref_journal::read_transaction(
-            &repository.store,
-            &repository.layout,
-            &second,
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(
-            transaction.parents.get("refs/heads/main"),
-            Some(&Some(first))
-        );
-        repository
-            .store
-            .put_overwrite(&manifest_path, manifest)
-            .await
-            .unwrap();
-        manifest_lock.release().await.unwrap();
-        runtime.shutdown().await;
-    }
-
     #[tokio::test(flavor = "multi_thread")]
     async fn growing_directory_does_not_accumulate_stale_delta_payloads() {
         let (repository, runtime, cancel) = capsule_fixture().await;
@@ -5266,7 +4831,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn growing_directory_keeps_cross_batch_delta_reads_shallow() {
-        let (repository, runtime, cancel) = fixture().await;
+        let (repository, runtime, cancel) = capsule_fixture().await;
         let coordinator = Coordinator::new(
             Arc::clone(&runtime),
             crab_remote_git::RepositoryOptions::default(),
@@ -5319,7 +4884,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn sustained_warm_directory_writes_publish_readable_bounded_cross_pack_deltas() {
-        let (repository, runtime, cancel) = fixture().await;
+        let (repository, runtime, cancel) = capsule_fixture().await;
         let coordinator = Coordinator::new(
             Arc::clone(&runtime),
             crab_remote_git::RepositoryOptions::default(),
@@ -5371,36 +4936,12 @@ mod tests {
             .await
             .unwrap()
             .unwrap();
-        let head = crab_metadata::ref_journal::read_ref_head(
-            &repository.store,
-            &repository.layout,
-            "refs/heads/main",
-        )
-        .await
-        .unwrap();
-        let transaction = crab_metadata::ref_journal::read_transaction(
-            &repository.store,
-            &repository.layout,
-            head.visible_transaction.as_deref().unwrap(),
-        )
-        .await
-        .unwrap();
-        let pack = transaction.packs.first().unwrap();
-        let (pack_bytes, _) = repository
-            .store
-            .get_with_etag(&repository.layout.pack_path(&pack.pack_id))
-            .await
-            .unwrap();
-        let (index_bytes, _) = repository
-            .store
-            .get_with_etag(&repository.layout.pack_index_path(&pack.pack_id))
-            .await
-            .unwrap();
-        let (reverse_bytes, _) = repository
-            .store
-            .get_with_etag(&repository.layout.pack_reverse_index_path(&pack.pack_id))
-            .await
-            .unwrap();
+        let published = capsule_view(&repository).await;
+        let capsule = published.capsules().last().unwrap();
+        let pack = capsule.git_packs().first().unwrap();
+        let pack_bytes = capsule.section_bytes(pack.pack_section()).unwrap();
+        let index_bytes = capsule.section_bytes(pack.index_section()).unwrap();
+        let reverse_bytes = capsule.section_bytes(pack.reverse_index_section()).unwrap();
         let files = tempfile::tempdir().unwrap();
         let index_path = files.path().join("pack.idx");
         let reverse_path = files.path().join("pack.rev");
@@ -5435,7 +4976,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn writes_initialize_branch_and_preserve_unrelated_files() {
-        let (repository, runtime, cancel) = fixture().await;
+        let (repository, runtime, cancel) = capsule_fixture().await;
         for (path, body) in [("a.txt", "alpha"), ("nested/b.txt", "bravo")] {
             apply(
                 &repository,
@@ -5531,7 +5072,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn lfs_put_commits_a_same_directory_tracking_rule() {
-        let (repository, runtime, cancel) = fixture().await;
+        let (repository, runtime, cancel) = capsule_fixture().await;
         let attributes_path =
             crab_remote_git::GitPath::new(b"nested/.gitattributes".to_vec()).unwrap();
         apply(
@@ -5634,7 +5175,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn batched_lfs_puts_extend_the_generated_attribute_blob() {
-        let (repository, runtime, cancel) = fixture().await;
+        let (repository, runtime, cancel) = capsule_fixture().await;
         let metrics = Metrics::new().unwrap();
         let mutation = |name: &str, marker: u8| Mutation {
             path: crab_remote_git::GitPath::new(format!("nested/{name}").into_bytes()).unwrap(),
@@ -5694,7 +5235,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn lfs_put_rejects_pointer_backed_attributes() {
-        let (repository, runtime, cancel) = fixture().await;
+        let (repository, runtime, cancel) = capsule_fixture().await;
         let attributes_path =
             crab_remote_git::GitPath::new(b"nested/.gitattributes".to_vec()).unwrap();
         let attributes_pointer = crab_git::LfsPointer {
@@ -5739,68 +5280,6 @@ mod tests {
         .await;
 
         assert!(matches!(result, Err(Error::InvalidAttributes)));
-        runtime.shutdown().await;
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn multipart_completion_token_makes_publication_retry_idempotent() {
-        let (repository, runtime, cancel) = fixture().await;
-        let path = crab_remote_git::GitPath::new(b"object.bin".to_vec()).unwrap();
-        let change = Change::Put {
-            bytes: Bytes::from_static(b"multipart content"),
-            track_lfs: false,
-            attributes: Box::new(attributes::PutAttributes {
-                etag_override: Some("multipart-etag-1".to_owned()),
-                completion_upload_id: Some("upload-id".to_owned()),
-                ..Default::default()
-            }),
-            condition: PutCondition::None,
-        };
-        apply(
-            &repository,
-            Arc::clone(&runtime),
-            crab_remote_git::RepositoryOptions::default(),
-            "refs/heads/main",
-            &path,
-            change.clone(),
-            "user",
-            &cancel,
-        )
-        .await
-        .unwrap();
-        let first = tip(&repository, Arc::clone(&runtime), &cancel).await;
-        apply(
-            &repository,
-            Arc::clone(&runtime),
-            crab_remote_git::RepositoryOptions::default(),
-            "refs/heads/main",
-            &path,
-            Change::Put {
-                bytes: Bytes::from_static(b"newer content"),
-                track_lfs: false,
-                attributes: Box::default(),
-                condition: PutCondition::None,
-            },
-            "user",
-            &cancel,
-        )
-        .await
-        .unwrap();
-        let overwritten = tip(&repository, Arc::clone(&runtime), &cancel).await;
-        apply(
-            &repository,
-            Arc::clone(&runtime),
-            crab_remote_git::RepositoryOptions::default(),
-            "refs/heads/main",
-            &path,
-            change,
-            "user",
-            &cancel,
-        )
-        .await
-        .unwrap();
-        let recovered = tip(&repository, Arc::clone(&runtime), &cancel).await;
-        assert!(first != overwritten && recovered == overwritten);
         runtime.shutdown().await;
     }
 
@@ -5890,7 +5369,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn attribute_only_mutation_preserves_object_bytes() {
-        let (repository, runtime, cancel) = fixture().await;
+        let (repository, runtime, cancel) = capsule_fixture().await;
         let path = crab_remote_git::GitPath::new(b"object.bin".to_vec()).unwrap();
         let bytes = Bytes::from_static(b"stable content");
         apply(
@@ -5943,7 +5422,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn if_match_rejects_a_stale_object_identity() {
-        let (repository, runtime, cancel) = fixture().await;
+        let (repository, runtime, cancel) = capsule_fixture().await;
         let path = crab_remote_git::GitPath::new(b"manifest".to_vec()).unwrap();
         let put = |bytes, condition| {
             apply(
@@ -5996,7 +5475,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn if_match_rejects_a_stale_etag_for_unchanged_bytes() {
-        let (repository, runtime, cancel) = fixture().await;
+        let (repository, runtime, cancel) = capsule_fixture().await;
         let path = crab_remote_git::GitPath::new(b"manifest".to_vec()).unwrap();
         let bytes = Bytes::from_static(b"same bytes");
         let oid = object_id(Kind::Blob, &bytes).unwrap();
@@ -6041,7 +5520,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn if_none_match_wildcard_preserves_an_existing_object() {
-        let (repository, runtime, cancel) = fixture().await;
+        let (repository, runtime, cancel) = capsule_fixture().await;
         let path = crab_remote_git::GitPath::new(b"manifest".to_vec()).unwrap();
         let put = |bytes, condition| {
             apply(
@@ -6179,7 +5658,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn batch_conditions_observe_prior_successes_in_fifo_order() {
-        let (repository, runtime, cancel) = fixture().await;
+        let (repository, runtime, cancel) = capsule_fixture().await;
         let path = crab_remote_git::GitPath::new(b"manifest".to_vec()).unwrap();
         let mutation = |bytes, condition| Mutation {
             path: path.clone(),
@@ -6231,20 +5710,15 @@ mod tests {
             read(&repository, Arc::clone(&runtime), &cancel, "manifest").await,
             "third"
         );
-        let snapshot = crab_metadata::manifest_store::read_repository_snapshot(
-            &repository.store,
-            &repository.layout,
-        )
-        .await
-        .unwrap();
-        assert_eq!(snapshot.journal.transactions.len(), 1);
-        assert_eq!(snapshot.journal.packs.len(), 1);
+        let published = capsule_view(&repository).await;
+        assert_eq!(published.capsules().len(), 1);
+        assert_eq!(published.capsules()[0].git_packs().len(), 1);
         runtime.shutdown().await;
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn conditional_delete_rejects_a_missing_object() {
-        let (repository, runtime, cancel) = fixture().await;
+        let (repository, runtime, cancel) = capsule_fixture().await;
         let path = crab_remote_git::GitPath::new(b"missing".to_vec()).unwrap();
         let result = apply(
             &repository,
@@ -6271,7 +5745,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn conditional_multi_delete_reports_a_missing_object() {
-        let (repository, runtime, cancel) = fixture().await;
+        let (repository, runtime, cancel) = capsule_fixture().await;
         let path = crab_remote_git::GitPath::new(b"missing".to_vec()).unwrap();
         let result = apply(
             &repository,
@@ -6295,7 +5769,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn conditional_delete_rejects_a_replaced_object() {
-        let (repository, runtime, cancel) = fixture().await;
+        let (repository, runtime, cancel) = capsule_fixture().await;
         let path = crab_remote_git::GitPath::new(b"manifest".to_vec()).unwrap();
         apply(
             &repository,
@@ -6381,7 +5855,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn same_ref_writes_share_one_pack_and_keep_one_commit_each() {
-        let (repository, runtime, cancel) = fixture().await;
+        let (repository, runtime, cancel) = capsule_fixture().await;
         let repository = Arc::new(repository);
         let blocker = PushLock::acquire_internal(
             repository.store.inner(),
@@ -6428,24 +5902,11 @@ mod tests {
         while let Some(result) = writes.join_next().await {
             result.unwrap().unwrap();
         }
-        let journal = crab_metadata::manifest_store::read_repository_snapshot(
-            &repository.store,
-            &repository.layout,
-        )
-        .await
-        .unwrap()
-        .journal;
-        assert_eq!(journal.transactions.len(), 1);
-        assert_eq!(journal.packs.len(), 1);
-        let transaction = crab_metadata::ref_journal::read_transaction(
-            &repository.store,
-            &repository.layout,
-            &journal.transactions[0],
-        )
-        .await
-        .unwrap();
-        assert_eq!(transaction.edits.len(), 1);
-        assert_eq!(transaction.packs.len(), 1);
+        let published = capsule_view(&repository).await;
+        assert_eq!(published.capsules().len(), 1);
+        let capsule = &published.capsules()[0];
+        assert_eq!(capsule.transaction().unwrap().edits().len(), 1);
+        assert_eq!(capsule.git_packs().len(), 1);
 
         let view = repository
             .read_views
@@ -6480,33 +5941,6 @@ mod tests {
         operation.finish(Ok(())).await.unwrap();
         blocker.release().await.unwrap();
 
-        let mut canonical = None;
-        for _ in 0..700 {
-            let snapshot = crab_metadata::manifest_store::read_repository_snapshot(
-                &repository.store,
-                &repository.layout,
-            )
-            .await
-            .unwrap();
-            if snapshot.journal.transactions.is_empty() {
-                canonical = RemoteGitRepository::open(
-                    repository.store.clone(),
-                    repository.layout.clone(),
-                    repository.identity.clone(),
-                    Arc::clone(&runtime),
-                    crab_remote_git::RepositoryOptions::default(),
-                    &cancel,
-                )
-                .await
-                .ok();
-                if canonical.is_some() {
-                    break;
-                }
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        let canonical = canonical.expect("background maintenance should publish a readable view");
-        assert!(canonical.refs().find("refs/heads/main").is_some());
         for index in 0..8 {
             assert_eq!(
                 read(
@@ -6524,7 +5958,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn fence_burst_preserves_batch_transactions_and_commit_history() {
-        let (repository, runtime, cancel) = fixture().await;
+        let (repository, runtime, cancel) = capsule_fixture().await;
         let blocker = PushLock::acquire_internal(
             repository.store.inner(),
             repository.layout.repo_prefix(),
@@ -6578,21 +6012,22 @@ mod tests {
             (&mut queued.result).await.unwrap().unwrap();
         }
 
-        let journal = crab_metadata::manifest_store::read_repository_snapshot(
-            &repository.store,
-            &repository.layout,
-        )
-        .await
-        .unwrap()
-        .journal;
+        let published = capsule_view(&repository).await;
         assert_eq!(
             (
-                journal.transactions.len(),
+                published.capsules().len(),
                 repository.maintenance.current_epoch()
             ),
             (2, 2)
         );
-        assert_eq!(journal.packs.len(), 2);
+        assert_eq!(
+            published
+                .capsules()
+                .iter()
+                .map(|capsule| capsule.git_packs().len())
+                .sum::<usize>(),
+            2
+        );
 
         let view = repository
             .read_views
@@ -6638,7 +6073,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn admitted_batch_survives_all_callers_being_dropped() {
-        let (repository, runtime, cancel) = fixture().await;
+        let (repository, runtime, cancel) = capsule_fixture().await;
         let repository = Arc::new(repository);
         let lock = PushLock::acquire_ref(
             repository.store.inner(),
@@ -6678,13 +6113,8 @@ mod tests {
 
         tokio::time::timeout(Duration::from_secs(5), async {
             loop {
-                let snapshot = crab_metadata::manifest_store::read_repository_snapshot(
-                    &repository.store,
-                    &repository.layout,
-                )
-                .await
-                .unwrap();
-                if snapshot.journal.transactions.len() == 1 {
+                let published = capsule_view(&repository).await;
+                if published.capsules().len() == 1 {
                     break;
                 }
                 tokio::task::yield_now().await;
@@ -6705,7 +6135,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn independent_coordinators_reprepare_against_the_winning_tip() {
-        let (repository, runtime, cancel) = fixture().await;
+        let (repository, runtime, cancel) = capsule_fixture().await;
         let repository = Arc::new(repository);
         let first = Arc::new(Coordinator::new(
             Arc::clone(&runtime),
@@ -6765,7 +6195,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
     async fn warm_precondition_failure_revalidates_the_object_store_ref() {
-        let (repository, runtime, cancel) = fixture().await;
+        let (repository, runtime, cancel) = capsule_fixture().await;
         let local = Coordinator::new(
             Arc::clone(&runtime),
             crab_remote_git::RepositoryOptions::default(),
@@ -6818,93 +6248,9 @@ mod tests {
         runtime.shutdown().await;
     }
 
-    #[tokio::test(flavor = "multi_thread", worker_threads = 4)]
-    async fn write_during_canonical_maintenance_retains_visibility_proof() {
-        let (repository, runtime, cancel) = fixture().await;
-        let coordinator = Coordinator::new(
-            Arc::clone(&runtime),
-            crab_remote_git::RepositoryOptions::default(),
-            cancel.clone(),
-            Metrics::new().unwrap(),
-        );
-        coordinated_put(
-            &coordinator,
-            &repository,
-            &cancel,
-            "baseline.txt",
-            b"baseline",
-        )
-        .await;
-        let baseline = wait_for_visibility(&repository).await;
-        let blocker = loop {
-            match PushLock::acquire_internal(
-                repository.store.inner(),
-                repository.layout.repo_prefix(),
-                GIT_OBJECT_LOCATOR_RESOURCE,
-                LOCK_TTL,
-            )
-            .await
-            {
-                Ok(blocker) => break blocker,
-                Err(crab_coordination::CoordinationError::PushLockHeld { .. }) => {
-                    tokio::time::sleep(Duration::from_millis(10)).await;
-                }
-                Err(error) => panic!("failed to acquire catalog blocker: {error}"),
-            }
-        };
-
-        coordinated_put(&coordinator, &repository, &cancel, "first.txt", b"first").await;
-        wait_for_generation_after(&repository, baseline).await;
-        coordinated_put(&coordinator, &repository, &cancel, "second.txt", b"second").await;
-        blocker.release().await.unwrap();
-        let final_generation = wait_for_visibility(&repository).await;
-
-        assert!(final_generation > baseline);
-        runtime.shutdown().await;
-    }
-
-    async fn wait_for_generation_after(repository: &Repository, generation: u64) {
-        for _ in 0..500 {
-            let (manifest, _) =
-                crab_metadata::manifest_store::read_manifest(&repository.store, &repository.layout)
-                    .await
-                    .unwrap();
-            if manifest.generation > generation {
-                return;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!("background maintenance did not advance the manifest");
-    }
-
-    async fn wait_for_visibility(repository: &Repository) -> u64 {
-        for _ in 0..500 {
-            let snapshot = crab_metadata::manifest_store::read_repository_snapshot(
-                &repository.store,
-                &repository.layout,
-            )
-            .await
-            .unwrap();
-            if snapshot.journal.transactions.is_empty()
-                && crab_metadata::git_visibility::read_for_manifest(
-                    &repository.store,
-                    &repository.layout,
-                    &snapshot.manifest,
-                )
-                .await
-                .unwrap()
-                .is_some()
-            {
-                return snapshot.manifest.generation;
-            }
-            tokio::time::sleep(Duration::from_millis(10)).await;
-        }
-        panic!("background maintenance did not publish a visibility proof");
-    }
-
     #[tokio::test(flavor = "multi_thread")]
     async fn each_commit_persists_only_its_path_attribute_delta() {
-        let (repository, runtime, cancel) = fixture().await;
+        let (repository, runtime, cancel) = capsule_fixture().await;
         let first = Coordinator::new(
             Arc::clone(&runtime),
             crab_remote_git::RepositoryOptions::default(),

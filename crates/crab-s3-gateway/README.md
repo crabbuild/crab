@@ -156,9 +156,10 @@ The first key component selects a ref:
 An empty listing prefix returns the authorized branch prefixes. Reads pin one
 commit for a consistent view.
 
-A present capsule-protocol root is the exclusive
-read authority; corrupt v2 state fails closed and never falls back to a legacy
-manifest. Repositories without a v2 root retain the v1 read path.
+A verified capsule-protocol root is required for reads and writes. Missing or
+corrupt Capsule authority fails closed; stored Crab pack-v1 repositories are not
+served or converted. The explicit initializer accepts empty prefixes and
+idempotently adopts an existing Capsule root.
 Each native read rechecks the root and visible ref transactions before reusing
 its validated immutable view. Stable reads avoid downloading capsule payloads
 again; external ref updates remain visible without a freshness TTL.
@@ -324,24 +325,13 @@ An exact-tip warm manifest that is already known to be partial selects Git
 listing immediately, without replaying attribute history merely to rediscover
 that the namespace index is incomplete.
 
-SlateDB is not required by this write path; its
-object catalog remains
-a rebuildable derived index.
-
-During sustained writes, one background worker every
-64 local publication epochs folds one captured ref-journal wave into the
-object-store manifest and advances catalog coverage for that generation under
-the generation-owner and GC-writer fences. It yields after that bounded pass;
-newer transactions remain authoritative and become eligible after another 64
-epochs instead of triggering an immediate catch-up loop.
-Each batch within a retained GC-fence burst advances that cadence separately,
-so fence reuse cannot multiply the unindexed pack tail by eight.
-
-Read views use the newest catalog whose immutable pack inventory is a
-proven subset of their snapshot, then inspect only the remaining pack tail. This
-also covers the interval between manifest compaction and matching catalog
-publication without scanning every historical pack. Full commit-graph
-maintenance still waits for a five-second quiet window.
+The Capsule root, per-ref heads and authenticated pack inventories own read
+coverage. The gateway does not maintain a v1 manifest or SlateDB object catalog.
+Foreground writers checkpoint at the native roll-up window or physical-frontier
+byte limit before appending; this applies to cold and warm writers alike.
+After a five-second local quiet window, one background owner performs shared
+root-pinned checkpoint and physical pack maintenance. New writes cancel only a
+scheduled pass; an admitted pass drains before the next owner starts.
 
 ### Key validation
 
@@ -467,30 +457,17 @@ blob limit and identical multipart session, byte-budget, and expiry settings.
 
 ### Background maintenance
 
-Run one continuously supervised `crab metadb owner` worker per backing
-repository for catalog, visibility, commit-graph, and geometric repack
-maintenance. Eligible pack suffixes are rolled up before graph-derived indexes
-are rebuilt when object-catalog coverage is current.
+The gateway schedules Capsule checkpoint and physical pack maintenance after a
+five-second quiet window, using the same verified shared implementation as
+other Capsule owners. Foreground publication independently bounds the frontier
+by transaction count and bytes, so continuous traffic does not depend on an idle
+maintenance pass for admission. Each batch advances the observed write epoch,
+including batches sharing GC fences; a running owner schedules another pass
+when later publications require it.
 
-If coverage trails the manifest, the owner advances it first so selected-pack REF_DELTA dependencies
-can be resolved without downloading the stable pack prefix.
-
-The continuous owner requires the manifest and active ref transactions
-to remain unchanged for one poll interval before it starts this work; every
-foreground change restarts that quiet window. `--once` is eager and belongs in
-an operator-approved maintenance window. Bounded repack cycles observe the
-owner poll interval, so catch-up work cannot form a zero-delay loop competing
-continuously with foreground requests.
-
-When the selected canonical packs have disjoint object inventories, the owner
-checks their immutable identities and committed indexes, copies each packed
-entry body once, and rebuilds one standard aggregate index. It does not
-reinflate already publication-validated historical trees. A budget deferral
-still lets derived-index repair run, preventing maintenance starvation.
-
-When selected packs overlap, the owner scans their headers, materializes only their
-REF_DELTA base objects, repairs thin inputs, and checks that the resulting
-self-contained pack has exactly the selected object IDs.
+Maintenance failure does not change an acknowledged publication. Storage
+recovery and broader repository maintenance remain explicit operator work;
+normal serving never creates v1 metadata or repairs a missing Capsule root.
 
 ### Branch serialization and routing
 
@@ -537,8 +514,7 @@ CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-s3-gateway \
 
 `--initialize` creates native v2 capsule roots only for empty configured
 prefixes, then exits. Existing v2 roots are adopted without changes. Nonempty
-prefixes without a v2 root are rejected; serve existing v1 repositories
-directly. Normal serving never initializes, migrates, or converts storage.
+prefixes without a v2 root are rejected, including stored pack-v1 repositories. Normal serving never initializes, migrates, or converts storage.
 
 SIGTERM and SIGINT trigger graceful connection draining.
 

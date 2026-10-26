@@ -1580,7 +1580,7 @@ mod tests {
     ) -> Repository {
         let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
         let layout = crab_storage::StoreLayout::new(store.clone(), "multipart-test".to_owned());
-        crab_write::initialize::initialize_repository(&store, &layout, "refs/heads/main")
+        crab_write::capsule_protocol::initialize(&layout, &"a".repeat(64), "refs/heads/main")
             .await
             .unwrap();
         Repository::new(

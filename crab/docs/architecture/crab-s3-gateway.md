@@ -602,11 +602,11 @@ verified data; authorization and mutable ref resolution are not permanently
 cached along with it. Missing path visibility follows the selected permission
 contract, including distinctions between access denial and absence.
 
-The implemented repository read view selects a present capsule-protocol root as
-the exclusive authority and keys it by root generation plus the authenticated
-per-ref state digest. Missing v2 authority selects the canonical v1 manifest;
-malformed or incomplete v2 state fails closed without legacy fallback. V1 views
-remain keyed by compacted generation and the validated committed-journal digest.
+The implemented repository read view requires a verified Capsule root and keys
+reuse by its authenticated root/per-ref state digest. Missing, malformed or
+incomplete Capsule authority fails closed; stored pack-v1 manifests and journals
+are never selected. Explicit initialization creates Capsule authority only in
+an empty prefix and idempotently adopts an existing root.
 Concurrent refreshes and branch-tip
 snapshot resolution use singleflight cells; Git trees reuse the generation-bound
 remote-read cache, and attributes are cached per immutable commit. The gateway
@@ -614,9 +614,8 @@ shares GET and HEAD object-attribute cells keyed by commit, path, and blob OID,
 so an attributed GET need not replay unrelated attribute history. The gateway
 invalidates its mutable-ref view after publication. HEAD and attributed LIST
 resolve size and ETag from committed attributes without opening blob payloads.
-Committed journal packs and authenticated v2 capsule packs remain readable
-through their respective canonical paths before derived locator/catalog
-publication completes. For v2 repositories, gateway mutations embed the
+Authenticated Capsule pack inventories remain readable before optional derived
+index publication completes. Gateway mutations embed the
 generated pack sidecars and exact visibility edit in one capsule, upload S3
 attributes before ref visibility, and commit through the per-ref head CAS.
 Multipart completion uses deterministic v2 intent/receipt recovery. Idle
@@ -666,9 +665,9 @@ EOF, disconnect, timeout and backend failure.
 
 ### 3.3 Listing projection and pagination
 
-Listing acceleration captures native ref heads under a v2 root and the journal
-under a legacy layout. It never requires a legacy manifest for a native
-repository. Reachable complete commit IDs use the canonical immutable Git
+Listing acceleration captures native ref heads under a verified Capsule root.
+Missing or corrupt Capsule authority never selects a stored pack-v1 manifest or
+journal. Reachable complete commit IDs use the canonical immutable Git
 listing path rather than being mistaken for missing branch names.
 
 ```mermaid
@@ -818,15 +817,10 @@ object; preparation records each generated entry's offset and CRC while writing
 it, then emits standard Git v2 and reverse indexes without decoding the pack a
 second time. Locator, checksum, object-inventory, and kind-sidecar checks remain
 mandatory before upload, with native Git as the compatibility oracle in tests.
-Generated packs at or below 8 MiB use one exact, retry-safe backend PUT instead
-of paying multipart start, part, and completion round trips; larger packs remain
-streamed from disk through bounded multipart upload. Under the lease it
-captures a bounded ref-journal head and parent transaction for warm existing-ref
-updates;
-cold creation and namespace-changing paths still capture a coherent repository
-snapshot. It revalidates the original parent and either advances the ref directly
-to the final commit with one journal transaction or releases and rebuilds the
-bounded batch. Journal success is the acknowledgement point. One ref worker may
+Generated pack bytes, sidecars and visibility edits are embedded in one Capsule.
+Under the ref lease, publication revalidates the expected parent and advances
+one ref through the canonical head CAS, or releases and rebuilds its bounded
+batch. A confirmed Capsule transaction is the acknowledgement point. One ref worker may
 retain the global and repository GC-writer fences across at most eight
 consecutive ordinary batches. Every batch still reacquires its ref lease,
 revalidates its parent, emits its own pack and transaction, and preserves one
@@ -872,22 +866,16 @@ deletions can restore eligibility, instead of failing or periodically copying an
 oversized manifest. Drained batches run
 under gateway ownership so disconnecting the caller
 that acquired local admission cannot abandon peer requests. A new foreground
-write cancels an in-flight maintenance pass so
-derived catalog work releases its fences and yields to S3 mutation traffic. The
-gateway schedules maintenance again after the local write burst is idle and
-prevents overlapping maintenance waves from advancing ahead of visibility proof
-publication. Sustained traffic additionally claims one catalog-maintenance pass
-every 64 local publication epochs, counting every batch within a retained-fence
-burst separately. The elected worker compacts one captured
-durable journal wave, advances exact-object catalog coverage for that generation
-even when newer transactions exist, and then yields under the generation-owner
-and GC-writer fences. It neither chases the moving journal for additional waves
-nor starts an immediate catch-up pass; later traffic becomes eligible at the next
-bounded interval. Quiet-window maintenance retains its exhaustive behavior.
+write cancels a scheduled maintenance pass. An admitted pass drains under its
+existing ownership, with later write epochs scheduling follow-up work. After a
+five-second local quiet window, the gateway runs the shared root-pinned Capsule
+checkpoint and verified physical pack maintenance. Foreground writers separately
+bound the frontier before appending, so continuous traffic does not depend on
+this idle pass or a v1 catalog scheduler.
 
 When an attribute delta ancestry proves that a branch began empty and every
 commit came from the gateway, its checkpoint is also a complete materialized S3
-namespace index. `ListObjects` binds that index to the current journal-projected
+namespace index. `ListObjects` binds that index to the current Capsule-projected
 ref and pages the sorted checkpoint plus the per-commit deltas from at most 63
 newer publication batches under normal checkpoint publication, without opening
 SlateDB or walking Git trees. A missing delta, legacy checkpoint, or Git-authored

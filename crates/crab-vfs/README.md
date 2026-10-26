@@ -14,6 +14,12 @@ write overlay semantics, background hydration, cancellation, refresh, and
 consistent read-after-write behavior. This crate owns that integration rather
 than putting filesystem lifecycle policy into the storage or Xet layers.
 
+Git LFS pointer blobs currently remain ordinary Git bytes in mounted views.
+A real gateway/RustFS probe returns a 132-byte pointer through NFS and FUSE while
+S3 GET returns its exact 6 MiB object. LFS hydration is an open VFS correctness
+gate; the Git LFS `spec/v1` marker is independent of the retired Crab pack-v1
+storage authority.
+
 ## Architecture
 
 ```text
