@@ -202,3 +202,60 @@ async fn failed_startup_gracefully_stops_and_reaps_its_child() {
     stop_failed_nfs_helper(&mut child, None).await.unwrap();
     assert!(child.try_wait().unwrap().unwrap().success());
 }
+
+#[cfg(unix)]
+#[tokio::test(flavor = "multi_thread")]
+async fn failed_startup_retains_a_child_still_draining_after_ten_seconds() {
+    use std::io::BufRead;
+    use std::process::{Command, Stdio};
+
+    let root = tempfile::tempdir().unwrap();
+    let release = root.path().join("release");
+    let mut child = Command::new("sh")
+        .args([
+            "-c",
+            "trap 'while [ ! -f \"$1\" ]; do sleep 0.01; done; exit 0' INT; printf 'ready\\n'; while :; do sleep 0.1; done",
+            "draining-helper",
+        ])
+        .arg(&release)
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .spawn()
+        .unwrap();
+    let mut ready = String::new();
+    std::io::BufReader::new(child.stdout.take().unwrap())
+        .read_line(&mut ready)
+        .unwrap();
+    assert_eq!(ready, "ready\n");
+    let waited = {
+        let cleanup = stop_failed_nfs_helper(&mut child, None);
+        tokio::pin!(cleanup);
+        let early = tokio::time::timeout(Duration::from_secs(11), cleanup.as_mut()).await;
+        std::fs::write(&release, b"release").unwrap();
+        match early {
+            Ok(result) => {
+                result.unwrap();
+                false
+            }
+            Err(_) => {
+                cleanup.await.unwrap();
+                true
+            }
+        }
+    };
+    assert!(waited, "startup cleanup killed a child still draining");
+    assert!(child.try_wait().unwrap().unwrap().success());
+}
+
+#[tokio::test]
+async fn cancelled_startup_skips_helper_admission() {
+    let root = tempfile::tempdir().unwrap();
+    let mut options = opts(
+        root.path().join("missing").to_str().unwrap(),
+        root.path().join("view"),
+    );
+    options.foreground = false;
+    options.cancel.cancel();
+    let result = spawn_nfs_background(options, root.path().join("view")).await;
+    assert!(matches!(result, Err(CrabError::Cancelled)));
+}

@@ -2260,6 +2260,67 @@ error-aware ownership decisions need separate reproduction and repair. macOS
 mapped-write draining, complete generation/remote-GC retention, stored pack-v1
 retirement, Windows locks and optimized total-resource/performance gates remain.
 
+## Thirty-seventh checkpoint: cancelled NFS startup retains its child
+
+The prior installed launcher has three reproduced failure modes. A helper still
+serving a busy native mount is killed after the ten-second startup-cleanup grace
+period, leaving the kernel mount attached with cache admission released. A
+terminal process-group interrupt reaches both launcher and helper; forwarding
+then becomes the helper's second signal and forces its exit. Finally, a delayed
+successful readiness reply admits the helper after launcher cancellation and
+returns success. The actual Linux/RustFS reproductions retain their failed
+results separately from diagnostic cleanup; none counts as successful teardown.
+A real child regression also fails at 10.02 seconds before this repair.
+
+`crab/src/cmd/mount.rs` keeps one owned launch/cleanup path. Pre-cancelled startup
+never resolves or spawns a helper. Cancellation now covers the entire awaited
+readiness exchange, with cancellation checked first when both branches are
+ready. Unix helpers get their own process group, so the launcher forwards one
+shutdown signal. Failed startup warns after ten seconds and continues waiting
+for the retained child to exit and be reaped; elapsed time cannot authorize
+termination or release its cache ownership. Non-Unix cleanup retries the
+PID-checked control request until shutdown is acknowledged, then waits for exit;
+Windows native qualification remains open.
+
+The Rust 1.97 standard-library contracts were read directly: dropping `Child`
+neither kills nor waits, `kill` is SIGKILL on Unix, `try_wait` reaps an exited Unix
+child, and `CommandExt::process_group(0)` assigns the child's own process group.
+Current `origin/main` instead inherits the group and kills after its sixty-second
+admission timeout; the ten-second graceful-then-kill behavior belongs to this
+branch's previous checkpoint. FUSE background startup follows coordinator
+standalone preparation before Tokio/signal initialization and calls `setsid`
+during daemonization, so it does not share this NFS helper signal path. Its
+other cleanup and foreground-discovery gates remain separate.
+
+Proof on Make-installed binaries:
+
+- Dedicated Linux: all 138 CLI mount tests pass with NFS/FUSE enabled. macOS:
+  all eight NFS registration/startup tests pass, including the real child held
+  beyond ten seconds. The new tests remain in the existing flat sibling file.
+- Native NFS on both Linux and macOS: individually signal the launcher, signal
+  its owned process group, and deliver a real successful readiness reply after
+  cancellation. Each case holds another process's cwd in the mount for twelve
+  seconds. Launcher and helper remain alive, cache admission stays exclusive,
+  live control responds, and a new read returns exact 6 MiB Capsule/RustFS bytes.
+  Releasing the client gives ordinary detach, cancelled launcher exit, child
+  completion/reaping, free cache, clean registry and removed control socket.
+  All six corrected cases require no emergency cleanup.
+- The Linux late reply finds its peer closed, as does macOS; neither can admit
+  the cancelled helper. Both helpers' process groups equal their own PIDs.
+- Normal foreground RW/RO and background RW installed-role flows are repeated
+  separately; this fault-injection proof does not replace normal operation.
+
+Raw harnesses, source/artifact hashes and results remain in external
+`nfs-launcher` evidence. The macOS harness initially raced a transient `ps` child
+and assumed its log directory contained only one file; both harness errors were
+corrected before counting results. No runtime test knob, new setting, dependency
+change or force-detach fallback was added. Production LOC grows modestly to make
+cancellation and retained ownership explicit; the old hard-kill path is removed.
+The stale README description of the already-repaired detached dependency owner
+is removed, and the user guide explains waiting for busy clients during startup
+cleanup. This closes the reproduced serving-stage launcher failures, not every
+early-preparation interruption or uncertain mount-presence query.
+
 ## Remaining priority order
 
 The helper-layout gap and live read-only inspection leak are closed by the
@@ -2276,8 +2337,10 @@ foreground/helper teardown. Native macOS mapped-write draining, stalled cleanup
 and the remaining product owners still block signoff.
 Checkpoint-33 closes the reproduced Unix control-socket and accepted-control
 ownership gaps. Checkpoint-36 repairs the shared data owner and busy-unmount
-lifetime; qualify stalled launcher startup, daemon/private owners and the macOS
-mapping barrier before claiming teardown complete.
+lifetime. Checkpoint-37 closes reproduced serving-stage startup cancellation,
+duplicate group signals and late-readiness admission. Early preparation,
+error-aware mount-presence decisions, daemon/private owners and the macOS mapping
+barrier still require proof before claiming teardown complete.
 
 1. **Correctness: coherent Git/Capsule generations.** Atomically install selected
    Git state, pinned catalog and read service for startup, refresh, switch and

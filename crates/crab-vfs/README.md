@@ -289,8 +289,12 @@ path. Transport shutdown stops incomplete input and blocked replies, then waits
 for admitted filesystem operations. The final journal flush follows RPC/control
 drain, covering unstable writes completed during teardown. Blocking Git/origin
 work may delay completion.
-The background launcher's eventual forced startup cleanup and daemon/private
-mode qualification remain separate gates.
+The background NFS launcher retains its child until failed or cancelled startup
+finishes cleanup. Cancellation covers the awaited readiness exchange, so a late
+reply cannot admit the helper. Unix helpers use a separate process group; the
+launcher forwards one shutdown signal instead of duplicating a terminal signal.
+After ten seconds cleanup warns and keeps waiting for actual detach and drain.
+Daemon/private mode qualification remains a separate gate.
 
 The NFS helper reports its actual cache identity when accepting shutdown. CLI
 unmount succeeds only after the kernel mount disappears and it acquires that
@@ -326,16 +330,6 @@ Remote-window requests own inflight claims through mutex admission and cache
 publication. Cancellation releases the claim; queued readers retain the same
 lock until the final claimant exits. Foreground request ownership and native
 teardown still require backend proof.
-
-The locked `nfs3_server` listener also spawns connection handlers and a transaction
-cleaner without exposing join handles. Listener drop notifies the cleaner, but
-neither that notification nor joining the listener proves child-task completion.
-A real TCP RPC probe confirms an idle accepted connection retains the engine
-after the Crab mount owner returns; closing that client releases it. In a
-dedicated Linux native probe, a client holding its working directory in the
-mount makes ordinary unmount fail. The helper then exits while the kernel mount
-remains attached and its cache lease is already released. Busy-unmount ownership
-and dependency task drain are unresolved correctness gates.
 
 ## Control exchange ownership
 

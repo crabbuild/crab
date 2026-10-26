@@ -140,6 +140,12 @@ crab mount --repo crab://bucket/repo --mountpoint /mnt/view
 echo "Mount is ready"
 ```
 
+Cancelling NFS startup waits for the helper to detach and finish admitted work.
+If a client keeps the mount busy, cleanup warns after ten seconds and continues
+waiting. Close files and leave the mounted directory in other terminals so
+ordinary unmount can complete. A late readiness reply cannot turn cancelled
+startup into success.
+
 ### Foreground
 
 With `--foreground`, the CLI itself becomes the mount process. It blocks until

@@ -1571,6 +1571,9 @@ async fn spawn_nfs_background(opts: NewMountOpts, mountpoint: PathBuf) -> Result
     // The owned launch task retains its child through admission or cleanup even
     // if the requesting caller stops waiting during startup.
     let task = tokio::spawn(async move {
+        if opts.cancel.is_cancelled() {
+            return Err(CrabError::Cancelled);
+        }
         let helper = resolve_nfs_background_helper(opts.backend)?;
         let registry_path = crate::vfs::mounts_registry::registry_path()?;
         let log_path = nfs_background_log_path(&mountpoint)?;
@@ -1614,53 +1617,61 @@ async fn spawn_nfs_background(opts: NewMountOpts, mountpoint: PathBuf) -> Result
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::from(log))
             .stderr(std::process::Stdio::from(stderr_log));
+        #[cfg(unix)]
+        {
+            use std::os::unix::process::CommandExt;
+            // The launcher forwards one shutdown signal. Sharing its terminal
+            // group would turn Ctrl-C plus forwarding into a forced second exit.
+            command.process_group(0);
+        }
         let mut child = command.spawn().map_err(CrabError::Io)?;
         let pid = child.id();
         let started_at = std::time::Instant::now();
-        let startup = async {
-            while started_at.elapsed() < NFS_BACKGROUND_STARTUP_TIMEOUT {
-                if opts.cancel.is_cancelled() {
-                    return Err(CrabError::Cancelled);
+        // A late readiness reply must not admit a helper after cancellation.
+        let startup = tokio::select! {
+            biased;
+            () = opts.cancel.cancelled() => Err(CrabError::Cancelled),
+            result = async {
+                while started_at.elapsed() < NFS_BACKGROUND_STARTUP_TIMEOUT {
+                    if crate::vfs::nfs_mount::is_mounted(&mountpoint)
+                        && nfs_background_control_ready(control_endpoint.as_deref()).await
+                        && attach_nfs_helper_log(
+                            &registry_path,
+                            &mountpoint,
+                            pid,
+                            control_endpoint.as_deref(),
+                            &log_path,
+                        )?
+                    {
+                        println!(
+                            "Mounted via NFS at {} (pid {}). Logs: {}",
+                            mountpoint.display(),
+                            pid,
+                            log_path.display()
+                        );
+                        return Ok(());
+                    }
+                    if let Some(status) = child.try_wait().map_err(CrabError::Io)? {
+                        let preflight_hint = nfs_background_startup_failure_hint(&mountpoint);
+                        return Err(CrabError::Internal(format!(
+                            "NFS mount helper exited before mounting {}: {status}. See {}{}",
+                            mountpoint.display(),
+                            log_path.display(),
+                            preflight_hint
+                        )));
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
                 }
-                if crate::vfs::nfs_mount::is_mounted(&mountpoint)
-                    && nfs_background_control_ready(control_endpoint.as_deref()).await
-                    && attach_nfs_helper_log(
-                        &registry_path,
-                        &mountpoint,
-                        pid,
-                        control_endpoint.as_deref(),
-                        &log_path,
-                    )?
-                {
-                    println!(
-                        "Mounted via NFS at {} (pid {}). Logs: {}",
-                        mountpoint.display(),
-                        pid,
-                        log_path.display()
-                    );
-                    return Ok(());
-                }
-                if let Some(status) = child.try_wait().map_err(CrabError::Io)? {
-                    let preflight_hint = nfs_background_startup_failure_hint(&mountpoint);
-                    return Err(CrabError::Internal(format!(
-                        "NFS mount helper exited before mounting {}: {status}. See {}{}",
-                        mountpoint.display(),
-                        log_path.display(),
-                        preflight_hint
-                    )));
-                }
-                tokio::time::sleep(Duration::from_millis(100)).await;
-            }
-            let preflight_hint = nfs_background_startup_failure_hint(&mountpoint);
-            Err(CrabError::Internal(format!(
-                "timed out after {}s waiting for NFS mount helper to mount {}. See {}{}",
-                NFS_BACKGROUND_STARTUP_TIMEOUT.as_secs(),
-                mountpoint.display(),
-                log_path.display(),
-                preflight_hint
-            )))
-        }
-        .await;
+                let preflight_hint = nfs_background_startup_failure_hint(&mountpoint);
+                Err(CrabError::Internal(format!(
+                    "timed out after {}s waiting for NFS mount helper to mount {}. See {}{}",
+                    NFS_BACKGROUND_STARTUP_TIMEOUT.as_secs(),
+                    mountpoint.display(),
+                    log_path.display(),
+                    preflight_hint
+                )))
+            } => result,
+        };
         if startup.is_err() {
             stop_failed_nfs_helper(&mut child, control_endpoint.as_deref()).await?;
         }
@@ -1707,36 +1718,49 @@ async fn stop_failed_nfs_helper(
     if child.try_wait()?.is_some() {
         return Ok(());
     }
+    let pid = child.id();
     #[cfg(unix)]
     {
-        let pid = child.id();
         // This unreaped child retains its PID. SIGINT lets the serving owner
         // detach its kernel client and drain before releasing cache admission.
         // SAFETY: kill targets only the live child retained by this launch task.
         if unsafe { libc::kill(pid as libc::pid_t, libc::SIGINT) } != 0 {
-            return Err(std::io::Error::last_os_error().into());
+            let error = std::io::Error::last_os_error();
+            if child.try_wait()?.is_some() {
+                return Ok(());
+            }
+            return Err(error.into());
         }
         let _ = endpoint;
     }
     #[cfg(not(unix))]
-    if let Some(endpoint) = endpoint
-        && let Ok(status) = crate::vfs::nfs_control::status(endpoint).await
-        && status.pid == child.id()
-    {
-        let _ = crate::vfs::nfs_control::shutdown(endpoint).await;
-    }
-    let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
-    while tokio::time::Instant::now() < deadline {
+    let mut shutdown_requested = false;
+    let mut warning_deadline = Some(tokio::time::Instant::now() + Duration::from_secs(10));
+    loop {
         if child.try_wait()?.is_some() {
             return Ok(());
         }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+        #[cfg(not(unix))]
+        if !shutdown_requested
+            && let Some(endpoint) = endpoint
+            && let Ok(status) = crate::vfs::nfs_control::status(endpoint).await
+            && status.pid == pid
+        {
+            shutdown_requested = crate::vfs::nfs_control::shutdown(endpoint).await.is_ok();
+        }
+        if let Some(deadline) = warning_deadline
+            && tokio::time::Instant::now() >= deadline
+        {
+            // A live child can still own a busy native mount or admitted work.
+            // Elapsed time cannot authorize termination or cache release.
+            warn!(
+                pid,
+                "waiting for NFS helper to detach and drain after failed startup"
+            );
+            warning_deadline = None;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
-    // Retain the existing hard startup deadline only after graceful shutdown
-    // has had a chance to run. Reaping is required even after forced termination.
-    child.kill()?;
-    child.wait()?;
-    Ok(())
 }
 
 #[cfg(feature = "nfs")]
