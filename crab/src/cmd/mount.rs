@@ -626,8 +626,6 @@ pub async fn run_mount_with_new_cli(mut opts: NewMountOpts) -> Result<()> {
         builder = builder.with_no_refresh(true);
     }
 
-    #[cfg(feature = "fuse")]
-    let rt = tokio::runtime::Handle::current();
     let output = builder.execute()?;
 
     info!(
@@ -703,32 +701,15 @@ pub async fn run_mount_with_new_cli(mut opts: NewMountOpts) -> Result<()> {
             ResolvedMountBackend::Fuse => {
                 #[cfg(feature = "fuse")]
                 {
-                    use crate::vfs::mount;
-
-                    let config = mount::MountConfig {
-                        mountpoint: mountpoint.clone(),
-                        git_dir: pipeline_config.git_dir.display().to_string(),
-                        write_pid: !opts.foreground,
-                        crab_dir: pipeline_config.cache_dir.clone(),
-                        read_only: opts.read_only,
-                    };
-                    if !opts.foreground {
-                        warn!("daemon mode not supported on this platform, running in foreground");
-                    }
-                    mount::install_signal_handler(opts.cancel.clone(), &rt);
-                    let mounted =
-                        mount::mount(&config, output.resolver, output.engine, rt.clone())?;
-
-                    println!("Mounted via FUSE at {}", mountpoint.display());
-                    println!("Press Ctrl+C to unmount.");
-
-                    mount::run_until_cancelled(
-                        mounted.session,
+                    run_foreground_fuse(
                         &mountpoint,
+                        pipeline_config,
+                        output,
+                        opts.no_refresh,
+                        opts.name.as_deref(),
                         opts.cancel,
-                        &pipeline_config.cache_dir,
-                    )?;
-                    println!("Unmounted.");
+                    )
+                    .await?;
                 }
                 #[cfg(not(feature = "fuse"))]
                 {
@@ -2387,46 +2368,67 @@ async fn run_foreground_mode(
     git_ref: Option<&str>,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
-    use crate::vfs::clone_cache::MountCacheLock;
-    use crate::vfs::mount;
-
-    let rt = tokio::runtime::Handle::current();
-    let _cache_lock = MountCacheLock::acquire(crab_dir)?;
-
-    // Build the mount components.
-    let (resolver, engine) = build_mount_components(crab_dir, git_ref).await?;
-
-    let config = mount::MountConfig {
-        mountpoint: mountpoint.to_path_buf(),
-        git_dir: find_git_dir(crab_dir),
-        write_pid: false,
-        crab_dir: crab_dir.to_path_buf(),
-        read_only: false,
-    };
-
-    // Install signal handler for graceful shutdown.
-    mount::install_signal_handler(cancel.clone(), &rt);
-
-    let result = (|| {
-        let mounted = mount::mount(
-            &config,
-            resolver,
-            std::sync::Arc::clone(&engine),
-            rt.clone(),
-        )?;
-
-        println!("Mounted at {}", mountpoint.display());
-        println!("Press Ctrl+C to unmount.");
-
-        mount::run_until_cancelled(mounted.session, mountpoint, cancel, crab_dir)?;
-
-        println!("Unmounted.");
-        Ok(())
-    })();
-    // Component preparation owns a separate hydration token. Cancelling the
-    // session token alone cannot finish those workers or their cache writes.
+    let _cache_lock = crate::vfs::clone_cache::MountCacheLock::acquire(crab_dir)?;
+    let (config, output) = Box::pin(build_mount_components(crab_dir, git_ref)).await?;
+    let engine = std::sync::Arc::clone(&output.engine);
+    let result = run_foreground_fuse(mountpoint, config, output, false, None, cancel).await;
     engine.shutdown_background().await;
     result
+}
+
+#[cfg(feature = "fuse")]
+async fn run_foreground_fuse(
+    mountpoint: &Path,
+    pipeline: crate::vfs::pipeline::PipelineConfig,
+    output: crate::vfs::pipeline::PipelineOutput,
+    no_refresh: bool,
+    name: Option<&str>,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    use crate::vfs::{mount, mounts_registry};
+
+    let registry = mounts_registry::registry_path()?;
+    let mut entry = mounts_registry::MountEntry {
+        mountpoint: mountpoint.display().to_string(),
+        source: pipeline.source.clone(),
+        git_ref: output.head_ref.clone(),
+        pid: std::process::id(),
+        start_time: mounts_registry::now_iso8601()?,
+        read_only: pipeline.read_only,
+        name: name.map_or_else(
+            || mounts_registry::derive_name_from_source(&pipeline.source),
+            str::to_owned,
+        ),
+        backend: Some("fuse".into()),
+        log_path: None,
+        control_endpoint: None,
+    };
+    let config = mount::MountConfig {
+        mountpoint: mountpoint.to_path_buf(),
+        git_dir: pipeline.git_dir.display().to_string(),
+        write_pid: false,
+        crab_dir: pipeline.cache_dir.clone(),
+        read_only: pipeline.read_only,
+    };
+    mount::install_signal_handler(cancel.clone(), &tokio::runtime::Handle::current());
+    let mut registered = false;
+    let result = mount::run_foreground(&config, output, pipeline, no_refresh, cancel, |socket| {
+        entry.control_endpoint = Some(socket.display().to_string());
+        mounts_registry::add_entry(&registry, entry.clone())?;
+        registered = true;
+        println!("Mounted via FUSE at {}", mountpoint.display());
+        println!("Press Ctrl+C to unmount.");
+        Ok(())
+    })
+    .await;
+    if registered {
+        // The live owner has joined accepted controls, detached the kernel and
+        // drained the engine. The caller still holds exclusive cache admission.
+        mounts_registry::remove_owned_entry(&registry, &entry)?;
+    }
+    result?;
+    println!("Unmounted.");
+    Ok(())
 }
 
 /// Run the mount in daemon mode: delegate to the coordinator via IPC.
@@ -2461,7 +2463,7 @@ async fn run_daemon_mode(
     }
 }
 
-/// Build the resolver and engine for a mount.
+/// Prepare the complete runtime and its configuration for a foreground mount.
 ///
 /// Uses the `MountPipelineBuilder` to execute the full 11-step pipeline.
 /// For standalone `crab mount`, the git dir is discovered from the `.crab`
@@ -2472,8 +2474,8 @@ async fn build_mount_components(
     crab_dir: &Path,
     git_ref: Option<&str>,
 ) -> Result<(
-    std::sync::Arc<crate::vfs::resolver::FuseResolver>,
-    std::sync::Arc<crate::vfs::engine::VfsEngine>,
+    crate::vfs::pipeline::PipelineConfig,
+    crate::vfs::pipeline::PipelineOutput,
 )> {
     use tokio_util::sync::CancellationToken;
 
@@ -2527,7 +2529,7 @@ async fn build_mount_components(
         cancel_token: cancel,
     };
 
-    let mut builder = MountPipelineBuilder::new(config);
+    let mut builder = MountPipelineBuilder::new(config.clone());
     if let Some(context) = read_context {
         builder = builder.with_read_context(context);
     }
@@ -2541,7 +2543,7 @@ async fn build_mount_components(
         "mount pipeline ready"
     );
 
-    Ok((output.resolver, output.engine))
+    Ok((config, output))
 }
 
 /// Read the remote URL from the committed `crab.toml` file.
@@ -5451,19 +5453,6 @@ fn find_crab_dir(mountpoint: &Path) -> PathBuf {
     }
 }
 
-/// Find the `.git` directory path as a string for the synthetic `.git` file.
-#[cfg(feature = "fuse")]
-fn find_git_dir(crab_dir: &Path) -> String {
-    // The .git dir is typically a sibling of .crab.
-    if let Some(parent) = crab_dir.parent() {
-        let git_dir = parent.join(".git");
-        if git_dir.exists() {
-            return git_dir.to_string_lossy().into_owned();
-        }
-    }
-    ".git".to_owned()
-}
-
 // ---------------------------------------------------------------------------
 // Tests
 // ---------------------------------------------------------------------------
@@ -6122,8 +6111,8 @@ mod tests {
             result.err()
         );
 
-        let (_, engine) = result.unwrap();
-        engine.shutdown_background().await;
+        let (_, output) = result.unwrap();
+        output.engine.shutdown_background().await;
     }
 
     /// Verify that `build_mount_components` respects the `git_ref` parameter.
@@ -6171,8 +6160,8 @@ mod tests {
             "build_mount_components with ref failed: {:?}",
             result.err()
         );
-        let (_, engine) = result.unwrap();
-        engine.shutdown_background().await;
+        let (_, output) = result.unwrap();
+        output.engine.shutdown_background().await;
     }
 
     /// Verify that `build_mount_components` fails gracefully when .git

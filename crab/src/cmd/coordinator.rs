@@ -180,7 +180,7 @@ async fn run_started_coordinator(
     cleanup_stale_pid(&config);
 
     // Step 2–5: Start the coordinator (acquires lock, writes PID, etc.).
-    let coordinator = match Coordinator::start(config) {
+    let coordinator = match Coordinator::start(config, None) {
         Ok(c) => c,
         Err(e) => {
             error!(error = %e, "coordinator startup failed");
@@ -706,11 +706,11 @@ mod tests {
         cleanup_stale_pid(&config);
 
         // But Coordinator::start() acquires the flock — first call succeeds.
-        let _coordinator = Coordinator::start(config.clone()).unwrap();
+        let _coordinator = Coordinator::start(config.clone(), None).unwrap();
 
         // Second call should fail because flock is held, regardless of PID file.
         let second_config = CoordinatorConfig::with_base_dir(tmp.path().to_path_buf());
-        let result = Coordinator::start(second_config);
+        let result = Coordinator::start(second_config, None);
         assert!(result.is_err());
         let err_msg = format!("{}", result.as_ref().err().unwrap());
         assert!(

@@ -3450,6 +3450,137 @@ remain excluded. Foreground FUSE controls, remaining legacy CLI/metadb/GC owners
 source-root retention, crash/resource ownership and optimized performance stay
 open; the full hardening goal remains active.
 
+## Checkpoint 51 — foreground FUSE live owner and ordered control drain
+
+The checkpoint-50 replay established an actual mode failure: foreground FUSE
+served writes/fsync but `mount commit --push` fell into offline handling and
+failed to resolve mounted Git metadata. Unchanged checkpoint-49 Make roles
+reproduced exit 6 with readable edited bytes retained. This is independent of
+checkpoint-50 chunk-candidate changes.
+
+`mount::run_foreground` now retains the complete prepared pipeline in a private
+coordinator, sharing the existing hydration chunk cache. It binds the unchanged
+FUSE IPC protocol before the serving CLI registers its actual PID/socket and
+prints readiness. Registration failure drains the installed session. Signals,
+external detach and live unmount converge on accepted-handler completion,
+engine-control drain, native detach and read-resource shutdown. The caller keeps
+exclusive cache admission through owner-conditional registry removal.
+
+`mount_control` selects a registered FUSE socket before default coordinator
+discovery. Rejected, missing or malformed known-owner exchanges cannot select
+saved overlay state or stale/PID cleanup. The IPC server tracks connections in
+a JoinSet, stops idle reads on cancellation, joins accepted handlers and retains
+their final replies. Response writes have a bounded I/O deadline; accepted
+mutations are not cancelled by that deadline. Coordinator removal and graceful
+shutdown close control admission and drain controls while native WRITE callbacks
+remain available. NFS retains its separate existing transport/runtime owner.
+
+The exported legacy `run_mount` helper also consumed the removed synchronous
+session loop and now shares the canonical foreground owner. Exhaustive Rust
+caller search finds no production caller of that helper: positional mounting is
+not exposed by the current CLI. Its preparation tests compile and pass, but it
+has no claimed positional CLI E2E proof. Local-source native proof uses the
+actual `--repo` entry point. Removing that pre-existing exported dead surface is
+separate from stored pack-v1 retirement.
+
+Two regressions fail before the repair and pass after it: private-owner controls
+return no owner, and IPC shutdown returns while an accepted resolver/handler
+still owns work. The routing regression covers status/list, refresh/switch,
+commit/rejection, diff/export/reset and live unmount for default/private sockets;
+it also requires a hard error after the registered endpoint disappears. These
+are transport tests, not native qualification of every control.
+
+| Evidence cell | Checked boundary |
+| --- | --- |
+| Changed surface | Foreground session owner, registry routing, coordinator startup/cache injection and IPC connection drain |
+| Product entry | `crab/src/main.rs` Mount → `run_mount_with_new_cli` → `run_foreground_fuse`; only registration-after-bind reports readiness |
+| Owner | Foreground PID retains coordinator, background callback session, pipeline and outer cache lease through cleanup |
+| Caller/callee | `mount_control::commit` → shared IPC commit → `VfsEngine::run_control` → `commit_mount_runtime` → canonical publisher/adoption/invalidation |
+| Siblings | Background FUSE shares IPC controls/removal ordering; NFS keeps its established pre-detach control drain and passes native replay |
+| Tests | Two before/after regressions; backend/control/client/coordinator slices; CLI mount/coordinator and integration lifecycle/shutdown consumers |
+| Main/base | Fetched main and crab-v2 retain the uncontrolled foreground session shape; actual failure reproduced on unchanged checkpoint-49 roles. No native main baseline is claimed |
+| Dependency | Cached fuser 0.17 Session::spawn/BackgroundSession::join and Tokio JoinSet join/cancellation contracts read before changing ownership. No dependency, lockfile or wire-format changes |
+
+Focused proof:
+
+- Linux/macOS: 120 VFS tests each. CLI mount/coordinator plus coordinator
+  lifecycle/shutdown: 160 Linux / 161 macOS passes.
+- Linux minimal and FUSE-only VFS checks pass; NFS-only Unix control routing
+  passes 13 tests without linking the FUSE server. Actual normal NFS-only CLI
+  roles also control the real foreground FUSE auxiliary role.
+- Combined-feature VFS library Clippy: zero warnings on both platforms.
+  Regular combined-feature CLI library Clippy completes with 636 macOS / 635
+  Linux warnings, zero primary spans on changed hunks. This is not a strict
+  whole-CLI or current-main lint baseline claim.
+- Both final four-role installations use Make with explicit external artifact
+  lookups. Exact final installed roles complete the checked-in RustFS CLI smoke,
+  all 25 checks per platform. Native Linux FUSE/NFS and macOS NFS, RO/RW,
+  return exact 6 MiB/full/range bytes. RO writes return EROFS; writable cases
+  fsync, live commit/push and verify an independent eager clone plus Git fsck.
+  Status PID equals the foreground serving process; ordinary SIGINT detaches
+  the kernel and returns exit 0. Four role hashes stay unchanged per replay.
+- Managed background FUSE also fsyncs, live commits/pushes, verifies an
+  independent eager clone and completes live unmount; its coordinator PID becomes
+  absent and its socket disappears. Its final role set matches the foreground
+  replay. The exact-role independent lifecycle replay also passes busy signal/
+  IPC unmount, cache exclusion, fail-closed controls during drain, local-source
+  fsync/live commit, registry-refusal cleanup and private socket/registry removal.
+  No forced detach was used.
+- The combined same-container managed-FUSE → foreground replay fails before
+  mounting: foreground preparation rejects the managed cache as a nonempty clone
+  destination. This is an open mode-interoperability gap, not a passing teardown
+  claim. Separate fresh-session successes do not close it; preserve the cache
+  and compare owner/preparation contracts and unchanged-base behavior next.
+  Unchanged checkpoint-49 Make roles reproduce the same exit-5/nonempty-clone
+  failure after a successful managed mount/read/unmount. Their four role hashes
+  match retained checkpoint-49 evidence, and the failing repository cache is
+  copied to external proof storage for investigation. No cache deletion or
+  initialization bypass was used to force that replay green.
+
+The user's test-layout preference also applies to the remaining PR-modified SDK
+`client/mutation/tests.rs`: it is moved byte-for-byte to the flat sibling
+`client/mutation_tests.rs`, with its module path explicit. Logical module/test
+names and assertions are unchanged. Its write+content mutation slice passes
+15 tests, one existing RustFS case ignored, on both platforms. No newly modified
+`feature/tests.rs` pair remains in the PR. Existing unmodified module layouts
+are not a repository-wide refactor.
+
+Is this the best fix? For the reproduced ownership gap, reusing the existing
+FUSE coordinator/controls keeps one publication/invalidation implementation,
+retains the foreground PID and preserves its warm cache. It adds no config,
+protocol mode, offline fallback or dependency. Runtime-prefix LOC grows by 157:
+the growth pays for the missing private owner, readiness/error cleanup and
+accepted-handler drain; control policies themselves are reused.
+
+CI on checkpoint 50 exposes earlier checkpoint follow-ups: architecture policy
+rejects three current dependency edges, still requires retired pack helper calls
+and rejects Git LFS's documented storage environment override. Its integration
+gate selects a removed staged-pack test instead of the existing Capsule receive
+regression. A concrete guard-update patch is prepared outside the repository;
+root AGENTS.md requires explicit approval before inventory/baseline changes.
+That request is pending; no checks, inventories or thresholds were edited.
+Its released-shape partial-clone job also fails fresh-destination ref discovery
+(exit 128 / CRAB-E0070 ENOENT); all four Git compatibility jobs fail their
+lifecycle report. The downloaded mirror artifact records a successful mirror
+command followed by failed remote ref discovery. Root cause and main/base
+comparison are unproven: investigate that producer/read path next, without
+classifying the failure as an obsolete oracle. Checkpoint-50 SDK, GC, NFS,
+provider, large-repository, replica, cache and HTTP workflows pass; gateway
+was still running at inspection.
+External `foreground-fuse-owner/qualification.json` binds the final native
+results, tests, before/after role hashes and 1,555 source/build inventory hashes;
+`evidence-inputs.json` separately hashes the drivers and checked-in smoke oracle.
+Final Make rebuilds and native replay follow the legacy caller's heap-pin fix.
+Failed harness attempts are retained: wrong unmount/positional CLI syntax,
+expected-byte races between two probes sharing a remote, an early PID-exit sample,
+and the actual managed-to-foreground cache failure. The Linux consumer compile
+was killed under concurrent memory pressure; a one-job retry passes. A shorter
+symlink to the same external macOS fixture directory avoids the Unix socket path
+limit without changing assertions or production fallback behavior.
+
+All-mode correctness, optimized performance and remaining pack-v1 removal are
+still open. This is a qualified checkpoint, not goal completion.
+
 ## Remaining priority order
 
 The helper-layout gap and live read-only inspection leak are closed by the
@@ -3481,8 +3612,10 @@ its Git/pointer reads to one capture. Checkpoint-49 retires the unused shared ma
 Checkpoint-50 retires current add-time and staged-proof legacy receipt dispatch,
 including the ambiguous advisory-cache domain and receipt-only importer. Its native
 replay reproduces missing foreground FUSE commit/control ownership on checkpoint-49
-binaries. Repair that live owner before further performance tuning. Then retire
-the actual old CLI publisher/fixture initializer, metadb/GC and
+binaries. Checkpoint-51 repairs that serving owner and qualifies live publication
+and ordinary teardown. Full control, early-startup, daemon/private and native
+mount-identity proofs remain. Retire the actual old CLI publisher/fixture
+initializer, metadb/GC and
 maintenance/replication stored pack-v1 dispatch.
 Checkpoints 42/43 repair canonical LFS publication and ignored-byte retention;
 checkpoint-44 reduces local verification amplification with bounded block proofs. Remote proof reuse, LFS generation
@@ -3520,8 +3653,8 @@ must not be deleted as pack-v1 compatibility.
 4. **Correctness/performance: total resource and lifecycle ownership.** Verified
    pointer/blob retention is bounded, but admitted reconstruction, upstream
    decoding, active replies and lower caches need a total memory/admission budget.
-   Bound native Git fetch time and prove NFS child-task completion. Unify refresh
-   ownership in foreground/helper/coordinator/daemon paths.
+   Bound native Git fetch time and prove NFS child-task completion. Complete refresh
+   ownership qualification in foreground/helper/coordinator/daemon paths.
 5. **Performance: concurrent dispatch and cold ranges.** Warm Git amplification is
    repaired. `mount.rs::mount_config` leaves fuser 0.17 `n_threads` unset; upstream
    `Session::run` defaults it to one. FUSE open/read callbacks synchronously await

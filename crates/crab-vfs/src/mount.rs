@@ -226,36 +226,126 @@ fn mount_config(read_only: bool) -> FuseConfig {
 // Graceful shutdown
 // ---------------------------------------------------------------------------
 
-/// Run the FUSE session in the foreground, blocking until the
-/// cancellation token is triggered (SIGINT/SIGTERM).
-///
-/// On cancellation: unmounts the filesystem, removes the PID file,
-/// and returns.
-pub fn run_until_cancelled(
-    session: Session<CrabFs>,
-    mountpoint: &Path,
+/// Serve a foreground FUSE mount through the shared live control owner.
+/// The caller retains exclusive cache admission and drains the prepared engine
+/// on startup failure. After bind, `on_ready` registers the private socket;
+/// registration failure still drains accepted controls and native callbacks.
+pub async fn run_foreground<F>(
+    config: &MountConfig,
+    output: crate::pipeline::PipelineOutput,
+    mut pipeline: crate::pipeline::PipelineConfig,
+    no_refresh: bool,
     cancel: CancellationToken,
-    crab_dir: &Path,
-) -> Result<()> {
-    let crab_dir_owned = crab_dir.to_path_buf();
-    let background = session.spawn()?;
+    on_ready: F,
+) -> Result<()>
+where
+    F: FnOnce(&Path) -> Result<()>,
+{
+    use crate::coordinator::{Coordinator, CoordinatorConfig, MountHandle, unmount_removed_mount};
+    use crate::ipc_server::IpcServer;
+    use tokio::sync::Mutex;
 
-    let result = loop {
-        if cancel.is_cancelled() {
-            info!("cancellation received, unmounting FUSE filesystem");
-            break unmount_background_session(background, mountpoint);
-        }
-
-        if background.guard.is_finished() {
-            break unmount_background_session(background, mountpoint);
-        }
-
-        std::thread::sleep(std::time::Duration::from_millis(50));
+    // A private owner preserves the foreground PID and its existing warm cache;
+    // the shared coordinator remains the sole implementation of FUSE controls.
+    let registry = crate::mounts_registry::registry_path()?;
+    let parent = registry
+        .parent()
+        .ok_or_else(|| CrabError::Internal("mount registry has no parent".into()))?;
+    std::fs::create_dir_all(parent)?;
+    let control_dir = tempfile::Builder::new().prefix("f-").tempdir_in(parent)?;
+    let owner_config = CoordinatorConfig::with_base_dir(control_dir.path().to_path_buf());
+    let mut coordinator = Coordinator::start(
+        owner_config,
+        Some(Arc::clone(output.hydration.chunk_cache())),
+    )?;
+    let reservation = coordinator.reserve_mount(&config.mountpoint, &pipeline.cache_dir)?;
+    let engine = Arc::clone(&output.engine);
+    let mounted = mount(
+        config,
+        Arc::clone(&output.resolver),
+        Arc::clone(&engine),
+        Handle::current(),
+    )?;
+    let background = mounted.session.spawn()?;
+    pipeline.ref_name = Some(output.head_ref.clone());
+    let refresh_handle = if no_refresh {
+        None
+    } else {
+        crate::pipeline::spawn_refresh_loop(
+            &output,
+            &pipeline,
+            &config.mountpoint,
+            std::time::Duration::from_secs(30),
+        )
     };
+    let handle = MountHandle {
+        resolver: Arc::clone(&output.resolver),
+        engine: Arc::clone(&engine),
+        hydration: Arc::clone(&output.hydration),
+        cancel_token: pipeline.cancel_token.clone(),
+        pipeline_output: output,
+        config: pipeline,
+        fuse_session: Some(background),
+        refresh_handle,
+        invalidation_index: Some(mounted.invalidation_index),
+        _cache_lock: None,
+    };
+    if let Err(failure) = coordinator.add_reserved_mount(reservation, handle) {
+        unmount_removed_mount(failure.handle, &config.mountpoint).await?;
+        return Err(failure.error);
+    }
 
-    remove_pid_file(&crab_dir_owned);
-    result?;
+    let socket = coordinator.socket_path().to_path_buf();
+    let owner_cancel = coordinator.cancel_token().clone();
+    let coordinator = Arc::new(Mutex::new(coordinator));
+    let server = IpcServer::new(
+        Arc::clone(&coordinator),
+        socket.clone(),
+        owner_cancel.clone(),
+    );
+    let (bound, ready) = tokio::sync::oneshot::channel();
+    let mut server = tokio::spawn(async move {
+        server
+            .run_with_bound_hook(move || {
+                let _ = bound.send(());
+            })
+            .await
+    });
+    let registration = match ready.await {
+        Ok(()) if !cancel.is_cancelled() => on_ready(&socket),
+        Ok(()) => Err(CrabError::Cancelled),
+        Err(_) => Err(CrabError::Internal(
+            "FUSE control owner did not become ready".into(),
+        )),
+    };
+    let mut server_result = None;
+    if registration.is_ok() {
+        loop {
+            tokio::select! {
+                () = cancel.cancelled() => break,
+                () = owner_cancel.cancelled() => break,
+                result = &mut server => { server_result = Some(result); break; }
+                () = tokio::time::sleep(std::time::Duration::from_millis(50)) => {
+                    if coordinator.lock().await.get_mount(&config.mountpoint)
+                        .and_then(|handle| handle.fuse_session.as_ref())
+                        .is_some_and(|session| session.guard.is_finished()) { break; }
+                }
+            }
+        }
+    }
 
+    // Accepted handlers may need the coordinator and native WRITE callbacks.
+    // Join them outside its lock before native detach and engine/cache release.
+    engine.close_control_admission();
+    owner_cancel.cancel();
+    let serving = match server_result {
+        Some(result) => result,
+        None => server.await,
+    };
+    coordinator.lock().await.shutdown_graceful().await;
+    remove_pid_file(&config.crab_dir);
+    serving.map_err(CrabError::ReadTask)??;
+    registration?;
     info!("FUSE session ended");
     Ok(())
 }

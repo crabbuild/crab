@@ -108,8 +108,14 @@ impl IpcServer {
         info!(path = %self.socket_path.display(), "IPC server listening");
         on_bound();
 
+        let mut connections = tokio::task::JoinSet::new();
         loop {
             tokio::select! {
+                Some(result) = connections.join_next() => {
+                    if let Err(error) = result {
+                        warn!(%error, "IPC connection task failed");
+                    }
+                }
                 () = self.cancel_token.cancelled() => {
                     info!("IPC server shutting down");
                     break;
@@ -121,7 +127,7 @@ impl IpcServer {
                             let coordinator = Arc::clone(&self.coordinator);
                             let read_resolver = Arc::clone(&self.read_resolver);
                             let cancel = self.cancel_token.clone();
-                            tokio::spawn(async move {
+                            connections.spawn(async move {
                                 if let Err(e) = handle_connection(
                                     stream,
                                     coordinator,
@@ -142,7 +148,14 @@ impl IpcServer {
             }
         }
 
-        // Cleanup socket file on shutdown.
+        // Cancelling stops idle reads, not accepted operations or final replies.
+        // Returning early could release mount/cache ownership under those tasks.
+        drop(listener);
+        while let Some(result) = connections.join_next().await {
+            if let Err(error) = result {
+                warn!(%error, "IPC connection task failed during shutdown");
+            }
+        }
         let _ = tokio::fs::remove_file(&self.socket_path).await;
         Ok(())
     }
@@ -219,9 +232,14 @@ async fn write_response(
     let mut json = serde_json::to_string(response)
         .map_err(|e| std::io::Error::other(format!("serialize error: {e}")))?;
     json.push('\n');
-    writer.write_all(json.as_bytes()).await?;
-    writer.flush().await?;
-    Ok(())
+    timeout(IDLE_TIMEOUT, async {
+        writer.write_all(json.as_bytes()).await?;
+        writer.flush().await
+    })
+    .await
+    .map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::TimedOut, "IPC response write timed out")
+    })?
 }
 
 // ---------------------------------------------------------------------------
@@ -1135,7 +1153,7 @@ mod tests {
 
         // We need a coordinator to test with. Use a minimal setup.
         let config = crate::coordinator::CoordinatorConfig::with_base_dir(tmp.path().to_path_buf());
-        let coordinator = Coordinator::start(config).unwrap();
+        let coordinator = Coordinator::start(config, None).unwrap();
         let cancel_token = coordinator.cancel_token().clone();
         let coordinator = Arc::new(Mutex::new(coordinator));
 
@@ -1187,7 +1205,7 @@ mod tests {
         let socket_path = tmp.path().join("test.sock");
 
         let config = crate::coordinator::CoordinatorConfig::with_base_dir(tmp.path().to_path_buf());
-        let coordinator = Coordinator::start(config).unwrap();
+        let coordinator = Coordinator::start(config, None).unwrap();
         let cancel_token = coordinator.cancel_token().clone();
         let coordinator = Arc::new(Mutex::new(coordinator));
 
@@ -1219,7 +1237,7 @@ mod tests {
         let socket_path = tmp.path().join("test.sock");
 
         let config = crate::coordinator::CoordinatorConfig::with_base_dir(tmp.path().to_path_buf());
-        let coordinator = Coordinator::start(config).unwrap();
+        let coordinator = Coordinator::start(config, None).unwrap();
         let cancel_token = coordinator.cancel_token().clone();
         let coordinator = Arc::new(Mutex::new(coordinator));
 
@@ -1263,12 +1281,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shutdown_retains_accepted_handler_and_final_reply() {
+        struct GatedResolver {
+            entered: tokio::sync::Notify,
+            release: tokio::sync::Notify,
+        }
+        #[async_trait::async_trait]
+        impl MountReadResolver for GatedResolver {
+            async fn resolve(
+                &self,
+                _remote: &str,
+            ) -> crate::Result<Option<crate::MountReadContext>> {
+                self.entered.notify_one();
+                self.release.notified().await;
+                Err(crate::VfsError::Cancelled)
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("control.sock");
+        let config =
+            crate::coordinator::CoordinatorConfig::with_base_dir(directory.path().to_path_buf());
+        let coordinator = Arc::new(Mutex::new(Coordinator::start(config, None).unwrap()));
+        let cancel = CancellationToken::new();
+        let resolver = Arc::new(GatedResolver {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let server = IpcServer::new(Arc::clone(&coordinator), socket.clone(), cancel.clone())
+            .with_read_resolver(resolver.clone());
+        let (bound, ready) = tokio::sync::oneshot::channel();
+        let mut owner = tokio::spawn(async move {
+            server
+                .run_with_bound_hook(move || {
+                    let _ = bound.send(());
+                })
+                .await
+        });
+        ready.await.unwrap();
+        let mut stream = tokio::net::UnixStream::connect(socket).await.unwrap();
+        stream.write_all(b"{\"op\":\"mount\",\"remote\":\"crab://bucket/repo\",\"mountpoint\":\"/unused\",\"ref\":\"main\",\"read_only\":false}\n").await.unwrap();
+        resolver.entered.notified().await;
+        cancel.cancel();
+        let premature = tokio::time::timeout(Duration::from_millis(50), &mut owner).await;
+        resolver.release.notify_one();
+        let response = BufReader::new(stream)
+            .lines()
+            .next_line()
+            .await
+            .unwrap()
+            .unwrap();
+        if premature.is_err() {
+            owner.await.unwrap().unwrap();
+        }
+        assert!(
+            premature.is_err(),
+            "server returned while an accepted handler still owned work"
+        );
+        assert!(!serde_json::from_str::<IpcResponse>(&response).unwrap().ok);
+        coordinator.lock().await.shutdown_graceful().await;
+    }
+
+    #[tokio::test]
     async fn ipc_server_idle_timeout() {
         let tmp = tempfile::tempdir().unwrap();
         let socket_path = tmp.path().join("test.sock");
 
         let config = crate::coordinator::CoordinatorConfig::with_base_dir(tmp.path().to_path_buf());
-        let coordinator = Coordinator::start(config).unwrap();
+        let coordinator = Coordinator::start(config, None).unwrap();
         let cancel_token = coordinator.cancel_token().clone();
         let coordinator = Arc::new(Mutex::new(coordinator));
 
@@ -1311,7 +1390,7 @@ mod tests {
         let socket_path = tmp.path().join("test.sock");
 
         let config = crate::coordinator::CoordinatorConfig::with_base_dir(tmp.path().to_path_buf());
-        let coordinator = Coordinator::start(config).unwrap();
+        let coordinator = Coordinator::start(config, None).unwrap();
         let cancel_token = coordinator.cancel_token().clone();
         let coordinator = Arc::new(Mutex::new(coordinator));
 
@@ -1363,7 +1442,7 @@ mod tests {
         let socket_path = tmp.path().join("test.sock");
 
         let config = crate::coordinator::CoordinatorConfig::with_base_dir(tmp.path().to_path_buf());
-        let coordinator = Coordinator::start(config).unwrap();
+        let coordinator = Coordinator::start(config, None).unwrap();
         let cancel_token = coordinator.cancel_token().clone();
         let coordinator = Arc::new(Mutex::new(coordinator));
 

@@ -99,6 +99,14 @@ pub async fn control_targets() -> Result<Vec<MountControlListEntry>> {
     #[cfg(unix)]
     {
         let mut entries = entries;
+        // A registered endpoint is an ownership claim, not optional display
+        // metadata. Its failure cannot authorize offline work or stale cleanup.
+        for entry in &mut entries {
+            if entry.backend.as_deref() == Some("fuse") && entry.control_endpoint.is_some() {
+                fuse_mount_client(&entry.mountpoint).await?;
+                entry.live = true;
+            }
+        }
         if let Some((_client, mounts)) = coordinator_mounts().await? {
             for mount in mounts {
                 upsert_list_entry(
@@ -254,13 +262,13 @@ async fn refresh_nfs_list_entries(entries: &mut [MountControlListEntry]) {
 async fn refresh_fuse_status(entries: &mut [MountControlListEntry]) {
     // Discovery already owns membership. Optional display metadata must not
     // erase a listed owner when a later status exchange fails.
-    let Ok(Some(mut client)) = coordinator_client().await else {
-        return;
-    };
     for entry in entries
         .iter_mut()
         .filter(|entry| entry.live && entry.backend.as_deref() == Some("fuse"))
     {
+        let Ok(Some(mut client)) = fuse_mount_client(&entry.mountpoint).await else {
+            continue;
+        };
         let status = send_fuse_request(
             &mut client,
             crate::ipc_protocol::IpcRequest::Status {
@@ -603,20 +611,44 @@ async fn coordinator_mounts() -> Result<
         Vec<crate::ipc_protocol::MountInfo>,
     )>,
 > {
-    let Some(mut client) = coordinator_client().await? else {
+    let Some(client) = coordinator_client().await? else {
         return Ok(None);
     };
+    fuse_mounts(client).await.map(Some)
+}
+
+#[cfg(unix)]
+async fn fuse_mounts(
+    mut client: crate::ipc_client::IpcClient,
+) -> Result<(
+    crate::ipc_client::IpcClient,
+    Vec<crate::ipc_protocol::MountInfo>,
+)> {
     // List establishes ownership without interpreting application error text.
     // Rejected or incomplete discovery cannot authorize absence or offline work.
     let response = send_fuse_request(&mut client, crate::ipc_protocol::IpcRequest::List).await?;
     let mounts = response
         .mounts
         .ok_or_else(|| CrabError::Internal("FUSE list response missing mounts".into()))?;
-    Ok(Some((client, mounts)))
+    Ok((client, mounts))
 }
 
 #[cfg(unix)]
 async fn fuse_mount_client(mountpoint: &str) -> Result<Option<crate::ipc_client::IpcClient>> {
+    let registry = crate::mounts_registry::registry_path()?;
+    let entry = crate::mounts_registry::list_entries(&registry)?
+        .into_iter()
+        .find(|entry| entry.mountpoint == mountpoint && entry.backend.as_deref() == Some("fuse"));
+    if let Some(endpoint) = entry.and_then(|entry| entry.control_endpoint) {
+        let client = crate::ipc_client::IpcClient::connect(Path::new(&endpoint)).await?;
+        let (client, mounts) = fuse_mounts(client).await?;
+        if !mounts.iter().any(|mount| mount.mountpoint == mountpoint) {
+            return Err(CrabError::Internal(format!(
+                "registered FUSE owner no longer serves {mountpoint}"
+            )));
+        }
+        return Ok(Some(client));
+    }
     let Some((client, mounts)) = coordinator_mounts().await? else {
         return Ok(None);
     };

@@ -383,6 +383,11 @@ impl HydrationService {
         })
     }
 
+    #[cfg(feature = "fuse")]
+    pub(crate) fn chunk_cache(&self) -> &Arc<ChunkCache> {
+        &self.state.cache
+    }
+
     pub(crate) fn for_reader(&self, reader: Arc<crab_read::PointerReader>) -> Arc<Self> {
         // Catalogs belong to immutable views; admission, retention and shutdown
         // belong to the mount and must not multiply across refreshed views.

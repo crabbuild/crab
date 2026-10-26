@@ -90,8 +90,16 @@ mode. Registration uses the session's actual endpoint, including its TCP token.
 The background launcher waits for that owner and attaches logs conditionally;
 it never publishes a second owner. Failed registration drains the native session.
 The serving CLI removes only its own record after detachment and engine drain,
-while it still holds the cache lease. Daemon/private discovery and foreground
-FUSE control admission remain separate qualification gates.
+while it still holds the cache lease.
+
+Foreground FUSE keeps the serving CLI's PID and prepared pipeline in a private
+coordinator. Its registered socket uses the same IPC controls, publication and
+kernel invalidation as background FUSE, sharing the pipeline's existing chunk
+cache. Readiness requires a bound socket and successful registry admission;
+registration failure drains the session. The CLI and legacy exported foreground helper use this owner. Known endpoint failures propagate without selecting saved
+state. Cleanup joins accepted handlers/replies, drains engine controls while
+WRITE callbacks remain available, then detaches and releases read/cache owners.
+Daemon/private discovery and all-mode native qualification remain separate gates.
 
 The resolver captures one retained snapshot view for lookup, attributes and
 directory paging. Generation, commit timestamp, selected ref and captured pointer
@@ -322,8 +330,9 @@ Its throughput is not directly comparable with older kernel-cached runs.
 | --- | --- | --- |
 | Hydration queue workers and read-window prefetch | `HydrationService`, retained by the mount owner | Await `shutdown()` after backend teardown; queued work is discarded and admitted prefetch finishes |
 | Ordinary Git loads and promotion copies | `OdbReader`, retained by `VfsEngine` | `VfsEngine::shutdown_background()` closes admission and drains admitted blocking operations before cache ownership is released |
-| Ref/snapshot refresh | Coordinator, daemon, or interactive NFS runtime | Cancel polling and await the task, including any admitted blocking Git/snapshot work |
+| Ref/snapshot refresh | Coordinator, foreground FUSE, daemon, or interactive NFS runtime | Cancel polling and await the task, including any admitted blocking Git/snapshot work |
 | NFS control connections | NFS control server, joined by the mount runtime | Close engine mutation admission and drain controls before detach; keep status/shutdown live while busy, then stop idle reads and join handlers/replies |
+| FUSE IPC connections | IPC server, joined by the coordinator/foreground owner | Stop idle reads and join accepted handlers and final replies before native/cache teardown; bound response writes without cancelling accepted mutations |
 | FUSE native client and callbacks | Foreground, coordinator or daemon mount owner | Retry ordinary native unmount while retaining the background session; join callbacks only after confirmed detach |
 | NFS data server, connection parsers and RPCs | NFS mount runtime and the scoped nfs3_server owner | Retry ordinary native unmount while retaining serving/cache ownership; after detachment request graceful transport shutdown and join every admitted RPC |
 

@@ -169,6 +169,14 @@ mount/control owners consume the pipeline output separately.
   inode-conditional socket cleanup. Keep its persistent `.sock.lock` inode.
   Sources: `nfs_mount.rs`, `nfs_control.rs`; flat sibling regressions:
   `nfs_mount_control_tests.rs`, `nfs_control_connection_tests.rs`.
+- Foreground FUSE retains the prepared pipeline in a private coordinator and
+  registers its actual serving PID/socket only after bind. The CLI and legacy exported helper
+  use this owner. The caller retains cache admission through conditional registry
+  cleanup. Registered endpoint failures cannot select default/offline ownership.
+  IPC owners join accepted handlers and final replies before native teardown;
+  drain engine controls while WRITE callbacks remain available. Sources:
+  `mount.rs`, `coordinator.rs`, `ipc_server.rs`, `mount_control.rs` and
+  `crab/src/cmd/mount.rs`.
 - FUSE IPC exchanges temporarily own their connection. Restore it only after a
   valid response; cancellation or errors must close it so a late response cannot
   satisfy a later request. Source: `crates/crab-vfs/src/ipc_client.rs`.

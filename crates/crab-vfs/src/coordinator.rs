@@ -235,10 +235,11 @@ impl Coordinator {
     /// 3. Writes PID to `daemon.pid`
     /// 4. Initializes shared `ChunkCache`
     ///
-    /// Returns the coordinator ready to accept mount requests.
+    /// Reuses `chunk_cache` when supplied by an existing foreground pipeline;
+    /// otherwise opens the configured shared cache after acquiring admission.
     /// The Unix socket listener is NOT started here — callers should
     /// use the returned `socket_path` to set up their own listener.
-    pub fn start(config: CoordinatorConfig) -> Result<Self> {
+    pub fn start(config: CoordinatorConfig, chunk_cache: Option<Arc<ChunkCache>>) -> Result<Self> {
         // Ensure base directory exists.
         fs::create_dir_all(&config.base_dir).map_err(|e| {
             CrabError::Internal(format!(
@@ -269,7 +270,10 @@ impl Coordinator {
 
         // Step 4: Initialize shared chunk cache.
         let cache_dir = config.cache_dir();
-        let chunk_cache = Arc::new(ChunkCache::open(cache_dir, Some(config.cache_max_bytes))?);
+        let chunk_cache = match chunk_cache {
+            Some(cache) => cache,
+            None => Arc::new(ChunkCache::open(cache_dir, Some(config.cache_max_bytes))?),
+        };
         info!(
             max_bytes = config.cache_max_bytes,
             "shared chunk cache initialized"
@@ -667,8 +671,11 @@ impl Coordinator {
 
         info!("coordinator initiating graceful shutdown");
 
-        // Cancel the coordinator-wide token first. This propagates to all
-        // child tokens, signaling hydration workers and refresh loops to stop.
+        // Controls may still need WRITE callbacks for client writeback. Close
+        // admission before stopping polling; keep the native session until drain.
+        for handle in self.mounts.values() {
+            handle.engine.close_control_admission();
+        }
         self.cancel_token.cancel();
         self.pending_mountpoints.clear();
         self.pending_cache_dirs.clear();
@@ -694,6 +701,7 @@ impl Coordinator {
             if let Some(refresh) = handle.refresh_handle.take() {
                 let _ = refresh.await;
             }
+            handle.engine.drain_controls().await;
             unmount_session_logged(handle.fuse_session.take(), mountpoint);
             if tokio::time::timeout(GRACE_PERIOD, handle.engine.shutdown_background())
                 .await
@@ -954,10 +962,14 @@ impl OverlayCommitTarget {
 }
 
 pub async fn unmount_removed_mount(mut handle: MountHandle, mountpoint: &Path) -> Result<()> {
+    // An admitted commit/inspection can be waiting for kernel WRITE callbacks.
+    // Keep callbacks and read resources alive until those controls finish.
+    handle.engine.close_control_admission();
     handle.cancel_token.cancel();
     if let Some(refresh) = handle.refresh_handle.take() {
         let _ = refresh.await;
     }
+    handle.engine.drain_controls().await;
     let result = unmount_session(handle.fuse_session, mountpoint);
     handle.engine.shutdown_background().await;
     result
@@ -1190,14 +1202,14 @@ mod tests {
         let lock = acquire_daemon_lock(&config.lock_path()).unwrap();
         drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
 
-        assert!(Coordinator::start(config.clone()).is_err());
+        assert!(Coordinator::start(config.clone(), None).is_err());
         assert!(
             path.exists(),
             "a losing coordinator must leave the socket alone"
         );
         drop(lock);
 
-        let _coordinator = Coordinator::start(config).unwrap();
+        let _coordinator = Coordinator::start(config, None).unwrap();
         assert!(!path.exists(), "the lock holder owns stale socket cleanup");
     }
 
@@ -1228,7 +1240,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let config = CoordinatorConfig::with_base_dir(tmp.path().to_path_buf());
 
-        let mut coordinator = Coordinator::start(config).unwrap();
+        let mut coordinator = Coordinator::start(config, None).unwrap();
 
         // Verify files were created.
         assert!(tmp.path().join("daemon.lock").exists());
@@ -1254,7 +1266,7 @@ mod tests {
 
         for _ in 0..2 {
             let config = CoordinatorConfig::with_base_dir(tmp.path().to_path_buf());
-            let coordinator = Coordinator::start(config).unwrap();
+            let coordinator = Coordinator::start(config, None).unwrap();
             assert!(tmp.path().join("daemon.pid").exists());
             drop(coordinator);
             assert!(!tmp.path().join("daemon.pid").exists());
@@ -1267,7 +1279,7 @@ mod tests {
     fn mount_reservation_blocks_same_mountpoint_and_starting_cache() {
         let tmp = tempfile::tempdir().unwrap();
         let config = CoordinatorConfig::with_base_dir(tmp.path().to_path_buf());
-        let mut coordinator = Coordinator::start(config).unwrap();
+        let mut coordinator = Coordinator::start(config, None).unwrap();
         let cache_dir = tmp.path().join("repo-cache");
         let mountpoint = Path::new("/mnt/repo");
 
@@ -1300,7 +1312,7 @@ mod tests {
     fn pending_mount_prevents_idle_shutdown_until_released() {
         let tmp = tempfile::tempdir().unwrap();
         let config = CoordinatorConfig::with_base_dir(tmp.path().to_path_buf());
-        let mut coordinator = Coordinator::start(config).unwrap();
+        let mut coordinator = Coordinator::start(config, None).unwrap();
 
         let reservation = coordinator
             .reserve_mount(Path::new("/mnt/repo"), &tmp.path().join("repo-cache"))
@@ -1345,7 +1357,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let config = CoordinatorConfig::with_base_dir(tmp.path().to_path_buf());
 
-        let mut coordinator = Coordinator::start(config).unwrap();
+        let mut coordinator = Coordinator::start(config, None).unwrap();
         let child = coordinator.child_cancel_token();
 
         assert!(!child.is_cancelled());
@@ -1481,7 +1493,7 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let config = CoordinatorConfig::with_base_dir(tmp.path().to_path_buf());
-        let mut coordinator = Coordinator::start(config).unwrap();
+        let mut coordinator = Coordinator::start(config, None).unwrap();
 
         let shared_cache = Arc::clone(coordinator.chunk_cache());
 

@@ -803,7 +803,7 @@ mod tests {
 
         // Set up a minimal coordinator for the IPC server.
         let config = crate::coordinator::CoordinatorConfig::with_base_dir(tmp.path().to_path_buf());
-        let coordinator = crate::coordinator::Coordinator::start(config).unwrap();
+        let coordinator = crate::coordinator::Coordinator::start(config, None).unwrap();
         let cancel_token = coordinator.cancel_token().clone();
         let coordinator = Arc::new(Mutex::new(coordinator));
 

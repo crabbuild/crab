@@ -522,25 +522,48 @@ fn nfs_context_ignores_non_nfs_registry_entries() {
 }
 #[cfg(unix)]
 #[test]
-fn unix_controls_reach_fuse_without_linking_the_server() {
+fn unix_controls_reach_each_fuse_owner_without_linking_the_server() {
     let _env_lock = crate::test_support::GIT_DIR_MUTEX
         .lock()
         .unwrap_or_else(std::sync::PoisonError::into_inner);
-    let directory = tempfile::tempdir().unwrap();
-    let _home = HomeGuard::set(directory.path());
-    let mountpoint = directory.path().join("view");
-    std::fs::create_dir(&mountpoint).unwrap();
-    // The CLI advertises canonical mount paths, including macOS temp aliases.
-    let mountpoint = normalize_mountpoint(&mountpoint);
-    let socket = directory.path().join(".crab/mounts/daemon.sock");
-    std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .unwrap();
-    runtime.block_on(async {
+    for private in [false, true] {
+        let directory = tempfile::tempdir().unwrap();
+        let _home = HomeGuard::set(directory.path());
+        let mountpoint = directory.path().join("view");
+        std::fs::create_dir(&mountpoint).unwrap();
+        // The CLI advertises canonical mount paths, including macOS temp aliases.
+        let mountpoint = normalize_mountpoint(&mountpoint);
+        let socket = directory.path().join(if private {
+            ".crab/mounts/fg.sock"
+        } else {
+            ".crab/mounts/daemon.sock"
+        });
+        if private {
+            crate::mounts_registry::add_entry(
+                &crate::mounts_registry::registry_path().unwrap(),
+                crate::mounts_registry::MountEntry {
+                    mountpoint: mountpoint.display().to_string(),
+                    source: "crab://bucket/repo".into(),
+                    git_ref: "main".into(),
+                    pid: std::process::id(),
+                    start_time: "owner".into(),
+                    read_only: false,
+                    name: "private".into(),
+                    backend: Some("fuse".into()),
+                    log_path: None,
+                    control_endpoint: Some(socket.display().to_string()),
+                },
+            )
+            .unwrap();
+        }
+        std::fs::create_dir_all(socket.parent().unwrap()).unwrap();
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .unwrap();
+        runtime.block_on(async {
         use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
-        let listener = tokio::net::UnixListener::bind(socket).unwrap();
+        let listener = tokio::net::UnixListener::bind(&socket).unwrap();
         let path = mountpoint.display().to_string();
         let server = tokio::spawn(async move {
             loop {
@@ -580,7 +603,12 @@ fn unix_controls_reach_fuse_without_linking_the_server() {
         assert!(matches!(shutdown(&mountpoint).await.unwrap().unwrap(), MountControlShutdown::Fuse { .. }));
         server.abort();
         let _ = server.await;
+        if private {
+            std::fs::remove_file(socket).unwrap();
+            assert!(commit(&mountpoint, "after owner loss", false).await.is_err());
+        }
     });
+    }
 }
 
 #[cfg(feature = "nfs")]
