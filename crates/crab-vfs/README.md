@@ -333,9 +333,10 @@ The foreground, coordinator and daemon FUSE paths share native detach/callback
 join; their callers retain the engine and cache lease through that boundary.
 Coordinator async teardown additionally drains engine work; synchronous Drop
 can only request engine shutdown and remains a separate qualification gate.
-Managed FUSE teardown still calls blocking native cleanup on an async worker.
-Concurrent busy mounts need a separate runtime-starvation and cancellation
-ownership qualification before all managed modes can be considered hardened.
+Native FUSE admission requires a multi-thread Tokio runtime. Cleanup uses
+`block_in_place` to hand off the worker while keeping session/cache ownership
+on the caller's stack; busy mounts must not starve independent controls.
+Cancellation during subsequent engine drain still requires qualification.
 Native teardown queries target presence by path; replacement-mount races still
 need identity-bound qualification.
 The current cache-lock helper enforces exclusivity on Unix. Its non-Unix branch

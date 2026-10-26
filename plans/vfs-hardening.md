@@ -11,7 +11,7 @@ Baseline: `origin/crab-v2` at `33f8e6c360d922b3ab1e2c0e5115a2d200eccd97`.
 Working branch: `codex/vfs-hardening`. PR:
 https://github.com/crabbuild/crab/pull/630 (base `crab-v2`). Follow-up hardening
 remains active. The PR is rebased onto `877b832b396`; final source and
-installed-role evidence is recorded at checkpoint 39.
+installed-role evidence is recorded at checkpoints 39 and 40.
 
 Baseline evidence and reproductions:
 `crab/docs/benchmarks/vfs-capsule-v2-audit-20261024.md` and its adjacent evidence
@@ -28,7 +28,7 @@ folder. The report describes the audited commit, not the current working tree.
 | Verified optional caches and bounded ownership | Same-length corruption, replacement races, missing/unsafe cache, ENOTDIR/disk-full, cancellation, explicit retention cap, active readers | Sixth and seventh checkpoints replace mutable VFS pointer/ODB byte caches with verified immutable retention; total admission/resource proof remains open. Shared persistent-cache policy is unchanged |
 | Efficient range reads | Ordinary blobs and pointers: small random reads, sequential windows, cold/warm, concurrent readers; origin bytes, userspace amplification, throughput, p95/p99, RSS | Seventh checkpoint removes repeated whole-blob loading on warm ranges; cold/concurrent and native/provider performance remain open |
 | Bounded dispatch and directories | Concurrent blocked hydration must not serialize unrelated FUSE operations; large-directory paging/inode lifetime; effective bounded prefetch | Open |
-| Consistent lifecycle in every mode | Foreground/helper/coordinator/daemon; read-only/writable; automatic/manual refresh; reset/commit; stalled clients and unmount during reads | Open; managed FUSE teardown, foreground FUSE controls/refresh, macOS mapped writeback and Windows ownership remain gaps |
+| Consistent lifecycle in every mode | Foreground/helper/coordinator/daemon; read-only/writable; automatic/manual refresh; reset/commit; stalled clients and unmount during reads | Open; managed engine-drain cancellation, foreground FUSE controls/refresh, macOS mapped writeback and Windows ownership remain gaps |
 | Retire Crab pack v1 compatibility | Reject v1 stored repositories at all read/write/selection dispatch boundaries; delete fallback readers/writers and obsolete compatibility tests/docs; preserve empty-repository v2 initialization | Admission/helper/doctor/selected-replica validation and eighteenth-checkpoint replica readiness require v2. Protected receive, legacy initialization, metadb/GC and maintenance/publication dispatch remain open |
 | Final qualification | Exact resulting sources, minimal/NFS/FUSE/combined feature checks, appropriate broad CI, native Linux NFS/FUSE + RustFS, macOS NFS; retained performance measurements | Scoped current-source checks are retained at each checkpoint; complete mode/platform/performance qualification remains open |
 
@@ -2487,6 +2487,64 @@ stays external and added tests keep the flat sibling layout. This checkpoint
 removes roughly fifty net Rust lines, including its new shared query module and
 regressions; no dependency, lockfile, setting or threshold changes are added.
 
+## Checkpoint 40 — managed FUSE worker handoff
+
+The next native probe reproduces a separate managed-owner availability failure.
+Five independent read-only mounts share one four-worker coordinator. One busy
+unmount leaves control responsive at roughly 0.4 ms; four concurrent busy
+unmounts stall an unrelated control request beyond its two-second observation
+window. Releasing clients immediately restores control. Native thread snapshots
+show all four runtime workers in the synchronous unmount retry sleep, proving
+worker starvation rather than a coordinator mutex or cache/endpoint collision.
+All diagnostic mounts detach normally; no forced cleanup is used.
+
+The shared native FUSE cleanup now uses Tokio `block_in_place`, handing off
+runtime work while preserving session/cache ownership on the caller's stack.
+Tokio 1.53.1's pinned source documents that this scope cannot be cancelled and
+that unrelated tasks can continue. FUSE admission requires a multi-thread
+runtime before native setup; all product foreground/coordinator/daemon builders
+already supply one. Current-thread runtimes are rejected rather than reaching
+Tokio's unsupported blocking context. The cleanup helper is crate-private; all
+its callers and synchronous Drop siblings use the same path. No detached task,
+new queue, compatibility mode or runtime setting is introduced. Cancellation
+during later asynchronous engine drain remains a separate gate.
+
+The native regression previously hid this path behind its own `spawn_blocking`.
+It now calls the same synchronous boundary as managed owners. Its real FUSE
+read-only case uses one runtime worker and an independent timer task; an OS-side
+observer always releases the client after twelve seconds, so starvation fails
+without deadlocking cleanup. The regression fails on checkpoint-39 source at
+12.30 seconds with `busy FUSE teardown starved the runtime`, then passes after
+the repair. The retained busy-owner assertion still covers premature detach.
+
+Final-source proof:
+
+- Linux: 662 VFS unit tests, all 16 native tests, all 138 CLI mount tests, strict
+  combined VFS Clippy and minimal/FUSE-only checks pass. The modified read-only
+  case proves independent progress even with a sole runtime worker.
+- macOS: strict all-target VFS Clippy with both backends, 112 selected NFS/daemon/
+  control/pipeline/hydration tests and Make install pass. Native FUSE remains
+  unavailable on this host; native NFS normal foreground RW/RO/helper RW and real
+  Capsule busy RO/SIGINT and RW/control are repeated on its installed roles.
+- The real Linux five-mount scenario now returns the unrelated control response
+  in about 0.48 ms while all four clients remain busy and cache admission remains
+  held. Closing the four unmount request sockets preserves native/cache owners;
+  releasing the clients completes detach and engine/cache release. The unrelated
+  mount still serves exact bytes, and all task mounts then detach normally.
+- The twelve foreground FUSE cases, Linux NFS mount-query failure and both-platform
+  normal/busy NFS cases are repeated against the new Make-installed roles. Running
+  foreground and installed executable hashes agree, and installed hashes remain
+  unchanged through proof. These are debug qualification observations, not an
+  optimized throughput or tail-latency benchmark.
+
+Only two Rust source inputs change from checkpoint 39, out of 1,558 captured
+source/build inputs. Net production Rust grows fourteen lines to make the
+ownership-preserving worker handoff and runtime admission explicit; the enhanced
+regression replaces the masking test adapter. No dependency/lockfile/settings
+changes are made, and the 2,156 excluded raw audit files remain preserved.
+Target identity, asynchronous engine-drain cancellation, synchronous Drop drain,
+macOS mapped writes and the other all-mode/resource gates remain open.
+
 ## Remaining priority order
 
 The helper-layout gap and live read-only inspection leak are closed by the
@@ -2512,8 +2570,8 @@ the macOS mapping barrier still require proof before claiming teardown complete.
 Immediate content gap: mounted Git LFS files remain pointer text on both
 adapters. Reuse canonical LFS integrity/range/session ownership rather than
 creating a second object reader; qualify snapshot/late-blob attributes, COW and
-generation transitions. Managed FUSE concurrency and replacement-target races
-need native reproductions alongside that work. Preserve these ownership/read
+generation transitions. Checkpoint-40 closes managed runtime-worker starvation;
+engine-drain cancellation and replacement-target races still need native proof. Preserve these ownership/read
 boundaries before widening concurrency. Git LFS is a current content type and
 must not be deleted as pack-v1 compatibility.
 

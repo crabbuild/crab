@@ -148,13 +148,7 @@ impl NativeMount {
 
     async fn stop(self) {
         if let Some(session) = self.fuse {
-            let path = self.path;
-            tokio::task::spawn_blocking(move || {
-                crate::mount::unmount_background_session(session, &path)
-            })
-            .await
-            .unwrap()
-            .unwrap();
+            crate::mount::unmount_background_session(session, &self.path).unwrap();
         }
         self.cancel.cancel();
         if let Some(task) = self.nfs {
@@ -382,9 +376,13 @@ async fn qualify(fuse: bool, read_only: bool) {
         eprintln!("native_open_lifetime fuse={fuse} rename_unlink_replacement_cow=true");
         Ok(())
     }).await;
-    let retained_busy_owner = if fuse && read_only {
+    let (retained_busy_owner, worker_progress) = if fuse && read_only {
         use std::io::BufRead;
         use std::process::{Command, Stdio};
+        use std::sync::{
+            Arc,
+            atomic::{AtomicBool, Ordering},
+        };
         let path = mounted.path.clone();
         let mut holder = Command::new("python3")
             .args([
@@ -401,16 +399,35 @@ async fn qualify(fuse: bool, read_only: bool) {
             .read_line(&mut ready)
             .unwrap();
         assert_eq!(ready.trim(), "ready");
-        let stopping = tokio::spawn(mounted.stop());
-        tokio::time::sleep(std::time::Duration::from_secs(12)).await;
-        let retained = crate::native_mounts::contains(&path).unwrap() && !stopping.is_finished();
-        holder.stdin.take().unwrap().write_all(b"release").unwrap();
-        holder.wait().unwrap();
+        let stopped = Arc::new(AtomicBool::new(false));
+        let completed = Arc::clone(&stopped);
+        let stopping = tokio::spawn(async move {
+            mounted.stop().await;
+            completed.store(true, Ordering::SeqCst);
+        });
+        let progress = Arc::new(AtomicBool::new(false));
+        let heartbeat = Arc::clone(&progress);
+        let heartbeat = tokio::spawn(async move {
+            tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+            heartbeat.store(true, Ordering::SeqCst);
+        });
+        // Release the real client independently of the runtime under test, so
+        // worker starvation fails an assertion instead of deadlocking cleanup.
+        let observer = tokio::task::spawn_blocking(move || {
+            std::thread::sleep(std::time::Duration::from_secs(12));
+            let retained = crate::native_mounts::contains(&path)
+                .map(|mounted| mounted && !stopped.load(Ordering::SeqCst));
+            let progressed = progress.load(Ordering::SeqCst);
+            holder.stdin.take().unwrap().write_all(b"release").unwrap();
+            holder.wait().unwrap();
+            (retained.unwrap(), progressed)
+        });
         stopping.await.unwrap();
-        retained
+        heartbeat.await.unwrap();
+        observer.await.unwrap()
     } else {
         mounted.stop().await;
-        true
+        (true, true)
     };
     output.engine.shutdown_background().await;
     assert_eq!(
@@ -426,6 +443,7 @@ async fn qualify(fuse: bool, read_only: bool) {
         retained_busy_owner,
         "busy FUSE teardown detached or released its serving owner"
     );
+    assert!(worker_progress, "busy FUSE teardown starved the runtime");
     let result = result.unwrap();
     assert!(result.is_ok(), "native operations failed: {result:?}");
 }
@@ -513,7 +531,7 @@ async fn nfs_mapped_commit_without_msync() {
     qualify_mapped_commit(false).await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[tokio::test(flavor = "multi_thread", worker_threads = 1)]
 #[ignore = "requires a dedicated Linux environment with native FUSE/NFS mount privileges"]
 async fn fuse_readonly() {
     qualify(true, true).await;

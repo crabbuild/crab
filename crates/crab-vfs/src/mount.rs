@@ -84,55 +84,69 @@ pub fn read_pid_file(crab_dir: &Path) -> Option<u32> {
 
 /// Detach the native client and join every FUSE callback before returning.
 /// Busy or uncertain native state retains serving ownership until detachment.
-pub fn unmount_background_session(
+/// Inside Tokio, the owner must use a multi-thread runtime.
+pub(crate) fn unmount_background_session(
     session: fuser::BackgroundSession,
     mountpoint: &Path,
 ) -> Result<()> {
-    loop {
-        let result = crate::native_mounts::contains(mountpoint);
-        match result {
-            Ok(false) => break,
-            Ok(true) => {
-                #[cfg(target_os = "linux")]
-                let result = std::process::Command::new("fusermount3")
-                    .arg("-u")
-                    .arg(mountpoint)
-                    .output();
-                #[cfg(not(target_os = "linux"))]
-                let result = std::process::Command::new("umount")
-                    .arg(mountpoint)
-                    .output();
-                match result {
-                    Ok(output) if output.status.success() => continue,
-                    Ok(output) => {
-                        warn!(mountpoint = %mountpoint.display(), status = %output.status, "FUSE unmount pending; retaining serving owner");
-                    }
-                    Err(error) => {
-                        warn!(%error, mountpoint = %mountpoint.display(), "FUSE unmount pending; retaining serving owner");
+    // Hand off the worker while keeping session/cache ownership on this stack.
+    // Cancelling a session-only job's waiter could drop cache admission early.
+    tokio::task::block_in_place(move || {
+        loop {
+            let result = crate::native_mounts::contains(mountpoint);
+            match result {
+                Ok(false) => break,
+                Ok(true) => {
+                    #[cfg(target_os = "linux")]
+                    let result = std::process::Command::new("fusermount3")
+                        .arg("-u")
+                        .arg(mountpoint)
+                        .output();
+                    #[cfg(not(target_os = "linux"))]
+                    let result = std::process::Command::new("umount")
+                        .arg(mountpoint)
+                        .output();
+                    match result {
+                        Ok(output) if output.status.success() => continue,
+                        Ok(output) => {
+                            warn!(mountpoint = %mountpoint.display(), status = %output.status, "FUSE unmount pending; retaining serving owner");
+                        }
+                        Err(error) => {
+                            warn!(%error, mountpoint = %mountpoint.display(), "FUSE unmount pending; retaining serving owner");
+                        }
                     }
                 }
+                Err(error) => {
+                    warn!(%error, mountpoint = %mountpoint.display(), "FUSE mount state unavailable; retaining serving owner");
+                }
             }
-            Err(error) => {
-                warn!(%error, mountpoint = %mountpoint.display(), "FUSE mount state unavailable; retaining serving owner");
-            }
+            // Keep callbacks and cache ownership while native clients are busy.
+            // A deadline cannot authorize forced detach or abandoning their thread.
+            std::thread::sleep(std::time::Duration::from_secs(2));
         }
-        // Keep callbacks and cache ownership while native clients are busy.
-        // A deadline cannot authorize forced detach or abandoning their thread.
-        std::thread::sleep(std::time::Duration::from_secs(2));
-    }
-    // Join only after confirmed native detachment; fuser's auto-unmount socket
-    // closure alone does not prove that the kernel client has detached.
-    session.join().map_err(CrabError::Io)
+        // Join only after confirmed native detachment; fuser's auto-unmount socket
+        // closure alone does not prove that the kernel client has detached.
+        session.join().map_err(CrabError::Io)
+    })
 }
 
 /// Mount the FUSE filesystem and return its owned session.
-/// Returns an error if the target is already mounted or setup fails.
+/// Requires a multi-thread Tokio runtime; rejects occupied targets and setup failures.
 pub fn mount(
     config: &MountConfig,
     resolver: Arc<FuseResolver>,
     engine: Arc<VfsEngine>,
     rt: Handle,
 ) -> Result<MountedSession> {
+    // Foreground signal handling and synchronous callback waits also need a
+    // scheduler that can keep driving independent work during native cleanup.
+    if rt.runtime_flavor() != tokio::runtime::RuntimeFlavor::MultiThread {
+        return Err(CrabError::Configuration {
+            key: "FUSE requires a multi-thread Tokio runtime".into(),
+            origin: "FUSE mount".into(),
+        });
+    }
+
     let mountpoint = &config.mountpoint;
 
     // Ensure mountpoint directory exists.
