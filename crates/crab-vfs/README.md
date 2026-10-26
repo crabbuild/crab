@@ -450,6 +450,9 @@ Unix preflight and the serving control owner hold the same exclusive endpoint
 lease. Preflight removes a stale socket only after a missing/refused connection;
 the server never unlinks an endpoint before binding. Teardown retains the lease
 through connection drain and removes only the socket device/inode it bound.
+The owner explicitly unlocks after cleanup, so an unrelated forked child retaining
+the file description cannot delay the next owner. Closing the descriptor alone
+does not establish this handoff.
 The zero-byte `.sock.lock` file remains intentionally: unlinking it could let a
 replacement bypass a process holding the previous inode. A live lease makes
 preflight fail even while its server is draining. Other endpoint connection

@@ -905,7 +905,22 @@ async fn run_unix_server(
 }
 
 #[cfg(unix)]
-fn lock_unix_endpoint(path: &Path) -> std::io::Result<std::fs::File> {
+struct UnixEndpointLease(std::fs::File);
+
+#[cfg(unix)]
+impl Drop for UnixEndpointLease {
+    fn drop(&mut self) {
+        // A forked child can retain this open-file description until exec.
+        // The serving owner joins handlers and cleans its socket before drop;
+        // explicitly unlock so unrelated children cannot extend its lease.
+        if let Err(error) = fs4::fs_std::FileExt::unlock(&self.0) {
+            tracing::warn!(%error, "failed to release NFS control endpoint lease");
+        }
+    }
+}
+
+#[cfg(unix)]
+fn lock_unix_endpoint(path: &Path) -> std::io::Result<UnixEndpointLease> {
     use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
 
     if let Some(parent) = path.parent() {
@@ -935,7 +950,7 @@ fn lock_unix_endpoint(path: &Path) -> std::io::Result<std::fs::File> {
             "NFS control endpoint already has an owner",
         ));
     }
-    Ok(file)
+    Ok(UnixEndpointLease(file))
 }
 
 #[cfg(unix)]

@@ -101,7 +101,7 @@ async fn endpoint_lease_keeps_one_inode_across_socket_cleanup() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("control.sock");
     let lease = lock_unix_endpoint(&path).unwrap();
-    fs4::fs_std::FileExt::unlock(&lease).unwrap();
+    fs4::fs_std::FileExt::unlock(&lease.0).unwrap();
     let (endpoint, cancel, handle) = start_unix(root.path()).await;
     let unavailable = probe_endpoint_available(Some(&endpoint));
     cancel.cancel();
@@ -110,13 +110,37 @@ async fn endpoint_lease_keeps_one_inode_across_socket_cleanup() {
         matches!(unavailable, Err(CrabError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock)
     );
     assert!(!path.exists());
-    assert!(fs4::fs_std::FileExt::try_lock_exclusive(&lease).unwrap());
+    assert!(fs4::fs_std::FileExt::try_lock_exclusive(&lease.0).unwrap());
     // A stale descriptor must still exclude the next owner. Recreating the
     // lease file during cleanup would let the new owner bypass this lock.
     assert!(
         matches!(lock_unix_endpoint(&path), Err(error) if error.kind() == std::io::ErrorKind::WouldBlock)
     );
     drop(lease);
+    probe_endpoint_available(Some(&endpoint)).unwrap();
+}
+
+#[cfg(unix)]
+#[test]
+fn endpoint_lease_release_does_not_wait_for_inherited_descriptors() {
+    let root = tempfile::tempdir().unwrap();
+    let path = root.path().join("control.sock");
+    let lease = lock_unix_endpoint(&path).unwrap();
+    // dup and fork retain the same open-file description and flock ownership.
+    let inherited = lease.0.try_clone().unwrap();
+    assert!(matches!(
+        lock_unix_endpoint(&path),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+    ));
+    drop(lease);
+    let next = lock_unix_endpoint(&path).unwrap();
+    drop(inherited);
+    assert!(matches!(
+        lock_unix_endpoint(&path),
+        Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
+    ));
+    drop(next);
+    let endpoint = format!("unix:{}", path.display());
     probe_endpoint_available(Some(&endpoint)).unwrap();
 }
 

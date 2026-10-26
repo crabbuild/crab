@@ -4020,7 +4020,79 @@ and scoped lease guard are prepared outside the checkout, not applied here.
 This is the next correctness repair; the CI cause is not declared proven by the
 kernel probe alone. The full hardening goal remains active.
 
+## Checkpoint 57 — explicit NFS endpoint lease release
+
+Checkpoint-55 CI failed its post-shutdown endpoint reacquisition. The control
+owner already joined handlers and performed inode-conditional socket cleanup,
+but closed its lease descriptor without explicitly unlocking. A concurrent fork
+can retain the same open-file description until exec, extending flock ownership
+after the serving owner has returned. Both Linux and macOS kernel probes reproduce
+that condition; Rust 1.97 documents that `File::try_clone` shares the underlying
+handle, and locked fs4 0.13.1 uses rustix flock on Unix.
+
+A private `UnixEndpointLease` now explicitly unlocks on drop. The existing
+acquisition, shutdown order, socket identity checks and persistent lock-file inode
+stay intact. Preflight and server errors receive the same release policy without
+repeating cleanup at each return. The runtime change adds 15 Rust lines; no public
+API, dependency, configuration, wire format, delay or retry policy is added.
+
+| Evidence cell | Checked boundary |
+| --- | --- |
+| Changed owner | `nfs_control` private lease guard, consumed by Unix preflight and serving |
+| Entry / callers | CLI foreground/helper NFS and daemon NFS through `nfs_mount::run_until_cancelled`; daemon uses the same control owner |
+| Callee / dependency | fs4 exclusive flock/unlock; Rust `File::try_clone`; actual duplicated-descriptor and fork kernel behavior |
+| Release boundary | Existing connection drain → conditional socket cleanup → listener drop → lease drop; early bind/preflight errors also drop the guard |
+| Siblings | Cache lifecycle and mount-cache guards already explicitly unlock. FUSE IPC has separate coordinator/cache ownership. TCP uses socket binding, not this flock guard; Unix TCP-override port lifetime under fork remains separate follow-up. Changed code is excluded on Windows |
+| Existing tests | Duplicate bind, persistent inode, replacement-path preservation, blocked snapshot drain, idle connections and reply deadlines remain in the full NFS-feature suites |
+| Main comparison | Current main has no persistent endpoint lease and uses socket bind/unlink admission. The direct lease baseline is checkpoint 56, not a claimed equivalent main test |
+
+Is this the best fix? Put release responsibility in the private owner so normal
+completion and every early error share it. Reusing the cache directory guard
+would import different path/cleanup policy; unlocking only two success branches
+would miss errors. No generic lock abstraction or new test API is needed.
+
+The regression keeps a duplicate descriptor alive, proves exclusion before owner
+drop, then requires immediate next-owner acquisition. Dropping the old duplicate
+must not release the new owner's lease. Its source is byte-identical before/after
+the fix. A single-field wrapper first preserves the previous implicit File-close
+behavior; that baseline fails with `WouldBlock` at next-owner acquisition on both
+platforms. Adding only the release implementation makes the same test pass. This
+reproduces the release mechanism, not the exact nondeterministic CI schedule.
+
+Final qualification:
+
+- Linux NFS/gix-facade library suite: 589 passes, one existing ignored case.
+  macOS: 591 passes, none ignored. The package has only its library target;
+  its enabled doctest slices complete with zero tests on both platforms.
+- Scoped VFS Clippy completes with zero diagnostics on both platforms. Empty,
+  FUSE-only and NFS-only library checks pass. No lint suppression changes.
+- Both final Make-installed role sets pass the checked-in 6 MiB reuse smoke's
+  25 checks. Eight fresh native cases omit `--ref`: Linux foreground FUSE/NFS
+  RO/RW and managed FUSE RW; macOS foreground NFS RO/RW and helper NFS RW.
+  Full/range bytes, EROFS, serving PID, fsync → live commit/push → independent
+  eager clone/fsck, normal detach and successful foreground exit pass. All four
+  role hashes stay fixed on each OS; no forced cleanup or cache reset.
+- The unchanged-source Linux feature baseline passes 588 tests with one ignored.
+  Its first generic runner lacked the real read-only Git metadata and failed two
+  ambient-context fixtures; the same binary passes after attaching that metadata.
+  Both original logs are retained. No test or oracle is changed for that recovery.
+- `endpoint-lease/source-manifest.json` binds 1,557 source/build/doc files,
+  including the touched README. Qualification binds immutable checkpoint-56
+  originals, failing baselines, unchanged regression, upstream contracts, feature/
+  lint results, exact-source roles and native reports. Separate driver hashes are
+  retained outside the checkout. No lockfile, guard/inventory or threshold change.
+
+Checkpoint-56 full Git qualification (195-check add/push, 20-check mirror and
+92-check partial clone) is retained; those whole Git suites are not rerun for this
+private NFS release change. Its workflows remain queued at the last snapshot.
+Return to the obsolete native publisher/fixtures and remaining stored pack-v1
+dispatch. Daemon/private native proof, TCP overrides, native target identity,
+Windows cache locking and all-mode performance/durability gates remain open.
+
 ## Remaining priority order
+
+Checkpoint-57 closes the reproduced Unix endpoint flock handoff mechanism;
+TCP override and other native identity/lifecycle proof remains open.
 
 The helper-layout gap and live read-only inspection leak are closed by the
 installed-role proofs. Checkpoint-25 closes the reproduced Linux NFS cache
