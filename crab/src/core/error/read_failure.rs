@@ -30,6 +30,7 @@ enum Cause<'a> {
 impl ReadFailure {
     fn with_cause<T>(&self, diagnostic: impl FnOnce(Cause<'_>) -> T) -> T {
         let mut current: Option<&(dyn Error + 'static)> = Some(&self.0);
+        let mut remote_context = None;
         while let Some(error) = current {
             if let Some(error) = error.downcast_ref::<CrabError>() {
                 return diagnostic(Cause::Product(error));
@@ -143,10 +144,83 @@ impl ReadFailure {
                 };
                 return diagnostic(Cause::Product(&product));
             }
+            if let Some(crab_metadata::error::MetadataError::CorruptObject { path, reason }) =
+                error.downcast_ref::<crab_metadata::error::MetadataError>()
+            {
+                let product = CrabError::CorruptObject {
+                    path: path.clone(),
+                    reason: reason.clone(),
+                };
+                return diagnostic(Cause::Product(&product));
+            }
+            if let Some(remote) = error.downcast_ref::<crab_remote_git::Error>() {
+                use crab_remote_git::{Error as Remote, RevisionError};
+                remote_context = Some(remote);
+                let product = match remote {
+                    // Transparent source adapters can omit the typed inner error
+                    // from Error::source(); retain its diagnostic contract explicitly.
+                    Remote::Storage(source) => {
+                        current = Some(source);
+                        continue;
+                    }
+                    Remote::Metadata(source)
+                    | Remote::Manifest { source }
+                    | Remote::Inventory { source } => {
+                        current = Some(source);
+                        continue;
+                    }
+                    // Borrow diagnostic facts; self.0 retains the complete typed
+                    // failure, including coalesced reads and failed close operations.
+                    Remote::SharedRead { source } => {
+                        current = Some(source.as_ref());
+                        continue;
+                    }
+                    Remote::CloseAfterFailure { operation, .. } => {
+                        current = Some(operation.as_ref());
+                        continue;
+                    }
+                    Remote::Corrupt { .. }
+                    | Remote::RepositoryState { .. }
+                    | Remote::ObjectKind { .. }
+                    | Remote::CommitParse { .. }
+                    | Remote::TreeParse { .. }
+                    | Remote::TagParse { .. }
+                    | Remote::PackedEntryCrcMismatch { .. }
+                    | Remote::ObjectIdMismatch { .. }
+                    | Remote::CacheCorrupt { .. }
+                    | Remote::PackEntry { .. }
+                    | Remote::Inflate { .. }
+                    | Remote::InvalidInflatedEntry { .. }
+                    | Remote::InvalidDelta { .. }
+                    | Remote::DeltaBaseNotFound { .. }
+                    | Remote::PackIndex {
+                        source:
+                            gix_pack::index::init::Error::Corrupt { .. }
+                            | gix_pack::index::init::Error::UnsupportedVersion { .. },
+                        ..
+                    }
+                    | Remote::Revision {
+                        reason: RevisionError::TagCycle,
+                    } => Some(CrabError::CorruptObject {
+                        path: "remote Git".to_owned(),
+                        reason: remote.to_string(),
+                    }),
+                    Remote::Cancelled => Some(CrabError::Cancelled),
+                    _ if remote.source().is_none() => Some(CrabError::Protocol(remote.to_string())),
+                    _ => None,
+                };
+                if let Some(product) = product {
+                    return diagnostic(Cause::Product(&product));
+                }
+            }
             if let Some(error) = error.downcast_ref::<std::io::Error>() {
                 return diagnostic(Cause::Io(error));
             }
             current = error.source();
+        }
+        if let Some(remote) = remote_context {
+            let product = CrabError::Protocol(remote.to_string());
+            return diagnostic(Cause::Product(&product));
         }
         diagnostic(Cause::Other)
     }
@@ -269,6 +343,43 @@ impl Error for ReadFailure {
 mod tests {
     use super::*;
     use std::time::Duration;
+
+    #[test]
+    fn remote_git_corruption_keeps_integrity_diagnostics_and_typed_source() {
+        use crab_remote_git::{CorruptionStage, Error as RemoteGitError};
+        for source in [
+            RemoteGitError::Corrupt {
+                stage: CorruptionStage::PackEntry,
+            },
+            RemoteGitError::SharedRead {
+                source: std::sync::Arc::new(RemoteGitError::Corrupt {
+                    stage: CorruptionStage::PackIndex,
+                }),
+            },
+            RemoteGitError::Metadata(crab_metadata::error::MetadataError::CorruptObject {
+                path: "remote Git metadata".to_owned(),
+                reason: "invalid committed bytes".to_owned(),
+            }),
+        ] {
+            let error = CrabError::from(ReadError::RemoteGit(source));
+            let mut current: Option<&(dyn Error + 'static)> = Some(&error);
+            let mut retained = false;
+            while let Some(source) = current {
+                retained |= source.downcast_ref::<RemoteGitError>().is_some();
+                current = source.source();
+            }
+            assert_eq!(
+                (
+                    error.code(),
+                    error.category(),
+                    error.exit_code(),
+                    error.is_retryable(),
+                    retained
+                ),
+                ("CRAB-E0020", ErrorCategory::Integrity, 4, false, true)
+            );
+        }
+    }
 
     fn storage_errors() -> Vec<StorageError> {
         use crab_storage::identity::StorageProviderKind;
@@ -410,32 +521,49 @@ mod tests {
 
     #[test]
     fn nested_storage_diagnostics_match_direct_product_conversion() {
-        for (source, direct) in storage_errors().into_iter().zip(storage_errors()) {
-            let direct = CrabError::from(direct);
-            let nested = CrabError::Read(ReadFailure(ReadError::CacheStore(
-                crab_cache_store::CacheStoreError::Storage(source),
-            )));
-            let source_before = std::iter::successors(nested.source(), |source| (*source).source())
-                .find_map(|source| source.downcast_ref::<StorageError>())
-                .unwrap() as *const StorageError;
+        fn retained_storage(error: &CrabError) -> Option<&StorageError> {
+            std::iter::successors(error.source(), |source| (*source).source()).find_map(|source| {
+                source.downcast_ref::<StorageError>().or_else(|| {
+                    match source.downcast_ref::<crab_remote_git::Error>() {
+                        Some(crab_remote_git::Error::Storage(storage)) => Some(storage),
+                        _ => None,
+                    }
+                })
+            })
+        }
+        let wrappers: [fn(StorageError) -> CrabError; 2] = [
+            |source| {
+                CrabError::Read(ReadFailure(ReadError::CacheStore(
+                    crab_cache_store::CacheStoreError::Storage(source),
+                )))
+            },
+            |source| CrabError::from(crab_remote_git::Error::Storage(source)),
+        ];
+        for wrap in wrappers {
+            for (source, direct) in storage_errors().into_iter().zip(storage_errors()) {
+                let direct = CrabError::from(direct);
+                let nested = wrap(source);
+                let source_before = retained_storage(&nested).map(std::ptr::from_ref);
 
-            assert_eq!(nested.code(), direct.code(), "{direct:?}");
-            assert_eq!(nested.exit_code(), direct.exit_code(), "{direct:?}");
-            assert_eq!(nested.category(), direct.category(), "{direct:?}");
-            assert_eq!(nested.is_retryable(), direct.is_retryable(), "{direct:?}");
-            assert_eq!(nested.hint(), direct.hint(), "{direct:?}");
-            assert_eq!(nested.docs_anchor(), direct.docs_anchor(), "{direct:?}");
-            assert_eq!(nested.details_json(), direct.details_json(), "{direct:?}");
-            assert_eq!(nested.to_string(), direct.to_string(), "{direct:?}");
-            let retry = match retry_class(&direct) {
-                RetryClass::InspectErrno => RetryClass::Fatal,
-                class => class,
-            };
-            assert_eq!(retry_class(&nested), retry, "{direct:?}");
-            let source_after = std::iter::successors(nested.source(), |source| (*source).source())
-                .find_map(|source| source.downcast_ref::<StorageError>())
-                .unwrap() as *const StorageError;
-            assert_eq!(source_before, source_after);
+                assert_eq!(nested.code(), direct.code(), "{direct:?}");
+                assert_eq!(nested.exit_code(), direct.exit_code(), "{direct:?}");
+                assert_eq!(nested.category(), direct.category(), "{direct:?}");
+                assert_eq!(nested.is_retryable(), direct.is_retryable(), "{direct:?}");
+                assert_eq!(nested.hint(), direct.hint(), "{direct:?}");
+                assert_eq!(nested.docs_anchor(), direct.docs_anchor(), "{direct:?}");
+                assert_eq!(nested.details_json(), direct.details_json(), "{direct:?}");
+                assert_eq!(nested.to_string(), direct.to_string(), "{direct:?}");
+                let retry = match retry_class(&direct) {
+                    RetryClass::InspectErrno => RetryClass::Fatal,
+                    class => class,
+                };
+                assert_eq!(retry_class(&nested), retry, "{direct:?}");
+                let source_after = retained_storage(&nested).map(std::ptr::from_ref);
+                assert_eq!(
+                    (source_before.is_some(), source_before),
+                    (true, source_after)
+                );
+            }
         }
     }
 

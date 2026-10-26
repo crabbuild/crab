@@ -713,7 +713,7 @@ where
                 result = crab_metadata::manifest_store::read_repository_snapshot(store, &layout) => result?,
             };
             let manifest = snapshot.materialized_manifest();
-            let refs = RepositoryRefs::try_from(&manifest).map_err(remote_error)?;
+            let refs = RepositoryRefs::try_from(&manifest).map_err(CrabError::from)?;
             (refs, snapshot.journal.packs, None)
         }
     };
@@ -838,7 +838,7 @@ where
                         || !admitted
                             .0
                             .matches_pack_inventory(&discovery_packs)
-                            .map_err(remote_error)?
+                            .map_err(CrabError::from)?
                     {
                         return reject_protocol_request(
                             writer,
@@ -1067,7 +1067,7 @@ async fn validate_fetch_admission_catalog(
         let operation = repository
             .operation(crab_remote_git::OperationKind::UploadPack, cancellation)
             .await
-            .map_err(remote_error)?;
+            .map_err(CrabError::from)?;
         let result = operation
             .catalog_object_ordinals(&request.wants)
             .await
@@ -1084,7 +1084,7 @@ async fn validate_fetch_admission_catalog(
                     })
                     .collect::<Vec<_>>()
             });
-        operation.finish(result).await.map_err(remote_error)?
+        operation.finish(result).await.map_err(CrabError::from)?
     } else {
         vec![false; request.wants.len()]
     };
@@ -1253,11 +1253,11 @@ async fn open_repository_with_visibility_requirement(
                         visibility_error = Some(error);
                         (Some(generation), generation)
                     }
-                    Err(error) => return Err(remote_error(error)),
+                    Err(error) => return Err(CrabError::from(error)),
                 }
             }
             Err(RemoteGitError::RepositoryIndexing { observed, required }) => (observed, required),
-            Err(error) => return Err(remote_error(error)),
+            Err(error) => return Err(CrabError::from(error)),
         };
         last_indexing = Some((observed_generation, required_generation));
 
@@ -1317,7 +1317,7 @@ async fn open_repository_with_visibility_requirement(
                 continue;
             }
             if let Some(error) = visibility_error {
-                return Err(remote_error(error));
+                return Err(CrabError::from(error));
             }
         }
         if !wait_for_locator_read_retry(
@@ -1338,7 +1338,7 @@ async fn open_repository_with_visibility_requirement(
             "upload-pack repository admission ended without a result".to_owned(),
         ));
     };
-    Err(remote_error(RemoteGitError::RepositoryIndexing {
+    Err(CrabError::from(RemoteGitError::RepositoryIndexing {
         observed,
         required,
     }))
@@ -1412,7 +1412,7 @@ async fn open_capsule_repository_from_root(
     Option<crab_read::capsule_protocol::LayeredColdClonePack>,
 )> {
     let layout = crab_storage::StoreLayout::new(store.clone(), prefix.to_owned());
-    let options = upload_pack_repository_options().map_err(remote_error)?;
+    let options = upload_pack_repository_options().map_err(CrabError::from)?;
     let maximum = options.operation_limits().max_fetched_bytes;
     let limits = crab_read::capsule_protocol::CapsuleReadLimits {
         max_capsule_bytes: maximum,
@@ -1427,7 +1427,7 @@ async fn open_capsule_repository_from_root(
         .await?;
         let direct_pack = footer_view
             .layered_cold_clone_pack(&layout, options.operation_limits().max_response_bytes)
-            .map_err(remote_error)?;
+            .map_err(CrabError::from)?;
         (footer_view, direct_pack, true)
     } else {
         (
@@ -1439,7 +1439,8 @@ async fn open_capsule_repository_from_root(
     };
     let bucket = store.bucket_identity();
     let provider = format!("{:?}:{}:{}", bucket.cloud, bucket.host, bucket.container);
-    let identity = RepositoryIdentity::new(provider, prefix.to_owned(), 1).map_err(remote_error)?;
+    let identity =
+        RepositoryIdentity::new(provider, prefix.to_owned(), 1).map_err(CrabError::from)?;
     let proof = if tip_bound {
         UploadPackVisibilityProof::TipBound {
             transitions: Arc::new(view.tip_bound_transitions().await?),
@@ -1675,7 +1676,7 @@ async fn visible_objects_catalog(
     let operation = repository
         .operation(crab_remote_git::OperationKind::UploadPack, cancellation)
         .await
-        .map_err(remote_error)?;
+        .map_err(CrabError::from)?;
     let ordinals = operation.catalog_object_ordinals(object_ids).await;
     let result = ordinals.map(|ordinals| {
         ordinals
@@ -1690,7 +1691,7 @@ async fn visible_objects_catalog(
             })
             .collect()
     });
-    operation.finish(result).await.map_err(remote_error)
+    operation.finish(result).await.map_err(CrabError::from)
 }
 
 async fn native_shallow_visibility(
@@ -1717,7 +1718,7 @@ async fn native_shallow_visibility(
     let Some(visible) = repository
         .commits_reachable_from(&object_ids, &roots, cancellation)
         .await
-        .map_err(remote_error)?
+        .map_err(CrabError::from)?
     else {
         tracing::debug!(
             candidate_commits = object_ids.len(),
@@ -2046,7 +2047,7 @@ async fn write_preplanned_cached_fetch_response<W: AsyncWrite + Unpin>(
                         cancellation,
                     )
                     .await
-                    .map_err(remote_error);
+                    .map_err(CrabError::from);
             }
         }
         let plan = match proof {
@@ -2081,7 +2082,7 @@ async fn write_preplanned_cached_fetch_response<W: AsyncWrite + Unpin>(
                 .await
             }
         }
-        .map_err(|error| CrabError::Protocol(format!("upload-pack request rejected: {error}")))?;
+        .map_err(CrabError::from)?;
         if !plan.shallow.is_empty() || !plan.unshallow.is_empty() {
             return Err(CrabError::Internal(
                 "non-deepening shallow fetch unexpectedly changed shallow boundaries".to_owned(),
@@ -2102,7 +2103,7 @@ async fn write_preplanned_cached_fetch_response<W: AsyncWrite + Unpin>(
         repository
             .generate_pack(&plan.object_ids, cancellation)
             .await
-            .map_err(remote_error)
+            .map_err(CrabError::from)
     };
     let pack = match repository
         .generate_pack_request_cached(cache_key, producer, cancellation)
@@ -2113,7 +2114,7 @@ async fn write_preplanned_cached_fetch_response<W: AsyncWrite + Unpin>(
             return reject_protocol_request(writer, error, cancellation).await;
         }
         Err(crab_remote_git::GeneratedPackRequestCacheError::Cache(error)) => {
-            return reject_protocol_request(writer, remote_error(error), cancellation).await;
+            return reject_protocol_request(writer, CrabError::from(error), cancellation).await;
         }
     };
 
@@ -2143,7 +2144,7 @@ async fn write_preplanned_cached_fetch_response<W: AsyncWrite + Unpin>(
     );
     pack.write_sideband(writer, cancellation)
         .await
-        .map_err(remote_error)?;
+        .map_err(CrabError::from)?;
     write_flush(writer, cancellation).await?;
     write_response_end(writer, cancellation)
         .await
@@ -2248,7 +2249,7 @@ async fn write_fetch_response<W: AsyncWrite + Unpin>(
                 },
                 "protocol-v2 upload-pack request rejected"
             );
-            let error = CrabError::Protocol(format!("upload-pack request rejected: {error}"));
+            let error = CrabError::from(error);
             return reject_protocol_request(writer, error, cancellation).await;
         }
     };
@@ -2343,12 +2344,7 @@ async fn write_fetch_response<W: AsyncWrite + Unpin>(
     let pack = match generated {
         Ok(pack) => pack,
         Err(error) => {
-            write_packet(writer, error.to_string().as_bytes(), Some(3), cancellation).await?;
-            write_flush(writer, cancellation).await?;
-            write_response_end(writer, cancellation).await?;
-            return Err(CrabError::Protocol(format!(
-                "upload-pack generation failed: {error}"
-            )));
+            return reject_pack_response(writer, CrabError::from(error), cancellation).await;
         }
     };
     tracing::info!(
@@ -2366,7 +2362,7 @@ async fn write_fetch_response<W: AsyncWrite + Unpin>(
     );
     pack.write_sideband(writer, cancellation)
         .await
-        .map_err(remote_error)?;
+        .map_err(CrabError::from)?;
     write_flush(writer, cancellation).await?;
     write_response_end(writer, cancellation)
         .await
@@ -2530,8 +2526,23 @@ async fn reject_protocol_request<W: AsyncWrite + Unpin>(
     Err(error)
 }
 
-fn remote_error(error: impl std::fmt::Display) -> CrabError {
-    CrabError::Protocol(format!("remote Git upload-pack error: {error}"))
+async fn reject_pack_response<W: AsyncWrite + Unpin>(
+    writer: &mut W,
+    error: CrabError,
+    cancellation: &CancellationToken,
+) -> Result<()> {
+    // Git may disconnect after a fatal sideband. Reporting failure cannot
+    // replace the integrity or origin failure that stopped pack generation.
+    let report = async {
+        write_packet(writer, error.to_string().as_bytes(), Some(3), cancellation).await?;
+        write_flush(writer, cancellation).await?;
+        write_response_end(writer, cancellation).await
+    }
+    .await;
+    if let Err(write_error) = report {
+        tracing::warn!(error = %write_error, "failed to write upload-pack fatal sideband");
+    }
+    Err(error)
 }
 
 fn protocol(message: impl Into<String>) -> CrabError {
@@ -2545,6 +2556,37 @@ mod tests {
     use super::*;
     use std::io::Cursor;
     use tokio::io::{AsyncReadExt, AsyncWriteExt, BufReader};
+
+    #[tokio::test]
+    async fn fatal_sideband_retains_corruption_after_client_disconnect() {
+        let (mut writer, reader) = tokio::io::duplex(64);
+        drop(reader);
+        let error = CrabError::from(RemoteGitError::Corrupt {
+            stage: crab_remote_git::CorruptionStage::PackEntry,
+        });
+        let result = reject_pack_response(&mut writer, error, &CancellationToken::new())
+            .await
+            .map_err(|error| (error.code(), std::error::Error::source(&error).is_some()));
+        assert_eq!(result, Err(("CRAB-E0020", true)));
+    }
+
+    #[tokio::test]
+    async fn fatal_sideband_frames_integrity_before_response_end() {
+        let error = CrabError::from(RemoteGitError::Corrupt {
+            stage: crab_remote_git::CorruptionStage::PackEntry,
+        });
+        let mut payload = vec![3];
+        payload.extend_from_slice(error.to_string().as_bytes());
+        let mut expected = packet(&payload);
+        expected.extend_from_slice(b"00000002");
+        let mut writer = Vec::new();
+        assert!(
+            reject_pack_response(&mut writer, error, &CancellationToken::new())
+                .await
+                .is_err()
+        );
+        assert_eq!(writer, expected);
+    }
 
     #[derive(Debug, PartialEq, Eq)]
     enum Packet {

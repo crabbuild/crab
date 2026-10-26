@@ -3037,7 +3037,7 @@ async fn fetch_capsule_incremental_packs(
         )
         .await
     }
-    .map_err(|error| CrabError::Protocol(format!("incremental fetch planning failed: {error}")))?;
+    .map_err(CrabError::from)?;
     let planning_ms = planning_started.elapsed().as_millis() as u64;
     let mut member_admission_ms = 0;
     let mut direct_install_ms = 0;
@@ -3073,20 +3073,14 @@ async fn fetch_capsule_incremental_packs(
         } else {
             let selected =
                 crab_read::capsule_protocol::layered_fetch_pack_selection(view, &plan.object_ids)
-                    .map_err(|error| {
-                    CrabError::Protocol(format!("incremental fetch admission failed: {error}"))
-                })?;
+                    .map_err(CrabError::from)?;
             match selected {
                 Some(selected) => (Some(selected), "frontier_admission"),
                 None => {
                     let pack_ids = repository
                         .pack_ids_for_objects(&plan.object_ids, cancel)
                         .await
-                        .map_err(|error| {
-                            CrabError::Protocol(format!(
-                                "incremental fetch locator admission failed: {error}"
-                            ))
-                        })?;
+                        .map_err(CrabError::from)?;
                     let selected = pack_ids
                         .into_iter()
                         .map(|pack_id| pack_id.to_string())
@@ -3190,9 +3184,7 @@ async fn fetch_capsule_incremental_packs(
                 .generate_pack_with_bases(&plan.object_ids, &[], cancel)
                 .await
         }
-        .map_err(|error| {
-            CrabError::Protocol(format!("incremental fetch pack generation failed: {error}"))
-        })?;
+        .map_err(CrabError::from)?;
         pack_generation_ms = pack_generation_started.elapsed().as_millis() as u64;
         let pack_dir = git_dir.join("objects").join("pack");
         let lock_wait_started = std::time::Instant::now();
@@ -3385,9 +3377,8 @@ async fn capsule_git_repository(
     let provider = format!("{:?}:{}:{}", bucket.cloud, bucket.host, bucket.container);
     let identity =
         crab_remote_git::RepositoryIdentity::new(provider, router.repo_prefix().to_owned(), 1)
-            .map_err(|error| CrabError::Protocol(error.to_string()))?;
-    let options = crab_read::upload_pack_repository_options()
-        .map_err(|error| CrabError::Protocol(error.to_string()))?;
+            .map_err(CrabError::from)?;
+    let options = crab_read::upload_pack_repository_options().map_err(CrabError::from)?;
     let layout = crab_storage::StoreLayout::with_global_prefix(
         store.as_storage().clone(),
         router.repo_prefix().to_owned(),
@@ -3488,9 +3479,7 @@ async fn fetch_capsule_constrained_pack(
     let pack = repository
         .generate_pack_cached(&plan.object_ids, cache_key, cancel)
         .await
-        .map_err(|error| {
-            CrabError::Protocol(format!("constrained fetch pack generation failed: {error}"))
-        })?;
+        .map_err(CrabError::from)?;
     let pack_dir = git_dir.join("objects").join("pack");
     let _install_lock = crate::git::fetch::acquire_fetch_install_lock(&pack_dir).await?;
     let pack_kind = if options.filter.is_some() {
@@ -3642,9 +3631,7 @@ async fn fetch_capsule_promisor_objects(
     let pack = repository
         .generate_pack(&plan.object_ids, cancel)
         .await
-        .map_err(|error| {
-            CrabError::Protocol(format!("promisor pack generation failed: {error}"))
-        })?;
+        .map_err(CrabError::from)?;
     tracing::info!(
         storage_protocol_version = 2,
         transport = "remote-helper-fetch",

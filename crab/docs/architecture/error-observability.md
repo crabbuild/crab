@@ -73,6 +73,14 @@ pub enum CrabError {
 - `tracing::error!` at the boundary that surfaces the error, not at every
   layer it passes through.
 
+Remote Git failures keep their typed source through the shared read diagnostic
+owner, including coalesced reads and close-after-failure wrappers. Verified
+pack/index corruption uses the existing `CRAB-E0020` integrity diagnostic; nested
+origin failures retain their storage/authentication category. Fetch planning and
+generation use the same conversion across protocol v2, classic, shallow and
+promisor paths. A failed fatal-sideband write cannot replace the original failure
+when Git disconnects. Reporting preserves the existing pkt-line framing phase.
+
 ## Exit Codes
 
 Each error variant maps to a specific exit code for scripting:

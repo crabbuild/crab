@@ -1093,6 +1093,12 @@ impl From<crab_read::upload_pack_wire::WireError> for CrabError {
     }
 }
 
+impl From<crab_remote_git::Error> for CrabError {
+    fn from(source: crab_remote_git::Error) -> Self {
+        Self::Read(ReadFailure(crab_read::ReadError::RemoteGit(source)))
+    }
+}
+
 impl From<crab_read::ReadError> for CrabError {
     fn from(error: crab_read::ReadError) -> Self {
         match error {
@@ -1102,7 +1108,7 @@ impl From<crab_read::ReadError> for CrabError {
             crab_read::ReadError::CacheStore(source) => Self::from(source),
             crab_read::ReadError::Storage(source) => Self::from(source),
             crab_read::ReadError::Metadata(source) => Self::from(source),
-            crab_read::ReadError::RemoteGit(source) => Self::Protocol(source.to_string()),
+            crab_read::ReadError::RemoteGit(source) => Self::from(source),
             crab_read::ReadError::GitWalk(source) => Self::from(source),
             crab_read::ReadError::Lfs(source) => Self::from(source),
             crab_read::ReadError::Xet(source) => Self::from(source),
@@ -2005,7 +2011,7 @@ impl From<crab_write::WriteError> for CrabError {
             crab_write::WriteError::Storage(source) => Self::from(source),
             crab_write::WriteError::Coordination(source) => Self::from(source),
             crab_write::WriteError::Metadata(source) => Self::from(source),
-            crab_write::WriteError::RemoteGit(source) => Self::Io(std::io::Error::other(source)),
+            crab_write::WriteError::RemoteGit(source) => Self::from(source),
             crab_write::WriteError::Git(source) => Self::from(source),
             crab_write::WriteError::GitLocator(source) => Self::from(source),
             crab_write::WriteError::Io(source) => Self::Io(source),
