@@ -66,6 +66,18 @@ weakens hidden-ref authorization.
 
 Source: `crab/src/git/remote_helper.rs`
 
+Remote ref discovery has no local Git owner requirement. The helper captures a
+shared state root only for an actual push, before opening staging or preparing
+push authorization. Read-only sessions neither load nor save `.crab/push-state`; current helper
+publication derives its frontier from the captured Capsule view. Explicit Git-directory configuration, push telemetry ownership and local
+object installation for fetch remain unchanged.
+
+Git's [helper invocation contract](https://git-scm.com/docs/gitremote-helpers#_invocation)
+provides repository context when available. Its
+[transport implementation](https://github.com/git/git/blob/v2.51.0/transport-helper.c#L140-L142)
+sets `GIT_DIR` only when a local Git directory exists; ref discovery must not
+assume one.
+
 ### Direct object-store support contract
 
 This matrix applies to `crab://bucket/repository` remotes backed directly by
@@ -75,7 +87,7 @@ and ETag evidence before Crab claims provider parity.
 
 | Git operation or capability | Direct S3-compatible remote | Automated evidence | RustFS evidence |
 |---|---|---|---|
-| Ref list / `git ls-remote` | Supported; an uninitialized remote reports `CRAB-E0032` with the `crab init <REMOTE>` recovery step, while malformed layout or manifest data fails as corruption | `git::remote_helper` manifest and resolved-session tests | missing, valid, and malformed manifest cases |
+| Ref list / `git ls-remote` | Supported outside a local Git repository, without creating push state; an uninitialized remote reports `CRAB-E0032` with the `crab init <REMOTE>` recovery step, while malformed Capsule data fails as corruption | `git::remote_helper` admission and resolved-session tests | missing, valid, and malformed Capsule cases |
 | Clone | Supported | `remote_helper_transcript`, `e2e_fetch_fsck` | fresh ordinary-Git and `crab clone` cases |
 | Fetch into an existing clone | Supported | resolved helper session and `e2e_fetch_fsck` | second-clone branch update case |
 | Push / branch update | Supported | `e2e_add_commit_push`, helper transcript tests | ordinary Git and Crab CLI cases |

@@ -3664,6 +3664,106 @@ benchmark files remain outside the PR, and no nested feature/tests file is added
 All-mode correctness, optimized performance and remaining pack-v1 removal remain
 open; this checkpoint does not complete the goal.
 
+## Checkpoint 53 — remote discovery without local push state
+
+The checkpoint-52 installed CLI reproduces `git ls-remote --refs` failing with
+E0070/ENOENT from an empty cwd, and default-ref foreground mounting failing with
+E0099 before native setup. The helper unconditionally canonicalized a local Git
+owner before dispatching reads. It also loaded/saved `.crab/push-state` despite
+its current Capsule publisher never consuming or updating that frontier. A
+focused resolved-session regression confirms read-only list creates that state
+before repair; actual entry-point qualification remains separate from that seam.
+
+Remove the obsolete helper state, its context fields and fixture-only roots.
+Capture the shared local state owner only for an actual non-preview push batch,
+before opening staging or preparing push authorization. Read list, write-authority
+list, protocol-v2 serving and fallback no longer resolve that push-only owner.
+Actual pushes retain strict Git ownership, selected-repository staging/telemetry,
+parse-rejection admission and canonical Capsule publication. No missing-metadata
+fallback, fake cwd owner, new env option, compatibility reader or wire change is
+added. The old CLI publisher still has separate PushState consumers; its remaining
+pack-v1 authority is not removed by deleting this unused helper state.
+
+| Evidence cell | Checked boundary |
+| --- | --- |
+| Changed surface | Production helper setup/context and shared protocol loop; push-only staging/telemetry admission |
+| Entry/owner | Git remote-helper entry, `git ls-remote`, remote mount default-ref discovery; actual push captures canonical common Git metadata before staging |
+| Caller/callee | `run_remote_helper` → protocol loop → read advertisement/upload-pack or `dispatch_batch` → Capsule publisher; publisher takes its frontier from the captured Capsule view |
+| Siblings | Classic/local-object fetch retains its Git installation owner; protocol-v2 serves the same captured runtime; dry-run/parse-only requests avoid local push state; actual push and unrelated-cwd telemetry tests remain strict |
+| Tests | Read-only local-state regression fails before repair; helper, Capsule push and discovery slices; dedicated native/default-ref and mirror checks recorded below |
+| Main/base | Current main/base still use native push state and their earlier root policy. Strict helper root capture entered this branch in `3fe268e82da`; the current failure is reproduced on unchanged checkpoint-52 installed roles, not claimed against a native main baseline |
+| Dependency | Git v2.51.0 `git.c` registers ls-remote with gentle setup; `transport-helper.c` exports GIT_DIR only if `have_git_dir()`. Read its source/manual before changing admission; no dependencies/lockfile changes |
+
+Is this the best fix? Removing unused persistence and moving strict local-owner
+capture to its actual consumer repairs read discovery without weakening push
+ownership or restoring the earlier cwd fallback. The old helper frontier was not
+a Capsule authority and cannot justify retaining read-time metadata mutation.
+Runtime-prefix LOC shrinks by 16; obsolete fixture arguments and state-only
+temporaries also disappear.
+
+
+Focused final-source proof:
+
+- Linux/macOS each pass 173 tests: 153 helper, 17 Capsule push and three Git
+  discovery tests. The no-push-owner rejection, selected-repository telemetry,
+  damaged-staging reads, classic/promisor/linked-worktree fetch and runtime-drain
+  cases remain covered. The read-only local-state regression fails before repair.
+- Final regular combined-feature CLI library Clippy completes with 635 macOS /
+  634 Linux warnings and no primary diagnostics on changed hunks. A new
+  single-match warning after removing state saves was fixed before final Make
+  rebuilds, tests and native replay; strict whole-CLI cleanliness is not claimed.
+- Both final Make-installed four-role sets pass all 25 checked-in RustFS CLI
+  smoke checks. With repository-context variables cleared and no local Git,
+  `git ls-remote --refs` succeeds, while an actual ownerless push returns E0070,
+  creates no local push state and leaves remote refs unchanged.
+- Every final native mount omits `--ref`: Linux foreground FUSE/NFS RO/RW,
+  managed FUSE RW, macOS foreground NFS RO/RW and NFS helper RW. Exact 6 MiB
+  full/range bytes, EROFS, real serving-PID status, write/fsync → live commit/push
+  → independent eager clone/fsck, ordinary detach and foreground exit zero pass.
+  All four installed role hashes remain unchanged; no forced cleanup is used.
+- The checked-in Linux mirror namespace suite passes 20 checks / 56 commands,
+  including the previously failing fresh-destination ref discovery. The isolated full
+  partial-clone suite passes 92 checks / 324 commands on Git 2.39.5, including
+  shallow/filter/lazy recovery, everyday workflows, visibility refusals,
+  disconnect cleanup and smaller filtered transfers. Other CI versions are not
+  inferred from one local Git version.
+
+An additional same-remote/same-environment entry replay binds the retained
+checkpoint-52 four-role hashes: baseline `git ls-remote` exits 128 / E0070,
+candidate returns success, and neither local Git nor push state is created.
+Both role sets stay unchanged. This distinguishes local-owner admission from
+configuration/auth or remote Capsule corruption.
+
+The native first attempt stopped on a RustFS health timeout while compilation
+was active; its failed report is retained. A first mirror attempt lacked git-lfs
+in the disposable qualification image; installing Debian git-lfs 3.3.0 in the
+transient runner permits the unchanged oracle to pass. The first broad
+partial-clone attempt passed unborn discovery but RustFS timed out listing the
+shared bucket for the dry-run inventory oracle. Its replay uses a separate fresh
+qualification bucket, retaining the original data and assertions. No production
+fallback, cache reset, admission bypass or threshold change was used.
+
+The gateway CI failures are real performance-gate failures, not stale report
+schemas. Runs 40314421527 and 40323576147 retain verified integrity but terminal
+small-write soak throughput drops to 0.766 and 0.750 of early windows; p95 ratios
+are 1.555 and 1.501. Existing limits require throughput at least 0.8 and p95 at
+most 1.5. Neither run measures a direct baseline, so these prove repeated
+within-run degradation, not a regression against main. Profile native small-write
+preparation and state growth next; keep these gates and establish a matched
+baseline before a causal verdict.
+
+Checkpoint-52 CI passes SDK, GC, NFS, provider, large-repository, replica, cache
+and HTTP; architecture, partial-clone and gateway fail. Architecture's separate
+concrete guard/inventory patch remains unapplied pending explicit approval.
+The NFS dependency-patch approval is scoped to that fork. Other stored pack-v1
+publishers/authority dispatch, lifecycle/retention proof, the matched Cellar/SQLite
+gate and optimized end-to-end throughput/tail latency/RSS remain open.
+
+External `read-only-helper/qualification.json` binds final source/build inputs,
+role hashes, tests, before/after entry points, native/default-ref proof and
+checked-in mirror/protocol results; drivers/oracles have separate hashes. Raw
+benchmark files remain excluded and tests stay inline/flat. Goal remains active.
+
 ## Remaining priority order
 
 The helper-layout gap and live read-only inspection leak are closed by the

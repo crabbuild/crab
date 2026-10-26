@@ -29,7 +29,6 @@ use crate::git::push::{
 };
 use crate::git::push_native::NativePushConfig;
 use crate::git::push_staging::PushStaging;
-use crate::git::push_state::PushState;
 use crate::storage::StoreLayout;
 use crab_metadata::commit_graph::CommitGraphTraversal;
 #[cfg(test)]
@@ -746,16 +745,12 @@ pub async fn run_remote_helper(
             }
         };
 
-    // Load push state for incremental walk (used by native push pipeline).
-    let repo_root = push_repo_root()?;
     let mut cache = SessionCache::new(config);
     cache.capsule_root = Some(resolved.capsule_root);
     let context = RemoteHelperContext {
         store: resolved.store,
         prefix: resolved.repository_prefix,
         cache,
-        push_state: PushState::load(&repo_root),
-        repo_root,
         progress_mode,
         jsonl_stderr_stream,
         invocation_url,
@@ -781,8 +776,6 @@ struct RemoteHelperContext {
     store: crate::storage::store::Store,
     prefix: String,
     cache: SessionCache,
-    push_state: PushState,
-    repo_root: std::path::PathBuf,
     progress_mode: OutputMode,
     jsonl_stderr_stream: Option<Arc<Mutex<JsonlStream<Stderr>>>>,
     invocation_url: String,
@@ -832,8 +825,6 @@ where
             store,
             prefix,
             mut cache,
-            push_state,
-            repo_root,
             progress_mode,
             jsonl_stderr_stream,
             invocation_url,
@@ -846,26 +837,21 @@ where
         let mut pinned_read_store = None;
 
         loop {
-            let batch = match pending_batch.take() {
-                Some(batch) => batch,
-                None => {
-                    let Some(batch) = read_batch(
-                        &mut reader,
-                        &mut line_buf,
-                        &mut options,
-                        &mut writer,
-                        &cancel,
-                    )
-                    .await?
-                    else {
-                        // Save push state on clean exit.
-                        if let Err(e) = push_state.save(&repo_root) {
-                            tracing::warn!(error = %e, "failed to save push state");
-                        }
-                        return Ok(());
-                    };
-                    batch
-                }
+            let batch = if let Some(batch) = pending_batch.take() {
+                batch
+            } else {
+                let Some(batch) = read_batch(
+                    &mut reader,
+                    &mut line_buf,
+                    &mut options,
+                    &mut writer,
+                    &cancel,
+                )
+                .await?
+                else {
+                    return Ok(());
+                };
+                batch
             };
             let uses_read_routing = match &batch {
                 Batch::Capabilities | Batch::List { for_push: false } | Batch::Fetch(_) => true,
@@ -921,9 +907,6 @@ where
                     writer.flush().await?;
                     Ok(())
                 };
-                if let Err(error) = push_state.save(&repo_root) {
-                    tracing::warn!(error = %error, "failed to save push state");
-                }
                 return result;
             }
             if matches!(batch, Batch::Capabilities) {
@@ -940,15 +923,20 @@ where
                     .await?;
                 continue;
             }
-            // Fetch/list never need local staging. Open one reader per push batch
-            // so a damaged local index cannot block reads or retain a session lock.
-            let staging = if matches!(batch, Batch::Push(_))
+            // Ref discovery may run outside Git. Capture a shared state owner
+            // only for a real push, before staging/auth admission. Read-only
+            // sessions must not require metadata or rewrite push-state files.
+            let repo_root = if matches!(batch, Batch::Push(_))
                 && !options.dry_run
                 && batch_requires_repository(&batch, &options)
             {
-                open_staging_for_push().await?
+                Some(push_repo_root()?)
             } else {
-                PushStaging::Missing
+                None
+            };
+            let staging = match repo_root.as_ref() {
+                Some(root) => PushStaging::open(root.join(".crab").join("staging")).await?,
+                None => PushStaging::Missing,
             };
             Box::pin(dispatch_batch(
                 &batch,
@@ -959,7 +947,7 @@ where
                 &prefix,
                 &mut cache,
                 remote_name,
-                Some(&repo_root),
+                repo_root.as_deref(),
                 progress_mode,
                 jsonl_stderr_stream.as_ref(),
                 Some(invocation_url.as_str()),
@@ -1015,13 +1003,9 @@ async fn load_replica_discovery_for_session(
     Ok(())
 }
 
-async fn open_staging_for_push() -> Result<PushStaging> {
-    PushStaging::open(push_repo_root()?.join(".crab").join("staging")).await
-}
-
 fn push_repo_root() -> Result<std::path::PathBuf> {
     // Git can provide GIT_DIR alone while cwd belongs to another repository.
-    // Both staging and push state must follow the selected shared metadata.
+    // Both staging and telemetry must follow the selected shared metadata.
     let common_dir = super::discover::discover_common_git_dir()?.canonicalize()?;
     common_dir
         .parent()
@@ -4036,17 +4020,11 @@ mod tests {
         }
     }
 
-    fn test_context(
-        store: crate::storage::store::Store,
-        prefix: &str,
-        repo_root: std::path::PathBuf,
-    ) -> RemoteHelperContext {
+    fn test_context(store: crate::storage::store::Store, prefix: &str) -> RemoteHelperContext {
         RemoteHelperContext {
             store,
             prefix: prefix.to_owned(),
             cache: SessionCache::new(crate::core::config::Config::default()),
-            push_state: PushState::default(),
-            repo_root,
             progress_mode: OutputMode::Text,
             jsonl_stderr_stream: None,
             invocation_url: format!("crab://bucket/{prefix}"),
@@ -4122,16 +4100,11 @@ mod tests {
 
     /// Run the production protocol loop with a resolved in-memory context.
     async fn run(input: &str) -> String {
-        let push_state_root = tempfile::tempdir().expect("push state tempdir");
         let store = crate::storage::store::Store::new(std::sync::Arc::new(
             object_store::memory::InMemory::new(),
         ));
         initialize_test_remote(&store, "remote-helper-unit").await;
-        let context = test_context(
-            store,
-            "remote-helper-unit",
-            push_state_root.path().to_path_buf(),
-        );
+        let context = test_context(store, "remote-helper-unit");
         let (output, result) =
             run_with_context(input, context, tokio_util::sync::CancellationToken::new()).await;
         result.expect("remote helper protocol session");
@@ -4233,6 +4206,29 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn read_only_sessions_do_not_write_push_state() {
+        let root = tempfile::tempdir().unwrap();
+        let _guard = GitEnvCwdGuard::set(root.path(), &root.path().join(".git"), root.path());
+        let store =
+            crate::storage::store::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        initialize_test_remote(&store, "read-only-session").await;
+        for (input, expected) in [
+            ("list\n", "\n"),
+            ("list for-push\n", "\n"),
+            ("stateless-connect git-receive-pack\n", "fallback\n"),
+        ] {
+            let context = test_context(store.clone(), "read-only-session");
+            let (output, result) =
+                run_with_context(input, context, tokio_util::sync::CancellationToken::new()).await;
+            result.unwrap();
+            assert_eq!(
+                (output.as_str(), root.path().join(".crab").exists()),
+                (expected, false)
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn actual_push_requires_a_captured_repository_owner() {
         let batch = Batch::Push(vec![PushItem::Spec(PushSpec {
             force: false,
@@ -4287,7 +4283,7 @@ mod tests {
         let store =
             crate::storage::store::Store::new(Arc::new(object_store::memory::InMemory::new()));
         initialize_test_remote(&store, "telemetry-owner").await;
-        let context = test_context(store, "telemetry-owner", selected.clone());
+        let context = test_context(store, "telemetry-owner");
         let (output, result) = Box::pin(run_with_context(
             "push refs/heads/main:refs/heads/main\n\n",
             context,
@@ -4309,7 +4305,6 @@ mod tests {
     #[tokio::test]
     async fn helper_exit_closes_its_owned_git_runtime() {
         for (input, cancelled) in [("", false), ("unknown-command\n", false), ("", true)] {
-            let directory = tempfile::tempdir().unwrap();
             let store =
                 crate::storage::store::Store::new(Arc::new(object_store::memory::InMemory::new()));
             let prefix = "helper-runtime-shutdown";
@@ -4322,7 +4317,7 @@ mod tests {
             crab_metadata::manifest_store::create_manifest(store.as_storage(), &layout, &manifest)
                 .await
                 .unwrap();
-            let context = test_context(store.clone(), prefix, directory.path().to_owned());
+            let context = test_context(store.clone(), prefix);
             let repository = crab_remote_git::RemoteGitRepository::open(
                 store.as_storage().clone(),
                 layout,
@@ -4412,11 +4407,11 @@ mod tests {
         std::fs::write(staging.join("index.db"), b"not a SQLite database")
             .expect("write damaged index");
         let _git_guard = GitEnvCwdGuard::set(repo, &repo.join(".git"), repo);
-        assert!(open_staging_for_push().await.is_err());
+        assert!(PushStaging::open(staging).await.is_err());
         let store =
             crate::storage::store::Store::new(Arc::new(object_store::memory::InMemory::new()));
         initialize_test_remote(&store, "damaged-staging-read").await;
-        let context = test_context(store, "damaged-staging-read", repo.to_path_buf());
+        let context = test_context(store, "damaged-staging-read");
 
         let (output, result) = run_with_context(
             "list\nlist for-push\n",
@@ -5558,11 +5553,7 @@ mod tests {
             } else {
                 TEST_GIT_REPO.commit_sha.clone()
             };
-            let context = test_context(
-                store.clone(),
-                router.repo_prefix(),
-                target.path().join("push-state"),
-            );
+            let context = test_context(store.clone(), router.repo_prefix());
             let input = format!("fetch {tip} refs/heads/main\n\n");
             let (_, result) =
                 run_with_context(&input, context, tokio_util::sync::CancellationToken::new()).await;
@@ -5609,11 +5600,7 @@ mod tests {
         let git_dir = target.path().join(".git");
         let _guard = GitEnvCwdGuard::set(target.path(), &git_dir, target.path());
         let tip = commits.last().expect("history tip");
-        let mut context = test_context(
-            store,
-            router.repo_prefix(),
-            target.path().join("push-state"),
-        );
+        let mut context = test_context(store, router.repo_prefix());
         context.cache = SessionCache::new(crate::core::config::Config {
             transfer_hide_refs: vec!["refs/tags/v1".to_owned()],
             ..Default::default()
@@ -5645,11 +5632,7 @@ mod tests {
             let input = format!(
                 "capabilities\nlist\noption filter blob:none\n{depth_option}fetch {tip} refs/heads/main\n\n"
             );
-            let context = test_context(
-                store.clone(),
-                router.repo_prefix(),
-                target.path().join("push-state"),
-            );
+            let context = test_context(store.clone(), router.repo_prefix());
             let (_, result) =
                 run_with_context(&input, context, tokio_util::sync::CancellationToken::new()).await;
             result.expect("classic filtered fetch uses the canonical planner");
@@ -5683,11 +5666,7 @@ mod tests {
             // A later helper process must recover the promised bytes without
             // widening ref visibility or changing the shallow boundary.
             let input = format!("option filter blob:none\nfetch {blob} {blob}\n\n");
-            let context = test_context(
-                store.clone(),
-                router.repo_prefix(),
-                target.path().join("push-state"),
-            );
+            let context = test_context(store.clone(), router.repo_prefix());
             let (_, result) =
                 run_with_context(&input, context, tokio_util::sync::CancellationToken::new()).await;
             result.expect("recover promised blob");
@@ -5714,11 +5693,7 @@ mod tests {
         let tip = commits.last().expect("history tip");
 
         let input = format!("option depth 1\nfetch {tip} refs/heads/main\n\n");
-        let context = test_context(
-            store.clone(),
-            router.repo_prefix(),
-            target.path().join("push-state"),
-        );
+        let context = test_context(store.clone(), router.repo_prefix());
         let (output, result) =
             run_with_context(&input, context, tokio_util::sync::CancellationToken::new()).await;
         result.expect("fetch depth-one capsule history");
@@ -5734,11 +5709,7 @@ mod tests {
         let input = format!(
             "option depth 1\noption deepen-relative true\noption followtags true\nfetch {tip} refs/heads/main\n\n"
         );
-        let context = test_context(
-            store.clone(),
-            router.repo_prefix(),
-            target.path().join("push-state"),
-        );
+        let context = test_context(store.clone(), router.repo_prefix());
         let (output, result) =
             run_with_context(&input, context, tokio_util::sync::CancellationToken::new()).await;
         result.expect("deepen capsule history");
@@ -5754,11 +5725,7 @@ mod tests {
         assert!(git_object_exists(target.path(), &tag));
 
         let input = format!("option depth 0\nfetch {tip} refs/heads/main\n\n");
-        let context = test_context(
-            store.clone(),
-            router.repo_prefix(),
-            target.path().join("push-state"),
-        );
+        let context = test_context(store.clone(), router.repo_prefix());
         let (output, result) =
             run_with_context(&input, context, tokio_util::sync::CancellationToken::new()).await;
         result.expect("unshallow capsule history");
@@ -5773,11 +5740,7 @@ mod tests {
         let _full_guard =
             GitEnvCwdGuard::set(full_target.path(), &full_git_dir, full_target.path());
         let input = format!("option depth 0\nfetch {tip} refs/heads/main\n\n");
-        let context = test_context(
-            store,
-            router.repo_prefix(),
-            full_target.path().join("push-state"),
-        );
+        let context = test_context(store, router.repo_prefix());
         let (output, result) =
             run_with_context(&input, context, tokio_util::sync::CancellationToken::new()).await;
         result.expect("fetch depth-zero capsule history into a full repository");
@@ -5796,11 +5759,7 @@ mod tests {
         let tip = commits.last().expect("history tip");
 
         let input = format!("option deepen-not refs/tags/v1\nfetch {tip} refs/heads/main\n\n");
-        let context = test_context(
-            store,
-            router.repo_prefix(),
-            target.path().join("push-state"),
-        );
+        let context = test_context(store, router.repo_prefix());
         let (output, result) =
             run_with_context(&input, context, tokio_util::sync::CancellationToken::new()).await;
         result.expect("excluded-ref shallow fetch");
@@ -5833,11 +5792,7 @@ mod tests {
         let tip = commits.last().expect("history tip");
 
         let input = format!("option deepen-since {cutoff}\nfetch {tip} refs/heads/main\n\n");
-        let context = test_context(
-            store,
-            router.repo_prefix(),
-            target.path().join("push-state"),
-        );
+        let context = test_context(store, router.repo_prefix());
         let (output, result) =
             run_with_context(&input, context, tokio_util::sync::CancellationToken::new()).await;
         result.expect("timestamp-bounded shallow fetch");
@@ -5863,11 +5818,7 @@ mod tests {
             let _guard = GitEnvCwdGuard::set(target.path(), &git_dir, target.path());
             let tip = commits.last().expect("history tip");
             let input = format!("option {selector}\nfetch {tip} refs/heads/main\n\n");
-            let context = test_context(
-                store.clone(),
-                router.repo_prefix(),
-                target.path().join("push-state"),
-            );
+            let context = test_context(store.clone(), router.repo_prefix());
             let (_, result) =
                 run_with_context(&input, context, tokio_util::sync::CancellationToken::new()).await;
             let error = result.expect_err("empty shallow selection must fail");
@@ -5932,11 +5883,7 @@ mod tests {
                     .trim(),
             );
             let _guard = GitEnvCwdGuard::set(&linked, &private, &linked);
-            let context = test_context(
-                store.clone(),
-                router.repo_prefix(),
-                target.path().join("push-state"),
-            );
+            let context = test_context(store.clone(), router.repo_prefix());
             let input = match mode {
                 "promisor" => format!("option filter blob:none\nfetch {blob} {blob}\n\n"),
                 "filtered" => format!("option filter blob:none\nfetch {tip} refs/heads/main\n\n"),
@@ -5982,11 +5929,7 @@ mod tests {
         run_git(target.path(), &["init", "-q"]);
         let git_dir = target.path().join(".git");
         let _guard = GitEnvCwdGuard::set(target.path(), &git_dir, target.path());
-        let context = test_context(
-            store,
-            router.repo_prefix(),
-            target.path().join("push-state"),
-        );
+        let context = test_context(store, router.repo_prefix());
         let input = format!("option filter blob:none\nfetch {blob} {blob}\n\n");
 
         let (output, result) =
@@ -6671,7 +6614,7 @@ mod tests {
         let prefix = "resolved-protocol-session";
         initialize_test_remote(&store, prefix).await;
 
-        let push_context = test_context(store.clone(), prefix, tmp.path().join("push-state-push"));
+        let push_context = test_context(store.clone(), prefix);
         let push_input = concat!(
             "capabilities\n",
             "list for-push\n",
@@ -6717,7 +6660,7 @@ mod tests {
             .join(&tag_oid[2..]);
         std::fs::remove_file(&loose_tag).expect("remove source tag object before fetch");
 
-        let fetch_context = test_context(store, prefix, tmp.path().join("push-state-fetch"));
+        let fetch_context = test_context(store, prefix);
         let fetch_input = format!(
             "option followtags true\nlist\nfetch {commit} refs/heads/main\nfetch {commit} refs/heads/dev\n\n"
         );
@@ -6753,11 +6696,10 @@ mod tests {
 
     #[tokio::test]
     async fn protocol_session_store_failure_returns_error_without_success() {
-        let tmp = tempfile::tempdir().expect("session tempdir");
         let store = crate::storage::store::Store::new(std::sync::Arc::new(ReadFailingStore {
             inner: object_store::memory::InMemory::new(),
         }));
-        let context = test_context(store, "read-failure", tmp.path().to_path_buf());
+        let context = test_context(store, "read-failure");
 
         let (output, result) = run_with_context(
             "list\n",
@@ -7168,10 +7110,9 @@ mod tests {
 
     #[tokio::test]
     async fn dry_run_previews_without_remote_state_or_auth_preparation() {
-        let root = tempfile::tempdir().expect("push state tempdir");
         let store =
             crate::storage::store::Store::new(Arc::new(object_store::memory::InMemory::new()));
-        let mut context = test_context(store.clone(), "preview", root.path().to_path_buf());
+        let mut context = test_context(store.clone(), "preview");
         context.cache.config.auth.provider = crate::core::config::AuthProvider::CrabAuth;
         let (output, result) = run_with_context(
             "option dry-run true\npush refs/heads/main:refs/heads/main\npush :refs/heads/retired\n\n",
@@ -7548,10 +7489,9 @@ mod tests {
         let input = format!(
             "option filter blob:none\noption filter blob:depth=1\nfetch {tip} refs/heads/main\n\n"
         );
-        let state = tempfile::tempdir().expect("push state");
         let store =
             crate::storage::store::Store::new(Arc::new(object_store::memory::InMemory::new()));
-        let context = test_context(store, "org/unsupported-filter", state.path().to_owned());
+        let context = test_context(store, "org/unsupported-filter");
         let (output, result) =
             run_with_context(&input, context, tokio_util::sync::CancellationToken::new()).await;
         assert_eq!(output, "ok\nunsupported\n");
