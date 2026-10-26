@@ -107,10 +107,12 @@ all acquired leases are released on returned failure or cancellation. The
 orchestrator rechecks capsule activity and conditionally publishes the small
 derived record. None of this is a foreground ref-publication prerequisite.
 
-`initialize::initialize_repository` owns canonical empty-repository creation for
-the CLI and HTTP server. It creates the layout only for an empty repository prefix,
-conditionally publishes the generation-zero manifest, and adopts concurrent or
-previous initialization after validating the persisted canonical roots.
+`capsule_protocol::initialize` creates the unborn Capsule root for CLI, SDK,
+gateway and view-service callers. Existing valid roots are adopted without
+changing HEAD. A nonempty prefix without a Capsule root is rejected unchanged;
+initialization does not upgrade stored pack-v1 repositories in place. The old
+manifest-only repository initializer is removed. Legacy journal/publication
+mechanics remain separate retirement work.
 
 ## Catalog publication
 
@@ -285,7 +287,7 @@ push can acknowledge a fully readable generation.
 | Invalid local evidence and remote-only byte reconstruction | [Catalog tests](tests/catalog.rs) |
 | Catalog close/release, cancellation, superseded generations, read readiness | [Generation tests](tests/generation.rs) |
 | Atomic batches, namespace conflicts, holder-safe cleanup, failed compaction and retry | [Journal tests](tests/journal.rs) |
-| Canonical initialization and adoption | [Initialization tests](src/initialize.rs) |
+| Capsule initialization, publication and recovery | [Capsule protocol tests](src/capsule_protocol.rs) |
 | Original error retained when cleanup also fails | [Error precedence test](src/lib.rs) |
 
 Run these focused tests from the repository root. Replace `crab-write-dev` with

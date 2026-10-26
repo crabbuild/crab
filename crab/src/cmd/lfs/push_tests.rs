@@ -112,13 +112,12 @@ fn remote_ref_tips_reject_a_manifest_repository_without_a_capsule_root() {
     let prefix = "org/lfs-pre-push-v1";
     let layout = crab_storage::StoreLayout::new(store.as_storage().clone(), prefix.to_owned());
     crate::cmd::lfs::block_on_runtime(async {
-        crab_write::initialize::initialize_repository(
-            store.as_storage(),
-            &layout,
-            "refs/heads/main",
-        )
-        .await
-        .map_err(CrabError::from)
+        crab_metadata::layout_descriptor::ensure_canonical_layout(store.as_storage(), &layout)
+            .await?;
+        let manifest = crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main");
+        crab_metadata::manifest_store::create_manifest(store.as_storage(), &layout, &manifest)
+            .await
+            .map_err(CrabError::from)
     })
     .unwrap();
     let context = lfs_remote_context(&store, prefix);

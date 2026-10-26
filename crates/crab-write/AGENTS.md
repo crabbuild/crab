@@ -26,7 +26,7 @@ Trace one path: `crab/src/git/push.rs` → `commit_edits` in
 | --- | --- | --- |
 | Ref publication | `crates/crab-write/src/journal.rs` | `crab/src/git/push.rs` |
 | Read readiness | `crates/crab-write/src/generation.rs` | `crates/crab-server/src/repository/maintenance.rs` |
-| Repository initialization | `crates/crab-write/src/initialize.rs` | `crab/src/cmd/init.rs` |
+| Repository initialization | `crates/crab-write/src/capsule_protocol.rs::initialize` | `crab/src/cmd/init.rs`, SDK, gateway and view-service callers |
 
 ## Invariants
 

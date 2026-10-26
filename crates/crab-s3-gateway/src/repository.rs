@@ -813,7 +813,12 @@ mod tests {
     async fn corrupt_capsule_root_never_falls_back_to_v1() {
         let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()));
         let layout = crab_storage::StoreLayout::new(store.clone(), "dual-read-view".to_owned());
-        crab_write::initialize::initialize_repository(&store, &layout, "refs/heads/main")
+        // Keep valid v1 metadata present to prove Capsule authority is mandatory.
+        crab_metadata::layout_descriptor::ensure_canonical_layout(&store, &layout)
+            .await
+            .unwrap();
+        let manifest = crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main");
+        crab_metadata::manifest_store::create_manifest(&store, &layout, &manifest)
             .await
             .unwrap();
         store
@@ -847,7 +852,12 @@ mod tests {
     async fn missing_capsule_root_rejects_legacy_read_and_write_authority() {
         let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
         let layout = StoreLayout::new(store.clone(), "legacy-authority".to_owned());
-        crab_write::initialize::initialize_repository(&store, &layout, "refs/heads/main")
+        // Keep valid v1 metadata present to prove Capsule authority is mandatory.
+        crab_metadata::layout_descriptor::ensure_canonical_layout(&store, &layout)
+            .await
+            .unwrap();
+        let manifest = crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main");
+        crab_metadata::manifest_store::create_manifest(&store, &layout, &manifest)
             .await
             .unwrap();
         let repository =

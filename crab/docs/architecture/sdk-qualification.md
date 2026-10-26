@@ -774,6 +774,12 @@ still requires the plan's remaining public mutation and workflow surfaces.
 
 ## Public direct initialization progress — incomplete SDK
 
+Historical evidence below describes the retired manifest-only initializer.
+Current CLI, SDK, gateway and view-service initialization uses
+`crab_write::capsule_protocol::initialize`; the old repository initializer and
+its `InitialHead` error are removed in VFS hardening checkpoint 46. Valid legacy
+metadata remains in negative fixtures to prove Capsule admission fails closed.
+
 The `write` feature exposes lazy `Client::initialize_remote(locator, head)`
 requests. The canonical `crab-write::initialize` owner validates fully qualified
 branch HEADs, creates metadata roots conditionally and adopts valid existing

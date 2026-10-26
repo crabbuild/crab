@@ -602,13 +602,21 @@ mod tests {
             v1_router.repo_prefix().to_owned(),
             v1_router.global_prefix().to_owned(),
         );
-        crab_write::initialize::initialize_repository(
+        // Seed valid legacy authority so refusal cannot pass on malformed junk.
+        crab_metadata::layout_descriptor::ensure_canonical_layout(
             v1_store.as_storage(),
             &v1_layout,
-            "refs/heads/main",
         )
         .await
-        .expect("initialize canonical-v1 repository");
+        .unwrap();
+        let manifest = crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main");
+        crab_metadata::manifest_store::create_manifest(
+            v1_store.as_storage(),
+            &v1_layout,
+            &manifest,
+        )
+        .await
+        .unwrap();
         assert!(matches!(
             open_repository_root(&v1_store, "org/v1", "crab://bucket/org/v1").await,
             Err(CrabError::RepositoryNotInitialized { .. })

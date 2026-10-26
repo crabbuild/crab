@@ -11,7 +11,7 @@ Baseline: `origin/crab-v2` at `33f8e6c360d922b3ab1e2c0e5115a2d200eccd97`.
 Working branch: `codex/vfs-hardening`. PR:
 https://github.com/crabbuild/crab/pull/630 (base `crab-v2`). Follow-up hardening
 remains active. The PR is rebased onto `877b832b396`; final source and
-installed-role evidence is recorded through checkpoint 45.
+installed-role evidence is recorded through checkpoint 46.
 
 Baseline evidence and reproductions:
 `crab/docs/benchmarks/vfs-capsule-v2-audit-20261024.md` and its adjacent evidence
@@ -2997,6 +2997,86 @@ LFS and Crab pointer spec/v1 formats are separate contracts and remain supported
 Remote LFS proof reuse, actual payload-retirement pins, all-mode lifecycle/crash
 qualification and optimized performance remain open. The goal stays active.
 
+## Checkpoint 46 — retire the shared manifest-only initializer
+
+Delete `crab_write::initialize::initialize_repository` and its `InitialHead`
+error. The shared library no longer exposes that layout-plus-generation-zero-
+manifest repository creator. No alias, adapter, migration or fallback replaces
+it. CLI, SDK, gateway and view-service initialization already call
+`capsule_protocol::initialize`; those production paths remain canonical.
+
+The four remaining initializer calls were negative fixtures: CLI read admission,
+LFS remote-ref discovery and two gateway authority tests. They now seed the same
+valid canonical layout and `Manifest::default_for_repo` through the metadata
+codecs directly. `ensure_canonical_layout` validates persisted descriptor bytes;
+`create_manifest` validates the complete manifest before conditional creation.
+The fixtures still prove refusal of valid old authority, including corrupt
+Capsule-over-v1 precedence and unchanged legacy bytes after refused writes.
+Their behavioral assertions are unchanged. Five tests exclusively preserving the
+removed initializer and its layout-race behavior are deleted with that API.
+
+Evidence map:
+
+| Surface | Proof |
+| --- | --- |
+| Removed owner | Full `initialize.rs` and every `initialize_repository` / `InitialHead` consumer searched; CLI and SDK error matches updated |
+| Current entry points | CLI `initialize_remote_repository_store`, SDK `Client::initialize_remote`, gateway `initialize_repositories` and auth view publication already call Capsule initialization |
+| Current callee | `RepositoryRoot::initial` validates before I/O; Capsule initialization conditionally creates/adopts a verified root and rejects nonempty rootless prefixes |
+| Siblings | Gateway and CLI legacy-admission fixtures keep valid old descriptor/manifest bytes; actual Capsule creation/opening remains covered by CLI/SDK and native flows |
+| Main/base | Both current `origin/main` and `origin/crab-v2` still export the deleted initializer; current v2 production call sites are not relabeled as new work |
+| Best fix | Delete the obsolete public producer; wrapping Capsule initialization under its old signature would retain a second API and invent repository-ID policy already owned by current callers |
+
+Strict write-only SDK lint exposed a content-only test helper compiled without
+its callers. Both `prepared_or_panic` callers are under `feature = "content"`;
+the helper now has the same gate. This is a feature boundary correction, with no
+lint suppression or changed assertion. The failed lint logs are retained. Full
+SDK tests then pass with both `write` and `write,content` on Linux and macOS.
+This test-only follow-up is explicitly recorded in the source manifest; both
+Make installs and native proof are repeated after final sources are frozen.
+
+Qualification:
+
+- Linux and macOS: **212 CLI tests** each (30 initialization, five repository
+  admission, 25 LFS push, 152 helper), **36 shared write tests** and all six
+  focused SDK initialization cases pass. Write has one ignored test.
+- Linux: all **208 gateway library tests** pass, including both valid-v1
+  admission fixtures. Full SDK profiles pass on both platforms: **49 write**
+  and **52 write/content** tests, with one ignored in each profile. The six
+  initialization cases are included in those SDK totals; child-process output
+  is not counted as additional parent tests.
+- Strict all-target write/SDK Clippy passes with each SDK profile on both
+  platforms; the Linux invocations also include gateway. Minimal CLI/SDK checks
+  pass on both. Existing whole-CLI warnings remain; strict whole-CLI/workspace
+  cleanliness is not claimed. Format and diff checks pass.
+- Fresh Make-installed Linux foreground NFS/managed FUSE and macOS foreground
+  NFS pass Capsule/RustFS initialization, 6 MiB payload publication, 132-byte
+  pointer commit, held-descriptor reads, no-push remount, later push and
+  post-push remount in the same cwd. Independent eager clone verifies all three
+  historical payloads; strict Git fsck and ordinary teardown pass. Unrelated
+  malformed project config and repository-owned telemetry checks pass again.
+- Final hash binding covers **1,558 source/build inputs** and unchanged four-role
+  installed sets on both platforms. The first Linux launch selected a nonexistent
+  qualification-directory binary path and stopped during hashing, before any
+  mount. Final proof uses the actual Make install prefix in this task's VM;
+  no binaries are manually copied and no admission check is bypassed.
+
+Rust source shrinks by 242 lines, including removed obsolete tests. No dependency,
+lockfile, config surface or serialized format changes. No new test files or
+nested test layout are introduced. Raw benchmark evidence remains excluded;
+all 2,156 files are preserved with zero tracked/diff paths in their directory.
+The scoped guide and README point to current Capsule initialization; the SDK
+qualification document marks the old initializer discussion as historical.
+
+Remaining stored-format work is explicit: `initialize::publish_initial_manifest`,
+the legacy CLI push pipeline/native entry points and CLI fixture initializer,
+protected receive, metadb/GC, maintenance and replication authority still need
+retirement. Current receive `validate_layout` and prepare-record creation fall
+back to v1 metadata; plan schemas 1/2 route into manifest verification/commit.
+Retire those linked paths together, preserving Capsule prepare/evidence records
+and shared payload verification that current Capsule publication still needs.
+The broader lifecycle, crash/pin ownership and optimized performance gates remain
+open. This checkpoint is progress, not completion of the goal.
+
 ## Remaining priority order
 
 The helper-layout gap and live read-only inspection leak are closed by the
@@ -3021,9 +3101,10 @@ the macOS mapping barrier still require proof before claiming teardown complete.
 
 Checkpoint-45 closes the reproduced helper configuration/telemetry ownership
 failure and qualifies the original sequential publication → next-mount flow on
-Linux NFS/FUSE without marker deletion or admission bypass. Immediate format
-priority: retire shared legacy initialization and remaining CLI, protected
-receive, metadb/GC and maintenance/replication stored pack-v1 dispatch.
+Linux NFS/FUSE without marker deletion or admission bypass. Checkpoint-46 removes shared manifest-only repository initialization. Immediate
+format priority: retire protected receive's v1 layout/prepare/plan/commit paths,
+then the remaining CLI publisher/fixture initializer, metadb/GC and
+maintenance/replication stored pack-v1 dispatch.
 Checkpoints 42/43 repair canonical LFS publication and ignored-byte retention;
 checkpoint-44 reduces local verification amplification with bounded block proofs. Remote proof reuse, LFS generation
 transitions, payload retirement and crash recovery remain open. Checkpoint-40 closes managed runtime-worker starvation;

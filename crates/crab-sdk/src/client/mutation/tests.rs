@@ -3,6 +3,7 @@ use std::{io::BufReader, path::Path, sync::Arc};
 use super::*;
 use crate::{GitPath, ObjectId, RefUpdate, Revision};
 
+#[cfg(feature = "content")]
 fn prepared_or_panic(result: crate::Result<PreparedMutation>) -> PreparedMutation {
     result.unwrap_or_else(|error| {
         let mut message = error.to_string();

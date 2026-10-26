@@ -2015,7 +2015,6 @@ impl From<crab_write::WriteError> for CrabError {
             crab_write::WriteError::Internal(message) => Self::Internal(message),
             crab_write::WriteError::Cancelled => Self::Cancelled,
             error @ (crab_write::WriteError::Namespace(_)
-            | crab_write::WriteError::InitialHead { .. }
             | crab_write::WriteError::CapsuleCommitUncertain { .. }
             | crab_write::WriteError::CapsuleCheckpointCommitUncertain { .. }
             | crab_write::WriteError::CapsuleMaintenanceCommitUncertain { .. }

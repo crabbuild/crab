@@ -115,7 +115,6 @@ impl From<Failure> for Error {
 fn write_kind(source: &crab_write::WriteError) -> ErrorKind {
     use crab_write::WriteError as W;
     match source {
-        W::InitialHead { .. } => ErrorKind::InvalidInput,
         W::CorruptObject { .. } => ErrorKind::Corruption,
         W::Cancelled => ErrorKind::Cancelled,
         W::RefChanged { .. }
