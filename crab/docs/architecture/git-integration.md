@@ -86,6 +86,11 @@ canonical-origin identity. `git::xorb_proof` owns bounded footer/metadata parsin
 and identity-bound cache checks. Neither cached validity nor a staged ID alone
 certifies a replaced object. The shared default metadata concurrency remains 64.
 
+The helper applies atomic mode, compare-and-swap ref leases and mirror-plan
+identity directly to `PushConfig`. Protected-push preparation can strengthen
+that same config before Capsule admission. Helper protocol replies remain on
+stdout; the final structured push result uses the existing JSONL stderr stream.
+
 Both the CLI and Git helper publish through `git::capsule_push`. The old
 `run_native_push` entry is currently used by legacy test fixtures; its API,
 publisher and fixtures remain scheduled for removal. Separating current chunk

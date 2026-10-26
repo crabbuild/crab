@@ -27,7 +27,6 @@ use crate::git::push::{
     configure_active_active_push_coordinator, duplicate_destination_result,
     record_push_audit_event,
 };
-use crate::git::push_native::NativePushConfig;
 use crate::git::push_staging::PushStaging;
 use crate::storage::StoreLayout;
 use crab_metadata::commit_graph::CommitGraphTraversal;
@@ -1671,25 +1670,20 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                     ));
                 }
                 let config = cache.config().clone();
-                let mut base_config = PushConfig::from_config(&config);
+                let mut push_config = PushConfig::from_config(&config);
                 let mut push_setup_error = if requires_repository {
                     configure_active_active_push_coordinator(
                         &config,
                         remote_url,
                         prefix,
-                        &mut base_config,
+                        &mut push_config,
                     )
                     .await
                     .err()
                 } else {
                     None
                 };
-                let mut native_config = native_push_config_for_helper(
-                    base_config,
-                    options,
-                    progress_mode,
-                    jsonl_stderr_stream,
-                );
+                let mut push_config = push_config_for_helper(push_config, options);
                 let mut push_store = store.cloned();
                 if requires_repository && push_setup_error.is_none() {
                     if let Some(repository) = managed_repository {
@@ -1707,8 +1701,8 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                                 .await
                                 {
                                     Ok(protected) => {
-                                        native_config.push.atomic = true;
-                                        native_config.push.protected_push = Some(protected.session);
+                                        push_config.atomic = true;
+                                        push_config.protected_push = Some(protected.session);
                                         push_store = Some(protected.store);
                                     }
                                     Err(error) => push_setup_error = Some(error),
@@ -1737,8 +1731,8 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                             .await
                             {
                                 Ok(protected) => {
-                                    native_config.push.atomic = true;
-                                    native_config.push.protected_push = Some(protected.session);
+                                    push_config.atomic = true;
+                                    push_config.protected_push = Some(protected.session);
                                     push_store = Some(protected.store);
                                 }
                                 Err(e) => push_setup_error = Some(e),
@@ -1761,7 +1755,7 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
 
                 // Parse-time rejections participate in the atomic contract;
                 // valid siblings must not reach a pipeline that could commit.
-                let atomic_parse_blocker = if native_config.push.atomic {
+                let atomic_parse_blocker = if push_config.atomic {
                     pre_rejected.first().map(|(dst, _)| dst.clone())
                 } else {
                     None
@@ -1793,7 +1787,7 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                                 origin: "push requires a resolved object store".to_owned(),
                             })?;
                     match crate::git::capsule_push::run(
-                        &native_config.push,
+                        &push_config,
                         &specs,
                         push_store,
                         &router,
@@ -1831,9 +1825,8 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
 
                 // Merge parse-time rejections into the outcome map.
                 // Pipeline outcomes never key on a pre-rejected `dst`
-                // (those specs were filtered out before
-                // `run_native_push`), so there is no collision to
-                // resolve — a simple insert preserves both sides.
+                // (those specs were filtered out before publication), so
+                // inserting preserves both sides without a collision.
                 for (dst, reason) in pre_rejected {
                     result
                         .outcomes
@@ -1888,37 +1881,11 @@ fn reject_specs_for_error(specs: &[PushSpec], err: &CrabError) -> PushResult {
     PushResult::new(outcomes)
 }
 
-fn native_push_config_for_helper(
-    base_config: PushConfig,
-    options: &HelperOptions,
-    progress_mode: OutputMode,
-    jsonl_stderr_stream: Option<&Arc<Mutex<JsonlStream<Stderr>>>>,
-) -> NativePushConfig {
-    let mut native_config = NativePushConfig::new(base_config);
-    native_config.progress = options.progress;
-    native_config.color = options.progress && crate::git::progress::is_tty();
-    native_config.emit_summary = false;
-    native_config.push.atomic = options.atomic;
-    native_config
-        .push
-        .expected_refs
-        .clone_from(&options.expected_refs);
-
-    // Git owns stdout for remote helpers. Human-readable phase progress
-    // can go to stderr, but the final stdout summary would be parsed as
-    // helper protocol instead of user text.
-    if progress_mode == OutputMode::Jsonl {
-        native_config.output_mode = Some(progress_mode);
-        native_config.jsonl_progress_stream = jsonl_stderr_stream
-            .map(Arc::clone)
-            .map(crate::git::push_native::NativePushProgressStream::Stderr);
-    }
-    native_config.mirror_git_only =
-        std::env::var_os(crate::git::push_native::MIRROR_GIT_ONLY_ENV).is_some();
-    native_config.push.mirror_plan_id =
-        std::env::var(crate::git::push_native::MIRROR_PLAN_ID_ENV).ok();
-
-    native_config
+fn push_config_for_helper(mut config: PushConfig, options: &HelperOptions) -> PushConfig {
+    config.atomic = options.atomic;
+    config.expected_refs.clone_from(&options.expected_refs);
+    config.mirror_plan_id = std::env::var(crab_remote::local::PUBLICATION_PLAN_ID_ENV).ok();
+    config
 }
 
 fn build_push_result_event(
@@ -6836,17 +6803,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ref_lease_option_reaches_native_push_and_rejects_conflicting_repeat() {
+    async fn ref_lease_option_reaches_capsule_push_and_rejects_conflicting_repeat() {
         let mut options = HelperOptions::default();
         let mut writer = Vec::new();
         let value = format!("refs/heads/main:{}", "a".repeat(40));
         handle_option("cas", &value, &mut options, &mut writer)
             .await
             .unwrap();
-        let native =
-            native_push_config_for_helper(PushConfig::default(), &options, OutputMode::Text, None);
+        let config = push_config_for_helper(PushConfig::default(), &options);
         assert_eq!(
-            native.push.expected_refs.get("refs/heads/main"),
+            config.expected_refs.get("refs/heads/main"),
             Some(&Some("a".repeat(40)))
         );
         let conflicting = format!("refs/heads/main:{}", "b".repeat(40));
@@ -6858,20 +6824,15 @@ mod tests {
     }
 
     #[test]
-    fn helper_native_push_config_does_not_treat_fetch_followtags_as_push_mode() {
+    fn helper_push_config_applies_atomic_option() {
         let options = HelperOptions {
             atomic: true,
-            followtags: true,
             ..HelperOptions::default()
         };
 
-        let config =
-            native_push_config_for_helper(PushConfig::default(), &options, OutputMode::Text, None);
+        let config = push_config_for_helper(PushConfig::default(), &options);
 
-        assert!(config.progress);
-        assert!(!config.emit_summary);
-        assert!(config.push.atomic);
-        assert!(!config.followtags);
+        assert!(config.atomic);
     }
 
     #[test]

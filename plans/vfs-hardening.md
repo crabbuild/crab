@@ -3867,6 +3867,68 @@ active.
 
 
 
+## Checkpoint 55 — direct Capsule configuration in the helper
+
+The helper still constructed `NativePushConfig` after routing publication to
+Capsule, then consumed only its inner `PushConfig`. Its incremental/progress,
+color, summary, JSONL wrapper and Git-only discovery flags never reached the
+current publisher. The helper now configures `PushConfig` directly. Atomic mode,
+compare-and-swap expectations and the canonical mirror plan identity are retained;
+managed/protected preparation still strengthens that same config before admission.
+The final JSONL result remains on the existing stderr stream after the authoritative
+stdout reply. No new option, environment variable, dependency or fallback is added.
+
+| Evidence cell | Checked boundary |
+| --- | --- |
+| Changed surface | `remote_helper::dispatch_batch` and its configuration helper; 39 net Rust lines removed |
+| Entry and caller | Real Git helper batch dispatch after captured local-owner admission and staging setup |
+| Callee | Current `capsule_push::run(&PushConfig, ...)`; coordinator and protected preparation retain their ordering and overrides |
+| Siblings | Direct CLI already builds `PushConfig`; mirror plan identity uses the same canonical `crab_remote::local::PUBLICATION_PLAN_ID_ENV` that the old alias named |
+| Contract | Read the whole dispatch and old constructor: only the `push` field was projected; removed wrapper fields were never consumed by Capsule. No Git/S3 wire or upstream API changes |
+| Tests | Existing ref-lease parsing/conflicting-repeat and atomic configuration checks use the current helper. Assertions for removed, unconsumed native-wrapper defaults are retired; current publication assertions are retained |
+| Main/base | Current main still invokes `run_native_push`; checkpoint 54 already invokes Capsule. This cleanup targets the v2 caller after that routing change, not equivalence with main's old producer |
+
+Is this the best fix? It removes an unnecessary configuration owner instead of
+maintaining a wrapper around current publication. The helper has zero references
+to the old native module. Its separate public entry and legacy fixture producers
+remain next retirement work; this checkpoint does not claim complete removal.
+
+Final qualification:
+
+- Both platforms pass 170 current helper/Capsule tests: 153 helper and 17
+  Capsule publisher cases. Initial no-run builds caught two references to the
+  removed private test seam; tests select the current helper instead of
+  restoring the wrapper. Final builds and existing publication assertions pass.
+- Regular combined-feature CLI library Clippy completes on macOS/Linux with
+  635/634 warnings. Warning level/code/primary-file counts match checkpoint 54.
+  One inherited large-future span overlaps the push block; its measured compiler
+  size decreases from 17,640 to 17,616 bytes. This is not zero-overlap lint proof
+  or a runtime performance measurement. No lint suppression changes.
+- Both final Make-installed role sets pass the checked-in 6 MiB reuse smoke's
+  25 checks. Fresh Linux foreground FUSE/NFS RW and managed FUSE RW, and macOS
+  foreground/helper NFS RW, pass full/range bytes, fsync → commit/push →
+  independent eager clone/fsck, actual owner inspection, ordinary detach and
+  successful foreground exit. All omit `--ref`; four role hashes stay unchanged
+  before/after. Checkpoint 54 retains the RO/EROFS proofs; they are not rerun here.
+- The final installed Linux CLI passes mirror namespace qualification
+  (20 checks / 57 commands) and isolated full partial clone
+  (92 checks / 324 commands, Git 2.39.5). With JSONL enabled, 15 valid final push
+  result events appear on stderr and none on stdout. Mirror plan receipts,
+  revalidated leases, namespace preservation and Git protocol oracles stay intact.
+- `helper-capsule-config/source-manifest.json` binds 1,557 source/build files;
+  `qualification.json` binds tests, lint comparison, final roles, native and
+  protocol reports, JSONL and caller evidence. Driver/oracle hashes are separate.
+  No dependency, lockfile, CI guard/inventory or threshold change. Raw benchmark
+  evidence stays excluded; no new test file or nested test module path.
+
+The checkpoint-53 gateway CI report independently repeats the sustained-write
+failure: all 95,100 acknowledged writes remain present with no failed requests,
+but terminal throughput is 0.721520 of early windows and p95 is 1.568081×.
+For 5,943 sixteen-commit build samples, early→late log-order p95 is
+2.133→8.116 ms. A direct baseline and timestamp/request alignment remain absent;
+this is a profiling target, not a cause or an optimized-performance claim.
+
+
 ## Remaining priority order
 
 The helper-layout gap and live read-only inspection leak are closed by the
