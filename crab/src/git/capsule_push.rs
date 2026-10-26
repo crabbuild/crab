@@ -397,8 +397,10 @@ async fn run_inner(
     };
     let mut xet_stats = super::xet_publication::XetPublicationStats::default();
     let mut pointer_delta = crab_metadata::capsule_protocol::PointerCatalog::new();
+    // Preparation retains large proof maps under GC admission; heap-pin it so
+    // serving and helper callers do not carry that state on their async stack.
     let publication: Result<Option<Option<crab_coordination::write_coordinator::CommitOutcome>>> =
-        async {
+        Box::pin(async {
             // LFS bytes share the ref visibility boundary with Git and Xet data.
             // Publishing them here also covers mirror batches that own hook stdin.
             let lfs_objects = crate::lfs::publication::publish_reachable_objects(
@@ -418,7 +420,6 @@ async fn run_inner(
                     staging,
                     caching_store,
                     metrics,
-                    &config.metadb,
                     config.upload_concurrency,
                     config.protected_push.is_none(),
                     cancel,
@@ -547,7 +548,7 @@ async fn run_inner(
                 Ok(CapsulePublishAttempt::RefChanged) => Ok(None),
                 Err(error) => Err(error),
             }
-        }
+        })
         .await;
     // Root visibility precedes advisory discovery, while global admission
     // still pins immutable hint pages until their own root becomes durable.

@@ -1,13 +1,12 @@
 # Protocol v2 Xorb and Shard Integration
 
-Current development checkpoint format is `CRBCKP06`: visibility dictionaries,
-ref closures and transitions use authenticated pages rooted in the footer.
-Git views load those pages lazily; explicit catalog access remains a complete
-async bulk read. See [indexed remote reads](../architecture/indexed-remote-reads.md#checkpoint-visibility-pages-in-progress)
-for proof and remaining gates. `CRBCKP05` records below describe the preceding
-format and its historical qualification; they do not qualify v6. Readers reject
-retired v5 pointers, and fresh-prefix v6 live qualification remains pending.
-
+Current development checkpoint format is `CRBCKP09` (format 9), with a
+copy-on-write paged catalog and authenticated visibility. See
+[indexed remote reads](../architecture/indexed-remote-reads.md#copy-on-write-checkpoint-catalog-format-9-under-qualification)
+for its implementation and qualification gates. Earlier checkpoint-format records
+below describe historical sources; they do not qualify format 9. Readers reject
+retired checkpoint formats. Complete current-format production qualification
+remains open.
 
 ## Document metadata
 
@@ -928,7 +927,7 @@ fixture/report subsequently disappeared; the removal's cause is unconfirmed.
 A later read-only inventory of the surviving GA bucket confirmed three xorbs,
 three shards, committed v2 source objects, and no `.crab/chunk_index_db/` objects.
 
-The production path explains the missing discovery:
+At that audited source, the production path explained the missing discovery:
 
 - `cmd/add.rs::open_add_remote_classifier` constructs `AddRemoteChunkClassifier`.
 - `git/push.rs::lookup_proven_remote_chunks_for_add` queries the global committed
@@ -973,12 +972,22 @@ cross-repository partial overlap, unpublished/stale hints, failed publication,
 missing/corrupt xorbs, and exact cold reconstruction. No production repair or
 full-parity claim is made here.
 
-The add-time classifier now lazily opens and reuses one read-only chunk-index
-handle per `crab add`; a missing manifest is memoized for that invocation, so
-later file batches do not repeat the same absence probe. Candidate proof and
-publication validation are unchanged. The regression test and serial Crab
-library suite pass; the effect on the full 100-GiB request trace is pending a
-fresh exact-source run.
+Current add-time discovery uses one lazily initialized `CapsuleChunkIndex` per
+`crab add`. An absent global hint root is memoized for that invocation without
+persisting per-chunk negatives; a miss in an available index can be cached. No
+legacy repository layout, manifest or receipt database selects another index.
+Persisted candidates use a separate Capsule cache namespace; ambiguous old
+entries are not migrated. The bounded hint records remain advisory: current source roots, catalog membership,
+exact placement/proof IDs and physical provider identity certify reuse.
+
+Capsule push revalidates exact staged placement IDs through the same Capsule
+index and source catalogs. Missing Capsule evidence cannot authorize importing
+pack-v1 receipts or downloading old receipt-only payloads. Local recipe authority
+can supply unproven chunks; otherwise preparation errors before ref publication.
+This read-only proof path no longer opens a legacy MetaDb session. Current
+cross-repository full/partial-hint reuse and source/origin refusal tests protect
+that boundary; optimized whole-workload request and memory qualification remains
+open. Older measurements above retain their original audited scope.
 
 ### 16.1 V1 product-parity inventory
 

@@ -1281,7 +1281,7 @@ async fn execute_add(
         .as_ref()
         .map(|classifier| classifier.shard_hint_scope());
     if let Some(classifier) = execution_plans.remote_classifier.take() {
-        classifier.close().await;
+        classifier.report_cache_stats();
     }
     summary.staging_duration_ms = staging_phase_start.elapsed().as_millis() as u64;
 

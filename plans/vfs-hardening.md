@@ -11,7 +11,7 @@ Baseline: `origin/crab-v2` at `33f8e6c360d922b3ab1e2c0e5115a2d200eccd97`.
 Working branch: `codex/vfs-hardening`. PR:
 https://github.com/crabbuild/crab/pull/630 (base `crab-v2`). Follow-up hardening
 remains active. The PR is rebased onto `877b832b396`; final source and
-installed-role evidence is recorded through checkpoint 49.
+installed-role evidence is recorded through checkpoint 50.
 
 Baseline evidence and reproductions:
 `crab/docs/benchmarks/vfs-capsule-v2-audit-20261024.md` and its adjacent evidence
@@ -3337,6 +3337,119 @@ optimized throughput, tail latency, RSS or all-mode lifecycle behavior. Next:
 retire the actual old CLI orchestration/manifest initializer, then metadb/GC and
 maintenance/replication authority. The full hardening goal remains active.
 
+## Checkpoint 50 — Capsule-only chunk candidate authority
+
+Remove `AddChunkIndex` and add-time layout/manifest selection. The production
+classifier opens only the bounded global `CapsuleChunkIndex`; an absent root
+stays session-scoped and does not manufacture persisted per-chunk misses. A
+miss from an available index can still be cached. Delete the legacy committed-
+receipt lookup wrapper and its source-manifest validation branch.
+
+Staged placement revalidation now accepts only exact Capsule records and their
+current source catalogs/physical origin assertions. Delete the unresolved-ID
+manifest-receipt fallback and native publication's receipt-only payload import.
+Verified Capsule xorb descriptors already expand all outgoing requested chunks;
+there is no second importer. Missing proof requires actual local recipe authority
+or preparation fails before refs move. Add and native preparation no longer
+construct/open a legacy MetaDb session. The former classifier close entry point
+now reports cache statistics synchronously; there is no MetaDb session to drain.
+The advisory SQLite cache follows the classifier’s Arc lifetime.
+The older `PushPipeline` remains the current proof implementation owner, not a
+new `NativeChunkPlanner` type. Its legacy publisher/fixture callers remain work.
+
+Three before failures establish the removed behavior:
+
+- Add records legacy layout/receipt reads despite an otherwise empty lookup.
+- Unresolved staged IDs probe the legacy receipt database.
+- A seeded old candidate cache returns opaque old IDs to fresh adds even after
+  the two reader branches are deleted. Persisted entries have no format tag.
+
+All three regressions pass after removal. A separate Capsule cache-key domain
+prevents old positives from suppressing local payload preparation; old entries
+are not migrated. Publisher negative-cache invalidation uses the same shared path
+function. The unreachable path helper's unscoped fallback is deleted. SQL table
+schema version 1 remains an independent local cache contract, not stored pack-v1.
+
+Heap-pin the publication future after Clippy identifies its 22,616-byte state.
+The same awaited scope still orders content, GC admission, ref publication,
+hint maintenance, staging adoption and lease release. No task is detached.
+
+Evidence map and best-fix check:
+
+| Surface | Proof |
+| --- | --- |
+| Entry/caller | Real `crab add` → streaming `ExistingChunkLookup`; `crab push`/remote helper → `capsule_push::run` → `xet_publication::prepare_delta`; full changed functions, callers and cache consumers read |
+| Owner | Shared classifier and staged-proof verifier own candidate interpretation. Staging retains recipe authority; native publication owns captured destination dependencies and GC admission |
+| Callee | `CapsuleChunkIndex` bounds/validates roots, pages, placement IDs and source anchors; current source catalogs plus fresh provider identity certify reuse. Its hint/root version 1 is independent of retired repository formats |
+| Siblings | Primary/duplicate add tasks share the classifier. Native CLI/protected payload preparation shares the same delta path. Current filtered clean uses local staging/builder policy; legacy public pipeline and its integration harnesses are explicitly inventoried, not assumed absent |
+| Main/base | Fresh `origin/main` `cc2e4e25f46` retains manifest candidate discovery; `origin/crab-v2` `877b832b396` retains both the add dispatch and unresolved-ID receipt fallback. No new base commits at final fetch |
+| Is this the best fix? | Yes for current candidate authority: remove both readers and the receipt importer, isolate ambiguous advisory cache entries, and retain the existing Capsule membership/origin proof. Keeping zero-valued legacy counters or a renamed importer would preserve obsolete concepts |
+
+Final-source verification on both platforms:
+
+- **595 relevant Rust passes / one ignored**: 311 push, 17 Capsule push, ten Xet
+  publication, 64 add, 152 helper, 14 candidate-cache and 27 cache-path/filter
+  matches. The complete selected slices are repeated after heap-pinning and
+  moving the two touched nested test modules inline. Existing native full/partial
+  hint reuse, exact-ID forgery, missing source root, replaced origin and conflicting
+  origin assertions remain intact. They also retain zero full-xorb GET and zero
+  duplicate-payload assertions for current proof reuse.
+- **Six Python proof-oracle tests** pass on both platforms. The real macOS run
+  first committed successfully and revalidated all 90 staged chunks, but its old
+  oracle required removed receipt-only counters. The oracle now requires complete
+  current Capsule counts, exact types and one ordered event pair, and rejects
+  retired counter fields even when zero. Its payload, adoption and inventory
+  thresholds are unchanged. Full fresh CLI replays then pass.
+- Regular combined-feature library Clippy completes on both platforms with
+  647/648 warnings; no primary warning span intersects a changed Rust hunk.
+  The large-future warning on the touched publication scope is removed. Minimal
+  library builds, formatting and diff checks pass. Strict whole-CLI/workspace
+  cleanliness and a current-main warning baseline are not claimed.
+- Four roles per platform are freshly `make install`ed from the frozen source,
+  with external Cargo targets and Make artifact lookups. No product executable
+  is manually copied. **1,555 compiled source/build inputs** match, and checked-in
+  Python oracles plus external driver hashes are bound separately.
+- The checked-in RustFS cross-repository CLI smoke passes **all 25 checks** in
+  each final platform/backend sequence at **6 MiB**. Real source add/commit/push
+  produces hints; consumer add retains remote recipe authority with no local
+  segment or prepared payload, consumer push revalidates every exact proof and
+  creates no new xorb, and a separate cold clone/hydrate returns exact bytes.
+- Native **Linux and macOS foreground NFS RO/RW** pass complete and boundary/
+  middle range reads, RO write refusal, RW write/fsync → commit/push → independent
+  eager clone and strict Git fsck. **Linux foreground FUSE RO** also returns exact
+  complete/range reads and rejects writes. All qualified owners detach normally
+  and exit zero, with four identical before/after role hashes per platform.
+  These are debug correctness/reuse proofs, not optimized throughput/RSS results.
+
+The attempted Linux foreground FUSE RW flow exposes an open mode failure:
+`mount commit` cannot resolve the mounted Git directory. It reads exact bytes and
+accepts write/fsync first, then falls into offline routing because foreground FUSE
+has no discoverable live control owner. The same actual failure reproduces with
+unchanged checkpoint-49 binaries whose four hashes match their prior qualified
+set. After the failed command, the baseline owner still serves the edited bytes;
+ordinary SIGINT detaches with exit zero. This is not attributed to the new chunk
+proof change, nor claimed repaired. Next priority: install and advertise the live
+foreground FUSE control owner, and route publication through that owner; guessing
+a cache Git path would bypass engine mutation/writeback ordering.
+
+Initial Linux harness attempts also preserve missing-AWS-tool and unshared Git-
+metadata preflight failures, both before publication/mount. AWS CLI 2.17.14 is
+installed only in the dedicated Workspace qualification environment. A read-only
+snapshot of actual Git metadata matches host HEAD and complete worktree status;
+it permits the existing provenance checks without changing them. No assertions,
+baselines, inventories or thresholds are weakened.
+
+Evidence stays external under `capsule-chunk-only/` and
+`linux/capsule-chunk-only/`. Runtime source before test modules shrinks by
+**296 lines**; all Rust shrinks by **155 lines**, including three new regressions
+and inlining the two existing test modules without new test files. No dependency,
+lockfile, serialized payload format, config option or override changes. The
+protocol document now identifies the actual `CRBCKP09` writer/reader contract;
+older measurements retain their historical scope. All 2,156 raw benchmark files
+remain excluded. Foreground FUSE controls, remaining legacy CLI/metadb/GC owners,
+source-root retention, crash/resource ownership and optimized performance stay
+open; the full hardening goal remains active.
+
 ## Remaining priority order
 
 The helper-layout gap and live read-only inspection leak are closed by the
@@ -3365,7 +3478,11 @@ Linux NFS/FUSE without marker deletion or admission bypass. Checkpoint-46 remove
 format priority: checkpoint-47 retires protected receive's linked legacy paths.
 Checkpoint-48 retires standalone auth view's manifest fallback/publisher and binds
 its Git/pointer reads to one capture. Checkpoint-49 retires the unused shared manifest preparation/upload/commit APIs.
-Next retire the actual old CLI publisher/fixture initializer, metadb/GC and
+Checkpoint-50 retires current add-time and staged-proof legacy receipt dispatch,
+including the ambiguous advisory-cache domain and receipt-only importer. Its native
+replay reproduces missing foreground FUSE commit/control ownership on checkpoint-49
+binaries. Repair that live owner before further performance tuning. Then retire
+the actual old CLI publisher/fixture initializer, metadb/GC and
 maintenance/replication stored pack-v1 dispatch.
 Checkpoints 42/43 repair canonical LFS publication and ignored-byte retention;
 checkpoint-44 reduces local verification amplification with bounded block proofs. Remote proof reuse, LFS generation
@@ -3502,8 +3619,9 @@ Remaining located storage-authority boundaries:
   valid refusal fixtures without retaining a compatibility wrapper.
 - Checkpoints 47/48 remove manifest authority from protected receive and standalone
   auth view, including their old producers. Checkpoint 49 removes the unused shared manifest preparation/upload/commit APIs.
-  The actual old CLI publisher still owns journal helpers, a plan DTO and manifest
-  initialization; retire that owner next rather than deleting manifest-shaped
+  Checkpoint 50 removes add-time manifest selection, staged old-receipt fallback
+  and native receipt import. The actual old CLI publisher still owns journal
+  helpers, a plan DTO and manifest initialization; retire that owner next rather than deleting manifest-shaped
   native projections by name.
 - Gateway read/write, listing, checkpoint ordering, completion recovery and
   maintenance now require Capsule authority at checkpoint-38. No production
