@@ -78,6 +78,19 @@ provides repository context when available. Its
 sets `GIT_DIR` only when a local Git directory exists; ref discovery must not
 assume one.
 
+Add-time chunk reuse and staged publication share `git::chunk_reuse::ChunkVerifier`.
+It owns only the origin/cache, metadata-check bound and cancellation token;
+classification never constructs the legacy push orchestrator. Exact placement IDs
+must still belong to a current source Capsule shard/catalog and match a fresh
+canonical-origin identity. `git::xorb_proof` owns bounded footer/metadata parsing
+and identity-bound cache checks. Neither cached validity nor a staged ID alone
+certifies a replaced object. The shared default metadata concurrency remains 64.
+
+Both the CLI and Git helper publish through `git::capsule_push`. The old
+`run_native_push` entry is currently used by legacy test fixtures; its API,
+publisher and fixtures remain scheduled for removal. Separating current chunk
+proof ownership enables that retirement without losing current reuse checks.
+
 ### Direct object-store support contract
 
 This matrix applies to `crab://bucket/repository` remotes backed directly by

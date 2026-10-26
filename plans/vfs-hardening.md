@@ -3764,6 +3764,109 @@ role hashes, tests, before/after entry points, native/default-ref proof and
 checked-in mirror/protocol results; drivers/oracles have separate hashes. Raw
 benchmark files remain excluded and tests stay inline/flat. Goal remains active.
 
+## Checkpoint 54 — independent Capsule chunk-proof ownership
+
+A fresh exhaustive caller search corrects the earlier remaining-work wording:
+normal `cmd::push` and the Git helper already invoke the Capsule publisher.
+`run_native_push` is called by legacy test fixtures, not a current workspace
+product entry. Its public API, publisher and fixtures still need retirement;
+this is not a claim about unknown external library consumers or a native main
+baseline. Current add classification and Xet staged-recipe adoption did still
+instantiate `PushPipeline` solely to reach its strict chunk-proof methods.
+
+`git::chunk_reuse` now owns those current operations. Its verifier retains the
+origin/cache, metadata concurrency and cancellation token without constructing
+a legacy push config, orchestrator, manifest state or metadb lifetime. Add's
+classifier keeps its existing advisory cache/absence policy. Exact staged IDs
+still select immutable candidate records, match every planned placement/proof
+field and revalidate current source roots/shard membership. Conflicting physical
+assertions remain errors; absent/stale authority cannot supply a reuse hit.
+
+`git::xorb_proof` owns the existing bounded footer/metadata decoder and exact
+provider/cache identity mechanics. The dedicated current verifier always checks
+a fresh origin HEAD and the rooted origin assertion before admitting selected
+chunks; generic legacy memory-cache shortcuts cannot certify it. The generic
+legacy method's strict-mode boolean is removed: no remaining production caller
+requests that mode. Current strict tests now exercise their actual verifier.
+The stored data, cache encodings, two-minute proof budget and default metadata
+concurrency of 64 are unchanged; the shared config constant replaces the
+previous duplicate default. No config/env/dependency or lockfile surface is added.
+
+| Evidence cell | Checked boundary |
+| --- | --- |
+| Changed owner | Add classifier, exact staged-ID revalidation, source-root/catalog checks and provider identity verification in `chunk_reuse`; shared format/cache mechanics in `xorb_proof` |
+| Entry/caller | `cmd::add::open_add_remote_classifier` and Capsule `xet_publication::prepare_delta`; legacy fixture pipeline delegates its retained revalidation call to the same verifier |
+| Callee | Metadata `CapsuleChunkIndex`/anchor validation/current source closure → canonical Store HEAD and bounded xorb index → exact chunk/hash/size/provider binding |
+| Siblings | CLI/helper/import use Capsule publication; NFS/FUSE publication reaches the same Xet path. Git LFS has its separate SHA-256 store/session contract, unaffected by the moved Xet format mechanics |
+| Cache/dependency | Read complete index-cache validation and Store HEAD adapters: caches require identity tokens, contiguous rows and recomputed xorb hash. Cache validity cannot replace fresh source authority/provider binding |
+| Tests | Existing rooted reuse, exact/forged IDs, replacement/conflicting identity, corruption, scoped misses and cancellation assertions retained; fixture changes only select the new owner |
+| Main/base | Main/base retain earlier manifest-era organization. Against the retained checkpoint-53 source, this is an ownership extraction and strict-mode specialization; no native main equivalence or performance baseline is claimed |
+
+Is this the best fix? It removes the current proof consumers' dependency on the
+legacy orchestrator while preserving one current Capsule proof path. It does not
+keep an alias or format fallback. Two test-only injection/access seams retain the
+existing corruption/cancellation probes without exposing mutable production
+classifier fields. Runtime-prefix LOC grows by 127 (117 total Rust lines): the
+new immutable owner and dedicated strict provider check replace the old class
+coupling, while the non-current generic publisher remains explicit next removal.
+The new modules immediately serve both current callers and the retained legacy
+fixture caller; this growth does not constitute completed publisher retirement.
+
+Final qualification:
+
+- Linux dedicated runner: 555 passes, one existing ignored case, across push
+  (311), add (64), Xet publication (10), Capsule push (17) and helper (153).
+  macOS focused proof: 41 passes across rooted candidate reuse, advisory cache,
+  cancellation, generic physical proof and current publication. Test assertions
+  are retained; no test is removed or weakened to accommodate the extraction.
+- Final combined-feature regular CLI library Clippy completes with 635 macOS /
+  634 Linux warnings, zero primary diagnostics on changed hunks. An extra
+  import left after moving the parser was identified separately and gated to
+  its remaining test consumers before final builds. Strict whole-CLI cleanliness
+  is not claimed. The final macOS Clippy run takes 16m18s; it is observed live
+  and allowed to complete, not restarted on an observation timeout.
+- Six moved physical/cache helper bodies compare byte-for-byte with checkpoint
+  53 after their opening brace. Their visibility/imports change, not data or
+  validation mechanics. The old source declares 65 production fields and two test-only fields;
+  the current verifier has five. These are structural observations, not RSS/throughput measurements.
+- Both final Make-installed four-role sets pass the checked-in 6 MiB reuse
+  smoke's 25 checks: current source membership, exact physical proofs, no new
+  duplicate xorb and independent cold reconstruction stay mandatory.
+  Linux foreground FUSE/NFS RO/RW and managed FUSE RW, plus macOS foreground
+  NFS RO/RW and helper NFS RW, pass full/range bytes, EROFS, actual serving-PID
+  inspection, write/fsync → live commit/push → independent eager clone/fsck,
+  normal detach and foreground exit zero. All omit `--ref`, and ownerless push
+  still fails without changing remote refs or local push state.
+- Final installed Linux CLI also passes checked-in mirror namespace proof
+  (20 checks / 57 commands) and full isolated partial-clone proof
+  (92 checks / 324 commands, Git 2.39.5). This is not all-version CI evidence.
+  Protocol runners install the required Git LFS tool inside their disposable
+  container and use separate qualification buckets. Four native role hashes
+  remain identical before/after; no cache reset, force cleanup or bypass is used.
+- `chunk-proof-owner/source-manifest.json` binds 1,557 source/build files;
+  `qualification.json` records tests, final roles, helper-body equivalence,
+  ownership evidence and native/protocol results. Drivers/oracles have separate
+  hashes. The raw benchmark directory remains excluded and tests stay inline/flat.
+
+While awaiting the macOS build, retained gateway evidence narrows the performance
+investigation. For 16-commit build samples, early→late log-order p95 grows
+2.215→8.393 ms in checkpoint-51 CI and 2.532→9.949 ms in checkpoint-52 CI.
+The emitting owner is gateway `mutation::build_batch`; its timer includes
+`MutableTree` preparation, individual commit construction and attribute checkpoint
+selection. These samples lack timestamps/request alignment, so they nominate
+that build path for profiling but do not establish the cause of the SLO failure
+or a regression against main. No gateway code, metric or threshold is changed.
+
+Next remove the obsolete public native-push entry/publisher and legacy fixtures,
+then remaining metadb/GC/maintenance/replication authority. Current product push
+routing is already Capsule; retain current chunk proof tests at their real owner
+while removing the old producer. Complete lifecycle/retention, matched
+Cellar/SQLite and optimized end-to-end performance gates remain open. The separate
+CI inventory/guard patch still awaits its own explicit approval. Goal remains
+active.
+
+
+
 ## Remaining priority order
 
 The helper-layout gap and live read-only inspection leak are closed by the

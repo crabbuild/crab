@@ -8,6 +8,7 @@ pub mod discover;
 pub(crate) mod capsule_push;
 #[cfg(feature = "gix-worktree")]
 pub mod checkout;
+pub(crate) mod chunk_reuse;
 pub mod fetch;
 #[cfg(feature = "gix-transport")]
 pub mod fetch_transport;
@@ -34,6 +35,7 @@ pub mod url;
 pub mod worktree;
 pub mod worktree_hydration;
 pub(crate) mod xet_publication;
+mod xorb_proof;
 
 #[cfg(feature = "gix-facade")]
 pub use crab_git::facade;

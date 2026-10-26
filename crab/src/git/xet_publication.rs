@@ -267,7 +267,8 @@ pub(crate) async fn prepare_delta(
     staged_candidates.retain(|hash, _| !placements.contains_key(hash));
     let planned_existing = staged_candidates.len();
     let verified_staged =
-        super::push::revalidate_staged_remote_chunks(layout, &staged_candidates, cancel).await?;
+        super::chunk_reuse::revalidate_staged_remote_chunks(layout, &staged_candidates, cancel)
+            .await?;
     tracing::debug!(
         planned_existing,
         stale_existing = planned_existing.saturating_sub(verified_staged.candidates.len()),
