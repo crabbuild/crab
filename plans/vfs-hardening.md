@@ -3929,6 +3929,97 @@ For 5,943 sixteen-commit build samples, early→late log-order p95 is
 this is a profiling target, not a cause or an optimized-performance claim.
 
 
+## Checkpoint 56 — typed fetch failures and current worktree fixtures
+
+The unchanged full RustFS add/push harness stopped on a corrupt pack: checkout
+and local HEAD correctly failed, but the helper discarded the typed failure and
+reported `CRAB-E0060`. Fetch planning/admission/generation now use one conversion
+through the existing `ReadFailure` owner. Its diagnostics borrow typed integrity,
+origin and metadata facts while retaining the original error, including shared
+reads and close-after-failure wrappers. Corrupt Git pack/index data reports the
+existing `CRAB-E0020`; storage/authentication failures retain their category.
+No enum variant, format, configuration, fallback or dependency is added.
+
+Fatal pack-sideband reporting retains the original failure if Git disconnects.
+Pre-response ERR packets and pack-sideband errors keep their distinct wire phases.
+The payload future is polled once under read admission; this change adds no stream
+replay. Upstream `gix-pack 0.70.0` distinguishes index I/O from corrupt/unsupported
+index bytes, and transparent source wrappers require direct typed-field traversal.
+
+| Evidence cell | Checked boundary |
+| --- | --- |
+| Changed surface | Core read/write RemoteGit conversions, borrowed read diagnostics, upload-pack wire and classic helper fetch adapters |
+| Entry / caller | Real Git clone/fetch through helper batch and stateless protocol-v2 dispatch |
+| Callee / owner | Shared upload-pack planner and remote Git repository generation return typed read/remote errors; product diagnostics belong in `ReadFailure` |
+| Siblings | Normal/cached protocol v2, classic incremental selection/admission, shallow/filter and promisor generation use the same conversion |
+| Tests / contract | Typed corruption/source retention, nested provider diagnostic parity, exact fatal packet framing and disconnected-client reporting; current Capsule worktree publication/hydration |
+| Main / previous behavior | Source inspection of current main retains the stringifying wire/read adapters and write-to-I/O conversion. The same-origin live comparison uses final checkpoint-55 roles, not main; no live main baseline is claimed |
+
+Is this the best fix? Retain the source once and reuse the existing diagnostic
+owner instead of assigning every remote failure a protocol string or introducing
+a new error hierarchy. Runtime Rust grows by 78 lines to classify borrowed typed
+causes and preserve fatal-reporting ownership. Total Rust decreases by 900 lines.
+
+The old linked-worktree integration target reproduced a missing file-index failure
+on checkpoint 55 because its native producer still wrote obsolete manifest state.
+Four useful behaviors move to the private flat `capsule_worktree_tests.rs` module:
+xorbs before Capsule visibility; hydrate/edit/push/reclone exact bytes; concurrent
+sibling staging; namespace contention retaining a recipe through successful retry.
+They use the real current Capsule publisher and canonical hydrator. The old
+1,454-line integration file and 510-line prepopulated-walk target are retired;
+obsolete push-state/trace assertions are not current stored-format contracts.
+The cohesive 893-line sibling fixture avoids a new public test API or nested
+`feature/tests.rs` path. The native publisher API and its remaining fixtures still
+require removal; current product CLI/helper publication already uses Capsule.
+
+Final qualification:
+
+- Both final-source platform suites pass 381 tests each: errors 74, wire 44,
+  helper 153, Capsule publisher 17, current worktrees 4 and hydration 89.
+  The new corruption diagnostic test fails before repair. Original failed attempts
+  and the obsolete fixture failure remain outside the checkout.
+- Regular combined-feature CLI library Clippy completes with 635 macOS / 634
+  Linux warnings. Diagnostic level/code/file/message inventories exactly match
+  checkpoint 55. Two inherited style spans overlap edited fetch admission; this
+  is not zero-overlap proof. No lint policy or suppression is relaxed.
+- Optional broader test lint remains red: 58 binary-test assertion errors in
+  unchanged checkpoint-55 source (all source fragments also occur on current
+  main); library-unit lint reports 7,526 errors / 1,557 warnings. The frozen-source
+  attempt matches the earlier diagnostic inventory. Its only edited primary
+  spans are the same two inherited style warnings. No whole-test lint signoff.
+- The same retained damaged Capsule (pack magic `QACK`) is read with separate
+  empty caches by checkpoint 55 and final roles. Both clones fail with exit 128,
+  no HEAD and no payload. Diagnostics change E0060 → E0020; raw root/ref and
+  damaged Capsule bytes stay identical. Four final installed roles remain fixed
+  through native qualification.
+- The unchanged full checked-in add/commit/push harness passes 195 checks /
+  374 commands, including corrupt pack/index refusal, concurrent CAS, committed
+  restaging, partial overlap and cross-repository reuse. Mirror namespace passes
+  20/57; partial clone passes 92/324 with Git 2.39.5. Fifteen final push-result
+  JSONL events appear on stderr and none on stdout.
+- Both final Make-installed role sets pass the checked-in 6 MiB reuse smoke's
+  25 checks. Fresh Linux foreground FUSE/NFS RO/RW and managed FUSE RW, plus
+  macOS foreground NFS RO/RW and helper NFS RW, pass full/range bytes, RO/EROFS,
+  actual owner inspection, fsync → live commit/push → independent eager clone/fsck,
+  ordinary detach and foreground exit zero. All omit `--ref`; all role hashes
+  stay unchanged. No forced cleanup, cache reset or admission bypass.
+- `native-publisher-retirement/source-manifest.json` binds 1,556 source/build
+  files and both deleted fixture paths. Final qualification and separate driver/
+  oracle hashes bind the tests, exact-source roles, same-origin fault replay and
+  reports. Raw benchmark artifacts remain excluded. No dependency, lockfile,
+  checked-in guard/inventory or performance-threshold change.
+
+Checkpoint-55 CI passes SDK, GC, cache, large-repository, provider, replica and
+HTTP workflows. Architecture and gateway remain red; partial clone was queued at
+the last snapshot. NFS fails its feature-gate suite (587 pass, one failure, one
+ignored) at the post-shutdown endpoint-lease reacquisition, before native jobs.
+A Linux/macOS kernel probe confirms that implicit close retains flock ownership
+while a forked child retains the same open-file description; existing cache guards
+already explicitly unlock for this reason. A deterministic endpoint regression
+and scoped lease guard are prepared outside the checkout, not applied here.
+This is the next correctness repair; the CI cause is not declared proven by the
+kernel probe alone. The full hardening goal remains active.
+
 ## Remaining priority order
 
 The helper-layout gap and live read-only inspection leak are closed by the

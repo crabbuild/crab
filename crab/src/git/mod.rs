@@ -6,6 +6,14 @@ pub mod delta_reconstruct;
 pub mod discover;
 
 pub(crate) mod capsule_push;
+#[cfg(test)]
+#[expect(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    clippy::panic,
+    reason = "test assertions"
+)]
+mod capsule_worktree_tests;
 #[cfg(feature = "gix-worktree")]
 pub mod checkout;
 pub(crate) mod chunk_reuse;
