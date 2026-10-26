@@ -1211,6 +1211,7 @@ impl From<crab_vfs::VfsError> for CrabError {
             crab_vfs::VfsError::NotFound { path } => Self::NotFound { path },
             crab_vfs::VfsError::Cache(source) => Self::from(source),
             crab_vfs::VfsError::Read(source) => Self::from(source),
+            crab_vfs::VfsError::Lfs(source) => Self::from(source),
             crab_vfs::VfsError::Staging(source) => Self::from(source),
             crab_vfs::VfsError::Storage(source) => Self::from(source),
             crab_vfs::VfsError::GitRef(source) => Self::Io(std::io::Error::other(source)),

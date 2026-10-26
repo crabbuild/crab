@@ -758,7 +758,7 @@ fn lfs_pointer_for_crab_content(
 
     // Only verified Crab bytes become an LFS upload or installed object.
     // The temporary-file owner removes partial output on every early return.
-    let staged = crate::lfs::cache::StagedObject::from_temp(temp)?;
+    let staged = crab_lfs::local::StagedObject::from_temp(temp)?;
     let lfs_pointer = LfsPointer {
         oid: *staged.oid(),
         size: staged.size(),

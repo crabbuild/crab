@@ -47,6 +47,9 @@ pub enum VfsError {
     #[error("VFS read error: {0}")]
     Read(#[from] crab_read::ReadError),
 
+    #[error("VFS LFS error: {0}")]
+    Lfs(#[from] crab_lfs::LfsError),
+
     #[error("VFS staging error: {0}")]
     Staging(#[from] crab_staging::StagingError),
 

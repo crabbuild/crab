@@ -26,7 +26,7 @@ thiserror = { workspace = true }
 tokio = { workspace = true, features = ["fs", "io-util", "macros", "rt", "sync"] }
 tracing = { workspace = true }
 tokio-util = { workspace = true, features = ["rt"] }
+tempfile = { workspace = true }
 
 [dev-dependencies]
 async-trait = { workspace = true }
-tempfile = { workspace = true }

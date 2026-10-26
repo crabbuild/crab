@@ -30,7 +30,7 @@ shutdown drains admitted LFS verification jobs before releasing cache ownership.
 LFS extensions require a smudge implementation and are rejected explicitly.
 Cold local windows currently hash the complete payload, and remote partial reads
 can do the same when no validator receipt exists. Bounded verification reuse,
-origin amplification, LFS publication/refresh and payload retirement remain
+origin amplification, LFS refresh and payload retirement remain
 qualification priorities. Git LFS `spec/v1` is a current pointer format,
 independent of retired Crab pack-v1 storage authority.
 
@@ -169,6 +169,16 @@ bad chunk records are removed before origin repair. The synchronous chunk
 adapter bypasses current-thread Tokio runtimes, where `block_in_place` would
 panic. Whole-pointer reconstruction continues through the configured
 `crab-read` runtime and its decoded-range cache.
+
+Writable LFS publication resolves effective Git attributes from the prepared
+index, including nested rules and attribute edits. It streams LFS backing bytes
+directly through `crab-lfs::local::ObjectWriter` and installs the payload before
+writing its pointer into the Git index. Mount-owned clones need no configured
+LFS filter executable, and publication does not alter user filter settings.
+No-push commits retain canonical local payloads for adoption/remount; the normal
+push pipeline uploads introduced LFS dependencies before exposing refs.
+Configured LFS extensions fail publication before ref/overlay changes because
+VFS cannot smudge transformed content. CLI extension support is unchanged.
 
 Writable publication flushes local staging before writing pointer blobs and
 publishes distinct history owners for unpushed versions. The shared

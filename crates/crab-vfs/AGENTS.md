@@ -51,6 +51,11 @@ mount/control owners consume the pipeline output separately.
   shutdown drains their shared `LfsReadSession`. Extensions requiring smudge fail.
 - Cached read windows retain integrity checks; corruption must not be served merely because the byte length matches.
   Source: `crates/crab-vfs/src/hydration.rs`.
+- Mounted publication owns both Crab and LFS pointer creation. Resolve effective
+  attributes with Git's cached attribute view; install local LFS payloads through
+  crab-lfs before publishing pointer/index/ref state. Do not depend on optional
+  Git filter executables or mutate borrowed filter settings. Unsupported LFS
+  extensions preserve overlay/ref state. Normal push owns remote LFS durability.
 - Publication and reads derive the same staging namespace through
   `repository::staging_root_for_git_dir`. Mounted versions keep distinct history
   owners; a later local commit must not retire earlier unpushed bytes.

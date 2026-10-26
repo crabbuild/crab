@@ -1,10 +1,156 @@
 //! Local LFS storage selection and verified preparation snapshots.
 
+use crab_git::lfs_pointer::hex_encode;
+use std::fs::File;
+use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
+use tempfile::NamedTempFile;
 
 use sha2::{Digest, Sha256};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio_util::sync::CancellationToken;
+
+/// Incrementally stages one LFS object in the cache filesystem.
+pub struct ObjectWriter {
+    temp: NamedTempFile,
+    hasher: Sha256,
+    size: u64,
+}
+
+impl ObjectWriter {
+    /// Creates a temporary object beside the final LFS cache.
+    pub fn new(lfs_dir: &Path) -> crate::Result<Self> {
+        let temp_dir = lfs_dir.join("tmp");
+        std::fs::create_dir_all(&temp_dir).map_err(crate::LfsError::from)?;
+        let temp = tempfile::Builder::new()
+            .prefix("crab-lfs-")
+            .tempfile_in(temp_dir)
+            .map_err(crate::LfsError::from)?;
+        Ok(Self {
+            temp,
+            hasher: Sha256::new(),
+            size: 0,
+        })
+    }
+
+    /// Finalizes the temporary object and its SHA-256 metadata.
+    pub fn finish(mut self) -> crate::Result<StagedObject> {
+        self.temp
+            .as_file_mut()
+            .flush()
+            .map_err(crate::LfsError::from)?;
+        self.temp
+            .as_file()
+            .sync_all()
+            .map_err(crate::LfsError::from)?;
+        Ok(StagedObject {
+            temp: self.temp,
+            oid: self.hasher.finalize().into(),
+            size: self.size,
+        })
+    }
+}
+
+impl Write for ObjectWriter {
+    fn write(&mut self, buf: &[u8]) -> std::io::Result<usize> {
+        let written = self.temp.write(buf)?;
+        self.hasher.update(&buf[..written]);
+        self.size = self
+            .size
+            .checked_add(written as u64)
+            .ok_or_else(|| std::io::Error::other("LFS object size overflow"))?;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.temp.flush()
+    }
+}
+
+/// A fully hashed temporary LFS object awaiting atomic installation.
+pub struct StagedObject {
+    temp: NamedTempFile,
+    oid: [u8; 32],
+    size: u64,
+}
+
+impl StagedObject {
+    /// SHA-256 identity of the staged payload.
+    #[must_use]
+    pub fn oid(&self) -> &[u8; 32] {
+        &self.oid
+    }
+
+    /// Exact byte length of the staged payload.
+    #[must_use]
+    pub fn size(&self) -> u64 {
+        self.size
+    }
+
+    /// Owned temporary payload path, valid until installation or drop.
+    #[must_use]
+    pub fn path(&self) -> &Path {
+        self.temp.path()
+    }
+
+    /// Re-hashes a completed temporary file after an extension transform.
+    pub fn from_temp(temp: NamedTempFile) -> crate::Result<Self> {
+        let (oid, size) = hash_file(temp.path())?;
+        Ok(Self { temp, oid, size })
+    }
+
+    /// Atomically installs the object under its content-addressed cache path.
+    pub fn install(self, lfs_dir: &Path) -> crate::Result<PathBuf> {
+        let target = object_path(lfs_dir, &self.oid);
+        if target.is_file() && verify_file(&target, &self.oid, self.size).is_ok() {
+            return Ok(target);
+        }
+        if let Some(parent) = target.parent() {
+            std::fs::create_dir_all(parent).map_err(crate::LfsError::from)?;
+        }
+
+        match self.temp.persist(&target) {
+            Ok(_) => {}
+            Err(error) => {
+                if target.is_file() && verify_file(&target, &self.oid, self.size).is_ok() {
+                    return Ok(target);
+                }
+                return Err(error.error.into());
+            }
+        }
+        verify_file(&target, &self.oid, self.size)?;
+        Ok(target)
+    }
+}
+
+/// Verify exact SHA-256 identity and size without retaining payload bytes.
+pub fn verify_file(path: &Path, oid: &[u8; 32], size: u64) -> crate::Result<()> {
+    let (actual, actual_size) = hash_file(path)?;
+    if actual != *oid || actual_size != size {
+        return Err(crate::LfsError::ObjectCorrupt {
+            oid: hex_encode(oid),
+        });
+    }
+    Ok(())
+}
+
+fn hash_file(path: &Path) -> crate::Result<([u8; 32], u64)> {
+    let mut file = File::open(path).map_err(crate::LfsError::from)?;
+    let mut hasher = Sha256::new();
+    let mut size = 0u64;
+    let mut buffer = vec![0u8; 1024 * 1024];
+    loop {
+        let read = file.read(&mut buffer).map_err(crate::LfsError::from)?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+        size = size
+            .checked_add(read as u64)
+            .ok_or_else(|| std::io::Error::other("LFS object size overflow"))?;
+    }
+    Ok((hasher.finalize().into(), size))
+}
 
 /// Resolve the existing LFS storage keys and environment override.
 #[must_use]

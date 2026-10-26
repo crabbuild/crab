@@ -345,10 +345,14 @@ writeback request can leave mapped changes in the client cache, so a live diff
 can report no changes until the application synchronizes its mapping. A waiting
 volume sync or ordinary file fsync does not close this gap.
 
-For large crab-tracked files, commit streams overlay file content directly into
-Crab staging when `.gitattributes` is stable, then writes pointer files into the
-Git index. If `.gitattributes` changed in the overlay, commit first materializes
-the publish worktree so Git attributes are resolved against the new tree.
+For Crab- and Git LFS-tracked files, commit resolves the effective attributes
+against the prepared Git index, including nested rules and attribute edits.
+It streams backing content directly to the corresponding local staging/object
+store, then writes the pointer into Git. LFS payloads are installed before their
+pointers; mount clones do not need an external LFS filter driver. Commit without
+push retains local payloads for reads and remount. LFS extensions are unsupported
+in VFS; publication fails while preserving the ref and overlay when extension
+configuration is present.
 
 With `--push`, Crab pushes from the detached publish worktree before moving the
 local ref. A failed push leaves the overlay and transaction state retryable with

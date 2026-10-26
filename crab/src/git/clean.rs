@@ -1891,7 +1891,7 @@ impl CleanSession {
     /// LFS clean path for callers that already materialized the input.
     fn lfs_clean_path(&self, pathname: &str, content: Vec<u8>) -> Result<Vec<u8>> {
         let lfs_dir = self.lfs_dir()?;
-        let mut writer = crate::lfs::cache::ObjectWriter::new(&lfs_dir)?;
+        let mut writer = crab_lfs::local::ObjectWriter::new(&lfs_dir)?;
         std::io::Write::write_all(&mut writer, &content).map_err(CrabError::Io)?;
         let extensions = crate::lfs::extension::configured_extensions_sorted()?;
         let cleaned = crate::lfs::extension::clean_staged_with_extensions(
@@ -1906,7 +1906,7 @@ impl CleanSession {
     fn finish_lfs_clean(
         &self,
         pathname: &str,
-        staged: crate::lfs::cache::StagedObject,
+        staged: crab_lfs::local::StagedObject,
         extensions: Vec<crab_git::lfs_pointer::LfsExtension>,
     ) -> Result<Vec<u8>> {
         let oid = *staged.oid();
@@ -2160,7 +2160,7 @@ impl CleanSession {
             Some(crate::git::filter_attr_cache::FilterKind::Lfs) => {
                 let extensions = crate::lfs::extension::configured_extensions_sorted()?;
                 let lfs_dir = self.lfs_dir()?;
-                let mut writer = crate::lfs::cache::ObjectWriter::new(&lfs_dir)?;
+                let mut writer = crab_lfs::local::ObjectWriter::new(&lfs_dir)?;
                 std::io::Write::write_all(&mut writer, &prefix).map_err(CrabError::Io)?;
                 if !reached_flush {
                     while let Some(pkt) = reader.read_packet()? {

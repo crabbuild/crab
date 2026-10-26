@@ -11,7 +11,7 @@ Baseline: `origin/crab-v2` at `33f8e6c360d922b3ab1e2c0e5115a2d200eccd97`.
 Working branch: `codex/vfs-hardening`. PR:
 https://github.com/crabbuild/crab/pull/630 (base `crab-v2`). Follow-up hardening
 remains active. The PR is rebased onto `877b832b396`; final source and
-installed-role evidence is recorded through checkpoint 41.
+installed-role evidence is recorded through checkpoint 42.
 
 Baseline evidence and reproductions:
 `crab/docs/benchmarks/vfs-capsule-v2-audit-20261024.md` and its adjacent evidence
@@ -2625,6 +2625,88 @@ same without a validator receipt. Bounded verification reuse, large-file origin
 amplification, LFS generation changes and payload retirement remain required.
 The full PR and all-mode performance goal remain unqualified.
 
+## Checkpoint 42 — shared LFS local writer and mount publication
+
+The native follow-up from checkpoint-41 and a new unit regression both fail
+before the repair: overlay publication commits full LFS payloads as Git blobs
+when the mount-owned clone has no configured clean driver. The unit observes a
+65,536-byte blob rather than a parseable pointer; the real NFS probe observes
+6 MiB. [Git's filter contract](https://git-scm.com/docs/gitattributes) explicitly
+treats a missing optional driver as passthrough, so configuring more retries or
+trusting `git add` cannot establish pointer publication.
+
+The existing CLI atomic local writer, staged object and file verifier now live
+in `crab-lfs::local`. CLI clean/filter-process, extension transforms, migration,
+cache installation and mounted publication call that same implementation; the
+old CLI implementation is deleted without a re-export/shim. Its errors remain
+typed through VFS and CLI conversions. The existing `tempfile` workspace
+reference moves from dev to production dependencies; Cargo.lock is unchanged,
+with no additional version, patch or vendor override.
+
+Publication queries Git's cached attributes for both Crab and LFS candidates,
+including nested rules and overlay policy edits. Both pointer types skip the
+redundant publish-worktree payload copy and external filter invocation. LFS
+streams backing bytes through the canonical writer, installs the verified local
+object first, then writes the small pointer to the prepared Git index. The
+normal push pipeline publishes introduced LFS dependencies under its writer
+admission before making refs visible. Configured LFS extensions fail without
+changing the source ref or clearing overlay bytes; CLI extension behavior remains.
+
+Evidence map:
+
+| Changed surface | Caller / owner | Callee / dependency contract | Proof |
+| --- | --- | --- | --- |
+| Local writer ownership | CLI standalone/filter-process, extension, migrate and VFS publisher | `crab-lfs::local::{ObjectWriter,StagedObject,verify_file}`; pinned tempfile 3.27.0 atomic persist | CLI cache vectors, extension/clean and migration conversion tests; 64 LFS tests |
+| Attribute routing | Live/offline `commit_overlay_with_view` | `git check-attr --cached`; shared Crab/LFS candidate routing | Missing-driver regression, nested mixed Crab/LFS/ordinary regression, existing Crab staging tests |
+| Index/ref order | Publisher under overlay freeze → prepared index → live CommitView | Install payload before pointer/index/ref, adopt before backing cleanup | Native held descriptor, no-push immediate read/remount, two commits before later push |
+| Remote durability | Both mount controls → ordinary push pipeline | `lfs::publication::publish_reachable` joined before refs | Independent eager clone and all three historical payload hashes on real RustFS |
+| Extension failure | VFS publisher → Git extension configuration | Stored transformed bytes require smudge, unsupported by VFS | Source ref and overlay records remain after failure |
+| Current main/base | `origin/main` cc2e4e25f46 and `origin/crab-v2` 877b832b396 | Neither VFS publisher stages LFS directly; previous native failure preserved | Canonical pointer publication is new; unrelated minimal-profile glob failures separately reproduced |
+
+Final-source proof:
+
+- Dedicated Linux: all 669 VFS tests, all 18 native NFS/FUSE tests, 64 LFS tests,
+  strict all-target library Clippy and minimal/FUSE-only checks pass.
+- CLI slices pass 293 tests: cache 7, extensions 6, migration 78, standalone 2,
+  clean 57, LFS publication 5 and mount controls 138. Two migration glob tests
+  fail in the no-default-feature profile. Exact unchanged matcher/test extracts
+  from `origin/crab-v2` reproduce both; `origin/main` reproduces its existing
+  exact-root-path failure. The multi-pattern matcher/test is present on v2 but
+  absent on main. No test assertions, thresholds or inventories were changed.
+- macOS passes strict all-target library Clippy and 94 selected publication,
+  hydration and snapshot tests. Both platforms use fresh Make-installed roles.
+- Linux foreground NFS and managed FUSE, plus macOS foreground NFS, pass real
+  Capsule/RustFS seed → 6 MiB edit/fsync → no-push commit as a 132-byte pointer →
+  held-descriptor read → detach/remount → second edit/commit → later push →
+  independent eager clone. All three historical LFS payloads verify and strict
+  Git fsck passes. Each mount clone explicitly has no LFS clean driver.
+- Final Linux FUSE proof binds the coordinator process incarnation through last
+  unmount, confirms exit and state-file removal; NFS owners exit zero. No forced
+  cleanup occurs. An earlier driver completed both data flows but tried to send
+  redundant shutdown after the coordinator correctly auto-exited; that harness
+  failure remains recorded and is superseded by the final normal-cleanup proof.
+- All 1,558 captured source/build inputs and both installed role hashes remain
+  unchanged through qualification. New production growth supplies shared writer
+  ownership and typed publication routing; most moved code replaces its CLI
+  owner, while new regressions cover behavior rather than duplicate helpers.
+  All 2,156 raw audit files remain excluded/preserved; tests use inline/flat layout.
+
+Atomic `tempfile::persist` does not synchronize directories. The writer retains
+its existing explicit temporary-file sync and post-install verification, without
+claiming power-loss recovery. Directory durability, crash/restart, old-reader
+payload retirement and efficient full-object verification reuse remain gates.
+
+The final ignore-policy probe discovers another correctness failure: an ignored
+ordinary file disappears after commit/remount, while an ignored LFS file is
+unexpectedly published because direct pointer staging bypasses `git add`'s ignore
+selection. Native macOS NFS proves both against the current installed source;
+normal cleanup succeeds. The existing ignore test checks tree membership only,
+so it does not protect retained bytes. This is a blocking follow-up before full
+publication signoff: plan one committed/retained scope for ordinary, Crab and LFS
+records; retain excluded backing bytes through adoption, recovery and remount.
+Do not repair only LFS filtering and thereby turn unintended publication into
+silent byte deletion. The full PR remains unqualified and the goal remains active.
+
 ## Remaining priority order
 
 The helper-layout gap and live read-only inspection leak are closed by the
@@ -2647,11 +2729,12 @@ reproduced foreground FUSE PID/detach failures and makes shared native queries
 error-aware. Early preparation, concurrent managed owners, target identity and
 the macOS mapping barrier still require proof before claiming teardown complete.
 
-Immediate content priority: checkpoint-41 repairs mounted LFS sizing, verified
-reads and native COW. The native publication diagnostic now proves missing clean
-driver configuration commits full payloads into Git. Fix that owner boundary,
-then qualify no-push/remount/later push and independent clone. Bound whole-object
-verification reuse before claiming efficient large-file ranges. LFS generation
+Immediate content priority: checkpoint-42 repairs canonical LFS publication,
+no-push/remount/later-push and independent clone. The new native ignore-policy
+probe proves ignored ordinary bytes are discarded and ignored LFS bytes are
+published unexpectedly. Fix shared committed/retained scope, including recovery
+and open descriptors, before publication signoff. Then bound whole-object
+verification reuse and measure local/origin amplification. LFS generation
 transitions and payload retirement remain open. Checkpoint-40 closes managed runtime-worker starvation;
 engine-drain cancellation and replacement-target races still need native proof. Preserve these ownership/read
 boundaries before widening concurrency. Git LFS is a current content type and

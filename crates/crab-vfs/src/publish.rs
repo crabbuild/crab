@@ -4,6 +4,7 @@ use std::path::{Component, Path, PathBuf};
 use std::process::Command;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
+use crab_git::FilterKind;
 use crab_staging::{StagingArea, StagingAreaReadOnly, StagingBatchId};
 use schemars::JsonSchema;
 use serde::{Deserialize, Serialize};
@@ -97,7 +98,8 @@ struct PublishTransaction {
 }
 
 #[derive(Debug, Clone)]
-struct CrabOverlayFile {
+struct PointerOverlayFile {
+    filter: FilterKind,
     path: String,
     source_path: PathBuf,
     mode: u32,
@@ -518,8 +520,8 @@ pub(crate) fn commit_overlay_with_view(
                 &applied_base_renames,
             )?;
         }
-        let crab_files = crab_overlay_files(&records, worktree.path())?;
-        let skipped_crab_paths = crab_files
+        let pointer_files = pointer_overlay_files(&records, worktree.path())?;
+        let skipped_pointer_paths = pointer_files
             .iter()
             .map(|file| file.path.clone())
             .collect::<std::collections::HashSet<_>>();
@@ -527,7 +529,7 @@ pub(crate) fn commit_overlay_with_view(
         if let Err(err) = apply_records(
             &records,
             worktree.path(),
-            &skipped_crab_paths,
+            &skipped_pointer_paths,
             &applied_base_renames,
         ) {
             set_transaction_status(&mut transaction, "failed");
@@ -539,7 +541,7 @@ pub(crate) fn commit_overlay_with_view(
         run_git_add(
             worktree.path(),
             &records,
-            &crab_files,
+            &pointer_files,
             &applied_base_renames,
         )
         .inspect_err(|e| {
@@ -548,9 +550,14 @@ pub(crate) fn commit_overlay_with_view(
             let _ = write_transaction(&options.cache_dir, &transaction);
         })?;
 
-        if !crab_files.is_empty() {
+        stage_lfs_overlay_files(&pointer_files, worktree.path(), &options.git_dir)?;
+
+        if pointer_files
+            .iter()
+            .any(|file| file.filter == FilterKind::Crab)
+        {
             let pointer_entries =
-                stage_crab_overlay_files(&crab_files, worktree.path(), &options.git_dir)
+                stage_crab_overlay_files(&pointer_files, worktree.path(), &options.git_dir)
                     .inspect_err(|e| {
                         set_transaction_status(&mut transaction, "failed");
                         transaction.error = Some(e.to_string());
@@ -910,7 +917,7 @@ fn is_macos_appledouble_path(path: &str) -> bool {
 fn apply_records(
     records: &[crate::overlay::OverlayRecord],
     worktree: &Path,
-    skipped_crab_paths: &std::collections::HashSet<String>,
+    skipped_pointer_paths: &std::collections::HashSet<String>,
     applied_base_renames: &[AppliedBaseRename],
 ) -> Result<()> {
     for record in records {
@@ -939,7 +946,7 @@ fn apply_records(
                 materialize_symlink(backing, &safe_join(worktree, &record.path)?)?;
             }
             OverlayChangeKind::Create | OverlayChangeKind::Modify | OverlayChangeKind::Rename => {
-                if skipped_crab_paths.contains(&record.path)
+                if skipped_pointer_paths.contains(&record.path)
                     && overlay_record_has_regular_backing(record)
                 {
                     continue;
@@ -1235,10 +1242,10 @@ fn create_platform_symlink(_link_target: &str, _path: &Path) -> Result<()> {
     })
 }
 
-fn crab_overlay_files(
+fn pointer_overlay_files(
     records: &[crate::overlay::OverlayRecord],
     worktree: &Path,
-) -> Result<Vec<CrabOverlayFile>> {
+) -> Result<Vec<PointerOverlayFile>> {
     let candidates = records
         .iter()
         .filter(|record| overlay_record_has_regular_backing(record))
@@ -1247,16 +1254,17 @@ fn crab_overlay_files(
         .iter()
         .map(|record| record.path.clone())
         .collect::<Vec<_>>();
-    let crab_paths = git_crab_filter_paths(worktree, &candidate_paths)?;
+    let filters = git_pointer_filters(worktree, &candidate_paths)?;
     let mut files = Vec::new();
     for record in candidates {
-        if !crab_paths.contains(&record.path) {
+        let Some(&filter) = filters.get(&record.path) else {
             continue;
-        }
+        };
         let source_path = record.backing_path.clone().ok_or_else(|| {
             CrabError::Internal(format!("overlay entry {} has no backing file", record.path))
         })?;
-        files.push(CrabOverlayFile {
+        files.push(PointerOverlayFile {
+            filter,
             path: record.path.clone(),
             source_path,
             mode: record.mode,
@@ -1279,12 +1287,12 @@ fn is_git_attributes_path(path: &str) -> bool {
     path == ".gitattributes" || path.ends_with("/.gitattributes")
 }
 
-fn git_crab_filter_paths(
+fn git_pointer_filters(
     worktree: &Path,
     paths: &[String],
-) -> Result<std::collections::HashSet<String>> {
+) -> Result<std::collections::HashMap<String, FilterKind>> {
     if paths.is_empty() {
-        return Ok(std::collections::HashSet::new());
+        return Ok(std::collections::HashMap::new());
     }
 
     let mut child = Command::new("git")
@@ -1329,16 +1337,18 @@ fn git_crab_filter_paths(
         ));
     }
 
-    let mut crab_paths = std::collections::HashSet::new();
+    let mut filters = std::collections::HashMap::new();
     for chunk in fields.chunks(3) {
-        if chunk[1] != b"filter" || chunk[2] != b"crab" {
-            continue;
-        }
+        let filter = match (chunk[1], chunk[2]) {
+            (b"filter", b"crab") => FilterKind::Crab,
+            (b"filter", b"lfs") => FilterKind::Lfs,
+            _ => continue,
+        };
         let path = std::str::from_utf8(chunk[0])
             .map_err(|e| CrabError::Internal(format!("git check-attr path utf8: {e}")))?;
-        crab_paths.insert(path.to_owned());
+        filters.insert(path.to_owned(), filter);
     }
-    Ok(crab_paths)
+    Ok(filters)
 }
 
 fn overlay_record_has_regular_backing(record: &crate::overlay::OverlayRecord) -> bool {
@@ -1359,10 +1369,10 @@ fn overlay_record_has_regular_backing(record: &crate::overlay::OverlayRecord) ->
 fn run_git_add(
     worktree: &Path,
     records: &[OverlayRecord],
-    crab_files: &[CrabOverlayFile],
+    pointer_files: &[PointerOverlayFile],
     applied_base_renames: &[AppliedBaseRename],
 ) -> Result<()> {
-    let crab_paths = crab_files
+    let pointer_paths = pointer_files
         .iter()
         .map(|file| file.path.as_str())
         .collect::<std::collections::HashSet<_>>();
@@ -1371,7 +1381,7 @@ fn run_git_add(
         if is_applied_metadata_base_rename(record, applied_base_renames) {
             continue;
         }
-        if !crab_paths.contains(record.path.as_str()) {
+        if !pointer_paths.contains(record.path.as_str()) {
             paths.insert(record.path.clone());
         }
         if let Some(base_path) = record.base_path.as_deref()
@@ -1466,12 +1476,79 @@ fn git_ignored_paths(
         .collect()
 }
 
+fn stage_lfs_overlay_files(
+    files: &[PointerOverlayFile],
+    worktree: &Path,
+    git_dir: &Path,
+) -> Result<()> {
+    let files = files
+        .iter()
+        .filter(|file| file.filter == FilterKind::Lfs)
+        .collect::<Vec<_>>();
+    if files.is_empty() {
+        return Ok(());
+    }
+    let extensions = Command::new("git")
+        .arg("--git-dir")
+        .arg(git_dir)
+        .args([
+            "config",
+            "--includes",
+            "--null",
+            "--get-regexp",
+            "^lfs\\.extension\\.",
+        ])
+        .env_remove("GIT_DIR")
+        .env_remove("GIT_COMMON_DIR")
+        .env_remove("GIT_WORK_TREE")
+        .env_remove("GIT_INDEX_FILE")
+        .output()?;
+    if extensions.status.success() {
+        return Err(CrabError::Configuration {
+            key: "Git LFS extensions require smudge support in VFS".into(),
+            origin: "mount publication".into(),
+        });
+    }
+    if extensions.status.code() != Some(1) {
+        return Err(CrabError::Internal(format!(
+            "Git LFS extension lookup failed: {}",
+            command_diagnostics(&extensions)
+        )));
+    }
+    let storage = crab_lfs::local::storage_from_git(git_dir)?;
+    let mut entries = Vec::with_capacity(files.len());
+    for file in files {
+        let mut source = std::fs::File::open(&file.source_path)?;
+        let mut writer = crab_lfs::local::ObjectWriter::new(&storage)?;
+        std::io::copy(&mut source, &mut writer)?;
+        let staged = writer.finish()?;
+        let pointer = crab_git::LfsPointer {
+            oid: *staged.oid(),
+            size: staged.size(),
+            extensions: Vec::new(),
+        };
+        // Publish the local payload before its Git pointer. Failed commits retain
+        // content-addressed bytes for retry, as the normal clean path does.
+        staged.install(&storage)?;
+        entries.push(GitIndexEntry {
+            path: file.path.clone(),
+            mode: git_index_mode(file.mode, &file.source_path).into(),
+            sha: write_pointer_blob(worktree, &pointer.serialize())?,
+        });
+    }
+    publish_git_index_entries(worktree, &entries)
+}
+
 fn stage_crab_overlay_files(
-    files: &[CrabOverlayFile],
+    files: &[PointerOverlayFile],
     worktree: &Path,
     git_dir: &Path,
 ) -> Result<Vec<DirectPointerEntry>> {
-    let files = files.to_vec();
+    let files = files
+        .iter()
+        .filter(|file| file.filter == FilterKind::Crab)
+        .cloned()
+        .collect::<Vec<_>>();
     let worktree = worktree.to_path_buf();
     let staging_root = crate::repository::staging_root_for_git_dir(git_dir)?;
     block_on_publish_runtime(async move {
@@ -2918,6 +2995,112 @@ mod tests {
             "refs/heads/main",
             "models/model.bin"
         ));
+    }
+
+    #[test]
+    fn commit_overlay_stages_lfs_payload_without_a_filter_driver() {
+        use sha2::{Digest, Sha256};
+        let fixture = GitFixture::new();
+        let cache_dir = fixture.root.path().join("cache");
+        let paths = OverlayPaths::from_cache_dir(&cache_dir);
+        let store = OverlayStore::open(&paths.db_path, &paths.upper_dir).unwrap();
+        let content = patterned_bytes(64 * 1024);
+        store.create_file(".gitattributes", 0o100_644).unwrap();
+        store
+            .write_file(".gitattributes", 0, b"*.bin filter=lfs diff=lfs -text\n")
+            .unwrap();
+        store.create_file("model.bin", 0o100_755).unwrap();
+        store.write_file("model.bin", 0, &content).unwrap();
+        commit_overlay(&OverlayCommitOptions {
+            cache_dir,
+            git_dir: fixture.bare_git_dir.clone(),
+            ref_name: "refs/heads/main".into(),
+            message: "LFS overlay".into(),
+            push: false,
+        })
+        .unwrap();
+        let blob = git_stdout_bytes(&fixture.bare_git_dir, ["show", "refs/heads/main:model.bin"]);
+        let pointer = crab_git::LfsPointer::parse(&blob).unwrap();
+        let storage = crab_lfs::local::storage_from_git(&fixture.bare_git_dir).unwrap();
+        assert_eq!(
+            (
+                pointer.oid,
+                pointer.size,
+                std::fs::read(crab_lfs::local::object_path(&storage, &pointer.oid)).unwrap()
+            ),
+            (
+                Sha256::digest(&content).into(),
+                content.len() as u64,
+                content
+            )
+        );
+    }
+
+    #[test]
+    fn commit_overlay_uses_git_filter_precedence_for_mixed_payloads() {
+        let fixture = GitFixture::new();
+        let cache_dir = fixture.root.path().join("cache");
+        let paths = OverlayPaths::from_cache_dir(&cache_dir);
+        let store = OverlayStore::open(&paths.db_path, &paths.upper_dir).unwrap();
+        let content = patterned_bytes(64 * 1024);
+        for (path, bytes) in [
+            (".gitattributes", b"*.bin filter=crab -text\n".as_slice()),
+            (
+                "nested/.gitattributes",
+                b"*.bin filter=lfs -text\nplain.bin -filter\n".as_slice(),
+            ),
+            ("crab.bin", content.as_slice()),
+            ("nested/lfs.bin", content.as_slice()),
+            ("nested/plain.bin", content.as_slice()),
+        ] {
+            store.create_file(path, 0o100_644).unwrap();
+            store.write_file(path, 0, bytes).unwrap();
+        }
+        commit_overlay(&OverlayCommitOptions {
+            cache_dir,
+            git_dir: fixture.bare_git_dir.clone(),
+            ref_name: "refs/heads/main".into(),
+            message: "mixed content".into(),
+            push: false,
+        })
+        .unwrap();
+        let blob = |path| git_stdout_bytes(&fixture.bare_git_dir, ["show", path]);
+        assert!(
+            Pointer::parse(&blob("refs/heads/main:crab.bin")).is_ok()
+                && crab_git::LfsPointer::parse(&blob("refs/heads/main:nested/lfs.bin")).is_ok()
+                && blob("refs/heads/main:nested/plain.bin") == content
+        );
+    }
+
+    #[test]
+    fn unsupported_lfs_extensions_preserve_overlay_and_ref() {
+        let fixture = GitFixture::new();
+        git_stdout(
+            &fixture.bare_git_dir,
+            ["config", "lfs.extension.zip.clean", "gzip"],
+        );
+        let cache_dir = fixture.root.path().join("cache");
+        let paths = OverlayPaths::from_cache_dir(&cache_dir);
+        let store = OverlayStore::open(&paths.db_path, &paths.upper_dir).unwrap();
+        for (path, bytes) in [
+            (".gitattributes", b"*.bin filter=lfs -text\n".as_slice()),
+            ("model.bin", b"retain these bytes".as_slice()),
+        ] {
+            store.create_file(path, 0o100_644).unwrap();
+            store.write_file(path, 0, bytes).unwrap();
+        }
+        let result = commit_overlay(&OverlayCommitOptions {
+            cache_dir,
+            git_dir: fixture.bare_git_dir.clone(),
+            ref_name: "refs/heads/main".into(),
+            message: "unsupported extension".into(),
+            push: false,
+        });
+        assert!(
+            matches!(result, Err(CrabError::Configuration { .. }))
+                && rev_parse(&fixture.bare_git_dir, "refs/heads/main").unwrap() == fixture.base_oid
+                && store.records().unwrap().len() == 2
+        );
     }
 
     #[test]

@@ -35,6 +35,14 @@ out of memory.
 `local` shares local payload paths and storage-key precedence with CLI and SDK
 callers. Its preparation snapshots verify SHA-256 and exact size while copying
 into caller-owned scratch, then return the Blake3 digest for durable recovery.
+`local::ObjectWriter` and `StagedObject` own the shared atomic local writer used
+by CLI clean, extension transforms, migration and mounted publication. The writer
+hashes incrementally, synchronizes its completed temporary file, and installs it
+under the verified SHA-256 path. Installation precedes Git pointer publication.
+The temporary owner removes abandoned output; failed Git publication can retain
+valid content-addressed objects for retry. Atomic installation does not itself
+prove directory-sync or power-loss recovery.
+
 Its local range API hashes the complete source in one bounded-memory pass,
 retaining only the requested range and returning bytes after exact-size/SHA-256
 verification. Only object-open `NotFound` returns absence. Other I/O or integrity

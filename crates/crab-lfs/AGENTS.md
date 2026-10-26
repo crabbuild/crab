@@ -7,7 +7,9 @@ Root `AGENTS.md` and `crates/AGENTS.md` apply. Read
 
 Owns LFS object layout, SHA-256 byte verification, receipts, and file-lock storage. crab-git owns pointer parsing; CLI/server layers own protocol and authorization.
 `src/local.rs` also owns local payload paths, storage override precedence and
-verified preparation snapshots shared by CLI and SDK callers.
+verified preparation snapshots shared by CLI and SDK callers. Its ObjectWriter
+and StagedObject supply the canonical local writer for CLI clean/extensions/
+migration and VFS pointer publication.
 
 ## Read first
 
