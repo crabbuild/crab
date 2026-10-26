@@ -8,10 +8,10 @@ full objective across implementation checkpoints. No release qualification is
 claimed by a partial checkpoint.
 
 Baseline: `origin/crab-v2` at `33f8e6c360d922b3ab1e2c0e5115a2d200eccd97`.
-Working branch: `codex/vfs-hardening`. Draft PR:
+Working branch: `codex/vfs-hardening`. PR:
 https://github.com/crabbuild/crab/pull/630 (base `crab-v2`). Follow-up hardening
-remains active. The PR checkpoint is rebased onto `9cc0fdab60a`; fresh integration
-and installed-role evidence is recorded at the twenty-third checkpoint.
+remains active. The PR is rebased onto `877b832b396`; final source and
+installed-role evidence is recorded at checkpoint 39.
 
 Baseline evidence and reproductions:
 `crab/docs/benchmarks/vfs-capsule-v2-audit-20261024.md` and its adjacent evidence
@@ -28,8 +28,8 @@ folder. The report describes the audited commit, not the current working tree.
 | Verified optional caches and bounded ownership | Same-length corruption, replacement races, missing/unsafe cache, ENOTDIR/disk-full, cancellation, explicit retention cap, active readers | Sixth and seventh checkpoints replace mutable VFS pointer/ODB byte caches with verified immutable retention; total admission/resource proof remains open. Shared persistent-cache policy is unchanged |
 | Efficient range reads | Ordinary blobs and pointers: small random reads, sequential windows, cold/warm, concurrent readers; origin bytes, userspace amplification, throughput, p95/p99, RSS | Seventh checkpoint removes repeated whole-blob loading on warm ranges; cold/concurrent and native/provider performance remain open |
 | Bounded dispatch and directories | Concurrent blocked hydration must not serialize unrelated FUSE operations; large-directory paging/inode lifetime; effective bounded prefetch | Open |
-| Consistent lifecycle in every mode | Foreground/helper/coordinator/daemon; read-only/writable; automatic/manual refresh; reset/commit; stalled clients and unmount during reads | Open; foreground FUSE refresh and NFS child-task ownership remain gaps |
-| Retire Crab pack v1 compatibility | Reject v1 stored repositories at all read/write/selection dispatch boundaries; delete fallback readers/writers and obsolete compatibility tests/docs; preserve empty-repository v2 initialization | Admission/helper/doctor/selected-replica validation and eighteenth-checkpoint replica readiness require v2. Protected receive, SDK and maintenance/publication dispatch remain open |
+| Consistent lifecycle in every mode | Foreground/helper/coordinator/daemon; read-only/writable; automatic/manual refresh; reset/commit; stalled clients and unmount during reads | Open; managed FUSE teardown, foreground FUSE controls/refresh, macOS mapped writeback and Windows ownership remain gaps |
+| Retire Crab pack v1 compatibility | Reject v1 stored repositories at all read/write/selection dispatch boundaries; delete fallback readers/writers and obsolete compatibility tests/docs; preserve empty-repository v2 initialization | Admission/helper/doctor/selected-replica validation and eighteenth-checkpoint replica readiness require v2. Protected receive, legacy initialization, metadb/GC and maintenance/publication dispatch remain open |
 | Final qualification | Exact resulting sources, minimal/NFS/FUSE/combined feature checks, appropriate broad CI, native Linux NFS/FUSE + RustFS, macOS NFS; retained performance measurements | Scoped current-source checks are retained at each checkpoint; complete mode/platform/performance qualification remains open |
 
 ## First checkpoint: source state and local revision selection
@@ -2402,6 +2402,91 @@ layout patterns are introduced. Documentation follows the single Capsule path;
 raw benchmark files remain excluded. All-mode correctness and performance
 signoff remain open.
 
+## Checkpoint 39 — FUSE PID and native detach ownership
+
+The installed core CLI intentionally omits FUSE. Its blocking child `.status()`
+kept PID-directed cancellation in the wrapper; the actual serving helper stayed
+mounted. A direct helper also received cancellation without completing native
+detachment: fuser 0.17's pure AutoUnmount path closes its socket and returns,
+which is not completion proof. Both baselines are retained; an ordinary native
+unmount released each diagnostic without a second shutdown signal.
+
+Unix delegation now replaces the process before cache/mount admission. The
+caller's PID becomes the serving helper. Shared FUSE cleanup retains its session,
+engine and caller-held cache admission while ordinary unmount is busy or native
+state is unknown, then joins callbacks only after confirmed detachment. The old
+timeout, force/lazy fallback and detached join thread are removed. Occupied
+mount targets are refused rather than force-cleared. Daemon sessions carry their
+canonical target through failed installation and teardown, eliminating the
+optional-runtime-path bypass. Managed async-worker starvation/cancellation and
+synchronous Drop engine drain remain explicit qualification gates.
+
+NFS and FUSE now share a fallible exact-byte native mount-table query. Linux
+splits kernel fields at ASCII spaces and decodes octal escapes without lossy
+UTF-8 conversion; vertical-tab/form-feed bytes remain part of the path. A real
+bind-mount table probe confirms that distinction. macOS uses bounded
+`getfsstat(MNT_NOWAIT)` snapshots with checked buffer lengths; query errors or
+repeated table truncation remain errors. NFS startup, control and teardown no
+longer interpret a failed query as an absent mount. Windows query failures also
+propagate; native Windows proof remains open.
+
+A real busy-client regression fails with the old cleanup at 12.78 seconds,
+when it disconnects/releases the owner. Final rebased sources pass all 662 VFS
+unit tests, all 16 native NFS/FUSE tests, all 138 CLI mount tests, strict combined
+VFS Clippy and minimal/FUSE-only checks. macOS passes strict NFS Clippy and
+112 selected daemon/NFS/control/pipeline/hydration tests. Rebase onto
+`877b832b396` brings the gateway tree-append optimization; all 208 gateway tests
+and strict all-target Clippy pass after integration.
+
+Make-installed final binaries pass twelve real Linux FUSE cases: PID SIGINT and
+SIGTERM, process-group interrupt, external ordinary detach, busy read-only and
+writable clients, busy group/TERM cancellation, unusual path bytes, an occupied
+target, native query failure, and direct helper invocation. PID identity is the
+actual helper; admitted and running executable hashes match. Busy cases retain
+the mount/cache for twelve seconds, read exact 6 MiB after cancellation and, for
+RW, complete write/fsync. Client release gives ordinary detach, callback join,
+exit zero and cache availability, without force or a second signal. Hiding only
+the container's `/proc` proves query errors retain serving/cache ownership; NFS
+passes the same fault and completes after the table is restored. macOS mount
+doctor recognizes the already-mounted APFS root without trying to mount it.
+
+Both platforms repeat normal native NFS foreground RW/RO and helper RW flows on
+fresh local Git fixtures: cache exclusion, write/fsync, diff/export/no-push
+commit, remount, read-only refusal, idle-control EOF and socket/lease/registry
+cleanup. Separate real Capsule/RustFS busy RO/SIGINT and RW/control cases retain
+data/status/cache, deliver exact 6 MiB through new VFS hydration after shutdown
+request, and finish with normal detach and exit zero. RW also finishes a new
+write/fsync. Installed artifact hashes remain unchanged through qualification.
+
+The native mapped-inspection harness initially paused writeback before its mmap
+prefault completed, deadlocking readiness. Kernel stacks identify that test
+ordering fault; prefault/setup now completes before arming the pause, retaining
+the later dirty-write/controller invariant. The failed diagnostic and exact
+task-PID termination are retained, not counted as successful cleanup. An early
+external harness used a nonexistent fixture filename; the corrected probe reads
+the fixture's actual 4 MiB file. Reused remote overlays correctly preserved notes
+from earlier busy-write tests, violating the normal script's clean-fixture
+precondition. Those failures are retained; normal flows use fresh local inputs,
+while separate Capsule probes verify remote hydration. No persisted notes were
+discarded or assertions weakened to hide that state.
+
+The best bounded repair uses one fallible mount table, one native detach/join
+path and direct PID ownership, deleting the timer/force/detached-wait alternatives.
+Managed async-worker starvation/cancellation, synchronous Drop engine drain,
+identity-bound replacement-mount races, foreground FUSE control/discovery,
+macOS FUSE, native Windows and optimized performance remain explicit gates.
+The upstream fuser auto-helper reaping behavior is also an investigation lead;
+no additional dependency override is authorized.
+
+Evidence binds 1,558 source/manifest/build inputs and both installed role sets;
+all inputs remain unchanged through final qualification. The rebase replayed
+historical tracked audit additions and their later exclusion, removing the local
+ignored copies. All 2,156 files were restored from the original Git tree and
+verified against their blob IDs; zero are tracked or in the PR diff. Raw evidence
+stays external and added tests keep the flat sibling layout. This checkpoint
+removes roughly fifty net Rust lines, including its new shared query module and
+regressions; no dependency, lockfile, setting or threshold changes are added.
+
 ## Remaining priority order
 
 The helper-layout gap and live read-only inspection leak are closed by the
@@ -2419,14 +2504,18 @@ and the remaining product owners still block signoff.
 Checkpoint-33 closes the reproduced Unix control-socket and accepted-control
 ownership gaps. Checkpoint-36 repairs the shared data owner and busy-unmount
 lifetime. Checkpoint-37 closes reproduced serving-stage startup cancellation,
-duplicate group signals and late-readiness admission. Early preparation,
-error-aware mount-presence decisions, daemon/private owners and the macOS mapping
-barrier still require proof before claiming teardown complete.
+duplicate group signals and late-readiness admission. Checkpoint-39 closes the
+reproduced foreground FUSE PID/detach failures and makes shared native queries
+error-aware. Early preparation, concurrent managed owners, target identity and
+the macOS mapping barrier still require proof before claiming teardown complete.
 
-Immediate reproduced gates: foreground FUSE does not complete shutdown after
-one global cancellation signal; mounted Git LFS files remain pointer text on
-both adapters. Repair these owner/read boundaries before widening concurrency.
-Git LFS is a current content type and must not be deleted as pack-v1 compatibility.
+Immediate content gap: mounted Git LFS files remain pointer text on both
+adapters. Reuse canonical LFS integrity/range/session ownership rather than
+creating a second object reader; qualify snapshot/late-blob attributes, COW and
+generation transitions. Managed FUSE concurrency and replacement-target races
+need native reproductions alongside that work. Preserve these ownership/read
+boundaries before widening concurrency. Git LFS is a current content type and
+must not be deleted as pack-v1 compatibility.
 
 1. **Correctness: coherent Git/Capsule generations.** Atomically install selected
    Git state, pinned catalog and read service for startup, refresh, switch and

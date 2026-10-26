@@ -1,6 +1,6 @@
 //! Mount/unmount lifecycle and PID file management.
 //!
-//! Handles force-unmounting stale mounts, creating FUSE sessions,
+//! Handles occupied-target admission, creating FUSE sessions,
 //! writing PID files for daemon mode, and graceful shutdown via
 //! `CancellationToken`.
 
@@ -16,9 +16,6 @@ use crate::core::error::{CrabError, Result};
 use crate::engine::VfsEngine;
 use crate::fuse::{CrabFs, FuseInvalidationIndex};
 use crate::resolver::FuseResolver;
-
-const FUSE_UNMOUNT_GRACE: std::time::Duration = std::time::Duration::from_secs(10);
-const FUSE_FORCE_UNMOUNT_GRACE: std::time::Duration = std::time::Duration::from_secs(5);
 
 // ---------------------------------------------------------------------------
 // Mount configuration
@@ -85,188 +82,51 @@ pub fn read_pid_file(crab_dir: &Path) -> Option<u32> {
         .and_then(|s| s.trim().parse().ok())
 }
 
-// ---------------------------------------------------------------------------
-// Force-unmount stale mounts
-// ---------------------------------------------------------------------------
-
-/// Attempt to force-unmount a stale mount at the given path.
-///
-/// On macOS: `umount -f <mountpoint>`
-/// On Linux: `fusermount3 -u <mountpoint>` (fallback: `umount -l`)
-///
-/// This attempts a **clean** unmount first and only escalates to
-/// `-f` / lazy unmount if the clean attempt fails. A forced unmount
-/// terminates in-flight I/O and can lose dirty overlay writes that
-/// haven't yet been flushed. Preferring the clean path first gives
-/// the kernel a chance to flush pending writes before we pull the
-/// plug.
-pub fn force_unmount(mountpoint: &Path) -> Result<()> {
-    info!(mountpoint = %mountpoint.display(), "attempting clean unmount of stale mount");
-
-    // Attempt 1: clean unmount.
-    #[cfg(target_os = "macos")]
-    let clean = std::process::Command::new("umount")
-        .arg(mountpoint)
-        .output();
-
-    #[cfg(target_os = "linux")]
-    let clean = std::process::Command::new("fusermount3")
-        .arg("-u")
-        .arg(mountpoint)
-        .output();
-
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    let clean: std::io::Result<std::process::Output> = Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "unmount not supported on this platform",
-    ));
-
-    if let Ok(output) = &clean {
-        if output.status.success() {
-            info!(mountpoint = %mountpoint.display(), "clean unmount succeeded");
-            return Ok(());
-        }
-        warn!(
-            mountpoint = %mountpoint.display(),
-            stderr = %String::from_utf8_lossy(&output.stderr).trim(),
-            "clean unmount failed, escalating to force"
-        );
-    }
-
-    // Attempt 2: forced/lazy unmount.
-    info!(mountpoint = %mountpoint.display(), "attempting force-unmount of stale mount");
-
-    #[cfg(target_os = "macos")]
-    let result = std::process::Command::new("umount")
-        .arg("-f")
-        .arg(mountpoint)
-        .output();
-
-    #[cfg(target_os = "linux")]
-    let result = std::process::Command::new("umount")
-        .arg("-l")
-        .arg(mountpoint)
-        .output();
-
-    #[cfg(not(any(target_os = "macos", target_os = "linux")))]
-    let result: std::io::Result<std::process::Output> = Err(std::io::Error::new(
-        std::io::ErrorKind::Unsupported,
-        "force-unmount not supported on this platform",
-    ));
-
-    match result {
-        Ok(output) if output.status.success() => {
-            info!(mountpoint = %mountpoint.display(), "force-unmount succeeded");
-            Ok(())
-        }
-        Ok(output) => {
-            let stderr = String::from_utf8_lossy(&output.stderr);
-            warn!(
-                mountpoint = %mountpoint.display(),
-                stderr = %stderr.trim(),
-                "force-unmount failed"
-            );
-            Err(CrabError::Internal(format!(
-                "force-unmount of {} failed: {stderr}",
-                mountpoint.display()
-            )))
-        }
-        Err(e) => {
-            warn!(mountpoint = %mountpoint.display(), error = %e, "force-unmount command failed");
-            Err(CrabError::Io(e))
-        }
-    }
-}
-
+/// Detach the native client and join every FUSE callback before returning.
+/// Busy or uncertain native state retains serving ownership until detachment.
 pub fn unmount_background_session(
     session: fuser::BackgroundSession,
     mountpoint: &Path,
 ) -> Result<()> {
-    let mountpoint = mountpoint.to_path_buf();
-    let mountpoint_for_worker = mountpoint.clone();
-    let (tx, rx) = std::sync::mpsc::channel();
-
-    std::thread::spawn(move || {
-        let result = session.umount_and_join().map_err(|e| {
-            CrabError::Io(std::io::Error::new(
-                e.kind(),
-                format!("failed to unmount {}: {e}", mountpoint_for_worker.display()),
-            ))
-        });
-        let _ = tx.send(result);
-    });
-
-    match rx.recv_timeout(FUSE_UNMOUNT_GRACE) {
-        Ok(result) => return result,
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => {
-            return Err(CrabError::Internal(format!(
-                "FUSE unmount worker exited without reporting status for {}",
-                mountpoint.display()
-            )));
-        }
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-            warn!(
-                mountpoint = %mountpoint.display(),
-                "FUSE session did not unmount within grace period, forcing OS unmount"
-            );
-        }
-    }
-
-    force_unmount(&mountpoint)?;
-
-    match rx.recv_timeout(FUSE_FORCE_UNMOUNT_GRACE) {
-        Ok(result) => result,
-        Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => Err(CrabError::Internal(format!(
-            "FUSE unmount worker exited without reporting status for {} after force-unmount",
-            mountpoint.display()
-        ))),
-        Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {
-            warn!(
-                mountpoint = %mountpoint.display(),
-                "FUSE session thread did not exit after force-unmount; continuing after OS unmount"
-            );
-            Ok(())
-        }
-    }
-}
-
-/// Check if a mountpoint appears to be in use (stale mount).
-fn is_mountpoint_busy(mountpoint: &Path) -> bool {
-    // A stale FUSE mount typically causes stat to hang or return ENOTCONN.
-    // If metadata succeeds, the directory is accessible (not a stale mount).
-    // Only ENOTCONN indicates a stale FUSE mount that needs force-unmounting.
-    match std::fs::metadata(mountpoint) {
-        Ok(_) => {
-            // Directory is accessible — check if it's already a FUSE mount
-            // by looking at /proc/mounts (Linux) or mount output.
-            #[cfg(target_os = "linux")]
-            {
-                if let Ok(mounts) = std::fs::read_to_string("/proc/mounts") {
-                    let mp_str = mountpoint.to_string_lossy();
-                    return mounts
-                        .lines()
-                        .any(|line| line.contains("fuse") && line.contains(mp_str.as_ref()));
+    loop {
+        let result = crate::native_mounts::contains(mountpoint);
+        match result {
+            Ok(false) => break,
+            Ok(true) => {
+                #[cfg(target_os = "linux")]
+                let result = std::process::Command::new("fusermount3")
+                    .arg("-u")
+                    .arg(mountpoint)
+                    .output();
+                #[cfg(not(target_os = "linux"))]
+                let result = std::process::Command::new("umount")
+                    .arg(mountpoint)
+                    .output();
+                match result {
+                    Ok(output) if output.status.success() => continue,
+                    Ok(output) => {
+                        warn!(mountpoint = %mountpoint.display(), status = %output.status, "FUSE unmount pending; retaining serving owner");
+                    }
+                    Err(error) => {
+                        warn!(%error, mountpoint = %mountpoint.display(), "FUSE unmount pending; retaining serving owner");
+                    }
                 }
             }
-            false
+            Err(error) => {
+                warn!(%error, mountpoint = %mountpoint.display(), "FUSE mount state unavailable; retaining serving owner");
+            }
         }
-        Err(e) => {
-            // ENOTCONN (errno 107 on Linux, 57 on macOS) indicates stale FUSE.
-            let raw = e.raw_os_error().unwrap_or(0);
-            // macOS: ENOTCONN = 57, Linux: ENOTCONN = 107
-            raw == 107 || raw == 57
-        }
+        // Keep callbacks and cache ownership while native clients are busy.
+        // A deadline cannot authorize forced detach or abandoning their thread.
+        std::thread::sleep(std::time::Duration::from_secs(2));
     }
+    // Join only after confirmed native detachment; fuser's auto-unmount socket
+    // closure alone does not prove that the kernel client has detached.
+    session.join().map_err(CrabError::Io)
 }
 
-// ---------------------------------------------------------------------------
-// Mount
-// ---------------------------------------------------------------------------
-
-/// Mount the FUSE filesystem and return a session that can be run or
-/// backgrounded.
-///
-/// If the mountpoint has a stale mount, attempts force-unmount first.
+/// Mount the FUSE filesystem and return its owned session.
+/// Returns an error if the target is already mounted or setup fails.
 pub fn mount(
     config: &MountConfig,
     resolver: Arc<FuseResolver>,
@@ -282,18 +142,15 @@ pub fn mount(
 
     crate::fuse_prereq::ensure_fuse_device_available()?;
 
-    // Force-unmount stale mounts.
-    if is_mountpoint_busy(mountpoint) {
-        if let Err(e) = force_unmount(mountpoint) {
-            error!(
-                mountpoint = %mountpoint.display(),
-                error = %e,
-                "cannot clear stale mount; is another process using this mountpoint?"
-            );
-            return Err(e);
-        }
-        // Brief pause to let the kernel clean up.
-        std::thread::sleep(std::time::Duration::from_millis(200));
+    let mountpoint = &std::fs::canonicalize(mountpoint)?;
+    if crate::native_mounts::contains(mountpoint)? {
+        return Err(CrabError::Configuration {
+            key: format!(
+                "{} already contains a mounted filesystem; unmount it before mounting",
+                mountpoint.display()
+            ),
+            origin: "FUSE mount".into(),
+        });
     }
 
     let fs = CrabFs::new(resolver, engine, &config.git_dir, rt);
@@ -301,12 +158,7 @@ pub fn mount(
 
     let fuse_config = mount_config(config.read_only);
 
-    let session = Session::new(fs, mountpoint, &fuse_config).map_err(|e| {
-        CrabError::Internal(format!(
-            "FUSE mount at {} failed: {e}",
-            mountpoint.display()
-        ))
-    })?;
+    let session = Session::new(fs, mountpoint, &fuse_config)?;
 
     // Write PID file if requested (daemon mode).
     if config.write_pid {
@@ -370,36 +222,25 @@ pub fn run_until_cancelled(
     mountpoint: &Path,
     cancel: CancellationToken,
     crab_dir: &Path,
-    rt: Handle,
 ) -> Result<()> {
     let crab_dir_owned = crab_dir.to_path_buf();
-    let (cancel_tx, cancel_rx) = std::sync::mpsc::channel();
-
-    rt.spawn(async move {
-        cancel.cancelled().await;
-        let _ = cancel_tx.send(());
-    });
-
-    let background = session
-        .spawn()
-        .map_err(|e| CrabError::Internal(format!("failed to spawn FUSE thread: {e}")))?;
+    let background = session.spawn()?;
 
     let result = loop {
-        if cancel_rx.try_recv().is_ok() {
+        if cancel.is_cancelled() {
             info!("cancellation received, unmounting FUSE filesystem");
-            break unmount_background_session(background, mountpoint)
-                .map_err(|e| std::io::Error::other(e.to_string()));
+            break unmount_background_session(background, mountpoint);
         }
 
         if background.guard.is_finished() {
-            break background.join();
+            break unmount_background_session(background, mountpoint);
         }
 
         std::thread::sleep(std::time::Duration::from_millis(50));
     };
 
     remove_pid_file(&crab_dir_owned);
-    result.map_err(|e| CrabError::Internal(format!("FUSE session error: {e}")))?;
+    result?;
 
     info!("FUSE session ended");
     Ok(())

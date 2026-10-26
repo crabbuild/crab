@@ -79,6 +79,8 @@ pub mod mount;
 pub mod mount_control;
 #[cfg(any(feature = "fuse", feature = "nfs"))]
 pub mod mount_runtime;
+#[cfg(all(unix, any(feature = "fuse", feature = "nfs")))]
+mod native_mounts;
 #[cfg(feature = "nfs")]
 pub mod nfs;
 #[cfg(feature = "nfs")]

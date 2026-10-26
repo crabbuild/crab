@@ -243,7 +243,10 @@ struct RepoRuntime {
 
 enum RepoMountSession {
     #[cfg(feature = "fuse")]
-    Fuse(fuser::BackgroundSession),
+    Fuse {
+        session: fuser::BackgroundSession,
+        mountpoint: PathBuf,
+    },
     #[cfg(feature = "nfs")]
     Nfs {
         cancel: CancellationToken,
@@ -255,7 +258,7 @@ impl RepoMountSession {
     fn is_finished(&self) -> bool {
         match self {
             #[cfg(feature = "fuse")]
-            Self::Fuse(_) => false,
+            Self::Fuse { .. } => false,
             #[cfg(feature = "nfs")]
             Self::Nfs { handle, .. } => handle.is_finished(),
         }
@@ -1000,8 +1003,9 @@ impl DaemonService {
                     #[cfg(feature = "fuse")]
                     {
                         info!(step = "fuse_mount", "mounting FUSE filesystem");
+                        let mountpoint = std::fs::canonicalize(&paths.mount_path)?;
                         let mount_config = MountConfig {
-                            mountpoint: paths.mount_path.clone(),
+                            mountpoint: mountpoint.clone(),
                             git_dir: paths.git_dir.to_string_lossy().into_owned(),
                             write_pid: true,
                             crab_dir: paths.repo_dir.join(".crab"),
@@ -1021,7 +1025,10 @@ impl DaemonService {
                             error!(step = "fuse_mount", error = %e, "failed to spawn FUSE background session");
                             CrabError::Internal(format!("FUSE background session: {e}"))
                         })?;
-                        RepoMountSession::Fuse(session)
+                        RepoMountSession::Fuse {
+                            session,
+                            mountpoint,
+                        }
                     }
                     #[cfg(not(feature = "fuse"))]
                     {
@@ -1136,8 +1143,7 @@ impl DaemonService {
             if !installed {
                 repo_cancel.cancel();
                 if let Some(session) = mount_session {
-                    let shutdown_result =
-                        shutdown_mount_session(&config.name, session, Some(paths)).await;
+                    let shutdown_result = shutdown_mount_session(&config.name, session).await;
                     remove_nfs_control_endpoint(paths);
                     shutdown_result?;
                 }
@@ -1179,7 +1185,7 @@ impl DaemonService {
 
         // 3. Unmount the backend before releasing any state used by requests.
         let mount_result = match rt.mount_session.take() {
-            Some(session) => shutdown_mount_session(name, session, rt.paths.as_ref()).await,
+            Some(session) => shutdown_mount_session(name, session).await,
             None => Ok(()),
         };
 
@@ -1516,18 +1522,16 @@ impl DaemonService {
         reason = "shared backend API awaits NFS operations when enabled"
     )
 )]
-async fn shutdown_mount_session(
-    name: &str,
-    session: RepoMountSession,
-    _paths: Option<&ComputedPaths>,
-) -> Result<()> {
+async fn shutdown_mount_session(name: &str, session: RepoMountSession) -> Result<()> {
     match session {
         #[cfg(feature = "fuse")]
-        RepoMountSession::Fuse(session) => {
-            let result = match _paths {
-                Some(paths) => crate::mount::unmount_background_session(session, &paths.mount_path),
-                None => session.umount_and_join().map_err(CrabError::Io),
-            };
+        RepoMountSession::Fuse {
+            session,
+            mountpoint,
+        } => {
+            // The session owns its target even if runtime installation fails;
+            // losing optional runtime paths must not bypass native detachment.
+            let result = crate::mount::unmount_background_session(session, &mountpoint);
             if let Err(error) = &result {
                 warn!(name, error = %error, "FUSE session unmount failed");
             } else {

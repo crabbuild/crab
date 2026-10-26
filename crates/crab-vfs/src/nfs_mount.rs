@@ -330,9 +330,13 @@ pub async fn run_until_cancelled(
                 break false;
             }
             () = tokio::time::sleep(Duration::from_secs(2)) => {
-                if !is_mounted(&session.mountpoint) {
-                    info!(mountpoint = %session.mountpoint.display(), "NFS mount disappeared");
-                    break false;
+                match is_mounted(&session.mountpoint) {
+                    Ok(false) => {
+                        info!(mountpoint = %session.mountpoint.display(), "NFS mount disappeared");
+                        break false;
+                    }
+                    Ok(true) => {}
+                    Err(error) => warn!(%error, "NFS mount state unavailable; retaining serving owner"),
                 }
             }
         }
@@ -361,19 +365,26 @@ pub async fn run_until_cancelled(
     // the user owns the mount, so they are reserved for stale CLI cleanup.
     let native_unmount_start = Instant::now();
     let mut native_unmount_attempted = false;
-    while is_mounted(&session.mountpoint) {
-        native_unmount_attempted = true;
-        let mountpoint = session.mountpoint.clone();
-        let result = tokio::task::spawn_blocking(move || unmount_native_nfs(&mountpoint))
-            .await
-            .map_err(CrabError::ReadTask)
-            .and_then(std::convert::identity);
-        if let Err(error) = result {
-            // A busy native client still owns this export and its cache lease.
-            // Keep cold reads and status live until ordinary detachment succeeds.
-            warn!(error = %error, mountpoint = %session.mountpoint.display(), "NFS unmount pending; retaining serving owner");
-            tokio::time::sleep(Duration::from_secs(2)).await;
+    loop {
+        match is_mounted(&session.mountpoint) {
+            Ok(false) => break,
+            Ok(true) => {
+                native_unmount_attempted = true;
+                let mountpoint = session.mountpoint.clone();
+                let result = tokio::task::spawn_blocking(move || unmount_native_nfs(&mountpoint))
+                    .await
+                    .map_err(CrabError::ReadTask)
+                    .and_then(std::convert::identity);
+                if let Err(error) = result {
+                    warn!(%error, mountpoint = %session.mountpoint.display(), "NFS unmount pending; retaining serving owner");
+                } else {
+                    continue;
+                }
+            }
+            Err(error) => warn!(%error, "NFS mount state unavailable; retaining serving owner"),
         }
+        // Uncertain state cannot release the serving owner or its cache lease.
+        tokio::time::sleep(Duration::from_secs(2)).await;
     }
     let native_unmount_ms = duration_millis(native_unmount_start.elapsed());
     // The select branch may already have consumed the join result. Only join
@@ -630,7 +641,19 @@ fn check_mountpoint(config: &NfsMountConfig, report: &mut NfsPreflightReport) {
     {
         match windows_mount_target(&config.mountpoint) {
             Ok(target) => {
-                if is_mounted(&config.mountpoint) {
+                let mounted = match is_mounted(&config.mountpoint) {
+                    Ok(mounted) => mounted,
+                    Err(error) => {
+                        report.mountpoint_ready = false;
+                        report.block(
+                            "NFS mount state unavailable",
+                            error.to_string(),
+                            "Restore access to the native mount table before mounting.",
+                        );
+                        return;
+                    }
+                };
+                if mounted {
                     report.mountpoint_ready = false;
                     report.block(
                         "Windows NFS drive already mounted",
@@ -679,7 +702,19 @@ fn check_mountpoint(config: &NfsMountConfig, report: &mut NfsPreflightReport) {
             );
             return;
         }
-        if is_mounted(&config.mountpoint) {
+        let mounted = match is_mounted(&config.mountpoint) {
+            Ok(mounted) => mounted,
+            Err(error) => {
+                report.mountpoint_ready = false;
+                report.block(
+                    "NFS mount state unavailable",
+                    error.to_string(),
+                    "Restore access to the native mount table before mounting.",
+                );
+                return;
+            }
+        };
+        if mounted {
             report.mountpoint_ready = false;
             report.block(
                 "NFS mountpoint is already mounted",
@@ -961,7 +996,7 @@ fn unmount_native_nfs(mountpoint: &Path) -> Result<()> {
                 output.status
             )));
         }
-        if is_mounted(mountpoint) {
+        if is_mounted(mountpoint)? {
             return Err(CrabError::Internal(format!(
                 "NFS unmount command succeeded but {} remains mounted",
                 mountpoint.display()
@@ -971,110 +1006,34 @@ fn unmount_native_nfs(mountpoint: &Path) -> Result<()> {
     }
 }
 
-pub fn is_mounted(mountpoint: &Path) -> bool {
-    #[cfg(target_os = "linux")]
+/// Query the exact target in the native mount table, preserving query failures.
+pub fn is_mounted(mountpoint: &Path) -> Result<bool> {
+    #[cfg(unix)]
     {
-        std::fs::read_to_string("/proc/mounts")
-            .is_ok_and(|mounts| linux_mounts_contains(&mounts, mountpoint))
+        crate::native_mounts::contains(mountpoint)
     }
-
-    #[cfg(target_os = "macos")]
-    {
-        use std::ffi::CStr;
-        use std::os::unix::ffi::OsStrExt;
-
-        // SAFETY: getfsstat initializes at most the capacity-sized buffer;
-        // C strings are fixed fields in every initialized statfs entry.
-        // MNT_NOWAIT avoids entering a stalled NFS client during health checks.
-        unsafe {
-            let count = libc::getfsstat(std::ptr::null_mut(), 0, libc::MNT_NOWAIT);
-            if count <= 0 {
-                return false;
-            }
-            let mut mounts = Vec::<libc::statfs>::with_capacity(count as usize);
-            let bytes = count.saturating_mul(std::mem::size_of::<libc::statfs>() as i32);
-            let count = libc::getfsstat(mounts.as_mut_ptr(), bytes, libc::MNT_NOWAIT);
-            if count <= 0 {
-                return false;
-            }
-            mounts.set_len(count as usize);
-            mounts.iter().any(|stat| {
-                let target = CStr::from_ptr(stat.f_mntonname.as_ptr());
-                let fstype = CStr::from_ptr(stat.f_fstypename.as_ptr());
-                target.to_bytes() == mountpoint.as_os_str().as_bytes()
-                    && fstype.to_bytes() == b"nfs"
-            })
-        }
-    }
-
     #[cfg(windows)]
     {
-        let Ok(target) = windows_mount_target(mountpoint) else {
-            return false;
-        };
-        let Ok(mount_exe) = windows_system_command("mount.exe") else {
-            return false;
-        };
-        let Ok(output) = Command::new(mount_exe).output() else {
-            return false;
-        };
+        let target = windows_mount_target(mountpoint)?;
+        let mount_exe = windows_system_command("mount.exe")?;
+        let output = Command::new(mount_exe).output()?;
         if !output.status.success() {
-            return false;
+            return Err(std::io::Error::other("Windows NFS mount table query failed").into());
         }
-        windows_mount_output_contains(&String::from_utf8_lossy(&output.stdout), &target)
+        Ok(windows_mount_output_contains(
+            &String::from_utf8_lossy(&output.stdout),
+            &target,
+        ))
     }
-
-    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = mountpoint;
-        false
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "NFS mount table is unavailable",
+        )
+        .into())
     }
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn linux_mounts_contains(mounts: &str, mountpoint: &Path) -> bool {
-    let needle = mountpoint.to_string_lossy();
-    mounts.lines().any(|line| {
-        line.split_whitespace()
-            .nth(1)
-            .is_some_and(|field| decode_linux_mount_field(field) == needle)
-    })
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn decode_linux_mount_field(field: &str) -> String {
-    let bytes = field.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'\\'
-            && index + 3 < bytes.len()
-            && let Some(value) = decode_octal_escape(&bytes[index + 1..index + 4])
-        {
-            decoded.push(value);
-            index += 4;
-            continue;
-        }
-        decoded.push(bytes[index]);
-        index += 1;
-    }
-    String::from_utf8_lossy(&decoded).into_owned()
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn decode_octal_escape(digits: &[u8]) -> Option<u8> {
-    if digits.len() != 3 || !digits.iter().all(u8::is_ascii_digit) {
-        return None;
-    }
-    let mut value = 0u16;
-    for digit in digits {
-        let octal = digit.checked_sub(b'0')?;
-        if octal > 7 {
-            return None;
-        }
-        value = value * 8 + u16::from(octal);
-    }
-    u8::try_from(value).ok()
 }
 
 #[cfg(any(windows, test))]
@@ -1457,39 +1416,6 @@ mod tests {
             blocker.key == "NFS mountpoint does not exist"
                 && blocker.detail == mountpoint.display().to_string()
         }));
-    }
-
-    #[test]
-    fn linux_mounts_parser_matches_exact_mountpoint() {
-        let mounts = "\
-127.0.0.1:/crab /mnt/crab nfs rw,vers=3 0 0\n\
-127.0.0.1:/crab /mnt/crab-extra nfs rw,vers=3 0 0\n";
-
-        assert!(linux_mounts_contains(mounts, Path::new("/mnt/crab")));
-        assert!(!linux_mounts_contains(mounts, Path::new("/mnt/missing")));
-    }
-
-    #[test]
-    fn linux_mounts_parser_decodes_escaped_mountpoint_fields() {
-        let mounts = "\
-127.0.0.1:/crab /mnt/Crab\\040Mount\\011One nfs rw,vers=3 0 0\n\
-127.0.0.1:/crab /mnt/Crab\\040Mount\\011One-extra nfs rw,vers=3 0 0\n";
-
-        assert!(linux_mounts_contains(
-            mounts,
-            Path::new("/mnt/Crab Mount\tOne")
-        ));
-        assert!(!linux_mounts_contains(
-            mounts,
-            Path::new("/mnt/Crab Mount\t")
-        ));
-    }
-
-    #[test]
-    fn linux_mount_field_decoder_leaves_invalid_escapes_literal() {
-        assert_eq!(decode_linux_mount_field(r"/mnt/a\040b"), "/mnt/a b");
-        assert_eq!(decode_linux_mount_field(r"/mnt/a\999b"), r"/mnt/a\999b");
-        assert_eq!(decode_linux_mount_field(r"/mnt/a\04"), r"/mnt/a\04");
     }
 
     #[test]

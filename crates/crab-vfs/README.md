@@ -281,6 +281,7 @@ Its throughput is not directly comparable with older kernel-cached runs.
 | Ordinary Git loads and promotion copies | `OdbReader`, retained by `VfsEngine` | `VfsEngine::shutdown_background()` closes admission and drains admitted blocking operations before cache ownership is released |
 | Ref/snapshot refresh | Coordinator, daemon, or interactive NFS runtime | Cancel polling and await the task, including any admitted blocking Git/snapshot work |
 | NFS control connections | NFS control server, joined by the mount runtime | Close engine mutation admission and drain controls before detach; keep status/shutdown live while busy, then stop idle reads and join handlers/replies |
+| FUSE native client and callbacks | Foreground, coordinator or daemon mount owner | Retry ordinary native unmount while retaining the background session; join callbacks only after confirmed detach |
 | NFS data server, connection parsers and RPCs | NFS mount runtime and the scoped nfs3_server owner | Retry ordinary native unmount while retaining serving/cache ownership; after detachment request graceful transport shutdown and join every admitted RPC |
 
 NFS shutdown requests stop refresh and new engine controls, while the installed
@@ -302,6 +303,23 @@ launcher forwards one shutdown signal instead of duplicating a terminal signal.
 After ten seconds cleanup warns and keeps waiting for actual detach and drain.
 Daemon/private mode qualification remains a separate gate.
 
+Foreground FUSE delegation replaces the core CLI with its FUSE helper on Unix,
+so the caller's PID remains the serving process. A PID-directed signal therefore
+reaches that owner directly. FUSE teardown queries the native mount table,
+performs ordinary unmount and joins its callback thread after detachment.
+Busy clients and query failures retain serving/cache ownership; neither a grace
+period nor auto-unmount socket closure proves completion. A new FUSE mount
+refuses an occupied target instead of force-clearing it.
+
+NFS and FUSE share a fallible, exact-path native mount-table query. Linux compares
+decoded path bytes, including escaped and non-UTF-8 names. macOS uses bounded
+`getfsstat(MNT_NOWAIT)` snapshots to avoid entering the filesystem being drained;
+a truncated/racing query remains an error. NFS preflight/control/startup propagate
+query failures, and serving owners retain admission while state is uncertain.
+Windows NFS query errors also propagate; native Windows ownership remains
+unqualified. Daemon persisted-status reconstruction has a separate inherited
+boolean probe and still needs error-aware status qualification.
+
 The NFS helper reports its actual cache identity when accepting shutdown. CLI
 unmount succeeds only after the kernel mount disappears and it acquires that
 cache's exclusive lease. The CLI retains the lease through conditional registry
@@ -311,8 +329,15 @@ helpers do not write the FUSE PID file, so their live cleanup does not remove it
 Single and batch unmount propagate live-control failures. A confirmed dead NFS
 helper is classified before any exchange and may use stale-mount cleanup;
 uncertain live shutdown cannot authorize force termination or a second operation.
-The coordinator already awaits FUSE unmount and engine drain before releasing
-its cache guard; daemon teardown separately owns its runtime cache lease.
+The foreground, coordinator and daemon FUSE paths share native detach/callback
+join; their callers retain the engine and cache lease through that boundary.
+Coordinator async teardown additionally drains engine work; synchronous Drop
+can only request engine shutdown and remains a separate qualification gate.
+Managed FUSE teardown still calls blocking native cleanup on an async worker.
+Concurrent busy mounts need a separate runtime-starvation and cancellation
+ownership qualification before all managed modes can be considered hardened.
+Native teardown queries target presence by path; replacement-mount races still
+need identity-bound qualification.
 The current cache-lock helper enforces exclusivity on Unix. Its non-Unix branch
 is still a no-op; Windows cache ownership and handoff require a real OS lock and
 separate qualification. Linux/macOS lease proof does not cover that branch.

@@ -152,6 +152,12 @@ With `--foreground`, the CLI itself becomes the mount process. It blocks until
 you press Ctrl+C. Useful for debugging, one-off browsing, or when you don't
 want a persistent coordinator.
 
+On Unix, the core CLI replaces itself with the FUSE helper when delegation is
+needed, retaining its PID. Foreground FUSE shutdown waits for ordinary unmount
+and callback completion. If another process holds the mount busy, close its
+files and leave the mounted directory so shutdown can finish. Starting a FUSE
+mount at an occupied target fails without force-clearing the existing mount.
+
 Foreground NFS mounts appear in `crab mount list` and accept status, overlay,
 commit, and unmount commands from another terminal.
 

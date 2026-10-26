@@ -33,7 +33,6 @@ async fn qualify_mapped_transition(fuse: bool, transition_kind: Transition) {
     let mountpoint = root.path().join("mount");
     std::fs::create_dir(&mountpoint).unwrap();
     let mounted = NativeMount::start(fuse, &config, &output, &mountpoint).await;
-    let pause = output.engine.pause_next_writeback();
     let path = mountpoint.join("mapped.txt");
     // A real client owns the mapping. In-process mappings/descriptors are
     // inherited by the server's Git children, whose exec/close can wait on the
@@ -45,9 +44,12 @@ async fn qualify_mapped_transition(fuse: bool, transition_kind: Transition) {
 import ctypes, mmap, os, sys
 fd = os.open(sys.argv[1], os.O_RDWR)
 mapping = mmap.mmap(fd, 4096)
-mapping[0] = ord('B')
+_ = mapping[0]
+os.fsync(fd)
 sys.stdout.buffer.write(b'1')
 sys.stdout.buffer.flush()
+sys.stdin.buffer.read(1)
+mapping[0] = ord('B')
 libc = ctypes.CDLL(None, use_errno=True)
 if libc.sync_file_range(fd, ctypes.c_longlong(0), ctypes.c_longlong(4096), 2):
     raise OSError(ctypes.get_errno(), 'sync_file_range')
@@ -68,7 +70,22 @@ os.close(fd)
         .unwrap();
     let mut release = writer.stdin.take().unwrap();
     let mut ready = writer.stdout.take().unwrap();
-    ready.read_u8().await.unwrap();
+    let ready_result =
+        tokio::time::timeout(std::time::Duration::from_secs(10), ready.read_u8()).await;
+    if !matches!(ready_result, Ok(Ok(b'1'))) {
+        writer.kill().await.unwrap();
+        mounted.stop().await;
+        output.engine.shutdown_background().await;
+        assert!(
+            matches!(ready_result, Ok(Ok(b'1'))),
+            "mapped client setup did not complete: {ready_result:?}"
+        );
+        return;
+    }
+    // Setup writeback must settle before fault admission. Otherwise page_mkwrite
+    // can wait on the paused WRITE before the client reports its first store.
+    let pause = output.engine.pause_next_writeback();
+    release.write_u8(1).await.unwrap();
     let entered = tokio::time::timeout(
         std::time::Duration::from_secs(10),
         pause.state.entered.notified(),

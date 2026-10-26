@@ -382,7 +382,36 @@ async fn qualify(fuse: bool, read_only: bool) {
         eprintln!("native_open_lifetime fuse={fuse} rename_unlink_replacement_cow=true");
         Ok(())
     }).await;
-    mounted.stop().await;
+    let retained_busy_owner = if fuse && read_only {
+        use std::io::BufRead;
+        use std::process::{Command, Stdio};
+        let path = mounted.path.clone();
+        let mut holder = Command::new("python3")
+            .args([
+                "-c",
+                "import os,sys;os.chdir(sys.argv[1]);print('ready',flush=True);sys.stdin.read(1)",
+            ])
+            .arg(&path)
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .spawn()
+            .unwrap();
+        let mut ready = String::new();
+        std::io::BufReader::new(holder.stdout.take().unwrap())
+            .read_line(&mut ready)
+            .unwrap();
+        assert_eq!(ready.trim(), "ready");
+        let stopping = tokio::spawn(mounted.stop());
+        tokio::time::sleep(std::time::Duration::from_secs(12)).await;
+        let retained = crate::native_mounts::contains(&path).unwrap() && !stopping.is_finished();
+        holder.stdin.take().unwrap().write_all(b"release").unwrap();
+        holder.wait().unwrap();
+        stopping.await.unwrap();
+        retained
+    } else {
+        mounted.stop().await;
+        true
+    };
     output.engine.shutdown_background().await;
     assert_eq!(
         (
@@ -392,6 +421,10 @@ async fn qualify(fuse: bool, read_only: bool) {
         ),
         source_state,
         "mount changed source staging or HEAD"
+    );
+    assert!(
+        retained_busy_owner,
+        "busy FUSE teardown detached or released its serving owner"
     );
     let result = result.unwrap();
     assert!(result.is_ok(), "native operations failed: {result:?}");

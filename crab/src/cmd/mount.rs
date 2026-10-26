@@ -414,17 +414,14 @@ pub fn run_fuse_mount_or_print() -> std::process::ExitCode {
             return std::process::ExitCode::from(1);
         };
 
-        let status = std::process::Command::new(fuse_mount)
+        use std::os::unix::process::CommandExt;
+        // Delegation precedes mount/cache admission. Keep the caller's PID as
+        // the serving owner so PID-directed signals cannot stop at a wrapper.
+        let error = std::process::Command::new(fuse_mount)
             .args(std::env::args_os().skip(1))
-            .status();
-        match status {
-            Ok(status) if status.success() => std::process::ExitCode::SUCCESS,
-            Ok(status) => std::process::ExitCode::from(status.code().unwrap_or(1) as u8),
-            Err(error) => {
-                eprintln!("error: failed to start Crab FUSE mount binary: {error}");
-                std::process::ExitCode::from(1)
-            }
-        }
+            .exec();
+        eprintln!("error: failed to start Crab FUSE mount binary: {error}");
+        std::process::ExitCode::from(1)
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -685,7 +682,7 @@ pub async fn run_mount_with_new_cli(mut opts: NewMountOpts) -> Result<()> {
                     }
                     let result = nfs_mount::run_until_cancelled(mounted, opts.cancel).await;
                     if let Ok(owner) = &registration
-                        && !nfs_mount::is_mounted(&mountpoint)
+                        && !nfs_mount::is_mounted(&mountpoint)?
                     {
                         // The serving process has drained; cache admission remains
                         // held by this CLI through owner-conditional registry cleanup.
@@ -730,7 +727,6 @@ pub async fn run_mount_with_new_cli(mut opts: NewMountOpts) -> Result<()> {
                         &mountpoint,
                         opts.cancel,
                         &pipeline_config.cache_dir,
-                        rt,
                     )?;
                     println!("Unmounted.");
                 }
@@ -1633,7 +1629,7 @@ async fn spawn_nfs_background(opts: NewMountOpts, mountpoint: PathBuf) -> Result
             () = opts.cancel.cancelled() => Err(CrabError::Cancelled),
             result = async {
                 while started_at.elapsed() < NFS_BACKGROUND_STARTUP_TIMEOUT {
-                    if crate::vfs::nfs_mount::is_mounted(&mountpoint)
+                    if crate::vfs::nfs_mount::is_mounted(&mountpoint)?
                         && nfs_background_control_ready(control_endpoint.as_deref()).await
                         && attach_nfs_helper_log(
                             &registry_path,
@@ -2422,7 +2418,7 @@ async fn run_foreground_mode(
         println!("Mounted at {}", mountpoint.display());
         println!("Press Ctrl+C to unmount.");
 
-        mount::run_until_cancelled(mounted.session, mountpoint, cancel, crab_dir, rt)?;
+        mount::run_until_cancelled(mounted.session, mountpoint, cancel, crab_dir)?;
 
         println!("Unmounted.");
         Ok(())
@@ -2674,7 +2670,7 @@ pub async fn try_mount_control_unmount(path: &Path) -> Result<bool> {
         crate::vfs::mount_control::MountControlShutdown::Nfs { context, cache_dir } => {
             let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
             while tokio::time::Instant::now() < deadline {
-                let mounted = crate::vfs::nfs_mount::is_mounted(&context.mountpoint);
+                let mounted = crate::vfs::nfs_mount::is_mounted(&context.mountpoint)?;
                 if let Some(_cache_guard) = nfs_shutdown_cache_guard(
                     is_pid_alive(context.entry.pid),
                     mounted,
@@ -3089,7 +3085,7 @@ fn force_unmount_cli(mountpoint: &Path) -> Result<()> {
 
 fn force_nfs_unmount_if_mounted(mountpoint: &Path) -> Result<()> {
     #[cfg(feature = "nfs")]
-    if crate::vfs::nfs_mount::is_mounted(mountpoint) {
+    if crate::vfs::nfs_mount::is_mounted(mountpoint)? {
         force_unmount_cli(mountpoint)?;
         ensure_nfs_unmounted(mountpoint)?;
     }
@@ -3100,7 +3096,7 @@ fn force_nfs_unmount_if_mounted(mountpoint: &Path) -> Result<()> {
 
 fn ensure_nfs_unmounted(mountpoint: &Path) -> Result<()> {
     #[cfg(feature = "nfs")]
-    if crate::vfs::nfs_mount::is_mounted(mountpoint) {
+    if crate::vfs::nfs_mount::is_mounted(mountpoint)? {
         return Err(CrabError::Internal(format!(
             "force-unmount command completed but {} remains mounted",
             mountpoint.display()
