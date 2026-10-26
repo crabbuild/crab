@@ -36,6 +36,11 @@ Discovery honors a nonempty `GIT_DIR` as a native OS path, without requiring
 Unicode or checking that the directory exists. An absent or empty override
 uses upward discovery. Linked-worktree `commondir` parsing remains separate.
 
+`raw_object_command` reads physical objects and actual parent links. It ignores
+local replacement refs, grafts and shallow markers so packing, visibility and
+ancestry checks agree on the stored graph. Callers retain transport, lazy-fetch
+and process-lifetime policy. Shallow fetch repacking keeps its explicit frontier.
+
 The main surfaces are:
 
 - `url`, `discover`, `ref_resolve`, `refname`, and `worktree` for repository

@@ -44,6 +44,11 @@ Trace one path: `crates/crab-server/src/git/receive/validate.rs` → `validate` 
   mode and NUL mode have different delimiter contracts; native Git path coverage
   lives in `worktree::tests`.
 
+- Immutable-object consumers use `raw_object_command` so local replacement refs,
+  grafts and shallow markers cannot change object kinds or ancestry. Fetch-specific
+  repacking retains its deliberately selected shallow frontier.
+  Source: `crates/crab-git/src/lib.rs`.
+
 ## Features and platform
 
 Only `facade` is declared; there is no declared default feature. It enables the optional high-level gix dependency. Git-spawning tests need Git on PATH; inspect locked gix source before altering its validation or discovery contract.

@@ -17633,12 +17633,10 @@ pub(crate) fn enumerate_visibility_difference(
     exclude: Option<&str>,
     maximum: usize,
 ) -> Result<Option<Vec<String>>> {
-    let mut command = std::process::Command::new("git");
+    let mut command = crab_git::raw_object_command(git_dir);
     // Visibility needs only object IDs. Optional pathname hints are ambiguous
     // and can make the text reader reject otherwise valid raw Git paths.
     command
-        .arg("--git-dir")
-        .arg(git_dir)
         .args(["rev-list", "--objects", "--no-object-names"])
         .arg(include);
     if let Some(exclude) = exclude {

@@ -46,6 +46,14 @@ preview is not a commit receipt or a guarantee of later authorization or
 concurrency outcomes. User-installed client hooks still follow Git's own
 execution rules; this does not promise to undo their side effects.
 
+Push publication requires complete remote ancestry. Local shallow markers,
+grafts and replacement refs cannot change pack contents, visibility evidence or
+fast-forward checks. A commit with missing parents cannot become a remote root.
+A first push with unavailable ancestors fails before refs change. An incremental
+push can reuse ancestry already published at its excluded remote tip. Crab leaves
+local Git history settings unchanged. The supported shallow/deepen fetch profile
+below retains its explicit client boundary.
+
 Recursive submodule operations need explicit trust for a custom transport,
 as required by [Git's protocol policy](https://git-scm.com/docs/git-config#Documentation/git-config.txt-protocolallow).
 For repositories whose submodule URLs have been reviewed, scope that trust to

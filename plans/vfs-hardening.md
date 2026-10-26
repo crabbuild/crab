@@ -11,7 +11,7 @@ Baseline: `origin/crab-v2` at `33f8e6c360d922b3ab1e2c0e5115a2d200eccd97`.
 Working branch: `codex/vfs-hardening`. PR:
 https://github.com/crabbuild/crab/pull/630 (base `crab-v2`). Follow-up hardening
 remains active. The PR is rebased onto `877b832b396`; final source and
-installed-role evidence is recorded through checkpoint 50.
+installed-role evidence is recorded through checkpoint 58.
 
 Baseline evidence and reproductions:
 `crab/docs/benchmarks/vfs-capsule-v2-audit-20261024.md` and its adjacent evidence
@@ -4088,6 +4088,107 @@ private NFS release change. Its workflows remain queued at the last snapshot.
 Return to the obsolete native publisher/fixtures and remaining stored pack-v1
 dispatch. Daemon/private native proof, TCP overrides, native target identity,
 Windows cache locking and all-mode performance/durability gates remain open.
+
+## Checkpoint 58 — publish physical Git history
+
+Current Capsule publication now uses the same physical Git object graph for
+packing, visibility, object kinds and fast-forward admission. Native Git's local
+shallow markers, `info/grafts` and replacement refs previously changed those
+queries independently. An incomplete first push could return success and expose
+a tip whose eager clone failed `git fsck`. A graft/replacement could also make a
+divergent update appear fast-forward; a forced cross-kind replacement changed the
+kind reported for an immutable blob OID.
+
+`crab_git::raw_object_command` owns the shared mechanical interpretation:
+`--no-replace-objects`, an explicit Git directory, an empty alternate shallow file
+and an empty `GIT_GRAFT_FILE`. Callers retain transport restrictions, lazy-fetch
+policy, subprocess lifetime and receive policy. No client history file is edited.
+Incomplete first pushes fail before refs change; incremental shallow pushes can
+reuse ancestors already published at the excluded remote tip. Fetch repacking
+keeps its deliberately selected shallow frontier.
+
+Current publisher tests also cover HEAD policy, atomic/non-atomic changing refs,
+delete/create batches, missing objects, canonical v2 plan intent/replay and lease
+release. An empty batch needs no remote Root, but still enters durable plan
+admission and checks cancellation. Final review caught an unpublished shortcut
+outside admission; the extended replay test fails before the ordering repair and
+passes unchanged afterward, for both empty and nonempty batches.
+
+Tests use flat `capsule_push_tests.rs`, `capsule_push_policy_tests.rs` and
+`batch_tests.rs` siblings. The existing Capsule CI filter runs all 32 tests;
+the batch test move is byte-identical. No Native producer is deleted in this
+checkpoint: porting its useful coverage exposed these integrity defects first.
+
+Evidence map:
+
+| Changed surface | Entry / caller | Owner / callee | Sibling and baseline proof |
+| --- | --- | --- | --- |
+| Pack and visibility graph | `crab push`, helper push, mounted commit/push → Capsule publisher | CLI policy → `crab-git` mechanics → native `pack-objects` / `rev-list` | Both push commands, both OSes; eager/filtered clones and unchanged local history controls |
+| Fast-forward admission | Capsule `is_ancestor` / `has_direct_parent` | Same physical graph → `merge-base`, `cat-file`, parent walk | Graft and replacement rewrite denials; four unchanged regressions fail before repair on each OS |
+| Immutable object queries | Shared kind/blob consumers, auth receive/view, verified read/fsck | `object_kinds_from_git_dir`, `verify_git_dir_blobs` → native `cat-file` | Cross-kind regression fails before repair; shared crate minimal/facade and auth consumer tests pass |
+| Plan admission | CLI/helper → `run_capsule_push` → `with_capsule_plan` → `run_inner` | Durable intent/replay owner encloses no-op completion | Linux empty-batch replay baseline fails; identical extended test passes after ordering repair |
+| Fetch sibling | Remote-helper shallow/filter paths | `repack_shallow_fetch` retains its explicit client frontier | Current-source 92-check partial-clone suite passes; physical gix OID/pointer reads already ignore local rewrites |
+| Current main / old producer | Main native commands lack one physical-history policy | Static main source retained; behavior reproduced against checkpoint 57 and the qualified shallow-only candidate | No full main E2E claim; obsolete Native entry and legacy publication remain explicit retirement work |
+
+Dependency contract proof: Git's [replacement documentation](https://git-scm.com/docs/git-replace),
+and supported-floor Git 2.39.5's
+[global option parser](https://github.com/git/git/blob/v2.39.5/git.c),
+[shallow reader](https://github.com/git/git/blob/v2.39.5/shallow.c) and
+[graft environment handling](https://github.com/git/git/blob/v2.39.5/environment.c).
+The empty alternate shallow file disables the local boundary; empty graft input
+prevents local graft ancestry. Linux runs Git 2.39.5; macOS runs Git 2.50.x.
+
+Final-source qualification, external `history-controls/qualification.json`:
+
+- 281 CLI tests pass each OS: Capsule 32, current worktrees 4, helper 153,
+  command push 46, pack 35, incremental walk 11. Shared Git: 288 minimal and
+  289 facade passes each, with one existing ignored test. Auth-server consumers:
+  75 Linux passes. Shared Git Clippy has zero diagnostics on both OSes.
+- Final Make installs all four roles on each OS. Fresh native runs omit `--ref`:
+  Linux foreground FUSE/NFS RO/RW plus managed FUSE RW; macOS foreground NFS RO/RW
+  plus helper NFS RW. Eight cases pass full/range reads, RO refusal, serving-owner
+  checks and writable fsync → commit/push → independent clone/fsck. Ordinary
+  detach succeeds, foreground owners exit zero, no forced cleanup. Checked-in
+  6 MiB reuse smoke passes 25 checks each OS; all four role hashes stay fixed.
+- Each OS passes six shallow-history cases and ten local-history/type/policy
+  cases, using both CLI and helper. Positive graft/replacement/cross-kind cases
+  include full and real blob-filtered clones, ancestor reads and `fsck`. Negative
+  cases preserve refs and history-control bytes. Final binary hashes match the
+  native roles. The fixture's initial receive-policy path was corrected from
+  project `crab.toml` to supported `.crab/local.toml`; its failed report is kept,
+  and no product parser or denial oracle was weakened.
+- Final installed Linux roles pass checked-in full add/commit/push at 16 MiB:
+  195 checks/374 commands; mirror 20/57; isolated partial clone 92/324. Fresh
+  `history58` run IDs/buckets avoid earlier-run authority. Reports record actual
+  parent `e6a3497fcf1` plus dirty source, bound to 1,561 source/build/doc hashes;
+  they do not pretend to be compiled from the later commit.
+- Final CLI SHA-256: Linux
+  `1072e19ef98cadabf62433cd6a42070cff30a8df11c62934db80d27c4fdb8035`;
+  macOS `6cee17c5962060437debd6f07fe47e4aeba319f7b2a118f1008d693e79b51a86`.
+- Empty-feature CLI checks pass. Normal library Clippy retains identical
+  checkpoint-56/phase-one inventories: 635 macOS/634 Linux warnings, no errors.
+  Optional whole-library test lint remains failing at 7,526 coded errors and
+  1,557 warnings. Its normalized diagnostic inventory matches checkpoint 56,
+  including moved source spans; no primary diagnostic targets the new policy
+  file. The metadata-only audit uses actual unit compiler arguments and verifies
+  final Cargo externs, features and build-script environment. It is not a green
+  whole-test lint gate. Format/diff checks pass; no suppression changes.
+
+Is this the best fix? One low-level command constructor makes immutable identity,
+graph coverage and ancestry checks agree without deleting intentional client
+history controls, adding settings or retaining another producer. Runtime grows
+seven net lines across six touched modules; the shared constructor replaces
+duplicated command setup. New test surface protects current publication policy
+before retiring old fixtures. No dependency, lockfile, vendor, CI guard or
+inventory change is included. All 2,156 original raw benchmark files remain
+untracked and excluded. Full hardening and optimized performance remain open.
+
+Next: finish obsolete Native/manifest publisher and fixture retirement, then
+metadb/GC/maintenance/replication authority. Preserve useful multibatch, overlap,
+shallow and follow-tag coverage on current Capsule paths. The sustained-write
+profile, bounded admission and remaining lifecycle/Windows gates below remain
+required. The separate concrete guard/inventory candidate is still unapplied
+pending explicit approval; the NFS dependency approval does not authorize it.
 
 ## Remaining priority order
 

@@ -1313,9 +1313,7 @@ pub fn object_kinds_from_git_dir(
         return Ok(std::collections::HashMap::new());
     }
 
-    let mut child = std::process::Command::new("git")
-        .arg("--git-dir")
-        .arg(git_dir)
+    let mut child = crate::raw_object_command(git_dir)
         .arg("cat-file")
         .arg("--batch-check=%(objectname) %(objecttype)")
         .stdin(Stdio::piped())
@@ -1553,6 +1551,21 @@ mod tests {
 
         assert_eq!(kinds.get(&object_ids[0]), Some(&gix_object::Kind::Blob));
         assert_eq!(kinds.get(&object_ids[1]), Some(&gix_object::Kind::Tree));
+
+        git(
+            &[
+                "--git-dir",
+                git_dir.to_str().expect("git path UTF-8"),
+                "replace",
+                "-f",
+                &blob,
+                &tree,
+            ],
+            None,
+        );
+        let physical =
+            object_kinds_from_git_dir(&git_dir, &object_ids).expect("physical object kinds");
+        assert_eq!(physical.get(&object_ids[0]), Some(&gix_object::Kind::Blob));
     }
 
     #[test]
