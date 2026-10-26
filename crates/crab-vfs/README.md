@@ -66,6 +66,13 @@ from their peeled snapshot commits. Fresh clones prepare in an owned temporary
 directory and publish only after success. A failed clone never recursively removes
 an existing destination. Clone/discovery commands clear ambient repository context.
 
+Foreground FUSE/NFS, managed FUSE and saved controls select the same Git metadata
+owner within a remote mount cache. Fresh caches use `.git`; an existing bare
+root retains its unpublished refs and derived staging namespace. Selection runs
+under cache admission, and mixed root/`.git` owners fail without replacing either
+history. The daemon uses its separate named-repository cache with explicit `.git`
+ownership. These Git directory locations do not select a stored payload format.
+
 `PipelineConfig.git_metadata` declares whether metadata is borrowed or owned by
 the mount. Borrowed repositories preserve their index and HEAD, even when the
 read context uses a remote data origin. Owned clones fetch refs and populate their

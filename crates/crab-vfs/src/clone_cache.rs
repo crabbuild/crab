@@ -73,6 +73,32 @@ pub fn cache_dir_for_url(url: &str) -> Result<PathBuf> {
     Ok(home.join(".crab").join("mounts").join("repos").join(hash))
 }
 
+/// Select the single Git metadata owner within a mount cache.
+/// Fresh caches use `.git`; existing bare metadata retains its refs and staging
+/// namespace. Reject mixed owners rather than choosing or replacing history.
+pub fn git_dir(cache_dir: &Path) -> Result<PathBuf> {
+    let nested = cache_dir.join(".git");
+    let root_metadata =
+        cache_dir.join("HEAD").try_exists()? || cache_dir.join("objects").try_exists()?;
+    if root_metadata && nested.try_exists()? {
+        return Err(CrabError::Configuration {
+            key: format!(
+                "mount cache has multiple Git metadata owners at {}",
+                cache_dir.display()
+            ),
+            origin: "crab mount".into(),
+        });
+    }
+    // Both current mount modes have produced bare Git metadata. Retaining its
+    // actual directory preserves unpushed refs and the derived staging owner;
+    // creating a second clone would orphan them under the same overlay cache.
+    Ok(if root_metadata {
+        cache_dir.to_path_buf()
+    } else {
+        nested
+    })
+}
+
 /// Cross-process guard for mutable mount cache ownership.
 #[derive(Debug)]
 pub struct MountCacheLock {
@@ -289,6 +315,22 @@ mod tests {
             );
         }
         // If HOME is not set, the function returns an error — that's fine.
+    }
+
+    #[test]
+    fn mixed_git_owners_are_rejected_without_replacing_history() {
+        let root = tempfile::tempdir().unwrap();
+        let nested = root.path().join(".git");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(root.path().join("HEAD"), b"root owner").unwrap();
+        std::fs::write(nested.join("HEAD"), b"nested owner").unwrap();
+        let result = git_dir(root.path());
+        assert!(matches!(result, Err(CrabError::Configuration { .. })));
+        assert_eq!(
+            std::fs::read(root.path().join("HEAD")).unwrap(),
+            b"root owner"
+        );
+        assert_eq!(std::fs::read(nested.join("HEAD")).unwrap(), b"nested owner");
     }
 
     #[test]

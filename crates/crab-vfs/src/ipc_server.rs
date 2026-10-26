@@ -335,7 +335,6 @@ async fn handle_mount(
         Err(e) => return IpcResponse::err(format!("failed to compute cache dir: {e}")),
     };
 
-    let git_dir = cache_dir.join(".git");
     let mountpoint_buf = PathBuf::from(&mountpoint);
     let (reservation, cancel_token, chunk_cache) = {
         let mut coord = coordinator.lock().await;
@@ -354,6 +353,14 @@ async fn handle_mount(
         Err(e) => {
             release_mount_reservation(coordinator, reservation).await;
             return IpcResponse::err(format!("{e}"));
+        }
+    };
+
+    let git_dir = match clone_cache::git_dir(&cache_dir) {
+        Ok(git_dir) => git_dir,
+        Err(error) => {
+            release_mount_reservation(coordinator, reservation).await;
+            return IpcResponse::err(format!("{error}"));
         }
     };
 

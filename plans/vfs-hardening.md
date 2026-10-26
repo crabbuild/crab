@@ -3581,6 +3581,89 @@ limit without changing assertions or production fallback behavior.
 All-mode correctness, optimized performance and remaining pack-v1 removal are
 still open. This is a qualified checkpoint, not goal completion.
 
+## Checkpoint 52 — preserve the mount cache's Git owner across modes
+
+Foreground remote preparation passed the cache root to `ensure_blobless_clone`,
+while managed FUSE passed `cache/.git`. After a managed mount, foreground startup
+therefore rejected its nonempty cache before mounting. Reversing that handoff
+could create a second clone beside existing bare metadata, losing access to local
+refs and the staging namespace derived from their original Git directory.
+
+`clone_cache::git_dir` now selects one metadata owner for foreground FUSE/NFS,
+managed FUSE and saved controls. Fresh caches use `.git`. Existing bare metadata
+retains its actual directory, unpublished refs and staging ownership. Mixed
+root/`.git` owners fail without replacing either history. Both mount entry paths
+hold cache admission before selection; IPC failures release their reservation.
+This consolidates the prior saved-control selection rather than moving metadata
+or adding a second reconstruction path. These are current Git directory shapes,
+not stored pack-v1 readers. Native proof below demonstrates the unpublished-data
+contract that requires retaining the actual directory.
+
+| Evidence cell | Checked boundary |
+| --- | --- |
+| Changed surface | Remote cache metadata selection in CLI preparation, saved controls and managed FUSE IPC |
+| Entry/owner | Normal CLI `--repo` foreground FUSE/NFS and managed mount request; exclusive cache lease precedes owner selection |
+| Caller/callee | CLI/IPC → `clone_cache::git_dir` → existing pipeline/`ensure_blobless_clone` → selected-ref fetch/reconciliation; publication and hydration derive staging from that same Git directory |
+| Siblings | NFS foreground/helper share CLI preparation; saved controls share selection. Daemon uses its separate named cache and explicit `.git`, with existing clone preparation; borrowed local sources are unchanged |
+| Tests | Real Git root/nested cache handoff retains unpublished commit and overlay; mixed owners reject without touching either HEAD; adjacent repository/pipeline/control/CLI consumers pass |
+| Main/base | Fetched main and crab-v2 retain root-only foreground versus nested managed preparation. Unchanged checkpoint-51 roles reproduce exit 5 against the exact preserved checkpoint-49 managed cache; candidate succeeds without resetting it |
+| Dependency | Existing shared Git clone/fetch/reconciliation and staging contracts retained; Git bare metadata remains the same directory/inode. No dependency, lockfile, format or protocol changes |
+
+Focused proof on the frozen four-file Rust change:
+
+- Linux and macOS: 93 VFS passes each across clone cache, repository, pipeline,
+  IPC server and mount control. CLI mount/coordinator and coordinator lifecycle/
+  shutdown consumers pass 160 Linux / 161 macOS tests.
+- Combined-feature VFS library Clippy has zero warnings on both platforms.
+  Regular CLI library Clippy completes with 635 Linux / 636 macOS warnings,
+  zero primary diagnostic spans on changed hunks. This is not a strict whole-CLI
+  lint or main baseline claim. Minimal/FUSE-only and NFS-only checks are recorded
+  separately in the external qualification.
+- Both Make-installed four-role sets pass the checked-in RustFS CLI smoke's 25
+  checks, including 6 MiB proof-bearing chunk reuse. Native Linux foreground
+  FUSE/NFS and macOS foreground NFS, RO/RW, verify full/range bytes, EROFS,
+  write/fsync → live commit/push → independent eager clone and Git fsck.
+  Status identifies the real serving PID; ordinary SIGINT detaches and exits 0.
+- Linux restores the exact preserved failing managed cache to its original
+  location. Unchanged checkpoint-51 roles reproduce the nonempty-clone failure;
+  candidate foreground FUSE reuses the original Git directory/inode, commits
+  without push, retains uncommitted overlay bytes across managed remount, then
+  pushes and independently verifies latest and historical content.
+- A second Linux case uses unchanged checkpoint-49 foreground NFS to create a
+  bare-root cache and real unpublished Crab/LFS versions. Candidate managed FUSE
+  reads both, performs COW edits and pushes; candidate foreground FUSE remounts
+  exact bytes. No second `.git` owner appears. Independent eager clone and
+  historical checkout/hydration verify both Crab and LFS versions.
+- macOS foreground NFS → background NFS helper retains unpublished 6 MiB
+  Crab/LFS versions, edits and pushes both, then verifies independent latest and
+  historical bytes. Normal live unmount succeeds. All native cases retain role
+  hashes; no forced detach, cache deletion or initialization bypass is used.
+
+Is this the best fix? A shared owner selection covers both handoff directions
+and saved controls while preserving the actual unpublished-data owner. Changing
+only the foreground clone destination would leave the opposite handoff capable
+of orphaning refs and recipes. Runtime-prefix LOC grows by 29; that pays for
+error-aware selection, mixed-owner rejection and IPC reservation cleanup. The
+remaining additions are behavior regressions and contract documentation.
+
+A separate real product failure is now reproduced from an empty working directory
+with repository-context environment cleared: `git ls-remote --refs <valid remote>`
+exits 128 / E0070 ENOENT, and default-ref foreground mounting exits 9 / E0099.
+The remote helper eagerly resolves push state/root before dispatching a read-only
+list request. This is the next investigation boundary; complete caller/callee
+and Git dependency-contract proof must precede a fix. Successful native cases
+above explicitly select `--ref main`; they do not qualify default discovery.
+CI mirror/ref and compatibility failures remain open. The separately proposed
+CI guard/inventory patch still awaits its own approval; the NFS dependency-patch
+approval does not authorize those edits.
+
+External `mount-cache-owner/qualification.json` binds source/build inventory,
+installed role hashes, focused tests, native handoffs and the preserved failing
+baseline. Drivers and the checked-in smoke oracle have separate hashes. Raw
+benchmark files remain outside the PR, and no nested feature/tests file is added.
+All-mode correctness, optimized performance and remaining pack-v1 removal remain
+open; this checkpoint does not complete the goal.
+
 ## Remaining priority order
 
 The helper-layout gap and live read-only inspection leak are closed by the

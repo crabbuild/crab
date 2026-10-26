@@ -2069,7 +2069,8 @@ async fn build_remote_pipeline_config(
     let cache_lock = MountCacheLock::acquire(&cache_dir)?;
 
     // Perform blobless clone (or update existing).
-    let git_dir = ensure_blobless_clone(url, ref_name, &cache_dir)?;
+    let git_dir = crate::vfs::clone_cache::git_dir(&cache_dir)?;
+    let git_dir = ensure_blobless_clone(url, ref_name, &git_dir)?;
 
     info!(
         url = %crate::vfs::repository::redact_url(url),
@@ -4049,12 +4050,7 @@ fn git_dir_for_mount_source(source: &str, cache_dir: &Path) -> Result<PathBuf> {
             Ok(crate::vfs::source::MountSource::validate_local(&path)?)
         }
         crate::vfs::source::MountSource::Remote { .. } => {
-            let nested = cache_dir.join(".git");
-            if nested.exists() {
-                Ok(nested)
-            } else {
-                Ok(cache_dir.to_path_buf())
-            }
+            Ok(crate::vfs::clone_cache::git_dir(cache_dir)?)
         }
     }
 }

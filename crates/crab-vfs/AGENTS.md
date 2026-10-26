@@ -67,6 +67,11 @@ mount/control owners consume the pipeline output separately.
   `repository::staging_root_for_git_dir`. Mounted versions keep distinct history
   owners; a later local commit must not retire earlier unpushed bytes.
   Sources: `crates/crab-vfs/src/publish.rs` and `crates/crab-read/src/pointer_reader.rs`.
+- Foreground and managed mounts sharing a remote cache must select its single
+  Git metadata owner under cache admission. Fresh caches use `.git`; retain an
+  existing bare root to preserve unpublished refs and their staging namespace.
+  Reject mixed owners before clone preparation. Saved controls use the same
+  selection; daemon caches have separate named ownership. Source: `clone_cache.rs`.
 - Remote-window requests own inflight claims through lock admission and cache
   publication. Cancellation drops the claim; retire its map entry only after
   the final claimant exits, so queued readers keep one lock.

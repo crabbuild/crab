@@ -199,6 +199,54 @@ fn cached_clone_fetches_requested_branch_without_losing_local_commits() {
 }
 
 #[test]
+fn mount_cache_handoff_preserves_unpublished_history_and_overlay() {
+    let _git_env = crate::test_support::CleanGitEnvGuard::new();
+    let root = tempfile::tempdir().unwrap();
+    let source = root.path().join("source");
+    std::fs::create_dir(&source).unwrap();
+    git(&source, &["init", "-b", "main"]);
+    git(&source, &["config", "user.name", "VFS test"]);
+    git(&source, &["config", "user.email", "vfs@example.invalid"]);
+    git(&source, &["commit", "--allow-empty", "-m", "base"]);
+    for nested in [false, true] {
+        let cache = root
+            .path()
+            .join(if nested { "nested-cache" } else { "bare-cache" });
+        let metadata = if nested {
+            cache.join(".git")
+        } else {
+            cache.clone()
+        };
+        ensure_blobless_clone(source.to_str().unwrap(), Some("main"), &metadata).unwrap();
+        git(&metadata, &["config", "user.name", "VFS test"]);
+        git(&metadata, &["config", "user.email", "vfs@example.invalid"]);
+        let unpublished = git(
+            &metadata,
+            &[
+                "commit-tree",
+                "main^{tree}",
+                "-p",
+                "main",
+                "-m",
+                "unpublished",
+            ],
+        );
+        git(&metadata, &["update-ref", "refs/heads/main", &unpublished]);
+        std::fs::write(cache.join("overlay.db"), b"retained overlay").unwrap();
+        let selected = crate::clone_cache::git_dir(&cache).unwrap();
+        ensure_blobless_clone(source.to_str().unwrap(), Some("main"), &selected).unwrap();
+        assert_eq!(
+            (
+                selected.clone(),
+                resolve_mount_ref(&selected, Some("main")).unwrap().0,
+                std::fs::read(cache.join("overlay.db")).unwrap()
+            ),
+            (metadata, unpublished, b"retained overlay".to_vec()),
+        );
+    }
+}
+
+#[test]
 fn ensure_clone_detects_existing_bare_repo() {
     let tmp = tempfile::tempdir().unwrap();
     let cache_dir = tmp.path().join("repo-cache");
