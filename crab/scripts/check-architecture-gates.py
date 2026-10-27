@@ -1115,15 +1115,18 @@ GIT_DELETED_CLI_OWNER_PATHS = (
     "crab/src/git/reject_reason.rs",
     "crab/src/git/walk.rs",
 )
-GIT_HEAD_SYMREF_SCAN_PATHS = (
+GIT_PUSH_HEAD_SCAN_PATHS = (
     "crab/src/git/push.rs",
+    "crab/src/git/capsule_push.rs",
 )
-GIT_HEAD_SYMREF_FORBIDDEN_PATTERNS = (
+GIT_PUSH_HEAD_FORBIDDEN_PATTERNS = (
     "try_find(\"HEAD\")",
     "resolve_local_head_at(",
+    "resolve_head_symref",
 )
+GIT_TAG_PEEL_SCAN_PATHS = (*GIT_PUSH_HEAD_SCAN_PATHS, "crab/src/cmd/push.rs")
 GIT_TAG_PEEL_REQUIRED_DELEGATIONS = {
-    "crab/src/git/push.rs": "crab_git::tag::peeled_tag_refs_at",
+    "crab/src/git/capsule_push.rs": "crab_git::tag::peeled_revision_targets_at",
     "crab/src/cmd/push.rs": "crab_git::tag::annotated_tag_refs_strict_at",
 }
 GIT_TAG_PEEL_FORBIDDEN_PATTERNS = (
@@ -4325,29 +4328,32 @@ def check_git_module_scope(root: Path, metadata: dict) -> bool:
     return False
 
 
-def check_git_head_symref_delegation(root: Path) -> bool:
+def check_git_push_head_authority(root: Path) -> bool:
     violations: list[str] = []
 
-    for scan_path in GIT_HEAD_SYMREF_SCAN_PATHS:
+    for scan_path in GIT_PUSH_HEAD_SCAN_PATHS:
         path = root / scan_path
         if not path.is_file():
+            violations.append(f"{scan_path}: push owner source is missing")
             continue
         text = path.read_text(encoding="utf-8")
-        if "crab_git::ref_resolve::resolve_head_symref" not in text:
+        if scan_path == "crab/src/git/capsule_push.rs" and (
+            "current_branch_is_denied(config, root.head(), &spec.dst)" not in text
+        ):
             violations.append(
-                f"{rel(root, path)}: local HEAD symref resolution must delegate to crab-git"
+                f"{rel(root, path)}: current-branch policy must use captured Capsule root HEAD"
             )
         for index, line in enumerate(text.splitlines(), start=1):
-            if any(pattern in line for pattern in GIT_HEAD_SYMREF_FORBIDDEN_PATTERNS):
+            if any(pattern in line for pattern in GIT_PUSH_HEAD_FORBIDDEN_PATTERNS):
                 violations.append(
-                    f"{rel(root, path)}:{index}: local HEAD symref lookup belongs in crab-git"
+                    f"{rel(root, path)}:{index}: push policy must not substitute local HEAD for remote root HEAD"
                 )
 
     if not violations:
-        print("ok: push local HEAD symref resolution delegates to crab-git")
+        print("ok: push HEAD policy uses Capsule root authority")
         return True
 
-    print("error: push local HEAD symref ownership drifted:", file=sys.stderr)
+    print("error: push HEAD authority drifted:", file=sys.stderr)
     for violation in violations:
         print(f"  {violation}", file=sys.stderr)
     return False
@@ -4356,12 +4362,14 @@ def check_git_head_symref_delegation(root: Path) -> bool:
 def check_git_tag_peel_delegation(root: Path) -> bool:
     violations: list[str] = []
 
-    for scan_path, required in GIT_TAG_PEEL_REQUIRED_DELEGATIONS.items():
+    for scan_path in GIT_TAG_PEEL_SCAN_PATHS:
         path = root / scan_path
         if not path.is_file():
+            violations.append(f"{scan_path}: push owner source is missing")
             continue
         text = path.read_text(encoding="utf-8")
-        if required not in text:
+        required = GIT_TAG_PEEL_REQUIRED_DELEGATIONS.get(scan_path)
+        if required is not None and required not in text:
             violations.append(f"{rel(root, path)}: annotated tag peeling must delegate to crab-git")
         for index, line in enumerate(text.splitlines(), start=1):
             if any(pattern in line for pattern in GIT_TAG_PEEL_FORBIDDEN_PATTERNS):
@@ -4949,7 +4957,7 @@ def main() -> int:
         check_read_fetch_admission_delegation(root),
         check_read_ref_advertisement_delegation(root),
         check_git_module_scope(root, metadata),
-        check_git_head_symref_delegation(root),
+        check_git_push_head_authority(root),
         check_git_tag_peel_delegation(root),
         check_storage_pack_layout_delegation(root),
         check_diff_module_scope(root, args.cargo, metadata),

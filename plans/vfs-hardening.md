@@ -4883,6 +4883,139 @@ qualification. Stored pack-v1 maintenance/GC/replication authority, all-mode
 lifecycle, total memory, cold-read concurrency, SQLite and performance gates
 remain open.
 
+## Checkpoint 68 — retire the generic manifest producer
+
+The change removes the remaining generic `PushPipeline`, `run_push_batch`,
+manifest-only initializer, and their private producer/test closure. Current CLI,
+remote helper and import publication already call `git::capsule_push::run`; no
+external generic calls remain after checkpoint 67. The push module falls from
+37,278 to 7,156 lines: 14,118 fewer lines before the test module and
+16,004 fewer inline-test lines. This is producer retirement, not complete removal
+of stored pack-v1 authority. No compatibility wrapper, dependency or configuration is added.
+
+An original-source Rust AST inventory identifies the live consumer closure;
+manual consumer review and semantic compilation qualify the candidate rather
+than treating identifier search as a proof of Rust name resolution. All 115
+retained push-module production item bodies and the nested current Capsule chunk-test
+module are byte-identical to checkpoint 67. Test-only imports remain in the existing
+inline module. The unused optional HEAD-etag mode of the private range fixture
+is removed. Current data-plane and term-construction guards remain intact.
+
+Evidence map:
+
+| Surface | Entry / owner | Caller / callee / sibling contract | Current proof |
+| --- | --- | --- | --- |
+| Current publication | CLI, remote helper, import → Capsule run | Shared PushConfig/outcomes/ref policy → crab-git and current Capsule publication | 70 retained push tests each OS; macOS 32 Capsule policy/transaction cases, excluding its heavy data group |
+| Retained maintenance | metadb, repack, upload-pack → push metadata helpers | Existing manifest maintenance/reader repairs are still live; their owners require separate format retirement | 115 production bodies preserved exactly; both platform lib-test builds compile |
+| Current chunk behavior | Nested Capsule chunk tests → add/staging/classifier | Current cross-repository ownership and receipt/proof behavior is retained | Whole nested module byte-identical; included in the 70 executed cases each OS |
+| Shared Store adapter | Integration fan-out → Store PUT → futures 0.3.32 | FuturesUnordered owns admitted futures; try_collect returns the first error; provider completion after drop is not proved by an InMemory fixture | Both test bodies, concurrency 16, 250 ms limit and error bounds unchanged; two passes on each OS |
+| Main / v2 comparison | Fetched main and crab-v2 → old generic producer | Current branch has already migrated external fixtures before producer removal | Exact old source, AST spans and consumer map preserved outside the checkout |
+| Protected source guard | Architecture inventory → current push ownership | Old requirements still demand deleted local-HEAD and manifest tag helpers | Unchanged guard fails two expectations; exact human-approved two-file migration applied, 15 self-tests and 75 actual source checks per OS pass |
+
+The guard candidate requires current-branch policy to use captured Capsule root
+HEAD, forbids local-HEAD substitution on both push surfaces, requires current
+crab-git tag delegation, retains all raw-peeling prohibitions across both shared
+and current push plus command policy, and rejects missing owner files. The human approves this exact two-file patch after reviewing its concrete
+candidate. Both working files equal the approved candidate bytes. All 15 guard
+self-tests and all 75 actual source checks on each OS pass. Raw-peeling
+prohibitions and performance thresholds remain intact.
+
+The task Colima VM stopped during the first final-qualification attempt. Both
+unified process handles subsequently disappeared; neither incomplete run is a
+pass. Its Linux log records a container EOF. The same owned VM and RustFS
+containers were restarted without resetting their data; new named qualification
+runs pass all 70 retained cases on each OS. Product source has not changed during
+the resumed runs. The producer-only archive contains 1,566 files, SHA-256
+`649b4ef8ec44bce263cfc99335575b6d5f49583e53c165723455d538ea12ed67`.
+Its Linux Capsule group passes all 39 cases with three explicitly ignored large
+cases; its Store tests pass twice on each OS under the unchanged limits. Linux
+production Clippy exits zero with 598 warnings; existing push-module diagnostics
+include the pre-existing dangling HEAD-concurrency doc comment. The missing Linux
+rustfmt component stops the orchestration before any installed build. The same
+source passes host formatting. macOS Clippy is deliberately interrupted with its
+verified task-only process group before installation to finish the producer's
+newly orphaned buffered-write path. No native mount is active at that interruption.
+Neither interruption is counted as a completed build or native proof.
+
+The final working cleanup removes MetaDbGuard::commit_buffered, the session and
+database buffered methods, both durability booleans, their unused increment API
+and runtime atomic counter, and the two obsolete buffered-mode tests. Durable
+session commits retain read-only refusal, empty-transaction lazy opening,
+per-database parallelism and receipt metrics. Durable Db writes retain
+await_durable:false followed by explicit flush, typed source errors and successful
+flush counting. Pinned SlateDB 0.15.0 defaults await_durable to true and waits on
+durable_seq; Crab disables timer flushes. Substituting default write options
+would change that ordering and could wait for a flush this caller has not issued.
+Existing takeover/reopen and current durable commit tests remain.
+
+The cumulative perf-state counter is a shipped CLI contract: it is present in
+release tags including v1.2.4, persists in stat output and has an existing roundtrip
+fixture with eight historical writes. Keep those stored totals while current
+operation deltas contribute zero; remove the unused runtime mutation API. A new
+filesystem regression checks that a current operation adds its bytes and preserves
+the prior count. CLI and public stat documentation describe the historical total.
+
+The revised frozen archive contains 1,568 files, SHA-256
+`e4bf19366c488f8edca336ec33ccd49bd05c6cc0d6c4f3b0779b8bf13af1adf3`.
+This runtime revision passes 209 cases on each OS: 78 metadata, 23 metrics,
+six stat, 70 retained push and 32 Capsule policy/transaction cases. This focused
+Capsule run explicitly excludes its heavy data group; the producer-only revision's
+39-case result retains its original binding. Production-library Clippy exits zero
+on both OSes (593 macOS / 596 Linux warnings, no suppressions). Four roles install through Make on each OS. Fresh Linux foreground FUSE/NFS
+RO/RW plus managed FUSE RW and macOS foreground NFS RO/RW plus managed NFS RW
+pass: eight native cases and 25 RustFS reuse checks per OS. They prove exact
+6 MiB full/range reads, RO refusal, live ownership/mode, applicable fsync →
+commit/push → independent eager clone/fsck and ordinary detach. All four role
+hashes remain fixed, with no forced cleanup. Linux core SHA-256 is
+`00f8842b4ccfccaaad62d8056898c9c69eed6b789f2e8b603b0e377b113654da`;
+macOS core is `ad5224dab92da543ae342a7d92c618ad091e09bfc89c0f094cb2da874e45d990`.
+The initial Linux native preflight fails because the image lacks AWS CLI, before
+any mount starts. Installing awscli only in the disposable task container permits
+the rerun; all four installed role hashes match the failed attempt exactly. The
+preflight failure remains in evidence. No source patch or binary rebuild is used
+to bypass it. No prior proof is rebound
+to the new metadata implementation.
+
+The public documentation build, typecheck, lint and ten tests pass. The built
+stat page contains the updated historical-counter description; the production
+link crawl checks 398 HTML pages and 4,307 fragments. npm installation leaves the
+lockfile byte-identical. The build reorders two tracked generated registries;
+their import target sets are identical. Those task-generated changes are saved
+outside the checkout and restored, then typecheck passes again.
+
+An exhaustive scan of the 238 removed unit-test roots finds two explicit CI
+selectors, while prefix review shows all nine filters in an old partial-clone
+block now match no retained tests. A routine workflow-wiring migration is prepared:
+the existing full Capsule and shared reader suites remain; current Capsule writer
+contracts replace the empty legacy group. SDK fault recovery selects current CLI
+staging retirement and current prepared-attempt/receipt recovery tests. No source inventory, expected-failure file, test assertion or threshold is changed
+by this workflow wiring. Both OSes execute 32 writer cases (one existing live-S3
+case ignored), two captured-catalog cases, one missing-binding case, one prepared
+multi-ref reader case, the two exact writer recovery cases and one exact current
+CLI case under the SDK gix-transport profile. Thus 39 passes per OS establish
+nonzero selection before applying the routine two-workflow patch. macOS uses the
+SDK MSRV compiler, Rust 1.97.0; Linux uses the dedicated image's Rust 1.97.1, so
+exact Linux MSRV remains a CI responsibility. YAML parsing proves only two run
+blocks change; all other workflow fields, permissions, actions and thresholds
+are identical. The separate commit/push receipt binds the qualified bytes to the published head;
+checkpoints 66/67 retain their original source-bound proof.
+
+Final review source contains 1,572 hashed files: the 1,568 qualified runtime/doc
+inputs plus the two approved guard and two routine workflow files. Archive SHA-256:
+`46363463ade1717c29a5956bbe1611e9d3ca8eae714e4b3ff6d0be0e7d2b2af9`.
+Runtime source remains byte-identical after final cargo fmt. No benchmark raw
+paths or dependency/lockfile changes are included. No optimized performance or
+all-mode signoff is claimed.
+
+Is this the best fix? Delete the obsolete producer after moving its useful
+properties to the current publication owner. Preserve live shared policy and
+maintenance consumers while retiring their old authority at the appropriate
+owner boundary; deleting the whole module would break those current callers.
+Retire the newly orphaned buffered mode through its real guard/session/database
+owner chain, keeping the one explicit durable path instead of suppressing the
+unused-wrapper warning. Stored metadata/GC/maintenance/replication dispatch,
+all-mode lifecycle, total memory and optimized performance remain open.
+
 ## Remaining priority order
 
 Checkpoints 57/62 close the reproduced Unix endpoint flock handoff and late
@@ -4920,9 +5053,9 @@ including the ambiguous advisory-cache domain and receipt-only importer. Its nat
 replay reproduces missing foreground FUSE commit/control ownership on checkpoint-49
 binaries. Checkpoint-51 repairs that serving owner and qualifies live publication
 and ordinary teardown. Full control, early-startup, daemon/private and native
-mount-identity proofs remain. Retire the actual old CLI publisher/fixture
-initializer, metadb/GC and
-maintenance/replication stored pack-v1 dispatch.
+mount-identity proofs remain. Checkpoint 68 removes the old CLI producer and
+initializer after current-format fixture qualification. Next retire metadb/doctor,
+GC, maintenance and replication stored pack-v1 dispatch.
 Checkpoints 42/43 repair canonical LFS publication and ignored-byte retention;
 checkpoint-44 reduces local verification amplification with bounded block proofs. Remote proof reuse, LFS generation
 transitions, payload retirement and crash recovery remain open. Checkpoint-40 closes managed runtime-worker starvation;

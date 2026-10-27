@@ -185,16 +185,7 @@ jobs:
           cargo test -p crab --lib git::index::tests --locked --features gix-transport
           cargo test -p crab --lib publication_recovery --locked --features gix-transport
           cargo test -p crab --lib git::capsule_push::tests --locked --features gix-transport
-          cargo test -p crab --lib --locked --features gix-transport -- \
-            git::push::tests::lookup_staging \
-            git::push::tests::under_lock_refresh \
-            git::push::tests::candidate_indexes_retain_uncompacted_journal_dependencies \
-            git::push::tests::candidate_metadata_anchor \
-            git::push::tests::snapshot_dependency_retention \
-            git::push::tests::cas_retry_reuses_dependencies \
-            git::push::tests::non_atomic_cas_retry \
-            git::push::tests::shared_xorb_non_atomic_replan \
-            git::push::tests::ref_lease
+          cargo test -p crab-write --lib capsule_protocol:: --locked
           cargo test -p crab --lib git::remote_helper::tests::list_session_does_not_open_a_damaged_staging_index --locked --features gix-transport
           cargo test -p crab --lib git::remote_helper::tests::capsule_promisor_fetch_ --locked --features gix-transport
           cargo test -p crab-metadata --lib file_index_lookup --locked --features file-index-reader

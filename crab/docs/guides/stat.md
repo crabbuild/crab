@@ -69,7 +69,7 @@ Performance counters track cumulative metrics across all crab operations:
 | `multipart_resumed_uploads` | Number of resumed multipart uploads |
 | `head_list_requests` | LIST requests issued by batched xorb resume checks |
 | `head_point_requests` | Individual HEAD requests issued by xorb resume checks |
-| `metadb_buffered_batch_write_count` | Buffered metadb batches submitted during pushes |
+| `metadb_buffered_batch_write_count` | Historical buffered metadata batches; Capsule pushes do not add to this total |
 | `metadb_wal_flush_count` | Explicit metadb WAL flushes |
 | `metadb_memtable_flush_count` | Explicit metadb memory-table-to-L0 flushes |
 

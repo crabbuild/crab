@@ -2189,9 +2189,7 @@ fn unix_ms_to_iso8601(ms: u64) -> String {
 }
 
 /// Convert days since the Unix epoch into a `(year, month, day)`
-/// triple using Howard Hinnant's civil-from-days algorithm. Matches
-/// the helper in `git::push::days_to_ymd` so the two formatters stay
-/// consistent.
+/// triple using Howard Hinnant's civil-from-days algorithm.
 fn days_to_ymd(days: u64) -> (u64, u64, u64) {
     let z = days + 719_468;
     let era = z / 146_097;

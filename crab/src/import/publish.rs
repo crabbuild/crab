@@ -7,7 +7,7 @@
 //! # What this stage does
 //!
 //! 1. Build one [`PushSpec`] targeting `refs/heads/<branch>` at
-//!    `head_commit_oid`. The native-push graph walk picks up all
+//!    `head_commit_oid`. The Capsule graph walk picks up all
 //!    ancestors automatically, so we never enumerate intermediate
 //!    commits.
 //! 2. Initialize one unborn protocol-v2 root at the empty target prefix.
@@ -24,10 +24,10 @@
 //! # What this stage does *not* do
 //!
 //! - Resolve credentials or build the target [`Store`]. That belongs
-//!   to the import coordinator (task 14) — publish takes an already-
+//!   to the import coordinator — publish takes an already-
 //!   resolved target.
-//! - Re-run the commit walk or enumerate pointers. The push pipeline
-//!   does that internally off [`PushPipeline::step_1_pointer_enumeration`].
+//! - Re-run the commit walk or enumerate pointers. The current Capsule
+//!   publisher discovers the selected Git dependency closure.
 //! - Touch the source bucket. Even on same-bucket imports the source
 //!   objects sit untouched; the push pipeline only writes xorbs,
 //!   shards, and refs to the `StoreLayout`-rooted prefix.

@@ -173,5 +173,48 @@ class CellarBoundaryTests(unittest.TestCase):
         self.assertFalse(self.check_source("#[cfg(test)] mod tests { use crab_ltx::CellReplica; }\n"))
 
 
+class PushOwnershipTests(unittest.TestCase):
+    def check_sources(self, sources, checker):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for relative, text in sources.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text, encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                return checker(root)
+
+    def test_head_policy_requires_root_authority_and_rejects_local_substitution(self):
+        valid = "current_branch_is_denied(config, root.head(), &spec.dst)"
+        sources = {path: valid for path in GATES.GIT_PUSH_HEAD_SCAN_PATHS}
+        self.assertTrue(self.check_sources(sources, GATES.check_git_push_head_authority))
+        for path in sources:
+            with self.subTest(missing=path):
+                missing = {key: value for key, value in sources.items() if key != path}
+                self.assertFalse(self.check_sources(missing, GATES.check_git_push_head_authority))
+            for pattern in GATES.GIT_PUSH_HEAD_FORBIDDEN_PATTERNS:
+                with self.subTest(path=path, pattern=pattern):
+                    changed = dict(sources, **{path: valid + "\n" + pattern})
+                    self.assertFalse(self.check_sources(changed, GATES.check_git_push_head_authority))
+        sources["crab/src/git/capsule_push.rs"] = ""
+        self.assertFalse(self.check_sources(sources, GATES.check_git_push_head_authority))
+
+    def test_tag_delegation_is_required_and_raw_peeling_rejected_on_all_push_owners(self):
+        sources = {path: GATES.GIT_TAG_PEEL_REQUIRED_DELEGATIONS.get(path, "")
+                   for path in GATES.GIT_TAG_PEEL_SCAN_PATHS}
+        self.assertTrue(self.check_sources(sources, GATES.check_git_tag_peel_delegation))
+        for path in sources:
+            with self.subTest(missing=path):
+                missing = {key: value for key, value in sources.items() if key != path}
+                self.assertFalse(self.check_sources(missing, GATES.check_git_tag_peel_delegation))
+            for pattern in GATES.GIT_TAG_PEEL_FORBIDDEN_PATTERNS:
+                with self.subTest(path=path, pattern=pattern):
+                    changed = dict(sources, **{path: sources[path] + "\n" + pattern})
+                    self.assertFalse(self.check_sources(changed, GATES.check_git_tag_peel_delegation))
+        for path in GATES.GIT_TAG_PEEL_REQUIRED_DELEGATIONS:
+            with self.subTest(delegation=path):
+                self.assertFalse(self.check_sources(dict(sources, **{path: ""}), GATES.check_git_tag_peel_delegation))
+
+
 if __name__ == "__main__":
     unittest.main()
