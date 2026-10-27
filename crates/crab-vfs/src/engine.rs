@@ -849,6 +849,7 @@ pub struct VfsEngine {
     overlay_locks: DashMap<String, Arc<AsyncMutex<()>>>,
     /// Drains all overlay mutations while a live overlay reset clears state.
     overlay_reset_gate: Arc<AsyncRwLock<()>>,
+    native_writeback_gate: Arc<AsyncRwLock<()>>,
     overlay_reset_epoch: AtomicU64,
     /// Monotonic clock for overlay invalidation events.
     overlay_version: AtomicU64,
@@ -881,7 +882,7 @@ struct OverlayMutationGuard {
 pub struct OverlayResetGuard<'a> {
     engine: &'a VfsEngine,
     epoch: &'a AtomicU64,
-    _guard: OwnedRwLockWriteGuard<()>,
+    _guard: (OwnedRwLockWriteGuard<()>, OwnedRwLockWriteGuard<()>),
 }
 
 impl Drop for OverlayResetGuard<'_> {
@@ -913,6 +914,7 @@ impl VfsEngine {
             snapshot,
             overlay_locks: DashMap::new(),
             overlay_reset_gate: Arc::new(AsyncRwLock::new(())),
+            native_writeback_gate: Arc::new(AsyncRwLock::new(())),
             overlay_reset_epoch: AtomicU64::new(0),
             overlay_version: AtomicU64::new(0),
             overlay_reset_version: AtomicU64::new(0),
@@ -1905,8 +1907,18 @@ impl VfsEngine {
         self.overlay_reset_gate.clone().read_owned().await
     }
 
-    pub(crate) async fn quiesce_overlay(&self) -> OwnedRwLockWriteGuard<()> {
-        self.overlay_reset_gate.clone().write_owned().await
+    pub(crate) async fn begin_native_writeback(&self) -> OwnedRwLockReadGuard<()> {
+        self.native_writeback_gate.clone().read_owned().await
+    }
+
+    pub(crate) async fn quiesce_overlay(
+        &self,
+    ) -> (OwnedRwLockWriteGuard<()>, OwnedRwLockWriteGuard<()>) {
+        // Entered native WRITEs can still be waiting for inode/namespace locks.
+        // Drain them before blocking engine mutations, or they cannot finish.
+        let writeback = self.native_writeback_gate.clone().write_owned().await;
+        let overlay = self.overlay_reset_gate.clone().write_owned().await;
+        (overlay, writeback)
     }
 
     pub async fn begin_overlay_reset(&self) -> OverlayResetGuard<'_> {
@@ -2619,6 +2631,30 @@ mod tests {
             _root: root,
             _cache: cache_dir,
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn native_writeback_drains_before_engine_mutations_are_blocked() {
+        let fixture = test_engine_with_base_file("file.txt");
+        let writeback = fixture.engine.begin_native_writeback().await;
+        let freeze = fixture.engine.quiesce_overlay();
+        tokio::pin!(freeze);
+        tokio::time::timeout(Duration::from_millis(10), freeze.as_mut())
+            .await
+            .unwrap_err();
+        tokio::time::timeout(
+            Duration::from_secs(5),
+            fixture.engine.write("file.txt", 0, b"accepted write"),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        drop(writeback);
+        let _freeze = tokio::time::timeout(Duration::from_secs(5), freeze)
+            .await
+            .unwrap();
+        let backing = fixture.overlay.get_backing_path("file.txt").unwrap();
+        assert_eq!(std::fs::read(backing).unwrap(), b"accepted write");
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

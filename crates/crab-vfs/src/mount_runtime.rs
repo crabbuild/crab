@@ -301,7 +301,7 @@ pub(crate) async fn export_overlay_runtime(
         .await
 }
 
-/// Flush client writeback before taking the engine mutation gate.
+/// Request client writeback before quiescing native callbacks and engine mutations.
 ///
 /// Linux waits for syncfs; macOS retains its global sync request. A missing
 /// synthetic Git file identifies an inactive helper with no client to flush.

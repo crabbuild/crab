@@ -7,7 +7,8 @@
 //! FUSE callbacks are synchronous (called from fuser's background threads).
 //! Async engine/resolver calls are bridged via `Handle::block_on`.
 //!
-//! Threading model: fuser dispatches callbacks on its own thread pool.
+//! Threading model: Linux mounts use a bounded fuser callback pool;
+//! other platforms retain fuser's single dispatcher.
 //! `block_on` is safe here because the tokio runtime runs on separate
 //! threads — fuser threads never run tokio tasks, so there's no
 //! deadlock risk from blocking. The hydration service's synchronous
@@ -1389,6 +1390,9 @@ impl Filesystem for CrabFs {
         _lock_owner: Option<LockOwner>,
         reply: ReplyWrite,
     ) {
+        // Control quiescence must include callbacks waiting for inode ownership,
+        // before they reach the engine's mutation gate.
+        let _writeback = self.rt.block_on(self.engine.begin_native_writeback());
         let fh = u64::from(fh);
 
         let Some(handle) = self.file_handle(u64::from(ino), fh) else {

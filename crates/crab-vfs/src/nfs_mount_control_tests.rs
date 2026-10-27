@@ -3,16 +3,6 @@
 use super::*;
 use std::future::Future;
 
-async fn ping_ready(endpoint: &str) {
-    for _ in 0..40 {
-        if nfs_control::ping(endpoint).await.is_ok() {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
-    nfs_control::ping(endpoint).await.unwrap();
-}
-
 #[tokio::test]
 async fn owner_cancellation_joins_control_cleanup_before_returning() {
     let root = tempfile::tempdir().unwrap();
@@ -22,6 +12,7 @@ async fn owner_cancellation_joins_control_cleanup_before_returning() {
     let (_sender, receiver) = mpsc::channel(1);
     let mut session = tests::synthetic_session(root.path(), server, server_cancel, receiver);
     session.control_endpoint = Some(endpoint.clone());
+    session.control_listener = Some(nfs_control::bind_server(&endpoint).await.unwrap());
     let cancel = CancellationToken::new();
     let shutdown = run_until_cancelled(session, cancel.clone());
     tokio::pin!(shutdown);
@@ -30,30 +21,21 @@ async fn owner_cancellation_joins_control_cleanup_before_returning() {
         std::task::Poll::Ready(())
     })
     .await;
-    ping_ready(&endpoint).await;
+    nfs_control::ping(&endpoint).await.unwrap();
     cancel.cancel();
     shutdown.await.unwrap();
     assert!(!socket.exists());
 }
 
 #[tokio::test]
-async fn control_bind_failure_stops_the_mount_and_preserves_the_existing_file() {
+async fn control_bind_failure_preserves_existing_source_before_mount() {
     let root = tempfile::tempdir().unwrap();
     let socket = root.path().join("control.sock");
     std::fs::write(&socket, b"existing source").unwrap();
-    let (server_cancel, server) = tests::idle_server();
-    let (_sender, receiver) = mpsc::channel(1);
-    let mut session = tests::synthetic_session(root.path(), server, server_cancel, receiver);
-    session.control_endpoint = Some(format!("unix:{}", socket.display()));
-    let cancel = CancellationToken::new();
-    let mut owner = tokio::spawn(run_until_cancelled(session, cancel.clone()));
-    let result = tokio::time::timeout(Duration::from_secs(1), &mut owner).await;
-    if result.is_err() {
-        cancel.cancel();
-        owner.await.unwrap().unwrap();
-    }
+    let endpoint = format!("unix:{}", socket.display());
+    let result = nfs_control::bind_server(&endpoint).await;
     assert!(
-        matches!(result, Ok(Ok(Err(CrabError::Io(error)))) if error.kind() == std::io::ErrorKind::AddrInUse)
+        matches!(result, Err(CrabError::Io(error)) if error.kind() == std::io::ErrorKind::AddrInUse)
     );
     assert_eq!(std::fs::read(socket).unwrap(), b"existing source");
 }
@@ -66,6 +48,7 @@ async fn owner_shutdown_waits_for_a_contended_control_snapshot() {
     let (_sender, receiver) = mpsc::channel(1);
     let mut session = tests::synthetic_session(root.path(), server, server_cancel, receiver);
     session.control_endpoint = Some(endpoint.clone());
+    session.control_listener = Some(nfs_control::bind_server(&endpoint).await.unwrap());
     let runtime = Arc::clone(session.runtime.as_ref().unwrap());
     let cancel = CancellationToken::new();
     let owner = run_until_cancelled(session, cancel.clone());
@@ -75,7 +58,7 @@ async fn owner_shutdown_waits_for_a_contended_control_snapshot() {
         std::task::Poll::Ready(())
     })
     .await;
-    ping_ready(&endpoint).await;
+    nfs_control::ping(&endpoint).await.unwrap();
     // Session, listener state and observer remain after the ping client closes.
     tokio::time::timeout(Duration::from_secs(2), async {
         while Arc::strong_count(&runtime) != 3 {

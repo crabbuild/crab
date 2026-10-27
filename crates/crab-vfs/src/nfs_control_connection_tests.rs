@@ -28,20 +28,73 @@ async fn start_unix(
 ) {
     let endpoint = format!("unix:{}", root.join("control.sock").display());
     let cancel = CancellationToken::new();
-    let handle = spawn_server(
-        Some(endpoint.clone()),
-        state(root, cancel.clone()),
-        cancel.clone(),
-    )
-    .unwrap();
-    for _ in 0..40 {
-        if ping(&endpoint).await.is_ok() {
-            return (endpoint, cancel, handle);
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    let handle = bind_server(&endpoint)
+        .await
+        .unwrap()
+        .spawn(state(root, cancel.clone()), cancel.clone());
     ping(&endpoint).await.unwrap();
     (endpoint, cancel, handle)
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn prepared_control_listener_accepts_connections_before_serving() {
+    let root = tempfile::tempdir().unwrap();
+    let endpoint = format!("unix:{}", root.path().join("control.sock").display());
+    let _listener = bind_server(&endpoint).await.unwrap();
+    assert!(
+        tokio::net::UnixStream::connect(unix_path_from_endpoint(&endpoint).unwrap())
+            .await
+            .is_ok()
+    );
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn dropping_unstarted_control_releases_its_endpoint() {
+    let root = tempfile::tempdir().unwrap();
+    let endpoint = format!("unix:{}", root.path().join("control.sock").display());
+    let listener = bind_server(&endpoint).await.unwrap();
+    drop(listener);
+    assert!(bind_server(&endpoint).await.is_ok());
+}
+
+#[tokio::test]
+async fn prepared_tcp_control_listener_accepts_connections_before_serving() {
+    let listener = bind_server("tcp:127.0.0.1:0?token=owned-token")
+        .await
+        .unwrap();
+    let addr = match &listener.listener {
+        ControlListener::Tcp(socket, _) => socket.local_addr().unwrap(),
+        #[cfg(unix)]
+        ControlListener::Unix(..) => panic!("TCP fixture selected another transport"),
+    };
+    assert!(tokio::net::TcpStream::connect(addr).await.is_ok());
+}
+
+#[tokio::test]
+async fn dropping_unstarted_tcp_control_releases_its_port() {
+    let listener = bind_server("tcp:127.0.0.1:0?token=owned-token")
+        .await
+        .unwrap();
+    let addr = match &listener.listener {
+        ControlListener::Tcp(socket, _) => socket.local_addr().unwrap(),
+        #[cfg(unix)]
+        ControlListener::Unix(..) => panic!("TCP fixture selected another transport"),
+    };
+    drop(listener);
+    assert!(tokio::net::TcpListener::bind(addr).await.is_ok());
+}
+
+#[tokio::test]
+async fn occupied_tcp_control_endpoint_is_rejected_before_serving() {
+    let occupied = tokio::net::TcpListener::bind((std::net::Ipv4Addr::LOCALHOST, 0))
+        .await
+        .unwrap();
+    let endpoint = format!("tcp:{}?token=owned-token", occupied.local_addr().unwrap());
+    assert!(
+        matches!(bind_server(&endpoint).await, Err(CrabError::Io(error)) if error.kind() == std::io::ErrorKind::AddrInUse)
+    );
 }
 
 #[cfg(unix)]
@@ -49,23 +102,12 @@ async fn start_unix(
 async fn duplicate_control_bind_does_not_unlink_the_serving_owner() {
     let root = tempfile::tempdir().unwrap();
     let (endpoint, cancel, handle) = start_unix(root.path()).await;
-    let second_cancel = CancellationToken::new();
-    let mut second = spawn_server(
-        Some(endpoint.clone()),
-        state(root.path(), second_cancel.clone()),
-        second_cancel.clone(),
-    )
-    .unwrap();
-    let rejected = tokio::time::timeout(Duration::from_secs(1), &mut second).await;
+    let rejected = bind_server(&endpoint).await;
     let reachable = ping(&endpoint).await.is_ok();
-    second_cancel.cancel();
-    if rejected.is_err() {
-        second.await.unwrap().unwrap();
-    }
     cancel.cancel();
     handle.await.unwrap().unwrap();
     assert!(
-        matches!(rejected, Ok(Ok(Err(CrabError::Io(error)))) if error.kind() == std::io::ErrorKind::WouldBlock)
+        matches!(rejected, Err(CrabError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock)
     );
     assert!(reachable);
 }
@@ -101,7 +143,7 @@ async fn endpoint_lease_keeps_one_inode_across_socket_cleanup() {
     let root = tempfile::tempdir().unwrap();
     let path = root.path().join("control.sock");
     let lease = lock_unix_endpoint(&path).unwrap();
-    fs4::fs_std::FileExt::unlock(&lease.0).unwrap();
+    fs4::fs_std::FileExt::unlock(&lease.file).unwrap();
     let (endpoint, cancel, handle) = start_unix(root.path()).await;
     let unavailable = probe_endpoint_available(Some(&endpoint));
     cancel.cancel();
@@ -110,7 +152,7 @@ async fn endpoint_lease_keeps_one_inode_across_socket_cleanup() {
         matches!(unavailable, Err(CrabError::Io(error)) if error.kind() == std::io::ErrorKind::WouldBlock)
     );
     assert!(!path.exists());
-    assert!(fs4::fs_std::FileExt::try_lock_exclusive(&lease.0).unwrap());
+    assert!(fs4::fs_std::FileExt::try_lock_exclusive(&lease.file).unwrap());
     // A stale descriptor must still exclude the next owner. Recreating the
     // lease file during cleanup would let the new owner bypass this lock.
     assert!(
@@ -127,7 +169,7 @@ fn endpoint_lease_release_does_not_wait_for_inherited_descriptors() {
     let path = root.path().join("control.sock");
     let lease = lock_unix_endpoint(&path).unwrap();
     // dup and fork retain the same open-file description and flock ownership.
-    let inherited = lease.0.try_clone().unwrap();
+    let inherited = lease.file.try_clone().unwrap();
     assert!(matches!(
         lock_unix_endpoint(&path),
         Err(error) if error.kind() == std::io::ErrorKind::WouldBlock
@@ -199,12 +241,10 @@ async fn shutdown_request_keeps_control_live_until_native_detachment() {
     let endpoint = format!("unix:{}", root.path().join("control.sock").display());
     let detach = CancellationToken::new();
     let transport = CancellationToken::new();
-    let owner = spawn_server(
-        Some(endpoint.clone()),
-        state(root.path(), detach.clone()),
-        transport.clone(),
-    )
-    .unwrap();
+    let owner = bind_server(&endpoint)
+        .await
+        .unwrap()
+        .spawn(state(root.path(), detach.clone()), transport.clone());
     for _ in 0..40 {
         if ping(&endpoint).await.is_ok() {
             break;

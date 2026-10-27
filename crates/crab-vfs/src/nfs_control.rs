@@ -797,40 +797,65 @@ fn tcp_control_port_from_hash(hash: &str) -> u16 {
     TCP_CONTROL_PORT_BASE + (value % TCP_CONTROL_PORT_RANGE)
 }
 
-pub fn spawn_server(
-    endpoint: Option<String>,
-    state: NfsControlState,
-    cancel: CancellationToken,
-) -> Option<tokio::task::JoinHandle<Result<()>>> {
-    let Some(endpoint) = endpoint else {
-        return None;
-    };
-    Some(tokio::spawn(async move {
-        if let Err(error) = run_server(&endpoint, state, cancel).await {
-            warn!(
-                endpoint = %display_control_endpoint(&endpoint),
-                error = %error,
-                "NFS control server stopped with error"
-            );
-            return Err(error);
-        }
-        Ok(())
-    }))
+/// Bound control endpoint retained through startup and serving.
+pub struct BoundControlListener {
+    listener: ControlListener,
 }
 
-async fn run_server(
-    endpoint: &str,
-    state: NfsControlState,
-    cancel: CancellationToken,
-) -> Result<()> {
+enum ControlListener {
+    Tcp(tokio::net::TcpListener, String),
+    #[cfg(unix)]
+    Unix(tokio::net::UnixListener, UnixEndpointLease),
+}
+
+impl BoundControlListener {
+    /// Serve an already bound endpoint until cancellation and handler drain.
+    pub fn spawn(
+        self,
+        state: NfsControlState,
+        cancel: CancellationToken,
+    ) -> tokio::task::JoinHandle<Result<()>> {
+        tokio::spawn(async move {
+            let result = match self.listener {
+                ControlListener::Tcp(listener, token) => {
+                    run_tcp_listener(listener, token, state, cancel).await
+                }
+                #[cfg(unix)]
+                ControlListener::Unix(listener, ownership) => {
+                    run_unix_listener(listener, ownership, state, cancel).await
+                }
+            };
+            if let Err(error) = &result {
+                warn!(%error, "NFS control server stopped with error");
+            }
+            result
+        })
+    }
+}
+
+/// Bind and own a control endpoint before native mount visibility.
+pub async fn bind_server(endpoint: &str) -> Result<BoundControlListener> {
     if endpoint.starts_with("tcp:") {
-        return run_tcp_server(endpoint, state, cancel).await;
+        let endpoint = tcp_endpoint_from_endpoint(endpoint)?;
+        let listener = tokio::net::TcpListener::bind(endpoint.addr).await?;
+        return Ok(BoundControlListener {
+            listener: ControlListener::Tcp(listener, endpoint.token),
+        });
     }
 
     if endpoint.starts_with("unix:") {
         #[cfg(unix)]
         {
-            return run_unix_server(endpoint, state, cancel).await;
+            let path = unix_path_from_endpoint(endpoint)?;
+            let mut ownership = lock_unix_endpoint(&path)?;
+            // Preflight owns stale cleanup; binding cannot unlink a new owner.
+            let listener = tokio::net::UnixListener::bind(&path)?;
+            let owner = std::fs::symlink_metadata(&path)?;
+            ownership.socket = Some((path, owner));
+            info!(endpoint, "NFS control server listening");
+            return Ok(BoundControlListener {
+                listener: ControlListener::Unix(listener, ownership),
+            });
         }
         #[cfg(not(unix))]
         {
@@ -854,20 +879,12 @@ async fn run_server(
 }
 
 #[cfg(unix)]
-async fn run_unix_server(
-    endpoint: &str,
+async fn run_unix_listener(
+    listener: tokio::net::UnixListener,
+    mut ownership: UnixEndpointLease,
     state: NfsControlState,
     cancel: CancellationToken,
 ) -> Result<()> {
-    use tokio::net::UnixListener;
-
-    let path = unix_path_from_endpoint(endpoint)?;
-    let ownership = lock_unix_endpoint(&path)?;
-    // Preflight owns stale cleanup. Binding must never unlink a live owner
-    // that appeared between preflight and server startup.
-    let listener = UnixListener::bind(&path)?;
-    let owner = std::fs::symlink_metadata(&path)?;
-    info!(endpoint, "NFS control server listening");
     let mut connections = JoinSet::new();
     let result = loop {
         tokio::select! {
@@ -898,22 +915,40 @@ async fn run_unix_server(
     let drained = drain_control_connections(&mut connections).await;
     // Retain endpoint ownership through connection drain and unlink. Neither
     // preflight nor another server may replace this path before cleanup finishes.
-    let cleanup = remove_owned_unix_socket(&path, &owner).map_err(CrabError::Io);
+    let cleanup = ownership.clear_socket().map_err(CrabError::Io);
     drop(listener);
     drop(ownership);
     result.and(drained).and(cleanup)
 }
 
 #[cfg(unix)]
-struct UnixEndpointLease(std::fs::File);
+struct UnixEndpointLease {
+    file: std::fs::File,
+    socket: Option<(PathBuf, std::fs::Metadata)>,
+}
+
+#[cfg(unix)]
+impl UnixEndpointLease {
+    fn clear_socket(&mut self) -> std::io::Result<()> {
+        match self.socket.take() {
+            Some((path, owner)) => remove_owned_unix_socket(&path, &owner),
+            None => Ok(()),
+        }
+    }
+}
 
 #[cfg(unix)]
 impl Drop for UnixEndpointLease {
     fn drop(&mut self) {
+        // A prepared listener can be dropped before its serving task starts.
+        // Retire only its socket while the endpoint lease is still exclusive.
+        if let Err(error) = self.clear_socket() {
+            warn!(%error, "failed to remove NFS control socket");
+        }
         // A forked child can retain this open-file description until exec.
         // The serving owner joins handlers and cleans its socket before drop;
         // explicitly unlock so unrelated children cannot extend its lease.
-        if let Err(error) = fs4::fs_std::FileExt::unlock(&self.0) {
+        if let Err(error) = fs4::fs_std::FileExt::unlock(&self.file) {
             tracing::warn!(%error, "failed to release NFS control endpoint lease");
         }
     }
@@ -950,7 +985,7 @@ fn lock_unix_endpoint(path: &Path) -> std::io::Result<UnixEndpointLease> {
             "NFS control endpoint already has an owner",
         ));
     }
-    Ok(UnixEndpointLease(file))
+    Ok(UnixEndpointLease { file, socket: None })
 }
 
 #[cfg(unix)]
@@ -972,16 +1007,6 @@ fn remove_owned_unix_socket(path: &Path, owner: &std::fs::Metadata) -> std::io::
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
         result => result,
     }
-}
-
-async fn run_tcp_server(
-    endpoint: &str,
-    state: NfsControlState,
-    cancel: CancellationToken,
-) -> Result<()> {
-    let endpoint = tcp_endpoint_from_endpoint(endpoint)?;
-    let listener = tokio::net::TcpListener::bind(endpoint.addr).await?;
-    run_tcp_listener(listener, endpoint.token, state, cancel).await
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -1939,9 +1964,12 @@ mod tests {
                 startup_ms: 8,
             },
         };
-        let handle = spawn_server(Some(endpoint.clone()), state, cancel.clone()).unwrap();
+        let handle = bind_server(&endpoint)
+            .await
+            .unwrap()
+            .spawn(state, cancel.clone());
 
-        let status = wait_for_status(&endpoint).await;
+        let status = status(&endpoint).await.unwrap();
 
         let dir_mode = std::fs::metadata(&socket_dir).unwrap().permissions().mode() & 0o777;
         assert_eq!(dir_mode, 0o700);
@@ -2006,7 +2034,7 @@ mod tests {
             Some("unauthorized NFS control request")
         );
 
-        let status = wait_for_status(&endpoint).await;
+        let status = status(&endpoint).await.unwrap();
 
         assert_eq!(status.mountpoint, mountpoint.display().to_string());
         assert!(status.read_only);
@@ -2017,16 +2045,6 @@ mod tests {
         shutdown(&endpoint).await.unwrap();
         assert!(cancel.is_cancelled());
         handle.await.unwrap().unwrap();
-    }
-
-    async fn wait_for_status(endpoint: &str) -> NfsControlStatus {
-        for _ in 0..20 {
-            if let Ok(status) = status(endpoint).await {
-                return status;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-        status(endpoint).await.unwrap()
     }
 
     #[tokio::test]

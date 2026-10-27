@@ -241,17 +241,6 @@ fn add_nfs_mount_entry(
     entry
 }
 
-#[cfg(feature = "nfs")]
-async fn wait_for_nfs_status(path: &Path) -> MountControlStatus {
-    for _ in 0..20 {
-        if let Ok(Some(status)) = status(path).await {
-            return status;
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-    }
-    status(path).await.unwrap().unwrap()
-}
-
 #[test]
 #[cfg(feature = "nfs")]
 fn nfs_control_status_and_shutdown_route_through_registry_endpoint() {
@@ -325,11 +314,12 @@ fn nfs_control_status_and_shutdown_route_through_registry_endpoint() {
                 config: config.clone(),
             },
         )));
-        let handle =
-            crate::nfs_control::spawn_server(Some(endpoint.clone()), state, cancel.clone())
-                .unwrap();
+        let handle = crate::nfs_control::bind_server(&endpoint)
+            .await
+            .unwrap()
+            .spawn(state, cancel.clone());
 
-        let status = wait_for_nfs_status(&mountpoint).await;
+        let status = status(&mountpoint).await.unwrap().unwrap();
 
         assert_eq!(status.backend, MountControlBackend::Nfs);
         assert_eq!(status.mountpoint, mountpoint);
@@ -384,13 +374,14 @@ fn nfs_control_list_refreshes_live_registry_entries() {
 
     runtime.block_on(async {
         let cancel = CancellationToken::new();
-        let handle = crate::nfs_control::spawn_server(
-            Some(endpoint.clone()),
-            nfs_control_state(&mountpoint, false, cancel.clone()),
-            cancel.clone(),
-        )
-        .unwrap();
-        wait_for_nfs_status(&mountpoint).await;
+        let handle = crate::nfs_control::bind_server(&endpoint)
+            .await
+            .unwrap()
+            .spawn(
+                nfs_control_state(&mountpoint, false, cancel.clone()),
+                cancel.clone(),
+            );
+        status(&mountpoint).await.unwrap().unwrap();
 
         let entries = list().await.unwrap();
 
@@ -428,13 +419,14 @@ fn nfs_control_refresh_and_switch_route_to_helper_endpoint() {
 
     runtime.block_on(async {
         let cancel = CancellationToken::new();
-        let handle = crate::nfs_control::spawn_server(
-            Some(endpoint.clone()),
-            nfs_control_state(&mountpoint, true, cancel.clone()),
-            cancel.clone(),
-        )
-        .unwrap();
-        wait_for_nfs_status(&mountpoint).await;
+        let handle = crate::nfs_control::bind_server(&endpoint)
+            .await
+            .unwrap()
+            .spawn(
+                nfs_control_state(&mountpoint, true, cancel.clone()),
+                cancel.clone(),
+            );
+        status(&mountpoint).await.unwrap().unwrap();
 
         let refresh_error = refresh(&mountpoint).await.unwrap_err().to_string();
         let switch_error = switch_ref(&mountpoint, "refs/heads/dev")
@@ -633,13 +625,11 @@ fn inspection_uses_live_nfs_mode_when_registry_is_stale() {
         .unwrap();
     runtime.block_on(async {
         let cancel = CancellationToken::new();
-        let server = crate::nfs_control::spawn_server(
-            Some(endpoint.clone()),
-            nfs_control_state(&mountpoint, true, cancel.clone()),
-            cancel,
-        )
-        .unwrap();
-        wait_for_nfs_status(&mountpoint).await;
+        let server = crate::nfs_control::bind_server(&endpoint)
+            .await
+            .unwrap()
+            .spawn(nfs_control_state(&mountpoint, true, cancel.clone()), cancel);
+        status(&mountpoint).await.unwrap().unwrap();
         let error = inspect_overlay(&mountpoint).await.unwrap_err();
         let export_error = export_overlay(&mountpoint, &tmp.path().join("review"))
             .await

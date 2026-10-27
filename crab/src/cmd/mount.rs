@@ -6756,22 +6756,12 @@ mod unmount_tests {
             let cancel = tokio_util::sync::CancellationToken::new();
             let state = nfs_control_state(&mountpoint, cancel.clone());
             let engine = state.engine.clone().unwrap();
-            let handle = crate::vfs::nfs_control::spawn_server(
-                Some(endpoint.clone()),
-                state,
-                cancel.clone(),
-            )
-            .unwrap();
+            let handle = crate::vfs::nfs_control::bind_server(&endpoint)
+                .await
+                .unwrap()
+                .spawn(state, cancel.clone());
 
-            let mut ready = false;
-            for _ in 0..20 {
-                if nfs_background_control_ready(Some(&endpoint)).await {
-                    ready = true;
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            }
-            assert!(ready);
+            assert!(nfs_background_control_ready(Some(&endpoint)).await);
 
             crate::vfs::nfs_control::shutdown(&endpoint).await.unwrap();
             handle.await.unwrap().unwrap();
@@ -6804,18 +6794,10 @@ mod unmount_tests {
             let cancel = tokio_util::sync::CancellationToken::new();
             let state = nfs_control_state(&mountpoint, cancel.clone());
             let engine = state.engine.clone().unwrap();
-            let handle = crate::vfs::nfs_control::spawn_server(
-                Some(endpoint.clone()),
-                state,
-                cancel.clone(),
-            )
-            .unwrap();
-            for _ in 0..20 {
-                if crate::vfs::nfs_control::status(&endpoint).await.is_ok() {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            }
+            let handle = crate::vfs::nfs_control::bind_server(&endpoint)
+                .await
+                .unwrap()
+                .spawn(state, cancel.clone());
             crate::vfs::nfs_control::status(&endpoint).await.unwrap();
 
             run_unmount_all_live_or_persisted().await.unwrap();

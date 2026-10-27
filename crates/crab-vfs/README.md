@@ -266,6 +266,16 @@ writing; promotion never reopens an unchecked disk-blob cache entry.
 
 ## Protocol read leases
 
+Linux FUSE mounts use two to eight callback threads, scaled to available CPUs.
+A blocked remote read can overlap unrelated filesystem requests. Native teardown
+joins every callback before releasing engine and cache ownership. Other platforms
+retain fuser's single dispatcher.
+
+FUSE and NFS WRITE callbacks retain shared engine admission before waiting for
+inode/namespace ownership. Controls request client writeback, drain that admission,
+then quiesce engine mutations. This ordering preserves pending mapped bytes while
+letting entered WRITEs finish; taking the mutation gate first would deadlock them.
+
 FUSE retains one shared content owner per open inode in `engine/open_file.rs`.
 Base files keep their captured snapshot/catalog; overlay files keep native
 descriptors rather than reopening names. Rename moves the inode's binding;
@@ -355,6 +365,12 @@ path. Transport shutdown stops incomplete input and blocked replies, then waits
 for admitted filesystem operations. The final journal flush follows RPC/control
 drain, covering unstable writes completed during teardown. Blocking Git/origin
 work may delay completion.
+
+NFS completes preflight and owns a bound control listener before the native client
+becomes visible. The serving owner uses that same binding, so announcing a mount
+cannot race a later endpoint bind. Startup failure releases the prepared listener;
+Unix socket cleanup retains its lease and preserves a replacement path.
+
 The background NFS launcher retains its child until failed or cancelled startup
 finishes cleanup. Cancellation covers the awaited readiness exchange, so a late
 reply cannot admit the helper. Unix helpers use a separate process group; the

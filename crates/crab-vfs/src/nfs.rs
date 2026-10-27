@@ -944,6 +944,7 @@ impl NfsFileSystem for CrabNfsFs {
         data: &[u8],
         stable: stable_how,
     ) -> Result<(fattr3, stable_how), nfsstat3> {
+        let _writeback = self.engine.begin_native_writeback().await;
         if self.read_only {
             return Err(nfsstat3::NFS3ERR_ROFS);
         }

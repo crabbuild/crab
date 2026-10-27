@@ -8,6 +8,7 @@ enum Transition {
     Switch,
     Automatic,
     Inspect,
+    Export,
 }
 
 async fn qualify_mapped_transition(fuse: bool, transition_kind: Transition) {
@@ -112,6 +113,8 @@ os.close(fd)
     git(&source, &["commit", "-m", "diverging base"]);
     let resolver = output.resolver.clone();
     let generation = resolver.generation();
+    let destination = root.path().join("export");
+    let exported_path = destination.join("mapped.txt");
     let mut transition = tokio::spawn(async move {
         let updated = match transition_kind {
             Transition::Switch => crate::mount_runtime::switch_mount_runtime(
@@ -119,6 +122,15 @@ os.close(fd)
                 &mut config,
                 &mountpoint,
                 "next",
+            )
+            .await
+            .map(|_| ()),
+            Transition::Export => crate::mount_runtime::export_overlay_runtime(
+                Arc::clone(&output.engine),
+                output.overlay.clone().unwrap(),
+                config.cache_dir.clone(),
+                mountpoint,
+                destination,
             )
             .await
             .map(|_| ()),
@@ -202,10 +214,13 @@ os.close(fd)
     let mut expected = vec![b'A'; 4096];
     expected[0] = b'B';
     let visible = visible.unwrap();
+    let exported = matches!(transition_kind, Transition::Export)
+        .then(|| std::fs::read(exported_path).unwrap());
     assert!(
         waited_for_write
             && held_generation == generation
-            && visible.as_ref() == expected.as_slice(),
+            && visible.as_ref() == expected.as_slice()
+            && exported.as_deref().is_none_or(|bytes| bytes == expected),
         "mapped transition: waited={waited_for_write}, generation={generation}, held_generation={held_generation}, actual prefix {:?}, expected prefix {:?}",
         &visible[..visible.len().min(8)],
         &expected[..8]
@@ -258,4 +273,16 @@ async fn fuse_mapped_inspection_without_msync() {
 #[ignore = "requires a dedicated Linux environment with native FUSE/NFS mount privileges"]
 async fn nfs_mapped_inspection_without_msync() {
     qualify_mapped_transition(false, Transition::Inspect).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires a dedicated Linux environment with native FUSE/NFS mount privileges"]
+async fn fuse_mapped_export_without_msync() {
+    qualify_mapped_transition(true, Transition::Export).await;
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 4)]
+#[ignore = "requires a dedicated Linux environment with native FUSE/NFS mount privileges"]
+async fn nfs_mapped_export_without_msync() {
+    qualify_mapped_transition(false, Transition::Export).await;
 }

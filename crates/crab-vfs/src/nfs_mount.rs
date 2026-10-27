@@ -147,6 +147,7 @@ pub struct NfsMountedSession {
     write_journal: Arc<NfsWriteJournal>,
     protocol_stats: Arc<NfsProtocolStats>,
     control_endpoint: Option<String>,
+    control_listener: Option<nfs_control::BoundControlListener>,
     read_only: bool,
     auto_refresh_interval: Option<Duration>,
     runtime: Option<Arc<Mutex<NfsMountRuntime>>>,
@@ -215,6 +216,21 @@ pub async fn mount(
     listener.with_export_name(EXPORT_NAME);
     let port = listener.get_listen_port();
     let ip = listener.get_listen_ip();
+    let report = preflight(config, ip, port);
+    for warning in &report.warnings {
+        warn!(
+            key = %warning.key,
+            detail = %warning.detail,
+            "NFS preflight warning"
+        );
+    }
+    report.ensure_ready()?;
+    // Bind before the client becomes visible. Status can then queue safely
+    // until the owner starts serving, and failed native setup releases the bind.
+    let control_listener = match control_endpoint.as_deref() {
+        Some(endpoint) => Some(nfs_control::bind_server(endpoint).await?),
+        None => None,
+    };
 
     let (mount_tx, mount_rx) = mpsc::channel::<bool>(1);
     listener.set_mount_listener(mount_tx);
@@ -259,6 +275,7 @@ pub async fn mount(
         write_journal,
         protocol_stats,
         control_endpoint,
+        control_listener,
         read_only: config.read_only,
         auto_refresh_interval: config.auto_refresh_interval,
         runtime: runtime.map(|runtime| Arc::new(Mutex::new(runtime))),
@@ -273,11 +290,10 @@ pub async fn run_until_cancelled(
 ) -> Result<()> {
     let control_cancel = CancellationToken::new();
     let control_state = session.control_state(cancel.clone());
-    let mut control_handle = nfs_control::spawn_server(
-        session.control_endpoint.clone(),
-        control_state.clone(),
-        control_cancel.clone(),
-    );
+    let mut control_handle = session
+        .control_listener
+        .take()
+        .map(|listener| listener.spawn(control_state.clone(), control_cancel.clone()));
     let refresh_handle = session
         .auto_refresh_interval
         .map(|interval| nfs_control::spawn_auto_refresh(control_state, interval, cancel.clone()));
@@ -783,16 +799,6 @@ fn check_mount_privilege(report: &mut NfsPreflightReport) {
 fn check_mount_privilege(_report: &mut NfsPreflightReport) {}
 
 fn mount_native_nfs(config: &NfsMountConfig, ip: IpAddr, port: u16) -> Result<()> {
-    let report = preflight(config, ip, port);
-    for warning in &report.warnings {
-        warn!(
-            key = %warning.key,
-            detail = %warning.detail,
-            "NFS preflight warning"
-        );
-    }
-    report.ensure_ready()?;
-
     #[cfg(windows)]
     let mountpoint = windows_mount_target(&config.mountpoint)?;
     #[cfg(not(windows))]
@@ -1169,6 +1175,7 @@ mod tests {
             write_journal: adapter.write_journal(),
             protocol_stats: adapter.protocol_stats(),
             control_endpoint: None,
+            control_listener: None,
             read_only: true,
             auto_refresh_interval: None,
             runtime: Some(Arc::new(Mutex::new(NfsMountRuntime {

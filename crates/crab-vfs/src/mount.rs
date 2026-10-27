@@ -219,6 +219,14 @@ fn mount_config(read_only: bool) -> FuseConfig {
     let mut config = FuseConfig::default();
     config.mount_options = mount_options;
     config.acl = acl;
+    #[cfg(target_os = "linux")]
+    {
+        // Callbacks can wait on remote reads. Keep unrelated requests moving;
+        // cap native workers because each retains its own receive buffer.
+        config.n_threads = Some(
+            std::thread::available_parallelism().map_or(2, |threads| threads.get().clamp(2, 8)),
+        );
+    }
     config
 }
 
