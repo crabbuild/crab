@@ -178,7 +178,7 @@ jobs:
           cargo test -p crab --lib engine::pointer::tests --locked --features gix-transport
           cargo test -p crab --lib cmd::pull:: --locked --features gix-transport
           cargo test -p crab --bin crab pull_machine_errors_keep_the_selected_mode_and_schema --locked --features gix-transport
-          cargo test -p crab --lib git::push_native::tests --locked --features gix-transport
+          cargo test -p crab --lib cmd::push::followtag_tests --locked --features gix-transport
           cargo test -p crab --lib git::push_staging::tests --locked --features gix-transport
           cargo test -p crab-staging --locked --test push_snapshot_guard --test publication_history_recovery
           cargo test -p crab-auth --lib protected_push --locked --features crab-auth-client
@@ -275,7 +275,8 @@ jobs:
         run: |
           cargo test -p crab --lib cmd::install::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
           cargo test -p crab --lib cmd::lfs::install::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
-          cargo test -p crab --lib git::push_native::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib cmd::push::followtag_tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib git::capsule_push::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
           cargo test -p crab --lib git::push_staging::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
           cargo test -p crab-staging --locked --test push_snapshot_guard --test publication_history_recovery
           cargo test -p crab-auth --lib protected_push --locked --features crab-auth-client

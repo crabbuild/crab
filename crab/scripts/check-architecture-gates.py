@@ -1124,7 +1124,7 @@ GIT_HEAD_SYMREF_FORBIDDEN_PATTERNS = (
 )
 GIT_TAG_PEEL_REQUIRED_DELEGATIONS = {
     "crab/src/git/push.rs": "crab_git::tag::peeled_tag_refs_at",
-    "crab/src/git/push_native.rs": "crab_git::tag::annotated_tag_refs_strict_at",
+    "crab/src/cmd/push.rs": "crab_git::tag::annotated_tag_refs_strict_at",
 }
 GIT_TAG_PEEL_FORBIDDEN_PATTERNS = (
     "peel_to_commit",
@@ -1149,20 +1149,18 @@ STORAGE_PACK_LAYOUT_REQUIRED_DELEGATIONS = {
         "repo_pack_index_path(",
         "repo_pack_reverse_index_path(",
     ),
-    "crab/src/replication/mod.rs": ("pack_path(", "pack_metadata_path("),
+    "crab/src/replication/mod.rs": ("check_capsule_read_replica_readiness(",),
     "crates/crab-auth-server/src/receive.rs": (
-        "pack_path(",
-        "pack_metadata_path(",
-    ),
-    "crates/crab-auth-server/src/receive/finalize.rs": (
-        "pack_path(",
-        "pack_metadata_path(",
+        "canonical_global_content_path(",
+        "content_hash_from_path(",
     ),
     "crates/crab-auth-server/src/receive/git_workspace.rs": (
-        "pack_path(",
-        "pack_metadata_path(",
+        "crab_read::capsule_protocol::install_git_packs_with_candidates_from_store(",
     ),
-    "crates/crab-auth-server/src/view.rs": ("pack_path(", "pack_metadata_path("),
+    "crates/crab-auth-server/src/view.rs": (
+        "ViewGitWorkspace::create(",
+        "publish_filtered_capsule_view(",
+    ),
 }
 STORAGE_PACK_LAYOUT_FORBIDDEN_PATTERNS = (
     'repo_path(&format!("packs/pack-',
@@ -1908,6 +1906,7 @@ WORKSPACE_DEPENDENCY_POLICY = {
             "crab-lfs",
             "crab-metadata",
             "crab-remote-git",
+            "crab-staging",
             "crab-storage",
             "crab-types",
             "crab-xet",
@@ -1943,13 +1942,14 @@ WORKSPACE_DEPENDENCY_POLICY = {
             "crab-cache",
             "crab-cache-store",
             "crab-git",
+            "crab-lfs",
             "crab-read",
             "crab-staging",
             "crab-storage",
             "crab-types",
             "crab-xet",
         },
-        "dev": {"crab-storage"},
+        "dev": {"crab-metadata", "crab-storage"},
     },
     "crab-workflow": {
         "normal": {"crab-coordination", "crab-storage", "crab-types"}
@@ -4517,7 +4517,10 @@ def check_lfs_module_scope(root: Path, metadata: dict) -> bool:
             except UnicodeDecodeError:
                 continue
             for index, line in enumerate(text.splitlines(), start=1):
-                if any(pattern in line for pattern in LFS_MODULE_FORBIDDEN_PATTERNS):
+                # Git LFS owns this documented storage override. Other environment
+                # reads and all CLI/provider policy remain forbidden.
+                scoped_line = re.sub(r'\benv::var\("GIT_LFS_DIR"\)', "", line)
+                if any(pattern in scoped_line for pattern in LFS_MODULE_FORBIDDEN_PATTERNS):
                     violations.append(f"{rel(root, candidate)}:{index}: {line.strip()}")
 
     if not violations:

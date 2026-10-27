@@ -11,7 +11,9 @@ Baseline: `origin/crab-v2` at `33f8e6c360d922b3ab1e2c0e5115a2d200eccd97`.
 Working branch: `codex/vfs-hardening`. PR:
 https://github.com/crabbuild/crab/pull/630 (base `crab-v2`). Follow-up hardening
 remains active. The PR is rebased onto `877b832b396`; final source and
-installed-role evidence is recorded through checkpoint 58.
+installed-role evidence is recorded through checkpoint 62. Checkpoints 59–62
+retain separate source and qualification records below. The human approved the
+exact four-file CI/inventory patch; it is applied with these checkpoints.
 
 Baseline evidence and reproductions:
 `crab/docs/benchmarks/vfs-capsule-v2-audit-20261024.md` and its adjacent evidence
@@ -4177,7 +4179,7 @@ Final-source qualification, external `history-controls/qualification.json`:
 Is this the best fix? One low-level command constructor makes immutable identity,
 graph coverage and ancestry checks agree without deleting intentional client
 history controls, adding settings or retaining another producer. Runtime grows
-seven net lines across six touched modules; the shared constructor replaces
+five net lines across six touched modules; the shared constructor replaces
 duplicated command setup. New test surface protects current publication policy
 before retiring old fixtures. No dependency, lockfile, vendor, CI guard or
 inventory change is included. All 2,156 original raw benchmark files remain
@@ -4190,10 +4192,365 @@ profile, bounded admission and remaining lifecycle/Windows gates below remain
 required. The separate concrete guard/inventory candidate is still unapplied
 pending explicit approval; the NFS dependency approval does not authorize it.
 
+## Checkpoint 59 — Native entry retirement
+
+Status: source and final installed roles qualified locally/dedicated Linux.
+The separate CI guard/workflow candidate was subsequently approved by the human
+and applied at checkpoint 62.
+
+The obsolete `git::push_native` module, public Native configuration/input API,
+push-state discovery, old manifest producer entry and its fixtures are removed.
+The current CLI's only live use of that module was follow-tag selection. That
+private helper now belongs to `cmd::push`, using shared strict tag peeling and
+physical commit reachability. Worktree HEAD still comes from the selected private
+Git directory; objects and shared tags come from its common directory. Bare and
+frozen-OID sources retain their meaning. Remote missing-tag filtering stays in the
+existing captured Capsule ref-view owner. `--no-incremental` remains active.
+
+Mirror no longer writes the unconsumed Git-only environment knob. Its publication
+plan identity uses `crab_remote::local::PUBLICATION_PLAN_ID_ENV` directly; the
+current helper already reads that canonical constant. No alias or replacement
+Native wrapper is retained.
+
+Clippy identified newly orphaned handoffs after the entry removal. The cleanup
+deletes precomputed-walk injection, exact-ref state/branches, pre-acquired-lock
+entry/DTO/setters and the committed-release wrapper. The remaining generic
+publisher acquires its own leases. Shared `crab-remote` committed-release behavior
+has current Capsule callers and is preserved. Five tests for removed internal
+modes are deleted; one retained generic journal test installs its fixture lease
+state directly with its publication/recovery oracle unchanged.
+
+Six obsolete Native/manifest fixture groups leave `remote_helper_transcript`.
+Retained refname, fetch reachability, peeled-tag, hidden-ref and protocol-edge
+modules compare byte-identical. All seven remaining generic add/commit tests are
+also byte-identical, including the explicit 65-chunk multibatch assertion,
+overlap and staging-recipe coverage. Their publisher remains retirement work;
+this checkpoint does not pretend those fixtures exercise current Capsule.
+The removed Native follow-tag integration duplicate is covered by current
+command tests and the checked-in real CLI smoke.
+
+Evidence map:
+
+| Surface | Entry / caller | Owner / dependency | Proof and sibling boundary |
+| --- | --- | --- | --- |
+| Follow-tag selection | `cmd::push::run_push_once` | Private command helper → `crab-git` ref/OID resolution and strict annotated-tag peeling → incremental commit walk | Four flat sibling tests: main/linked/bare HEAD, lightweight/unreachable/explicit exclusion, missing tag objects, frozen tag OIDs; actual CLI smoke verifies publication |
+| Mirror subprocess | Legacy mirror and reconciliation apply → Git helper | Canonical plan identity constant → current Capsule admission | 75 command/mirror tests, real 20-check mirror suite; removed Git-only env has no current reader |
+| Orphaned publisher handoffs | Only the removed Native entry supplied them | Generic publisher keeps its ordinary lease and coherent-snapshot path | Constructor/caller search proves removed states had no remaining production setter; generic admission, refresh, CAS retry, compaction and lease tests pass |
+| Current publication sibling | CLI/helper/mounted commit/push | Existing Capsule publisher, Xet preparation and shared committed release | Current publisher/helper/worktree tests plus eight fresh native cases and full Git suites |
+| Main comparison | `origin/main` retains Native CLI calls and the old module | Static main source snapshot retained | Behavioral baseline is checkpoint 58; no main live equivalence claim |
+
+Final-source proof in external `native-owner-removal/`:
+
+- 401 checks pass each OS: focused CLI 360 (including four new command follow-tag
+  tests, Capsule 32, worktrees 4, helper 153, command push 46, mirror 75, pack 35,
+  incremental walk 11), transcript 25 and generic publisher 16.
+- Empty-feature checks pass. Production library Clippy has no errors or added
+  diagnostics: 629 macOS/628 Linux warnings, six fewer each. Optional whole-unit
+  metadata-only Clippy remains failing: 7,484 coded errors/1,536 warnings. No newly
+  diagnosed primary spans or diagnostics in the new follow-tag test file; two
+  inherited large-future warnings change measured size at unchanged call sites.
+  No lint suppression is added to production.
+- Four roles are installed through Make on each OS. Checked-in 6 MiB reuse smoke
+  passes 25 checks each. Eight fresh cases omit `--ref`: Linux foreground FUSE/NFS
+  RO/RW and managed FUSE RW; macOS foreground NFS RO/RW and helper NFS RW. Visible
+  full/range bytes, RO refusal, serving owner, fsync → commit/push → independent
+  clone/fsck, ordinary detach and foreground exit zero pass. No forced cleanup;
+  all four role hashes remain fixed on each OS.
+- Final installed Linux roles pass full 16 MiB add/commit/push (195 checks/374
+  commands), mirror (20/57) and isolated partial clone (92/324). Fresh `native59`
+  namespaces bind reports to actual parent `74d0da3b22c` plus dirty sources and
+  1,567 source/build/doc hashes. Linux CLI SHA-256:
+  `68107ada67eafd089329c1cbf9fb2582a024e58c5251dc84a04b1d4465fd9307`;
+  macOS `cd1b5d8d64af6723491b11de0059c457c012a91bbba0b3fc833edfe199ce7892`.
+- The optional ref-edit feature check passes. Direct minimal SDK-profile proof
+  passes 32 current Capsule tests and four follow-tag tests; the exact replay
+  selector separately passes one test. Candidate Python/YAML and touched SVG syntax pass; its
+  strict tag-owner and pack-layout delegations pass a scoped external trial.
+
+Is this the best fix? Delete the producer and all newly orphaned modes; keep the
+one useful command policy at its caller and reusable Git mechanics below it.
+This removes 2,021 runtime lines without adding compatibility shims or new
+settings. The generic manifest publisher, initializer and remaining authority
+dispatch are explicit next work, rather than being relabeled as complete v1
+retirement. The checkpoint-58 runtime delta is corrected to five net lines: the
+earlier calculation stopped `push.rs` at a leading test-only import and missed
+two deleted command-setup lines; behavioral evidence is unchanged.
+
+The concrete 150-line, four-file CI candidate was prepared outside the checkout
+and subsequently approved/applied at checkpoint 62. It moves
+strict tag delegation to the command owner, follows current SDK paths/replay
+selection, and replaces both obsolete partial-clone Native selectors with current
+follow-tag coverage (plus Capsule coverage where missing). It retains the earlier
+pending actual-dependency/Capsule-delegation/Git-LFS override/integration-selector
+corrections. Forbidden raw peeling/pack patterns and performance thresholds stay
+intact. Approval covers exactly those four guard/workflow files. No dependency,
+lockfile or vendor change is included; the earlier approved NFS fork is separate.
+
+## Checkpoint 60 — measured read dispatch and sustained-write costs
+
+Status: qualified intermediate source, superseded by checkpoints 61/62. The
+separate protected CI patch is approved/applied at checkpoint 62. Checkpoint-59's
+exact 1,567-file source is retained
+in an external hashed archive before these VFS edits; its evidence is not rebound
+to changed sources. `origin/crab-v2` remains `877b832b396` and `origin/main` remains
+`cc2e4e25f46` after a fresh fetch.
+
+A real Linux kernel data-read probe reproduces FUSE head-of-line blocking. Open a
+known-size ordinary Git file, remove only the fixture-created loose object, then
+hold its lazy Git fetch. An unrelated directory lookup under a different parent
+cannot finish before release with the old single FUSE dispatcher. NFS finishes
+that lookup in RO and RW modes. Exact bytes and ordinary detach pass. The first
+probe stalled classification during pathname lookup instead; both protocols
+blocked there. That weaker probe is retained, not used as dispatcher proof.
+
+`mount::mount_config` now selects two to eight fuser workers, scaled to available
+CPUs, for read-only Linux mounts. No setting, dependency override or detached
+reply-task path is added. Foreground, coordinator and daemon share that owner;
+fuser joins callback workers through the existing session teardown. Its locked
+0.17.0 source documents a default of one worker and supports multiple workers
+only on Linux. Current `origin/main` also leaves that default selected.
+
+Writable mounts deliberately retain one dispatcher. The first unrestricted
+candidate passed the blocked-read probe in both modes but failed four existing
+native mapped refresh/switch/automatic-refresh/inspection tests: a paused pending
+WRITE was overtaken by a control and the visible bytes became the diverging base.
+All four pass against the preserved single-dispatcher source. No test or oracle
+was changed. Stronger server callback/writeback admission is required before
+writable concurrency; changing thread count alone is insufficient.
+
+Evidence map:
+
+| Surface | Entry / owner / callee | Sibling and proof |
+| --- | --- | --- |
+| Linux RO FUSE dispatch | Foreground/helper, coordinator and daemon → shared `mount_config` → fuser `Session` worker dispatch/join | Actual installed helper: four workers on four CPUs; unrelated lookup completes during held data read; exact 1 MiB bytes and ordinary detach |
+| Writable FUSE | Same mount owner; no concurrency enabled | Actual installed helper retains one worker; blocked lookup remains an explicit performance gap; mapped-transition baseline/candidate comparison protects correctness |
+| NFS | Same engine, independent NFS transport owner | RO/RW unrelated lookup remains responsive; full bytes and ordinary detach |
+| Lifetime and shared reads | Existing engine/open-file, hydration, overlay and mount controls | Existing privileged native suite covers mappings, commit/remount, LFS, refresh/switch, open-file replacement and detach; no new callback lifetime abstraction |
+
+The optimized gateway diagnostic uses unchanged product/client sources frozen
+before the VFS change, 300 seconds per endpoint, 30-second windows, 16 writers
+and 4 KiB objects. The task-owned Colima data disk was increased from 80 to
+160 GiB through Colima, preserving all other configuration and existing data;
+a five-second capacity probe showed the original free space was insufficient.
+No acceptance threshold was changed.
+
+- Gateway: 81,278 ACKs, zero failed requests, exactly 81,278 listed keys and 48
+  post-timing sample GET byte checks. Independent native Git clone and strict
+  fsck pass: 81,279 commits/files including the seed; every committed blob
+  matches the original payload, totaling 332,914,709 bytes. The owner exits zero
+  without forced cleanup.
+- The CI terminal slowdown is not reproduced here: terminal/early throughput
+  1.006369, p95 ratio 1.173877. This is no CI repair or full performance signoff.
+- Direct baseline: 709,883 ACKs and zero PUT errors, but the original listing
+  check fails. A separate full-list audit fails with HTTP 500 on page 512.
+  The original paired report remains failed, including integrity failure;
+  successful gateway proof does not turn that report green.
+- Existing timestamped phase logs align with actual client windows: clock-offset
+  drift 522 ns, maximum anchor-read skew 1,583 ns. Across 5,079 batches, build
+  p95 grows from 0.993 to 3.352 ms while encoding, upload and ref-CAS remain much
+  steadier. Maximum sampled RSS is 1,330,472 KiB. These are aggregate associations,
+  not proof of an individual-request cause or a live-allocation bound.
+
+Final read-only candidate proof: 679 VFS tests pass (19 privileged tests ignored
+in that run); crate library Clippy reports zero warnings/errors; all 18 dedicated
+native tests pass, including the four mapped-transition regressions. Four actual
+installed CLI cases verify FUSE/NFS RO/RW. FUSE uses four workers in RO and one in
+RW on this VM. All role hashes stay fixed through testing; only the FUSE helper
+changes from checkpoint 59. Core CLI, NFS helper and cache server hashes remain
+identical. New Linux FUSE helper SHA-256:
+`37d042e0984ff509344b58ff7ce6651bc58a2f6e941c853afaf5e9a1d483ffc7`.
+Format and diff checks pass. No macOS native rerun is claimed for this Linux-only
+runtime change; checkpoint-59 macOS proof retains its original frozen source.
+
+External `gateway-profile/` retains the failed paired report, timestamped service
+log, clocks, metrics, process samples, independent all-byte Git audit and the
+separate baseline failure. `vfs-dispatch-profile/` retains the stronger native
+probe, initial unrestricted failure, restored-source baseline, final candidate
+and source/role hashes. No raw evidence enters the PR.
+
+Is this the best fix? For read-only dispatch, use the dependency's intended
+concurrency at the single shared mount boundary and retain its joined lifetime.
+Writable concurrency needs a real callback/writeback fence first; its four native
+regressions are not waived. Growing tree-build cost and RSS need allocation/CPU
+proof before a gateway optimization; a local run without the CI symptom cannot
+justify a speculative fix.
+
+Immediate priorities: pending-WRITE/control fencing for writable FUSE; managed
+read-only dispatch qualification and global in-flight read memory; gateway
+allocation/tree-build diagnosis and an equivalent CI slowdown reproduction;
+remaining generic manifest publisher, metadb/GC and replication authority removal.
+
+## Checkpoint 61 — entered WRITE admission and writable dispatch
+
+Status: qualified writeback change; the demonstrated startup failure is repaired
+at checkpoint 62. The separate CI inventory/guard patch is approved/applied there.
+The objective remains open. Checkpoint-60 source is
+retained in a hashed external archive before this change; checkpoint 61 has its
+own 1,567-file source manifest/archive and platform-specific proof.
+
+The shared engine now admits native WRITE callbacks through a separate read
+lock before FUSE waits for namespace/inode ownership or NFS resolves its target.
+Quiescence takes that gate exclusively before the existing mutation gate and
+retains both through reset/adoption, inspection or export. An entered WRITE can
+therefore reach its mutation gate and finish before the control freezes it.
+Inode-lock ordering remains unchanged. Owned guards preserve cancellation and
+shutdown behavior; no detached reply tasks, retry setting or dependency patch is
+introduced.
+
+Linux FUSE dispatch now uses its bounded worker pool in both RO and RW modes.
+The four mapped refresh/switch/automatic-refresh/inspection tests that failed
+under unrestricted dispatch without admission now pass unchanged. A new engine
+unit test proves a queued quiescence still lets an admitted write reach actual
+overlay storage; two native mapped-export tests prove FUSE/NFS exported bytes
+include the pending edit. No prior oracle is weakened.
+
+Evidence map:
+
+| Changed surface | Entry / owner / callee | Sibling and contract proof |
+| --- | --- | --- |
+| Native admission | FUSE `write` and NFS `write` → engine native-writeback read guard → existing mutation/COW/storage path | Both callbacks retain admission through their result/reply boundary; ordinary engine writes retain their original mutation policy |
+| Control freeze | `begin_mount_update`, live inspection and live export → shared `quiesce_overlay` → native drain then mutation freeze | Refresh, switch, commit/reset and automatic refresh use that boundary; offline CLI paths have no live engine/accepted callbacks |
+| Lock/lifetime ordering | Inode ownership remains before engine mutation admission; controllers acquire neither inode lock nor mounted-path reads | Tokio 1.53.1 owned RW guards provide FIFO writer preference and RAII cancellation; native admission drains before blocking the writes it awaits |
+| Native dependency | Shared FUSE mount config → locked fuser 0.17.0 worker pool/session join | `origin/main` leaves one dispatcher selected; current Linux uses four on this VM, bounded to 2–8 by available CPUs |
+
+The VM runs Ubuntu kernel `6.8.0-117-generic`. The upstream
+[6.8 FUSE sync handler](https://github.com/torvalds/linux/blob/v6.8/fs/fuse/inode.c)
+skips the backend roundtrip when `sync_fs` is disabled. Upstream
+[fuser's contract notes](https://github.com/cberner/fuser/blob/master/CHANGELOG.md)
+explain that ordinary fuser mounts do not receive that roundtrip. A dependency
+upgrade or assumed `syncfs` callback is therefore not the owner fix. These sources
+explain the observed admission gap; they do not establish an arbitrary client
+mapping/unqueued-write guarantee or close macOS mapped draining.
+
+Dedicated Linux proof:
+
+- 680 unit tests pass; 21 privileged/performance tests are ignored in that run.
+  All 20 native mount tests pass separately, including the four old regressions
+  and two new FUSE/NFS mapped exports. VFS library Clippy has zero warnings/errors.
+- Four roles installed through Make. The actual installed FUSE/NFS RO/RW helpers
+  all complete an unrelated directory lookup during a deliberately held data
+  read, return exact 1 MiB bytes, detach normally and exit zero. FUSE has four
+  workers in RO and RW. Core CLI SHA-256:
+  `6aa2a18a461598f3da8a6495f930d1418c6bdbfc96e72b140b5be928fca5dd0f`;
+  FUSE helper `8bb254d0fc92039f936e703172a9a5558df16fc69a281b085af1e2124e0b97d1`.
+- The first provider harness stops at preflight because its runner omitted the
+  installed AWS CLI directory from PATH. That failure is retained. With PATH
+  restored, the unchanged checked-in 6 MiB reuse smoke passes all 25 checks.
+  Foreground FUSE RO/RW then pass through RW fsync/commit/push, independent clone
+  and strict fsck. The full native harness stops later at foreground NFS RO
+  live-status failure, despite correct file bytes. NFS RW and the managed case
+  are not reached in that run; it is not reported as a full Linux E2E pass.
+
+macOS proof: 88 focused checks pass (native admission 1, mount runtime 22,
+cancelled control 1 and NFS adapter 64); VFS Clippy has zero warnings/errors.
+Four roles installed through Make. Fresh 6 MiB reuse passes 25 checks, then
+foreground NFS RO/RW and helper NFS RW pass exact full/range reads, RO refusal,
+live identity, write/fsync/commit/push, independent clone/fsck and ordinary
+detach. All role hashes stay fixed, without forced cleanup. The existing large
+`__eh_frame` linker warning is also present in checkpoint-59 logs; it is not a
+new diagnostic or a performance qualification.
+
+The Linux control failure is retained and minimized, not retried until green.
+Six fresh ordinary NFS RO diagnostics return live status successfully, but a
+task-only LD_PRELOAD bind-delay probe reproduces the ordering gap deterministically:
+preflight binds twice while unmounted, the serving control bind happens only
+after native visibility and the printed "Mounted" message. While that third
+bind is held, 6 MiB reads succeed and live-only status exits 6. Releasing it makes
+status exit zero; the owner then detaches normally and exits zero. Product code,
+protocol expectations and acceptance thresholds are unchanged by the fault probe.
+
+Source confirms `nfs_mount::mount` creates the kernel mount first; the CLI then
+registers/announces it, and only `run_until_cancelled` spawns asynchronous control
+binding. The next fix must prepare and own the control listener before exposing
+readiness, drain it on startup failure, and cover Unix/TCP plus foreground,
+helper and daemon owners. Adding status retries or treating readable data as
+control readiness would leave this ownership gap intact.
+
+Is this the best fix? The writeback drain belongs at the shared engine boundary,
+with adapters admitting callbacks before waits. This preserves both protocol
+surfaces and allows writable dispatch without the four demonstrated data-loss
+regressions. Native startup/control availability is a different owner boundary
+and remains an explicit failing priority rather than being hidden by these
+passing tests. Global in-flight memory, remaining native lifecycle modes,
+performance reproduction and stored pack-v1 authority retirement remain open.
+
+## Checkpoint 62 — control readiness before native visibility
+
+The human approved the exact 150-line, four-file CI/inventory candidate. It is
+applied without changing raw-peeling/pack prohibitions, performance thresholds,
+dependencies or lockfiles. All 75 architecture checks pass. The updated current
+Capsule/follow-tag/minimal SDK selectors have direct checkpoint-59 proof; the
+full final-integration script passes all seven checks in the dedicated Linux
+environment, including protected Capsule receive/retry and both helper doctors.
+Earlier checkpoint descriptions retain the historical pending-approval state.
+
+`nfs_control::bind_server` now returns an owned `BoundControlListener`. Public
+mount setup validates the actual data address, then binds control before starting
+the data server or invoking the native mount command. The session retains that
+same listener until serving starts; no second bind or readiness polling is used.
+The obsolete late-binding entry is removed and all callers migrate. A Unix lease
+retains the socket identity through handler drain and startup rollback, removes
+only its own socket, and explicitly unlocks its persistent lock file. TCP holds
+the actual bound listener through the same prepare/serve lifecycle.
+
+Evidence map:
+
+| Surface | Entry / caller | Owner / callee / dependency | Proof / sibling boundary |
+| --- | --- | --- | --- |
+| Native setup | CLI foreground, helper and daemon preparation → `nfs_mount::mount` | Actual-address preflight → prepared control binding → NFS data task → OS mount | Linux bind-delay probe: old installed binary exposes kernel/printed readiness before control; new Unix and TCP paths remain invisible until binding succeeds |
+| Serving | `run_until_cancelled` | Session consumes its prepared listener; Tokio bound listener queues connections until accept | First status succeeds without test polling; Unix/TCP lifecycle tests, existing handler cancellation/drain tests |
+| Failed startup | Native mount helper failure → session setup unwind | Bound Unix listener/lease Drop → inode-aware cleanup → explicit fs4 unlock; TCP listener Drop closes port | Injected native failure observes prepared socket, no mounted/ready state, released lease; replacement-file bytes preserved; subsequent real mount succeeds |
+| Writable sibling | FUSE/NFS WRITE callbacks → shared engine admission | Native-writeback gate drains before mutation quiescence | Existing 20 Linux native tests retain mapped transition/export oracles; both writable protocol cases pass provider publication/clone proof |
+| Product siblings | Native foreground and managed owners | Same library mount factory, existing lifecycle controls | Five Linux and three macOS installed-role cases; other daemon/Windows and macOS mapped-writeback qualification remains open |
+| Main / baseline | `origin/main` versus selected `origin/crab-v2` | Main is not a live-equivalence target; behavioral baseline is checkpoint 61 | Exact old-binary fault probe retained; no claim of cross-platform production completion |
+
+Final source is frozen across 1,567 files in external `nfs-control-readiness/`;
+archive SHA-256 `1ebcb0eedd76aac8e217567a0d91625432eadf4d2a1035fef63d13c8ad7b1641`.
+The approved CI files have a separate patch hash and are outside that Rust source
+closure. Two TCP test pattern matches receive a test-only portability correction;
+all 12 final connection tests pass again. No production code changes after the
+full unit/native run. Initial three fixture failures are retained: synthetic
+sessions lacked the newly required bound listener; their setup migrated while
+the original drain/error assertions stayed intact.
+
+- Linux: 685 unit tests pass (21 ignored), all 20 native mount tests pass, CLI
+  mount/unmount 15 + 17 pass. VFS Clippy has no warnings/errors. Whole CLI
+  production-library Clippy has 628 inherited warnings, no errors, and exactly
+  checkpoint-59 warning signatures; no suppression is added.
+- macOS: 173 focused checks pass (admission, runtime, cancellation, NFS adapter,
+  control, session lifecycle and CLI unmount); VFS Clippy has no warnings/errors.
+  Four final roles install through Make on each OS.
+- Linux RustFS reuse passes 25 checks; foreground FUSE/NFS RO/RW and managed FUSE
+  RW pass exact full/range bytes, RO refusal, live owner/mode, writable fsync →
+  commit/push → independent clone/fsck and normal detach. Core CLI SHA-256:
+  `950dc689424f9e202a4e00e9106260738e63af837b833d6ca15d458fb0e38544`.
+- macOS RustFS reuse passes 25 checks; foreground NFS RO/RW and helper NFS RW
+  pass the same applicable byte/publication/clone/lifecycle checks. All role
+  hashes remain fixed on each OS; no forced cleanup.
+- Deterministic Linux Unix/TCP bind-delay probes and both startup-failure cleanup
+  variants pass. The original checkpoint-61 NFS status failure and failing
+  old-binary regression probe remain preserved; no oracle/threshold is relaxed.
+- Windows cross/native proof is unavailable: the dedicated image has only the
+  aarch64 Linux Rust target and no Windows linker. TCP proof here is Linux;
+  no Windows qualification is claimed. Existing whole-unit CLI lint debt and
+  the failed paired gateway performance/integrity experiment remain open.
+
+Is this the best fix? Bind ownership belongs before native visibility and must
+survive into serving. One prepared listener removes the asynchronous bind race
+for every mount caller, while preserving socket identity, handler drain and
+failure rollback. Retries would only hide that ordering defect. The extra
+production ownership surface replaces the former late-bind path; no compatibility
+wrapper, dependency patch, environment option or test-directory pattern is added.
+The raw benchmark directory remains excluded. Next retire the generic manifest
+publisher and its seven useful fixtures, then metadb/GC/maintenance/replication
+fallback authority; keep global memory and remaining lifecycle/performance gates
+explicitly open.
+
 ## Remaining priority order
 
-Checkpoint-57 closes the reproduced Unix endpoint flock handoff mechanism;
-TCP override and other native identity/lifecycle proof remains open.
+Checkpoints 57/62 close the reproduced Unix endpoint flock handoff and late
+control-binding mechanisms. Linux Unix/TCP readiness and rollback are now proven;
+other native identity/lifecycle and Windows proof remain open.
 
 The helper-layout gap and live read-only inspection leak are closed by the
 installed-role proofs. Checkpoint-25 closes the reproduced Linux NFS cache
@@ -4267,13 +4624,13 @@ must not be deleted as pack-v1 compatibility.
    decoding, active replies and lower caches need a total memory/admission budget.
    Bound native Git fetch time and prove NFS child-task completion. Complete refresh
    ownership qualification in foreground/helper/coordinator/daemon paths.
-5. **Performance: concurrent dispatch and cold ranges.** Warm Git amplification is
-   repaired. `mount.rs::mount_config` leaves fuser 0.17 `n_threads` unset; upstream
-   `Session::run` defaults it to one. FUSE open/read callbacks synchronously await
-   Tokio work, and reads hold the inode content mutex across reconstruction.
+5. **Performance: concurrent dispatch and cold ranges.** Warm Git amplification and Linux
+   dispatch are repaired: checkpoints 60/61 configure 2–8 FUSE workers and admit
+   native writes before control quiescence. FUSE callbacks still synchronously
+   await Tokio work, and reads hold the inode content mutex across reconstruction.
    Unrelated cold ordinary blobs additionally share `OdbReader::fills`.
-   Reproduce a blocked origin read plus an unrelated native lookup, then measure
-   bounded Linux dispatch and concurrent same-inode reads while preserving
+   The installed blocked-read/unrelated-lookup probe now passes all four Linux
+   modes. Next measure concurrent same-inode reads while preserving
    promotion/namespace ordering and total memory admission. Upstream rejects
    multiple session threads outside Linux; do not apply that setting to macOS.
    Warm hits already bypass the Git fill gate. Preserve whole-object integrity
@@ -4365,9 +4722,10 @@ Remaining located storage-authority boundaries:
 - Checkpoints 47/48 remove manifest authority from protected receive and standalone
   auth view, including their old producers. Checkpoint 49 removes the unused shared manifest preparation/upload/commit APIs.
   Checkpoint 50 removes add-time manifest selection, staged old-receipt fallback
-  and native receipt import. The actual old CLI publisher still owns journal
-  helpers, a plan DTO and manifest initialization; retire that owner next rather than deleting manifest-shaped
-  native projections by name.
+  and native receipt import. Checkpoint 59 removes the obsolete Native entry and its orphaned handoffs. The
+  generic manifest publisher still owns journal helpers, a plan DTO and manifest
+  initialization; retire that owner and migrate its seven useful integration
+  fixtures next rather than deleting rooted projections by name.
 - Gateway read/write, listing, checkpoint ordering, completion recovery and
   maintenance now require Capsule authority at checkpoint-38. No production
   gateway caller selects the old initializer, manifest/journal reader/publisher
