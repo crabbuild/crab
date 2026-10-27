@@ -281,7 +281,10 @@ impl OdbReader {
                 operation: format!("verify {oid}"),
                 source: Box::new(source),
             })?;
-        Ok(Some(Bytes::copy_from_slice(data.data)))
+        // gix returns the complete body in this buffer. Boxing discards spare
+        // delta scratch capacity before retention; transferring the verified
+        // body avoids an unconditional full-size copy.
+        Ok(Some(Bytes::from(decoded.into_boxed_slice())))
     }
 
     fn fetch_native(&self, oid: &ObjectId) -> Result<Bytes> {

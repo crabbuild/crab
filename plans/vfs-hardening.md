@@ -4740,6 +4740,67 @@ and expected-byte comparison rather than retaining multiple whole-file copies.
 This is test resource ownership, not a production memory-admission fix. Metadb/GC/
 maintenance/replication authority and full mode/performance qualification remain.
 
+## Checkpoint 66 — transfer compact verified Git blob bodies
+
+Cold native ODB reads no longer unconditionally copy the complete decoded blob
+before returning it. After the existing type, size and Git object checksum
+checks, the reader transfers the decoder buffer through `into_boxed_slice`.
+Boxing discards spare capacity before retention. This matters for real deltas:
+the fixture decodes a 262,144-byte body into a 524,307-byte allocation; its returned
+verified body retains exactly 262,144 bytes. Direct Vec-to-Bytes transfer would
+retain the larger allocation under bytes 1.11.1 and is deliberately not used.
+
+The dependency proof reads the pinned gix-odb 0.80.0 cache, loose, packed and
+ref-delta return paths: they return the complete body in the supplied buffer.
+gix-pack 0.70.0 uses two result work buffers plus instructions and truncates the
+final body without reducing capacity. The installed standard-library contract
+for `Vec::into_boxed_slice` discards excess capacity; bytes' Box conversion owns
+that exact slice. No dependency, configuration or concurrency changes.
+
+Evidence map:
+
+| Surface | Entry / owner | Callee / contract | Proof / sibling boundary |
+| --- | --- | --- | --- |
+| Ordinary reads | Engine captured BaseBlob → OdbReader | Native gix lookup, kind/size and whole-object checksum before ownership transfer | Both FUSE read_open_file and NFS read_at share this engine boundary |
+| Decoder ownership | read_native → boxed verified body | Loose, packed, ref-delta and object-cache paths return the entire supplied buffer | Real loose/delta-packed bodies match; packed fixture removes loose files, verifies a delta, and measures spare capacity |
+| Retention | Box-to-Bytes transfer | Discard decoder scratch capacity before retaining output | Returned capacity equals exact body length for both fixture bodies and storage representations |
+| Cache and replies | read_blob_id → MemoryCache; read_blob_range | Cache still owns/charges its exact reservation; range replies copy only the selected bytes | No cache policy or reply-lifetime change; this is not a total peak-memory budget fix |
+| Sibling fetch / COW | fetch_native and copy_blob | Git fetch already transfers its own verified Vec, without a second gix-body copy; COW retains tracked output ownership | Existing promisor, raw-OID, cancellation, shutdown and range tests pass; fetch allocation growth remains part of the broader budget audit |
+| Main / base | Older OdbReader in engine.rs:159 on main and v2 | Cold body copied with data.data.to_vec into an uncapped disk cache | Earlier checkpoints migrated verification/cache/admission; this follow-up preserves those current contracts |
+
+macOS passes all 16 blob tests, including the new compact-body regression,
+production VFS Clippy with zero diagnostics, and `make install` for all four
+binary roles. Fresh installed NFS read-only, writable and managed cases pass,
+plus all 25 checked-in RustFS reuse checks. Proof includes full/range reads,
+read-only refusal, write/fsync → commit/push → independent clone/strict fsck,
+normal detach, exit zero and unchanged binary hashes; no forced cleanup.
+Core binary SHA-256:
+`3f9000ae75bc906d3cc8a0b282c6dbe41d261d24e0d60f414f69d6dcefd4d027`.
+
+Runtime review source contains 1,568 hashed files, archive SHA-256:
+`8f7492a5ff80c458ee6c10ff0e8f60082f73ded1fbab90406afa6d33c0fdf28f`.
+The separately running reconstruction fixture is restored to HEAD in that review
+archive. Compiler dependency files prove it is absent from both product and VFS
+unit inputs. Its actual running-source archive is preserved separately; no proof
+is rebound to a different fixture. The runtime diff adds three explanatory
+comment lines and replaces one expression; the flat regression module grows.
+
+Is this the best fix? Transfer the already verified decoder owner and trim spare
+capacity at that same boundary. An unconditional copy is unnecessary for ordinary
+bodies; a plain Vec transfer would retain delta workspace. Preserve the existing
+cold-fill admission, checksum, cache accounting, reply copies and tracked teardown.
+No helper, wrapper, compatibility path or wider concurrency is introduced.
+
+Fresh Linux qualification remains pending while the dedicated VM finishes the
+previous reconstruction corpus; no new Linux native or throughput claim is made.
+The new default reconstruction group passes seven tests on macOS, with three
+large cases explicitly ignored there and running separately on Linux. Linux has
+already passed exact 2k/5k, deterministic/randomized 22k, and one five-file batch
+at 100/2k/5k/22k/27k chunks. The replacement fixture remains uncommitted and both
+old suites remain intact until its full corpus completes. Generic publisher
+retirement, metadb/GC/maintenance authority, all-mode lifecycle, total memory,
+cold-read concurrency, SQLite qualification and performance gates remain open.
+
 ## Remaining priority order
 
 Checkpoints 57/62 close the reproduced Unix endpoint flock handoff and late

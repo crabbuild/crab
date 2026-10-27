@@ -150,6 +150,81 @@ fn odb_reader_read_blob_returns_correct_content() {
 }
 
 #[test]
+fn odb_reader_preserves_loose_and_delta_packed_bodies() {
+    use rand::{RngCore, SeedableRng};
+
+    for packed in [false, true] {
+        let mut content = vec![0_u8; 256 * 1024];
+        rand::rngs::StdRng::seed_from_u64(17).fill_bytes(&mut content);
+        let mut changed = content.clone();
+        changed[content.len() / 2] ^= 1;
+        let (_root, git_dir, oid) = create_git_repo_with_blob(&content);
+        let oids = [oid, write_git_blob(&git_dir, &changed)];
+        if packed {
+            pack_git_blobs(&git_dir, &[&oids[0], &oids[1]]);
+            for oid in &oids {
+                let loose = git_dir.join("objects").join(&oid[..2]).join(&oid[2..]);
+                std::fs::remove_file(loose).unwrap();
+            }
+            let index = std::fs::read_dir(git_dir.join("objects/pack"))
+                .unwrap()
+                .map(|entry| entry.unwrap().path())
+                .find(|path| path.extension().is_some_and(|ext| ext == "idx"))
+                .unwrap();
+            let verification = std::process::Command::new("git")
+                .args(["verify-pack", "-v"])
+                .arg(index)
+                .output()
+                .unwrap();
+            assert!(verification.status.success());
+            let records = String::from_utf8(verification.stdout).unwrap();
+            assert!(
+                records.lines().any(|line| {
+                    let fields = line.split_whitespace().collect::<Vec<_>>();
+                    fields.len() == 7 && oids.iter().any(|oid| oid == fields[0])
+                }),
+                "fixture must contain a delta object"
+            );
+        }
+        let reader = OdbReader::new(&git_dir).unwrap();
+        if packed {
+            assert!(
+                oids.iter().any(|oid| {
+                    let mut scratch = Vec::new();
+                    let length = reader
+                        .odb
+                        .lock()
+                        .unwrap()
+                        .try_find(&parse_oid(oid).unwrap(), &mut scratch)
+                        .unwrap()
+                        .unwrap()
+                        .data
+                        .len();
+                    eprintln!(
+                        "odb_decoder_body_bytes={length} capacity_bytes={}",
+                        scratch.capacity()
+                    );
+                    scratch.capacity() > length
+                }),
+                "fixture must exercise spare delta scratch capacity"
+            );
+        }
+        for (oid, expected) in oids.iter().zip([&content, &changed]) {
+            let actual = reader
+                .read_native(&parse_oid(oid).unwrap())
+                .unwrap()
+                .unwrap();
+            assert_eq!(actual.as_ref(), expected, "packed={packed}, oid={oid}");
+            assert_eq!(
+                actual.try_into_mut().unwrap().capacity(),
+                expected.len(),
+                "decoded bytes must not retain delta scratch capacity"
+            );
+        }
+    }
+}
+
+#[test]
 fn odb_reader_serves_from_cache_on_second_read() {
     let content = b"read me twice";
     let (_dir, git_dir, oid_hex) = create_git_repo_with_blob(content);
