@@ -612,6 +612,7 @@ struct CheckpointJob {
     branch: String,
     commit: ObjectId,
     manifest: attributes::Manifest,
+    manifest_permit: tokio::sync::OwnedSemaphorePermit,
 }
 
 struct CheckpointRefState {
@@ -622,6 +623,7 @@ struct CheckpointRefState {
 struct CheckpointScheduler {
     refs: std::sync::Mutex<HashMap<String, CheckpointRefState>>,
     permits: Arc<Semaphore>,
+    manifest_bytes: Arc<Semaphore>,
     cancellation: CancellationToken,
     active: AtomicUsize,
     idle: Notify,
@@ -633,6 +635,7 @@ impl CheckpointScheduler {
         Self {
             refs: std::sync::Mutex::new(HashMap::new()),
             permits: Arc::new(Semaphore::new(CHECKPOINT_PUBLICATION_CONCURRENCY)),
+            manifest_bytes: Arc::new(Semaphore::new(MAX_WARM_BRANCH_STATE_BYTES)),
             cancellation,
             active: AtomicUsize::new(0),
             idle: Notify::new(),
@@ -650,8 +653,29 @@ impl CheckpointScheduler {
         if self.cancellation.is_cancelled() {
             return;
         }
+        // Charge before copying; queued refs must not retain repository-sized
+        // manifests beyond the process pool. A minimum charge also bounds empty jobs.
+        let bytes = manifest
+            .estimated_bytes()
+            .max(MAX_WARM_BRANCH_STATE_BYTES / MAX_TRACKED_REFS);
+        let permit = u32::try_from(bytes).ok().and_then(|bytes| {
+            Arc::clone(&self.manifest_bytes)
+                .try_acquire_many_owned(bytes)
+                .ok()
+        });
+        let Some(manifest_permit) = permit else {
+            self.metrics.record_checkpoint_skipped();
+            return;
+        };
+        let job = CheckpointJob {
+            repository: repository.clone(),
+            branch: branch.to_owned(),
+            commit,
+            manifest: manifest.clone(),
+            manifest_permit,
+        };
         let key = format!("{}\0{branch}", repository.config.name);
-        let start = {
+        let (start, replaced) = {
             let mut refs = self
                 .refs
                 .lock()
@@ -660,21 +684,17 @@ impl CheckpointScheduler {
                 running: false,
                 pending: None,
             });
-            let replaced = state.pending.replace(CheckpointJob {
-                repository: repository.clone(),
-                branch: branch.to_owned(),
-                commit,
-                manifest: manifest.clone(),
-            });
+            let replaced = state.pending.replace(job);
             self.metrics.record_checkpoint_scheduled(replaced.is_some());
-            if state.running {
-                false
-            } else {
+            let start = !state.running;
+            if start {
                 state.running = true;
                 self.active.fetch_add(1, Ordering::AcqRel);
-                true
             }
+            (start, replaced)
         };
+        // Both full copies and retirement can be large; neither owns the queue lock.
+        drop(replaced);
         if start {
             let scheduler = Arc::clone(self);
             tokio::spawn(async move { scheduler.run_ref(key).await });
@@ -715,9 +735,14 @@ impl CheckpointScheduler {
             let repository = job.repository;
             let branch = job.branch;
             let manifest = job.manifest;
+            let manifest_permit = job.manifest_permit;
             let preparation = self.metrics.observe_checkpoint_prepare(async {
                 tokio::task::spawn_blocking(move || {
-                    attributes::prepare_checkpoint(&branch, commit, &manifest)
+                    // The blocking owner retains admission until its decoded copy drops.
+                    let prepared = attributes::prepare_checkpoint(&branch, commit, &manifest);
+                    drop(manifest);
+                    drop(manifest_permit);
+                    prepared
                 })
                 .await
                 .map_err(Error::Worker)?
@@ -3608,6 +3633,165 @@ mod tests {
             },
             principal: "user".to_owned(),
         }
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn checkpoint_jobs_bound_retained_manifests_and_drain_on_shutdown() {
+        let (repository, runtime, cancel) = capsule_fixture().await;
+        let scheduler = Arc::new(CheckpointScheduler::new(cancel, Metrics::new().unwrap()));
+        // Hold serialization closed so every scheduled ref retains one manifest,
+        // whether its owner has taken the job from the queue yet or not.
+        let _blocked = Arc::clone(&scheduler.permits)
+            .acquire_many_owned(CHECKPOINT_PUBLICATION_CONCURRENCY as u32)
+            .await
+            .unwrap();
+        let mut manifest = attributes::Manifest::empty_complete();
+        let oid = ObjectId::empty_blob(gix_hash::Kind::Sha1);
+        let mut file = 0;
+        while manifest.estimated_bytes() < 16 * 1024 * 1024 {
+            manifest.update(
+                format!("objects/{file}"),
+                Some(attributes::ObjectAttributes::new(
+                    oid,
+                    "1".repeat(32),
+                    1,
+                    1,
+                    attributes::PutAttributes {
+                        metadata: BTreeMap::from([("value".to_owned(), "x".repeat(4096))]),
+                        ..Default::default()
+                    },
+                )),
+            );
+            file += 1;
+        }
+        for branch in 0..9 {
+            scheduler.schedule(
+                &repository,
+                &format!("refs/heads/ref-{branch}"),
+                oid,
+                &manifest,
+            );
+        }
+        let retained_bytes = scheduler.active.load(Ordering::Acquire) * manifest.estimated_bytes();
+        tokio::time::timeout(Duration::from_secs(5), scheduler.shutdown())
+            .await
+            .unwrap();
+        runtime.shutdown().await;
+        assert!(
+            retained_bytes <= MAX_WARM_BRANCH_STATE_BYTES,
+            "checkpoint owners retained {retained_bytes} manifest bytes",
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn checkpoint_pool_bounds_empty_jobs_and_reclaims_cancelled_work() {
+        let (repository, runtime, cancel) = capsule_fixture().await;
+        let scheduler = Arc::new(CheckpointScheduler::new(cancel, Metrics::new().unwrap()));
+        let _blocked = Arc::clone(&scheduler.permits)
+            .acquire_many_owned(CHECKPOINT_PUBLICATION_CONCURRENCY as u32)
+            .await
+            .unwrap();
+        let manifest = attributes::Manifest::empty_complete();
+        for branch in 0..=MAX_TRACKED_REFS {
+            scheduler.schedule(
+                &repository,
+                &format!("refs/heads/ref-{branch}"),
+                ObjectId::empty_tree(gix_hash::Kind::Sha1),
+                &manifest,
+            );
+        }
+        let owners = scheduler.active.load(Ordering::Acquire);
+        tokio::time::timeout(Duration::from_secs(5), scheduler.shutdown())
+            .await
+            .unwrap();
+        runtime.shutdown().await;
+        assert_eq!(
+            (owners, scheduler.manifest_bytes.available_permits()),
+            (MAX_TRACKED_REFS, MAX_WARM_BRANCH_STATE_BYTES),
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn checkpoint_pool_pressure_preserves_cold_reads_and_later_checkpoints() {
+        let (repository, runtime, cancel) = capsule_fixture().await;
+        let metrics = Metrics::new().unwrap();
+        let admission = crate::admission::Admission::new(8, cancel.clone(), metrics.clone());
+        let coordinator = Coordinator::new(
+            Arc::clone(&runtime),
+            crab_remote_git::RepositoryOptions::default(),
+            cancel.clone(),
+            metrics.clone(),
+        );
+        let blocked = Arc::clone(&coordinator.checkpoints.manifest_bytes)
+            .acquire_many_owned(MAX_WARM_BRANCH_STATE_BYTES as u32)
+            .await
+            .unwrap();
+        coordinated_put(&coordinator, &repository, &cancel, "first", b"original").await;
+        let first_tip = tip(&repository, Arc::clone(&runtime), &cancel).await;
+        let reader = Repository::new(repository.config.clone(), repository.store.clone()).unwrap();
+        let cold_runtime = Arc::new(crab_remote_git::RemoteGitRuntime::default());
+        let replayed = read(
+            &reader,
+            Arc::clone(&cold_runtime),
+            &CancellationToken::new(),
+            "first",
+        )
+        .await;
+        let oid = object_id(Kind::Blob, b"original").unwrap();
+        let replayed_manifest = reader.attributes.load(first_tip).await.unwrap();
+        let replayed_etag = replayed_manifest.object("first", oid).unwrap().etag.clone();
+        cold_runtime.shutdown().await;
+        drop(blocked);
+        for file in 0..ATTRIBUTE_CHECKPOINT_BATCHES {
+            coordinated_put(
+                &coordinator,
+                &repository,
+                &cancel,
+                &format!("later/{file}"),
+                b"later",
+            )
+            .await;
+        }
+        coordinator.checkpoints.wait_idle().await;
+        let tip = tip(&repository, Arc::clone(&runtime), &cancel).await;
+        coordinator.shutdown().await;
+        runtime.shutdown().await;
+
+        // New owners prove durable delta/checkpoint recovery, not warm process state.
+        let reader = Repository::new(repository.config.clone(), repository.store.clone()).unwrap();
+        let cold_runtime = Arc::new(crab_remote_git::RemoteGitRuntime::default());
+        let content = read(
+            &reader,
+            Arc::clone(&cold_runtime),
+            &CancellationToken::new(),
+            "first",
+        )
+        .await;
+        let manifest = reader.attributes.load(tip).await.unwrap();
+        let oid = object_id(Kind::Blob, b"original").unwrap();
+        let etag = manifest.object("first", oid).unwrap().etag.clone();
+        cold_runtime.shutdown().await;
+        let report = metrics.render(&admission);
+        assert_eq!(
+            (
+                (replayed, replayed_etag),
+                (content, etag),
+                report.contains("crab_s3_gateway_attribute_checkpoints_skipped_total 1"),
+                report.contains("crab_s3_gateway_attribute_checkpoints_published_total 1"),
+            ),
+            (
+                (
+                    Bytes::from_static(b"original"),
+                    crate::gateway::md5_hex(b"original")
+                ),
+                (
+                    Bytes::from_static(b"original"),
+                    crate::gateway::md5_hex(b"original")
+                ),
+                true,
+                true
+            ),
+        );
     }
 
     #[test]

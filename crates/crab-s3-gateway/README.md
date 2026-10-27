@@ -178,8 +178,7 @@ compacts runs within the unchanged 64-segment/512-transaction-per-run limits;
 those segment counts are distinct from original transaction counts. Publication
 charges the exact prepared frontier bytes and rejects a successor above the
 2 GiB read budget before its ref CAS. Cold captures after restart or cache eviction
-use the same checkpoint admission as warm branches. V1 repositories retain the
-journal publisher.
+use the same checkpoint admission as warm branches.
 
 ### Mutation batching and publication
 
@@ -286,6 +285,17 @@ committed in-memory manifest, coalesces newer work for the same ref, serializes
 outside the async runtime, and uses conditional replacement plus ancestry checks
 so an older worker cannot displace a newer checkpoint. It does not reread 64
 deltas to prepare derived state.
+
+Queued and serializing checkpoint manifests share a separate 128 MiB process
+pool, charged using the maintained decoded-size estimate before copying. Each
+job reserves at least 512 KiB, bounding even empty jobs to 256. Full copies and
+retirement run outside the scheduler's queue lock. The blocking serializer owns
+its charge until it drops the decoded manifest, including during cancellation.
+Pool exhaustion skips this derived checkpoint and increments
+`crab_s3_gateway_attribute_checkpoints_skipped_total`; committed attribute deltas
+remain readable and the next normal checkpoint interval can try again. This pool
+bounds estimated manifest retention, separately from warm state, compressed
+checkpoint output, and total process RSS.
 
 During one process lineage, the scheduler
 carries the manifest's proven predecessor; when the branch slot still names that

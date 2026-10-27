@@ -6370,3 +6370,95 @@ are not a claim that those detailed artifacts are still available. The source
 checkout and 2,156 excluded original raw audit files remain intact. New-head CI
 must regenerate retained proof; bulk artifacts were not rebuilt merely to undo
 the requested cleanup. Publication metadata uses a separate small directory.
+
+
+## Checkpoint 80 — bound background attribute checkpoint retention
+
+The signed-HTTP gateway degradation gate remains open. Recover the parent's
+small CI artifact before more tuning: run 40578901550, artifact 12772127823,
+ZIP SHA-256 `6d46041a3e0662fe79fce820a56e4f352046579ed6e770e4d43bca6b7299b26c`.
+All 23,690 preparation events remain available in this recovery. First/last phase
+quartiles show build median **1.900 → 7.461 ms**, encode **3.618 → 4.009 ms**,
+sidecars **0.360 → 0.369 ms**. These quartiles are not aligned throughput windows;
+phase sums do not describe the entire concurrent publication critical path.
+
+A temporary fixed-batch probe uses 16 independent writers and 500/6,000 entries
+per directory. Four optimized macOS samples per case give build medians
+**0.590 → 1.555 ms** without populated attributes and **0.602 → 1.667 ms** with
+attributes. Forced shared-manifest copying grows **0.689 → 10.494 ms** with
+populated attributes. The unoptimized instrumented probe assigns almost all tree
+build growth to collision-checked preparation; offset copying stays below
+0.1 ms per batch. Therefore changing offsets is not supported by this evidence.
+The public unconditional PUT path does not retain an attribute snapshot on every
+write. Checkpoint scheduling copies periodically; concurrent reads may also force
+a copy. These isolated probes do not prove a throughput fix. All temporary tests
+and timing instrumentation were removed; tree_appends.rs is byte-identical to
+the published parent.
+
+One concrete resource defect is reproduced before fixing it: nine blocked
+checkpoint jobs retain **151,014,150 estimated manifest bytes**, beyond the
+existing 128 MiB branch-state allowance. Both current main and the PR parent
+clone manifests under the global scheduler mutex; four serializer permits do
+not bound manifests queued or waiting for those permits.
+
+The scheduler now reserves from a separate **128 MiB** pool before cloning.
+A minimum **512 KiB** reservation also caps empty jobs at **256**. Each owned
+reservation follows its job into blocking serialization and releases only after
+the decoded copy drops. Cancellation, replacement and early exits drop the same
+owned permit. Full copies and old-job destruction occur outside the queue lock.
+Exhaustion skips the optional derived checkpoint, counts the skip with the fixed
+`crab_s3_gateway_attribute_checkpoints_skipped_total` metric, and leaves committed
+attribute deltas authoritative. The next existing checkpoint interval can retry.
+README and protocol contract describe this behavior. The estimate is serialized
+decoded content size; this is not a strict heap/RSS limit. Compressed output,
+warm state and other process allocations remain separate. Foreground cloning
+still has CPU cost; moving it outside the mutex does not move it off Tokio.
+
+Evidence map: public PUT/COPY/tagging/delete and multipart completion enter the
+same Coordinator mutation boundary. apply_with_fences schedules derived work
+only after successful Capsule publication and ref-lease release. The scheduler
+owns pending manifests; attributes::prepare_checkpoint owns serialization and
+attributes::publish_checkpoint owns lineage/ETag CAS. ReadState::advance already
+replays immutable deltas when a marked slot is absent. Coordinator shutdown
+closes admission and waits for mutation tasks before draining checkpoints and
+closing the read runtime. This ordering also protects the new pre-lock copy.
+Sibling Git publication, FUSE/NFS adapters and pointer reconstruction do not use
+this private derived-state pool. Current main's scheduler has the same missing
+aggregate admission. Tokio 1.53.1 source proves immediate owned multi-permit
+admission and release-on-drop; the serializer closure retains that owner.
+
+Final source passes **17 focused tests**: 13 checkpoint/attribute/metrics/native
+publication cases and four unchanged append identity/FIFO cases; zero ignored.
+Three new regressions prove large-manifest admission, empty-job/cancellation
+closure, and real Capsule mutation → cold byte/ETag replay with a missing slot →
+64 further publications → successful checkpoint → independent cold read. The
+original large-manifest test failed before the source fix and passed unchanged
+after it. Gateway all-target Clippy with `-D warnings`, formatting and optimized
+gateway build pass. No dependency, lockfile, protected inventory, threshold or
+baseline changes. About 39 net non-test Rust lines pay for admission, ownership,
+shorter lock lifetime and observability; tests remain inline in the existing
+module. Broad Linux/packaged HTTP and sustained performance proof belongs to CI;
+these scoped tests are not new mounted or real-provider throughput signoff.
+
+Is this the best fix? The private scheduler is the owner of derived copies and
+must admit them before allocation. A shared owned pool bounds all queued and
+serializing copies without changing authoritative persistence, ref sequencing,
+formats or settings. Removing collision checks or weakening throughput thresholds
+would not address this resource defect.
+
+Fetched origin/crab-v2 remains `877b832b39628e16d37666fdd4193e53e1355257`;
+origin/main remains `cc2e4e25f46eeaee3cfd30025d257397c17a6049`. On parent
+99534023a23c, NFS evidence, large-repository RustFS, GC and HTTP-container CI pass;
+S3 gateway remains queued at the last check. Keep all 2,156 original raw audit
+files excluded and preserved. This checkpoint retains only small diagnostic
+receipts and its dedicated build target; it does not recreate the deleted phase
+1–79 evidence root.
+
+Next: unchanged gateway throughput/tail gate and periodic copy/checkpoint costs;
+captured readers through actual explicit pruning plus aged repo GC; sustained
+mounted writes; oversized streaming tails and remaining resident memory. The
+retention audit has not proved a missing-data bug: pointer catalogs merge shard
+rows monotonically, and caller-owned GC protection remains an explicit lookup
+precondition. Reproduce at the prune boundary before adding lifetime policy.
+Continue the remaining stored-v1 authority audit and provider/Windows/MSRV gates.
+The hardening goal remains active.

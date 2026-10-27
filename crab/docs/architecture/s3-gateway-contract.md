@@ -428,7 +428,15 @@ per-branch object-store slot. The final commit delta records that slot. Under th
 same ref lease, the gateway revalidates the parent and publishes the final
 transaction. Only the winner schedules a coalesced background checkpoint; the
 slot replacement checks commit lineage and uses ETag CAS. Acknowledgement does
-not wait for that derived checkpoint. A crash or checkpoint-write failure leaves
+not wait for that derived checkpoint. Queued and serializing checkpoint
+manifests have a separate 128 MiB process pool, using the maintained decoded-size
+estimate and a minimum 512 KiB reservation per job. Admission precedes copying;
+blocking serialization retains its reservation until the decoded copy drops.
+Pool exhaustion skips the derived checkpoint without failing the acknowledged
+mutation; the next normal checkpoint interval can try again. The fixed
+`crab_s3_gateway_attribute_checkpoints_skipped_total` counter records these skips.
+This is an estimated manifest-retention bound, separate from compressed output
+and total process RSS. A crash or checkpoint-write failure leaves
 a missing or stale slot, so readers replay immutable deltas. A superseded slot has
 the same fallback; malformed checkpoint content fails closed. A manifest
 above the existing 32 MiB manifest bound skips checkpointing without failing the
