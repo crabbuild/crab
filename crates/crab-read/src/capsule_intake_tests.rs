@@ -9,7 +9,7 @@ use std::io::Cursor;
 
 const BLOBS: [&[u8]; 2] = [b"first intake member", b"second intake member"];
 
-fn git_pack(blob: &[u8]) -> (CapsuleGitPack, ObjectId) {
+pub(super) fn git_pack(blob: &[u8]) -> (CapsuleGitPack, ObjectId) {
     let blob_oid = gix_object::compute_hash(gix_hash::Kind::Sha1, Kind::Blob, blob).unwrap();
     let mut tree = b"100644 payload\0".to_vec();
     tree.extend_from_slice(blob_oid.as_bytes());
@@ -106,7 +106,7 @@ async fn over_budget_candidate_batch_exposes_no_packs() {
     let payloads = payloads_from_capsule(candidate.clone()).unwrap();
     let limit = payloads
         .iter()
-        .map(|p| p.pack.as_ref().unwrap().len() as u64)
+        .map(|p| p.pack.as_ref().unwrap().len())
         .max()
         .unwrap();
     let destination = tempfile::tempdir().unwrap();
@@ -133,7 +133,7 @@ async fn over_budget_maintenance_batch_exposes_no_packs_or_kinds() {
     let payloads = payloads_from_capsule(candidate.clone()).unwrap();
     let limit = payloads
         .iter()
-        .map(|p| p.pack.as_ref().unwrap().len() as u64)
+        .map(|p| p.pack.as_ref().unwrap().len())
         .max()
         .unwrap();
     let destination = tempfile::tempdir().unwrap();
@@ -169,7 +169,7 @@ async fn rejected_resident_batch_preserves_existing_pack_files() {
     let mut payloads = payloads_from_capsule(candidate.clone()).unwrap();
     let limit = payloads
         .iter()
-        .map(|p| p.pack.as_ref().unwrap().len() as u64)
+        .map(|p| p.pack.as_ref().unwrap().len())
         .max()
         .unwrap();
     let destination = tempfile::tempdir().unwrap();
@@ -205,7 +205,7 @@ async fn resident_batch_accepts_exact_and_unlimited_budgets() {
     let payloads = payloads_from_capsule(candidate.clone()).unwrap();
     let total = payloads
         .iter()
-        .map(|p| p.pack.as_ref().unwrap().len() as u64)
+        .map(|p| p.pack.as_ref().unwrap().len())
         .sum::<u64>();
     for native in [true, false] {
         for limit in [total, 0] {

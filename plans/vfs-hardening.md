@@ -6225,3 +6225,148 @@ https://github.com/crabbuild/crab/actions/runs/40563256083/job/122397638041.
 Retained-reader closure through explicit pruning, remaining stored-v1 authority,
 actual mounted sustained writes, total memory and broader platform/provider
 gates remain open. The full hardening goal stays active.
+
+## Checkpoint 79 — stream selected pack bodies into private files
+
+
+Generic layered pack installation previously retained every selected pack body.
+With sources/objects fixed, selecting larger native blobs grew process memory
+linearly. Replace the collected-window path with authenticated streaming section
+staging shared by historical/native, maintenance, selected fetch, and physical
+sidecar reads. Preserve pre-I/O and whole-batch admission, coalescing, exact EOF,
+OID admission, thin dependency ordering, local reuse and immutable installation.
+Source full-size mismatch now fails even if selected section hashes match.
+
+New flat modules own section streaming, staged file lifetime and six behavioral
+fixtures. The public checkpoint late-error test retains a typed ConnectionReset,
+proves empty output/private cleanup, and retries against a healthy source.
+Remove two tests tied to the deleted private collector; their spawn/coalescing
+properties now use real 16-member Git fixtures across four selection modes.
+Use existing Git file SHA/trailer verification for thin packs by making that
+mechanic public. No dependencies, lockfiles, format, config, protected inventory,
+compatibility reader, grace period or performance-guard thresholds change.
+
+Is this the best fix? A single format-aware read owner passes private files to
+the existing Git installer; storage keeps its canonical streaming transport.
+ScratchSpace only writes/reads complete Bytes and hides paths, so adapting it
+would reintroduce materialization or widen the storage API. Copying cold-clone
+policy would miss the generic thin/maintenance boundary. Net production growth
+is justified by section demultiplexing, exact framing and owned/drained writes.
+
+Limits and explicit contract changes: sidecars, OID maps, caller-supplied Capsule
+bodies and total VFS memory remain separate. Streaming opening retries and
+complete bounded-range retries preserve their existing storage contract;
+mid-body failures after delivery fail the operation and permit caller retry.
+The removed collector's signed range accelerator is not used. Over 512 MiB the
+canonical stream uses one HEAD plus 32-MiB requests with four shared slots,
+replacing the reader's 128-MiB / six-slot collector; oversized request count is
+reported. Explicit cancellation drains; abandoned futures retain private workers
+and require Tokio/destination lifetime through drain.
+
+Evidence map: historical recovery/checkpoint suffix/selected fetch → generic
+builder → streamed pack/sidecar owner → Store range framing/retry → crab-git
+SHA/sidecar/thin/immutable install. Optimized cold clone/cache already stages
+files and retains its separate complete visibility proof. Current main has no
+shared Capsule reader; exact baseline is PR parent 53010575f4d.
+
+Performance excludes the initial stale Linux candidate (Cargo reused old owner
+libraries under source overlays) and initial Mac large-source timing overlapped
+with input copying. Both are retained and labelled excluded. Corrected Linux
+artifacts require fresh compilation; final profile production hashes bind to the
+frozen source. All binaries come directly from separate Cargo test targets;
+temporary manifest targets/profiling source are removed from the PR. Verification
+runs in separate untimed processes; generated ODBs are removed only after exact
+blob hashes, strict Git fsck and installed-file hash receipts are retained.
+
+Broader qualification caught a source regression before publication: streaming
+returns `ReadError::Cancelled` during intake, before checkpoint's next phase
+check. Derived conversion wrapped it as a read failure. The two existing phase
+cancellation tests failed on both OSes. Normalize that outcome at the checkpoint
+error owner; preserve typed sources for every other read error. No assertions
+changed. Server and S3 maintenance already distinguish the canonical cancelled
+outcome. Transfer already exposed read cancellation through its earlier cold
+path; browse owners retain their existing token check.
+
+Final frozen source passes **257 tests per OS**, none ignored: nine minimal
+reader, 62 Capsule reader, 62 Git pack, 49 checkpoint and 75 protected-helper
+cases. Local-staging, formatting, **18 guard self-tests + 75 source checks** and
+reader Clippy pass on both OSes. Reader Clippy has zero warnings/errors. Product
+build warnings match the published parent's sets: 59 macOS / 58 Linux. The
+Linux disposable container initially lacked rustfmt; install the pinned component
+and resume from formatting without changing source or repeating passing tests.
+Both protected-helper binaries build; all four product roles install via Make.
+
+Fresh RustFS/native qualification passes **eight mounted cases**: Linux FUSE/NFS
+RO/RW plus managed FUSE; macOS NFS RO/RW plus managed NFS. Exact 6 MiB full/range
+bytes, RO refusal, applicable fsync → commit/push → independent eager clone and
+strict fsck, normal detach, **25 reuse checks per OS** and stable role hashes
+pass. Repack passes **15 commands per OS**, unchanged refs, exact reconstruction,
+strict fsck, deep closure and missing-root refusal. No bucket sweep or forced
+cleanup. The first macOS cross-repository smoke observed a bucket-wide xorb count
+change during concurrent Linux source publication. Its own consumer had zero
+local/prepared payloads. Retain that failure separately; the unchanged macOS
+fixture passes when run alone. Runtime assertions were not weakened.
+
+Paired public-API measurements retain exact blob hashes, strict Git fsck, Store
+request/consumed-byte counts and installed-file hashes. These are debug builds,
+with untimed verification and immutable fixture inputs; they are not optimized
+or mounted sustained-throughput signoff. With 32 sources / 96 Git objects and
+1 GiB of native blob data, the final RustFS measurements are:
+
+| API case | Peak process RSS, before → after | Install time, before → after |
+| --- | --- | --- |
+| macOS native | 1333.0 → 42.6 MiB | 32.53 → 19.83 s |
+| macOS maintenance | 1365.7 → 44.7 MiB | 39.46 → 15.87 s |
+| Linux native | 1242.7 → 28.2 MiB | 10.93 → 10.23 s |
+| Linux maintenance | 1245.7 → 26.7 MiB | 10.52 → 10.02 s |
+
+All four pairs retain **32 Store read requests** and **1,073,959,277 consumed
+bytes**. The corrected Linux local-file 1-GiB pairs fall from 1037.0–1037.1 to
+17.1–17.8 MiB RSS; timings overlap and include slower candidate samples. Earlier
+macOS local paired measurements used the pre-format prototype and retain their
+own source/executable bindings; they are not final-source throughput proof.
+
+A single 576-MiB native blob exercises oversized transport. Native installation
+has three paired samples per OS: median **18.758 → 18.574 s macOS**,
+**6.262 → 6.092 s Linux**. Candidate Linux samples span **6.005–20.938 s**; the
+20.938-s observation remains included, so tail performance is unresolved. Peak
+RSS ranges fall **1686.5–1703.8 → 151.8–152.9 MiB macOS** and
+**965.2–975.9 → 139.3–147.8 MiB Linux**. Maintenance's one pair per OS is retained
+separately. Every oversized pair reads **604,076,417 bytes**; Store requests rise
+**5 → 20** under canonical bounded streaming. No universal speedup is claimed.
+All final provider/profile package inputs bind to the frozen reader/Git source;
+checkpoint's later cancellation conversion is outside that profiling dependency
+closure. No binaries were manually copied. Temporary Cargo profiling targets and
+source were removed before source freeze.
+
+Runtime source: **2,066 files**, archive SHA-256 `79c25b64f69a84ab782530995176723124a5aaaeef689d6e32754fc9021c0379`. Core SHA: macOS `a0ea762a437422404eb276759b4dbd893aecb637c4efdcead89fb8843ee073e6`; Linux `2e51d3805ff463c5e296913b197f670008370cba8f5b3272e2ca22987bb71a18`. README bindings and the hardening ledger are separate from the runtime archive. All 2,156 raw audit files remain preserved and excluded. The dedicated workspace evidence directories were removed after the completed audit, as described below.
+
+Is this the best fix? The canonical format-aware read owner stages selected
+sections and passes their owned files to the existing Git installer. Storage
+keeps transfer/retry mechanics; Git keeps SHA, sidecar, thin repair and immutable
+publication. Added non-test code pays for demultiplexing, exact framing and
+cancel-safe file ownership while deleting the collected-window implementation.
+No caller-specific collector, broad ScratchSpace API, dependency override,
+compatibility reader or new setting is added.
+
+The latest parent gateway job passes integrity with **93,126 acknowledgements**,
+zero failed/missing/duplicate/unexpected keys. Throughput retention **0.758438×**
+fails the unchanged 0.8 limit; p95 **1.480864×** passes 1.5. This measures signed
+HTTP PUTs, not mounted writes:
+https://github.com/crabbuild/crab/actions/runs/40578901550/job/122452682786.
+
+Next priorities: retained closure through explicit pruning and remaining stored-v1
+authority; actual sustained mounted writes and gateway degradation; oversized
+stream tails plus metadata/caller-resident/decoder/reply memory; lifecycle/cache
+and broader provider/Windows/MSRV gates. The hardening goal remains active.
+
+After the final audit passed, the separate **Clean up Cargo build data** task
+removed `crab-ios-02d01345-vfs` at the user's request, stopping/restarting its VM
+and services during removal. This deleted the source archives, installed binaries,
+profiling inputs/controllers and detailed phase receipts for this and earlier
+checkpoints. The results above completed before cleanup; the execution transcript
+and this ledger retain their summaries, source/core hashes and exclusions. They
+are not a claim that those detailed artifacts are still available. The source
+checkout and 2,156 excluded original raw audit files remain intact. New-head CI
+must regenerate retained proof; bulk artifacts were not rebuilt merely to undo
+the requested cleanup. Publication metadata uses a separate small directory.

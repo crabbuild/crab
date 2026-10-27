@@ -481,6 +481,22 @@ budget. Its result reports complete visibility only after the downloaded index
 OID union exactly matches the authenticated closure and includes every captured
 ref/peeled tip; metadata alone is not installation proof.
 
+Historical, incremental, and maintenance range reads stream selected pack sections
+into private files and authenticate every section before installation. Sidecars
+remain resident; body memory no longer grows with the total selected pack bytes.
+The existing storage stream bounds large-range transfer buffers separately.
+Source sizes, exact ranges, complete stream EOF, hashes, and the aggregate intake
+budget are still checked. Resident Capsule bodies supplied by a caller retain
+that caller's memory cost.
+
+These reads use storage's streaming retry contract: opening a request is
+retryable; a body failure after delivery fails the operation, drains private
+writes, and permits a fresh caller retry. Large parallel ranges retry their
+complete bounded buffers before delivery. They do not use the collected-range
+signed-download accelerator. Explicit cancellation drains active workers before
+returning. If the installer future is abandoned, its workers retain staging
+until they drain; keep Tokio alive and the destination intact through cleanup.
+
 Duplicate pack bodies are installed once, including repeated members in one compacted run. Native
 installation and remote object reads use metadata's content comparison to reject
 conflicting commitments while retaining authenticated physical member positions.

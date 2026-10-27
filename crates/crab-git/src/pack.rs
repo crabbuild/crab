@@ -1085,7 +1085,10 @@ fn install_pack_file_blocking(
     })
 }
 
-pub(crate) fn verify_pack_file_sha1(path: &Path) -> Result<String> {
+/// Verify a pack file's SHA-1 trailer and return its hexadecimal identity.
+///
+/// Returns an I/O or integrity error if the complete file cannot be verified.
+pub fn verify_pack_file_sha1(path: &Path) -> Result<String> {
     verify_pack_file(path, false).map(|(git_sha1, _, _)| git_sha1)
 }
 

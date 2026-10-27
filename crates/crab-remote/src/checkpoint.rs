@@ -107,7 +107,7 @@ pub enum CheckpointError {
     #[error("checkpoint consolidation cancelled")]
     Cancelled,
     #[error("capsule repository read failed")]
-    Read(#[from] crab_read::ReadError),
+    Read(#[source] crab_read::ReadError),
     #[error("Git pack consolidation failed")]
     Repack(#[from] crab_git::repack::RepackError),
     #[error("Git pack evidence failed")]
@@ -128,6 +128,17 @@ pub enum CheckpointError {
     OutputLimit { maximum: u64 },
     #[error("checkpoint pack path has no canonical content identifier: {path}")]
     InvalidPackPath { path: PathBuf },
+}
+
+impl From<crab_read::ReadError> for CheckpointError {
+    fn from(error: crab_read::ReadError) -> Self {
+        // Intake can cancel before the next phase check. Keep that outcome
+        // recognizable by maintenance owners instead of reporting a read failure.
+        match error {
+            crab_read::ReadError::Cancelled => Self::Cancelled,
+            other => Self::Read(other),
+        }
+    }
 }
 
 /// Compact a capsule repository once its immutable frontier reaches `threshold`.

@@ -52,6 +52,9 @@ receipt and complete checkpoint between phases; it does not reread its own
 publication. The metadata owner and HTTP server use this two-phase pass, with
 separate CAS and cancellation boundaries.
 
+Cancellation during pack intake returns `CheckpointError::Cancelled`, as do
+phase-boundary checks; already-completed logical publication remains visible.
+
 Explicit CLI repack consolidates the
 selected suffix and checkpoints its pinned view with one root CAS. Small
 frontiers reuse already authenticated capsule bodies; large frontiers retain
