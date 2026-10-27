@@ -59,8 +59,11 @@ retain a candidate that was collectible in that snapshot.
 
 Bucket administrators can rebuild the shared GC root registry with
 `crab gc --repair-registry --bucket <bucket>`. The repair enumerates repository
-manifests, validates each current shard index, CAS-replaces the discovered
-entries, and only then marks bucket coverage complete. Destructive bucket GC
+roots, authenticates each protocol-v2 Capsule pointer catalog, CAS-replaces
+the discovered entries, and only then marks bucket coverage complete. A retired
+manifest marker still identifies a repository, but cannot supply its roots.
+Missing or corrupt Capsule roots abort repair before registry replacement;
+root capture, marking, and closure repair never fall back to manifest history. Destructive bucket GC
 fails closed while the registry schema or coverage marker is incomplete.
 The registry stores a small record per repository and spreads each repo's
 shard roots across deterministic four-hex CAS partitions. Push contention and

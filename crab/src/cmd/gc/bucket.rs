@@ -37,7 +37,7 @@ use crate::storage::store::Store;
 use crab_metadata::ref_registry::RefRegistry;
 use crab_storage::layout::CAPSULE_CHUNK_PAGE_KIND;
 use crab_storage::{
-    StorageProviderKind, StoreLayout, canonical_global_content_path, content_hash_from_path,
+    StorageProviderKind, canonical_global_content_path, content_hash_from_path,
     global_content_partition_prefix, global_content_prefix,
 };
 use crab_xet::hash::MerkleHash;
@@ -482,13 +482,8 @@ async fn run_bucket_gc_under_maintenance(
     };
 
     if !args.dry_run {
-        let roots = bucket_root_snapshot_streaming(
-            store,
-            registry,
-            args.list_concurrency,
-            coordinator_protected_keys,
-        )
-        .await?;
+        let roots =
+            bucket_root_snapshot_streaming(store, registry, coordinator_protected_keys).await?;
         let resume_phase = if let Some(run_id) = args.resume_run_id.as_deref() {
             let journal = super::journal::GcRunJournal::resume(
                 store.clone(),
@@ -518,13 +513,7 @@ async fn run_bucket_gc_under_maintenance(
         .await;
     }
 
-    let roots = bucket_root_snapshot_streaming(
-        store,
-        registry,
-        args.list_concurrency,
-        coordinator_protected_keys,
-    )
-    .await?;
+    let roots = bucket_root_snapshot_streaming(store, registry, coordinator_protected_keys).await?;
     return run_bucket_gc_streaming(
         args,
         store,
@@ -670,14 +659,7 @@ async fn run_bucket_gc_streaming(
     let mut root_reader =
         DurableMarkReader::new_keys(store.clone(), journal.marks_prefix(), "referenced-shards");
     if resume_phase != Some(super::journal::GcRunPhase::Deleting) {
-        write_bucket_root_marks(
-            store,
-            registry,
-            args.list_concurrency,
-            &capsule_shards,
-            &journal,
-        )
-        .await?;
+        write_bucket_root_marks(store, registry, &capsule_shards, &journal).await?;
         root_reader =
             DurableMarkReader::new_keys(store.clone(), journal.marks_prefix(), "referenced-shards");
     }
@@ -838,13 +820,8 @@ async fn run_bucket_gc_streaming(
 
     if args.dry_run {
         let preview = async {
-            let current_roots = bucket_root_snapshot_streaming(
-                store,
-                registry,
-                args.list_concurrency,
-                coordinator_protected_keys,
-            )
-            .await?;
+            let current_roots =
+                bucket_root_snapshot_streaming(store, registry, coordinator_protected_keys).await?;
             journal.ensure_root_identity(&current_roots.root_identity)?;
             let mut file_reader = DurableMarkReader::new_hash_width(
                 store.clone(),
@@ -893,14 +870,7 @@ async fn run_bucket_gc_streaming(
 
     journal.finish_plan().await?;
     if sweep_lease.is_none() {
-        seal_bucket_journal(
-            args,
-            store,
-            coordinator_protected_keys,
-            &mut journal,
-            cancel,
-        )
-        .await?;
+        seal_bucket_journal(store, coordinator_protected_keys, &mut journal, cancel).await?;
     }
     if !journal.file_index_complete() {
         let mut file_reader = DurableMarkReader::new_hash_width(
@@ -926,7 +896,6 @@ async fn run_bucket_gc_streaming(
 }
 
 async fn seal_bucket_journal(
-    args: &BucketGcArgs,
     store: &Store,
     coordinator_protected_keys: &HashSet<String>,
     journal: &mut super::journal::GcRunJournal,
@@ -942,13 +911,8 @@ async fn seal_bucket_journal(
     let current = async {
         let registry = load_ref_registry_summary(store, false).await?;
         ensure_registry_complete_for_destructive_gc(&registry)?;
-        let roots = bucket_root_snapshot_streaming(
-            store,
-            &registry,
-            args.list_concurrency,
-            coordinator_protected_keys,
-        )
-        .await?;
+        let roots =
+            bucket_root_snapshot_streaming(store, &registry, coordinator_protected_keys).await?;
         journal.ensure_root_identity(&roots.root_identity)?;
         journal.seal_fence_epoch(seal.epoch()).await
     }
@@ -1114,19 +1078,10 @@ struct CapsuleRepositoryRoots {
 async fn capsule_repository_roots(
     store: &Store,
     repo_prefix: &str,
-) -> Result<Option<CapsuleRepositoryRoots>> {
+) -> Result<CapsuleRepositoryRoots> {
     let storage = store.as_storage().clone();
     let router = crab_storage::StoreLayout::new(storage, repo_prefix.to_owned());
-    let root = match crab_metadata::capsule_protocol::load_root(&router).await {
-        Ok(root) => root,
-        Err(error) => {
-            let error = CrabError::from(error);
-            if matches!(error, CrabError::NotFound { .. }) {
-                return Ok(None);
-            }
-            return Err(error);
-        }
-    };
+    let root = crab_metadata::capsule_protocol::load_root(&router).await?;
     let view = crab_read::capsule_protocol::open_view_from_root_with_control(
         &router,
         root,
@@ -1138,10 +1093,10 @@ async fn capsule_repository_roots(
     .await?;
     let root_digest = view.state_digest();
     let shard_hashes = view.pointer_catalog_shard_hashes().await?;
-    Ok(Some(CapsuleRepositoryRoots {
+    Ok(CapsuleRepositoryRoots {
         root_digest,
         shard_hashes,
-    }))
+    })
 }
 
 #[derive(Default)]
@@ -1174,40 +1129,9 @@ impl RootDigest {
     }
 }
 
-async fn visit_repository_historical_shards<F, Fut>(
-    store: &Store,
-    repo_prefix: &str,
-    concurrency: usize,
-    mut visit: F,
-) -> Result<()>
-where
-    F: FnMut(String) -> Fut,
-    Fut: std::future::Future<Output = Result<()>>,
-{
-    let storage = store.clone().into_storage();
-    let router = crab_storage::StoreLayout::new(storage.clone(), repo_prefix.to_owned());
-    crab_metadata::layout_descriptor::read_canonical_layout(&storage, &router).await?;
-    let mut history =
-        crab_metadata::manifest_store::stream_manifest_history(&storage, &router, concurrency);
-    while let Some(entry) = history.try_next().await.map_err(CrabError::from)? {
-        if entry.manifest.shard_index_hash.is_empty() {
-            continue;
-        }
-        crab_metadata::manifest_store::visit_bulk_shard_list(
-            &storage,
-            &router,
-            &entry.manifest.shard_index_hash,
-            |record| visit(record.shard_hash),
-        )
-        .await?;
-    }
-    Ok(())
-}
-
 async fn bucket_root_snapshot_streaming(
     store: &Store,
     registry: &RefRegistry,
-    concurrency: usize,
     coordinator_protected_keys: &HashSet<String>,
 ) -> Result<BucketRootSnapshot> {
     let mut repo_prefixes = registry.repos.keys().cloned().collect::<Vec<_>>();
@@ -1243,29 +1167,15 @@ async fn bucket_root_snapshot_streaming(
     )
     .await?;
     for repo_prefix in &repo_prefixes {
-        if let Some(roots) = capsule_repository_roots(store, repo_prefix).await? {
-            digest.add(
-                "capsule-root",
-                &format!("{repo_prefix}\0{}", roots.root_digest),
-            );
-            for hash in &roots.shard_hashes {
-                digest.add("capsule-shard", &format!("{repo_prefix}\0{hash}"));
-            }
-            capsule_shards.insert(repo_prefix.clone(), roots.shard_hashes);
-            continue;
+        let roots = capsule_repository_roots(store, repo_prefix).await?;
+        digest.add(
+            "capsule-root",
+            &format!("{repo_prefix}\0{}", roots.root_digest),
+        );
+        for hash in &roots.shard_hashes {
+            digest.add("capsule-shard", &format!("{repo_prefix}\0{hash}"));
         }
-        let mut visit = |hash: String| {
-            let result = MerkleHash::from_hex(&hash)
-                .map_err(|error| CrabError::CorruptObject {
-                    path: format!("{repo_prefix}/metadata/shard"),
-                    reason: format!("invalid historical shard hash: {error}"),
-                })
-                .map(|_| {
-                    digest.add("historical-shard", &format!("{repo_prefix}\0{hash}"));
-                });
-            std::future::ready(result)
-        };
-        visit_repository_historical_shards(store, repo_prefix, concurrency, &mut visit).await?;
+        capsule_shards.insert(repo_prefix.clone(), roots.shard_hashes);
     }
     for (repo_prefix, stages) in &registry.workflow_stage_hashes {
         for stage in stages {
@@ -1303,7 +1213,6 @@ async fn bucket_root_snapshot_streaming(
 async fn write_bucket_root_marks(
     store: &Store,
     registry: &RefRegistry,
-    concurrency: usize,
     capsule_shards: &HashMap<String, Vec<String>>,
     journal: &super::journal::GcRunJournal,
 ) -> Result<()> {
@@ -1336,21 +1245,10 @@ async fn write_bucket_root_marks(
         },
     )
     .await?;
-    let mut repo_prefixes = registry.repos.keys().cloned().collect::<Vec<_>>();
-    repo_prefixes.sort_unstable();
-    for repo_prefix in repo_prefixes {
-        if let Some(shard_hashes) = capsule_shards.get(&repo_prefix) {
-            for hash in shard_hashes {
-                marks.lock().await.add(&hash).await?;
-            }
-            continue;
+    for shard_hashes in capsule_shards.values() {
+        for hash in shard_hashes {
+            marks.lock().await.add(hash).await?;
         }
-        let marks_for_visit = Arc::clone(&marks);
-        let mut visit = move |hash: String| {
-            let marks = Arc::clone(&marks_for_visit);
-            async move { marks.lock().await.add(&hash).await }
-        };
-        visit_repository_historical_shards(store, &repo_prefix, concurrency, &mut visit).await?;
     }
     let marks = Arc::try_unwrap(marks)
         .map_err(|_| {
@@ -1371,30 +1269,8 @@ async fn repository_referenced_shards(
         let repo_prefix = repo_prefix.clone();
         let mut shards = current.iter().cloned().collect::<HashSet<_>>();
         async move {
-            if let Some(roots) = capsule_repository_roots(&store, &repo_prefix).await? {
-                shards.extend(roots.shard_hashes);
-                return Ok::<_, CrabError>((repo_prefix, shards));
-            }
-            let storage = store.into_storage();
-            let router = crab_storage::StoreLayout::new(storage.clone(), repo_prefix.clone());
-            crab_metadata::layout_descriptor::read_canonical_layout(&storage, &router).await?;
-            let mut history = crab_metadata::manifest_store::stream_manifest_history(
-                &storage,
-                &router,
-                parallelism,
-            );
-            while let Some(entry) = history.try_next().await? {
-                if entry.manifest.shard_index_hash.is_empty() {
-                    continue;
-                }
-                let historical = crab_metadata::manifest_store::read_bulk_shard_list(
-                    &storage,
-                    &router,
-                    &entry.manifest.shard_index_hash,
-                )
-                .await?;
-                shards.extend(historical);
-            }
+            let roots = capsule_repository_roots(&store, &repo_prefix).await?;
+            shards.extend(roots.shard_hashes);
             Ok::<_, CrabError>((repo_prefix, shards))
         }
     }))
@@ -2591,6 +2467,8 @@ pub async fn repair_ref_registry(store: &Store) -> Result<(usize, usize)> {
         while let Some(item) = objects.next().await {
             let meta = item.map_err(CrabError::from)?;
             let location = meta.location.as_ref();
+            // Retired markers still identify repositories. Omitting them could
+            // certify partial coverage; every discovered repo must load a v2 root.
             let discovered = location
                 .strip_suffix("/v2/root")
                 .map(|prefix| (prefix, RootKind::Capsule))
@@ -2622,24 +2500,9 @@ pub async fn repair_ref_registry(store: &Store) -> Result<(usize, usize)> {
         let mut repos = HashMap::with_capacity(repo_prefixes.len());
         let mut shard_count = 0usize;
         for repo_prefix in &repo_prefixes {
-            let shards = match repositories[repo_prefix] {
-                RootKind::Capsule => {
-                    capsule_repository_roots(store, repo_prefix)
-                        .await?
-                        .ok_or_else(|| CrabError::NotFound {
-                            path: format!("{repo_prefix}/v2/root"),
-                        })?
-                        .shard_hashes
-                }
-                RootKind::Manifest => {
-                    let router = StoreLayout::new(store.clone(), repo_prefix.clone());
-                    crate::core::remote_layout::open(store, &router).await?;
-                    crate::metadata::manifest::read_repository_snapshot(store, &router)
-                        .await?
-                        .journal
-                        .shards
-                }
-            };
+            let shards = capsule_repository_roots(store, repo_prefix)
+                .await?
+                .shard_hashes;
             shard_count = shard_count.checked_add(shards.len()).ok_or_else(|| {
                 CrabError::Internal("ref-registry repair shard count overflow".to_owned())
             })?;
@@ -2669,1318 +2532,5 @@ pub async fn repair_ref_registry(store: &Store) -> Result<(usize, usize)> {
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used)]
-mod tests {
-    use super::*;
-    use bytes::Bytes;
-    use object_store::memory::InMemory;
-    use std::sync::Arc;
-
-    use crab_metadata::ref_registry::ActiveActiveCoordinatorRegistration;
-
-    fn memory_store() -> Store {
-        Store::new(Arc::new(InMemory::new()))
-    }
-
-    struct TestListOutcome {
-        objects: Vec<ListedObject>,
-        requests: u64,
-        parallelism: usize,
-    }
-
-    #[derive(Default)]
-    struct TestObjectCollector(Vec<ListedObject>);
-
-    #[async_trait(?Send)]
-    impl GlobalObjectConsumer for TestObjectCollector {
-        async fn consume(&mut self, object: ListedObject) -> Result<()> {
-            self.0.push(object);
-            Ok(())
-        }
-    }
-
-    async fn list_global_objects(
-        store: &Store,
-        kind: &str,
-        profile: GcListProfile,
-        concurrency: usize,
-        permits: Arc<Semaphore>,
-        cancel: &CancellationToken,
-    ) -> Result<TestListOutcome> {
-        let mut collector = TestObjectCollector::default();
-        let stats = scan_global_objects(
-            store,
-            kind,
-            profile,
-            concurrency,
-            permits,
-            cancel,
-            &mut collector,
-        )
-        .await?;
-        Ok(TestListOutcome {
-            objects: collector.0,
-            requests: stats.requests,
-            parallelism: stats.parallelism,
-        })
-    }
-
-    async fn seed_registry(store: &Store, registry: &RefRegistry) {
-        let storage = store.as_storage().clone();
-        let bucket_router = crab_storage::StoreLayout::new(storage.clone(), String::new());
-        let mut repos = registry.repos.clone();
-        for repo in registry
-            .workflow_stage_hashes
-            .keys()
-            .chain(registry.workflow_experiment_ids.keys())
-            .chain(registry.active_active_coordinators.keys())
-        {
-            repos.entry(repo.clone()).or_default();
-        }
-        crab_metadata::ref_registry::replace_ref_registry_from_repository_roots(
-            &storage,
-            &bucket_router,
-            repos,
-        )
-        .await
-        .unwrap();
-        for repo in registry.repos.keys().chain(
-            registry
-                .workflow_stage_hashes
-                .keys()
-                .chain(registry.workflow_experiment_ids.keys()),
-        ) {
-            let router = crab_storage::StoreLayout::new(storage.clone(), repo.clone());
-            crab_metadata::ref_registry::register_workflow_roots_exact(
-                &storage,
-                &router,
-                registry
-                    .workflow_stage_hashes
-                    .get(repo)
-                    .cloned()
-                    .unwrap_or_default(),
-                registry
-                    .workflow_experiment_ids
-                    .get(repo)
-                    .cloned()
-                    .unwrap_or_default(),
-            )
-            .await
-            .unwrap();
-        }
-        for (repo, coordinator) in &registry.active_active_coordinators {
-            let router = crab_storage::StoreLayout::new(storage.clone(), repo.clone());
-            crab_metadata::ref_registry::register_active_active_coordinator_for_repo(
-                &storage,
-                &router,
-                coordinator.clone(),
-            )
-            .await
-            .unwrap();
-        }
-    }
-
-    async fn publish_capsule_pointer_catalog(store: &Store, repo: &str) -> (String, String) {
-        use crab_metadata::capsule_protocol::{
-            Capsule, CapsuleRefEdit, CapsuleSection, CapsuleSectionKind, CapsuleTransaction,
-            PointerCatalog, ShardCatalogEntry, XorbCatalogEntry, XorbChunkEntry,
-        };
-
-        let router = crab_storage::StoreLayout::new(store.as_storage().clone(), repo.to_owned());
-        let base =
-            crab_write::capsule_protocol::initialize(&router, &"1".repeat(64), "refs/heads/main")
-                .await
-                .unwrap();
-        let xorb_hash = "a".repeat(64);
-        let shard_hash = "b".repeat(64);
-        let mut catalog = PointerCatalog::new();
-        catalog
-            .insert_xorb(
-                xorb_hash.clone(),
-                XorbCatalogEntry::new(
-                    1,
-                    "c".repeat(64),
-                    vec![XorbChunkEntry::new("d".repeat(64), 1)],
-                ),
-            )
-            .unwrap();
-        catalog
-            .insert_shard(
-                shard_hash.clone(),
-                ShardCatalogEntry::new(1, vec![xorb_hash.clone()]),
-            )
-            .unwrap();
-        let transaction = CapsuleTransaction::new(
-            base.record().digest(),
-            vec![CapsuleRefEdit::new(
-                "refs/heads/main",
-                None,
-                Some("2".repeat(40)),
-                None,
-            )],
-        )
-        .unwrap();
-        let capsule = Capsule::build(
-            &transaction,
-            Vec::new(),
-            vec![CapsuleSection::new(
-                CapsuleSectionKind::CatalogDelta,
-                catalog.encode_delta().unwrap(),
-            )],
-        )
-        .unwrap();
-        crab_write::capsule_protocol::publish(&router, base, &transaction, &capsule)
-            .await
-            .unwrap();
-        (shard_hash, xorb_hash)
-    }
-
-    #[test]
-    fn extract_hash_from_key_works() {
-        assert_eq!(
-            extract_hash_from_key(&format!(".crab/shards/ab/{}", "ab".repeat(32))),
-            "ab".repeat(32)
-        );
-        assert_eq!(
-            extract_hash_from_key(&format!(".crab/xorbs/de/{}", "de".repeat(32))),
-            "de".repeat(32)
-        );
-        assert_eq!(extract_hash_from_key(""), "");
-    }
-
-    #[tokio::test]
-    async fn adaptive_global_listing_keeps_small_namespace_on_one_stream() {
-        let store = memory_store();
-        let hashes = [
-            "aa".repeat(32),
-            "ff".repeat(32),
-            format!("aa{}", "1".repeat(62)),
-        ];
-        for hash in &hashes {
-            store
-                .put(
-                    &crab_storage::canonical_global_content_path("xorbs", hash),
-                    Bytes::from(hash.clone()),
-                )
-                .await
-                .unwrap();
-        }
-
-        let mut outcome = list_global_objects(
-            &store,
-            "xorbs",
-            GcListProfile::Adaptive,
-            8,
-            Arc::new(Semaphore::new(8)),
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-        outcome
-            .objects
-            .sort_by(|left, right| left.location.cmp(&right.location));
-
-        assert_eq!(outcome.objects.len(), 3);
-        assert_eq!(outcome.requests, 1);
-        assert_eq!(outcome.parallelism, 1);
-        assert!(
-            outcome
-                .objects
-                .iter()
-                .all(|object| { content_hash_from_path(&object.location, "xorbs").is_some() })
-        );
-    }
-
-    #[tokio::test]
-    async fn latency_global_listing_scans_only_populated_hash_partitions() {
-        let store = memory_store();
-        for hash in ["aa".repeat(32), "ff".repeat(32)] {
-            store
-                .put(
-                    &crab_storage::canonical_global_content_path("xorbs", &hash),
-                    Bytes::from(hash),
-                )
-                .await
-                .unwrap();
-        }
-
-        let outcome = list_global_objects(
-            &store,
-            "xorbs",
-            GcListProfile::Latency,
-            8,
-            Arc::new(Semaphore::new(8)),
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(outcome.requests, 3);
-        assert_eq!(outcome.parallelism, 2);
-    }
-
-    #[tokio::test]
-    async fn adaptive_global_listing_partitions_large_namespace_after_bounded_probe() {
-        let store = memory_store().with_bucket_identity(crab_storage::BucketIdentity::new(
-            StorageProviderKind::S3,
-            "bucket",
-            "bucket",
-        ));
-        for index in 0..=256_000_u64 {
-            let hash = format!("{:02x}{index:062x}", index % 256);
-            store
-                .put(
-                    &crab_storage::canonical_global_content_path("xorbs", &hash),
-                    Bytes::new(),
-                )
-                .await
-                .unwrap();
-        }
-
-        let outcome = list_global_objects(
-            &store,
-            "xorbs",
-            GcListProfile::Adaptive,
-            16,
-            Arc::new(Semaphore::new(16)),
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(outcome.objects.len(), 256_001);
-        assert_eq!(outcome.requests, 258);
-    }
-
-    #[tokio::test]
-    async fn adaptive_global_listing_keeps_local_and_serial_stores_recursive() {
-        let local = memory_store();
-        let s3 = memory_store().with_bucket_identity(crab_storage::BucketIdentity::new(
-            StorageProviderKind::S3,
-            "bucket",
-            "bucket",
-        ));
-        for index in 0..=2_000_u64 {
-            let hash = format!("{index:064x}");
-            let path = crab_storage::canonical_global_content_path("xorbs", &hash);
-            local.put(&path, Bytes::new()).await.unwrap();
-            s3.put(&path, Bytes::new()).await.unwrap();
-        }
-
-        let local_outcome = list_global_objects(
-            &local,
-            "xorbs",
-            GcListProfile::Adaptive,
-            8,
-            Arc::new(Semaphore::new(8)),
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-        let serial_outcome = list_global_objects(
-            &s3,
-            "xorbs",
-            GcListProfile::Adaptive,
-            1,
-            Arc::new(Semaphore::new(1)),
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(local_outcome.requests, 1);
-        assert_eq!(serial_outcome.requests, 1);
-    }
-
-    #[test]
-    fn adaptive_probe_uses_provider_page_capacity() {
-        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-        let s3 = Store::new(Arc::clone(&inner)).with_bucket_identity(
-            crab_storage::BucketIdentity::new(StorageProviderKind::S3, "bucket", "bucket"),
-        );
-        let azure = Store::new(Arc::clone(&inner)).with_bucket_identity(
-            crab_storage::BucketIdentity::new(StorageProviderKind::Azure, "account", "container"),
-        );
-        let local = Store::new(inner);
-
-        assert_eq!(adaptive_probe_limit(&s3), 256_000);
-        assert_eq!(adaptive_probe_limit(&azure), 1_280_000);
-        assert_eq!(adaptive_probe_limit(&local), usize::MAX);
-    }
-
-    #[tokio::test]
-    async fn global_listing_honors_cancellation_during_enumeration() {
-        let store = memory_store();
-        let cancel = CancellationToken::new();
-        cancel.cancel();
-
-        let result = list_global_objects(
-            &store,
-            "xorbs",
-            GcListProfile::Cost,
-            8,
-            Arc::new(Semaphore::new(8)),
-            &cancel,
-        )
-        .await;
-
-        assert!(matches!(result, Err(CrabError::Cancelled)));
-    }
-
-    #[tokio::test]
-    async fn global_listing_rejects_flat_legacy_objects() {
-        let store = memory_store();
-        let hash = "ab".repeat(32);
-        store
-            .put(
-                &ObjectPath::from(format!(".crab/xorbs/{hash}")),
-                Bytes::from_static(b"legacy"),
-            )
-            .await
-            .unwrap();
-
-        let result = list_global_objects(
-            &store,
-            "xorbs",
-            GcListProfile::Adaptive,
-            8,
-            Arc::new(Semaphore::new(8)),
-            &CancellationToken::new(),
-        )
-        .await;
-
-        assert!(matches!(result, Err(CrabError::CorruptObject { .. })));
-    }
-
-    #[tokio::test]
-    async fn destructive_plan_collects_orphan_closure_segments() {
-        let store = memory_store();
-        let hash = "a".repeat(64);
-        let path = super::super::closure::segment_path(GLOBAL_PREFIX, &hash, 7);
-        store
-            .put(&path, Bytes::from_static(b"orphan"))
-            .await
-            .unwrap();
-        let mut journal = super::super::journal::GcRunJournal::start(
-            store.clone(),
-            GLOBAL_PREFIX,
-            "bucket",
-            GLOBAL_PREFIX,
-            SystemTime::now(),
-            Duration::from_secs(3600),
-            true,
-        )
-        .await
-        .unwrap();
-        journal.set_root_identity("root").await.unwrap();
-        let protected = HashSet::new();
-        let mut planner = ImmutableObjectStreamingPlanner::new(
-            DurableMarkReader::new_keys(
-                store.clone(),
-                journal.marks_prefix(),
-                "live-closure-segments",
-            ),
-            &protected,
-            SystemTime::now(),
-            true,
-            &mut journal,
-        );
-
-        scan_closure_segment_objects(
-            &store,
-            Arc::new(Semaphore::new(1)),
-            &CancellationToken::new(),
-            &mut planner,
-        )
-        .await
-        .unwrap();
-        planner.finish().await.unwrap();
-        journal.finish_plan().await.unwrap();
-
-        let batch = journal.next_batch().await.unwrap().unwrap();
-        assert_eq!(batch.len(), 1);
-        assert_eq!(batch[0].key, path.to_string());
-    }
-
-    #[tokio::test]
-    async fn streaming_plan_retains_coordinator_protected_xorb() {
-        let store = memory_store();
-        let hash = "a".repeat(64);
-        let path = crab_storage::canonical_global_content_path("xorbs", &hash).to_string();
-        let mut journal = super::super::journal::GcRunJournal::start(
-            store.clone(),
-            GLOBAL_PREFIX,
-            "bucket",
-            GLOBAL_PREFIX,
-            SystemTime::now(),
-            Duration::from_secs(3600),
-            true,
-        )
-        .await
-        .unwrap();
-        journal.set_root_identity("root").await.unwrap();
-        let protected = [path.clone()].into_iter().collect();
-        let mut planner = XorbStreamingPlanner::new(
-            DurableMarkReader::new(store.clone(), journal.marks_prefix(), "referenced-xorbs"),
-            &protected,
-            SystemTime::now(),
-            true,
-            &mut journal,
-        );
-
-        planner
-            .consume(ListedObject {
-                location: path,
-                size: 7,
-                last_modified: SystemTime::UNIX_EPOCH,
-                e_tag: Some("planned".to_owned()),
-                version: None,
-            })
-            .await
-            .unwrap();
-        planner.finish().await.unwrap();
-        journal.finish_plan().await.unwrap();
-
-        assert!(journal.next_batch().await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn load_registry_missing_without_force_errors() {
-        let store = memory_store();
-        let result = load_ref_registry(&store, false).await;
-        assert!(matches!(result, Err(CrabError::NotFound { .. })));
-    }
-
-    #[tokio::test]
-    async fn load_registry_missing_with_force_returns_empty() {
-        let store = memory_store();
-        let reg = load_ref_registry(&store, true).await.unwrap();
-        assert!(reg.repos.is_empty());
-        assert_eq!(reg.generation, 0);
-        assert_eq!(reg.schema_version, 0);
-        assert!(!reg.is_complete_for_destructive_gc());
-    }
-
-    #[tokio::test]
-    async fn load_registry_valid_json() {
-        let store = memory_store();
-        let reg = RefRegistry {
-            generation: 5,
-            repos: [("org/models".to_string(), vec!["aaa".to_string()])]
-                .into_iter()
-                .collect(),
-            ..RefRegistry::default()
-        };
-        seed_registry(&store, &reg).await;
-
-        let loaded = load_ref_registry(&store, false).await.unwrap();
-        assert_eq!(loaded.repos.len(), 1);
-    }
-
-    #[tokio::test]
-    async fn deregister_missing_repo_is_a_noop() {
-        let store = memory_store();
-        deregister_repo(&store, "org/old-repo").await.unwrap();
-
-        assert!(matches!(
-            load_ref_registry(&store, false).await,
-            Err(CrabError::NotFound { .. })
-        ));
-    }
-
-    #[tokio::test]
-    async fn deregister_removes_existing_repo() {
-        let store = memory_store();
-        let reg = RefRegistry {
-            generation: 3,
-            repos: [
-                ("org/models".to_string(), vec!["aaa".to_string()]),
-                ("org/datasets".to_string(), vec!["bbb".to_string()]),
-            ]
-            .into_iter()
-            .collect(),
-            ..RefRegistry::default()
-        };
-        seed_registry(&store, &reg).await;
-
-        deregister_repo(&store, "org/models").await.unwrap();
-
-        let updated = load_ref_registry(&store, false).await.unwrap();
-        assert_eq!(updated.repos.len(), 1);
-        assert!(!updated.repos.contains_key("org/models"));
-        assert!(updated.repos.contains_key("org/datasets"));
-    }
-
-    #[tokio::test]
-    async fn registry_repair_discovers_manifests_and_marks_coverage_complete() {
-        let store = memory_store();
-        for repo in ["org/a", "org/b"] {
-            let router = StoreLayout::new(store.clone(), repo.to_owned());
-            crate::core::remote_layout::initialize(&store, &router)
-                .await
-                .unwrap();
-            let manifest = crate::metadata::manifest::Manifest::default_for_repo("refs/heads/main");
-            crate::metadata::manifest::create_manifest(&store, &router, &manifest)
-                .await
-                .unwrap();
-        }
-
-        let (repos, shards) = repair_ref_registry(&store).await.unwrap();
-
-        assert_eq!((repos, shards), (2, 0));
-        let registry = load_ref_registry(&store, false).await.unwrap();
-        assert!(registry.is_complete_for_destructive_gc());
-        assert!(registry.complete_repos.contains("org/a"));
-        assert!(registry.complete_repos.contains("org/b"));
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    #[ignore = "requires CRAB_E2E_FLAT_BUCKET and explicit scratch S3 credentials"]
-    async fn live_capsule_shard_inspection_reads_published_catalog_without_gc() {
-        let bucket = std::env::var("CRAB_E2E_FLAT_BUCKET").unwrap();
-        let storage =
-            crab_storage::build_static_env_store(&bucket, crab_storage::StorageProviderKind::S3)
-                .unwrap();
-        let store = Store::from_storage(storage);
-        let repo = format!("catalog-shard-inspection/{}", uuid::Uuid::now_v7());
-        let (expected, _) = publish_capsule_pointer_catalog(&store, &repo).await;
-        let roots = capsule_repository_roots(&store, &repo)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(roots.shard_hashes, vec![expected]);
-        // Root capture only: this fixture must never invoke a bucket sweep.
-        let again = capsule_repository_roots(&store, &repo)
-            .await
-            .unwrap()
-            .unwrap();
-        assert_eq!(again.root_digest, roots.root_digest);
-    }
-
-    #[tokio::test]
-    async fn registry_repair_and_bucket_marks_preserve_capsule_catalog_shards() {
-        use crab_metadata::capsule_protocol::{Capsule, CapsuleRefEdit, CapsuleTransaction};
-
-        let store = memory_store();
-        let repo = "org/v2";
-        let (shard_hash, _) = publish_capsule_pointer_catalog(&store, repo).await;
-
-        let (repos, shards) = repair_ref_registry(&store).await.unwrap();
-
-        assert_eq!((repos, shards), (1, 1));
-        let registry = load_ref_registry(&store, false).await.unwrap();
-        assert_eq!(registry.repos[repo], vec![shard_hash.clone()]);
-        assert!(registry.is_complete_for_destructive_gc());
-        let roots = bucket_root_snapshot_streaming(&store, &registry, 4, &HashSet::new())
-            .await
-            .unwrap();
-        let layout = crab_storage::StoreLayout::new(store.as_storage().clone(), repo.to_owned());
-        let base = crab_write::capsule_protocol::open_root(&layout)
-            .await
-            .unwrap();
-        let transaction = CapsuleTransaction::new(
-            base.record().digest(),
-            vec![CapsuleRefEdit::new(
-                "refs/heads/main",
-                Some("2".repeat(40)),
-                Some("3".repeat(40)),
-                None,
-            )],
-        )
-        .unwrap();
-        let capsule = Capsule::build(&transaction, Vec::new(), Vec::new()).unwrap();
-        crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
-            .await
-            .unwrap();
-        let moved_roots = bucket_root_snapshot_streaming(&store, &registry, 4, &HashSet::new())
-            .await
-            .unwrap();
-        assert_ne!(roots.root_identity, moved_roots.root_identity);
-
-        let journal = super::super::journal::GcRunJournal::start(
-            store.clone(),
-            GLOBAL_PREFIX,
-            "bucket",
-            GLOBAL_PREFIX,
-            SystemTime::now(),
-            Duration::from_secs(3600),
-            true,
-        )
-        .await
-        .unwrap();
-        write_bucket_root_marks(&store, &registry, 4, &roots.capsule_shards, &journal)
-            .await
-            .unwrap();
-        let mut reader =
-            DurableMarkReader::new_keys(store, journal.marks_prefix(), "referenced-shards");
-        assert!(reader.contains(&shard_hash).await.unwrap());
-    }
-
-    #[tokio::test]
-    async fn bucket_gc_roots_include_history_only_shards() {
-        use crate::metadata::manifest::{
-            BulkData, Manifest, compact_pack_index, compact_shard_index, create_manifest,
-            read_manifest, upload_segmented_bulk, write_manifest_cas,
-        };
-
-        let store = memory_store();
-        let router = StoreLayout::new(store.clone(), "org/models".to_owned());
-        crate::core::remote_layout::initialize(&store, &router)
-            .await
-            .unwrap();
-        let historical_shard = "a".repeat(64);
-        let (old_shard_hash, _, old_shard_write) =
-            compact_shard_index(1, std::slice::from_ref(&historical_shard)).unwrap();
-        let (old_pack_hash, _, old_pack_write) = compact_pack_index(1, &[]).unwrap();
-        upload_segmented_bulk(
-            &store,
-            &router,
-            &BulkData {
-                shard_index: old_shard_write,
-                pack_index: old_pack_write,
-            },
-        )
-        .await
-        .unwrap();
-        let mut old = Manifest::default_for_repo("refs/heads/main");
-        old.generation = 1;
-        old.shard_index_hash = old_shard_hash;
-        old.pack_index_hash = old_pack_hash;
-        old.seal_git_validation();
-        create_manifest(&store, &router, &old).await.unwrap();
-        let (_, etag) = read_manifest(&store, &router).await.unwrap();
-
-        let (new_shard_hash, _, new_shard_write) = compact_shard_index(2, &[]).unwrap();
-        let (new_pack_hash, _, new_pack_write) = compact_pack_index(2, &[]).unwrap();
-        upload_segmented_bulk(
-            &store,
-            &router,
-            &BulkData {
-                shard_index: new_shard_write,
-                pack_index: new_pack_write,
-            },
-        )
-        .await
-        .unwrap();
-        let mut current = old.clone();
-        current.generation = 2;
-        current.shard_index_hash = new_shard_hash;
-        current.pack_index_hash = new_pack_hash;
-        current.seal_git_validation();
-        write_manifest_cas(&store, &router, &current, &etag)
-            .await
-            .unwrap();
-        let mut registry = RefRegistry::default();
-        registry.register("org/models", Vec::new());
-
-        let historical = repository_referenced_shards(&store, &registry, 4)
-            .await
-            .unwrap();
-
-        assert_eq!(
-            historical["org/models"],
-            [historical_shard].into_iter().collect()
-        );
-    }
-
-    #[tokio::test]
-    async fn registry_repair_rejects_manifest_without_canonical_layout() {
-        let store = memory_store();
-        let router = StoreLayout::new(store.clone(), "org/legacy".to_owned());
-        crate::metadata::manifest::create_manifest(
-            &store,
-            &router,
-            &crate::metadata::manifest::Manifest::default_for_repo("refs/heads/main"),
-        )
-        .await
-        .unwrap();
-
-        let error = repair_ref_registry(&store)
-            .await
-            .expect_err("bucket root repair must reject a repository without its v1 descriptor");
-
-        assert!(matches!(
-            error,
-            CrabError::NotFound { ref path }
-                if path == router.layout_descriptor_path().as_ref()
-        ));
-    }
-
-    #[tokio::test]
-    async fn dry_run_bucket_gc_with_empty_store() {
-        let store = memory_store();
-        let reg = RefRegistry::default();
-        seed_registry(&store, &reg).await;
-
-        let args = BucketGcArgs {
-            bucket: "test-bucket".to_string(),
-            dry_run: true,
-            grace_period: Duration::from_secs(3600),
-            force: false,
-            yes: false,
-            list_concurrency: 16,
-            list_profile: GcListProfile::Adaptive,
-            delete_concurrency: 64,
-            resume_run_id: None,
-        };
-
-        let protected = HashSet::new();
-        let protected_repos = HashSet::new();
-        let outcome = run_bucket_gc(
-            &args,
-            &store,
-            &protected,
-            &protected_repos,
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-        assert!(outcome.dry_run);
-        assert_eq!(outcome.shards_deleted, 0);
-        assert_eq!(outcome.xorbs_deleted, 0);
-        assert_eq!(outcome.file_index_deleted, 0);
-
-        let mut scratch = store
-            .inner()
-            .list(Some(&ObjectPath::from(".crab/gc/runs/")));
-        assert!(scratch.try_next().await.unwrap().is_none());
-    }
-
-    #[tokio::test]
-    async fn destructive_bucket_gc_preserves_recent_xorb_without_force() {
-        let store = memory_store();
-        let mut registry = RefRegistry::default();
-        registry.mark_coverage_complete();
-        seed_registry(&store, &registry).await;
-        let xorb_path = canonical_global_content_path("xorbs", &"a".repeat(64));
-        store
-            .put(&xorb_path, Bytes::from_static(b"recent orphan"))
-            .await
-            .unwrap();
-
-        let outcome = run_bucket_gc(
-            &BucketGcArgs {
-                bucket: "test-bucket".to_owned(),
-                dry_run: false,
-                grace_period: Duration::from_secs(3600),
-                force: false,
-                yes: false,
-                list_concurrency: 16,
-                list_profile: GcListProfile::Adaptive,
-                delete_concurrency: 64,
-                resume_run_id: None,
-            },
-            &store,
-            &HashSet::new(),
-            &HashSet::new(),
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(outcome.xorbs_deleted, 0);
-        store.get_with_etag(&xorb_path).await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn destructive_bucket_gc_force_deletes_recent_xorb() {
-        let store = memory_store();
-        let mut registry = RefRegistry::default();
-        registry.mark_coverage_complete();
-        seed_registry(&store, &registry).await;
-        let xorb_path = canonical_global_content_path("xorbs", &"b".repeat(64));
-        let xorb = Bytes::from_static(b"recent orphan");
-        store.put(&xorb_path, xorb.clone()).await.unwrap();
-
-        let outcome = run_bucket_gc(
-            &BucketGcArgs {
-                bucket: "test-bucket".to_owned(),
-                dry_run: false,
-                grace_period: Duration::from_secs(3600),
-                force: true,
-                yes: true,
-                list_concurrency: 16,
-                list_profile: GcListProfile::Adaptive,
-                delete_concurrency: 64,
-                resume_run_id: None,
-            },
-            &store,
-            &HashSet::new(),
-            &HashSet::new(),
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(outcome.xorbs_deleted, 1);
-        assert_eq!(outcome.bytes_reclaimed, xorb.len() as u64);
-        assert!(matches!(
-            store.get_with_etag(&xorb_path).await,
-            Err(CrabError::NotFound { .. })
-        ));
-        let summary = outcome.to_summary();
-        assert_eq!(summary.packs_deleted, 0);
-        assert_eq!(summary.xorbs_deleted, 1);
-        assert_eq!(summary.shards_deleted, 0);
-        assert_eq!(summary.bytes_reclaimed, xorb.len() as u64);
-        assert!(!summary.dry_run);
-        assert!(!summary.cancelled);
-        assert!(!summary.partial_enumeration);
-    }
-
-    #[tokio::test]
-    async fn bucket_gc_tombstones_file_rows_outside_each_repo_closure() {
-        use crab_metadata::value_codec::CommittedFileRecord;
-
-        let store = memory_store();
-        let repo = "org/models";
-        let retained = MerkleHash::from([1, 2, 3, 4]);
-        let stale = MerkleHash::from([5, 6, 7, 8]);
-        let shard = MerkleHash::from([9, 10, 11, 12]);
-        let config = crate::metadata::MetaDbConfig::for_repo(repo);
-        let guard = crate::metadata::MetaDbGuard::new(crate::metadata::MetaDb::new(
-            Arc::clone(store.inner()),
-            repo.to_owned(),
-            config.clone(),
-        ));
-        let file_index = guard.file_index().await.unwrap();
-        let mut transaction = guard.new_transaction().unwrap();
-        file_index.save_committed_batch(
-            &mut transaction,
-            &[
-                (
-                    retained,
-                    CommittedFileRecord {
-                        recipe_hash: [1; 32],
-                        shard_hash: shard,
-                        committed_generation: 1,
-                        shard_index_hash: shard,
-                    },
-                ),
-                (
-                    stale,
-                    CommittedFileRecord {
-                        recipe_hash: [2; 32],
-                        shard_hash: shard,
-                        committed_generation: 1,
-                        shard_index_hash: shard,
-                    },
-                ),
-            ],
-        );
-        guard.commit(transaction).await.unwrap();
-        guard.close().await.unwrap();
-
-        let marks_prefix = ".crab/gc/runs/test/marks".to_owned();
-        let mut writer = DurableMarkWriter::new_hash_width(
-            store.clone(),
-            marks_prefix.clone(),
-            "referenced-files",
-            4,
-        );
-        writer.add(&retained.hex()).await.unwrap();
-        writer.finish().await.unwrap();
-        let mut reader =
-            DurableMarkReader::new_hash_width(store.clone(), marks_prefix, "referenced-files", 4);
-        let removed = gc_file_indexes_partitioned(
-            &store,
-            &[repo.to_owned()],
-            &mut reader,
-            false,
-            None,
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(removed, 1);
-        let guard = crate::metadata::MetaDbGuard::new(crate::metadata::MetaDb::new(
-            Arc::clone(store.inner()),
-            repo.to_owned(),
-            config.with_read_only(true),
-        ));
-        let values = guard
-            .file_index()
-            .await
-            .unwrap()
-            .get_committed_batch(&[retained, stale])
-            .await
-            .unwrap();
-        assert!(values[0].is_some());
-        assert!(values[1].is_none());
-        guard.close().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn gc_writer_fence_blocks_destructive_bucket_gc_but_not_preview() {
-        let store = memory_store();
-        let router = StoreLayout::new(store.clone(), "org/models".to_owned());
-        crate::core::remote_layout::initialize(&store, &router)
-            .await
-            .unwrap();
-        let mut registry = RefRegistry::default();
-        registry.register("org/models", Vec::new());
-        registry.mark_coverage_complete();
-        seed_registry(&store, &registry).await;
-        let held = crab_coordination::GcFenceLease::acquire_writer(
-            store.inner(),
-            GLOBAL_PREFIX,
-            crab_coordination::DEFAULT_GC_FENCE_TTL,
-        )
-        .await
-        .unwrap();
-
-        let destructive = run_bucket_gc(
-            &BucketGcArgs {
-                bucket: "test-bucket".to_owned(),
-                dry_run: false,
-                grace_period: Duration::from_secs(3600),
-                force: false,
-                yes: false,
-                list_concurrency: 16,
-                list_profile: GcListProfile::Adaptive,
-                delete_concurrency: 64,
-                resume_run_id: None,
-            },
-            &store,
-            &HashSet::new(),
-            &HashSet::new(),
-            &CancellationToken::new(),
-        )
-        .await;
-        assert!(matches!(destructive, Err(CrabError::PushLockHeld { .. })));
-
-        let preview = run_bucket_gc(
-            &BucketGcArgs {
-                bucket: "test-bucket".to_owned(),
-                dry_run: true,
-                grace_period: Duration::from_secs(3600),
-                force: false,
-                yes: false,
-                list_concurrency: 16,
-                list_profile: GcListProfile::Adaptive,
-                delete_concurrency: 64,
-                resume_run_id: None,
-            },
-            &store,
-            &HashSet::new(),
-            &HashSet::new(),
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-        assert!(preview.dry_run);
-
-        held.release().await.unwrap();
-    }
-
-    #[tokio::test]
-    async fn destructive_gc_aborts_when_referenced_shard_is_corrupt() {
-        let store = memory_store();
-        let router = StoreLayout::new(store.clone(), "org/models".to_owned());
-        crate::core::remote_layout::initialize(&store, &router)
-            .await
-            .unwrap();
-        let corrupt_shard = Bytes::from_static(b"not a shard");
-        let shard_hash = crab_xet::hash::compute_data_hash(&corrupt_shard).hex();
-        store
-            .put(
-                &canonical_global_content_path("shards", &shard_hash),
-                corrupt_shard,
-            )
-            .await
-            .unwrap();
-
-        let mut registry = RefRegistry::default();
-        registry.register("org/models", vec![shard_hash]);
-        registry.mark_coverage_complete();
-        seed_registry(&store, &registry).await;
-
-        let error = run_bucket_gc(
-            &BucketGcArgs {
-                bucket: "test-bucket".to_owned(),
-                dry_run: false,
-                grace_period: Duration::from_secs(3600),
-                force: false,
-                yes: false,
-                list_concurrency: 16,
-                list_profile: GcListProfile::Adaptive,
-                delete_concurrency: 64,
-                resume_run_id: None,
-            },
-            &store,
-            &HashSet::new(),
-            &HashSet::new(),
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap_err();
-
-        assert!(matches!(error, CrabError::CorruptObject { .. }));
-    }
-
-    #[tokio::test]
-    async fn destructive_gc_aborts_when_registry_root_is_missing() {
-        let store = memory_store();
-        let router = StoreLayout::new(store.clone(), "org/models".to_owned());
-        crate::core::remote_layout::initialize(&store, &router)
-            .await
-            .unwrap();
-        let mut registry = RefRegistry::default();
-        registry.register("org/models", vec!["a".repeat(64)]);
-        registry.mark_coverage_complete();
-        seed_registry(&store, &registry).await;
-
-        let error = run_bucket_gc(
-            &BucketGcArgs {
-                bucket: "test-bucket".to_owned(),
-                dry_run: false,
-                grace_period: Duration::from_secs(3600),
-                force: false,
-                yes: false,
-                list_concurrency: 16,
-                list_profile: GcListProfile::Adaptive,
-                delete_concurrency: 64,
-                resume_run_id: None,
-            },
-            &store,
-            &HashSet::new(),
-            &HashSet::new(),
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap_err();
-
-        assert!(matches!(error, CrabError::CorruptObject { .. }));
-    }
-
-    #[tokio::test]
-    async fn bucket_gc_destructive_run_requires_proof_for_registered_active_active_repos() {
-        let store = memory_store();
-        let mut reg = RefRegistry::default();
-        reg.mark_coverage_complete();
-        reg.register_active_active_coordinator(
-            "org/models",
-            ActiveActiveCoordinatorRegistration {
-                provider: "dynamodb".to_owned(),
-                url: "dynamodb://crab-coordinator".to_owned(),
-                region: "us-east-1".to_owned(),
-                failover_regions: vec!["us-west-2".to_owned()],
-            },
-        );
-        seed_registry(&store, &reg).await;
-        let args = BucketGcArgs {
-            bucket: "test-bucket".to_string(),
-            dry_run: false,
-            grace_period: Duration::from_secs(3600),
-            force: false,
-            yes: false,
-            list_concurrency: 16,
-            list_profile: GcListProfile::Adaptive,
-            delete_concurrency: 64,
-            resume_run_id: None,
-        };
-        let protected = HashSet::new();
-        let protected_repos = HashSet::new();
-
-        let err = run_bucket_gc(
-            &args,
-            &store,
-            &protected,
-            &protected_repos,
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap_err();
-
-        assert!(matches!(err, CrabError::Configuration { .. }));
-        assert!(err.to_string().contains("org/models"));
-    }
-
-    #[tokio::test]
-    async fn bucket_gc_destructive_run_accepts_all_repo_coordinator_proof() {
-        let store = memory_store();
-        let router = StoreLayout::new(store.as_storage().clone(), "org/models".to_owned());
-        crab_metadata::layout_descriptor::ensure_canonical_layout(store.as_storage(), &router)
-            .await
-            .expect("initialize canonical repository layout");
-        let mut reg = RefRegistry::default();
-        reg.mark_coverage_complete();
-        reg.register_active_active_coordinator(
-            "org/models",
-            ActiveActiveCoordinatorRegistration {
-                provider: "dynamodb".to_owned(),
-                url: "dynamodb://crab-coordinator".to_owned(),
-                region: "us-east-1".to_owned(),
-                failover_regions: Vec::new(),
-            },
-        );
-        seed_registry(&store, &reg).await;
-        let args = BucketGcArgs {
-            bucket: "test-bucket".to_string(),
-            dry_run: false,
-            grace_period: Duration::from_secs(3600),
-            force: false,
-            yes: false,
-            list_concurrency: 16,
-            list_profile: GcListProfile::Adaptive,
-            delete_concurrency: 64,
-            resume_run_id: None,
-        };
-        let protected = HashSet::new();
-        let protected_repos = ["org/models".to_owned()].into_iter().collect();
-
-        let outcome = run_bucket_gc(
-            &args,
-            &store,
-            &protected,
-            &protected_repos,
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-
-        assert_eq!(outcome.shards_deleted, 0);
-        assert_eq!(outcome.xorbs_deleted, 0);
-    }
-
-    #[tokio::test]
-    async fn bucket_gc_destructive_run_rejects_incomplete_legacy_registry() {
-        let store = memory_store();
-        let legacy = br#"{"generation":1,"repos":{"org/models":["shard-a"]}}"#;
-        let registry_path = ObjectPath::from(format!("{GLOBAL_PREFIX}/ref-registry"));
-        store
-            .put(&registry_path, Bytes::from_static(legacy))
-            .await
-            .unwrap();
-        let args = BucketGcArgs {
-            bucket: "test-bucket".to_string(),
-            dry_run: false,
-            grace_period: Duration::from_secs(3600),
-            force: true,
-            yes: true,
-            list_concurrency: 16,
-            list_profile: GcListProfile::Adaptive,
-            delete_concurrency: 64,
-            resume_run_id: None,
-        };
-
-        let err = run_bucket_gc(
-            &args,
-            &store,
-            &HashSet::new(),
-            &HashSet::new(),
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap_err();
-
-        assert!(matches!(err, CrabError::Configuration { .. }));
-        assert!(err.to_string().contains("ref-registry"));
-    }
-
-    /// Regression: the bucket GC walker MUST NOT enumerate or delete
-    /// objects under `.crab/workflow/**`.
-    ///
-    /// The workflow push path (task 4.8) ships a fresh object
-    /// namespace (`workflow/stages/…`, `workflow/exp/…`) that the
-    /// current walker is intentionally blind to. This test seeds
-    /// representative objects in that namespace, runs the GC with
-    /// force=true (so a missing workflow entry in the registry
-    /// doesn't error out) and dry_run=true (so we observe what
-    /// *would* be deleted without needing to backdate
-    /// `last_modified`), and asserts the workflow objects remain
-    /// intact regardless of registry contents.
-    ///
-    /// If someone later adds a generic `list_global_objects(store, "*")`
-    /// call to the walker without filtering, this test fails
-    /// loudly: the workflow objects would show up in
-    /// `bytes_reclaimed` / deletion counters.
-    #[tokio::test]
-    async fn bucket_gc_does_not_touch_workflow_objects() {
-        let store = memory_store();
-
-        // Empty ref-registry — worst case for the walker: every
-        // workflow object is unreferenced by construction.
-        let reg = RefRegistry::default();
-        seed_registry(&store, &reg).await;
-
-        // Seed representative workflow objects. Synthetic bytes
-        // are fine — the walker never inspects object content,
-        // only keys, so the test exercises key-matching behavior.
-        let stage_key = ObjectPath::from(format!("{GLOBAL_PREFIX}/workflow/stages/ab/abcdef.json"));
-        let meta_key = ObjectPath::from(format!(
-            "{GLOBAL_PREFIX}/workflow/exp/01931b9e-4b3c-7b2a-b9f0-0123456789ab/meta.json"
-        ));
-        let stage_refs_key = ObjectPath::from(format!(
-            "{GLOBAL_PREFIX}/workflow/exp/01931b9e-4b3c-7b2a-b9f0-0123456789ab/stage-refs.json"
-        ));
-        store
-            .put(&stage_key, Bytes::from_static(b"{\"stage\": \"payload\"}"))
-            .await
-            .unwrap();
-        store
-            .put(&meta_key, Bytes::from_static(b"{\"exp\": \"payload\"}"))
-            .await
-            .unwrap();
-        store
-            .put(&stage_refs_key, Bytes::from_static(b"[\"deadbeef\"]"))
-            .await
-            .unwrap();
-
-        // Run GC in dry-run mode. Nothing should be deleted (dry
-        // run), and regardless of what *would* be deleted, the
-        // workflow keys must not appear in any deletion counter.
-        let args = BucketGcArgs {
-            bucket: "test-bucket".to_string(),
-            dry_run: true,
-            grace_period: Duration::from_secs(3600),
-            force: true,
-            yes: false,
-            list_concurrency: 16,
-            list_profile: GcListProfile::Adaptive,
-            delete_concurrency: 64,
-            resume_run_id: None,
-        };
-        let protected = HashSet::new();
-        let protected_repos = HashSet::new();
-        let outcome = run_bucket_gc(
-            &args,
-            &store,
-            &protected,
-            &protected_repos,
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-        assert!(outcome.dry_run);
-        assert_eq!(
-            outcome.shards_deleted, 0,
-            "workflow stage entries must not be counted as shard deletions",
-        );
-        assert_eq!(
-            outcome.xorbs_deleted, 0,
-            "workflow stage entries must not be counted as xorb deletions",
-        );
-        assert_eq!(
-            outcome.file_index_deleted, 0,
-            "workflow stage entries must not be counted as file-index deletions",
-        );
-        assert_eq!(outcome.bytes_reclaimed, 0);
-
-        // All three workflow objects survive — the walker never
-        // saw them.
-        assert!(
-            store.get_with_etag(&stage_key).await.is_ok(),
-            "workflow stage entry was touched by bucket GC",
-        );
-        assert!(
-            store.get_with_etag(&meta_key).await.is_ok(),
-            "workflow experiment meta was touched by bucket GC",
-        );
-        assert!(
-            store.get_with_etag(&stage_refs_key).await.is_ok(),
-            "workflow experiment stage-refs blob was touched by bucket GC",
-        );
-    }
-    mod hint_tests;
-}
+#[path = "bucket_tests.rs"]
+mod tests;

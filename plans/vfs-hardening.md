@@ -5763,14 +5763,93 @@ No bucket-wide GC command runs. Finish stored pack-v1 retirement and retained
 reader protection, then sustained mounted writes and the separate gateway PUT
 performance failure. The full goal remains active.
 
+## Checkpoint 76 — Capsule-only bucket maintenance roots
+
+Four strict-authority regressions fail on published `5a1a963aa45` with production
+code unchanged: missing-root loading, bucket root capture, closure-repair roots,
+and registry certification each accept a valid manifest repository. Make the
+existing Capsule root loader mandatory and remove both manifest-history shard
+walkers and their mark/repair dispatch. A missing or corrupt root is terminal.
+The complete captured map supplies marks; no second history read can replace
+its authority. Existing snapshot identity, current registry roots, coordinator
+proof, writer/sweep fences, journal reconciliation, grace and delete checks stay
+intact.
+
+Registry repair still discovers retired manifest markers so an unsupported
+repository cannot silently disappear from the coverage scan. Every discovered
+repository must authenticate its Capsule root/catalog before any registry
+replacement starts. Mixed Capsule/manifest roots remain terminal. This does
+not change replacement's existing behavior on a storage failure during writes;
+root-validation failure is proven to leave registry objects unchanged.
+
+Move the touched tests into flat sibling `bucket_tests.rs` and
+`bucket_hint_tests.rs`. Remove two tests dedicated to retired v1 history/layout
+success; normal coverage, writer-fence, corrupt-shard and missing-shard fixtures
+now use the real shared v2 initializer and keep their original assertions.
+Production code shrinks by 137 lines. No dependency, lockfile, inventory,
+configuration, threshold, persistent format or public API changes.
+
+Final source passes **218 focused tests per OS**, zero ignores: 136 GC,
+12 history, 58 fsck and 12 source-retention cases. Both OSes pass **18 guard
+self-tests + 75 source checks**, format and production library/CLI Clippy;
+684 macOS / 685 Linux warnings remain, zero errors and no unused bucket import.
+Four roles per OS are built and installed through Make with external targets.
+
+Each final RustFS fixture passes **34 commands**: normal native-content
+track/add/commit/push; valid registry repair; missing-root and corrupt-root
+refusals with exact unchanged registry bytes and ETags; successful repair after
+restoration; fresh eager clone and strict fsck. Each reconstructs **6,291,456
+bytes** exactly. These are isolated owned buckets, with **no bucket sweep**.
+No fresh OS-mount or optimized-throughput result is claimed for this GC slice.
+The earlier checkpoint-75 native mount/race receipts retain their bindings.
+
+Fresh operator-site build, typecheck, lint, all ten tests and the 398-page /
+4,301-fragment link check pass. Generated registries are restored and rechecked.
+Runtime inputs are frozen: **2,063 files**, archive SHA-256
+`f9807a7d30c4b4d5ec681cf0cb311e0f64d41d8952b054923d76a8cd1900aec4`.
+Core binaries: macOS
+`bcf6286c265033aab81fe6650e8a780a01e7f4a088636f4f461aefc58f301545`;
+Linux `d890470202a66ab15199f1c515d73350bcbf779c6e409ce7358e39e2e6aecbae`.
+All **2,156** raw audit files stay preserved and excluded from the PR.
+
+Publisher retention is independent of browse readiness: replaced ref-frontier
+sources receive authenticated lifetime records before the replacement ref CAS.
+Repository GC marks those records; explicit history pruning advances a durable
+generation floor before retiring them. Pointer catalog deltas retain immutable
+shard/xorb rows, and history restore merges current and historical catalogs to
+retain newer-only data. These source contracts explain sibling behavior; they
+do not prove arbitrary reader lifetime through explicit pruning. Fixed reader
+admission slots are not treated as root leases.
+
+Evidence map: CLI registry/closure-repair entry → bucket capture/mark/seal owner →
+bounded Capsule root GET/decode → captured complete catalog inspection →
+registry replacement only after complete validation. Repo GC already uses
+strict Capsule authority. Current main still walks manifest history; no main
+code is merged into v2. Is this the best fix? Make the existing owner mandatory,
+delete fallback dispatch and duplicate traversal, and preserve discovery of
+unsupported repositories instead of hiding them behind complete coverage.
+
+Retained qualification attempts include the initial missing private argument
+updates, the empty external history selector (corrected to the real module),
+and complete pre-import-cleanup proof. No empty selector counts as validation;
+no assertion or threshold is weakened. External evidence is under the dedicated
+`gc-capsule-authority` directory on the workspace volume.
+
+Next: finish retained reader/shared-shard closure and remaining stored-v1
+maintenance/replication/history retirement. Audit repair policy when both root
+and marker are absent, including explicit deregistration. Bound the generic
+payload installer, then measure sustained OS-mounted FUSE/NFS writes and the
+separate gateway throughput/p95 failure. This checkpoint does not establish
+complete VFS correctness or optimized performance; the full goal remains active.
+
 ## Remaining priority order
 
 Checkpoint 73 removes the measured post-fetch bulk mirror: the same large-cache
 fixture now peaks at about 76 MiB on macOS and 82 MiB on Linux, versus the earlier
 252–253 / 228 MiB. All values and receipts remain intact. Checkpoint 74 closes
-the reproduced wire recapture race and retires its manifest repair closure. Next
-finish GC authority and reader retention, then qualify sustained FUSE/NFS
-writes. Checkpoint 75 closes the reproduced classic discovery/promotion gaps. The CI
+the reproduced wire recapture race and retires its manifest repair closure. Checkpoint 76 retires the bucket manifest fallback. Next finish retained-reader
+and shared-shard closure plus other stored-v1 maintenance authority, then qualify
+sustained FUSE/NFS writes. Checkpoint 75 closes the reproduced classic discovery/promotion gaps. The CI
 `native-soak` artifact measures signed S3 gateway PUTs into a native Crab
 repository; its degradation is a separate gateway gate, not an OS-mount result.
 

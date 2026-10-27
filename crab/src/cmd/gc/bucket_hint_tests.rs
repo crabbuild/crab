@@ -175,11 +175,11 @@ async fn hint_root_changes_invalidate_bucket_root_identity() {
     seed_registry(&store, &RefRegistry::default()).await;
     let registry = load_ref_registry(&store, false).await.unwrap();
     publish_hints(&store, "first").await;
-    let before = bucket_root_snapshot_streaming(&store, &registry, 4, &HashSet::new())
+    let before = bucket_root_snapshot_streaming(&store, &registry, &HashSet::new())
         .await
         .unwrap();
     publish_hints(&store, "second").await;
-    let after = bucket_root_snapshot_streaming(&store, &registry, 4, &HashSet::new())
+    let after = bucket_root_snapshot_streaming(&store, &registry, &HashSet::new())
         .await
         .unwrap();
     assert_ne!(before.root_identity, after.root_identity);
