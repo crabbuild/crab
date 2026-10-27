@@ -118,8 +118,12 @@ In read-replica mode, the `[remote]` URL remains the write authority.
 `[replication]` only augments read routing.
 
 Git protocol v2 clone and fetch select a ready replica before capability
-advertisement, then pin that replica's store and repository prefix for the
-upload-pack session. `crab replica add`, read enable/disable, removal, and
+advertisement, then pin its store, repository prefix and verified Capsule root
+for the upload-pack session. The primary's earlier root cannot substitute for
+the selected replica's root. Classic helper capability, list and fetch batches
+share that selected repository. Push discovery retains its separate primary
+authority; read advertisements cannot become push admission.
+`crab replica add`, read enable/disable, removal, and
 primary-change operations publish the read-routing subset to
 `{repo}/metadata/replica-discovery.json` in the primary object store. A fresh
 direct-bucket clone reads this bounded, versioned document before its initial

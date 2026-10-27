@@ -2397,7 +2397,7 @@ This table supersedes §13 with entries for capabilities described in
 | Upload concurrency | `crates/crab-xet/src/upload_concurrency.rs` | `UploadConcurrency` |
 | HEAD batch | `storage/head_batch.rs` | `head_batch`, `HeadBatchConfig`, `HeadBatchResult` |
 | Persistent chunk index | `metadata/persistent_chunk_index.rs` | `PersistentChunkIndex::open_or_create`, `load_all`, `install_shard` |
-| Shard synchronizer | `metadata/shard_sync.rs` | `ShardSynchronizer::sync`, `with_repo_cache_dir`, `with_persistent_index` |
+| Shard synchronizer | `metadata/shard_sync.rs` | `ShardSynchronizer::sync`, `with_persistent_index` |
 | Three-tier dedup | `engine/dedup.rs` | `Classifier::classify_with_context`, `DedupContext`, `lookup_three_tier` |
 | Cache-service tier | `cache_service/*` | `CachingStore::query_known_chunks`, `put` |
 | Local cache warming | `cache/local_cache.rs` | `LocalCache::put`, `get`, `default_cache_root` |

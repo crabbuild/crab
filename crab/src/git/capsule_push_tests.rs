@@ -1007,16 +1007,12 @@ async fn real_git_incremental_push_round_trips_with_bounded_requests() {
     assert_eq!(committed.refs()["refs/heads/main"], second);
     assert_eq!(committed.capsules().len(), 2);
 
-    let repack_workspace = tempfile::tempdir().expect("repack workspace");
     let before_repack = observer.count();
     let repack = crate::cmd::repack::run_repack_from_root(
         &store,
         "repos/test",
         committed.root_snapshot().clone(),
-        &crate::cmd::repack::RepackConfig {
-            workspace_root: repack_workspace.path().to_owned(),
-            ..crate::cmd::repack::RepackConfig::default()
-        },
+        false,
         &CancellationToken::new(),
     )
     .await

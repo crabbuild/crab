@@ -246,22 +246,13 @@ pub async fn run_clone_in(
 
     check_cancelled(cancel)?;
 
-    // Step 3c: Warm the local chunk-index cache via a post-clone shard
-    // sync. The manifest's shard-list is downloaded once, installed
-    // shards are skipped (empty set on a fresh clone), and the delta
-    // is fetched + parsed into the local `PersistentChunkIndex`. This
-    // is what makes subsequent pushes classify most chunks as already
-    // remote without hitting `chunk_index_db` per chunk.
-    //
-    // CI workflows that push once and never read back can skip this
-    // step with `--sync-chunk-index`.
+    // Optional warming primes local placement hints without making a
+    // completed clone depend on the health of its derived cache.
     if args.sync_chunk_index {
         let phase = PhaseTimer::start("clone", "shard_sync");
         if let Err(e) = run_post_clone_shard_sync(&target_dir, &args.url, args.mode, cancel).await {
-            // Non-fatal: the clone itself succeeded, the cache is an
-            // optimisation. The next push's classifier will still hit
-            // the remote `chunk_index_db` for chunks that are missing
-            // from the local cache.
+            // Publication still verifies placement authority when this
+            // derived-cache optimization is unavailable.
             tracing::warn!(error = %e, "clone: post-clone shard sync failed (non-fatal)");
         }
         emit_phase(jsonl_stream.as_deref(), phase.finish(0, 0, 1));
@@ -1811,14 +1802,20 @@ mod tests {
         ));
         let primary_router = crate::storage::StoreLayout::new(primary.clone(), prefix.to_owned());
         let primary_hash =
-            write_sync_manifest_with_shard(&primary, &primary_router, 11, b"primary shard").await;
+            write_sync_capsule_with_shard(&primary, &primary_router, b"primary shard").await;
 
         let replica = crate::storage::store::Store::new(std::sync::Arc::new(
             object_store::memory::InMemory::new(),
         ));
         let replica_router = crate::storage::StoreLayout::new(replica.clone(), prefix.to_owned());
         let replica_hash =
-            write_sync_manifest_with_shard(&replica, &replica_router, 11, b"replica shard").await;
+            write_sync_capsule_with_shard(&replica, &replica_router, b"replica shard").await;
+
+        let root_layout =
+            crab_storage::StoreLayout::new(replica.as_storage().clone(), prefix.to_owned());
+        let capsule_root = crab_metadata::capsule_protocol::load_root(&root_layout)
+            .await
+            .unwrap();
 
         run_post_clone_shard_sync_with_selector(
             repo.path(),
@@ -1829,6 +1826,7 @@ mod tests {
                 let replica = replica.clone();
                 async move {
                     Ok(crate::replication::ReadStoreSelection {
+                        capsule_root,
                         store: replica.clone(),
                         router: crate::storage::StoreLayout::new(replica, prefix.to_owned()),
                         source: crate::replication::ReadSource::Replica {
@@ -1861,7 +1859,7 @@ mod tests {
             object_store::memory::InMemory::new(),
         ));
         let router = crate::storage::StoreLayout::new(store.clone(), "repo".to_owned());
-        write_sync_manifest_with_shard(&store, &router, 1, b"shard").await;
+        write_sync_capsule_with_shard(&store, &router, b"shard").await;
 
         for symlinked in [false, true] {
             let temp = tempfile::tempdir().unwrap();
@@ -1905,15 +1903,15 @@ mod tests {
         }
     }
 
-    async fn write_sync_manifest_with_shard(
+    async fn write_sync_capsule_with_shard(
         store: &crate::storage::store::Store,
         router: &crate::storage::StoreLayout,
-        generation: u64,
         shard_bytes: &'static [u8],
     ) -> String {
-        crate::core::remote_layout::initialize(store, router)
-            .await
-            .unwrap();
+        use crab_metadata::capsule_protocol::{
+            Capsule, CapsuleRefEdit, CapsuleSection, CapsuleSectionKind, CapsuleTransaction,
+            PointerCatalog, ShardCatalogEntry,
+        };
         let shard_hash = crab_xet::hash::compute_data_hash(shard_bytes);
         store
             .put(
@@ -1922,31 +1920,45 @@ mod tests {
             )
             .await
             .unwrap();
-
-        let shard_hex = shard_hash.hex();
-        let (shard_index_hash, _index, shard_write) =
-            crate::metadata::manifest::compact_shard_index(
-                generation,
-                std::slice::from_ref(&shard_hex),
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
+        );
+        let base =
+            crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+                .await
+                .unwrap();
+        let mut catalog = PointerCatalog::new();
+        catalog
+            .insert_shard(
+                shard_hash.hex(),
+                ShardCatalogEntry::new(shard_bytes.len() as u64, Vec::new()),
             )
             .unwrap();
-        crate::metadata::segmented::upload_write(store, router, &shard_write)
+        let transaction = CapsuleTransaction::new(
+            base.record().digest(),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some("2".repeat(40)),
+                None,
+            )],
+        )
+        .unwrap();
+        let capsule = Capsule::build(
+            &transaction,
+            Vec::new(),
+            vec![CapsuleSection::new(
+                CapsuleSectionKind::CatalogDelta,
+                catalog.encode_delta().unwrap(),
+            )],
+        )
+        .unwrap();
+        crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
             .await
             .unwrap();
-
-        let mut manifest = crate::metadata::manifest::Manifest::default_for_repo("refs/heads/main");
-        manifest.generation = generation;
-        manifest.shard_index_hash = shard_index_hash;
-        manifest.seal_git_validation();
-        store
-            .put(
-                &router.manifest_path(),
-                bytes::Bytes::from(serde_json::to_vec(&manifest).unwrap()),
-            )
-            .await
-            .unwrap();
-
-        shard_hex
+        shard_hash.hex()
     }
 
     fn shard_cache_path(cache_root: &Path, hash: &str) -> PathBuf {

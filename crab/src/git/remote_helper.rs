@@ -539,10 +539,12 @@ struct SessionCache {
     config: crate::core::config::Config,
     /// Primary v2 root retained from `list for-push` as the publication CAS base.
     capsule_root: Option<crab_metadata::capsule_protocol::RootSnapshot>,
+    /// One provider, layout and captured root across wire and classic read batches.
+    read_repository: Option<crate::replication::ReadStoreSelection>,
     /// Materialized v2 refs and capsules retained across one Git protocol session.
     capsule_view: Option<crab_read::capsule_protocol::CapsuleRepositoryView>,
     /// Payload-free primary ref state retained from `list for-push`.
-    capsule_ref_view: Option<crab_read::capsule_protocol::CapsuleRefView>,
+    push_ref_view: Option<crab_read::capsule_protocol::CapsuleRefView>,
     metrics: Arc<Metrics>,
     persisted_metrics: MetricsSummary,
 }
@@ -554,7 +556,8 @@ impl SessionCache {
             config,
             capsule_root: None,
             capsule_view: None,
-            capsule_ref_view: None,
+            read_repository: None,
+            push_ref_view: None,
             metrics: Arc::new(Metrics::new()),
             persisted_metrics: MetricsSummary::zeroed(),
         }
@@ -831,10 +834,6 @@ where
             caching_store,
             mut replica_discovery_pending,
         } = context;
-        // Protocol v2 advertises and serves one immutable repository view. Keep
-        // the selected store and layout together so the handoff cannot drift.
-        let mut pinned_read_store = None;
-
         loop {
             let batch = if let Some(batch) = pending_batch.take() {
                 batch
@@ -871,29 +870,32 @@ where
                 let hidden_ref_patterns = cache.config().transfer_hide_refs.clone();
                 let fetch_policy = fetch_admission_policy(cache.config());
                 let result = if service == "git-upload-pack" {
-                    let (read_store, read_router) = pinned_read_store_for_batch(
-                        &mut pinned_read_store,
+                    let selected = pinned_read_store_for_batch(
+                        &mut cache.read_repository,
                         &store,
                         &prefix,
+                        cache.capsule_root.as_ref(),
                         Some(invocation_url.as_str()),
-                        cache.config(),
+                        &cache.config,
                         &cancel,
                     )
-                    .await;
+                    .await?;
                     // Bind the cache facade to the selected primary or replica.
                     // Reusing the primary facade after replica routing would read
                     // a different repository view than the pinned layout.
-                    let stateless_store =
-                        cache_aware_storage_for_selected_read(&read_store, &cache.config().cache);
+                    let stateless_store = cache_aware_storage_for_selected_read(
+                        &selected.store,
+                        &cache.config().cache,
+                    );
                     crate::git::upload_pack_wire::serve(
                         &mut reader,
                         &mut writer,
                         &stateless_store,
-                        read_router.repo_prefix(),
+                        selected.router.repo_prefix(),
                         &hidden_ref_patterns,
                         &fetch_policy,
                         options.progress,
-                        cache.capsule_root.take(),
+                        selected.capsule_root,
                         &cache.git_runtime,
                         &cancel,
                     )
@@ -909,17 +911,25 @@ where
                 return result;
             }
             if matches!(batch, Batch::Capabilities) {
-                let (read_store, read_router) = pinned_read_store_for_batch(
-                    &mut pinned_read_store,
+                let selected = pinned_read_store_for_batch(
+                    &mut cache.read_repository,
                     &store,
                     &prefix,
+                    cache.capsule_root.as_ref(),
                     Some(invocation_url.as_str()),
-                    cache.config(),
+                    &cache.config,
                     &cancel,
                 )
-                .await;
-                dispatch_capabilities(&mut writer, &read_store, &read_router, &mut cache, &cancel)
-                    .await?;
+                .await?;
+                dispatch_capabilities(
+                    &mut writer,
+                    &selected.store,
+                    &selected.router,
+                    &selected.capsule_root,
+                    &mut cache,
+                    &cancel,
+                )
+                .await?;
                 continue;
             }
             // Ref discovery may run outside Git. Capture a shared state owner
@@ -1369,6 +1379,7 @@ async fn dispatch_capabilities<W: tokio::io::AsyncWrite + Unpin>(
     writer: &mut W,
     store: &crate::storage::store::Store,
     router: &StoreLayout,
+    root: &crab_metadata::capsule_protocol::RootSnapshot,
     cache: &mut SessionCache,
     _cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<()> {
@@ -1384,7 +1395,15 @@ async fn dispatch_capabilities<W: tokio::io::AsyncWrite + Unpin>(
             router.repo_prefix().to_owned(),
             router.global_prefix().to_owned(),
         );
-        match open_capsule_fetch_view_minimal(store, router, cache.config(), None).await {
+        match open_capsule_fetch_view_minimal(
+            store,
+            router,
+            cache.config(),
+            None,
+            Some(root.clone()),
+        )
+        .await
+        {
             Ok(view) => {
                 let direct = view
                     .layered_cold_clone_packs(&layout, capsule_fetch_maximum(cache.config()))?
@@ -1489,8 +1508,18 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
         }
         Batch::Capabilities => {
             if let Some(store) = store {
-                let router = StoreLayout::new(store.clone(), prefix.to_owned());
-                dispatch_capabilities(writer, store, &router, cache, cancel).await?;
+                let selected =
+                    primary_store_for_batch(store, prefix, cache.capsule_root.as_ref(), cancel)
+                        .await?;
+                dispatch_capabilities(
+                    writer,
+                    &selected.store,
+                    &selected.router,
+                    &selected.capsule_root,
+                    cache,
+                    cancel,
+                )
+                .await?;
             } else {
                 let caps = format_capabilities_with_v2(false, false);
                 writer.write_all(caps.as_bytes()).await?;
@@ -1502,7 +1531,7 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
             let output = if let Some(s) = store {
                 if *for_push {
                     let hidden_ref_patterns = cache.config().transfer_hide_refs.clone();
-                    let (output, view) = match cache.capsule_ref_view.take() {
+                    let (output, view) = match cache.push_ref_view.take() {
                         Some(view) => {
                             (list_output_from_ref_view(&view, &hidden_ref_patterns), view)
                         }
@@ -1518,44 +1547,42 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                             .map_err(map_missing_capsule_root)?
                         }
                     };
-                    cache.capsule_ref_view = Some(view);
+                    cache.push_ref_view = Some(view);
                     output
                 } else {
-                    let (read_store, router, hidden_ref_patterns, may_reuse_primary_root) = {
-                        let cfg = cache.config();
-                        let selected = read_store_for_list_batch(
-                            s, prefix, remote_url, cfg, *for_push, cancel,
-                        )
-                        .await;
-                        let may_reuse_primary_root = *for_push
-                            || cfg
-                                .replication
-                                .as_ref()
-                                .is_none_or(|replication| !replication.has_read_replicas());
-                        (
-                            selected.0,
-                            selected.1,
-                            cfg.transfer_hide_refs.clone(),
-                            may_reuse_primary_root,
-                        )
-                    };
-                    let (output, view) = match cache.capsule_ref_view.take() {
-                        Some(view) if may_reuse_primary_root => {
-                            (list_output_from_ref_view(&view, &hidden_ref_patterns), view)
+                    let selected = match cache.read_repository.clone() {
+                        Some(selected) => selected,
+                        None => {
+                            let selected = read_store_for_list_batch(
+                                s,
+                                prefix,
+                                cache.capsule_root.as_ref(),
+                                remote_url,
+                                cache.config(),
+                                false,
+                                cancel,
+                            )
+                            .await?;
+                            cache.read_repository = Some(selected.clone());
+                            selected
                         }
-                        _ => read_remote_refs_payload_free_with_snapshot(
-                            &read_store,
-                            &router,
-                            &hidden_ref_patterns,
-                            may_reuse_primary_root
-                                .then(|| cache.capsule_root.clone())
-                                .flatten(),
+                    };
+                    let hidden_ref_patterns = &cache.config.transfer_hide_refs;
+                    if let Some(view) = cache.capsule_view.as_ref() {
+                        let advertisement =
+                            crab_read::capsule_ref_advertisement(view, hidden_ref_patterns);
+                        list_output_from_advertisement(advertisement)
+                    } else {
+                        let (output, _) = read_remote_refs_payload_free_with_snapshot(
+                            &selected.store,
+                            &selected.router,
+                            hidden_ref_patterns,
+                            Some(selected.capsule_root),
                         )
                         .await
-                        .map_err(map_missing_capsule_root)?,
-                    };
-                    cache.capsule_ref_view = Some(view);
-                    output
+                        .map_err(map_missing_capsule_root)?;
+                        output
+                    }
                 }
             } else {
                 ListOutput {
@@ -1791,7 +1818,7 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                         &specs,
                         push_store,
                         &router,
-                        cache.capsule_ref_view.take(),
+                        cache.push_ref_view.take(),
                         &config.transfer_hide_refs,
                         staging.reader(),
                         caching_store,
@@ -1801,7 +1828,7 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                     .await
                     {
                         Ok((r, view)) => {
-                            cache.capsule_ref_view = view;
+                            cache.push_ref_view = view;
                             r
                         }
                         // Partial outcomes carry per-ref state the pipeline
@@ -1969,9 +1996,25 @@ where
     let mut fetch_result = FetchBatchResult::default();
     if let Some(s) = store {
         let cfg = cache.config().clone();
-        let (read_store, router) =
-            read_store_for_batch_with_selector(s, prefix, remote_url, &cfg, cancel, select_read)
-                .await;
+        let selected = match cache.read_repository.clone() {
+            Some(selected) => selected,
+            None => {
+                let selected = read_store_for_batch_with_selector(
+                    s,
+                    prefix,
+                    cache.capsule_root.as_ref(),
+                    remote_url,
+                    &cfg,
+                    cancel,
+                    select_read,
+                )
+                .await?;
+                cache.read_repository = Some(selected.clone());
+                selected
+            }
+        };
+        let read_store = selected.store;
+        let router = selected.router;
         // Classic, constrained and raw-object fetches share one admission
         // owner. Direct pack installation must not bypass the repository's
         // reader limit or acquire a separate ticket for each pack source.
@@ -2031,14 +2074,16 @@ fn list_read_authority(for_push: bool) -> ListReadAuthority {
 async fn read_store_for_list_batch(
     primary_store: &crate::storage::store::Store,
     prefix: &str,
+    primary_root: Option<&crab_metadata::capsule_protocol::RootSnapshot>,
     remote_url: Option<&str>,
     config: &crate::core::config::Config,
     for_push: bool,
     cancel: &tokio_util::sync::CancellationToken,
-) -> (crate::storage::store::Store, StoreLayout) {
+) -> Result<crate::replication::ReadStoreSelection> {
     read_store_for_list_batch_with_selector(
         primary_store,
         prefix,
+        primary_root,
         remote_url,
         config,
         for_push,
@@ -2053,12 +2098,13 @@ async fn read_store_for_list_batch(
 async fn read_store_for_list_batch_with_selector<F, Fut>(
     primary_store: &crate::storage::store::Store,
     prefix: &str,
+    primary_root: Option<&crab_metadata::capsule_protocol::RootSnapshot>,
     remote_url: Option<&str>,
     config: &crate::core::config::Config,
     for_push: bool,
     cancel: &tokio_util::sync::CancellationToken,
     select_read: F,
-) -> (crate::storage::store::Store, StoreLayout)
+) -> Result<crate::replication::ReadStoreSelection>
 where
     F: FnOnce(
         crate::core::config::Config,
@@ -2071,11 +2117,14 @@ where
         // Git asks `list for-push` before sending updates. That ref
         // advertisement is part of write admission, so stale replicas are
         // unsafe even when they are healthy enough for clone/fetch reads.
-        ListReadAuthority::Primary => primary_store_for_batch(primary_store, prefix),
+        ListReadAuthority::Primary => {
+            primary_store_for_batch(primary_store, prefix, primary_root, cancel).await
+        }
         ListReadAuthority::ReplicaEligible => {
             read_store_for_batch_with_selector(
                 primary_store,
                 prefix,
+                primary_root,
                 remote_url,
                 config,
                 cancel,
@@ -2086,24 +2135,45 @@ where
     }
 }
 
-fn primary_store_for_batch(
+async fn primary_store_for_batch(
     primary_store: &crate::storage::store::Store,
     prefix: &str,
-) -> (crate::storage::store::Store, StoreLayout) {
-    (
-        primary_store.clone(),
-        StoreLayout::new(primary_store.clone(), prefix.to_owned()),
-    )
+    primary_root: Option<&crab_metadata::capsule_protocol::RootSnapshot>,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<crate::replication::ReadStoreSelection> {
+    let router = StoreLayout::new(primary_store.clone(), prefix.to_owned());
+    let capsule_root = match primary_root {
+        Some(root) => root.clone(),
+        None => {
+            let layout = crab_storage::StoreLayout::with_global_prefix(
+                primary_store.as_storage().clone(),
+                router.repo_prefix().to_owned(),
+                router.global_prefix().to_owned(),
+            );
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(CrabError::Cancelled),
+                result = crab_write::capsule_protocol::open_root(&layout) => result?,
+            }
+        }
+    };
+    Ok(crate::replication::ReadStoreSelection {
+        store: primary_store.clone(),
+        router,
+        source: crate::replication::ReadSource::Primary,
+        capsule_root,
+    })
 }
 
 async fn read_store_for_batch_with_selector<F, Fut>(
     primary_store: &crate::storage::store::Store,
     prefix: &str,
+    primary_root: Option<&crab_metadata::capsule_protocol::RootSnapshot>,
     remote_url: Option<&str>,
     config: &crate::core::config::Config,
     cancel: &tokio_util::sync::CancellationToken,
     select_read: F,
-) -> (crate::storage::store::Store, StoreLayout)
+) -> Result<crate::replication::ReadStoreSelection>
 where
     F: FnOnce(
         crate::core::config::Config,
@@ -2115,20 +2185,20 @@ where
     // Managed grants already bind this store to one physical repository view.
     // Re-parsing the logical URL as a direct bucket would bypass that scope.
     if primary_store.storage_scope().is_some() {
-        return primary_store_for_batch(primary_store, prefix);
+        return primary_store_for_batch(primary_store, prefix, primary_root, cancel).await;
     }
     if config
         .replication
         .as_ref()
         .is_none_or(|replication| !replication.has_read_replicas())
     {
-        return primary_store_for_batch(primary_store, prefix);
+        return primary_store_for_batch(primary_store, prefix, primary_root, cancel).await;
     }
     let Some(url) = remote_url else {
-        return primary_store_for_batch(primary_store, prefix);
+        return primary_store_for_batch(primary_store, prefix, primary_root, cancel).await;
     };
     let Ok(parsed) = crate::git::url::CrabUrl::parse(url) else {
-        return primary_store_for_batch(primary_store, prefix);
+        return primary_store_for_batch(primary_store, prefix, primary_root, cancel).await;
     };
 
     match select_read(config.clone(), parsed, cancel.clone()).await {
@@ -2136,27 +2206,29 @@ where
             if let crate::replication::ReadSource::Replica { name } = &selection.source {
                 tracing::debug!(replica = %name, "selected read replica for remote-helper batch");
             }
-            (selection.store, selection.router)
+            Ok(selection)
         }
         Err(e) => {
             tracing::debug!(error = %e, "replica read selection failed; using primary");
-            primary_store_for_batch(primary_store, prefix)
+            primary_store_for_batch(primary_store, prefix, primary_root, cancel).await
         }
     }
 }
 
 async fn pinned_read_store_for_batch(
-    pinned: &mut Option<(crate::storage::store::Store, StoreLayout)>,
+    pinned: &mut Option<crate::replication::ReadStoreSelection>,
     primary_store: &crate::storage::store::Store,
     prefix: &str,
+    primary_root: Option<&crab_metadata::capsule_protocol::RootSnapshot>,
     remote_url: Option<&str>,
     config: &crate::core::config::Config,
     cancel: &tokio_util::sync::CancellationToken,
-) -> (crate::storage::store::Store, StoreLayout) {
+) -> Result<crate::replication::ReadStoreSelection> {
     pinned_read_store_for_batch_with_selector(
         pinned,
         primary_store,
         prefix,
+        primary_root,
         remote_url,
         config,
         cancel,
@@ -2168,14 +2240,15 @@ async fn pinned_read_store_for_batch(
 }
 
 async fn pinned_read_store_for_batch_with_selector<F, Fut>(
-    pinned: &mut Option<(crate::storage::store::Store, StoreLayout)>,
+    pinned: &mut Option<crate::replication::ReadStoreSelection>,
     primary_store: &crate::storage::store::Store,
     prefix: &str,
+    primary_root: Option<&crab_metadata::capsule_protocol::RootSnapshot>,
     remote_url: Option<&str>,
     config: &crate::core::config::Config,
     cancel: &tokio_util::sync::CancellationToken,
     select_read: F,
-) -> (crate::storage::store::Store, StoreLayout)
+) -> Result<crate::replication::ReadStoreSelection>
 where
     F: FnOnce(
         crate::core::config::Config,
@@ -2184,21 +2257,22 @@ where
     ) -> Fut,
     Fut: Future<Output = Result<crate::replication::ReadStoreSelection>>,
 {
-    if let Some((store, router)) = pinned {
-        return (store.clone(), router.clone());
+    if let Some(selected) = pinned {
+        return Ok(selected.clone());
     }
 
     let selected = read_store_for_batch_with_selector(
         primary_store,
         prefix,
+        primary_root,
         remote_url,
         config,
         cancel,
         select_read,
     )
-    .await;
+    .await?;
     *pinned = Some(selected.clone());
-    selected
+    Ok(selected)
 }
 
 fn cache_aware_storage_for_selected_read(
@@ -2298,6 +2372,17 @@ fn list_output_from_ref_view(
     hidden_ref_patterns: &[String],
 ) -> ListOutput {
     let advertisement = crab_read::capsule_ref_view_advertisement(view, hidden_ref_patterns);
+    tracing::debug!(
+        ref_count = view.refs().len(),
+        head_symref = ?advertisement.head_symref,
+        "read remote refs from payload-free capsule ref view"
+    );
+    list_output_from_advertisement(advertisement)
+}
+
+fn list_output_from_advertisement(
+    advertisement: crab_read::ManifestRefAdvertisement,
+) -> ListOutput {
     let refs = advertisement
         .refs
         .into_iter()
@@ -2307,13 +2392,6 @@ fn list_output_from_ref_view(
             peeled: entry.peeled,
         })
         .collect();
-
-    tracing::debug!(
-        ref_count = view.refs().len(),
-        head_symref = ?advertisement.head_symref,
-        "read remote refs from payload-free capsule ref view"
-    );
-
     ListOutput {
         refs,
         head_symref: advertisement.head_symref,
@@ -2626,42 +2704,58 @@ async fn fetch_packs(
                 "raw object fetch cannot carry shallow constraints".to_owned(),
             ));
         }
+    }
+    if !raw_object_fetch {
+        if fetch_options.filter.is_some() {
+            return Err(CrabError::Protocol(
+                "filtered fetch requires protocol v2".to_owned(),
+            ));
+        }
+        if fetch_options.deepen_relative && fetch_options.depth.is_none() {
+            return Err(CrabError::Protocol(
+                "relative deepening requires a depth".to_owned(),
+            ));
+        }
+        if fetch_options.depth.is_some()
+            && (fetch_options.deepen_since.is_some() || !fetch_options.deepen_not.is_empty())
+        {
+            return Err(CrabError::Protocol(
+                "depth cannot be combined with deepen-since or deepen-not".to_owned(),
+            ));
+        }
+        if fetch_options.deepen_relative
+            && (fetch_options.deepen_since.is_some() || !fetch_options.deepen_not.is_empty())
+        {
+            return Err(CrabError::Protocol(
+                "deepen-relative cannot be combined with deepen-since or deepen-not".to_owned(),
+            ));
+        }
+    }
+    let captured_root = cache
+        .read_repository
+        .as_ref()
+        .map(|selected| selected.capsule_root.clone());
+    let cached_view = open_capsule_fetch_view_minimal(
+        store,
+        router,
+        config,
+        cache.capsule_view.take(),
+        captured_root,
+    )
+    .await?;
+    if raw_object_fetch {
         fetch_capsule_promisor_objects(
             store,
             router,
             entries,
             config,
             options.filter_requested || fetch_options.filter.is_some(),
-            cache.capsule_view.take(),
+            Some(cached_view),
             &runtime,
             cancel,
         )
         .await?;
         return Ok(FetchBatchResult::default());
-    }
-    if fetch_options.filter.is_some() {
-        return Err(CrabError::Protocol(
-            "filtered fetch requires protocol v2".to_owned(),
-        ));
-    }
-    if fetch_options.deepen_relative && fetch_options.depth.is_none() {
-        return Err(CrabError::Protocol(
-            "relative deepening requires a depth".to_owned(),
-        ));
-    }
-    if fetch_options.depth.is_some()
-        && (fetch_options.deepen_since.is_some() || !fetch_options.deepen_not.is_empty())
-    {
-        return Err(CrabError::Protocol(
-            "depth cannot be combined with deepen-since or deepen-not".to_owned(),
-        ));
-    }
-    if fetch_options.deepen_relative
-        && (fetch_options.deepen_since.is_some() || !fetch_options.deepen_not.is_empty())
-    {
-        return Err(CrabError::Protocol(
-            "deepen-relative cannot be combined with deepen-since or deepen-not".to_owned(),
-        ));
     }
     if fetch_options.depth.is_some()
         || fetch_options.deepen_since.is_some()
@@ -2676,7 +2770,7 @@ async fn fetch_packs(
             entries,
             options,
             config,
-            cache.capsule_view.take(),
+            Some(cached_view),
             &runtime,
             cancel,
         )
@@ -2688,7 +2782,7 @@ async fn fetch_packs(
         router,
         entries,
         config,
-        cache.capsule_view.take(),
+        Some(cached_view),
         options.check_connectivity,
         &runtime,
         cancel,
@@ -2758,6 +2852,7 @@ async fn open_capsule_fetch_view_minimal(
     router: &StoreLayout,
     config: &crate::core::config::Config,
     cached_view: Option<crab_read::capsule_protocol::CapsuleRepositoryView>,
+    captured_root: Option<crab_metadata::capsule_protocol::RootSnapshot>,
 ) -> Result<crab_read::capsule_protocol::CapsuleRepositoryView> {
     if let Some(view) = cached_view {
         return Ok(view);
@@ -2771,7 +2866,10 @@ async fn open_capsule_fetch_view_minimal(
         max_capsule_bytes: capsule_fetch_maximum(config),
         max_frontier_bytes: capsule_fetch_maximum(config),
     };
-    let root = crab_write::capsule_protocol::open_root(&layout).await?;
+    let root = match captured_root {
+        Some(root) => root,
+        None => crab_write::capsule_protocol::open_root(&layout).await?,
+    };
     crab_read::capsule_protocol::open_view_from_root_with_layered_control(&layout, root, limits)
         .await
         .map_err(Into::into)
@@ -2797,7 +2895,8 @@ async fn fetch_capsule_packs(
     let haves = local_fetch_have_tips(&git_dir)?;
     let local_haves_ms = haves_started.elapsed().as_millis() as u64;
     let view_started = std::time::Instant::now();
-    let mut view = open_capsule_fetch_view_minimal(store, router, config, cached_view).await?;
+    let mut view =
+        open_capsule_fetch_view_minimal(store, router, config, cached_view, None).await?;
     let view_open_ms = view_started.elapsed().as_millis() as u64;
     let advertisement = crab_read::capsule_ref_advertisement(&view, &config.transfer_hide_refs);
     let visible = advertisement
@@ -4403,9 +4502,10 @@ mod tests {
         let config = config_with_read_replica();
         let cancel = tokio_util::sync::CancellationToken::new();
 
-        let (read_store, router) = read_store_for_list_batch_with_selector(
+        let selected = read_store_for_list_batch_with_selector(
             &primary_store,
             "org/repo",
+            None,
             Some("crab://primary/org/repo"),
             &config,
             false,
@@ -4414,7 +4514,13 @@ mod tests {
                 let replica_store = replica_store.clone();
                 let replica_router = replica_router.clone();
                 async move {
+                    let layout = crab_storage::StoreLayout::new(
+                        replica_store.as_storage().clone(),
+                        replica_router.repo_prefix().to_owned(),
+                    );
+                    let capsule_root = crab_metadata::capsule_protocol::load_root(&layout).await?;
                     Ok(crate::replication::ReadStoreSelection {
+                        capsule_root,
                         store: replica_store,
                         router: replica_router,
                         source: crate::replication::ReadSource::Replica {
@@ -4424,7 +4530,10 @@ mod tests {
                 }
             },
         )
-        .await;
+        .await
+        .expect("select rooted read store");
+        let read_store = selected.store;
+        let router = selected.router;
 
         let output = read_remote_refs(&read_store, &router, &[])
             .await
@@ -4446,9 +4555,10 @@ mod tests {
         let config = crate::core::config::Config::default();
         let cancel = tokio_util::sync::CancellationToken::new();
 
-        let (read_store, router) = read_store_for_list_batch_with_selector(
+        let selected = read_store_for_list_batch_with_selector(
             &primary_store,
             "org/repo",
+            None,
             Some("crab://primary/org/repo"),
             &config,
             true,
@@ -4459,7 +4569,10 @@ mod tests {
                 ))
             },
         )
-        .await;
+        .await
+        .expect("select rooted read store");
+        let read_store = selected.store;
+        let router = selected.router;
 
         let output = read_remote_refs(&read_store, &router, &[])
             .await
@@ -4487,9 +4600,10 @@ mod tests {
         let config = crate::core::config::Config::default();
         let cancel = tokio_util::sync::CancellationToken::new();
 
-        let (read_store, router) = read_store_for_list_batch_with_selector(
+        let selected = read_store_for_list_batch_with_selector(
             &primary_store,
             "org/repo",
+            None,
             Some("crab://crab.crab.test/acme/models"),
             &config,
             false,
@@ -4500,7 +4614,10 @@ mod tests {
                 ))
             },
         )
-        .await;
+        .await
+        .expect("select rooted read store");
+        let read_store = selected.store;
+        let router = selected.router;
 
         let output = read_remote_refs(&read_store, &router, &[])
             .await
@@ -4525,9 +4642,10 @@ mod tests {
         let selector_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let selector_called_in_closure = std::sync::Arc::clone(&selector_called);
 
-        let (read_store, router) = read_store_for_batch_with_selector(
+        let selected = read_store_for_batch_with_selector(
             &primary_store,
             "org/repo",
+            None,
             Some("crab://primary/org/repo"),
             &config,
             &cancel,
@@ -4536,7 +4654,10 @@ mod tests {
                 async { Err(CrabError::Internal("selector must not run".into())) }
             },
         )
-        .await;
+        .await
+        .expect("select rooted read store");
+        let read_store = selected.store;
+        let router = selected.router;
 
         let output = read_remote_refs(&read_store, &router, &[])
             .await
@@ -4567,20 +4688,27 @@ mod tests {
         let selector_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut pinned = None;
 
-        for _ in 0..2 {
+        for attempt in 0..2 {
             let selector_calls = std::sync::Arc::clone(&selector_calls);
             let replica_store = replica_store.clone();
             let replica_router = replica_router.clone();
-            let (read_store, router) = pinned_read_store_for_batch_with_selector(
+            let selected = pinned_read_store_for_batch_with_selector(
                 &mut pinned,
                 &primary_store,
                 "org/repo",
+                None,
                 Some("crab://primary/org/repo"),
                 &config,
                 &cancel,
                 move |_, _, _| async move {
                     selector_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let layout = crab_storage::StoreLayout::new(
+                        replica_store.as_storage().clone(),
+                        replica_router.repo_prefix().to_owned(),
+                    );
+                    let capsule_root = crab_metadata::capsule_protocol::load_root(&layout).await?;
                     Ok(crate::replication::ReadStoreSelection {
+                        capsule_root,
                         store: replica_store,
                         router: replica_router,
                         source: crate::replication::ReadSource::Replica {
@@ -4589,18 +4717,77 @@ mod tests {
                     })
                 },
             )
-            .await;
-            let output = read_remote_refs(&read_store, &router, &[])
-                .await
-                .expect("read pinned replica refs");
+            .await
+            .expect("select rooted read store");
+            let read_store = selected.store;
+            let router = selected.router;
+            let (output, _) = read_remote_refs_payload_free_with_snapshot(
+                &read_store,
+                &router,
+                &[],
+                Some(selected.capsule_root),
+            )
+            .await
+            .expect("read pinned replica refs");
             assert_eq!(
                 output.refs[0].sha,
                 "2222222222222222222222222222222222222222"
             );
             assert_eq!(router.repo_prefix(), "replica/repo");
+            if attempt == 0 {
+                read_store
+                    .delete(&router.capsule_root_path())
+                    .await
+                    .expect("remove mutable root after capture");
+            }
         }
 
         assert_eq!(selector_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn replica_read_advertisement_cannot_supply_push_admission() {
+        let (primary, _) = memory_store_with_manifest("refs/heads/main", &"1".repeat(40)).await;
+        let (replica, router) = memory_store_with_manifest_at_prefix(
+            "replica/repo",
+            "refs/heads/main",
+            &"2".repeat(40),
+        )
+        .await;
+        let layout = crab_storage::StoreLayout::new(
+            replica.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+        );
+        let capsule_root = crab_metadata::capsule_protocol::load_root(&layout)
+            .await
+            .expect("replica root");
+        let mut context = test_context(primary, "org/repo");
+        context.cache.read_repository = Some(crate::replication::ReadStoreSelection {
+            store: replica,
+            router,
+            capsule_root,
+            source: crate::replication::ReadSource::Replica {
+                name: "west".to_owned(),
+            },
+        });
+        let (output, result) = run_with_context(
+            "list\n\nlist for-push\n\n",
+            context,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+        result.expect("read and push advertisements");
+        let refs = output
+            .lines()
+            .filter(|line| line.ends_with(" refs/heads/main"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            refs,
+            vec![
+                format!("{} refs/heads/main", "2".repeat(40)),
+                format!("{} refs/heads/main", "1".repeat(40))
+            ]
+        );
     }
 
     #[tokio::test]
@@ -4673,7 +4860,13 @@ mod tests {
                 let replica_store = replica_store.clone();
                 let replica_router = replica_router.clone();
                 async move {
+                    let layout = crab_storage::StoreLayout::new(
+                        replica_store.as_storage().clone(),
+                        replica_router.repo_prefix().to_owned(),
+                    );
+                    let capsule_root = crab_metadata::capsule_protocol::load_root(&layout).await?;
                     Ok(crate::replication::ReadStoreSelection {
+                        capsule_root,
                         store: replica_store,
                         router: replica_router,
                         source: crate::replication::ReadSource::Replica {
@@ -4698,6 +4891,24 @@ mod tests {
         assert_eq!(lines.next(), Some("connectivity-ok"));
         assert_eq!(lines.next(), Some(""));
         assert_eq!(lines.next(), None);
+        let mut repeated = Vec::new();
+        dispatch_fetch_batch_with_selector(
+            &entries,
+            &options,
+            &mut repeated,
+            Some(&primary_store),
+            "org/repo",
+            &mut cache,
+            Some("crab://primary/org/repo"),
+            &cancel,
+            |_, _, _| async {
+                Err(CrabError::Internal(
+                    "read source must remain pinned".to_owned(),
+                ))
+            },
+        )
+        .await
+        .expect("repeat fetch from the admitted replica without selecting again");
     }
 
     #[tokio::test]
@@ -6301,15 +6512,11 @@ mod tests {
             .expect("hydrate incrementally deduplicated v2 pointer");
         assert_eq!(reconstructed, updated_content);
 
-        let repack_workspace = tempfile::tempdir().expect("pointer repack workspace");
         crate::cmd::repack::run_repack_from_root(
             &store,
             "remote-helper-dispatch",
             view.root_snapshot().clone(),
-            &crate::cmd::repack::RepackConfig {
-                workspace_root: repack_workspace.path().to_owned(),
-                ..crate::cmd::repack::RepackConfig::default()
-            },
+            false,
             &cancel,
         )
         .await
@@ -6331,10 +6538,7 @@ mod tests {
             &store,
             "remote-helper-dispatch",
             checkpoint_root,
-            &crate::cmd::repack::RepackConfig {
-                workspace_root: repack_workspace.path().to_owned(),
-                ..crate::cmd::repack::RepackConfig::default()
-            },
+            false,
             &cancel,
         )
         .await

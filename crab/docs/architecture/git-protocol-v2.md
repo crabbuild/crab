@@ -80,6 +80,13 @@ cache entries; missing roots never select manifest/index probing. Initialized
 empty Capsule repositories remain valid. Classic Git helper
 fetch commands remain available for authenticated layered cold clones; Git's
 wire protocol version is independent of Crab's stored repository format.
+Read routing retains the selected store, layout and verified Capsule root
+together. A root captured from primary before replica selection cannot supply
+the replica's upload-pack view: it can name replaced checkpoint objects absent
+from a replica that has passed current-state readiness. Primary push discovery
+keeps its own captured authority. Classic helper capability, list and fetch
+batches also share their selected repository; read ref views cannot supply
+primary push admission.
 The session supports:
 
 - protocol-v2 capability advertisement;
@@ -90,9 +97,9 @@ The session supports:
 - the bounded filter matrix: `blob:none`; `blob:limit=<n>[kmg]`; `tree:<depth>`;
   `object:type={tag,commit,tree,blob}`; `sparse:oid=<full SHA-1>`; and
   repeated filters or percent-encoded `combine:` intersections;
-- `thin-pack` and `ofs-delta` request options are accepted, but the first
-  producer emits a self-contained, non-delta pack because no external base is
-  required or assumed;
+- `thin-pack` and `ofs-delta` request options are accepted; authenticated
+  external bases are eligible only for a complete, unfiltered, non-shallow
+  transition. Other responses remain self-contained;
 - standard local Git pack installation on the v2 path.
 
 The line helper normalizes `--shallow-since` date expressions through Git's
@@ -101,10 +108,10 @@ ref-exclusion selectors apply to requested tips as well as their parents.
 If no commits qualify, fetching fails before pack installation or shallow-file
 publication; it does not substitute a depth-one checkout.
 
-An empty manifest is a valid ref snapshot without a catalog. Empty clones and
+An initialized empty Capsule root is a valid ref snapshot. Empty clones and
 `ls-remote` complete through v2; clients requesting `unborn` receive the
 configured HEAD target unless hidden. Object wants against that empty snapshot
-are rejected before pack production, without inventing locator coverage.
+are rejected before pack production.
 
 The filter forms are parsed and planned before object bytes are read.
 `blob:limit` uses Git's binary `k`, `m`, and `g` suffixes and retains blobs
@@ -153,65 +160,30 @@ ambiguous, or incomplete chains do not grant early completion; shallow,
 filtered, and tag-expanded requests retain their existing complete-admission
 path. The response still requires full pack planning and budget checks.
 
-For fresh `blob:none` and `object:type` requests, the catalog visibility
-bitmap is consumed as ordinals. Crab reads the additive ordinal metadata
-sidecar, filters by the published object kinds, and resolves only retained
-ordinals back to OIDs. This removes the large-closure OID-to-kind lookup wave;
-catalogs from before the sidecar or with incomplete metadata use the bounded
-canonical traversal path instead.
+Complete Capsule metadata supplies the materialized visibility proof for
+filtered, shallow and tag-sensitive requests. The shared planner applies its
+bounded visibility-selection and traversal paths. Its separate catalog-ordinal
+planner is not a wire-path promise for Capsule repositories.
 
 Failures detected before the `packfile` response section use Git's terminal
 `ERR` packet. Failures after that section begins use sideband channel 3. This
 keeps request rejections distinguishable from truncated pack generation.
 
-Every requested OID is admitted from the immutable visibility proof before the
-remote reader obtains object bytes. Current proofs are keyed by and carry the
-manifest Git-validation digest, which binds generation, pack inventory, HEAD,
-refs, and peeled refs. Their storage codec writes each object ID once in a
-sorted dictionary and represents each ref closure as sparse dictionary
-positions or a dense bitmap, avoiding repeated 40-byte IDs and integer-heavy
-closures for shared history. Invalid or missing
-proof suppresses v2 advertisement; it never triggers a silent complete
-filtered fetch. At runtime, the proof retains one binary SHA-1 dictionary and
-sparse-or-bitmap ordinal closures; ref authorization, unions, differences, and
-counts do not expand per-ref hexadecimal strings. The current version-4 codec
-also stores up to 64 monotonic transitions per ref. Version-3 proofs normalize
-directly into the same runtime model and acquire transitions as later journal
-edits are compacted. Crab 1.0.15 proofs keyed only by generation and pack-index hash
-remain an explicit read migration: write and repair owners backfill the
-digest-bound key, and GC retains both roots while that tagged-data migration is
-supported. If a valid legacy key contains a different ref closure from the
-current manifest, migration treats it as an abandoned candidate and rebuilds
-the digest-bound proof; malformed bodies still fail closed as corruption.
+Each wire session captures its physical origin, authenticated root and stable,
+epoch-filtered ref heads with their committed multi-ref activations. Discovery
+reads that ref state without requiring checkpoint or capsule payloads. Fetch
+opens its metadata only when requested. Ordinary layered fetches can keep the
+large visibility body cold; a request needing complete visibility promotes from
+the same capture. A concurrent push may advance a ref without changing root
+generation, so the root digest alone cannot pin this transition.
 
-Each direct ref update uploads content-addressed visibility evidence before its
-journal marker becomes visible. When the compacted generation already has an
-exact proof, updates enumerate only objects reachable from the new tip but not
-the old tip and vice versa. This keeps ordinary large-repository pushes bounded
-by changed reachability rather than total history. New refs publish a bounded
-complete replacement because they have no prior closure. The single
-journal-compaction owner applies ordered evidence and uploads the next
-generation proof before advancing the compacted manifest. Concurrent writers
-therefore do not need one another's pack bodies or local Git object databases.
-
-Evidence upload failures abort before the ref becomes visible. A delta larger
-than the synchronous 100,000-object profile, or one crossing a shallow-client
-boundary, may commit without derived evidence; protocol v2 is then withheld
-until the owner reconstructs the exact generation. An initial repository whose
-proof exceeds that synchronous profile similarly remains on complete-pack
-fetch until owner publication. Total repository size does not by itself defer
-evidence after an exact base proof exists.
-The RustFS concurrency qualification follows each independent-ref and hot-ref
-write swarm with fresh protocol-v2 clones, strict Git fsck, and byte checks so
-ref visibility alone cannot satisfy the gate.
-
-Generation-owner contention does not suppress protocol-v2 capability discovery
-when the compacted manifest has visibility evidence, a bounded pending handoff
-bound to that manifest, or is empty. Discovery does not repair or compact
-metadata. Fetch admission waits for owner work when needed, completes and
-validates pending handoffs, then verifies the advertised refs and immutable pack
-inventory against the admitted snapshot. A pending handoff is not itself object
-authorization; absent evidence still withholds v2.
+Every requested OID is admitted from the captured visibility proof before
+object traversal or response-pack production. Complete proofs retain one binary
+SHA-1 dictionary with sparse-or-bitmap ref closures. Ordinary tip-bound fetches
+use authenticated transitions only under the exact advertised-tip and request
+shape restrictions above. Missing dependencies and corrupt metadata fail the
+fetch; upload-pack does not read a manifest-only layout, repair a locator,
+compact a ref journal, or migrate old visibility keys.
 
 Upload-pack admission is repository-scoped and distributed: each helper
 process must hold one of the fixed object-store read leases for the duration
@@ -245,9 +217,9 @@ byte identity, or it rejects the request before writing response bytes,
 hydrate or unfilter the repository while a compatible binary is still
 available; it must never silently install a complete fallback pack.
 
-The existing line-oriented helper remains the compatibility path for older Git
-and for ordinary complete fetches when v2 is unavailable. Push continues to
-use Crab's existing helper and manifest-CAS pipeline; there is no receive-pack
+The line-oriented helper remains available for older Git and for authenticated
+complete-pack installation. Both wire profiles require Capsule storage authority.
+Push uses the helper and Capsule per-ref publication; there is no receive-pack
 takeover.
 
 ## Explicitly unsupported
@@ -264,14 +236,13 @@ can request one of the supported filter forms directly.
 
 ## Operations and repair
 
-The protocol qualification separates post-push read admission from steady-state
-filter reads. A fresh blobless clone of the pushed branch exercises journal
-compaction and derived-index repair before the filter matrix captures its
-canonical-object inventory. Fetching back into the writer is insufficient:
-Git may skip object transfer when the tip is already present locally. Subsequent
-filter reads must leave canonical object counts and bytes unchanged; generated
-response-pack cache and coordination objects are accounted for separately. This
-is not a claim that first-read repair works with read-only object-store credentials.
+Protocol qualification separates ref discovery from fetch admission and
+steady-state filter reads. A fresh clone must read the published Capsule state
+without first repairing canonical storage. Fetching back into the writer is
+insufficient: Git may skip transfer when a tip is already local. Filter reads
+leave canonical object counts and bytes unchanged; generated response-pack
+cache and coordination objects are accounted for separately. Read admission
+and response caching still use their existing object-store permissions.
 
 The add/commit/push RustFS smoke exercises the current physical fault boundary:
 loss of a published capsule and corruption confined to its embedded Git pack
@@ -280,21 +251,17 @@ HEAD or checked-out payload. It compares the remote root and ref-head bytes
 before and after the fault; discovery can itself reject a damaged capsule,
 so successful `ls-remote` is not the mutation oracle.
 
-Direct pushes and protected/service publication paths publish visibility
-before the corresponding ref or manifest commit. Protected receive extracts
-the closure from the already-verified materialization ODB before that workspace
-is released; it does not download the candidate packs again to build proof. If
-a supported current generation predates that ordering or loses derived
-coverage, upload-pack can rebuild the proof from generation-pinned locator data
-before advertising v2. The repair reads commit, tree, and tag objects once;
-blob IDs come from verified
-tree entries, so blob bodies are not downloaded. Current Capsule `crab metadb rebuild` verifies embedded visibility and the full
-content closure before publishing a checkpoint. `crab doctor --metadb` reports
-Capsule authority and read-only local cache health; it does not open the
-manifest-backed locator or report separate legacy coverage. `crab fsck --store` checks current
-and historical proof roots; `crab fsck --store --repair` verifies the historical
-pack closure and idempotently backfills missing roots. Until repair completes,
-v2 stays disabled for that repository.
+Direct pushes and protected/service publication carry authenticated visibility
+with immutable Git members before per-ref CAS makes a transaction visible.
+Protected receive extracts closure from its verified materialization ODB before
+releasing that workspace. Upload-pack consumes this evidence; it does not
+publish a replacement when evidence is missing.
+
+Explicit maintenance and recovery own canonical verification and publication.
+`crab metadb rebuild` verifies embedded visibility and the full content closure
+before publishing a checkpoint. `crab doctor --metadb` reports Capsule authority
+and read-only local cache health. Missing or corrupt authority is an error, and
+a stored pack-v1 manifest cannot replace it.
 
 When replication is configured, protocol-v2 capability admission and the
 terminal `stateless-connect` upload-pack session bind to the same selected

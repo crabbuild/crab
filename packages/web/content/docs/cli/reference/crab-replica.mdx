@@ -43,9 +43,13 @@ Use `crab replica doctor` for configuration and readiness diagnostics. Use
 `promote` or `set-primary` only as guarded disaster-recovery operations after
 reviewing the generated plan and provider state.
 
-Read-enabled replicas participate in both legacy Git fetches and protocol-v2
+Read-enabled replicas participate in both classic Git helper fetches and protocol-v2
 clone/fetch sessions. Protocol v2 selects the ready replica before capability
-advertisement and pins its storage location for the upload-pack session.
+advertisement and pins its store, repository prefix and verified Capsule root
+for the upload-pack session. The primary's earlier root cannot replace that
+replica root. Classic helper capability, list and fetch batches share the same
+selected repository. Push discovery keeps its separate primary authority;
+read advertisements cannot become push admission.
 Replica configuration changes also publish a bounded discovery document under
 the primary repository prefix. A fresh direct-bucket clone reads that document
 before its initial fetch, so it does not need an ancestor `crab.toml`.

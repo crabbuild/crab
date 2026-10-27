@@ -93,6 +93,82 @@ pub struct CapsuleDependencyProof {
     pub reachable_lfs_bytes: u64,
 }
 
+/// One physical repository root and its transaction-consistent ref heads.
+///
+/// Retain this capture when changing read detail after discovery: reopening
+/// mutable heads could replace the refs already advertised to a client.
+pub struct CapsuleRepositoryCapture {
+    layout: StoreLayout<Store>,
+    root: crab_metadata::capsule_protocol::RootSnapshot,
+    heads: Vec<crab_metadata::capsule_protocol::CapsuleRefHead>,
+    active: BTreeSet<String>,
+}
+
+impl CapsuleRepositoryCapture {
+    /// Capture stable ref heads belonging to this authenticated root and origin.
+    pub async fn from_root(
+        layout: StoreLayout<Store>,
+        root: crab_metadata::capsule_protocol::RootSnapshot,
+    ) -> Result<Self> {
+        let (heads, active) = capture_ref_heads(&layout, root.record().root()).await?;
+        Ok(Self {
+            layout,
+            root,
+            heads,
+            active,
+        })
+    }
+
+    /// Return the physical origin retained with this capture.
+    #[must_use]
+    pub fn layout(&self) -> &StoreLayout<Store> {
+        &self.layout
+    }
+
+    /// Materialize payload-free refs from the captured heads.
+    pub fn ref_view(&self) -> Result<CapsuleRefView> {
+        let visible =
+            materialize_visible_ref_heads(self.root.record().root(), &self.heads, &self.active)
+                .map_err(metadata_control_error)?;
+        Ok(CapsuleRefView {
+            root: self.root.clone(),
+            refs: visible.refs,
+            peeled_refs: visible.peeled_refs,
+            visible_ref_transactions: visible.transactions,
+            push_ref_head_bases: BTreeMap::new(),
+        })
+    }
+
+    /// Open checkpoint footer and run controls without recapturing mutable refs.
+    pub async fn layered_control_view(
+        &self,
+        limits: CapsuleReadLimits,
+    ) -> Result<CapsuleRepositoryView> {
+        assemble_layered_control_view(
+            &self.layout,
+            self.root.clone(),
+            limits,
+            &self.heads,
+            &self.active,
+            ControlRead::Fetch,
+        )
+        .await
+    }
+
+    /// Open complete metadata without Git bodies or a second ref-head capture.
+    pub async fn metadata_view(&self, limits: CapsuleReadLimits) -> Result<CapsuleRepositoryView> {
+        assemble_layered_control_view(
+            &self.layout,
+            self.root.clone(),
+            limits,
+            &self.heads,
+            &self.active,
+            ControlRead::Complete,
+        )
+        .await
+    }
+}
+
 /// One authenticated repository root and every post-checkpoint capsule it names.
 #[derive(Clone)]
 pub struct CapsuleRepositoryView {
@@ -4192,8 +4268,8 @@ pub async fn open_view_from_root_for_repack(
         router,
         snapshot,
         limits,
-        heads,
-        active,
+        &heads,
+        &active,
         ControlRead::Complete,
     )
     .await
@@ -4345,8 +4421,8 @@ pub async fn open_view_from_root_with_metadata(
         router,
         snapshot,
         limits,
-        heads,
-        active,
+        &heads,
+        &active,
         ControlRead::Complete,
     )
     .await
@@ -4362,7 +4438,7 @@ pub async fn open_git_view_from_root(
     limits: CapsuleReadLimits,
 ) -> Result<CapsuleRepositoryView> {
     let (heads, active) = capture_ref_heads(router, snapshot.record().root()).await?;
-    assemble_layered_control_view(router, snapshot, limits, heads, active, ControlRead::Git).await
+    assemble_layered_control_view(router, snapshot, limits, &heads, &active, ControlRead::Git).await
 }
 
 #[derive(Clone, Copy)]
@@ -4395,8 +4471,8 @@ async fn assemble_view(
             router,
             snapshot,
             limits,
-            heads,
-            active,
+            &heads,
+            &active,
             if matches!(checkpoint_load, CheckpointLoad::LayeredControl) {
                 ControlRead::Fetch
             } else {
@@ -4625,14 +4701,14 @@ async fn assemble_layered_control_view(
     router: &StoreLayout<Store>,
     snapshot: crab_metadata::capsule_protocol::RootSnapshot,
     limits: CapsuleReadLimits,
-    heads: Vec<crab_metadata::capsule_protocol::CapsuleRefHead>,
-    active: BTreeSet<String>,
+    heads: &[crab_metadata::capsule_protocol::CapsuleRefHead],
+    active: &BTreeSet<String>,
     read: ControlRead,
 ) -> Result<CapsuleRepositoryView> {
     let footer_only = matches!(read, ControlRead::Fetch);
     let mut refs = snapshot.record().root().refs().clone();
     let mut peeled_refs = snapshot.record().root().peeled_refs().clone();
-    let visible = materialize_visible_ref_heads(snapshot.record().root(), &heads, &active)
+    let visible = materialize_visible_ref_heads(snapshot.record().root(), heads, active)
         .map_err(metadata_control_error)?;
     let expected_refs = visible.refs;
     let expected_peeled = visible.peeled_refs;

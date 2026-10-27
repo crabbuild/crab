@@ -1576,49 +1576,40 @@ async fn snapshot_catalog_tail(
     Ok(Some((identity, tail)))
 }
 
-/// Parse references from a validated manifest without opening object storage.
-///
-/// The caller validates the manifest envelope and Git-state digest. This
-/// conversion checks ref names, targets, peeling associations and HEAD.
-impl TryFrom<&crab_metadata::manifests::Manifest> for RepositoryRefs {
-    type Error = Error;
-
-    fn try_from(manifest: &crab_metadata::manifests::Manifest) -> Result<Self> {
-        if crab_git::validate_push_refname(&manifest.head).is_err()
-            || !manifest.head.starts_with("refs/")
-        {
+impl RepositoryRefs {
+    /// Validate and own one captured reference map, peeled targets and symbolic HEAD.
+    pub fn from_maps(
+        head_name: &str,
+        refs: &std::collections::BTreeMap<String, String>,
+        peeled_refs: &std::collections::BTreeMap<String, String>,
+    ) -> Result<Self> {
+        if crab_git::validate_push_refname(head_name).is_err() || !head_name.starts_with("refs/") {
             return Err(Error::RepositoryState {
                 reason: RepositoryStateError::InvalidReference,
             });
         }
-        if manifest
-            .peeled_refs
-            .keys()
-            .any(|name| !manifest.refs.contains_key(name))
-        {
+        if peeled_refs.keys().any(|name| !refs.contains_key(name)) {
             return Err(Error::RepositoryState {
                 reason: RepositoryStateError::OrphanPeeledReference,
             });
         }
         let mut entries = Vec::new();
         entries
-            .try_reserve_exact(manifest.refs.len())
+            .try_reserve_exact(refs.len())
             .map_err(|source| Error::Allocation {
-                requested: manifest
-                    .refs
+                requested: refs
                     .len()
                     .saturating_mul(std::mem::size_of::<RepositoryRef>()),
                 source,
             })?;
-        for (name, value) in &manifest.refs {
+        for (name, value) in refs {
             if !name.starts_with("refs/") || crab_git::validate_push_refname(name).is_err() {
                 return Err(Error::RepositoryState {
                     reason: RepositoryStateError::InvalidReference,
                 });
             }
             let target = parse_oid(value)?;
-            let peeled = manifest
-                .peeled_refs
+            let peeled = peeled_refs
                 .get(name)
                 .map(|value| parse_oid(value))
                 .transpose()?;
@@ -1628,20 +1619,17 @@ impl TryFrom<&crab_metadata::manifests::Manifest> for RepositoryRefs {
                 peeled,
             });
         }
-        let (head, unborn_head) = if !manifest.refs.contains_key(&manifest.head)
-            && (entries.is_empty() || manifest.head.starts_with("refs/heads/"))
+        let (head, unborn_head) = if !refs.contains_key(head_name)
+            && (entries.is_empty() || head_name.starts_with("refs/heads/"))
         {
-            (None, Some(manifest.head.clone()))
+            (None, Some(head_name.to_owned()))
         } else {
-            let target = manifest
-                .refs
-                .get(&manifest.head)
-                .ok_or(Error::RepositoryState {
-                    reason: RepositoryStateError::HeadDoesNotResolve,
-                })?;
+            let target = refs.get(head_name).ok_or(Error::RepositoryState {
+                reason: RepositoryStateError::HeadDoesNotResolve,
+            })?;
             (
                 Some(HeadReference {
-                    name: manifest.head.clone(),
+                    name: head_name.to_owned(),
                     target: parse_oid(target)?,
                 }),
                 None,
@@ -1652,6 +1640,18 @@ impl TryFrom<&crab_metadata::manifests::Manifest> for RepositoryRefs {
             unborn_head,
             entries,
         })
+    }
+}
+
+/// Parse references from a validated manifest without opening object storage.
+///
+/// The caller validates the manifest envelope and Git-state digest. This
+/// conversion checks ref names, targets, peeling associations and HEAD.
+impl TryFrom<&crab_metadata::manifests::Manifest> for RepositoryRefs {
+    type Error = Error;
+
+    fn try_from(manifest: &crab_metadata::manifests::Manifest) -> Result<Self> {
+        Self::from_maps(&manifest.head, &manifest.refs, &manifest.peeled_refs)
     }
 }
 

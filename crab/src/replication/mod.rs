@@ -8526,8 +8526,14 @@ fn ensure_active_active_mutation_admitted_with_status(
     })
 }
 
-/// Result of selecting a store for a read operation.
-pub type ReadStoreSelection = crab_read::ReadStoreSelection<Store, StoreLayout>;
+/// Verified repository authority selected for one read operation.
+#[derive(Clone)]
+pub struct ReadStoreSelection {
+    pub store: Store,
+    pub router: StoreLayout,
+    pub source: ReadSource,
+    pub capsule_root: crab_metadata::capsule_protocol::RootSnapshot,
+}
 
 /// Result of selecting the primary store for a write operation.
 pub struct WriteStoreSelection {
@@ -8536,7 +8542,10 @@ pub struct WriteStoreSelection {
     pub capsule_root: crab_metadata::capsule_protocol::RootSnapshot,
 }
 
-async fn validate_read_replica_store(store: &Store, router: &StoreLayout) -> Result<()> {
+async fn validate_read_replica_store(
+    store: &Store,
+    router: &StoreLayout,
+) -> Result<crab_metadata::capsule_protocol::RootSnapshot> {
     let layout = crab_storage::StoreLayout::with_global_prefix(
         store.as_storage().clone(),
         router.repo_prefix().to_owned(),
@@ -8544,7 +8553,6 @@ async fn validate_read_replica_store(store: &Store, router: &StoreLayout) -> Res
     );
     crab_metadata::capsule_protocol::load_root(&layout)
         .await
-        .map(|_| ())
         .map_err(Into::into)
 }
 
@@ -8597,11 +8605,14 @@ impl<'a> StoreResolver<'a> {
             self.cancel,
         )
         .await?;
-        let primary_store = resolved.store;
-        let primary_router =
-            StoreLayout::new(primary_store.clone(), resolved.repository_prefix.clone());
-        if primary_store.storage_scope().is_some() {
-            return Ok(ReadStoreSelection::primary(primary_store, primary_router));
+        let primary = ReadStoreSelection {
+            router: StoreLayout::new(resolved.store.clone(), resolved.repository_prefix.clone()),
+            store: resolved.store,
+            source: ReadSource::Primary,
+            capsule_root: resolved.capsule_root,
+        };
+        if primary.store.storage_scope().is_some() {
+            return Ok(primary);
         }
         let policy = match self.read_policy.as_ref() {
             Some(policy) => policy.clone(),
@@ -8609,13 +8620,11 @@ impl<'a> StoreResolver<'a> {
         };
 
         let Some(replication) = self.config.replication.as_ref() else {
-            return Ok(ReadStoreSelection::primary(primary_store, primary_router));
+            return Ok(primary);
         };
 
-        let primary_fallback_store = primary_store.clone();
-        let primary_fallback_router = primary_router.clone();
         let selection = select_read_store_with_replicas(
-            primary_store,
+            primary.store.clone(),
             &resolved.repository_prefix,
             replication.replicas.iter(),
             operation,
@@ -8623,32 +8632,41 @@ impl<'a> StoreResolver<'a> {
             build_replica_store,
         )
         .await?;
-        let ReadSource::Replica { name } = &selection.source else {
-            return Ok(selection);
-        };
-        if let Err(error) = validate_read_replica_store(&selection.store, &selection.router).await {
-            tracing::warn!(replica = %name, error = %error, "replica read-layout validation failed; using primary");
-            if let Some(replica) = replication
-                .replicas
-                .iter()
-                .find(|replica| replica.name == *name)
-            {
-                record_replica_read_event(
-                    replica,
-                    selection.router.repo_prefix(),
-                    operation,
-                    ReplicaReadOutcome::Fallback,
-                    None,
-                    None,
-                    Some(format!("replica read-layout validation failed: {error}")),
-                );
+        let capsule_root = match &selection.source {
+            ReadSource::Primary => primary.capsule_root,
+            ReadSource::Replica { name } => {
+                match validate_read_replica_store(&selection.store, &selection.router).await {
+                    Ok(root) => root,
+                    Err(error) => {
+                        tracing::warn!(replica = %name, error = %error, "replica read-layout validation failed; using primary");
+                        if let Some(replica) = replication
+                            .replicas
+                            .iter()
+                            .find(|replica| replica.name == *name)
+                        {
+                            record_replica_read_event(
+                                replica,
+                                selection.router.repo_prefix(),
+                                operation,
+                                ReplicaReadOutcome::Fallback,
+                                None,
+                                None,
+                                Some(format!("replica read-layout validation failed: {error}")),
+                            );
+                        }
+                        return Ok(primary);
+                    }
+                }
             }
-            return Ok(ReadStoreSelection::primary(
-                primary_fallback_store,
-                primary_fallback_router,
-            ));
-        }
-        Ok(selection)
+        };
+        // The selected provider must own the captured root. A primary snapshot
+        // can name retired objects that a currently ready replica never needed.
+        Ok(ReadStoreSelection {
+            store: selection.store,
+            router: selection.router,
+            source: selection.source,
+            capsule_root,
+        })
     }
 
     /// Selects the primary store for write-class operations.
@@ -8713,14 +8731,14 @@ async fn select_read_store_with_replicas<'replicas, I, F>(
     operation: &str,
     policy: ReadRoutingPolicy,
     mut build_replica: F,
-) -> Result<ReadStoreSelection>
+) -> Result<crab_read::ReadStoreSelection<Store, StoreLayout>>
 where
     I: IntoIterator<Item = &'replicas ReplicaConfig>,
     F: FnMut(&ReplicaConfig, &str) -> Result<(Store, String)>,
 {
     let primary_router = StoreLayout::new(primary_store.clone(), primary_repo_path.to_owned());
     let primary_selection =
-        ReadStoreSelection::primary(primary_store.clone(), primary_router.clone());
+        crab_read::ReadStoreSelection::primary(primary_store.clone(), primary_router.clone());
     if matches!(
         policy,
         ReadRoutingPolicy::PreferPrimary | ReadRoutingPolicy::ReadDisabled
@@ -8843,7 +8861,10 @@ where
         }));
     }
     let primary_router = StoreLayout::new(primary_store.clone(), primary_repo_path.to_owned());
-    Ok(ReadStoreSelection::primary(primary_store, primary_router))
+    Ok(crab_read::ReadStoreSelection::primary(
+        primary_store,
+        primary_router,
+    ))
 }
 
 fn record_replica_fallback_events(

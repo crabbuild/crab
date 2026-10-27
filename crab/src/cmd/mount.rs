@@ -6012,11 +6012,24 @@ mod tests {
 
         let replica = crate::storage::store::Store::new(Arc::new(InMemory::new()));
         let replica_layout = crate::storage::StoreLayout::new(replica.clone(), prefix.to_owned());
+        crate::cmd::init::initialize_remote_repository_store(
+            &replica,
+            &replica_layout,
+            "refs/heads/main",
+        )
+        .await
+        .unwrap();
         replica
             .put(
                 &replica_layout.repo_path(marker),
                 Bytes::from_static(b"replica"),
             )
+            .await
+            .unwrap();
+
+        let root_layout =
+            crab_storage::StoreLayout::new(replica.as_storage().clone(), prefix.to_owned());
+        let capsule_root = crab_metadata::capsule_protocol::load_root(&root_layout)
             .await
             .unwrap();
 
@@ -6028,6 +6041,7 @@ mod tests {
                 let replica = replica.clone();
                 async move {
                     Ok(crate::replication::ReadStoreSelection {
+                        capsule_root,
                         store: replica.clone(),
                         router: crate::storage::StoreLayout::new(replica, prefix.to_owned()),
                         source: crate::replication::ReadSource::Replica {
