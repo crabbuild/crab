@@ -11,7 +11,8 @@ Baseline: `origin/crab-v2` at `33f8e6c360d922b3ab1e2c0e5115a2d200eccd97`.
 Working branch: `codex/vfs-hardening`. PR:
 https://github.com/crabbuild/crab/pull/630 (base `crab-v2`). Follow-up hardening
 remains active. The PR is rebased onto `877b832b396`; final source and
-installed-role evidence is recorded through checkpoint 62. Checkpoints 59–62
+installed-role evidence is recorded through checkpoint 62, with current Capsule
+fixture coverage added at checkpoint 63. Checkpoints 59–63
 retain separate source and qualification records below. The human approved the
 exact four-file CI/inventory patch; it is applied with these checkpoints.
 
@@ -4545,6 +4546,83 @@ The raw benchmark directory remains excluded. Next retire the generic manifest
 publisher and its seven useful fixtures, then metadb/GC/maintenance/replication
 fallback authority; keep global memory and remaining lifecycle/performance gates
 explicitly open.
+
+## Checkpoint 63 — current Capsule add/commit fixtures
+
+The human explicitly approved the prepared one-file fixture migration, including
+the obsolete recipe-owner assertion correction. The exact candidate patch hash is
+`dab722f29cdd23a9a3ab485699d86dcf640fd09b08998341dc705632601ff78e`.
+Only `crab/tests/e2e_add_commit_push.rs` changes in the source closure; production
+code, exports, dependencies, configuration, CI inventories and thresholds are
+identical to checkpoint 62. Native/provider proof remains checkpoint-62 proof.
+
+Seven useful integration fixtures now use the existing public publication stage
+(`import::publish::run_publish`), which delegates to private Capsule orchestration.
+No internal push API is exported for tests. Each selected branch publishes through
+that current owner; these fixtures do not establish atomic multi-ref behavior.
+They initialize through the real publication owner, open the resulting Capsule
+view, compare exact ref OIDs, require the authenticated pointer catalog, retain
+xorb/shard existence checks and reconstruct published pointer bytes independently.
+
+All seven test bodies compare unchanged except migrated helper names/arguments.
+The original minimum-65-chunk multibatch assertion, partial overlap, cross-branch
+recipe lifetime, filter/add behavior and byte-identical reconstruction remain.
+Shallow first push now exercises the current error contract and additionally
+checks an unchanged root, empty refs and unchanged local shallow-marker bytes.
+The retired generic per-ref error wrapper and manifest generation/index assertions
+are removed with the old publisher dependency.
+
+The first direct migration fails identically on both OSes: six passes, one failure
+before publication at the old published-recipe lookup. That failure and a focused
+Linux reproduction are retained. Source/dependency-contract review establishes
+that `origin/crab-v2` already delegates verified clean-filter recipes; the filter
+cannot attest the outer Git writer's index success. Shared staging documents and
+queries distinguish published native transactions from delegated external leases.
+`push_staging::recipes_for_selected_pointers` selects delegated leases only after
+Git pointer discovery. Changing production to satisfy the old lookup would break
+that ownership boundary. The approved fixture instead requires no native published
+transaction and an exact delegated recipe for the selected file identity, while
+retaining no-segment-rewrite, local reconstruction and later remote hydration.
+There is no published/delegated fallback in the fixture. An earlier attempted
+private-module call fails compilation and is preserved; the public entry avoids
+expanding the product API.
+
+Evidence map:
+
+| Surface | Caller / owner | Callee / contract | Proof / sibling boundary |
+| --- | --- | --- | --- |
+| Add/filter staging | Actual `crab add`, Git add/filter subprocesses | Prepared payload flush → verified recipe → external handoff; Git index owns pointer visibility | Seven unchanged fixture bodies; skip-index, ≥65 chunks, overlap and cross-branch retention assertions |
+| Current publication | External fixture → public import publication stage | Same private Capsule publisher used by CLI/helper → shared initializer/write admission | Exact Capsule refs/catalog, uploaded objects and independent byte reconstruction; no production API change |
+| Recipe admission | Git-selected pointer identity → staging lookup | Exact delegated lease; native published state remains absent | Failing old lookup retained on both OSes; strict new owner assertion passes, without changing product ownership |
+| Shallow refusal | Actual shallow clone → current publication stage | Physical history validation before ref visibility | Failure plus unchanged root, empty refs and preserved local marker |
+| Sibling / main comparison | CLI/helper keep the same private Capsule owner | Current v2 delegates; static main retains the older publication owner behavior | Product hashes identical to checkpoint 62; main is not asserted live-equivalent; atomic/ref-policy proof stays in existing Capsule tests |
+
+Final approved sources pass all seven fixtures on each OS, with zero ignored or
+skipped cases; success output is retained and checked for skip messages. Linux
+qualification first mounts the candidate as one read-only source overlay, then
+all 1,567 resulting source hashes match the approved checkout. macOS runs the
+applied source directly. Exact archive SHA-256:
+`827bf7e41d2a437dd5851f2cf87b6b9acd6199c91d9ee1cfa18e90e6555bd29a`.
+Format/diff checks pass. No raw benchmark path is added.
+
+Is this the best fix? Preserve the useful data/recipe assertions on a current
+public caller, rather than exposing internal orchestration or retaining an old
+producer solely for tests. The explicit owner correction follows the existing
+v2 contract and strengthens the absence of a false native publication claim.
+Production LOC delta is zero; the test-only growth pays for current view/ref and
+rollback assertions. A prior external note incorrectly inferred seven old fixture
+passes from preserved bodies; it is corrected: checkpoint 59 proved 16 generic
+publisher unit checks, while these seven integration bodies were retained there.
+No earlier pass evidence is invented or rebound.
+
+The refined census finds four actual generic-publisher calls across three suites:
+`e2e_incomplete_shard_fail_loud` (two), `e2e_pack_size_limit` (one) and
+`prop_push_reconstruction_coverage` (one). `parallel_metadata_upload` has historical
+comments only. No production caller outside the generic module remains. Migrate
+those behavior/property contracts before deleting the generic pipeline, initializer
+and newly orphaned helpers; preserve shared policy/types still used by Capsule.
+Metadb/GC/maintenance/replication authority, total memory and remaining platform/
+lifecycle/performance proof stay open.
 
 ## Remaining priority order
 
