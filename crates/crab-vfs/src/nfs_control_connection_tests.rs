@@ -260,3 +260,60 @@ async fn shutdown_request_keeps_control_live_until_native_detachment() {
     transport.cancel();
     owner.await.unwrap().unwrap();
 }
+
+#[cfg(unix)]
+struct CapturedControlLog(Arc<Mutex<Vec<u8>>>);
+
+#[cfg(unix)]
+impl std::io::Write for CapturedControlLog {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        self.0.lock().unwrap().extend_from_slice(bytes);
+        Ok(bytes.len())
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        Ok(())
+    }
+}
+
+#[cfg(unix)]
+#[tokio::test]
+async fn listener_failure_reports_its_prepared_endpoint() {
+    let captured = Arc::new(Mutex::new(Vec::new()));
+    let writer = Arc::clone(&captured);
+    let subscriber = tracing_subscriber::fmt()
+        .with_ansi(false)
+        .without_time()
+        .with_writer(move || CapturedControlLog(Arc::clone(&writer)))
+        .finish();
+    let _subscriber = tracing::subscriber::set_default(subscriber);
+    let root = tempfile::tempdir().unwrap();
+    let directory = root.path().join("control");
+    std::fs::create_dir(&directory).unwrap();
+    let endpoint = format!("unix:{}", directory.join("owner.sock").display());
+    let cancel = CancellationToken::new();
+    let owner = bind_server(&endpoint)
+        .await
+        .unwrap()
+        .spawn(state(root.path(), cancel.clone()), cancel.clone());
+    ping(&endpoint).await.unwrap();
+
+    // A real filesystem lookup failure exercises the server boundary after bind;
+    // the moved socket and replacement remain owned by this private fixture.
+    std::fs::rename(&directory, root.path().join("moved-control")).unwrap();
+    std::fs::write(&directory, b"replacement").unwrap();
+    cancel.cancel();
+    let error = owner.await.unwrap().unwrap_err();
+    assert!(
+        matches!(error, CrabError::Io(source) if source.kind() == std::io::ErrorKind::NotADirectory)
+    );
+    let logs = String::from_utf8(captured.lock().unwrap().clone()).unwrap();
+    let failure = logs
+        .lines()
+        .find(|line| line.contains("NFS control server stopped with error"))
+        .unwrap();
+    assert!(
+        failure.contains(&endpoint),
+        "failure diagnostics lost the serving endpoint: {failure}"
+    );
+}

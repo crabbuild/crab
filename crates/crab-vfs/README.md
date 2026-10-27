@@ -455,7 +455,8 @@ the daemon lock. The startup retry budget does not bound an individual connect.
 ### NFS control deadlines
 
 The mount runtime supervises the control server: a bind or listener failure
-starts teardown and is returned after cleanup. Teardown closes engine control
+starts teardown and is returned after cleanup. Failure logs retain the prepared
+endpoint identity with TCP authentication tokens redacted. Teardown closes engine control
 admission, cancels future polling and idle connection reads, and awaits accepted
 handlers without aborting their blocking work. The data server remains available
 while admitted controls finish client writeback. Final responses, including the

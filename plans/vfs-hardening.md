@@ -13,7 +13,8 @@ https://github.com/crabbuild/crab/pull/630 (base `crab-v2`). Follow-up hardening
 remains active. The PR is rebased onto `877b832b396`; final source and
 installed-role evidence is recorded through checkpoint 62, with current Capsule
 fixture coverage added at checkpoint 63. Checkpoints 59–63
-retain separate source and qualification records below. The human approved the
+retain separate source and qualification records below. Checkpoint 64 restores
+NFS diagnostics after fresh CI exposed a regression. The human approved the
 exact four-file CI/inventory patch; it is applied with these checkpoints.
 
 Baseline evidence and reproductions:
@@ -4623,6 +4624,64 @@ those behavior/property contracts before deleting the generic pipeline, initiali
 and newly orphaned helpers; preserve shared policy/types still used by Capsule.
 Metadb/GC/maintenance/replication authority, total memory and remaining platform/
 lifecycle/performance proof stay open.
+
+## Checkpoint 64 — restore prepared-control failure context
+
+Fresh checkpoint-63 NFS CI fails before native execution: run `40430901673`,
+feature-gate job `121948021245`, release-contract check for redacted endpoint
+failure context. The checkpoint-62 listener refactor removed that warning field.
+Both `origin/crab-v2` and static `origin/main` retain it. No guard change is needed.
+
+The bound listener now retains its already-redacted diagnostic identity through
+serving. Authentication stays in the listener variant; diagnostics do not retain
+another raw TCP token. The shared failure boundary includes the endpoint through
+the existing redaction helper and preserves the original error. Unix/TCP bind,
+readiness, serving, connection drain and lease ordering are unchanged.
+
+A new Unix regression uses real sockets/filesystem operations: ping the prepared
+owner, move its private socket directory, replace the original parent with a file,
+then cancel. Socket cleanup returns `NotADirectory`; the same warning line must
+identify the serving endpoint. The old production source fails that unchanged
+assertion. Existing TCP malformed-token and authenticated serving/shutdown tests
+remain intact; no simulated TCP accept failure is claimed.
+
+Evidence map:
+
+| Surface | Entry / owner | Callee / contract | Proof / sibling boundary |
+| --- | --- | --- | --- |
+| Prepared control identity | `nfs_mount::mount` → `bind_server` | One bound listener owns redacted diagnostic identity | Actual binding/startup API unchanged; release guard restored without edits |
+| Failure reporting | Session `run_until_cancelled` → bound listener `spawn` | Unix/TCP serving result → shared warning; original error returned | New real Unix cleanup-error regression; same assertion fails against checkpoint-63 source |
+| Redaction/authentication | Shared endpoint display helper versus TCP listener token | Diagnostics retain a redacted string; request verification keeps the original token | Existing token-redaction and TCP authentication/shutdown cases pass |
+| Lifecycle sibling | Unix serving owns lease through handler drain and socket cleanup | Identity-aware unlink and explicit fs4 unlock | Existing connection, replacement-file, fork-descriptor and cancellation tests retained |
+| Main / base | Static `origin/main` and `origin/crab-v2` | Both log redacted endpoint context | This repairs the earlier listener refactor regression; no live-main equivalence claim |
+
+Exact 1,567-file source archive SHA-256:
+`c7e1b690b6c100d01a889b7a379d1a192fd84e45c2c6f0f04de9db85665b888a`.
+Only NFS control production/tests and its README differ from checkpoint 63 in that
+closure. macOS has 32 control checks passing and zero VFS Clippy diagnostics.
+The rebuilt full Linux NFS feature gate passes: 596 VFS tests, one existing
+ignored, two coordinator response checks, core CLI NFS/gix-all check and all report/
+release self-tests. Linux VFS Clippy has zero diagnostics too. The new same-warning-
+line regression passes unchanged; no guard or acceptance threshold is relaxed.
+
+The first Linux before/after attempt reused the intentionally failing baseline
+unit artifact after restoring older-mtime source from a read-only overlay. Its
+full-gate failure is retained. Source timestamps and Cargo's lack of a VFS compile
+confirm the cache problem; only this worktree's VFS package artifacts were
+invalidated (387 files/2.4 GiB), with its explicit external target directory.
+Final qualification rebuilds the package; the regression and all guards stay
+unchanged. No other repository target, installed evidence binary or task service
+is removed.
+
+Is this the best fix? Retain diagnostic identity at the owner that crosses the
+prepare/serve boundary, then report it at the shared failure boundary. This
+restores useful context for both protocols and keeps tokens out of diagnostic
+state. Relaxing a source guard would leave the observed regression. Runtime grows
+ten net lines; no configuration, dependency, lockfile or protected inventory
+changes. Fresh CI/native qualification remains separate from local feature-gate
+proof. The broader hardening, performance and stored pack-v1 removal goal remains
+open; the current Capsule bounded-pack replacement is retained as a separate
+prepared candidate while this CI regression is addressed.
 
 ## Remaining priority order
 

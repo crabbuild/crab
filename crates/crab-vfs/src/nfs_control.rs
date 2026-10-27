@@ -800,6 +800,8 @@ fn tcp_control_port_from_hash(hash: &str) -> u16 {
 /// Bound control endpoint retained through startup and serving.
 pub struct BoundControlListener {
     listener: ControlListener,
+    // Keep diagnostic identity without another copy of a TCP authentication token.
+    endpoint: String,
 }
 
 enum ControlListener {
@@ -816,6 +818,7 @@ impl BoundControlListener {
         cancel: CancellationToken,
     ) -> tokio::task::JoinHandle<Result<()>> {
         tokio::spawn(async move {
+            let endpoint = self.endpoint;
             let result = match self.listener {
                 ControlListener::Tcp(listener, token) => {
                     run_tcp_listener(listener, token, state, cancel).await
@@ -826,7 +829,11 @@ impl BoundControlListener {
                 }
             };
             if let Err(error) = &result {
-                warn!(%error, "NFS control server stopped with error");
+                warn!(
+                    endpoint = %display_control_endpoint(&endpoint),
+                    %error,
+                    "NFS control server stopped with error"
+                );
             }
             result
         })
@@ -835,11 +842,13 @@ impl BoundControlListener {
 
 /// Bind and own a control endpoint before native mount visibility.
 pub async fn bind_server(endpoint: &str) -> Result<BoundControlListener> {
+    let diagnostic_endpoint = display_control_endpoint(endpoint);
     if endpoint.starts_with("tcp:") {
         let endpoint = tcp_endpoint_from_endpoint(endpoint)?;
         let listener = tokio::net::TcpListener::bind(endpoint.addr).await?;
         return Ok(BoundControlListener {
             listener: ControlListener::Tcp(listener, endpoint.token),
+            endpoint: diagnostic_endpoint,
         });
     }
 
@@ -855,6 +864,7 @@ pub async fn bind_server(endpoint: &str) -> Result<BoundControlListener> {
             info!(endpoint, "NFS control server listening");
             return Ok(BoundControlListener {
                 listener: ControlListener::Unix(listener, ownership),
+                endpoint: diagnostic_endpoint,
             });
         }
         #[cfg(not(unix))]
