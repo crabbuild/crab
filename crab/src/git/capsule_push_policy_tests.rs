@@ -670,3 +670,6 @@ async fn local_history_grafts_cannot_forge_fast_forward() {
 async fn local_history_replacements_cannot_forge_fast_forward() {
     assert_local_history_cannot_forge_fast_forward(true).await;
 }
+
+#[path = "capsule_push_data_tests.rs"]
+mod data;

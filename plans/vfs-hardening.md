@@ -12,7 +12,7 @@ Working branch: `codex/vfs-hardening`. PR:
 https://github.com/crabbuild/crab/pull/630 (base `crab-v2`). Follow-up hardening
 remains active. The PR is rebased onto `877b832b396`; final source and
 installed-role evidence is recorded through checkpoint 62, with current Capsule
-fixture coverage added at checkpoint 63. Checkpoints 59–63
+fixture coverage added at checkpoints 63/65. Checkpoints 59–65
 retain separate source and qualification records below. Checkpoint 64 restores
 NFS diagnostics after fresh CI exposed a regression. The human approved the
 exact four-file CI/inventory patch; it is applied with these checkpoints.
@@ -31,7 +31,7 @@ folder. The report describes the audited commit, not the current working tree.
 | Stable open-file lifetime | Native FUSE and NFS rename, unlink, replacement, concurrent descriptors, writes/fsync and generation transitions | Thirteenth checkpoint repairs live commit handoff and Linux mapped writeback; seventeenth preserves failed-COW descriptors, twentieth pins unpublished base recipes. Reset/refresh, other product owners and broader failure/resource qualification remain open |
 | Verified optional caches and bounded ownership | Same-length corruption, replacement races, missing/unsafe cache, ENOTDIR/disk-full, cancellation, explicit retention cap, active readers | Sixth and seventh checkpoints replace mutable VFS pointer/ODB byte caches with verified immutable retention; total admission/resource proof remains open. Shared persistent-cache policy is unchanged |
 | Efficient range reads | Ordinary blobs and pointers: small random reads, sequential windows, cold/warm, concurrent readers; origin bytes, userspace amplification, throughput, p95/p99, RSS | Seventh checkpoint removes repeated whole-blob loading on warm ranges; cold/concurrent and native/provider performance remain open |
-| Bounded dispatch and directories | Concurrent blocked hydration must not serialize unrelated FUSE operations; large-directory paging/inode lifetime; effective bounded prefetch | Open |
+| Bounded dispatch and directories | Concurrent blocked hydration must not serialize unrelated FUSE operations; large-directory paging/inode lifetime; effective bounded prefetch | Linux blocked-read dispatch and entered-WRITE admission repaired at checkpoints 60/61; directory lifetime, prefetch and total memory remain open |
 | Consistent lifecycle in every mode | Foreground/helper/coordinator/daemon; read-only/writable; automatic/manual refresh; reset/commit; stalled clients and unmount during reads | Open; managed engine-drain cancellation, foreground FUSE controls/refresh, macOS mapped writeback and Windows ownership remain gaps |
 | Retire Crab pack v1 compatibility | Reject v1 stored repositories at all read/write/selection dispatch boundaries; delete fallback readers/writers and obsolete compatibility tests/docs; preserve empty-repository v2 initialization | Admission/helper/doctor/selected-replica validation and eighteenth-checkpoint replica readiness require v2. Protected receive, legacy initialization, metadb/GC and maintenance/publication dispatch remain open |
 | Final qualification | Exact resulting sources, minimal/NFS/FUSE/combined feature checks, appropriate broad CI, native Linux NFS/FUSE + RustFS, macOS NFS; retained performance measurements | Scoped current-source checks are retained at each checkpoint; complete mode/platform/performance qualification remains open |
@@ -4682,6 +4682,63 @@ changes. Fresh CI/native qualification remains separate from local feature-gate
 proof. The broader hardening, performance and stored pack-v1 removal goal remains
 open; the current Capsule bounded-pack replacement is retained as a separate
 prepared candidate while this CI regression is addressed.
+
+## Checkpoint 65 — bounded multi-pack publication on Capsule
+
+The remaining pack-size integration suite no longer invokes the generic manifest
+publisher. Its aggregate case is replaced by a current Capsule test under the
+existing private policy fixture, in flat `capsule_push_data_tests.rs`. No product
+API is exported. All six retained generation/installation test bodies compare
+byte-identical, covering over-limit rejection/timing, typed/protocol rejection,
+exact-limit acceptance, zero/unlimited semantics and local installation refusal.
+
+The new test commits four distinct incompressible 700 KiB blobs, configures a
+1 MiB per-pack limit, and publishes through current Capsule orchestration. It
+requires the exact ref OID, one visible Capsule transaction, multiple authenticated
+pack descriptors and every pack at or below the bound. It handles both inline
+and origin-backed descriptor types. The selected origin installs the full view
+into an independent bare repository with validated sidecars, strict full fsck
+and exact bytes for every blob.
+
+Evidence map:
+
+| Surface | Entry / owner | Callee / contract | Proof / sibling boundary |
+| --- | --- | --- | --- |
+| Aggregate publication | Existing policy fixture → private Capsule `run` | Bounded plural pack generation → one Capsule/ref publication | Complete ref/transaction, per-pack bounds, full independent install/fsck and four exact blob reads |
+| Pack admission | Existing public Git pack tests | Generation/intake size checks and shared rejection mapping | Six retained cases are byte-identical; no current Git pack contract is retired |
+| Read/install | Captured Capsule view and selected origin | Inline body sections versus origin-backed member ranges; authenticated sidecar installation | Both descriptor shapes are included in the size inventory; installer/strict fsck proves complete object closure |
+| Sibling policy | Full Capsule test group | Cancellation, direct/coordinated publication, atomic refs, history, leases and replay | All 33 cases pass on both OSes |
+| Main / base | Static main/v2 older integration fixture | Old case asserts manifest generation, old pack layout and metadata keys | Replaced only after stronger current-format proof; these obsolete storage details are not current Capsule contracts |
+
+Final source has 1,568 hashed files, archive SHA-256:
+`8b3c981fd0a3c34e77ba8ed479ed877540e239e9507a74dc0cfc0b4919c8ca72`.
+Both OSes pass 33 Capsule tests and all six retained pack-intake tests, zero
+ignored/skipped. The first test draft mixed the two authenticated descriptor
+Rust types and failed compilation; its logs are retained. Correct code follows
+the reader's explicit descriptor contracts and installs origin-backed payloads
+through the selected store. The test body first passes each OS before its flat
+file extraction, then the entire final group passes again. Format/diff checks
+pass. No dependency, config, guard, inventory, threshold or production code
+changes; no fresh native/performance proof is claimed by this test-only update.
+
+Is this the best fix? Preserve aggregate closure/bounds on the actual Capsule
+owner and preserve shared Git intake behavior independently. One authenticated
+transaction replaces the old manifest-generation assertion; verified sidecars,
+strict fsck and exact blob reads replace old-layout metadata existence checks.
+Test LOC shrinks overall. One obsolete publisher call and its format-specific
+fixture leave; no shim or duplicate producer is introduced.
+
+Three actual generic-publisher calls remain across two suites:
+`e2e_incomplete_shard_fail_loud` (two) and
+`prop_push_reconstruction_coverage` (one). Next preserve their real CDC, high-chunk,
+multifile, negative-publication and reconstruction properties on Capsule before
+removing the generic pipeline/initializer and orphaned helpers. Keep current
+shared policy/types. The extreme cases currently hide behind environment-gated
+returns; qualification must identify actual executed chunk counts and distinguish
+skips. The owned Linux environment has 8 GiB RAM: stream fixture generation/staging
+and expected-byte comparison rather than retaining multiple whole-file copies.
+This is test resource ownership, not a production memory-admission fix. Metadb/GC/
+maintenance/replication authority and full mode/performance qualification remain.
 
 ## Remaining priority order
 
