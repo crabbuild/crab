@@ -5671,14 +5671,106 @@ retrying against newer refs would change the advertised contract. Removing the
 retired wire writer closure and keeping one-shot borrowing also reduces local
 complexity without adding a fallback or unrelated async ownership.
 
+## Checkpoint 75 — classic discovery owns its fetch capture
+
+Three regressions fail on published head `bbfdbc9e7ab` with production code
+unchanged: an uncheckpointed cold fetch rejects advertised B after B → C;
+a checkpointed shallow promotion reports changed heads despite unchanged Root;
+and promisor recovery admits a blob from the later C generation. All fixtures
+use actual Git packs and publication, with exact Root identity checked.
+
+Classic capability/list/fetch now borrow one `CapsuleRepositoryCapture` owned by
+`SessionCache`. Payload-free list retains heads/activations; complete admission,
+constrained and promisor fetches reuse them. The uncheckpointed multi-run path
+opens captured metadata and feeds authenticated source ranges to the existing
+installer, instead of reopening heads and eager complete Git bodies. Existing
+one-run/layered direct installation stays intact. Router-owned stores keep
+admission and reads on the selected physical origin. Primary push ref admission
+remains separate.
+
+Consolidate capability routing into the ordinary dispatcher using the existing
+pinned selector; delete the separate loop branch. A newly created capability
+capture survives only when its cached direct view will supply discovery. A
+fourth control catches the first candidate freezing an empty probe before any
+advertisement, and passes after the source cleanup. Existing descriptor
+eligibility errors still propagate outside the optional probe handler; final
+review restores that exact error boundary before publication. No new fallback,
+shared-crate API, config, dependency, inventory or compatibility path.
+
+The final focused suite passes **477 cases per OS**, no ignores: 158 helper
+(including four new cases), 41 wire, 105 replica, two clone/one mount selector,
+64 push, 32 Capsule policy, 33 repository and 41 shared read/capture. Minimal
+feature checks pass. Production Clippy exits zero with **683 macOS / 686 Linux
+warnings**, no unused item in the changed helper and no suppression. Actual
+guards pass **18 self-tests + 75 source checks** each OS, byte-identical to the
+approved migration. Format passes. The helper file has a net deletion; its
+prefix before the central test module shrinks 3,925 → 3,863 lines. Four new
+behavior tests live in a **314-line flat sibling file**; existing assertions stay
+intact (one direct-call fixture supplies the now-mandatory captured Root).
+
+**Eight fresh native cases pass** with final Make-installed roles: Linux FUSE/NFS
+RO/RW and managed FUSE; macOS NFS RO/RW and managed NFS. Both OSes pass 25 reuse
+checks, exact 6 MiB full/range reads, RO refusal, applicable fsync → commit/push →
+independent clone/strict fsck and normal detach. No forced cleanup; fixed role
+hashes. **15 repack + 31 metadata CLI commands** per OS also pass. OS runs are
+serialized to protect the shared inventory fixture.
+
+Real Git/RustFS races execute **three modes on both OSes**: protocol-0 classic
+cold fetch, protocol-0 classic shallow fetch and the protocol-v2 wire sibling.
+Hold the advertised response, perform a normal concurrent push, verify Root is
+unchanged, then resume. Each old helper exits **128** at the reproduced policy
+boundary; each current helper exits **0**, installs the advertised FETCH_HEAD,
+excludes the concurrent commit and passes strict fsck. Classic comparisons use
+head-74 binaries; the wire sibling retains its source-73 failing baseline. This
+is functional/debug-role qualification, not sustained-throughput proof.
+
+Frozen source: **2,061 files**, archive SHA-256
+`ca39dfb69eb34601deb330e8d9dd83cba4e6d6e088ac7bd74a099c6f6fbd4905`.
+Only the helper, flat regression module and Rust architecture document differ
+from checkpoint 74. Core SHA: macOS
+`8d824a2ca85dcb1e037b44454d8449f5ecb4bc72777acab6c6436d1812ad9b5b`;
+Linux `2c7ea0a88f9f6e1e90dfbce54995e71d7649aa1e804de9bc6fe3de447bb89c1c`.
+All source inputs and installed roles stay exact. The first qualified candidate,
+red tests, empty-probe correction and final error-boundary correction retain
+separate bindings in external `classic-capture/` receipts. All 482 web inputs
+remain exact against checkpoint 74's production build/types/lint/10 tests and
+398-page/4,301-fragment proof; no new web execution is claimed. Raw 2,156 files
+remain preserved/excluded; zero tracked paths.
+
+Evidence map: helper dispatcher → selected router/Root → retained read capture →
+shared stable-head/activation/frontier validation → complete metadata/planner
+or authenticated source installer. The wire sibling remains independently
+captured and is exercised live after the routing consolidation. Replica/push,
+hidden-ref, shallow-boundary and promised-object siblings retain their existing
+tests. Git's helper contract ties fetch object IDs to list responses:
+https://git-scm.com/docs/gitremote-helpers . Current main still opens a fresh
+manifest/journal repository snapshot for classic fetch. No main code is merged
+into this v2 follow-up.
+
+Is this the best fix? Retain the validated physical capture at the read-session
+owner; Root digest comparison cannot detect these ref-only updates, and retrying
+against newer heads changes the advertised state. Reuse existing metadata-only
+installation and delete recapture/routing duplication. Preserve typed failures
+and direct cold-clone eligibility rather than adding another fallback.
+
+Remaining evidence gaps: the generic layered range installer collects payload
+windows before installation (`fetch_layered_payload_windows`), so total memory
+still needs a measured bound. GC's bucket root collector still falls back from
+missing Capsule roots to historical shard traversal; whole-call-graph reader
+protection and retained reachability need proof. `ReadAdmissionTicket` bounds
+concurrency; its interaction with GC is not established by that type alone.
+No bucket-wide GC command runs. Finish stored pack-v1 retirement and retained
+reader protection, then sustained mounted writes and the separate gateway PUT
+performance failure. The full goal remains active.
+
 ## Remaining priority order
 
 Checkpoint 73 removes the measured post-fetch bulk mirror: the same large-cache
 fixture now peaks at about 76 MiB on macOS and 82 MiB on Linux, versus the earlier
 252–253 / 228 MiB. All values and receipts remain intact. Checkpoint 74 closes
 the reproduced wire recapture race and retires its manifest repair closure. Next
-finish classic capture coherence, GC authority and reader retention, then qualify
-sustained FUSE/NFS writes. The CI
+finish GC authority and reader retention, then qualify sustained FUSE/NFS
+writes. Checkpoint 75 closes the reproduced classic discovery/promotion gaps. The CI
 `native-soak` artifact measures signed S3 gateway PUTs into a native Crab
 repository; its degradation is a separate gateway gate, not an OS-mount result.
 
@@ -5877,7 +5969,7 @@ Authority retirement status and remaining boundaries:
   its physical Capsule root across wire and classic batches. Checkpoint 72's
   qualified worktree removes the post-fetch shard-sync fallback and generation
   cursor. Wire's optional-root manifest/visibility closure is retired in checkpoint 74;
-  classic complete-view promotions still need captured-state ownership. `crab/src/cmd/gc/bucket.rs` still permits missing-root
+  classic complete-view promotions gain captured-state ownership in checkpoint 75. `crab/src/cmd/gc/bucket.rs` still permits missing-root
   fallback during registered-repository root collection; prove complete
   reachability and fail-closed authority before changing deletion decisions.
   No bucket-wide GC command was run.

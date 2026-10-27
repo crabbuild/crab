@@ -84,9 +84,13 @@ Read routing retains the selected store, layout and verified Capsule root
 together. A root captured from primary before replica selection cannot supply
 the replica's upload-pack view: it can name replaced checkpoint objects absent
 from a replica that has passed current-state readiness. Primary push discovery
-keeps its own captured authority. Classic helper capability, list and fetch
-batches also share their selected repository; read ref views cannot supply
-primary push admission.
+keeps its own captured authority. Classic helper discovery and fetch retain
+one validated ref-head/activation capture with their selected repository.
+Complete metadata and cold multi-run installation reuse it, including shallow
+and promisor requests; Root identity alone cannot pin mutable ref heads. A
+capability probe retains a new capture only when its cached direct view will
+supply discovery. Declined probes do not freeze later advertisements. Read ref
+views cannot supply primary push admission.
 The session supports:
 
 - protocol-v2 capability advertisement;
