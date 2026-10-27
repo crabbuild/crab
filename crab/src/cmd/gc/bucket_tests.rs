@@ -590,6 +590,7 @@ async fn capsule_authority_closure_repair_rejects_manifest_fallback() {
 #[tokio::test]
 async fn capsule_authority_registry_repair_does_not_certify_manifest_repository() {
     let store = memory_store();
+    initialize_capsule_repository(&store, "org/current").await;
     legacy_manifest(&store, "org/legacy").await;
     let mut registry = RefRegistry::default();
     registry.register("org/current", Vec::new());
@@ -617,6 +618,74 @@ async fn initialize_capsule_repository(store: &Store, repo: &str) {
     crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
         .await
         .unwrap();
+}
+
+#[tokio::test]
+async fn registry_repair_keeps_registered_roots_when_repository_marker_disappears() {
+    let store = memory_store();
+    let repo = "org/registered";
+    let (shard, _) = publish_capsule_pointer_catalog(&store, repo).await;
+    repair_ref_registry(&store).await.unwrap();
+    let before = load_ref_registry(&store, false).await.unwrap();
+    let layout = crab_storage::StoreLayout::new(store.as_storage().clone(), repo.to_owned());
+    layout
+        .store()
+        .delete(&layout.capsule_root_path())
+        .await
+        .unwrap();
+
+    let result = repair_ref_registry(&store).await;
+    assert!(
+        matches!(result, Err(CrabError::NotFound { ref path }) if path == "org/registered/v2/root")
+    );
+    let after = load_ref_registry(&store, false).await.unwrap();
+    assert_eq!(
+        (
+            after.generation,
+            after.coverage_complete,
+            after.repos[repo].clone()
+        ),
+        (before.generation, before.coverage_complete, vec![shard])
+    );
+}
+
+#[tokio::test]
+async fn registry_repair_respects_explicit_deregistration_after_marker_removal() {
+    let store = memory_store();
+    let repo = "org/removed";
+    publish_capsule_pointer_catalog(&store, repo).await;
+    repair_ref_registry(&store).await.unwrap();
+    let layout = crab_storage::StoreLayout::new(store.as_storage().clone(), repo.to_owned());
+    layout
+        .store()
+        .delete(&layout.capsule_root_path())
+        .await
+        .unwrap();
+    deregister_repo(&store, repo).await.unwrap();
+
+    assert_eq!(repair_ref_registry(&store).await.unwrap(), (0, 0));
+}
+
+#[tokio::test]
+async fn registry_repair_replaces_a_corrupt_coverage_marker() {
+    let store = memory_store();
+    publish_capsule_pointer_catalog(&store, "org/current").await;
+    repair_ref_registry(&store).await.unwrap();
+    let layout = crab_storage::StoreLayout::new(store.as_storage().clone(), String::new());
+    let coverage = ObjectPath::from(format!("{}/coverage.json", layout.ref_registry_path()));
+    layout
+        .store()
+        .put_overwrite(&coverage, Bytes::from_static(b"corrupt coverage"))
+        .await
+        .unwrap();
+
+    assert_eq!(repair_ref_registry(&store).await.unwrap(), (1, 1));
+    assert!(
+        load_ref_registry(&store, false)
+            .await
+            .unwrap()
+            .is_complete_for_destructive_gc()
+    );
 }
 
 #[tokio::test]

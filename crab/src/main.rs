@@ -390,7 +390,7 @@ enum Cmd {
         /// Remove a repo's entry from the ref-registry.
         #[arg(long, conflicts_with = "repair_registry")]
         deregister: Option<String>,
-        /// Rebuild the bucket ref-registry from every current repo manifest.
+        /// Rebuild bucket GC roots from registered and discovered repositories.
         #[arg(long, conflicts_with = "deregister")]
         repair_registry: bool,
         /// Backfill and verify durable shard reachability closures.

@@ -586,6 +586,45 @@ async fn replace_repo_shard_roots(
     Ok(())
 }
 
+#[cfg(feature = "storage")]
+async fn read_registry_record(store: &Store, path: &Path) -> Result<RepoRefRecord> {
+    let (body, _) = store.get_with_etag(path).await?;
+    let record: RepoRefRecord =
+        serde_json::from_slice(&body).map_err(|error| MetadataError::CorruptObject {
+            path: path.to_string(),
+            reason: format!("invalid JSON: {error}"),
+        })?;
+    validate_record(&record, path)?;
+    Ok(record)
+}
+
+/// Return registered repository identities independently of coverage and shard roots.
+///
+/// Unreadable or invalid listed coordination records return an error.
+#[cfg(feature = "storage")]
+pub async fn registered_repo_prefixes(
+    store: &Store,
+    router: &StoreLayout<Store>,
+) -> Result<Vec<String>> {
+    let prefix = registry_records_prefix(router);
+    let mut records = store.inner().list(Some(&prefix));
+    let mut repos = Vec::new();
+    while let Some(meta) = records
+        .try_next()
+        .await
+        .map_err(|source| MetadataError::Storage {
+            source: crab_storage::StorageError::ObjectStore { source },
+        })?
+    {
+        repos.push(
+            read_registry_record(store, &meta.location)
+                .await?
+                .repo_prefix,
+        );
+    }
+    Ok(repos)
+}
+
 /// Loads registry coordination records without materializing shard roots.
 #[cfg(feature = "storage")]
 pub async fn load_ref_registry_summary(
@@ -626,13 +665,7 @@ pub async fn load_ref_registry_summary(
             source: crab_storage::StorageError::ObjectStore { source },
         })?
     {
-        let (body, _) = store.get_with_etag(&meta.location).await?;
-        let mut record: RepoRefRecord =
-            serde_json::from_slice(&body).map_err(|error| MetadataError::CorruptObject {
-                path: meta.location.to_string(),
-                reason: format!("invalid JSON: {error}"),
-            })?;
-        validate_record(&record, &meta.location)?;
+        let mut record = read_registry_record(store, &meta.location).await?;
         normalize(&mut record.workflow_stage_hashes);
         normalize(&mut record.workflow_experiment_ids);
         let repo = record.repo_prefix.clone();
@@ -1538,6 +1571,73 @@ mod tests {
                 .unwrap()
         );
         assert!(load_ref_registry_summary(&store, &router).await.is_err());
+    }
+
+    #[cfg(feature = "storage")]
+    #[tokio::test]
+    async fn registered_prefixes_do_not_require_coverage_or_shard_bodies() {
+        use bytes::Bytes;
+        use object_store::memory::InMemory;
+        use std::sync::Arc;
+
+        let store = Store::new(Arc::new(InMemory::new()));
+        let router = StoreLayout::new(store.clone(), String::new());
+        for repo in ["org/a", "org/b"] {
+            let repo_router = StoreLayout::new(store.clone(), repo.to_owned());
+            union_register_repo_shards(&store, &repo_router, vec!["a".repeat(64)])
+                .await
+                .unwrap();
+        }
+        store
+            .put_overwrite(
+                &registry_coverage_path(&router),
+                Bytes::from_static(b"corrupt coverage"),
+            )
+            .await
+            .unwrap();
+        for object in store
+            .list_prefix(&registry_shard_roots_prefix(&router))
+            .await
+            .unwrap()
+        {
+            store
+                .put_overwrite(
+                    &object.location,
+                    Bytes::from_static(b"corrupt shard partition"),
+                )
+                .await
+                .unwrap();
+        }
+
+        let mut repos = registered_repo_prefixes(&store, &router).await.unwrap();
+        repos.sort_unstable();
+        assert_eq!(repos, vec!["org/a", "org/b"]);
+    }
+
+    #[cfg(feature = "storage")]
+    #[tokio::test]
+    async fn registered_prefixes_reject_invalid_coordination_records() {
+        use bytes::Bytes;
+        use object_store::memory::InMemory;
+        use std::sync::Arc;
+
+        let wrong_identity = serde_json::to_vec(&RepoRefRecord {
+            repo_prefix: "org/other".to_owned(),
+            ..RepoRefRecord::default()
+        })
+        .unwrap();
+        for body in [
+            Bytes::from_static(b"invalid JSON"),
+            Bytes::from(wrong_identity),
+        ] {
+            let store = Store::new(Arc::new(InMemory::new()));
+            let router = StoreLayout::new(store.clone(), String::new());
+            let path = registry_record_path(&router, "org/registered");
+            store.put_overwrite(&path, body).await.unwrap();
+
+            assert!(matches!(registered_repo_prefixes(&store, &router).await,
+                Err(MetadataError::CorruptObject { path: actual, .. }) if actual == path.as_ref()));
+        }
     }
 
     #[cfg(feature = "storage")]

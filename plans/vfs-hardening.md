@@ -5842,12 +5842,94 @@ payload installer, then measure sustained OS-mounted FUSE/NFS writes and the
 separate gateway throughput/p95 failure. This checkpoint does not establish
 complete VFS correctness or optimized performance; the full goal remains active.
 
+## Checkpoint 77 — repair retains registered repository identities
+
+On published `145ca2adf79`, deleting only a repository's `v2/root` marker makes
+registry repair omit that repository and remove its existing shard roots.
+The new missing-marker regression fails with production unchanged; four
+selected controls pass, including explicit deregistration and corrupt coverage
+recovery. The initial coverage fixture incorrectly used immutable `Store::put`
+to inject different bytes at an occupied key; the corrected fixture uses the
+explicit overwrite API. That setup failure and the actual baseline are retained
+separately.
+
+Under the existing exclusive global sweep lease, repair now captures the union
+of validated registered identities and discovered physical markers, then
+requires an authenticated Capsule root/catalog for every identity before exact
+replacement. A missing marker cannot imply deregistration. Explicit removal
+remains available through the existing deregister operation. Retired-marker
+and mixed-root refusal, shard replacement, coordinator/fence/grace/delete
+contracts are unchanged.
+
+The storage-gated metadata API returns only registered prefixes independently
+of coverage and shard-root bodies. This lets repair rebuild a missing/corrupt
+coverage marker. The API and normal summaries share the existing record reader
+and identity validation; normal summaries retain coverage checks and workflow
+normalization. Targeted push receipt reads remain unchanged. New production
+surface grows by **39 lines** (six in bucket repair, 33 in metadata), paying for
+independent identity recovery and shared schema ownership. No new dependency,
+format, config, compatibility path, inventory or suppression.
+
+The prior manifest-refusal fixture also registered an unrelated rootless
+`org/current` peer. Initialize that intended healthy peer through the v2 writer
+so its original missing-legacy-root and unchanged-registry assertions stay
+focused on their actual fault. No assertion is weakened. Three new CLI cases
+cover missing markers, explicit retirement and coverage recovery; two metadata
+cases cover independent identity reading and invalid JSON/record identity.
+
+Final frozen source passes **249 focused tests per OS**, no ignores: 139 GC,
+12 history, 58 fsck, 28 registry and 12 source-retention cases. Both OSes pass
+the minimum metadata feature check and **18 guard self-tests + 75 source checks**.
+Metadata Clippy has **zero warnings/errors**; production library/CLI Clippy has
+zero errors with 684 macOS / 685 Linux preexisting warnings. Format passes.
+All four product roles are built and installed through Make for each OS.
+
+The final isolated RustFS fixture passes **63 commands on each OS**. The exact
+published-76 binary succeeds after marker loss while dropping known repository
+roots; the current binary refuses the missing root and retains byte/ETag/size-
+identical registry objects. Explicit deregistration, re-registration after root
+restoration, missing/corrupt roots and corrupt coverage recovery all pass.
+Fresh eager clones and strict Git fsck pass with **6,291,456 bytes reconstructed
+exactly per OS**. No bucket sweep runs. New mount-throughput proof is not claimed.
+
+Fresh operator-site build/types/lint, all ten tests and the **398-page /
+4,301-fragment** link check pass; generated registries are restored/rechecked.
+Runtime source: **2,063 files**, archive SHA-256
+`8be84dd2bb2d4dfbd679e200c1d73077830e69ccdc93e3462a0f558b51979aea`.
+Current core SHA: macOS
+`dc1764eae7f8abd01706a69c0c2ee480dfb8fcb63fc1abfbe90ae27c8a06590e`;
+Linux `1393142ed74589105f195db04c207448ac8d14b684a2d9f1532101a6c88ac2c3`.
+Old comparison binaries retain source-76 archive/core bindings. All source and
+role hashes remain exact; all **2,156** raw audit files remain excluded from the
+PR. Evidence lives in the dedicated `registry-identity-retention` directories
+on the workspace volume.
+
+Evidence map: CLI repair → exclusive bucket sweep → registered identity reader
+plus physical marker discovery → complete Capsule root/catalog authentication →
+existing exact replacement. Bucket marking and closure repair already require
+roots for registered repositories; repair now preserves that identity set.
+Exact replacement still removes aborted candidate shards for healthy repos.
+Current main shares list-only discovery/omission; no main code is merged here.
+
+Is this the best fix? Keep identity discovery at the metadata owner and union
+known identities at the repair owner. Requiring a healthy coverage summary
+would block coverage recovery, while preserving every stale shard would defeat
+exact repair. The narrow API gives repair the required identities without adding
+steady-state VFS or targeted-push reads.
+
+Next: retained-reader/shared-shard closure through explicit pruning and remaining
+stored-v1 maintenance/replication/history retirement. Bound generic payload-window
+memory and measure sustained actual FUSE/NFS writes. This root-loss repair does
+not establish reader lifetime through pruning or optimized mount performance.
+The full goal stays active.
+
 ## Remaining priority order
 
 Checkpoint 73 removes the measured post-fetch bulk mirror: the same large-cache
 fixture now peaks at about 76 MiB on macOS and 82 MiB on Linux, versus the earlier
 252–253 / 228 MiB. All values and receipts remain intact. Checkpoint 74 closes
-the reproduced wire recapture race and retires its manifest repair closure. Checkpoint 76 retires the bucket manifest fallback. Next finish retained-reader
+the reproduced wire recapture race and retires its manifest repair closure. Checkpoint 76 retires the bucket manifest fallback; checkpoint 77 prevents
+repair from discarding registered identities after marker loss. Next finish retained-reader
 and shared-shard closure plus other stored-v1 maintenance authority, then qualify
 sustained FUSE/NFS writes. Checkpoint 75 closes the reproduced classic discovery/promotion gaps. The CI
 `native-soak` artifact measures signed S3 gateway PUTs into a native Crab

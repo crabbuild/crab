@@ -2462,6 +2462,13 @@ pub async fn repair_ref_registry(store: &Store) -> Result<(usize, usize)> {
             Manifest,
         }
 
+        let storage = store.as_storage();
+        let router = crab_storage::StoreLayout::new(storage.clone(), String::new());
+        // A missing marker is not deregistration. Keep known identities so
+        // repository damage cannot turn referenced shard roots into garbage.
+        let mut repo_prefixes =
+            crab_metadata::ref_registry::registered_repo_prefixes(storage, &router).await?;
+
         let mut objects = store.inner().list(None);
         let mut repositories = HashMap::<String, RootKind>::new();
         while let Some(item) = objects.next().await {
@@ -2495,8 +2502,9 @@ pub async fn repair_ref_registry(store: &Store) -> Result<(usize, usize)> {
             }
         }
 
-        let mut repo_prefixes = repositories.keys().cloned().collect::<Vec<_>>();
+        repo_prefixes.extend(repositories.into_keys());
         repo_prefixes.sort_unstable();
+        repo_prefixes.dedup();
         let mut repos = HashMap::with_capacity(repo_prefixes.len());
         let mut shard_count = 0usize;
         for repo_prefix in &repo_prefixes {
@@ -2509,10 +2517,8 @@ pub async fn repair_ref_registry(store: &Store) -> Result<(usize, usize)> {
             repos.insert(repo_prefix.clone(), shards);
         }
 
-        let storage = store.clone().into_storage();
-        let router = crab_storage::StoreLayout::new(storage.clone(), String::new());
         crab_metadata::ref_registry::replace_ref_registry_from_repository_roots(
-            &storage, &router, repos,
+            storage, &router, repos,
         )
         .await?;
         info!(
