@@ -7,8 +7,6 @@ use std::sync::{Arc, Mutex, MutexGuard};
 use crab::cache::LocalCache;
 use crab::core::config::CacheConfig;
 use crab::git::push::{PushConfig, RefPushOutcome, run_push_batch};
-use crab::git::push_native::{NativePushConfig, NativePushInputs, run_native_push};
-use crab::git::push_state::PushState;
 use crab::git::remote_helper::PushSpec;
 use crab::metadata::manifest::Manifest;
 use crab::storage::{Store, StoreLayout};
@@ -195,77 +193,6 @@ async fn push_refs_to_memory(repo: &Path, scratch: &Path, refs: &[&str]) -> (Sto
     (store, router)
 }
 
-async fn native_push_main_follow_tags_to_memory(
-    repo: &Path,
-    scratch: &Path,
-    tag_ref: &str,
-    tag_sha: &str,
-) {
-    let staging = StagingAreaReadOnly::open(repo.join(".crab/staging"))
-        .await
-        .expect("open staging readonly");
-    let store = Store::new(Arc::new(InMemory::new()));
-    let router = StoreLayout::new(store.clone(), "smoke/follow-tags".to_owned());
-    initialize_memory_repository(&store, &router).await;
-    let mut push_config = PushConfig {
-        git_dir: Some(repo.join(".git")),
-        ..PushConfig::default()
-    };
-    push_config.metadb.chunk_index.local_path =
-        Some(scratch.join("follow-tags-metadb/chunk-index.sqlite"));
-    let mut native_config = NativePushConfig::new(push_config);
-    native_config.followtags = true;
-    native_config.progress = false;
-    native_config.emit_summary = false;
-
-    let specs = vec![PushSpec {
-        force: false,
-        src: "refs/heads/main".to_owned(),
-        dst: "refs/heads/main".to_owned(),
-    }];
-    let mut push_state = PushState::default();
-    let result = run_native_push(
-        &native_config,
-        &specs,
-        NativePushInputs::new(
-            Some(store.clone()),
-            None,
-            crab::git::push_staging::PushStaging::Ready(Arc::new(staging)),
-            router.clone(),
-            &mut push_state,
-            "origin",
-            "crab://bucket/repo",
-            None,
-            CancellationToken::new(),
-        ),
-    )
-    .await
-    .expect("native follow-tags push");
-
-    assert!(matches!(
-        result.outcomes.get("refs/heads/main"),
-        Some(RefPushOutcome::Ok)
-    ));
-    assert!(matches!(
-        result.outcomes.get(tag_ref),
-        Some(RefPushOutcome::Ok)
-    ));
-
-    let (manifest_bytes, _) = store
-        .get_with_etag(&router.manifest_path())
-        .await
-        .expect("manifest uploaded");
-    let manifest: Manifest = serde_json::from_slice(&manifest_bytes).expect("manifest json");
-    assert_eq!(
-        manifest.generation, 1,
-        "branch and synthesized tag must publish through one first-generation CAS"
-    );
-    assert_eq!(
-        manifest.refs.get(tag_ref).map(String::as_str),
-        Some(tag_sha)
-    );
-}
-
 fn assert_main_push_uploads(repo: &Path, scratch: &Path) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
@@ -273,21 +200,6 @@ fn assert_main_push_uploads(repo: &Path, scratch: &Path) {
         .expect("tokio runtime");
     runtime.block_on(async {
         let _ = push_refs_to_memory(repo, scratch, &["refs/heads/main"]).await;
-    });
-}
-
-fn assert_native_follow_tags_pushes_annotated_tag(
-    repo: &Path,
-    scratch: &Path,
-    tag_ref: &str,
-    tag_sha: &str,
-) {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime");
-    runtime.block_on(async {
-        native_push_main_follow_tags_to_memory(repo, scratch, tag_ref, tag_sha).await;
     });
 }
 
@@ -604,34 +516,6 @@ fn git_add_commit_then_push_in_memory_store() {
 
     require_git_ok(&repo, &["commit", "-qm", "add model pointer"]).expect("commit pointer");
     assert_main_push_uploads(&repo, tmp.path());
-}
-
-#[test]
-fn native_push_follow_tags_pushes_annotated_tag_in_memory_store() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let repo = tmp.path().join("repo");
-    let cache_dir = tmp.path().join("cache");
-    let _cache_guard = CacheEnvGuard::new(&cache_dir);
-
-    let Some(()) = init_repo(&repo) else {
-        return;
-    };
-    let Some(()) = configure_crab_filter(&repo) else {
-        return;
-    };
-    commit_crab_attributes(&repo);
-
-    std::fs::write(repo.join("model.bin"), b"follow tags smoke\n").expect("write model");
-    require_git_ok(&repo, &["add", "model.bin"]).expect("git add model");
-    let _ = indexed_crab_pointer(&repo, "model.bin");
-    require_git_ok(&repo, &["commit", "-qm", "add release pointer"]).expect("commit pointer");
-    require_git_ok(&repo, &["tag", "-a", "v1.0", "-m", "release"]).expect("annotated tag");
-    let tag_sha = require_git_ok(&repo, &["rev-parse", "refs/tags/v1.0"])
-        .map(|out| String::from_utf8(out.stdout).expect("tag sha utf8"))
-        .map(|sha| sha.trim().to_owned())
-        .expect("tag sha");
-
-    assert_native_follow_tags_pushes_annotated_tag(&repo, tmp.path(), "refs/tags/v1.0", &tag_sha);
 }
 
 #[test]

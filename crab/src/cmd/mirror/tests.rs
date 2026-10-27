@@ -159,12 +159,6 @@ fn assert_command(command: &ProcessCommand, program: &str, args: &[&str]) {
     assert_eq!(command.args, args);
 }
 
-fn assert_mirror_git_only_env(command: &ProcessCommand) {
-    assert!(command.envs.iter().any(|(key, value)| {
-        key == crate::git::push_native::MIRROR_GIT_ONLY_ENV && value == &OsString::from("1")
-    }));
-}
-
 fn assert_stdin(command: &ProcessCommand, lines: &[String]) {
     assert_eq!(command.stdin.as_deref(), Some(stdin_lines(lines).as_str()));
 }
@@ -359,7 +353,6 @@ fn missing_cache_initializes_then_mirrors_lfs_and_git_refs()
         "git",
         &["push", "--mirror", "--atomic", CRAB_REMOTE],
     );
-    assert_mirror_git_only_env(commands[7]);
     Ok(())
 }
 
@@ -447,7 +440,6 @@ fn no_lfs_pointers_skips_lfs_fetch_and_push() -> std::result::Result<(), Box<dyn
         "git",
         &["push", "--mirror", "--atomic", CRAB_REMOTE],
     );
-    assert_mirror_git_only_env(commands[commands.len() - 1]);
     Ok(())
 }
 
@@ -560,7 +552,6 @@ fn no_atomic_omits_atomic_push_flag() -> std::result::Result<(), Box<dyn std::er
     assert!(!summary.atomic);
     let last = &runner.commands[runner.commands.len() - 1];
     assert_command(last, "git", &["push", "--mirror", CRAB_REMOTE]);
-    assert_mirror_git_only_env(last);
     Ok(())
 }
 

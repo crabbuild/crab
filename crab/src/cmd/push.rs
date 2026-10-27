@@ -505,7 +505,7 @@ async fn run_push_once(
         .map(|spec| spec.dst.clone())
         .collect::<BTreeSet<_>>();
     if args.follow_tags {
-        specs.extend(crate::git::push_native::collect_followtag_candidates(
+        specs.extend(collect_followtag_candidates(
             &specs,
             explicit_context
                 .as_ref()
@@ -969,6 +969,72 @@ impl RetryablePushContext<'_> {
             agent_integration_lock: false,
         })))
     }
+}
+
+fn collect_followtag_candidates(
+    explicit_specs: &[PushSpec],
+    git_dir_override: Option<&Path>,
+) -> Result<Vec<PushSpec>> {
+    // HEAD belongs to the selected worktree; objects and shared tag refs belong
+    // to its common directory. Keeping both avoids following the main checkout.
+    let (git_dir, common_git_dir) = if let Some(git_dir) = git_dir_override {
+        (
+            git_dir.to_owned(),
+            crate::git::discover::resolve_common_dir(git_dir),
+        )
+    } else if (std::env::var_os("GIT_DIR").is_none() || std::env::var_os("GIT_WORK_TREE").is_some())
+        && let Ok(context) = crate::git::worktree::WorktreeContext::resolve()
+    {
+        (context.per_worktree_git_dir, context.common_git_dir)
+    } else {
+        let git_dir = crate::git::discover::discover_git_dir()?;
+        let common = crate::git::discover::resolve_common_dir(&git_dir);
+        (git_dir, common)
+    };
+    let source_names = explicit_specs
+        .iter()
+        .filter(|spec| !spec.src.is_empty())
+        .map(|spec| spec.src.as_str())
+        .collect::<Vec<_>>();
+    let resolved = crab_git::ref_resolve::resolve_refs_batch_at(&git_dir, &source_names)?;
+    let direct_tips = explicit_specs
+        .iter()
+        .filter_map(|spec| {
+            resolved
+                .get(&spec.src)
+                .map(|oid| (spec.src.clone(), oid.clone()))
+        })
+        .collect::<BTreeMap<_, _>>();
+    if direct_tips.is_empty() {
+        return Ok(Vec::new());
+    }
+    let peeled = crab_git::tag::peeled_revision_targets_at(&common_git_dir, &direct_tips)?;
+    let mut reachable = std::collections::HashSet::new();
+    let mut walked = std::collections::HashSet::new();
+    for (name, direct_oid) in &direct_tips {
+        let tip = peeled.get(name).unwrap_or(direct_oid);
+        if walked.insert(tip) {
+            reachable.extend(
+                crate::git::incremental_walk::collect_entries_from_walk(&common_git_dir, tip)?
+                    .into_iter()
+                    .map(|entry| entry.oid),
+            );
+        }
+    }
+    Ok(
+        crab_git::tag::annotated_tag_refs_strict_at(&common_git_dir)?
+            .into_iter()
+            .filter(|tag| {
+                reachable.contains(&tag.peeled_commit)
+                    && !explicit_specs.iter().any(|spec| spec.dst == tag.name)
+            })
+            .map(|tag| PushSpec {
+                force: false,
+                src: tag.name.clone(),
+                dst: tag.name,
+            })
+            .collect(),
+    )
 }
 
 fn retain_missing_follow_tags(
@@ -2428,3 +2494,8 @@ mod tests {
         assert_eq!(root, expected);
     }
 }
+
+#[cfg(test)]
+#[expect(clippy::unwrap_used, clippy::expect_used, reason = "test assertions")]
+#[path = "push_followtag_tests.rs"]
+mod followtag_tests;

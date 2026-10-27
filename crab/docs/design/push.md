@@ -11,7 +11,7 @@ durable, deduplicated objects on cloud storage.**
 |--------------|-------------------------------------------------------------|
 | Project      | crab                                                        |
 | Scope        | Push pipeline architecture, data flow, performance analysis |
-| Status       | Living document                                             |
+| Status       | Historical legacy publisher reference; current contract below |
 | Companion to | [Capsule Publication Protocol](capsule-publication-protocol.md) |
 | Version      | 0.1                                                         |
 
@@ -19,19 +19,20 @@ durable, deduplicated objects on cloud storage.**
 
 ## Current publication contract
 
-Native `crab push` and the Git remote helper execute one dependency state
-machine. It snapshots published file recipes, classifies the cross-file unique
-chunk set, and runs missing-payload read → xorb pack → origin upload through a
-bounded backpressured channel while Git candidate locators are prepared in
-parallel. CPU compression runs on blocking workers; every stage is drained and
-joined before locks or staging handles are released.
+`crab push` and the Git remote helper publish through
+`crab/src/git/capsule_push.rs`; pointer payload preparation lives in
+`crab/src/git/xet_publication.rs`. Physical Git object history determines pack
+contents, visibility and ancestry admission. Captured Capsule roots and exact
+dependency proofs authorize publication, using single-ref CAS or a multi-ref
+transaction. Local push-state and manifest files are not current publication
+authority. See [Git integration](../architecture/git-integration.md) and the
+[Capsule protocol](capsule-publication-protocol.md) for the current contract.
 
-Before manifest CAS, push union-registers the complete candidate shard set for
-bucket GC, revalidates every referenced xorb against the canonical origin, and
-builds a base-bound dependency plan and commit receipt. The manifest CAS is the
-only publication point. File indexes, Git locators, and generation
-receipts are written after CAS and are rebuildable with `crab metadb rebuild`.
-Cache/index hits are candidates only; they never replace origin proof.
+The obsolete Native entry is removed. Follow-tag selection belongs to
+`crab/src/cmd/push.rs`, with shared strict tag peeling in `crab-git`. The sections
+below describe the remaining generic manifest publisher and historical designs;
+they do not document a selectable current CLI mode. Its remaining APIs and test
+callers are still being retired.
 
 -----
 
@@ -143,7 +144,7 @@ Cache/index hits are candidates only; they never replace origin proof.
     - [20.3 Adaptive Concurrency](#203-adaptive-concurrency)
     - [20.4 Adaptive Xorb Sizing](#204-adaptive-xorb-sizing)
     - [20.5 Cache-Service Dedup Tier](#205-cache-service-dedup-tier)
-    - [20.6 Native Push Orchestrator (`run_native_push`)](#206-native-push-orchestrator-run_native_push)
+    - [20.6 Retired Native Push Orchestrator](#206-retired-native-push-orchestrator)
     - [20.7 Push-State Tracking for Incremental Walks](#207-push-state-tracking-for-incremental-walks)
   - [21. Updated Source Map](#21-updated-source-map)
   - [22. Document Status Note](#22-document-status-note)
@@ -1536,7 +1537,7 @@ would walk only modified subtrees.
 
 **Current state:** `NativePushProgress` (see `crab/src/git/progress.rs`)
 reports phase transitions and per-file upload progress on stderr. The
-streaming packer in `push_native` emits structured progress events.
+retired Native entry emitted structured progress events.
 
 **Remaining gap:** Progress lines are not yet piped through the remote
 helper sideband to git, so stock `git push` (rather than
@@ -1545,7 +1546,7 @@ operations. This is a protocol surface issue rather than an instrumentation
 gap.
 
 **Source:** `crab/src/git/progress.rs`,
-`crab/src/git/push_native.rs`.
+the retired Native owner (historical).
 
 #### Open
 
@@ -1573,7 +1574,7 @@ can lock in a small target size for the rest of the push.
 
 **Proposed fix:** EMA with longer memory, or reset on push start.
 
-**Source:** `crab/src/git/push_native.rs` (`ThroughputMonitor`).
+**Source:** the retired Native owner (historical) (`ThroughputMonitor`).
 
 ### Bottleneck Priority Matrix
 
@@ -2267,7 +2268,7 @@ Backpressure events are counted in `push_stream_backpressure_events`.
 actually run by `run_push_batch` today; v1 remains as a regression
 baseline for tests.
 
-**Source:** `crab/src/git/push_native.rs`
+**Source:** the retired Native owner (historical)
 (`streaming_classify_pack_upload`, `streaming_packer_task`,
 `upload_workers`, `process_file_worker`).
 
@@ -2316,7 +2317,7 @@ Bounded by `min_xorb_size` and `max_xorb_size` (defaults 16 MiB / 256
 MiB). The controller needs 3+ observations before it adjusts; the first
 few xorbs always use the default size.
 
-**Source:** `crab/src/git/push_native.rs` (`ThroughputMonitor`).
+**Source:** the retired Native owner (historical) (`ThroughputMonitor`).
 
 ### 20.5 Cache-Service Dedup Tier
 
@@ -2350,28 +2351,11 @@ returning it as known.
 `crates/crab-cache/src/cache_client.rs`,
 `crab/src/git/push.rs` (`classify_chunks`, `upload_shard_and_file_index`).
 
-### 20.6 Native Push Orchestrator (`run_native_push`)
+### 20.6 Retired Native Push Orchestrator
 
-The remote helper route (`git push` → `git-remote-crab` →
-`run_push_batch`) is the default. A parallel `run_native_push` entry
-point in `push_native.rs` bypasses the remote helper protocol and
-drives the pipeline directly from CLI (`crab push-native`).
-
-Differences from the remote-helper route:
-
-- Full progress ticker on stderr (phase bars, per-phase ETA).
-- Streaming classifier → packer → uploader wired end-to-end.
-- Pre-populates the pipeline's walk via `phase_discover` so step 1
-  never re-walks.
-- Directly updates `.crab/push-state` on success.
-
-The two entry points converge into the same step 7–14 code in
-`PushPipeline::execute_inner`; the native orchestrator's advantage is
-that it feeds richer pre-computed state into the pipeline rather than
-reconstructing it from the remote-helper batch.
-
-**Source:** `crab/src/git/push_native.rs` (`run_native_push`,
-`phase_discover`, `update_push_state_on_success`).
+The separate Native entry, configuration, discovery orchestration and manifest
+fixtures are removed. Current CLI and helper publication use Capsule; the command
+owns annotated follow-tag selection. There is no separate push-native mode.
 
 ### 20.7 Push-State Tracking for Incremental Walks
 
@@ -2405,9 +2389,8 @@ This table supersedes §13 with entries for capabilities described in
 
 | Component | File | Key Functions |
 |-----------|------|---------------|
-| Native push orchestrator | `git/push_native.rs` | `run_native_push`, `phase_discover`, `streaming_classify_pack_upload` |
-| Streaming packer | `git/push_native.rs` | `streaming_packer_task`, `packer_task`, `upload_workers`, `process_file_worker` |
-| Throughput-adaptive sizing | `git/push_native.rs` | `ThroughputMonitor` |
+| Current Capsule publisher | `git/capsule_push.rs` | `run`, ref admission, physical Git preparation |
+| Current pointer payload publication | `git/xet_publication.rs` | `prepare_delta` |
 | Push-state persistence | `git/push_state.rs` | `PushState::load`, `set`, `save`, `last_pushed` |
 | Incremental walk | `git/incremental_walk.rs` | `walk_incremental`, `walk_tree_for_pointers` |
 | Adaptive compression | `storage/xorb/builder.rs` | `AdaptiveCompression`, `FixedCompression`, `CompressionPolicy` |

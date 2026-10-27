@@ -91,10 +91,11 @@ identity directly to `PushConfig`. Protected-push preparation can strengthen
 that same config before Capsule admission. Helper protocol replies remain on
 stdout; the final structured push result uses the existing JSONL stderr stream.
 
-Both the CLI and Git helper publish through `git::capsule_push`. The old
-`run_native_push` entry is currently used by legacy test fixtures; its API,
-publisher and fixtures remain scheduled for removal. Separating current chunk
-proof ownership enables that retirement without losing current reuse checks.
+Both the CLI and Git helper publish through `git::capsule_push`. The obsolete
+Native entry and its manifest fixtures are removed. Command-level follow-tag
+selection stays in `cmd::push`, using shared strict tag peeling and physical
+commit reachability. The generic manifest publisher and its remaining callers
+still require retirement; removing one entry does not complete pack-v1 removal.
 
 ### Direct object-store support contract
 
@@ -108,11 +109,11 @@ and ETag evidence before Crab claims provider parity.
 | Ref list / `git ls-remote` | Supported outside a local Git repository, without creating push state; an uninitialized remote reports `CRAB-E0032` with the `crab init <REMOTE>` recovery step, while malformed Capsule data fails as corruption | `git::remote_helper` admission and resolved-session tests | missing, valid, and malformed Capsule cases |
 | Clone | Supported | `remote_helper_transcript`, `e2e_fetch_fsck` | fresh ordinary-Git and `crab clone` cases |
 | Fetch into an existing clone | Supported | resolved helper session and `e2e_fetch_fsck` | second-clone branch update case |
-| Push / branch update | Supported | `e2e_add_commit_push`, helper transcript tests | ordinary Git and Crab CLI cases |
+| Push / branch update | Supported | current Capsule publisher and CLI smoke | ordinary Git and Crab CLI cases |
 | Force push | Supported when explicitly requested | push decision tests | force-update case |
-| Branch deletion | Supported | helper delete-ref tests | delete/list/fresh-clone case |
-| Atomic multi-ref push | Supported; one rejected ref aborts the batch | helper atomic-abort tests | two-ref rejection case |
-| `git push --follow-tags` / `crab push --follow-tags` | Supported; Git sends selected tag refs, while the native CLI discovers eligible annotated tags | native follow-tags and multi-ref manifest tests | annotated-tag object and ref verification |
+| Branch deletion | Supported | Capsule delete-policy tests | delete/list/fresh-clone case |
+| Atomic multi-ref push | Supported; one rejected ref aborts the batch | Capsule atomic-batch tests | two-ref rejection case |
+| `git push --follow-tags` / `crab push --follow-tags` | Supported; Git sends selected tag refs, while the native CLI discovers eligible annotated tags | command follow-tag and Capsule multi-ref tests | annotated-tag object and ref verification |
 | Fetch tag following (`option followtags`) | Supported by complete-pack installation | resolved helper session installs an annotated tag object | tag fetch/clone verification |
 | Remote-helper `include-tag` option | Unsupported; it is not a defined remote-helper option | option contract test | not advertised |
 | Depth-based shallow clone/fetch | Supported through a bounded commit-graph summary; requests beyond its retained edge safely complete as a full fetch | shallow fetch, compaction-edge, deepen, and unshallow tests | depth, deepen, and unshallow cases |

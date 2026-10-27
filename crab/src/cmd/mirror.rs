@@ -748,10 +748,7 @@ fn push_git_refs(
         ]
     };
 
-    let command = git_command_from_vec(args, Some(cache_dir), options, true).env(
-        crate::git::push_native::MIRROR_GIT_ONLY_ENV,
-        OsString::from("1"),
-    );
+    let command = git_command_from_vec(args, Some(cache_dir), options, true);
     run_required(runner, command, options.mode)?;
 
     Ok(())

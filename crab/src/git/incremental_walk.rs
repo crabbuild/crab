@@ -262,7 +262,7 @@ pub fn walk_incremental_with_hidden(
 
 /// Collect commit entries by walking all commits reachable from `new_sha`.
 /// Used by full-walk discovery and follow-tags reachability checks.
-pub(super) fn collect_entries_from_walk(git_dir: &Path, new_sha: &str) -> Result<Vec<CommitEntry>> {
+pub(crate) fn collect_entries_from_walk(git_dir: &Path, new_sha: &str) -> Result<Vec<CommitEntry>> {
     let objects_dir = git_dir.join("objects");
     if !objects_dir.is_dir() {
         return Ok(Vec::new());

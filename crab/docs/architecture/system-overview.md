@@ -130,7 +130,7 @@ crab/src/
 │   ├── clean.rs         Clean filter: content → pointer + staging
 │   ├── smudge.rs        Smudge filter: pointer → content
 │   ├── push.rs          14-step push pipeline orchestrator
-│   ├── push_native.rs   Native push (non-helper) entry point
+│   ├── capsule_push.rs  Capsule publication shared by CLI and remote helper
 │   ├── push_manifest.rs Manifest update during push
 │   ├── push_state.rs    Push state tracking
 │   ├── fetch.rs         Fetch pipeline: download packs + shards

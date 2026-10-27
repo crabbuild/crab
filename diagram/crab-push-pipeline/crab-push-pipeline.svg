@@ -69,7 +69,7 @@
 
   <text x="40" y="45" class="title">Crab push pipeline architecture</text>
   <text x="40" y="63" class="subtitle">Focus: git push / crab push, shared PushPipeline, immutable uploads, manifest commit, enterprise auth, and cache acceleration.</text>
-  <text x="40" y="78" class="subtitle">Source surfaces: crab/src/cmd/push.rs, crab/src/git/remote_helper.rs, crab/src/git/push_native.rs, crab/src/git/push.rs</text>
+  <text x="40" y="78" class="subtitle">Source surfaces: crab/src/cmd/push.rs, crab/src/git/remote_helper.rs, crab/src/git/capsule_push.rs, crab/src/git/push.rs</text>
 
   <!-- Region boundaries -->
   <rect x="40" y="200" width="280" height="360" rx="12" class="region" stroke="#22d3ee"/>

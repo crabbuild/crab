@@ -33,7 +33,6 @@ pub(crate) mod protected_push;
 pub mod push;
 #[cfg(feature = "gix-ref-edits")]
 pub mod push_edits;
-pub mod push_native;
 pub mod push_staging;
 pub mod remote_helper;
 pub mod shallow;
