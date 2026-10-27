@@ -375,11 +375,11 @@ invalid predecessor takes the existing complete-pack rebuild path; the owner
 reports that distinction as `commit_graph_incremental` versus
 `commit_graph_rebuild` so qualification can measure pack-read avoidance.
 
-`crab metadb rebuild` is the repository-scoped migration and repair boundary.
-It ignores the retired `git_locator_db/` namespace, reconstructs the catalog
-from manifest-pinned immutable packs, and publishes coverage only after every
-row and the exact visibility proof are durable. Re-running it is safe; an
-interrupted attempt never advances the digest-named checkpoint.
+Current `crab metadb` commands require Capsule authority. Rebuild captures one
+view inside the maintenance/GC fence, authenticates the complete metadata and
+content closure, and publishes a checkpoint by exact root CAS. It does not
+reconstruct manifest-backed locator databases or migrate retired namespaces.
+Missing or corrupt source bytes require verified history, a replica, or backup.
 
 Catalog writers disable SlateDB's periodic background garbage collector because
 each helper is short-lived and SlateDB's first timer tick runs immediately.

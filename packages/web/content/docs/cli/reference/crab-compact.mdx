@@ -30,8 +30,7 @@ For a v1 repository, the command retains the legacy standalone shard-list
 compare-and-swap path. A present but corrupt v2 root fails closed and is never
 treated as v1. Both paths hash-check downloaded and replacement shards, publish
 immutable candidates before authority changes, register their GC roots, and
-leave source shards for later garbage collection. It does not replace
-`crab metadb compact`, which addresses metadata-database maintenance.
+leave source shards for later garbage collection. For Capsule checkpoint maintenance, use `crab metadb owner` or `crab metadb rebuild`.
 
 For conceptual background, see [Compacting Data](/docs/cli/storage/compacting-data).
 

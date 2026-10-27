@@ -1478,7 +1478,7 @@ impl FsckRepairer for StoreRepairer {
                     debug!(
                         file_hash = %key,
                         "file-index repair: entry missing or stale in file_index_db, \
-                         use `crab metadb rebuild --db file_index` to regenerate"
+                         use `crab metadb diagnose --deep` to verify authoritative content"
                     );
                     Ok(false)
                 }

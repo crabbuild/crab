@@ -232,16 +232,10 @@ pub async fn run_cache_service_support_bundle(
     Ok(())
 }
 
-/// Run the metadb-focused health report (`crab doctor --metadb`).
+/// Report Capsule authority and local cache health for the current repository.
 ///
-/// Opens a short-lived [`MetaDbGuard`] against the current repo and
-/// prints a two-section summary: one per SlateDB instance plus a
-/// shard-count line derived from S3 LIST on `.crab/shards/`.
-///
-/// This is a read-only snapshot — no compaction trigger, no WAL
-/// replay. Failures during open map to a `Fail` line in the report
-/// rather than aborting, so operators running this in an incident
-/// still see what they can see.
+/// Missing or corrupt authority and unreadable caches return errors; diagnosis
+/// does not create metadata databases or scan the global shard namespace.
 pub async fn run_doctor_metadb(mode: OutputMode) -> Result<()> {
     let cwd = std::env::current_dir()?;
     crate::cmd::metadb::run_doctor_metadb_in(&cwd, mode).await

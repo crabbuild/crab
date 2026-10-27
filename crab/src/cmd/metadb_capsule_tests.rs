@@ -12,7 +12,7 @@ use crab_storage::{StorageObservation, StorageObserver, StorageOperation, Store,
 use object_store::{ObjectStoreExt, memory::InMemory};
 use tokio_util::sync::CancellationToken;
 
-use super::{CrabError, DbSelector, OutputMode, diagnose_capsule, run_capsule_rebuild_in};
+use super::{CrabError, OutputMode, diagnose_capsule, run_capsule_rebuild_in};
 
 const LIMIT: u64 = 8 * 1024 * 1024;
 
@@ -110,7 +110,7 @@ async fn layered_diagnosis_and_rebuild_verify_nonempty_repository_without_rewrit
         .unwrap();
     let before = root.record().digest().to_owned();
     assert_eq!(root.record().root().checkpoint().unwrap().format(), 9);
-    let diagnosis = diagnose_capsule(&layout, root.clone(), DbSelector::Both, true, &cancel)
+    let diagnosis = diagnose_capsule(&layout, root.clone(), true, &cancel)
         .await
         .unwrap();
     let deep = diagnosis.deep_integrity.unwrap();
@@ -121,7 +121,6 @@ async fn layered_diagnosis_and_rebuild_verify_nonempty_repository_without_rewrit
         &layout,
         root,
         layout.repo_prefix(),
-        DbSelector::Both,
         OutputMode::Text,
         &cancel,
     )
@@ -154,7 +153,6 @@ async fn rebuild_rejects_missing_reachable_file_before_publishing_checkpoint() {
         &layout,
         root,
         layout.repo_prefix(),
-        DbSelector::Both,
         OutputMode::Text,
         &CancellationToken::new(),
     )
@@ -189,7 +187,7 @@ async fn layered_metadata_verification_preserves_missing_source_failure() {
     .unwrap();
     let missing = layout.capsule_path(checkpoint.sources()[0].object_hash());
     layout.store().delete(&missing).await.unwrap();
-    let diagnosis = diagnose_capsule(&layout, root.clone(), DbSelector::Both, true, &cancel).await;
+    let diagnosis = diagnose_capsule(&layout, root.clone(), true, &cancel).await;
     assert!(matches!(
         diagnosis,
         Err(CrabError::NotFound { path }) if path == missing.as_ref()
@@ -198,7 +196,6 @@ async fn layered_metadata_verification_preserves_missing_source_failure() {
         &layout,
         root,
         layout.repo_prefix(),
-        DbSelector::Both,
         OutputMode::Text,
         &cancel,
     )
@@ -272,7 +269,7 @@ async fn layered_metadata_verification_rejects_corruption_outside_git_pack_range
     .await
     .unwrap();
     assert!(matches!(
-        diagnose_capsule(&layout, root.clone(), DbSelector::Both, true, &cancel).await,
+        diagnose_capsule(&layout, root.clone(), true, &cancel).await,
         Err(CrabError::CorruptObject { .. })
     ));
     assert!(matches!(
@@ -280,7 +277,6 @@ async fn layered_metadata_verification_rejects_corruption_outside_git_pack_range
             &layout,
             root,
             layout.repo_prefix(),
-            DbSelector::Both,
             OutputMode::Text,
             &cancel,
         )
@@ -342,4 +338,245 @@ async fn dependency_proof_admits_whole_source_bytes_before_object_reads() {
         "{proof:?}"
     );
     assert_eq!(requests.0.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rebuild_releases_both_fences_for_valid_missing_and_corrupt_authority() {
+    use futures_util::TryStreamExt;
+    for state in ["valid", "missing", "corrupt"] {
+        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let counted = Arc::new(crab_storage::test_support::CountingObjectStore::new(inner));
+        let store = crate::storage::Store::new(counted.clone());
+        let router = crate::storage::StoreLayout::new(store, format!("rebuild-{state}"));
+        let layout = StoreLayout::new(
+            router.store().as_storage().clone(),
+            router.repo_prefix().to_owned(),
+        );
+        match state {
+            "valid" => {
+                crab_write::capsule_protocol::initialize(
+                    &layout,
+                    &"1".repeat(64),
+                    "refs/heads/main",
+                )
+                .await
+                .unwrap();
+            }
+            "corrupt" => {
+                layout
+                    .store()
+                    .put(
+                        &layout.capsule_root_path(),
+                        Bytes::from_static(b"corrupt root"),
+                    )
+                    .await
+                    .unwrap();
+            }
+            _ => {}
+        }
+        counted.reset();
+        let result =
+            super::run_rebuild_in(&router, OutputMode::Text, &CancellationToken::new()).await;
+        match state {
+            "valid" => result.unwrap(),
+            "missing" => assert!(matches!(result, Err(CrabError::NotFound { .. }))),
+            "corrupt" => assert!(matches!(result, Err(CrabError::CorruptObject { .. }))),
+            _ => unreachable!(),
+        }
+        assert!(counted.requests().iter().all(
+            |request| !request.location.contains("file_index_db")
+                && !request.location.contains("chunk_index_db")
+                && !request.location.ends_with("manifest.json")
+        ));
+        let objects = router
+            .store()
+            .inner()
+            .list(None)
+            .try_collect::<Vec<_>>()
+            .await
+            .unwrap();
+        assert!(
+            objects
+                .iter()
+                .all(|object| !object.location.as_ref().contains("file_index_db")
+                    && !object.location.as_ref().contains("chunk_index_db"))
+        );
+        let lock_path = crab_coordination::internal_lock_path(
+            router.repo_prefix(),
+            crab_coordination::REPOSITORY_MAINTENANCE_RESOURCE,
+        )
+        .unwrap();
+        let body = router
+            .store()
+            .inner()
+            .get(&object_store::path::Path::from(lock_path))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        let lock: crab_coordination::PushLockPayload = serde_json::from_slice(&body).unwrap();
+        assert!(lock.is_released(), "{state}");
+        for domain in [router.global_prefix(), router.repo_prefix()] {
+            let sweep = crab_coordination::GcFenceLease::acquire_sweep(
+                router.store().inner(),
+                domain,
+                std::time::Duration::from_secs(60),
+            )
+            .await
+            .unwrap();
+            sweep.release().await.unwrap();
+        }
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn owner_requires_capsule_authority_before_claiming_lease_and_releases_success() {
+    for state in ["valid", "missing", "corrupt"] {
+        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
+        let counted = Arc::new(crab_storage::test_support::CountingObjectStore::new(inner));
+        let router = crate::storage::StoreLayout::new(
+            crate::storage::Store::new(counted.clone()),
+            format!("owner-{state}"),
+        );
+        let layout = StoreLayout::new(
+            router.store().as_storage().clone(),
+            router.repo_prefix().to_owned(),
+        );
+        match state {
+            "valid" => {
+                crab_write::capsule_protocol::initialize(
+                    &layout,
+                    &"1".repeat(64),
+                    "refs/heads/main",
+                )
+                .await
+                .unwrap();
+            }
+            "corrupt" => {
+                layout
+                    .store()
+                    .put(
+                        &layout.capsule_root_path(),
+                        Bytes::from_static(b"corrupt root"),
+                    )
+                    .await
+                    .unwrap();
+            }
+            _ => {}
+        }
+        counted.reset();
+        let result = super::run_generation_owner_in(
+            &router,
+            true,
+            30,
+            false,
+            std::time::Duration::from_secs(60),
+            &CancellationToken::new(),
+        )
+        .await;
+        match state {
+            "valid" => {
+                result.unwrap();
+                let next = crab_coordination::PushLock::acquire_internal(
+                    router.store().inner(),
+                    router.repo_prefix(),
+                    crab_coordination::GIT_GENERATION_OWNER_RESOURCE,
+                    std::time::Duration::from_secs(60),
+                )
+                .await
+                .unwrap();
+                next.release().await.unwrap();
+            }
+            "missing" => assert!(matches!(result, Err(CrabError::NotFound { .. }))),
+            "corrupt" => assert!(matches!(result, Err(CrabError::CorruptObject { .. }))),
+            _ => unreachable!(),
+        }
+        if state != "valid" {
+            assert_eq!(counted.put_requests(), 0, "{state}");
+            assert!(
+                counted
+                    .requests()
+                    .iter()
+                    .all(|request| request.location == layout.capsule_root_path().as_ref())
+            );
+        }
+    }
+}
+
+#[test]
+fn cache_diagnosis_rejects_corruption_without_replacing_bytes() {
+    let directory = tempfile::tempdir().unwrap();
+    let path = directory.path().join("cache.sqlite");
+    let bytes = b"this is not SQLite; diagnosis must preserve it";
+    std::fs::write(&path, bytes).unwrap();
+    assert!(super::cache_stats_for(&path).is_err());
+    assert_eq!(std::fs::read(&path).unwrap(), bytes);
+    assert_eq!(std::fs::read_dir(directory.path()).unwrap().count(), 1);
+}
+
+#[test]
+fn owner_storage_throttle_remains_retryable_with_provider_source() {
+    let error = super::map_capsule_owner_error(crab_remote::checkpoint::CheckpointError::Storage(
+        crab_storage::StorageError::Throttled {
+            retry_after: Some(std::time::Duration::from_secs(7)),
+            source: Some(object_store::Error::Generic {
+                store: "fixture",
+                source: std::io::Error::other("provider throttle").into(),
+            }),
+        },
+    ));
+    assert!(super::generation_owner_once_retryable(&error));
+    assert!(
+        matches!(&error, CrabError::Throttled { retry_after: Some(delay), .. } if *delay == std::time::Duration::from_secs(7))
+    );
+    let source = std::error::Error::source(&error).unwrap();
+    assert!(source.to_string().contains("provider throttle"));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn rebuild_does_not_capture_authority_before_maintenance_admission() {
+    let counted = Arc::new(crab_storage::test_support::CountingObjectStore::new(
+        Arc::new(InMemory::new()),
+    ));
+    let router = crate::storage::StoreLayout::new(
+        crate::storage::Store::new(counted.clone()),
+        "rebuild-fence-order".to_owned(),
+    );
+    let layout = StoreLayout::new(
+        router.store().as_storage().clone(),
+        router.repo_prefix().to_owned(),
+    );
+    crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+        .await
+        .unwrap();
+    let cancel = CancellationToken::new();
+    let blocker = crate::maintenance::RepositoryMaintenanceLease::acquire(
+        router.store(),
+        router.global_prefix(),
+        router.repo_prefix(),
+        &cancel,
+    )
+    .await
+    .unwrap();
+    counted.reset();
+    let result = super::run_rebuild_in(&router, OutputMode::Text, &cancel).await;
+    assert!(matches!(result, Err(CrabError::PushLockHeld { .. })));
+    assert!(
+        counted
+            .requests()
+            .iter()
+            .all(|request| request.location != layout.capsule_root_path().as_ref())
+    );
+    layout
+        .store()
+        .put_overwrite(
+            &layout.capsule_root_path(),
+            Bytes::from_static(b"changed to corrupt authority while admission blocked"),
+        )
+        .await
+        .unwrap();
+    blocker.release().await.unwrap();
+    let result = super::run_rebuild_in(&router, OutputMode::Text, &cancel).await;
+    assert!(matches!(result, Err(CrabError::CorruptObject { .. })));
 }

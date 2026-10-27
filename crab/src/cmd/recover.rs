@@ -1853,7 +1853,7 @@ fn inventory_only_message(item_kind: RecoverItemKind) -> &'static str {
             "pack reference recorded; restore the Git pack from a healthy replica or source remote"
         }
         RecoverItemKind::FileIndex => {
-            "file-index mapping recorded; after shard objects are present, rerun with `--rebuild-file-index` or use `crab metadb rebuild --db file_index`"
+            "file-index mapping recorded; after shard objects are present, rerun with `--rebuild-file-index` or use `crab metadb rebuild`"
         }
         RecoverItemKind::File => {
             "metadata reference recorded for inspection; recover apply does not repair remote metadata"
@@ -1874,8 +1874,7 @@ async fn file_index_metadata_repairs(
         .iter()
         .map(|entry| (entry.file_hash, entry.shard_hash))
         .collect();
-    let verified =
-        crate::cmd::metadb::rebuild_file_index_for_current_repo_and_verify(&entries).await?;
+    let verified = crate::cmd::metadb::verify_current_file_shard_bindings(&entries).await?;
 
     for (entry, matches_plan) in planned_entries.into_iter().zip(verified.into_iter()) {
         states[entry.item_index] = Some(if matches_plan {
@@ -3956,7 +3955,7 @@ mod tests {
         assert_eq!(
             result.items[0].message.as_deref(),
             Some(
-                "file-index mapping recorded; after shard objects are present, rerun with `--rebuild-file-index` or use `crab metadb rebuild --db file_index`"
+                "file-index mapping recorded; after shard objects are present, rerun with `--rebuild-file-index` or use `crab metadb rebuild`"
             )
         );
         Ok(())

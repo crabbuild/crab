@@ -288,9 +288,10 @@ a supported current generation predates that ordering or loses derived
 coverage, upload-pack can rebuild the proof from generation-pinned locator data
 before advertising v2. The repair reads commit, tree, and tag objects once;
 blob IDs come from verified
-tree entries, so blob bodies are not downloaded. Repack, history recovery, and
-`crab metadb rebuild` also rebuild visibility. `crab doctor --metadb` reports
-locator and visibility coverage separately. `crab fsck --store` checks current
+tree entries, so blob bodies are not downloaded. Current Capsule `crab metadb rebuild` verifies embedded visibility and the full
+content closure before publishing a checkpoint. `crab doctor --metadb` reports
+Capsule authority and read-only local cache health; it does not open the
+manifest-backed locator or report separate legacy coverage. `crab fsck --store` checks current
 and historical proof roots; `crab fsck --store --repair` verifies the historical
 pack closure and idempotently backfills missing roots. Until repair completes,
 v2 stays disabled for that repository.

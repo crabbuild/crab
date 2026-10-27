@@ -1,6 +1,6 @@
 ---
 title: "crab metadb"
-description: "Diagnose, rebuild, own, compact, and inspect Crab metadata databases."
+description: "Diagnose Capsule metadata, verify content, maintain checkpoints, and inspect the local cache."
 meta:
   contentType: Reference
   goal: "Find the supported syntax and behavior for crab metadb."
@@ -9,62 +9,84 @@ meta:
 
 # crab metadb
 
-Administer the local and durable metadata databases used by Crab's chunk and
-repository indexes.
+Inspect and maintain the Capsule v2 authority selected by `v2/root` and its
+transaction-consistent ref heads. Missing or corrupt authority returns an error.
 
 ## Synopsis
 
 ```bash
-crab metadb <SUBCOMMAND> [OPTIONS]
+crab metadb diagnose [--deep] [--json]
+crab metadb rebuild [--json]
+crab metadb owner [--once] [--interval SECONDS] [--jsonl]
+crab metadb cache stats
+crab metadb cache clear
 ```
 
 ## Subcommands
 
 | Command | Purpose |
 | --- | --- |
-| `diagnose` | Print `sys:*` key snapshots for one or both databases |
-| `rebuild` | Validate manifest-named shards and packs, then rebuild generation-bound index evidence |
-| `owner` | Continuously publish Git locator checkpoints and visibility proofs |
-| `compact` | Run SlateDB's size-tiered compactor until current eligible work drains |
-| `cache` | Inspect or transactionally clear the local chunk-index cache |
+| `diagnose` | Authenticate root/ref state; add `--deep` to verify the complete reachable metadata and content closure |
+| `rebuild` | Verify complete content and publish a checkpoint from the captured view |
+| `owner` | Continuously checkpoint and repack eligible Capsule state |
+| `cache stats` | Inspect SQLite counts and database-file size through a read-only connection |
+| `cache clear` | Remove the local SQLite database file after processes using it have stopped |
 
-Use the subcommand's `--help` output for database selectors and cache-specific
-options. Rebuild and cache-clear operations can be expensive; run diagnostics
-first and keep a backup of the durable remote data.
+The `--db` selector and `metadb compact` are removed. Capsule catalogs are one
+authenticated unit. `crab optimize indexes diagnose` and `rebuild` use the same
+implementations. [`crab compact`](/docs/cli/reference/crab-compact) consolidates
+remote shards separately.
 
-`compact` holds a renewable repository maintenance lease and exits non-zero on
-cancellation, an already-active compaction, or a new SlateDB compaction failure.
-`cache stats` is read-only; `cache clear` preserves the SQLite file, schema, and
-GC cursor while removing cached chunk and shard rows.
-
-`rebuild` streams each manifest-named Xet shard through a temporary maintenance
-file, verifies its content hash, and parses only the selected index sections.
-This keeps full shard bodies out of the rebuild process heap; selecting one
-database also avoids decoding the other index.
+## Diagnosis and rebuild
 
 ```bash
-crab metadb diagnose
-crab metadb owner --once
-crab metadb cache stats
-crab metadb compact
+crab metadb diagnose --deep --json
+crab doctor --metadb --json
+crab metadb rebuild --json
 ```
 
-For a team repository, run one continuous owner from a supervised checkout:
+Default diagnosis reads root/ref authority without stable pack bodies. Deep
+diagnosis validates catalogs, shards, xorbs, visibility, and the reachable Git
+closure, then rejects a result if repository activity changed during the check.
+Doctor reports Capsule authority and local cache health; unreadable or corrupt
+caches fail instead of appearing absent.
+
+Rebuild acquires maintenance and GC writer fences before capturing authority.
+It validates the complete closure before no-op success or checkpoint publication.
+Root compare-and-swap rejects conflicting maintenance; concurrent ref updates
+remain as an authenticated suffix. An empty repository or already covered
+frontier needs no checkpoint. JSON reports publication and verified counts;
+legacy index-write counters remain zero. Rebuild cannot restore missing source
+bytes or invent catalog entries from unrelated bucket objects.
+
+## Continuous maintenance
 
 ```bash
 crab metadb owner --interval 30 --jsonl
+crab metadb owner --once
 ```
 
-Push clients then hand generation-bound Git locator publication to that owner.
-The continuous owner always drains committed ref-journal transactions first.
-After a drain, it observes an elapsed quiet window of at least one polling interval
-and five seconds before starting repository-sized catalog, commit-graph, or repack
-work. Sustained pushes
-therefore keep ref publication bounded instead of competing with background
-maintenance. `--once` remains eager for explicit operator maintenance.
-The default idle polling cost is 2,880 manifest reads per repository per day,
-plus two renewable object-store leases and a ten-minute derived-state
-revalidation. Between revalidations, an unchanged manifest identity reports the
-last verified maintenance snapshot without reopening the repository catalog.
-Increase `--interval` when storage request cost matters more than the delay
-before protocol-v2 fetch becomes available for a new generation.
+Run one owner under a process supervisor. It requires valid Capsule authority,
+holds a renewable exclusive owner lease, and drains cooperative cancellation
+before release. A second owner fails lease acquisition.
+
+The continuous owner waits for unchanged root/ref activity for at least one
+polling interval and five seconds. It checkpoints a frontier of at least 32
+capsules and revisits multi-pack checkpoints for physical repacking. `--once`
+eagerly maintains a nonempty Git frontier. Stable completed state is reused for
+up to ten minutes before full maintenance revalidation; quiet polls still read
+independently mutable ref heads, so cost scales with ref count.
+
+JSONL identifies the action, reason, eligibility, generation, and whether pack
+inventory was loaded. Zero pack counts with `inventory_loaded: false` do not
+mean the repository is empty. Legacy locator and graph work counters stay zero.
+
+## Local cache
+
+Stats never creates, migrates, or repairs the cache, and does not materialize
+all chunk rows. It reports the main database-file size, excluding WAL and
+shared-memory sidecars. Stop Crab processes using the bucket before `cache
+clear`: the current command unlinks the SQLite file and requires a cold reopen.
+It does not change remote content.
+
+For recovery guidance, see [Metadata diagnostics](/docs/cli/diagnostics/metadata-database).

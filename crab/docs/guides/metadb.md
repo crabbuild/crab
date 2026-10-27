@@ -1,439 +1,123 @@
 # crab metadb
 
-Inspect, repair, and manage Crab's repository metadata.
+Inspect Capsule v2 authority, verify reachable content, and maintain checkpoints.
 
-## Overview
+## Repository authority
 
-Protocol v2 carries its authenticated Git and Xet catalogs in checkpoints and
-capsules selected by `v2/root`; it does not use SlateDB as repository authority.
-Protocol v1 uses two SlateDB instances that accelerate committed manifest
-state. A per-repo `file_index_db` at
-`{repo_prefix}/file_index_db/` holds generation-pinned file-to-shard records.
-A globally shared `chunk_index_db` at `.crab/chunk_index_db/` holds immutable
-committed chunk receipts plus a rebuildable point-readable head per chunk. A
-local two-tier chunk-index cache (in-memory + SQLite) sits in front of the
-remote chunk-index. Every lookup remains a candidate until its manifest,
-GC-root, shard, and canonical-origin proof succeeds. This guide is for operators running the
-`crab metadb` subcommands to diagnose problems, repair corruption,
-and inspect state.
-
-Architecture detail lives in
-[docs/architecture/metadata-subsystem.md](../architecture/metadata-subsystem.md).
+Metadata commands require a valid `v2/root`. They capture the root and
+transaction-consistent ref heads, then use the catalogs selected by that view.
+Missing or corrupt authority returns an error. Commands never interpret an
+absent root as a manifest-v1 repository or reconstruct authority by listing
+unrelated bucket objects.
 
 ## Synopsis
 
+```bash
+crab metadb diagnose [--deep] [--json]
+crab metadb rebuild [--json]
+crab metadb owner [--once] [--interval SECONDS] [--jsonl]
+crab metadb cache stats
+crab metadb cache clear
+crab doctor --metadb [--json]
 ```
-crab metadb diagnose [--db file_index|chunk_index|both] [--deep] [--json]
-crab metadb rebuild  --db  file_index|chunk_index|both  [--json]
-crab metadb owner    [--once] [--interval SECONDS] [--jsonl]
-crab metadb compact  [--db file_index|chunk_index|both]
-crab metadb cache    stats
-crab metadb cache    clear
-```
 
-`--db` defaults to `both` everywhere it is accepted.
+The former `--db` selector and `metadb compact` command are removed. File,
+shard, xorb, visibility, and Git metadata form one authenticated correctness
+unit. `crab optimize indexes diagnose` and `rebuild` call the same implementations.
+Shard compaction remains a separate `crab compact` operation.
 
-## Subcommands
-
-### `crab metadb diagnose`
-
-Read-only health snapshot selected by repository authority. A present v2 root
-is exclusive: the default probe authenticates the root and transaction-consistent
-ref heads without downloading stable capsule, checkpoint, or Git-pack bodies.
-It reports generation, root and state digests, visible refs and capsules, and
-checkpoint presence. A corrupt v2 root fails closed instead of falling back to
-SlateDB.
-
-For a repository without a v2 root, diagnose reads the v1 `sys:*` keys (format
-version, epoch, created_at, and — for `chunk_index_db` — `gc_generation`) and
-reports each database's open state and path.
+## Diagnose
 
 ```bash
-crab metadb diagnose
-crab metadb diagnose --db chunk_index
-crab metadb diagnose --db file_index --json
+crab metadb diagnose --json
+crab metadb diagnose --deep --json
+crab doctor --metadb --json
 ```
 
-Safe to run concurrently with a push: v2 captures a stable ref-head view, while
-v1 opens each SlateDB in read-only mode. Neither path fences an in-flight writer.
-`--json` emits a `DiagnosePayload` structure suitable for scripting.
+The default diagnosis authenticates root and ref-head state without downloading
+stable capsule, checkpoint, or Git-pack bodies. It reports `protocol: capsule-v2`,
+generation, root and state digests, visible refs and capsules, and checkpoint
+presence. `doctor --metadb` reports the same authority and local cache health.
+Configuration, storage, authority, and cache errors produce non-zero exits;
+they are not reported as uninitialized databases or absent caches.
 
-For v2, `--deep` authenticates the complete checkpoint and capsule frontier,
-pointer catalog, visibility proof, and embedded Git packs from one captured
-view. It also fully reads and verifies every catalogued shard and xorb, installs
-the Git packs in a temporary repository, and proves the complete current Git
-closure with strict fsck/repack validation. A final payload-free activity probe
-rejects a diagnosis if the repository changed during those checks. The `--db`
-selector limits whether file- and xorb-entry counts are reported; shards are
-always checked because they join those catalogs.
+Deep diagnosis opens one captured view, authenticates its metadata and Git
+visibility, verifies catalogued shards and xorbs, and reconstructs and checks the
+reachable Git closure. A final activity probe rejects the result if repository
+state changed during verification. Retry against a stable repository view.
+Diagnosis does not change remote authority or acquire a writer fence.
 
-For v1, `--deep` scans every key/value row and enumerates the backing object
-store. The verdict also flags malformed compacted-SST names (SlateDB
-requires 26-character ULIDs), so an orphaned or legacy object is reported as
-a warning instead of being mistaken for a clean database. Diagnosis never
-deletes remote objects; use the provider's retention/GC procedure after
-reviewing the reported path.
-
-Use `diagnose` to verify the selected repository authority and its derived
-catalogs. On v1 it also checks an index epoch against the manifest and the
-remote `gc_generation` used by the local cache.
-
-### `crab metadb rebuild`
-
-Authority-selected metadata reconstruction and verification. For v2, rebuild
-opens one authenticated root/ref view, validates its complete pointer and Git
-visibility catalogs, fully reads and verifies every canonical shard and xorb,
-strictly reconstructs the Git closure, and publishes a complete checkpoint
-from that exact view. Checkpoint publication uses the root CAS; a competing
-maintenance root causes the command to fail retriably, while concurrent ref
-pushes remain as an authenticated suffix. The command never creates a v1
-manifest or SlateDB database after selecting v2.
-
-V2 catalogs are a single correctness unit, so `--db file_index` and
-`--db chunk_index` still verify and checkpoint the complete catalog. Structured
-output identifies `protocol: capsule-v2`, whether a checkpoint was published,
-and the verified file, shard, xorb, pack, and Git-object counts.
-
-For v1, rebuild reconstructs acceleration records from only the shards and Git
-packs named by the current manifest's segmented indexes. It writes
-generation-pinned file records, candidate chunk records, exact Git object locators,
-and a generation-index receipt tied to the committed pack/shard index hashes.
+## Rebuild
 
 ```bash
-crab metadb rebuild --db chunk_index
-crab metadb rebuild --db file_index
-crab metadb rebuild --db both
+crab metadb rebuild --json
 ```
 
-Rebuild is idempotent and restartable. V2 retries reuse content-addressed
-checkpoint/history objects and publish only through an exact root CAS. V1
-repeated runs produce the same receipt history and point-readable heads. Any
-validation failure or cancellation exits non-zero without publishing new
-authority.
+Rebuild acquires repository maintenance and GC writer fences before capturing
+its root. It verifies the complete content closure before publishing a
+checkpoint, and releases its leases on success or error. Publication uses
+compare-and-swap against that exact root. A conflicting root change returns an
+error; concurrent ref updates remain as an authenticated suffix.
 
-The following shard-replay details apply to v1. It validates every
-manifest-named shard, xorb placement, and Git pack before publishing generation
-evidence. A failure retains legacy rows and leaves the generation receipt
-unpublished.
+An empty repository, or a checkpoint already covering the visible capsule
+frontier, needs no new checkpoint. The JSON result reports
+`checkpoint_published` and verified file, shard, xorb, pack, and Git-object counts.
+Existing index-write counters remain zero: this command does not write SlateDB
+indexes. Repeating rebuild reuses immutable content-addressed objects.
 
-Shard validation is disk-backed. Rebuild downloads one manifest-named shard at
-a time into the maintenance cache, verifies its Xet hash, and parses its
-file/chunk sections from the temporary file. `--db file_index` and
-`--db chunk_index` avoid decoding the other index's entries.
+Rebuild cannot restore missing or corrupt authoritative metadata or payloads.
+Recover those bytes from verified retained history, a replica, or a backup,
+then rerun deep diagnosis. It never invents file bindings by scanning a bucket.
 
-For v1, rebuild is also the repair path after a crash between manifest CAS and
-post-CAS acceleration indexing. It never scans or advertises orphan shards
-outside the current manifest. See
-[When to use `rebuild`](#when-to-use-rebuild) below for the specific
-scenarios.
-
-`--json` emits a `RebuildReport` summarizing shards, Git packs, and entries.
-`crab doctor --metadb` reports the generation receipt, repo/bucket registry
-completeness, and Git locator availability, and names the applicable repair
-command.
-
-### `crab metadb owner`
-
-Run one durable derived-state owner for a repository. Authority selection is
-format-strict: a present v2 root selects capsule maintenance, while an absent
-v2 root selects the legacy manifest path. A corrupt v2 root fails closed and
-never falls back to or creates a legacy manifest.
-
-For v2, the continuous owner fingerprints one transaction-consistent root/ref
-view and waits until it is unchanged for one configured interval. An eligible
-cycle checkpoints the authenticated capsule frontier once it reaches 32
-capsules. The already-pinned view is reused for consolidation and exact-root
-CAS publication, avoiding a duplicate root/ref-head capture; a concurrent push
-wins cleanly and a later owner pass retries from its newer authority. `--once`
-eagerly checkpoints any non-empty Git-pack frontier. Git visibility, object
-locations, and Xet pointer catalogs are carried inside the verified checkpoint;
-the owner does not publish v1 locator, graph, receipt, or manifest objects.
-
-For v1, the continuous owner fingerprints the manifest and active ref
-transactions, then waits until that activity is unchanged for one configured
-interval before it begins maintenance. Each eligible cycle pins one manifest
-snapshot and performs bounded maintenance: advance the object catalog, repair
-visibility, rebuild or compact the split commit graph, rebuild the
-shallow-closure index, or roll up the smallest non-geometric pack suffix.
-An eligible pack suffix is repacked before commit-graph or shallow-closure
-rebuilding when both the object catalog and visibility proof cover the pinned
-generation. Stale catalog coverage is advanced first because bounded repack
-uses it to materialize any REF_DELTA bases discovered in the selected packs.
-A pending catalog-bound visibility handoff is completed before repack, which
-then stages its own zero-edit handoff to preserve incremental ref history across
-the new pack-index identity without serializing the repository's OID dictionary.
-Folding an active ref journal completes that cycle and restarts the quiet window
-before repack or derived work. Repeated bounded
-cycles observe the configured poll interval, so pack convergence cannot
-monopolize the owner or continuously contend with foreground writes. Any
-manifest or active-transaction change restarts the quiet window; `--once`
-remains eager for an operator-approved maintenance window. Derived indexes are
-rebuilt once the pack inventory converges instead of
-being invalidated and rebuilt between successive rollups. A budget-deferred
-rollup does not block catalog, visibility, or graph repair. Canonical disjoint
-packs retain their already-validated entry bodies: the owner rechecks immutable
-pack identity and committed sidecars, then rebuilds the aggregate index while
-copying bodies once instead of inflating every historical tree again. Graph
-When overlapping selected packs require a native rewrite, the owner scans their
-entry headers, reads only the referenced delta-base objects, repairs each thin
-source pack, and verifies that the self-contained replacement preserves exactly
-the selected object set. Graph maintenance
-never shares a cycle with shallow-closure rebuilding, so a large repository
-cannot let one poll monopolize the owner lease. The locator
-writer and its lease are opened only for catalog work and are closed before
-repository-sized graph or pack work begins. Push and upload-pack clients detect
-the repository owner and leave repair to it; complete-pack fetch remains the
-safe fallback while a new generation is being indexed.
+## Repository owner
 
 ```bash
-crab metadb owner
-crab metadb owner --interval 60 --jsonl
+crab metadb owner --interval 30 --jsonl
 crab metadb owner --once
 ```
 
-Run the continuous form under a process supervisor with the same repository
-configuration and object-store credentials as `crab push`. Exactly one owner
-may run per repository. A second process exits because it cannot acquire the
-owner lease. SIGINT/SIGTERM closes SlateDB and releases both leases before exit;
-expired leases remain reclaimable after a process or host failure.
+Run one continuous owner under a process supervisor with the repository's
+configuration and credentials. It requires valid Capsule authority before
+claiming the exclusive owner lease. The lease renews every third of its TTL;
+cooperative cancellation drains work before release.
 
-The default 30-second poll bounds normal derived-state lag to roughly one
-interval per pending action after foreground activity becomes quiet. An active
-v1 repository reads only the manifest and bounded active-transaction inventory
-on each poll; it does not enter journal compaction, catalog, graph, or repack
-work. A v2 poll captures every independently mutable ref head so its quiet
-decision covers per-ref publication that does not advance the compacted root;
-this is exact but its request cost currently scales with ref count. An unchanged
-repository does not download stable pack bodies. The
-repository-owner lease is renewed every one-third of the configured
-push-lock TTL; the shorter locator lease is acquired only while advancing its
-SlateDB catalog. Choose a longer interval for low-traffic repositories; choose
-a shorter interval only when lower repair or maintenance lag justifies the
-additional metadata requests.
+The continuous owner waits for unchanged root/ref activity for at least one
+polling interval and five seconds. At 32 visible capsules it checkpoints the
+frontier; a multi-pack checkpoint can also trigger physical repacking. `--once`
+eagerly maintains a nonempty Git frontier. An already checkpointed empty suffix
+is a no-op. The captured view is reused for exact-root publication.
 
-For large existing packs, owner catalog publication verifies the pack indexes
-and locator ranges without downloading covered stable pack bodies. New or
-rebound packs are scanned once to fill optional object-kind metadata. New
-publications write the ordinal-keyed kind sidecar together with the object and
-reverse-ordinal rows. A complete sidecar lets fresh kind-only filters select
-ordinals without a second OID-family lookup; a filtered request whose selected
-rows lack kind metadata falls back to the bounded canonical planner. Direct
-pushes continue to publish kinds for newly introduced objects when the local
-Git source is available.
+An unchanged completed view is reused for up to ten minutes before full
+maintenance revalidation. Quiet polls still capture independently mutable ref
+heads, so request cost scales with ref count. Stable pack bodies are not
+fetched on each poll. No manifest, locator, graph, or legacy receipt is written.
 
-The locator writer also maintains a derived pack-slot membership index for
-stale-pack cleanup. It scans only memberships for slots absent from the
-current manifest, then validates and removes their canonical OID, ordinal, and
-metadata rows. If the completion marker is absent on a historical catalog, the
-owner rebuilds this derived index once. An interrupted rebuild leaves an
-explicit in-progress marker and cannot advance catalog coverage until every
-retained pack has replayed; readers and the manifest never depend on it.
+JSONL reports `protocol`, action, maintenance reason, next eligibility, inventory
+availability, generation, pack counts, and elapsed time. Existing locator,
+catalog-layer, and commit-graph work counters are zero under Capsule. When
+`inventory_loaded` is false, zero pack counts mean inventory was not loaded.
 
-When a current generation is missing its split commit graph but the immediately
-previous generation has a validated graph, the owner reads only the new commit
-closure through the pinned remote-Git operation and appends one immutable graph
-layer. The JSONL action is `commit_graph_incremental` and its maintenance byte
-counters cover the remote commit payloads and newly written graph objects. If a
-valid predecessor is unavailable, the owner uses the complete pack-materializing
-rebuild once; later generations can return to the incremental path.
-
-`--once` executes one decision, not the entire backlog. Repeat it until
-`action` is `none`, or run the continuous owner. `--jsonl` emits one record per
-sample with the selected action, stable `maintenance_reason`,
-`next_eligibility_secs` (`0` when the owner immediately rechecks a superseded
-generation), `protocol`, `inventory_loaded`, active pack count/bytes, geometric
-roll-up size, catalog and
-commit-graph layer count/bytes, maintenance bytes read and written, visibility
-state, supersession, and elapsed time. The reason values are operational
-labels, not user-controlled repository names: for example,
-`catalog_coverage_stale`, `commit_graph_layers_due`,
-`shallow_closure_missing`, `geometric_pack_threshold`, and
-`capsule_frontier_threshold`. A payload-free v2 quiet/no-op poll reports
-`inventory_loaded: false`; its zero pack counters mean the pack inventory was
-deliberately not downloaded, not that the repository is empty.
-
-### `crab metadb compact`
-
-Request immediate SlateDB compaction on one or both databases.
-
-```bash
-crab metadb compact
-crab metadb compact --db chunk_index
-```
-
-The command acquires a renewable repository maintenance lease, starts
-SlateDB's size-tiered compactor immediately, and waits until the currently
-eligible work has drained. When `--db both` is selected, it compacts the
-per-repository file index first and the bucket-shared chunk index second. It
-rejects an already-active compaction and exits non-zero on cancellation or a
-new compaction failure. An already policy-satisfied database is reported as a
-truthful no-op.
-
-### `crab metadb cache stats`
-
-Report on the local chunk-index cache.
+## Local cache
 
 ```bash
 crab metadb cache stats
 ```
 
-Prints the SQLite cache path, combined database/WAL/shared-memory size, entry
-count, installed shard count, and the `cache_gc_generation` cursor. Inspection
-uses a read-only connection: it does not create, migrate, repair, or load all
-cache rows into memory. A configured `metadb.chunk_index.local_path` is honored.
-Useful before
-running `cache clear` (to know what you're wiping) and for
-troubleshooting "push is slow / no dedup" reports.
-
-### `crab metadb cache clear`
-
-Clear chunk and shard rows in the local chunk-index SQLite database at
-`~/.cache/crab/buckets/{bucket-hash}/chunk-index.sqlite`.
+Stats reports the bucket-scoped SQLite path, database-file size, chunk count,
+installed shard count, and GC generation cursor. It uses the existing read-only
+inspection API and SQL counts, without loading all chunk rows or opening a
+writer-capable shared handle. A missing file reports an absent cache; unreadable
+or invalid files return errors without replacement or repair. The size is the
+main SQLite file, excluding WAL and shared-memory sidecars.
 
 ```bash
 crab metadb cache clear
 ```
 
-Forces a cold re-warm on the next operation: the next push falls
-through to `chunk_index_db` on every classification miss until the
-cache refills. Useful when the cache is suspected of drift or
-corruption, or when you want to force a clean starting point for
-a benchmark. The remote state is untouched. The SQLite file, schema, and GC
-generation cursor are preserved so live process-shared handles remain valid.
+Stop Crab processes using this bucket before clearing. The current command
+removes the local SQLite database file, forcing a cold cache on the next
+operation. It does not modify remote content. Coordinating clear with live
+SQLite handles and sidecars remains a separate lifecycle hardening task.
 
-## When to use `rebuild`
-
-Use rebuild when authenticated metadata is healthy enough to enumerate its
-durable closure but derived or checkpoint state needs reconstruction. For v2,
-missing or corrupt authoritative capsules/checkpoints require retained history,
-a verified replica, or backup recovery; rebuild never invents catalog entries
-by scanning unrelated bucket objects. Typical v1 triggers include:
-
-- `crab metadb diagnose` reports a manifest or WAL read failure.
-- `crab push` reports that refs committed but post-CAS MetaDB indexing needs
-  repair.
-- A `{repo_prefix}/file_index_db/` or `.crab/chunk_index_db/`
-  prefix was accidentally deleted from the bucket.
-
-Unversioned rows inside the current SlateDB namespaces are retired only after
-every manifest-named shard has been verified and rebuilt successfully. Objects
-from pre-SlateDB test layouts such as `{repo_prefix}/file-index/{hash}` remain
-outside this migration and are ignored.
-
-## Troubleshooting
-
-| Symptom | Likely cause | Action |
-|---------|--------------|--------|
-| `push` fails with `MetaDbError::Open` | SlateDB manifest unreadable or S3 credentials / path wrong | Run `crab doctor --metadb` to see which database failed and the underlying error. Check the AWS credentials for the session and that the `.crab/chunk_index_db/` and `{repo_prefix}/file_index_db/` prefixes are readable. If the error is corruption, `crab metadb rebuild --db <affected>`. |
-| `hydrate` reports `FileNotFoundInFileIndexDb` | Either the file was never pushed, or `file_index_db` is missing entries | First verify the file was pushed: look for a shard entry naming that `file_hash` under `.crab/shards/`. If the shard exists but the entry is missing, `crab metadb rebuild --db file_index` repopulates from the shards. |
-| Push is slow and xet says nothing deduped | Local cache is empty or was wiped | Run `crab pull` (or `crab fetch`) to warm the cache via shard sync, then retry. Verify with `crab metadb cache stats` — after a pull, the entry count and installed shard count should both be non-zero. |
-| `crab metadb cache stats` shows the cache was wiped unexpectedly | Remote `sys:gc_generation` drifted beyond `cache_gc_grace` after `crab gc` ran | Expected behavior. GC bumps the remote generation so stale clients know to re-validate; when the drift exceeds the grace window the cache is wiped. The cache refills on the next `crab pull` / `crab push`. Increase `metadb.chunk_index.cache_gc_grace` if you want more headroom. |
-| `compact` reports that policy is already satisfied | SlateDB has no currently eligible size-tiered work | No action is needed. The command only starts a foreground worker when the scheduler proposes work. |
-
-For anything not covered here, `crab doctor --metadb` gives a
-per-database tabular report (path, open state, epoch, SSTable count,
-WAL segment count, shard count via S3 LIST) that usually isolates
-the problem to one database.
-
-## Configuration
-
-All tunables live under the `[metadb]` section of the crab config
-(`.crab/local.toml` or the user-level config at
-`~/.config/crab/config.toml`) and can be overridden by
-`CRAB_METADB_*` environment variables.
-
-```toml
-[metadb.file_index]
-# path                  = "{repo_prefix}/file_index_db/"   # derived
-compaction_threshold    = 4
-wal_flush_size          = 4194304                          # 4 MiB
-bloom_bits_per_key      = 10
-
-[metadb.chunk_index]
-# path                  = ".crab/chunk_index_db/"        # derived
-compaction_threshold    = 4
-wal_flush_size          = 4194304                          # 4 MiB
-bloom_bits_per_key      = 10
-# local_path            = "~/.cache/crab/..."             # derived
-in_memory_ceiling_bytes = 1073741824                        # 1 GiB
-cache_gc_grace          = 3
-```
-
-Leave a field unset to use the derived default shown in comments.
-The shipped `wal_flush_size` key controls SlateDB's L0 SST target size; Crab
-performs WAL durability flushes explicitly at commit boundaries. File-index and
-chunk-index tuning is applied independently, including to foreground
-`metadb compact` workers. Values must be non-zero.
-
-### Environment variables
-
-Each TOML field is mirrored by an `CRAB_METADB_*` environment
-variable:
-
-| Variable | Maps to |
-|----------|---------|
-| `CRAB_METADB_FILE_INDEX_PATH` | `metadb.file_index.path` |
-| `CRAB_METADB_FILE_INDEX_COMPACTION_THRESHOLD` | `metadb.file_index.compaction_threshold` |
-| `CRAB_METADB_FILE_INDEX_WAL_FLUSH_SIZE` | `metadb.file_index.wal_flush_size` |
-| `CRAB_METADB_FILE_INDEX_BLOOM_BITS_PER_KEY` | `metadb.file_index.bloom_bits_per_key` |
-| `CRAB_METADB_CHUNK_INDEX_PATH` | `metadb.chunk_index.path` |
-| `CRAB_METADB_CHUNK_INDEX_COMPACTION_THRESHOLD` | `metadb.chunk_index.compaction_threshold` |
-| `CRAB_METADB_CHUNK_INDEX_WAL_FLUSH_SIZE` | `metadb.chunk_index.wal_flush_size` |
-| `CRAB_METADB_CHUNK_INDEX_BLOOM_BITS_PER_KEY` | `metadb.chunk_index.bloom_bits_per_key` |
-| `CRAB_METADB_CHUNK_INDEX_LOCAL_PATH` | `metadb.chunk_index.local_path` |
-| `CRAB_METADB_CHUNK_INDEX_IN_MEMORY_CEILING_BYTES` | `metadb.chunk_index.in_memory_ceiling_bytes` |
-| `CRAB_METADB_CHUNK_INDEX_CACHE_GC_GRACE` | `metadb.chunk_index.cache_gc_grace` |
-
-Env vars win over TOML; malformed values are logged and skipped
-rather than failing the command.
-
-There is no `metadata.backend` option and no `chunk_index.shard_count`
-option. SlateDB is the only backend, and `chunk_index_db` is always
-a single instance (the earlier 16-way sharding idea was dropped).
-
-## Writer lifecycle and bootstrap
-
-Fresh repositories do not need any setup. The first `crab push`
-to a clean bucket auto-creates both SlateDB instances via
-`Db::open`'s create-if-missing semantics. There is no
-`crab metadb bootstrap`, no `crab metadb init`, and no
-migration command.
-
-Push planning uses read-only SlateDB readers. After manifest CAS, a push that
-has metadata changes closes its reader, opens a short-lived writer directly on
-the canonical origin, commits generation-pinned records and queued stale-row
-tombstones, then closes it. Code-only and no-op pushes do not open a metadata
-writer. This prevents a large push from holding the bucket-global writer fence
-during classification and upload.
-
-The Git object locator uses the same short-lived writer model. It disables
-SlateDB's periodic collector because the dependency's first timer tick would
-scan remote state on every publication. A writer that advances exact locator
-coverage across a 32-generation boundary instead runs one foreground collection
-after its reader checkpoint is published and the database is closed. That
-compactor consumes the bounded L0 frontier with one compaction and one
-subcompaction, using four bounded read-ahead fetch tasks; writer-side
-existing-object lookup switches from point gets to a bounded ordered scan only
-when active SST fan-out makes the scan cheaper. Sparse or small requests retain
-exact OID gets. SlateDB's five-minute minimum age remains in force.
-
-If you are upgrading from a pre-spec build that wrote
-`{repo_prefix}/file-index/{hash}` objects, those legacy remote
-objects are garbage after the cutover and must be wiped manually
-before pushing with the new binary:
-
-```bash
-# remote: wipe the legacy per-file index
-aws s3 rm --recursive s3://{bucket}/{repo_prefix}/file-index/
-
-# local: optional, force the SQLite chunk-index cache to re-warm
-crab metadb cache clear
-```
-
-Then push with the new binary. The hard-cutover section of
-[RELEASE_NOTES.md](../../RELEASE_NOTES.md) covers this in more
-detail.
-
-Current builds have no redb-backed chunk-index path. Older
-`chunk-index.redb` files are ignored; remove them manually only if you
-need to reclaim disk from a pre-SQLite client.
+See [metadata diagnostics](https://crab.build/docs/cli/diagnostics/metadata-database)
+for the operator workflow.

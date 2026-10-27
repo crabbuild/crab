@@ -1253,11 +1253,8 @@ enum OptimizeCacheCmd {
 
 #[derive(Subcommand)]
 enum OptimizeIndexesCmd {
-    /// Print metadata database snapshots and optional deep integrity checks.
+    /// Diagnose Capsule authority and optional complete content integrity.
     Diagnose {
-        /// Target database (defaults to both).
-        #[arg(long, value_enum, default_value_t = crab::cmd::metadb::DbSelector::Both)]
-        db: crab::cmd::metadb::DbSelector,
         /// Structured JSON output.
         #[arg(long)]
         json: bool,
@@ -1265,20 +1262,11 @@ enum OptimizeIndexesCmd {
         #[arg(long)]
         deep: bool,
     },
-    /// Rebuild metadata databases from durable shards.
+    /// Verify Capsule content and publish a current metadata checkpoint.
     Rebuild {
-        /// Target database.
-        #[arg(long, value_enum, default_value_t = crab::cmd::metadb::DbSelector::Both)]
-        db: crab::cmd::metadb::DbSelector,
         /// Structured JSON output.
         #[arg(long)]
         json: bool,
-    },
-    /// Compact one or both metadata databases.
-    Compact {
-        /// Target database.
-        #[arg(long, value_enum, default_value_t = crab::cmd::metadb::DbSelector::Both)]
-        db: crab::cmd::metadb::DbSelector,
     },
     /// Report local chunk-index cache state.
     CacheStats,
@@ -1459,9 +1447,7 @@ impl OptimizeCmd {
                 OptimizeIndexesCmd::Warm { json, jsonl, .. } => {
                     OutputMode::from_flags(*json, *jsonl)
                 }
-                OptimizeIndexesCmd::Compact { .. }
-                | OptimizeIndexesCmd::CacheStats
-                | OptimizeIndexesCmd::CacheClear => OutputMode::Text,
+                OptimizeIndexesCmd::CacheStats | OptimizeIndexesCmd::CacheClear => OutputMode::Text,
             },
             Self::WorkflowCache(command) => match command {
                 OptimizeWorkflowCacheCmd::Push(args) => args.output_mode(),
@@ -1494,7 +1480,6 @@ impl OptimizeCmd {
             Self::Indexes(command) => match command {
                 OptimizeIndexesCmd::Diagnose { .. } => "metadb.diagnose",
                 OptimizeIndexesCmd::Rebuild { .. } => "metadb.rebuild",
-                OptimizeIndexesCmd::Compact { .. } => "metadb.compact",
                 OptimizeIndexesCmd::CacheStats => "metadb.cache.stats",
                 OptimizeIndexesCmd::CacheClear => "metadb.cache.clear",
                 OptimizeIndexesCmd::Warm { .. } => "fetch",
@@ -5404,22 +5389,15 @@ async fn run_optimize_command(
             }
         },
         OptimizeCmd::Indexes(command) => match command {
-            OptimizeIndexesCmd::Diagnose { db, json, deep } => {
+            OptimizeIndexesCmd::Diagnose { json, deep } => {
                 run_metadb_command(
-                    crab::cmd::metadb::MetadbCommand::Diagnose { db, json, deep },
+                    crab::cmd::metadb::MetadbCommand::Diagnose { json, deep },
                     cancel,
                 )
                 .await
             }
-            OptimizeIndexesCmd::Rebuild { db, json } => {
-                run_metadb_command(
-                    crab::cmd::metadb::MetadbCommand::Rebuild { db, json },
-                    cancel,
-                )
-                .await
-            }
-            OptimizeIndexesCmd::Compact { db } => {
-                run_metadb_command(crab::cmd::metadb::MetadbCommand::Compact { db }, cancel).await
+            OptimizeIndexesCmd::Rebuild { json } => {
+                run_metadb_command(crab::cmd::metadb::MetadbCommand::Rebuild { json }, cancel).await
             }
             OptimizeIndexesCmd::CacheStats => {
                 run_metadb_command(

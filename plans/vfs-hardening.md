@@ -5016,6 +5016,121 @@ owner chain, keeping the one explicit durable path instead of suppressing the
 unused-wrapper warning. Stored metadata/GC/maintenance/replication dispatch,
 all-mode lifecycle, total memory and optimized performance remain open.
 
+## Checkpoint 69 — require Capsule authority in metadata commands
+
+Reproduced with checkpoint-68 installed macOS binaries against a real healthy
+RustFS repository: `metadb diagnose --json` reports Capsule authority, while
+`doctor --metadb --json` exits zero with both legacy databases uninitialized.
+With poison bytes at the task-owned local cache path, doctor still exits zero
+and reports `exists: false`, despite the file existing and retaining its bytes.
+The baseline commands, binary hash and poison-byte receipt are retained.
+
+Remove the legacy owner/diagnose/rebuild/recovery dispatch and doctor's legacy
+MetaDb, acceleration and global shard-LIST report. Missing or corrupt Capsule
+root is an error, never a selector for manifest-backed metadata. Direct metadb
+and optimize-index entry points both drop `--db` and the obsolete `compact`
+no-op. File, shard, xorb, visibility and Git metadata are one correctness unit.
+Doctor shares the current Capsule diagnosis and propagates authority/cache
+errors. Cache stats reuses `PersistentChunkIndex::inspect`: read-only schema
+validation and SQL counts, with no whole-index Vec or writer-capable shared
+handle. Filesystem errors and corruption do not become absent/zero caches.
+
+Rebuild captures root inside the existing repository maintenance/GC writer
+fence, authenticates the complete closure before either no-op success or exact
+root CAS, and explicitly releases both leases on errors. The generation owner
+requires valid authority before claiming its lease, reloads samples while that
+lease renews, drains cooperative cancellation and releases explicitly. Preserve
+the existing Capsule checkpoint/repack policy. Preserve typed
+`CheckpointError::Storage`, including provider source and retry classification.
+
+| Evidence-map cell | Current boundary and proof |
+| --- | --- |
+| Entry and callers | `main.rs` direct/optimize metadata dispatch; `cmd/doctor.rs` metadata report; `cmd/recover.rs` selected file/shard lookup |
+| Owner | `cmd/metadb.rs` owns strict Capsule selection; `maintenance.rs` owns destructive maintenance admission/release; coordination owns renewable generation-owner lease |
+| Callees | Captured root/view/activity, selected pointer catalog lookup, full reachable-dependency verifier and exact-root checkpoint publisher |
+| Siblings | Both CLI selectors retired together; doctor/diagnose share Capsule health; rebuild retains full closure; recovery retains selected order/duplicates and 64-query batches |
+| Existing contracts | Real large-repository qualifier requires owner locator-sweep telemetry before its Capsule branch; preserve truthful zero work fields without a legacy authority path. Rebuild's existing write counters remain zero |
+| Dependencies | `while_renewing` drains after renewal cancellation and requires caller release. Maintenance acquires GC writers before its lock and releases both. Read-only SQLite inspect neither creates nor migrates. Storage `put` is create-only; deliberate existing-root corruption uses explicit overwrite |
+| Current main/base | Fetched main `cc2e4e25f46` still reports legacy doctor state; crab-v2 `877b832b396` has Capsule-first metadata selection plus missing-root legacy dispatch. The installed parent reproduces both operator defects |
+| Retention | 23 production items remain byte-identical. All existing external Capsule test bodies remain after removing the retired selector and moving them to flat sibling files. The module shrinks 5,676 → 1,442 lines; no dependency or lockfile changes |
+
+The five new regressions cover missing/corrupt/successful owner admission and
+release; rebuild's maintenance/GC release on all three authority states; no root
+read before maintenance admission plus fresh authority afterward; cache
+corruption without byte replacement; and throttle retryability/provider cause.
+The 18 existing Capsule tests retain deep corruption/closure refusal, whole-source
+byte admission, ordered selected lookups and the 100k-unrelated-catalog read
+budget. Legacy-only tests retire with their deleted producer paths. Current
+test modules are flat `metadb_capsule_tests.rs` and
+`metadb_capsule_lookup_tests.rs`; no feature/tests directory is added.
+
+Qualification against the final frozen source:
+
+- Each OS: **109 passes** — 23 metadata, 50 doctor, 34 recovery and two actual
+  CLI parser cases. Both parser filters execute one case. No ignores. Unchanged
+  architecture guard: **15 self-tests + 75 source checks** each OS.
+- Production library and CLI Clippy exit zero, **686 macOS / 689 Linux warnings**;
+  no suppression. These include the CLI binary, unlike checkpoint-68's
+  library-only count. Host formatting passes. Host Rust 1.97.0; Linux 1.97.1,
+  leaving exact Linux MSRV to CI.
+- Four Make-installed roles per OS. Linux FUSE/NFS RO/RW and managed FUSE; macOS
+  NFS RO/RW and managed NFS: **eight native cases**. Exact 6 MiB full/range reads,
+  RO refusal, live ownership/mode and applicable fsync → commit/push → independent
+  eager clone/fsck pass. **25 reuse checks** each OS, normal detach, fixed role
+  hashes and no forced cleanup.
+- Installed metadata CLI: **31 commands per OS**. Healthy doctor matches Capsule
+  diagnosis; corrupt local bytes fail doctor/cache stats without replacement;
+  diagnosis leaves remote inventory unchanged; both CLI groups expose current
+  syntax; deep closure, rebuild and owner succeed. Isolated canonical project
+  config points at missing/corrupt roots: all four metadata entry points fail,
+  no legacy authority is created, corrupt remote bytes remain unchanged, and
+  the original native repository/configuration remains unchanged.
+- Web production build, typecheck, lint and **10 tests** pass; built HTML contains
+  current authority text and the existing shared path-diagram component. Link
+  crawl: **398 HTML pages / 4,301 fragments**. Generated registry import multisets
+  match; reordered output is retained externally and restored, followed by a
+  second passing typecheck. Lockfiles are unchanged.
+
+Failed qualification attempts remain explicit. The newly added fence test first
+used create-only `put` to inject corruption into an existing root: both OS runs
+retain **22 passes / one setup failure**. Only the fault setup changes to the
+existing explicit overwrite API; assertions are unchanged. The final source
+passes all 23 metadata cases. The first macOS CLI error probe changed only Git
+remote; commands correctly retained committed `crab.toml` authority. A separate
+project-config fixture supplies the intended missing/corrupt authority. Linux's
+packaged AWS CLI ignored the endpoint environment setting; explicit
+`--endpoint-url`, already used by native smoke, fixes only that harness setup.
+Original group exits remain failed, and successful separate CLI retries are
+bound to the same installed role hashes. No runtime change or threshold waiver
+is used to bypass either failure.
+
+Source archive: **2,054 files**, SHA-256
+`ac090c9cb9b121968a711392d7a76507b7aa9a9651161dc546d278f0bad10687`.
+All inputs remain identical after qualification. Core installed SHA-256:
+macOS `8f150bb8a7b465d9b6c3a5779b2f957626288a4e0d9a4aed2ffcf57dd7155363`;
+Linux `9b2ea6a6ce380a1b05780fe21e9675350a2c2b008c5eaf8e52c46138274821a8`.
+Receipts, archives, AST/body retention proof, terminal group results and separate
+successful CLI retry results live under the owned external
+`metadata-authority-retirement/` qualification directory. No raw benchmark
+files are added to the PR.
+
+Is this the best fix? Require the canonical root and delete the legacy writer
+closures, rather than repairing only doctor formatting. Reuse the established
+read-only cache API and fenced checkpoint owner. This removes over 4k lines
+from the command module while retaining the current dependency ordering and
+useful tests. Stored GC/maintenance/replication authority, complete lifecycle
+and optimized performance remain open.
+
+Next: remove remaining GC/repack/replication manifest dispatch with sibling
+reachability, reader grace/history and root-fence proof. Separately audit the
+recovery planner/journal's existing `MetadataRepaired` status for verification-only
+Capsule bindings and propagation of its caller's cancellation token. The unchanged
+cache-clear command still unlinks the main SQLite file; operator docs now state
+its stop-process restriction. Replace that lifecycle only after proving live
+handles, sidecars, corrupt-cache handling and Windows ownership. Total memory,
+cold/concurrent reads and sustained-write degradation remain performance work;
+SQL counts alone are not an optimized throughput result.
+
 ## Remaining priority order
 
 Checkpoints 57/62 close the reproduced Unix endpoint flock handoff and late
@@ -5054,7 +5169,8 @@ replay reproduces missing foreground FUSE commit/control ownership on checkpoint
 binaries. Checkpoint-51 repairs that serving owner and qualifies live publication
 and ordinary teardown. Full control, early-startup, daemon/private and native
 mount-identity proofs remain. Checkpoint 68 removes the old CLI producer and
-initializer after current-format fixture qualification. Next retire metadb/doctor,
+initializer after current-format fixture qualification. Checkpoint 69 retires
+metadb/doctor manifest dispatch and fixes read-only cache diagnosis. Next retire
 GC, maintenance and replication stored pack-v1 dispatch.
 Checkpoints 42/43 repair canonical LFS publication and ignored-byte retention;
 checkpoint-44 reduces local verification amplification with bounded block proofs. Remote proof reuse, LFS generation

@@ -4,7 +4,8 @@ use crab_metadata::capsule_protocol::{
     Capsule, CapsuleRefEdit, CapsuleSection, CapsuleSectionKind, CapsuleTransaction,
     FileCatalogEntry, PointerCatalog, ShardCatalogEntry,
 };
-use object_store::memory::InMemory;
+use futures_util::TryStreamExt;
+use object_store::{memory::InMemory, path::Path as ObjectPath};
 
 #[tokio::test]
 async fn capsule_file_index_verification_does_not_create_legacy_metadata() {
