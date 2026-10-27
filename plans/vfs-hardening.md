@@ -6130,10 +6130,11 @@ Authority retirement status and remaining boundaries:
   its physical Capsule root across wire and classic batches. Checkpoint 72's
   qualified worktree removes the post-fetch shard-sync fallback and generation
   cursor. Wire's optional-root manifest/visibility closure is retired in checkpoint 74;
-  classic complete-view promotions gain captured-state ownership in checkpoint 75. `crab/src/cmd/gc/bucket.rs` still permits missing-root
-  fallback during registered-repository root collection; prove complete
-  reachability and fail-closed authority before changing deletion decisions.
-  No bucket-wide GC command was run.
+  classic complete-view promotions gain captured-state ownership in checkpoint 75.
+  Checkpoint 76 removes the bucket-maintenance missing-root fallback; checkpoint
+  77 retains registered identities when physical markers disappear. Retained
+  readers through explicit history pruning still need closure proof. No
+  bucket-wide GC command was run.
 - Maintenance/publication/replication dispatch and related docs still require an
   exhaustive storage-authority inventory. The locations above are confirmed
   reachable source leads, not complete removal proof. Manifest projections used
@@ -6142,3 +6143,85 @@ Authority retirement status and remaining boundaries:
 Acceptance requires a real v1-only fixture to be refused, empty-prefix v2
 initialization/push to work, and v2 clone/fetch/mount/replica behavior to pass.
 Removing only the VFS startup no-root path is not full protocol retirement.
+
+## Checkpoint 78 — admit complete pack batches before publication
+
+The shared installer on published `b34a176a96a` rejects an aggregate input limit
+inside its publication loop. A valid first pack therefore remains visible when a
+later pack pushes the batch over budget. Both native and maintenance reproductions
+fail on macOS and Linux; maintenance also leaves its kind sidecar. Strengthening
+the existing real captured-base/thin-candidate test reproduces the same prefix
+publication through the store-backed caller on both OSes. The initial caller
+selector lacked `publication` and ran zero tests; that result is excluded and
+retained separately. Corrected probes produce three real failing cases per OS
+with two passing controls.
+
+Preflight the complete resident pack-body sum at the shared installer, before
+pack or kind-sidecar publication, and remove the incremental check. Checked
+addition, zero-as-unlimited, exact-budget acceptance, external-base ordering,
+per-pack integrity checks and verified local reuse retain their contracts.
+Previously installed files remain byte-identical on rejection. This is a batch
+size limit, not total-memory admission or rollback for every later I/O error.
+Production grows by three lines; no new policy, public API, setting, dependency,
+override, inventory, serialized format or threshold. Four tests use a flat sibling
+module and real three-object Git packs. README states the enforced contract.
+
+Final frozen source passes **185 tests per OS**, none ignored: four minimal-reader,
+58 Capsule-reader, 48 checkpoint and 75 protected-helper library cases. The
+local-staging check, formatting, **18 guard self-tests + 75 source checks** and
+reader Clippy pass on both OSes; reader Clippy reports zero warnings/errors.
+Linux initially lacked rustfmt; installing the component for the pinned 1.97.1
+toolchain resolves the tooling failure without source edits. Both protected-helper
+binaries build, and all four product roles install through Make per OS.
+
+Fresh RustFS/native qualification passes **eight mounted cases**: Linux FUSE/NFS
+read-only/writable plus managed FUSE; macOS NFS read-only/writable plus managed
+NFS. Exact 6-MiB full/range reads, read-only refusal, applicable fsync → commit/push
+→ independent eager clone/strict fsck and normal detach pass with unchanged role
+hashes and no forced cleanup. Reuse checks: 25 macOS / 25 Linux. Fresh
+repack proof passes 15 commands macOS / 15 Linux, including payload-free preview,
+convergence, unchanged refs, strict clone/fsck, complete deep closure and missing
+authority refusals. No bucket sweep runs. These debug roles provide functional
+proof; sustained mounted throughput remains unqualified.
+
+Runtime source: **2064 files**, archive SHA-256
+`94e9acb42ffab3cf64fbbebc5f7369dba135876fcbc8a27610b782e0b61ef617`.
+Core SHA: macOS `04093e0622e2069e89f3e64f7cfce8a8e5f88f9d10d042cde683e5294411242c`;
+Linux `1635e67e5fb0ddc2b8283a42c01a3c498f062967f898e91a1a6ca7b7e6fd0ba9`.
+README is bound separately; this ledger is excluded from the frozen runtime
+archive. All 2,156 raw audit files remain preserved and excluded from the PR.
+Evidence: dedicated `resident-intake-admission` directories on the workspace
+volume, plus `layered-payload-memory` for the separate pre-change profiler.
+
+Evidence map: resident/candidate API and protected receive → generic payload
+builder → shared batch installer → crab-git per-pack file verification/atomic
+publication. Maintenance uses that owner with raw packs and `.kinds`. Selected
+fetch/historical checkpoints retain their existing range admission; optimized
+cold clone already preflights body+sidecar reads at its separate file-backed
+owner. Current main has no shared Capsule installer; comparison uses the current
+PR parent.
+
+Is this the best fix? Preflight at the batch owner covers native and maintenance
+siblings without caller-specific patches or rollback that could remove existing
+immutable packs. Per-pack limits cannot enforce aggregate admission.
+
+Next performance opportunity is measured: with 32 sources / 96 objects fixed,
+8→32 MiB random native blobs raise generic-install peak RSS from **273.03–273.58
+MiB** to **1040.88–1041.23 MiB** across native, maintenance, pre-admitted fetch and
+sidecar-first fetch. All eight isolated install processes preserve every blob
+and pass strict Git fsck in separate untimed processes. Native/maintenance/combined
+fetch use 32 requests; split fetch uses 64; selected bytes match per fixture size.
+These are macOS debug baselines on b34 production with test-only instrumentation,
+not mounted or optimized-throughput measurements. Stage pack bodies to private
+files through canonical bounded transport; retain authentication, coalescing,
+aggregate admission, cancellation/draining and exact byte/request proof. Metadata
+and total VFS memory need separate bounds. The profiler stays outside the PR.
+
+The b34 gateway CI job passes integrity with **94,820 acknowledgements**, zero
+failed/missing/duplicate/unexpected entries, but throughput retention **0.737223×**
+fails the unchanged 0.8 threshold. p95 **1.468728×** passes the 1.5 limit. This is
+signed HTTP PUT qualification, not mounted writes. Job:
+https://github.com/crabbuild/crab/actions/runs/40563256083/job/122397638041.
+Retained-reader closure through explicit pruning, remaining stored-v1 authority,
+actual mounted sustained writes, total memory and broader platform/provider
+gates remain open. The full hardening goal stays active.

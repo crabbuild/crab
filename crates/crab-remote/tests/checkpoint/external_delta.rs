@@ -157,6 +157,12 @@ async fn candidate_install_shares_intake_and_resolves_captured_external_bases() 
                 ..
             })
         ));
+        assert_eq!(
+            std::fs::read_dir(bounded.path().join("objects/pack"))
+                .unwrap()
+                .count(),
+            0,
+        );
         let directory = tempfile::tempdir().unwrap();
         crab_git::initialize_bare_git_dir(directory.path()).unwrap();
         let cancelled = CancellationToken::new();

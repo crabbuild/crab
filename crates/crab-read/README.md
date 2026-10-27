@@ -129,6 +129,8 @@ origin-backed packs with verified candidate capsules. Candidates participate
 in the same pack intake limit and external-delta ordering, so protected receive
 can use a paged view without materializing its catalog. The caller binds each
 candidate to the captured root; installation does not grant visibility.
+Resident pack-body intake is admitted for the whole batch before publishing
+packs or maintenance kind sidecars. Exceeding that limit leaves existing files intact.
 Maintenance installation retains each authenticated `.kinds` sidecar beside its
 raw pack so checkpointing can preserve kinds without decoding historical bodies.
 

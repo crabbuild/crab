@@ -36,6 +36,10 @@ pub use dependency::{
 #[cfg(all(test, feature = "hydration"))]
 mod visibility_tests;
 
+#[cfg(test)]
+#[path = "capsule_intake_tests.rs"]
+mod intake_tests;
+
 const LAYERED_SIDECAR_COALESCE_GAP_BYTES: u64 = 64 * 1024;
 const LAYERED_SIDECAR_MAX_EXTRA_BYTES: u64 = 4 * 1024 * 1024;
 const LAYERED_SIDECAR_MAX_WINDOW_BYTES: u64 = 16 * 1024 * 1024;
@@ -1882,7 +1886,22 @@ async fn install_git_pack_payloads(
         } else {
             payloads
         };
-        let mut total = 0_u64;
+        // Admit the complete batch before publishing any pack or kind sidecar;
+        // a later over-budget member must not leave an installed prefix.
+        let total = payloads
+            .iter()
+            .filter_map(|payload| payload.pack.as_ref())
+            .try_fold(0_u64, |total, pack| {
+                total.checked_add(pack.len() as u64).ok_or_else(|| {
+                    ReadError::internal("capsule-protocol Git intake size overflowed")
+                })
+            })?;
+        if max_input_bytes > 0 && total > max_input_bytes {
+            return Err(ReadError::CapsuleReadLimit {
+                resource: "Git pack intake",
+                maximum: max_input_bytes,
+            });
+        }
         let mut installed = Vec::new();
         for GitPackPayload {
             pack,
@@ -1896,7 +1915,6 @@ async fn install_git_pack_payloads(
             external_delta_bases,
         } in payloads
         {
-            let has_download = pack.is_some();
             let final_pack = pack_dir.join(format!("pack-{content_hash}.pack"));
             let final_index = pack_dir.join(format!("pack-{content_hash}.idx"));
             let final_reverse = pack_dir.join(format!("pack-{content_hash}.rev"));
@@ -1904,17 +1922,6 @@ async fn install_git_pack_payloads(
                 Some(pack) => pack.len() as u64,
                 None => std::fs::metadata(&final_pack)?.len(),
             };
-            if has_download {
-                total = total.checked_add(pack_size).ok_or_else(|| {
-                    ReadError::internal("capsule-protocol Git intake size overflowed")
-                })?;
-                if max_input_bytes > 0 && total > max_input_bytes {
-                    return Err(ReadError::CapsuleReadLimit {
-                        resource: "Git pack intake",
-                        maximum: max_input_bytes,
-                    });
-                }
-            }
             // Complete capsule views may carry bodies already installed by a
             // previous read. Reuse only after the existing hash/sidecar checks;
             // receipt of the same payload is not a destination conflict.
