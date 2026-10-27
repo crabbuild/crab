@@ -270,14 +270,14 @@ have always lived at; what changed is how they are populated.
    SQLite handle is available, the persistent tier. Chunks this client
    just pushed are immediately in its own caches.
 2. **Opt-in fetch-time shard sync** — when `crab clone --sync-chunk-index`,
-   `crab pull`, or `crab fetch` runs shard sync, the retained `ShardSynchronizer` downloads the
-   delta between the manifest's shard index and
-   `PersistentChunkIndex::installed_shards()`, then calls
-   `install_shard` on each new shard. This is the primary warming path
-   for chunks pushed by other clients. Its local generation cursor is written
-   through a sibling tempfile and atomic rename, so concurrent processes sharing
-   one cache root read either the previous complete cursor or the new complete
-   cursor.
+   `crab pull`, or `crab fetch` runs shard sync, `ShardSynchronizer` uses the
+   authenticated Capsule pointer catalog, installed-shard receipts and verified
+   local cache bytes to download missing shards. Receipt lookups are keyed by
+   candidate shard; warming does not load the bucket's cached chunk mappings
+   into a temporary in-memory mirror. It calls `install_shard` on each new
+   shard. Missing or corrupt Capsule authority is an error; a
+   manifest cannot substitute for it. There is no local generation cursor:
+   per-ref catalog updates can become visible without changing root generation.
 3. **Lazy-on-miss** — when `ChunkIndexStore::get` misses local tiers,
    it issues one `Db::get` against `chunk_index_db`. A remote hit
    writes back to `ChunkIndex::insert` and, when available,

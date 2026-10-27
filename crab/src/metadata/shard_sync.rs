@@ -6,20 +6,15 @@
 //! each install. Race-window handling (listed-but-not-yet-visible shards)
 //! is built in: a 404 on a listed shard is logged and skipped, not fatal.
 //!
-//! Incremental sync: when a cached shard-list generation matches the
-//! remote generation, all downloads are skipped and the `ChunkIndex` is
-//! populated from the `PersistentChunkIndex` only. When the remote is
-//! ahead, only the delta (hashes in remote but not in cached list) is
-//! downloaded. Falls back to full sync when the cached generation is
-//! missing or corrupt.
+//! Candidate shards come only from an authenticated Capsule pointer catalog.
+//! Installed-shard receipts and verified local bytes avoid repeat downloads;
+//! repository root generation cannot key independently mutable ref catalogs.
 
 use std::collections::HashSet;
-use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use bytes::Bytes;
-use serde::{Deserialize, Serialize};
 use tracing::{debug, info, warn};
 
 use crate::cache::{CacheKey, LocalCache};
@@ -28,7 +23,6 @@ use crate::core::metrics::Metrics;
 use crate::storage::StoreLayout;
 use crab_metadata::bloom_prefilter::{BloomCheck, check_shard_chunk_bloom};
 use crab_metadata::chunk_index::ChunkIndex;
-use crab_metadata::manifests::ShardList;
 use crab_metadata::persistent_chunk_index::PersistentChunkIndex;
 use crab_xet::hash::compute_data_hash;
 use crab_xet::shard::{MDBMinimalShard, MDBShardFile, new_shard_file_cache};
@@ -48,95 +42,12 @@ pub struct SyncStats {
     pub shards_bloom_skipped: u64,
 }
 
-/// Locally cached shard-list generation for incremental sync.
-///
-/// Persisted at `~/.cache/crab/repos/{repo_hash}/shard-list-gen.json`.
-/// Stores the generation counter and the set of shard hashes that were
-/// present at that generation, enabling delta computation on subsequent
-/// syncs.
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CachedShardListGen {
-    /// The shard-list generation counter at the time of caching.
-    pub generation: u64,
-    /// The shard hashes present in the shard-list at this generation.
-    pub shard_hashes: Vec<String>,
-}
-
-/// Load a cached shard-list generation from disk.
-///
-/// Returns `None` if the file is missing or corrupt (triggers full sync
-/// fallback).
-fn load_cached_generation(path: &Path) -> Option<CachedShardListGen> {
-    const MAX_GENERATION_FILE_BYTES: u64 = 64 * 1024 * 1024;
-    let data = match std::fs::File::open(path).and_then(|file| {
-        let mut data = Vec::new();
-        file.take(MAX_GENERATION_FILE_BYTES + 1)
-            .read_to_end(&mut data)?;
-        if data.len() as u64 > MAX_GENERATION_FILE_BYTES {
-            return Err(std::io::Error::new(
-                std::io::ErrorKind::InvalidData,
-                "cached shard-list generation is oversized",
-            ));
-        }
-        Ok(data)
-    }) {
-        Ok(d) => d,
-        Err(e) => {
-            debug!(path = %path.display(), error = %e, "no cached shard-list generation");
-            return None;
-        }
-    };
-    match serde_json::from_slice::<CachedShardListGen>(&data) {
-        Ok(cached) => Some(cached),
-        Err(e) => {
-            warn!(path = %path.display(), error = %e, "corrupt cached shard-list generation, falling back to full sync");
-            None
-        }
-    }
-}
-
-/// Persist a shard-list generation to disk.
-///
-/// Creates parent directories as needed. Errors are logged but not fatal
-/// — the next sync will simply do a full download.
-fn save_cached_generation(path: &Path, cached: &CachedShardListGen) {
-    if let Some(parent) = path.parent()
-        && let Err(e) = crab_cache::ensure_private_cache_directory(parent)
-    {
-        warn!(path = %parent.display(), error = %e, "failed to create cache directory for shard-list generation");
-        return;
-    }
-    match serde_json::to_vec(cached) {
-        Ok(data) => {
-            if let Err(e) = write_cached_generation_atomic(path, &data) {
-                warn!(path = %path.display(), error = %e, "failed to persist shard-list generation");
-            }
-        }
-        Err(e) => {
-            warn!(error = %e, "failed to serialize shard-list generation");
-        }
-    }
-}
-
-fn write_cached_generation_atomic(path: &Path, data: &[u8]) -> std::io::Result<()> {
-    // NamedTempFile creates privately and owns cleanup only for its own file.
-    // Persisting in the same directory preserves that mode across replacement.
-    let parent = path.parent().unwrap_or_else(|| Path::new("."));
-    let mut file = tempfile::NamedTempFile::new_in(parent)?;
-    file.write_all(data)?;
-    file.flush()?;
-    file.persist(path).map(|_| ()).map_err(|error| error.error)
-}
-
 /// Cross-client shard synchronizer.
 ///
 /// Computes the remote-vs-local shard delta, downloads missing shards
 /// in parallel, hash-verifies each download, installs into the local
 /// cache, and incrementally refreshes the `ChunkIndex`.
 ///
-/// When a cached shard-list generation is available, compares it against
-/// the remote generation to download only the delta set. Falls back to
-/// full sync when the cached generation is missing or corrupt.
 pub struct ShardSynchronizer {
     router: StoreLayout,
     cache: Arc<LocalCache>,
@@ -144,8 +55,6 @@ pub struct ShardSynchronizer {
     metrics: Option<Arc<Metrics>>,
     /// Maximum number of concurrent shard downloads.
     parallelism: usize,
-    /// Path to the cached shard-list generation file, if set.
-    gen_cache_path: Option<PathBuf>,
     /// Chunk hashes being pushed, used for bloom-first filtering.
     /// When set, shards in the delta set are checked against their bloom
     /// filter before downloading the full shard body.
@@ -171,7 +80,6 @@ impl ShardSynchronizer {
             persistent_index: None,
             metrics,
             parallelism: 8,
-            gen_cache_path: None,
             query_hashes: None,
             exact_query_matches: false,
             shard_files: Vec::new(),
@@ -183,20 +91,6 @@ impl ShardSynchronizer {
     #[must_use]
     pub fn with_persistent_index(mut self, index: Arc<PersistentChunkIndex>) -> Self {
         self.persistent_index = Some(index);
-        self
-    }
-
-    /// Set the per-repo cache directory for generation-based incremental
-    /// sync. The generation file is stored at
-    /// `{cache_dir}/repos/{repo_hash}/shard-list-gen.json`.
-    #[must_use]
-    pub fn with_repo_cache_dir(mut self, cache_dir: &Path, repo_hash: &str) -> Self {
-        self.gen_cache_path = Some(
-            cache_dir
-                .join("repos")
-                .join(repo_hash)
-                .join("shard-list-gen.json"),
-        );
         self
     }
 
@@ -257,110 +151,27 @@ impl ShardSynchronizer {
         install_chunk_index_shard(chunk_index, shard_hash, entries, self.metrics.as_deref());
     }
 
-    /// Synchronize shards using the manifest's shard list hash.
-    ///
-    /// Reads the bulk shard-list object from the manifest pointer's
-    /// `shard_index_hash`, then delegates to [`Self::sync`]. Uses the
-    /// content hash as a cache key: if the hash hasn't changed since the
-    /// last sync, all downloads are skipped (same hash = same content).
-    ///
-    /// # Errors
-    ///
-    /// Returns errors from manifest loading or fatal storage failures.
-    pub async fn sync_from_manifest(
-        &mut self,
-        chunk_index: &mut ChunkIndex,
-        shard_index_hash: &str,
-        generation: u64,
-    ) -> Result<SyncStats> {
-        // Cache key: if the shard-list hash hasn't changed AND the
-        // ChunkIndex already has entries (from the PersistentChunkIndex
-        // loaded earlier), skip the download. Without the `!chunk_index.is_empty()`
-        // guard, a stale generation cache combined with an empty/missing
-        // PersistentChunkIndex causes the sync to skip, leaving the
-        // ChunkIndex empty — all chunks are then classified as "New"
-        // and re-uploaded, destroying cross-version dedup.
-        if let Some(ref gen_path) = self.gen_cache_path
-            && let Some(cached) = load_cached_generation(gen_path)
-            && cached.generation == generation
-            && !shard_index_hash.is_empty()
-        {
-            if !chunk_index.is_empty() {
-                debug!(
-                    shard_index_hash,
-                    generation,
-                    chunk_index_entries = chunk_index.len(),
-                    "shard-list hash unchanged and ChunkIndex populated, skipping sync"
-                );
-                let stats = SyncStats {
-                    shards_skipped: cached.shard_hashes.len() as u64,
-                    ..SyncStats::default()
-                };
-                return Ok(stats);
-            }
-            debug!(
-                shard_index_hash,
-                generation,
-                "shard-list generation matches but ChunkIndex is empty, forcing full sync"
-            );
-        }
-
-        if shard_index_hash.is_empty() {
-            debug!("empty shard_index_hash, nothing to sync");
-            return Ok(SyncStats::default());
-        }
-
-        let shard_hashes = crate::metadata::manifest::read_bulk_shard_list(
-            self.router.store(),
-            &self.router,
-            shard_index_hash,
-        )
-        .await?;
-
-        let shard_list = ShardList {
-            generation,
-            entries: shard_hashes,
-        };
-
-        self.sync(chunk_index, &shard_list).await
-    }
-
     /// Synchronize shards from the remote shard list into the local cache
     /// and chunk index.
     ///
-    /// When a cached shard-list generation is available and matches the
-    /// remote generation, all downloads are skipped and the `ChunkIndex`
-    /// is populated from the `PersistentChunkIndex` only. When the remote
-    /// is ahead, only the delta (hashes in remote but not in cached list)
-    /// is downloaded. Falls back to full sync when the cached generation
-    /// is missing or corrupt.
+    /// Installed-shard receipts and verified local cache entries determine
+    /// which authenticated candidates still need downloading.
     ///
     /// Returns statistics about the sync operation.
     ///
     /// # Errors
     ///
-    /// Returns errors from manifest loading or fatal storage failures.
+    /// Individual download and local-cache failures are counted in the result.
     /// Individual shard download failures are counted in `shards_failed`
     /// rather than aborting the entire sync.
     pub async fn sync(
         &mut self,
         chunk_index: &mut ChunkIndex,
-        shard_list: &ShardList,
+        remote_shards: &[String],
     ) -> Result<SyncStats> {
         let mut stats = SyncStats::default();
-        let remote_generation = shard_list.generation;
-        let remote_shards = &shard_list.entries;
-
-        // Try incremental sync via generation comparison.
-        let effective_shards = self.resolve_incremental_delta(
-            chunk_index,
-            remote_generation,
-            remote_shards,
-            &mut stats,
-        );
-
         let to_download = self
-            .compute_delta(chunk_index, &effective_shards, &mut stats)
+            .compute_delta(chunk_index, remote_shards, &mut stats)
             .await;
 
         if to_download.is_empty() {
@@ -368,7 +179,7 @@ impl ShardSynchronizer {
                 skipped = stats.shards_skipped,
                 "shard sync: all shards up to date"
             );
-            self.persist_generation(remote_generation, remote_shards);
+
             return Ok(stats);
         }
 
@@ -383,7 +194,7 @@ impl ShardSynchronizer {
                 bloom_skipped = stats.shards_bloom_skipped,
                 "shard sync: all shards up to date after bloom filtering"
             );
-            self.persist_generation(remote_generation, remote_shards);
+
             return Ok(stats);
         }
 
@@ -409,133 +220,7 @@ impl ShardSynchronizer {
             "shard sync complete"
         );
 
-        // Persist the new generation after successful sync.
-        self.persist_generation(remote_generation, remote_shards);
-
         Ok(stats)
-    }
-
-    /// Resolve the effective set of shards to consider for delta
-    /// computation, using the cached generation for incremental sync.
-    ///
-    /// Returns the subset of remote shards that need to be checked
-    /// against the local state. When generations match, returns an empty
-    /// vec (all shards are already accounted for). When the remote is
-    /// ahead, returns only the delta (remote - cached). Falls back to
-    /// the full remote list when no cached generation is available.
-    fn resolve_incremental_delta(
-        &self,
-        chunk_index: &mut ChunkIndex,
-        remote_generation: u64,
-        remote_shards: &[String],
-        stats: &mut SyncStats,
-    ) -> Vec<String> {
-        let Some(gen_path) = &self.gen_cache_path else {
-            return remote_shards.to_vec();
-        };
-
-        let Some(cached) = load_cached_generation(gen_path) else {
-            debug!("no cached generation, performing full sync");
-            return remote_shards.to_vec();
-        };
-
-        if cached.generation == remote_generation {
-            // Generations match — all shards are already known locally.
-            // Mark all remote shards as installed in the chunk index
-            // (they should already be in the persistent index from a
-            // previous sync).
-            //
-            // However, if the ChunkIndex is still empty after attempting
-            // to load from the persistent index, the persistent index is
-            // missing or corrupt. In that case, fall through to full sync
-            // so the shards are re-downloaded and entries are installed.
-            let mut all_verified = true;
-            for shard_hex in remote_shards {
-                let Ok(hash) = MerkleHash::from_hex(shard_hex) else {
-                    continue;
-                };
-                if !chunk_index.has_shard(&hash) {
-                    // The persistent index should have this shard from
-                    // the previous sync. Mark it as installed.
-                    if let Some(pi) = &self.persistent_index {
-                        if let Ok(true) = pi.has_shard(&hash) {
-                            self.install_chunk_index_shard(chunk_index, hash, &[]);
-                        } else {
-                            all_verified = false;
-                        }
-                    } else {
-                        all_verified = false;
-                    }
-                }
-                stats.shards_skipped += 1;
-            }
-
-            if all_verified {
-                debug!(
-                    generation = remote_generation,
-                    shards = remote_shards.len(),
-                    "generations match, all shards verified in persistent index"
-                );
-                return Vec::new();
-            }
-
-            // Persistent index is missing entries for some shards.
-            // Reset the skipped count and fall through to full sync.
-            debug!(
-                generation = remote_generation,
-                shards = remote_shards.len(),
-                "generations match but persistent index incomplete, falling back to full sync"
-            );
-            stats.shards_skipped = 0;
-            return remote_shards.to_vec();
-        }
-
-        if remote_generation > cached.generation {
-            // Remote is ahead — compute the delta.
-            let cached_set: HashSet<&str> =
-                cached.shard_hashes.iter().map(String::as_str).collect();
-            let delta: Vec<String> = remote_shards
-                .iter()
-                .filter(|h| !cached_set.contains(h.as_str()))
-                .cloned()
-                .collect();
-            info!(
-                cached_gen = cached.generation,
-                remote_gen = remote_generation,
-                total_remote = remote_shards.len(),
-                delta = delta.len(),
-                "incremental sync: downloading delta shards"
-            );
-
-            // Mark cached shards as skipped — they were synced in a
-            // previous session and should be in the persistent index.
-            for shard_hex in remote_shards {
-                if cached_set.contains(shard_hex.as_str()) {
-                    let Ok(hash) = MerkleHash::from_hex(shard_hex) else {
-                        continue;
-                    };
-                    if !chunk_index.has_shard(&hash)
-                        && let Some(pi) = &self.persistent_index
-                        && let Ok(true) = pi.has_shard(&hash)
-                    {
-                        self.install_chunk_index_shard(chunk_index, hash, &[]);
-                    }
-                    stats.shards_skipped += 1;
-                }
-            }
-
-            return delta;
-        }
-
-        // Remote generation is behind cached — shouldn't happen in
-        // normal operation (generations are monotonic). Fall back to
-        // full sync to be safe.
-        warn!(
-            cached_gen = cached.generation,
-            remote_gen = remote_generation,
-            "remote generation behind cached, falling back to full sync"
-        );
-        remote_shards.to_vec()
     }
 
     /// Apply bloom-first filtering to the delta set.
@@ -611,18 +296,6 @@ impl ShardSynchronizer {
         remaining
     }
 
-    /// Persist the current shard-list generation to disk.
-    fn persist_generation(&self, generation: u64, shard_hashes: &[String]) {
-        let Some(gen_path) = &self.gen_cache_path else {
-            return;
-        };
-        let cached = CachedShardListGen {
-            generation,
-            shard_hashes: shard_hashes.to_vec(),
-        };
-        save_cached_generation(gen_path, &cached);
-    }
-
     /// Compute which remote shards are missing locally.
     async fn compute_delta(
         &mut self,
@@ -649,9 +322,9 @@ impl ShardSynchronizer {
             if let Some(pi) = &self.persistent_index {
                 match pi.has_shard(&hash) {
                     Ok(true) => {
-                        // Mark the shard as installed in the in-memory index
-                        // without loading entries (they were loaded in bulk
-                        // at startup via load_all).
+                        // The persistent receipt covers the complete shard.
+                        // Its entries stay on disk; delta discovery only needs
+                        // the receipt, not an in-memory copy of every chunk.
                         self.install_chunk_index_shard(chunk_index, hash, &[]);
                         stats.shards_skipped += 1;
                         continue;
@@ -1024,7 +697,7 @@ fn install_chunk_index_shard(
 /// Invoked by clone, pull, and fetch after packs are on disk: reads
 /// the current repository snapshot, computes the shard delta against
 /// locally installed shards via
-/// [`PersistentChunkIndex::installed_shards`], downloads the missing
+/// [`PersistentChunkIndex::has_shard`], downloads the missing
 /// shards in parallel, and installs them into both local cache tiers.
 ///
 /// Progress is reported to stderr when `emit_progress` is true —
@@ -1038,8 +711,8 @@ fn install_chunk_index_shard(
 /// Repository snapshot failures are returned to the caller. Clone/fetch may
 /// report them as a post-fetch cache-warming warning only after the canonical
 /// repository snapshot has already been admitted. Individual shard and local
-/// cache failures remain optimisation misses; correctness comes from
-/// lazy-on-miss lookups against the remote `chunk_index_db` on the next push.
+/// cache failures remain optimisation misses. Canonical Capsule read and
+/// publication checks remain responsible for content and placement integrity.
 pub async fn run_post_fetch_shard_sync(
     router: StoreLayout,
     repo_hash: &str,
@@ -1047,9 +720,9 @@ pub async fn run_post_fetch_shard_sync(
     metrics: Option<Arc<Metrics>>,
     emit_progress: bool,
 ) -> Result<SyncStats> {
-    let published = load_published_shards(&router).await?;
+    let shard_hashes = load_published_shards(&router).await?;
 
-    if published.entries.is_empty() {
+    if shard_hashes.is_empty() {
         debug!("post-fetch shard sync: repository has no shards, nothing to sync");
         return Ok(SyncStats::default());
     }
@@ -1071,7 +744,7 @@ pub async fn run_post_fetch_shard_sync(
         Err(e) => {
             // The cache is an optimisation — if it can't be opened, skip
             // the sync entirely rather than aborting the fetch. Next
-            // push will lazy-fill against chunk_index_db on miss.
+            // publication still verifies placement when warming is unavailable.
             warn!(
                 error = %e,
                 path = %index_path.display(),
@@ -1081,37 +754,10 @@ pub async fn run_post_fetch_shard_sync(
         }
     };
 
-    // Warm the in-memory ChunkIndex from the persistent tier so the
-    // delta computation can skip shards already on disk.
+    // This index is discarded after warming. Persistent receipts already
+    // suppress repeat downloads, so copying the bucket's unrelated chunks
+    // here only makes fetch memory and latency grow with the entire cache.
     let mut chunk_index = ChunkIndex::new();
-    match persistent.load_all() {
-        Ok(entries) => {
-            for (chunk_hash, xorb_ref) in &entries {
-                chunk_index.insert(*chunk_hash, *xorb_ref);
-            }
-            if let Ok(installed) = persistent.installed_shards() {
-                for shard_hash in &installed {
-                    install_chunk_index_shard(
-                        &mut chunk_index,
-                        *shard_hash,
-                        &[],
-                        metrics.as_deref(),
-                    );
-                }
-                debug!(
-                    shards = installed.len(),
-                    entries = entries.len(),
-                    "post-fetch shard sync: loaded persistent chunk index"
-                );
-            }
-        }
-        Err(e) => {
-            warn!(
-                error = %e,
-                "post-fetch shard sync: failed to load persistent chunk index, starting empty"
-            );
-        }
-    }
 
     let local_cache = Arc::new(LocalCache::new(cache_dir.to_path_buf()));
     let shard_cache_dir = cache_dir.join("repos").join(repo_hash).join("shards");
@@ -1120,21 +766,7 @@ pub async fn run_post_fetch_shard_sync(
         .with_persistent_index(Arc::clone(&persistent))
         .with_shard_cache_dir(shard_cache_dir);
 
-    // V1 manifest generations and v2 root generations both lag their mutable
-    // per-ref journals. Cache only a snapshot whose authority has no overlay.
-    if published.cacheable_generation {
-        synchronizer = synchronizer.with_repo_cache_dir(cache_dir, repo_hash);
-    }
-
-    let stats = synchronizer
-        .sync(
-            &mut chunk_index,
-            &ShardList {
-                generation: published.generation,
-                entries: published.entries,
-            },
-        )
-        .await?;
+    let stats = synchronizer.sync(&mut chunk_index, &shard_hashes).await?;
 
     info!(
         downloaded = stats.shards_downloaded,
@@ -1157,1001 +789,19 @@ pub async fn run_post_fetch_shard_sync(
     Ok(stats)
 }
 
-struct PublishedShards {
-    generation: u64,
-    entries: Vec<String>,
-    cacheable_generation: bool,
-}
-
-async fn load_published_shards(router: &StoreLayout) -> Result<PublishedShards> {
-    let capsule_layout = crab_storage::StoreLayout::with_global_prefix(
+async fn load_published_shards(router: &StoreLayout) -> Result<Vec<String>> {
+    let layout = crab_storage::StoreLayout::with_global_prefix(
         router.store().as_storage().clone(),
         router.repo_prefix().to_owned(),
         router.global_prefix().to_owned(),
     );
-    match crab_metadata::capsule_protocol::load_root(&capsule_layout).await {
-        Ok(root) => {
-            let generation = root.record().root().generation();
-            let inspection = crab_metadata::capsule_protocol::inspect_pointer_catalog_from_root(
-                &capsule_layout,
-                &root,
-            )
-            .await?;
-            Ok(PublishedShards {
-                generation,
-                entries: inspection.into_shard_hashes().await?,
-                // Per-ref heads can advance without changing the compacted root
-                // generation, so this value cannot key the local generation cache.
-                cacheable_generation: false,
-            })
-        }
-        Err(crab_metadata::error::MetadataError::Storage {
-            source: crab_storage::StorageError::NotFound { .. },
-        }) => {
-            let snapshot =
-                crate::metadata::manifest::read_repository_snapshot(router.store(), router).await?;
-            Ok(PublishedShards {
-                generation: snapshot.manifest.generation,
-                entries: snapshot.journal.shards,
-                cacheable_generation: snapshot.journal.transactions.is_empty(),
-            })
-        }
-        Err(error) => Err(error.into()),
-    }
+    let root = crab_metadata::capsule_protocol::load_root(&layout).await?;
+    let inspection =
+        crab_metadata::capsule_protocol::inspect_pointer_catalog_from_root(&layout, &root).await?;
+    inspection.into_shard_hashes().await.map_err(Into::into)
 }
 
 #[cfg(test)]
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
-mod tests {
-    use std::collections::BTreeMap;
-
-    use super::*;
-    use crate::metadata::manifest::{
-        Manifest, RefJournalEdit, RefJournalTransaction, commit_ref_journal_transaction,
-        create_manifest, read_ref_journal_head,
-    };
-    use crate::storage::StoreLayout;
-    use crate::storage::store::Store;
-    use crab_metadata::capsule_protocol::{
-        Capsule, CapsuleRefEdit, CapsuleSection, CapsuleSectionKind, CapsuleTransaction,
-        PointerCatalog, ShardCatalogEntry,
-    };
-    use crab_metadata::manifests::ShardList;
-    use object_store::memory::InMemory;
-    use tempfile::TempDir;
-
-    fn setup() -> (StoreLayout, Arc<LocalCache>, TempDir) {
-        let inner: Arc<dyn object_store::ObjectStore> = Arc::new(InMemory::new());
-        let store = Store::new(inner);
-        let router = StoreLayout::new(store, "repo".to_string());
-        let dir = TempDir::new().unwrap();
-        // Let the cache create its private root; TempDir inherits the process umask.
-        let cache = Arc::new(LocalCache::new(dir.path().join("cache")));
-        (router, cache, dir)
-    }
-
-    /// Build a ShardList from a slice of hex strings and a generation.
-    fn make_shard_list(generation: u64, entries: &[String]) -> ShardList {
-        ShardList {
-            generation,
-            entries: entries.to_vec(),
-        }
-    }
-
-    async fn publish_v2_shard(router: &StoreLayout, shard_data: &'static [u8]) -> MerkleHash {
-        let shard_hash = compute_data_hash(shard_data);
-        router
-            .store()
-            .put(
-                &router.shard_path(&shard_hash),
-                Bytes::from_static(shard_data),
-            )
-            .await
-            .unwrap();
-        let layout = crab_storage::StoreLayout::with_global_prefix(
-            router.store().as_storage().clone(),
-            router.repo_prefix().to_owned(),
-            router.global_prefix().to_owned(),
-        );
-        let base =
-            crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
-                .await
-                .unwrap();
-        let mut catalog = PointerCatalog::new();
-        catalog
-            .insert_shard(
-                shard_hash.hex(),
-                ShardCatalogEntry::new(shard_data.len() as u64, Vec::new()),
-            )
-            .unwrap();
-        let transaction = CapsuleTransaction::new(
-            base.record().digest(),
-            vec![CapsuleRefEdit::new(
-                "refs/heads/main",
-                None,
-                Some("2".repeat(40)),
-                None,
-            )],
-        )
-        .unwrap();
-        let capsule = Capsule::build(
-            &transaction,
-            Vec::new(),
-            vec![CapsuleSection::new(
-                CapsuleSectionKind::CatalogDelta,
-                catalog.encode_delta().unwrap(),
-            )],
-        )
-        .unwrap();
-        crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
-            .await
-            .unwrap();
-        shard_hash
-    }
-
-    #[tokio::test]
-    async fn sync_with_empty_shard_list() {
-        let (router, cache, _dir) = setup();
-        let mut sync = ShardSynchronizer::new(router, cache, None);
-        let mut idx = ChunkIndex::new();
-        let shard_list = make_shard_list(0, &[]);
-        let stats = sync.sync(&mut idx, &shard_list).await.unwrap();
-        assert_eq!(stats.shards_downloaded, 0);
-        assert_eq!(stats.shards_skipped, 0);
-        assert_eq!(stats.shards_failed, 0);
-    }
-
-    #[tokio::test]
-    async fn sync_skips_already_installed_shards() {
-        let (router, cache, _dir) = setup();
-        let mut sync = ShardSynchronizer::new(router, cache, None);
-        let mut idx = ChunkIndex::new();
-
-        let hash = MerkleHash::from([1u64, 1, 1, 1]);
-        idx.install_shard(hash, &[]);
-
-        let shard_list = make_shard_list(1, &[hash.hex()]);
-        let stats = sync.sync(&mut idx, &shard_list).await.unwrap();
-        assert_eq!(stats.shards_skipped, 1);
-        assert_eq!(stats.shards_downloaded, 0);
-    }
-
-    #[tokio::test]
-    async fn sync_handles_invalid_hash_gracefully() {
-        let (router, cache, _dir) = setup();
-        let mut sync = ShardSynchronizer::new(router, cache, None);
-        let mut idx = ChunkIndex::new();
-
-        let shard_list = make_shard_list(1, &["not-a-valid-hex".to_string()]);
-        let stats = sync.sync(&mut idx, &shard_list).await.unwrap();
-        assert_eq!(stats.shards_failed, 1);
-    }
-
-    #[tokio::test]
-    async fn sync_handles_missing_shard_race_window() {
-        let (router, cache, _dir) = setup();
-        let mut sync = ShardSynchronizer::new(router, cache, None);
-        let mut idx = ChunkIndex::new();
-
-        // Shard listed but not uploaded — 404 (race window).
-        let hash = MerkleHash::from([42u64, 42, 42, 42]);
-        let shard_list = make_shard_list(1, &[hash.hex()]);
-        let stats = sync.sync(&mut idx, &shard_list).await.unwrap();
-        assert_eq!(stats.shards_failed, 1);
-        assert_eq!(stats.shards_downloaded, 0);
-    }
-
-    #[tokio::test]
-    async fn sync_downloads_and_installs_shard() {
-        let (router, cache, _dir) = setup();
-
-        let shard_data = b"fake shard data for testing";
-        let hash = compute_data_hash(shard_data);
-        let hex = hash.hex();
-        // Upload to the global shard path that StoreLayout produces.
-        let obj_path = router.shard_path(&hash);
-        router
-            .store()
-            .put(&obj_path, Bytes::from(shard_data.as_slice()))
-            .await
-            .unwrap();
-
-        let mut sync = ShardSynchronizer::new(router, cache.clone(), None);
-        let mut idx = ChunkIndex::new();
-
-        let shard_list = make_shard_list(1, &[hex.clone()]);
-        let stats = sync.sync(&mut idx, &shard_list).await.unwrap();
-        assert_eq!(stats.shards_downloaded, 1);
-        assert!(idx.has_shard(&hash));
-        assert!(cache.contains(&CacheKey::Shard(hash)).await);
-    }
-
-    #[tokio::test]
-    async fn post_fetch_sync_does_not_hide_journal_shards_behind_manifest_generation_cache() {
-        let (router, cache, _dir) = setup();
-        crate::core::remote_layout::initialize(router.store(), &router)
-            .await
-            .unwrap();
-        let manifest = Manifest::default_for_repo("refs/heads/main");
-        create_manifest(router.store(), &router, &manifest)
-            .await
-            .unwrap();
-
-        let shard_data = b"journal shard";
-        let shard_hash = compute_data_hash(shard_data);
-        router
-            .store()
-            .put(
-                &router.shard_path(&shard_hash),
-                Bytes::from_static(shard_data),
-            )
-            .await
-            .unwrap();
-
-        let ref_name = "refs/heads/main";
-        let head = read_ref_journal_head(router.store(), &router, ref_name)
-            .await
-            .unwrap();
-        let transaction = RefJournalTransaction::new(
-            BTreeMap::from([(ref_name.to_owned(), head.visible_transaction.clone())]),
-            vec![RefJournalEdit {
-                ref_name: ref_name.to_owned(),
-                old_oid: None,
-                new_oid: Some("a".repeat(40)),
-                peeled_oid: None,
-                lock_holder: None,
-                visibility_evidence_hash: None,
-            }],
-            None,
-            Vec::new(),
-            vec![shard_hash.hex()],
-        )
-        .unwrap();
-        commit_ref_journal_transaction(router.store(), &router, &transaction, &[head])
-            .await
-            .unwrap();
-
-        crab_cache::ensure_private_cache_directory(cache.root()).unwrap();
-        let generation_path = cache
-            .root()
-            .join("repos")
-            .join("repo-hash")
-            .join("shard-list-gen.json");
-        save_cached_generation(
-            &generation_path,
-            &CachedShardListGen {
-                generation: manifest.generation,
-                shard_hashes: Vec::new(),
-            },
-        );
-
-        let stats = run_post_fetch_shard_sync(router, "repo-hash", cache.root(), None, false)
-            .await
-            .unwrap();
-
-        assert_eq!(stats.shards_downloaded, 1);
-    }
-
-    #[tokio::test]
-    async fn post_fetch_sync_reads_v2_pointer_catalog_without_manifest() {
-        let (router, cache, _dir) = setup();
-        let shard_hash = publish_v2_shard(&router, b"v2 pointer catalog shard").await;
-
-        let stats = run_post_fetch_shard_sync(router, "repo-hash", cache.root(), None, false)
-            .await
-            .unwrap();
-
-        assert_eq!(stats.shards_downloaded, 1);
-        assert!(cache.contains(&CacheKey::Shard(shard_hash)).await);
-    }
-
-    #[tokio::test]
-    async fn corrupt_v2_root_does_not_fall_back_to_v1_shards() {
-        let (router, _cache, _dir) = setup();
-        let manifest = Manifest::default_for_repo("refs/heads/main");
-        create_manifest(router.store(), &router, &manifest)
-            .await
-            .unwrap();
-        let layout = crab_storage::StoreLayout::with_global_prefix(
-            router.store().as_storage().clone(),
-            router.repo_prefix().to_owned(),
-            router.global_prefix().to_owned(),
-        );
-        router
-            .store()
-            .put(
-                &layout.capsule_root_path(),
-                Bytes::from_static(b"not a capsule root"),
-            )
-            .await
-            .unwrap();
-
-        assert!(matches!(
-            load_published_shards(&router).await,
-            Err(CrabError::CorruptObject { .. })
-        ));
-    }
-
-    #[tokio::test]
-    async fn sync_detects_corrupt_download() {
-        let (router, cache, _dir) = setup();
-
-        let hash = MerkleHash::from([99u64, 99, 99, 99]);
-        let obj_path = router.shard_path(&hash);
-        router
-            .store()
-            .put(&obj_path, Bytes::from_static(b"wrong content"))
-            .await
-            .unwrap();
-
-        let mut sync = ShardSynchronizer::new(router, cache, None);
-        let mut idx = ChunkIndex::new();
-
-        let shard_list = make_shard_list(1, &[hash.hex()]);
-        let stats = sync.sync(&mut idx, &shard_list).await.unwrap();
-        assert_eq!(stats.shards_failed, 1);
-        assert_eq!(stats.shards_downloaded, 0);
-    }
-
-    #[tokio::test]
-    async fn sync_emits_metrics() {
-        let (router, cache, _dir) = setup();
-        let metrics = Arc::new(Metrics::new());
-
-        let shard_data = b"metrics test shard";
-        let hash = compute_data_hash(shard_data);
-        let hex = hash.hex();
-        let obj_path = router.shard_path(&hash);
-        router
-            .store()
-            .put(&obj_path, Bytes::from(shard_data.as_slice()))
-            .await
-            .unwrap();
-
-        let mut sync = ShardSynchronizer::new(router, cache, Some(metrics.clone()));
-        let mut idx = ChunkIndex::new();
-
-        let shard_list = make_shard_list(1, &[hex]);
-        sync.sync(&mut idx, &shard_list).await.unwrap();
-
-        let snap = metrics.snapshot();
-        assert_eq!(snap.chunk_index_shards_installed, 1);
-    }
-
-    // --- Incremental sync tests ---
-
-    #[tokio::test]
-    async fn incremental_sync_skips_all_when_generations_match() {
-        let (router, cache, dir) = setup();
-        let cache_dir = dir.path();
-
-        let hash_a = MerkleHash::from([1u64, 2, 3, 4]);
-        let hash_b = MerkleHash::from([5u64, 6, 7, 8]);
-        let entries = vec![hash_a.hex(), hash_b.hex()];
-
-        // Pre-populate the cached generation file.
-        let gen_path = cache_dir
-            .join("repos")
-            .join("testhash")
-            .join("shard-list-gen.json");
-        let cached = CachedShardListGen {
-            generation: 5,
-            shard_hashes: entries.clone(),
-        };
-        save_cached_generation(&gen_path, &cached);
-
-        // Set up a PersistentChunkIndex with both shards marked as
-        // installed. Without this, the sync correctly falls through to
-        // full download because it can't verify the shards are locally
-        // available.
-        let pi_path = cache_dir
-            .join("repos")
-            .join("testhash")
-            .join("chunk-index.sqlite");
-        let pi = PersistentChunkIndex::open_or_create(&pi_path).unwrap();
-        // Install both shards with dummy entries so has_shard returns true.
-        let dummy_hash = MerkleHash::from([99u64, 99, 99, 99]);
-        let dummy_ref = crab_xet::xorb::format::XorbRef {
-            xorb_hash: dummy_hash,
-            chunk_index: 0,
-            uncompressed_size: 1024,
-        };
-        pi.install_shard(hash_a, &[(dummy_hash, dummy_ref)])
-            .unwrap();
-        pi.install_shard(hash_b, &[(dummy_hash, dummy_ref)])
-            .unwrap();
-
-        let mut sync = ShardSynchronizer::new(router, cache, None)
-            .with_repo_cache_dir(cache_dir, "testhash")
-            .with_persistent_index(Arc::new(pi));
-        let mut idx = ChunkIndex::new();
-
-        // Remote generation matches cached — should skip all because
-        // the persistent index confirms both shards are installed.
-        let shard_list = make_shard_list(5, &entries);
-        let stats = sync.sync(&mut idx, &shard_list).await.unwrap();
-        assert_eq!(stats.shards_downloaded, 0);
-        assert_eq!(stats.shards_skipped, 2);
-        assert_eq!(stats.shards_failed, 0);
-    }
-
-    #[tokio::test]
-    async fn incremental_sync_downloads_only_delta_when_remote_ahead() {
-        let (router, cache, dir) = setup();
-        let cache_dir = dir.path();
-
-        let hash_a = MerkleHash::from([1u64, 2, 3, 4]);
-        let hash_b = MerkleHash::from([5u64, 6, 7, 8]);
-
-        // Cached generation has only hash_a at gen 3.
-        let gen_path = cache_dir
-            .join("repos")
-            .join("testhash")
-            .join("shard-list-gen.json");
-        let cached = CachedShardListGen {
-            generation: 3,
-            shard_hashes: vec![hash_a.hex()],
-        };
-        save_cached_generation(&gen_path, &cached);
-
-        // Remote has both hash_a and hash_b at gen 5.
-        // hash_b is new — it should be the only one in the delta.
-        // hash_b won't be found in the store (404), so it'll be counted
-        // as failed, but the point is hash_a is skipped.
-        let mut sync =
-            ShardSynchronizer::new(router, cache, None).with_repo_cache_dir(cache_dir, "testhash");
-        let mut idx = ChunkIndex::new();
-
-        let shard_list = make_shard_list(5, &[hash_a.hex(), hash_b.hex()]);
-        let stats = sync.sync(&mut idx, &shard_list).await.unwrap();
-        // hash_a skipped via incremental delta, hash_b attempted download (404 = failed)
-        assert_eq!(stats.shards_skipped, 1);
-        assert_eq!(stats.shards_failed, 1);
-        assert_eq!(stats.shards_downloaded, 0);
-    }
-
-    #[tokio::test]
-    async fn incremental_sync_falls_back_on_missing_generation() {
-        let (router, cache, dir) = setup();
-        let cache_dir = dir.path();
-
-        // No cached generation file — should fall back to full sync.
-        let hash = MerkleHash::from([42u64, 42, 42, 42]);
-        let mut sync =
-            ShardSynchronizer::new(router, cache, None).with_repo_cache_dir(cache_dir, "testhash");
-        let mut idx = ChunkIndex::new();
-
-        let shard_list = make_shard_list(1, &[hash.hex()]);
-        let stats = sync.sync(&mut idx, &shard_list).await.unwrap();
-        // Full sync attempted — hash not in store, so failed.
-        assert_eq!(stats.shards_failed, 1);
-    }
-
-    #[tokio::test]
-    async fn incremental_sync_falls_back_on_corrupt_generation() {
-        let (router, cache, dir) = setup();
-        let cache_dir = dir.path();
-
-        // Write corrupt data to the generation file.
-        let gen_path = cache_dir
-            .join("repos")
-            .join("testhash")
-            .join("shard-list-gen.json");
-        std::fs::create_dir_all(gen_path.parent().unwrap()).unwrap();
-        std::fs::write(&gen_path, b"not valid json").unwrap();
-
-        let hash = MerkleHash::from([42u64, 42, 42, 42]);
-        let mut sync =
-            ShardSynchronizer::new(router, cache, None).with_repo_cache_dir(cache_dir, "testhash");
-        let mut idx = ChunkIndex::new();
-
-        let shard_list = make_shard_list(1, &[hash.hex()]);
-        let stats = sync.sync(&mut idx, &shard_list).await.unwrap();
-        // Full sync attempted — hash not in store, so failed.
-        assert_eq!(stats.shards_failed, 1);
-    }
-
-    #[tokio::test]
-    async fn incremental_sync_persists_generation_after_sync() {
-        let (router, cache, dir) = setup();
-        let cache_dir = dir.path();
-
-        let shard_data = b"persist gen test";
-        let hash = compute_data_hash(shard_data);
-        let obj_path = router.shard_path(&hash);
-        router
-            .store()
-            .put(&obj_path, Bytes::from(shard_data.as_slice()))
-            .await
-            .unwrap();
-
-        let mut sync =
-            ShardSynchronizer::new(router, cache, None).with_repo_cache_dir(cache_dir, "testhash");
-        let mut idx = ChunkIndex::new();
-
-        let shard_list = make_shard_list(7, &[hash.hex()]);
-        sync.sync(&mut idx, &shard_list).await.unwrap();
-
-        // Verify the generation was persisted.
-        let gen_path = cache_dir
-            .join("repos")
-            .join("testhash")
-            .join("shard-list-gen.json");
-        let saved = load_cached_generation(&gen_path).unwrap();
-        assert_eq!(saved.generation, 7);
-        assert_eq!(saved.shard_hashes, vec![hash.hex()]);
-    }
-
-    #[test]
-    #[cfg(unix)]
-    fn cached_generation_creates_private_directories_and_replacements() {
-        use std::os::unix::fs::PermissionsExt as _;
-
-        let dir = TempDir::new().unwrap();
-        let path = dir.path().join("repos/repo/shard-list-gen.json");
-        for generation in [1, 2] {
-            save_cached_generation(
-                &path,
-                &CachedShardListGen {
-                    generation,
-                    shard_hashes: vec![],
-                },
-            );
-            let modes: Vec<_> = [
-                dir.path().join("repos"),
-                dir.path().join("repos/repo"),
-                path.clone(),
-            ]
-            .iter()
-            .map(|path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777)
-            .collect();
-            assert_eq!(modes, [0o700, 0o700, 0o600]);
-        }
-    }
-
-    #[test]
-    fn cached_generation_save_overwrites_without_tempfile_leftover() {
-        let dir = TempDir::new().unwrap();
-        let gen_path = dir.path().join("repos/testhash/shard-list-gen.json");
-        let first = CachedShardListGen {
-            generation: 1,
-            shard_hashes: vec!["a".to_owned()],
-        };
-        let second = CachedShardListGen {
-            generation: 2,
-            shard_hashes: vec!["b".to_owned(), "c".to_owned()],
-        };
-
-        save_cached_generation(&gen_path, &first);
-        save_cached_generation(&gen_path, &second);
-
-        let saved = load_cached_generation(&gen_path).unwrap();
-        assert_eq!(saved.generation, 2);
-        assert_eq!(saved.shard_hashes, second.shard_hashes);
-
-        let files: Vec<_> = std::fs::read_dir(gen_path.parent().unwrap())
-            .unwrap()
-            .map(|entry| entry.unwrap().file_name())
-            .collect();
-        assert_eq!(files, vec![std::ffi::OsString::from("shard-list-gen.json")]);
-    }
-
-    #[tokio::test]
-    async fn incremental_sync_without_repo_cache_dir_does_full_sync() {
-        let (router, cache, _dir) = setup();
-
-        // No with_repo_cache_dir call — should do full sync (no generation caching).
-        let hash = MerkleHash::from([42u64, 42, 42, 42]);
-        let mut sync = ShardSynchronizer::new(router, cache, None);
-        let mut idx = ChunkIndex::new();
-
-        let shard_list = make_shard_list(1, &[hash.hex()]);
-        let stats = sync.sync(&mut idx, &shard_list).await.unwrap();
-        // Full sync — hash not in store, so failed.
-        assert_eq!(stats.shards_failed, 1);
-    }
-
-    // --- Bloom-first filtering tests ---
-
-    /// Build a canonical v1 shard with a bloom filter.
-    /// Returns `(shard_bytes, shard_hash)`.
-    fn build_bloom_shard(chunk_hashes: &[MerkleHash]) -> (Vec<u8>, MerkleHash) {
-        use crab_xet::shard::ShardWriter;
-
-        let w = ShardWriter::new();
-        w.finalize_with_bloom(&[], chunk_hashes).unwrap()
-    }
-
-    /// Build a canonical v1 shard without the optional bloom.
-    fn build_plain_shard() -> (Vec<u8>, MerkleHash) {
-        use crab_xet::shard::ShardWriter;
-
-        let w = ShardWriter::new();
-        w.finalize().unwrap()
-    }
-
-    fn build_shard_with_one_chunk() -> (
-        Vec<u8>,
-        MerkleHash,
-        MerkleHash,
-        crab_xet::xorb::format::XorbRef,
-    ) {
-        use crab_xet::shard::ShardWriter;
-        use crab_xet::shard::{MDBXorbInfo, XorbChunkSequenceEntry, XorbChunkSequenceHeader};
-
-        let xorb_hash = MerkleHash::from([7000, 7000, 7000, 7000]);
-        let chunk_hash = MerkleHash::from([7001, 7001, 7001, 7001]);
-        let chunk_size = 1024_u32;
-        let xorb = Arc::new(MDBXorbInfo {
-            metadata: XorbChunkSequenceHeader::new(xorb_hash, 1, chunk_size as usize),
-            chunks: vec![XorbChunkSequenceEntry::new(chunk_hash, chunk_size, 0)],
-        });
-        let mut writer = ShardWriter::new();
-        writer.add_xorb(xorb).unwrap();
-        let (bytes, shard_hash) = writer.finalize().unwrap();
-        (
-            bytes,
-            shard_hash,
-            chunk_hash,
-            crab_xet::xorb::format::XorbRef {
-                xorb_hash,
-                chunk_index: 0,
-                uncompressed_size: chunk_size,
-            },
-        )
-    }
-
-    #[tokio::test]
-    async fn bloom_filter_skips_shard_when_no_chunk_matches() {
-        let (router, cache, _dir) = setup();
-
-        // Build a bloom shard with 500 chunk hashes to create a large bloom
-        // filter where false positives for unrelated hashes are negligible.
-        let shard_chunks: Vec<MerkleHash> = (10_000..10_500)
-            .map(|i: u64| {
-                MerkleHash::from([
-                    i,
-                    i.wrapping_mul(31),
-                    i.wrapping_mul(97),
-                    i.wrapping_mul(127),
-                ])
-            })
-            .collect();
-        let (shard_bytes, shard_hash) = build_bloom_shard(&shard_chunks);
-
-        let obj_path = router.shard_path(&shard_hash);
-        router
-            .store()
-            .put(&obj_path, Bytes::from(shard_bytes))
-            .await
-            .unwrap();
-
-        // Single query hash from a completely different range.
-        let query: HashSet<MerkleHash> = [MerkleHash::from([
-            99_999u64,
-            99_999u64.wrapping_mul(31),
-            99_999u64.wrapping_mul(97),
-            99_999u64.wrapping_mul(127),
-        ])]
-        .into_iter()
-        .collect();
-
-        let mut sync = ShardSynchronizer::new(router, cache, None).with_query_hashes(query);
-        let mut idx = ChunkIndex::new();
-
-        let shard_list = make_shard_list(1, &[shard_hash.hex()]);
-        let stats = sync.sync(&mut idx, &shard_list).await.unwrap();
-
-        assert_eq!(stats.shards_bloom_skipped, 1);
-        assert_eq!(stats.shards_downloaded, 0);
-        assert!(!idx.has_shard(&shard_hash));
-    }
-
-    #[tokio::test]
-    async fn bloom_filter_downloads_shard_when_chunk_may_match() {
-        let (router, cache, _dir) = setup();
-
-        // Build a shard whose bloom contains 100 chunk hashes.
-        let shard_chunks: Vec<MerkleHash> = (1000..1100)
-            .map(|i: u64| {
-                MerkleHash::from([
-                    i,
-                    i.wrapping_mul(31),
-                    i.wrapping_mul(97),
-                    i.wrapping_mul(127),
-                ])
-            })
-            .collect();
-        let (shard_bytes, shard_hash) = build_bloom_shard(&shard_chunks);
-
-        let obj_path = router.shard_path(&shard_hash);
-        router
-            .store()
-            .put(&obj_path, Bytes::from(shard_bytes))
-            .await
-            .unwrap();
-
-        // Query includes hash 1050 which IS in the shard's bloom.
-        let query: HashSet<MerkleHash> = [MerkleHash::from([
-            1050u64,
-            1050u64.wrapping_mul(31),
-            1050u64.wrapping_mul(97),
-            1050u64.wrapping_mul(127),
-        ])]
-        .into_iter()
-        .collect();
-
-        let mut sync = ShardSynchronizer::new(router, cache, None).with_query_hashes(query);
-        let mut idx = ChunkIndex::new();
-
-        let shard_list = make_shard_list(1, &[shard_hash.hex()]);
-        let stats = sync.sync(&mut idx, &shard_list).await.unwrap();
-
-        assert_eq!(stats.shards_bloom_skipped, 0);
-        assert_eq!(stats.shards_downloaded, 1);
-        assert!(!idx.has_shard(&shard_hash));
-    }
-
-    #[tokio::test]
-    async fn bloom_filter_falls_back_for_v1_shard() {
-        let (router, cache, _dir) = setup();
-
-        // Build a canonical v1 shard without a bloom.
-        let (shard_bytes, shard_hash) = build_plain_shard();
-
-        let obj_path = router.shard_path(&shard_hash);
-        router
-            .store()
-            .put(&obj_path, Bytes::from(shard_bytes))
-            .await
-            .unwrap();
-
-        // Even with query hashes set, no-bloom shards download normally.
-        let query: HashSet<MerkleHash> =
-            (200..210).map(|i| MerkleHash::from([i, i, i, i])).collect();
-
-        let mut sync = ShardSynchronizer::new(router, cache, None).with_query_hashes(query);
-        let mut idx = ChunkIndex::new();
-
-        let shard_list = make_shard_list(1, &[shard_hash.hex()]);
-        let stats = sync.sync(&mut idx, &shard_list).await.unwrap();
-
-        assert_eq!(stats.shards_bloom_skipped, 0);
-        assert_eq!(stats.shards_downloaded, 1);
-        assert!(!idx.has_shard(&shard_hash));
-    }
-
-    #[tokio::test]
-    async fn query_scoped_sync_does_not_mark_persistent_shard_complete() {
-        let (router, cache, dir) = setup();
-
-        let shard_chunks: Vec<MerkleHash> = (3000..3100)
-            .map(|i: u64| {
-                MerkleHash::from([
-                    i,
-                    i.wrapping_mul(31),
-                    i.wrapping_mul(97),
-                    i.wrapping_mul(127),
-                ])
-            })
-            .collect();
-        let (shard_bytes, shard_hash) = build_bloom_shard(&shard_chunks);
-
-        let obj_path = router.shard_path(&shard_hash);
-        router
-            .store()
-            .put(&obj_path, Bytes::from(shard_bytes.clone()))
-            .await
-            .unwrap();
-
-        let persistent_path = dir
-            .path()
-            .join("repos")
-            .join("testhash")
-            .join("chunk-index.sqlite");
-        let persistent = Arc::new(PersistentChunkIndex::open_or_create(&persistent_path).unwrap());
-        let query: HashSet<MerkleHash> = [shard_chunks[0]].into_iter().collect();
-        let mut sync = ShardSynchronizer::new(router, cache, None)
-            .with_query_hashes(query)
-            .with_persistent_index(Arc::clone(&persistent));
-        let mut idx = ChunkIndex::new();
-
-        let shard_list = make_shard_list(1, &[shard_hash.hex()]);
-        let stats = sync.sync(&mut idx, &shard_list).await.unwrap();
-
-        assert_eq!(stats.shards_downloaded, 1);
-        assert!(!idx.has_shard(&shard_hash));
-        assert!(!persistent.has_shard(&shard_hash).unwrap());
-
-        sync.install_shard_data(&shard_hash, &Bytes::from(shard_bytes), &mut idx, false);
-
-        assert!(idx.has_shard(&shard_hash));
-        assert!(persistent.has_shard(&shard_hash).unwrap());
-    }
-
-    #[tokio::test]
-    async fn exact_query_sync_installs_every_requested_match_only() {
-        let (router, cache, _dir) = setup();
-        let (shard_bytes, shard_hash, requested, expected_ref) = build_shard_with_one_chunk();
-        router
-            .store()
-            .put(&router.shard_path(&shard_hash), Bytes::from(shard_bytes))
-            .await
-            .unwrap();
-        let mut sync = ShardSynchronizer::new(router, cache, None)
-            .with_exact_query_hashes([requested].into_iter().collect());
-        let mut idx = ChunkIndex::new();
-
-        let stats = sync
-            .sync(&mut idx, &make_shard_list(1, &[shard_hash.hex()]))
-            .await
-            .unwrap();
-
-        assert_eq!(stats.shards_downloaded, 1);
-        assert_eq!(idx.get(&requested), Some(&expected_ref));
-        assert_eq!(idx.len(), 1);
-        assert!(!idx.has_shard(&shard_hash));
-    }
-
-    #[tokio::test]
-    async fn full_shard_install_repairs_marker_only_persistent_index() {
-        let (router, cache, dir) = setup();
-        let (shard_bytes, shard_hash, chunk_hash, xorb_ref) = build_shard_with_one_chunk();
-        let persistent_path = dir
-            .path()
-            .join("repos")
-            .join("testhash")
-            .join("chunk-index.sqlite");
-        let persistent = Arc::new(PersistentChunkIndex::open_or_create(&persistent_path).unwrap());
-
-        persistent.install_shard(shard_hash, &[]).unwrap();
-        assert!(persistent.has_shard(&shard_hash).unwrap());
-        assert!(persistent.get(&chunk_hash).unwrap().is_none());
-
-        let mut sync = ShardSynchronizer::new(router, cache, None)
-            .with_persistent_index(Arc::clone(&persistent));
-        let mut idx = ChunkIndex::new();
-
-        sync.install_shard_data(&shard_hash, &Bytes::from(shard_bytes), &mut idx, false);
-
-        assert_eq!(persistent.get(&chunk_hash).unwrap(), Some(xorb_ref));
-        assert_eq!(idx.get(&chunk_hash).copied(), Some(xorb_ref));
-        assert!(idx.has_shard(&shard_hash));
-    }
-
-    #[tokio::test]
-    async fn bloom_filter_disabled_without_query_hashes() {
-        let (router, cache, _dir) = setup();
-
-        // Build a canonical v1 shard with a bloom.
-        let shard_chunks: Vec<MerkleHash> = (1000..1100)
-            .map(|i: u64| {
-                MerkleHash::from([
-                    i,
-                    i.wrapping_mul(31),
-                    i.wrapping_mul(97),
-                    i.wrapping_mul(127),
-                ])
-            })
-            .collect();
-        let (shard_bytes, shard_hash) = build_bloom_shard(&shard_chunks);
-
-        let obj_path = router.shard_path(&shard_hash);
-        router
-            .store()
-            .put(&obj_path, Bytes::from(shard_bytes))
-            .await
-            .unwrap();
-
-        // No with_query_hashes — bloom filtering should be skipped entirely.
-        let mut sync = ShardSynchronizer::new(router, cache, None);
-        let mut idx = ChunkIndex::new();
-
-        let shard_list = make_shard_list(1, &[shard_hash.hex()]);
-        let stats = sync.sync(&mut idx, &shard_list).await.unwrap();
-
-        assert_eq!(stats.shards_bloom_skipped, 0);
-        assert_eq!(stats.shards_downloaded, 1);
-        assert!(idx.has_shard(&shard_hash));
-    }
-
-    // --- On-disk shard fallback tests ---
-
-    #[tokio::test]
-    async fn shard_spills_to_disk_when_chunk_index_over_ceiling() {
-        let (router, cache, dir) = setup();
-        let shard_cache_dir = dir.path().join("repos").join("testhash").join("shards");
-
-        // Build a valid plain v1 shard and upload it.
-        let (shard_bytes, shard_hash) = build_plain_shard();
-        let obj_path = router.shard_path(&shard_hash);
-        router
-            .store()
-            .put(&obj_path, Bytes::from(shard_bytes))
-            .await
-            .unwrap();
-
-        // Use a ChunkIndex with a very low ceiling and pre-populate it
-        // with entries so it's already over the ceiling before sync.
-        let mut idx = ChunkIndex::with_ceiling(40);
-        let dummy_hash = MerkleHash::from([1u64, 1, 1, 1]);
-        let dummy_ref = crab_xet::xorb::format::XorbRef {
-            xorb_hash: MerkleHash::from([2u64, 2, 2, 2]),
-            chunk_index: 0,
-            uncompressed_size: 100,
-        };
-        idx.insert(dummy_hash, dummy_ref);
-        idx.insert(MerkleHash::from([3u64, 3, 3, 3]), dummy_ref);
-        assert!(idx.over_ceiling());
-
-        let mut sync = ShardSynchronizer::new(router, cache, None)
-            .with_shard_cache_dir(shard_cache_dir.clone());
-
-        let shard_list = make_shard_list(1, &[shard_hash.hex()]);
-        let stats = sync.sync(&mut idx, &shard_list).await.unwrap();
-
-        assert_eq!(stats.shards_downloaded, 1);
-        // The shard is marked as installed (so it won't be re-downloaded).
-        assert!(idx.has_shard(&shard_hash));
-        // An MDBShardFile handle was created for on-disk querying.
-        assert_eq!(sync.shard_files().len(), 1);
-        // The shard cache directory was created.
-        assert!(shard_cache_dir.exists());
-    }
-
-    #[tokio::test]
-    async fn shard_loads_into_memory_when_under_ceiling() {
-        let (router, cache, dir) = setup();
-        let shard_cache_dir = dir.path().join("repos").join("testhash").join("shards");
-
-        // Build a valid plain v1 shard and upload it.
-        let (shard_bytes, shard_hash) = build_plain_shard();
-        let obj_path = router.shard_path(&shard_hash);
-        router
-            .store()
-            .put(&obj_path, Bytes::from(shard_bytes))
-            .await
-            .unwrap();
-
-        // Default ceiling (1 GiB) — should load into memory, not disk.
-        let mut idx = ChunkIndex::new();
-
-        let mut sync =
-            ShardSynchronizer::new(router, cache, None).with_shard_cache_dir(shard_cache_dir);
-
-        let shard_list = make_shard_list(1, &[shard_hash.hex()]);
-        let stats = sync.sync(&mut idx, &shard_list).await.unwrap();
-
-        assert_eq!(stats.shards_downloaded, 1);
-        assert!(idx.has_shard(&shard_hash));
-        // No on-disk fallback handles created.
-        assert_eq!(sync.shard_files().len(), 0);
-    }
-
-    #[tokio::test]
-    async fn shard_falls_back_to_memory_without_shard_cache_dir() {
-        let (router, cache, _dir) = setup();
-
-        // Build a valid plain v1 shard and upload it.
-        let (shard_bytes, shard_hash) = build_plain_shard();
-        let obj_path = router.shard_path(&shard_hash);
-        router
-            .store()
-            .put(&obj_path, Bytes::from(shard_bytes))
-            .await
-            .unwrap();
-
-        // Ceiling of 0 but no shard_cache_dir — should fall back to
-        // in-memory install since there's nowhere to spill.
-        let mut idx = ChunkIndex::with_ceiling(0);
-
-        let mut sync = ShardSynchronizer::new(router, cache, None);
-
-        let shard_list = make_shard_list(1, &[shard_hash.hex()]);
-        let stats = sync.sync(&mut idx, &shard_list).await.unwrap();
-
-        assert_eq!(stats.shards_downloaded, 1);
-        assert!(idx.has_shard(&shard_hash));
-        assert_eq!(sync.shard_files().len(), 0);
-    }
-}
+#[path = "shard_sync_tests.rs"]
+mod tests;

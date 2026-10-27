@@ -34,8 +34,9 @@ When you fetch, Crab:
 3. Selects the configured primary or replica.
 4. Reconstructs each selected file through the verified shard/xorb read path,
    discarding output after hash and size validation.
-5. Synchronizes the persistent local chunk index unless
-   `--no-sync-chunk-index` is set.
+5. Warms the persistent local chunk index from the authenticated Capsule shard
+   catalog unless `--no-sync-chunk-index` is set. Missing or corrupt Capsule
+   authority is an error; manifest metadata cannot replace it.
 
 The local cache lives at `~/.cache/crab/` by default; `$CRAB_CACHE_DIR` overrides its root.
 

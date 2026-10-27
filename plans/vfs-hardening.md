@@ -33,7 +33,7 @@ folder. The report describes the audited commit, not the current working tree.
 | Efficient range reads | Ordinary blobs and pointers: small random reads, sequential windows, cold/warm, concurrent readers; origin bytes, userspace amplification, throughput, p95/p99, RSS | Seventh checkpoint removes repeated whole-blob loading on warm ranges; cold/concurrent and native/provider performance remain open |
 | Bounded dispatch and directories | Concurrent blocked hydration must not serialize unrelated FUSE operations; large-directory paging/inode lifetime; effective bounded prefetch | Linux blocked-read dispatch and entered-WRITE admission repaired at checkpoints 60/61; directory lifetime, prefetch and total memory remain open |
 | Consistent lifecycle in every mode | Foreground/helper/coordinator/daemon; read-only/writable; automatic/manual refresh; reset/commit; stalled clients and unmount during reads | Open; managed engine-drain cancellation, foreground FUSE controls/refresh, macOS mapped writeback and Windows ownership remain gaps |
-| Retire Crab pack v1 compatibility | Reject v1 stored repositories at all read/write/selection dispatch boundaries; delete fallback readers/writers and obsolete compatibility tests/docs; preserve empty-repository v2 initialization | Admission/helper/doctor/selected-replica validation and eighteenth-checkpoint replica readiness require v2. Protected receive, legacy initialization, metadb/GC and maintenance/publication dispatch remain open |
+| Retire Crab pack v1 compatibility | Reject v1 stored repositories at all read/write/selection dispatch boundaries; delete fallback readers/writers and obsolete compatibility tests/docs; preserve empty-repository v2 initialization | Admission, protected receive, initialization, metadata owner/doctor, selected-replica validation and post-fetch warming require v2. Prepared repack retirement is qualified. Wire, GC/maintenance/replication and retained-history inventory remain open |
 | Final qualification | Exact resulting sources, minimal/NFS/FUSE/combined feature checks, appropriate broad CI, native Linux NFS/FUSE + RustFS, macOS NFS; retained performance measurements | Scoped current-source checks are retained at each checkpoint; complete mode/platform/performance qualification remains open |
 
 ## First checkpoint: source state and local revision selection
@@ -5131,7 +5131,556 @@ handles, sidecars, corrupt-cache handling and Windows ownership. Total memory,
 cold/concurrent reads and sustained-write degradation remain performance work;
 SQL counts alone are not an optimized throughput result.
 
+## Checkpoint 70 — Capsule-only repack and checkpoint error ownership
+
+Runtime/doc changes are qualified in the worktree, not yet committed or pushed.
+The prepared two-file pack-layout guard migration remains unapplied pending
+explicit human approval under AGENTS.md:222. PR #630 therefore still publishes
+checkpoint 69 at `98cbaf091cb504f34544697454bfa5a7f5e66e40`.
+
+Remove the remaining CLI manifest repack publisher, bounded-owner policy,
+standalone pack/index/metadata repair and legacy-only tests. Production callers
+already use captured Capsule roots. Keep that current publisher and its
+`RepackOutcome`/`RepackSummary` bodies exactly, replacing the configuration that
+only affected the deleted path with the needed dry-run boolean. The module
+shrinks **2,124 → 149 lines**. Existing Capsule assertions move unchanged into
+flat `repack_capsule_tests.rs`; no feature/tests directory is introduced.
+
+A macOS red probe against the original repack adapter proves a retryable typed
+storage reset becomes `Internal("checkpoint storage failed")` with no cause.
+Replace all **five** product checkpoint adapters — repack, metadb, retained
+history, shard compaction and xorb reconciliation — with one exhaustive
+`From<CheckpointError>` at the CLI error boundary. Preserve storage/read/Git/
+metadata/write/I/O causes, worker JoinError and existing leaf error messages.
+The match has no future-variant catch-all. New regressions preserve provider
+retry classification, GC fence identity/expiry with unchanged root, worker cause,
+and uncertain checkpoint evidence without a blind retry. The existing metadb
+throttle/delay/source assertion follows the canonical conversion unchanged.
+
+Preview previously used the apply view, which retains a small frontier's Git
+bodies. Select the existing complete metadata-only entry point for dry-run;
+apply retains its prior pinned-view/consolidation implementation and limits.
+One fixture has a **262,268-byte** frontier Git pack. Qualified read totals:
+
+| OS | Former preview/apply-view path | New preview | Scope |
+| --- | ---: | ---: | --- |
+| macOS | 275,774 bytes | 10,739 bytes | Same fixture and captured authority |
+| Linux | 275,781 bytes | 10,746 bytes | Same fixture and captured authority |
+
+The initial focused run measures 275,785 → 10,750 bytes; small control metadata
+varies between fixtures/runs. These measurements prove about **96.1% fewer
+source bytes** and no full frontier pack download, not improved latency,
+throughput or bounded total memory. Preview retains counts/bytes, zero body-work
+counters and an unchanged root. Existing dry-run and selected-suffix/no-op
+assertions remain. Update operator docs to current Capsule publication and
+truthful terminal JSONL output, removing obsolete manifest/locator/receipt and
+per-pack-progress claims.
+
+Evidence map:
+
+- Entry: main direct repack and grouped optimize packs → authenticated selected
+  store/root → `run_repack_from_root`. Current Capsule push/helper fixtures call
+  the same API, with unchanged verification assertions.
+- Owner/callee: root-bound view → shared `crab_remote::checkpoint` policy →
+  verified Git consolidation, immutable pack layers, catalogs/visibility and
+  exact-root CAS. No speculative new setting, dependency or fallback.
+- Siblings: all five CLI adapters use one typed conversion. Compaction retains
+  preflight before writer leases: its existing missing-root test requires zero
+  writes. Its captured root still protects publication by exact CAS; document
+  that intentional admission difference instead of blindly changing its lease
+  ordering. Metadb/history lease drain and release remain unchanged.
+- Dependency contract: shared repack performs one selected suffix pass; a
+  competing root replacement is an unpublished result, while a GC fence is a
+  typed write conflict. Uncertain write errors retain verification evidence.
+  Metadata opening does not need apply's retained body buffers.
+- Main/base: main retains the manifest publisher; crab-v2 has both the old
+  publisher and Capsule entry point. After checkpoint 69 the manifest publisher
+  has no production caller. Whole-module and all-consumer reads precede removal.
+
+Runtime qualification on each OS: **179 actual tests** — repack four, error
+contracts 73, metadata 23, compaction 14, reconciliation 18, Capsule policy 32,
+real helper pointer round-trip one, CLI parsers two, and corrected history 12.
+The original history filter matches zero tests and is explicitly not counted;
+`cmd::history_recovery::v2::` executes the real cases. No ignored cases in the
+selected groups; heavy Capsule data tests remain outside this focused slice.
+Production library/CLI Clippy exits zero, **684 macOS / 687 Linux warnings**, no
+suppression. Host formatting passes.
+
+Four Make-installed roles each OS pass **eight native cases**: Linux FUSE/NFS
+RO/RW and managed FUSE; macOS NFS RO/RW and managed NFS. Exact 6 MiB full/range
+reads, RO refusal, ownership/mode, applicable fsync → commit/push → independent
+clone/fsck and normal detach pass. **25 reuse checks** each OS, fixed role
+hashes and no forced cleanup. Corrected installed probes pass **13 repack + 31
+metadata commands per OS**, including both CLI entries, refs unchanged,
+independent exact 6 MiB reconstruction, strict fsck/deep closure, missing-root
+refusal and previous cache/authority error checks.
+
+The first new CLI probe assumes one suffix pass is followed by no-op. Actual
+receipts show macOS **3 → 2 → 1** and Linux **4 → 2 → 1** packs; both passes
+succeed. Shared policy explicitly permits this. Preserve those failed harness
+exits/receipts and require bounded strict progress to zero body work in the
+corrected probe, with a bound derived from initial fixture pack count. Separate
+retries reuse the same role hashes and verify the original refs plus exact
+content after the earlier successful passes. No runtime change or numerical
+performance-gate waiver bypasses that failure.
+
+Web build, typecheck, lint and **10 tests** pass. Built HTML verifies the current
+repack/storage/compaction contracts. Link crawl: **398 pages / 4,301 fragments**.
+Generated import multisets match; task reorder is retained externally/restored,
+then typecheck passes again. Lockfiles and the 2,156 excluded raw files remain
+unchanged.
+
+Unchanged architecture self-tests pass **15** each OS; the actual source gate
+fails only the repack inventory's three obsolete loose-pack delegation strings.
+Prepared **109-line/two-file** migration requires captured root, scoped storage
+layout, metadata preview and shared Capsule consolidation, retains raw-path
+prohibitions, forbids manifest repack calls, and rejects missing pack-layout
+owners. Against the unapplied candidate, **18 self-tests + 75 source checks**
+pass each OS. This is candidate evidence, not a passing current source gate.
+The exact patch is open for review and explicitly awaiting approval.
+
+Runtime/doc source archive: **2,055 files**, SHA-256
+`b976cd4cf243cd27a62f20aa901e5a2e0500850decc8c8632e9ed59c956b1d5c`.
+All frozen inputs remain unchanged through qualification. Installed core SHA:
+macOS `945d7da6dd09adefb0f30345e2911c58b3cbe47075c294fd8943423e5055e230`;
+Linux `f073d0e40fb985c77de70c6a608de1f5697ff9d89733636b7292875bc0c63c5a`.
+Receipts, failed attempts, final retry results, candidate guard hashes and body
+retention proof live in the owned external `repack-authority-retirement/` tree.
+
+Is this the best fix? Delete the orphaned format-specific publisher while
+keeping one captured Capsule path. Put cross-product error conversion at its
+existing CLI error owner so source/retry semantics cannot drift between five
+copies. Preview uses an already supported metadata contract and has direct read
+amplification proof. Remaining cold large-catalog/member costs, GC/reader pins,
+replication, cache clear/recovery semantics, lifecycle/platform and optimized
+performance still require work. The next audit records newly orphaned publisher
+helpers and the legacy history/locator repair closure; synthesized current-view
+Manifest DTOs and Xet shard format v1 must not be mistaken for Crab pack-v1
+repository fallback.
+
+## Checkpoint 71 — keep selected Capsule authority through helper reads
+
+Qualified worktree changes; not committed or pushed. The separate 109-line,
+two-file pack-layout guard candidate from checkpoint 70 remains unapplied.
+The repeated HEAD/tag approval covers checkpoint 68's already published guard,
+not this inventory migration. PR #630 still publishes checkpoint 69 at
+`98cbaf091cb504f34544697454bfa5a7f5e66e40`.
+
+The normal protocol-v2 fetch reproduction passes on both OSes after the fix.
+Before the fix, replay one verified pre-checkpoint primary root response, then
+allow selection to read matching current primary/replica state. Exhaustive
+current-state replica verification passes. A replaced checkpoint is absent only
+from the disposable replica. The helper combines its old primary root with the
+selected replica store, requests that old checkpoint and fails with CRAB-E0020;
+Git exits 128. Current-root controls succeed. The same old root works on primary;
+fresh cache does not repair the replica failure. This is provider-response replay
+of a capture window, not simultaneous live-writer stress or complete retained-
+history replication proof.
+
+Retain the selected root that `StoreResolver::read_store` previously validated
+and discarded. Its product result now carries store, layout, source and mandatory
+verified root. The shared generic policy-selection type stays unchanged. Primary
+selection reuses the authenticated root; replica selection reuses its existing
+validation read. No extra root validation request, config option or dependency.
+
+The helper owns this read selection across wire and classic capability/list/
+fetch batches. Capability probes and fetch views open its captured root. Classic
+fetch opens one view after request validation under the existing reader admission,
+then shares it with ordinary, constrained and raw-object paths. A cached cold-clone
+view supplies its own advertised refs. Primary push ref views have their own cache;
+ordinary read advertisements cannot seed push CAS admission. The optional cached
+primary root is an I/O reuse decision: absence strictly opens Capsule authority,
+never a manifest reader. Existing reader renewal/release and runtime drain remain.
+
+The sibling classic-path reproduction also passes. On the old Make-installed
+binary, a normal cold clone succeeds, but denying primary-root GETs after its
+third successful root request causes Git exit 128 despite a readable selected
+replica. The helper was selecting again between capability/list/fetch batches.
+The new binary keeps its selected repository: both baseline and denial arms
+succeed with exact checkout bytes and strict full fsck on macOS and Linux.
+Primary-root GETs fall **7 → 3** in the baseline on both OSes. The denial arm
+needs no fourth root request. This is a measured request-count reduction, not
+an optimized throughput, latency, RSS or sustained-write result.
+
+Evidence map: repository auth captures physical primary scope → product resolver
+returns verified selected authority → helper session owns that selection → shared
+Capsule view opener and Git runtime → provider/native paths. Push continues through
+its primary ref snapshot and Capsule publisher. Other resolver consumers retain
+the selected store/layout; they do not combine this read root with an independent
+provider. Mount selection and clone shard sync retain direct selector coverage.
+Current main still serves manifest authority; current crab-v2 and the published
+PR head retain the reproduced independently passed Capsule root. Both fetched
+base refs remain unchanged.
+
+Focused qualification executes **262 distinct tests each OS**: 154 helper,
+105 replica, two clone-selector and one mount-selector cases, with no ignores.
+The pinning case additionally runs alone. It removes the mutable root after
+capture and still reads the pinned replica snapshot; the selector runs once.
+The classic test repeats fetch with a selector that would fail, proving reuse.
+A new read/push sequence verifies replica read refs and independent primary push
+refs. Existing assertions remain. The clone shard fixture now publishes a Capsule
+catalog instead of a legacy manifest. Its shard-selection and unsafe-cache checks
+stay unchanged. The marker-only mount fixture initializes its root before data.
+No feature/tests directory is introduced.
+
+Four Make-installed roles each OS pass **eight fresh native cases**: Linux
+FUSE/NFS RO/RW plus managed FUSE; macOS NFS RO/RW plus managed NFS. Exact 6 MiB
+full/range reads, RO refusal, live ownership/mode, applicable fsync → commit/push →
+independent clone/fsck and normal detach pass. **25 reuse checks each OS**; no
+forced cleanup. Fresh installed probes pass **15 repack + 31 metadata commands
+each OS**, using unchanged installed role hashes through all later replays.
+
+Preserve unsuccessful attempts. An initial fixture update used a create-only
+ref edit for an existing head; the pinning case now tests mutable-root removal
+instead of that unrelated publication. A mechanical selector fixture edit failed
+compilation and was corrected without changing existing assertions. The first
+macOS NFS-only mount filter executes zero tests and is not counted; both final
+runs enable the required feature and execute the case. Linux catches the marker
+fixture's initialization order; the rootless-nonempty-prefix refusal stays intact.
+
+The first Linux installed group stops before native mounting: its global xorb
+sets contain 188 objects after source push, 189 before consumer add and 189 after
+add. The changed inventory predates that add; the simultaneously running macOS
+harness shares this bucket-global namespace. Preserve the failed report and all
+three lists. A serialized retry uses the exact same binaries and unchanged
+harness/assertions and passes all five Linux native cases plus CLI probes. No
+threshold or inventory assertion is waived. An initial Linux inline Python probe
+receives no stdin through the noninteractive Docker runner and executes no code;
+only the subsequent file-based, result-validated replay is counted.
+
+Production library/CLI Clippy exits zero: **692 macOS / 695 Linux warnings**,
+without suppression. Formatting passes. Web production build, typecheck, lint
+and **10 tests** pass; built HTML contains the selected-root/session/push contract.
+Link crawl: **398 pages / 4,301 fragments**. Generated import multisets match;
+reordering is retained externally/restored and a second typecheck passes. Locks
+and all 2,156 excluded raw files are unchanged.
+
+Actual architecture self-tests pass 15; the actual source check has 74 passing
+gates and only the three obsolete repack-delegation violations. Its first local
+invocation lacked Cargo on PATH; the corrected invocation supplies the actual
+failure evidence. The unchanged, unapplied guard candidate passes **18 self-tests
+and 75 source checks each OS**. AGENTS.md:222 still requires explicit approval.
+
+Published-head CI is now terminal: nine workflow successes, S3 gateway failure,
+and the protocol workflow canceled. Native platform jobs skip on this PR event;
+the dedicated runs above provide the stated native proof. S3 service, traffic,
+ecosystem and native workload steps succeed, but retained-report verification
+rejects the native soak's unchanged performance limits. Ten clean windows give
+terminal throughput **0.764566×** early throughput and p95 **1.518136×** early
+p95, outside 0.8 / 1.5 limits. The report's integrity flag passes with 94,862
+acknowledgements; performance fails. No direct baseline is measured. Preserve
+this as a current performance gap; the new read request-count result is not a
+soak rerun. No workflow, threshold or expected-failure file is changed.
+
+Current frozen source: **2,056 files**, archive SHA-256
+`fa3bf72fb10d2bc803b8c88c12c1169b842e9c2215e57ca797f451a374671c2e`.
+All frozen inputs remain exact. Installed core SHA:
+macOS `bf285107e4ff392a6f243a0105b3862821de6f81d578c4bfcc18f2c20d74c2dc`;
+Linux `d40a955fbeaa39e59038e069de70b3f8f52d7614f88930de511c18dffce71e9f`.
+Intermediate archive/tests, failed attempts, role hashes, before/after traces and
+`qualified-summary71.json` live in the owned external `selected-root-binding/`
+trees. The older audit and checkpoint-70 archives remain separate bindings.
+
+Is this the best fix? Capture physical read authority at selection and retain it
+through the whole helper read session; do not reconstruct provider/root pairing
+at terminal handoff or keep selecting beneath cached views. Reuse verified reads
+and existing canonical view/admission APIs. The extra product carrier and session
+state replace an invalid independent-root assumption and prevent cross-provider
+push admission; non-test LOC growth pays for that ownership boundary.
+
+Stored pack-v1 retirement is still incomplete. Wire's optional-root manifest/
+visibility repair closure, post-fetch shard-sync fallback, GC/maintenance and
+retained-history contracts remain. Reader/payload retention, total memory, cold
+concurrency, lifecycle/platform proof and the unchanged failing optimized gates
+also remain. This checkpoint is not all-mode or optimized-performance signoff.
+
+## Checkpoint 72 — Capsule-only post-fetch shard warming
+
+The prepared worktree removes the shard-sync manifest/journal fallback and its
+repository-generation cursor. A valid manifest-only fixture returns a successful
+zero-shard result before the fix; the same regression now requires typed missing
+`v2/root` authority and proves no derived cache was opened. Existing corrupt-root
+refusal is retained. Empty authenticated catalogs still produce an empty delta.
+
+`load_published_shards` now loads the physical Capsule root, captures its complete
+pointer catalog and returns its shard hashes. `PointerCatalogInspection` finishes
+and closes scratch state on success/error. The shared publisher commits through
+independently mutable per-ref heads, so root generation cannot key this catalog.
+The new regression publishes another shard while root generation is unchanged;
+the second sync downloads one new shard and skips its predecessor.
+
+Delete `CachedShardListGen`, its JSON cursor, `with_repo_cache_dir`,
+`sync_from_manifest`, generation persistence and the unconditional full-list
+clone. `sync` accepts only the authenticated hash slice. Preserve bounded shard
+GETs, content hashes, receipts, bloom/query behavior, private cache handling,
+spill/install behavior and all `SyncStats` fields. The production section shrinks
+1,202 → 829 lines. The main module is 834 lines; 707 lines of tests live in flat
+`shard_sync_tests.rs`, with no feature/tests directory.
+
+| Surface | Caller / owner | Contract / sibling proof | Current behavior |
+| --- | --- | --- | --- |
+| CLI warming | Opt-in clone and default fetch/pull → `run_post_fetch_shard_sync` | Selected physical store/layout; clone warns after admitted clone, fetch propagates authority failure | Same strict catalog reader for both paths |
+| Authority | `load_published_shards` → shared Capsule root/catalog capture | Complete normalized catalog and explicit inspection finish; per-ref publication need not change root generation | No manifest or generation-cursor fallback |
+| Derived reuse | `compute_delta` → persistent `has_shard`, verified shard cache and hash-bounded download | Existing receipt, corruption, bloom, exact-query and spill assertions retained | Skip installed receipts; download missing candidates |
+| Main/base comparison | Current main warms legacy manifest state; crab-v2 admits missing-root manifest shards | Before-fix valid-manifest refusal fails with `Ok(SyncStats { ...0 })` | Current worktree returns typed missing Capsule authority |
+
+All **19 retained test assertion sets remain identical after whitespace**.
+Remove nine tests solely for the retired generation cursor and add three for
+missing authority, unchanged-root publication and selective persistent receipts.
+Final qualification executes **25 cases each OS**: 22 shard-sync, two clone
+selector and one fetch-output test; no ignores. Production Clippy exits zero
+with 692 macOS / 695 Linux warnings and no suppression. Format/diff checks pass.
+
+Four roles are Make-installed each OS. New actual CLI qualification executes
+**10 commands each OS** across lazy clone with warming and lazy clone followed
+by fetch warming. macOS clone downloads three shards; Linux downloads four.
+Cold fetch installs the missing two/three shards after canonical prefetch caches
+one. Repeated fetches download zero and skip all installed shards. Every fetch
+emits a real shard-sync phase and selects one 6 MiB file. SQLite receipts and
+chunk rows plus cached shard bytes are checked, hydration is byte-exact, and
+independent Git fsck is strict. Role hashes remain fixed. Checkpoint 71's eight
+native mounts, 262 focused tests and 46 CLI commands per OS retain their separate
+source binding; this slice does not claim a fresh native mount rerun.
+
+A controlled private-cache profile uses the same 6 MiB fetch and adds 500,000
+unrelated valid chunk rows. Eight samples per OS cover normal/large cache and
+warming on/off, with two repeats each. All fetches pass. Large-cache peak RSS:
+**macos 251.6–253.0 MiB with warming versus 73.5–74.6 MiB without; linux 228.1–228.4 MiB with warming versus 83.7–83.7 MiB without**. The bulk `PersistentChunkIndex::load_all` and temporary
+in-memory mirror are still present. This is a measured next target, not an
+applied memory improvement or sustained native-write proof. No threshold changes.
+
+Preserve probe/setup failures. The initial macOS CLI probe expects text tracing
+fields but the successful clone emits JSON; a structured-output retry with fresh
+caches retains every assertion. The first macOS profile requests WAL checkpoint
+inside its uncommitted fixture transaction; committing first fixes only setup.
+Linux fixture insertion on the Docker host bind is interrupted after three
+minutes of page spill. The retry gives only the fixture writer a 128 MiB page
+cache; measured CLI connections use normal settings and the same 500,000 rows.
+
+Docs production build, types, lint, 10 tests and the 398-page/4,301-fragment crawl
+pass. Built HTML states mandatory Capsule warming and clone's warning boundary.
+Generated registry import multisets match, are restored, and typecheck passes
+again. No dependency/lockfile or inventory/threshold change. All 2,156 raw audit
+files remain preserved and excluded; zero tracked paths.
+
+Frozen source: **2,058 files**, archive SHA-256
+`4c5dd72c86e544c93928d1d11c4281c46cb02e083cbc3e6f085ecdf3a3bccde3`.
+All inputs remain exact. Core SHA:
+macOS `4c764de04073d541d948db5a281e2240546382f1322f8182009a14053dc6f986`;
+Linux `974a09da184a0c735982bb0c5dbabda8d8fc31780690cdec11e566edb0e39771`.
+External `shard-sync-authority/` receipts retain sources, failed attempts,
+commands, SQLite/cache checks and memory samples. Earlier snapshots stay separate.
+
+Is this the best fix? Use one authenticated catalog path and exact installation
+receipts. Delete the cursor rather than finding another root-generation key for
+independently mutable ref catalogs. Existing typed authority, inspection cleanup
+and persistent receipt APIs provide the required contracts without a new layer.
+
+The unchanged 109-line/two-file pack-layout guard candidate passes 18 self-tests
+and 75 source gates each OS. It remains unapplied pending the separate explicit
+approval under AGENTS.md:222. Actual source gates retain the same three obsolete
+repack requirements. Earlier HEAD/tag approval was already published. No push is
+attempted with this known related gate failure. Next remove the measured bulk
+cache load, retire wire's optional-root/visibility legacy closure, finish GC and
+reader-retention authority, and repair the unchanged sustained native-write soak
+failure. Whole-mode/platform/optimized-performance acceptance remains open.
+
+## Checkpoint 73 — warming memory follows the candidate delta
+
+The prepared worktree removes the temporary bulk persistent-index mirror from
+post-fetch shard warming. Previously every fetch deserialized the bucket's
+entire `chunks_v1` table into a Vec, copied it into a HashMap, loaded all shard
+receipts, then discarded both collections after warming. The same path already
+checks `PersistentChunkIndex::has_shard` for each authenticated candidate.
+
+Keep that existing keyed path and delete the eager mirror. `EXPLAIN QUERY PLAN`
+shows a covering-index search on the shard receipt's primary key on both OSes.
+Receipt hits mark only the current ephemeral candidate set. Verified local bytes,
+bounded/hash-checked downloads, full/query-scoped installation, persistent
+transactions and spill behavior remain unchanged. No function signature, schema,
+error or metric field/method changes. Both production warming callers pass no
+metrics collector; the existing direct synchronizer metrics test still passes.
+The production section shrinks another 27 lines. No tests or baselines change.
+
+| Surface | Entry / owner | Dependency and sibling evidence | Proof |
+| --- | --- | --- | --- |
+| Post-fetch warming | Clone selector / fetch → `run_post_fetch_shard_sync` | Ephemeral ChunkIndex never escapes; persistent `has_shard` checks installation receipt | Full bulk Vec/map and all-receipt enumeration removed |
+| Receipt hit | `compute_delta` → keyed `has_shard` | SQLite primary key; hash-verified catalog selects candidates | Existing selective-receipt and unchanged-root cases pass |
+| Installation | `download_and_install` / verified local-cache install | Persistent shard transaction stores entries before receipt; current bloom/query/spill methods unchanged | All 22 shard-sync cases plus clone/fetch callers pass |
+| Telemetry / other owners | Direct synchronizer metrics; persistent inspection/current SQLite API | Metrics methods unchanged; production callers supply None. Shared APIs and their property tests remain | Existing metrics assertion unchanged; no schema/API edit |
+| Main / base | Both fetched refs and published head retain the bulk mirror | Source 72 process baseline captures actual scaling, rather than relying on code shape | Same source 72 profile fails the new external 64 MiB growth check |
+
+Final source executes **25 tests each OS**, without ignores, and production
+library/CLI Clippy exits zero (692 macOS / 695 Linux warnings, no suppression).
+Four roles are Make-installed each OS. Ten actual CLI commands each OS prove
+clone warming, fetch warming, repeat receipt reuse, exact 6 MiB hydration and
+strict Git fsck. All existing test source hashes remain unchanged.
+
+The memory comparison copies the retained source-72 private caches; streaming
+row digests prove identical chunk mappings and receipts before/after each arm.
+The large cache has exactly 500,000 unrelated additional valid chunk rows.
+Eight fetch samples per OS cover warming on/off and normal/large caches, twice
+per arm. Every sample succeeds, selects one 6 MiB file, and every warming sample
+downloads zero while skipping all installed shards. Large-cache peak RSS:
+
+| OS | Before peak RSS (MiB) | After peak RSS (MiB) | Shard-sync before / after (ms) |
+| --- | --- | --- | --- |
+| macos | 251.6–253.0 | 76.2 | 756–768 / 23–25 |
+| linux | 228.1–228.4 | 81.6–81.7 | 1157–2645 / 112–133 |
+
+The external regression check allows at most 64 MiB extra peak RSS from those
+unrelated rows. Both source-72 baselines fail; both current binaries pass.
+This is a private-cache, two-sample comparison. It does not bound all VFS reply,
+COW, reconstruction, prefetch or captured-metadata memory, and it is not sustained
+mounted-write throughput proof. No existing threshold or CI policy changes.
+
+Frozen source: **2,058 files**, archive SHA-256
+`52f708821dc1fd498c8e47666ca052ca261e845a499923923542dcbe89299270`.
+Only shard_sync.rs and its architecture document differ from source 72. All
+frozen inputs and installed roles remain exact. Core SHA: macos `6aa0b6829e5904a3b63a211a15a9f9a1a7cb049c637656f088125c16e10131b0`; linux `7bb0677a3295c6101c6ccea097be67d4a744a74105f9881afe1c2c9f0342915f`.
+External `shard-sync-memory/` receipts retain the old failing memory budgets,
+query plans, exact copied-cache row digests, command results and process samples.
+No new unsuccessful product qualification attempt. One diagnostic `du` process
+is stopped to avoid competing with the live compilers; it supplies no claimed
+size evidence. All qualification jobs finish and are collected.
+
+Source-72 web inputs remain byte-identical; that checkpoint's build/type/lint,
+10 tests and 398-page/4,301-fragment proof retain their separate binding. This
+slice changes only the Rust architecture document and reruns no web suite.
+Checkpoint 71's eight native mount cases also retain their separate binding;
+no fresh OS-mounted performance or correctness run is claimed here.
+
+Correct the soak scope. The S3 gateway workflow's `native-soak-proof.json`
+executes signed HTTP PUTs against a native Crab repository, with 16 writers,
+4 KiB objects and ten 30-second windows. It does not exercise FUSE/NFS mounts.
+The earlier native-write wording was too broad. Its observed throughput/p95
+failure remains a gateway gate; sustained OS-mounted writes need their own
+measurement. No report assertion or threshold is changed to conceal the failure.
+
+Is this the best fix? Installation receipts already answer whether a candidate
+needs warming. Remove the discarded global mirror instead of adding limits,
+configuration or another cache. Preserve full persistent contents and canonical
+read verification. The measured memory scaling disappears through the existing
+ownership boundary, with a net deletion and no new production path.
+
+Candidate guards pass 18 self-tests and 75 source checks each OS, unchanged and
+unapplied. Publication still waits for the separate 109-line/two-file pack-layout
+guard approval under AGENTS.md:222; the already-published HEAD/tag approval does
+not cover it. All 2,156 original raw files remain preserved/excluded. Next finish
+wire/GC authority and reader retention, measure sustained mounted writes, and
+resolve the separate gateway degradation. The full goal remains active.
+
+## Checkpoint 74 — retain advertised Capsule state through wire fetch
+
+A concurrent push can advance ref heads B → C without changing the authenticated
+Root digest. Source 73 advertises B, then reopens mutable heads for complete-view
+promotion and denies its previously advertised want. The new negotiation test is
+red on that runtime (three retained cases pass, the new case fails CRAB-E0060).
+The repaired test validates the exact three-object pack/checksum with Git's strict
+indexer, admits B, and proves C absent.
+
+`crab-read::CapsuleRepositoryCapture` owns the physical layout, RootSnapshot,
+validated ref heads and committed activations for this session. Discovery uses
+only captured refs. Fetch opens verified metadata lazily, and complete promotion
+reuses those same heads. Root is mandatory at the wire entry; no optional-root
+manifest/visibility-repair path remains. The shared metadata owner retains its
+existing bounded version/epoch/activation and ordered-frontier checks. No stored
+format, policy default, dependency, configuration or threshold changes.
+
+Preserve borrowed-layout one-shot APIs: ref-only and layered-control function
+bodies remain exact, while complete metadata passes borrowed heads/activations to
+the existing assembler. Only the multi-stage wire session owns the new capture.
+`RepositoryRefs::from_maps` exposes the existing parser without a Manifest DTO;
+its trait caller retains the same validation and ordering.
+
+Remove the orphaned push locator/journal/visibility-repair closure and private
+backoff, with six tests solely for those retired writers. The push module shrinks
+7,156 → 5,747 lines. Historical recovery still uses the retained local-ODB
+visibility publisher; pre-existing graph/materialization maintenance remains a
+separate retirement inventory. The wire module is 1,850 lines, with flat sibling
+test files of 668, 413 and 436 lines. Five obsolete legacy wire tests are removed;
+empty/unborn, hidden-ref, peeled-tag and payload-free discovery assertions are
+migrated to actual Capsule fixtures. Missing payload after successful discovery
+produces the terminal error and no pack.
+
+Final runtime qualification, each OS: **365 passes, zero failures/ignores** —
+64 retained push, 32 current Capsule policy, 41 wire, 154 helper, 33 repository
+parser and 41 shared read/capture cases. Minimal-feature read/remote checks pass.
+Production library/CLI Clippy exits zero, with 687 macOS / 690 Linux warnings;
+new unused imports are removed, no suppression. Format passes. Four roles are
+Make-installed per OS, using the external per-worktree target.
+
+**Eight fresh native cases pass**: Linux FUSE/NFS RO/RW plus managed FUSE; macOS
+NFS RO/RW plus managed NFS. Each OS also passes 25 reuse checks, 15 installed
+repack commands and 31 installed metadata commands. Exact 6 MiB full/range reads,
+RO refusal, applicable fsync → commit/push → independent eager clone/strict fsck,
+default refs and outside-Git discovery pass. Owners exit normally, kernels detach,
+role hashes remain exact, and no forced cleanup is needed. Serialize the OS runs
+so global xorb inventories cannot race each other.
+
+An isolated RustFS fixture proves the regression through normal Git protocol-v2
+shallow fetch on both OSes. Hold the ls-refs response, publish C, verify the Root
+digest stays fixed, then resume Git. Old source-73 helpers exit **128**, explicitly
+denying advertised B; final helpers exit **0**, install B as FETCH_HEAD, exclude C
+and pass strict fsck. The first unconstrained probe stays on the tip-bound path
+and succeeds with the old helper; retain it as a control, not a false red case.
+Depth-one requests force the affected complete-view admission.
+
+A separately bound intermediate run passes 39 default Capsule cases per OS,
+including seven data cases: 3,236,572,256 reconstructed bytes on macOS and
+3,955,888,660 on Linux. Three existing large-corpus ignores remain explicit.
+An external parser incorrectly required zero ignores; Cargo passed, the wrapper
+failed, and both outputs remain retained. Final focused runs execute the 32
+non-data policy cases with no ignores; do not add the intermediate seven to the
+final-source 365 count. The earlier explicit large-corpus proof remains separate.
+Other retained setup failures include the test fixture borrow/stack corrections,
+missing Cargo in a probe PATH, and a guard-manifest shape check rejected before
+mutation. No product assertion or source baseline is relaxed for those retries.
+
+The human explicitly approves the remaining **109-line/two-file pack-layout guard
+migration**. Apply the exact before/candidate hashes. Actual repository checks now
+pass **18 self-tests + 75 source checks per OS**. Required captured-root/shared
+Capsule repack ownership, raw-path prohibitions, missing-owner refusal and
+manifest-repack refusal all remain enforced. The earlier three stale repack checks
+are superseded by the approved current contract; no further approval is pending.
+
+Final source: **2,060 files**, approved archive SHA-256
+`acc0722f664d157a0c3d732d43329393cd9b8f374ba8d95c9d8ca53c2d5920c8`.
+Runtime archive `886277cba7da2a3cebcc1c5f6fd255b9427c7b538a214fb9ffa0a90813b23b23`
+differs only in the two approved Python guard files; all Rust/runtime inputs stay
+exact. Core SHA: macOS `e028163bdd4717fcc32b8e39f3420f76b5a0b12c5a657257616f3228779dc3d5`;
+Linux `a6e44704754a367e2979655bd83fe78d9268b44487a9e60aaaf0d90d5520c78c`.
+All 482 web inputs remain byte-identical to this checkpoint's production build,
+types, lint, 10 tests and 398-page/4,301-fragment validation. Original 2,156 raw
+benchmark files remain preserved/excluded; zero tracked paths. External
+`wire-authority-retirement/` receipts retain every source binding and attempt.
+
+Evidence map: helper selection → wire session → shared captured physical owner →
+metadata stable-head/activation/frontier contracts → authenticated pack generation.
+Current main still has legacy manifest snapshot/repair. Classic
+`open_capsule_fetch_view` recaptures but explicitly refuses changed refs/peeled
+refs/transactions; uncheckpointed multi-run `fetch_capsule_packs` can reopen Root.
+Those classic paths need the same capture audit next. GC reader retention,
+maintenance/replication/history authority, Windows/lifecycle qualification and
+sustained mounted performance remain open. No all-mode or optimized-performance
+signoff; the gateway PUT degradation remains a separate failing CI gate.
+
+Is this the best fix? Retain the validated physical capture at its shared owner.
+Root-digest comparison alone cannot detect this reproduced mutable-head race;
+retrying against newer refs would change the advertised contract. Removing the
+retired wire writer closure and keeping one-shot borrowing also reduces local
+complexity without adding a fallback or unrelated async ownership.
+
 ## Remaining priority order
+
+Checkpoint 73 removes the measured post-fetch bulk mirror: the same large-cache
+fixture now peaks at about 76 MiB on macOS and 82 MiB on Linux, versus the earlier
+252–253 / 228 MiB. All values and receipts remain intact. Checkpoint 74 closes
+the reproduced wire recapture race and retires its manifest repair closure. Next
+finish classic capture coherence, GC authority and reader retention, then qualify
+sustained FUSE/NFS writes. The CI
+`native-soak` artifact measures signed S3 gateway PUTs into a native Crab
+repository; its degradation is a separate gateway gate, not an OS-mount result.
 
 Checkpoints 57/62 close the reproduced Unix endpoint flock handoff and late
 control-binding mechanisms. Linux Unix/TCP readiness and rollback are now proven;
@@ -5300,7 +5849,7 @@ Completed admission boundaries:
   Execution/finalization no longer have no-store success paths. Both old remote
   publishers and their newly orphaned candidate-index helpers are gone.
 
-Remaining located storage-authority boundaries:
+Authority retirement status and remaining boundaries:
 
 - SDK `initialize_remote` was changed upstream in #629 to canonical Capsule
   initialization. Checkpoint-46 removes the exported old initializer and updates
@@ -5308,10 +5857,12 @@ Remaining located storage-authority boundaries:
 - Checkpoints 47/48 remove manifest authority from protected receive and standalone
   auth view, including their old producers. Checkpoint 49 removes the unused shared manifest preparation/upload/commit APIs.
   Checkpoint 50 removes add-time manifest selection, staged old-receipt fallback
-  and native receipt import. Checkpoint 59 removes the obsolete Native entry and its orphaned handoffs. The
-  generic manifest publisher still owns journal helpers, a plan DTO and manifest
-  initialization; retire that owner and migrate its seven useful integration
-  fixtures next rather than deleting rooted projections by name.
+  and native receipt import. Checkpoint 59 removes the obsolete Native entry
+  and its orphaned handoffs. Checkpoints 63/67 migrate the useful producer
+  properties to current Capsule fixtures; checkpoint 68 removes the generic
+  publisher and initializer. Checkpoint 70's qualified worktree removes the
+  orphaned manifest repack publisher. Rooted projections remain current data
+  transfer types, not evidence that an old-format reader is required.
 - Gateway read/write, listing, checkpoint ordering, completion recovery and
   maintenance now require Capsule authority at checkpoint-38. No production
   gateway caller selects the old initializer, manifest/journal reader/publisher
@@ -5321,10 +5872,15 @@ Remaining located storage-authority boundaries:
 - LFS pre-push ref discovery now requires a Capsule root; its missing-root
   manifest/empty-base fallback is removed at checkpoint-35. First and incremental
   real Git hook publication plus an independent eager clone pass on RustFS.
-- `crab/src/cmd/metadb.rs::capsule_owner_root`: optional roots select alternative
-  generation, maintenance and recovery paths. `crab/src/cmd/gc/bucket.rs` also
-  has missing-root fallback at registered-repository root collection. Read and
-  change these authority contracts together; no bucket-wide GC command was run.
+- Checkpoint 69 removes the optional-root metadata owner, diagnosis and rebuild
+  dispatch. Checkpoint 71's qualified worktree binds helper read selection to
+  its physical Capsule root across wire and classic batches. Checkpoint 72's
+  qualified worktree removes the post-fetch shard-sync fallback and generation
+  cursor. Wire's optional-root manifest/visibility closure is retired in checkpoint 74;
+  classic complete-view promotions still need captured-state ownership. `crab/src/cmd/gc/bucket.rs` still permits missing-root
+  fallback during registered-repository root collection; prove complete
+  reachability and fail-closed authority before changing deletion decisions.
+  No bucket-wide GC command was run.
 - Maintenance/publication/replication dispatch and related docs still require an
   exhaustive storage-authority inventory. The locations above are confirmed
   reachable source leads, not complete removal proof. Manifest projections used
