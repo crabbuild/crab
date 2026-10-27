@@ -4801,6 +4801,88 @@ old suites remain intact until its full corpus completes. Generic publisher
 retirement, metadb/GC/maintenance authority, all-mode lifecycle, total memory,
 cold-read concurrency, SQLite qualification and performance gates remain open.
 
+## Checkpoint 67 — current Capsule reconstruction corpus
+
+Both remaining external generic-publisher suites are replaced by current Capsule
+coverage in the existing flat `capsule_push_data_tests.rs`. Their original files
+and hashes remain in external evidence. All replacement cases pass before either
+old file is removed; Cargo autodiscovery then confirms both old targets are gone.
+Historical benchmark reports naming those targets retain their original evidence.
+No production API or dependency changes. Test LOC shrinks by 1,425 lines.
+
+The shared fixture generates an exact number of real Gear CDC chunks, ending at
+a boundary, and writes expected bytes to private temporary files. It stages real
+bytes in 512-chunk batches, flushes, publishes a verified recipe lease, closes and
+reopens staging, then requires complete durable file-version membership. One
+memory-heavy scenario owns admission until its staging/origin/file owners drop.
+This bounds fixture scheduling; it is not a production memory-budget change.
+
+Valid inputs must publish successfully, rather than accepting the old conditional
+E0085 outcome. Current rooted refs, catalog file count, sizes and shard membership
+must agree; the CLI hydrator writes every byte to disk, then full byte comparisons
+and both EOFs must match. A deliberately inconsistent pointer/recipe size returns
+typed StagingCorrupt, leaves the root digest unchanged and publishes no ref.
+Current Capsule preparation explicitly permits safe immutable orphans on other
+failure paths; old manifest/MetaDb-prefix absence assertions are not a current
+storage contract. Complete term construction and missing-placement E0085 guards
+remain in canonical crab-xet. No data-plane guard is removed or weakened. The five canonical term/coverage
+guard tests pass on both OSes, including missing identity, excess coverage,
+reversed/overflowed ranges and repeated chunk occurrences.
+
+Evidence map:
+
+| Surface | Entry / owner | Contract | Proof / sibling boundary |
+| --- | --- | --- | --- |
+| Real CDC membership | Private pointer fixture → StagingArea | Exact real chunks, bounded batches, verified recipe lease and durable reopen | Exact requested count after reopen; all payload bytes remain independently available for comparison |
+| Current publication | Existing private Capsule run with explicit Git directory | One selected pointer set and captured staging ownership before ref publication | Exact HEAD ref and authenticated catalog coverage for every file; no new public test API or global Git-directory mutation |
+| Reconstruction | Existing CLI hydration owner → verified streaming writer | Full content hash, exact size and complete output | Whole-file byte comparisons plus both EOFs for deterministic and randomized cases |
+| Negative admission | Selected recipe/pointer size disagreement | Typed error before visibility | Unchanged root digest and no visible ref; valid corpus cannot hide behind a fail-loud alternative |
+| Shared guards | xet_publication → file_info_from_placements → FileTermBuilder | Every recipe occurrence resolves or errors | Existing canonical missing/overflow/repeated-occurrence checks remain; no old storage layout is retained |
+| Main / base | Both removed suites are byte-identical on fetched main and v2 | Three old generic calls; environment-gated returns and manifest/MetaDb assertions | Current-format replacement qualified before removal; original files/hashes and complete test-domain map preserved |
+
+Linux's default Capsule group passes all 39 cases, with three explicitly ignored
+large cases. Those three also pass in the dedicated Linux environment with zero
+ignored/skipped: deterministic 22k/27k/50k, a single five-file publish call at
+100/2k/5k/22k/27k, and four randomized large cases. In total they reconstruct 12
+files, 226,100 chunk occurrences and 14,560,023,399 exact bytes. The 50k case alone
+is 3,225,368,782 bytes. macOS passes all seven default data cases, including the
+three properties with four samples each; its three large cases are explicitly
+ignored and are not claimed as macOS large-corpus qualification. The original
+sampling domains remain; the old hidden environment returns are gone.
+
+The complete large run takes 3,589.27 seconds in debug mode, including generation,
+staging and comparison. It is correctness evidence, not optimized throughput.
+Its source archive is `f804576435cdfb1d95e9c98d5d8969d5c229ef8f118ea919c4d2c994d5d87e86`.
+That binary predates checkpoint 66's VFS blob-copy change; the current publication
+and reconstruction code is unchanged. The final Linux default group includes
+the published blob change. No earlier proof is rebound to a different source.
+Final migration source contains 1,566 hashed files; archive SHA-256:
+`841d0322ef3c07d83fc9cf550f3938f7f3ec0f8746d5e13df425c61131154ae3`.
+The new fixture is byte-identical to its qualified source; the only subsequent
+change is deleting the two integration files absent from lib-test inputs.
+
+Checkpoint 66's deferred Linux proof also completes: 687 regular VFS tests,
+all 20 explicitly run native FUSE/NFS tests, one isolated warm-range test and
+production VFS Clippy with zero diagnostics. Thus all 708 VFS cases execute
+across those runs. Native coverage retains mapped transitions, refresh/switch,
+inspection/export, rename/unlink/replacement, COW, LFS and committed remounts.
+The isolated 4 MiB warm-read probe records 113 userspace-read bytes under the
+unchanged bound. This is not a fresh installed Linux CLI or optimized benchmark.
+
+Is this the best fix? Put reconstruction properties on the current private
+Capsule owner, require success for valid files, and retain direct byte proof.
+Exact executed chunk counts and explicit large-test disposition replace approximate
+labels and hidden skips. Preserve current shared types and metadata consumers;
+remove the obsolete producer instead of keeping a second test-only publisher.
+
+No external generic-publisher calls remain. The 37,278-line push module still
+contains the old producer and current shared policy/maintenance code. An unapplied
+retirement candidate preserves 115 live production item bodies and the current
+Capsule chunk-test module; it parses but still needs manual review and semantic
+qualification. Stored pack-v1 maintenance/GC/replication authority, all-mode
+lifecycle, total memory, cold-read concurrency, SQLite and performance gates
+remain open.
+
 ## Remaining priority order
 
 Checkpoints 57/62 close the reproduced Unix endpoint flock handoff and late
