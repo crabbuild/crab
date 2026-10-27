@@ -429,8 +429,7 @@ async fn capsule_generation_owner_sample(
         CAPSULE_OWNER_MAX_CHECKPOINT_BYTES,
         cancel,
     )
-    .await
-    .map_err(map_capsule_owner_error)?;
+    .await?;
     let checkpointed = maintenance.checkpointed.published;
     let repacked = maintenance.repacked.published;
     let changed = checkpointed || repacked;
@@ -486,23 +485,6 @@ fn capsule_owner_sample(
         maintenance_bytes_written: 0,
         superseded,
         elapsed_ms: u64::try_from(started.elapsed().as_millis()).unwrap_or(u64::MAX),
-    }
-}
-
-fn map_capsule_owner_error(error: crab_remote::checkpoint::CheckpointError) -> CrabError {
-    match error {
-        crab_remote::checkpoint::CheckpointError::Cancelled => CrabError::Cancelled,
-        crab_remote::checkpoint::CheckpointError::Read(source) => source.into(),
-        crab_remote::checkpoint::CheckpointError::Repack(source) => source.into(),
-        crab_remote::checkpoint::CheckpointError::Pack(source) => source.into(),
-        crab_remote::checkpoint::CheckpointError::Metadata(source) => source.into(),
-        crab_remote::checkpoint::CheckpointError::Write(source) => source.into(),
-        crab_remote::checkpoint::CheckpointError::Storage(source) => source.into(),
-        crab_remote::checkpoint::CheckpointError::Io(source) => source.into(),
-        crab_remote::checkpoint::CheckpointError::Worker(source) => {
-            CrabError::Io(std::io::Error::other(source))
-        }
-        other => CrabError::Internal(other.to_string()),
     }
 }
 
@@ -932,8 +914,7 @@ async fn run_capsule_rebuild_in(
             CAPSULE_OWNER_MAX_CHECKPOINT_BYTES,
             cancel,
         )
-        .await
-        .map_err(map_capsule_owner_error)?;
+        .await?;
         if !published.published {
             return Err(CrabError::CasConflict {
                 path: layout.capsule_root_path().to_string(),

@@ -1148,9 +1148,10 @@ STORAGE_PACK_LAYOUT_REQUIRED_DELEGATIONS = {
         "pack_metadata_path(",
     ),
     "crab/src/cmd/repack.rs": (
-        "repo_pack_path(",
-        "repo_pack_index_path(",
-        "repo_pack_reverse_index_path(",
+        "root: crab_metadata::capsule_protocol::RootSnapshot,",
+        "crab_storage::StoreLayout::with_global_prefix(",
+        "crab_read::capsule_protocol::open_view_from_root_with_metadata(",
+        "crab_remote::checkpoint::repack_capsule_repository_from_view(",
     ),
     "crab/src/replication/mod.rs": ("check_capsule_read_replica_readiness(",),
     "crates/crab-auth-server/src/receive.rs": (
@@ -1163,6 +1164,13 @@ STORAGE_PACK_LAYOUT_REQUIRED_DELEGATIONS = {
     "crates/crab-auth-server/src/view.rs": (
         "ViewGitWorkspace::create(",
         "publish_filtered_capsule_view(",
+    ),
+}
+STORAGE_PACK_LAYOUT_FORBIDDEN_DELEGATIONS = {
+    "crab/src/cmd/repack.rs": (
+        "read_manifest(",
+        "write_manifest_cas(",
+        "upload_segmented_bulk(",
     ),
 }
 STORAGE_PACK_LAYOUT_FORBIDDEN_PATTERNS = (
@@ -4393,15 +4401,20 @@ def check_storage_pack_layout_delegation(root: Path) -> bool:
     for scan_path, required_patterns in STORAGE_PACK_LAYOUT_REQUIRED_DELEGATIONS.items():
         path = root / scan_path
         if not path.is_file():
+            violations.append(f"{scan_path}: pack layout owner source is missing")
             continue
         text = path.read_text(encoding="utf-8")
         for required in required_patterns:
             if required not in text:
                 violations.append(
-                    f"{rel(root, path)}: pack object layout must delegate to crab-storage"
+                    f"{rel(root, path)}: pack object layout must retain its delegated owner"
                 )
+        forbidden = (
+            *STORAGE_PACK_LAYOUT_FORBIDDEN_PATTERNS,
+            *STORAGE_PACK_LAYOUT_FORBIDDEN_DELEGATIONS.get(scan_path, ()),
+        )
         for index, line in enumerate(text.splitlines(), start=1):
-            if any(pattern in line for pattern in STORAGE_PACK_LAYOUT_FORBIDDEN_PATTERNS):
+            if any(pattern in line for pattern in forbidden):
                 violations.append(
                     f"{rel(root, path)}:{index}: pack object layout belongs in crab-storage"
                 )

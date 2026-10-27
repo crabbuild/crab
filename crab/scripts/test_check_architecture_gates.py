@@ -216,5 +216,53 @@ class PushOwnershipTests(unittest.TestCase):
                 self.assertFalse(self.check_sources(dict(sources, **{path: ""}), GATES.check_git_tag_peel_delegation))
 
 
+
+class PackLayoutOwnershipTests(unittest.TestCase):
+    def fixture(self, root):
+        for name, patterns in GATES.STORAGE_PACK_LAYOUT_REQUIRED_DELEGATIONS.items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("\n".join(patterns), encoding="utf-8")
+
+    def check(self, root):
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            return GATES.check_storage_pack_layout_delegation(root)
+
+    def test_repack_requires_current_capsule_delegations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root)
+            path = root / "crab/src/cmd/repack.rs"
+            original = path.read_text(encoding="utf-8")
+            self.assertTrue(self.check(root))
+            for required in GATES.STORAGE_PACK_LAYOUT_REQUIRED_DELEGATIONS["crab/src/cmd/repack.rs"]:
+                with self.subTest(required=required):
+                    path.write_text(original.replace(required, ""), encoding="utf-8")
+                    self.assertFalse(self.check(root))
+
+    def test_pack_paths_and_manifest_repack_cannot_return(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root)
+            path = root / "crab/src/cmd/repack.rs"
+            original = path.read_text(encoding="utf-8")
+            forbidden = (*GATES.STORAGE_PACK_LAYOUT_FORBIDDEN_PATTERNS, *GATES.STORAGE_PACK_LAYOUT_FORBIDDEN_DELEGATIONS["crab/src/cmd/repack.rs"])
+            for pattern in forbidden:
+                with self.subTest(pattern=pattern):
+                    path.write_text(original + "\n" + pattern, encoding="utf-8")
+                    self.assertFalse(self.check(root))
+
+    def test_every_pack_layout_owner_is_required(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root)
+            for name in GATES.STORAGE_PACK_LAYOUT_REQUIRED_DELEGATIONS:
+                with self.subTest(owner=name):
+                    path = root / name
+                    original = path.read_text(encoding="utf-8")
+                    path.unlink()
+                    self.assertFalse(self.check(root))
+                    path.write_text(original, encoding="utf-8")
+
 if __name__ == "__main__":
     unittest.main()

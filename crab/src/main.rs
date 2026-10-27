@@ -5691,17 +5691,8 @@ async fn run_repack_command(
     let (store, root) =
         crab::auth::build_repository_url_store_with_root(&config, parsed, "repack", cancel).await?;
 
-    let repack_config = crab::cmd::repack::RepackConfig {
-        lock_ttl: std::time::Duration::from_secs(config.push_lock_ttl_secs),
-        dry_run,
-        download_concurrency: config.download_concurrency,
-        max_cas_retries: config.push_max_cas_retries,
-        workspace_root: crab::cache::default_cache_root().join("maintenance"),
-    };
-
     let outcome =
-        crab::cmd::repack::run_repack_from_root(&store, &prefix, root, &repack_config, cancel)
-            .await?;
+        crab::cmd::repack::run_repack_from_root(&store, &prefix, root, dry_run, cancel).await?;
     let summary = outcome.to_summary();
 
     match mode {

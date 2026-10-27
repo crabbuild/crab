@@ -1111,8 +1111,7 @@ async fn finalize_capsule(
             MAX_CAPSULE_BYTES,
             cancel,
         )
-        .await
-        .map_err(map_checkpoint_error)?;
+        .await?;
         if published.published {
             info!(
                 entries_updated,
@@ -1145,19 +1144,6 @@ async fn finalize_capsule(
         path: layout.capsule_root_path().to_string(),
         expected_etag: None,
     })
-}
-
-fn map_checkpoint_error(error: crab_remote::checkpoint::CheckpointError) -> CrabError {
-    match error {
-        crab_remote::checkpoint::CheckpointError::Cancelled => CrabError::Cancelled,
-        crab_remote::checkpoint::CheckpointError::Read(source) => source.into(),
-        crab_remote::checkpoint::CheckpointError::Repack(source) => source.into(),
-        crab_remote::checkpoint::CheckpointError::Pack(source) => source.into(),
-        crab_remote::checkpoint::CheckpointError::Metadata(source) => source.into(),
-        crab_remote::checkpoint::CheckpointError::Write(source) => source.into(),
-        crab_remote::checkpoint::CheckpointError::Io(source) => source.into(),
-        other => CrabError::Internal(other.to_string()),
-    }
 }
 
 /// Check that a CAS repeat is a no-op (idempotency).

@@ -3,7 +3,7 @@
 //!
 //! This is **not** `cmd::repack` (git-pack consolidation). Xorb optimization
 //! operates on content-addressed xorbs, not git packs. The existing
-//! `crab repack` command and its `RepackConfig` are untouched.
+//! `crab repack` command remains the Git pack maintenance entry point.
 //!
 //! # Submodules
 //!

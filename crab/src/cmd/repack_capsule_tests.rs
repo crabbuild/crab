@@ -9,7 +9,7 @@ use crab_storage::{
     ImmutableWriteVerification, StorageObservation, StorageObserver, StorageOperation,
 };
 use std::collections::BTreeMap;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 
 const LIMIT: u64 = 8 * 1024 * 1024;
 
@@ -31,6 +31,25 @@ async fn fixture(
     Vec<u64>,
     Arc<Observations>,
 ) {
+    let bodies = (0..count).map(|ordinal| {
+        if ordinal == 0 {
+            (0..2048_u32)
+                .flat_map(|index| *blake3::hash(&index.to_le_bytes()).as_bytes())
+                .collect::<Vec<_>>()
+        } else {
+            format!("recent blob {ordinal}").into_bytes()
+        }
+    });
+    fixture_with_bodies(bodies).await
+}
+
+async fn fixture_with_bodies(
+    bodies: impl IntoIterator<Item = Vec<u8>>,
+) -> (
+    crab_storage::StoreLayout<crab_storage::Store>,
+    Vec<u64>,
+    Arc<Observations>,
+) {
     let observations = Arc::new(Observations::default());
     let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()))
         .with_immutable_write_verification(ImmutableWriteVerification::Sha256Checksum)
@@ -40,14 +59,7 @@ async fn fixture(
         .await
         .unwrap();
     let mut sizes = Vec::new();
-    for ordinal in 0..count {
-        let body = if ordinal == 0 {
-            (0..2048_u32)
-                .flat_map(|index| *blake3::hash(&index.to_le_bytes()).as_bytes())
-                .collect::<Vec<_>>()
-        } else {
-            format!("recent blob {ordinal}").into_bytes()
-        };
+    for (ordinal, body) in bodies.into_iter().enumerate() {
         let kind = gix_object::Kind::Blob;
         let oid = crab_remote::objects::object_id(kind, &body)
             .unwrap()
@@ -143,10 +155,7 @@ async fn layered_dry_run_reports_zero_pack_io_without_publishing() {
         &Store::from_storage(layout.store().clone()),
         layout.repo_prefix(),
         root,
-        &RepackConfig {
-            dry_run: true,
-            ..Default::default()
-        },
+        true,
         &CancellationToken::new(),
     )
     .await
@@ -181,7 +190,7 @@ async fn layered_repack_reports_only_selected_body_io_and_zero_for_a_following_n
         &store,
         layout.repo_prefix(),
         root,
-        &RepackConfig::default(),
+        false,
         &CancellationToken::new(),
     )
     .await
@@ -205,11 +214,109 @@ async fn layered_repack_reports_only_selected_body_io_and_zero_for_a_following_n
         &store,
         layout.repo_prefix(),
         root,
-        &RepackConfig::default(),
+        false,
         &CancellationToken::new(),
     )
     .await
     .unwrap();
     assert_eq!((noop.bytes_read, noop.bytes_written), (0, 0));
     assert_eq!(noop.bytes_after, outcome.bytes_after);
+}
+
+#[tokio::test]
+async fn repack_preserves_gc_fence_failure_without_publishing() {
+    let (layout, _, _) = fixture(3).await;
+    let root = crab_write::capsule_protocol::open_root(&layout)
+        .await
+        .unwrap();
+    let fence_id = "e".repeat(64);
+    let expires_at = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        + 3600;
+    let fenced = crab_write::capsule_protocol::begin_gc(
+        &layout,
+        root,
+        crab_metadata::capsule_protocol::GcFence::new(&fence_id, expires_at).unwrap(),
+    )
+    .await
+    .unwrap();
+    let digest = fenced.record().digest().to_owned();
+    let result = run_repack_from_root(
+        &Store::from_storage(layout.store().clone()),
+        layout.repo_prefix(),
+        fenced,
+        false,
+        &CancellationToken::new(),
+    )
+    .await;
+    let current = crab_write::capsule_protocol::open_root(&layout)
+        .await
+        .unwrap();
+    let actual = current.record().digest().to_owned();
+    let released = crab_write::capsule_protocol::end_gc(&layout, current, &fence_id)
+        .await
+        .unwrap();
+    assert!(
+        matches!(result, Err(CrabError::PushLockHeld { holder, expires_at_unix: Some(expiry), .. }) if holder == fence_id && expiry == expires_at)
+    );
+    assert_eq!(actual, digest);
+    assert!(released.record().root().gc_fence().is_none());
+}
+
+#[tokio::test]
+async fn dry_run_reads_metadata_without_loading_small_frontier_pack_bodies() {
+    let body = (0..8192_u32)
+        .flat_map(|index| *blake3::hash(&index.to_le_bytes()).as_bytes())
+        .collect::<Vec<_>>();
+    let (layout, sizes, observations) =
+        fixture_with_bodies([b"stable prefix".to_vec(), body]).await;
+    let root = crab_write::capsule_protocol::open_root(&layout)
+        .await
+        .unwrap();
+    let before = root.record().digest().to_owned();
+    observations.0.lock().unwrap().clear();
+    // This is the apply-view entry point used by the former preview path.
+    // Its small-frontier body retention remains useful for real consolidation.
+    let apply_view = open_repack_view(&layout, root.clone(), LIMIT)
+        .await
+        .unwrap();
+    drop(apply_view);
+    let apply_bytes = observations
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|item| item.bytes_read)
+        .sum::<u64>();
+    observations.0.lock().unwrap().clear();
+    let outcome = run_repack_from_root(
+        &Store::from_storage(layout.store().clone()),
+        layout.repo_prefix(),
+        root,
+        true,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    let preview_bytes = observations
+        .0
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|item| item.bytes_read)
+        .sum::<u64>();
+    println!(
+        "preview body admission: apply_view_bytes={apply_bytes} preview_bytes={preview_bytes} frontier_pack_bytes={}",
+        sizes[1]
+    );
+    assert!(apply_bytes >= sizes[1]);
+    assert!(preview_bytes < sizes[1]);
+    assert_eq!((outcome.bytes_read, outcome.bytes_written), (0, 0));
+    assert_eq!((outcome.packs_before, outcome.packs_after), (2, 2));
+    let current = crab_write::capsule_protocol::open_root(&layout)
+        .await
+        .unwrap();
+    assert_eq!(current.record().digest(), before);
 }

@@ -22,40 +22,34 @@ flowchart LR
 
 ## How Repacking Works
 
-1. Pins the canonical manifest and segmented pack inventory.
-2. Selects the smallest suffix whose replacement restores a factor-two
-   geometric progression.
-3. Downloads and verifies only that suffix with bounded concurrency after a
-   free-space preflight; stable large packs stay in object storage and are not
-   rewritten.
-4. Generates one pack from the exact selected OID union and verifies that no
-   object was added or lost.
-5. Uploads only newly generated pack, index, and reverse-index objects, and
-   repairs missing metadata sidecars.
-6. Stages a zero-edit catalog visibility handoff, then atomically updates the
-   manifest using compare-and-swap (CAS). The handoff preserves incremental ref
-   history across the new pack-index identity without serializing the complete
-   OID dictionary.
-7. Completes the visibility handoff, rebinds the commit-graph proof, then
-   publishes exact locators and a generation receipt. Repack rebinds a legacy
-   materialized visibility proof when no catalog-bound proof exists. Repairable
-   post-CAS failures never invalidate the committed manifest.
+1. Requires Capsule authority and captures the authenticated repository root.
+2. Opens the complete repack view from that root, including current catalogs and
+   visibility.
+3. Selects a geometric suffix from compressed physical source sizes; format
+   admission can also require consolidation. Stable-prefix sources remain intact.
+4. Consolidates selected sources with verified Git pack mechanics, then publishes
+   their checkpoint with an exact-root compare-and-swap.
+5. Reports actual selected body I/O and the resulting inventory for this pass.
+   A following no-op reports zero body work.
 
-Old pack files leave the active manifest after the update, but immutable
-recovery history continues to reference them. Repack therefore reduces the
-pack count used by clone and fetch. To reclaim old pack bytes, preview and apply
-an explicit history-retention boundary with `crab recover history prune
---keep-last N`, then run repo-scoped `crab gc`.
+Small frontiers reuse already authenticated capsule bodies; larger frontiers use
+bounded control and range reads. This path does not write a unified manifest,
+legacy locator, or generation receipt.
+
+Old sources leave the active checkpoint inventory, but immutable recovery history
+can continue referencing them. Repack improves active reads. To reclaim older
+storage, preview and apply a retained-history boundary before repository GC.
 
 ### Atomicity and Safety
 
-The manifest update uses CAS to prevent concurrent maintenance or push activity
-from corrupting state. Apply mode holds the repository maintenance lease. If
-the manifest changes between repack and commit, the operation fails without
-replacing newer state; rerun against the new generation. Missing post-CAS
-evidence is repairable on a rerun without advancing an already consolidated
-generation. Dry-run reports current bytes; replacement size is unknown until
-Git performs the repack.
+Publication stays bound to the captured root and preserves concurrent ref updates
+as an authenticated suffix. A competing root replacement leaves the pass
+unpublished; its summary retains the input inventory and actual body work rather
+than attributing another writer's result to this command. GC-fence conflicts
+remain retryable; uncertain publication retains evidence for reconciliation.
+
+Dry-run does not publish or read pack bodies. It reports captured pack count and
+bytes, with zero body-work counters. It does not estimate replacement size.
 
 ## Usage
 

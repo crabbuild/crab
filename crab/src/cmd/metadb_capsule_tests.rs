@@ -517,7 +517,7 @@ fn cache_diagnosis_rejects_corruption_without_replacing_bytes() {
 
 #[test]
 fn owner_storage_throttle_remains_retryable_with_provider_source() {
-    let error = super::map_capsule_owner_error(crab_remote::checkpoint::CheckpointError::Storage(
+    let error = CrabError::from(crab_remote::checkpoint::CheckpointError::Storage(
         crab_storage::StorageError::Throttled {
             retry_after: Some(std::time::Duration::from_secs(7)),
             source: Some(object_store::Error::Generic {

@@ -86,6 +86,8 @@ pub async fn run_compact_with_cancel(
     validate_max_shard_size(args.max_shard_size)?;
     check_cancelled(cancel)?;
     let layout = crab_storage::StoreLayout::new(store.as_storage().clone(), args.repo.clone());
+    // Validate before writer admission: missing authority must not mutate storage.
+    // Publication remains bound to this exact snapshot if another writer wins.
     let root = crab_metadata::capsule_protocol::load_root(&layout).await?;
     if args.dry_run {
         return Box::pin(compact_view(args, store, &layout, root, cancel)).await;
@@ -176,8 +178,7 @@ async fn compact_view(
         MAX_CAPSULE_BYTES,
         cancel,
     )
-    .await
-    .map_err(map_checkpoint_error)?;
+    .await?;
     if !published.published {
         return Err(CrabError::CasConflict {
             path: layout.capsule_root_path().to_string(),
@@ -398,19 +399,6 @@ async fn upload_compacted_shards(
         hashes.push(hash);
     }
     Ok(hashes)
-}
-
-fn map_checkpoint_error(error: crab_remote::checkpoint::CheckpointError) -> CrabError {
-    match error {
-        crab_remote::checkpoint::CheckpointError::Cancelled => CrabError::Cancelled,
-        crab_remote::checkpoint::CheckpointError::Read(source) => source.into(),
-        crab_remote::checkpoint::CheckpointError::Repack(source) => source.into(),
-        crab_remote::checkpoint::CheckpointError::Pack(source) => source.into(),
-        crab_remote::checkpoint::CheckpointError::Metadata(source) => source.into(),
-        crab_remote::checkpoint::CheckpointError::Write(source) => source.into(),
-        crab_remote::checkpoint::CheckpointError::Io(source) => source.into(),
-        other => CrabError::Internal(other.to_string()),
-    }
 }
 
 /// Download all shards by hash into a local directory as `MDBShardFile` instances.

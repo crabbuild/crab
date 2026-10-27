@@ -61,13 +61,13 @@ Apply the rewrite:
 crab optimize xorbs --profile ml --apply
 ```
 
-Apply consolidates bounded batches of source xorbs and verifies every source
-and destination size/hash. For v2 it rebuilds affected Xet shards, verifies the
-complete replacement catalog, and publishes an authenticated checkpoint with
-exact-root compare-and-swap; it does not create a legacy manifest or file
-index. V1 repositories retain manifest-CAS publication. A repository
-maintenance lease prevents overlapping destructive maintenance; old xorbs
-remain immutable until a later GC proves them unreferenced.
+Apply requires a Capsule v2 root, consolidates bounded batches of source xorbs,
+and verifies every source and destination size/hash. It rebuilds affected Xet
+shards, verifies the complete replacement catalog, and publishes an
+authenticated checkpoint with exact-root compare-and-swap. Missing Capsule
+authority is an error. A repository maintenance lease prevents overlapping
+destructive maintenance; old xorbs remain immutable until a later GC proves
+them unreferenced.
 
 Resume or abort an interrupted run:
 

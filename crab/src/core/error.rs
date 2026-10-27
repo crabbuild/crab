@@ -1975,6 +1975,27 @@ impl From<crab_storage::error::StorageError> for CrabError {
     }
 }
 
+impl From<crab_remote::checkpoint::CheckpointError> for CrabError {
+    fn from(error: crab_remote::checkpoint::CheckpointError) -> Self {
+        use crab_remote::checkpoint::CheckpointError;
+        match error {
+            CheckpointError::Cancelled => Self::Cancelled,
+            CheckpointError::Read(source) => source.into(),
+            CheckpointError::Repack(source) => source.into(),
+            CheckpointError::Pack(source) => source.into(),
+            CheckpointError::Metadata(source) => source.into(),
+            CheckpointError::Storage(source) => source.into(),
+            CheckpointError::Write(source) => source.into(),
+            CheckpointError::Io(source) => source.into(),
+            CheckpointError::Worker(source) => Self::Io(std::io::Error::other(source)),
+            error @ (CheckpointError::AccountingOverflow
+            | CheckpointError::GitInit { .. }
+            | CheckpointError::OutputLimit { .. }
+            | CheckpointError::InvalidPackPath { .. }) => Self::Internal(error.to_string()),
+        }
+    }
+}
+
 impl From<crab_remote::publication::Error> for CrabError {
     fn from(error: crab_remote::publication::Error) -> Self {
         match error {
@@ -3959,6 +3980,83 @@ pub fn check_cancelled(cancel: &tokio_util::sync::CancellationToken) -> Result<(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checkpoint_uncertain_publication_keeps_evidence_without_blind_retry() {
+        let error = CrabError::from(crab_remote::checkpoint::CheckpointError::Write(
+            crab_write::WriteError::CapsuleCheckpointCommitUncertain {
+                checkpoint_hash: "a".repeat(64),
+                source: Box::new(crab_storage::StorageError::NetworkTransient {
+                    source: object_store::Error::Generic {
+                        store: "fixture",
+                        source: std::io::Error::new(
+                            std::io::ErrorKind::ConnectionReset,
+                            "uncertain checkpoint update",
+                        )
+                        .into(),
+                    },
+                }),
+                verification: Some(Box::new(crab_write::WriteError::Cancelled)),
+            },
+        ));
+        assert!(!error.is_retryable());
+        let CrabError::Io(io) = &error else {
+            panic!("uncertain publication lost its typed cause: {error:?}");
+        };
+        let source = io
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<crab_write::WriteError>()
+            .unwrap();
+        assert!(
+            matches!(source, crab_write::WriteError::CapsuleCheckpointCommitUncertain { checkpoint_hash, verification, .. } if checkpoint_hash == &"a".repeat(64) && matches!(verification.as_deref(), Some(crab_write::WriteError::Cancelled)))
+        );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_worker_failure_retains_join_cause() {
+        let worker = tokio::spawn(std::future::pending::<()>());
+        worker.abort();
+        let error = CrabError::from(crab_remote::checkpoint::CheckpointError::Worker(
+            worker.await.unwrap_err(),
+        ));
+        let CrabError::Io(io) = error else {
+            panic!("worker failure lost its typed cause: {error:?}");
+        };
+        assert!(
+            io.get_ref()
+                .unwrap()
+                .downcast_ref::<tokio::task::JoinError>()
+                .unwrap()
+                .is_cancelled()
+        );
+    }
+
+    #[test]
+    fn checkpoint_provider_error_keeps_retry_classification_and_cause() {
+        let error = CrabError::from(crab_remote::checkpoint::CheckpointError::Storage(
+            crab_storage::StorageError::NetworkTransient {
+                source: object_store::Error::Generic {
+                    store: "fixture",
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::ConnectionReset,
+                        "provider connection reset",
+                    )
+                    .into(),
+                },
+            },
+        ));
+        assert!(
+            matches!(&error, CrabError::NetworkTransient(_)),
+            "{error:?}"
+        );
+        assert!(
+            std::error::Error::source(&error)
+                .unwrap()
+                .to_string()
+                .contains("provider connection reset")
+        );
+    }
 
     #[test]
     fn hydration_failure_preserves_cause_diagnostics() {
