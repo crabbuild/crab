@@ -3982,16 +3982,9 @@ async fn publish_diagnostics_bundle(
     .await?;
     let object_path = ObjectPath::from(object_key.as_str());
     let body = Bytes::from(body);
-    let operation = tokio::select! {
-        biased;
-        () = cancel.cancelled() => Err(CrabError::Cancelled),
-        result = selection.store.put(&object_path, body) => result,
-    };
-    let release = gc_writer.release().await;
-    match (operation, release) {
-        (Ok(()), Ok(())) => {}
-        (Err(error), _) | (Ok(()), Err(error)) => return Err(error),
-    }
+    gc_writer
+        .run(selection.store.put(&object_path, body))
+        .await?;
 
     Ok(DiagnosticsPublication {
         primary: primary.to_owned(),

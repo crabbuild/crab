@@ -71,6 +71,13 @@ success and error paths. The operation must cooperate with the cancellation
 token and close its own resources before returning. Without a token, renewal
 failure still waits for the operation; the wrapper cannot stop it for the caller.
 
+CLI repair, diagnostics publication and experiment writes use the product GC
+admission owner to await work before releasing repository and global fences.
+Cancellation stops repair before regional publication begins; an entered
+publication drains through commit resolution. A cancelled repair can require an
+idempotent retry to acknowledge already-visible regional state. Storage failures
+remain the primary error even when cancellation also reaches cleanup.
+
 ### Admission and active-active writes
 
 `PushAdmissionTicket` bounds expensive single-repository push pipelines with a

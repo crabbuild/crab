@@ -2574,22 +2574,16 @@ pub async fn run_exp_push(args: &PushArgs, repo_root: &Path) -> Result<ExpPushPa
         &cancel,
     )
     .await?;
-    let operation = tokio::select! {
-        biased;
-        () = cancel.cancelled() => Err(CrabError::Cancelled),
-        result = push_experiments_to_remote(
+    let payload = gc_writer
+        .run(push_experiments_to_remote(
             &remote.store,
             &remote.prefix,
             repo_root,
             &ids,
             args.force,
-        ) => result,
-    };
-    let release = gc_writer.release().await;
-    let payload = match (operation, release) {
-        (Ok(payload), Ok(())) => payload,
-        (Err(error), _) | (Ok(_), Err(error)) => return Err(error),
-    };
+            &cancel,
+        ))
+        .await?;
     emit_push(&payload, args.output_mode())?;
     Ok(payload)
 }
@@ -2756,14 +2750,15 @@ async fn run_exp_remove_remote(args: &RemoveArgs, repo_root: &Path) -> Result<Ex
             &cancel,
         )
         .await?;
-        let operation =
-            remove_remote_experiments(&remote.store, &remote.prefix, args, repo_root, &cancel)
-                .await;
-        let release = gc_writer.release().await;
-        match (operation, release) {
-            (Ok(payload), Ok(())) => payload,
-            (Err(error), _) | (Ok(_), Err(error)) => return Err(error),
-        }
+        gc_writer
+            .run(remove_remote_experiments(
+                &remote.store,
+                &remote.prefix,
+                args,
+                repo_root,
+                &cancel,
+            ))
+            .await?
     };
     emit_remove(&payload, args.output_mode())?;
     Ok(payload)
@@ -3222,14 +3217,17 @@ async fn push_experiments_to_remote(
     repo_root: &Path,
     ids: &[ExperimentId],
     force: bool,
+    cancel: &CancellationToken,
 ) -> Result<ExpPushPayload> {
     let mut pushed = Vec::new();
     let mut skipped = Vec::new();
 
     for id in ids {
+        check_cancelled(cancel)?;
         let ref_path = remote_exp_meta_ref_path(prefix, id);
         if !force && remote_object_exists(store, &ref_path).await? {
             let metadata = read_remote_metadata(store, prefix, id).await?;
+            check_cancelled(cancel)?;
             register_workflow_gc_roots(store, prefix, &metadata).await?;
             skipped.push(id.to_string());
             continue;
@@ -3245,13 +3243,16 @@ async fn push_experiments_to_remote(
                 ),
             });
         }
+        check_cancelled(cancel)?;
         if force {
             delete_remote_experiment(store, prefix, id).await?;
         }
 
         push_workspace_snapshot(store, prefix, repo_root, id).await?;
+        check_cancelled(cancel)?;
         push_checkpoint_state(store, prefix, repo_root, id).await?;
 
+        check_cancelled(cancel)?;
         let meta_bytes = metadata.canonical_json()?;
         let meta_hash = metadata.content_hash()?;
         store
@@ -3261,6 +3262,7 @@ async fn push_experiments_to_remote(
             )
             .await?;
 
+        check_cancelled(cancel)?;
         let stage_refs = experiment_stage_refs_json(&metadata)?;
         store
             .put(
@@ -3274,8 +3276,10 @@ async fn push_experiments_to_remote(
         // metadata ref. Union semantics protect concurrent pushes; a failed
         // ref publication can leave only an extra root, never an unsafe
         // deletion candidate.
+        check_cancelled(cancel)?;
         register_workflow_gc_roots(store, prefix, &metadata).await?;
 
+        check_cancelled(cancel)?;
         store.put(&ref_path, Bytes::from(meta_hash)).await?;
         pushed.push(id.to_string());
     }
@@ -8398,9 +8402,16 @@ mod tests {
         )
         .unwrap();
 
-        let pushed = push_experiments_to_remote(&store, prefix, repo_root, &[id], false)
-            .await
-            .unwrap();
+        let pushed = push_experiments_to_remote(
+            &store,
+            prefix,
+            repo_root,
+            &[id],
+            false,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert_eq!(pushed.pushed, vec![id.to_string()]);
         assert!(pushed.skipped.is_empty());
 
@@ -8422,9 +8433,16 @@ mod tests {
         crab_metadata::ref_registry::deregister_repo(&storage, &registry_router, prefix)
             .await
             .unwrap();
-        let skipped = push_experiments_to_remote(&store, prefix, repo_root, &[id], false)
-            .await
-            .unwrap();
+        let skipped = push_experiments_to_remote(
+            &store,
+            prefix,
+            repo_root,
+            &[id],
+            false,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         assert!(skipped.pushed.is_empty());
         assert_eq!(skipped.skipped, vec![id.to_string()]);
 
@@ -8564,9 +8582,16 @@ mod tests {
             .unwrap();
         lineage.save_atomic(&state_root.join("train.json")).unwrap();
 
-        push_experiments_to_remote(&store, prefix, repo_root, &[id], false)
-            .await
-            .unwrap();
+        push_experiments_to_remote(
+            &store,
+            prefix,
+            repo_root,
+            &[id],
+            false,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         remove_experiment_files(repo_root, &id).unwrap();
 
         let remote = ExperimentRemote {
@@ -8636,9 +8661,16 @@ mod tests {
         )
         .unwrap();
 
-        push_experiments_to_remote(&primary, prefix, repo_root, &[id], false)
-            .await
-            .unwrap();
+        push_experiments_to_remote(
+            &primary,
+            prefix,
+            repo_root,
+            &[id],
+            false,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
         remove_experiment_files(repo_root, &id).unwrap();
 
         let remote = ExperimentRemote {

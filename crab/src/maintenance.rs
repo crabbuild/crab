@@ -93,6 +93,26 @@ impl GcWriterLeases {
         })
     }
 
+    /// Drain cooperative work before releasing both GC admissions.
+    ///
+    /// Work must check its cancellation token before starting publication. Once
+    /// started, storage requests must finish before cleanup, including on loss.
+    pub(crate) async fn run<T>(
+        self,
+        operation: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        let result = async {
+            check_cancelled(&self.operation_cancel)?;
+            operation.await
+        }
+        .await;
+        let release = self.release().await;
+        match (result, release) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        }
+    }
+
     /// Stop both heartbeats and release repository before global admission.
     pub(crate) async fn release(self) -> Result<()> {
         let cancelled = self.operation_cancel.is_cancelled();

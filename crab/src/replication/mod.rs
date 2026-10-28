@@ -27,7 +27,7 @@ use crab_read::{
 pub use crab_read::{ReadRoutingPolicy, ReadSource, ReadinessCheckOptions};
 
 use crate::core::config::Config;
-use crate::core::error::{CrabError, Result};
+use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::git::url::{Cloud, CrabUrl, ObjectUrl, UrlForm};
 use crate::storage::StoreLayout;
 use crate::storage::store::Store;
@@ -8077,57 +8077,58 @@ async fn apply_active_active_repair(
     primary_repo_path: &str,
 ) -> Result<()> {
     for action in &plan.actions {
-        apply_active_active_repair_action(replication, action, primary_repo_path).await?;
+        let source_writer = coordination_active_active::active_active_writer_for_region(
+            &active_active_coordination_config(replication),
+            &action.source_region,
+        )
+        .map(writer_from_coordination)
+        .map_err(CrabError::from)?;
+        let (_, source_prefix) = build_writer_store(&source_writer, primary_repo_path)?;
+        let (target_store, target_prefix) = build_writer_store(&action.writer, primary_repo_path)?;
+        let target_router = StoreLayout::new(target_store, target_prefix);
+        let cancel = CancellationToken::new();
+        apply_active_active_repair_action(action, &source_prefix, &target_router, &cancel).await?;
     }
     Ok(())
 }
 
 async fn apply_active_active_repair_action(
-    replication: &ReplicationConfig,
     action: &ActiveActiveRepairAction,
-    primary_repo_path: &str,
+    source_prefix: &str,
+    target_router: &StoreLayout,
+    cancel: &CancellationToken,
 ) -> Result<()> {
-    let source_writer = coordination_active_active::active_active_writer_for_region(
-        &active_active_coordination_config(replication),
-        &action.source_region,
-    )
-    .map(writer_from_coordination)
-    .map_err(CrabError::from)?;
-    let (_, source_prefix) = build_writer_store(&source_writer, primary_repo_path)?;
-    let (target_store, target_prefix) = build_writer_store(&action.writer, primary_repo_path)?;
-    let target_router = StoreLayout::new(target_store.clone(), target_prefix.clone());
-    let cancel = CancellationToken::new();
+    let target_store = target_router.store();
+    let target_prefix = target_router.repo_prefix();
     let writer = crate::maintenance::GcWriterLeases::acquire(
-        &target_store,
+        target_store,
         target_router.global_prefix(),
         target_router.repo_prefix(),
-        &cancel,
+        cancel,
     )
     .await?;
 
-    let operation = tokio::select! {
-        biased;
-        () = cancel.cancelled() => Err(CrabError::Cancelled),
-        result = async {
+    writer
+        .run(async {
             let descriptor = &action.capsule_publication;
             verify_repair_uploaded_objects_present(
-                &target_store,
+                target_store,
                 &action.uploaded_objects,
-                &source_prefix,
-                &target_prefix,
+                source_prefix,
+                target_prefix,
             )
             .await?;
+            check_cancelled(cancel)?;
             let target_layout = crab_storage::StoreLayout::with_global_prefix(
                 target_store.as_storage().clone(),
                 target_router.repo_prefix().to_owned(),
                 target_router.global_prefix().to_owned(),
             );
-            let transaction = crab_write::capsule_protocol::coordinated_transaction(
-                &target_layout,
-                descriptor,
-            )
-            .await?;
+            let transaction =
+                crab_write::capsule_protocol::coordinated_transaction(&target_layout, descriptor)
+                    .await?;
             validate_coordinated_repair_refs(action, &transaction)?;
+            check_cancelled(cancel)?;
             let view = crab_read::capsule_protocol::open_view(
                 &target_layout,
                 crab_read::capsule_protocol::CapsuleReadLimits {
@@ -8137,18 +8138,19 @@ async fn apply_active_active_repair_action(
             )
             .await?;
             let mut catalog = view.pointer_catalog().await?;
-            if let Some(delta) =
-                crab_write::capsule_protocol::coordinated_pointer_catalog_delta(
-                    &target_layout,
-                    descriptor,
-                )
-                .await?
+            if let Some(delta) = crab_write::capsule_protocol::coordinated_pointer_catalog_delta(
+                &target_layout,
+                descriptor,
+            )
+            .await?
             {
                 catalog.apply(&delta)?;
             }
-            crab_read::verify_capsule_pointer_catalog_objects(&target_layout, &catalog)
-                .await?;
+            crab_read::verify_capsule_pointer_catalog_objects(&target_layout, &catalog).await?;
             let root = crab_write::capsule_protocol::open_root(&target_layout).await?;
+            // Stop before visibility on lease loss; once replay starts, drain it
+            // through commit resolution before releasing either GC fence.
+            check_cancelled(cancel)?;
             let repaired = crab_write::capsule_protocol::materialize_coordinated_repair(
                 &target_layout,
                 root,
@@ -8164,8 +8166,7 @@ async fn apply_active_active_repair_action(
                 .await?
                 .ok_or_else(|| CrabError::CorruptObject {
                     path: target_layout.capsule_plan_intent_path(plan_id).to_string(),
-                    reason: "coordinated mirror transaction has no durable plan intent"
-                        .to_owned(),
+                    reason: "coordinated mirror transaction has no durable plan intent".to_owned(),
                 })?;
                 if intent.transaction() != &transaction {
                     return Err(CrabError::CorruptObject {
@@ -8183,13 +8184,8 @@ async fn apply_active_active_repair_action(
                 .await?;
             }
             Ok(())
-        } => result,
-    };
-    let release = writer.release().await;
-    match (operation, release) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(error), _) | (Ok(()), Err(error)) => Err(error),
-    }
+        })
+        .await
 }
 
 fn validate_coordinated_repair_refs(
@@ -12359,6 +12355,255 @@ mod tests {
 
         assert_ne!(first.request.operation_id, second.request.operation_id);
         assert_eq!(second.request.target_regions, vec!["us-east-1".to_owned()]);
+    }
+
+    #[derive(Debug)]
+    struct GatedRepairStore {
+        inner: Arc<InMemory>,
+        path: String,
+        block_put: bool,
+        entered: tokio::sync::Notify,
+        resume: tokio::sync::Notify,
+        drained: std::sync::atomic::AtomicBool,
+    }
+
+    impl GatedRepairStore {
+        async fn wait(&self) {
+            if self.drained.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            self.entered.notify_one();
+            self.resume.notified().await;
+            self.drained
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
+
+    impl fmt::Display for GatedRepairStore {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("GatedRepairStore")
+        }
+    }
+
+    #[async_trait]
+    impl ObjectStore for GatedRepairStore {
+        async fn put_opts(
+            &self,
+            location: &ObjectPath,
+            payload: PutPayload,
+            opts: PutOptions,
+        ) -> object_store::Result<PutResult> {
+            if self.block_put && location.as_ref().starts_with(&self.path) {
+                self.wait().await;
+            }
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &ObjectPath,
+            opts: PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &ObjectPath,
+            options: GetOptions,
+        ) -> object_store::Result<GetResult> {
+            if !self.block_put && location.as_ref() == self.path {
+                self.wait().await;
+            }
+            self.inner.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: BoxStream<'static, object_store::Result<ObjectPath>>,
+        ) -> BoxStream<'static, object_store::Result<ObjectPath>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&ObjectPath>,
+        ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&ObjectPath>,
+        ) -> object_store::Result<ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &ObjectPath,
+            to: &ObjectPath,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn repair_cancellation_drains_verification_before_releasing_gc_admission() {
+        repair_cancellation_drains_io(false, false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn repair_cancellation_preserves_verification_error_after_draining() {
+        repair_cancellation_drains_io(false, true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn repair_cancellation_drains_publication_before_releasing_gc_admission() {
+        repair_cancellation_drains_io(true, false).await;
+    }
+
+    async fn repair_cancellation_drains_io(block_put: bool, missing_object: bool) {
+        use crab_metadata::capsule_protocol::{Capsule, CapsuleRefEdit, CapsuleTransaction};
+        use crab_write::capsule_protocol::{initialize, prepare_coordinated_publication};
+        use object_store::ObjectStoreExt;
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+
+        let inner = Arc::new(InMemory::new());
+        let store = Store::new(inner.clone());
+        let layout = crab_storage::StoreLayout::new(store.as_storage().clone(), "repo".to_owned());
+        let base = initialize(&layout, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+        let transaction = CapsuleTransaction::new(
+            base.record().digest(),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some("2".repeat(40)),
+                None,
+            )],
+        )
+        .unwrap();
+        let capsule = Capsule::build(&transaction, Vec::new(), Vec::new()).unwrap();
+        let prepared = prepare_coordinated_publication(&layout, base, &transaction, &capsule)
+            .await
+            .unwrap();
+        let mut plan = plan_active_active_repair(
+            &active_active_replication_for_push(),
+            &coordinator_repair_snapshot(vec![repair_gap("op", "us-west-2")]),
+        )
+        .unwrap();
+        let action = &mut plan.actions[0];
+        action.capsule_publication = prepared.descriptor().clone();
+        action.refs = vec![active_active_ref_update(
+            "refs/heads/main",
+            None,
+            Some(&"2".repeat(40)),
+            false,
+        )];
+        action.uploaded_objects = vec!["repo/verified-object".to_owned()];
+        if !missing_object {
+            inner
+                .put(
+                    &ObjectPath::from("repo/verified-object"),
+                    Bytes::from_static(b"verified").into(),
+                )
+                .await
+                .unwrap();
+        }
+        let gated = Arc::new(GatedRepairStore {
+            inner,
+            path: if block_put {
+                layout.capsule_transactions_prefix().to_string()
+            } else {
+                action.uploaded_objects[0].clone()
+            },
+            block_put,
+            entered: tokio::sync::Notify::new(),
+            resume: tokio::sync::Notify::new(),
+            drained: std::sync::atomic::AtomicBool::new(false),
+        });
+        let target = StoreLayout::new(Store::new(gated.clone()), "repo".to_owned());
+        let cancel = CancellationToken::new();
+        let mut repair = Box::pin(apply_active_active_repair_action(
+            action, "repo", &target, &cancel,
+        ));
+        tokio::select! {
+            () = gated.entered.notified() => {},
+            result = &mut repair => panic!("repair did not reach the storage gate: {result:?}"),
+            () = tokio::time::sleep(Duration::from_secs(5)) => panic!("repair storage gate timed out"),
+        }
+        cancel.cancel();
+        // Poll the real repair after cancellation, without dropping a pending operation.
+        let early = tokio::time::timeout(Duration::from_millis(100), &mut repair)
+            .await
+            .ok();
+        let returned_early = early.is_some();
+        let mut swept_while_blocked = false;
+        for domain in [target.global_prefix(), target.repo_prefix()] {
+            match crab_coordination::GcFenceLease::acquire_sweep(
+                target.store().inner(),
+                domain,
+                Duration::from_secs(30),
+            )
+            .await
+            {
+                Ok(sweep) => {
+                    swept_while_blocked = true;
+                    sweep.release().await.unwrap();
+                }
+                Err(crab_coordination::CoordinationError::GcFenceHeld { .. }) => {}
+                Err(error) => panic!("unexpected sweep admission failure: {error}"),
+            }
+        }
+        gated.resume.notify_one();
+        let outcome = match early {
+            Some(result) => result,
+            None => tokio::time::timeout(Duration::from_secs(5), repair)
+                .await
+                .unwrap(),
+        };
+        for domain in [target.global_prefix(), target.repo_prefix()] {
+            crab_coordination::GcFenceLease::acquire_sweep(
+                target.store().inner(),
+                domain,
+                Duration::from_secs(30),
+            )
+            .await
+            .unwrap()
+            .release()
+            .await
+            .unwrap();
+        }
+        assert!(
+            !returned_early && !swept_while_blocked && gated.drained.load(Ordering::SeqCst),
+            "repair returned_early={returned_early}, swept_while_blocked={swept_while_blocked} before storage drained",
+        );
+        if missing_object {
+            assert!(
+                matches!(outcome, Err(CrabError::Configuration { ref key, .. })
+                if key == "replication.repair.object"),
+                "{outcome:?}"
+            );
+        } else {
+            assert!(matches!(outcome, Err(CrabError::Cancelled)), "{outcome:?}");
+        }
+        let view = crab_read::capsule_protocol::open_view(
+            &layout,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: 16 * 1024 * 1024,
+                max_frontier_bytes: 16 * 1024 * 1024,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            view.refs().get("refs/heads/main").cloned(),
+            block_put.then(|| "2".repeat(40))
+        );
     }
 
     #[test]
