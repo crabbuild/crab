@@ -4,13 +4,12 @@ use std::sync::Arc;
 
 use bytes::Bytes;
 use crab_remote_git::{
-    EntryKind, GitPath, OperationKind, PageRequest, RemoteGitRepository, RemoteGitRuntime,
-    RepositoryOptions, Revision,
+    EntryKind, GitPath, OperationKind, PageRequest, RemoteGitRuntime, RepositoryOptions, Revision,
 };
 use crab_storage::{StorageProviderKind, StoreLayout, build_static_env_store};
 use tokio_util::sync::CancellationToken;
 
-#[tokio::main]
+#[tokio::main(flavor = "current_thread")]
 async fn main() -> Result<(), Box<dyn StdError>> {
     let mut args = std::env::args().skip(1);
     let bucket = required_arg(&mut args, "bucket")?;
@@ -23,17 +22,41 @@ async fn main() -> Result<(), Box<dyn StdError>> {
     let store = build_static_env_store(&bucket, StorageProviderKind::S3)?;
     let identity =
         crab_remote_git::RepositoryIdentity::new(format!("s3:{bucket}"), repo_prefix.clone(), 1)?;
-    let layout = StoreLayout::new(store.clone(), repo_prefix);
+    let layout = StoreLayout::new(store, repo_prefix);
     let cancellation = CancellationToken::new();
-    let repository = RemoteGitRepository::open(
-        store,
-        layout,
-        identity,
-        Arc::new(RemoteGitRuntime::default()),
-        RepositoryOptions::default(),
-        &cancellation,
+    let runtime = Arc::new(RemoteGitRuntime::default());
+    let result = inspect(layout, identity, paths, Arc::clone(&runtime), &cancellation).await;
+    runtime.shutdown().await;
+    result
+}
+
+async fn inspect(
+    layout: StoreLayout<crab_storage::Store>,
+    identity: crab_remote_git::RepositoryIdentity,
+    paths: Vec<String>,
+    runtime: Arc<RemoteGitRuntime>,
+    cancellation: &CancellationToken,
+) -> Result<(), Box<dyn StdError>> {
+    let maximum_bytes = 2 * 1024 * 1024 * 1024;
+    let view = crab_read::capsule_protocol::open_view(
+        &layout,
+        crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: maximum_bytes,
+            max_frontier_bytes: maximum_bytes,
+        },
     )
     .await?;
+    let repository = view
+        .git_repository_from_store(
+            layout,
+            identity,
+            runtime,
+            RepositoryOptions::default(),
+            maximum_bytes,
+            cancellation,
+            None,
+        )
+        .await?;
     let head = repository
         .refs()
         .head
@@ -41,7 +64,7 @@ async fn main() -> Result<(), Box<dyn StdError>> {
         .ok_or_else(|| io::Error::other("repository is empty"))?;
     let revision = Revision::Reference(head.name.clone());
     let operation = repository
-        .operation(OperationKind::Repository, &cancellation)
+        .operation(OperationKind::Repository, cancellation)
         .await?;
     let result = async {
         let resolved = repository.resolve(&revision, &operation).await?;

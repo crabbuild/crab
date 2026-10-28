@@ -10,7 +10,6 @@ use std::time::Duration;
 use async_trait::async_trait;
 use bytes::Bytes;
 use crab_git::{PackLocationIter, write_pack_reverse_index};
-use crab_metadata::commit_graph::{CommitEntry, CommitGraphSummary};
 use crab_metadata::git_object_locator::{
     GitLocatorCoverage, GitObjectLocation, GitObjectLocatorEntry, GitObjectLocatorWriter,
     GitPackLocatorRecord,
@@ -756,34 +755,25 @@ async fn publish_with_runtime(
     options: RepositoryOptions,
     runtime_options: RuntimeOptions,
 ) -> PublishedFixture {
-    publish_with_runtime_and_summary(
-        delta_kind,
-        corrupt_target_crc,
-        options,
-        runtime_options,
-        false,
-    )
-    .await
-}
-
-async fn publish_with_summary(
-    delta_kind: DeltaKind,
-    options: RepositoryOptions,
-) -> PublishedFixture {
-    publish_with_runtime_and_summary(delta_kind, false, options, RuntimeOptions::default(), true)
-        .await
-}
-
-async fn publish_with_runtime_and_summary(
-    delta_kind: DeltaKind,
-    corrupt_target_crc: bool,
-    options: RepositoryOptions,
-    runtime_options: RuntimeOptions,
-    include_incomplete_commit_graph: bool,
-) -> PublishedFixture {
     let fixture = PackFixture::new(delta_kind);
     let pack_bytes = Bytes::from(fs::read(&fixture.pack).expect("read fixture pack"));
-    let index_bytes = Bytes::from(fs::read(&fixture.index).expect("read fixture index"));
+    let mut index_bytes = fs::read(&fixture.index).expect("read fixture index");
+    if corrupt_target_crc {
+        let index = gix_pack::index::File::at(&fixture.index, gix_hash::Kind::Sha1)
+            .expect("open fixture index");
+        assert_eq!(index.version(), gix_pack::index::Version::V2);
+        let ordinal = index
+            .lookup(fixture.target)
+            .expect("target in fixture index");
+        let crc_offset = 8 + 256 * 4 + index.num_objects() as usize * 20 + ordinal as usize * 4;
+        let corrupt_crc = index.crc32_at_index(ordinal).expect("v2 CRC") ^ 1;
+        index_bytes[crc_offset..crc_offset + 4].copy_from_slice(&corrupt_crc.to_be_bytes());
+        // Captured reads select the Git index, not the mutable locator. Keep the
+        // index checksum valid so decoding reaches the entry CRC boundary.
+        let checksum_offset = index_bytes.len() - 20;
+        let checksum = Sha1::digest(&index_bytes[..checksum_offset]);
+        index_bytes[checksum_offset..].copy_from_slice(&checksum);
+    }
     let reverse_index_bytes =
         Bytes::from(fs::read(&fixture.reverse).expect("read fixture reverse index"));
     let pack_id = MerkleHash::from_hex(blake3::hash(&pack_bytes).to_hex().as_str())
@@ -793,6 +783,9 @@ async fn publish_with_runtime_and_summary(
     let inner: Arc<dyn ObjectStore> = backend.clone();
     let store = Store::new(Arc::clone(&inner));
     let layout = StoreLayout::new(store.clone(), "org/repo".to_owned());
+    crab_metadata::layout_descriptor::ensure_canonical_layout(&store, &layout)
+        .await
+        .expect("fixture captured layout");
     inner
         .put(&layout.pack_path(&pack_id), pack_bytes.into())
         .await
@@ -863,36 +856,6 @@ async fn publish_with_runtime_and_summary(
         .insert("refs/tags/v2".to_owned(), fixture.commit.to_string());
     manifest.pack_index_hash = pack_index_hash;
     manifest.shard_index_hash = shard_index_hash;
-    if include_incomplete_commit_graph {
-        let summary = CommitGraphSummary {
-            generation: 1,
-            commits: vec![
-                CommitEntry {
-                    oid: fixture.commit.to_string(),
-                    gen_number: 10,
-                    parents: vec![
-                        fixture.root_commit.to_string(),
-                        fixture.side_commit.to_string(),
-                    ],
-                },
-                CommitEntry {
-                    oid: fixture.side_commit.to_string(),
-                    gen_number: 9,
-                    parents: vec![fixture.root_commit.to_string()],
-                },
-            ],
-        };
-        let bytes = serde_json::to_vec(&summary).expect("serialize commit graph summary");
-        let hash = blake3::hash(&bytes).to_hex().to_string();
-        inner
-            .put(
-                &layout.bulk_manifest_path("commit-graph", &hash),
-                Bytes::from(bytes).into(),
-            )
-            .await
-            .expect("upload commit graph summary");
-        manifest.commit_graph_hash = Some(hash);
-    }
     manifest.seal_git_validation();
     create_manifest(&store, &layout, &manifest)
         .await
@@ -924,11 +887,7 @@ async fn publish_with_runtime_and_summary(
             location: GitObjectLocation {
                 pack_offset: location.pack_offset,
                 entry_len: location.entry_len,
-                crc32: if corrupt_target_crc && location.oid == fixture.target {
-                    location.crc32 ^ 1
-                } else {
-                    location.crc32
-                },
+                crc32: location.crc32,
             },
             metadata: Default::default(),
         })
@@ -948,8 +907,7 @@ async fn publish_with_runtime_and_summary(
         RemoteGitRuntime::new(runtime_options, Arc::new(crab_remote_git::NoopMetrics))
             .expect("runtime"),
     );
-    let repository = RemoteGitRepository::open(
-        store.clone(),
+    let repository = capture_fixture_repository(
         layout.clone(),
         crab_remote_git::RepositoryIdentity::new("memory", "org/repo", 1).expect("identity"),
         Arc::clone(&runtime),
@@ -1014,6 +972,22 @@ async fn read_target_in_operation(
     operation.finish(result).await
 }
 
+// Protocol-independent query fixtures provide the validated captured contract;
+// production capture belongs to crab-read's Capsule owner, never this Git crate.
+async fn capture_fixture_repository(
+    layout: StoreLayout<Store>,
+    identity: crab_remote_git::RepositoryIdentity,
+    runtime: Arc<RemoteGitRuntime>,
+    options: RepositoryOptions,
+    cancellation: &CancellationToken,
+) -> crab_remote_git::Result<RemoteGitRepository> {
+    let snapshot = crab_metadata::manifest_store::read_repository_snapshot(layout.store(), &layout)
+        .await
+        .map_err(Error::Metadata)?;
+    RemoteGitRepository::from_snapshot(layout, &snapshot, identity, runtime, options, cancellation)
+        .await
+}
+
 async fn reopen_fixture(
     fixture: &PublishedFixture,
 ) -> (RemoteGitRepository, Arc<RemoteGitRuntime>) {
@@ -1024,8 +998,7 @@ async fn reopen_fixture(
         )
         .expect("runtime"),
     );
-    let repository = RemoteGitRepository::open(
-        fixture.store.clone(),
+    let repository = capture_fixture_repository(
         fixture.layout.clone(),
         crab_remote_git::RepositoryIdentity::new("memory", "org/repo", 1).expect("identity"),
         Arc::clone(&runtime),
@@ -1408,10 +1381,6 @@ async fn assert_runtime_is_within_configured_bounds(
     assert!(occupancy.parsed_bytes <= options.max_parsed_cache_bytes);
     assert!(occupancy.blame_entries <= options.max_blame_cache_entries);
     assert!(occupancy.blame_bytes <= options.max_blame_cache_bytes);
-    assert!(occupancy.manifest_entries <= options.max_manifest_cache_entries);
-    assert!(occupancy.manifest_bytes <= options.max_manifest_cache_bytes);
-    assert!(occupancy.inventory_entries <= options.max_inventory_cache_entries);
-    assert!(occupancy.inventory_bytes <= options.max_inventory_cache_bytes);
     assert!(occupancy.negative_entries <= options.max_negative_cache_entries);
     assert!(occupancy.negative_bytes <= options.max_negative_cache_bytes);
 }
@@ -2546,36 +2515,6 @@ async fn visibility_rebuild_batches_remote_object_reads() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn repository_handle_revalidation_detects_manifest_replacement() {
-    let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
-    let cancellation = CancellationToken::new();
-    assert!(
-        fixture
-            .repository
-            .is_current(&cancellation)
-            .await
-            .expect("revalidate current manifest")
-    );
-
-    let (mut manifest, etag) = read_manifest(&fixture.store, &fixture.layout)
-        .await
-        .expect("read fixture manifest");
-    manifest.generation += 1;
-    manifest.seal_git_validation();
-    write_manifest_cas(&fixture.store, &fixture.layout, &manifest, &etag)
-        .await
-        .expect("replace fixture manifest");
-
-    assert!(
-        !fixture
-            .repository
-            .is_current(&cancellation)
-            .await
-            .expect("revalidate replaced manifest")
-    );
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn browser_paths_preserve_modes_and_never_follow_links_or_gitlinks() {
     let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
     let cancellation = CancellationToken::new();
@@ -3231,11 +3170,6 @@ async fn disabled_caches_preserve_canonical_read_results() {
         max_pack_index_cache_bytes: 0,
         max_parsed_cache_entries: 0,
         max_parsed_cache_bytes: 0,
-        max_manifest_cache_entries: 0,
-        max_manifest_cache_bytes: 0,
-        manifest_cache_ttl: Duration::ZERO,
-        max_inventory_cache_entries: 0,
-        max_inventory_cache_bytes: 0,
         max_negative_cache_entries: 0,
         max_negative_cache_bytes: 0,
         negative_cache_ttl: Duration::ZERO,
@@ -4160,45 +4094,6 @@ async fn ahead_history_excludes_every_base_ancestor_and_binds_both_commits() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
-async fn incomplete_commit_graph_cannot_hide_raw_history() {
-    let fixture = publish_with_summary(DeltaKind::Ref, RepositoryOptions::default()).await;
-    let cancellation = CancellationToken::new();
-    let operation = fixture
-        .repository
-        .operation(OperationKind::Repository, &cancellation)
-        .await
-        .expect("operation");
-    let result = async {
-        let snapshot = fixture
-            .repository
-            .snapshot(&Revision::Reference("main".to_owned()), &operation)
-            .await?;
-        let page = snapshot
-            .history(
-                HistoryTraversal::AllParents,
-                &PageRequest::new(10, None)?,
-                &operation,
-            )
-            .await?;
-        assert_eq!(
-            page.items
-                .iter()
-                .map(|commit| commit.oid)
-                .collect::<Vec<_>>(),
-            vec![
-                snapshot.commit_oid(),
-                fixture.root_commit,
-                fixture.side_commit
-            ]
-        );
-        assert!(page.next.is_none());
-        Ok(())
-    }
-    .await;
-    operation.finish(result).await.expect("finish operation");
-}
-
-#[tokio::test(flavor = "multi_thread")]
 async fn path_history_uses_raw_commits_and_omits_unchanged_merges() {
     let fixture = publish(DeltaKind::Ref, false, RepositoryOptions::default()).await;
     let cancellation = CancellationToken::new();
@@ -4377,8 +4272,7 @@ async fn textual_diff_reports_too_large_without_partial_hunks() {
     )
     .expect("strict options");
     let cancellation = CancellationToken::new();
-    let repository = RemoteGitRepository::open(
-        fixture.store.clone(),
+    let repository = capture_fixture_repository(
         fixture.layout.clone(),
         crab_remote_git::RepositoryIdentity::new("memory", "org/repo", 1).expect("identity"),
         Arc::clone(&fixture.runtime),
@@ -4778,8 +4672,7 @@ async fn immutable_blame_cache_is_bounded_and_replays_semantic_budgets() {
         },
     )
     .expect("strict options");
-    let strict_repository = RemoteGitRepository::open(
-        fixture.store.clone(),
+    let strict_repository = capture_fixture_repository(
         fixture.layout.clone(),
         crab_remote_git::RepositoryIdentity::new("memory", "org/repo", 1).expect("identity"),
         Arc::clone(&fixture.runtime),
@@ -4878,8 +4771,7 @@ async fn retained_blob_comparison_does_not_bypass_a_stricter_blame_budget() {
         },
     )
     .unwrap();
-    let repository = RemoteGitRepository::open(
-        fixture.store.clone(),
+    let repository = capture_fixture_repository(
         fixture.layout.clone(),
         fixture.repository.identity().clone(),
         fixture.runtime.clone(),
@@ -4967,8 +4859,7 @@ async fn consumer_failure_finalizes_as_failure_and_preserves_its_source() {
     let runtime =
         Arc::new(RemoteGitRuntime::new(RuntimeOptions::default(), metrics.clone()).unwrap());
     let cancellation = CancellationToken::new();
-    let repository = RemoteGitRepository::open(
-        fixture.store.clone(),
+    let repository = capture_fixture_repository(
         fixture.layout.clone(),
         crab_remote_git::RepositoryIdentity::new("memory", "org/repo", 1).unwrap(),
         runtime.clone(),
@@ -5208,8 +5099,7 @@ async fn declared_graph_uses_verified_commit_roots_including_nested_tags() {
     write_manifest_cas(&fixture.store, &fixture.layout, &manifest, &etag)
         .await
         .unwrap();
-    let repository = RemoteGitRepository::open(
-        fixture.store.clone(),
+    let repository = capture_fixture_repository(
         fixture.layout.clone(),
         fixture.repository.identity().clone(),
         Arc::clone(&fixture.runtime),
@@ -5244,8 +5134,7 @@ async fn graph_attachment_rejects_other_ref_state_and_cancelled_work() {
     write_manifest_cas(&fixture.store, &fixture.layout, &manifest, &etag)
         .await
         .unwrap();
-    let repository = RemoteGitRepository::open(
-        fixture.store.clone(),
+    let repository = capture_fixture_repository(
         fixture.layout.clone(),
         fixture.repository.identity().clone(),
         Arc::clone(&fixture.runtime),
@@ -5398,8 +5287,7 @@ async fn peeled_tip_resolution_verifies_its_tag_chain() {
             .await
             .expect("publish tag-only refs");
         let cancellation = CancellationToken::new();
-        let repository = RemoteGitRepository::open(
-            fixture.store.clone(),
+        let repository = capture_fixture_repository(
             fixture.layout.clone(),
             fixture.repository.identity().clone(),
             Arc::clone(&fixture.runtime),
@@ -5449,8 +5337,7 @@ async fn direct_commit_resolution_checks_both_merge_parents_before_deeper_histor
             .await
             .expect("publish merge as the only ref");
         let cancellation = CancellationToken::new();
-        let repository = RemoteGitRepository::open(
-            fixture.store.clone(),
+        let repository = capture_fixture_repository(
             fixture.layout.clone(),
             fixture.repository.identity().clone(),
             Arc::clone(&fixture.runtime),

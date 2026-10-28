@@ -1136,7 +1136,8 @@ GIT_TAG_PEEL_FORBIDDEN_PATTERNS = (
     "find_object(",
 )
 STORAGE_PACK_LAYOUT_REQUIRED_DELEGATIONS = {
-    "crab/src/git/push.rs": ("pack_path(", "pack_metadata_path("),
+    # Push policy no longer materializes remote packs; keep scanning its source.
+    "crab/src/git/push.rs": (),
     "crab/src/git/remote_helper.rs": ("pack_path(", "pack_index_path("),
     # Snapshot readers use the range-backed v2 installer; pack naming and
     # selection remain owned by crab-read.
@@ -1167,6 +1168,14 @@ STORAGE_PACK_LAYOUT_REQUIRED_DELEGATIONS = {
     ),
 }
 STORAGE_PACK_LAYOUT_FORBIDDEN_DELEGATIONS = {
+    "crab/src/git/push.rs": (
+        "read_manifest(",
+        "write_manifest_cas(",
+        "materialize_remote_git_packs(",
+        "run_bounded_pack_materialization(",
+        "rebuild_split_commit_graph_from_remote_packs_if_current(",
+        "rebuild_shallow_closure_index_from_remote_packs_if_current(",
+    ),
     "crab/src/cmd/repack.rs": (
         "read_manifest(",
         "write_manifest_cas(",

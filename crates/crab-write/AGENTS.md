@@ -5,27 +5,26 @@ Root `AGENTS.md` and `crates/AGENTS.md` apply. Read
 
 ## Purpose and ownership
 
-Owns shared initialization, journal publication/compaction, and catalog generation mechanics. Authorization, ref leases, dependency proof, GC fencing, and generation-owner election belong to callers.
+Owns shared Capsule initialization/publication and captured browse-index mechanics; retained journal primitives are separate retirement work. Authorization, ref leases, dependency proof, GC fencing, and generation-owner election belong to callers.
 
 ## Read first
 
 1. `crates/crab-write/src/lib.rs` — shared API and source-preserving errors.
 2. `crates/crab-write/src/journal.rs` — `commit_edits / compact_for_owner`: commit preconditions and uncertain outcomes.
 3. `crates/crab-write/src/namespace.rs` — `with_ref_namespace`: namespace lease around ref-set changes.
-4. `crates/crab-write/src/generation.rs` — `maintain_catalog / make_readable`: catalog lifecycle and make_readable.
-5. `crates/crab-write/src/catalog.rs` — `publish_inventory / LocatorPackEvidence`: immutable pack evidence and locator writes.
+4. `crates/crab-write/src/generation.rs` and `src/generation/browse.rs` — fenced ownership and caller-captured browse-index construction.
+5. `crates/crab-write/src/capsule_protocol.rs` — `initialize / prepare_publication / publish_prepared`: native Capsule authority.
 
-Trace one path: `crab/src/git/push.rs` → `commit_edits` in
-`crates/crab-write/src/journal.rs` → namespace protection in
-`crates/crab-write/src/namespace.rs` and journal commit in
-`crates/crab-metadata/src/ref_journal.rs`.
+Trace one path: `crates/crab-remote/src/publication.rs` → prepared Capsule
+publication in `crates/crab-write/src/capsule_protocol.rs` → conditional ref-head
+and transaction metadata in `crates/crab-metadata/src/capsule_protocol/`.
 
 ## Common changes
 
 | Task | Start here | Also inspect |
 | --- | --- | --- |
 | Ref publication | `crates/crab-write/src/journal.rs` | `crab/src/git/push.rs` |
-| Read readiness | `crates/crab-write/src/generation.rs` | `crates/crab-server/src/repository/maintenance.rs` |
+| Read readiness | `crates/crab-write/src/generation/browse.rs` | `crates/crab-remote/src/browse_indexes.rs` |
 | Repository initialization | `crates/crab-write/src/capsule_protocol.rs::initialize` | `crab/src/cmd/init.rs`, SDK, gateway and view-service callers |
 
 ## Invariants
@@ -49,8 +48,11 @@ Trace one path: `crab/src/git/push.rs` → `commit_edits` in
 - Maintenance combines operation and cleanup errors through `finish_after_cleanup`
   in `crates/crab-write/src/lib.rs`. Namespace publication preserves a known
   committed result even after lease failure; keep that distinct outcome policy.
-- Journal publication does not make the catalog readable. Trace maintain_catalog and make_readable, including explicit writer close, before acknowledging broader readiness.
-  Source: `crates/crab-write/src/generation.rs`.
+- Browse construction consumes a caller-pinned Capsule snapshot and origin-backed
+  Git reader. The orchestrator rechecks root/ref-head authority before publishing
+  readiness. Generation maintenance has no live v1 manifest/journal path.
+  Sources: `crates/crab-write/src/generation/browse.rs`,
+  `crates/crab-remote/src/browse_indexes.rs`.
 - Namespace changes need a fresh final-ref-set check under the namespace lease; individual ref locks do not prevent parent/child name conflicts.
   Source: `crates/crab-write/src/namespace.rs`.
 
@@ -60,7 +62,7 @@ No declared Cargo features. Dependencies enable storage/index/lease capabilities
 
 ## Verification
 
-Integration tests `crates/crab-write/tests/journal.rs`, `crates/crab-write/tests/generation.rs`, and `crates/crab-write/tests/catalog.rs` exercise publication and maintenance boundaries.
+Integration tests `crates/crab-write/tests/journal.rs` and `crates/crab-write/tests/generation.rs` exercise retained journal and ownership boundaries. Inline Capsule protocol tests exercise native initialization, publication, checkpointing and recovery. The unused mutable inventory publisher and initial-manifest publisher are removed.
 
 Run from repository root. The target below is the example for worktree `089c`;
 replace it with a unique directory for your checkout. Before compilation, verify

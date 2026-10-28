@@ -1163,6 +1163,10 @@ extraction remain separate work.
 
 ## Initial-import publication boundary
 
+Historical boundary: the initial-manifest publisher below is retired. Current
+CLI and SDK initialization/publication use the rooted Capsule protocol; no
+manifest-only first-import API remains in `crab-write`.
+
 The direct CLI first-import path now calls
 `crab-write::initialize::publish_initial_manifest` after uploading its segmented
 bulk metadata and complete Git visibility proof. The shared owner holds the

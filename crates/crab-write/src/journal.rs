@@ -597,32 +597,6 @@ pub async fn compact_for_owner(
     .await
 }
 
-/// Fold one captured journal wave into the manifest, then yield ownership.
-///
-/// This is the sustained-traffic counterpart to [`compact_for_owner`]. Newer
-/// transactions remain authoritative in the journal and are handled by a later
-/// owner pass.
-pub(crate) async fn compact_once_for_owner(
-    store: &Store,
-    router: &StoreLayout<Store>,
-    lock_ttl: Duration,
-    pusher: Option<String>,
-    cancel: &CancellationToken,
-) -> Result<bool> {
-    check_cancelled(cancel)?;
-    let active = crab_metadata::ref_journal::list_active_transactions(store, router).await?;
-    let Some(transaction_id) = active.first() else {
-        return Ok(false);
-    };
-    let Some(lock) =
-        acquire_ref_journal_compaction_lock(store, router, transaction_id, lock_ttl, cancel)
-            .await?
-    else {
-        return Ok(false);
-    };
-    compact_ref_journal_with_lock(store, router, lock, pusher, cancel, 1).await
-}
-
 /// Make one bounded, non-blocking reader repair attempt for an active ref journal.
 ///
 /// Upload-pack readers may arrive as a large fanout while a push is handing

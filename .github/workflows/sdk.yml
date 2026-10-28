@@ -211,7 +211,7 @@ jobs:
           cargo "+${SDK_MSRV}" test -p crab-metadata --locked --features file-index-reader --lib file_index_lookup
           cargo "+${SDK_MSRV}" test -p crab-read --locked --lib store_client::tests
           cargo "+${SDK_MSRV}" test -p crab-remote-git --locked budget::tests
-          cargo "+${SDK_MSRV}" test -p crab-write --locked --test journal --test generation --test catalog
+          cargo "+${SDK_MSRV}" test -p crab-write --locked --lib --test journal --test generation
       - name: Qualify metadata recovery contracts
         shell: bash
         run: |

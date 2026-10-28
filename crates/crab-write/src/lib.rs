@@ -1,8 +1,6 @@
 //! Shared publication mechanics; authentication and product policy stay with callers.
 pub mod capsule_protocol;
-pub mod catalog;
 pub mod generation;
-pub mod initialize;
 pub mod journal;
 mod namespace;
 pub use namespace::{with_ref_namespace, with_ref_namespaces, with_ref_namespaces_wait};
@@ -89,11 +87,6 @@ pub enum WriteError {
     #[error("invalid manifest {field} hash")]
     ManifestHash {
         field: &'static str,
-        #[source]
-        source: Box<dyn std::error::Error + Send + Sync>,
-    },
-    #[error("invalid pack identity")]
-    PackIdentity {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },

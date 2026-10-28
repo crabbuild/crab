@@ -252,6 +252,21 @@ class PackLayoutOwnershipTests(unittest.TestCase):
                     path.write_text(original + "\n" + pattern, encoding="utf-8")
                     self.assertFalse(self.check(root))
 
+    def test_push_policy_remains_scanned_without_a_retired_materializer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root)
+            path = root / "crab/src/git/push.rs"
+            self.assertTrue(self.check(root))
+            forbidden = (
+                *GATES.STORAGE_PACK_LAYOUT_FORBIDDEN_PATTERNS,
+                *GATES.STORAGE_PACK_LAYOUT_FORBIDDEN_DELEGATIONS["crab/src/git/push.rs"],
+            )
+            for pattern in forbidden:
+                with self.subTest(pattern=pattern):
+                    path.write_text(pattern, encoding="utf-8")
+                    self.assertFalse(self.check(root))
+
     def test_every_pack_layout_owner_is_required(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

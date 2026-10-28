@@ -431,9 +431,8 @@ without ACKing it. The ordinary authorization, object budget, and complete
 pack plan still run before any pack bytes are sent. Unknown, ambiguous, or
 incomplete chains continue negotiation.
 
-Publication must recheck capsule activity against a freshly loaded root;
-`RemoteGitRepository::is_current` checks the v1 manifest and is not a v2
-freshness check.
+Publication must recheck Capsule activity against freshly loaded root/ref-head
+authority. The removed manifest-ETag API cannot establish this freshness.
 
 `git_repository_from_store` retains the supplied origin before and after the
 first checkpoint, so placement checks and derived-index readers share the
@@ -693,3 +692,11 @@ streams the full checkpoint catalog, resolves reachable file bindings from
 that same immutable checkpoint and shares the Git/whole-file/LFS byte proof.
 Proof counts include the encoded bytes of distinct verified shard/xorb bodies;
 logical recipe occurrences and repeated references do not increase that total.
+
+
+### Inspect a captured Capsule repository
+
+`cargo run --locked -p crab-read --example inspect_remote -- <bucket> <prefix> <path>...`
+opens the native Capsule view, reads selected Git paths with bounded operations,
+and drains the owned runtime on success or failure. The example lives with the
+capture owner; crab-remote-git no longer provides a live stored-manifest opener.

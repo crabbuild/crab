@@ -2051,7 +2051,6 @@ impl From<crab_write::WriteError> for CrabError {
             | crab_write::WriteError::CapsuleHeadCommitUncertain { .. }
             | crab_write::WriteError::Worker(_)
             | crab_write::WriteError::VisibilityUnavailable { .. }
-            | crab_write::WriteError::PackIdentity { .. }
             | crab_write::WriteError::ManifestHash { .. }) => {
                 Self::Io(std::io::Error::other(error))
             }

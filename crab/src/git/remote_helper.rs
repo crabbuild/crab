@@ -4305,24 +4305,31 @@ mod tests {
             let prefix = "helper-runtime-shutdown";
             let layout =
                 crab_storage::StoreLayout::new(store.as_storage().clone(), prefix.to_owned());
-            crab_metadata::layout_descriptor::ensure_canonical_layout(store.as_storage(), &layout)
-                .await
-                .unwrap();
-            let manifest = crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main");
-            crab_metadata::manifest_store::create_manifest(store.as_storage(), &layout, &manifest)
+            crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
                 .await
                 .unwrap();
             let context = test_context(store.clone(), prefix);
-            let repository = crab_remote_git::RemoteGitRepository::open(
-                store.as_storage().clone(),
-                layout,
-                crab_remote_git::RepositoryIdentity::new("memory", prefix, 1).unwrap(),
-                Arc::clone(&context.cache.git_runtime),
-                crab_remote_git::RepositoryOptions::default(),
-                &tokio_util::sync::CancellationToken::new(),
+            let view = crab_read::capsule_protocol::open_view(
+                &layout,
+                crab_read::capsule_protocol::CapsuleReadLimits {
+                    max_capsule_bytes: 8 * 1024 * 1024,
+                    max_frontier_bytes: 8 * 1024 * 1024,
+                },
             )
             .await
             .unwrap();
+            let repository = view
+                .git_repository_from_store(
+                    layout,
+                    crab_remote_git::RepositoryIdentity::new("memory", prefix, 1).unwrap(),
+                    Arc::clone(&context.cache.git_runtime),
+                    crab_remote_git::RepositoryOptions::default(),
+                    8 * 1024 * 1024,
+                    &tokio_util::sync::CancellationToken::new(),
+                    None,
+                )
+                .await
+                .unwrap();
             let cancellation = tokio_util::sync::CancellationToken::new();
             if cancelled {
                 cancellation.cancel();
