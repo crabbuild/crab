@@ -163,8 +163,105 @@ fn coordination_kind(source: &crab_coordination::CoordinationError) -> ErrorKind
         C::RetryDeadline { .. } => ErrorKind::Timeout,
         C::NotFound { .. } => ErrorKind::NotFound,
         C::Configuration { .. } => ErrorKind::InvalidInput,
-        C::MalformedPushLock { .. } | C::GcFenceMalformed { .. } => ErrorKind::Corruption,
-        C::GcFenceLost { .. } => ErrorKind::Cancelled,
+        C::MalformedPushLock { .. }
+        | C::GcFenceMalformed { .. }
+        | C::ReadRetentionMalformed { .. } => ErrorKind::Corruption,
+        C::GcFenceLost { .. } | C::ReadRetentionLost { .. } => ErrorKind::Cancelled,
+        C::ReadRetentionFailed(source) => coordination_kind(source),
         C::Serialize { .. } => ErrorKind::Io,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crab_coordination::CoordinationError as C;
+    use std::sync::Arc;
+
+    #[test]
+    fn retention_failures_keep_their_category_across_mutation_boundaries() {
+        let boundaries: [fn(C) -> Failure; 3] = [
+            |source| Failure::Publication(source.into()),
+            |source| Failure::Write(source.into()),
+            |source| Failure::Prepare(crab_remote::prepare::Error::Write(source.into())),
+        ];
+        for boundary in boundaries {
+            let cases = [
+                (
+                    C::ReadRetentionLost {
+                        path: "claim".into(),
+                    },
+                    ErrorKind::Cancelled,
+                ),
+                (
+                    C::ReadRetentionMalformed {
+                        path: "claim".into(),
+                        reason: "invalid claim".into(),
+                    },
+                    ErrorKind::Corruption,
+                ),
+                (
+                    C::ObjectStore {
+                        path: "claim".into(),
+                        source: object_store::Error::PermissionDenied {
+                            path: "claim".into(),
+                            source: Box::new(std::io::Error::from(
+                                std::io::ErrorKind::PermissionDenied,
+                            )),
+                        },
+                    },
+                    ErrorKind::Authorization,
+                ),
+                (
+                    C::RetryDeadline {
+                        path: "claim".into(),
+                        source: Box::new(C::ReadRetentionLost {
+                            path: "claim".into(),
+                        }),
+                    },
+                    ErrorKind::Timeout,
+                ),
+            ];
+            for (source, expected) in cases {
+                assert_eq!(
+                    Error::from(boundary(C::ReadRetentionFailed(Arc::new(source)))).kind(),
+                    expected
+                );
+            }
+            assert_eq!(
+                Error::from(boundary(C::ReadRetentionLost {
+                    path: "claim".into()
+                }))
+                .kind(),
+                ErrorKind::Cancelled
+            );
+            assert_eq!(
+                Error::from(boundary(C::ReadRetentionMalformed {
+                    path: "claim".into(),
+                    reason: "invalid claim".into()
+                }))
+                .kind(),
+                ErrorKind::Corruption
+            );
+        }
+    }
+
+    #[test]
+    fn retention_failure_preserves_the_shared_diagnostic_source() {
+        let original = Arc::new(C::ReadRetentionLost {
+            path: "claim".into(),
+        });
+        let error = Error::from(Failure::Write(
+            C::ReadRetentionFailed(Arc::clone(&original)).into(),
+        ));
+        let mut current = std::error::Error::source(&error);
+        while let Some(source) = current {
+            if let Some(C::ReadRetentionFailed(shared)) = source.downcast_ref::<C>() {
+                assert!(Arc::ptr_eq(shared, &original));
+                return;
+            }
+            current = source.source();
+        }
+        panic!("retention source missing from SDK error chain");
     }
 }
