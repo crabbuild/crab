@@ -545,21 +545,6 @@ pub async fn create_manifest_with_etag(
         .map_err(CrabError::from)
 }
 
-pub async fn materialize_active_active_manifest_projection(
-    store: &Store,
-    router: &StoreLayout,
-    manifest: &Manifest,
-) -> Result<()> {
-    let router = storage_layout(store, router);
-    crab_metadata::manifest_store::materialize_active_active_manifest_projection(
-        store.as_storage(),
-        &router,
-        manifest,
-    )
-    .await
-    .map_err(CrabError::from)
-}
-
 #[must_use]
 pub fn serialize_shard_list(hashes: &[String]) -> Vec<u8> {
     crab_metadata::manifests::serialize_shard_list(hashes)

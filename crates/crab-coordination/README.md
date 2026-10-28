@@ -91,8 +91,9 @@ provider-specific DynamoDB, Spanner, and Cosmos DB implementations share the
 same CAS-backed state contract.
 
 For production publication, use `commit_uploaded_push_refs` after uploading
-immutable objects, then persist the regional v1 manifest projection or materialize
-the exact v2 capsule transaction before calling `mark_region_materialized`:
+immutable objects, then materialize the exact v2 Capsule transaction before
+calling `mark_region_materialized`. Product repair rejects an entire plan if any
+gap lacks Capsule authority or names a stored-v1 manifest generation:
 
 ```text
 upload objects → commit_uploaded_push_refs → persist regional authority

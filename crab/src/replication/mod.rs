@@ -29,10 +29,6 @@ pub use crab_read::{ReadRoutingPolicy, ReadSource, ReadinessCheckOptions};
 use crate::core::config::Config;
 use crate::core::error::{CrabError, Result};
 use crate::git::url::{Cloud, CrabUrl, ObjectUrl, UrlForm};
-use crate::metadata::manifest::{
-    Manifest, materialize_active_active_manifest_projection as materialize_manifest_projection,
-    read_manifest,
-};
 use crate::storage::StoreLayout;
 use crate::storage::store::Store;
 use crab_coordination::active_active as coordination_active_active;
@@ -6655,19 +6651,17 @@ pub struct ActiveActiveBucketGcProtection {
     pub protected_repos: HashSet<String>,
 }
 
-/// One regional manifest repair action derived from coordinator truth.
+/// One regional Capsule repair action derived from coordinator truth.
 #[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct ActiveActiveRepairAction {
     pub operation_id: String,
-    pub manifest_generation: u64,
     pub commit_sequence: u64,
     pub region: String,
     pub writer: WriterConfig,
     pub source_region: String,
     pub refs: Vec<CoordinatedRefUpdate>,
     pub uploaded_objects: Vec<String>,
-    pub capsule_publication:
-        Option<crab_coordination::write_coordinator::CoordinatedCapsulePublication>,
+    pub capsule_publication: crab_coordination::write_coordinator::CoordinatedCapsulePublication,
 }
 
 /// Repair plan for committed active-active transactions not materialized everywhere.
@@ -6783,7 +6777,7 @@ pub fn plan_active_active_capsule_push(
     })
 }
 
-/// Plan regional manifest repairs from a coordinator snapshot.
+/// Plan regional Capsule repairs from a coordinator snapshot.
 pub fn plan_active_active_repair(
     replication: &ReplicationConfig,
     snapshot: &CoordinatorRepairSnapshot,
@@ -6793,30 +6787,52 @@ pub fn plan_active_active_repair(
         snapshot,
     )
     .map_err(CrabError::from)?;
-    Ok(active_active_repair_plan_from_coordination(plan))
+    active_active_repair_plan_from_coordination(plan)
 }
 
 fn active_active_repair_plan_from_coordination(
     plan: coordination_active_active::ActiveActiveRepairPlan,
-) -> ActiveActiveRepairPlan {
-    ActiveActiveRepairPlan {
-        coordinator_epoch: plan.coordinator_epoch,
-        actions: plan
-            .actions
-            .into_iter()
-            .map(|action| ActiveActiveRepairAction {
+) -> Result<ActiveActiveRepairPlan> {
+    // Validate every gap before applying any region. An old coordinator record
+    // cannot authorize a manifest projection or a partially applied repair plan.
+    let actions = plan
+        .actions
+        .into_iter()
+        .map(|action| {
+            let capsule_publication = action.capsule_publication.ok_or_else(|| {
+                CrabError::Configuration {
+                    key: "replication.repair.capsule_publication".into(),
+                    origin: format!(
+                        "operation {} has no Capsule publication authority; stored-v1 repair is unsupported",
+                        action.operation_id
+                    ),
+                }
+            })?;
+            if action.manifest_generation != 0 {
+                return Err(CrabError::Configuration {
+                    key: "replication.repair.capsule_publication".into(),
+                    origin: format!(
+                        "operation {} mixes Capsule authority with a stored-v1 manifest generation",
+                        action.operation_id
+                    ),
+                });
+            }
+            Ok(ActiveActiveRepairAction {
                 operation_id: action.operation_id,
-                manifest_generation: action.manifest_generation,
                 commit_sequence: action.commit_sequence,
                 region: action.region,
                 writer: writer_from_coordination(action.writer),
                 source_region: action.source_region,
                 refs: action.refs,
                 uploaded_objects: action.uploaded_objects,
-                capsule_publication: action.capsule_publication,
+                capsule_publication,
             })
-            .collect(),
-    }
+        })
+        .collect::<Result<Vec<_>>>()?;
+    Ok(ActiveActiveRepairPlan {
+        coordinator_epoch: plan.coordinator_epoch,
+        actions,
+    })
 }
 
 /// Select the active-active writer whose URL matches the push remote.
@@ -7481,7 +7497,7 @@ fn coordinator_gc_snapshot_status_error(
     }
 }
 
-/// Build a regional manifest repair plan from coordinator truth.
+/// Build a regional Capsule repair plan from coordinator truth.
 pub async fn active_active_repair_plan_from_coordinator(
     config: &Config,
     repo_prefix: &str,
@@ -7507,10 +7523,10 @@ pub async fn active_active_repair_plan_from_coordinator(
     )
     .await
     .map_err(CrabError::from)?;
-    Ok(active_active_repair_plan_from_coordination(plan))
+    active_active_repair_plan_from_coordination(plan)
 }
 
-/// Repairs regional manifest projections from coordinator truth.
+/// Repair regional Capsule transactions from coordinator truth.
 pub async fn apply_active_active_repair_from_coordinator(
     config: &Config,
     repo_prefix: &str,
@@ -7537,8 +7553,8 @@ pub async fn apply_active_active_repair_from_coordinator(
     )
     .await
     .map_err(CrabError::from)?;
-    let plan = active_active_repair_plan_from_coordination(coordination_plan.clone());
-    apply_active_active_repair_manifests(replication, &plan, repo_prefix).await?;
+    let plan = active_active_repair_plan_from_coordination(coordination_plan.clone())?;
+    apply_active_active_repair(replication, &plan, repo_prefix).await?;
     crab_coordination::mark_active_active_repair_materialized(
         &coordination_config,
         repo_prefix,
@@ -8055,7 +8071,7 @@ async fn cosmosdb_active_active_gc_protected_keys_for_registration(
     })
 }
 
-async fn apply_active_active_repair_manifests(
+async fn apply_active_active_repair(
     replication: &ReplicationConfig,
     plan: &ActiveActiveRepairPlan,
     primary_repo_path: &str,
@@ -8077,9 +8093,8 @@ async fn apply_active_active_repair_action(
     )
     .map(writer_from_coordination)
     .map_err(CrabError::from)?;
-    let (source_store, source_prefix) = build_writer_store(&source_writer, primary_repo_path)?;
+    let (_, source_prefix) = build_writer_store(&source_writer, primary_repo_path)?;
     let (target_store, target_prefix) = build_writer_store(&action.writer, primary_repo_path)?;
-    let source_router = StoreLayout::new(source_store.clone(), source_prefix.clone());
     let target_router = StoreLayout::new(target_store.clone(), target_prefix.clone());
     let cancel = CancellationToken::new();
     let writer = crate::maintenance::GcWriterLeases::acquire(
@@ -8094,94 +8109,7 @@ async fn apply_active_active_repair_action(
         biased;
         () = cancel.cancelled() => Err(CrabError::Cancelled),
         result = async {
-            if let Some(descriptor) = action.capsule_publication.as_ref() {
-                verify_repair_uploaded_objects_present(
-                    &target_store,
-                    &action.uploaded_objects,
-                    &source_prefix,
-                    &target_prefix,
-                )
-                .await?;
-                let target_layout = crab_storage::StoreLayout::with_global_prefix(
-                    target_store.as_storage().clone(),
-                    target_router.repo_prefix().to_owned(),
-                    target_router.global_prefix().to_owned(),
-                );
-                let transaction = crab_write::capsule_protocol::coordinated_transaction(
-                    &target_layout,
-                    descriptor,
-                )
-                .await?;
-                validate_coordinated_repair_refs(action, &transaction)?;
-                let view = crab_read::capsule_protocol::open_view(
-                    &target_layout,
-                    crab_read::capsule_protocol::CapsuleReadLimits {
-                        max_capsule_bytes: 2 * 1024 * 1024 * 1024,
-                        max_frontier_bytes: 2 * 1024 * 1024 * 1024,
-                    },
-                )
-                .await?;
-                let mut catalog = view.pointer_catalog().await?;
-                if let Some(delta) =
-                    crab_write::capsule_protocol::coordinated_pointer_catalog_delta(
-                        &target_layout,
-                        descriptor,
-                    )
-                    .await?
-                {
-                    catalog.apply(&delta)?;
-                }
-                crab_read::verify_capsule_pointer_catalog_objects(&target_layout, &catalog)
-                    .await?;
-                let root = crab_write::capsule_protocol::open_root(&target_layout).await?;
-                let repaired = crab_write::capsule_protocol::materialize_coordinated_repair(
-                    &target_layout,
-                    root,
-                    descriptor,
-                )
-                .await?;
-                if let Some(plan_id) = transaction.plan_id() {
-                    let intent = crab_metadata::capsule_protocol::read_capsule_plan_intent(
-                        target_layout.store(),
-                        &target_layout,
-                        plan_id,
-                    )
-                    .await?
-                    .ok_or_else(|| CrabError::CorruptObject {
-                        path: target_layout.capsule_plan_intent_path(plan_id).to_string(),
-                        reason: "coordinated mirror transaction has no durable plan intent"
-                            .to_owned(),
-                    })?;
-                    if intent.transaction() != &transaction {
-                        return Err(CrabError::CorruptObject {
-                            path: target_layout.capsule_plan_intent_path(plan_id).to_string(),
-                            reason: "mirror plan intent does not match the coordinated transaction"
-                                .to_owned(),
-                        });
-                    }
-                    crab_metadata::capsule_protocol::publish_capsule_plan_repair_receipt(
-                        target_layout.store(),
-                        &target_layout,
-                        &intent,
-                        repaired.activation_id(),
-                    )
-                    .await?;
-                }
-                return Ok(());
-            }
-            crate::core::remote_layout::open(&source_store, &source_router).await?;
-            crate::core::remote_layout::open(&target_store, &target_router).await?;
-            let (manifest, _) = read_manifest(&source_store, &source_router).await?;
-            if manifest.generation < action.manifest_generation {
-                return Err(CrabError::Configuration {
-                    key: "replication.repair.source_manifest".into(),
-                    origin: format!(
-                        "source region {} manifest generation {} is behind coordinator generation {}",
-                        action.source_region, manifest.generation, action.manifest_generation
-                    ),
-                });
-            }
-
+            let descriptor = &action.capsule_publication;
             verify_repair_uploaded_objects_present(
                 &target_store,
                 &action.uploaded_objects,
@@ -8189,24 +8117,72 @@ async fn apply_active_active_repair_action(
                 &target_prefix,
             )
             .await?;
-            replicate_git_visibility_index(
-                &source_store,
-                &source_router,
-                &target_store,
-                &target_router,
-                &manifest,
+            let target_layout = crab_storage::StoreLayout::with_global_prefix(
+                target_store.as_storage().clone(),
+                target_router.repo_prefix().to_owned(),
+                target_router.global_prefix().to_owned(),
+            );
+            let transaction = crab_write::capsule_protocol::coordinated_transaction(
+                &target_layout,
+                descriptor,
             )
             .await?;
-            replicate_shallow_closure_index(
-                &source_store,
-                &source_router,
-                &target_store,
-                &target_router,
-                &manifest,
+            validate_coordinated_repair_refs(action, &transaction)?;
+            let view = crab_read::capsule_protocol::open_view(
+                &target_layout,
+                crab_read::capsule_protocol::CapsuleReadLimits {
+                    max_capsule_bytes: 2 * 1024 * 1024 * 1024,
+                    max_frontier_bytes: 2 * 1024 * 1024 * 1024,
+                },
             )
             .await?;
-            materialize_active_active_manifest_projection(&target_store, &target_router, &manifest)
-                .await
+            let mut catalog = view.pointer_catalog().await?;
+            if let Some(delta) =
+                crab_write::capsule_protocol::coordinated_pointer_catalog_delta(
+                    &target_layout,
+                    descriptor,
+                )
+                .await?
+            {
+                catalog.apply(&delta)?;
+            }
+            crab_read::verify_capsule_pointer_catalog_objects(&target_layout, &catalog)
+                .await?;
+            let root = crab_write::capsule_protocol::open_root(&target_layout).await?;
+            let repaired = crab_write::capsule_protocol::materialize_coordinated_repair(
+                &target_layout,
+                root,
+                descriptor,
+            )
+            .await?;
+            if let Some(plan_id) = transaction.plan_id() {
+                let intent = crab_metadata::capsule_protocol::read_capsule_plan_intent(
+                    target_layout.store(),
+                    &target_layout,
+                    plan_id,
+                )
+                .await?
+                .ok_or_else(|| CrabError::CorruptObject {
+                    path: target_layout.capsule_plan_intent_path(plan_id).to_string(),
+                    reason: "coordinated mirror transaction has no durable plan intent"
+                        .to_owned(),
+                })?;
+                if intent.transaction() != &transaction {
+                    return Err(CrabError::CorruptObject {
+                        path: target_layout.capsule_plan_intent_path(plan_id).to_string(),
+                        reason: "mirror plan intent does not match the coordinated transaction"
+                            .to_owned(),
+                    });
+                }
+                crab_metadata::capsule_protocol::publish_capsule_plan_repair_receipt(
+                    target_layout.store(),
+                    &target_layout,
+                    &intent,
+                    repaired.activation_id(),
+                )
+                .await?;
+            }
+            Ok(())
         } => result,
     };
     let release = writer.release().await;
@@ -8242,122 +8218,6 @@ fn validate_coordinated_repair_refs(
     })
 }
 
-async fn replicate_git_visibility_index(
-    source_store: &Store,
-    source_router: &StoreLayout,
-    target_store: &Store,
-    target_router: &StoreLayout,
-    manifest: &Manifest,
-) -> Result<()> {
-    if manifest.refs.is_empty() || manifest.pack_index_hash.is_empty() {
-        return Ok(());
-    }
-
-    let source_storage_router = crab_storage::StoreLayout::new(
-        source_store.as_storage().clone(),
-        source_router.repo_prefix().to_owned(),
-    );
-    // Repair can only copy an existing proof; unlike push publication it
-    // cannot reconstruct one before materializing the target manifest.
-    let index = match crab_metadata::git_visibility::read(
-        source_store.as_storage(),
-        &source_storage_router,
-        manifest.generation,
-        &manifest.pack_index_hash,
-        &manifest.git_validation_digest,
-    )
-    .await
-    {
-        Ok(index) => index,
-        Err(crab_metadata::error::MetadataError::Storage {
-            source: crab_storage::StorageError::NotFound { .. },
-        }) => return Ok(()),
-        Err(error) => return Err(CrabError::from(error)),
-    };
-    if !index.matches_manifest(manifest) {
-        return Err(CrabError::CorruptObject {
-            path: source_storage_router
-                .git_visibility_path(&manifest.git_validation_digest)
-                .as_ref()
-                .to_owned(),
-            reason: "Git visibility proof does not match its source manifest".to_owned(),
-        });
-    }
-    let target_storage_router = crab_storage::StoreLayout::new(
-        target_store.as_storage().clone(),
-        target_router.repo_prefix().to_owned(),
-    );
-    crab_metadata::git_visibility::upload_if_absent(
-        target_store.as_storage(),
-        &target_storage_router,
-        &index,
-    )
-    .await
-    .map_err(CrabError::from)
-}
-
-async fn replicate_shallow_closure_index(
-    source_store: &Store,
-    source_router: &StoreLayout,
-    target_store: &Store,
-    target_router: &StoreLayout,
-    manifest: &Manifest,
-) -> Result<()> {
-    if manifest.refs.is_empty() || manifest.pack_index_hash.is_empty() {
-        return Ok(());
-    }
-    let source_storage = source_store.as_storage();
-    let source_storage_router = crab_storage::StoreLayout::new(
-        source_storage.clone(),
-        source_router.repo_prefix().to_owned(),
-    );
-    let Some(descriptor) = crab_metadata::shallow_closure::load_shallow_closure_descriptor(
-        source_storage,
-        &source_storage_router,
-        &manifest.git_validation_digest,
-        manifest.generation,
-        &manifest.pack_index_hash,
-        crab_metadata::shallow_closure::DEFAULT_MAX_SHALLOW_CLOSURE_DESCRIPTOR_BYTES,
-    )
-    .await
-    .map_err(CrabError::from)?
-    else {
-        return Ok(());
-    };
-    let mut entries = Vec::with_capacity(descriptor.entries.len());
-    for reference in &descriptor.entries {
-        entries.push(
-            crab_metadata::shallow_closure::load_shallow_closure_entry(
-                source_storage,
-                &source_storage_router,
-                reference,
-                crab_metadata::shallow_closure::DEFAULT_MAX_SHALLOW_CLOSURE_ENTRY_BYTES,
-            )
-            .await
-            .map_err(CrabError::from)?,
-        );
-    }
-    let write = crab_metadata::shallow_closure::build_shallow_closure_write(
-        manifest.generation,
-        manifest.pack_index_hash.clone(),
-        manifest.git_validation_digest.clone(),
-        entries,
-    )
-    .map_err(CrabError::from)?;
-    let target_storage_router = crab_storage::StoreLayout::new(
-        target_store.as_storage().clone(),
-        target_router.repo_prefix().to_owned(),
-    );
-    crab_metadata::shallow_closure::upload_shallow_closure(
-        target_store.as_storage(),
-        &target_storage_router,
-        &manifest.git_validation_digest,
-        &write,
-    )
-    .await
-    .map_err(CrabError::from)
-}
-
 async fn verify_repair_uploaded_objects_present(
     target_store: &Store,
     uploaded_objects: &[String],
@@ -8380,7 +8240,7 @@ async fn verify_repair_uploaded_objects_present(
                 return Err(CrabError::Configuration {
                     key: "replication.repair.object".into(),
                     origin: format!(
-                        "target region is missing replicated transaction object {target_key}; repair refuses to publish the manifest before object replication catches up"
+                        "target region is missing replicated transaction object {target_key}; repair refuses to publish the Capsule transaction before object replication catches up"
                     ),
                 });
             }
@@ -8451,15 +8311,6 @@ fn repair_object_key_for_target_prefix(
             "transaction object {key} is outside source repo prefix {source_prefix} and shared .crab/"
         ),
     })
-}
-
-/// Writes a regional active-active manifest projection without making it write authority.
-pub async fn materialize_active_active_manifest_projection(
-    store: &Store,
-    router: &StoreLayout,
-    manifest: &Manifest,
-) -> Result<()> {
-    materialize_manifest_projection(store, router, manifest).await
 }
 
 fn build_writer_store(writer: &WriterConfig, primary_repo_path: &str) -> Result<(Store, String)> {
@@ -9796,7 +9647,7 @@ pub fn project_config_path(root: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::{BTreeMap, HashMap, HashSet};
+    use std::collections::{HashMap, HashSet};
     use std::fmt;
     use std::sync::Arc;
     use std::sync::Mutex;
@@ -12511,6 +12362,29 @@ mod tests {
     }
 
     #[test]
+    fn active_active_repair_rejects_unbound_coordinator_gap() {
+        let replication = active_active_replication_for_push();
+        for missing_descriptor in [true, false] {
+            let mut gap = repair_gap("unbound", "us-west-2");
+            if missing_descriptor {
+                gap.capsule_publication = None;
+            } else {
+                gap.manifest_generation = 42;
+            }
+            let snapshot =
+                coordinator_repair_snapshot(vec![repair_gap("native", "us-east-1"), gap]);
+
+            let result = plan_active_active_repair(&replication, &snapshot);
+
+            assert!(
+                matches!(result, Err(CrabError::Configuration { ref key, .. })
+                if key == "replication.repair.capsule_publication"),
+                "missing_descriptor={missing_descriptor}: {result:?}"
+            );
+        }
+    }
+
+    #[test]
     fn active_active_repair_plan_maps_gaps_to_enabled_writers() {
         let replication = active_active_replication_for_push();
         let snapshot = coordinator_repair_snapshot(vec![
@@ -12626,76 +12500,6 @@ mod tests {
         assert!(err.to_string().contains("corrupt"));
     }
 
-    #[tokio::test]
-    async fn repair_materialization_writes_manifest_projection() {
-        let store = Store::new(Arc::new(InMemory::new()));
-        let router = StoreLayout::new(store.clone(), "target/repo".to_owned());
-        let mut manifest = Manifest::default_for_repo("refs/heads/main");
-        manifest.generation = 42;
-        manifest
-            .refs
-            .insert("refs/heads/main".into(), "a".repeat(40));
-        manifest.seal_git_validation();
-
-        materialize_active_active_manifest_projection(&store, &router, &manifest)
-            .await
-            .unwrap();
-
-        let (written, _) = read_manifest(&store, &router).await.unwrap();
-        assert_eq!(written, manifest);
-    }
-
-    #[tokio::test]
-    async fn repair_refuses_to_replicate_mismatched_v1_visibility() {
-        let source = Store::new(Arc::new(InMemory::new()));
-        let source_router = StoreLayout::new(source.clone(), "source/repo".to_owned());
-        let target = Store::new(Arc::new(InMemory::new()));
-        let target_router = StoreLayout::new(target.clone(), "target/repo".to_owned());
-        let mut manifest = Manifest::default_for_repo("refs/heads/main");
-        manifest.generation = 7;
-        manifest.pack_index_hash = "a".repeat(64);
-        manifest
-            .refs
-            .insert("refs/heads/main".to_owned(), "1".repeat(40));
-        manifest.seal_git_validation();
-        let index = crab_metadata::git_visibility::GitVisibilityIndex::new(
-            manifest.generation,
-            &manifest.pack_index_hash,
-            &manifest.git_validation_digest,
-            BTreeMap::from([("refs/heads/main".to_owned(), vec!["2".repeat(40)])]),
-        )
-        .unwrap();
-        let source_storage_router = crab_storage::StoreLayout::new(
-            source.as_storage().clone(),
-            source_router.repo_prefix().to_owned(),
-        );
-        crab_metadata::git_visibility::upload_digest_bound_if_absent(
-            source.as_storage(),
-            &source_storage_router,
-            &index,
-        )
-        .await
-        .unwrap();
-
-        let error = replicate_git_visibility_index(
-            &source,
-            &source_router,
-            &target,
-            &target_router,
-            &manifest,
-        )
-        .await
-        .unwrap_err();
-
-        assert!(matches!(error, CrabError::CorruptObject { .. }));
-        assert!(matches!(
-            target
-                .head(&target_router.git_visibility_path(&manifest.git_validation_digest))
-                .await,
-            Err(CrabError::NotFound { .. })
-        ));
-    }
-
     #[test]
     fn active_active_config_rejects_duplicate_enabled_writer_regions() {
         let mut replication = active_active_replication_for_push();
@@ -12799,7 +12603,7 @@ mod tests {
     ) -> crab_coordination::write_coordinator::CoordinatorMaterializationGap {
         crab_coordination::write_coordinator::CoordinatorMaterializationGap {
             operation_id: operation_id.to_owned(),
-            manifest_generation: 42,
+            manifest_generation: 0,
             commit_sequence: 1,
             region: region.to_owned(),
             writer: "west".into(),
@@ -12811,7 +12615,15 @@ mod tests {
                 false,
             )],
             uploaded_objects: vec!["xorbs/aa/object".into()],
-            capsule_publication: None,
+            capsule_publication: Some(
+                crab_coordination::write_coordinator::CoordinatedCapsulePublication {
+                    base_root_digest: "1".repeat(64),
+                    transaction_id: "2".repeat(64),
+                    activation_id: "3".repeat(64),
+                    run_hash: "4".repeat(64),
+                    run_size: 1024,
+                },
+            ),
         }
     }
 

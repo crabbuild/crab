@@ -10863,8 +10863,9 @@ fn repair_payload_from_coordinator_plan(
             .iter()
             .map(|action| {
                 format!(
-                    "materialize manifest generation {} for region {} via writer {} from {} (operation {})",
-                    action.manifest_generation,
+                    "materialize Capsule transaction {} at commit {} for region {} via writer {} from {} (operation {})",
+                    action.capsule_publication.transaction_id,
+                    action.commit_sequence,
                     action.region,
                     action.writer.name,
                     action.source_region,
@@ -10873,10 +10874,10 @@ fn repair_payload_from_coordinator_plan(
             })
             .collect(),
         None => vec![
-            "read committed refs and manifest generation from the coordinator".to_owned(),
-            "compare each writer region's manifest with coordinator truth".to_owned(),
+            "read committed refs and Capsule publications from the coordinator".to_owned(),
+            "compare each writer region's Capsule transactions with coordinator truth".to_owned(),
             "build a per-region repair plan from configured active-active writers".to_owned(),
-            "materialize missing regional manifests after referenced objects are present".to_owned(),
+            "materialize missing regional Capsule transactions after referenced objects are present".to_owned(),
         ],
     };
     RepairPayload {
@@ -20361,14 +20362,20 @@ mod tests {
             coordinator_epoch: 9,
             actions: vec![crate::replication::ActiveActiveRepairAction {
                 operation_id: "op-1".into(),
-                manifest_generation: 12,
                 commit_sequence: 1,
                 region: "us-east-1".into(),
                 writer,
                 source_region: "us-west-2".into(),
                 refs: Vec::new(),
                 uploaded_objects: vec!["xorbs/aa/object".into()],
-                capsule_publication: None,
+                capsule_publication:
+                    crab_coordination::write_coordinator::CoordinatedCapsulePublication {
+                        base_root_digest: "1".repeat(64),
+                        transaction_id: "2".repeat(64),
+                        activation_id: "3".repeat(64),
+                        run_hash: "4".repeat(64),
+                        run_size: 1024,
+                    },
             }],
         };
 
@@ -20376,7 +20383,10 @@ mod tests {
 
         assert_eq!(payload.coordinator_plan.as_ref(), Some(&plan));
         assert_eq!(payload.planned_actions.len(), 1);
-        assert!(payload.planned_actions[0].contains("generation 12"));
+        assert!(payload.planned_actions[0].contains(&format!(
+            "Capsule transaction {} at commit 1",
+            "2".repeat(64)
+        )));
         assert!(payload.blocked_reason.is_none());
     }
 
