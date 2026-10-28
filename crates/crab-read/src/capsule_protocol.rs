@@ -1342,11 +1342,19 @@ impl CapsuleRepositoryView {
         }
         if object_index.is_none()
             && checkpoint.is_some_and(|value| !value.is_control_only())
-            && !all_members.is_empty()
+            && !frontier_pack_ids.is_empty()
         {
+            // Frontier metadata remains admitted at opening. Historical packs
+            // use checkpoint member admission and lazy verified indexes instead
+            // of reloading the complete sidecar inventory for each base read.
+            let frontier_members = all_members
+                .iter()
+                .filter(|member| frontier_pack_ids.contains(&member.pack_id.to_string()))
+                .cloned()
+                .collect::<Vec<_>>();
             inline_locators.extend(
                 physical_locators_for_members(
-                    &all_members,
+                    &frontier_members,
                     &metadata_layout,
                     max_input_bytes,
                     cancellation,

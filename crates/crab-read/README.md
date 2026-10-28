@@ -65,8 +65,13 @@ cold. Frontier and physical delta dependencies retain their existing admission
 paths. Selected indexes and reconstructed object bytes remain independently
 verified under the operation's cancellation and byte budget.
 Maintenance and writers requiring exact admission sets continue using the
-complete metadata entry point. Checkpoint visibility, catalog and source/ref
-enumeration are still eager; total bounded opening remains unqualified.
+complete metadata entry point. Opening its Git reader reuses checkpoint member
+admission without reading historical pack sidecars. Frontier sidecars retain
+opening admission. Selected historical reads still verify indexes, entry CRCs
+and reconstructed object IDs; explicit physical-index construction and deep
+integrity checks retain complete validation.
+Checkpoint visibility, catalog and source/ref enumeration are still eager;
+total bounded opening remains unqualified.
 
 Selected-ref control reads retain only their bounded in-flight names and return
 `Send` futures for multithreaded callers. They do not fetch capsule payloads.
