@@ -627,7 +627,8 @@ The shared writer compacts those runs within the unchanged 64-segment and
 The gateway charges exact prepared successor bytes after publication and rejects
 a successor above its 2 GiB read budget before the ref CAS. This bounds continuously
 active frontiers without rebuilding full-history checkpoints every few dozen
-transactions. V1 repositories retain their existing manifest/journal write path.
+transactions. Serving requires native Capsule root authority; an absent or
+corrupt root fails.
 
 GET uses logical content opening for Git, Crab and LFS content. Raw `read_blob`
 is not a substitute. Read symlinks/submodules only according to phase 0; never
