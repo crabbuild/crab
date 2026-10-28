@@ -76,7 +76,8 @@ impl GeneratedObject {
         data: impl Into<Bytes>,
     ) -> std::result::Result<Self, gix_hash::hasher::Error> {
         let data = data.into();
-        let oid = gix_object::compute_hash(gix_hash::Kind::Sha1, kind, &data)?;
+        let header = gix_object::encode::loose_header(kind, data.len() as u64);
+        let oid = collision_checked_sha1(&[header.as_ref(), &data])?;
         Ok(Self {
             oid,
             kind,
@@ -93,13 +94,9 @@ impl GeneratedObject {
         let mut data = bytes::BytesMut::with_capacity(base.data.len() + suffix.len());
         data.extend_from_slice(&base.data);
         data.extend_from_slice(suffix);
-        let oid = gix_object::compute_hash(gix_hash::Kind::Sha1, base.kind, &data)?;
-        Ok(Self {
-            oid,
-            kind: base.kind,
-            data: data.freeze(),
-            prefix_delta_base: Some(base.oid),
-        })
+        let mut object = Self::new(base.kind, data.freeze())?;
+        object.prefix_delta_base = Some(base.oid);
+        Ok(object)
     }
 
     /// Returns the identity bound to these bytes.
@@ -125,6 +122,23 @@ impl GeneratedObject {
     pub fn shared_data(&self) -> Bytes {
         self.data.clone()
     }
+}
+
+fn collision_checked_sha1(
+    parts: &[&[u8]],
+) -> std::result::Result<ObjectId, gix_hash::hasher::Error> {
+    let mut hasher = sha1dc::Hasher::new();
+    for part in parts {
+        hasher.update(part);
+    }
+    // Report the unmodified digest on collision, preserving Gitoxide's error
+    // contract as well as standard Git object identities on successful hashes.
+    hasher
+        .finalize()
+        .map(|digest| ObjectId::Sha1(*digest.as_bytes()))
+        .map_err(|collision| gix_hash::hasher::Error::CollisionAttack {
+            digest: ObjectId::Sha1(*collision.digest().as_bytes()),
+        })
 }
 
 /// Failures during pack quarantine; no canonical storage is modified.
@@ -793,3 +807,48 @@ fn copy_inflated(
 
 #[cfg(test)]
 mod tests;
+
+#[cfg(test)]
+mod generated_hash_tests {
+    use super::*;
+
+    #[test]
+    fn generated_ids_match_gitoxide_across_kinds_and_block_boundaries() {
+        for kind in [Kind::Blob, Kind::Tree, Kind::Commit, Kind::Tag] {
+            for size in [0, 1, 55, 56, 63, 64, 65, 119, 120, 127, 128, 4097] {
+                let bytes = (0..size)
+                    .map(|i| (i * 131 + i / 7) as u8)
+                    .collect::<Vec<_>>();
+                let expected =
+                    gix_object::compute_hash(gix_hash::Kind::Sha1, kind, &bytes).unwrap();
+                let split = size / 2;
+                let base = GeneratedObject::new(kind, bytes[..split].to_vec()).unwrap();
+                let appended = GeneratedObject::append(&base, &bytes[split..]).unwrap();
+                let whole = GeneratedObject::new(kind, bytes).unwrap();
+                assert_eq!((whole.oid(), appended.oid()), (expected, expected));
+            }
+        }
+    }
+
+    #[test]
+    fn collision_errors_preserve_gitoxide_digests_across_update_boundaries() {
+        let inputs: [&[u8]; 2] = [
+            include_bytes!("../tests/fixtures/sha1-collisions/sha-mbles-1.bin"),
+            include_bytes!("../tests/fixtures/sha1-collisions/sha-mbles-2.bin"),
+        ];
+        for input in inputs {
+            for chunk_size in [1, 7, 63, 64, 65, 4096] {
+                let parts = input.chunks(chunk_size).collect::<Vec<_>>();
+                let mut original = gix_hash::hasher(gix_hash::Kind::Sha1);
+                for part in &parts {
+                    original.update(part);
+                }
+                let gix_hash::hasher::Error::CollisionAttack { digest: expected } =
+                    original.try_finalize().unwrap_err();
+                let gix_hash::hasher::Error::CollisionAttack { digest } =
+                    collision_checked_sha1(&parts).unwrap_err();
+                assert_eq!(digest, expected);
+            }
+        }
+    }
+}

@@ -2437,6 +2437,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1 0.11.0",
+ "sha1dc",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
@@ -9218,6 +9219,12 @@ dependencies = [
  "digest 0.10.7",
  "sha1 0.10.6",
 ]
+
+[[package]]
+name = "sha1dc"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c5b0ebf6537e3e8db8bb7d21ecb6d7399738c953c757945c6b95e46c4e95df7b"
 
 [[package]]
 name = "sha2"
