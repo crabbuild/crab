@@ -276,7 +276,12 @@ async fn active_active_capsule_commit_materializes_local_ref_and_retains_repair_
     let repair = coordinator.repair_snapshot().await.unwrap();
     assert_eq!(repair.materialization_gaps.len(), 1);
     assert_eq!(repair.materialization_gaps[0].region, "us-west-2");
-    assert!(repair.materialization_gaps[0].capsule_publication.is_some());
+    assert_eq!(
+        repair.materialization_gaps[0]
+            .capsule_publication
+            .transaction_id,
+        transaction.id().unwrap()
+    );
 }
 
 #[tokio::test]

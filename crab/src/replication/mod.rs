@@ -6731,29 +6731,6 @@ pub fn validate_active_active_config(replication: &ReplicationConfig) -> Result<
     .map_err(CrabError::from)
 }
 
-/// Build the coordinator commit request for an active-active push.
-pub fn plan_active_active_push(
-    replication: &ReplicationConfig,
-    preferred_writer: Option<&str>,
-    manifest_generation: u64,
-    refs: Vec<CoordinatedRefUpdate>,
-    uploaded_objects: Vec<String>,
-) -> Result<ActiveActivePushPlan> {
-    let plan = coordination_active_active::plan_active_active_push(
-        &active_active_coordination_config(replication),
-        preferred_writer,
-        manifest_generation,
-        refs,
-        uploaded_objects,
-    )
-    .map_err(CrabError::from)?;
-    Ok(ActiveActivePushPlan {
-        writer: writer_from_coordination(plan.writer),
-        coordinator_url: plan.coordinator_url,
-        request: plan.request,
-    })
-}
-
 /// Build a coordinator request bound to one exact protocol-v2 capsule run.
 pub fn plan_active_active_capsule_push(
     replication: &ReplicationConfig,
@@ -6787,52 +6764,30 @@ pub fn plan_active_active_repair(
         snapshot,
     )
     .map_err(CrabError::from)?;
-    active_active_repair_plan_from_coordination(plan)
+    Ok(active_active_repair_plan_from_coordination(plan))
 }
 
 fn active_active_repair_plan_from_coordination(
     plan: coordination_active_active::ActiveActiveRepairPlan,
-) -> Result<ActiveActiveRepairPlan> {
-    // Validate every gap before applying any region. An old coordinator record
-    // cannot authorize a manifest projection or a partially applied repair plan.
+) -> ActiveActiveRepairPlan {
     let actions = plan
         .actions
         .into_iter()
-        .map(|action| {
-            let capsule_publication = action.capsule_publication.ok_or_else(|| {
-                CrabError::Configuration {
-                    key: "replication.repair.capsule_publication".into(),
-                    origin: format!(
-                        "operation {} has no Capsule publication authority; stored-v1 repair is unsupported",
-                        action.operation_id
-                    ),
-                }
-            })?;
-            if action.manifest_generation != 0 {
-                return Err(CrabError::Configuration {
-                    key: "replication.repair.capsule_publication".into(),
-                    origin: format!(
-                        "operation {} mixes Capsule authority with a stored-v1 manifest generation",
-                        action.operation_id
-                    ),
-                });
-            }
-            Ok(ActiveActiveRepairAction {
-                operation_id: action.operation_id,
-                commit_sequence: action.commit_sequence,
-                region: action.region,
-                writer: writer_from_coordination(action.writer),
-                source_region: action.source_region,
-                refs: action.refs,
-                uploaded_objects: action.uploaded_objects,
-                capsule_publication,
-            })
+        .map(|action| ActiveActiveRepairAction {
+            operation_id: action.operation_id,
+            commit_sequence: action.commit_sequence,
+            region: action.region,
+            writer: writer_from_coordination(action.writer),
+            source_region: action.source_region,
+            refs: action.refs,
+            uploaded_objects: action.uploaded_objects,
+            capsule_publication: action.capsule_publication,
         })
-        .collect::<Result<Vec<_>>>()?;
-    Ok(ActiveActiveRepairPlan {
+        .collect();
+    ActiveActiveRepairPlan {
         coordinator_epoch: plan.coordinator_epoch,
         actions,
-    })
+    }
 }
 
 /// Select the active-active writer whose URL matches the push remote.
@@ -7523,7 +7478,7 @@ pub async fn active_active_repair_plan_from_coordinator(
     )
     .await
     .map_err(CrabError::from)?;
-    active_active_repair_plan_from_coordination(plan)
+    Ok(active_active_repair_plan_from_coordination(plan))
 }
 
 /// Repair regional Capsule transactions from coordinator truth.
@@ -7553,7 +7508,7 @@ pub async fn apply_active_active_repair_from_coordinator(
     )
     .await
     .map_err(CrabError::from)?;
-    let plan = active_active_repair_plan_from_coordination(coordination_plan.clone())?;
+    let plan = active_active_repair_plan_from_coordination(coordination_plan.clone());
     apply_active_active_repair(replication, &plan, repo_prefix).await?;
     crab_coordination::mark_active_active_repair_materialized(
         &coordination_config,
@@ -8199,8 +8154,7 @@ fn validate_coordinated_repair_refs(
             .iter()
             .zip(transaction.edits())
             .all(|(authorized, edit)| {
-                !authorized.force
-                    && authorized.name == edit.ref_name()
+                authorized.name == edit.ref_name()
                     && authorized.expected.as_deref() == edit.expected_old()
                     && authorized.new.as_deref() == edit.new_oid()
             });
@@ -12166,197 +12120,6 @@ mod tests {
         ensure_active_active_maintenance_admitted(&config, "garbage collection").unwrap();
     }
 
-    #[test]
-    fn active_active_push_plan_selects_first_enabled_writer() {
-        let replication = active_active_replication_for_push();
-        let refs = vec![active_active_ref_update(
-            "refs/heads/main",
-            Some("old"),
-            Some("new"),
-            false,
-        )];
-
-        let plan = plan_active_active_push(&replication, None, 42, refs, Vec::new()).unwrap();
-
-        assert_eq!(plan.writer.name, "east");
-        assert_eq!(plan.coordinator_url, "dynamodb://crab-coordinator");
-        assert_eq!(plan.request.writer, "east");
-        assert_eq!(plan.request.region, "us-east-1");
-        assert_eq!(plan.request.manifest_generation, 42);
-        assert_eq!(plan.request.refs.len(), 1);
-        assert_eq!(
-            plan.request.target_regions,
-            vec!["us-east-1".to_owned(), "us-west-2".to_owned()]
-        );
-        assert!(plan.request.operation_id.starts_with("crab-op-"));
-    }
-
-    #[test]
-    fn active_active_push_plan_uses_preferred_enabled_writer() {
-        let replication = active_active_replication_for_push();
-
-        let plan = plan_active_active_push(
-            &replication,
-            Some("west"),
-            7,
-            vec![active_active_ref_update(
-                "refs/heads/feature",
-                None,
-                Some("new"),
-                false,
-            )],
-            Vec::new(),
-        )
-        .unwrap();
-
-        assert_eq!(plan.writer.name, "west");
-        assert_eq!(plan.request.writer, "west");
-        assert_eq!(plan.request.region, "us-west-2");
-    }
-
-    #[test]
-    fn active_active_push_plan_rejects_disabled_preferred_writer() {
-        let replication = active_active_replication_for_push();
-
-        let err = plan_active_active_push(
-            &replication,
-            Some("disabled"),
-            7,
-            vec![active_active_ref_update(
-                "refs/heads/main",
-                Some("old"),
-                Some("new"),
-                false,
-            )],
-            Vec::new(),
-        )
-        .unwrap_err();
-
-        assert!(matches!(err, CrabError::Configuration { .. }));
-    }
-
-    #[test]
-    fn active_active_push_plan_rejects_empty_ref_set() {
-        let replication = active_active_replication_for_push();
-
-        let err =
-            plan_active_active_push(&replication, None, 7, Vec::new(), Vec::new()).unwrap_err();
-
-        assert!(matches!(err, CrabError::Configuration { .. }));
-    }
-
-    #[test]
-    fn active_active_push_operation_id_is_stable_for_ref_order() {
-        let replication = active_active_replication_for_push();
-        let refs = vec![
-            active_active_ref_update("refs/heads/main", Some("a"), Some("b"), false),
-            active_active_ref_update("refs/tags/v1", None, Some("c"), true),
-        ];
-        let mut reversed = refs.clone();
-        reversed.reverse();
-
-        let first =
-            plan_active_active_push(&replication, Some("east"), 9, refs, Vec::new()).unwrap();
-        let second =
-            plan_active_active_push(&replication, Some("east"), 9, reversed, Vec::new()).unwrap();
-
-        assert_eq!(first.request.operation_id, second.request.operation_id);
-    }
-
-    #[test]
-    fn active_active_push_operation_id_changes_for_ref_content() {
-        let replication = active_active_replication_for_push();
-
-        let first = plan_active_active_push(
-            &replication,
-            Some("east"),
-            9,
-            vec![active_active_ref_update(
-                "refs/heads/main",
-                Some("a"),
-                Some("b"),
-                false,
-            )],
-            Vec::new(),
-        )
-        .unwrap();
-        let second = plan_active_active_push(
-            &replication,
-            Some("east"),
-            9,
-            vec![active_active_ref_update(
-                "refs/heads/main",
-                Some("a"),
-                Some("c"),
-                false,
-            )],
-            Vec::new(),
-        )
-        .unwrap();
-
-        assert_ne!(first.request.operation_id, second.request.operation_id);
-    }
-
-    #[test]
-    fn active_active_push_operation_id_changes_for_uploaded_objects() {
-        let replication = active_active_replication_for_push();
-        let refs = vec![active_active_ref_update(
-            "refs/heads/main",
-            Some("a"),
-            Some("b"),
-            false,
-        )];
-
-        let first = plan_active_active_push(
-            &replication,
-            Some("east"),
-            9,
-            refs.clone(),
-            vec!["xorbs/aa/one".to_owned()],
-        )
-        .unwrap();
-        let second = plan_active_active_push(
-            &replication,
-            Some("east"),
-            9,
-            refs,
-            vec!["xorbs/bb/two".to_owned()],
-        )
-        .unwrap();
-
-        assert_ne!(first.request.operation_id, second.request.operation_id);
-        assert_eq!(
-            first.request.uploaded_objects,
-            vec!["xorbs/aa/one".to_owned()]
-        );
-    }
-
-    #[test]
-    fn active_active_push_operation_id_changes_for_target_regions() {
-        let mut replication = active_active_replication_for_push();
-        let refs = vec![active_active_ref_update(
-            "refs/heads/main",
-            Some("a"),
-            Some("b"),
-            false,
-        )];
-        let first =
-            plan_active_active_push(&replication, Some("east"), 9, refs.clone(), Vec::new())
-                .unwrap();
-
-        replication
-            .writers
-            .iter_mut()
-            .find(|writer| writer.name == "west")
-            .unwrap()
-            .enabled = false;
-        let second =
-            plan_active_active_push(&replication, Some("east"), 9, refs, Vec::new()).unwrap();
-
-        assert_ne!(first.request.operation_id, second.request.operation_id);
-        assert_eq!(second.request.target_regions, vec!["us-east-1".to_owned()]);
-    }
-
     #[derive(Debug)]
     struct GatedRepairStore {
         inner: Arc<InMemory>,
@@ -12502,7 +12265,6 @@ mod tests {
             "refs/heads/main",
             None,
             Some(&"2".repeat(40)),
-            false,
         )];
         action.uploaded_objects = vec!["repo/verified-object".to_owned()];
         if !missing_object {
@@ -12604,29 +12366,6 @@ mod tests {
             view.refs().get("refs/heads/main").cloned(),
             block_put.then(|| "2".repeat(40))
         );
-    }
-
-    #[test]
-    fn active_active_repair_rejects_unbound_coordinator_gap() {
-        let replication = active_active_replication_for_push();
-        for missing_descriptor in [true, false] {
-            let mut gap = repair_gap("unbound", "us-west-2");
-            if missing_descriptor {
-                gap.capsule_publication = None;
-            } else {
-                gap.manifest_generation = 42;
-            }
-            let snapshot =
-                coordinator_repair_snapshot(vec![repair_gap("native", "us-east-1"), gap]);
-
-            let result = plan_active_active_repair(&replication, &snapshot);
-
-            assert!(
-                matches!(result, Err(CrabError::Configuration { ref key, .. })
-                if key == "replication.repair.capsule_publication"),
-                "missing_descriptor={missing_descriptor}: {result:?}"
-            );
-        }
     }
 
     #[test]
@@ -12821,13 +12560,11 @@ mod tests {
         name: &str,
         expected: Option<&str>,
         new: Option<&str>,
-        force: bool,
     ) -> CoordinatedRefUpdate {
         CoordinatedRefUpdate {
             name: name.to_owned(),
             expected: expected.map(str::to_owned),
             new: new.map(str::to_owned),
-            force,
         }
     }
 
@@ -12848,7 +12585,6 @@ mod tests {
     ) -> crab_coordination::write_coordinator::CoordinatorMaterializationGap {
         crab_coordination::write_coordinator::CoordinatorMaterializationGap {
             operation_id: operation_id.to_owned(),
-            manifest_generation: 0,
             commit_sequence: 1,
             region: region.to_owned(),
             writer: "west".into(),
@@ -12857,10 +12593,9 @@ mod tests {
                 "refs/heads/main",
                 Some("a"),
                 Some("b"),
-                false,
             )],
             uploaded_objects: vec!["xorbs/aa/object".into()],
-            capsule_publication: Some(
+            capsule_publication:
                 crab_coordination::write_coordinator::CoordinatedCapsulePublication {
                     base_root_digest: "1".repeat(64),
                     transaction_id: "2".repeat(64),
@@ -12868,7 +12603,6 @@ mod tests {
                     run_hash: "4".repeat(64),
                     run_size: 1024,
                 },
-            ),
         }
     }
 

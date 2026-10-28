@@ -104,7 +104,10 @@ impl PushFinalizeResponse {
             operation_id: Some(outcome.operation_id.clone()),
             coordinator_epoch: Some(outcome.coordinator_epoch),
             writer_region: Some(outcome.region.clone()),
-            manifest_generation: Some(outcome.manifest_generation),
+            // Managed API v1 (release v1.2.4) requires this field. Capsules have
+            // no manifest generation; retain the native zero value on this wire
+            // contract until a versioned API can expose the consensus sequence.
+            manifest_generation: Some(0),
             commit_state: Some(outcome.state),
         }
     }
@@ -540,8 +543,7 @@ mod tests {
             coordinator_epoch: 7,
             writer: "writer-a".to_owned(),
             region: "us-west-2".to_owned(),
-            manifest_generation: 42,
-            commit_sequence: 0,
+            commit_sequence: 42,
             state: PushTransactionState::Materialized,
         };
 
@@ -553,7 +555,7 @@ mod tests {
         assert_eq!(response.operation_id.as_deref(), Some("op-123"));
         assert_eq!(response.coordinator_epoch, Some(7));
         assert_eq!(response.writer_region.as_deref(), Some("us-west-2"));
-        assert_eq!(response.manifest_generation, Some(42));
+        assert_eq!(response.manifest_generation, Some(0));
         assert_eq!(
             response.commit_state,
             Some(PushTransactionState::Materialized)
@@ -585,7 +587,6 @@ mod tests {
                 coordinator_epoch: 1,
                 writer: "writer".to_owned(),
                 region: "region".to_owned(),
-                manifest_generation: 1,
                 commit_sequence: 1,
                 state,
             };

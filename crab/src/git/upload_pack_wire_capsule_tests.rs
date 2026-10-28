@@ -406,6 +406,9 @@ async fn complete_view_promotion_keeps_advertised_capsule_ref_state() {
         &pack[pack.len() - 20..],
         Sha1::digest(&pack[..pack.len() - 20]).as_slice()
     );
+    // The Git inspection owns this repository; sibling helper overrides must
+    // not redirect its init, index-pack or cat-file subprocesses.
+    let _git_env = crate::test::git_repo::CleanGitEnvGuard::new();
     let directory = tempfile::tempdir().unwrap();
     let repository = directory.path();
     assert!(

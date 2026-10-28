@@ -1,8 +1,9 @@
 use crate::active_active::*;
 use crate::error::CoordinationError;
+use crate::write_coordinator::tests::{capsule_publication, capsule_run_key};
 use crate::write_coordinator::{
-    CoordinatedCapsulePublication, CoordinatedRefUpdate, CoordinatorMaterializationGap,
-    CoordinatorRepairSnapshot, ManagedCoordinatorProvider,
+    CoordinatedRefUpdate, CoordinatorMaterializationGap, CoordinatorRepairSnapshot,
+    ManagedCoordinatorProvider,
 };
 
 fn active_active_replication() -> ActiveActiveReplicationConfig {
@@ -43,17 +44,6 @@ fn ref_update(name: &str, expected: Option<&str>, new: Option<&str>) -> Coordina
         name: name.into(),
         expected: expected.map(str::to_owned),
         new: new.map(str::to_owned),
-        force: false,
-    }
-}
-
-fn capsule_publication() -> CoordinatedCapsulePublication {
-    CoordinatedCapsulePublication {
-        base_root_digest: "1".repeat(64),
-        transaction_id: "2".repeat(64),
-        activation_id: "3".repeat(64),
-        run_hash: "4".repeat(64),
-        run_size: 1024,
     }
 }
 
@@ -128,13 +118,20 @@ fn active_active_push_plan_selects_first_enabled_writer() {
     let replication = active_active_replication();
     let refs = vec![ref_update("refs/heads/main", Some("old"), Some("new"))];
 
-    let plan = plan_active_active_push(&replication, None, 42, refs, Vec::new()).unwrap();
+    let plan = plan_active_active_capsule_push(
+        &replication,
+        None,
+        capsule_publication(),
+        refs,
+        vec![capsule_run_key()],
+    )
+    .unwrap();
 
     assert_eq!(plan.writer.name, "east");
     assert_eq!(plan.coordinator_url, "dynamodb://crab-coordinator");
     assert_eq!(plan.request.writer, "east");
     assert_eq!(plan.request.region, "us-east-1");
-    assert_eq!(plan.request.manifest_generation, 42);
+    assert_eq!(plan.request.capsule_publication, capsule_publication());
     assert_eq!(
         plan.request.target_regions,
         vec!["us-east-1".to_owned(), "us-west-2".to_owned()]
@@ -146,12 +143,12 @@ fn active_active_push_plan_selects_first_enabled_writer() {
 fn active_active_push_plan_uses_preferred_enabled_writer() {
     let replication = active_active_replication();
 
-    let plan = plan_active_active_push(
+    let plan = plan_active_active_capsule_push(
         &replication,
         Some("west"),
-        7,
+        capsule_publication(),
         vec![ref_update("refs/heads/feature", None, Some("new"))],
-        Vec::new(),
+        vec![capsule_run_key()],
     )
     .unwrap();
 
@@ -164,12 +161,12 @@ fn active_active_push_plan_uses_preferred_enabled_writer() {
 fn active_active_push_plan_rejects_disabled_preferred_writer() {
     let replication = active_active_replication();
 
-    let err = plan_active_active_push(
+    let err = plan_active_active_capsule_push(
         &replication,
         Some("disabled"),
-        7,
+        capsule_publication(),
         vec![ref_update("refs/heads/main", Some("old"), Some("new"))],
-        Vec::new(),
+        vec![capsule_run_key()],
     )
     .unwrap_err();
 
@@ -180,7 +177,14 @@ fn active_active_push_plan_rejects_disabled_preferred_writer() {
 fn active_active_push_plan_rejects_empty_ref_set() {
     let replication = active_active_replication();
 
-    let err = plan_active_active_push(&replication, None, 7, Vec::new(), Vec::new()).unwrap_err();
+    let err = plan_active_active_capsule_push(
+        &replication,
+        None,
+        capsule_publication(),
+        Vec::new(),
+        vec![capsule_run_key()],
+    )
+    .unwrap_err();
 
     assert!(matches!(err, CoordinationError::Configuration { .. }));
 }
@@ -190,19 +194,65 @@ fn active_active_push_operation_id_is_stable_for_ref_order() {
     let replication = active_active_replication();
     let refs = vec![
         ref_update("refs/heads/main", Some("a"), Some("b")),
-        CoordinatedRefUpdate {
-            force: true,
-            ..ref_update("refs/tags/v1", None, Some("c"))
-        },
+        ref_update("refs/tags/v1", None, Some("c")),
     ];
     let mut reversed = refs.clone();
     reversed.reverse();
 
-    let first = plan_active_active_push(&replication, Some("east"), 9, refs, Vec::new()).unwrap();
-    let second =
-        plan_active_active_push(&replication, Some("east"), 9, reversed, Vec::new()).unwrap();
+    let first = plan_active_active_capsule_push(
+        &replication,
+        Some("east"),
+        capsule_publication(),
+        refs,
+        vec![capsule_run_key()],
+    )
+    .unwrap();
+    let second = plan_active_active_capsule_push(
+        &replication,
+        Some("east"),
+        capsule_publication(),
+        reversed,
+        vec![capsule_run_key()],
+    )
+    .unwrap();
 
     assert_eq!(first.request.operation_id, second.request.operation_id);
+}
+
+#[test]
+fn active_active_capsule_operation_id_binds_ref_content_and_target_regions() {
+    let replication = active_active_replication();
+    let refs = vec![ref_update("refs/heads/main", Some("a"), Some("b"))];
+    let original = plan_active_active_capsule_push(
+        &replication,
+        Some("east"),
+        capsule_publication(),
+        refs.clone(),
+        vec![capsule_run_key()],
+    )
+    .unwrap();
+
+    for change_refs in [true, false] {
+        let mut changed_replication = replication.clone();
+        let mut changed_refs = refs.clone();
+        if change_refs {
+            changed_refs[0].new = Some("c".to_owned());
+        } else {
+            changed_replication.writers[1].enabled = false;
+        }
+        let changed = plan_active_active_capsule_push(
+            &changed_replication,
+            Some("east"),
+            capsule_publication(),
+            changed_refs,
+            vec![capsule_run_key()],
+        )
+        .unwrap();
+        assert_ne!(
+            original.request.operation_id, changed.request.operation_id,
+            "change_refs={change_refs}"
+        );
+    }
 }
 
 #[test]
@@ -210,27 +260,27 @@ fn active_active_push_operation_id_changes_for_uploaded_objects() {
     let replication = active_active_replication();
     let refs = vec![ref_update("refs/heads/main", Some("a"), Some("b"))];
 
-    let first = plan_active_active_push(
+    let first = plan_active_active_capsule_push(
         &replication,
         Some("east"),
-        9,
+        capsule_publication(),
         refs.clone(),
-        vec!["xorbs/aa/one".to_owned()],
+        vec![capsule_run_key(), "xorbs/aa/one".to_owned()],
     )
     .unwrap();
-    let second = plan_active_active_push(
+    let second = plan_active_active_capsule_push(
         &replication,
         Some("east"),
-        9,
+        capsule_publication(),
         refs,
-        vec!["xorbs/bb/two".to_owned()],
+        vec![capsule_run_key(), "xorbs/bb/two".to_owned()],
     )
     .unwrap();
 
     assert_ne!(first.request.operation_id, second.request.operation_id);
     assert_eq!(
         first.request.uploaded_objects,
-        vec!["xorbs/aa/one".to_owned()]
+        vec![capsule_run_key(), "xorbs/aa/one".to_owned()]
     );
 }
 
@@ -249,8 +299,7 @@ fn active_active_capsule_plan_binds_exact_publication() {
     )
     .unwrap();
 
-    assert_eq!(plan.request.capsule_publication, Some(publication));
-    assert_eq!(plan.request.manifest_generation, 0);
+    assert_eq!(plan.request.capsule_publication, publication);
     assert!(plan.request.operation_id.starts_with("crab-op-"));
 }
 
@@ -328,25 +377,25 @@ fn active_active_repair_plan_maps_gaps_to_enabled_writers() {
         materialization_gaps: vec![
             CoordinatorMaterializationGap {
                 operation_id: "op-2".into(),
-                manifest_generation: 12,
+
                 commit_sequence: 2,
                 region: "us-west-2".into(),
                 writer: "east".into(),
                 source_region: "us-east-1".into(),
                 refs: Vec::new(),
                 uploaded_objects: Vec::new(),
-                capsule_publication: None,
+                capsule_publication: capsule_publication(),
             },
             CoordinatorMaterializationGap {
                 operation_id: "op-1".into(),
-                manifest_generation: 11,
+
                 commit_sequence: 1,
                 region: "us-east-1".into(),
                 writer: "west".into(),
                 source_region: "us-west-2".into(),
                 refs: Vec::new(),
                 uploaded_objects: Vec::new(),
-                capsule_publication: None,
+                capsule_publication: capsule_publication(),
             },
         ],
     };

@@ -35,6 +35,8 @@ Trace one path: `crates/crab-write/src/generation.rs` → `while_renewing` in
   Source: `crates/crab-coordination/src/lease_operation.rs`.
 - Do not conflate ref leases, GC fences, and active-active transaction state; inspect the corresponding owner contract before moving authority boundaries.
   Source: `crates/crab-coordination/src/write_coordinator.rs`.
+- Stored coordinator authority requires the `capsule_v2` format and exact Capsule descriptors. Reject retired state as a whole before refs, repair or GC use; never convert decode errors into empty protection. Force policy cannot bypass exact coordinator ref CAS.
+  Sources: `write_coordinator.rs` and provider coordinator modules in this crate.
 
 - Check both Unix expiry and monotonic renewal-deadline arithmetic. Reject unrepresentable durations before storage access; retain fresh expiry calculation on each renewal attempt.
   Source: `crates/crab-coordination/src/push_lock.rs`.

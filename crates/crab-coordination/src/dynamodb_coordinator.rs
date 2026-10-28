@@ -1179,8 +1179,9 @@ mod tests {
     use crate::error::CoordinationError;
 
     use super::*;
+    use crate::write_coordinator::tests::{capsule_publication, capsule_run_key};
     use crate::write_coordinator::{
-        apply_coordinator_control_plane_plan_with_backend, commit_uploaded_push,
+        apply_coordinator_control_plane_plan_with_backend, commit_uploaded_push_refs,
         coordinator_control_plane_remove_plan, dynamodb_coordinator_plan,
         remove_coordinator_control_plane_plan_with_backend,
     };
@@ -1338,7 +1339,7 @@ mod tests {
         let client = FakeDynamoDbWriteClient::with_state(state_with_ref("refs/heads/main", "a"));
         let coordinator = DynamoDbWriteCoordinator::new("crab-coordinator", "org/repo", &client);
 
-        let outcome = commit_uploaded_push(
+        let outcome = commit_and_materialize_in_fixture(
             &coordinator,
             commit_request("op-1", Some("a"), Some("b"), &["xorb/1"]),
         )
@@ -1364,10 +1365,12 @@ mod tests {
         let coordinator = DynamoDbWriteCoordinator::new("crab-coordinator", "org/repo", &client);
         let request = commit_request("op-1", Some("a"), Some("b"), &["xorb/1"]);
 
-        let first = commit_uploaded_push(&coordinator, request.clone())
+        let first = commit_and_materialize_in_fixture(&coordinator, request.clone())
             .await
             .unwrap();
-        let second = commit_uploaded_push(&coordinator, request).await.unwrap();
+        let second = commit_and_materialize_in_fixture(&coordinator, request)
+            .await
+            .unwrap();
 
         assert_eq!(first, second);
         assert_eq!(
@@ -1382,14 +1385,14 @@ mod tests {
         let coordinator = DynamoDbWriteCoordinator::new("crab-coordinator", "org/repo", &client)
             .with_max_completed_operations(1);
 
-        commit_uploaded_push(
+        commit_and_materialize_in_fixture(
             &coordinator,
             commit_request("op-1", Some("a"), Some("b"), &["xorb/1"]),
         )
         .await
         .unwrap();
         let second_request = commit_request("op-2", Some("b"), Some("c"), &["xorb/2"]);
-        let first = commit_uploaded_push(&coordinator, second_request.clone())
+        let first = commit_and_materialize_in_fixture(&coordinator, second_request.clone())
             .await
             .unwrap();
         let state = client.state();
@@ -1399,7 +1402,7 @@ mod tests {
         assert!(!state.completed_operations.contains_key("op-1"));
         assert!(state.completed_operations.contains_key("op-2"));
         assert_eq!(
-            commit_uploaded_push(&coordinator, second_request)
+            commit_and_materialize_in_fixture(&coordinator, second_request)
                 .await
                 .unwrap(),
             first
@@ -1419,7 +1422,7 @@ mod tests {
         let coordinator = DynamoDbWriteCoordinator::new("crab-coordinator", "org/repo", &client)
             .with_max_completed_operations(2);
 
-        commit_uploaded_push(
+        commit_and_materialize_in_fixture(
             &coordinator,
             commit_request("op-1", Some("a"), Some("b"), &["xorb/1"]),
         )
@@ -1479,14 +1482,14 @@ mod tests {
             .fence_writes(Some("operator fenced region-a".to_owned()))
             .await
             .unwrap();
-        let err = commit_uploaded_push(
+        let err = commit_and_materialize_in_fixture(
             &coordinator,
             commit_request("op-1", Some("a"), Some("b"), &["xorb/1"]),
         )
         .await
         .unwrap_err();
         let resume = coordinator.resume_writes().await.unwrap();
-        let outcome = commit_uploaded_push(
+        let outcome = commit_and_materialize_in_fixture(
             &coordinator,
             commit_request("op-1", Some("a"), Some("b"), &["xorb/1"]),
         )
@@ -1511,7 +1514,7 @@ mod tests {
         let client = FakeDynamoDbWriteClient::with_state(state_with_ref("refs/heads/main", "a"));
         let coordinator = DynamoDbWriteCoordinator::new("crab-coordinator", "org/repo", &client);
 
-        let err = commit_uploaded_push(
+        let err = commit_and_materialize_in_fixture(
             &coordinator,
             commit_request("op-1", Some("stale"), Some("b"), &["xorb/1"]),
         )
@@ -1549,14 +1552,16 @@ mod tests {
         let mut request = commit_request("op-1", Some("a"), Some("b"), &["xorb/1"]);
         request.target_regions = vec!["us-east-1".to_owned(), "us-west-2".to_owned()];
 
-        commit_uploaded_push(&coordinator, request).await.unwrap();
+        commit_and_materialize_in_fixture(&coordinator, request)
+            .await
+            .unwrap();
         let snapshot = coordinator.repair_snapshot().await.unwrap();
 
         assert_eq!(snapshot.materialization_gaps.len(), 1);
         assert_eq!(snapshot.materialization_gaps[0].region, "us-west-2");
         assert_eq!(
             snapshot.materialization_gaps[0].uploaded_objects,
-            vec!["xorb/1"]
+            vec!["xorb/1".to_owned(), capsule_run_key()]
         );
     }
 
@@ -1572,7 +1577,7 @@ mod tests {
 
         assert_eq!(
             snapshot.protected_keys(),
-            std::collections::HashSet::from(["xorb/1".to_owned()])
+            std::collections::HashSet::from(["xorb/1".to_owned(), capsule_run_key()])
         );
     }
 
@@ -1597,19 +1602,19 @@ mod tests {
             AwsDynamoDbWriteCoordinatorClient::new(client.clone()),
         );
 
-        let first = commit_uploaded_push(
+        let first = commit_and_materialize_in_fixture(
             &coordinator,
             commit_request("op-local-1", None, Some("a"), &["xorb/local-1"]),
         )
         .await
         .unwrap();
-        let replay = commit_uploaded_push(
+        let replay = commit_and_materialize_in_fixture(
             &coordinator,
             commit_request("op-local-1", None, Some("a"), &["xorb/local-1"]),
         )
         .await
         .unwrap();
-        let stale = commit_uploaded_push(
+        let stale = commit_and_materialize_in_fixture(
             &coordinator,
             commit_request("op-local-2", None, Some("b"), &["xorb/local-2"]),
         )
@@ -1619,14 +1624,14 @@ mod tests {
             .fence_writes(Some("local verification fence".to_owned()))
             .await
             .unwrap();
-        let fenced_write = commit_uploaded_push(
+        let fenced_write = commit_and_materialize_in_fixture(
             &coordinator,
             commit_request("op-local-3", Some("a"), Some("c"), &["xorb/local-3"]),
         )
         .await
         .unwrap_err();
         let resume = coordinator.resume_writes().await.unwrap();
-        let second = commit_uploaded_push(
+        let second = commit_and_materialize_in_fixture(
             &coordinator,
             commit_request("op-local-3", Some("a"), Some("c"), &["xorb/local-3"]),
         )
@@ -1770,6 +1775,19 @@ mod tests {
         state
     }
 
+    // These state-machine fixtures model completed regional I/O explicitly.
+    async fn commit_and_materialize_in_fixture(
+        coordinator: &dyn WriteCoordinator,
+        request: CommitRequest,
+    ) -> Result<CommitOutcome> {
+        let region = request.region.clone();
+        let mut outcome = commit_uploaded_push_refs(coordinator, request).await?;
+        outcome.state = coordinator
+            .mark_region_materialized(&outcome.operation_id, &region)
+            .await?;
+        Ok(outcome)
+    }
+
     fn commit_request(
         operation_id: &str,
         expected: Option<&str>,
@@ -1780,17 +1798,16 @@ mod tests {
             operation_id: operation_id.to_owned(),
             writer: "east".to_owned(),
             region: "us-east-1".to_owned(),
-            manifest_generation: 7,
-            capsule_publication: None,
+            capsule_publication: capsule_publication(),
             refs: vec![crate::write_coordinator::CoordinatedRefUpdate {
                 name: "refs/heads/main".to_owned(),
                 expected: expected.map(str::to_owned),
                 new: new.map(str::to_owned),
-                force: false,
             }],
             uploaded_objects: uploaded_objects
                 .iter()
                 .map(|object| (*object).to_owned())
+                .chain(std::iter::once(capsule_run_key()))
                 .collect(),
             target_regions: Vec::new(),
         }

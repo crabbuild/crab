@@ -1284,7 +1284,8 @@ pub struct PushCommitMetadata {
     pub coordinator_epoch: u64,
     pub writer: String,
     pub writer_region: String,
-    pub manifest_generation: u64,
+    // Managed API v1 does not return a consensus sequence.
+    pub commit_sequence: Option<u64>,
     pub commit_state: PushTransactionState,
 }
 
@@ -1295,7 +1296,7 @@ impl From<CommitOutcome> for PushCommitMetadata {
             coordinator_epoch: outcome.coordinator_epoch,
             writer: outcome.writer,
             writer_region: outcome.region,
-            manifest_generation: outcome.manifest_generation,
+            commit_sequence: Some(outcome.commit_sequence),
             commit_state: outcome.state,
         }
     }
@@ -1388,7 +1389,8 @@ struct PushAuditActiveActive<'a> {
     coordinator_epoch: u64,
     writer: &'a str,
     writer_region: &'a str,
-    manifest_generation: u64,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    commit_sequence: Option<u64>,
     commit_state: &'static str,
 }
 
@@ -1416,7 +1418,7 @@ pub fn record_push_audit_event(
                 coordinator_epoch: commit.coordinator_epoch,
                 writer: &commit.writer,
                 writer_region: &commit.writer_region,
-                manifest_generation: commit.manifest_generation,
+                commit_sequence: commit.commit_sequence,
                 commit_state: commit.commit_state_name(),
             }),
     };

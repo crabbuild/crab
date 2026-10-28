@@ -7507,7 +7507,7 @@ mod tests {
             coordinator_epoch: 9,
             writer: "west".into(),
             writer_region: "us-west-2".into(),
-            manifest_generation: 3,
+            commit_sequence: Some(3),
             commit_state: PushTransactionState::Materialized,
         });
 

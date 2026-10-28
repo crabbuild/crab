@@ -2190,7 +2190,7 @@ mod tests {
             coordinator_epoch: 42,
             writer: "east".to_owned(),
             writer_region: "us-east-1".to_owned(),
-            manifest_generation: 7,
+            commit_sequence: Some(7),
             commit_state: PushTransactionState::Materialized,
         });
 

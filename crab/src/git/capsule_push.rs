@@ -404,7 +404,7 @@ async fn run_inner(
     let mut pointer_delta = crab_metadata::capsule_protocol::PointerCatalog::new();
     // Preparation retains large proof maps under GC admission; heap-pin it so
     // serving and helper callers do not carry that state on their async stack.
-    let publication: Result<Option<Option<crab_coordination::write_coordinator::CommitOutcome>>> =
+    let publication: Result<Option<Option<crate::git::push::PushCommitMetadata>>> =
         Box::pin(async {
             // LFS bytes share the ref visibility boundary with Git and Xet data.
             // Publishing them here also covers mirror batches that own hook stdin.
@@ -549,7 +549,7 @@ async fn run_inner(
                 .await
             };
             match result {
-                Ok(CapsulePublishAttempt::Committed(outcome)) => Ok(Some(outcome)),
+                Ok(CapsulePublishAttempt::Committed(outcome)) => Ok(Some(outcome.map(Into::into))),
                 Ok(CapsulePublishAttempt::RefChanged) => Ok(None),
                 Err(error) => Err(error),
             }
@@ -637,7 +637,7 @@ async fn run_inner(
             outcomes.insert(ref_name, RefPushOutcome::Ok);
         }
         let result = match active_active_commit {
-            Some(outcome) => PushResult::new(outcomes).with_active_active_commit(outcome.into()),
+            Some(outcome) => PushResult::new(outcomes).with_active_active_commit(outcome),
             None => PushResult::new(outcomes),
         };
         return Ok((
@@ -759,9 +759,6 @@ async fn publish_capsule(
                 name: edit.ref_name().to_owned(),
                 expected: edit.expected_old().map(str::to_owned),
                 new: edit.new_oid().map(str::to_owned),
-                // Git force policy was already evaluated. Consensus must still
-                // compare the exact old value authenticated by the transaction.
-                force: false,
             },
         )
         .collect::<Vec<_>>();

@@ -25,12 +25,11 @@ pub enum PushTransactionState {
 
 /// Ref update requested by an active-active push.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CoordinatedRefUpdate {
     pub name: String,
     pub expected: Option<String>,
     pub new: Option<String>,
-    #[serde(default)]
-    pub force: bool,
 }
 
 /// Exact immutable protocol-v2 publication authorized by a coordinator commit.
@@ -75,16 +74,8 @@ pub(crate) fn validate_coordinated_capsule_publication(
 }
 
 pub(crate) fn validate_commit_request(request: &CommitRequest) -> Result<()> {
-    let Some(publication) = request.capsule_publication.as_ref() else {
-        return Ok(());
-    };
+    let publication = &request.capsule_publication;
     validate_coordinated_capsule_publication(publication)?;
-    if request.manifest_generation != 0 {
-        return Err(CoordinationError::Configuration {
-            key: "replication.active_active.capsule".into(),
-            origin: "protocol-v2 capsule commits must not name a v1 manifest generation".into(),
-        });
-    }
     if !request
         .uploaded_objects
         .iter()
@@ -100,13 +91,12 @@ pub(crate) fn validate_commit_request(request: &CommitRequest) -> Result<()> {
 
 /// Active-active commit request sent to the coordinator.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CommitRequest {
     pub operation_id: String,
     pub writer: String,
     pub region: String,
-    pub manifest_generation: u64,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub capsule_publication: Option<CoordinatedCapsulePublication>,
+    pub capsule_publication: CoordinatedCapsulePublication,
     pub refs: Vec<CoordinatedRefUpdate>,
     #[serde(default)]
     pub uploaded_objects: Vec<String>,
@@ -116,13 +106,12 @@ pub struct CommitRequest {
 
 /// Successful coordinator commit result.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CommitOutcome {
     pub operation_id: String,
     pub coordinator_epoch: u64,
     pub writer: String,
     pub region: String,
-    pub manifest_generation: u64,
-    #[serde(default)]
     pub commit_sequence: u64,
     pub state: PushTransactionState,
 }
@@ -165,7 +154,6 @@ pub struct CoordinatorProtectedObject {
     pub key: String,
     pub operation_id: String,
     pub state: PushTransactionState,
-    pub manifest_generation: u64,
     pub writer: String,
     pub region: String,
 }
@@ -187,22 +175,21 @@ impl CoordinatorGcSafetySnapshot {
     }
 }
 
-/// Regional manifest materialization that should be repaired from coordinator truth.
+/// Regional Capsule materialization that should be repaired from coordinator truth.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
+#[serde(deny_unknown_fields)]
 pub struct CoordinatorMaterializationGap {
     pub operation_id: String,
-    pub manifest_generation: u64,
     pub commit_sequence: u64,
     pub region: String,
     pub writer: String,
     pub source_region: String,
     pub refs: Vec<CoordinatedRefUpdate>,
     pub uploaded_objects: Vec<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub capsule_publication: Option<CoordinatedCapsulePublication>,
+    pub capsule_publication: CoordinatedCapsulePublication,
 }
 
-/// Coordinator snapshot used by repair workers to rematerialize regional manifests.
+/// Coordinator snapshot used by repair workers to replay regional Capsules.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize, JsonSchema)]
 pub struct CoordinatorRepairSnapshot {
     pub coordinator_epoch: u64,
@@ -216,26 +203,33 @@ pub struct CoordinatorStateRecord {
     pub state: CoordinatorRepoState,
 }
 
+/// Stored coordinator authority format; retired unversioned records are unsupported.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum CoordinatorStateFormat {
+    CapsuleV2,
+}
+
 /// Serialized repository authority state for CAS-backed coordinators.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct CoordinatorRepoState {
+    pub format: CoordinatorStateFormat,
     pub epoch: u64,
     pub healthy: bool,
     #[serde(default)]
     pub fence_reason: Option<String>,
     pub refs: BTreeMap<String, String>,
     pub transactions: BTreeMap<String, CoordinatorTransactionRecord>,
-    #[serde(default)]
     pub completed_operations: BTreeMap<String, CoordinatorCompletedOperationRecord>,
-    #[serde(default)]
     pub next_completed_sequence: u64,
-    #[serde(default)]
     pub next_commit_sequence: u64,
 }
 
 impl Default for CoordinatorRepoState {
     fn default() -> Self {
         Self {
+            format: CoordinatorStateFormat::CapsuleV2,
             epoch: 1,
             healthy: true,
             fence_reason: None,
@@ -255,7 +249,6 @@ pub struct CoordinatorTransactionRecord {
     pub outcome: Option<CommitOutcome>,
     pub state: PushTransactionState,
     pub materialized_regions: BTreeSet<String>,
-    #[serde(default)]
     pub coordinator_epoch: u64,
 }
 
@@ -683,7 +676,7 @@ pub trait WriteCoordinator: Send + Sync {
 /// push pipeline one monotonic transaction path to call after object upload:
 /// begin, mark objects uploaded, and commit refs. Failed commits are aborted
 /// when possible. Callers must mark regional materialization only after the
-/// manifest projection is durably written in that region.
+/// exact Capsule transaction is durably published in that region.
 pub async fn commit_uploaded_push_refs(
     coordinator: &dyn WriteCoordinator,
     request: CommitRequest,
@@ -727,24 +720,6 @@ pub async fn commit_uploaded_push_refs(
             Err(error)
         }
     }
-}
-
-/// Commits an active-active push and marks the writer region materialized.
-///
-/// Prefer [`commit_uploaded_push_refs`] when a caller must durably write a
-/// regional manifest projection before marking materialization complete.
-pub async fn commit_uploaded_push(
-    coordinator: &dyn WriteCoordinator,
-    request: CommitRequest,
-) -> Result<CommitOutcome> {
-    let materialized_region = request.region.clone();
-    let mut outcome = commit_uploaded_push_refs(coordinator, request).await?;
-    if outcome.state != PushTransactionState::Materialized {
-        outcome.state = coordinator
-            .mark_region_materialized(&outcome.operation_id, &materialized_region)
-            .await?;
-    }
-    Ok(outcome)
 }
 
 /// Generic CAS-backed implementation of the active-active write coordinator.
@@ -862,6 +837,8 @@ where
             ensure_versioned_state_healthy(self.provider, state)?;
             let (materialized_regions, transaction_epoch) =
                 if let Some(record) = state.transactions.get(&request.operation_id) {
+                    // A replay must still bind the exact request after consensus commits.
+                    ensure_versioned_transaction_request(record, &request)?;
                     if let Some(outcome) = record.outcome.as_ref() {
                         return Ok(outcome.clone());
                     }
@@ -871,7 +848,6 @@ where
                             expected_etag: None,
                         });
                     }
-                    ensure_versioned_transaction_request(record, &request)?;
                     ensure_versioned_transaction_epoch_current(state.epoch, record)?;
                     (
                         record.materialized_regions.clone(),
@@ -884,9 +860,6 @@ where
                 };
 
             for update in &request.refs {
-                if update.force {
-                    continue;
-                }
                 let current = state.refs.get(&update.name).cloned();
                 if current != update.expected {
                     return Err(CoordinationError::NonFastForward {
@@ -914,7 +887,6 @@ where
                 coordinator_epoch: transaction_epoch,
                 writer: request.writer.clone(),
                 region: request.region.clone(),
-                manifest_generation: request.manifest_generation,
                 commit_sequence,
                 state: PushTransactionState::Committed,
             };
@@ -1019,7 +991,6 @@ where
                     key: key.clone(),
                     operation_id: operation_id.clone(),
                     state: record.state,
-                    manifest_generation: record.request.manifest_generation,
                     writer: record.request.writer.clone(),
                     region: record.request.region.clone(),
                 });
@@ -1050,7 +1021,6 @@ where
                 }
                 materialization_gaps.push(CoordinatorMaterializationGap {
                     operation_id: operation_id.clone(),
-                    manifest_generation: record.request.manifest_generation,
                     commit_sequence: record
                         .outcome
                         .as_ref()
@@ -1370,6 +1340,8 @@ impl InMemoryWriteCoordinator {
 
         let (materialized_regions, transaction_epoch) =
             if let Some(record) = state.transactions.get(&request.operation_id) {
+                // A replay must still bind the exact request after consensus commits.
+                ensure_versioned_transaction_request(record, &request)?;
                 if let Some(outcome) = record.outcome.as_ref() {
                     return Ok(outcome.clone());
                 }
@@ -1379,7 +1351,6 @@ impl InMemoryWriteCoordinator {
                         expected_etag: None,
                     });
                 }
-                ensure_versioned_transaction_request(record, &request)?;
                 ensure_versioned_transaction_epoch_current(state.epoch, record)?;
                 (
                     record.materialized_regions.clone(),
@@ -1392,9 +1363,6 @@ impl InMemoryWriteCoordinator {
             };
 
         for update in &request.refs {
-            if update.force {
-                continue;
-            }
             let current = state.refs.get(&update.name).cloned();
             if current != update.expected {
                 return Err(CoordinationError::NonFastForward {
@@ -1422,7 +1390,6 @@ impl InMemoryWriteCoordinator {
             coordinator_epoch: transaction_epoch,
             writer: request.writer.clone(),
             region: request.region.clone(),
-            manifest_generation: request.manifest_generation,
             commit_sequence,
             state: PushTransactionState::Committed,
         };
@@ -1517,7 +1484,6 @@ impl InMemoryWriteCoordinator {
                     key: key.clone(),
                     operation_id: operation_id.clone(),
                     state: record.state,
-                    manifest_generation: record.request.manifest_generation,
                     writer: record.request.writer.clone(),
                     region: record.request.region.clone(),
                 });
@@ -1548,7 +1514,6 @@ impl InMemoryWriteCoordinator {
                 }
                 materialization_gaps.push(CoordinatorMaterializationGap {
                     operation_id: operation_id.clone(),
-                    manifest_generation: record.request.manifest_generation,
                     commit_sequence: record
                         .outcome
                         .as_ref()
@@ -2505,44 +2470,102 @@ pub fn coordinator_effective_target_regions(request: &CommitRequest) -> BTreeSet
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use std::sync::Mutex;
 
     use super::*;
 
     #[test]
-    fn commit_request_defaults_missing_optional_lists() {
-        let request: CommitRequest = serde_json::from_str(
-            r#"{
-                "operation_id": "op-1",
-                "writer": "writer-a",
-                "region": "us-west-2",
-                "manifest_generation": 7,
-                "refs": []
-            }"#,
-        )
-        .unwrap();
-
-        assert!(request.uploaded_objects.is_empty());
-        assert!(request.target_regions.is_empty());
-        assert!(request.capsule_publication.is_none());
+    fn coordinator_wire_roundtrips_native_authority() {
+        let mut state = CoordinatorRepoState::default();
+        state
+            .refs
+            .insert("refs/heads/main".to_owned(), "abc".to_owned());
+        let encoded = serde_json::to_value(&state).unwrap();
+        assert_eq!(encoded["format"], "capsule_v2");
+        assert_eq!(
+            serde_json::from_value::<CoordinatorRepoState>(encoded).unwrap(),
+            state
+        );
     }
 
     #[test]
-    fn commit_outcome_defaults_pre_sequence_records() {
-        let outcome: CommitOutcome = serde_json::from_str(
-            r#"{
-                "operation_id": "op-1",
-                "coordinator_epoch": 2,
-                "writer": "east",
-                "region": "us-east-1",
-                "manifest_generation": 7,
-                "state": "committed"
-            }"#,
-        )
-        .unwrap();
+    fn coordinator_wire_rejects_force_bypass() {
+        let edit =
+            json!({"name": "refs/heads/main", "expected": "old", "new": "new", "force": true});
+        assert!(serde_json::from_value::<CoordinatedRefUpdate>(edit).is_err());
+    }
 
-        assert_eq!(outcome.commit_sequence, 0);
+    #[test]
+    fn coordinator_wire_rejects_unversioned_state_with_refs() {
+        let mut state = serde_json::to_value(CoordinatorRepoState::default()).unwrap();
+        state.as_object_mut().unwrap().remove("format");
+        state["refs"] = json!({"refs/heads/main": "retired-ref"});
+        assert!(serde_json::from_value::<CoordinatorRepoState>(state).is_err());
+    }
+
+    #[test]
+    fn coordinator_wire_rejects_manifest_authority() {
+        let request = json!({
+            "operation_id": "retired", "writer": "east", "region": "east",
+            "manifest_generation": 7, "refs": [], "uploaded_objects": ["packs/old"]
+        });
+        assert!(serde_json::from_value::<CommitRequest>(request).is_err());
+    }
+
+    #[test]
+    fn coordinator_wire_rejects_mixed_authority() {
+        let mut request = serde_json::to_value(request("mixed")).unwrap();
+        request["manifest_generation"] = json!(7);
+        request["capsule_publication"] = json!({
+            "base_root_digest": "1".repeat(64), "transaction_id": "2".repeat(64),
+            "activation_id": "3".repeat(64), "run_hash": "4".repeat(64), "run_size": 1024
+        });
+        assert!(serde_json::from_value::<CommitRequest>(request).is_err());
+    }
+
+    #[tokio::test]
+    async fn coordinator_wire_rejects_retired_state_before_gc_or_mutation() {
+        struct SerializedState(Vec<u8>);
+        #[async_trait::async_trait]
+        impl VersionedCoordinatorStateStore for SerializedState {
+            async fn read_repo_state(
+                &self,
+                _: &str,
+                _: &str,
+            ) -> Result<Option<CoordinatorStateRecord>> {
+                let state = serde_json::from_slice(&self.0).map_err(|source| {
+                    CoordinationError::Serialize {
+                        key: "test-repository".to_owned(),
+                        context: "decode coordinator state",
+                        source,
+                    }
+                })?;
+                Ok(Some(CoordinatorStateRecord { version: 1, state }))
+            }
+            async fn compare_and_swap_repo_state(
+                &self,
+                _: &str,
+                _: &str,
+                _: Option<u64>,
+                _: &CoordinatorRepoState,
+            ) -> Result<bool> {
+                panic!("retired authority must not be rewritten");
+            }
+        }
+        let mut stored = serde_json::to_value(CoordinatorRepoState::default()).unwrap();
+        stored.as_object_mut().unwrap().remove("format");
+        stored["refs"] = json!({"refs/heads/main": "abc"});
+        let coordinator = VersionedStateWriteCoordinator::new(
+            "test",
+            "test",
+            "repo",
+            SerializedState(serde_json::to_vec(&stored).unwrap()),
+        );
+        assert!(coordinator.gc_safety_snapshot().await.is_err());
+        assert!(coordinator.repair_snapshot().await.is_err());
+        assert!(coordinator.ref_value("refs/heads/main").await.is_err());
+        assert!(coordinator.begin(request("new")).await.is_err());
     }
 
     #[test]
@@ -2554,7 +2577,6 @@ mod tests {
                     key: "repo/.crab/xorbs/a".to_owned(),
                     operation_id: "op-1".to_owned(),
                     state: PushTransactionState::ObjectsUploaded,
-                    manifest_generation: 2,
                     writer: "writer-a".to_owned(),
                     region: "us-west-2".to_owned(),
                 },
@@ -2562,7 +2584,6 @@ mod tests {
                     key: "repo/.crab/xorbs/b".to_owned(),
                     operation_id: "op-2".to_owned(),
                     state: PushTransactionState::Committed,
-                    manifest_generation: 3,
                     writer: "writer-b".to_owned(),
                     region: "us-east-1".to_owned(),
                 },
@@ -2633,7 +2654,9 @@ mod tests {
         store.seed_ref("refs/heads/main", "abc");
         let coordinator = VersionedStateWriteCoordinator::new("test", "namespace", "repo", &store);
         let mut request = request("op-versioned-1");
-        request.uploaded_objects = vec!["repo/.crab/xorbs/a".to_owned()];
+        request
+            .uploaded_objects
+            .push("repo/.crab/xorbs/a".to_owned());
 
         assert_eq!(
             coordinator.begin(request.clone()).await.unwrap(),
@@ -2688,7 +2711,9 @@ mod tests {
         let coordinator = InMemoryWriteCoordinator::new();
         coordinator.seed_ref("refs/heads/main", "abc").await;
         let mut request = request("op-memory-1");
-        request.uploaded_objects = vec!["repo/.crab/xorbs/a".to_owned()];
+        request
+            .uploaded_objects
+            .push("repo/.crab/xorbs/a".to_owned());
 
         assert_eq!(
             coordinator.begin(request.clone()).await.unwrap(),
@@ -2742,16 +2767,9 @@ mod tests {
         let coordinator = InMemoryWriteCoordinator::new();
         coordinator.seed_ref("refs/heads/main", "abc").await;
         let mut first = request("op-z");
-        first.manifest_generation = 0;
         first.target_regions = vec!["us-east-1".to_owned()];
-        first.capsule_publication = Some(CoordinatedCapsulePublication {
-            base_root_digest: "1".repeat(64),
-            transaction_id: "2".repeat(64),
-            activation_id: "3".repeat(64),
-            run_hash: "4".repeat(64),
-            run_size: 1024,
-        });
-        first.uploaded_objects = vec![format!("repo/v2/capsules/44/{}", "4".repeat(64))];
+        first.capsule_publication = capsule_publication();
+        first.uploaded_objects = vec![capsule_run_key()];
         let first_outcome = coordinator.commit(first.clone()).await.unwrap();
 
         let mut second = request("op-a");
@@ -2793,7 +2811,6 @@ mod tests {
             coordinator_epoch: 4,
             writer: request.writer.clone(),
             region: request.region.clone(),
-            manifest_generation: request.manifest_generation,
             commit_sequence: 9,
             state: PushTransactionState::Materialized,
         };
@@ -2855,6 +2872,63 @@ mod tests {
         record: Mutex<Option<CoordinatorStateRecord>>,
     }
 
+    async fn assert_commit_replay_rejects_changed_authority(coordinator: &dyn WriteCoordinator) {
+        let mut original = request("replay-identity");
+        original.refs[0].expected = None;
+        let committed = coordinator.commit(original.clone()).await.unwrap();
+        for materialized in [false, true] {
+            if materialized {
+                coordinator
+                    .mark_materialized(&original.operation_id)
+                    .await
+                    .unwrap();
+            }
+            assert_eq!(
+                coordinator
+                    .commit(original.clone())
+                    .await
+                    .unwrap()
+                    .commit_sequence,
+                committed.commit_sequence
+            );
+            for change_publication in [false, true] {
+                let mut changed = original.clone();
+                if change_publication {
+                    changed.capsule_publication.activation_id = "5".repeat(64);
+                } else {
+                    changed.refs[0].new = Some("different-ref".to_owned());
+                }
+                assert!(
+                    matches!(
+                        coordinator.commit(changed).await,
+                        Err(CoordinationError::CasConflict { .. })
+                    ),
+                    "materialized={materialized}, change_publication={change_publication}"
+                );
+            }
+            assert_eq!(
+                coordinator.ref_value("refs/heads/main").await.unwrap(),
+                original.refs[0].new
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn versioned_commit_replay_rejects_changed_authority() {
+        let coordinator = VersionedStateWriteCoordinator::new(
+            "test",
+            "namespace",
+            "repo",
+            TestVersionedStateStore::default(),
+        );
+        assert_commit_replay_rejects_changed_authority(&coordinator).await;
+    }
+
+    #[tokio::test]
+    async fn in_memory_commit_replay_rejects_changed_authority() {
+        assert_commit_replay_rejects_changed_authority(&InMemoryWriteCoordinator::new()).await;
+    }
+
     impl TestVersionedStateStore {
         fn seed_ref(&self, name: &str, value: &str) {
             let mut state = CoordinatorRepoState::default();
@@ -2896,20 +2970,32 @@ mod tests {
         }
     }
 
+    pub(crate) fn capsule_publication() -> CoordinatedCapsulePublication {
+        CoordinatedCapsulePublication {
+            base_root_digest: "1".repeat(64),
+            transaction_id: "2".repeat(64),
+            activation_id: "3".repeat(64),
+            run_hash: "4".repeat(64),
+            run_size: 1024,
+        }
+    }
+
+    pub(crate) fn capsule_run_key() -> String {
+        format!("repo/v2/capsules/44/{}", "4".repeat(64))
+    }
+
     fn request(operation_id: &str) -> CommitRequest {
         CommitRequest {
             operation_id: operation_id.to_owned(),
             writer: "writer-a".to_owned(),
             region: "us-west-2".to_owned(),
-            manifest_generation: 9,
-            capsule_publication: None,
+            capsule_publication: capsule_publication(),
             refs: vec![CoordinatedRefUpdate {
                 name: "refs/heads/main".to_owned(),
                 expected: Some("abc".to_owned()),
                 new: Some("bcd".to_owned()),
-                force: false,
             }],
-            uploaded_objects: Vec::new(),
+            uploaded_objects: vec![capsule_run_key()],
             target_regions: Vec::new(),
         }
     }
