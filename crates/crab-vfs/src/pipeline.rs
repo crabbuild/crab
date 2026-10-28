@@ -465,13 +465,20 @@ impl MountPipelineBuilder {
         let overlay_writer: Option<Arc<dyn crate::engine::OverlayWriter>> =
             overlay.map(|ov| Arc::clone(ov) as Arc<dyn crate::engine::OverlayWriter>);
 
-        Ok(Arc::new(VfsEngine::new(
-            Arc::clone(resolver),
-            overlay_writer,
-            Arc::clone(hydration),
-            Some(odb_reader),
-            Some(Arc::clone(snapshot)),
-        )))
+        Ok(Arc::new(
+            VfsEngine::new(
+                Arc::clone(resolver),
+                overlay_writer,
+                Arc::clone(hydration),
+                Some(odb_reader),
+                Some(Arc::clone(snapshot)),
+            )
+            .with_mount_catalog(
+                self.read_context
+                    .as_ref()
+                    .map(|context| Arc::clone(&context.catalog)),
+            ),
+        ))
     }
 }
 

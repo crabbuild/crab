@@ -14,6 +14,12 @@ capsule metadata capture and Git repository views without the hydration/cache
 stack. The SDK's `remote` feature uses that metadata-only path; its `content`
 and `write` features enable hydration.
 
+Hydration can carry a caller-registered retained capture. Its read pin follows
+the shared Xet client through background source tasks, so cancellation cannot
+release remote dependencies while a worker still needs them. Closed or expired
+retention rejects new reconstruction, including warm cache hits; provider failures
+remain typed errors. Capture registration and authorization stay with the caller.
+
 ## Why it exists
 
 Several product surfaces need the same read guarantees: fetch, hydrate, path

@@ -11,6 +11,10 @@ pub type Result<T> = std::result::Result<T, ReadError>;
 /// Errors from read-side reconstruction and hydration.
 #[derive(thiserror::Error, Debug)]
 pub enum ReadError {
+    #[cfg(feature = "hydration")]
+    #[error("captured-read retention failed")]
+    Retention(#[from] crab_coordination::CoordinationError),
+
     #[cfg(feature = "local-staging")]
     #[error("local staging read failed")]
     Staging(#[source] crab_staging::StagingError),

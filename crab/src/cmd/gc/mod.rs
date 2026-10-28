@@ -19,6 +19,7 @@ pub mod inventory;
 pub mod journal;
 pub mod marks;
 pub mod parallel_enum;
+mod read_retention;
 
 #[cfg(test)]
 mod capsule_cleanup_tests;
@@ -3129,6 +3130,10 @@ async fn run_capsule_gc(
         Some(crate::maintenance::GcSweepLease::acquire(store, router.repo_prefix(), cancel).await?)
     };
     let operation = async {
+        let retirement_time = match &sweep_lease {
+            Some(lease) => Some(lease.read_retention_time().await?),
+            None => None,
+        };
         let base = crab_write::capsule_protocol::open_root(&layout).await?;
         let fence_id = blake3::hash(uuid::Uuid::now_v7().as_bytes())
             .to_hex()
@@ -3176,6 +3181,7 @@ async fn run_capsule_gc(
                 snapshot_at,
                 grace_period,
                 started,
+                retirement_time,
             )
             .await
         }
@@ -3217,6 +3223,7 @@ async fn sweep_capsule_objects(
     snapshot_at: SystemTime,
     grace_period: Duration,
     started: Instant,
+    retirement_time: Option<i64>,
 ) -> Result<GcOutcome> {
     let mut reachable = HashSet::new();
     let mut verified_catalogs = HashSet::new();
@@ -3278,6 +3285,56 @@ async fn sweep_capsule_objects(
         &mut verified_catalogs,
     )
     .await?;
+
+    let readers = store.list_prefix(&layout.read_retention_prefix()).await?;
+    let claims = read_retention::claims(layout, &readers, retirement_time).await?;
+    let reader_owners = claims.keys().cloned().collect::<HashSet<_>>();
+    let reader_prefix = format!("{}/", layout.read_retention_prefix());
+    for (owner, claim) in claims {
+        let mut capture = crab_metadata::capsule_protocol::RetainedReadCapture::open(
+            layout.clone(),
+            &owner,
+            root.repository_id(),
+            claim.hash(),
+            claim.size(),
+        )
+        .await?;
+        if let Some(checkpoint) = capture.checkpoint() {
+            reachable.insert(
+                layout
+                    .capsule_checkpoint_path(checkpoint.hash())
+                    .to_string(),
+            );
+            mark_layered_checkpoint_sources(
+                layout,
+                checkpoint,
+                &mut reachable,
+                &mut verified_catalogs,
+            )
+            .await?;
+        }
+        while let Some(runs) = capture.next_runs().await? {
+            reachable.extend(
+                runs.iter()
+                    .map(|run| layout.capsule_path(run.hash()).to_string()),
+            );
+        }
+    }
+    // A live claim protects its complete private descriptor chain. Unclaimed
+    // uploads and terminal claims remain subject to the immutable-object grace.
+    reachable.extend(
+        readers
+            .iter()
+            .filter(|object| {
+                object
+                    .location
+                    .as_ref()
+                    .strip_prefix(&reader_prefix)
+                    .and_then(|path| path.split_once('/'))
+                    .is_some_and(|(owner, _)| reader_owners.contains(owner))
+            })
+            .map(|object| object.location.to_string()),
+    );
 
     let scoped_hints = owns_scoped_hint_pages(store, layout);
     let hint_pages = if scoped_hints {
@@ -3384,6 +3441,7 @@ async fn sweep_capsule_objects(
         .chain(pack_layers)
         .chain(history)
         .chain(derived_index_objects)
+        .chain(readers)
         .filter(|object| !reachable.contains(object.location.as_ref()))
         // Per-ref publications do not register in one shared writer object.
         // Snapshot readers may still hold an older head, so even forced GC
@@ -3451,7 +3509,7 @@ async fn sweep_capsule_objects(
         accounting.bytes_reclaimed = deleted.bytes_reclaimed;
     }
     Ok(GcOutcome {
-        list_requests: 8 + u64::from(scoped_hints),
+        list_requests: 9 + u64::from(scoped_hints),
         list_parallelism: 8,
         list_wall_seconds: started.elapsed().as_secs_f64(),
         dry_run: args.dry_run,
@@ -5754,6 +5812,7 @@ mod tests {
                 SystemTime::now(),
                 Duration::from_secs(3600),
                 Instant::now(),
+                None,
             )
             .await
             .unwrap();
@@ -5781,6 +5840,7 @@ mod tests {
             SystemTime::now() + Duration::from_secs(2 * 3600),
             Duration::from_secs(3600),
             Instant::now(),
+            None,
         )
         .await
         .unwrap();
@@ -6158,6 +6218,7 @@ mod tests {
             SystemTime::now(),
             Duration::from_secs(3600),
             Instant::now(),
+            None,
         )
         .await
         .unwrap();
@@ -6175,6 +6236,7 @@ mod tests {
             SystemTime::now() + Duration::from_secs(2 * 3600),
             Duration::from_secs(3600),
             Instant::now(),
+            None,
         )
         .await
         .unwrap();

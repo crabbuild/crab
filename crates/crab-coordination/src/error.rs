@@ -75,4 +75,13 @@ pub enum CoordinationError {
 
     #[error("malformed GC fence at {path}: {reason}")]
     GcFenceMalformed { path: String, reason: String },
+
+    #[error("read retention lease lost at {path}")]
+    ReadRetentionLost { path: String },
+
+    #[error("captured-read retention failed: {0}")]
+    ReadRetentionFailed(#[source] std::sync::Arc<CoordinationError>),
+
+    #[error("malformed read retention claim at {path}: {reason}")]
+    ReadRetentionMalformed { path: String, reason: String },
 }

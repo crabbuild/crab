@@ -1137,6 +1137,7 @@ impl From<crab_read::ReadError> for CrabError {
             },
             crab_read::ReadError::Cancelled => Self::Cancelled,
             error @ (crab_read::ReadError::Availability { .. }
+            | crab_read::ReadError::Retention(_)
             | crab_read::ReadError::GitPack(_)
             | crab_read::ReadError::Runtime(_)
             | crab_read::ReadError::ResolutionTask(_)
@@ -2220,6 +2221,19 @@ impl From<crab_coordination::error::CoordinationError> for CrabError {
             crab_coordination::error::CoordinationError::GcFenceMalformed { path, reason } => {
                 Self::CorruptObject { path, reason }
             }
+            crab_coordination::error::CoordinationError::ReadRetentionLost { path } => {
+                Self::Configuration {
+                    key: path,
+                    origin: "captured read retention was lost; reopen the mount".to_owned(),
+                }
+            }
+            error @ crab_coordination::error::CoordinationError::ReadRetentionFailed(_) => {
+                Self::Io(std::io::Error::other(error))
+            }
+            crab_coordination::error::CoordinationError::ReadRetentionMalformed {
+                path,
+                reason,
+            } => Self::CorruptObject { path, reason },
         }
     }
 }

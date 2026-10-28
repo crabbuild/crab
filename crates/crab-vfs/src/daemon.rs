@@ -977,13 +977,20 @@ impl DaemonService {
         let overlay_writer: Option<Arc<dyn crate::engine::OverlayWriter>> = overlay
             .as_ref()
             .map(|ov| Arc::clone(ov) as Arc<dyn crate::engine::OverlayWriter>);
-        let engine = Arc::new(VfsEngine::new(
-            Arc::clone(&resolver),
-            overlay_writer,
-            Arc::clone(&hydration),
-            Some(odb_reader),
-            Some(Arc::clone(&snapshot)),
-        ));
+        let engine = Arc::new(
+            VfsEngine::new(
+                Arc::clone(&resolver),
+                overlay_writer,
+                Arc::clone(&hydration),
+                Some(odb_reader),
+                Some(Arc::clone(&snapshot)),
+            )
+            .with_mount_catalog(
+                read_context
+                    .as_ref()
+                    .map(|context| Arc::clone(&context.catalog)),
+            ),
+        );
 
         let result = async {
             // Step 11: Mount the configured filesystem backend.

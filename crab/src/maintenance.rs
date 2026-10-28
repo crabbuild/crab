@@ -173,6 +173,13 @@ impl GcSweepLease {
         Ok(Self { fence, heartbeat })
     }
 
+    pub(crate) async fn read_retention_time(&self) -> Result<i64> {
+        self.fence
+            .read_retention_time()
+            .await
+            .map_err(CrabError::from)
+    }
+
     /// Stop renewal and release the exclusive fence.
     pub(crate) async fn release(self) -> Result<()> {
         self.heartbeat.stop().await;

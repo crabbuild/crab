@@ -66,6 +66,9 @@ pub struct StoreClient {
     cancellation: CancellationToken,
     chunk_cache: Option<term_cache::TermCache>,
     selective_xorb_reads: bool,
+    // Xet tasks may outlive the caller future. Its shared client keeps the
+    // admitted read pinned until the last source worker exits.
+    _retention: Option<Arc<crab_coordination::read_retention_runtime::ReadRetentionPin>>,
 }
 
 impl StoreClient {
@@ -87,6 +90,7 @@ impl StoreClient {
             cancellation: CancellationToken::new(),
             chunk_cache: None,
             selective_xorb_reads: false,
+            _retention: None,
         }
     }
 
@@ -119,6 +123,14 @@ impl StoreClient {
 
     pub(crate) fn with_cancellation(mut self, cancellation: CancellationToken) -> Self {
         self.cancellation = cancellation;
+        self
+    }
+
+    pub(crate) fn with_read_retention(
+        mut self,
+        retention: Option<Arc<crab_coordination::read_retention_runtime::ReadRetentionPin>>,
+    ) -> Self {
+        self._retention = retention;
         self
     }
 

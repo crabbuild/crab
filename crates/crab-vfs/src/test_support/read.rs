@@ -19,6 +19,10 @@ struct FixedCatalog(Arc<crab_read::ShardHydrator>);
 
 #[async_trait::async_trait]
 impl crate::MountCatalogCapture for FixedCatalog {
+    async fn shutdown(&self) -> crate::Result<()> {
+        Ok(())
+    }
+
     async fn capture(&self) -> crate::Result<Arc<crab_read::ShardHydrator>> {
         Ok(Arc::clone(&self.0))
     }

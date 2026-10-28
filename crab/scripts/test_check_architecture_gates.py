@@ -279,5 +279,52 @@ class PackLayoutOwnershipTests(unittest.TestCase):
                     self.assertFalse(self.check(root))
                     path.write_text(original, encoding="utf-8")
 
+
+
+class ReadRetentionScopeTests(unittest.TestCase):
+    def check_scope(self, source, *, optional=True, features=None, hydration=True):
+        metadata = {"packages": [{
+            "name": "crab-read",
+            "features": {"hydration": ["dep:crab-coordination"] if hydration else []},
+            "dependencies": [
+                {"name": "object_store", "kind": None, "optional": False,
+                 "uses_default_features": False, "features": []},
+                {"name": "crab-coordination", "kind": None, "optional": optional,
+                 "uses_default_features": False,
+                 "features": ["object-store-lock"] if features is None else features},
+            ],
+        }]}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "crates/crab-read/src/hydrator.rs"
+            path.parent.mkdir(parents=True)
+            path.write_text(source)
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                return GATES.check_read_module_scope(root, metadata)
+
+    def test_only_hydration_inherits_the_retention_runtime(self):
+        self.assertTrue(self.check_scope(""))
+        for options in ({"optional": False}, {"features": ["coordinator-dynamodb"]}, {"hydration": False}):
+            with self.subTest(options=options):
+                self.assertFalse(self.check_scope("", **options))
+
+    def test_readers_pin_but_cannot_register_or_acquire_write_authority(self):
+        for source, expected in (
+            ("use crab_coordination::read_retention_runtime::RetainedRead;", True),
+            ("use crab_coordination::read_retention_runtime::ReadRetentionPin;", True),
+            ("source: crab_coordination::CoordinationError,", True),
+            ("use crab_coordination::read_retention::ReadRetentionLease;", False),
+            ("use crab_coordination::read_retention_runtime::ReadRetentionSession;", False),
+            ("use crab_coordination::read_retention_runtime::*;", False),
+            ("use crab_coordination::push_lock::PushLock;", False),
+            ("use crab_coordination::{GcFenceLease};", False),
+        ):
+            with self.subTest(source=source):
+                self.assertEqual(self.check_scope(source), expected)
+
+    def test_test_claims_do_not_allow_product_credentials(self):
+        self.assertTrue(self.check_scope("#[cfg(test)]\nmod tests {\nuse crab_coordination::read_retention::ReadRetentionLease;\n}"))
+        self.assertFalse(self.check_scope("#[cfg(test)]\nmod tests {\nuse crab_auth::AuthConfig;\n}"))
+
 if __name__ == "__main__":
     unittest.main()

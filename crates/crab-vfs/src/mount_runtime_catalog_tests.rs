@@ -7,6 +7,10 @@ struct Catalog {
 
 #[async_trait::async_trait]
 impl crate::MountCatalogCapture for Catalog {
+    async fn shutdown(&self) -> Result<()> {
+        Ok(())
+    }
+
     async fn capture(&self) -> Result<Arc<crab_read::ShardHydrator>> {
         if self.fail.load(std::sync::atomic::Ordering::Acquire) {
             return Err(std::io::Error::other("injected catalog capture failure").into());

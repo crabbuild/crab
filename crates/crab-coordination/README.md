@@ -53,6 +53,27 @@ remain lost. Generated holder IDs retain a diagnostic PID and use UUID entropy
 across hosts and container namespaces; PIDs and wall clocks alone are insufficient.
 Malformed stored fence state remains an error and is never silently repaired.
 
+Read retention uses a private conditional claim for each immutable capture.
+`GcReadBarrier` observes both repository and global sweep history before capture;
+the caller validates both after creating the claim, before admitting reads.
+`ReadRetentionLease` changes its sequence on renewal so content-derived ETags
+cannot let stale retirement overwrite a fresh renewal. Cancelled, uncertain or
+late renewals permanently lose local ownership. Callers must stop and drain
+reads before release; this primitive does not run a renewal worker.
+`ReadRetentionSession` owns that worker and tracks capture admission through
+claim registration. Captured views retain renewal through clones; operation
+pins retain claims through child workers after the caller stops waiting.
+Shutdown closes admission, cancels reads, and waits for pins and releases.
+Renewal continues during normal draining. Lease loss stops reads, preserves the
+provider error, and never replaces an uncertain claim with a fresh owner.
+
+Repository GC conditionally retires expired claims, retains their roots through
+the existing uncertainty quarantine, then reclaims aged private objects. Global
+GC planning conservatively retains active and retired roots until that cleanup.
+Linux RustFS qualification covers retained cold reads, renewal, native NFS/FUSE
+teardown and subsequent repository GC reclamation. Managed issuer authority,
+other providers/platforms and existing-store rollout remain production gates.
+
 ### Lease lifecycle
 
 `while_renewing` borrows a `PushLock` and polls work alongside lease renewal.

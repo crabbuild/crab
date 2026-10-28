@@ -34,6 +34,21 @@ pub struct RunCatalogSource {
 }
 
 impl RunCatalogSource {
+    pub(in crate::capsule_protocol) fn retained_members(
+        &self,
+        ranks: &BTreeMap<String, usize>,
+    ) -> (&object_store::path::Path, BTreeMap<String, u64>) {
+        let members = self
+            .capsules
+            .iter()
+            .filter_map(|(hash, range)| {
+                range.as_ref()?;
+                ranks.get(hash).map(|rank| (hash.clone(), *rank as u64))
+            })
+            .collect();
+        (&self.path, members)
+    }
+
     pub(in crate::capsule_protocol::run) fn new(
         layout: &StoreLayout<Store>,
         hash: &str,

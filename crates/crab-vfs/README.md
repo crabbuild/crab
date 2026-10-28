@@ -86,6 +86,16 @@ policy-blob fetches from the linked worktree used by overlay publication.
 Mounting and refresh are lifecycle operations performed outside the pipeline so a
 daemon, coordinator, or foreground CLI can own cancellation.
 
+The CLI registers each immutable remote catalog under repository and global GC
+barriers before exposing it. Snapshot readers and open files retain that claim;
+engine teardown drains hydration and the catalog's retention session after native
+requests stop. A configured remote's authentication or retention failure aborts
+preparation. Only absent local project configuration selects ordinary Git reads.
+Linux RustFS NFS/FUSE qualification covers cold reads across history pruning and
+GC, renewal, teardown and post-release reclamation. Managed Hydrate credentials
+still need the scoped read-retention capability from their issuer; other
+providers and platforms require their own qualification.
+
 Mounted publication passes explicit Git-directory authority to the normal
 remote helper. Helper configuration, metrics and audit output follow that
 selected repository, including when a FUSE coordinator runs from `/`. Relative

@@ -16,6 +16,9 @@ pub struct MountReadContext {
 #[async_trait::async_trait]
 pub trait MountCatalogCapture: Send + Sync {
     async fn capture(&self) -> Result<Arc<crab_read::ShardHydrator>>;
+
+    /// Drain retained captures after backend requests and hydration workers stop.
+    async fn shutdown(&self) -> Result<()>;
 }
 
 /// Resolves credentials, replica routing, and hydration configuration for a mount source.

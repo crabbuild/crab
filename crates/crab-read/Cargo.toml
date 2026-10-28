@@ -10,7 +10,7 @@ description = "Read and hydration orchestration for Crab repositories."
 
 [features]
 default = ["hydration"]
-hydration = ["dep:crab-cache", "dep:crab-cache-store", "dep:crab-diff", "dep:crab-lfs", "dep:globset", "dep:gix-packetline", "dep:gix-ignore", "dep:xet-client", "dep:xet-data", "dep:xet-runtime", "crab-metadata/file-index-reader"]
+hydration = ["dep:crab-cache", "dep:crab-cache-store", "dep:crab-coordination", "dep:crab-diff", "dep:crab-lfs", "dep:globset", "dep:gix-packetline", "dep:gix-ignore", "dep:xet-client", "dep:xet-data", "dep:xet-runtime", "crab-metadata/file-index-reader"]
 local-staging = ["hydration", "dep:crab-staging"]
 
 [lib]
@@ -24,6 +24,7 @@ bstr = { version = "1", default-features = false, features = ["std"] }
 bytes = { workspace = true }
 crab-cache = { workspace = true, optional = true, features = ["local-cache", "xet-chunk-cache"] }
 crab-cache-store = { workspace = true, optional = true }
+crab-coordination = { workspace = true, optional = true, features = ["object-store-lock"] }
 crab-diff = { workspace = true, optional = true }
 crab-git = { workspace = true }
 crab-lfs = { workspace = true, optional = true }

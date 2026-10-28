@@ -17,6 +17,8 @@ pub mod pointer_proof;
 #[cfg(feature = "local-staging")]
 mod pointer_reader;
 #[cfg(feature = "hydration")]
+mod read_retention;
+#[cfg(feature = "hydration")]
 mod ref_advertisement;
 #[cfg(feature = "hydration")]
 mod selection;

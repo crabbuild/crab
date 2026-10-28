@@ -60,30 +60,36 @@ async fn dropping_unstarted_control_releases_its_endpoint() {
 }
 
 #[tokio::test]
-async fn prepared_tcp_control_listener_accepts_connections_before_serving() {
+async fn prepared_tcp_control_listener_accepts_connections_before_serving() -> Result<()> {
     let listener = bind_server("tcp:127.0.0.1:0?token=owned-token")
         .await
         .unwrap();
     let addr = match &listener.listener {
         ControlListener::Tcp(socket, _) => socket.local_addr().unwrap(),
         #[cfg(unix)]
-        ControlListener::Unix(..) => panic!("TCP fixture selected another transport"),
+        ControlListener::Unix(..) => {
+            return Err(std::io::Error::other("TCP fixture selected another transport").into());
+        }
     };
     assert!(tokio::net::TcpStream::connect(addr).await.is_ok());
+    Ok(())
 }
 
 #[tokio::test]
-async fn dropping_unstarted_tcp_control_releases_its_port() {
+async fn dropping_unstarted_tcp_control_releases_its_port() -> Result<()> {
     let listener = bind_server("tcp:127.0.0.1:0?token=owned-token")
         .await
         .unwrap();
     let addr = match &listener.listener {
         ControlListener::Tcp(socket, _) => socket.local_addr().unwrap(),
         #[cfg(unix)]
-        ControlListener::Unix(..) => panic!("TCP fixture selected another transport"),
+        ControlListener::Unix(..) => {
+            return Err(std::io::Error::other("TCP fixture selected another transport").into());
+        }
     };
     drop(listener);
     assert!(tokio::net::TcpListener::bind(addr).await.is_ok());
+    Ok(())
 }
 
 #[tokio::test]

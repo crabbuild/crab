@@ -1347,3 +1347,289 @@ async fn bucket_gc_does_not_touch_workflow_objects() {
 }
 #[path = "bucket_hint_tests.rs"]
 mod hint_tests;
+
+struct RetainedReaderFixture {
+    store: Store,
+    layout: crab_storage::StoreLayout<crab_storage::Store>,
+    current: crab_metadata::capsule_protocol::RootSnapshot,
+    lease: crab_coordination::read_retention::ReadRetentionLease,
+    retained_objects: Vec<object_store::path::Path>,
+}
+
+async fn retained_reader_fixture() -> RetainedReaderFixture {
+    use crab_coordination::read_retention::{ReadRetentionLease, RetainedReadRoot};
+    use crab_metadata::capsule_protocol::{
+        FileCatalogEntry, GcFence, HistorySegment, HistorySegmentState, LayeredCheckpoint,
+        PointerCatalog, ShardCatalogEntry, store_read_capture,
+    };
+    use crab_write::capsule_protocol::{
+        begin_gc, end_gc, initialize, publish_ref_layered_checkpoint, replace_history,
+    };
+    let store = memory_store();
+    let layout = StoreLayout::new(store.as_storage().clone(), "retained-reader".to_owned());
+    let initial = initialize(&layout, &"1".repeat(64), "refs/heads/main")
+        .await
+        .unwrap();
+    let mut catalog = PointerCatalog::new();
+    catalog
+        .insert_file("a".repeat(64), FileCatalogEntry::new(7, "b".repeat(64)))
+        .unwrap();
+    catalog
+        .insert_shard("b".repeat(64), ShardCatalogEntry::new(8, Vec::new()))
+        .unwrap();
+    let layer = crab_metadata::capsule_protocol::PackLayer::build(
+        &crab_metadata::capsule_protocol::CapsuleGitPack::new(
+            Bytes::from_static(b"PACK"),
+            Bytes::from_static(b"index"),
+            Bytes::from_static(b"reverse"),
+            Bytes::from_static(b"locator"),
+            "3".repeat(40),
+            1,
+        )
+        .unwrap(),
+    )
+    .unwrap();
+    layout
+        .store()
+        .put_if_absent_verified(
+            &layout.capsule_pack_layer_path(layer.hash()),
+            layer.bytes().clone(),
+        )
+        .await
+        .unwrap();
+    let source = layer.source_descriptor().unwrap();
+    let old = LayeredCheckpoint::build(
+        0,
+        initial.record().digest(),
+        vec![source.clone()],
+        catalog,
+        None,
+    )
+    .unwrap();
+    let captured = publish_ref_layered_checkpoint(
+        &layout,
+        initial,
+        &old,
+        Default::default(),
+        Default::default(),
+        Default::default(),
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    let view = crab_read::capsule_protocol::open_view_from_root_with_control(
+        &layout,
+        captured.clone(),
+        crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: 8 * 1024 * 1024,
+            max_frontier_bytes: 8 * 1024 * 1024,
+        },
+    )
+    .await
+    .unwrap();
+    let lookup = view
+        .pointer_catalog_lookup(&layout, 8 * 1024 * 1024)
+        .unwrap();
+    let owner = "c".repeat(64);
+    let (hash, size) = store_read_capture(
+        &layout,
+        &owner,
+        view.root(),
+        view.capsule_run_pointers(),
+        &lookup,
+    )
+    .await
+    .unwrap();
+    let lease = ReadRetentionLease::create(
+        store.inner().clone(),
+        layout.read_retention_claim_path(&owner),
+        RetainedReadRoot::new(hash, size).unwrap(),
+    )
+    .await
+    .unwrap();
+    let mut retained_objects = old
+        .catalog_objects(&layout, u64::MAX)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(path, _)| path)
+        .collect::<Vec<_>>();
+    retained_objects.push(layout.capsule_checkpoint_path(old.hash()));
+    retained_objects.extend(
+        store
+            .list_prefix(&layout.read_retention_prefix())
+            .await
+            .unwrap()
+            .into_iter()
+            .map(|object| object.location),
+    );
+    let empty = LayeredCheckpoint::build(
+        captured.record().root().generation(),
+        captured.record().digest(),
+        vec![source],
+        PointerCatalog::new(),
+        None,
+    )
+    .unwrap();
+    let current = publish_ref_layered_checkpoint(
+        &layout,
+        captured,
+        &empty,
+        Default::default(),
+        Default::default(),
+        Default::default(),
+        Vec::new(),
+    )
+    .await
+    .unwrap();
+    let root = current.record().root();
+    let history = HistorySegment::build(
+        root.checkpoint().unwrap().clone(),
+        None,
+        HistorySegmentState::new(
+            root.refs().clone(),
+            root.peeled_refs().clone(),
+            root.head().to_owned(),
+            root.compacted_ref_transactions().clone(),
+            Vec::new(),
+        ),
+    )
+    .unwrap();
+    let fence = "d".repeat(64);
+    let current = begin_gc(&layout, current, GcFence::new(&fence, u64::MAX).unwrap())
+        .await
+        .unwrap();
+    let current = replace_history(&layout, current, &[history]).await.unwrap();
+    let current = end_gc(&layout, current, &fence).await.unwrap();
+    RetainedReaderFixture {
+        store,
+        layout,
+        current,
+        lease,
+        retained_objects,
+    }
+}
+
+#[tokio::test]
+async fn retained_reader_roots_survive_history_pruning_and_renewal_without_reusing_released_marks()
+{
+    let mut fixture = retained_reader_fixture().await;
+    let before = capsule_repository_roots(&fixture.store, fixture.layout.repo_prefix())
+        .await
+        .unwrap();
+    assert_eq!(before.shard_hashes, vec!["b".repeat(64)]);
+    fixture.lease.renew().await.unwrap();
+    let renewed = capsule_repository_roots(&fixture.store, fixture.layout.repo_prefix())
+        .await
+        .unwrap();
+    assert_eq!(before.root_digest, renewed.root_digest);
+    fixture.lease.release().await.unwrap();
+    let released = capsule_repository_roots(&fixture.store, fixture.layout.repo_prefix())
+        .await
+        .unwrap();
+    assert!(released.shard_hashes.is_empty());
+    assert_ne!(before.root_digest, released.root_digest);
+}
+
+#[tokio::test]
+async fn repository_gc_retains_reader_metadata_until_release_then_reclaims_aged_objects() {
+    let fixture = retained_reader_fixture().await;
+    let current = crab_read::capsule_protocol::open_view_from_root_with_control(
+        &fixture.layout,
+        fixture.current.clone(),
+        crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: 8 * 1024 * 1024,
+            max_frontier_bytes: 8 * 1024 * 1024,
+        },
+    )
+    .await
+    .unwrap();
+    let snapshot = current.git_snapshot().unwrap();
+    let args = super::super::GcArgs::default();
+    let protected = HashSet::new();
+    let cancel = CancellationToken::new();
+    let collect = || {
+        super::super::sweep_capsule_objects(
+            &args,
+            &fixture.store,
+            &fixture.layout,
+            fixture.current.record().root(),
+            current.capsule_run_pointers(),
+            &snapshot.manifest,
+            &protected,
+            &cancel,
+            std::time::SystemTime::now() + Duration::from_secs(7200),
+            Duration::from_secs(3600),
+            std::time::Instant::now(),
+            None,
+        )
+    };
+    collect().await.unwrap();
+    for path in &fixture.retained_objects {
+        assert!(
+            fixture.store.head(path).await.is_ok(),
+            "retained metadata disappeared at {path}"
+        );
+    }
+    fixture.lease.release().await.unwrap();
+    collect().await.unwrap();
+    for path in &fixture.retained_objects {
+        assert!(
+            matches!(
+                fixture.store.head(path).await,
+                Err(CrabError::NotFound { .. })
+            ),
+            "released metadata survived at {path}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn missing_reader_capture_aborts_both_gc_marks_before_deleting_orphans() {
+    let fixture = retained_reader_fixture().await;
+    let descriptor = fixture
+        .retained_objects
+        .iter()
+        .find(|path| path.as_ref().contains("/readers/") && path.as_ref().contains("/objects/"))
+        .unwrap();
+    fixture.store.delete(descriptor).await.unwrap();
+    let orphan = fixture.layout.capsule_path(&"f".repeat(64));
+    fixture
+        .store
+        .put(&orphan, Bytes::from_static(b"orphan"))
+        .await
+        .unwrap();
+    assert!(
+        capsule_repository_roots(&fixture.store, fixture.layout.repo_prefix())
+            .await
+            .is_err()
+    );
+    let current = crab_read::capsule_protocol::open_view_from_root_with_control(
+        &fixture.layout,
+        fixture.current.clone(),
+        crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: 8 * 1024 * 1024,
+            max_frontier_bytes: 8 * 1024 * 1024,
+        },
+    )
+    .await
+    .unwrap();
+    let snapshot = current.git_snapshot().unwrap();
+    let result = super::super::sweep_capsule_objects(
+        &super::super::GcArgs::default(),
+        &fixture.store,
+        &fixture.layout,
+        fixture.current.record().root(),
+        current.capsule_run_pointers(),
+        &snapshot.manifest,
+        &HashSet::new(),
+        &CancellationToken::new(),
+        std::time::SystemTime::now() + Duration::from_secs(7200),
+        Duration::from_secs(3600),
+        std::time::Instant::now(),
+        None,
+    )
+    .await;
+    assert!(result.is_err());
+    assert!(fixture.store.head(&orphan).await.is_ok());
+}

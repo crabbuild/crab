@@ -838,6 +838,7 @@ pub struct VfsEngine {
     resolver: Arc<FuseResolver>,
     overlay: Option<Arc<dyn OverlayWriter>>,
     hydration: Arc<HydrationService>,
+    mount_catalog: Option<Arc<dyn crate::MountCatalogCapture>>,
     /// ODB reader for small-file blobs stored in git packs.
     /// `None` in tests without a real git directory.
     odb_reader: Option<Arc<OdbReader>>,
@@ -910,6 +911,7 @@ impl VfsEngine {
             resolver,
             overlay,
             hydration,
+            mount_catalog: None,
             odb_reader: odb_reader.map(Arc::new),
             snapshot,
             overlay_locks: DashMap::new(),
@@ -933,6 +935,14 @@ impl VfsEngine {
                 DEFAULT_READ_SOURCE_CACHE_MAX_ESTIMATED_BYTES,
             ),
         }
+    }
+
+    pub(crate) fn with_mount_catalog(
+        mut self,
+        catalog: Option<Arc<dyn crate::MountCatalogCapture>>,
+    ) -> Self {
+        self.mount_catalog = catalog;
+        self
     }
 
     /// Return true when an error means the caller should reopen a read lease.
@@ -1022,6 +1032,11 @@ impl VfsEngine {
             reader.shutdown().await;
         }
         self.hydration.shutdown().await;
+        if let Some(catalog) = &self.mount_catalog
+            && let Err(error) = catalog.shutdown().await
+        {
+            tracing::warn!(%error, "captured-read release failed; claim remains subject to GC retention");
+        }
     }
 
     /// Close read admission and request worker shutdown without waiting for completion.

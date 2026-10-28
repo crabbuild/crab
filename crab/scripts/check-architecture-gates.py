@@ -947,7 +947,6 @@ READ_MODULE_DIRECT_FORBIDDEN_PACKAGES = {
     "crab-auth",
     "crab-auth-server",
     "crab-cache-server",
-    "crab-coordination",
 }
 READ_MODULE_FORBIDDEN_PATTERNS = {
     "AmazonS3Builder",
@@ -969,12 +968,10 @@ READ_MODULE_FORBIDDEN_PATTERNS = {
     "crab-auth-server",
     "crab-auth",
     "crab-cache-server",
-    "crab-coordination",
     "crab::",
     "crab_auth_server",
     "crab_auth",
     "crab_cache_server",
-    "crab_coordination",
     "google-cloud",
     "google_cloud",
     "object_store::aws",
@@ -1921,6 +1918,7 @@ WORKSPACE_DEPENDENCY_POLICY = {
         "normal": {
             "crab-cache",
             "crab-cache-store",
+            "crab-coordination",
             "crab-diff",
             "crab-git",
             "crab-lfs",
@@ -4158,6 +4156,14 @@ def check_read_module_scope(root: Path, metadata: dict) -> bool:
         if object_store["features"]:
             violations.append("crab-read: object_store must stay featureless")
 
+    coordination = normal_dependency(package, "crab-coordination")
+    if (coordination is None or not coordination["optional"]
+            or coordination["uses_default_features"]
+            or set(coordination["features"]) != {"object-store-lock"}):
+        violations.append("crab-read: retention must use optional object-store-lock coordination only")
+    if "dep:crab-coordination" not in package.get("features", {}).get("hydration", []):
+        violations.append("crab-read: coordination must remain hydration-gated")
+
     for name in READ_MODULE_DIRECT_FORBIDDEN_PACKAGES:
         if normal_dependency(package, name) is not None:
             violations.append(f"crab-read: {name} must not be a normal dependency")
@@ -4180,7 +4186,17 @@ def check_read_module_scope(root: Path, metadata: dict) -> bool:
                 text = candidate.read_text(encoding="utf-8")
             except UnicodeDecodeError:
                 continue
+            test_lines = rust_test_only_lines(text) if candidate.suffix == ".rs" else set()
             for index, line in enumerate(text.splitlines(), start=1):
+                if candidate.suffix == ".rs" and index not in test_lines:
+                    modules = re.findall(r"\bcrab_coordination(?:::([A-Za-z_]\w*))?", line)
+                    invalid_module = any(module not in {"read_retention_runtime", "CoordinationError"} for module in modules)
+                    owns_capture = re.search(
+                        r"\b(?:ReadRetentionLease|ReadRetentionSession|ReadRetentionCapture|GcReadBarrier|GcFenceLease|PushLock|WriteCoordinator)\b"
+                        r"|crab_coordination::read_retention_runtime::\*", line,
+                    )
+                    if invalid_module or owns_capture:
+                        violations.append(f"{rel(root, candidate)}:{index}: capture registration and write coordination belong to callers")
                 if any(pattern in line for pattern in READ_MODULE_FORBIDDEN_PATTERNS):
                     violations.append(f"{rel(root, candidate)}:{index}: {line.strip()}")
 

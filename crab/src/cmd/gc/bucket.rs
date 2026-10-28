@@ -1091,11 +1091,34 @@ async fn capsule_repository_roots(
         },
     )
     .await?;
-    let root_digest = view.state_digest();
-    let shard_hashes = view.pointer_catalog_shard_hashes().await?;
+    let mut digest = RootDigest::default();
+    digest.add("current", &view.state_digest());
+    let mut shards = view
+        .pointer_catalog_shard_hashes()
+        .await?
+        .into_iter()
+        .collect::<std::collections::BTreeSet<_>>();
+    let readers = store.list_prefix(&router.read_retention_prefix()).await?;
+    for (owner, claim) in super::read_retention::claims(&router, &readers, None).await? {
+        let capture = crab_metadata::capsule_protocol::RetainedReadCapture::open(
+            router.clone(),
+            &owner,
+            view.root().root().repository_id(),
+            claim.hash(),
+            claim.size(),
+        )
+        .await?;
+        shards.extend(capture.into_shard_hashes().await?);
+        // Renewal must not invalidate a durable plan, but a newly captured or
+        // released root must force a fresh mark before any resumed deletion.
+        digest.add(
+            "reader",
+            &format!("{owner}\0{}\0{}", claim.hash(), claim.size()),
+        );
+    }
     Ok(CapsuleRepositoryRoots {
-        root_digest,
-        shard_hashes,
+        root_digest: digest.finish(),
+        shard_hashes: shards.into_iter().collect(),
     })
 }
 

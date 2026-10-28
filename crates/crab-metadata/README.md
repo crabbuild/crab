@@ -43,6 +43,22 @@ heads and immutable capsule runs. Complete capsule reads share storage's bounded
 immutable transfer policy, including concurrent ranges for large seed capsules.
 Full decoding still materializes the body and validates every pointer commitment.
 
+Root envelope and payload version 5 require collectors to include captured-reader
+claims. Version 4 collectors reject these roots before planning deletions; a new
+namespace alone would not protect mounted captures from those collectors. Both
+versions are unreleased. Version 4 roots are rejected, with no implicit upgrade
+or fallback reader. Existing development repositories require a separately
+qualified, quiesced conversion before adopting this format.
+
+`store_read_capture` records a view's checkpoint, exact run pointers and selected
+catalog-member ranks in private immutable pages. It uses the same captured
+`PointerCatalogLookup` without loading catalog bodies or payloads. The paired
+`RetainedReadCapture` authenticates the complete page chain for repository GC
+and replays only selected logical members for shared-payload GC. Physical run
+order never replaces captured file precedence. A descriptor is a lifetime root,
+not visibility authority; callers must register and maintain its conditional
+claim before admitting reads.
+
 Run construction reuses verified immutable capsule descriptors. Compaction checks
 byte-for-byte equality when moving capsules into its new buffer, releases the old
 buffers, and hashes the completed run once. Downloaded runs still pass full capsule,

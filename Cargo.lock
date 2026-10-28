@@ -2502,6 +2502,7 @@ dependencies = [
  "bytes",
  "crab-cache",
  "crab-cache-store",
+ "crab-coordination",
  "crab-diff",
  "crab-git",
  "crab-lfs",
