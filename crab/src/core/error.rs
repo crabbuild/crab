@@ -1984,6 +1984,9 @@ impl From<crab_remote::checkpoint::CheckpointError> for CrabError {
             CheckpointError::Repack(source) => source.into(),
             CheckpointError::Pack(source) => source.into(),
             CheckpointError::Metadata(source) => source.into(),
+            source @ CheckpointError::SourceInventoryRecord(_) => {
+                Self::Io(std::io::Error::other(source))
+            }
             CheckpointError::Storage(source) => source.into(),
             CheckpointError::Write(source) => source.into(),
             CheckpointError::Io(source) => source.into(),
@@ -4151,16 +4154,23 @@ mod tests {
     }
 
     #[test]
-    fn physical_index_json_source_survives_cli_conversion() {
+    fn metadata_json_sources_survive_cli_conversion() {
         use std::error::Error;
 
-        let source = serde_json::from_slice::<serde_json::Value>(b"{").unwrap_err();
-        let error =
-            CrabError::from(crab_metadata::error::MetadataError::GitObjectIndexRecord { source });
-        assert!(
-            std::iter::successors(error.source(), |source| (*source).source())
-                .any(|source| source.downcast_ref::<serde_json::Error>().is_some())
-        );
+        let source = || serde_json::from_slice::<serde_json::Value>(b"{").unwrap_err();
+        for error in [
+            CrabError::from(crab_metadata::error::MetadataError::GitObjectIndexRecord {
+                source: source(),
+            }),
+            CrabError::from(
+                crab_remote::checkpoint::CheckpointError::SourceInventoryRecord(source()),
+            ),
+        ] {
+            assert!(
+                std::iter::successors(error.source(), |source| (*source).source())
+                    .any(|source| source.downcast_ref::<serde_json::Error>().is_some())
+            );
+        }
     }
 
     #[test]

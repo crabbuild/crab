@@ -38,10 +38,12 @@ authenticated source directory; the hard 64-source or 8 MiB footer limit can
 force a suffix roll-up. Member-heavy runs can exhaust footer bytes before the
 source-count limit. Every publication path admits the required source metadata
 before its root CAS, retaining physical work accounting across consolidation.
-Footer-byte admission replaces the newest member-heavy run, or the smallest
-two-source suffix, until required metadata fits; larger merges remain background
-work. Source-count admission uses the compressed-byte geometric cut to amortize
-work across later checkpoints. Keeping a fixed
+When removing the entire singleton tail cannot free enough footer bytes,
+footer admission includes that tail with the newest member-heavy run within the
+existing 512 MiB suffix budget, avoiding repeated small roll-ups and delta-base
+reads. Other candidates retain minimal footer admission; larger
+merges remain background work. Source-count admission uses the compressed-byte
+geometric cut to amortize work across later checkpoints. Keeping a fixed
 63-source prefix would repeatedly rewrite the growing tail during continuous
 writes. The existing 512 MiB suffix budget still defers a larger geometric
 merge in favor of the minimum consolidation required for format admission.
