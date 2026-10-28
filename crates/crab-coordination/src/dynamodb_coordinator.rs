@@ -225,6 +225,14 @@ where
         self.inner.gc_safety_snapshot().await
     }
 
+    async fn acquire_gc_fence(&self) -> crate::Result<CoordinatorGcSafetySnapshot> {
+        self.inner.acquire_gc_fence().await
+    }
+
+    async fn release_gc_fence(&self, coordinator_epoch: u64) -> crate::Result<()> {
+        self.inner.release_gc_fence(coordinator_epoch).await
+    }
+
     async fn repair_snapshot(&self) -> crate::Result<CoordinatorRepairSnapshot> {
         self.inner.repair_snapshot().await
     }
@@ -1655,6 +1663,36 @@ mod tests {
         );
         assert!(health.healthy);
         assert!(health.linearizable);
+
+        let pending = commit_request("op-gc", Some("c"), Some("d"), &["xorb/gc"]);
+        coordinator.begin(pending.clone()).await.unwrap();
+        coordinator
+            .mark_objects_uploaded(&pending.operation_id)
+            .await
+            .unwrap();
+        let gc = coordinator.acquire_gc_fence().await.unwrap();
+        assert_eq!(
+            gc.protected_keys(),
+            pending.uploaded_objects.iter().cloned().collect()
+        );
+        coordinator
+            .fence_writes(Some("operator after GC".to_owned()))
+            .await
+            .unwrap();
+        assert!(
+            coordinator
+                .release_gc_fence(gc.coordinator_epoch)
+                .await
+                .is_err()
+        );
+        assert!(!coordinator.health().await.unwrap().healthy);
+        coordinator.resume_writes().await.unwrap();
+        let gc = coordinator.acquire_gc_fence().await.unwrap();
+        coordinator
+            .release_gc_fence(gc.coordinator_epoch)
+            .await
+            .unwrap();
+        assert!(coordinator.health().await.unwrap().healthy);
 
         let _ = client.delete_table().table_name(table_name).send().await;
     }

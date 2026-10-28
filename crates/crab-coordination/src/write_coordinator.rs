@@ -665,8 +665,19 @@ pub trait WriteCoordinator: Send + Sync {
     async fn abort(&self, operation_id: &str) -> Result<PushTransactionState>;
     async fn ref_value(&self, name: &str) -> Result<Option<String>>;
     async fn gc_safety_snapshot(&self) -> Result<CoordinatorGcSafetySnapshot>;
+    /// Atomically excludes new writes and captures the objects a GC run must retain.
+    ///
+    /// Fails without changing a pre-existing fence. The returned epoch belongs
+    /// to this GC run; release it only after all deletion work has drained.
+    async fn acquire_gc_fence(&self) -> Result<CoordinatorGcSafetySnapshot>;
+    /// Releases only the acquired GC epoch; a later operator fence stays closed.
+    async fn release_gc_fence(&self, coordinator_epoch: u64) -> Result<()>;
     async fn repair_snapshot(&self) -> Result<CoordinatorRepairSnapshot>;
     async fn fence_writes(&self, reason: Option<String>) -> Result<CoordinatorFenceOutcome>;
+    /// Administratively resumes writes after external recovery proof.
+    ///
+    /// The caller must stop and drain all GC runs and verify repair/provider
+    /// recovery first. Automatic GC cleanup must use `release_gc_fence`.
     async fn resume_writes(&self) -> Result<CoordinatorFenceOutcome>;
 }
 
@@ -981,30 +992,17 @@ where
     pub async fn gc_safety_snapshot(&self) -> Result<CoordinatorGcSafetySnapshot> {
         let state = self.load_state().await?;
         ensure_versioned_state_healthy(self.provider, &state)?;
-        let mut protected_objects = Vec::new();
-        for (operation_id, record) in &state.transactions {
-            if !versioned_transaction_state_protects_uploaded_objects(record.state) {
-                continue;
-            }
-            for key in &record.request.uploaded_objects {
-                protected_objects.push(CoordinatorProtectedObject {
-                    key: key.clone(),
-                    operation_id: operation_id.clone(),
-                    state: record.state,
-                    writer: record.request.writer.clone(),
-                    region: record.request.region.clone(),
-                });
-            }
-        }
-        protected_objects.sort_by(|left, right| {
-            left.key
-                .cmp(&right.key)
-                .then_with(|| left.operation_id.cmp(&right.operation_id))
-        });
-        Ok(CoordinatorGcSafetySnapshot {
-            coordinator_epoch: state.epoch,
-            protected_objects,
-        })
+        Ok(coordinator_gc_snapshot(&state))
+    }
+
+    pub async fn acquire_gc_fence(&self) -> Result<CoordinatorGcSafetySnapshot> {
+        self.mutate_state(|state| acquire_coordinator_gc_fence(self.provider, state))
+            .await
+    }
+
+    pub async fn release_gc_fence(&self, coordinator_epoch: u64) -> Result<()> {
+        self.mutate_state(|state| release_coordinator_gc_fence(state, coordinator_epoch))
+            .await
     }
 
     pub async fn repair_snapshot(&self) -> Result<CoordinatorRepairSnapshot> {
@@ -1047,55 +1045,13 @@ where
     }
 
     pub async fn fence_writes(&self, reason: Option<String>) -> Result<CoordinatorFenceOutcome> {
-        self.mutate_state(|state| {
-            let previous_epoch = state.epoch;
-            let previous_healthy = state.healthy;
-            let previous_reason = state.fence_reason.clone();
-            let next_reason = reason.clone();
-
-            if state.healthy {
-                state.epoch = state.epoch.saturating_add(1);
-                state.healthy = false;
-            }
-            if next_reason.is_some() {
-                state.fence_reason = next_reason;
-            }
-            let changed = previous_epoch != state.epoch
-                || previous_healthy != state.healthy
-                || previous_reason != state.fence_reason;
-
-            Ok(CoordinatorFenceOutcome {
-                previous_epoch,
-                coordinator_epoch: state.epoch,
-                previous_healthy,
-                healthy: state.healthy,
-                changed,
-                reason: state.fence_reason.clone(),
-            })
-        })
-        .await
+        self.mutate_state(|state| fence_coordinator_state(state, reason.clone()))
+            .await
     }
 
     pub async fn resume_writes(&self) -> Result<CoordinatorFenceOutcome> {
-        self.mutate_state(|state| {
-            let previous_epoch = state.epoch;
-            let previous_healthy = state.healthy;
-            let previous_reason = state.fence_reason.clone();
-
-            state.healthy = true;
-            state.fence_reason = None;
-            let changed = previous_healthy != state.healthy || previous_reason.is_some();
-
-            Ok(CoordinatorFenceOutcome {
-                previous_epoch,
-                coordinator_epoch: state.epoch,
-                previous_healthy,
-                healthy: state.healthy,
-                changed,
-                reason: None,
-            })
-        })
-        .await
+        self.mutate_state(|state| Ok(resume_coordinator_state(state)))
+            .await
     }
 
     async fn load_state(&self) -> Result<CoordinatorRepoState> {
@@ -1217,6 +1173,14 @@ where
 
     async fn gc_safety_snapshot(&self) -> Result<CoordinatorGcSafetySnapshot> {
         self.gc_safety_snapshot().await
+    }
+
+    async fn acquire_gc_fence(&self) -> Result<CoordinatorGcSafetySnapshot> {
+        self.acquire_gc_fence().await
+    }
+
+    async fn release_gc_fence(&self, coordinator_epoch: u64) -> Result<()> {
+        self.release_gc_fence(coordinator_epoch).await
     }
 
     async fn repair_snapshot(&self) -> Result<CoordinatorRepairSnapshot> {
@@ -1474,30 +1438,17 @@ impl InMemoryWriteCoordinator {
     pub async fn gc_safety_snapshot(&self) -> Result<CoordinatorGcSafetySnapshot> {
         let state = self.state.lock().await;
         ensure_versioned_state_healthy("in-memory", &state)?;
-        let mut protected_objects = Vec::new();
-        for (operation_id, record) in &state.transactions {
-            if !versioned_transaction_state_protects_uploaded_objects(record.state) {
-                continue;
-            }
-            for key in &record.request.uploaded_objects {
-                protected_objects.push(CoordinatorProtectedObject {
-                    key: key.clone(),
-                    operation_id: operation_id.clone(),
-                    state: record.state,
-                    writer: record.request.writer.clone(),
-                    region: record.request.region.clone(),
-                });
-            }
-        }
-        protected_objects.sort_by(|left, right| {
-            left.key
-                .cmp(&right.key)
-                .then_with(|| left.operation_id.cmp(&right.operation_id))
-        });
-        Ok(CoordinatorGcSafetySnapshot {
-            coordinator_epoch: state.epoch,
-            protected_objects,
-        })
+        Ok(coordinator_gc_snapshot(&state))
+    }
+
+    pub async fn acquire_gc_fence(&self) -> Result<CoordinatorGcSafetySnapshot> {
+        let mut state = self.state.lock().await;
+        acquire_coordinator_gc_fence("in-memory", &mut state)
+    }
+
+    pub async fn release_gc_fence(&self, coordinator_epoch: u64) -> Result<()> {
+        let mut state = self.state.lock().await;
+        release_coordinator_gc_fence(&mut state, coordinator_epoch)
     }
 
     pub async fn repair_snapshot(&self) -> Result<CoordinatorRepairSnapshot> {
@@ -1541,49 +1492,12 @@ impl InMemoryWriteCoordinator {
 
     pub async fn fence_writes(&self, reason: Option<String>) -> Result<CoordinatorFenceOutcome> {
         let mut state = self.state.lock().await;
-        let previous_epoch = state.epoch;
-        let previous_healthy = state.healthy;
-        let previous_reason = state.fence_reason.clone();
-
-        if state.healthy {
-            state.epoch = state.epoch.saturating_add(1);
-            state.healthy = false;
-        }
-        if reason.is_some() {
-            state.fence_reason = reason;
-        }
-        let changed = previous_epoch != state.epoch
-            || previous_healthy != state.healthy
-            || previous_reason != state.fence_reason;
-
-        Ok(CoordinatorFenceOutcome {
-            previous_epoch,
-            coordinator_epoch: state.epoch,
-            previous_healthy,
-            healthy: state.healthy,
-            changed,
-            reason: state.fence_reason.clone(),
-        })
+        fence_coordinator_state(&mut state, reason)
     }
 
     pub async fn resume_writes(&self) -> Result<CoordinatorFenceOutcome> {
         let mut state = self.state.lock().await;
-        let previous_epoch = state.epoch;
-        let previous_healthy = state.healthy;
-        let previous_reason = state.fence_reason.clone();
-
-        state.healthy = true;
-        state.fence_reason = None;
-        let changed = previous_healthy != state.healthy || previous_reason.is_some();
-
-        Ok(CoordinatorFenceOutcome {
-            previous_epoch,
-            coordinator_epoch: state.epoch,
-            previous_healthy,
-            healthy: state.healthy,
-            changed,
-            reason: None,
-        })
+        Ok(resume_coordinator_state(&mut state))
     }
 
     async fn transition(
@@ -1661,6 +1575,14 @@ impl WriteCoordinator for InMemoryWriteCoordinator {
         self.gc_safety_snapshot().await
     }
 
+    async fn acquire_gc_fence(&self) -> Result<CoordinatorGcSafetySnapshot> {
+        self.acquire_gc_fence().await
+    }
+
+    async fn release_gc_fence(&self, coordinator_epoch: u64) -> Result<()> {
+        self.release_gc_fence(coordinator_epoch).await
+    }
+
     async fn repair_snapshot(&self) -> Result<CoordinatorRepairSnapshot> {
         self.repair_snapshot().await
     }
@@ -1671,6 +1593,102 @@ impl WriteCoordinator for InMemoryWriteCoordinator {
 
     async fn resume_writes(&self) -> Result<CoordinatorFenceOutcome> {
         self.resume_writes().await
+    }
+}
+
+fn coordinator_gc_snapshot(state: &CoordinatorRepoState) -> CoordinatorGcSafetySnapshot {
+    let mut protected_objects = Vec::new();
+    for (operation_id, record) in &state.transactions {
+        if !versioned_transaction_state_protects_uploaded_objects(record.state) {
+            continue;
+        }
+        for key in &record.request.uploaded_objects {
+            protected_objects.push(CoordinatorProtectedObject {
+                key: key.clone(),
+                operation_id: operation_id.clone(),
+                state: record.state,
+                writer: record.request.writer.clone(),
+                region: record.request.region.clone(),
+            });
+        }
+    }
+    protected_objects.sort_by(|left, right| {
+        left.key
+            .cmp(&right.key)
+            .then_with(|| left.operation_id.cmp(&right.operation_id))
+    });
+    CoordinatorGcSafetySnapshot {
+        coordinator_epoch: state.epoch,
+        protected_objects,
+    }
+}
+
+fn acquire_coordinator_gc_fence(
+    provider: &str,
+    state: &mut CoordinatorRepoState,
+) -> Result<CoordinatorGcSafetySnapshot> {
+    ensure_versioned_state_healthy(provider, state)?;
+    // Capture protection in the same mutation that closes admission. A separate
+    // read could observe an operator's replacement fence or omit a racing commit.
+    fence_coordinator_state(state, Some("repo garbage collection".to_owned()))?;
+    Ok(coordinator_gc_snapshot(state))
+}
+
+fn release_coordinator_gc_fence(
+    state: &mut CoordinatorRepoState,
+    coordinator_epoch: u64,
+) -> Result<()> {
+    if state.healthy || state.epoch != coordinator_epoch {
+        return Err(CoordinationError::CasConflict {
+            path: "coordinator/gc-fence".to_owned(),
+            expected_etag: None,
+        });
+    }
+    resume_coordinator_state(state);
+    Ok(())
+}
+
+fn fence_coordinator_state(
+    state: &mut CoordinatorRepoState,
+    reason: Option<String>,
+) -> Result<CoordinatorFenceOutcome> {
+    let previous_epoch = state.epoch;
+    let previous_healthy = state.healthy;
+    // Every fence takes a new epoch, including one that replaces an existing
+    // fence. Otherwise an older GC owner could resume a later operator fence.
+    state.epoch = state
+        .epoch
+        .checked_add(1)
+        .ok_or_else(|| CoordinationError::Configuration {
+            key: "replication.coordinator.epoch".to_owned(),
+            origin: "coordinator fence epoch is exhausted".to_owned(),
+        })?;
+    state.healthy = false;
+    if reason.is_some() {
+        state.fence_reason = reason;
+    }
+    Ok(CoordinatorFenceOutcome {
+        previous_epoch,
+        coordinator_epoch: state.epoch,
+        previous_healthy,
+        healthy: false,
+        changed: true,
+        reason: state.fence_reason.clone(),
+    })
+}
+
+fn resume_coordinator_state(state: &mut CoordinatorRepoState) -> CoordinatorFenceOutcome {
+    let previous_healthy = state.healthy;
+    let changed = !previous_healthy || state.fence_reason.is_some();
+    state.healthy = true;
+    state.fence_reason = None;
+    CoordinatorFenceOutcome {
+        previous_epoch: state.epoch,
+        coordinator_epoch: state.epoch,
+        previous_healthy,
+        healthy: true,
+        changed,
+        reason: None,
     }
 }
 
@@ -2870,6 +2888,161 @@ pub(crate) mod tests {
     #[derive(Default)]
     struct TestVersionedStateStore {
         record: Mutex<Option<CoordinatorStateRecord>>,
+    }
+
+    fn gc_coordinators() -> Vec<Box<dyn WriteCoordinator>> {
+        vec![
+            Box::new(InMemoryWriteCoordinator::new()),
+            Box::new(VersionedStateWriteCoordinator::new(
+                "test",
+                "namespace",
+                "repo",
+                TestVersionedStateStore::default(),
+            )),
+        ]
+    }
+
+    #[tokio::test]
+    async fn gc_fence_captures_protection_and_excludes_writes_until_release() {
+        for coordinator in gc_coordinators() {
+            let mut pending = request("gc-protected");
+            pending.refs[0].expected = None;
+            coordinator.begin(pending.clone()).await.unwrap();
+            coordinator
+                .mark_objects_uploaded(&pending.operation_id)
+                .await
+                .unwrap();
+            let snapshot = coordinator.acquire_gc_fence().await.unwrap();
+            assert_eq!(
+                snapshot.protected_keys(),
+                pending.uploaded_objects.iter().cloned().collect()
+            );
+            assert!(matches!(
+                coordinator.commit(pending).await,
+                Err(CoordinationError::Configuration { .. })
+            ));
+            coordinator
+                .release_gc_fence(snapshot.coordinator_epoch)
+                .await
+                .unwrap();
+            assert!(coordinator.health().await.unwrap().healthy);
+        }
+    }
+
+    #[tokio::test]
+    async fn gc_release_preserves_a_later_fence_even_with_the_same_reason() {
+        for coordinator in gc_coordinators() {
+            let snapshot = coordinator.acquire_gc_fence().await.unwrap();
+            coordinator
+                .fence_writes(Some("repo garbage collection".to_owned()))
+                .await
+                .unwrap();
+            let replacement = coordinator.health().await.unwrap();
+            assert!(matches!(
+                coordinator
+                    .release_gc_fence(snapshot.coordinator_epoch)
+                    .await,
+                Err(CoordinationError::CasConflict { .. })
+            ));
+            assert_eq!(coordinator.health().await.unwrap(), replacement);
+            assert!(!replacement.healthy);
+        }
+    }
+
+    #[tokio::test]
+    async fn gc_admission_leaves_a_preexisting_operator_fence_unchanged() {
+        for coordinator in gc_coordinators() {
+            coordinator
+                .fence_writes(Some("operator maintenance".to_owned()))
+                .await
+                .unwrap();
+            let before = coordinator.health().await.unwrap();
+            assert!(coordinator.acquire_gc_fence().await.is_err());
+            assert_eq!(coordinator.health().await.unwrap(), before);
+        }
+    }
+
+    #[tokio::test]
+    async fn gc_stale_release_cannot_clear_a_new_owner_after_verified_resume() {
+        for coordinator in gc_coordinators() {
+            let old = coordinator.acquire_gc_fence().await.unwrap();
+            coordinator.resume_writes().await.unwrap();
+            let current = coordinator.acquire_gc_fence().await.unwrap();
+            assert!(
+                coordinator
+                    .release_gc_fence(old.coordinator_epoch)
+                    .await
+                    .is_err()
+            );
+            assert!(!coordinator.health().await.unwrap().healthy);
+            coordinator
+                .release_gc_fence(current.coordinator_epoch)
+                .await
+                .unwrap();
+            assert!(coordinator.health().await.unwrap().healthy);
+        }
+    }
+
+    #[test]
+    fn gc_and_operator_fences_reject_epoch_exhaustion_without_mutation() {
+        let mut state = CoordinatorRepoState {
+            epoch: u64::MAX,
+            ..Default::default()
+        };
+        let before = state.clone();
+        assert!(acquire_coordinator_gc_fence("test", &mut state).is_err());
+        assert_eq!(state, before);
+        assert!(fence_coordinator_state(&mut state, Some("operator".to_owned())).is_err());
+        assert_eq!(state, before);
+    }
+
+    #[tokio::test]
+    async fn gc_cas_retry_does_not_replace_a_racing_operator_fence() {
+        struct RacingStore(TestVersionedStateStore);
+        #[async_trait::async_trait]
+        impl VersionedCoordinatorStateStore for RacingStore {
+            async fn read_repo_state(
+                &self,
+                namespace: &str,
+                repo: &str,
+            ) -> Result<Option<CoordinatorStateRecord>> {
+                self.0.read_repo_state(namespace, repo).await
+            }
+
+            async fn compare_and_swap_repo_state(
+                &self,
+                _: &str,
+                _: &str,
+                _: Option<u64>,
+                _: &CoordinatorRepoState,
+            ) -> Result<bool> {
+                let mut record = self.0.record.lock().unwrap();
+                assert!(
+                    record.is_none(),
+                    "GC retried a mutation against fenced state"
+                );
+                record.replace(CoordinatorStateRecord {
+                    version: 1,
+                    state: CoordinatorRepoState {
+                        epoch: 2,
+                        healthy: false,
+                        fence_reason: Some("operator won CAS".to_owned()),
+                        ..Default::default()
+                    },
+                });
+                Ok(false)
+            }
+        }
+        let coordinator = VersionedStateWriteCoordinator::new(
+            "test",
+            "namespace",
+            "repo",
+            RacingStore(TestVersionedStateStore::default()),
+        );
+        assert!(coordinator.acquire_gc_fence().await.is_err());
+        let health = coordinator.health().await.unwrap();
+        assert!(!health.healthy);
+        assert_eq!(health.reason.as_deref(), Some("operator won CAS"));
     }
 
     async fn assert_commit_replay_rejects_changed_authority(coordinator: &dyn WriteCoordinator) {

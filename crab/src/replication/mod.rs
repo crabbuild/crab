@@ -6711,7 +6711,7 @@ pub struct ActiveActiveResumeProof {
 }
 
 impl ActiveActiveResumeProof {
-    /// Confirms coordinator-backed repair and external failover checks completed.
+    /// Confirms all GC runs stopped and drained, with repair and external failover checks complete.
     #[must_use]
     pub fn verified_after_repair() -> Self {
         Self {
@@ -7126,12 +7126,10 @@ pub async fn active_active_gc_protected_keys(
 ///
 /// A protected-key snapshot without this authority fence is only advisory:
 /// another coordinator transaction could upload and commit between the read
-/// and the object-store delete. The guard leaves a pre-fenced coordinator
-/// untouched and deliberately requires operator resume after process loss.
+/// and the object-store delete. The guard rejects a pre-fenced coordinator
+/// unchanged and requires verified operator resume after process loss.
 pub struct ActiveActiveGcFence {
     coordinator: Arc<dyn WriteCoordinator>,
-    repo_prefix: String,
-    previous_healthy: bool,
     protected_keys: HashSet<String>,
     coordinator_epoch: u64,
 }
@@ -7147,36 +7145,21 @@ impl ActiveActiveGcFence {
         }
         validate_active_active_config(replication)?;
         let coordinator = active_active_write_coordinator_for_repo(config, repo_prefix).await?;
-        let health = coordinator.health().await.map_err(CrabError::from)?;
-        if !health.healthy || !health.linearizable {
-            return Err(CrabError::Configuration {
-                key: "replication.coordinator".to_owned(),
-                origin: health.reason.unwrap_or_else(|| {
-                    "active-active coordinator is not healthy and linearizable for GC fencing"
-                        .to_owned()
-                }),
-            });
-        }
-        let fence = coordinator
-            .fence_writes(Some("repo garbage collection".to_owned()))
+        Self::acquire_with_coordinator(coordinator).await.map(Some)
+    }
+
+    async fn acquire_with_coordinator(coordinator: Arc<dyn WriteCoordinator>) -> Result<Self> {
+        // The managed constructor verifies topology; the shared state owner
+        // atomically verifies write admission, fences it and captures protection.
+        let snapshot = coordinator
+            .acquire_gc_fence()
             .await
             .map_err(CrabError::from)?;
-        let snapshot = match coordinator.gc_safety_snapshot().await {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                if fence.previous_healthy {
-                    let _ = coordinator.resume_writes().await;
-                }
-                return Err(CrabError::from(error));
-            }
-        };
-        Ok(Some(Self {
+        Ok(Self {
             coordinator,
-            repo_prefix: repo_prefix.to_owned(),
-            previous_healthy: fence.previous_healthy,
             protected_keys: snapshot.protected_keys(),
             coordinator_epoch: snapshot.coordinator_epoch,
-        }))
+        })
     }
 
     /// Returns the fenced coordinator's protected object set.
@@ -7191,22 +7174,12 @@ impl ActiveActiveGcFence {
         self.coordinator_epoch
     }
 
-    /// Resumes writes only when this guard created the fence.
+    /// Resumes writes only while this guard still owns the acquired epoch.
     pub async fn release(self) -> Result<()> {
-        if !self.previous_healthy {
-            return Ok(());
-        }
         self.coordinator
-            .resume_writes()
+            .release_gc_fence(self.coordinator_epoch)
             .await
-            .map(|_| ())
-            .map_err(|error| CrabError::Configuration {
-                key: "replication.coordinator".to_owned(),
-                origin: format!(
-                    "failed to resume coordinator for repo {} after GC: {error}",
-                    self.repo_prefix
-                ),
-            })
+            .map_err(CrabError::from)
     }
 }
 
@@ -7555,7 +7528,7 @@ fn validate_active_active_resume_proof(proof: ActiveActiveResumeProof) -> Result
     if !proof.repair_verified {
         return Err(CrabError::Configuration {
             key: "replication.failover.resume.repair_verified".into(),
-            origin: "active-active resume requires proof that coordinator-backed repair and external provider failover checks completed".into(),
+            origin: "active-active resume requires proof that all GC runs stopped and drained, coordinator-backed repair and external provider failover checks completed".into(),
         });
     }
     Ok(())
@@ -9616,6 +9589,109 @@ mod tests {
         CoordinatorCheckState, CoordinatorControlPlaneCheck, CoordinatorControlPlaneStatus,
         ManagedCoordinatorProvider,
     };
+
+    #[tokio::test]
+    async fn active_active_gc_retains_pending_capsule_and_deletes_unowned_old_object() {
+        use crab_metadata::capsule_protocol::{Capsule, CapsuleRefEdit, CapsuleTransaction};
+        use std::time::Duration;
+
+        let storage = Arc::new(crate::cmd::gc::captured_index_tests::AgedObjects::new(
+            Arc::new(InMemory::new()),
+            SystemTime::now() - Duration::from_secs(24 * 3600),
+        ));
+        let store = Store::new(storage.clone());
+        let router = StoreLayout::new(store.clone(), "repo".to_owned());
+        let layout = crab_storage::StoreLayout::new(store.as_storage().clone(), "repo".to_owned());
+        let base =
+            crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+                .await
+                .unwrap();
+        let transaction = CapsuleTransaction::new(
+            base.record().digest(),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some("2".repeat(40)),
+                None,
+            )],
+        )
+        .unwrap();
+        let capsule = Capsule::build(&transaction, Vec::new(), Vec::new()).unwrap();
+        let prepared = crab_write::capsule_protocol::prepare_coordinated_publication(
+            &layout,
+            base,
+            &transaction,
+            &capsule,
+        )
+        .await
+        .unwrap();
+        let protected_path = layout.capsule_path(&prepared.descriptor().run_hash);
+        let (expected_bytes, _) = store.get_with_etag(&protected_path).await.unwrap();
+        let orphan_path = layout.capsule_path(&"f".repeat(64));
+        store
+            .put(&orphan_path, Bytes::from_static(b"unowned"))
+            .await
+            .unwrap();
+        storage.age(&[protected_path.clone(), orphan_path.clone()]);
+        let plan = plan_active_active_capsule_push(
+            &active_active_replication_for_push(),
+            Some("east"),
+            prepared.descriptor().clone(),
+            vec![active_active_ref_update(
+                "refs/heads/main",
+                None,
+                Some(&"2".repeat(40)),
+            )],
+            vec![protected_path.to_string()],
+        )
+        .unwrap();
+        let coordinator = Arc::new(crab_coordination::InMemoryWriteCoordinator::new());
+        coordinator.begin(plan.request.clone()).await.unwrap();
+        coordinator
+            .mark_objects_uploaded(&plan.request.operation_id)
+            .await
+            .unwrap();
+        let fence = ActiveActiveGcFence::acquire_with_coordinator(coordinator.clone())
+            .await
+            .unwrap();
+        let outcome = crate::cmd::gc::run_repo_remote_gc(
+            &crate::cmd::gc::GcArgs::default(),
+            &store,
+            &router,
+            fence.protected_keys(),
+            &CancellationToken::new(),
+            Duration::from_secs(3600),
+            None,
+        )
+        .await
+        .unwrap();
+        fence.release().await.unwrap();
+
+        assert_eq!(outcome.packs_deleted, 1);
+        assert!(matches!(store.head(&orphan_path).await,
+            Err(CrabError::NotFound { path }) if path == orphan_path.as_ref()));
+        assert_eq!(
+            store.get_with_etag(&protected_path).await.unwrap().0,
+            expected_bytes
+        );
+        assert!(coordinator.health().await.unwrap().healthy);
+    }
+
+    #[tokio::test]
+    async fn active_active_gc_cleanup_does_not_resume_a_later_operator_fence() {
+        let coordinator = Arc::new(crab_coordination::InMemoryWriteCoordinator::new());
+        let fence = ActiveActiveGcFence::acquire_with_coordinator(coordinator.clone())
+            .await
+            .unwrap();
+        coordinator
+            .fence_writes(Some("operator maintenance".to_owned()))
+            .await
+            .unwrap();
+        let operator = coordinator.health().await.unwrap();
+        assert!(fence.release().await.is_err());
+        assert_eq!(coordinator.health().await.unwrap(), operator);
+        assert!(!operator.healthy);
+    }
 
     struct TestControlPlaneBackend {
         provider: ReplicationProviderKind,

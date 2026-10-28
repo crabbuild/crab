@@ -457,7 +457,7 @@ pub struct FailoverPlanArgs {
     /// Writer reported unhealthy by an external regional health check.
     #[arg(long = "writer-unhealthy")]
     pub unhealthy_writers: Vec<String>,
-    /// Confirm coordinator-backed repair and external failover checks completed.
+    /// Confirm GC has stopped and drained, and repair and external failover checks completed.
     #[arg(long)]
     pub repair_verified: bool,
     /// Structured JSON output.
@@ -473,7 +473,7 @@ pub struct FailoverRunArgs {
     /// Writer reported unhealthy by an external regional health check.
     #[arg(long = "writer-unhealthy")]
     pub unhealthy_writers: Vec<String>,
-    /// Confirm coordinator-backed repair and external failover checks completed.
+    /// Confirm GC has stopped and drained, and repair and external failover checks completed.
     #[arg(long)]
     pub repair_verified: bool,
     /// Structured JSON output.
@@ -499,7 +499,7 @@ pub struct FailoverResumeArgs {
     /// Mutate the managed coordinator state.
     #[arg(long)]
     pub apply: bool,
-    /// Confirm coordinator-backed repair and external failover checks completed.
+    /// Confirm GC has stopped and drained, and repair and external failover checks completed.
     #[arg(long)]
     pub repair_verified: bool,
     /// Structured JSON output.
@@ -2997,7 +2997,7 @@ fn validate_failover_apply_confirmation(
     if operation == ActiveActiveFailoverOperation::Resume && apply && !repair_verified {
         return Err(CrabError::Configuration {
             key: "replica.failover.resume.repair_verified".into(),
-            origin: "failover resume --apply requires --repair-verified after coordinator-backed repair and external provider failover checks complete".into(),
+            origin: "failover resume --apply requires --repair-verified after all GC runs stop and drain, coordinator-backed repair, and external provider failover checks complete".into(),
         });
     }
     Ok(())

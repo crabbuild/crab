@@ -23,7 +23,7 @@ pub mod parallel_enum;
 #[cfg(test)]
 mod capsule_cleanup_tests;
 #[cfg(test)]
-mod captured_index_tests;
+pub(crate) mod captured_index_tests;
 
 use std::collections::HashSet;
 #[cfg(test)]

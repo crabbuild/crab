@@ -37,6 +37,7 @@ Trace one path: `crates/crab-write/src/generation.rs` → `while_renewing` in
   Source: `crates/crab-coordination/src/write_coordinator.rs`.
 - Stored coordinator authority requires the `capsule_v2` format and exact Capsule descriptors. Reject retired state as a whole before refs, repair or GC use; never convert decode errors into empty protection. Force policy cannot bypass exact coordinator ref CAS.
   Sources: `write_coordinator.rs` and provider coordinator modules in this crate.
+- Coordinator GC admission and protection are one atomic mutation. Release only its acquired epoch after work drains; every later fence advances the epoch. Administrative resume requires external quiescence/repair proof and is never automatic GC cleanup. Source: `write_coordinator.rs`.
 
 - Check both Unix expiry and monotonic renewal-deadline arithmetic. Reject unrepresentable durations before storage access; retain fresh expiry calculation on each renewal attempt.
   Source: `crates/crab-coordination/src/push_lock.rs`.

@@ -37,12 +37,28 @@ const LIMIT: u64 = 8 * 1024 * 1024;
 // Immutable bodies can predate their first reader by years. Alter only their
 // provider timestamps; native pack validation and conditional publication stay real.
 #[derive(Debug)]
-struct AgedObjects {
+pub(crate) struct AgedObjects {
     inner: Arc<dyn ObjectStore>,
     deletes: Option<Arc<cancellation::DeleteGate>>,
     paths: Mutex<HashSet<Path>>,
     modified: SystemTime,
     list_calls: Mutex<Vec<Path>>,
+}
+
+impl AgedObjects {
+    pub(crate) fn new(inner: Arc<dyn ObjectStore>, modified: SystemTime) -> Self {
+        Self {
+            inner,
+            deletes: None,
+            paths: Mutex::new(HashSet::new()),
+            modified,
+            list_calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub(crate) fn age(&self, paths: &[Path]) {
+        self.paths.lock().unwrap().extend(paths.iter().cloned());
+    }
 }
 
 impl std::fmt::Display for AgedObjects {

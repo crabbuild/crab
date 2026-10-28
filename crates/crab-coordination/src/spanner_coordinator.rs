@@ -187,6 +187,14 @@ where
         self.inner.gc_safety_snapshot().await
     }
 
+    async fn acquire_gc_fence(&self) -> crate::Result<CoordinatorGcSafetySnapshot> {
+        self.inner.acquire_gc_fence().await
+    }
+
+    async fn release_gc_fence(&self, coordinator_epoch: u64) -> crate::Result<()> {
+        self.inner.release_gc_fence(coordinator_epoch).await
+    }
+
     async fn repair_snapshot(&self) -> crate::Result<CoordinatorRepairSnapshot> {
         self.inner.repair_snapshot().await
     }

@@ -97,6 +97,21 @@ ref lookup, GC safety snapshots, repair snapshots, and write fencing. The
 provider-specific DynamoDB, Spanner, and Cosmos DB implementations share the
 same CAS-backed state contract.
 
+Repo GC uses `acquire_gc_fence` to capture protected objects and close write
+admission in one atomic state mutation. A pre-existing fence is rejected
+unchanged. After deletion work drains, `release_gc_fence` releases only the
+acquired epoch. Every operator fence advances the epoch, even when already
+fenced, so GC cleanup cannot resume a later operator fence. Epoch exhaustion
+fails without mutation. Advisory GC snapshots do not grant deletion authority.
+
+A process lost after GC admission leaves writes fenced; there is no automatic
+expiry or reset. Operator resume remains an explicit recovery override under
+the existing `--repair-verified` contract. Before using it, stop and drain all
+GC runs for the repository as well as verifying provider failover, object
+replication and coordinator-backed repair. Resume during an active sweep
+invalidates its exclusion guarantee. Automatic GC cleanup never uses this
+administrative override.
+
 For production publication, use `commit_uploaded_push_refs` after uploading
 immutable objects, then materialize the exact v2 Capsule transaction before
 calling `mark_region_materialized`. Requests and repair gaps require an exact
