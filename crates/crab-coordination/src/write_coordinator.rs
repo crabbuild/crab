@@ -656,7 +656,15 @@ pub trait WriteCoordinator: Send + Sync {
     async fn begin(&self, request: CommitRequest) -> Result<PushTransactionState>;
     async fn mark_objects_uploaded(&self, operation_id: &str) -> Result<PushTransactionState>;
     async fn commit(&self, request: CommitRequest) -> Result<CommitOutcome>;
+    /// Acknowledges durable publication in every target region, even while writes are fenced.
+    ///
+    /// The caller must have published the exact committed Capsule in all targets.
+    /// This does not resume admission or authorize a pending transaction.
     async fn mark_materialized(&self, operation_id: &str) -> Result<PushTransactionState>;
+    /// Acknowledges durable publication of the committed Capsule in one target region.
+    ///
+    /// A write fence must permit this acknowledgement so repair can finish before
+    /// administrative resume. The caller must finish regional publication first.
     async fn mark_region_materialized(
         &self,
         operation_id: &str,
@@ -672,6 +680,10 @@ pub trait WriteCoordinator: Send + Sync {
     async fn acquire_gc_fence(&self) -> Result<CoordinatorGcSafetySnapshot>;
     /// Releases only the acquired GC epoch; a later operator fence stays closed.
     async fn release_gc_fence(&self, coordinator_epoch: u64) -> Result<()>;
+    /// Reads committed regional gaps independently of new-write admission.
+    ///
+    /// Fenced epochs retain their committed authority; provider and state-read
+    /// errors still fail closed. The snapshot never authorizes new ref edits.
     async fn repair_snapshot(&self) -> Result<CoordinatorRepairSnapshot>;
     async fn fence_writes(&self, reason: Option<String>) -> Result<CoordinatorFenceOutcome>;
     /// Administratively resumes writes after external recovery proof.
@@ -918,7 +930,6 @@ where
 
     pub async fn mark_materialized(&self, operation_id: &str) -> Result<PushTransactionState> {
         self.mutate_state(|state| {
-            ensure_versioned_state_healthy(self.provider, state)?;
             if let Some(record) = state.completed_operations.get(operation_id) {
                 return coordinator_completed_materialized_state(record, operation_id);
             }
@@ -946,7 +957,6 @@ where
         region: &str,
     ) -> Result<PushTransactionState> {
         self.mutate_state(|state| {
-            ensure_versioned_state_healthy(self.provider, state)?;
             if let Some(record) = state.completed_operations.get(operation_id) {
                 return coordinator_completed_region_materialized_state(
                     record,
@@ -1007,7 +1017,6 @@ where
 
     pub async fn repair_snapshot(&self) -> Result<CoordinatorRepairSnapshot> {
         let state = self.load_state().await?;
-        ensure_versioned_state_healthy(self.provider, &state)?;
         let mut materialization_gaps = Vec::new();
         for (operation_id, record) in &state.transactions {
             if record.outcome.is_none() || record.state == PushTransactionState::Aborted {
@@ -1372,7 +1381,6 @@ impl InMemoryWriteCoordinator {
 
     pub async fn mark_materialized(&self, operation_id: &str) -> Result<PushTransactionState> {
         let mut state = self.state.lock().await;
-        ensure_versioned_state_healthy("in-memory", &state)?;
         if let Some(record) = state.completed_operations.get(operation_id) {
             return coordinator_completed_materialized_state(record, operation_id);
         }
@@ -1398,7 +1406,6 @@ impl InMemoryWriteCoordinator {
         region: &str,
     ) -> Result<PushTransactionState> {
         let mut state = self.state.lock().await;
-        ensure_versioned_state_healthy("in-memory", &state)?;
         if let Some(record) = state.completed_operations.get(operation_id) {
             return coordinator_completed_region_materialized_state(record, operation_id, region);
         }
@@ -1453,7 +1460,6 @@ impl InMemoryWriteCoordinator {
 
     pub async fn repair_snapshot(&self) -> Result<CoordinatorRepairSnapshot> {
         let state = self.state.lock().await;
-        ensure_versioned_state_healthy("in-memory", &state)?;
         let mut materialization_gaps = Vec::new();
         for (operation_id, record) in &state.transactions {
             if record.outcome.is_none() || record.state == PushTransactionState::Aborted {
@@ -2900,6 +2906,156 @@ pub(crate) mod tests {
                 TestVersionedStateStore::default(),
             )),
         ]
+    }
+
+    #[tokio::test]
+    async fn fenced_repair_snapshot_retains_only_committed_authority() {
+        for coordinator in gc_coordinators() {
+            for operation in ["pending", "uploaded", "aborted", "committed"] {
+                let mut request = request(operation);
+                request.refs[0].expected = None;
+                request.target_regions = vec!["us-east-1".to_owned()];
+                coordinator.begin(request.clone()).await.unwrap();
+                match operation {
+                    "uploaded" => {
+                        coordinator.mark_objects_uploaded(operation).await.unwrap();
+                    }
+                    "aborted" => {
+                        coordinator.abort(operation).await.unwrap();
+                    }
+                    "committed" => {
+                        coordinator.commit(request).await.unwrap();
+                    }
+                    _ => {}
+                }
+            }
+            let mut expected = coordinator.repair_snapshot().await.unwrap();
+            assert_eq!(expected.materialization_gaps.len(), 2);
+            assert!(
+                expected
+                    .materialization_gaps
+                    .iter()
+                    .all(|gap| gap.operation_id == "committed")
+            );
+            let fence = coordinator
+                .fence_writes(Some("repair".to_owned()))
+                .await
+                .unwrap();
+            expected.coordinator_epoch = fence.coordinator_epoch;
+            assert_eq!(coordinator.repair_snapshot().await.unwrap(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn fenced_repair_acknowledges_committed_regions_without_resuming_writes() {
+        for coordinator in gc_coordinators() {
+            let mut committed = request("committed");
+            committed.refs[0].expected = None;
+            committed.target_regions = vec!["us-east-1".to_owned()];
+            coordinator.commit(committed.clone()).await.unwrap();
+            let fence = coordinator
+                .fence_writes(Some("repair".to_owned()))
+                .await
+                .unwrap();
+            for (region, expected) in [
+                ("us-west-2", PushTransactionState::Committed),
+                ("us-east-1", PushTransactionState::Materialized),
+                ("us-west-2", PushTransactionState::Materialized),
+            ] {
+                assert_eq!(
+                    coordinator
+                        .mark_region_materialized("committed", region)
+                        .await
+                        .unwrap(),
+                    expected
+                );
+                assert!(
+                    coordinator
+                        .mark_region_materialized("committed", "unknown")
+                        .await
+                        .is_err()
+                );
+            }
+            assert!(
+                coordinator
+                    .repair_snapshot()
+                    .await
+                    .unwrap()
+                    .materialization_gaps
+                    .is_empty()
+            );
+            assert!(coordinator.begin(request("new")).await.is_err());
+            assert!(coordinator.commit(committed).await.is_err());
+            let health = coordinator.health().await.unwrap();
+            assert!(!health.healthy);
+            assert_eq!(health.epoch, fence.coordinator_epoch);
+            assert_eq!(health.reason.as_deref(), Some("repair"));
+            assert_eq!(
+                coordinator.ref_value("refs/heads/main").await.unwrap(),
+                Some("bcd".to_owned())
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn fenced_repair_rejects_uncommitted_or_aborted_acknowledgements() {
+        for coordinator in gc_coordinators() {
+            for operation in ["pending", "uploaded", "aborted"] {
+                coordinator.begin(request(operation)).await.unwrap();
+                if operation == "uploaded" {
+                    coordinator.mark_objects_uploaded(operation).await.unwrap();
+                } else if operation == "aborted" {
+                    coordinator.abort(operation).await.unwrap();
+                }
+            }
+            coordinator
+                .fence_writes(Some("repair".to_owned()))
+                .await
+                .unwrap();
+            let before = coordinator.health().await.unwrap();
+            for operation in ["pending", "uploaded", "aborted", "missing"] {
+                assert!(coordinator.mark_materialized(operation).await.is_err());
+                assert!(
+                    coordinator
+                        .mark_region_materialized(operation, "us-west-2")
+                        .await
+                        .is_err()
+                );
+            }
+            assert!(coordinator.mark_objects_uploaded("pending").await.is_err());
+            assert_eq!(coordinator.health().await.unwrap(), before);
+        }
+    }
+
+    #[tokio::test]
+    async fn fenced_repair_completion_preserves_owned_gc_protection() {
+        for coordinator in gc_coordinators() {
+            let mut committed = request("committed");
+            committed.refs[0].expected = None;
+            coordinator.commit(committed.clone()).await.unwrap();
+            let gc = coordinator.acquire_gc_fence().await.unwrap();
+            // This state-machine fixture models already-durable regional I/O.
+            // GC owns its captured protection even if acknowledgement compacts the record.
+            for _ in 0..2 {
+                assert_eq!(
+                    coordinator.mark_materialized("committed").await.unwrap(),
+                    PushTransactionState::Materialized
+                );
+            }
+            assert_eq!(
+                gc.protected_keys(),
+                committed.uploaded_objects.into_iter().collect()
+            );
+            let health = coordinator.health().await.unwrap();
+            assert!(!health.healthy);
+            assert_eq!(health.epoch, gc.coordinator_epoch);
+            assert_eq!(health.state_summary.unwrap().transaction_count, 0);
+            coordinator
+                .release_gc_fence(gc.coordinator_epoch)
+                .await
+                .unwrap();
+            assert!(coordinator.health().await.unwrap().healthy);
+        }
     }
 
     #[tokio::test]

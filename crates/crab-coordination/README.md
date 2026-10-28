@@ -97,6 +97,14 @@ ref lookup, GC safety snapshots, repair snapshots, and write fencing. The
 provider-specific DynamoDB, Spanner, and Cosmos DB implementations share the
 same CAS-backed state contract.
 
+Write fencing closes new transaction admission, not repair of committed
+authority. Repair snapshots and materialization acknowledgements remain
+available while fenced, including for transactions committed in an earlier
+epoch. Acknowledgements still require committed state and a valid target region;
+callers must finish durable regional publication first. Neither repair operation
+resumes writes or changes the fence epoch/reason. Provider topology admission,
+state decoding and backend read/CAS failures still fail closed.
+
 Repo GC uses `acquire_gc_fence` to capture protected objects and close write
 admission in one atomic state mutation. A pre-existing fence is rejected
 unchanged. After deletion work drains, `release_gc_fence` releases only the

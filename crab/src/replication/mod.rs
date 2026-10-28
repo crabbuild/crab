@@ -12289,6 +12289,140 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
+    async fn fenced_repair_publishes_capsule_before_acknowledgement_and_resume() {
+        use crab_metadata::capsule_protocol::{Capsule, CapsuleRefEdit, CapsuleTransaction};
+        use crab_write::capsule_protocol::{
+            initialize, materialize_coordinated_publication, prepare_coordinated_publication,
+        };
+        use std::time::Duration;
+
+        let source = Store::new(Arc::new(InMemory::new()));
+        let target = Store::new(Arc::new(InMemory::new()));
+        let source_layout =
+            crab_storage::StoreLayout::new(source.as_storage().clone(), "repo".to_owned());
+        let target_layout =
+            crab_storage::StoreLayout::new(target.as_storage().clone(), "repo".to_owned());
+        let router = StoreLayout::new(target.clone(), "repo".to_owned());
+        let base = initialize(&source_layout, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+        let transaction = CapsuleTransaction::new(
+            base.record().digest(),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some("2".repeat(40)),
+                None,
+            )],
+        )
+        .unwrap();
+        let capsule = Capsule::build(&transaction, Vec::new(), Vec::new()).unwrap();
+        let prepared =
+            prepare_coordinated_publication(&source_layout, base, &transaction, &capsule)
+                .await
+                .unwrap();
+        let run_path = source_layout.capsule_path(&prepared.descriptor().run_hash);
+        // Model provider replication of the bootstrap root and immutable run;
+        // regional mutable ref publication still belongs to the repair path.
+        for path in [source_layout.capsule_root_path(), run_path.clone()] {
+            let bytes = source.get_with_etag(&path).await.unwrap().0;
+            target.put(&path, bytes).await.unwrap();
+        }
+        let replication = active_active_replication_for_push();
+        let plan = plan_active_active_capsule_push(
+            &replication,
+            Some("east"),
+            prepared.descriptor().clone(),
+            vec![active_active_ref_update(
+                "refs/heads/main",
+                None,
+                Some(&"2".repeat(40)),
+            )],
+            vec![run_path.to_string()],
+        )
+        .unwrap();
+        let coordinator = crab_coordination::InMemoryWriteCoordinator::new();
+        crab_coordination::commit_uploaded_push_refs(&coordinator, plan.request.clone())
+            .await
+            .unwrap();
+        materialize_coordinated_publication(&source_layout, prepared)
+            .await
+            .unwrap();
+        coordinator
+            .mark_region_materialized(&plan.request.operation_id, "us-east-1")
+            .await
+            .unwrap();
+        let fence = coordinator
+            .fence_writes(Some("regional repair".to_owned()))
+            .await
+            .unwrap();
+        let snapshot = coordinator.repair_snapshot().await.unwrap();
+        let repair = plan_active_active_repair(&replication, &snapshot).unwrap();
+        assert_eq!(repair.actions.len(), 1);
+        let action = &repair.actions[0];
+        assert_eq!(action.region, "us-west-2");
+        let limits = crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: 16 * 1024 * 1024,
+            max_frontier_bytes: 16 * 1024 * 1024,
+        };
+        assert!(
+            crab_read::capsule_protocol::open_view(&target_layout, limits)
+                .await
+                .unwrap()
+                .refs()
+                .is_empty()
+        );
+
+        let sweep = crab_coordination::GcFenceLease::acquire_sweep(
+            target.inner(),
+            "repo",
+            Duration::from_secs(30),
+        )
+        .await
+        .unwrap();
+        let cancel = CancellationToken::new();
+        assert!(
+            matches!(apply_active_active_repair_action(action, "repo", &router, &cancel).await, Err(CrabError::PushLockHeld { ref_name, .. }) if ref_name == "gc-fence/repo")
+        );
+        sweep.release().await.unwrap();
+        assert_eq!(coordinator.repair_snapshot().await.unwrap(), snapshot);
+        for _ in 0..2 {
+            apply_active_active_repair_action(action, "repo", &router, &cancel)
+                .await
+                .unwrap();
+        }
+        assert_eq!(
+            crab_read::capsule_protocol::open_view(&target_layout, limits)
+                .await
+                .unwrap()
+                .refs()
+                .get("refs/heads/main"),
+            Some(&"2".repeat(40))
+        );
+        coordinator
+            .mark_region_materialized(&action.operation_id, &action.region)
+            .await
+            .unwrap();
+        assert!(
+            coordinator
+                .repair_snapshot()
+                .await
+                .unwrap()
+                .materialization_gaps
+                .is_empty()
+        );
+        let health = coordinator.health().await.unwrap();
+        assert!(!health.healthy);
+        assert_eq!(health.epoch, fence.coordinator_epoch);
+        assert!(coordinator.commit(plan.request.clone()).await.is_err());
+        coordinator.resume_writes().await.unwrap();
+        assert_eq!(
+            coordinator.commit(plan.request).await.unwrap().state,
+            crab_coordination::PushTransactionState::Materialized
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
     async fn repair_cancellation_drains_verification_before_releasing_gc_admission() {
         repair_cancellation_drains_io(false, false).await;
     }

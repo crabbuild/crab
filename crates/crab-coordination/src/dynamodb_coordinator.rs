@@ -1694,6 +1694,43 @@ mod tests {
             .unwrap();
         assert!(coordinator.health().await.unwrap().healthy);
 
+        let repair_request = commit_request("op-repair", Some("c"), Some("e"), &["xorb/repair"]);
+        let committed = coordinator.commit(repair_request.clone()).await.unwrap();
+        let fence = coordinator
+            .fence_writes(Some("repair".to_owned()))
+            .await
+            .unwrap();
+        let repair = coordinator.repair_snapshot().await.unwrap();
+        assert_eq!(repair.coordinator_epoch, fence.coordinator_epoch);
+        assert_eq!(repair.materialization_gaps.len(), 1);
+        assert_eq!(
+            repair.materialization_gaps[0].commit_sequence,
+            committed.commit_sequence
+        );
+        // The SDK fixture models successful regional I/O before acknowledgement.
+        assert_eq!(
+            coordinator
+                .mark_region_materialized("op-repair", "us-east-1")
+                .await
+                .unwrap(),
+            PushTransactionState::Materialized
+        );
+        assert!(
+            coordinator
+                .repair_snapshot()
+                .await
+                .unwrap()
+                .materialization_gaps
+                .is_empty()
+        );
+        assert!(!coordinator.health().await.unwrap().healthy);
+        assert!(coordinator.commit(repair_request).await.is_err());
+        coordinator.resume_writes().await.unwrap();
+        assert_eq!(
+            coordinator.ref_value("refs/heads/main").await.unwrap(),
+            Some("e".to_owned())
+        );
+
         let _ = client.delete_table().table_name(table_name).send().await;
     }
 
