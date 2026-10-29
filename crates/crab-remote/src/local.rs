@@ -1046,36 +1046,32 @@ mod tests {
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     #[cfg(unix)]
     async fn cancellation_drains_descendants_holding_output_pipes() {
-        use std::os::unix::fs::PermissionsExt as _;
         for parent_waits in [true, false] {
             let directory = tempfile::tempdir().unwrap();
-            let crab = directory.path().join("owned-command");
-            std::fs::write(
-                &crab,
-                format!(
-                    "#!/bin/sh\nsleep 120 &\nprintf '%s %s' \"$$\" \"$!\" > child.pid\n{}\n",
-                    if parent_waits { "wait" } else { "exit 0" }
-                ),
-            )
-            .unwrap();
-            std::fs::set_permissions(&crab, std::fs::Permissions::from_mode(0o755)).unwrap();
-            let tools = LocalTools::new(&git_path(), &crab).unwrap();
+            // Execute an installed shell: parallel forks can inherit a freshly
+            // written script's writable descriptor and make exec return ETXTBSY.
+            let tools = LocalTools::new(&git_path(), Path::new("/bin/sh")).unwrap();
+            let script = format!(
+                "sleep 120 &\nprintf '%s %s' \"$$\" \"$!\" > child.pid\n{}\n",
+                if parent_waits { "wait" } else { "exit 0" }
+            );
             let cancel = CancellationToken::new();
             let child_cancel = cancel.clone();
             let root = directory.path().to_owned();
             let mut task = tokio::spawn(async move {
                 tools
-                    .run_crab(Some(&root), std::iter::empty::<&str>(), true, &child_cancel)
+                    .run_crab(Some(&root), ["-c", &script], true, &child_cancel)
                     .await
             });
             let pid_file = directory.path().join("child.pid");
-            tokio::time::timeout(std::time::Duration::from_secs(10), async {
-                while !pid_file.exists() {
-                    tokio::time::sleep(std::time::Duration::from_millis(10)).await;
-                }
-            })
-            .await
-            .unwrap();
+            tokio::select! {
+                result = &mut task => panic!("fixture exited before cancellation: {result:?}"),
+                started = tokio::time::timeout(std::time::Duration::from_secs(10), async {
+                    while !pid_file.exists() {
+                        tokio::time::sleep(std::time::Duration::from_millis(10)).await;
+                    }
+                }) => started.unwrap(),
+            }
             let pids = std::fs::read_to_string(pid_file).unwrap();
             let pids = pids.split_whitespace().collect::<Vec<_>>();
             let parent_exited = tokio::time::timeout(std::time::Duration::from_secs(10), async {
