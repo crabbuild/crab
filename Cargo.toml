@@ -61,10 +61,13 @@ crab-write = { version = "=0.1.0", path = "crates/crab-write", default-features 
 crab-workflow = { version = "=0.1.0", path = "crates/crab-workflow", default-features = false }
 crab-xet = { version = "=0.1.0", path = "crates/crab-xet", default-features = false }
 
-xet-client = "1.6.0"
-xet-core-structures = "1.6.0"
-xet-data = "1.6.0"
-xet-runtime = "1.6.0"
+# These crates share trait and data contracts with Crab's adapters. Xet 1.7.1
+# changes Client::upload_shard incompatibly; package consumers resolve without
+# this workspace's lockfile, so keep the qualified family aligned explicitly.
+xet-client = "=1.6.0"
+xet-core-structures = "=1.6.0"
+xet-data = "=1.6.0"
+xet-runtime = "=1.6.0"
 
 gix = "0.83.0"
 gix-attributes = "0.33.0"
