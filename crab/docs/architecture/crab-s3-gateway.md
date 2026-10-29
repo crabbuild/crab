@@ -850,9 +850,12 @@ a bounded background scheduler receives the exact committed in-memory manifest,
 coalesces pending work per ref, serializes outside the async runtime, and
 conditionally replaces the branch slot only when ancestry proves it is newer.
 During one process lineage, the scheduler carries the manifest's proven
-predecessor checkpoint. A matching slot can therefore advance with one
-ETag-guarded replacement without replaying the intervening deltas; CAS conflict,
-restart, or divergent Git history retains the canonical ancestry-validation
+predecessor checkpoint. The repository caches up to 16 confirmed slot versions,
+retaining both provider ETag and version tokens from successful writes. A matching
+predecessor can therefore advance with one conditional replacement, without
+downloading and decoding its previous namespace or replaying intervening deltas.
+CAS conflict, cache eviction, restart, or divergent Git history rereads and
+validates the current checkpoint through the canonical ancestry-validation
 path. It does not reread the preceding delta chain merely
 to build derived state. A
 crash, shutdown, or checkpoint-write failure leaves a missing or stale slot,
