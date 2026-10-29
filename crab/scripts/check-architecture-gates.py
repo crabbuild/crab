@@ -2001,10 +2001,10 @@ WORKSPACE_DEPENDENCY_PATHS = {
     "crab-xet": "crates/crab-xet",
 }
 WORKSPACE_XET_DEPENDENCY_VERSIONS = {
-    "xet-client": "1.6.0",
-    "xet-core-structures": "1.6.0",
-    "xet-data": "1.6.0",
-    "xet-runtime": "1.6.0",
+    "xet-client": "=1.6.0",
+    "xet-core-structures": "=1.6.0",
+    "xet-data": "=1.6.0",
+    "xet-runtime": "=1.6.0",
 }
 WORKSPACE_GITOXIDE_DEPENDENCIES = {
     "gix": "0.83.0",
