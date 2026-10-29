@@ -26,12 +26,11 @@ shard/Xorb closure, and publishes the replacement catalog in a checkpoint. The
 checkpoint is accepted only by compare-and-swap against the exact root that was
 read; concurrent ref updates remain as a suffix after the captured positions.
 
-For a v1 repository, the command retains the legacy standalone shard-list
-compare-and-swap path. A present but corrupt v2 root fails closed and is never
-treated as v1. Both paths hash-check downloaded and replacement shards, publish
-immutable candidates before authority changes, register their GC roots, and
-leave source shards for later garbage collection. It does not replace
-`crab metadb compact`, which addresses metadata-database maintenance.
+The command requires Capsule authority. Missing or corrupt roots fail closed;
+there is no standalone manifest-v1 shard-list fallback. Source and replacement
+shards are hash-checked, the replacement file/Xorb closure is verified before
+publication, and old source shards remain available for later garbage collection.
+Use `crab metadb owner` or `crab metadb rebuild` for checkpoint maintenance.
 
 For conceptual background, see [Compacting Data](/docs/cli/storage/compacting-data).
 

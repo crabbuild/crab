@@ -5,11 +5,11 @@ use gix_hash::ObjectId;
 pub struct HeadReference {
     /// Complete symbolic reference name, such as `refs/heads/main`.
     pub name: String,
-    /// Object named by the symbolic reference in the pinned manifest.
+    /// Object named by the symbolic reference in the pinned snapshot.
     pub target: ObjectId,
 }
 
-/// One reference from a pinned repository manifest.
+/// One reference from a pinned repository snapshot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RepositoryRef {
     /// Complete reference name.
@@ -20,7 +20,7 @@ pub struct RepositoryRef {
     pub peeled: Option<ObjectId>,
 }
 
-/// Complete reference state from one validated manifest generation.
+/// Complete reference state from one validated repository snapshot.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct RepositoryRefs {
     /// Resolved symbolic `HEAD`, absent when the repository is empty or HEAD
@@ -42,7 +42,7 @@ impl RepositoryRefs {
             .map(|index| &self.entries[index])
     }
 
-    /// Return whether this manifest describes an empty repository.
+    /// Return whether this snapshot describes an empty repository.
     #[must_use]
     pub fn is_empty(&self) -> bool {
         self.entries.is_empty()

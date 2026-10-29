@@ -111,6 +111,59 @@ async fn checkpoint_admits_member_heavy_sources_below_the_source_count_limit() {
 }
 
 #[tokio::test]
+async fn complete_checkpoint_open_defers_pack_sidecars_until_object_read() {
+    let (layout, observations) = empty_fixture().await;
+    for name in ["first", "second", "third", "fourth"] {
+        publish_blob(&layout, name).await;
+    }
+    let captured = checkpoint(&layout).await;
+    let checkpoint = captured.layered_checkpoint().unwrap();
+    assert!(!checkpoint.is_control_only());
+    let oid = crab_remote::objects::object_id(gix_object::Kind::Blob, b"first").unwrap();
+    let visibility = checkpoint.visibility_ordinal_snapshot().unwrap().unwrap();
+    let position = visibility
+        .objects()
+        .binary_search(&oid.as_bytes().try_into().unwrap())
+        .unwrap();
+    let member = visibility.member_admission().unwrap()[position];
+    let selected = &checkpoint.sources()[usize::from(member.source_index())];
+    let unrelated = checkpoint
+        .sources()
+        .iter()
+        .filter(|source| source.object_hash() != selected.object_hash())
+        .map(|source| layout.capsule_path(source.object_hash()))
+        .collect::<Vec<_>>();
+    assert!(!unrelated.is_empty());
+    for path in &unrelated {
+        observations.2.block_body_reads_for(path);
+    }
+    let runtime = Arc::new(crab_remote_git::RemoteGitRuntime::default());
+    let cancel = CancellationToken::new();
+    observations.2.reset();
+    let repository = captured
+        .git_repository_from_store(
+            layout.clone(),
+            crab_remote_git::RepositoryIdentity::new("memory", "complete-placement", 1).unwrap(),
+            runtime.clone(),
+            crab_remote_git::RepositoryOptions::default(),
+            LIMIT,
+            &cancel,
+            None,
+        )
+        .await
+        .unwrap();
+    assert!(observations.2.requests().is_empty());
+    let operation = repository
+        .operation(crab_remote_git::OperationKind::Repository, &cancel)
+        .await
+        .unwrap();
+    let result = operation.read_objects(&[oid]).await;
+    let objects = operation.finish(result).await.unwrap();
+    assert_eq!(objects[0].data.as_ref(), b"first");
+    runtime.shutdown().await;
+}
+
+#[tokio::test]
 async fn paged_checkpoint_placement_keeps_unrelated_pack_indexes_cold() {
     let (layout, observations) = empty_fixture().await;
     for name in ["first", "second", "third", "fourth"] {

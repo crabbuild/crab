@@ -734,32 +734,19 @@ async fn checkpoint_is_newer(
     if delta_chain_reaches(repository, existing, checkpoint.commit).await? {
         return Ok(false);
     }
-    let current = match crab_metadata::capsule_protocol::load_root(&repository.layout).await {
-        Ok(root) => crab_read::capsule_protocol::open_view_from_root_with_control(
-            &repository.layout,
-            root,
-            crab_read::capsule_protocol::CapsuleReadLimits {
-                max_capsule_bytes: MAX_CAPSULE_READ_BYTES,
-                max_frontier_bytes: MAX_CAPSULE_READ_BYTES,
-            },
-        )
-        .await?
-        .refs()
-        .get(&checkpoint.branch)
-        .cloned(),
-        Err(crab_metadata::error::MetadataError::Storage {
-            source: crab_storage::StorageError::NotFound { .. },
-        }) => crab_metadata::manifest_store::read_repository_snapshot(
-            &repository.store,
-            &repository.layout,
-        )
-        .await?
-        .journal
-        .refs
-        .get(&checkpoint.branch)
-        .cloned(),
-        Err(error) => return Err(error.into()),
-    };
+    let root = crab_metadata::capsule_protocol::load_root(&repository.layout).await?;
+    let current = crab_read::capsule_protocol::open_view_from_root_with_control(
+        &repository.layout,
+        root,
+        crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: MAX_CAPSULE_READ_BYTES,
+            max_frontier_bytes: MAX_CAPSULE_READ_BYTES,
+        },
+    )
+    .await?
+    .refs()
+    .get(&checkpoint.branch)
+    .cloned();
     let Some(current) = current else {
         return Ok(false);
     };

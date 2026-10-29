@@ -9,10 +9,9 @@ Git reads; services own authorization and representation selection.
 ```text
 Caller: authorize and resolve physical placement
   -> RepositoryIdentity + RemoteGitRuntime
-  -> RemoteGitRepository::open
-       manifest generation + pack inventory + locator coverage
-     or RemoteGitRepository::from_snapshot
-       validated manifest + committed journal overlay
+  -> crab-read Capsule capture: authenticated root, refs and immutable sources
+  -> RemoteGitRepository::from_snapshot
+       caller-validated materialized snapshot
      or RemoteGitRepository::from_snapshot_with_catalog_tail
        compacted-base catalog + bounded journal-pack overlay
   -> OperationContext: shared budgets and cancellation
@@ -20,10 +19,11 @@ Caller: authorize and resolve physical placement
   -> OperationContext::finish: result + locator close
 ```
 
-A repository handle pins validated metadata. A snapshot pins a reachable commit
-and its root tree. Locator publication lag returns `RepositoryIndexing`;
-opening never performs write-side catalog maintenance. Empty repositories can
-open, but selecting a snapshot returns `EmptyRepository`.
+A repository handle pins caller-validated metadata. A snapshot pins a reachable
+commit and its root tree. This crate does not open a live stored manifest/ref
+journal or infer current authority from a locator. Product callers capture the
+Capsule view through crab-read and own freshness and remote retention. Empty
+captures open, but selecting a snapshot returns `EmptyRepository`.
 
 Snapshot constructors retain explicitly supplied commit-graph/path-state indexes
 only for their exact materialized Git state. Loading a graph shares the normal
@@ -69,11 +69,10 @@ peeling; non-tip commits retain bounded breadth-first reachability traversal.
 | Need | API | Contract |
 | --- | --- | --- |
 | Shared admission and caches | `RemoteGitRuntime` | Process-wide; shut down after active contexts finish or drop |
-| Open a repository | `RemoteGitRepository::open` | Caller supplies authorized physical placement identity |
-| Open a committed journal view | `RemoteGitRepository::from_snapshot` | Caller supplies a validated snapshot, retention, and freshness policy; no catalog required |
+| Open a captured Git view | `RemoteGitRepository::from_snapshot` | Caller supplies a validated snapshot, retention, and freshness policy; no catalog required |
 | Open authenticated capsule sources | `RemoteGitRepository::from_snapshot_with_lookup_sources` | `SnapshotLookupSources` carries validated locators, source ranges, preferred indexes and object-to-member admission; snapshot identity and inventory checks remain mandatory |
 | Accelerate a committed snapshot | `RemoteGitRepository::from_snapshot_with_catalog_tail` | Any available catalog whose immutable pack inventory is a subset of the snapshot combines with the remaining pack tail; unavailable or unproven catalogs fall back to all pinned pack indexes |
-| Reuse a handle | `is_current` | Checks manifest identity; journal freshness can require reopening |
+| Reuse a handle | Caller-held Capsule capture | Revalidate root and ref-head authority in the capture owner; never infer freshness from a legacy manifest ETag |
 | Select a revision | `refs`, `resolve`, `snapshot` | Selection stays within pinned visible refs |
 | Browse content | `entry`, `list_directory`, `list_tree_blobs`, `list_tree_recursive`, `read_blob` | Paths are opaque `GitPath` bytes; bounded blob pages seek by prefix/continuation without reading bodies |
 | Inspect changes | `history`, `path_history`, `compare`, `diff`, `blame` | Aggregate work limits apply, including cache hits |

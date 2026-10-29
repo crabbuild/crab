@@ -148,7 +148,7 @@ impl From<&StagedEntry> for IndexPublicationEntry {
 struct AddExecutionPlans {
     duplicate_plan: DuplicateReusePlan,
     stream_xorb_plan: Option<StreamPreparedXorbPlan>,
-    remote_classifier: Option<Arc<crate::git::push::AddRemoteChunkClassifier>>,
+    remote_classifier: Option<Arc<crate::git::chunk_reuse::AddRemoteChunkClassifier>>,
 }
 
 struct StreamPreparedXorbPlan {
@@ -1281,7 +1281,7 @@ async fn execute_add(
         .as_ref()
         .map(|classifier| classifier.shard_hint_scope());
     if let Some(classifier) = execution_plans.remote_classifier.take() {
-        classifier.close().await;
+        classifier.report_cache_stats();
     }
     summary.staging_duration_ms = staging_phase_start.elapsed().as_millis() as u64;
 
@@ -2111,7 +2111,7 @@ fn add_execution_plans(candidates: &[(PathBuf, u64)], total_bytes: u64) -> AddEx
 
 async fn open_add_remote_classifier(
     cancel: &CancellationToken,
-) -> Option<Arc<crate::git::push::AddRemoteChunkClassifier>> {
+) -> Option<Arc<crate::git::chunk_reuse::AddRemoteChunkClassifier>> {
     let config = match crate::core::config::Config::resolve_local() {
         Ok(config) => config,
         Err(error) => {
@@ -2149,13 +2149,15 @@ async fn open_add_remote_classifier(
         &config.cache,
     )
     .await;
-    Some(Arc::new(crate::git::push::AddRemoteChunkClassifier::new(
-        PushConfig::from_config(&config),
-        selection.store,
-        caching_store,
-        selection.router,
-        cancel.clone(),
-    )))
+    Some(Arc::new(
+        crate::git::chunk_reuse::AddRemoteChunkClassifier::new(
+            config.push_head_check_concurrency,
+            selection.store,
+            caching_store,
+            selection.router,
+            cancel.clone(),
+        ),
+    ))
 }
 
 fn add_push_config(total_bytes: u64) -> Option<Arc<PushConfig>> {

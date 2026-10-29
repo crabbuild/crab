@@ -1224,14 +1224,8 @@ pub(crate) fn deserialize_payload(path: &str, body: &[u8]) -> Result<PushLockPay
 }
 
 pub(crate) fn generate_holder_id() -> String {
-    use std::sync::atomic::{AtomicU64, Ordering};
-    static HOLDER_SEQUENCE: AtomicU64 = AtomicU64::new(0);
-    let nanos = SystemTime::now()
-        .duration_since(UNIX_EPOCH)
-        .unwrap_or(Duration::ZERO)
-        .as_nanos();
-    let sequence = HOLDER_SEQUENCE.fetch_add(1, Ordering::Relaxed);
-    format!("pid-{}-{nanos}-{sequence}", std::process::id())
+    // PIDs and wall clocks can coincide across hosts and container namespaces.
+    format!("pid-{}-{}", std::process::id(), uuid::Uuid::now_v7())
 }
 
 fn lease_expiry(ttl: Duration) -> Result<u64> {

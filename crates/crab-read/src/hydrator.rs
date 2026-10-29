@@ -112,6 +112,7 @@ impl ReadRuntimeBuilder {
             metrics: None,
             availability: self.availability,
             file_index_lookup: self.file_index_lookup,
+            retention: None,
         })
     }
 }
@@ -127,9 +128,93 @@ pub struct ShardHydrator {
     metrics: Option<Arc<dyn ReadMetrics>>,
     availability: Option<Arc<dyn XorbAvailability>>,
     file_index_lookup: Option<SharedFileIndexLookup>,
+    retention: Option<crab_coordination::read_retention_runtime::RetainedRead>,
 }
 
 impl ShardHydrator {
+    #[cfg(feature = "local-staging")]
+    pub(crate) async fn read_lfs_range(
+        &self,
+        pointer: &crab_git::LfsPointer,
+        range: std::ops::Range<u64>,
+        cancel: &CancellationToken,
+        session: &crab_lfs::LfsReadSession,
+    ) -> Result<bytes::Bytes> {
+        crate::read_retention::read(self.retention.as_ref(), cancel, |_, cancel| async move {
+            self.read_lfs_range_inner(pointer, range, &cancel, session)
+                .await
+        })
+        .await
+    }
+
+    #[cfg(feature = "local-staging")]
+    async fn read_lfs_range_inner(
+        &self,
+        pointer: &crab_git::LfsPointer,
+        range: std::ops::Range<u64>,
+        cancel: &CancellationToken,
+        session: &crab_lfs::LfsReadSession,
+    ) -> Result<bytes::Bytes> {
+        use futures_util::StreamExt;
+
+        // Xet also admits buffered output before a connection. Keep that order
+        // so mixed LFS/Crab reads cannot hold each other's admission in a cycle.
+        let _buffer = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(ReadError::Cancelled),
+            result = self.buffer_semaphore.acquire_many(range.end - range.start) => result.map_err(std::io::Error::other)?,
+        };
+        let _download = tokio::select! {
+            biased;
+            () = cancel.cancelled() => return Err(ReadError::Cancelled),
+            result = self.concurrency.acquire_connection_permit() => result.map_err(std::io::Error::other)?,
+        };
+        let store =
+            crab_lfs::LfsObjectStore::new(self.router.store().clone(), self.router.repo_prefix());
+        let read = async {
+            let (_, _, mut stream) = store
+                .get_stream_with_session(&pointer.oid, pointer.size, Some(range.clone()), session)
+                .await?;
+            let expected =
+                usize::try_from(range.end - range.start).map_err(std::io::Error::other)?;
+            let mut bytes = Vec::new();
+            bytes
+                .try_reserve_exact(expected)
+                .map_err(|source| std::io::Error::new(std::io::ErrorKind::OutOfMemory, source))?;
+            // Integrity includes stream EOF; no range enters the VFS cache
+            // while a later verification error can still revoke its bytes.
+            while let Some(chunk) = stream.next().await {
+                bytes.extend_from_slice(&chunk?);
+            }
+            Ok(bytes::Bytes::from(bytes))
+        };
+        tokio::select! {
+            biased;
+            () = cancel.cancelled() => Err(ReadError::Cancelled),
+            result = read => result,
+        }
+    }
+
+    #[cfg(feature = "local-staging")]
+    pub(crate) async fn captured_shard(&self, pointer: &Pointer) -> Result<Option<MerkleHash>> {
+        let Some(lookup) = &self.file_index_lookup else {
+            return Ok(None);
+        };
+        crate::read_retention::read(
+            self.retention.as_ref(),
+            &CancellationToken::new(),
+            |_, cancel| async move {
+                let hash = MerkleHash::from(pointer.file_hash);
+                tokio::select! {
+                    biased;
+                    () = cancel.cancelled() => Err(ReadError::Cancelled),
+                    result = lookup.lookup(&hash) => result.map_err(Into::into),
+                }
+            },
+        )
+        .await
+    }
+
     /// Scope origin admission while sharing cache, download and buffer budgets.
     #[must_use]
     pub fn with_read_admission(mut self, admission: Arc<dyn crab_storage::ReadAdmission>) -> Self {
@@ -195,6 +280,16 @@ impl ShardHydrator {
         self
     }
 
+    /// Retain this exact captured catalog through readers and reconstruction workers.
+    #[must_use]
+    pub fn with_read_retention(
+        mut self,
+        retention: crab_coordination::read_retention_runtime::RetainedRead,
+    ) -> Self {
+        self.retention = Some(retention);
+        self
+    }
+
     /// Reconstruct a pointer into memory and verify its whole-file hash.
     pub async fn reconstruct_from_pointer(&self, pointer_bytes: &[u8]) -> Result<Vec<u8>> {
         let ptr = Pointer::parse(pointer_bytes)?;
@@ -203,8 +298,22 @@ impl ShardHydrator {
 
     /// Reconstruct a pointer into `dest` and verify its whole-file hash.
     pub async fn reconstruct_to_path(&self, ptr: &Pointer, dest: &std::path::Path) -> Result<u64> {
+        self.reconstruct_to_path_with_cancel(ptr, dest, &CancellationToken::new())
+            .await
+    }
+
+    pub(crate) async fn reconstruct_to_path_with_cancel(
+        &self,
+        ptr: &Pointer,
+        dest: &std::path::Path,
+        cancel: &CancellationToken,
+    ) -> Result<u64> {
+        if cancel.is_cancelled() {
+            return Err(ReadError::Cancelled);
+        }
         let file = std::fs::File::create(dest)?;
-        self.reconstruct_to_writer(ptr, file).await
+        self.reconstruct_to_writer_with_cancel(ptr, file, None, cancel)
+            .await
     }
 
     /// Reconstruct `[start, end)` into `dest` without buffering the selected range.
@@ -338,6 +447,25 @@ impl ShardHydrator {
     where
         W: Write + Send + 'static,
     {
+        crate::read_retention::read(self.retention.as_ref(), cancel, |pin, cancel| async move {
+            self.reconstruct_pinned_writer(ptr, writer, range, file_index_lookup, &cancel, pin)
+                .await
+        })
+        .await
+    }
+
+    async fn reconstruct_pinned_writer<W>(
+        &self,
+        ptr: &Pointer,
+        writer: W,
+        range: Option<std::ops::Range<u64>>,
+        file_index_lookup: Option<&SharedFileIndexLookup>,
+        cancel: &CancellationToken,
+        pin: Option<Arc<crab_coordination::read_retention_runtime::ReadRetentionPin>>,
+    ) -> Result<u64>
+    where
+        W: Write + Send + 'static,
+    {
         if cancel.is_cancelled() {
             return Err(ReadError::Cancelled);
         }
@@ -348,6 +476,7 @@ impl ShardHydrator {
         let file_hash = MerkleHash::from(ptr.file_hash);
         let client = self
             .store_client_for_pointer(ptr, file_index_lookup)
+            .with_read_retention(pin)
             .with_cancellation(cancel.clone());
         if full {
             self.preflight_shard_coverage(&client, ptr).await?;
@@ -399,19 +528,23 @@ impl ShardHydrator {
             return Ok(Vec::new());
         }
 
-        let buffer = ReconstructionBuffer::new(end - start)?;
-        let file_hash = MerkleHash::from(ptr.file_hash);
         let cancel = CancellationToken::new();
         let _cancel_on_drop = cancel.clone().drop_guard();
+        self.reconstruct_range_with_cancel(&ptr, start..end, &cancel)
+            .await
+    }
+
+    pub(crate) async fn reconstruct_range_with_cancel(
+        &self,
+        ptr: &Pointer,
+        range: std::ops::Range<u64>,
+        cancel: &CancellationToken,
+    ) -> Result<Vec<u8>> {
+        let buffer = ReconstructionBuffer::new(range.end - range.start)?;
+        let file_hash = MerkleHash::from(ptr.file_hash);
 
         let outcome = self
-            .reconstruct_range_to_writer_with_cancel(
-                &ptr,
-                start..end,
-                buffer.writer(),
-                None,
-                &cancel,
-            )
+            .reconstruct_range_to_writer_with_cancel(ptr, range, buffer.writer(), None, cancel)
             .await
             .map(|_| ());
         buffer.finish(outcome, &file_hash)
@@ -1187,6 +1320,113 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn closed_retention_rejects_even_warm_reconstruction() {
+        use crab_coordination::read_retention::{ReadRetentionLease, RetainedReadRoot};
+        use crab_coordination::read_retention_runtime::ReadRetentionSession;
+
+        let directory = tempfile::tempdir().unwrap();
+        let (hydrator, pointer, original) =
+            reconstruction_fixture(&directory.path().join("cache"), false).await;
+        let session = ReadRetentionSession::default();
+        let root = RetainedReadRoot::new(blake3::hash(b"capture").to_hex().to_string(), 7).unwrap();
+        let lease = ReadRetentionLease::create(
+            Arc::new(object_store::memory::InMemory::new()),
+            "repo/v2/readers/owner/claim".into(),
+            root,
+        )
+        .await
+        .unwrap();
+        let hydrator =
+            hydrator.with_read_retention(session.capture().unwrap().retain(lease).unwrap());
+        assert_eq!(
+            hydrator
+                .reconstruct_from_pointer(&pointer.serialize())
+                .await
+                .unwrap(),
+            original
+        );
+        session.shutdown().await.unwrap();
+        assert!(matches!(
+            hydrator
+                .reconstruct_from_pointer(&pointer.serialize())
+                .await,
+            Err(crate::ReadError::Retention(_))
+        ));
+    }
+
+    #[tokio::test]
+    async fn retained_reconstruction_drains_source_workers_before_releasing_claim() {
+        use crab_coordination::read_retention::{
+            ReadRetentionLease, RetainedReadRoot, load_read_retention_root,
+        };
+        use crab_coordination::read_retention_runtime::ReadRetentionSession;
+
+        struct PendingXorb(tokio::sync::Notify);
+        #[async_trait::async_trait]
+        impl crate::XorbAvailability for PendingXorb {
+            async fn ensure_available(&self, path: &object_store::path::Path) -> crate::Result<()> {
+                if path.as_ref().contains("shards/") {
+                    return Ok(());
+                }
+                self.0.notify_one();
+                std::future::pending().await
+            }
+        }
+
+        for abandon in [false, true] {
+            let directory = tempfile::tempdir().unwrap();
+            let (hydrator, pointer, _) =
+                reconstruction_fixture(&directory.path().join("cache"), false).await;
+            let availability = Arc::new(PendingXorb(tokio::sync::Notify::new()));
+            let session = ReadRetentionSession::default();
+            let store: Arc<dyn object_store::ObjectStore> =
+                Arc::new(object_store::memory::InMemory::new());
+            let path = object_store::path::Path::from("repo/v2/readers/owner/claim");
+            let root =
+                RetainedReadRoot::new(blake3::hash(b"capture").to_hex().to_string(), 7).unwrap();
+            let lease = ReadRetentionLease::create(store.clone(), path.clone(), root)
+                .await
+                .unwrap();
+            let hydrator = hydrator
+                .with_read_retention(session.capture().unwrap().retain(lease).unwrap())
+                .with_availability(availability.clone());
+            let mut read = Box::pin(hydrator.reconstruct_to_writer(&pointer, std::io::sink()));
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                tokio::select! {
+                    result = &mut read => panic!("source completed before shutdown: {result:?}"),
+                    () = availability.0.notified() => {}
+                }
+            })
+            .await
+            .unwrap();
+            assert!(
+                load_read_retention_root(&store, &path)
+                    .await
+                    .unwrap()
+                    .is_some()
+            );
+            tokio::time::timeout(std::time::Duration::from_secs(5), async {
+                if abandon {
+                    drop(read);
+                    session.shutdown().await.unwrap();
+                } else {
+                    let (read, shutdown) = tokio::join!(read, session.shutdown());
+                    assert!(matches!(read, Err(crate::ReadError::Retention(_))));
+                    shutdown.unwrap();
+                }
+            })
+            .await
+            .unwrap();
+            assert!(
+                load_read_retention_root(&store, &path)
+                    .await
+                    .unwrap()
+                    .is_none()
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn pinned_file_index_lookup_keeps_reconstruction_on_captured_catalog() {
         let directory = tempfile::tempdir().unwrap();
         let (hydrator, mut pointer, expected) =
@@ -1307,6 +1547,26 @@ mod tests {
                 .unwrap(),
             expected
         );
+        #[cfg(feature = "local-staging")]
+        {
+            let unavailable = directory.path().join("unavailable-staging");
+            std::fs::write(&unavailable, b"not a staging directory").unwrap();
+            let reader =
+                crate::PointerReader::new(Some(Arc::new(hydrator)), Some(unavailable), None);
+            assert_eq!(
+                reader
+                    .read_range(
+                        &pointer,
+                        0..pointer.size,
+                        &tokio_util::sync::CancellationToken::new()
+                    )
+                    .await
+                    .unwrap()
+                    .bytes
+                    .as_ref(),
+                expected
+            );
+        }
     }
 
     #[tokio::test]

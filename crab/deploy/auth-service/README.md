@@ -342,9 +342,11 @@ the policy gate. The Crab client sends active-active context to
 `/v1/push/finalize`; the service verifies the staged bundle and changed-path
 policy first, then passes the approved context to `crab-auth-receive commit`.
 The receive helper commits refs through the managed coordinator, materializes
-the regional manifest projection, and returns `operation_id`,
+the exact regional Capsule transaction, and returns `operation_id`,
 `coordinator_epoch`, `writer_region`, `manifest_generation`, and `commit_state`
-to the client.
+to the client. The managed v1 contract shipped in v1.2.4 retains
+`manifest_generation: 0` for native Capsules; it does not expose the coordinator
+commit sequence.
 
 Set `CRAB_AUTH_ACTIVE_ACTIVE_CONFIG_JSON` on the CrabAuth service to the exact
 approved active-active payload shape:

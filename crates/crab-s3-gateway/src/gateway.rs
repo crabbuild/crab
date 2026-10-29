@@ -640,7 +640,7 @@ impl Gateway {
         loaded: crate::multipart::Loaded,
     ) -> S3Result<bool> {
         let plan_id = crate::multipart::publication_plan_id(&loaded.session.id);
-        if crab_metadata::plan_receipt::resolve_plan_receipt(
+        if crab_metadata::capsule_protocol::resolve_capsule_plan_receipt(
             &repository.store,
             &repository.layout,
             &plan_id,
@@ -4191,31 +4191,18 @@ impl Gateway {
         // The complete namespace index needs only a captured ref, not Git
         // payloads. Native roots must use their mutable ref heads; consulting
         // the legacy manifest would fail or select stale authority.
-        let tip = match crab_metadata::capsule_protocol::load_root(&repository.layout).await {
-            Ok(root) => {
-                let names = std::collections::BTreeSet::from([reference.to_owned()]);
-                crab_read::capsule_protocol::read_visible_refs_from_root_for_refs(
-                    &repository.layout,
-                    &root,
-                    &names,
-                )
-                .await
-                .map_err(|error| gateway_error(error.into()))?
-                .remove(reference)
-            }
-            Err(crab_metadata::error::MetadataError::Storage {
-                source: crab_storage::StorageError::NotFound { .. },
-            }) => crab_metadata::manifest_store::read_repository_snapshot(
-                &repository.store,
-                &repository.layout,
-            )
+        let root = crab_metadata::capsule_protocol::load_root(&repository.layout)
             .await
-            .map_err(|error| gateway_error(error.into()))?
-            .journal
-            .refs
-            .remove(reference),
-            Err(error) => return Err(gateway_error(error.into())),
-        };
+            .map_err(|error| gateway_error(error.into()))?;
+        let names = std::collections::BTreeSet::from([reference.to_owned()]);
+        let tip = crab_read::capsule_protocol::read_visible_refs_from_root_for_refs(
+            &repository.layout,
+            &root,
+            &names,
+        )
+        .await
+        .map_err(|error| gateway_error(error.into()))?
+        .remove(reference);
         let Some(tip) = tip else {
             return Ok(None);
         };
@@ -4925,15 +4912,6 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn object_listing_pages_merge_blobs_and_prefixes_in_complete_key_order() {
-        check_object_listing_pages(false).await;
-    }
-
-    #[tokio::test(flavor = "multi_thread")]
-    async fn capsule_object_listing_uses_the_native_ref_authority() {
-        check_object_listing_pages(true).await;
-    }
-
-    async fn check_object_listing_pages(capsule: bool) {
         let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
         let cache = tempfile::tempdir().unwrap();
         let local_cache = Arc::new(LocalCache::with_limits(
@@ -4962,15 +4940,6 @@ mod tests {
             Arc::clone(&local_cache),
         )
         .unwrap();
-        if !capsule {
-            crab_write::initialize::initialize_repository(
-                &repository.store,
-                &repository.layout,
-                "refs/heads/main",
-            )
-            .await
-            .unwrap();
-        }
         let secret = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(secret.path(), "listing-secret-value").unwrap();
         let auth = GatewayAuth::load(&Config {
@@ -5015,7 +4984,7 @@ mod tests {
             cancellation,
         };
         let repository = &gateway.repositories["repo"];
-        if capsule {
+        {
             gateway.initialize_repositories().await.unwrap();
             let root = crab_metadata::capsule_protocol::load_root(&repository.layout)
                 .await
@@ -5681,9 +5650,9 @@ mod tests {
             multipart_upload_ttl_seconds: 604_800,
         };
         let repository = Repository::new(repository_config, store).unwrap();
-        crab_write::initialize::initialize_repository(
-            &repository.store,
+        crab_write::capsule_protocol::initialize(
             &repository.layout,
+            &"a".repeat(64),
             "refs/heads/main",
         )
         .await

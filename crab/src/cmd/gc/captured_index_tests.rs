@@ -37,12 +37,28 @@ const LIMIT: u64 = 8 * 1024 * 1024;
 // Immutable bodies can predate their first reader by years. Alter only their
 // provider timestamps; native pack validation and conditional publication stay real.
 #[derive(Debug)]
-struct AgedObjects {
+pub(crate) struct AgedObjects {
     inner: Arc<dyn ObjectStore>,
     deletes: Option<Arc<cancellation::DeleteGate>>,
     paths: Mutex<HashSet<Path>>,
     modified: SystemTime,
     list_calls: Mutex<Vec<Path>>,
+}
+
+impl AgedObjects {
+    pub(crate) fn new(inner: Arc<dyn ObjectStore>, modified: SystemTime) -> Self {
+        Self {
+            inner,
+            deletes: None,
+            paths: Mutex::new(HashSet::new()),
+            modified,
+            list_calls: Mutex::new(Vec::new()),
+        }
+    }
+
+    pub(crate) fn age(&self, paths: &[Path]) {
+        self.paths.lock().unwrap().extend(paths.iter().cloned());
+    }
 }
 
 impl std::fmt::Display for AgedObjects {
@@ -303,6 +319,7 @@ async fn cold_capture_after_gc(replace_readiness: bool) -> crab_metadata::error:
         SystemTime::now(),
         Duration::from_secs(3600),
         Instant::now(),
+        None,
     )
     .await
     .unwrap();
@@ -455,6 +472,7 @@ async fn gc_preserves_cold_catalog_sessions_without_browse_indexes() {
         SystemTime::now(),
         Duration::from_secs(3600),
         Instant::now(),
+        None,
     )
     .await
     .unwrap();
@@ -497,6 +515,7 @@ async fn capsule_gc_lists_each_candidate_namespace_once() {
         SystemTime::now(),
         Duration::from_secs(3600),
         Instant::now(),
+        None,
     )
     .await
     .unwrap();
@@ -508,6 +527,7 @@ async fn capsule_gc_lists_each_candidate_namespace_once() {
         "v2/catalogs/",
         "v2/pack-layers/",
         "v2/history/",
+        "v2/readers/",
         "metadata/",
         "v2/browse-roots/",
         "manifests/",
@@ -517,7 +537,7 @@ async fn capsule_gc_lists_each_candidate_namespace_once() {
     expected.sort();
     assert_eq!(
         (actual, outcome.list_requests, outcome.list_parallelism),
-        (expected, 8, 8)
+        (expected, 9, 8)
     );
 }
 
@@ -564,6 +584,7 @@ async fn capsule_gc_preserves_metadata_outside_owned_index_directories() {
         SystemTime::now(),
         Duration::from_secs(3600),
         Instant::now(),
+        None,
     )
     .await
     .unwrap();
@@ -711,6 +732,7 @@ async fn checkpoint_catalog_gc_preserves_roots_and_grace_period() {
         SystemTime::now(),
         Duration::from_secs(3600),
         Instant::now(),
+        None,
     )
     .await
     .unwrap();

@@ -4,7 +4,7 @@ use gix_object::Kind;
 use sha2::Digest as _;
 use std::io::{self, BufRead, BufReader, Read, Seek, Write};
 use std::path::Path;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 /// A captured blob header whose body still requires identity verification.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -60,10 +60,7 @@ pub fn verify_git_dir_blobs(
         writeln!(input, "{}", gix_hash::ObjectId::Sha1(blob.oid))?;
     }
     input.rewind()?;
-    let mut child = Command::new("git")
-        .arg("--no-replace-objects")
-        .arg("--git-dir")
-        .arg(git_dir)
+    let mut child = crate::raw_object_command(git_dir)
         .args(["cat-file", "--batch"])
         .env("GIT_CONFIG_NOSYSTEM", "1")
         .env("GIT_TERMINAL_PROMPT", "0")
@@ -249,4 +246,5 @@ fn invalid(message: impl Into<String>) -> io::Error {
 }
 
 #[cfg(test)]
+#[path = "batch_tests.rs"]
 mod tests;

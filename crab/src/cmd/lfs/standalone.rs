@@ -23,7 +23,7 @@ pub fn run_lfs_clean(path: Option<&str>) -> Result<()> {
     let file_name = path.unwrap_or("<unknown file>");
     let extensions = configured_extensions_sorted()?;
     let lfs_dir = resolve_lfs_storage_dir()?;
-    let mut writer = crate::lfs::cache::ObjectWriter::new(&lfs_dir)?;
+    let mut writer = crab_lfs::local::ObjectWriter::new(&lfs_dir)?;
     io::copy(&mut io::stdin().lock(), &mut writer).map_err(CrabError::Io)?;
     let staged = writer.finish()?;
     if extensions.is_empty() && staged.size() <= 1024 {

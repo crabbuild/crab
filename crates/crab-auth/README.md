@@ -21,7 +21,11 @@ credential is handed to an object-store builder.
 A successful protected finalize response requires `status: updated`. If it
 includes coordinator metadata, the complete metadata must attest `Committed`
 or `Materialized`; pending, uploaded-only and aborted states are rejected before
-a caller can retire its local staging payloads.
+a caller can retire its local staging payloads. The managed API v1 wire contract
+shipped in v1.2.4 retains `manifest_generation`; native Capsule publication sends
+zero because it has no manifest generation. This field authorizes no v1 storage
+path. The API does not expose the consensus commit sequence; clients must not
+invent one from this diagnostic field. Exposing it requires a versioned API.
 
 ## Architecture
 

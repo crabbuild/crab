@@ -116,20 +116,6 @@ impl TrackedLocatorSession {
         }
     }
 
-    pub(crate) fn coverage(&self) -> Option<crab_metadata::git_object_locator::GitLocatorCoverage> {
-        self.session
-            .as_ref()
-            .and_then(GitObjectLocatorSession::coverage)
-    }
-
-    pub(crate) fn catalog_identity(
-        &self,
-    ) -> Option<crab_metadata::git_object_locator::GitObjectCatalogIdentity> {
-        self.session
-            .as_ref()
-            .and_then(GitObjectLocatorSession::catalog_identity)
-    }
-
     fn session(&self) -> Option<&GitObjectLocatorSession> {
         self.session.as_ref()
     }

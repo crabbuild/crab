@@ -74,15 +74,14 @@ pub(crate) fn add_remote_candidate_cache_path(
     identity: &BucketIdentity,
     global_prefix: &str,
 ) -> PathBuf {
-    let chunk_index_path = chunk_index_cache_path(cache_root, identity);
-    let Some(parent) = chunk_index_path.parent() else {
-        return cache_root.join("remote-candidates.sqlite");
-    };
     let mut hasher = blake3::Hasher::new();
-    hasher.update(b"crab-add-remote-candidates-v1\0");
+    // Cached placement IDs have no format tag. Keep Capsule-only discovery
+    // separate so a retired manifest hint cannot suppress local recipe bytes.
+    hasher.update(b"crab-add-capsule-candidates-v1\0");
     hasher.update(global_prefix.as_bytes());
     let hex = hasher.finalize().to_hex();
-    parent.join(format!("remote-candidates-{}.sqlite", &hex[..16]))
+    let file_name = format!("remote-candidates-{}.sqlite", &hex[..16]);
+    chunk_index_cache_path(cache_root, identity).with_file_name(file_name)
 }
 
 #[cfg(test)]

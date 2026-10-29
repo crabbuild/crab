@@ -109,7 +109,7 @@ Parameters:
 This ensures that reconstructing a file typically requires fetching only a
 handful of xorbs rather than hundreds.
 
-Source: `crab/src/storage/xorb/builder.rs`, `crab/src/git/push_native.rs`
+Source: `crab/src/storage/xorb/builder.rs`, `crab/src/git/xet_publication.rs`
 
 ### Xorb Builder Pipeline
 
@@ -121,7 +121,7 @@ target size:
 File bytes → GearhashChunker → XorbBuilder → Xorb bytes
 ```
 
-Source: `crab/src/storage/xorb/builder.rs`, `crab/src/git/push_native.rs`
+Source: `crab/src/storage/xorb/builder.rs`, `crab/src/git/xet_publication.rs`
 
 ## Pointer Format
 

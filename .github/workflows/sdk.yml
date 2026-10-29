@@ -16,7 +16,10 @@ on:
       - "crab/src/cmd/mirror/**"
       - "crab/src/cmd/push.rs"
       - "crab/src/git/push.rs"
-      - "crab/src/git/push_native.rs"
+      - "crab/src/git/capsule_push.rs"
+      - "crab/src/git/capsule_push_tests.rs"
+      - "crab/src/git/capsule_push_policy_tests.rs"
+      - "crab/src/cmd/push_followtag_tests.rs"
       - "crab/src/git/filter_process.rs"
       - "crab/src/git/prefetch.rs"
       - "crab/src/cmd/hydrate.rs"
@@ -38,7 +41,10 @@ on:
       - "crab/src/cmd/mirror/**"
       - "crab/src/cmd/push.rs"
       - "crab/src/git/push.rs"
-      - "crab/src/git/push_native.rs"
+      - "crab/src/git/capsule_push.rs"
+      - "crab/src/git/capsule_push_tests.rs"
+      - "crab/src/git/capsule_push_policy_tests.rs"
+      - "crab/src/cmd/push_followtag_tests.rs"
       - "crab/src/git/filter_process.rs"
       - "crab/src/git/prefetch.rs"
       - "crab/src/cmd/hydrate.rs"
@@ -205,7 +211,7 @@ jobs:
           cargo "+${SDK_MSRV}" test -p crab-metadata --locked --features file-index-reader --lib file_index_lookup
           cargo "+${SDK_MSRV}" test -p crab-read --locked --lib store_client::tests
           cargo "+${SDK_MSRV}" test -p crab-remote-git --locked budget::tests
-          cargo "+${SDK_MSRV}" test -p crab-write --locked --test journal --test generation --test catalog
+          cargo "+${SDK_MSRV}" test -p crab-write --locked --lib --test journal --test generation
       - name: Qualify metadata recovery contracts
         shell: bash
         run: |
@@ -235,8 +241,10 @@ jobs:
           cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport git::filter_process::tests::
           cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport git::prefetch::tests::
           cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport lfs::config::tests::
-          cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport git::push_native::tests::unresolved_plan_blocks_replay_before_ref_admission -- --exact
-          cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport git::push::tests::next_writer_repairs_publication_cancelled_at_active_marker -- --exact
+          cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport git::capsule_push::tests::policy::unresolved_plan_blocks_replay_before_ref_admission -- --exact
+          cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport git::capsule_push::tests::capsule_push_retires_staging_only_after_confirmed_ref_publication -- --exact
+          cargo "+${SDK_MSRV}" test -p crab-write --locked --lib capsule_protocol::tests::aborting_a_prepared_attempt_prevents_late_multi_ref_commit -- --exact
+          cargo "+${SDK_MSRV}" test -p crab-write --locked --lib capsule_protocol::tests::planned_single_ref_uses_transaction_marker_and_repairs_its_receipt -- --exact
           cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport cmd::push::tests::uncertain_commit_does_not_enter_automatic_transient_retry -- --exact
           cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport cmd::mirror::reconcile::tests::lost_success_response_recovers_the_plan_receipt_without_another_push -- --exact
           cargo "+${SDK_MSRV}" test -p crab --locked --lib --no-default-features --features gix-transport cmd::gc::tests::repo_gc_retains_plan_recovery_after_compaction_and_restart -- --exact

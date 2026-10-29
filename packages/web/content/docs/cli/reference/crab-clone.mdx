@@ -43,6 +43,11 @@ is a Crab CLI convenience and does not reinterpret arbitrary Git paths.
 | `--json` | Disabled | Emit one terminal JSON envelope |
 | `--jsonl` | Disabled | Stream JSONL events followed by the terminal result |
 
+`--sync-chunk-index` reads the authenticated Capsule shard catalog and warms
+derived local caches. A warming failure produces a warning after the clone has
+succeeded. It does not admit a manifest-only repository or replace Capsule
+authority with legacy metadata.
+
 ## Managed examples
 
 ### Canonical hosted URL

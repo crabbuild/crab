@@ -8,10 +8,10 @@ use crate::core::error::{CrabError, Result};
 pub enum MountControlBackend {
     Nfs,
     #[cfg_attr(
-        all(feature = "nfs", not(feature = "fuse")),
+        all(feature = "nfs", not(unix)),
         allow(
             dead_code,
-            reason = "NFS-only builds keep backend-agnostic control payloads without constructing FUSE"
+            reason = "non-Unix NFS builds retain the backend-neutral payload"
         )
     )]
     Fuse,
@@ -62,17 +62,20 @@ pub struct MountControlUpdate {
     pub head_ref: Option<String>,
 }
 
+/// Resources needed to finish an accepted backend shutdown.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct MountControlShutdown {
-    pub backend: MountControlBackend,
-    pub mountpoint: PathBuf,
-    pub mountpoint_str: String,
-    pub registry_path: Option<PathBuf>,
-    pub pid: Option<u32>,
+pub enum MountControlShutdown {
+    #[cfg(feature = "nfs")]
+    Nfs {
+        context: Box<NfsMountControlContext>,
+        cache_dir: PathBuf,
+    },
+    #[cfg(unix)]
+    Fuse { mountpoint: PathBuf },
 }
 
 #[cfg(feature = "nfs")]
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct NfsMountControlContext {
     pub mountpoint: PathBuf,
     pub mountpoint_str: String,
@@ -82,15 +85,54 @@ pub struct NfsMountControlContext {
 }
 
 pub async fn list() -> Result<Vec<MountControlListEntry>> {
-    let mut entries = persisted_list()?;
-
+    let mut entries = control_targets().await?;
     #[cfg(feature = "nfs")]
     refresh_nfs_list_entries(&mut entries).await;
-
-    #[cfg(feature = "fuse")]
-    refresh_fuse_list_entries(&mut entries).await;
-
+    #[cfg(unix)]
+    refresh_fuse_status(&mut entries).await;
     Ok(entries)
+}
+
+/// Discover registered and coordinator-owned mounts without querying status.
+pub async fn control_targets() -> Result<Vec<MountControlListEntry>> {
+    let entries = persisted_list()?;
+    #[cfg(unix)]
+    {
+        let mut entries = entries;
+        // A registered endpoint is an ownership claim, not optional display
+        // metadata. Its failure cannot authorize offline work or stale cleanup.
+        for entry in &mut entries {
+            if entry.backend.as_deref() == Some("fuse") && entry.control_endpoint.is_some() {
+                fuse_mount_client(&entry.mountpoint).await?;
+                entry.live = true;
+            }
+        }
+        if let Some((_client, mounts)) = coordinator_mounts().await? {
+            for mount in mounts {
+                upsert_list_entry(
+                    &mut entries,
+                    MountControlListEntry {
+                        name: crate::mounts_registry::derive_name_from_source(&mount.remote),
+                        backend: Some(MountControlBackend::Fuse.as_str().to_owned()),
+                        mountpoint: mount.mountpoint,
+                        source: mount.remote,
+                        head_ref: mount.r#ref,
+                        read_only: mount.read_only,
+                        pid: None,
+                        start_time: None,
+                        log_path: None,
+                        control_endpoint: None,
+                        live: true,
+                    },
+                );
+            }
+        }
+        Ok(entries)
+    }
+    #[cfg(not(unix))]
+    {
+        Ok(entries)
+    }
 }
 
 pub fn persisted_list() -> Result<Vec<MountControlListEntry>> {
@@ -122,12 +164,18 @@ pub async fn status(path: &Path) -> Result<Option<MountControlStatus>> {
         }));
     }
 
-    #[cfg(feature = "fuse")]
+    #[cfg(unix)]
     {
         let mountpoint = normalize_mountpoint(path);
-        let response = send_fuse_request(crate::ipc_server::IpcRequest::Status {
-            mountpoint: mountpoint.display().to_string(),
-        })
+        let Some(mut client) = fuse_mount_client(&mountpoint.display().to_string()).await? else {
+            return Ok(None);
+        };
+        let response = send_fuse_request(
+            &mut client,
+            crate::ipc_protocol::IpcRequest::Status {
+                mountpoint: mountpoint.display().to_string(),
+            },
+        )
         .await?;
         let Some(status) = response.status else {
             return Err(CrabError::Internal(
@@ -147,7 +195,7 @@ pub async fn status(path: &Path) -> Result<Option<MountControlStatus>> {
         }));
     }
 
-    #[cfg(not(feature = "fuse"))]
+    #[cfg(not(unix))]
     {
         let _ = path;
         Ok(None)
@@ -172,7 +220,7 @@ impl MountControlListEntry {
     }
 }
 
-#[cfg(any(feature = "fuse", test))]
+#[cfg(any(unix, test))]
 fn upsert_list_entry(entries: &mut Vec<MountControlListEntry>, live: MountControlListEntry) {
     if let Some(existing) = entries
         .iter_mut()
@@ -210,55 +258,33 @@ async fn refresh_nfs_list_entries(entries: &mut [MountControlListEntry]) {
     }
 }
 
-#[cfg(feature = "fuse")]
-async fn refresh_fuse_list_entries(entries: &mut Vec<MountControlListEntry>) {
-    let Ok(response) = send_fuse_request(crate::ipc_server::IpcRequest::List).await else {
-        return;
-    };
-    let Some(mounts) = response.mounts else {
-        return;
-    };
-    for mount in mounts {
-        let status = fuse_status_for_mountpoint(&mount.mountpoint).await;
-        let pid = status.as_ref().and_then(|status| status.pid);
-        let head_ref = status
-            .as_ref()
-            .map(|status| status.r#ref.clone())
-            .unwrap_or(mount.r#ref);
-        let source = status
-            .as_ref()
-            .map(|status| status.remote.clone())
-            .unwrap_or(mount.remote);
-        let read_only = status
-            .as_ref()
-            .map_or(mount.read_only, |status| status.read_only);
-        upsert_list_entry(
-            entries,
-            MountControlListEntry {
-                name: crate::mounts_registry::derive_name_from_source(&source),
-                backend: Some(MountControlBackend::Fuse.as_str().to_owned()),
-                mountpoint: mount.mountpoint,
-                source,
-                head_ref,
-                read_only,
-                pid,
-                start_time: None,
-                log_path: None,
-                control_endpoint: None,
-                live: true,
+#[cfg(unix)]
+async fn refresh_fuse_status(entries: &mut [MountControlListEntry]) {
+    // Discovery already owns membership. Optional display metadata must not
+    // erase a listed owner when a later status exchange fails.
+    for entry in entries
+        .iter_mut()
+        .filter(|entry| entry.live && entry.backend.as_deref() == Some("fuse"))
+    {
+        let Ok(Some(mut client)) = fuse_mount_client(&entry.mountpoint).await else {
+            continue;
+        };
+        let status = send_fuse_request(
+            &mut client,
+            crate::ipc_protocol::IpcRequest::Status {
+                mountpoint: entry.mountpoint.clone(),
             },
-        );
+        )
+        .await
+        .ok()
+        .and_then(|response| response.status);
+        if let Some(status) = status {
+            entry.pid = status.pid.or(entry.pid);
+            entry.head_ref = status.r#ref;
+            entry.source = status.remote;
+            entry.read_only = status.read_only;
+        }
     }
-}
-
-#[cfg(feature = "fuse")]
-async fn fuse_status_for_mountpoint(mountpoint: &str) -> Option<crate::ipc_server::MountStatus> {
-    let response = send_fuse_request(crate::ipc_server::IpcRequest::Status {
-        mountpoint: mountpoint.to_owned(),
-    })
-    .await
-    .ok()?;
-    response.status
 }
 
 pub async fn refresh(path: &Path) -> Result<Option<MountControlUpdate>> {
@@ -273,12 +299,18 @@ pub async fn refresh(path: &Path) -> Result<Option<MountControlUpdate>> {
         }));
     }
 
-    #[cfg(feature = "fuse")]
+    #[cfg(unix)]
     {
         let mountpoint = normalize_mountpoint(path);
-        let response = send_fuse_request(crate::ipc_server::IpcRequest::Refresh {
-            mountpoint: mountpoint.display().to_string(),
-        })
+        let Some(mut client) = fuse_mount_client(&mountpoint.display().to_string()).await? else {
+            return Ok(None);
+        };
+        let response = send_fuse_request(
+            &mut client,
+            crate::ipc_protocol::IpcRequest::Refresh {
+                mountpoint: mountpoint.display().to_string(),
+            },
+        )
         .await?;
         return Ok(Some(MountControlUpdate {
             backend: MountControlBackend::Fuse,
@@ -288,7 +320,7 @@ pub async fn refresh(path: &Path) -> Result<Option<MountControlUpdate>> {
         }));
     }
 
-    #[cfg(not(feature = "fuse"))]
+    #[cfg(not(unix))]
     {
         let _ = path;
         Ok(None)
@@ -309,13 +341,19 @@ pub async fn switch_ref(path: &Path, git_ref: &str) -> Result<Option<MountContro
         }));
     }
 
-    #[cfg(feature = "fuse")]
+    #[cfg(unix)]
     {
         let mountpoint = normalize_mountpoint(path);
-        let response = send_fuse_request(crate::ipc_server::IpcRequest::SwitchRef {
-            mountpoint: mountpoint.display().to_string(),
-            r#ref: git_ref.to_owned(),
-        })
+        let Some(mut client) = fuse_mount_client(&mountpoint.display().to_string()).await? else {
+            return Ok(None);
+        };
+        let response = send_fuse_request(
+            &mut client,
+            crate::ipc_protocol::IpcRequest::SwitchRef {
+                mountpoint: mountpoint.display().to_string(),
+                r#ref: git_ref.to_owned(),
+            },
+        )
         .await?;
         return Ok(Some(MountControlUpdate {
             backend: MountControlBackend::Fuse,
@@ -325,7 +363,7 @@ pub async fn switch_ref(path: &Path, git_ref: &str) -> Result<Option<MountContro
         }));
     }
 
-    #[cfg(not(feature = "fuse"))]
+    #[cfg(not(unix))]
     {
         let _ = (path, git_ref);
         Ok(None)
@@ -343,23 +381,21 @@ pub async fn commit(
         return Ok(Some(result));
     }
 
-    #[cfg(not(feature = "fuse"))]
+    #[cfg(not(unix))]
     {
         let _ = (path, message, push);
         Ok(None)
     }
 
-    #[cfg(feature = "fuse")]
+    #[cfg(unix)]
     {
         let mountpoint = normalize_mountpoint(path);
-        if fuse_status_for_mountpoint(&mountpoint.display().to_string())
-            .await
-            .is_none()
-        {
+        let Some(mut client) = fuse_mount_client(&mountpoint.display().to_string()).await? else {
             return Ok(None);
-        }
+        };
         let response = send_fuse_request_with_timeout(
-            crate::ipc_server::IpcRequest::CommitOverlay {
+            &mut client,
+            crate::ipc_protocol::IpcRequest::CommitOverlay {
                 mountpoint: mountpoint.display().to_string(),
                 message: message.to_owned(),
                 push,
@@ -367,13 +403,6 @@ pub async fn commit(
             std::time::Duration::from_mins(30),
         )
         .await?;
-        if !response.ok {
-            return Err(CrabError::Internal(
-                response
-                    .error
-                    .unwrap_or_else(|| "FUSE mount commit failed".to_owned()),
-            ));
-        }
         let result = response
             .overlay_commit_result
             .ok_or_else(|| CrabError::Internal("FUSE commit response missing result".into()))?;
@@ -381,13 +410,76 @@ pub async fn commit(
     }
 }
 
-#[cfg_attr(
-    not(feature = "nfs"),
-    expect(
-        clippy::unused_async,
-        reason = "shared backend API awaits NFS operations when enabled"
-    )
-)]
+/// Inspect an active writable mount through its live owner.
+pub async fn inspect_overlay(path: &Path) -> Result<Option<crate::publish::OverlayDiff>> {
+    #[cfg(feature = "nfs")]
+    if let Some(context) = nfs_context(path)? {
+        return crate::nfs_control::inspect_overlay(&context.endpoint)
+            .await
+            .map(Some);
+    }
+    #[cfg(unix)]
+    {
+        let mountpoint = normalize_mountpoint(path).display().to_string();
+        let Some(mut client) = fuse_mount_client(&mountpoint).await? else {
+            return Ok(None);
+        };
+        let response = send_fuse_request(
+            &mut client,
+            crate::ipc_protocol::IpcRequest::DiffOverlay { mountpoint },
+        )
+        .await?;
+        let diff = response
+            .overlay_diff
+            .ok_or_else(|| CrabError::Internal("FUSE inspection response missing diff".into()))?;
+        Ok(Some(diff))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(None)
+    }
+}
+
+/// Export an active writable mount through its live owner.
+pub async fn export_overlay(
+    path: &Path,
+    destination: &Path,
+) -> Result<Option<crate::publish::OverlayDiff>> {
+    let destination = std::env::current_dir()?.join(destination);
+    #[cfg(feature = "nfs")]
+    if let Some(context) = nfs_context(path)? {
+        return crate::nfs_control::export_overlay(&context.endpoint, &destination)
+            .await
+            .map(Some);
+    }
+    #[cfg(unix)]
+    {
+        let mountpoint = normalize_mountpoint(path).display().to_string();
+        let Some(mut client) = fuse_mount_client(&mountpoint).await? else {
+            return Ok(None);
+        };
+        let response = send_fuse_request_with_timeout(
+            &mut client,
+            crate::ipc_protocol::IpcRequest::ExportOverlay {
+                mountpoint,
+                destination,
+            },
+            std::time::Duration::from_mins(30),
+        )
+        .await?;
+        response
+            .overlay_diff
+            .map(Some)
+            .ok_or_else(|| CrabError::Internal("FUSE export response missing diff".into()))
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = (path, destination);
+        Ok(None)
+    }
+}
+
 pub async fn reset_overlay(path: &Path) -> Result<Option<crate::publish::OverlayDiff>> {
     #[cfg(feature = "nfs")]
     if let Some(context) = nfs_context(path)? {
@@ -399,44 +491,64 @@ pub async fn reset_overlay(path: &Path) -> Result<Option<crate::publish::Overlay
         return Ok(Some(diff));
     }
 
-    let _ = path;
-    Ok(None)
+    #[cfg(unix)]
+    {
+        let mountpoint = normalize_mountpoint(path);
+        let Some(mut client) = fuse_mount_client(&mountpoint.display().to_string()).await? else {
+            return Ok(None);
+        };
+        let response = send_fuse_request(
+            &mut client,
+            crate::ipc_protocol::IpcRequest::ResetOverlay {
+                mountpoint: mountpoint.display().to_string(),
+            },
+        )
+        .await?;
+        let diff = response
+            .overlay_diff
+            .ok_or_else(|| CrabError::Internal("FUSE reset response missing diff".into()))?;
+        return Ok(Some(diff));
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = path;
+        Ok(None)
+    }
 }
 
 pub async fn shutdown(path: &Path) -> Result<Option<MountControlShutdown>> {
     #[cfg(feature = "nfs")]
     if let Some(context) = nfs_context(path)? {
-        crate::nfs_control::shutdown(&context.endpoint).await?;
-        return Ok(Some(MountControlShutdown {
-            backend: MountControlBackend::Nfs,
-            mountpoint: context.mountpoint,
-            mountpoint_str: context.mountpoint_str,
-            registry_path: Some(context.registry_path),
-            pid: Some(context.entry.pid),
+        let cache_dir = crate::nfs_control::shutdown(&context.endpoint)
+            .await?
+            .ok_or_else(|| {
+                CrabError::Internal("NFS shutdown response missing live cache identity".into())
+            })?;
+        return Ok(Some(MountControlShutdown::Nfs {
+            context: Box::new(context),
+            cache_dir,
         }));
     }
 
-    #[cfg(feature = "fuse")]
+    #[cfg(unix)]
     {
         let mountpoint = normalize_mountpoint(path);
+        let Some(mut client) = fuse_mount_client(&mountpoint.display().to_string()).await? else {
+            return Ok(None);
+        };
         let mountpoint_str = mountpoint.display().to_string();
         let _response = send_fuse_request_with_timeout(
-            crate::ipc_server::IpcRequest::Unmount {
+            &mut client,
+            crate::ipc_protocol::IpcRequest::Unmount {
                 mountpoint: mountpoint_str.clone(),
             },
             std::time::Duration::from_mins(2),
         )
         .await?;
-        return Ok(Some(MountControlShutdown {
-            backend: MountControlBackend::Fuse,
-            mountpoint,
-            mountpoint_str,
-            registry_path: None,
-            pid: None,
-        }));
+        return Ok(Some(MountControlShutdown::Fuse { mountpoint }));
     }
 
-    #[cfg(not(feature = "fuse"))]
+    #[cfg(not(unix))]
     {
         let _ = path;
         Ok(None)
@@ -482,26 +594,85 @@ pub fn nfs_context(path: &Path) -> Result<Option<NfsMountControlContext>> {
     }))
 }
 
-#[cfg(feature = "fuse")]
-async fn send_fuse_request(
-    request: crate::ipc_server::IpcRequest,
-) -> Result<crate::ipc_server::IpcResponse> {
-    send_fuse_request_with_timeout(request, std::time::Duration::from_secs(30)).await
+#[cfg(unix)]
+async fn coordinator_client() -> Result<Option<crate::ipc_client::IpcClient>> {
+    let socket_path = crate::ipc_client::default_socket_path()?;
+    match crate::ipc_client::IpcClient::connect(&socket_path).await {
+        Ok(client) => Ok(Some(client)),
+        Err(error) if error.is_unavailable() => Ok(None),
+        Err(error) => Err(error.into()),
+    }
 }
 
-#[cfg(feature = "fuse")]
+#[cfg(unix)]
+async fn coordinator_mounts() -> Result<
+    Option<(
+        crate::ipc_client::IpcClient,
+        Vec<crate::ipc_protocol::MountInfo>,
+    )>,
+> {
+    let Some(client) = coordinator_client().await? else {
+        return Ok(None);
+    };
+    fuse_mounts(client).await.map(Some)
+}
+
+#[cfg(unix)]
+async fn fuse_mounts(
+    mut client: crate::ipc_client::IpcClient,
+) -> Result<(
+    crate::ipc_client::IpcClient,
+    Vec<crate::ipc_protocol::MountInfo>,
+)> {
+    // List establishes ownership without interpreting application error text.
+    // Rejected or incomplete discovery cannot authorize absence or offline work.
+    let response = send_fuse_request(&mut client, crate::ipc_protocol::IpcRequest::List).await?;
+    let mounts = response
+        .mounts
+        .ok_or_else(|| CrabError::Internal("FUSE list response missing mounts".into()))?;
+    Ok((client, mounts))
+}
+
+#[cfg(unix)]
+async fn fuse_mount_client(mountpoint: &str) -> Result<Option<crate::ipc_client::IpcClient>> {
+    let registry = crate::mounts_registry::registry_path()?;
+    let entry = crate::mounts_registry::list_entries(&registry)?
+        .into_iter()
+        .find(|entry| entry.mountpoint == mountpoint && entry.backend.as_deref() == Some("fuse"));
+    if let Some(endpoint) = entry.and_then(|entry| entry.control_endpoint) {
+        let client = crate::ipc_client::IpcClient::connect(Path::new(&endpoint)).await?;
+        let (client, mounts) = fuse_mounts(client).await?;
+        if !mounts.iter().any(|mount| mount.mountpoint == mountpoint) {
+            return Err(CrabError::Internal(format!(
+                "registered FUSE owner no longer serves {mountpoint}"
+            )));
+        }
+        return Ok(Some(client));
+    }
+    let Some((client, mounts)) = coordinator_mounts().await? else {
+        return Ok(None);
+    };
+    Ok(mounts
+        .iter()
+        .any(|mount| mount.mountpoint == mountpoint)
+        .then_some(client))
+}
+
+#[cfg(unix)]
+async fn send_fuse_request(
+    client: &mut crate::ipc_client::IpcClient,
+    request: crate::ipc_protocol::IpcRequest,
+) -> Result<crate::ipc_protocol::IpcResponse> {
+    send_fuse_request_with_timeout(client, request, std::time::Duration::from_secs(30)).await
+}
+
+#[cfg(unix)]
 async fn send_fuse_request_with_timeout(
-    request: crate::ipc_server::IpcRequest,
+    client: &mut crate::ipc_client::IpcClient,
+    request: crate::ipc_protocol::IpcRequest,
     timeout: std::time::Duration,
-) -> Result<crate::ipc_server::IpcResponse> {
-    let socket_path = crate::ipc_client::default_socket_path()?;
-    let mut client = crate::ipc_client::IpcClient::connect(&socket_path)
-        .await
-        .map_err(CrabError::from)?;
-    let response = client
-        .send_with_timeout(&request, timeout)
-        .await
-        .map_err(CrabError::from)?;
+) -> Result<crate::ipc_protocol::IpcResponse> {
+    let response = client.send_with_timeout(&request, timeout).await?;
     if response.ok {
         return Ok(response);
     }
@@ -511,469 +682,5 @@ async fn send_fuse_request_with_timeout(
 }
 
 #[cfg(test)]
-#[expect(
-    clippy::unwrap_used,
-    reason = "test setup and assertions fail on unexpected errors"
-)]
-mod tests {
-    use super::*;
-
-    #[cfg(feature = "nfs")]
-    use std::sync::Arc;
-
-    #[cfg(feature = "nfs")]
-    use tokio_util::sync::CancellationToken;
-
-    struct HomeGuard {
-        original: Option<std::ffi::OsString>,
-    }
-
-    impl HomeGuard {
-        fn set(home: &Path) -> Self {
-            let original = std::env::var_os("HOME");
-            // SAFETY: these tests update HOME before starting any worker
-            // threads and restore it before returning to the harness.
-            unsafe {
-                std::env::set_var("HOME", home);
-            }
-            Self { original }
-        }
-    }
-
-    impl Drop for HomeGuard {
-        fn drop(&mut self) {
-            // SAFETY: restores the process environment for this single-threaded
-            // test scope.
-            unsafe {
-                if let Some(original) = &self.original {
-                    std::env::set_var("HOME", original);
-                } else {
-                    std::env::remove_var("HOME");
-                }
-            }
-        }
-    }
-
-    #[test]
-    fn backend_names_match_registry_values() {
-        assert_eq!(MountControlBackend::Nfs.as_str(), "nfs");
-        assert_eq!(MountControlBackend::Fuse.as_str(), "fuse");
-    }
-
-    #[test]
-    fn normalize_preserves_missing_paths() {
-        let path = Path::new("/tmp/crab-missing-mount-control-test");
-        assert_eq!(normalize_mountpoint(path), path);
-    }
-
-    #[test]
-    fn persisted_list_reads_registry_entries() {
-        let _env_lock = crate::test_support::GIT_DIR_MUTEX
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let tmp = tempfile::tempdir().unwrap();
-        let _home = HomeGuard::set(tmp.path());
-        let mountpoint = tmp.path().join("view");
-        let registry_path = crate::mounts_registry::registry_path().unwrap();
-        crate::mounts_registry::add_entry(
-            &registry_path,
-            crate::mounts_registry::MountEntry {
-                mountpoint: mountpoint.display().to_string(),
-                source: "crab://bucket/repo".to_owned(),
-                git_ref: "refs/heads/main".to_owned(),
-                pid: 123,
-                start_time: "2026-01-01T00:00:00Z".to_owned(),
-                read_only: true,
-                name: "repo".to_owned(),
-                backend: Some("nfs".to_owned()),
-                log_path: Some("/tmp/crab-nfs.log".to_owned()),
-                control_endpoint: Some("unix:/tmp/crab-nfs.sock".to_owned()),
-            },
-        )
-        .unwrap();
-
-        let entries = persisted_list().unwrap();
-
-        assert_eq!(entries.len(), 1);
-        let entry = &entries[0];
-        assert_eq!(entry.name, "repo");
-        assert_eq!(entry.backend.as_deref(), Some("nfs"));
-        assert_eq!(entry.mountpoint, mountpoint.display().to_string());
-        assert_eq!(entry.source, "crab://bucket/repo");
-        assert_eq!(entry.head_ref, "refs/heads/main");
-        assert!(entry.read_only);
-        assert_eq!(entry.pid, Some(123));
-        assert_eq!(entry.start_time.as_deref(), Some("2026-01-01T00:00:00Z"));
-        assert_eq!(entry.log_path.as_deref(), Some("/tmp/crab-nfs.log"));
-        assert_eq!(
-            entry.control_endpoint.as_deref(),
-            Some("unix:/tmp/crab-nfs.sock")
-        );
-        assert!(!entry.live);
-    }
-
-    #[test]
-    fn list_keeps_registry_entries_when_live_probe_fails() {
-        let _env_lock = crate::test_support::GIT_DIR_MUTEX
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let tmp = tempfile::tempdir().unwrap();
-        let _home = HomeGuard::set(tmp.path());
-        let mountpoint = tmp.path().join("view");
-        let registry_path = crate::mounts_registry::registry_path().unwrap();
-        crate::mounts_registry::add_entry(
-            &registry_path,
-            crate::mounts_registry::MountEntry {
-                mountpoint: mountpoint.display().to_string(),
-                source: "crab://bucket/repo".to_owned(),
-                git_ref: "refs/heads/main".to_owned(),
-                pid: 123,
-                start_time: "2026-01-01T00:00:00Z".to_owned(),
-                read_only: true,
-                name: "repo".to_owned(),
-                backend: Some("nfs".to_owned()),
-                log_path: None,
-                control_endpoint: Some("unix:/tmp/crab-nfs-missing.sock".to_owned()),
-            },
-        )
-        .unwrap();
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-
-        let entries = runtime.block_on(list()).unwrap();
-
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].mountpoint, mountpoint.display().to_string());
-        assert!(!entries[0].live);
-    }
-
-    #[test]
-    fn upsert_list_entry_preserves_registry_metadata() {
-        let mut entries = vec![MountControlListEntry {
-            name: "repo".to_owned(),
-            backend: Some("nfs".to_owned()),
-            mountpoint: "/mnt/repo".to_owned(),
-            source: "crab://bucket/repo".to_owned(),
-            head_ref: "refs/heads/main".to_owned(),
-            read_only: true,
-            pid: Some(123),
-            start_time: Some("2026-01-01T00:00:00Z".to_owned()),
-            log_path: Some("/tmp/crab-nfs.log".to_owned()),
-            control_endpoint: Some("unix:/tmp/crab-nfs.sock".to_owned()),
-            live: false,
-        }];
-
-        upsert_list_entry(
-            &mut entries,
-            MountControlListEntry {
-                name: "ignored".to_owned(),
-                backend: Some("fuse".to_owned()),
-                mountpoint: "/mnt/repo".to_owned(),
-                source: "crab://bucket/repo-live".to_owned(),
-                head_ref: "refs/heads/dev".to_owned(),
-                read_only: false,
-                pid: Some(456),
-                start_time: None,
-                log_path: None,
-                control_endpoint: None,
-                live: true,
-            },
-        );
-
-        assert_eq!(entries.len(), 1);
-        let entry = &entries[0];
-        assert_eq!(entry.name, "repo");
-        assert_eq!(entry.backend.as_deref(), Some("fuse"));
-        assert_eq!(entry.source, "crab://bucket/repo-live");
-        assert_eq!(entry.head_ref, "refs/heads/dev");
-        assert!(!entry.read_only);
-        assert_eq!(entry.pid, Some(456));
-        assert_eq!(entry.start_time.as_deref(), Some("2026-01-01T00:00:00Z"));
-        assert_eq!(entry.log_path.as_deref(), Some("/tmp/crab-nfs.log"));
-        assert_eq!(
-            entry.control_endpoint.as_deref(),
-            Some("unix:/tmp/crab-nfs.sock")
-        );
-        assert!(entry.live);
-    }
-
-    #[cfg(feature = "nfs")]
-    fn nfs_control_state(
-        mountpoint: &Path,
-        read_only: bool,
-    ) -> crate::nfs_control::NfsControlState {
-        crate::nfs_control::NfsControlState {
-            mountpoint: mountpoint.to_path_buf(),
-            read_only,
-            read_leases: crate::read_lease_pool::ReadLeasePool::new(4, 4096),
-            directory_pages: crate::nfs::NfsDirectoryPageCache::new(4, 4096),
-            write_journal: Arc::new(crate::nfs::NfsWriteJournal::new()),
-            protocol_stats: Arc::new(crate::nfs::NfsProtocolStats::new()),
-            engine: None,
-            runtime: None,
-            lifecycle: crate::nfs_control::NfsMountLifecycleStatus {
-                server_bind_ms: 3,
-                native_mount_ms: 5,
-                startup_ms: 8,
-            },
-        }
-    }
-
-    #[cfg(feature = "nfs")]
-    fn free_tcp_control_endpoint() -> String {
-        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-        let addr = listener.local_addr().unwrap();
-        drop(listener);
-        format!("tcp:{addr}?token=mount-control-test")
-    }
-
-    #[cfg(feature = "nfs")]
-    fn add_nfs_mount_entry(
-        registry_path: &Path,
-        mountpoint: &Path,
-        endpoint: &str,
-    ) -> crate::mounts_registry::MountEntry {
-        let entry = crate::mounts_registry::MountEntry {
-            mountpoint: mountpoint.display().to_string(),
-            source: "crab://bucket/repo".to_owned(),
-            git_ref: "refs/heads/main".to_owned(),
-            pid: 123,
-            start_time: "2026-01-01T00:00:00Z".to_owned(),
-            read_only: true,
-            name: "repo".to_owned(),
-            backend: Some("nfs".to_owned()),
-            log_path: Some("/tmp/crab-nfs.log".to_owned()),
-            control_endpoint: Some(endpoint.to_owned()),
-        };
-        crate::mounts_registry::add_entry(registry_path, entry.clone()).unwrap();
-        entry
-    }
-
-    #[cfg(feature = "nfs")]
-    async fn wait_for_nfs_status(path: &Path) -> MountControlStatus {
-        for _ in 0..20 {
-            if let Ok(Some(status)) = status(path).await {
-                return status;
-            }
-            tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-        }
-        status(path).await.unwrap().unwrap()
-    }
-
-    #[test]
-    #[cfg(feature = "nfs")]
-    fn nfs_control_status_and_shutdown_route_through_registry_endpoint() {
-        let _env_lock = crate::test_support::GIT_DIR_MUTEX
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let tmp = tempfile::tempdir().unwrap();
-        let _home = HomeGuard::set(tmp.path());
-        let raw_mountpoint = tmp.path().join("view");
-        std::fs::create_dir_all(&raw_mountpoint).unwrap();
-        let mountpoint = normalize_mountpoint(&raw_mountpoint);
-        let registry_path = crate::mounts_registry::registry_path().unwrap();
-        let endpoint = free_tcp_control_endpoint();
-        add_nfs_mount_entry(&registry_path, &mountpoint, &endpoint);
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-
-        runtime.block_on(async {
-            let cancel = CancellationToken::new();
-            let handle = crate::nfs_control::spawn_server(
-                Some(endpoint.clone()),
-                nfs_control_state(&mountpoint, false),
-                cancel.clone(),
-            )
-            .unwrap();
-
-            let status = wait_for_nfs_status(&mountpoint).await;
-
-            assert_eq!(status.backend, MountControlBackend::Nfs);
-            assert_eq!(status.mountpoint, mountpoint);
-            assert_eq!(status.source.as_deref(), Some("crab://bucket/repo"));
-            assert_eq!(status.head_ref.as_deref(), Some("refs/heads/main"));
-            assert!(!status.read_only);
-            assert_eq!(status.pid, Some(std::process::id()));
-            assert_eq!(
-                status.nfs_runtime.unwrap().lifecycle,
-                crate::nfs_control::NfsMountLifecycleStatus {
-                    server_bind_ms: 3,
-                    native_mount_ms: 5,
-                    startup_ms: 8,
-                }
-            );
-
-            let shutdown = shutdown(&mountpoint).await.unwrap().unwrap();
-
-            assert_eq!(shutdown.backend, MountControlBackend::Nfs);
-            assert_eq!(shutdown.mountpoint, mountpoint);
-            assert_eq!(
-                shutdown.mountpoint_str,
-                shutdown.mountpoint.display().to_string()
-            );
-            assert_eq!(
-                shutdown.registry_path.as_deref(),
-                Some(registry_path.as_path())
-            );
-            assert_eq!(shutdown.pid, Some(123));
-            assert!(cancel.is_cancelled());
-            handle.await.unwrap().unwrap();
-        });
-    }
-
-    #[test]
-    #[cfg(feature = "nfs")]
-    fn nfs_control_list_refreshes_live_registry_entries() {
-        let _env_lock = crate::test_support::GIT_DIR_MUTEX
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let tmp = tempfile::tempdir().unwrap();
-        let _home = HomeGuard::set(tmp.path());
-        let raw_mountpoint = tmp.path().join("view");
-        std::fs::create_dir_all(&raw_mountpoint).unwrap();
-        let mountpoint = normalize_mountpoint(&raw_mountpoint);
-        let registry_path = crate::mounts_registry::registry_path().unwrap();
-        let endpoint = free_tcp_control_endpoint();
-        add_nfs_mount_entry(&registry_path, &mountpoint, &endpoint);
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-
-        runtime.block_on(async {
-            let cancel = CancellationToken::new();
-            let handle = crate::nfs_control::spawn_server(
-                Some(endpoint.clone()),
-                nfs_control_state(&mountpoint, false),
-                cancel.clone(),
-            )
-            .unwrap();
-            wait_for_nfs_status(&mountpoint).await;
-
-            let entries = list().await.unwrap();
-
-            assert_eq!(entries.len(), 1);
-            assert_eq!(entries[0].mountpoint, mountpoint.display().to_string());
-            assert_eq!(entries[0].backend.as_deref(), Some("nfs"));
-            assert_eq!(entries[0].pid, Some(std::process::id()));
-            assert!(!entries[0].read_only);
-            assert!(entries[0].live);
-
-            crate::nfs_control::shutdown(&endpoint).await.unwrap();
-            handle.await.unwrap().unwrap();
-            assert!(cancel.is_cancelled());
-        });
-    }
-
-    #[test]
-    #[cfg(feature = "nfs")]
-    fn nfs_control_refresh_and_switch_route_to_helper_endpoint() {
-        let _env_lock = crate::test_support::GIT_DIR_MUTEX
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let tmp = tempfile::tempdir().unwrap();
-        let _home = HomeGuard::set(tmp.path());
-        let raw_mountpoint = tmp.path().join("view");
-        std::fs::create_dir_all(&raw_mountpoint).unwrap();
-        let mountpoint = normalize_mountpoint(&raw_mountpoint);
-        let registry_path = crate::mounts_registry::registry_path().unwrap();
-        let endpoint = free_tcp_control_endpoint();
-        add_nfs_mount_entry(&registry_path, &mountpoint, &endpoint);
-        let runtime = tokio::runtime::Builder::new_current_thread()
-            .enable_all()
-            .build()
-            .unwrap();
-
-        runtime.block_on(async {
-            let cancel = CancellationToken::new();
-            let handle = crate::nfs_control::spawn_server(
-                Some(endpoint.clone()),
-                nfs_control_state(&mountpoint, true),
-                cancel.clone(),
-            )
-            .unwrap();
-            wait_for_nfs_status(&mountpoint).await;
-
-            let refresh_error = refresh(&mountpoint).await.unwrap_err().to_string();
-            let switch_error = switch_ref(&mountpoint, "refs/heads/dev")
-                .await
-                .unwrap_err()
-                .to_string();
-
-            assert!(refresh_error.contains("NFS control refresh unavailable"));
-            assert!(switch_error.contains("NFS control switch unavailable"));
-            assert!(!cancel.is_cancelled());
-
-            crate::nfs_control::shutdown(&endpoint).await.unwrap();
-            handle.await.unwrap().unwrap();
-        });
-    }
-
-    #[test]
-    #[cfg(feature = "nfs")]
-    fn nfs_context_uses_registry_backend_and_endpoint() {
-        let _env_lock = crate::test_support::GIT_DIR_MUTEX
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let tmp = tempfile::tempdir().unwrap();
-        let _home = HomeGuard::set(tmp.path());
-        let mountpoint = tmp.path().join("view");
-        let registry_path = crate::mounts_registry::registry_path().unwrap();
-        crate::mounts_registry::add_entry(
-            &registry_path,
-            crate::mounts_registry::MountEntry {
-                mountpoint: mountpoint.display().to_string(),
-                source: "crab://bucket/repo".to_owned(),
-                git_ref: "refs/heads/main".to_owned(),
-                pid: 123,
-                start_time: "2026-01-01T00:00:00Z".to_owned(),
-                read_only: true,
-                name: "repo".to_owned(),
-                backend: Some("nfs".to_owned()),
-                log_path: Some("/tmp/crab-nfs.log".to_owned()),
-                control_endpoint: Some("unix:/tmp/crab-nfs.sock".to_owned()),
-            },
-        )
-        .unwrap();
-
-        let context = nfs_context(&mountpoint).unwrap().unwrap();
-
-        assert_eq!(context.mountpoint, mountpoint);
-        assert_eq!(context.endpoint, "unix:/tmp/crab-nfs.sock");
-        assert_eq!(context.entry.pid, 123);
-    }
-
-    #[test]
-    #[cfg(feature = "nfs")]
-    fn nfs_context_ignores_non_nfs_registry_entries() {
-        let _env_lock = crate::test_support::GIT_DIR_MUTEX
-            .lock()
-            .unwrap_or_else(std::sync::PoisonError::into_inner);
-        let tmp = tempfile::tempdir().unwrap();
-        let _home = HomeGuard::set(tmp.path());
-        let mountpoint = tmp.path().join("view");
-        let registry_path = crate::mounts_registry::registry_path().unwrap();
-        crate::mounts_registry::add_entry(
-            &registry_path,
-            crate::mounts_registry::MountEntry {
-                mountpoint: mountpoint.display().to_string(),
-                source: "crab://bucket/repo".to_owned(),
-                git_ref: "refs/heads/main".to_owned(),
-                pid: 123,
-                start_time: "2026-01-01T00:00:00Z".to_owned(),
-                read_only: true,
-                name: "repo".to_owned(),
-                backend: Some("fuse".to_owned()),
-                log_path: None,
-                control_endpoint: Some("unix:/tmp/crab-nfs.sock".to_owned()),
-            },
-        )
-        .unwrap();
-
-        assert!(nfs_context(&mountpoint).unwrap().is_none());
-    }
-}
+#[path = "mount_control_tests.rs"]
+mod tests;

@@ -7,7 +7,9 @@ Root `AGENTS.md` and `crates/AGENTS.md` apply. Read
 
 Owns LFS object layout, SHA-256 byte verification, receipts, and file-lock storage. crab-git owns pointer parsing; CLI/server layers own protocol and authorization.
 `src/local.rs` also owns local payload paths, storage override precedence and
-verified preparation snapshots shared by CLI and SDK callers.
+verified preparation snapshots shared by CLI and SDK callers. Its ObjectWriter
+and StagedObject supply the canonical local writer for CLI clean/extensions/
+migration and VFS pointer publication.
 
 ## Read first
 
@@ -50,6 +52,14 @@ shared-lock fix reaches HTTP but does not automatically reach that CLI surface.
 - Multipart uploads begin and complete through `crab_storage::Store`, which
   routes protected writes and records their verified size and Blake3 inventory.
   Calling the raw origin handle bypasses staging and can expose unpublished data.
+- `LfsReadSession::read_local_range` verifies whole SHA-256/size once before
+  retaining its opened source and bounded 1 MiB block proofs. Later ranges prove
+  every covered block; metadata/path identity alone is insufficient. Cache
+  pressure evicts only inactive claims; unretained reads still verify fully.
+  A failed read clears its proof for later repair without selecting remote in
+  that call. Close drains jobs and releases sources. This is not a durable GC pin.
+  Only open-time absence may select remote. Resolve Git settings outside data
+  callbacks. Tracked jobs retain global verification admission after cancellation.
 - Keep declared SHA-256 identity and size verification together; presence or a matching path alone does not prove object bytes.
   Source: `crates/crab-lfs/src/object_store.rs`.
 - Fresh origin verification differs from receipt-aware reads and replica fallback; callers needing publication proof must retain the origin-only boundary.

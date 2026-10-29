@@ -232,16 +232,10 @@ pub async fn run_cache_service_support_bundle(
     Ok(())
 }
 
-/// Run the metadb-focused health report (`crab doctor --metadb`).
+/// Report Capsule authority and local cache health for the current repository.
 ///
-/// Opens a short-lived [`MetaDbGuard`] against the current repo and
-/// prints a two-section summary: one per SlateDB instance plus a
-/// shard-count line derived from S3 LIST on `.crab/shards/`.
-///
-/// This is a read-only snapshot — no compaction trigger, no WAL
-/// replay. Failures during open map to a `Fail` line in the report
-/// rather than aborting, so operators running this in an incident
-/// still see what they can see.
+/// Missing or corrupt authority and unreadable caches return errors; diagnosis
+/// does not create metadata databases or scan the global shard namespace.
 pub async fn run_doctor_metadb(mode: OutputMode) -> Result<()> {
     let cwd = std::env::current_dir()?;
     crate::cmd::metadb::run_doctor_metadb_in(&cwd, mode).await
@@ -808,19 +802,11 @@ async fn remote_repository_authority(
         router.repo_prefix().to_owned(),
         router.global_prefix().to_owned(),
     );
-    match crab_metadata::capsule_protocol::load_root(&layout).await {
-        Ok(root) => Ok(format!(
-            "capsule v2 generation {}",
-            root.record().root().generation()
-        )),
-        Err(crab_metadata::error::MetadataError::Storage {
-            source: crab_storage::StorageError::NotFound { .. },
-        }) => {
-            crate::core::remote_layout::open(store, router).await?;
-            Ok("canonical v1 layout".to_owned())
-        }
-        Err(error) => Err(error.into()),
-    }
+    let root = crab_metadata::capsule_protocol::load_root(&layout).await?;
+    Ok(format!(
+        "capsule v2 generation {}",
+        root.record().root().generation()
+    ))
 }
 
 fn remote_access_failure(bucket: &str, repo: Option<&str>, error: &CrabError) -> CheckResult {
@@ -2758,7 +2744,7 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn remote_repository_authority_falls_back_to_validated_v1_layout() {
+    async fn remote_repository_authority_rejects_v1_layout() {
         use object_store::memory::InMemory;
         use std::sync::Arc;
 
@@ -2768,9 +2754,10 @@ mod tests {
             .await
             .unwrap();
 
-        let authority = remote_repository_authority(&store, &router).await.unwrap();
-
-        assert_eq!(authority, "canonical v1 layout");
+        assert!(matches!(
+            remote_repository_authority(&store, &router).await,
+            Err(CrabError::NotFound { .. })
+        ));
     }
 
     #[tokio::test]

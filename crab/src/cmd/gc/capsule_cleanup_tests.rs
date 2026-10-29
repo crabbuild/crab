@@ -193,6 +193,7 @@ async fn captured_catalog_pages_survive_checkpoint_replacement_and_gc() {
         SystemTime::now() + Duration::from_secs(2 * 3600),
         Duration::from_secs(3600),
         Instant::now(),
+        None,
     )
     .await
     .unwrap();
@@ -434,6 +435,7 @@ async fn capsule_gc_does_not_report_revalidated_retained_objects_as_deleted() {
             snapshot_at,
             Duration::from_secs(3600),
             Instant::now(),
+            None,
         )
         .await
         .unwrap();

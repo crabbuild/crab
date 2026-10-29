@@ -3522,9 +3522,45 @@ impl Index {
     }
 
     pub fn mark_batch_published(&self, batch_id: &str) -> Result<Vec<[u8; 32]>> {
+        self.publish_batch(batch_id, false)
+    }
+
+    pub fn mark_batch_history_published(&self, batch_id: &str) -> Result<Vec<[u8; 32]>> {
+        self.publish_batch(batch_id, true)
+    }
+
+    fn publish_batch(&self, batch_id: &str, history: bool) -> Result<Vec<[u8; 32]>> {
         let tx = self.conn.unchecked_transaction().map_err(|e| {
             StagingError::Internal(format!("failed to begin staging publication: {e}"))
         })?;
+        if history {
+            let attached: bool = tx.query_row("SELECT EXISTS(SELECT 1 FROM publication_intent_entries WHERE batch_id = ?1) OR EXISTS(SELECT 1 FROM external_publications WHERE batch_id = ?1)", params![batch_id], |row| row.get(0))?;
+            if attached {
+                return Err(StagingError::StagingCorrupt(
+                    "history publication cannot replace an active handoff".into(),
+                ));
+            }
+            let count: i64 = tx.query_row(
+                "SELECT count(*) FROM path_leases WHERE batch_id = ?1",
+                params![batch_id],
+                |row| row.get(0),
+            )?;
+            if count != 1 {
+                return Err(StagingError::StagingCorrupt(
+                    "history publication requires one file recipe".into(),
+                ));
+            }
+            // A mounted commit publishes history, not a replaceable worktree
+            // index head. Each batch keeps its own owner so a later commit or
+            // failed attempt cannot retire an earlier unpushed version.
+            let owner = super::staging_path_bytes(
+                &std::path::PathBuf::from(".crab/history").join(batch_id),
+            );
+            tx.execute(
+                "UPDATE path_leases SET path_bytes = ?1 WHERE batch_id = ?2",
+                params![owner, batch_id],
+            )?;
+        }
         let superseded_batches = {
             let mut statement = tx
                 .prepare_cached(
@@ -4868,6 +4904,23 @@ impl Index {
         snapshot_id: &str,
         recipes: &[crate::recipe::FileRecipe],
     ) -> Result<()> {
+        self.create_recipe_snapshot(snapshot_id, recipes, false)
+    }
+
+    pub(crate) fn create_read_snapshot(
+        &self,
+        snapshot_id: &str,
+        recipes: &[crate::recipe::FileRecipe],
+    ) -> Result<()> {
+        self.create_recipe_snapshot(snapshot_id, recipes, true)
+    }
+
+    fn create_recipe_snapshot(
+        &self,
+        snapshot_id: &str,
+        recipes: &[crate::recipe::FileRecipe],
+        read_only: bool,
+    ) -> Result<()> {
         let tx = self.conn.unchecked_transaction().map_err(|e| {
             StagingError::Internal(format!("failed to begin push snapshot transaction: {e}"))
         })?;
@@ -4935,9 +4988,15 @@ impl Index {
                 )));
             }
 
-            let published_head: bool = tx
-                .query_row(
-                    "SELECT EXISTS(
+            let owner_query = if read_only {
+                "SELECT EXISTS(SELECT 1 FROM verified_recipes WHERE recipe_hash = ?1)
+                 AND (EXISTS(SELECT 1 FROM path_leases WHERE recipe_hash = ?1)
+                   OR EXISTS(SELECT 1 FROM push_snapshot_recipes AS pin
+                             JOIN push_snapshots AS snapshot USING (snapshot_id)
+                             WHERE pin.recipe_hash = ?1
+                               AND snapshot.state IN ('open', 'committed')))"
+            } else {
+                "SELECT EXISTS(
                          SELECT 1
                          FROM path_heads AS head
                          JOIN staging_batches AS batch USING (batch_id)
@@ -4949,18 +5008,20 @@ impl Index {
                          JOIN staging_batches AS batch ON batch.batch_id = lease.batch_id
                          JOIN verified_recipes USING (recipe_hash)
                          WHERE lease.recipe_hash = ?1 AND batch.state = 'open'
-                     )",
-                    params![recipe_hash.as_slice()],
-                    |row| row.get(0),
-                )
-                .map_err(|e| {
-                    StagingError::Internal(format!(
-                        "failed to verify published recipe head for snapshot {snapshot_id}: {e}"
-                    ))
+                     )"
+            };
+            let eligible: bool =
+                tx.query_row(owner_query, params![recipe_hash.as_slice()], |row| {
+                    row.get(0)
                 })?;
-            if !published_head {
+            if !eligible {
+                let owner = if read_only {
+                    "retained"
+                } else {
+                    "published or delegated"
+                };
                 return Err(StagingError::StagingCorrupt(format!(
-                    "push snapshot {snapshot_id} recipe {} has no published or delegated lease",
+                    "push snapshot {snapshot_id} recipe {} has no {owner} lease",
                     blake3::Hash::from(recipe_hash).to_hex()
                 )));
             }
@@ -4974,6 +5035,11 @@ impl Index {
                     "failed to pin recipe in push snapshot {snapshot_id}: {e}"
                 ))
             })?;
+            // Read ownership retains bytes without granting push publication
+            // authority or preventing retirement of the published path lease.
+            if read_only {
+                continue;
+            }
             let captured = tx
                 .execute(
                     "INSERT INTO push_snapshot_leases

@@ -13,12 +13,8 @@ use std::path::{Path, PathBuf};
 
 #[cfg(any(feature = "fuse", feature = "nfs"))]
 use serde::Serialize;
-#[cfg(all(any(feature = "fuse", feature = "nfs"), target_os = "linux"))]
-use std::os::fd::AsRawFd;
 #[cfg(any(feature = "fuse", feature = "nfs"))]
 use std::time::Duration;
-#[cfg(any(feature = "fuse", feature = "nfs"))]
-use tracing::debug;
 use tracing::{info, warn};
 
 use crate::core::error::{CrabError, Result};
@@ -418,17 +414,14 @@ pub fn run_fuse_mount_or_print() -> std::process::ExitCode {
             return std::process::ExitCode::from(1);
         };
 
-        let status = std::process::Command::new(fuse_mount)
+        use std::os::unix::process::CommandExt;
+        // Delegation precedes mount/cache admission. Keep the caller's PID as
+        // the serving owner so PID-directed signals cannot stop at a wrapper.
+        let error = std::process::Command::new(fuse_mount)
             .args(std::env::args_os().skip(1))
-            .status();
-        match status {
-            Ok(status) if status.success() => std::process::ExitCode::SUCCESS,
-            Ok(status) => std::process::ExitCode::from(status.code().unwrap_or(1) as u8),
-            Err(error) => {
-                eprintln!("error: failed to start Crab FUSE mount binary: {error}");
-                std::process::ExitCode::from(1)
-            }
-        }
+            .exec();
+        eprintln!("error: failed to start Crab FUSE mount binary: {error}");
+        std::process::ExitCode::from(1)
     }
 
     #[cfg(not(any(target_os = "macos", target_os = "linux")))]
@@ -535,10 +528,11 @@ pub struct NewMountOpts {
 /// builds the pipeline config, and executes the mount. Handles both
 /// local and remote sources.
 #[cfg(any(feature = "fuse", feature = "nfs"))]
-pub async fn run_mount_with_new_cli(opts: NewMountOpts) -> Result<()> {
+pub async fn run_mount_with_new_cli(mut opts: NewMountOpts) -> Result<()> {
     use crate::vfs::pipeline::MountPipelineBuilder;
     use crate::vfs::source::MountSource;
 
+    opts.repo = MountSource::canonical_input(&opts.repo)?;
     let initial_backend = resolve_mount_backend(opts.backend)?;
 
     // Resolve and validate the mountpoint.
@@ -578,7 +572,7 @@ pub async fn run_mount_with_new_cli(opts: NewMountOpts) -> Result<()> {
 
     #[cfg(feature = "nfs")]
     if !opts.foreground && backend == ResolvedMountBackend::Nfs {
-        return spawn_nfs_background(&opts, &mountpoint).await;
+        return spawn_nfs_background(opts, mountpoint).await;
     }
 
     // Parse the source.
@@ -632,8 +626,6 @@ pub async fn run_mount_with_new_cli(opts: NewMountOpts) -> Result<()> {
         builder = builder.with_no_refresh(true);
     }
 
-    #[cfg(feature = "fuse")]
-    let rt = tokio::runtime::Handle::current();
     let output = builder.execute()?;
 
     info!(
@@ -642,7 +634,7 @@ pub async fn run_mount_with_new_cli(opts: NewMountOpts) -> Result<()> {
         "mount pipeline ready"
     );
 
-    let hydration = std::sync::Arc::clone(&output.hydration);
+    let engine = std::sync::Arc::clone(&output.engine);
     let result = async {
         match backend {
             ResolvedMountBackend::Nfs => {
@@ -672,13 +664,30 @@ pub async fn run_mount_with_new_cli(opts: NewMountOpts) -> Result<()> {
                         output,
                         config: pipeline_config.clone(),
                     };
+                    let registry_path = crate::vfs::mounts_registry::registry_path()?;
                     let mounted =
                         nfs_mount::mount(&config, resolver, engine, Some(runtime)).await?;
-
-                    println!("Mounted via NFS at {}", mountpoint.display());
-                    println!("Press Ctrl+C to unmount.");
-
-                    nfs_mount::run_until_cancelled(mounted, opts.cancel).await?;
+                    let endpoint = mounted.control_endpoint().map(str::to_owned);
+                    let registration =
+                        register_nfs_mount(&registry_path, &opts, &mountpoint, endpoint);
+                    if registration.is_ok() {
+                        println!("Mounted via NFS at {}", mountpoint.display());
+                        println!("Press Ctrl+C to unmount.");
+                    } else {
+                        // Registry admission is part of startup. Drain the actual
+                        // session on failure instead of abandoning a mounted server.
+                        opts.cancel.cancel();
+                    }
+                    let result = nfs_mount::run_until_cancelled(mounted, opts.cancel).await;
+                    if let Ok(owner) = &registration
+                        && !nfs_mount::is_mounted(&mountpoint)?
+                    {
+                        // The serving process has drained; cache admission remains
+                        // held by this CLI through owner-conditional registry cleanup.
+                        crate::vfs::mounts_registry::remove_owned_entry(&registry_path, owner)?;
+                    }
+                    result?;
+                    registration?;
                     println!("Unmounted.");
                 }
                 #[cfg(not(feature = "nfs"))]
@@ -692,33 +701,15 @@ pub async fn run_mount_with_new_cli(opts: NewMountOpts) -> Result<()> {
             ResolvedMountBackend::Fuse => {
                 #[cfg(feature = "fuse")]
                 {
-                    use crate::vfs::mount;
-
-                    let config = mount::MountConfig {
-                        mountpoint: mountpoint.clone(),
-                        git_dir: pipeline_config.git_dir.display().to_string(),
-                        write_pid: !opts.foreground,
-                        crab_dir: pipeline_config.cache_dir.clone(),
-                        read_only: opts.read_only,
-                    };
-                    if !opts.foreground {
-                        warn!("daemon mode not supported on this platform, running in foreground");
-                    }
-                    mount::install_signal_handler(opts.cancel.clone(), &rt);
-                    let mounted =
-                        mount::mount(&config, output.resolver, output.engine, rt.clone())?;
-
-                    println!("Mounted via FUSE at {}", mountpoint.display());
-                    println!("Press Ctrl+C to unmount.");
-
-                    mount::run_until_cancelled(
-                        mounted.session,
+                    run_foreground_fuse(
                         &mountpoint,
+                        pipeline_config,
+                        output,
+                        opts.no_refresh,
+                        opts.name.as_deref(),
                         opts.cancel,
-                        &pipeline_config.cache_dir,
-                        rt,
-                    )?;
-                    println!("Unmounted.");
+                    )
+                    .await?;
                 }
                 #[cfg(not(feature = "fuse"))]
                 {
@@ -733,7 +724,7 @@ pub async fn run_mount_with_new_cli(opts: NewMountOpts) -> Result<()> {
         Ok(())
     }
     .await;
-    hydration.shutdown().await;
+    engine.shutdown_background().await;
     result
 }
 
@@ -1553,97 +1544,200 @@ fn indent_multiline_detail(detail: &str) -> String {
 }
 
 #[cfg(feature = "nfs")]
-async fn spawn_nfs_background(opts: &NewMountOpts, mountpoint: &Path) -> Result<()> {
-    let helper = resolve_nfs_background_helper(opts.backend)?;
-    let log_path = nfs_background_log_path(mountpoint)?;
-    let log = std::fs::OpenOptions::new()
-        .create(true)
-        .write(true)
-        .truncate(true)
-        .open(&log_path)
-        .map_err(CrabError::Io)?;
-    let stderr_log = log.try_clone().map_err(CrabError::Io)?;
-    let mut command = std::process::Command::new(helper);
-    let control_endpoint = crate::vfs::nfs_control::fresh_endpoint_for_mountpoint(mountpoint)?;
-    if let Some(endpoint) = control_endpoint.as_deref() {
-        command.env(crate::vfs::nfs_control::CONTROL_ENDPOINT_ENV, endpoint);
-    }
-    command
-        .arg("mount")
-        .arg("--backend")
-        .arg("nfs")
-        .arg("--foreground")
-        .arg("--repo")
-        .arg(&opts.repo)
-        .arg("--mountpoint")
-        .arg(mountpoint);
-    if let Some(git_ref) = &opts.git_ref {
-        command.arg("--ref").arg(git_ref);
-    }
-    if opts.read_only {
-        command.arg("--read-only");
-    }
-    if opts.no_refresh {
-        command.arg("--no-refresh");
-    }
-    if opts.allow_nested {
-        command.arg("--allow-nested");
-    }
-    if let Some(name) = &opts.name {
-        command.arg("--name").arg(name);
-    }
-    command
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::from(log))
-        .stderr(std::process::Stdio::from(stderr_log));
-    let mut child = command.spawn().map_err(CrabError::Io)?;
-    let pid = child.id();
-    let started_at = std::time::Instant::now();
-    while started_at.elapsed() < NFS_BACKGROUND_STARTUP_TIMEOUT {
-        if crate::vfs::nfs_mount::is_mounted(mountpoint)
-            && nfs_background_control_ready(control_endpoint.as_deref()).await
+async fn spawn_nfs_background(opts: NewMountOpts, mountpoint: PathBuf) -> Result<()> {
+    // The owned launch task retains its child through admission or cleanup even
+    // if the requesting caller stops waiting during startup.
+    let task = tokio::spawn(async move {
+        if opts.cancel.is_cancelled() {
+            return Err(CrabError::Cancelled);
+        }
+        let helper = resolve_nfs_background_helper(opts.backend)?;
+        let registry_path = crate::vfs::mounts_registry::registry_path()?;
+        let log_path = nfs_background_log_path(&mountpoint)?;
+        let log = std::fs::OpenOptions::new()
+            .create(true)
+            .write(true)
+            .truncate(true)
+            .open(&log_path)
+            .map_err(CrabError::Io)?;
+        let stderr_log = log.try_clone().map_err(CrabError::Io)?;
+        let mut command = std::process::Command::new(helper);
+        let control_endpoint = crate::vfs::nfs_control::fresh_endpoint_for_mountpoint(&mountpoint)?;
+        if let Some(endpoint) = control_endpoint.as_deref() {
+            command.env(crate::vfs::nfs_control::CONTROL_ENDPOINT_ENV, endpoint);
+        }
+        command
+            .arg("mount")
+            .arg("--backend")
+            .arg("nfs")
+            .arg("--foreground")
+            .arg("--repo")
+            .arg(&opts.repo)
+            .arg("--mountpoint")
+            .arg(&mountpoint);
+        if let Some(git_ref) = &opts.git_ref {
+            command.arg("--ref").arg(git_ref);
+        }
+        if opts.read_only {
+            command.arg("--read-only");
+        }
+        if opts.no_refresh {
+            command.arg("--no-refresh");
+        }
+        if opts.allow_nested {
+            command.arg("--allow-nested");
+        }
+        if let Some(name) = &opts.name {
+            command.arg("--name").arg(name);
+        }
+        command
+            .stdin(std::process::Stdio::null())
+            .stdout(std::process::Stdio::from(log))
+            .stderr(std::process::Stdio::from(stderr_log));
+        #[cfg(unix)]
         {
-            if let Err(error) = register_nfs_background_mount(
-                opts,
-                mountpoint,
-                pid,
-                &log_path,
-                control_endpoint.clone(),
-            ) {
-                warn!(error = %error, "failed to register NFS mount");
+            use std::os::unix::process::CommandExt;
+            // The launcher forwards one shutdown signal. Sharing its terminal
+            // group would turn Ctrl-C plus forwarding into a forced second exit.
+            command.process_group(0);
+        }
+        let mut child = command.spawn().map_err(CrabError::Io)?;
+        let pid = child.id();
+        let started_at = std::time::Instant::now();
+        // A late readiness reply must not admit a helper after cancellation.
+        let startup = tokio::select! {
+            biased;
+            () = opts.cancel.cancelled() => Err(CrabError::Cancelled),
+            result = async {
+                while started_at.elapsed() < NFS_BACKGROUND_STARTUP_TIMEOUT {
+                    if crate::vfs::nfs_mount::is_mounted(&mountpoint)?
+                        && nfs_background_control_ready(control_endpoint.as_deref()).await
+                        && attach_nfs_helper_log(
+                            &registry_path,
+                            &mountpoint,
+                            pid,
+                            control_endpoint.as_deref(),
+                            &log_path,
+                        )?
+                    {
+                        println!(
+                            "Mounted via NFS at {} (pid {}). Logs: {}",
+                            mountpoint.display(),
+                            pid,
+                            log_path.display()
+                        );
+                        return Ok(());
+                    }
+                    if let Some(status) = child.try_wait().map_err(CrabError::Io)? {
+                        let preflight_hint = nfs_background_startup_failure_hint(&mountpoint);
+                        return Err(CrabError::Internal(format!(
+                            "NFS mount helper exited before mounting {}: {status}. See {}{}",
+                            mountpoint.display(),
+                            log_path.display(),
+                            preflight_hint
+                        )));
+                    }
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                }
+                let preflight_hint = nfs_background_startup_failure_hint(&mountpoint);
+                Err(CrabError::Internal(format!(
+                    "timed out after {}s waiting for NFS mount helper to mount {}. See {}{}",
+                    NFS_BACKGROUND_STARTUP_TIMEOUT.as_secs(),
+                    mountpoint.display(),
+                    log_path.display(),
+                    preflight_hint
+                )))
+            } => result,
+        };
+        if startup.is_err() {
+            stop_failed_nfs_helper(&mut child, control_endpoint.as_deref()).await?;
+        }
+        startup
+    });
+    task.await.map_err(crate::vfs::error::VfsError::ReadTask)?
+}
+
+#[cfg(feature = "nfs")]
+fn attach_nfs_helper_log(
+    registry_path: &Path,
+    mountpoint: &Path,
+    pid: u32,
+    endpoint: Option<&str>,
+    log_path: &Path,
+) -> Result<bool> {
+    use crate::vfs::mounts_registry;
+
+    let mountpoint = mountpoint.display().to_string();
+    let Some(owner) = mounts_registry::list_entries(registry_path)?
+        .into_iter()
+        .find(|entry| {
+            entry.mountpoint == mountpoint
+                && entry.pid == pid
+                && entry.backend.as_deref() == Some("nfs")
+                && entry.control_endpoint.as_deref() == endpoint
+        })
+    else {
+        return Ok(false);
+    };
+    if !mounts_registry::set_owned_log_path(registry_path, &owner, log_path)? {
+        return Err(CrabError::Internal(
+            "NFS mount owner changed while attaching helper logs".into(),
+        ));
+    }
+    Ok(true)
+}
+
+#[cfg(feature = "nfs")]
+async fn stop_failed_nfs_helper(
+    child: &mut std::process::Child,
+    endpoint: Option<&str>,
+) -> Result<()> {
+    if child.try_wait()?.is_some() {
+        return Ok(());
+    }
+    let pid = child.id();
+    #[cfg(unix)]
+    {
+        // This unreaped child retains its PID. SIGINT lets the serving owner
+        // detach its kernel client and drain before releasing cache admission.
+        // SAFETY: kill targets only the live child retained by this launch task.
+        if unsafe { libc::kill(pid as libc::pid_t, libc::SIGINT) } != 0 {
+            let error = std::io::Error::last_os_error();
+            if child.try_wait()?.is_some() {
+                return Ok(());
             }
-            println!(
-                "Mounted via NFS at {} (pid {}). Logs: {}",
-                mountpoint.display(),
-                pid,
-                log_path.display()
-            );
+            return Err(error.into());
+        }
+        let _ = endpoint;
+    }
+    #[cfg(not(unix))]
+    let mut shutdown_requested = false;
+    let mut warning_deadline = Some(tokio::time::Instant::now() + Duration::from_secs(10));
+    loop {
+        if child.try_wait()?.is_some() {
             return Ok(());
         }
-        if let Some(status) = child.try_wait().map_err(CrabError::Io)? {
-            let preflight_hint = nfs_background_startup_failure_hint(mountpoint);
-            return Err(CrabError::Internal(format!(
-                "NFS mount helper exited before mounting {}: {status}. See {}{}",
-                mountpoint.display(),
-                log_path.display(),
-                preflight_hint
-            )));
+        #[cfg(not(unix))]
+        if !shutdown_requested
+            && let Some(endpoint) = endpoint
+            && let Ok(status) = crate::vfs::nfs_control::status(endpoint).await
+            && status.pid == pid
+        {
+            shutdown_requested = crate::vfs::nfs_control::shutdown(endpoint).await.is_ok();
         }
-        tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+        if let Some(deadline) = warning_deadline
+            && tokio::time::Instant::now() >= deadline
+        {
+            // A live child can still own a busy native mount or admitted work.
+            // Elapsed time cannot authorize termination or cache release.
+            warn!(
+                pid,
+                "waiting for NFS helper to detach and drain after failed startup"
+            );
+            warning_deadline = None;
+        }
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
-
-    if let Err(error) = child.kill() {
-        warn!(pid, error = %error, "failed to terminate timed-out NFS mount helper");
-    }
-    let _ = child.wait();
-    let preflight_hint = nfs_background_startup_failure_hint(mountpoint);
-    Err(CrabError::Internal(format!(
-        "timed out after {}s waiting for NFS mount helper to mount {}. See {}{}",
-        NFS_BACKGROUND_STARTUP_TIMEOUT.as_secs(),
-        mountpoint.display(),
-        log_path.display(),
-        preflight_hint
-    )))
 }
 
 #[cfg(feature = "nfs")]
@@ -1748,17 +1842,17 @@ fn nfs_background_preflight_failure_hint(
 }
 
 #[cfg(feature = "nfs")]
-fn register_nfs_background_mount(
+fn register_nfs_mount(
+    registry_path: &Path,
     opts: &NewMountOpts,
     mountpoint: &Path,
-    pid: u32,
-    log_path: &Path,
     control_endpoint: Option<String>,
-) -> Result<()> {
+) -> Result<crate::vfs::mounts_registry::MountEntry> {
     use crate::vfs::mounts_registry::{self, MountEntry};
 
-    let registry_path = mounts_registry::registry_path()?;
-    let source = normalized_mount_source_for_registry(&opts.repo)?;
+    // The source was normalized before helper startup. Recording a live mount
+    // must not fail merely because its source path disappeared in the meantime.
+    let source = opts.repo.clone();
     let git_ref = opts.git_ref.as_deref().map_or_else(
         || "HEAD".to_owned(),
         |git_ref| {
@@ -1777,26 +1871,16 @@ fn register_nfs_background_mount(
         mountpoint: mountpoint.display().to_string(),
         source,
         git_ref,
-        pid,
+        pid: std::process::id(),
         start_time: mounts_registry::now_iso8601()?,
         read_only: opts.read_only,
         name,
         backend: Some("nfs".to_owned()),
-        log_path: Some(log_path.display().to_string()),
+        log_path: None,
         control_endpoint,
     };
-    Ok(mounts_registry::add_entry(&registry_path, entry)?)
-}
-
-#[cfg(feature = "nfs")]
-fn normalized_mount_source_for_registry(source: &str) -> Result<String> {
-    match crate::vfs::source::MountSource::parse(source)? {
-        crate::vfs::source::MountSource::Remote { url } => Ok(url),
-        crate::vfs::source::MountSource::Local { path } => {
-            let canonical = std::fs::canonicalize(path).map_err(CrabError::Io)?;
-            Ok(canonical.display().to_string())
-        }
-    }
+    mounts_registry::add_entry(registry_path, entry.clone())?;
+    Ok(entry)
 }
 
 #[cfg(feature = "nfs")]
@@ -1933,6 +2017,7 @@ async fn build_local_pipeline_config(
     let config = PipelineConfig {
         source: abs_path.display().to_string(),
         git_dir,
+        git_metadata: crate::vfs::pipeline::GitMetadataOwnership::Borrowed,
         ref_name,
         read_only,
         cache_dir: cache_dir.clone(),
@@ -1942,7 +2027,7 @@ async fn build_local_pipeline_config(
     // Attempt to read StoreLayout from the repo's committed crab.toml
     // for pointer-file hydration from object storage.
     let crab_dir = repo_path.join(".crab");
-    let read_context = resolve_mount_read_context_from_local_repo(&crab_dir).await;
+    let read_context = resolve_mount_read_context_from_local_repo(&crab_dir).await?;
 
     if read_context.is_none() {
         warn!(
@@ -1971,8 +2056,9 @@ async fn build_remote_pipeline_config(
     Option<crate::vfs::MountReadContext>,
     crate::vfs::clone_cache::MountCacheLock,
 )> {
-    use crate::vfs::clone_cache::{MountCacheLock, cache_dir_for_url, ensure_blobless_clone};
+    use crate::vfs::clone_cache::{MountCacheLock, cache_dir_for_url};
     use crate::vfs::pipeline::PipelineConfig;
+    use crate::vfs::repository::ensure_blobless_clone;
     use crate::vfs::source::MountSource;
 
     // Validate the remote URL format.
@@ -1983,10 +2069,11 @@ async fn build_remote_pipeline_config(
     let cache_lock = MountCacheLock::acquire(&cache_dir)?;
 
     // Perform blobless clone (or update existing).
-    let git_dir = ensure_blobless_clone(url, ref_name, &cache_dir)?;
+    let git_dir = crate::vfs::clone_cache::git_dir(&cache_dir)?;
+    let git_dir = ensure_blobless_clone(url, ref_name, &git_dir)?;
 
     info!(
-        url = %crate::vfs::refresh::redact_url(url),
+        url = %crate::vfs::repository::redact_url(url),
         cache_dir = %cache_dir.display(),
         "remote clone ready"
     );
@@ -2002,6 +2089,7 @@ async fn build_remote_pipeline_config(
     let config = PipelineConfig {
         source: url.to_owned(),
         git_dir,
+        git_metadata: crate::vfs::pipeline::GitMetadataOwnership::Mount,
         ref_name: ref_name_owned,
         read_only,
         cache_dir: cache_dir.clone(),
@@ -2009,12 +2097,7 @@ async fn build_remote_pipeline_config(
     };
 
     // Attempt to build a StoreLayout for xorb fetching.
-    let read_context = resolve_mount_read_context_from_remote_url(url)
-        .await
-        .ok_or_else(|| CrabError::Configuration {
-            key: "object-store read layout unavailable for remote mount".into(),
-            origin: "crab mount".into(),
-        })?;
+    let read_context = resolve_mount_read_context_from_remote_url(url).await?;
 
     Ok((config, Some(read_context), cache_lock))
 }
@@ -2027,7 +2110,7 @@ async fn build_remote_pipeline_config(
 #[cfg(any(feature = "fuse", feature = "nfs"))]
 async fn resolve_mount_read_context_from_local_repo(
     crab_dir: &Path,
-) -> Option<crate::vfs::MountReadContext> {
+) -> Result<Option<crate::vfs::MountReadContext>> {
     // Reuse the existing helper that reads from crab.toml.
     resolve_mount_read_context_from_config(crab_dir).await
 }
@@ -2035,16 +2118,16 @@ async fn resolve_mount_read_context_from_local_repo(
 /// Attempt to construct a `StoreLayout` from a remote URL.
 ///
 /// Parses the URL, authenticates, and builds the object store.
-/// Returns `None` if any step fails.
+/// Propagates authentication, capture and retention failures before mounting.
 #[cfg(any(feature = "fuse", feature = "nfs"))]
 async fn resolve_mount_read_context_from_remote_url(
     url: &str,
-) -> Option<crate::vfs::MountReadContext> {
-    let config = crate::core::config::Config::resolve_local().unwrap_or_default();
+) -> Result<crate::vfs::MountReadContext> {
+    let config = crate::core::config::Config::resolve_local()?;
     let cancel = tokio_util::sync::CancellationToken::new();
     let cache_dir = crab_auth::token_cache::expand_token_cache_path(&config.auth.token_cache_path);
     let resolver = crab_auth_store::ManagedRepositoryResolver::new(cache_dir);
-    let locator = resolver.classify(url).ok()?;
+    let locator = resolver.classify(url)?;
     let layout = match locator {
         crab_git::RepositoryLocator::Direct(repository) => {
             let parsed = crate::git::url::CrabUrl {
@@ -2060,49 +2143,8 @@ async fn resolve_mount_read_context_from_remote_url(
                 crab_auth::TransferOperation::Hydrate,
                 &cancel,
             )
-            .await
-            .ok()?;
+            .await?;
             crate::storage::StoreLayout::new(resolved.store, resolved.repository_prefix)
-        }
-    };
-    let read_layout = crab_storage::StoreLayout::with_global_prefix(
-        layout.store().as_storage().clone(),
-        layout.repo_prefix().to_owned(),
-        layout.global_prefix().to_owned(),
-    );
-    let pinned_lookup = match crab_metadata::capsule_protocol::load_root(&read_layout).await {
-        Ok(root) => {
-            let maximum = if config.uploadpack_max_egress_bytes == 0 {
-                u64::MAX
-            } else {
-                config.uploadpack_max_egress_bytes
-            };
-            // The mount needs captured catalog roots, not complete checkpoint bodies.
-            // Keep pages cold until hydration requests their dependency closure.
-            let view = crab_read::capsule_protocol::open_git_view_from_root(
-                &read_layout,
-                root,
-                crab_read::capsule_protocol::CapsuleReadLimits {
-                    max_capsule_bytes: maximum,
-                    max_frontier_bytes: maximum,
-                },
-            )
-            .await
-            .ok()?;
-            let catalog = view.pointer_catalog_lookup(&read_layout, maximum).ok()?;
-            Some(
-                crab_metadata::file_index_lookup::SharedFileIndexLookup::for_pointer_catalog(
-                    read_layout.clone(),
-                    catalog,
-                ),
-            )
-        }
-        Err(crab_metadata::error::MetadataError::Storage {
-            source: crab_storage::StorageError::NotFound { .. },
-        }) => None,
-        Err(error) => {
-            warn!(error = %error, "v2 mount read view could not be authenticated");
-            return None;
         }
     };
     let restore_availability = crate::cmd::hydrate_restore::build_restore_availability(
@@ -2111,9 +2153,8 @@ async fn resolve_mount_read_context_from_remote_url(
         layout.repo_prefix(),
         config.hydrate.auto_restore,
     )
-    .await
-    .ok()?;
-    build_mount_read_context(&config, layout, pinned_lookup, restore_availability)
+    .await?;
+    build_mount_read_context(&config, layout, restore_availability).await
 }
 
 #[cfg(any(feature = "fuse", feature = "nfs"))]
@@ -2121,7 +2162,7 @@ async fn select_mount_read_layout(
     config: &crate::core::config::Config,
     parsed: &crate::git::url::CrabUrl,
     cancel: &tokio_util::sync::CancellationToken,
-) -> Option<crate::storage::StoreLayout> {
+) -> Result<crate::storage::StoreLayout> {
     select_mount_read_layout_with_selector(
         config,
         parsed,
@@ -2139,7 +2180,7 @@ async fn select_mount_read_layout_with_selector<F, Fut>(
     parsed: &crate::git::url::CrabUrl,
     cancel: &tokio_util::sync::CancellationToken,
     select_read: F,
-) -> Option<crate::storage::StoreLayout>
+) -> Result<crate::storage::StoreLayout>
 where
     F: FnOnce(
         crate::core::config::Config,
@@ -2148,43 +2189,160 @@ where
     ) -> Fut,
     Fut: std::future::Future<Output = Result<crate::replication::ReadStoreSelection>>,
 {
-    let selection = select_read(config.clone(), parsed.clone(), cancel.clone())
-        .await
-        .ok()?;
+    let selection = select_read(config.clone(), parsed.clone(), cancel.clone()).await?;
     if let crate::replication::ReadSource::Replica { name } = &selection.source {
         tracing::debug!(replica = %name, "selected read replica for mount");
     }
-    Some(selection.router)
+    Ok(selection.router)
 }
 
 #[cfg(any(feature = "fuse", feature = "nfs"))]
-fn build_mount_read_context(
+async fn build_mount_read_context(
     config: &crate::core::config::Config,
     layout: crate::storage::StoreLayout,
-    pinned_lookup: Option<crab_metadata::file_index_lookup::SharedFileIndexLookup>,
     restore_availability: Option<std::sync::Arc<dyn crab_read::XorbAvailability>>,
-) -> Option<crate::vfs::MountReadContext> {
+) -> Result<crate::vfs::MountReadContext> {
     let origin = layout.store().as_storage().clone();
     let store_layout = crab_storage::StoreLayout::with_global_prefix(
         origin.clone(),
         layout.repo_prefix().to_owned(),
         layout.global_prefix().to_owned(),
     );
-    let caching_store = crab_cache_store::CachingStore::new(origin, &config.cache).ok()?;
-    let hydrator = crate::read::build_shared_hydrator(caching_store, layout, config).ok()?;
-    let hydrator = match pinned_lookup {
-        Some(lookup) => hydrator.with_file_index_lookup(lookup),
-        None => hydrator,
-    };
+    let caching_store = crab_cache_store::CachingStore::new(origin, &config.cache)?;
+    let hydrator = crate::read::build_shared_hydrator(caching_store, layout, config)?;
     let hydrator = match restore_availability {
         Some(availability) => hydrator.with_availability(availability),
         None => hydrator,
     };
 
-    Some(crate::vfs::MountReadContext {
+    let catalog = std::sync::Arc::new(CrabMountCatalogCapture {
+        retention: crab_coordination::read_retention_runtime::ReadRetentionSession::default(),
+        base: hydrator,
+        layout: store_layout.clone(),
+        maximum: if config.uploadpack_max_egress_bytes == 0 {
+            u64::MAX
+        } else {
+            config.uploadpack_max_egress_bytes
+        },
+    });
+    let hydrator = match crate::vfs::MountCatalogCapture::capture(catalog.as_ref()).await {
+        Ok(hydrator) => hydrator,
+        Err(error) => {
+            // Initial preparation has no engine to drain a registered claim.
+            // Keep its owner alive until cleanup completes, preserving the cause.
+            if let Err(cleanup) = crate::vfs::MountCatalogCapture::shutdown(catalog.as_ref()).await
+            {
+                tracing::warn!(%cleanup, "failed to release rejected mount capture");
+            }
+            return Err(error.into());
+        }
+    };
+    Ok(crate::vfs::MountReadContext {
         store_layout,
-        hydrator: std::sync::Arc::new(hydrator),
+        hydrator,
+        catalog,
     })
+}
+
+#[cfg(any(feature = "fuse", feature = "nfs"))]
+struct CrabMountCatalogCapture {
+    retention: crab_coordination::read_retention_runtime::ReadRetentionSession,
+    base: crab_read::ShardHydrator,
+    layout: crab_storage::StoreLayout<crab_storage::Store>,
+    maximum: u64,
+}
+
+#[cfg(any(feature = "fuse", feature = "nfs"))]
+#[async_trait::async_trait]
+impl crate::vfs::MountCatalogCapture for CrabMountCatalogCapture {
+    async fn capture(&self) -> crate::vfs::Result<std::sync::Arc<crab_read::ShardHydrator>> {
+        let admission = self
+            .retention
+            .capture()
+            .map_err(crab_read::ReadError::from)?;
+        let store = self.layout.store().inner();
+        let repository = crab_coordination::GcReadBarrier::observe(
+            std::sync::Arc::clone(store),
+            self.layout.repo_prefix(),
+        )
+        .await
+        .map_err(crab_read::ReadError::from)?;
+        let global = crab_coordination::GcReadBarrier::observe(
+            std::sync::Arc::clone(store),
+            self.layout.global_prefix(),
+        )
+        .await
+        .map_err(crab_read::ReadError::from)?;
+        let root = crab_metadata::capsule_protocol::load_root(&self.layout)
+            .await
+            .map_err(crab_read::ReadError::from)?;
+        // Capture catalog roots once per transition. Cloning the base shares
+        // cache, download and buffer admission across old and new read views.
+        let view = crab_read::capsule_protocol::open_git_view_from_root(
+            &self.layout,
+            root,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: self.maximum,
+                max_frontier_bytes: self.maximum,
+            },
+        )
+        .await?;
+        let catalog = view.pointer_catalog_lookup(&self.layout, self.maximum)?;
+        let owner = blake3::hash(uuid::Uuid::now_v7().as_bytes())
+            .to_hex()
+            .to_string();
+        let (hash, size) = crab_metadata::capsule_protocol::store_read_capture(
+            &self.layout,
+            &owner,
+            view.root(),
+            view.capsule_run_pointers(),
+            &catalog,
+        )
+        .await
+        .map_err(crab_read::ReadError::from)?;
+        let root = crab_coordination::read_retention::RetainedReadRoot::new(hash, size)
+            .map_err(crab_read::ReadError::from)?;
+        let lease = crab_coordination::read_retention::ReadRetentionLease::create(
+            std::sync::Arc::clone(store),
+            self.layout.read_retention_claim_path(&owner),
+            root,
+        )
+        .await
+        .map_err(crab_read::ReadError::from)?;
+        let retention = admission
+            .retain(lease)
+            .map_err(crab_read::ReadError::from)?;
+        // A sweep crossing root capture may have omitted this new claim. Do not
+        // admit that view; dropping its owner drains and releases the claim.
+        repository
+            .validate()
+            .await
+            .map_err(crab_read::ReadError::from)?;
+        global
+            .validate()
+            .await
+            .map_err(crab_read::ReadError::from)?;
+        // Barrier reads can outlast renewal. Do not expose an already lost view.
+        let _ready = retention.pin().map_err(crab_read::ReadError::from)?;
+        let lookup = crab_metadata::file_index_lookup::SharedFileIndexLookup::for_pointer_catalog(
+            self.layout.clone(),
+            catalog,
+        );
+        Ok(std::sync::Arc::new(
+            self.base
+                .clone()
+                .with_file_index_lookup(lookup)
+                .with_read_retention(retention),
+        ))
+    }
+
+    async fn shutdown(&self) -> crate::vfs::Result<()> {
+        self.retention
+            .shutdown()
+            .await
+            .map_err(crab_read::ReadError::from)?;
+        Ok(())
+    }
 }
 
 #[cfg(any(feature = "fuse", feature = "nfs"))]
@@ -2198,7 +2356,19 @@ impl crate::vfs::MountReadResolver for CrabMountReadResolver {
         &self,
         remote: &str,
     ) -> crate::vfs::Result<Option<crate::vfs::MountReadContext>> {
-        Ok(resolve_mount_read_context_from_remote_url(remote).await)
+        match crate::vfs::source::MountSource::parse(remote)? {
+            crate::vfs::source::MountSource::Remote { url } => {
+                resolve_mount_read_context_from_remote_url(&url)
+                    .await
+                    .map(Some)
+                    .map_err(|error| std::io::Error::other(error).into())
+            }
+            crate::vfs::source::MountSource::Local { path } => {
+                resolve_mount_read_context_from_local_repo(&path.join(".crab"))
+                    .await
+                    .map_err(|error| std::io::Error::other(error).into())
+            }
+        }
     }
 }
 
@@ -2270,46 +2440,67 @@ async fn run_foreground_mode(
     git_ref: Option<&str>,
     cancel: tokio_util::sync::CancellationToken,
 ) -> Result<()> {
-    use crate::vfs::clone_cache::MountCacheLock;
-    use crate::vfs::mount;
-
-    let rt = tokio::runtime::Handle::current();
-    let _cache_lock = MountCacheLock::acquire(crab_dir)?;
-
-    // Build the mount components.
-    let (resolver, engine) = build_mount_components(crab_dir, git_ref).await?;
-
-    let config = mount::MountConfig {
-        mountpoint: mountpoint.to_path_buf(),
-        git_dir: find_git_dir(crab_dir),
-        write_pid: false,
-        crab_dir: crab_dir.to_path_buf(),
-        read_only: false,
-    };
-
-    // Install signal handler for graceful shutdown.
-    mount::install_signal_handler(cancel.clone(), &rt);
-
-    let result = (|| {
-        let mounted = mount::mount(
-            &config,
-            resolver,
-            std::sync::Arc::clone(&engine),
-            rt.clone(),
-        )?;
-
-        println!("Mounted at {}", mountpoint.display());
-        println!("Press Ctrl+C to unmount.");
-
-        mount::run_until_cancelled(mounted.session, mountpoint, cancel, crab_dir, rt)?;
-
-        println!("Unmounted.");
-        Ok(())
-    })();
-    // Component preparation owns a separate hydration token. Cancelling the
-    // session token alone cannot finish those workers or their cache writes.
+    let _cache_lock = crate::vfs::clone_cache::MountCacheLock::acquire(crab_dir)?;
+    let (config, output) = Box::pin(build_mount_components(crab_dir, git_ref)).await?;
+    let engine = std::sync::Arc::clone(&output.engine);
+    let result = run_foreground_fuse(mountpoint, config, output, false, None, cancel).await;
     engine.shutdown_background().await;
     result
+}
+
+#[cfg(feature = "fuse")]
+async fn run_foreground_fuse(
+    mountpoint: &Path,
+    pipeline: crate::vfs::pipeline::PipelineConfig,
+    output: crate::vfs::pipeline::PipelineOutput,
+    no_refresh: bool,
+    name: Option<&str>,
+    cancel: tokio_util::sync::CancellationToken,
+) -> Result<()> {
+    use crate::vfs::{mount, mounts_registry};
+
+    let registry = mounts_registry::registry_path()?;
+    let mut entry = mounts_registry::MountEntry {
+        mountpoint: mountpoint.display().to_string(),
+        source: pipeline.source.clone(),
+        git_ref: output.head_ref.clone(),
+        pid: std::process::id(),
+        start_time: mounts_registry::now_iso8601()?,
+        read_only: pipeline.read_only,
+        name: name.map_or_else(
+            || mounts_registry::derive_name_from_source(&pipeline.source),
+            str::to_owned,
+        ),
+        backend: Some("fuse".into()),
+        log_path: None,
+        control_endpoint: None,
+    };
+    let config = mount::MountConfig {
+        mountpoint: mountpoint.to_path_buf(),
+        git_dir: pipeline.git_dir.display().to_string(),
+        write_pid: false,
+        crab_dir: pipeline.cache_dir.clone(),
+        read_only: pipeline.read_only,
+    };
+    mount::install_signal_handler(cancel.clone(), &tokio::runtime::Handle::current());
+    let mut registered = false;
+    let result = mount::run_foreground(&config, output, pipeline, no_refresh, cancel, |socket| {
+        entry.control_endpoint = Some(socket.display().to_string());
+        mounts_registry::add_entry(&registry, entry.clone())?;
+        registered = true;
+        println!("Mounted via FUSE at {}", mountpoint.display());
+        println!("Press Ctrl+C to unmount.");
+        Ok(())
+    })
+    .await;
+    if registered {
+        // The live owner has joined accepted controls, detached the kernel and
+        // drained the engine. The caller still holds exclusive cache admission.
+        mounts_registry::remove_owned_entry(&registry, &entry)?;
+    }
+    result?;
+    println!("Unmounted.");
+    Ok(())
 }
 
 /// Run the mount in daemon mode: delegate to the coordinator via IPC.
@@ -2344,7 +2535,7 @@ async fn run_daemon_mode(
     }
 }
 
-/// Build the resolver and engine for a mount.
+/// Prepare the complete runtime and its configuration for a foreground mount.
 ///
 /// Uses the `MountPipelineBuilder` to execute the full 11-step pipeline.
 /// For standalone `crab mount`, the git dir is discovered from the `.crab`
@@ -2355,8 +2546,8 @@ async fn build_mount_components(
     crab_dir: &Path,
     git_ref: Option<&str>,
 ) -> Result<(
-    std::sync::Arc<crate::vfs::resolver::FuseResolver>,
-    std::sync::Arc<crate::vfs::engine::VfsEngine>,
+    crate::vfs::pipeline::PipelineConfig,
+    crate::vfs::pipeline::PipelineOutput,
 )> {
     use tokio_util::sync::CancellationToken;
 
@@ -2397,19 +2588,20 @@ async fn build_mount_components(
     // pointer is first opened, hiding corrupt or unavailable repository state.
     let read_context = require_remote_mount_read_context(
         &source,
-        resolve_mount_read_context_from_config(crab_dir).await,
+        resolve_mount_read_context_from_config(crab_dir).await?,
     )?;
 
     let config = PipelineConfig {
         source,
         git_dir: git_dir.clone(),
+        git_metadata: crate::vfs::pipeline::GitMetadataOwnership::Borrowed,
         ref_name,
         read_only: false,
         cache_dir: crab_dir.to_path_buf(),
         cancel_token: cancel,
     };
 
-    let mut builder = MountPipelineBuilder::new(config);
+    let mut builder = MountPipelineBuilder::new(config.clone());
     if let Some(context) = read_context {
         builder = builder.with_read_context(context);
     }
@@ -2423,7 +2615,7 @@ async fn build_mount_components(
         "mount pipeline ready"
     );
 
-    Ok((output.resolver, output.engine))
+    Ok((config, output))
 }
 
 /// Read the remote URL from the committed `crab.toml` file.
@@ -2440,17 +2632,24 @@ fn read_remote_url_from_crab_dir(crab_dir: &Path) -> Result<String> {
 /// Attempt to construct a `StoreLayout` from the crab remote config.
 ///
 /// Reads the remote URL from `crab.toml`, parses it as a Crab URL,
-/// builds an authenticated object store, and returns the layout. Returns
-/// `None` if any step fails (e.g. no remote configured, auth unavailable).
-/// Callers must reject `None` for `crab://` sources; local mounts may still
-/// use the Git object database fallback.
+/// builds an authenticated object store, and returns the retained read context.
+/// Only an absent project configuration selects ordinary local Git behavior.
 #[cfg(any(feature = "fuse", feature = "nfs"))]
 async fn resolve_mount_read_context_from_config(
     crab_dir: &Path,
-) -> Option<crate::vfs::MountReadContext> {
-    let url_str = read_remote_url_from_crab_dir(crab_dir).ok()?;
+) -> Result<Option<crate::vfs::MountReadContext>> {
+    let repo_root = crab_dir.parent().ok_or_else(|| CrabError::Configuration {
+        key: "remote.url".into(),
+        origin: "cannot locate repository root from .crab directory".into(),
+    })?;
+    if crate::core::project_config::ProjectConfig::load_for_repo(repo_root)?.is_none() {
+        return Ok(None);
+    }
+    let url_str = read_remote_url_from_crab_dir(crab_dir)?;
 
-    resolve_mount_read_context_from_remote_url(&url_str).await
+    resolve_mount_read_context_from_remote_url(&url_str)
+        .await
+        .map(Some)
 }
 
 #[cfg(feature = "fuse")]
@@ -2535,62 +2734,65 @@ pub fn run_unmount(path: &Path) -> Result<()> {
 
 #[cfg(any(feature = "fuse", feature = "nfs"))]
 pub async fn try_mount_control_unmount(path: &Path) -> Result<bool> {
+    #[cfg(feature = "nfs")]
+    if let Some(context) = crate::vfs::mount_control::nfs_context(path)?
+        && !is_pid_alive(context.entry.pid)
+    {
+        // A confirmed dead helper has no live exchange to preserve. Classify
+        // stale cleanup before sending; an uncertain live shutdown must fail.
+        return Ok(false);
+    }
     let Some(shutdown) = crate::vfs::mount_control::shutdown(path).await? else {
         return Ok(false);
     };
 
-    match shutdown.backend {
-        crate::vfs::mount_control::MountControlBackend::Nfs => {
-            #[cfg(feature = "nfs")]
-            {
-                let Some(registry_path) = shutdown.registry_path else {
-                    return Err(CrabError::Internal(
-                        "NFS mount control shutdown missing registry path".into(),
-                    ));
-                };
-                let Some(pid) = shutdown.pid else {
-                    return Err(CrabError::Internal(
-                        "NFS mount control shutdown missing helper PID".into(),
-                    ));
-                };
-                let deadline = tokio::time::Instant::now() + std::time::Duration::from_secs(10);
-                while tokio::time::Instant::now() < deadline {
-                    let mounted = crate::vfs::nfs_mount::is_mounted(&shutdown.mountpoint);
-                    if nfs_shutdown_complete(is_pid_alive(pid), mounted, &shutdown.mountpoint)? {
-                        crate::vfs::mounts_registry::remove_entry(
-                            &registry_path,
-                            &shutdown.mountpoint_str,
-                        )?;
-                        clean_pid_file(&find_crab_dir(&shutdown.mountpoint));
-                        println!("Unmounted {}.", shutdown.mountpoint.display());
-                        return Ok(true);
-                    }
-                    tokio::time::sleep(std::time::Duration::from_millis(100)).await;
+    match shutdown {
+        #[cfg(feature = "nfs")]
+        crate::vfs::mount_control::MountControlShutdown::Nfs { context, cache_dir } => {
+            let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+            while tokio::time::Instant::now() < deadline {
+                let mounted = crate::vfs::nfs_mount::is_mounted(&context.mountpoint)?;
+                if let Some(_cache_guard) = nfs_shutdown_cache_guard(
+                    is_pid_alive(context.entry.pid),
+                    mounted,
+                    &context.mountpoint,
+                    &cache_dir,
+                )? {
+                    // Retain cache ownership through registry cleanup so a new
+                    // mount cannot acquire this cache before cleanup finishes.
+                    crate::vfs::mounts_registry::remove_owned_entry(
+                        &context.registry_path,
+                        &context.entry,
+                    )?;
+                    println!("Unmounted {}.", context.mountpoint.display());
+                    return Ok(true);
                 }
-
-                Err(CrabError::Internal(format!(
-                    "NFS helper accepted shutdown for {} but did not unmount within 10s",
-                    shutdown.mountpoint.display()
-                )))
+                tokio::time::sleep(Duration::from_millis(10)).await;
             }
-            #[cfg(not(feature = "nfs"))]
-            {
-                Err(CrabError::Internal(
-                    "NFS mount control returned without NFS support".into(),
-                ))
-            }
+            Err(CrabError::Internal(format!(
+                "NFS helper accepted shutdown for {} but did not unmount and release its cache within 10s",
+                context.mountpoint.display()
+            )))
         }
-        crate::vfs::mount_control::MountControlBackend::Fuse => {
-            println!("Unmounted {}.", shutdown.mountpoint.display());
+        #[cfg(unix)]
+        crate::vfs::mount_control::MountControlShutdown::Fuse { mountpoint } => {
+            println!("Unmounted {}.", mountpoint.display());
             Ok(true)
         }
     }
 }
 
 #[cfg(feature = "nfs")]
-fn nfs_shutdown_complete(pid_alive: bool, mounted: bool, mountpoint: &Path) -> Result<bool> {
+fn nfs_shutdown_cache_guard(
+    pid_alive: bool,
+    mounted: bool,
+    mountpoint: &Path,
+    cache_dir: &Path,
+) -> Result<Option<crate::vfs::clone_cache::MountCacheLock>> {
     if !mounted {
-        return Ok(true);
+        return Ok(crate::vfs::clone_cache::MountCacheLock::try_acquire(
+            cache_dir,
+        )?);
     }
     if !pid_alive {
         return Err(CrabError::Internal(format!(
@@ -2598,7 +2800,7 @@ fn nfs_shutdown_complete(pid_alive: bool, mounted: bool, mountpoint: &Path) -> R
             mountpoint.display()
         )));
     }
-    Ok(false)
+    Ok(None)
 }
 
 #[cfg(any(feature = "fuse", feature = "nfs"))]
@@ -2704,8 +2906,11 @@ fn unmount_registry_entry(
         println!("Cleaned up stale mount at {}.", entry.mountpoint);
     }
 
-    clean_pid_file(&find_crab_dir(mountpoint));
-    crate::vfs::mounts_registry::remove_entry(registry_path, &entry.mountpoint)?;
+    if crate::vfs::mounts_registry::remove_owned_entry(registry_path, entry)?
+        && entry.backend.as_deref() != Some("nfs")
+    {
+        clean_pid_file(&find_crab_dir(mountpoint));
+    }
     Ok(true)
 }
 
@@ -2729,39 +2934,78 @@ fn unmount_stale_registry_mount(
 #[cfg(any(feature = "fuse", feature = "nfs"))]
 pub async fn run_unmount_all_live_or_persisted() -> Result<()> {
     let registry_path = crate::vfs::mounts_registry::registry_path()?;
-    let entries = crate::vfs::mounts_registry::list_entries(&registry_path)?;
-
+    let entries = crate::vfs::mount_control::control_targets().await?;
     if entries.is_empty() {
         println!("No active mounts.");
         return Ok(());
     }
-
     let mut unmounted = 0u32;
     for entry in &entries {
         let mountpoint = Path::new(&entry.mountpoint);
-        match try_mount_control_unmount(mountpoint).await {
-            Ok(true) => {
-                unmounted += 1;
-                continue;
-            }
-            Ok(false) => {}
-            Err(error) => {
-                warn!(
-                    mountpoint = %entry.mountpoint,
-                    error = %error,
-                    "live mount-control unmount failed, falling back"
-                );
+        if entry.live {
+            let conflicting = crate::vfs::mounts_registry::list_entries(&registry_path)?
+                .into_iter()
+                .any(|saved| {
+                    saved.mountpoint == entry.mountpoint && saved.backend != entry.backend
+                });
+            if conflicting {
+                return Err(CrabError::Configuration {
+                    key: format!("conflicting mount owners at {}", entry.mountpoint),
+                    origin: "crab unmount --all".into(),
+                });
             }
         }
-
-        if unmount_registry_entry(&registry_path, entry)? {
+        if try_mount_control_unmount(mountpoint).await? {
+            unmounted += 1;
+            continue;
+        }
+        // A discovered live owner cannot become PID-based stale cleanup after
+        // its control connection disappears. The caller can retry discovery.
+        if entry.live {
+            return Err(CrabError::Configuration {
+                key: format!(
+                    "live mount control disappeared before batch unmount: {}",
+                    entry.mountpoint
+                ),
+                origin: "crab unmount --all".into(),
+            });
+        }
+        let saved = crate::vfs::mounts_registry::list_entries(&registry_path)?
+            .into_iter()
+            .find(|saved| saved.mountpoint == entry.mountpoint);
+        let Some(saved) = saved else {
+            return Err(CrabError::Configuration {
+                key: format!(
+                    "registered mount owner disappeared during batch unmount: {}",
+                    entry.mountpoint
+                ),
+                origin: "crab unmount --all".into(),
+            });
+        };
+        if Some(saved.pid) != entry.pid
+            || Some(&saved.start_time) != entry.start_time.as_ref()
+            || saved.control_endpoint != entry.control_endpoint
+            || is_pid_alive(saved.pid)
+        {
+            return Err(CrabError::Configuration {
+                key: format!(
+                    "registered mount owner changed or remains alive without control: {}",
+                    entry.mountpoint
+                ),
+                origin: "crab unmount --all".into(),
+            });
+        }
+        if unmount_registry_entry(&registry_path, &saved)? {
             unmounted += 1;
         }
     }
-
     println!("Unmounted {unmounted} mount(s).");
     Ok(())
 }
+
+#[cfg(all(test, unix, any(feature = "fuse", feature = "nfs")))]
+#[path = "mount_batch_unmount_tests.rs"]
+mod batch_unmount_tests;
 
 fn normalize_unmount_path(path: &Path) -> PathBuf {
     #[cfg(all(any(windows, test), feature = "nfs"))]
@@ -2922,7 +3166,7 @@ fn force_unmount_cli(mountpoint: &Path) -> Result<()> {
 
 fn force_nfs_unmount_if_mounted(mountpoint: &Path) -> Result<()> {
     #[cfg(feature = "nfs")]
-    if crate::vfs::nfs_mount::is_mounted(mountpoint) {
+    if crate::vfs::nfs_mount::is_mounted(mountpoint)? {
         force_unmount_cli(mountpoint)?;
         ensure_nfs_unmounted(mountpoint)?;
     }
@@ -2933,7 +3177,7 @@ fn force_nfs_unmount_if_mounted(mountpoint: &Path) -> Result<()> {
 
 fn ensure_nfs_unmounted(mountpoint: &Path) -> Result<()> {
     #[cfg(feature = "nfs")]
-    if crate::vfs::nfs_mount::is_mounted(mountpoint) {
+    if crate::vfs::nfs_mount::is_mounted(mountpoint)? {
         return Err(CrabError::Internal(format!(
             "force-unmount command completed but {} remains mounted",
             mountpoint.display()
@@ -3553,7 +3797,7 @@ pub struct MountOverlayCommitPayload {
 #[cfg(any(feature = "fuse", feature = "nfs"))]
 pub async fn run_mount_diff(path: &Path, json: bool) -> Result<()> {
     let context = resolve_mount_overlay_context(path).await?;
-    let diff = stable_overlay_diff(&context).await?;
+    let diff = overlay_diff_once(&context).await?;
     if json {
         emit_json(
             "mount.diff",
@@ -3573,12 +3817,25 @@ pub async fn run_mount_diff(path: &Path, json: bool) -> Result<()> {
 #[cfg(any(feature = "fuse", feature = "nfs"))]
 pub async fn run_mount_export(path: &Path, destination: &Path, json: bool) -> Result<()> {
     let context = resolve_mount_overlay_context(path).await?;
-    let _ = stable_overlay_diff(&context).await?;
-    let diff = crate::vfs::publish::export_overlay_from_view(
-        &context.overlay_paths,
-        destination,
-        &context.mountpoint_path,
-    )?;
+    let diff = if let Some(diff) =
+        crate::vfs::mount_control::export_overlay(&context.mountpoint_path, destination).await?
+    {
+        diff
+    } else {
+        if context.live_owner || context.read_only {
+            return Err(CrabError::Configuration {
+                key: "writable live mount control unavailable for export".into(),
+                origin: "crab mount export".into(),
+            });
+        }
+        let paths = context.overlay_paths.clone();
+        let destination = destination.to_owned();
+        tokio::task::spawn_blocking(move || {
+            crate::vfs::publish::export_overlay(&paths, &destination)
+        })
+        .await
+        .map_err(crate::vfs::error::VfsError::ReadTask)??
+    };
     if json {
         emit_json(
             "mount.export",
@@ -3613,7 +3870,6 @@ pub async fn run_mount_reset(path: &Path, overlay: bool, yes: bool, json: bool) 
     }
 
     let context = resolve_mount_overlay_context(path).await?;
-    let _ = stable_overlay_diff(&context).await?;
     let diff = reset_overlay_for_context(&context).await?;
     if json {
         emit_json(
@@ -3631,36 +3887,6 @@ pub async fn run_mount_reset(path: &Path, overlay: bool, yes: bool, json: bool) 
     Ok(())
 }
 
-#[cfg(feature = "fuse")]
-async fn drain_live_overlay_reset(context: &MountOverlayContext) -> Result<()> {
-    const CLEAN_DRAIN_PASSES: usize = 2;
-    const MAX_DRAIN_PASSES: usize = 6;
-
-    let mut clean_passes = 0;
-    for pass in 1..=MAX_DRAIN_PASSES {
-        flush_mount_writes(&context.mountpoint_path)?;
-        let diff = crate::vfs::ipc_client::try_ipc_reset_overlay(&context.mountpoint).await?;
-        if diff.changes.is_empty() {
-            clean_passes += 1;
-            if clean_passes >= CLEAN_DRAIN_PASSES {
-                return Ok(());
-            }
-            continue;
-        }
-        clean_passes = 0;
-        debug!(
-            mountpoint = %context.mountpoint,
-            pass,
-            changes = diff.changes.len(),
-            "discarded delayed FUSE writes after overlay reset"
-        );
-    }
-
-    Err(CrabError::Internal(
-        "overlay reset did not quiesce delayed FUSE writes".into(),
-    ))
-}
-
 #[cfg(any(feature = "fuse", feature = "nfs"))]
 async fn reset_overlay_for_context(
     context: &MountOverlayContext,
@@ -3668,22 +3894,15 @@ async fn reset_overlay_for_context(
     if let Some(diff) = crate::vfs::mount_control::reset_overlay(&context.mountpoint_path).await? {
         return Ok(diff);
     }
-
-    #[cfg(feature = "fuse")]
-    {
-        match crate::vfs::ipc_client::try_ipc_reset_overlay(&context.mountpoint).await {
-            Ok(diff) => {
-                drain_live_overlay_reset(context).await?;
-                return Ok(diff);
-            }
-            Err(e) if context.invalidate_via_ipc => return Err(e.into()),
-            Err(_) => {}
-        }
+    // Losing a live owner cannot authorize mutating its backing database offline.
+    if context.live_owner {
+        return Err(CrabError::Configuration {
+            key: "live mount control disappeared before reset".into(),
+            origin: "crab mount reset".into(),
+        });
     }
-
-    let diff = crate::vfs::publish::reset_overlay(&context.overlay_paths)?;
-    invalidate_after_overlay_reset(context, &diff).await?;
-    Ok(diff)
+    flush_mount_writes(&context.mountpoint_path).await?;
+    Ok(crate::vfs::publish::reset_overlay(&context.overlay_paths)?)
 }
 
 #[cfg(any(feature = "fuse", feature = "nfs"))]
@@ -3695,11 +3914,17 @@ pub async fn run_mount_commit(path: &Path, message: &str, push: bool, json: bool
             origin: "crab mount commit".into(),
         });
     }
-    let _ = stable_overlay_diff(&context).await?;
-    let (result, committed_via_live_control) =
+    let result =
         if let Some(result) = crate::vfs::mount_control::commit(path, message, push).await? {
-            (result, true)
+            result
         } else {
+            // A lost/uncertain live operation must not become a second offline commit.
+            if context.live_owner {
+                return Err(CrabError::Configuration {
+                    key: "live mount control disappeared before commit".into(),
+                    origin: "crab mount commit".into(),
+                });
+            }
             let git_dir = context
                 .git_dir
                 .clone()
@@ -3715,23 +3940,15 @@ pub async fn run_mount_commit(path: &Path, message: &str, push: bool, json: bool
                     origin: "crab mount commit".into(),
                 })?;
 
-            (
-                crate::vfs::publish::commit_overlay(&crate::vfs::publish::OverlayCommitOptions {
-                    cache_dir: context.overlay_paths.cache_dir.clone(),
-                    git_dir,
-                    ref_name,
-                    message: message.to_owned(),
-                    push,
-                })?,
-                false,
-            )
+            flush_mount_writes(&context.mountpoint_path).await?;
+            crate::vfs::publish::commit_overlay(&crate::vfs::publish::OverlayCommitOptions {
+                cache_dir: context.overlay_paths.cache_dir.clone(),
+                git_dir,
+                ref_name,
+                message: message.to_owned(),
+                push,
+            })?
         };
-    #[cfg(feature = "fuse")]
-    if !committed_via_live_control && context.invalidate_via_ipc && result.overlay_cleaned {
-        drain_live_overlay_reset(&context).await?;
-    }
-    #[cfg(not(feature = "fuse"))]
-    let _ = committed_via_live_control;
 
     if json {
         emit_json(
@@ -3751,108 +3968,30 @@ pub async fn run_mount_commit(path: &Path, message: &str, push: bool, json: bool
 }
 
 #[cfg(any(feature = "fuse", feature = "nfs"))]
-async fn stable_overlay_diff(
-    context: &MountOverlayContext,
-) -> Result<crate::vfs::publish::OverlayDiff> {
-    const STABLE_PASSES: usize = 3;
-    const MAX_PASSES: usize = 40;
-    const QUIESCE_DELAY: Duration = Duration::from_millis(50);
-
-    let mut last_key = None;
-    let mut stable_passes = 0;
-
-    for pass in 1..=MAX_PASSES {
-        let diff = overlay_diff_once(context).await?;
-        let key = overlay_diff_key(&diff);
-        if last_key.as_ref() == Some(&key) {
-            stable_passes += 1;
-        } else {
-            last_key = Some(key);
-            stable_passes = 1;
-        }
-
-        if stable_passes >= STABLE_PASSES {
-            return Ok(diff);
-        }
-
-        debug!(
-            mountpoint = %context.mountpoint,
-            pass,
-            "waiting for mounted overlay writes to quiesce"
-        );
-        tokio::time::sleep(QUIESCE_DELAY).await;
-    }
-
-    Err(CrabError::Internal(
-        "mounted overlay writes did not quiesce".into(),
-    ))
-}
-
-#[cfg(any(feature = "fuse", feature = "nfs"))]
 async fn overlay_diff_once(
     context: &MountOverlayContext,
 ) -> Result<crate::vfs::publish::OverlayDiff> {
-    flush_mount_writes(&context.mountpoint_path)?;
-    if context.invalidate_via_ipc {
-        #[cfg(feature = "fuse")]
-        return Ok(crate::vfs::ipc_client::try_ipc_overlay_diff(&context.mountpoint).await?);
-        #[cfg(not(feature = "fuse"))]
-        return Err(CrabError::Internal(
-            "mount IPC requested but FUSE IPC support is not compiled".into(),
-        ));
+    if let Some(diff) = crate::vfs::mount_control::inspect_overlay(&context.mountpoint_path).await?
+    {
+        return Ok(diff);
     }
+    if context.live_owner {
+        return Err(CrabError::Configuration {
+            key: "live mount control disappeared before inspection".into(),
+            origin: "crab mount diff".into(),
+        });
+    }
+    flush_mount_writes(&context.mountpoint_path).await?;
     Ok(crate::vfs::publish::inspect_overlay(
         &context.overlay_paths,
     )?)
 }
 
 #[cfg(any(feature = "fuse", feature = "nfs"))]
-fn overlay_diff_key(diff: &crate::vfs::publish::OverlayDiff) -> Vec<String> {
-    diff.changes
-        .iter()
-        .map(|change| {
-            format!(
-                "{}\0{}\0{}\0{}\0{}",
-                change.path, change.kind, change.size_bytes, change.mode, change.has_backing_file
-            )
-        })
-        .collect()
-}
-
-#[cfg(all(any(feature = "fuse", feature = "nfs"), target_os = "linux"))]
-fn flush_mount_writes(mountpoint: &Path) -> Result<()> {
-    let file = std::fs::File::open(mountpoint)?;
-    // SAFETY: syncfs only borrows a valid open directory/file descriptor and
-    // does not retain it after the call returns.
-    let rc = unsafe { libc::syncfs(file.as_raw_fd()) };
-    if rc == 0 {
-        return Ok(());
-    }
-    Err(CrabError::Io(std::io::Error::last_os_error()))
-}
-
-#[cfg(all(any(feature = "fuse", feature = "nfs"), target_os = "macos"))]
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "keeps shared flush call sites fallible on every platform"
-)]
-fn flush_mount_writes(_mountpoint: &Path) -> Result<()> {
-    // SAFETY: libc::sync has no arguments and only asks the OS to schedule a
-    // global filesystem flush. macOS does not expose Linux syncfs.
-    unsafe { libc::sync() };
-    Ok(())
-}
-
-#[cfg(all(
-    any(feature = "fuse", feature = "nfs"),
-    not(any(target_os = "linux", target_os = "macos"))
-))]
-#[expect(
-    clippy::unnecessary_wraps,
-    reason = "keeps shared flush call sites fallible on every platform"
-)]
-fn flush_mount_writes(_mountpoint: &Path) -> Result<()> {
-    Ok(())
+async fn flush_mount_writes(mountpoint: &Path) -> Result<()> {
+    // CLI input must exist even when the helper has no mounted client to flush.
+    let _mountpoint = std::fs::File::open(mountpoint)?;
+    Ok(crate::vfs::mount_runtime::flush_mount_writes(mountpoint).await?)
 }
 
 #[cfg(any(feature = "fuse", feature = "nfs"))]
@@ -3863,34 +4002,7 @@ struct MountOverlayContext {
     git_dir: Option<PathBuf>,
     ref_name: Option<String>,
     read_only: bool,
-    invalidate_via_ipc: bool,
-}
-
-#[cfg(feature = "fuse")]
-async fn invalidate_after_overlay_reset(
-    context: &MountOverlayContext,
-    diff: &crate::vfs::publish::OverlayDiff,
-) -> Result<()> {
-    if !context.invalidate_via_ipc {
-        return Ok(());
-    }
-    let paths = diff
-        .changes
-        .iter()
-        .map(|change| change.path.clone())
-        .collect::<Vec<_>>();
-    if paths.is_empty() {
-        return Ok(());
-    }
-    Ok(crate::vfs::ipc_client::try_ipc_invalidate(&context.mountpoint, paths).await?)
-}
-
-#[cfg(all(not(feature = "fuse"), feature = "nfs"))]
-async fn invalidate_after_overlay_reset(
-    _context: &MountOverlayContext,
-    _diff: &crate::vfs::publish::OverlayDiff,
-) -> Result<()> {
-    Ok(())
+    live_owner: bool,
 }
 
 #[cfg(any(feature = "fuse", feature = "nfs"))]
@@ -3905,11 +4017,8 @@ async fn resolve_mount_overlay_context(path: &Path) -> Result<MountOverlayContex
         return mount_context_from_entry(entry.clone(), false, mountpoint_str, &mountpoint);
     }
 
-    #[cfg(feature = "fuse")]
-    {
-        if let Some(status) = ipc_status_for_mountpoint(&mountpoint_str).await {
-            return mount_context_from_ipc_status(status);
-        }
+    if let Some(status) = crate::vfs::mount_control::status(&mountpoint).await? {
+        return mount_context_from_control_status(status);
     }
 
     let is_dot_path = path.as_os_str() == ".";
@@ -3940,7 +4049,7 @@ async fn resolve_mount_overlay_context(path: &Path) -> Result<MountOverlayContex
         git_dir: None,
         ref_name: None,
         read_only: false,
-        invalidate_via_ipc: false,
+        live_owner: false,
     })
 }
 
@@ -3971,41 +4080,31 @@ fn mount_context_from_entry(
         git_dir: Some(git_dir),
         ref_name: Some(entry.git_ref),
         read_only: entry.read_only,
-        invalidate_via_ipc: false,
+        live_owner: entry.backend.is_some(),
     })
 }
 
-#[cfg(feature = "fuse")]
-fn mount_context_from_ipc_status(
-    status: crate::vfs::ipc_server::MountStatus,
+#[cfg(any(feature = "fuse", feature = "nfs"))]
+fn mount_context_from_control_status(
+    status: crate::vfs::mount_control::MountControlStatus,
 ) -> Result<MountOverlayContext> {
-    let cache_dir = cache_dir_for_mount_source(&status.remote)?;
-    let git_dir = git_dir_for_mount_source(&status.remote, &cache_dir)?;
-    let mountpoint_path = PathBuf::from(&status.mountpoint);
+    let source = status
+        .source
+        .ok_or_else(|| CrabError::Internal("live mount status missing source".into()))?;
+    let ref_name = status
+        .head_ref
+        .ok_or_else(|| CrabError::Internal("live mount status missing ref".into()))?;
+    let cache_dir = cache_dir_for_mount_source(&source)?;
+    let git_dir = git_dir_for_mount_source(&source, &cache_dir)?;
     Ok(MountOverlayContext {
-        mountpoint: status.mountpoint,
-        mountpoint_path,
+        mountpoint: status.mountpoint.display().to_string(),
+        mountpoint_path: status.mountpoint,
         overlay_paths: crate::vfs::publish::OverlayPaths::from_cache_dir(&cache_dir),
         git_dir: Some(git_dir),
-        ref_name: Some(status.r#ref),
+        ref_name: Some(ref_name),
         read_only: status.read_only,
-        invalidate_via_ipc: true,
+        live_owner: true,
     })
-}
-
-#[cfg(feature = "fuse")]
-async fn ipc_status_for_mountpoint(
-    mountpoint: &str,
-) -> Option<crate::vfs::ipc_server::MountStatus> {
-    let socket_path = crate::vfs::ipc_client::default_socket_path().ok()?;
-    let mut client = crate::vfs::ipc_client::IpcClient::connect(&socket_path)
-        .await
-        .ok()?;
-    let request = crate::vfs::ipc_server::IpcRequest::Status {
-        mountpoint: mountpoint.to_owned(),
-    };
-    let response = client.send(&request).await.ok()?;
-    response.ok.then_some(response.status).flatten()
 }
 
 #[cfg(any(feature = "fuse", feature = "nfs"))]
@@ -4029,12 +4128,7 @@ fn git_dir_for_mount_source(source: &str, cache_dir: &Path) -> Result<PathBuf> {
             Ok(crate::vfs::source::MountSource::validate_local(&path)?)
         }
         crate::vfs::source::MountSource::Remote { .. } => {
-            let nested = cache_dir.join(".git");
-            if nested.exists() {
-                Ok(nested)
-            } else {
-                Ok(cache_dir.to_path_buf())
-            }
+            Ok(crate::vfs::clone_cache::git_dir(cache_dir)?)
         }
     }
 }
@@ -5045,7 +5139,7 @@ fn run_daemon_add_repo(
     let config = RepoConfig {
         name: name.to_owned(),
         remote: remote.to_owned(),
-        remote_redacted: crate::vfs::refresh::redact_url(remote),
+        remote_redacted: crate::vfs::repository::redact_url(remote),
         branch: branch.to_owned(),
         mount_root: mount_root.to_owned(),
         refresh_interval_secs: 30,
@@ -5431,19 +5525,6 @@ fn find_crab_dir(mountpoint: &Path) -> PathBuf {
     } else {
         mountpoint.join(".crab")
     }
-}
-
-/// Find the `.git` directory path as a string for the synthetic `.git` file.
-#[cfg(feature = "fuse")]
-fn find_git_dir(crab_dir: &Path) -> String {
-    // The .git dir is typically a sibling of .crab.
-    if let Some(parent) = crab_dir.parent() {
-        let git_dir = parent.join(".git");
-        if git_dir.exists() {
-            return git_dir.to_string_lossy().into_owned();
-        }
-    }
-    ".git".to_owned()
 }
 
 // ---------------------------------------------------------------------------
@@ -6009,11 +6090,24 @@ mod tests {
 
         let replica = crate::storage::store::Store::new(Arc::new(InMemory::new()));
         let replica_layout = crate::storage::StoreLayout::new(replica.clone(), prefix.to_owned());
+        crate::cmd::init::initialize_remote_repository_store(
+            &replica,
+            &replica_layout,
+            "refs/heads/main",
+        )
+        .await
+        .unwrap();
         replica
             .put(
                 &replica_layout.repo_path(marker),
                 Bytes::from_static(b"replica"),
             )
+            .await
+            .unwrap();
+
+        let root_layout =
+            crab_storage::StoreLayout::new(replica.as_storage().clone(), prefix.to_owned());
+        let capsule_root = crab_metadata::capsule_protocol::load_root(&root_layout)
             .await
             .unwrap();
 
@@ -6025,6 +6119,7 @@ mod tests {
                 let replica = replica.clone();
                 async move {
                     Ok(crate::replication::ReadStoreSelection {
+                        capsule_root,
                         store: replica.clone(),
                         router: crate::storage::StoreLayout::new(replica, prefix.to_owned()),
                         source: crate::replication::ReadSource::Replica {
@@ -6048,6 +6143,37 @@ mod tests {
             .await
             .unwrap();
         assert_eq!(primary_body, Bytes::from_static(b"primary"));
+    }
+
+    #[tokio::test]
+    async fn local_mount_distinguishes_absent_config_from_invalid_config() {
+        let repo = tempfile::tempdir().unwrap();
+        let crab_dir = repo.path().join(".crab");
+        assert!(
+            resolve_mount_read_context_from_local_repo(&crab_dir)
+                .await
+                .unwrap()
+                .is_none()
+        );
+        std::fs::write(repo.path().join("crab.toml"), "[invalid").unwrap();
+        assert!(matches!(
+            resolve_mount_read_context_from_local_repo(&crab_dir).await,
+            Err(CrabError::Configuration { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn mount_read_selection_preserves_provider_failure() {
+        let config = crate::core::config::Config::default();
+        let parsed = crate::git::url::CrabUrl::parse("crab://primary/org/repo").unwrap();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let result =
+            select_mount_read_layout_with_selector(&config, &parsed, &cancel, |_, _, _| async {
+                Err(std::io::Error::from(std::io::ErrorKind::PermissionDenied).into())
+            })
+            .await;
+        assert!(matches!(result, Err(CrabError::Io(error))
+            if error.kind() == std::io::ErrorKind::PermissionDenied));
     }
 
     /// Verify that `build_mount_components` executes the pipeline
@@ -6104,8 +6230,8 @@ mod tests {
             result.err()
         );
 
-        let (_, engine) = result.unwrap();
-        engine.shutdown_background().await;
+        let (_, output) = result.unwrap();
+        output.engine.shutdown_background().await;
     }
 
     /// Verify that `build_mount_components` respects the `git_ref` parameter.
@@ -6153,8 +6279,8 @@ mod tests {
             "build_mount_components with ref failed: {:?}",
             result.err()
         );
-        let (_, engine) = result.unwrap();
-        engine.shutdown_background().await;
+        let (_, output) = result.unwrap();
+        output.engine.shutdown_background().await;
     }
 
     /// Verify that `build_mount_components` fails gracefully when .git
@@ -6458,18 +6584,187 @@ mod unmount_tests {
     }
 
     #[cfg(feature = "nfs")]
-    fn nfs_control_state(mountpoint: &Path) -> crate::vfs::nfs_control::NfsControlState {
+    fn nfs_control_state(
+        mountpoint: &Path,
+        shutdown: tokio_util::sync::CancellationToken,
+    ) -> crate::vfs::nfs_control::NfsControlState {
+        let root = mountpoint.parent().unwrap();
+        let source = root.join("control-source");
+        for args in [
+            vec!["init", "-b", "main"],
+            vec![
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+                "commit",
+                "--allow-empty",
+                "-m",
+                "seed",
+            ],
+        ] {
+            std::fs::create_dir_all(&source).unwrap();
+            let result = std::process::Command::new("git")
+                .arg("-C")
+                .arg(&source)
+                .args(args)
+                .env_remove("GIT_DIR")
+                .env_remove("GIT_COMMON_DIR")
+                .env_remove("GIT_WORK_TREE")
+                .env_remove("GIT_INDEX_FILE")
+                .output()
+                .unwrap();
+            assert!(
+                result.status.success(),
+                "{}",
+                String::from_utf8_lossy(&result.stderr)
+            );
+        }
+        let config = crate::vfs::pipeline::PipelineConfig {
+            source: source.display().to_string(),
+            git_dir: source.join(".git"),
+            git_metadata: crate::vfs::pipeline::GitMetadataOwnership::Borrowed,
+            ref_name: Some("refs/heads/main".into()),
+            read_only: true,
+            cache_dir: root.join("live-cache"),
+            cancel_token: tokio_util::sync::CancellationToken::new(),
+        };
+        let output = crate::vfs::pipeline::MountPipelineBuilder::new(config.clone())
+            .execute()
+            .unwrap();
         crate::vfs::nfs_control::NfsControlState {
+            shutdown,
             mountpoint: mountpoint.to_path_buf(),
             read_only: true,
             read_leases: crate::vfs::read_lease_pool::ReadLeasePool::new(4, 4096),
             directory_pages: crate::vfs::nfs::NfsDirectoryPageCache::new(4, 4096),
             write_journal: std::sync::Arc::new(crate::vfs::nfs::NfsWriteJournal::new()),
             protocol_stats: std::sync::Arc::new(crate::vfs::nfs::NfsProtocolStats::new()),
-            engine: None,
-            runtime: None,
+            engine: Some(std::sync::Arc::clone(&output.engine)),
+            runtime: Some(std::sync::Arc::new(std::sync::Mutex::new(
+                crate::vfs::nfs_control::NfsMountRuntime { output, config },
+            ))),
             lifecycle: crate::vfs::nfs_control::NfsMountLifecycleStatus::default(),
         }
+    }
+
+    #[cfg(all(feature = "nfs", unix))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn unmount_waits_for_live_cache_lease() {
+        use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+        let _env_lock = crate::test::git_repo::GIT_DIR_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = set_test_home(tmp.path());
+        let mountpoint = tmp.path().join("view");
+        std::fs::create_dir(&mountpoint).unwrap();
+        let mountpoint = normalize_unmount_path(&mountpoint);
+        let cache_dir = tmp.path().join("actual-live-cache");
+        let cache_lock = crate::vfs::clone_cache::MountCacheLock::acquire(&cache_dir).unwrap();
+        let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+        let endpoint = format!("tcp:{}?token=cache-handoff", listener.local_addr().unwrap());
+        let registry_path = mounts_registry::registry_path().unwrap();
+        let entry = sample_nfs_entry(&mountpoint.display().to_string(), &endpoint);
+        mounts_registry::add_entry(&registry_path, entry.clone()).unwrap();
+        let response = serde_json::json!({"ok": true, "cache_dir": cache_dir}).to_string() + "\n";
+        let peer = tokio::spawn(async move {
+            let (stream, _) = listener.accept().await.unwrap();
+            let (reader, mut writer) = stream.into_split();
+            let mut lines = BufReader::new(reader).lines();
+            let request: serde_json::Value =
+                serde_json::from_str(&lines.next_line().await.unwrap().unwrap()).unwrap();
+            assert_eq!(request["op"], "shutdown");
+            writer.write_all(response.as_bytes()).await.unwrap();
+        });
+        let mut unmount = tokio::spawn(async move { try_mount_control_unmount(&mountpoint).await });
+        peer.await.unwrap();
+        assert!(
+            tokio::time::timeout(Duration::from_millis(150), &mut unmount)
+                .await
+                .is_err(),
+            "unmount returned while its live cache was still owned"
+        );
+        assert_eq!(
+            mounts_registry::list_entries(&registry_path).unwrap(),
+            vec![entry]
+        );
+        drop(cache_lock);
+        assert!(
+            tokio::time::timeout(Duration::from_secs(2), unmount)
+                .await
+                .unwrap()
+                .unwrap()
+                .unwrap()
+        );
+        assert!(
+            mounts_registry::list_entries(&registry_path)
+                .unwrap()
+                .is_empty()
+        );
+        crate::vfs::clone_cache::MountCacheLock::acquire(&cache_dir).unwrap();
+    }
+
+    #[cfg(all(feature = "nfs", unix))]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn batch_unmount_preserves_live_owner_after_control_failure() {
+        let _env_lock = crate::test::git_repo::GIT_DIR_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = set_test_home(tmp.path());
+        let mountpoint = tmp.path().join("view");
+        std::fs::create_dir(&mountpoint).unwrap();
+        let mountpoint = normalize_unmount_path(&mountpoint);
+        let mut child = std::process::Command::new("sleep")
+            .arg("30")
+            .spawn()
+            .unwrap();
+        let registry_path = mounts_registry::registry_path().unwrap();
+        let mut entry = sample_nfs_entry(
+            &mountpoint.display().to_string(),
+            &free_tcp_control_endpoint(),
+        );
+        entry.pid = child.id();
+        mounts_registry::add_entry(&registry_path, entry.clone()).unwrap();
+        let result = run_unmount_all_live_or_persisted().await;
+        let alive = child.try_wait().unwrap().is_none();
+        let entries = mounts_registry::list_entries(&registry_path).unwrap();
+        let _ = child.kill();
+        child.wait().unwrap();
+        assert!(result.is_err());
+        assert!(
+            alive,
+            "failed live control must not terminate its persisted PID"
+        );
+        assert_eq!(entries, vec![entry]);
+    }
+
+    #[cfg(feature = "nfs")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn confirmed_dead_nfs_helper_uses_stale_cleanup() {
+        let _env_lock = crate::test::git_repo::GIT_DIR_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = set_test_home(tmp.path());
+        let mountpoint = tmp.path().join("view");
+        std::fs::create_dir(&mountpoint).unwrap();
+        let mountpoint = normalize_unmount_path(&mountpoint);
+        let registry_path = mounts_registry::registry_path().unwrap();
+        let mut entry = sample_nfs_entry(
+            &mountpoint.display().to_string(),
+            "unix:/missing/control.sock",
+        );
+        entry.pid = 4_000_000_000;
+        mounts_registry::add_entry(&registry_path, entry).unwrap();
+        assert!(!try_mount_control_unmount(&mountpoint).await.unwrap());
+        run_unmount(&mountpoint).unwrap();
+        assert!(
+            mounts_registry::list_entries(&registry_path)
+                .unwrap()
+                .is_empty()
+        );
     }
 
     /// A PID of 0 is never alive (it's the kernel).
@@ -6490,22 +6785,28 @@ mod unmount_tests {
 
     #[test]
     #[cfg(feature = "nfs")]
-    fn nfs_shutdown_requires_kernel_mount_to_disappear() {
-        let mountpoint = Path::new("/mnt/crab");
-
-        assert!(nfs_shutdown_complete(true, false, mountpoint).unwrap());
-        assert!(!nfs_shutdown_complete(true, true, mountpoint).unwrap());
-        assert!(nfs_shutdown_complete(false, true, mountpoint).is_err());
-    }
-
-    #[test]
-    fn linux_force_unmount_falls_back_to_plain_umount() {
-        let programs = linux_unmount_commands()
-            .iter()
-            .map(|command| command.program)
-            .collect::<Vec<_>>();
-
-        assert_eq!(programs, vec!["fusermount3", "fusermount", "umount"]);
+    fn nfs_shutdown_requires_kernel_detachment_and_cache_ownership() {
+        let tmp = tempfile::tempdir().unwrap();
+        let mountpoint = tmp.path().join("view");
+        let cache_dir = tmp.path().join("cache");
+        let lock = crate::vfs::clone_cache::MountCacheLock::acquire(&cache_dir).unwrap();
+        assert!(
+            nfs_shutdown_cache_guard(true, false, &mountpoint, &cache_dir)
+                .unwrap()
+                .is_none()
+        );
+        drop(lock);
+        assert!(
+            nfs_shutdown_cache_guard(true, false, &mountpoint, &cache_dir)
+                .unwrap()
+                .is_some()
+        );
+        assert!(
+            nfs_shutdown_cache_guard(true, true, &mountpoint, &cache_dir)
+                .unwrap()
+                .is_none()
+        );
+        assert!(nfs_shutdown_cache_guard(false, true, &mountpoint, &cache_dir).is_err());
     }
 
     /// run_unmount removes the registry entry for a stale mount.
@@ -6560,6 +6861,9 @@ mod unmount_tests {
     #[test]
     #[cfg(feature = "nfs")]
     fn background_nfs_readiness_waits_for_control_endpoint() {
+        let _env_lock = crate::test::git_repo::GIT_DIR_MUTEX
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
         let tmp = tempfile::tempdir().unwrap();
         let mountpoint = tmp.path().join("view");
         let endpoint = free_tcp_control_endpoint();
@@ -6573,25 +6877,18 @@ mod unmount_tests {
             assert!(!nfs_background_control_ready(Some(&endpoint)).await);
 
             let cancel = tokio_util::sync::CancellationToken::new();
-            let handle = crate::vfs::nfs_control::spawn_server(
-                Some(endpoint.clone()),
-                nfs_control_state(&mountpoint),
-                cancel.clone(),
-            )
-            .unwrap();
+            let state = nfs_control_state(&mountpoint, cancel.clone());
+            let engine = state.engine.clone().unwrap();
+            let handle = crate::vfs::nfs_control::bind_server(&endpoint)
+                .await
+                .unwrap()
+                .spawn(state, cancel.clone());
 
-            let mut ready = false;
-            for _ in 0..20 {
-                if nfs_background_control_ready(Some(&endpoint)).await {
-                    ready = true;
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            }
-            assert!(ready);
+            assert!(nfs_background_control_ready(Some(&endpoint)).await);
 
             crate::vfs::nfs_control::shutdown(&endpoint).await.unwrap();
             handle.await.unwrap().unwrap();
+            engine.shutdown_background().await;
         });
     }
 
@@ -6618,24 +6915,19 @@ mod unmount_tests {
 
         runtime.block_on(async {
             let cancel = tokio_util::sync::CancellationToken::new();
-            let handle = crate::vfs::nfs_control::spawn_server(
-                Some(endpoint.clone()),
-                nfs_control_state(&mountpoint),
-                cancel.clone(),
-            )
-            .unwrap();
-            for _ in 0..20 {
-                if crate::vfs::nfs_control::status(&endpoint).await.is_ok() {
-                    break;
-                }
-                tokio::time::sleep(std::time::Duration::from_millis(25)).await;
-            }
+            let state = nfs_control_state(&mountpoint, cancel.clone());
+            let engine = state.engine.clone().unwrap();
+            let handle = crate::vfs::nfs_control::bind_server(&endpoint)
+                .await
+                .unwrap()
+                .spawn(state, cancel.clone());
             crate::vfs::nfs_control::status(&endpoint).await.unwrap();
 
             run_unmount_all_live_or_persisted().await.unwrap();
 
             assert!(cancel.is_cancelled());
             handle.await.unwrap().unwrap();
+            engine.shutdown_background().await;
         });
 
         let entries = mounts_registry::list_entries(&registry_path).unwrap();
@@ -6731,10 +7023,10 @@ mod unmount_tests {
     }
 
     #[cfg(feature = "fuse")]
-    #[test]
-    fn flush_mount_writes_accepts_existing_directory() {
+    #[tokio::test]
+    async fn flush_mount_writes_accepts_existing_directory() {
         let tmp = tempfile::tempdir().unwrap();
-        flush_mount_writes(tmp.path()).unwrap();
+        flush_mount_writes(tmp.path()).await.unwrap();
     }
 }
 
@@ -6957,7 +7249,7 @@ mod mount_list_tests {
 }
 
 #[cfg(test)]
-#[cfg(all(feature = "fuse", unix))]
+#[cfg(all(any(feature = "fuse", feature = "nfs"), unix))]
 #[allow(clippy::unwrap_used, reason = "test assertions")]
 mod mount_overlay_context_tests {
     use std::sync::{
@@ -6970,6 +7262,46 @@ mod mount_overlay_context_tests {
 
     use super::*;
     use crate::vfs::mounts_registry::{self, MountEntry};
+
+    #[cfg(feature = "nfs")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn inspection_refuses_offline_state_after_losing_known_owner() {
+        use crate::vfs::engine::OverlayWriter;
+        let tmp = tempfile::tempdir().unwrap();
+        let _home = set_test_home(tmp.path());
+        let mountpoint = tmp.path().join("view");
+        std::fs::create_dir(&mountpoint).unwrap();
+        let mountpoint = std::fs::canonicalize(mountpoint).unwrap();
+        let registry_path = mounts_registry::registry_path().unwrap();
+        mounts_registry::add_entry(
+            &registry_path,
+            MountEntry {
+                mountpoint: mountpoint.display().to_string(),
+                source: "crab://bucket/repo".into(),
+                git_ref: "refs/heads/main".into(),
+                pid: 123,
+                start_time: "2026-01-01T00:00:00Z".into(),
+                read_only: false,
+                name: "repo".into(),
+                backend: Some("nfs".into()),
+                log_path: None,
+                control_endpoint: Some("unix:/missing/control.sock".into()),
+            },
+        )
+        .unwrap();
+        let context = resolve_mount_overlay_context(&mountpoint).await.unwrap();
+        let store = crate::vfs::overlay::OverlayStore::open(
+            &context.overlay_paths.db_path,
+            &context.overlay_paths.upper_dir,
+        )
+        .unwrap();
+        store.create_file("private.txt", 0o100_644).unwrap();
+        store.write_file("private.txt", 0, b"preserve").unwrap();
+        mounts_registry::remove_entry(&registry_path, &context.mountpoint).unwrap();
+        let result = overlay_diff_once(&context).await;
+        assert!(matches!(result, Err(CrabError::Configuration { .. })));
+        assert_eq!(store.records().unwrap().len(), 1);
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn registered_mount_context_skips_stale_fuse_ipc_status() {
@@ -7008,8 +7340,8 @@ mod mount_overlay_context_tests {
             let (reader, mut writer) = stream.into_split();
             let mut lines = BufReader::new(reader).lines();
             let _ = lines.next_line().await;
-            let response = crate::vfs::ipc_server::IpcResponse::status_ok(
-                crate::vfs::ipc_server::MountStatus {
+            let response = crate::vfs::ipc_protocol::IpcResponse::status_ok(
+                crate::vfs::ipc_protocol::MountStatus {
                     mountpoint: mountpoint_str,
                     remote: "crab://bucket/stale-fuse-repo".to_owned(),
                     r#ref: "refs/heads/stale".to_owned(),
@@ -7028,127 +7360,14 @@ mod mount_overlay_context_tests {
 
         assert_eq!(context.mountpoint, mountpoint.display().to_string());
         assert_eq!(context.ref_name, Some("HEAD".to_owned()));
-        assert!(!context.invalidate_via_ipc);
+        assert!(!context.live_owner);
         assert!(!contacted.load(Ordering::SeqCst));
     }
 }
 
-#[cfg(test)]
-#[cfg(feature = "nfs")]
-#[allow(clippy::unwrap_used, reason = "test assertions")]
-mod nfs_mount_registration_tests {
-    use super::*;
-    use crate::test::git_repo::GIT_DIR_MUTEX;
-    use crate::vfs::mounts_registry;
-
-    struct CurrentDirGuard {
-        _lock: std::sync::MutexGuard<'static, ()>,
-        original: PathBuf,
-    }
-
-    impl CurrentDirGuard {
-        fn set(path: &Path) -> Self {
-            let lock = GIT_DIR_MUTEX
-                .lock()
-                .unwrap_or_else(|error| error.into_inner());
-            let original = std::env::current_dir().unwrap();
-            std::env::set_current_dir(path).unwrap();
-            Self {
-                _lock: lock,
-                original,
-            }
-        }
-    }
-
-    impl Drop for CurrentDirGuard {
-        fn drop(&mut self) {
-            std::env::set_current_dir(&self.original).unwrap();
-        }
-    }
-
-    fn opts(repo: &str, mountpoint: PathBuf) -> NewMountOpts {
-        NewMountOpts {
-            repo: repo.to_owned(),
-            mountpoint,
-            backend: MountBackend::Nfs,
-            git_ref: None,
-            foreground: false,
-            read_only: false,
-            no_refresh: false,
-            allow_nested: false,
-            name: None,
-            cancel: tokio_util::sync::CancellationToken::new(),
-        }
-    }
-
-    #[test]
-    fn background_registration_stores_canonical_local_source() {
-        let tmp = tempfile::tempdir().unwrap();
-        let repo = tmp.path().join("repo");
-        std::fs::create_dir_all(repo.join(".git")).unwrap();
-        let mountpoint = tmp.path().join("view");
-        let log_path = tmp.path().join("nfs.log");
-        let control_endpoint = Some("tcp:127.0.0.1:50000?token=parent-secret".to_owned());
-        std::fs::create_dir_all(&mountpoint).unwrap();
-        let _cwd = CurrentDirGuard::set(tmp.path());
-        let _home = set_test_home(tmp.path());
-
-        register_nfs_background_mount(
-            &opts("./repo", mountpoint.clone()),
-            &mountpoint,
-            12345,
-            &log_path,
-            control_endpoint.clone(),
-        )
-        .unwrap();
-
-        let entries =
-            mounts_registry::read_entries(&mounts_registry::registry_path().unwrap()).unwrap();
-        let canonical_repo = std::fs::canonicalize(repo).unwrap();
-
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].source, canonical_repo.display().to_string());
-        assert_eq!(entries[0].name, "repo");
-        assert_eq!(entries[0].backend.as_deref(), Some("nfs"));
-        assert_eq!(
-            entries[0].log_path.as_deref(),
-            Some(log_path.to_string_lossy().as_ref())
-        );
-        assert_eq!(entries[0].control_endpoint, control_endpoint);
-    }
-
-    #[test]
-    fn background_registration_preserves_remote_source() {
-        let tmp = tempfile::tempdir().unwrap();
-        let _home = set_test_home(tmp.path());
-        let mountpoint = tmp.path().join("view");
-        let log_path = tmp.path().join("nfs.log");
-        let control_endpoint = Some("tcp:127.0.0.1:50001?token=parent-secret".to_owned());
-        std::fs::create_dir_all(&mountpoint).unwrap();
-
-        register_nfs_background_mount(
-            &opts("crab://bucket/repo", mountpoint.clone()),
-            &mountpoint,
-            12345,
-            &log_path,
-            control_endpoint.clone(),
-        )
-        .unwrap();
-
-        let entries =
-            mounts_registry::read_entries(&mounts_registry::registry_path().unwrap()).unwrap();
-
-        assert_eq!(entries.len(), 1);
-        assert_eq!(entries[0].source, "crab://bucket/repo");
-        assert_eq!(entries[0].name, "repo");
-        assert_eq!(entries[0].backend.as_deref(), Some("nfs"));
-        assert_eq!(
-            entries[0].log_path.as_deref(),
-            Some(log_path.to_string_lossy().as_ref())
-        );
-        assert_eq!(entries[0].control_endpoint, control_endpoint);
-    }
-}
+#[cfg(all(test, feature = "nfs"))]
+#[path = "mount_nfs_registration_tests.rs"]
+mod nfs_mount_registration_tests;
 
 #[cfg(test)]
 #[cfg(any(feature = "fuse", feature = "nfs"))]

@@ -22,18 +22,13 @@ use tokio_util::sync::CancellationToken;
 
 use crab_read::{
     ReadReplicaCandidate, ReadReplicaFallback, ReadReplicaProbeResult, ReadStoreChoice,
-    ReadStoreTarget, check_capsule_read_replica_readiness, check_legacy_read_replica_readiness,
-    select_read_store_choice,
+    ReadStoreTarget, check_capsule_read_replica_readiness, select_read_store_choice,
 };
 pub use crab_read::{ReadRoutingPolicy, ReadSource, ReadinessCheckOptions};
 
 use crate::core::config::Config;
-use crate::core::error::{CrabError, Result};
+use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::git::url::{Cloud, CrabUrl, ObjectUrl, UrlForm};
-use crate::metadata::manifest::{
-    Manifest, materialize_active_active_manifest_projection as materialize_manifest_projection,
-    read_manifest,
-};
 use crate::storage::StoreLayout;
 use crate::storage::store::Store;
 use crab_coordination::active_active as coordination_active_active;
@@ -6656,19 +6651,17 @@ pub struct ActiveActiveBucketGcProtection {
     pub protected_repos: HashSet<String>,
 }
 
-/// One regional manifest repair action derived from coordinator truth.
+/// One regional Capsule repair action derived from coordinator truth.
 #[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct ActiveActiveRepairAction {
     pub operation_id: String,
-    pub manifest_generation: u64,
     pub commit_sequence: u64,
     pub region: String,
     pub writer: WriterConfig,
     pub source_region: String,
     pub refs: Vec<CoordinatedRefUpdate>,
     pub uploaded_objects: Vec<String>,
-    pub capsule_publication:
-        Option<crab_coordination::write_coordinator::CoordinatedCapsulePublication>,
+    pub capsule_publication: crab_coordination::write_coordinator::CoordinatedCapsulePublication,
 }
 
 /// Repair plan for committed active-active transactions not materialized everywhere.
@@ -6718,7 +6711,7 @@ pub struct ActiveActiveResumeProof {
 }
 
 impl ActiveActiveResumeProof {
-    /// Confirms coordinator-backed repair and external failover checks completed.
+    /// Confirms all GC runs stopped and drained, with repair and external failover checks complete.
     #[must_use]
     pub fn verified_after_repair() -> Self {
         Self {
@@ -6736,29 +6729,6 @@ pub fn validate_active_active_config(replication: &ReplicationConfig) -> Result<
         replication,
     ))
     .map_err(CrabError::from)
-}
-
-/// Build the coordinator commit request for an active-active push.
-pub fn plan_active_active_push(
-    replication: &ReplicationConfig,
-    preferred_writer: Option<&str>,
-    manifest_generation: u64,
-    refs: Vec<CoordinatedRefUpdate>,
-    uploaded_objects: Vec<String>,
-) -> Result<ActiveActivePushPlan> {
-    let plan = coordination_active_active::plan_active_active_push(
-        &active_active_coordination_config(replication),
-        preferred_writer,
-        manifest_generation,
-        refs,
-        uploaded_objects,
-    )
-    .map_err(CrabError::from)?;
-    Ok(ActiveActivePushPlan {
-        writer: writer_from_coordination(plan.writer),
-        coordinator_url: plan.coordinator_url,
-        request: plan.request,
-    })
 }
 
 /// Build a coordinator request bound to one exact protocol-v2 capsule run.
@@ -6784,7 +6754,7 @@ pub fn plan_active_active_capsule_push(
     })
 }
 
-/// Plan regional manifest repairs from a coordinator snapshot.
+/// Plan regional Capsule repairs from a coordinator snapshot.
 pub fn plan_active_active_repair(
     replication: &ReplicationConfig,
     snapshot: &CoordinatorRepairSnapshot,
@@ -6800,23 +6770,23 @@ pub fn plan_active_active_repair(
 fn active_active_repair_plan_from_coordination(
     plan: coordination_active_active::ActiveActiveRepairPlan,
 ) -> ActiveActiveRepairPlan {
+    let actions = plan
+        .actions
+        .into_iter()
+        .map(|action| ActiveActiveRepairAction {
+            operation_id: action.operation_id,
+            commit_sequence: action.commit_sequence,
+            region: action.region,
+            writer: writer_from_coordination(action.writer),
+            source_region: action.source_region,
+            refs: action.refs,
+            uploaded_objects: action.uploaded_objects,
+            capsule_publication: action.capsule_publication,
+        })
+        .collect();
     ActiveActiveRepairPlan {
         coordinator_epoch: plan.coordinator_epoch,
-        actions: plan
-            .actions
-            .into_iter()
-            .map(|action| ActiveActiveRepairAction {
-                operation_id: action.operation_id,
-                manifest_generation: action.manifest_generation,
-                commit_sequence: action.commit_sequence,
-                region: action.region,
-                writer: writer_from_coordination(action.writer),
-                source_region: action.source_region,
-                refs: action.refs,
-                uploaded_objects: action.uploaded_objects,
-                capsule_publication: action.capsule_publication,
-            })
-            .collect(),
+        actions,
     }
 }
 
@@ -7156,12 +7126,10 @@ pub async fn active_active_gc_protected_keys(
 ///
 /// A protected-key snapshot without this authority fence is only advisory:
 /// another coordinator transaction could upload and commit between the read
-/// and the object-store delete. The guard leaves a pre-fenced coordinator
-/// untouched and deliberately requires operator resume after process loss.
+/// and the object-store delete. The guard rejects a pre-fenced coordinator
+/// unchanged and requires verified operator resume after process loss.
 pub struct ActiveActiveGcFence {
     coordinator: Arc<dyn WriteCoordinator>,
-    repo_prefix: String,
-    previous_healthy: bool,
     protected_keys: HashSet<String>,
     coordinator_epoch: u64,
 }
@@ -7177,36 +7145,21 @@ impl ActiveActiveGcFence {
         }
         validate_active_active_config(replication)?;
         let coordinator = active_active_write_coordinator_for_repo(config, repo_prefix).await?;
-        let health = coordinator.health().await.map_err(CrabError::from)?;
-        if !health.healthy || !health.linearizable {
-            return Err(CrabError::Configuration {
-                key: "replication.coordinator".to_owned(),
-                origin: health.reason.unwrap_or_else(|| {
-                    "active-active coordinator is not healthy and linearizable for GC fencing"
-                        .to_owned()
-                }),
-            });
-        }
-        let fence = coordinator
-            .fence_writes(Some("repo garbage collection".to_owned()))
+        Self::acquire_with_coordinator(coordinator).await.map(Some)
+    }
+
+    async fn acquire_with_coordinator(coordinator: Arc<dyn WriteCoordinator>) -> Result<Self> {
+        // The managed constructor verifies topology; the shared state owner
+        // atomically verifies write admission, fences it and captures protection.
+        let snapshot = coordinator
+            .acquire_gc_fence()
             .await
             .map_err(CrabError::from)?;
-        let snapshot = match coordinator.gc_safety_snapshot().await {
-            Ok(snapshot) => snapshot,
-            Err(error) => {
-                if fence.previous_healthy {
-                    let _ = coordinator.resume_writes().await;
-                }
-                return Err(CrabError::from(error));
-            }
-        };
-        Ok(Some(Self {
+        Ok(Self {
             coordinator,
-            repo_prefix: repo_prefix.to_owned(),
-            previous_healthy: fence.previous_healthy,
             protected_keys: snapshot.protected_keys(),
             coordinator_epoch: snapshot.coordinator_epoch,
-        }))
+        })
     }
 
     /// Returns the fenced coordinator's protected object set.
@@ -7221,22 +7174,12 @@ impl ActiveActiveGcFence {
         self.coordinator_epoch
     }
 
-    /// Resumes writes only when this guard created the fence.
+    /// Resumes writes only while this guard still owns the acquired epoch.
     pub async fn release(self) -> Result<()> {
-        if !self.previous_healthy {
-            return Ok(());
-        }
         self.coordinator
-            .resume_writes()
+            .release_gc_fence(self.coordinator_epoch)
             .await
-            .map(|_| ())
-            .map_err(|error| CrabError::Configuration {
-                key: "replication.coordinator".to_owned(),
-                origin: format!(
-                    "failed to resume coordinator for repo {} after GC: {error}",
-                    self.repo_prefix
-                ),
-            })
+            .map_err(CrabError::from)
     }
 }
 
@@ -7482,7 +7425,7 @@ fn coordinator_gc_snapshot_status_error(
     }
 }
 
-/// Build a regional manifest repair plan from coordinator truth.
+/// Build a regional Capsule repair plan from coordinator truth.
 pub async fn active_active_repair_plan_from_coordinator(
     config: &Config,
     repo_prefix: &str,
@@ -7511,7 +7454,7 @@ pub async fn active_active_repair_plan_from_coordinator(
     Ok(active_active_repair_plan_from_coordination(plan))
 }
 
-/// Repairs regional manifest projections from coordinator truth.
+/// Repair regional Capsule transactions from coordinator truth.
 pub async fn apply_active_active_repair_from_coordinator(
     config: &Config,
     repo_prefix: &str,
@@ -7539,7 +7482,7 @@ pub async fn apply_active_active_repair_from_coordinator(
     .await
     .map_err(CrabError::from)?;
     let plan = active_active_repair_plan_from_coordination(coordination_plan.clone());
-    apply_active_active_repair_manifests(replication, &plan, repo_prefix).await?;
+    apply_active_active_repair(replication, &plan, repo_prefix).await?;
     crab_coordination::mark_active_active_repair_materialized(
         &coordination_config,
         repo_prefix,
@@ -7585,7 +7528,7 @@ fn validate_active_active_resume_proof(proof: ActiveActiveResumeProof) -> Result
     if !proof.repair_verified {
         return Err(CrabError::Configuration {
             key: "replication.failover.resume.repair_verified".into(),
-            origin: "active-active resume requires proof that coordinator-backed repair and external provider failover checks completed".into(),
+            origin: "active-active resume requires proof that all GC runs stopped and drained, coordinator-backed repair and external provider failover checks completed".into(),
         });
     }
     Ok(())
@@ -8056,165 +7999,121 @@ async fn cosmosdb_active_active_gc_protected_keys_for_registration(
     })
 }
 
-async fn apply_active_active_repair_manifests(
+async fn apply_active_active_repair(
     replication: &ReplicationConfig,
     plan: &ActiveActiveRepairPlan,
     primary_repo_path: &str,
 ) -> Result<()> {
     for action in &plan.actions {
-        apply_active_active_repair_action(replication, action, primary_repo_path).await?;
+        let source_writer = coordination_active_active::active_active_writer_for_region(
+            &active_active_coordination_config(replication),
+            &action.source_region,
+        )
+        .map(writer_from_coordination)
+        .map_err(CrabError::from)?;
+        let (_, source_prefix) = build_writer_store(&source_writer, primary_repo_path)?;
+        let (target_store, target_prefix) = build_writer_store(&action.writer, primary_repo_path)?;
+        let target_router = StoreLayout::new(target_store, target_prefix);
+        let cancel = CancellationToken::new();
+        apply_active_active_repair_action(action, &source_prefix, &target_router, &cancel).await?;
     }
     Ok(())
 }
 
 async fn apply_active_active_repair_action(
-    replication: &ReplicationConfig,
     action: &ActiveActiveRepairAction,
-    primary_repo_path: &str,
+    source_prefix: &str,
+    target_router: &StoreLayout,
+    cancel: &CancellationToken,
 ) -> Result<()> {
-    let source_writer = coordination_active_active::active_active_writer_for_region(
-        &active_active_coordination_config(replication),
-        &action.source_region,
-    )
-    .map(writer_from_coordination)
-    .map_err(CrabError::from)?;
-    let (source_store, source_prefix) = build_writer_store(&source_writer, primary_repo_path)?;
-    let (target_store, target_prefix) = build_writer_store(&action.writer, primary_repo_path)?;
-    let source_router = StoreLayout::new(source_store.clone(), source_prefix.clone());
-    let target_router = StoreLayout::new(target_store.clone(), target_prefix.clone());
-    let cancel = CancellationToken::new();
+    let target_store = target_router.store();
+    let target_prefix = target_router.repo_prefix();
     let writer = crate::maintenance::GcWriterLeases::acquire(
-        &target_store,
+        target_store,
         target_router.global_prefix(),
         target_router.repo_prefix(),
-        &cancel,
+        cancel,
     )
     .await?;
 
-    let operation = tokio::select! {
-        biased;
-        () = cancel.cancelled() => Err(CrabError::Cancelled),
-        result = async {
-            if let Some(descriptor) = action.capsule_publication.as_ref() {
-                verify_repair_uploaded_objects_present(
-                    &target_store,
-                    &action.uploaded_objects,
-                    &source_prefix,
-                    &target_prefix,
-                )
-                .await?;
-                let target_layout = crab_storage::StoreLayout::with_global_prefix(
-                    target_store.as_storage().clone(),
-                    target_router.repo_prefix().to_owned(),
-                    target_router.global_prefix().to_owned(),
-                );
-                let transaction = crab_write::capsule_protocol::coordinated_transaction(
-                    &target_layout,
-                    descriptor,
-                )
-                .await?;
-                validate_coordinated_repair_refs(action, &transaction)?;
-                let view = crab_read::capsule_protocol::open_view(
-                    &target_layout,
-                    crab_read::capsule_protocol::CapsuleReadLimits {
-                        max_capsule_bytes: 2 * 1024 * 1024 * 1024,
-                        max_frontier_bytes: 2 * 1024 * 1024 * 1024,
-                    },
-                )
-                .await?;
-                let mut catalog = view.pointer_catalog().await?;
-                if let Some(delta) =
-                    crab_write::capsule_protocol::coordinated_pointer_catalog_delta(
-                        &target_layout,
-                        descriptor,
-                    )
-                    .await?
-                {
-                    catalog.apply(&delta)?;
-                }
-                crab_read::verify_capsule_pointer_catalog_objects(&target_layout, &catalog)
-                    .await?;
-                let root = crab_write::capsule_protocol::open_root(&target_layout).await?;
-                let repaired = crab_write::capsule_protocol::materialize_coordinated_repair(
-                    &target_layout,
-                    root,
-                    descriptor,
-                )
-                .await?;
-                if let Some(plan_id) = transaction.plan_id() {
-                    let intent = crab_metadata::capsule_protocol::read_capsule_plan_intent(
-                        target_layout.store(),
-                        &target_layout,
-                        plan_id,
-                    )
-                    .await?
-                    .ok_or_else(|| CrabError::CorruptObject {
-                        path: target_layout.capsule_plan_intent_path(plan_id).to_string(),
-                        reason: "coordinated mirror transaction has no durable plan intent"
-                            .to_owned(),
-                    })?;
-                    if intent.transaction() != &transaction {
-                        return Err(CrabError::CorruptObject {
-                            path: target_layout.capsule_plan_intent_path(plan_id).to_string(),
-                            reason: "mirror plan intent does not match the coordinated transaction"
-                                .to_owned(),
-                        });
-                    }
-                    crab_metadata::capsule_protocol::publish_capsule_plan_repair_receipt(
-                        target_layout.store(),
-                        &target_layout,
-                        &intent,
-                        repaired.activation_id(),
-                    )
-                    .await?;
-                }
-                return Ok(());
-            }
-            crate::core::remote_layout::open(&source_store, &source_router).await?;
-            crate::core::remote_layout::open(&target_store, &target_router).await?;
-            let (manifest, _) = read_manifest(&source_store, &source_router).await?;
-            if manifest.generation < action.manifest_generation {
-                return Err(CrabError::Configuration {
-                    key: "replication.repair.source_manifest".into(),
-                    origin: format!(
-                        "source region {} manifest generation {} is behind coordinator generation {}",
-                        action.source_region, manifest.generation, action.manifest_generation
-                    ),
-                });
-            }
-
+    writer
+        .run(async {
+            let descriptor = &action.capsule_publication;
             verify_repair_uploaded_objects_present(
-                &target_store,
+                target_store,
                 &action.uploaded_objects,
-                &source_prefix,
-                &target_prefix,
+                source_prefix,
+                target_prefix,
             )
             .await?;
-            replicate_git_visibility_index(
-                &source_store,
-                &source_router,
-                &target_store,
-                &target_router,
-                &manifest,
+            check_cancelled(cancel)?;
+            let target_layout = crab_storage::StoreLayout::with_global_prefix(
+                target_store.as_storage().clone(),
+                target_router.repo_prefix().to_owned(),
+                target_router.global_prefix().to_owned(),
+            );
+            let transaction =
+                crab_write::capsule_protocol::coordinated_transaction(&target_layout, descriptor)
+                    .await?;
+            validate_coordinated_repair_refs(action, &transaction)?;
+            check_cancelled(cancel)?;
+            let view = crab_read::capsule_protocol::open_view(
+                &target_layout,
+                crab_read::capsule_protocol::CapsuleReadLimits {
+                    max_capsule_bytes: 2 * 1024 * 1024 * 1024,
+                    max_frontier_bytes: 2 * 1024 * 1024 * 1024,
+                },
             )
             .await?;
-            replicate_shallow_closure_index(
-                &source_store,
-                &source_router,
-                &target_store,
-                &target_router,
-                &manifest,
+            let mut catalog = view.pointer_catalog().await?;
+            if let Some(delta) = crab_write::capsule_protocol::coordinated_pointer_catalog_delta(
+                &target_layout,
+                descriptor,
+            )
+            .await?
+            {
+                catalog.apply(&delta)?;
+            }
+            crab_read::verify_capsule_pointer_catalog_objects(&target_layout, &catalog).await?;
+            let root = crab_write::capsule_protocol::open_root(&target_layout).await?;
+            // Stop before visibility on lease loss; once replay starts, drain it
+            // through commit resolution before releasing either GC fence.
+            check_cancelled(cancel)?;
+            let repaired = crab_write::capsule_protocol::materialize_coordinated_repair(
+                &target_layout,
+                root,
+                descriptor,
             )
             .await?;
-            materialize_active_active_manifest_projection(&target_store, &target_router, &manifest)
-                .await
-        } => result,
-    };
-    let release = writer.release().await;
-    match (operation, release) {
-        (Ok(()), Ok(())) => Ok(()),
-        (Err(error), _) | (Ok(()), Err(error)) => Err(error),
-    }
+            if let Some(plan_id) = transaction.plan_id() {
+                let intent = crab_metadata::capsule_protocol::read_capsule_plan_intent(
+                    target_layout.store(),
+                    &target_layout,
+                    plan_id,
+                )
+                .await?
+                .ok_or_else(|| CrabError::CorruptObject {
+                    path: target_layout.capsule_plan_intent_path(plan_id).to_string(),
+                    reason: "coordinated mirror transaction has no durable plan intent".to_owned(),
+                })?;
+                if intent.transaction() != &transaction {
+                    return Err(CrabError::CorruptObject {
+                        path: target_layout.capsule_plan_intent_path(plan_id).to_string(),
+                        reason: "mirror plan intent does not match the coordinated transaction"
+                            .to_owned(),
+                    });
+                }
+                crab_metadata::capsule_protocol::publish_capsule_plan_repair_receipt(
+                    target_layout.store(),
+                    &target_layout,
+                    &intent,
+                    repaired.activation_id(),
+                )
+                .await?;
+            }
+            Ok(())
+        })
+        .await
 }
 
 fn validate_coordinated_repair_refs(
@@ -8228,8 +8127,7 @@ fn validate_coordinated_repair_refs(
             .iter()
             .zip(transaction.edits())
             .all(|(authorized, edit)| {
-                !authorized.force
-                    && authorized.name == edit.ref_name()
+                authorized.name == edit.ref_name()
                     && authorized.expected.as_deref() == edit.expected_old()
                     && authorized.new.as_deref() == edit.new_oid()
             });
@@ -8241,122 +8139,6 @@ fn validate_coordinated_repair_refs(
         reason: "coordinator ref edits do not match the authenticated capsule transaction"
             .to_owned(),
     })
-}
-
-async fn replicate_git_visibility_index(
-    source_store: &Store,
-    source_router: &StoreLayout,
-    target_store: &Store,
-    target_router: &StoreLayout,
-    manifest: &Manifest,
-) -> Result<()> {
-    if manifest.refs.is_empty() || manifest.pack_index_hash.is_empty() {
-        return Ok(());
-    }
-
-    let source_storage_router = crab_storage::StoreLayout::new(
-        source_store.as_storage().clone(),
-        source_router.repo_prefix().to_owned(),
-    );
-    // Repair can only copy an existing proof; unlike push publication it
-    // cannot reconstruct one before materializing the target manifest.
-    let index = match crab_metadata::git_visibility::read(
-        source_store.as_storage(),
-        &source_storage_router,
-        manifest.generation,
-        &manifest.pack_index_hash,
-        &manifest.git_validation_digest,
-    )
-    .await
-    {
-        Ok(index) => index,
-        Err(crab_metadata::error::MetadataError::Storage {
-            source: crab_storage::StorageError::NotFound { .. },
-        }) => return Ok(()),
-        Err(error) => return Err(CrabError::from(error)),
-    };
-    if !index.matches_manifest(manifest) {
-        return Err(CrabError::CorruptObject {
-            path: source_storage_router
-                .git_visibility_path(&manifest.git_validation_digest)
-                .as_ref()
-                .to_owned(),
-            reason: "Git visibility proof does not match its source manifest".to_owned(),
-        });
-    }
-    let target_storage_router = crab_storage::StoreLayout::new(
-        target_store.as_storage().clone(),
-        target_router.repo_prefix().to_owned(),
-    );
-    crab_metadata::git_visibility::upload_if_absent(
-        target_store.as_storage(),
-        &target_storage_router,
-        &index,
-    )
-    .await
-    .map_err(CrabError::from)
-}
-
-async fn replicate_shallow_closure_index(
-    source_store: &Store,
-    source_router: &StoreLayout,
-    target_store: &Store,
-    target_router: &StoreLayout,
-    manifest: &Manifest,
-) -> Result<()> {
-    if manifest.refs.is_empty() || manifest.pack_index_hash.is_empty() {
-        return Ok(());
-    }
-    let source_storage = source_store.as_storage();
-    let source_storage_router = crab_storage::StoreLayout::new(
-        source_storage.clone(),
-        source_router.repo_prefix().to_owned(),
-    );
-    let Some(descriptor) = crab_metadata::shallow_closure::load_shallow_closure_descriptor(
-        source_storage,
-        &source_storage_router,
-        &manifest.git_validation_digest,
-        manifest.generation,
-        &manifest.pack_index_hash,
-        crab_metadata::shallow_closure::DEFAULT_MAX_SHALLOW_CLOSURE_DESCRIPTOR_BYTES,
-    )
-    .await
-    .map_err(CrabError::from)?
-    else {
-        return Ok(());
-    };
-    let mut entries = Vec::with_capacity(descriptor.entries.len());
-    for reference in &descriptor.entries {
-        entries.push(
-            crab_metadata::shallow_closure::load_shallow_closure_entry(
-                source_storage,
-                &source_storage_router,
-                reference,
-                crab_metadata::shallow_closure::DEFAULT_MAX_SHALLOW_CLOSURE_ENTRY_BYTES,
-            )
-            .await
-            .map_err(CrabError::from)?,
-        );
-    }
-    let write = crab_metadata::shallow_closure::build_shallow_closure_write(
-        manifest.generation,
-        manifest.pack_index_hash.clone(),
-        manifest.git_validation_digest.clone(),
-        entries,
-    )
-    .map_err(CrabError::from)?;
-    let target_storage_router = crab_storage::StoreLayout::new(
-        target_store.as_storage().clone(),
-        target_router.repo_prefix().to_owned(),
-    );
-    crab_metadata::shallow_closure::upload_shallow_closure(
-        target_store.as_storage(),
-        &target_storage_router,
-        &manifest.git_validation_digest,
-        &write,
-    )
-    .await
-    .map_err(CrabError::from)
 }
 
 async fn verify_repair_uploaded_objects_present(
@@ -8381,7 +8163,7 @@ async fn verify_repair_uploaded_objects_present(
                 return Err(CrabError::Configuration {
                     key: "replication.repair.object".into(),
                     origin: format!(
-                        "target region is missing replicated transaction object {target_key}; repair refuses to publish the manifest before object replication catches up"
+                        "target region is missing replicated transaction object {target_key}; repair refuses to publish the Capsule transaction before object replication catches up"
                     ),
                 });
             }
@@ -8454,15 +8236,6 @@ fn repair_object_key_for_target_prefix(
     })
 }
 
-/// Writes a regional active-active manifest projection without making it write authority.
-pub async fn materialize_active_active_manifest_projection(
-    store: &Store,
-    router: &StoreLayout,
-    manifest: &Manifest,
-) -> Result<()> {
-    materialize_manifest_projection(store, router, manifest).await
-}
-
 fn build_writer_store(writer: &WriterConfig, primary_repo_path: &str) -> Result<(Store, String)> {
     let parsed = ObjectUrl::parse(&writer.url)?;
     let Some(provider) = ReplicationProviderKind::from_storage_provider_kind(parsed.cloud) else {
@@ -8527,8 +8300,14 @@ fn ensure_active_active_mutation_admitted_with_status(
     })
 }
 
-/// Result of selecting a store for a read operation.
-pub type ReadStoreSelection = crab_read::ReadStoreSelection<Store, StoreLayout>;
+/// Verified repository authority selected for one read operation.
+#[derive(Clone)]
+pub struct ReadStoreSelection {
+    pub store: Store,
+    pub router: StoreLayout,
+    pub source: ReadSource,
+    pub capsule_root: crab_metadata::capsule_protocol::RootSnapshot,
+}
 
 /// Result of selecting the primary store for a write operation.
 pub struct WriteStoreSelection {
@@ -8537,25 +8316,18 @@ pub struct WriteStoreSelection {
     pub capsule_root: crab_metadata::capsule_protocol::RootSnapshot,
 }
 
-async fn validate_read_replica_store(store: &Store, router: &StoreLayout) -> Result<()> {
+async fn validate_read_replica_store(
+    store: &Store,
+    router: &StoreLayout,
+) -> Result<crab_metadata::capsule_protocol::RootSnapshot> {
     let layout = crab_storage::StoreLayout::with_global_prefix(
         store.as_storage().clone(),
         router.repo_prefix().to_owned(),
         router.global_prefix().to_owned(),
     );
-    match crab_metadata::capsule_protocol::load_root(&layout).await {
-        Ok(_) => Ok(()),
-        Err(crab_metadata::error::MetadataError::Storage {
-            source: crab_storage::StorageError::NotFound { .. },
-        }) => {
-            // Before cutover, v1 replicas have no capsule root. Revalidate the
-            // manifest instead of rejecting a healthy legacy read target.
-            crate::metadata::manifest::read_manifest(store, router)
-                .await
-                .map(|_| ())
-        }
-        Err(error) => Err(error.into()),
-    }
+    crab_metadata::capsule_protocol::load_root(&layout)
+        .await
+        .map_err(Into::into)
 }
 
 struct SelectedReadReplicaStore {
@@ -8607,11 +8379,14 @@ impl<'a> StoreResolver<'a> {
             self.cancel,
         )
         .await?;
-        let primary_store = resolved.store;
-        let primary_router =
-            StoreLayout::new(primary_store.clone(), resolved.repository_prefix.clone());
-        if primary_store.storage_scope().is_some() {
-            return Ok(ReadStoreSelection::primary(primary_store, primary_router));
+        let primary = ReadStoreSelection {
+            router: StoreLayout::new(resolved.store.clone(), resolved.repository_prefix.clone()),
+            store: resolved.store,
+            source: ReadSource::Primary,
+            capsule_root: resolved.capsule_root,
+        };
+        if primary.store.storage_scope().is_some() {
+            return Ok(primary);
         }
         let policy = match self.read_policy.as_ref() {
             Some(policy) => policy.clone(),
@@ -8619,13 +8394,11 @@ impl<'a> StoreResolver<'a> {
         };
 
         let Some(replication) = self.config.replication.as_ref() else {
-            return Ok(ReadStoreSelection::primary(primary_store, primary_router));
+            return Ok(primary);
         };
 
-        let primary_fallback_store = primary_store.clone();
-        let primary_fallback_router = primary_router.clone();
         let selection = select_read_store_with_replicas(
-            primary_store,
+            primary.store.clone(),
             &resolved.repository_prefix,
             replication.replicas.iter(),
             operation,
@@ -8633,32 +8406,41 @@ impl<'a> StoreResolver<'a> {
             build_replica_store,
         )
         .await?;
-        let ReadSource::Replica { name } = &selection.source else {
-            return Ok(selection);
-        };
-        if let Err(error) = validate_read_replica_store(&selection.store, &selection.router).await {
-            tracing::warn!(replica = %name, error = %error, "replica read-layout validation failed; using primary");
-            if let Some(replica) = replication
-                .replicas
-                .iter()
-                .find(|replica| replica.name == *name)
-            {
-                record_replica_read_event(
-                    replica,
-                    selection.router.repo_prefix(),
-                    operation,
-                    ReplicaReadOutcome::Fallback,
-                    None,
-                    None,
-                    Some(format!("replica read-layout validation failed: {error}")),
-                );
+        let capsule_root = match &selection.source {
+            ReadSource::Primary => primary.capsule_root,
+            ReadSource::Replica { name } => {
+                match validate_read_replica_store(&selection.store, &selection.router).await {
+                    Ok(root) => root,
+                    Err(error) => {
+                        tracing::warn!(replica = %name, error = %error, "replica read-layout validation failed; using primary");
+                        if let Some(replica) = replication
+                            .replicas
+                            .iter()
+                            .find(|replica| replica.name == *name)
+                        {
+                            record_replica_read_event(
+                                replica,
+                                selection.router.repo_prefix(),
+                                operation,
+                                ReplicaReadOutcome::Fallback,
+                                None,
+                                None,
+                                Some(format!("replica read-layout validation failed: {error}")),
+                            );
+                        }
+                        return Ok(primary);
+                    }
+                }
             }
-            return Ok(ReadStoreSelection::primary(
-                primary_fallback_store,
-                primary_fallback_router,
-            ));
-        }
-        Ok(selection)
+        };
+        // The selected provider must own the captured root. A primary snapshot
+        // can name retired objects that a currently ready replica never needed.
+        Ok(ReadStoreSelection {
+            store: selection.store,
+            router: selection.router,
+            source: selection.source,
+            capsule_root,
+        })
     }
 
     /// Selects the primary store for write-class operations.
@@ -8723,14 +8505,14 @@ async fn select_read_store_with_replicas<'replicas, I, F>(
     operation: &str,
     policy: ReadRoutingPolicy,
     mut build_replica: F,
-) -> Result<ReadStoreSelection>
+) -> Result<crab_read::ReadStoreSelection<Store, StoreLayout>>
 where
     I: IntoIterator<Item = &'replicas ReplicaConfig>,
     F: FnMut(&ReplicaConfig, &str) -> Result<(Store, String)>,
 {
     let primary_router = StoreLayout::new(primary_store.clone(), primary_repo_path.to_owned());
     let primary_selection =
-        ReadStoreSelection::primary(primary_store.clone(), primary_router.clone());
+        crab_read::ReadStoreSelection::primary(primary_store.clone(), primary_router.clone());
     if matches!(
         policy,
         ReadRoutingPolicy::PreferPrimary | ReadRoutingPolicy::ReadDisabled
@@ -8853,7 +8635,10 @@ where
         }));
     }
     let primary_router = StoreLayout::new(primary_store.clone(), primary_repo_path.to_owned());
-    Ok(ReadStoreSelection::primary(primary_store, primary_router))
+    Ok(crab_read::ReadStoreSelection::primary(
+        primary_store,
+        primary_router,
+    ))
 }
 
 fn record_replica_fallback_events(
@@ -9052,117 +8837,7 @@ async fn replica_readiness(
         max_capsule_bytes: 2 * 1024 * 1024 * 1024,
         max_frontier_bytes: 2 * 1024 * 1024 * 1024,
     };
-    let primary_root = match crab_metadata::capsule_protocol::load_root(&primary_read_router).await
-    {
-        Ok(root) => Some(root),
-        Err(crab_metadata::error::MetadataError::Storage {
-            source: crab_storage::StorageError::NotFound { .. },
-        }) => None,
-        Err(error) => return Err(error.into()),
-    };
-    let Some(primary_root) = primary_root else {
-        // A repository without v2 authority is still a supported v1 read
-        // target. Keep its manifest/index readiness contract until cutover.
-        let readiness = check_legacy_read_replica_readiness(
-            primary_store.as_storage(),
-            &primary_read_router,
-            replica_store.as_storage(),
-            &replica_read_router,
-            options,
-        )
-        .await?;
-        let Some(primary_state_digest) = readiness.primary_state_digest.as_deref() else {
-            return Err(CrabError::Configuration {
-                key: "replication.readiness".into(),
-                origin: "legacy readiness omitted its manifest state token".into(),
-            });
-        };
-        let primary_generation = readiness.primary_generation;
-        let replica_prefix = replica_router.repo_prefix();
-        let now_ms = now_unix_ms();
-        if let Some(cache_age_ms) = readiness_cache_hit(
-            replica,
-            replica_prefix,
-            primary_generation,
-            primary_state_digest,
-            now_ms,
-            options,
-        ) {
-            return Ok(ReplicaStatus {
-                name: replica.name.clone(),
-                provider: replica.provider,
-                url: replica.url.clone(),
-                region: replica.region.clone(),
-                backfill_required: replica.backfill,
-                read_enabled: replica.read,
-                primary_generation: Some(primary_generation),
-                replica_generation: Some(primary_generation),
-                ready: true,
-                lag_generations: Some(0),
-                last_fallback_reason: None,
-                last_fallback_class: None,
-                last_fallback_at_ms: None,
-                last_fallback_operation: None,
-                fallback_count: 0,
-                primary_fallback_bytes: 0,
-                last_selected_at_ms: None,
-                last_selected_operation: None,
-                selected_count: 0,
-                readiness_cache_hit: true,
-                readiness_cache_age_ms: Some(cache_age_ms),
-                readiness_check_latency_ms: Some(elapsed_ms(started)),
-                readiness_object_probe_count: 0,
-                readiness_object_read_count: 0,
-            });
-        }
-        if let Some(reason) = readiness.reason {
-            return Ok(status_with_readiness_stats(
-                status_with_reason(
-                    replica,
-                    Some(readiness.primary_generation),
-                    readiness.replica_generation,
-                    reason,
-                ),
-                started,
-                readiness.stats,
-            ));
-        }
-        if options.max_object_probes.is_none() {
-            write_readiness_cache(
-                replica,
-                replica_prefix,
-                primary_generation,
-                primary_state_digest,
-                now_ms,
-            );
-        }
-        return Ok(ReplicaStatus {
-            name: replica.name.clone(),
-            provider: replica.provider,
-            url: replica.url.clone(),
-            region: replica.region.clone(),
-            backfill_required: replica.backfill,
-            read_enabled: replica.read,
-            primary_generation: Some(primary_generation),
-            replica_generation: readiness.replica_generation,
-            ready: true,
-            lag_generations: readiness.lag_generations,
-            last_fallback_reason: None,
-            last_fallback_class: None,
-            last_fallback_at_ms: None,
-            last_fallback_operation: None,
-            fallback_count: 0,
-            primary_fallback_bytes: 0,
-            last_selected_at_ms: None,
-            last_selected_operation: None,
-            selected_count: 0,
-            readiness_cache_hit: false,
-            readiness_cache_age_ms: None,
-            readiness_check_latency_ms: Some(elapsed_ms(started)),
-            readiness_object_probe_count: readiness.stats.object_probe_count,
-            readiness_object_read_count: readiness.stats.object_read_count,
-        });
-    };
+    let primary_root = crab_metadata::capsule_protocol::load_root(&primary_read_router).await?;
     let primary_view = crab_read::capsule_protocol::open_view_from_root(
         &primary_read_router,
         primary_root,
@@ -9895,7 +9570,7 @@ pub fn project_config_path(root: &Path) -> PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use std::collections::{BTreeMap, HashMap, HashSet};
+    use std::collections::{HashMap, HashSet};
     use std::fmt;
     use std::sync::Arc;
     use std::sync::Mutex;
@@ -9909,14 +9584,114 @@ mod tests {
         PutMultipartOptions, PutOptions, PutPayload, PutResult,
     };
 
-    use crate::metadata::manifest::{
-        Manifest, PackManifestEntry, compact_pack_index, create_manifest,
-    };
-    use crate::metadata::segmented;
+    use crate::metadata::manifest::{Manifest, create_manifest};
     use crab_coordination::write_coordinator::{
         CoordinatorCheckState, CoordinatorControlPlaneCheck, CoordinatorControlPlaneStatus,
         ManagedCoordinatorProvider,
     };
+
+    #[tokio::test]
+    async fn active_active_gc_retains_pending_capsule_and_deletes_unowned_old_object() {
+        use crab_metadata::capsule_protocol::{Capsule, CapsuleRefEdit, CapsuleTransaction};
+        use std::time::Duration;
+
+        let storage = Arc::new(crate::cmd::gc::captured_index_tests::AgedObjects::new(
+            Arc::new(InMemory::new()),
+            SystemTime::now() - Duration::from_secs(24 * 3600),
+        ));
+        let store = Store::new(storage.clone());
+        let router = StoreLayout::new(store.clone(), "repo".to_owned());
+        let layout = crab_storage::StoreLayout::new(store.as_storage().clone(), "repo".to_owned());
+        let base =
+            crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+                .await
+                .unwrap();
+        let transaction = CapsuleTransaction::new(
+            base.record().digest(),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some("2".repeat(40)),
+                None,
+            )],
+        )
+        .unwrap();
+        let capsule = Capsule::build(&transaction, Vec::new(), Vec::new()).unwrap();
+        let prepared = crab_write::capsule_protocol::prepare_coordinated_publication(
+            &layout,
+            base,
+            &transaction,
+            &capsule,
+        )
+        .await
+        .unwrap();
+        let protected_path = layout.capsule_path(&prepared.descriptor().run_hash);
+        let (expected_bytes, _) = store.get_with_etag(&protected_path).await.unwrap();
+        let orphan_path = layout.capsule_path(&"f".repeat(64));
+        store
+            .put(&orphan_path, Bytes::from_static(b"unowned"))
+            .await
+            .unwrap();
+        storage.age(&[protected_path.clone(), orphan_path.clone()]);
+        let plan = plan_active_active_capsule_push(
+            &active_active_replication_for_push(),
+            Some("east"),
+            prepared.descriptor().clone(),
+            vec![active_active_ref_update(
+                "refs/heads/main",
+                None,
+                Some(&"2".repeat(40)),
+            )],
+            vec![protected_path.to_string()],
+        )
+        .unwrap();
+        let coordinator = Arc::new(crab_coordination::InMemoryWriteCoordinator::new());
+        coordinator.begin(plan.request.clone()).await.unwrap();
+        coordinator
+            .mark_objects_uploaded(&plan.request.operation_id)
+            .await
+            .unwrap();
+        let fence = ActiveActiveGcFence::acquire_with_coordinator(coordinator.clone())
+            .await
+            .unwrap();
+        let outcome = crate::cmd::gc::run_repo_remote_gc(
+            &crate::cmd::gc::GcArgs::default(),
+            &store,
+            &router,
+            fence.protected_keys(),
+            &CancellationToken::new(),
+            Duration::from_secs(3600),
+            None,
+        )
+        .await
+        .unwrap();
+        fence.release().await.unwrap();
+
+        assert_eq!(outcome.packs_deleted, 1);
+        assert!(matches!(store.head(&orphan_path).await,
+            Err(CrabError::NotFound { path }) if path == orphan_path.as_ref()));
+        assert_eq!(
+            store.get_with_etag(&protected_path).await.unwrap().0,
+            expected_bytes
+        );
+        assert!(coordinator.health().await.unwrap().healthy);
+    }
+
+    #[tokio::test]
+    async fn active_active_gc_cleanup_does_not_resume_a_later_operator_fence() {
+        let coordinator = Arc::new(crab_coordination::InMemoryWriteCoordinator::new());
+        let fence = ActiveActiveGcFence::acquire_with_coordinator(coordinator.clone())
+            .await
+            .unwrap();
+        coordinator
+            .fence_writes(Some("operator maintenance".to_owned()))
+            .await
+            .unwrap();
+        let operator = coordinator.health().await.unwrap();
+        assert!(fence.release().await.is_err());
+        assert_eq!(coordinator.health().await.unwrap(), operator);
+        assert!(!operator.healthy);
+    }
 
     struct TestControlPlaneBackend {
         provider: ReplicationProviderKind,
@@ -12421,195 +12196,386 @@ mod tests {
         ensure_active_active_maintenance_admitted(&config, "garbage collection").unwrap();
     }
 
-    #[test]
-    fn active_active_push_plan_selects_first_enabled_writer() {
-        let replication = active_active_replication_for_push();
-        let refs = vec![active_active_ref_update(
-            "refs/heads/main",
-            Some("old"),
-            Some("new"),
-            false,
-        )];
-
-        let plan = plan_active_active_push(&replication, None, 42, refs, Vec::new()).unwrap();
-
-        assert_eq!(plan.writer.name, "east");
-        assert_eq!(plan.coordinator_url, "dynamodb://crab-coordinator");
-        assert_eq!(plan.request.writer, "east");
-        assert_eq!(plan.request.region, "us-east-1");
-        assert_eq!(plan.request.manifest_generation, 42);
-        assert_eq!(plan.request.refs.len(), 1);
-        assert_eq!(
-            plan.request.target_regions,
-            vec!["us-east-1".to_owned(), "us-west-2".to_owned()]
-        );
-        assert!(plan.request.operation_id.starts_with("crab-op-"));
+    #[derive(Debug)]
+    struct GatedRepairStore {
+        inner: Arc<InMemory>,
+        path: String,
+        block_put: bool,
+        entered: tokio::sync::Notify,
+        resume: tokio::sync::Notify,
+        drained: std::sync::atomic::AtomicBool,
     }
 
-    #[test]
-    fn active_active_push_plan_uses_preferred_enabled_writer() {
-        let replication = active_active_replication_for_push();
+    impl GatedRepairStore {
+        async fn wait(&self) {
+            if self.drained.load(std::sync::atomic::Ordering::SeqCst) {
+                return;
+            }
+            self.entered.notify_one();
+            self.resume.notified().await;
+            self.drained
+                .store(true, std::sync::atomic::Ordering::SeqCst);
+        }
+    }
 
-        let plan = plan_active_active_push(
-            &replication,
-            Some("west"),
-            7,
-            vec![active_active_ref_update(
-                "refs/heads/feature",
+    impl fmt::Display for GatedRepairStore {
+        fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+            f.write_str("GatedRepairStore")
+        }
+    }
+
+    #[async_trait]
+    impl ObjectStore for GatedRepairStore {
+        async fn put_opts(
+            &self,
+            location: &ObjectPath,
+            payload: PutPayload,
+            opts: PutOptions,
+        ) -> object_store::Result<PutResult> {
+            if self.block_put && location.as_ref().starts_with(&self.path) {
+                self.wait().await;
+            }
+            self.inner.put_opts(location, payload, opts).await
+        }
+
+        async fn put_multipart_opts(
+            &self,
+            location: &ObjectPath,
+            opts: PutMultipartOptions,
+        ) -> object_store::Result<Box<dyn MultipartUpload>> {
+            self.inner.put_multipart_opts(location, opts).await
+        }
+
+        async fn get_opts(
+            &self,
+            location: &ObjectPath,
+            options: GetOptions,
+        ) -> object_store::Result<GetResult> {
+            if !self.block_put && location.as_ref() == self.path {
+                self.wait().await;
+            }
+            self.inner.get_opts(location, options).await
+        }
+
+        fn delete_stream(
+            &self,
+            locations: BoxStream<'static, object_store::Result<ObjectPath>>,
+        ) -> BoxStream<'static, object_store::Result<ObjectPath>> {
+            self.inner.delete_stream(locations)
+        }
+
+        fn list(
+            &self,
+            prefix: Option<&ObjectPath>,
+        ) -> BoxStream<'static, object_store::Result<ObjectMeta>> {
+            self.inner.list(prefix)
+        }
+
+        async fn list_with_delimiter(
+            &self,
+            prefix: Option<&ObjectPath>,
+        ) -> object_store::Result<ListResult> {
+            self.inner.list_with_delimiter(prefix).await
+        }
+
+        async fn copy_opts(
+            &self,
+            from: &ObjectPath,
+            to: &ObjectPath,
+            options: object_store::CopyOptions,
+        ) -> object_store::Result<()> {
+            self.inner.copy_opts(from, to, options).await
+        }
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn fenced_repair_publishes_capsule_before_acknowledgement_and_resume() {
+        use crab_metadata::capsule_protocol::{Capsule, CapsuleRefEdit, CapsuleTransaction};
+        use crab_write::capsule_protocol::{
+            initialize, materialize_coordinated_publication, prepare_coordinated_publication,
+        };
+        use std::time::Duration;
+
+        let source = Store::new(Arc::new(InMemory::new()));
+        let target = Store::new(Arc::new(InMemory::new()));
+        let source_layout =
+            crab_storage::StoreLayout::new(source.as_storage().clone(), "repo".to_owned());
+        let target_layout =
+            crab_storage::StoreLayout::new(target.as_storage().clone(), "repo".to_owned());
+        let router = StoreLayout::new(target.clone(), "repo".to_owned());
+        let base = initialize(&source_layout, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+        let transaction = CapsuleTransaction::new(
+            base.record().digest(),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
                 None,
-                Some("new"),
-                false,
+                Some("2".repeat(40)),
+                None,
             )],
-            Vec::new(),
         )
         .unwrap();
-
-        assert_eq!(plan.writer.name, "west");
-        assert_eq!(plan.request.writer, "west");
-        assert_eq!(plan.request.region, "us-west-2");
-    }
-
-    #[test]
-    fn active_active_push_plan_rejects_disabled_preferred_writer() {
+        let capsule = Capsule::build(&transaction, Vec::new(), Vec::new()).unwrap();
+        let prepared =
+            prepare_coordinated_publication(&source_layout, base, &transaction, &capsule)
+                .await
+                .unwrap();
+        let run_path = source_layout.capsule_path(&prepared.descriptor().run_hash);
+        // Model provider replication of the bootstrap root and immutable run;
+        // regional mutable ref publication still belongs to the repair path.
+        for path in [source_layout.capsule_root_path(), run_path.clone()] {
+            let bytes = source.get_with_etag(&path).await.unwrap().0;
+            target.put(&path, bytes).await.unwrap();
+        }
         let replication = active_active_replication_for_push();
-
-        let err = plan_active_active_push(
+        let plan = plan_active_active_capsule_push(
             &replication,
-            Some("disabled"),
-            7,
+            Some("east"),
+            prepared.descriptor().clone(),
             vec![active_active_ref_update(
                 "refs/heads/main",
-                Some("old"),
-                Some("new"),
-                false,
+                None,
+                Some(&"2".repeat(40)),
             )],
-            Vec::new(),
-        )
-        .unwrap_err();
-
-        assert!(matches!(err, CrabError::Configuration { .. }));
-    }
-
-    #[test]
-    fn active_active_push_plan_rejects_empty_ref_set() {
-        let replication = active_active_replication_for_push();
-
-        let err =
-            plan_active_active_push(&replication, None, 7, Vec::new(), Vec::new()).unwrap_err();
-
-        assert!(matches!(err, CrabError::Configuration { .. }));
-    }
-
-    #[test]
-    fn active_active_push_operation_id_is_stable_for_ref_order() {
-        let replication = active_active_replication_for_push();
-        let refs = vec![
-            active_active_ref_update("refs/heads/main", Some("a"), Some("b"), false),
-            active_active_ref_update("refs/tags/v1", None, Some("c"), true),
-        ];
-        let mut reversed = refs.clone();
-        reversed.reverse();
-
-        let first =
-            plan_active_active_push(&replication, Some("east"), 9, refs, Vec::new()).unwrap();
-        let second =
-            plan_active_active_push(&replication, Some("east"), 9, reversed, Vec::new()).unwrap();
-
-        assert_eq!(first.request.operation_id, second.request.operation_id);
-    }
-
-    #[test]
-    fn active_active_push_operation_id_changes_for_ref_content() {
-        let replication = active_active_replication_for_push();
-
-        let first = plan_active_active_push(
-            &replication,
-            Some("east"),
-            9,
-            vec![active_active_ref_update(
-                "refs/heads/main",
-                Some("a"),
-                Some("b"),
-                false,
-            )],
-            Vec::new(),
+            vec![run_path.to_string()],
         )
         .unwrap();
-        let second = plan_active_active_push(
-            &replication,
-            Some("east"),
-            9,
-            vec![active_active_ref_update(
-                "refs/heads/main",
-                Some("a"),
-                Some("c"),
-                false,
-            )],
-            Vec::new(),
+        let coordinator = crab_coordination::InMemoryWriteCoordinator::new();
+        crab_coordination::commit_uploaded_push_refs(&coordinator, plan.request.clone())
+            .await
+            .unwrap();
+        materialize_coordinated_publication(&source_layout, prepared)
+            .await
+            .unwrap();
+        coordinator
+            .mark_region_materialized(&plan.request.operation_id, "us-east-1")
+            .await
+            .unwrap();
+        let fence = coordinator
+            .fence_writes(Some("regional repair".to_owned()))
+            .await
+            .unwrap();
+        let snapshot = coordinator.repair_snapshot().await.unwrap();
+        let repair = plan_active_active_repair(&replication, &snapshot).unwrap();
+        assert_eq!(repair.actions.len(), 1);
+        let action = &repair.actions[0];
+        assert_eq!(action.region, "us-west-2");
+        let limits = crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: 16 * 1024 * 1024,
+            max_frontier_bytes: 16 * 1024 * 1024,
+        };
+        assert!(
+            crab_read::capsule_protocol::open_view(&target_layout, limits)
+                .await
+                .unwrap()
+                .refs()
+                .is_empty()
+        );
+
+        let sweep = crab_coordination::GcFenceLease::acquire_sweep(
+            target.inner(),
+            "repo",
+            Duration::from_secs(30),
         )
+        .await
         .unwrap();
-
-        assert_ne!(first.request.operation_id, second.request.operation_id);
-    }
-
-    #[test]
-    fn active_active_push_operation_id_changes_for_uploaded_objects() {
-        let replication = active_active_replication_for_push();
-        let refs = vec![active_active_ref_update(
-            "refs/heads/main",
-            Some("a"),
-            Some("b"),
-            false,
-        )];
-
-        let first = plan_active_active_push(
-            &replication,
-            Some("east"),
-            9,
-            refs.clone(),
-            vec!["xorbs/aa/one".to_owned()],
-        )
-        .unwrap();
-        let second = plan_active_active_push(
-            &replication,
-            Some("east"),
-            9,
-            refs,
-            vec!["xorbs/bb/two".to_owned()],
-        )
-        .unwrap();
-
-        assert_ne!(first.request.operation_id, second.request.operation_id);
+        let cancel = CancellationToken::new();
+        assert!(
+            matches!(apply_active_active_repair_action(action, "repo", &router, &cancel).await, Err(CrabError::PushLockHeld { ref_name, .. }) if ref_name == "gc-fence/repo")
+        );
+        sweep.release().await.unwrap();
+        assert_eq!(coordinator.repair_snapshot().await.unwrap(), snapshot);
+        for _ in 0..2 {
+            apply_active_active_repair_action(action, "repo", &router, &cancel)
+                .await
+                .unwrap();
+        }
         assert_eq!(
-            first.request.uploaded_objects,
-            vec!["xorbs/aa/one".to_owned()]
+            crab_read::capsule_protocol::open_view(&target_layout, limits)
+                .await
+                .unwrap()
+                .refs()
+                .get("refs/heads/main"),
+            Some(&"2".repeat(40))
+        );
+        coordinator
+            .mark_region_materialized(&action.operation_id, &action.region)
+            .await
+            .unwrap();
+        assert!(
+            coordinator
+                .repair_snapshot()
+                .await
+                .unwrap()
+                .materialization_gaps
+                .is_empty()
+        );
+        let health = coordinator.health().await.unwrap();
+        assert!(!health.healthy);
+        assert_eq!(health.epoch, fence.coordinator_epoch);
+        assert!(coordinator.commit(plan.request.clone()).await.is_err());
+        coordinator.resume_writes().await.unwrap();
+        assert_eq!(
+            coordinator.commit(plan.request).await.unwrap().state,
+            crab_coordination::PushTransactionState::Materialized
         );
     }
 
-    #[test]
-    fn active_active_push_operation_id_changes_for_target_regions() {
-        let mut replication = active_active_replication_for_push();
-        let refs = vec![active_active_ref_update(
+    #[tokio::test(flavor = "multi_thread")]
+    async fn repair_cancellation_drains_verification_before_releasing_gc_admission() {
+        repair_cancellation_drains_io(false, false).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn repair_cancellation_preserves_verification_error_after_draining() {
+        repair_cancellation_drains_io(false, true).await;
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn repair_cancellation_drains_publication_before_releasing_gc_admission() {
+        repair_cancellation_drains_io(true, false).await;
+    }
+
+    async fn repair_cancellation_drains_io(block_put: bool, missing_object: bool) {
+        use crab_metadata::capsule_protocol::{Capsule, CapsuleRefEdit, CapsuleTransaction};
+        use crab_write::capsule_protocol::{initialize, prepare_coordinated_publication};
+        use object_store::ObjectStoreExt;
+        use std::sync::atomic::Ordering;
+        use std::time::Duration;
+
+        let inner = Arc::new(InMemory::new());
+        let store = Store::new(inner.clone());
+        let layout = crab_storage::StoreLayout::new(store.as_storage().clone(), "repo".to_owned());
+        let base = initialize(&layout, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+        let transaction = CapsuleTransaction::new(
+            base.record().digest(),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some("2".repeat(40)),
+                None,
+            )],
+        )
+        .unwrap();
+        let capsule = Capsule::build(&transaction, Vec::new(), Vec::new()).unwrap();
+        let prepared = prepare_coordinated_publication(&layout, base, &transaction, &capsule)
+            .await
+            .unwrap();
+        let mut plan = plan_active_active_repair(
+            &active_active_replication_for_push(),
+            &coordinator_repair_snapshot(vec![repair_gap("op", "us-west-2")]),
+        )
+        .unwrap();
+        let action = &mut plan.actions[0];
+        action.capsule_publication = prepared.descriptor().clone();
+        action.refs = vec![active_active_ref_update(
             "refs/heads/main",
-            Some("a"),
-            Some("b"),
-            false,
+            None,
+            Some(&"2".repeat(40)),
         )];
-        let first =
-            plan_active_active_push(&replication, Some("east"), 9, refs.clone(), Vec::new())
+        action.uploaded_objects = vec!["repo/verified-object".to_owned()];
+        if !missing_object {
+            inner
+                .put(
+                    &ObjectPath::from("repo/verified-object"),
+                    Bytes::from_static(b"verified").into(),
+                )
+                .await
                 .unwrap();
-
-        replication
-            .writers
-            .iter_mut()
-            .find(|writer| writer.name == "west")
+        }
+        let gated = Arc::new(GatedRepairStore {
+            inner,
+            path: if block_put {
+                layout.capsule_transactions_prefix().to_string()
+            } else {
+                action.uploaded_objects[0].clone()
+            },
+            block_put,
+            entered: tokio::sync::Notify::new(),
+            resume: tokio::sync::Notify::new(),
+            drained: std::sync::atomic::AtomicBool::new(false),
+        });
+        let target = StoreLayout::new(Store::new(gated.clone()), "repo".to_owned());
+        let cancel = CancellationToken::new();
+        let mut repair = Box::pin(apply_active_active_repair_action(
+            action, "repo", &target, &cancel,
+        ));
+        tokio::select! {
+            () = gated.entered.notified() => {},
+            result = &mut repair => panic!("repair did not reach the storage gate: {result:?}"),
+            () = tokio::time::sleep(Duration::from_secs(5)) => panic!("repair storage gate timed out"),
+        }
+        cancel.cancel();
+        // Poll the real repair after cancellation, without dropping a pending operation.
+        let early = tokio::time::timeout(Duration::from_millis(100), &mut repair)
+            .await
+            .ok();
+        let returned_early = early.is_some();
+        let mut swept_while_blocked = false;
+        for domain in [target.global_prefix(), target.repo_prefix()] {
+            match crab_coordination::GcFenceLease::acquire_sweep(
+                target.store().inner(),
+                domain,
+                Duration::from_secs(30),
+            )
+            .await
+            {
+                Ok(sweep) => {
+                    swept_while_blocked = true;
+                    sweep.release().await.unwrap();
+                }
+                Err(crab_coordination::CoordinationError::GcFenceHeld { .. }) => {}
+                Err(error) => panic!("unexpected sweep admission failure: {error}"),
+            }
+        }
+        gated.resume.notify_one();
+        let outcome = match early {
+            Some(result) => result,
+            None => tokio::time::timeout(Duration::from_secs(5), repair)
+                .await
+                .unwrap(),
+        };
+        for domain in [target.global_prefix(), target.repo_prefix()] {
+            crab_coordination::GcFenceLease::acquire_sweep(
+                target.store().inner(),
+                domain,
+                Duration::from_secs(30),
+            )
+            .await
             .unwrap()
-            .enabled = false;
-        let second =
-            plan_active_active_push(&replication, Some("east"), 9, refs, Vec::new()).unwrap();
-
-        assert_ne!(first.request.operation_id, second.request.operation_id);
-        assert_eq!(second.request.target_regions, vec!["us-east-1".to_owned()]);
+            .release()
+            .await
+            .unwrap();
+        }
+        assert!(
+            !returned_early && !swept_while_blocked && gated.drained.load(Ordering::SeqCst),
+            "repair returned_early={returned_early}, swept_while_blocked={swept_while_blocked} before storage drained",
+        );
+        if missing_object {
+            assert!(
+                matches!(outcome, Err(CrabError::Configuration { ref key, .. })
+                if key == "replication.repair.object"),
+                "{outcome:?}"
+            );
+        } else {
+            assert!(matches!(outcome, Err(CrabError::Cancelled)), "{outcome:?}");
+        }
+        let view = crab_read::capsule_protocol::open_view(
+            &layout,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: 16 * 1024 * 1024,
+                max_frontier_bytes: 16 * 1024 * 1024,
+            },
+        )
+        .await
+        .unwrap();
+        assert_eq!(
+            view.refs().get("refs/heads/main").cloned(),
+            block_put.then(|| "2".repeat(40))
+        );
     }
 
     #[test]
@@ -12728,76 +12694,6 @@ mod tests {
         assert!(err.to_string().contains("corrupt"));
     }
 
-    #[tokio::test]
-    async fn repair_materialization_writes_manifest_projection() {
-        let store = Store::new(Arc::new(InMemory::new()));
-        let router = StoreLayout::new(store.clone(), "target/repo".to_owned());
-        let mut manifest = Manifest::default_for_repo("refs/heads/main");
-        manifest.generation = 42;
-        manifest
-            .refs
-            .insert("refs/heads/main".into(), "a".repeat(40));
-        manifest.seal_git_validation();
-
-        materialize_active_active_manifest_projection(&store, &router, &manifest)
-            .await
-            .unwrap();
-
-        let (written, _) = read_manifest(&store, &router).await.unwrap();
-        assert_eq!(written, manifest);
-    }
-
-    #[tokio::test]
-    async fn repair_refuses_to_replicate_mismatched_v1_visibility() {
-        let source = Store::new(Arc::new(InMemory::new()));
-        let source_router = StoreLayout::new(source.clone(), "source/repo".to_owned());
-        let target = Store::new(Arc::new(InMemory::new()));
-        let target_router = StoreLayout::new(target.clone(), "target/repo".to_owned());
-        let mut manifest = Manifest::default_for_repo("refs/heads/main");
-        manifest.generation = 7;
-        manifest.pack_index_hash = "a".repeat(64);
-        manifest
-            .refs
-            .insert("refs/heads/main".to_owned(), "1".repeat(40));
-        manifest.seal_git_validation();
-        let index = crab_metadata::git_visibility::GitVisibilityIndex::new(
-            manifest.generation,
-            &manifest.pack_index_hash,
-            &manifest.git_validation_digest,
-            BTreeMap::from([("refs/heads/main".to_owned(), vec!["2".repeat(40)])]),
-        )
-        .unwrap();
-        let source_storage_router = crab_storage::StoreLayout::new(
-            source.as_storage().clone(),
-            source_router.repo_prefix().to_owned(),
-        );
-        crab_metadata::git_visibility::upload_digest_bound_if_absent(
-            source.as_storage(),
-            &source_storage_router,
-            &index,
-        )
-        .await
-        .unwrap();
-
-        let error = replicate_git_visibility_index(
-            &source,
-            &source_router,
-            &target,
-            &target_router,
-            &manifest,
-        )
-        .await
-        .unwrap_err();
-
-        assert!(matches!(error, CrabError::CorruptObject { .. }));
-        assert!(matches!(
-            target
-                .head(&target_router.git_visibility_path(&manifest.git_validation_digest))
-                .await,
-            Err(CrabError::NotFound { .. })
-        ));
-    }
-
     #[test]
     fn active_active_config_rejects_duplicate_enabled_writer_regions() {
         let mut replication = active_active_replication_for_push();
@@ -12874,13 +12770,11 @@ mod tests {
         name: &str,
         expected: Option<&str>,
         new: Option<&str>,
-        force: bool,
     ) -> CoordinatedRefUpdate {
         CoordinatedRefUpdate {
             name: name.to_owned(),
             expected: expected.map(str::to_owned),
             new: new.map(str::to_owned),
-            force,
         }
     }
 
@@ -12901,7 +12795,6 @@ mod tests {
     ) -> crab_coordination::write_coordinator::CoordinatorMaterializationGap {
         crab_coordination::write_coordinator::CoordinatorMaterializationGap {
             operation_id: operation_id.to_owned(),
-            manifest_generation: 42,
             commit_sequence: 1,
             region: region.to_owned(),
             writer: "west".into(),
@@ -12910,10 +12803,16 @@ mod tests {
                 "refs/heads/main",
                 Some("a"),
                 Some("b"),
-                false,
             )],
             uploaded_objects: vec!["xorbs/aa/object".into()],
-            capsule_publication: None,
+            capsule_publication:
+                crab_coordination::write_coordinator::CoordinatedCapsulePublication {
+                    base_root_digest: "1".repeat(64),
+                    transaction_id: "2".repeat(64),
+                    activation_id: "3".repeat(64),
+                    run_hash: "4".repeat(64),
+                    run_size: 1024,
+                },
         }
     }
 
@@ -13417,12 +13316,12 @@ mod tests {
     }
 
     #[derive(Clone)]
-    struct HeadFailingInMemory {
+    struct ReadFailingInMemory {
         inner: Arc<InMemory>,
         fail_contains: String,
     }
 
-    impl HeadFailingInMemory {
+    impl ReadFailingInMemory {
         fn new(fail_contains: &str) -> Self {
             Self {
                 inner: Arc::new(InMemory::new()),
@@ -13437,22 +13336,22 @@ mod tests {
         }
     }
 
-    impl fmt::Debug for HeadFailingInMemory {
+    impl fmt::Debug for ReadFailingInMemory {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.debug_struct("HeadFailingInMemory")
+            f.debug_struct("ReadFailingInMemory")
                 .field("fail_contains", &self.fail_contains)
                 .finish()
         }
     }
 
-    impl fmt::Display for HeadFailingInMemory {
+    impl fmt::Display for ReadFailingInMemory {
         fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-            f.write_str("HeadFailingInMemory")
+            f.write_str("ReadFailingInMemory")
         }
     }
 
     #[async_trait]
-    impl ObjectStore for HeadFailingInMemory {
+    impl ObjectStore for ReadFailingInMemory {
         async fn put_opts(
             &self,
             location: &ObjectPath,
@@ -13475,7 +13374,7 @@ mod tests {
             location: &ObjectPath,
             options: GetOptions,
         ) -> object_store::Result<GetResult> {
-            if options.head && location.as_ref().contains(&self.fail_contains) {
+            if location.as_ref().contains(&self.fail_contains) {
                 return Err(Self::injected_error());
             }
             self.inner.get_opts(location, options).await
@@ -13613,11 +13512,11 @@ mod tests {
         (store, router)
     }
 
-    fn head_failing_memory_store_with_layout(
+    fn read_failing_memory_store_with_layout(
         repo_prefix: &str,
         fail_contains: &str,
     ) -> (Store, StoreLayout) {
-        let store = Store::new(Arc::new(HeadFailingInMemory::new(fail_contains)));
+        let store = Store::new(Arc::new(ReadFailingInMemory::new(fail_contains)));
         let router = StoreLayout::new(store.clone(), repo_prefix.to_owned());
         (store, router)
     }
@@ -13636,13 +13535,41 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_replica_validation_accepts_legacy_manifest_without_capsule_root() {
+    async fn readiness_rejects_primary_without_capsule_root() {
+        for legacy_manifest in [true, false] {
+            let (primary, primary_router) = memory_store_with_layout("org/repo");
+            let (replica, replica_router) = memory_store_with_layout("org/repo");
+            if legacy_manifest {
+                for (store, router) in [(&primary, &primary_router), (&replica, &replica_router)] {
+                    write_test_manifest(store, router, &test_manifest(7)).await;
+                }
+            }
+            let result = replica_readiness(
+                &primary,
+                &primary_router,
+                &replica,
+                &replica_router,
+                &test_replica(),
+                ReadinessCheckOptions::deep(),
+            )
+            .await;
+            assert!(
+                matches!(result, Err(CrabError::NotFound { ref path })
+                    if path == primary_router.capsule_root_path().as_ref()),
+                "legacy_manifest={legacy_manifest}: {result:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn read_replica_validation_rejects_manifest_without_capsule_root() {
         let (store, router) = memory_store_with_layout("org/repo");
         write_test_manifest(&store, &router, &test_manifest(7)).await;
 
-        validate_read_replica_store(&store, &router)
-            .await
-            .expect("legacy manifest validates a pre-cutover replica");
+        assert!(matches!(
+            validate_read_replica_store(&store, &router).await,
+            Err(CrabError::NotFound { .. })
+        ));
     }
 
     #[tokio::test]
@@ -13660,103 +13587,64 @@ mod tests {
         assert!(validate_read_replica_store(&store, &router).await.is_err());
     }
 
-    async fn write_pack_generation(
-        store: &Store,
-        router: &StoreLayout,
-        generation: u64,
-        pack_id: &str,
-        include_pack_index: bool,
-        include_pack_object: bool,
-        include_pack_metadata: bool,
-    ) -> Manifest {
-        let pack = test_pack_entry(pack_id);
-        let (pack_index_hash, _index, pack_write) =
-            compact_pack_index(generation, std::slice::from_ref(&pack)).expect("build pack index");
-        let mut manifest = test_manifest(generation);
-        manifest.pack_index_hash = pack_index_hash;
-        manifest.seal_git_validation();
-        write_test_manifest(store, router, &manifest).await;
-        if include_pack_index {
-            segmented::upload_write(store, router, &pack_write)
-                .await
-                .expect("upload pack index");
-        }
-        if include_pack_object {
+    async fn write_capsule_generation(store: &Store, router: &StoreLayout, include_xorb: bool) {
+        use crab_metadata::capsule_protocol::{
+            CapsuleSection, CapsuleSectionKind, PointerCatalog, XorbCatalogEntry, XorbChunkEntry,
+        };
+        use crab_xet::xorb::{
+            builder::{RunId, XorbBuilder},
+            format::Chunk,
+        };
+        let base = initialize_capsule_repository(store, router).await;
+        let chunk = Chunk::new(Bytes::from_static(b"replicated payload"));
+        let mut builder = XorbBuilder::new();
+        builder.push(&chunk, RunId(0)).unwrap();
+        let xorb = builder.finalize().unwrap().pop().unwrap();
+        let mut catalog = PointerCatalog::new();
+        catalog
+            .insert_xorb(
+                xorb.hash.hex(),
+                XorbCatalogEntry::new(
+                    xorb.bytes.len() as u64,
+                    blake3::hash(&xorb.bytes).to_hex().to_string(),
+                    vec![XorbChunkEntry::new(
+                        chunk.hash.hex(),
+                        chunk.data.len() as u32,
+                    )],
+                ),
+            )
+            .unwrap();
+        if include_xorb {
             store
-                .put(
-                    &router.pack_path(&pack.pack_id),
-                    Bytes::from_static(b"pack"),
-                )
+                .put(&router.xorb_path(&xorb.hash), xorb.bytes)
                 .await
-                .expect("upload pack object");
+                .unwrap();
         }
-        if include_pack_metadata {
-            store
-                .put(
-                    &router.pack_metadata_path(&pack.pack_id),
-                    Bytes::from_static(b"meta"),
-                )
-                .await
-                .expect("upload pack metadata");
-        }
-        manifest
-    }
-
-    fn test_pack_entry(pack_id: &str) -> PackManifestEntry {
-        let pack_id = canonical_test_pack_id(pack_id);
-        PackManifestEntry {
-            pack_id: pack_id.clone(),
-            size: 42,
-            content_hash: pack_id,
-            ref_tips: vec!["b".repeat(40)],
-            object_count: 1,
-        }
-    }
-
-    fn canonical_test_pack_id(label: &str) -> String {
-        if label.len() == 64 && label.chars().all(|ch| ch.is_ascii_hexdigit()) {
-            label.to_owned()
-        } else {
-            blake3::hash(label.as_bytes()).to_hex().to_string()
-        }
+        let sections = vec![CapsuleSection::new(
+            CapsuleSectionKind::CatalogDelta,
+            catalog.encode_delta().unwrap(),
+        )];
+        publish_capsule_ref(store, router, base, sections).await;
     }
 
     #[tokio::test]
     async fn read_resolver_uses_ready_replica_for_user_read_operations() {
         let _cache = isolated_replica_cache();
-        for (generation, operation, slug) in [
-            (40, "clone:shard-sync", "clone"),
-            (41, "fetch", "fetch"),
-            (42, "hydrate", "hydrate"),
-            (43, "mount", "mount"),
-            (44, "sdk-read", "sdk-read"),
-            (45, "smudge", "smudge"),
+        for (operation, slug) in [
+            ("clone:shard-sync", "clone"),
+            ("fetch", "fetch"),
+            ("hydrate", "hydrate"),
+            ("mount", "mount"),
+            ("sdk-read", "sdk-read"),
+            ("smudge", "smudge"),
         ] {
             let (primary_store, primary_router) = memory_store_with_layout("org/repo");
             let (replica_store, replica_router) = memory_store_with_layout("org/repo");
             let replica = named_test_replica(&format!("ready-{slug}"));
             clear_replica_test_cache(&replica);
             let replicas = vec![replica.clone()];
-            write_pack_generation(
-                &primary_store,
-                &primary_router,
-                generation,
-                "ready",
-                true,
-                true,
-                true,
-            )
-            .await;
-            write_pack_generation(
-                &replica_store,
-                &replica_router,
-                generation,
-                "ready",
-                true,
-                true,
-                true,
-            )
-            .await;
+            write_capsule_generation(&primary_store, &primary_router, true).await;
+            write_capsule_generation(&replica_store, &replica_router, true).await;
             replica_store
                 .put(
                     &replica_router.repo_path("packs/replica-only"),
@@ -13842,18 +13730,9 @@ mod tests {
         clear_replica_test_cache(&east);
         clear_replica_test_cache(&west);
         let replicas = vec![east.clone(), west.clone()];
-        write_pack_generation(
-            &primary_store,
-            &primary_router,
-            45,
-            "policy",
-            true,
-            true,
-            true,
-        )
-        .await;
-        write_pack_generation(&east_store, &east_router, 45, "policy", true, true, true).await;
-        write_pack_generation(&west_store, &west_router, 45, "policy", true, true, true).await;
+        write_capsule_generation(&primary_store, &primary_router, true).await;
+        write_capsule_generation(&east_store, &east_router, true).await;
+        write_capsule_generation(&west_store, &west_router, true).await;
         east_store
             .put(
                 &east_router.repo_path("packs/replica-policy"),
@@ -14135,41 +14014,23 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn read_resolver_falls_back_when_replica_manifest_precedes_pack_objects() {
+    async fn read_resolver_falls_back_when_replica_catalog_precedes_payload_objects() {
         let _cache = isolated_replica_cache();
-        for (generation, operation, slug) in [
-            (50, "clone:shard-sync", "clone"),
-            (51, "fetch", "fetch"),
-            (52, "hydrate", "hydrate"),
-            (53, "mount", "mount"),
-            (54, "sdk-read", "sdk-read"),
-            (55, "smudge", "smudge"),
+        for (operation, slug) in [
+            ("clone:shard-sync", "clone"),
+            ("fetch", "fetch"),
+            ("hydrate", "hydrate"),
+            ("mount", "mount"),
+            ("sdk-read", "sdk-read"),
+            ("smudge", "smudge"),
         ] {
             let (primary_store, primary_router) = memory_store_with_layout("org/repo");
             let (replica_store, replica_router) = memory_store_with_layout("org/repo");
             let replica = named_test_replica(&format!("delayed-{slug}"));
             clear_replica_test_cache(&replica);
             let replicas = vec![replica.clone()];
-            write_pack_generation(
-                &primary_store,
-                &primary_router,
-                generation,
-                "delayed",
-                true,
-                true,
-                true,
-            )
-            .await;
-            write_pack_generation(
-                &replica_store,
-                &replica_router,
-                generation,
-                "delayed",
-                true,
-                false,
-                false,
-            )
-            .await;
+            write_capsule_generation(&primary_store, &primary_router, true).await;
+            write_capsule_generation(&replica_store, &replica_router, false).await;
             primary_store
                 .put(
                     &primary_router.repo_path("packs/primary-only"),
@@ -14266,42 +14127,23 @@ mod tests {
     #[tokio::test]
     async fn read_resolver_falls_back_when_replica_readiness_probe_fails() {
         let _cache = isolated_replica_cache();
-        for (generation, operation, slug) in [
-            (60, "clone:shard-sync", "clone"),
-            (61, "fetch", "fetch"),
-            (62, "hydrate", "hydrate"),
-            (63, "mount", "mount"),
-            (64, "sdk-read", "sdk-read"),
-            (65, "smudge", "smudge"),
+        for (operation, slug) in [
+            ("clone:shard-sync", "clone"),
+            ("fetch", "fetch"),
+            ("hydrate", "hydrate"),
+            ("mount", "mount"),
+            ("sdk-read", "sdk-read"),
+            ("smudge", "smudge"),
         ] {
             let (primary_store, primary_router) = memory_store_with_layout("org/repo");
-            let flaky_pack_id = canonical_test_pack_id("flaky");
-            let fail_contains = format!("pack-{flaky_pack_id}.pack");
+            let fail_contains = "/xorbs/";
             let (replica_store, replica_router) =
-                head_failing_memory_store_with_layout("org/repo", &fail_contains);
+                read_failing_memory_store_with_layout("org/repo", fail_contains);
             let replica = named_test_replica(&format!("probe-failed-{slug}"));
             clear_replica_test_cache(&replica);
             let replicas = vec![replica.clone()];
-            write_pack_generation(
-                &primary_store,
-                &primary_router,
-                generation,
-                &flaky_pack_id,
-                true,
-                true,
-                true,
-            )
-            .await;
-            write_pack_generation(
-                &replica_store,
-                &replica_router,
-                generation,
-                &flaky_pack_id,
-                true,
-                true,
-                true,
-            )
-            .await;
+            write_capsule_generation(&primary_store, &primary_router, true).await;
+            write_capsule_generation(&replica_store, &replica_router, true).await;
             primary_store
                 .put(
                     &primary_router.repo_path("packs/primary-probe-fallback"),
@@ -14406,6 +14248,7 @@ mod tests {
         store: &Store,
         router: &StoreLayout,
         base: crab_write::capsule_protocol::RootSnapshot,
+        sections: Vec<crab_metadata::capsule_protocol::CapsuleSection>,
     ) {
         let transaction = crab_metadata::capsule_protocol::CapsuleTransaction::for_plan(
             base.record().digest(),
@@ -14419,7 +14262,7 @@ mod tests {
         )
         .expect("build capsule transaction");
         let capsule =
-            crab_metadata::capsule_protocol::Capsule::build(&transaction, Vec::new(), Vec::new())
+            crab_metadata::capsule_protocol::Capsule::build(&transaction, Vec::new(), sections)
                 .expect("build capsule");
         crab_write::capsule_protocol::publish(
             &capsule_layout(store, router),
@@ -14437,8 +14280,8 @@ mod tests {
         let (replica_store, replica_router) = memory_store_with_layout("org/repo");
         let primary_root = initialize_capsule_repository(&primary_store, &primary_router).await;
         let replica_root = initialize_capsule_repository(&replica_store, &replica_router).await;
-        publish_capsule_ref(&primary_store, &primary_router, primary_root).await;
-        publish_capsule_ref(&replica_store, &replica_router, replica_root).await;
+        publish_capsule_ref(&primary_store, &primary_router, primary_root, Vec::new()).await;
+        publish_capsule_ref(&replica_store, &replica_router, replica_root, Vec::new()).await;
 
         let status = replica_readiness(
             &primary_store,
@@ -14489,7 +14332,7 @@ mod tests {
         assert!(cached.ready);
         assert!(cached.readiness_cache_hit);
 
-        publish_capsule_ref(&primary_store, &primary_router, primary_root).await;
+        publish_capsule_ref(&primary_store, &primary_router, primary_root, Vec::new()).await;
         let changed = replica_readiness(
             &primary_store,
             &primary_router,
@@ -14532,7 +14375,7 @@ mod tests {
         .expect("initial readiness check");
         assert!(initial.ready);
 
-        publish_capsule_ref(&replica_store, &replica_router, replica_root).await;
+        publish_capsule_ref(&replica_store, &replica_router, replica_root, Vec::new()).await;
         let cached = replica_readiness(
             &primary_store,
             &primary_router,

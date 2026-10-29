@@ -93,6 +93,26 @@ impl GcWriterLeases {
         })
     }
 
+    /// Drain cooperative work before releasing both GC admissions.
+    ///
+    /// Work must check its cancellation token before starting publication. Once
+    /// started, storage requests must finish before cleanup, including on loss.
+    pub(crate) async fn run<T>(
+        self,
+        operation: impl std::future::Future<Output = Result<T>>,
+    ) -> Result<T> {
+        let result = async {
+            check_cancelled(&self.operation_cancel)?;
+            operation.await
+        }
+        .await;
+        let release = self.release().await;
+        match (result, release) {
+            (Ok(value), Ok(())) => Ok(value),
+            (Err(error), _) | (Ok(_), Err(error)) => Err(error),
+        }
+    }
+
     /// Stop both heartbeats and release repository before global admission.
     pub(crate) async fn release(self) -> Result<()> {
         let cancelled = self.operation_cancel.is_cancelled();
@@ -151,6 +171,13 @@ impl GcSweepLease {
                 .map_err(CrabError::from)?;
         let heartbeat = GcFenceHeartbeat::spawn(&fence, cancel.clone(), GC_RUN_FENCE_TTL / 3);
         Ok(Self { fence, heartbeat })
+    }
+
+    pub(crate) async fn read_retention_time(&self) -> Result<i64> {
+        self.fence
+            .read_retention_time()
+            .await
+            .map_err(CrabError::from)
     }
 
     /// Stop renewal and release the exclusive fence.

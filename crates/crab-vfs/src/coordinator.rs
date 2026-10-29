@@ -121,14 +121,17 @@ pub struct OverlayResetTarget {
     engine: Arc<VfsEngine>,
     overlay: Arc<OverlayStore>,
     mountpoint: PathBuf,
+    notifier: Option<fuser::Notifier>,
+    invalidation_index: Option<FuseInvalidationIndex>,
 }
 
 pub struct OverlayCommitTarget {
     pub engine: Arc<VfsEngine>,
-    pub snapshot: Arc<crate::snapshot::SnapshotStore>,
-    pub options: crate::publish::OverlayCommitOptions,
+    pub output: PipelineOutput,
+    pub config: PipelineConfig,
+    pub notifier: Option<fuser::Notifier>,
+    pub invalidation_index: Option<FuseInvalidationIndex>,
     pub mountpoint: PathBuf,
-    pub head_ref: String,
 }
 
 // ---------------------------------------------------------------------------
@@ -232,10 +235,11 @@ impl Coordinator {
     /// 3. Writes PID to `daemon.pid`
     /// 4. Initializes shared `ChunkCache`
     ///
-    /// Returns the coordinator ready to accept mount requests.
+    /// Reuses `chunk_cache` when supplied by an existing foreground pipeline;
+    /// otherwise opens the configured shared cache after acquiring admission.
     /// The Unix socket listener is NOT started here — callers should
     /// use the returned `socket_path` to set up their own listener.
-    pub fn start(config: CoordinatorConfig) -> Result<Self> {
+    pub fn start(config: CoordinatorConfig, chunk_cache: Option<Arc<ChunkCache>>) -> Result<Self> {
         // Ensure base directory exists.
         fs::create_dir_all(&config.base_dir).map_err(|e| {
             CrabError::Internal(format!(
@@ -266,7 +270,10 @@ impl Coordinator {
 
         // Step 4: Initialize shared chunk cache.
         let cache_dir = config.cache_dir();
-        let chunk_cache = Arc::new(ChunkCache::open(cache_dir, Some(config.cache_max_bytes))?);
+        let chunk_cache = match chunk_cache {
+            Some(cache) => cache,
+            None => Arc::new(ChunkCache::open(cache_dir, Some(config.cache_max_bytes))?),
+        };
         info!(
             max_bytes = config.cache_max_bytes,
             "shared chunk cache initialized"
@@ -477,58 +484,12 @@ impl Coordinator {
             return Ok(());
         };
 
-        let notifier = session.notifier();
-        let mut fallback_top_level_names = BTreeSet::new();
-        for path in paths {
-            let target = handle
-                .invalidation_index
-                .as_ref()
-                .and_then(|index| index.target_for_path(path));
-
-            if let Some(target) = target {
-                if let Err(e) = notifier.inval_entry(target.parent, &target.name) {
-                    warn!(
-                        mountpoint = %mountpoint.display(),
-                        path = %path,
-                        error = %e,
-                        "failed to invalidate FUSE entry"
-                    );
-                }
-                if let Some(inode) = target.inode
-                    && let Err(e) = notifier.inval_inode(inode, 0, i64::MAX)
-                {
-                    warn!(
-                        mountpoint = %mountpoint.display(),
-                        path = %path,
-                        error = %e,
-                        "failed to invalidate FUSE inode"
-                    );
-                }
-            } else if let Some(name) = path.split('/').next()
-                && !name.is_empty()
-            {
-                fallback_top_level_names.insert(name.to_owned());
-            }
-        }
-
-        for name in fallback_top_level_names {
-            if let Err(e) = notifier.inval_entry(fuser::INodeNo::ROOT, OsStr::new(&name)) {
-                warn!(
-                    mountpoint = %mountpoint.display(),
-                    path = %name,
-                    error = %e,
-                    "failed to invalidate FUSE entry"
-                );
-            }
-        }
-        if let Err(e) = notifier.inval_inode(fuser::INodeNo::ROOT, 0, 0) {
-            warn!(
-                mountpoint = %mountpoint.display(),
-                error = %e,
-                "failed to invalidate FUSE root inode"
-            );
-        }
-
+        invalidate_paths(
+            &session.notifier(),
+            handle.invalidation_index.as_ref(),
+            mountpoint,
+            paths,
+        );
         Ok(())
     }
 
@@ -551,6 +512,11 @@ impl Coordinator {
             engine: Arc::clone(&handle.engine),
             overlay: Arc::clone(overlay),
             mountpoint: mountpoint.to_path_buf(),
+            notifier: handle
+                .fuse_session
+                .as_ref()
+                .map(fuser::BackgroundSession::notifier),
+            invalidation_index: handle.invalidation_index.clone(),
         })
     }
 
@@ -558,34 +524,61 @@ impl Coordinator {
     pub async fn reset_overlay_target(
         target: OverlayResetTarget,
     ) -> Result<crate::publish::OverlayDiff> {
-        let _reset = target.engine.begin_overlay_reset().await;
-        let diff = crate::publish::reset_overlay_store(&target.overlay)?;
-        for pass in 1..=LIVE_RESET_QUIESCE_PASSES {
-            tokio::time::sleep(LIVE_RESET_QUIESCE).await;
-            let remaining = target.overlay.records()?;
-            if remaining.is_empty() {
-                info!(
-                    mountpoint = %target.mountpoint.display(),
-                    changes = diff.changes.len(),
-                    "reset mounted overlay"
-                );
-                return Ok(diff);
-            }
-            warn!(
-                mountpoint = %target.mountpoint.display(),
-                pass,
-                records = remaining.len(),
-                "clearing delayed overlay mutations after reset"
-            );
-            target.overlay.clear()?;
-        }
-        Err(CrabError::Internal(
-            "overlay reset did not quiesce delayed mutations".into(),
-        ))
+        let engine = Arc::clone(&target.engine);
+        engine
+            .run_control(async move {
+                let _reset =
+                    crate::mount_runtime::begin_mount_update(&target.engine, &target.mountpoint)
+                        .await?;
+                let overlay = Arc::clone(&target.overlay);
+                let diff = tokio::task::spawn_blocking(move || {
+                    crate::publish::reset_overlay_store(&overlay)
+                })
+                .await
+                .map_err(CrabError::ReadTask)??;
+                for pass in 1..=LIVE_RESET_QUIESCE_PASSES {
+                    tokio::time::sleep(LIVE_RESET_QUIESCE).await;
+                    let remaining = target.overlay.records()?;
+                    if remaining.is_empty() {
+                        info!(
+                            mountpoint = %target.mountpoint.display(),
+                            changes = diff.changes.len(),
+                            "reset mounted overlay"
+                        );
+                        if let Some(notifier) = &target.notifier {
+                            let paths = diff
+                                .changes
+                                .iter()
+                                .map(|change| change.path.clone())
+                                .collect::<Vec<_>>();
+                            invalidate_paths(
+                                notifier,
+                                target.invalidation_index.as_ref(),
+                                &target.mountpoint,
+                                &paths,
+                            );
+                        }
+                        return Ok(diff);
+                    }
+                    warn!(
+                        mountpoint = %target.mountpoint.display(),
+                        pass,
+                        records = remaining.len(),
+                        "clearing delayed overlay mutations after reset"
+                    );
+                    target.overlay.clear()?;
+                }
+                Err(CrabError::Internal(
+                    "overlay reset did not quiesce delayed mutations".into(),
+                ))
+            })
+            .await
     }
 
-    /// Inspect a mounted writable overlay through the live store.
-    pub fn inspect_mount_overlay(&self, mountpoint: &Path) -> Result<crate::publish::OverlayDiff> {
+    pub(crate) fn overlay_inspection_target(
+        &self,
+        mountpoint: &Path,
+    ) -> Result<(Arc<VfsEngine>, Arc<OverlayStore>, PathBuf)> {
         let handle = self
             .mounts
             .get(mountpoint)
@@ -598,19 +591,16 @@ impl Coordinator {
         let overlay = handle.pipeline_output.overlay.as_ref().ok_or_else(|| {
             CrabError::Internal(format!("mount has no overlay: {}", mountpoint.display()))
         })?;
-        let diff = crate::publish::inspect_overlay_store(overlay)?;
-        overlay.checkpoint_wal()?;
-        Ok(diff)
+        Ok((
+            Arc::clone(&handle.engine),
+            Arc::clone(overlay),
+            handle.config.cache_dir.clone(),
+        ))
     }
 
     /// Return the live resources needed to commit a mounted overlay without
     /// holding the coordinator lock during Git and filesystem I/O.
-    pub fn overlay_commit_target(
-        &self,
-        mountpoint: &Path,
-        message: String,
-        push: bool,
-    ) -> Result<OverlayCommitTarget> {
+    pub fn overlay_commit_target(&self, mountpoint: &Path) -> Result<OverlayCommitTarget> {
         let handle = self
             .mounts
             .get(mountpoint)
@@ -622,37 +612,15 @@ impl Coordinator {
         }
         Ok(OverlayCommitTarget {
             engine: Arc::clone(&handle.engine),
-            snapshot: Arc::clone(&handle.pipeline_output.snapshot),
-            options: crate::publish::OverlayCommitOptions {
-                cache_dir: handle.config.cache_dir.clone(),
-                git_dir: handle.config.git_dir.clone(),
-                ref_name: handle.pipeline_output.head_ref.clone(),
-                message,
-                push,
-            },
+            output: handle.pipeline_output.clone(),
+            config: handle.config.clone(),
+            notifier: handle
+                .fuse_session
+                .as_ref()
+                .map(fuser::BackgroundSession::notifier),
+            invalidation_index: handle.invalidation_index.clone(),
             mountpoint: mountpoint.to_path_buf(),
-            head_ref: handle.pipeline_output.head_ref.clone(),
         })
-    }
-
-    /// Swap a live mount to the generation persisted by a successful commit.
-    pub fn adopt_mount_commit(
-        &mut self,
-        mountpoint: &Path,
-        head_oid: &str,
-        head_ref: &str,
-    ) -> Result<()> {
-        let handle = self
-            .mounts
-            .get_mut(mountpoint)
-            .ok_or_else(|| CrabError::Internal(format!("no mount at {}", mountpoint.display())))?;
-        crate::mount_runtime::adopt_published_snapshot(
-            &mut handle.pipeline_output,
-            &handle.config.git_dir,
-            head_oid,
-            head_ref,
-        )?;
-        Ok(())
     }
 
     /// Graceful shutdown: unmount all FUSE sessions, close socket, remove files.
@@ -679,7 +647,7 @@ impl Coordinator {
             if let Some(handle) = self.mounts.remove(mountpoint) {
                 handle.cancel_token.cancel();
                 unmount_session_logged(handle.fuse_session, mountpoint);
-                handle.hydration.request_shutdown();
+                handle.engine.request_shutdown();
                 info!(mountpoint = %mountpoint.display(), "unmounted during shutdown");
             }
         }
@@ -703,8 +671,11 @@ impl Coordinator {
 
         info!("coordinator initiating graceful shutdown");
 
-        // Cancel the coordinator-wide token first. This propagates to all
-        // child tokens, signaling hydration workers and refresh loops to stop.
+        // Controls may still need WRITE callbacks for client writeback. Close
+        // admission before stopping polling; keep the native session until drain.
+        for handle in self.mounts.values() {
+            handle.engine.close_control_admission();
+        }
         self.cancel_token.cancel();
         self.pending_mountpoints.clear();
         self.pending_cache_dirs.clear();
@@ -730,8 +701,9 @@ impl Coordinator {
             if let Some(refresh) = handle.refresh_handle.take() {
                 let _ = refresh.await;
             }
+            handle.engine.drain_controls().await;
             unmount_session_logged(handle.fuse_session.take(), mountpoint);
-            if tokio::time::timeout(GRACE_PERIOD, handle.hydration.shutdown())
+            if tokio::time::timeout(GRACE_PERIOD, handle.engine.shutdown_background())
                 .await
                 .is_err()
             {
@@ -741,7 +713,7 @@ impl Coordinator {
                 );
                 // Cancelling the wait does not cancel reconstruction or detach
                 // its blocking cache writes. Retain mount/cache ownership.
-                handle.hydration.shutdown().await;
+                handle.engine.shutdown_background().await;
             }
             info!(mountpoint = %mountpoint.display(), "unmounted and drained background hydration");
         }
@@ -843,7 +815,7 @@ impl Coordinator {
     /// overlay, and swaps the resolver's generation.
     ///
     /// Returns the new HEAD OID on success.
-    pub fn refresh_mount(&mut self, mountpoint: &Path) -> Result<String> {
+    pub async fn refresh_mount(&mut self, mountpoint: &Path) -> Result<String> {
         let handle = self
             .mounts
             .get_mut(mountpoint)
@@ -853,7 +825,8 @@ impl Coordinator {
             &mut handle.pipeline_output,
             &handle.config,
             mountpoint,
-        )?;
+        )
+        .await?;
         Ok(update.head_oid)
     }
 
@@ -864,7 +837,7 @@ impl Coordinator {
     /// the mount's tracked ref.
     ///
     /// Returns the new HEAD OID on success.
-    pub fn switch_mount_ref(&mut self, mountpoint: &Path, new_ref: &str) -> Result<String> {
+    pub async fn switch_mount_ref(&mut self, mountpoint: &Path, new_ref: &str) -> Result<String> {
         let handle = self
             .mounts
             .get_mut(mountpoint)
@@ -875,7 +848,8 @@ impl Coordinator {
             &mut handle.config,
             mountpoint,
             new_ref,
-        )?;
+        )
+        .await?;
         Ok(update.head_oid)
     }
 }
@@ -902,7 +876,7 @@ impl Drop for Coordinator {
             if let Some(handle) = self.mounts.remove(mountpoint) {
                 handle.cancel_token.cancel();
                 unmount_session_logged(handle.fuse_session, mountpoint);
-                handle.hydration.request_shutdown();
+                handle.engine.request_shutdown();
             }
         }
 
@@ -919,13 +893,85 @@ fn unmount_session(session: Option<fuser::BackgroundSession>, mountpoint: &Path)
     crate::mount::unmount_background_session(session, mountpoint)
 }
 
+fn invalidate_paths(
+    notifier: &fuser::Notifier,
+    index: Option<&FuseInvalidationIndex>,
+    mountpoint: &Path,
+    paths: &[String],
+) {
+    let mut fallback_top_level_names = BTreeSet::new();
+    for path in paths {
+        let target = index.and_then(|index| index.target_for_path(path));
+
+        if let Some(target) = target {
+            if let Err(e) = notifier.inval_entry(target.parent, &target.name) {
+                warn!(
+                    mountpoint = %mountpoint.display(),
+                    path = %path,
+                    error = %e,
+                    "failed to invalidate FUSE entry"
+                );
+            }
+            if let Some(inode) = target.inode
+                && let Err(e) = notifier.inval_inode(inode, 0, i64::MAX)
+            {
+                warn!(
+                    mountpoint = %mountpoint.display(),
+                    path = %path,
+                    error = %e,
+                    "failed to invalidate FUSE inode"
+                );
+            }
+        } else if let Some(name) = path.split('/').next()
+            && !name.is_empty()
+        {
+            fallback_top_level_names.insert(name.to_owned());
+        }
+    }
+
+    for name in fallback_top_level_names {
+        if let Err(e) = notifier.inval_entry(fuser::INodeNo::ROOT, OsStr::new(&name)) {
+            warn!(
+                mountpoint = %mountpoint.display(),
+                path = %name,
+                error = %e,
+                "failed to invalidate FUSE entry"
+            );
+        }
+    }
+    if let Err(e) = notifier.inval_inode(fuser::INodeNo::ROOT, 0, 0) {
+        warn!(
+            mountpoint = %mountpoint.display(),
+            error = %e,
+            "failed to invalidate FUSE root inode"
+        );
+    }
+}
+
+impl OverlayCommitTarget {
+    pub(crate) fn invalidate(&self, paths: &[String]) {
+        if let Some(notifier) = &self.notifier {
+            invalidate_paths(
+                notifier,
+                self.invalidation_index.as_ref(),
+                &self.mountpoint,
+                paths,
+            );
+        }
+    }
+}
+
 pub async fn unmount_removed_mount(mut handle: MountHandle, mountpoint: &Path) -> Result<()> {
+    // An admitted commit/inspection can be waiting for kernel WRITE callbacks.
+    // Keep callbacks and read resources alive until those controls finish.
+    handle.engine.close_control_admission();
     handle.cancel_token.cancel();
     if let Some(refresh) = handle.refresh_handle.take() {
         let _ = refresh.await;
     }
+    handle.engine.drain_controls().await;
     let result = unmount_session(handle.fuse_session, mountpoint);
-    handle.hydration.shutdown().await;
+    handle.engine.shutdown_background().await;
     result
 }
 
@@ -1156,14 +1202,14 @@ mod tests {
         let lock = acquire_daemon_lock(&config.lock_path()).unwrap();
         drop(std::os::unix::net::UnixListener::bind(&path).unwrap());
 
-        assert!(Coordinator::start(config.clone()).is_err());
+        assert!(Coordinator::start(config.clone(), None).is_err());
         assert!(
             path.exists(),
             "a losing coordinator must leave the socket alone"
         );
         drop(lock);
 
-        let _coordinator = Coordinator::start(config).unwrap();
+        let _coordinator = Coordinator::start(config, None).unwrap();
         assert!(!path.exists(), "the lock holder owns stale socket cleanup");
     }
 
@@ -1194,7 +1240,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let config = CoordinatorConfig::with_base_dir(tmp.path().to_path_buf());
 
-        let mut coordinator = Coordinator::start(config).unwrap();
+        let mut coordinator = Coordinator::start(config, None).unwrap();
 
         // Verify files were created.
         assert!(tmp.path().join("daemon.lock").exists());
@@ -1220,7 +1266,7 @@ mod tests {
 
         for _ in 0..2 {
             let config = CoordinatorConfig::with_base_dir(tmp.path().to_path_buf());
-            let coordinator = Coordinator::start(config).unwrap();
+            let coordinator = Coordinator::start(config, None).unwrap();
             assert!(tmp.path().join("daemon.pid").exists());
             drop(coordinator);
             assert!(!tmp.path().join("daemon.pid").exists());
@@ -1233,7 +1279,7 @@ mod tests {
     fn mount_reservation_blocks_same_mountpoint_and_starting_cache() {
         let tmp = tempfile::tempdir().unwrap();
         let config = CoordinatorConfig::with_base_dir(tmp.path().to_path_buf());
-        let mut coordinator = Coordinator::start(config).unwrap();
+        let mut coordinator = Coordinator::start(config, None).unwrap();
         let cache_dir = tmp.path().join("repo-cache");
         let mountpoint = Path::new("/mnt/repo");
 
@@ -1266,7 +1312,7 @@ mod tests {
     fn pending_mount_prevents_idle_shutdown_until_released() {
         let tmp = tempfile::tempdir().unwrap();
         let config = CoordinatorConfig::with_base_dir(tmp.path().to_path_buf());
-        let mut coordinator = Coordinator::start(config).unwrap();
+        let mut coordinator = Coordinator::start(config, None).unwrap();
 
         let reservation = coordinator
             .reserve_mount(Path::new("/mnt/repo"), &tmp.path().join("repo-cache"))
@@ -1311,7 +1357,7 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let config = CoordinatorConfig::with_base_dir(tmp.path().to_path_buf());
 
-        let mut coordinator = Coordinator::start(config).unwrap();
+        let mut coordinator = Coordinator::start(config, None).unwrap();
         let child = coordinator.child_cancel_token();
 
         assert!(!child.is_cancelled());
@@ -1389,14 +1435,14 @@ mod tests {
             cancel: CancellationToken,
         ) -> MountHandle {
             let snapshot = Arc::new(SnapshotStore::open_or_create(snapshot_path).unwrap());
-            let resolver = Arc::new(FuseResolver::new(Arc::clone(&snapshot), None, 0, 0));
+            let resolver =
+                Arc::new(FuseResolver::new(Arc::clone(&snapshot), None, 0, 0, None, None).unwrap());
             let hydration = HydrationService::new(
                 Arc::clone(cache),
                 Arc::new(VerifiedSet::default()),
                 Arc::new(StubFileIndexResolver),
                 Arc::new(StubShardLoader),
                 Arc::new(StubXorbFetcher),
-                None,
                 None,
                 Some(2),
                 cancel.clone(),
@@ -1412,6 +1458,7 @@ mod tests {
             let config = PipelineConfig {
                 source: source.into(),
                 git_dir: snapshot_path.parent().unwrap().join(".git"),
+                git_metadata: crate::pipeline::GitMetadataOwnership::Borrowed,
                 ref_name: Some("refs/heads/main".into()),
                 read_only,
                 cache_dir: snapshot_path.parent().unwrap().to_path_buf(),
@@ -1427,6 +1474,7 @@ mod tests {
                 head_oid: "deadbeef".into(),
                 head_ref: "refs/heads/main".into(),
                 generation: 0,
+                read_context: None,
             };
 
             MountHandle {
@@ -1445,7 +1493,7 @@ mod tests {
 
         let tmp = tempfile::tempdir().unwrap();
         let config = CoordinatorConfig::with_base_dir(tmp.path().to_path_buf());
-        let mut coordinator = Coordinator::start(config).unwrap();
+        let mut coordinator = Coordinator::start(config, None).unwrap();
 
         let shared_cache = Arc::clone(coordinator.chunk_cache());
 

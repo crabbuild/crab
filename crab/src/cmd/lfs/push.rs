@@ -404,44 +404,28 @@ fn collect_push_pointers(
 fn collect_pointers_from_range_with_base_refs(
     local_shas: &[String],
     remote_shas: &[String],
-    base_manifest_refs: &[String],
+    published_ref_tips: &[String],
     cancel: &CancellationToken,
 ) -> Result<Vec<(String, LfsPointer)>> {
     collect_pointers_from_range_in_with_base_refs(
         Path::new("."),
         local_shas,
         remote_shas,
-        base_manifest_refs,
+        published_ref_tips,
         cancel,
     )
 }
 
 fn load_remote_ref_tips(ctx: &super::store_setup::LfsRemoteContext) -> Result<Vec<String>> {
-    let store = crate::storage::Store::from_storage(ctx.store.store().clone());
-    let router = crate::storage::StoreLayout::new(store.clone(), ctx.prefix.clone());
-    let capsule_layout =
-        crab_storage::StoreLayout::new(store.as_storage().clone(), ctx.prefix.clone());
+    let layout = crab_storage::StoreLayout::new(ctx.store.store().clone(), ctx.prefix.clone());
     super::block_on_runtime(async move {
-        match crab_metadata::capsule_protocol::load_root(&capsule_layout).await {
-            Ok(root) => {
-                return crab_read::capsule_protocol::read_visible_refs_from_root(
-                    &capsule_layout,
-                    &root,
-                )
-                .await
-                .map(|refs| refs.into_values().collect())
-                .map_err(CrabError::from);
-            }
-            Err(crab_metadata::error::MetadataError::Storage {
-                source: crab_storage::StorageError::NotFound { .. },
-            }) => {}
-            Err(error) => return Err(error.into()),
-        }
-        match crate::metadata::manifest::read_manifest(&store, &router).await {
-            Ok((manifest, _)) => Ok(manifest.refs.into_values().collect()),
-            Err(CrabError::NotFound { .. }) => Ok(Vec::new()),
-            Err(error) => Err(error),
-        }
+        // Store admission already requires a Capsule root. Losing it cannot
+        // authorize manifest refs or an empty history exclusion set.
+        let root = crab_metadata::capsule_protocol::load_root(&layout).await?;
+        crab_read::capsule_protocol::read_visible_refs_from_root(&layout, &root)
+            .await
+            .map(|refs| refs.into_values().collect())
+            .map_err(CrabError::from)
     })
 }
 
@@ -481,4 +465,5 @@ fn hex_nibble(b: u8) -> std::result::Result<u8, ()> {
 }
 
 #[cfg(test)]
+#[path = "push_tests.rs"]
 mod tests;

@@ -1,7 +1,7 @@
 //! Typed ref-edit construction for the push pipeline.
 //!
 //! This module collapses the ad-hoc `PushSpec::is_empty() → skip`
-//! short-circuit in [`crate::git::push_native`] and [`crate::git::push`]
+//! short-circuit in [`crate::git::push`]
 //! onto `gix-ref`'s `RefEdit` type. Every push refspec becomes a
 //! typed `Create`, `Update`, or `Delete` change with a precondition
 //! describing what the remote value must look like for the edit to

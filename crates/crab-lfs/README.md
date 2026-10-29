@@ -35,6 +35,31 @@ out of memory.
 `local` shares local payload paths and storage-key precedence with CLI and SDK
 callers. Its preparation snapshots verify SHA-256 and exact size while copying
 into caller-owned scratch, then return the Blake3 digest for durable recovery.
+`local::ObjectWriter` and `StagedObject` own the shared atomic local writer used
+by CLI clean, extension transforms, migration and mounted publication. The writer
+hashes incrementally, synchronizes its completed temporary file, and installs it
+under the verified SHA-256 path. Installation precedes Git pointer publication.
+The temporary owner removes abandoned output; failed Git publication can retain
+valid content-addressed objects for retry. Atomic installation does not itself
+prove directory-sync or power-loss recovery.
+
+`LfsReadSession::read_local_range` verifies complete SHA-256 and exact size on
+first selection. A bounded session cache then retains the opened file and
+BLAKE3 proofs for 1 MiB blocks observed in that verified pass. Later ranges
+read and verify every covered block before returning owned bytes. File metadata
+or a matching pathname never substitutes for content verification; replacing
+or unlinking the path cannot redirect a retained source. A failed range clears
+that proof for a fresh later repair, while the failing call remains an error.
+
+The session retains at most 128 sources and 8 MiB of block hashes. Active claims
+cannot be evicted into duplicate verifiers. If a proof cannot fit, that read
+still performs full verification without retaining it. Payload buffers and other
+sessions are separate resources. Only open-time `NotFound` returns absence;
+other I/O or integrity failures remain errors. Callers resolve Git settings
+before callbacks. Blocking reads retain shared process verification admission
+after cancellation; session close drains jobs and releases retained sources.
+Retention is an acceleration cache, not a durable LFS GC-root/payload pin.
+
 Streaming uploads use the storage facade for multipart start and completion;
 protected writes stay under their staging prefix and enter the verified object
 inventory only after successful completion. Empty payloads use an ordinary

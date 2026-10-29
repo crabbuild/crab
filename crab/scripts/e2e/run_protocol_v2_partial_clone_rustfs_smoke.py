@@ -3235,6 +3235,10 @@ class ProtocolV2PartialCloneSmoke:
             [str(self.crab_bin), "init", "--mirror=origin", mirror_url],
             mirror_source,
         )
+        # Direct fixture pushes change only the destination. Newer Git also
+        # updates matching remotes for URL pushes; that would mutate the source
+        # namespace and invalidate both equality and Crab-only drift fixtures.
+        self.run_git(mirror_source, ["config", "--unset-all", "remote.crab.fetch"])
         content = deterministic_bytes(1024 * 1024, f"mirror-origin:{self.run_id}")
         (mirror_source / "mirror-data.bin").write_bytes(content)
         self.run_cmd(

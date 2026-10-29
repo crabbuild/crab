@@ -3,9 +3,60 @@ use std::sync::{Mutex, MutexGuard};
 #[cfg(any(feature = "fuse", feature = "nfs"))]
 mod read;
 #[cfg(any(feature = "fuse", feature = "nfs"))]
-pub(crate) use read::StoredPointer;
+pub(crate) use read::{StoredPointer, create_git_repo_with_blob, pack_git_blobs, write_git_blob};
 
 pub static GIT_DIR_MUTEX: Mutex<()> = Mutex::new(());
+
+#[cfg(all(target_os = "linux", feature = "fuse", feature = "nfs"))]
+pub(crate) mod writeback {
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicBool, Ordering};
+
+    pub(crate) struct Pause {
+        pub(crate) state: Arc<State>,
+    }
+
+    pub(crate) struct State {
+        claimed: AtomicBool,
+        pub(crate) entered: tokio::sync::Notify,
+        pub(crate) control_started: tokio::sync::Notify,
+        pub(crate) resume: tokio::sync::Semaphore,
+    }
+
+    impl Pause {
+        pub(crate) fn new() -> Self {
+            Self {
+                state: Arc::new(State {
+                    claimed: AtomicBool::new(false),
+                    entered: tokio::sync::Notify::new(),
+                    control_started: tokio::sync::Notify::new(),
+                    resume: tokio::sync::Semaphore::new(0),
+                }),
+            }
+        }
+    }
+
+    impl State {
+        pub(crate) async fn wait(&self) -> crate::Result<()> {
+            if self.claimed.swap(true, Ordering::AcqRel) {
+                return Ok(());
+            }
+            self.entered.notify_one();
+            self.resume
+                .acquire()
+                .await
+                .map_err(|_| crate::error::VfsError::Cancelled)?
+                .forget();
+            Ok(())
+        }
+    }
+
+    impl Drop for Pause {
+        fn drop(&mut self) {
+            self.state.resume.close();
+        }
+    }
+}
 
 pub struct CleanGitEnvGuard {
     _lock: MutexGuard<'static, ()>,

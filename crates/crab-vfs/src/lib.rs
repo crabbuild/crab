@@ -48,7 +48,9 @@ pub mod integration;
 
 pub use chunk_cache::ChunkCache;
 pub use error::{Result, VfsError};
-pub use integration::{MountReadContext, MountReadResolver, NoopMountReadResolver};
+pub use integration::{
+    MountCatalogCapture, MountReadContext, MountReadResolver, NoopMountReadResolver,
+};
 
 /// Object-store routing used by mounted repositories.
 pub type StoreLayout = crab_storage::StoreLayout<crab_storage::Store>;
@@ -60,6 +62,8 @@ pub mod core {
 }
 
 #[cfg(any(feature = "fuse", feature = "nfs"))]
+pub mod blob;
+#[cfg(any(feature = "fuse", feature = "nfs"))]
 pub mod daemon;
 #[cfg(any(feature = "fuse", feature = "nfs"))]
 pub mod engine;
@@ -67,12 +71,16 @@ pub mod engine;
 pub mod fuse;
 #[cfg(any(feature = "fuse", feature = "nfs"))]
 pub mod hydration;
+#[cfg(any(feature = "fuse", feature = "nfs"))]
+mod memory_cache;
 #[cfg(feature = "fuse")]
 pub mod mount;
 #[cfg(any(feature = "fuse", feature = "nfs"))]
 pub mod mount_control;
 #[cfg(any(feature = "fuse", feature = "nfs"))]
 pub mod mount_runtime;
+#[cfg(all(unix, any(feature = "fuse", feature = "nfs")))]
+mod native_mounts;
 #[cfg(feature = "nfs")]
 pub mod nfs;
 #[cfg(feature = "nfs")]
@@ -86,6 +94,8 @@ pub mod read_lease_pool;
 #[cfg(any(feature = "fuse", feature = "nfs"))]
 pub mod refresh;
 #[cfg(any(feature = "fuse", feature = "nfs"))]
+pub mod repository;
+#[cfg(any(feature = "fuse", feature = "nfs"))]
 pub mod resolver;
 #[cfg(any(feature = "fuse", feature = "nfs"))]
 pub mod snapshot;
@@ -96,8 +106,10 @@ pub mod clone_cache;
 pub mod coordinator;
 #[cfg(feature = "fuse")]
 pub mod daemonize;
-#[cfg(feature = "fuse")]
+#[cfg(all(unix, any(feature = "fuse", feature = "nfs")))]
 pub mod ipc_client;
+#[cfg(all(unix, any(feature = "fuse", feature = "nfs")))]
+pub mod ipc_protocol;
 #[cfg(feature = "fuse")]
 pub mod ipc_server;
 #[cfg(feature = "fuse")]
@@ -116,3 +128,6 @@ pub mod verified_set;
 
 #[cfg(test)]
 mod test_support;
+
+#[cfg(all(test, target_os = "linux", feature = "fuse", feature = "nfs"))]
+mod native_mount;

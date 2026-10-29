@@ -638,8 +638,7 @@ async fn restore_history(
             &view,
             RESTORE_CHECKPOINT_BYTES,
         )
-        .await
-        .map_err(map_checkpoint_error)?;
+        .await?;
         // Retain newer-only content while older refs regain visibility. Current
         // bindings still win, so the old byte proof alone cannot certify them.
         let restored_catalog = crab_metadata::capsule_protocol::merge_checkpoint_catalogs(
@@ -667,8 +666,7 @@ async fn restore_history(
                 RESTORE_CHECKPOINT_BYTES,
                 cancel,
             )
-            .await
-            .map_err(map_checkpoint_error)?;
+            .await?;
         let checkpointed = crab_write::capsule_protocol::open_root(layout).await?;
         // The shared publisher reports CAS loss as a no-op. Restore cannot
         // fence an unrelated winner using the catalog and refs captured above.
@@ -762,23 +760,6 @@ async fn restore_history(
     match (operation, release) {
         (Ok(payload), Ok(())) => Ok(payload),
         (Err(error), _) | (Ok(_), Err(error)) => Err(error),
-    }
-}
-
-fn map_checkpoint_error(error: crab_remote::checkpoint::CheckpointError) -> CrabError {
-    match error {
-        crab_remote::checkpoint::CheckpointError::Cancelled => CrabError::Cancelled,
-        crab_remote::checkpoint::CheckpointError::Read(source) => source.into(),
-        crab_remote::checkpoint::CheckpointError::Repack(source) => source.into(),
-        crab_remote::checkpoint::CheckpointError::Pack(source) => source.into(),
-        crab_remote::checkpoint::CheckpointError::Metadata(source) => source.into(),
-        crab_remote::checkpoint::CheckpointError::Storage(source) => source.into(),
-        crab_remote::checkpoint::CheckpointError::Write(source) => source.into(),
-        crab_remote::checkpoint::CheckpointError::Io(source) => source.into(),
-        crab_remote::checkpoint::CheckpointError::Worker(source) => {
-            CrabError::Io(std::io::Error::other(source))
-        }
-        other => CrabError::Internal(other.to_string()),
     }
 }
 

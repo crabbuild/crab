@@ -831,55 +831,6 @@ pub async fn create_manifest_with_etag(
     Ok(etag.e_tag.unwrap_or_default())
 }
 
-/// Writes a regional active-active manifest projection without making it write authority.
-pub async fn materialize_active_active_manifest_projection(
-    store: &Store,
-    router: &StoreLayout<Store>,
-    manifest: &Manifest,
-) -> Result<()> {
-    validate_manifest_payload(manifest)?;
-    for _attempt in 0..8 {
-        match read_manifest(store, router).await {
-            Ok((current, etag)) => {
-                if current.generation > manifest.generation {
-                    return Ok(());
-                }
-                if current.generation == manifest.generation {
-                    if current == *manifest {
-                        return Ok(());
-                    }
-                    return Err(MetadataError::ManifestCasConflict {
-                        path: router.manifest_path().as_ref().to_owned(),
-                        expected_etag: Some(etag),
-                    });
-                }
-                match write_manifest_cas(store, router, manifest, &etag).await {
-                    Ok(_) => return Ok(()),
-                    Err(MetadataError::Storage {
-                        source: StorageError::StateConflict { .. },
-                    }) => {}
-                    Err(e) => return Err(e),
-                }
-            }
-            Err(MetadataError::Storage {
-                source: StorageError::NotFound { .. },
-            }) => match create_manifest(store, router, manifest).await {
-                Ok(()) => return Ok(()),
-                Err(MetadataError::Storage {
-                    source: StorageError::StateConflict { .. },
-                }) => {}
-                Err(e) => return Err(e),
-            },
-            Err(e) => return Err(e),
-        }
-    }
-
-    Err(MetadataError::Internal(
-        "active-active repair manifest materialization failed after repeated CAS conflicts"
-            .to_owned(),
-    ))
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1785,70 +1736,6 @@ mod tests {
         );
         let (still_current, _) = read_manifest(&store, &router).await.unwrap();
         assert_eq!(still_current, current);
-    }
-
-    #[tokio::test]
-    async fn active_active_projection_writes_missing_manifest() {
-        let store = memory_store();
-        let router = test_layout(store.clone());
-        let mut manifest = Manifest::default_for_repo("refs/heads/main");
-        manifest.generation = 42;
-        manifest
-            .refs
-            .insert("refs/heads/main".into(), "a".repeat(40));
-        manifest.seal_git_validation();
-
-        materialize_active_active_manifest_projection(&store, &router, &manifest)
-            .await
-            .unwrap();
-
-        let (written, _) = read_manifest(&store, &router).await.unwrap();
-        assert_eq!(written, manifest);
-    }
-
-    #[tokio::test]
-    async fn active_active_projection_rejects_same_generation_different_manifest() {
-        let store = memory_store();
-        let router = test_layout(store.clone());
-        let mut manifest = Manifest::default_for_repo("refs/heads/main");
-        manifest.generation = 42;
-        manifest.seal_git_validation();
-        create_manifest(&store, &router, &manifest).await.unwrap();
-
-        manifest
-            .refs
-            .insert("refs/heads/main".into(), "b".repeat(40));
-        manifest.seal_git_validation();
-        let err = materialize_active_active_manifest_projection(&store, &router, &manifest)
-            .await
-            .expect_err("same generation with different contents must conflict");
-
-        assert!(matches!(
-            err,
-            MetadataError::ManifestCasConflict {
-                path,
-                expected_etag: Some(_),
-            } if path == "org/models/manifest"
-        ));
-    }
-
-    #[tokio::test]
-    async fn active_active_projection_rejects_stale_proof_before_newer_generation_short_circuit() {
-        let store = memory_store();
-        let router = test_layout(store.clone());
-        let mut current = Manifest::default_for_repo("refs/heads/main");
-        current.generation = 42;
-        current.seal_git_validation();
-        create_manifest(&store, &router, &current).await.unwrap();
-
-        let mut invalid = Manifest::default_for_repo("refs/heads/main");
-        invalid.generation = 41;
-
-        let error = materialize_active_active_manifest_projection(&store, &router, &invalid)
-            .await
-            .expect_err("stale proof must fail before generation comparison");
-
-        assert!(matches!(error, MetadataError::CorruptObject { .. }));
     }
 
     #[tokio::test]

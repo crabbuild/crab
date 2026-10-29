@@ -19,6 +19,7 @@ use tracing::{debug, error, info, warn};
 use crate::clone_cache;
 use crate::coordinator::{Coordinator, MountHandle, MountReservation, unmount_removed_mount};
 use crate::integration::{MountReadResolver, NoopMountReadResolver};
+use crate::ipc_protocol::{IpcRequest, IpcResponse, MountInfo, MountStatus};
 use crate::mount::{self, MountConfig};
 use crate::pipeline::{self, MountPipelineBuilder, PipelineConfig};
 
@@ -32,271 +33,6 @@ const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 // ---------------------------------------------------------------------------
 // IPC Request / Response types
 // ---------------------------------------------------------------------------
-
-/// A single IPC request from a client.
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-#[serde(tag = "op", rename_all = "snake_case")]
-pub enum IpcRequest {
-    /// Mount a repository at a given mountpoint.
-    Mount {
-        remote: String,
-        mountpoint: String,
-        #[serde(default = "default_ref")]
-        r#ref: String,
-        #[serde(default)]
-        read_only: bool,
-        #[serde(default)]
-        no_refresh: bool,
-    },
-    /// Unmount a mountpoint.
-    Unmount { mountpoint: String },
-    /// List all active mounts.
-    List,
-    /// Get status of a specific mount.
-    Status { mountpoint: String },
-    /// Refresh a mount (re-fetch from remote).
-    Refresh { mountpoint: String },
-    /// Switch a mount to a different ref/branch.
-    SwitchRef { mountpoint: String, r#ref: String },
-    /// Invalidate cached FUSE entries for paths changed outside the mount.
-    Invalidate {
-        mountpoint: String,
-        paths: Vec<String>,
-    },
-    /// Inspect a writable mount overlay through the live coordinator state.
-    DiffOverlay { mountpoint: String },
-    /// Reset a writable mount overlay through the live coordinator state.
-    ResetOverlay { mountpoint: String },
-    /// Commit a writable mount overlay and adopt the published generation.
-    CommitOverlay {
-        mountpoint: String,
-        message: String,
-        push: bool,
-    },
-    /// Lightweight liveness check.
-    Ping,
-    /// Detailed health information.
-    Health,
-    /// Request graceful shutdown.
-    Shutdown,
-}
-
-fn default_ref() -> String {
-    "HEAD".to_owned()
-}
-
-/// A single IPC response sent back to the client.
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct IpcResponse {
-    /// Whether the operation succeeded.
-    pub ok: bool,
-    /// Error message (present when `ok` is false).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub error: Option<String>,
-    /// Operation-specific payload fields.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mountpoint: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub pid: Option<u32>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub head_oid: Option<String>,
-    /// List of mounts (for the `list` operation).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mounts: Option<Vec<MountInfo>>,
-    /// Mount status details (for the `status` operation).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub status: Option<MountStatus>,
-    /// Overlay diff payload for reset operations.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub overlay_diff: Option<crate::publish::OverlayDiff>,
-    /// Overlay commit payload for commit operations.
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub overlay_commit_result: Option<crate::publish::OverlayCommitResult>,
-    /// Coordinator uptime in seconds (for ping/health).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub uptime_secs: Option<u64>,
-    /// Active mount count (for health).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub mount_count: Option<usize>,
-    /// Total cache size in bytes (for health).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub cache_size_bytes: Option<u64>,
-    /// Hydration queue depth (for health).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hydration_queue_depth: Option<usize>,
-    /// Hydration worker count (for health).
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub hydration_workers: Option<usize>,
-}
-
-/// Summary info for a single mount (returned by `list`).
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct MountInfo {
-    pub mountpoint: String,
-    pub remote: String,
-    pub r#ref: String,
-    pub read_only: bool,
-}
-
-/// Detailed status for a single mount (returned by `status`).
-#[derive(Debug, Clone, serde::Deserialize, serde::Serialize)]
-pub struct MountStatus {
-    pub mountpoint: String,
-    pub remote: String,
-    pub r#ref: String,
-    pub read_only: bool,
-    pub head_oid: Option<String>,
-    pub pid: Option<u32>,
-}
-
-impl IpcResponse {
-    /// Create a success response with no payload.
-    pub fn ok() -> Self {
-        Self {
-            ok: true,
-            error: None,
-            mountpoint: None,
-            pid: None,
-            head_oid: None,
-            mounts: None,
-            status: None,
-            overlay_diff: None,
-            overlay_commit_result: None,
-            uptime_secs: None,
-            mount_count: None,
-            cache_size_bytes: None,
-            hydration_queue_depth: None,
-            hydration_workers: None,
-        }
-    }
-
-    /// Create an error response.
-    pub fn err(message: impl Into<String>) -> Self {
-        Self {
-            ok: false,
-            error: Some(message.into()),
-            mountpoint: None,
-            pid: None,
-            head_oid: None,
-            mounts: None,
-            status: None,
-            overlay_diff: None,
-            overlay_commit_result: None,
-            uptime_secs: None,
-            mount_count: None,
-            cache_size_bytes: None,
-            hydration_queue_depth: None,
-            hydration_workers: None,
-        }
-    }
-
-    /// Create a success response for a mount operation.
-    pub fn mount_ok(mountpoint: String, pid: u32, head_oid: Option<String>) -> Self {
-        Self {
-            ok: true,
-            error: None,
-            mountpoint: Some(mountpoint),
-            pid: Some(pid),
-            head_oid,
-            mounts: None,
-            status: None,
-            overlay_diff: None,
-            overlay_commit_result: None,
-            uptime_secs: None,
-            mount_count: None,
-            cache_size_bytes: None,
-            hydration_queue_depth: None,
-            hydration_workers: None,
-        }
-    }
-
-    /// Create a success response for a list operation.
-    pub fn list_ok(mounts: Vec<MountInfo>) -> Self {
-        Self {
-            ok: true,
-            error: None,
-            mountpoint: None,
-            pid: None,
-            head_oid: None,
-            mounts: Some(mounts),
-            status: None,
-            overlay_diff: None,
-            overlay_commit_result: None,
-            uptime_secs: None,
-            mount_count: None,
-            cache_size_bytes: None,
-            hydration_queue_depth: None,
-            hydration_workers: None,
-        }
-    }
-
-    /// Create a success response for a status operation.
-    pub fn status_ok(status: MountStatus) -> Self {
-        Self {
-            ok: true,
-            error: None,
-            mountpoint: None,
-            pid: None,
-            head_oid: None,
-            mounts: None,
-            status: Some(status),
-            overlay_diff: None,
-            overlay_commit_result: None,
-            uptime_secs: None,
-            mount_count: None,
-            cache_size_bytes: None,
-            hydration_queue_depth: None,
-            hydration_workers: None,
-        }
-    }
-
-    /// Create a success response for a ping operation.
-    pub fn ping_ok(pid: u32, uptime_secs: u64) -> Self {
-        Self {
-            ok: true,
-            error: None,
-            mountpoint: None,
-            pid: Some(pid),
-            head_oid: None,
-            mounts: None,
-            status: None,
-            overlay_diff: None,
-            overlay_commit_result: None,
-            uptime_secs: Some(uptime_secs),
-            mount_count: None,
-            cache_size_bytes: None,
-            hydration_queue_depth: None,
-            hydration_workers: None,
-        }
-    }
-
-    /// Create a success response for a health operation.
-    pub fn health_ok(
-        pid: u32,
-        uptime_secs: u64,
-        mount_count: usize,
-        cache_size_bytes: u64,
-        hydration_queue_depth: usize,
-        hydration_workers: usize,
-    ) -> Self {
-        Self {
-            ok: true,
-            error: None,
-            mountpoint: None,
-            pid: Some(pid),
-            head_oid: None,
-            mounts: None,
-            status: None,
-            overlay_diff: None,
-            overlay_commit_result: None,
-            uptime_secs: Some(uptime_secs),
-            mount_count: Some(mount_count),
-            cache_size_bytes: Some(cache_size_bytes),
-            hydration_queue_depth: Some(hydration_queue_depth),
-            hydration_workers: Some(hydration_workers),
-        }
-    }
-}
 
 // ---------------------------------------------------------------------------
 // IpcServer
@@ -372,8 +108,14 @@ impl IpcServer {
         info!(path = %self.socket_path.display(), "IPC server listening");
         on_bound();
 
+        let mut connections = tokio::task::JoinSet::new();
         loop {
             tokio::select! {
+                Some(result) = connections.join_next() => {
+                    if let Err(error) = result {
+                        warn!(%error, "IPC connection task failed");
+                    }
+                }
                 () = self.cancel_token.cancelled() => {
                     info!("IPC server shutting down");
                     break;
@@ -385,7 +127,7 @@ impl IpcServer {
                             let coordinator = Arc::clone(&self.coordinator);
                             let read_resolver = Arc::clone(&self.read_resolver);
                             let cancel = self.cancel_token.clone();
-                            tokio::spawn(async move {
+                            connections.spawn(async move {
                                 if let Err(e) = handle_connection(
                                     stream,
                                     coordinator,
@@ -406,7 +148,14 @@ impl IpcServer {
             }
         }
 
-        // Cleanup socket file on shutdown.
+        // Cancelling stops idle reads, not accepted operations or final replies.
+        // Returning early could release mount/cache ownership under those tasks.
+        drop(listener);
+        while let Some(result) = connections.join_next().await {
+            if let Err(error) = result {
+                warn!(%error, "IPC connection task failed during shutdown");
+            }
+        }
         let _ = tokio::fs::remove_file(&self.socket_path).await;
         Ok(())
     }
@@ -483,9 +232,14 @@ async fn write_response(
     let mut json = serde_json::to_string(response)
         .map_err(|e| std::io::Error::other(format!("serialize error: {e}")))?;
     json.push('\n');
-    writer.write_all(json.as_bytes()).await?;
-    writer.flush().await?;
-    Ok(())
+    timeout(IDLE_TIMEOUT, async {
+        writer.write_all(json.as_bytes()).await?;
+        writer.flush().await
+    })
+    .await
+    .map_err(|_| {
+        std::io::Error::new(std::io::ErrorKind::TimedOut, "IPC response write timed out")
+    })?
 }
 
 // ---------------------------------------------------------------------------
@@ -530,6 +284,10 @@ async fn dispatch_request(
         IpcRequest::DiffOverlay { mountpoint } => {
             handle_diff_overlay(coordinator, mountpoint).await
         }
+        IpcRequest::ExportOverlay {
+            mountpoint,
+            destination,
+        } => handle_export_overlay(coordinator, mountpoint, destination).await,
         IpcRequest::ResetOverlay { mountpoint } => {
             handle_reset_overlay(coordinator, mountpoint).await
         }
@@ -577,7 +335,6 @@ async fn handle_mount(
         Err(e) => return IpcResponse::err(format!("failed to compute cache dir: {e}")),
     };
 
-    let git_dir = cache_dir.join(".git");
     let mountpoint_buf = PathBuf::from(&mountpoint);
     let (reservation, cancel_token, chunk_cache) = {
         let mut coord = coordinator.lock().await;
@@ -599,6 +356,14 @@ async fn handle_mount(
         }
     };
 
+    let git_dir = match clone_cache::git_dir(&cache_dir) {
+        Ok(git_dir) => git_dir,
+        Err(error) => {
+            release_mount_reservation(coordinator, reservation).await;
+            return IpcResponse::err(format!("{error}"));
+        }
+    };
+
     // If the caller asked for HEAD, pass None so the pipeline resolves
     // HEAD naturally; otherwise pass the explicit ref.
     let ref_name_for_config = if ref_name == "HEAD" {
@@ -610,6 +375,7 @@ async fn handle_mount(
     let pipeline_config = PipelineConfig {
         source: remote.clone(),
         git_dir: git_dir.clone(),
+        git_metadata: crate::pipeline::GitMetadataOwnership::Mount,
         ref_name: ref_name_for_config,
         read_only,
         cache_dir: cache_dir.clone(),
@@ -642,7 +408,7 @@ async fn handle_mount(
     let crab_dir = cache_dir.join(".crab");
     if let Err(e) = std::fs::create_dir_all(&crab_dir) {
         cancel_token.cancel();
-        output.hydration.shutdown().await;
+        output.engine.shutdown_background().await;
         release_mount_reservation(coordinator, reservation).await;
         return IpcResponse::err(format!("failed to create .crab dir: {e}"));
     }
@@ -666,7 +432,7 @@ async fn handle_mount(
         Ok(s) => s,
         Err(e) => {
             cancel_token.cancel();
-            output.hydration.shutdown().await;
+            output.engine.shutdown_background().await;
             release_mount_reservation(coordinator, reservation).await;
             return IpcResponse::err(format!("FUSE mount failed: {e}"));
         }
@@ -677,7 +443,7 @@ async fn handle_mount(
         Ok(s) => s,
         Err(e) => {
             cancel_token.cancel();
-            output.hydration.shutdown().await;
+            output.engine.shutdown_background().await;
             release_mount_reservation(coordinator, reservation).await;
             return IpcResponse::err(format!("FUSE background session failed: {e}"));
         }
@@ -688,6 +454,7 @@ async fn handle_mount(
         pipeline::spawn_refresh_loop(
             &output,
             &config_for_handle,
+            Path::new(&mountpoint),
             std::time::Duration::from_secs(30),
         )
     } else {
@@ -793,9 +560,10 @@ async fn handle_status(coordinator: &Arc<Mutex<Coordinator>>, mountpoint: String
                     .config
                     .ref_name
                     .clone()
-                    .unwrap_or_else(|| handle.pipeline_output.head_ref.clone()),
+                    .or_else(|| handle.resolver.head().map(|head| head.1))
+                    .unwrap_or_default(),
                 read_only: handle.config.read_only,
-                head_oid: Some(handle.pipeline_output.head_oid.clone()),
+                head_oid: handle.resolver.head().map(|head| head.0),
                 pid: Some(std::process::id()),
             };
             IpcResponse::status_ok(status)
@@ -816,7 +584,7 @@ async fn handle_refresh(coordinator: &Arc<Mutex<Coordinator>>, mountpoint: Strin
         return IpcResponse::err(format!("mount not found: {mountpoint}"));
     }
 
-    match coord.refresh_mount(mp) {
+    match coord.refresh_mount(mp).await {
         Ok(head_oid) => {
             let mut resp = IpcResponse::ok();
             resp.mountpoint = Some(mountpoint);
@@ -843,7 +611,7 @@ async fn handle_switch_ref(
         return IpcResponse::err(format!("mount not found: {mountpoint}"));
     }
 
-    match coord.switch_mount_ref(mp, &ref_name) {
+    match coord.switch_mount_ref(mp, &ref_name).await {
         Ok(head_oid) => {
             let mut resp = IpcResponse::ok();
             resp.mountpoint = Some(mountpoint);
@@ -874,10 +642,16 @@ async fn handle_diff_overlay(
     coordinator: &Arc<Mutex<Coordinator>>,
     mountpoint: String,
 ) -> IpcResponse {
-    let coord = coordinator.lock().await;
-    let mp = Path::new(&mountpoint);
-
-    match coord.inspect_mount_overlay(mp) {
+    let (engine, overlay, _) = {
+        let coord = coordinator.lock().await;
+        match coord.overlay_inspection_target(Path::new(&mountpoint)) {
+            Ok(target) => target,
+            Err(error) => return IpcResponse::err(format!("diff failed: {error}")),
+        }
+    };
+    match crate::mount_runtime::inspect_overlay_runtime(engine, overlay, PathBuf::from(&mountpoint))
+        .await
+    {
         Ok(diff) => {
             let mut response = IpcResponse::ok();
             response.mountpoint = Some(mountpoint);
@@ -885,6 +659,37 @@ async fn handle_diff_overlay(
             response
         }
         Err(e) => IpcResponse::err(format!("diff failed: {e}")),
+    }
+}
+
+async fn handle_export_overlay(
+    coordinator: &Arc<Mutex<Coordinator>>,
+    mountpoint: String,
+    destination: PathBuf,
+) -> IpcResponse {
+    let (engine, overlay, cache_dir) = {
+        let coord = coordinator.lock().await;
+        match coord.overlay_inspection_target(Path::new(&mountpoint)) {
+            Ok(target) => target,
+            Err(error) => return IpcResponse::err(format!("export failed: {error}")),
+        }
+    };
+    match crate::mount_runtime::export_overlay_runtime(
+        engine,
+        overlay,
+        cache_dir,
+        PathBuf::from(&mountpoint),
+        destination,
+    )
+    .await
+    {
+        Ok(diff) => {
+            let mut response = IpcResponse::ok();
+            response.mountpoint = Some(mountpoint);
+            response.overlay_diff = Some(diff);
+            response
+        }
+        Err(error) => IpcResponse::err(format!("export failed: {error}")),
     }
 }
 
@@ -904,22 +709,6 @@ async fn handle_reset_overlay(
 
     match Coordinator::reset_overlay_target(target).await {
         Ok(diff) => {
-            let paths = diff
-                .changes
-                .iter()
-                .map(|change| change.path.clone())
-                .collect::<Vec<_>>();
-            let invalidate_result = {
-                let coord = coordinator.lock().await;
-                if coord.has_mount(mp) {
-                    coord.invalidate_mount_paths(mp, &paths)
-                } else {
-                    Ok(())
-                }
-            };
-            if let Err(e) = invalidate_result {
-                return IpcResponse::err(format!("reset invalidation failed: {e}"));
-            }
             let mut response = IpcResponse::ok();
             response.mountpoint = Some(mountpoint);
             response.overlay_diff = Some(diff);
@@ -938,53 +727,46 @@ async fn handle_commit_overlay(
 ) -> IpcResponse {
     let target = {
         let coord = coordinator.lock().await;
-        match coord.overlay_commit_target(Path::new(&mountpoint), message, push) {
+        match coord.overlay_commit_target(Path::new(&mountpoint)) {
             Ok(target) => target,
             Err(error) => return IpcResponse::err(format!("commit failed: {error}")),
         }
     };
     let engine = Arc::clone(&target.engine);
-    let _reset = engine.begin_overlay_reset().await;
-    let committed_mountpoint = target.mountpoint;
-    let head_ref = target.head_ref;
-    let result = match tokio::task::spawn_blocking(move || {
-        crate::publish::commit_overlay_with_snapshot(
-            &target.options,
-            Some(target.snapshot.as_ref()),
-        )
-    })
-    .await
+    match engine
+        .run_control(async move {
+            let reset =
+                crate::mount_runtime::begin_mount_update(&target.engine, &target.mountpoint)
+                    .await?;
+            let mut output = target.output.clone();
+            let result = crate::mount_runtime::commit_mount_runtime(
+                &mut output,
+                &target.config,
+                &reset,
+                message,
+                push,
+            )
+            .await?;
+            if result.commit_oid.is_some() {
+                let paths = result
+                    .diff
+                    .changes
+                    .iter()
+                    .map(|change| change.path.clone())
+                    .collect::<Vec<_>>();
+                target.invalidate(&paths);
+            }
+            let mut response = IpcResponse::ok();
+            response.mountpoint = Some(mountpoint);
+            response.head_oid.clone_from(&result.commit_oid);
+            response.overlay_commit_result = Some(result);
+            Ok(response)
+        })
+        .await
     {
-        Ok(Ok(result)) => result,
-        Ok(Err(error)) => return IpcResponse::err(format!("commit failed: {error}")),
-        Err(error) => return IpcResponse::err(format!("commit task failed: {error}")),
-    };
-
-    if let Some(head_oid) = result.commit_oid.as_deref() {
-        let paths = result
-            .diff
-            .changes
-            .iter()
-            .map(|change| change.path.clone())
-            .collect::<Vec<_>>();
-        let adoption = {
-            let mut coord = coordinator.lock().await;
-            coord
-                .adopt_mount_commit(&committed_mountpoint, head_oid, &head_ref)
-                .and_then(|()| coord.invalidate_mount_paths(&committed_mountpoint, &paths))
-        };
-        if let Err(error) = adoption {
-            return IpcResponse::err(format!(
-                "commit {head_oid} succeeded but live mount adoption failed: {error}; run `crab mount refresh`"
-            ));
-        }
+        Ok(response) => response,
+        Err(error) => IpcResponse::err(format!("commit failed: {error}")),
     }
-
-    let mut response = IpcResponse::ok();
-    response.mountpoint = Some(mountpoint);
-    response.head_oid.clone_from(&result.commit_oid);
-    response.overlay_commit_result = Some(result);
-    response
 }
 
 /// Handle a ping request.
@@ -1378,7 +1160,7 @@ mod tests {
 
         // We need a coordinator to test with. Use a minimal setup.
         let config = crate::coordinator::CoordinatorConfig::with_base_dir(tmp.path().to_path_buf());
-        let coordinator = Coordinator::start(config).unwrap();
+        let coordinator = Coordinator::start(config, None).unwrap();
         let cancel_token = coordinator.cancel_token().clone();
         let coordinator = Arc::new(Mutex::new(coordinator));
 
@@ -1430,7 +1212,7 @@ mod tests {
         let socket_path = tmp.path().join("test.sock");
 
         let config = crate::coordinator::CoordinatorConfig::with_base_dir(tmp.path().to_path_buf());
-        let coordinator = Coordinator::start(config).unwrap();
+        let coordinator = Coordinator::start(config, None).unwrap();
         let cancel_token = coordinator.cancel_token().clone();
         let coordinator = Arc::new(Mutex::new(coordinator));
 
@@ -1462,7 +1244,7 @@ mod tests {
         let socket_path = tmp.path().join("test.sock");
 
         let config = crate::coordinator::CoordinatorConfig::with_base_dir(tmp.path().to_path_buf());
-        let coordinator = Coordinator::start(config).unwrap();
+        let coordinator = Coordinator::start(config, None).unwrap();
         let cancel_token = coordinator.cancel_token().clone();
         let coordinator = Arc::new(Mutex::new(coordinator));
 
@@ -1506,12 +1288,73 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn shutdown_retains_accepted_handler_and_final_reply() {
+        struct GatedResolver {
+            entered: tokio::sync::Notify,
+            release: tokio::sync::Notify,
+        }
+        #[async_trait::async_trait]
+        impl MountReadResolver for GatedResolver {
+            async fn resolve(
+                &self,
+                _remote: &str,
+            ) -> crate::Result<Option<crate::MountReadContext>> {
+                self.entered.notify_one();
+                self.release.notified().await;
+                Err(crate::VfsError::Cancelled)
+            }
+        }
+        let directory = tempfile::tempdir().unwrap();
+        let socket = directory.path().join("control.sock");
+        let config =
+            crate::coordinator::CoordinatorConfig::with_base_dir(directory.path().to_path_buf());
+        let coordinator = Arc::new(Mutex::new(Coordinator::start(config, None).unwrap()));
+        let cancel = CancellationToken::new();
+        let resolver = Arc::new(GatedResolver {
+            entered: tokio::sync::Notify::new(),
+            release: tokio::sync::Notify::new(),
+        });
+        let server = IpcServer::new(Arc::clone(&coordinator), socket.clone(), cancel.clone())
+            .with_read_resolver(resolver.clone());
+        let (bound, ready) = tokio::sync::oneshot::channel();
+        let mut owner = tokio::spawn(async move {
+            server
+                .run_with_bound_hook(move || {
+                    let _ = bound.send(());
+                })
+                .await
+        });
+        ready.await.unwrap();
+        let mut stream = tokio::net::UnixStream::connect(socket).await.unwrap();
+        stream.write_all(b"{\"op\":\"mount\",\"remote\":\"crab://bucket/repo\",\"mountpoint\":\"/unused\",\"ref\":\"main\",\"read_only\":false}\n").await.unwrap();
+        resolver.entered.notified().await;
+        cancel.cancel();
+        let premature = tokio::time::timeout(Duration::from_millis(50), &mut owner).await;
+        resolver.release.notify_one();
+        let response = BufReader::new(stream)
+            .lines()
+            .next_line()
+            .await
+            .unwrap()
+            .unwrap();
+        if premature.is_err() {
+            owner.await.unwrap().unwrap();
+        }
+        assert!(
+            premature.is_err(),
+            "server returned while an accepted handler still owned work"
+        );
+        assert!(!serde_json::from_str::<IpcResponse>(&response).unwrap().ok);
+        coordinator.lock().await.shutdown_graceful().await;
+    }
+
+    #[tokio::test]
     async fn ipc_server_idle_timeout() {
         let tmp = tempfile::tempdir().unwrap();
         let socket_path = tmp.path().join("test.sock");
 
         let config = crate::coordinator::CoordinatorConfig::with_base_dir(tmp.path().to_path_buf());
-        let coordinator = Coordinator::start(config).unwrap();
+        let coordinator = Coordinator::start(config, None).unwrap();
         let cancel_token = coordinator.cancel_token().clone();
         let coordinator = Arc::new(Mutex::new(coordinator));
 
@@ -1554,7 +1397,7 @@ mod tests {
         let socket_path = tmp.path().join("test.sock");
 
         let config = crate::coordinator::CoordinatorConfig::with_base_dir(tmp.path().to_path_buf());
-        let coordinator = Coordinator::start(config).unwrap();
+        let coordinator = Coordinator::start(config, None).unwrap();
         let cancel_token = coordinator.cancel_token().clone();
         let coordinator = Arc::new(Mutex::new(coordinator));
 
@@ -1606,7 +1449,7 @@ mod tests {
         let socket_path = tmp.path().join("test.sock");
 
         let config = crate::coordinator::CoordinatorConfig::with_base_dir(tmp.path().to_path_buf());
-        let coordinator = Coordinator::start(config).unwrap();
+        let coordinator = Coordinator::start(config, None).unwrap();
         let cancel_token = coordinator.cancel_token().clone();
         let coordinator = Arc::new(Mutex::new(coordinator));
 

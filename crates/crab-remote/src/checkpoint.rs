@@ -107,13 +107,15 @@ pub enum CheckpointError {
     #[error("checkpoint consolidation cancelled")]
     Cancelled,
     #[error("capsule repository read failed")]
-    Read(#[from] crab_read::ReadError),
+    Read(#[source] crab_read::ReadError),
     #[error("Git pack consolidation failed")]
     Repack(#[from] crab_git::repack::RepackError),
     #[error("Git pack evidence failed")]
     Pack(#[from] crab_git::pack::PackError),
     #[error("checkpoint metadata failed")]
     Metadata(#[from] crab_metadata::error::MetadataError),
+    #[error("checkpoint source inventory encoding failed")]
+    SourceInventoryRecord(#[from] serde_json::Error),
     #[error("checkpoint storage failed")]
     Storage(#[from] crab_storage::StorageError),
     #[error("checkpoint publication failed")]
@@ -128,6 +130,17 @@ pub enum CheckpointError {
     OutputLimit { maximum: u64 },
     #[error("checkpoint pack path has no canonical content identifier: {path}")]
     InvalidPackPath { path: PathBuf },
+}
+
+impl From<crab_read::ReadError> for CheckpointError {
+    fn from(error: crab_read::ReadError) -> Self {
+        // Intake can cancel before the next phase check. Keep that outcome
+        // recognizable by maintenance owners instead of reporting a read failure.
+        match error {
+            crab_read::ReadError::Cancelled => Self::Cancelled,
+            other => Self::Read(other),
+        }
+    }
 }
 
 /// Compact a capsule repository once its immutable frontier reaches `threshold`.
@@ -652,7 +665,7 @@ async fn publish_layered_sources(
         };
         match checkpoint {
             Ok(checkpoint) => break checkpoint,
-            Err(crab_metadata::error::MetadataError::CheckpointFooterSize { .. })
+            Err(crab_metadata::error::MetadataError::CheckpointFooterSize { bytes, maximum })
                 if sources
                     .iter()
                     .map(|source| source.members().len())
@@ -661,7 +674,7 @@ async fn publish_layered_sources(
             {
                 // A few member-heavy runs can exhaust the footer below its source
                 // count limit. Admit the replacement before any root publication.
-                let start = footer_admission_suffix_start(&sources);
+                let start = footer_admission_suffix_start(&sources, bytes, maximum)?;
                 let consolidation =
                     consolidate_layered_suffix(layout, view, sources, start, maximum_bytes, cancel)
                         .await?;
@@ -706,18 +719,46 @@ async fn publish_layered_sources(
     Ok(CheckpointPublication { work, committed })
 }
 
-fn footer_admission_suffix_start(sources: &[PackSourceDescriptor]) -> usize {
-    // One run can hold hundreds of packs. Otherwise combine two sources;
-    // each replacement reduces member count, bounding repeated admission work.
-    // Leave larger geometric merges to maintenance so a footer limit does not
-    // block foreground requests on rewriting the entire historical inventory.
-    if sources
+fn footer_admission_suffix_start(
+    sources: &[PackSourceDescriptor],
+    footer_bytes: usize,
+    maximum_footer_bytes: usize,
+) -> Result<usize, CheckpointError> {
+    let minimum = if sources
         .last()
         .is_some_and(|source| source.members().len() > 1)
     {
         sources.len().saturating_sub(1)
     } else {
         sources.len().saturating_sub(2)
+    };
+    let Some(start) = sources
+        .iter()
+        .rposition(|source| source.members().len() > 1)
+    else {
+        return Ok(minimum);
+    };
+    if start >= minimum {
+        return Ok(minimum);
+    }
+    // A small roll-up can suffice while the singleton tail covers the excess.
+    // Expand only when even removing that entire tail cannot admit the footer.
+    let tail_bytes = serde_json::to_vec(&sources[start + 1..])?.len();
+    if footer_bytes.saturating_sub(maximum_footer_bytes) <= tail_bytes {
+        return Ok(minimum);
+    }
+    let bytes = sources[start..].iter().try_fold(0_u64, |total, source| {
+        total
+            .checked_add(source.compressed_bytes()?)
+            .ok_or(CheckpointError::AccountingOverflow)
+    })?;
+    // Pairwise singleton roll-ups repeatedly resolve the same bases before
+    // reaching a member-heavy run. Include its tail within the existing budget;
+    // leave larger merges to maintenance unless minimal admission requires them.
+    if bytes <= LAYERED_SUFFIX_BYTE_BUDGET {
+        Ok(start)
+    } else {
+        Ok(minimum)
     }
 }
 
@@ -1439,6 +1480,80 @@ mod tests {
     fn layered_member_suffix_stays_at_target_after_one_pack_replacement() {
         assert_eq!(layered_member_suffix_start(&[1_usize; 8]), None);
         assert_eq!(layered_member_suffix_start(&[1_usize; 9]), Some(7));
+    }
+
+    #[test]
+    fn footer_admission_reaches_member_heavy_run_without_rewriting_older_prefix() {
+        let sources = vec![
+            source(100_000),
+            capsule_run_source(32),
+            source(1),
+            source(1),
+        ];
+
+        let footer_bytes = serde_json::to_vec(&sources).unwrap().len();
+
+        assert_eq!(
+            footer_admission_suffix_start(&sources, footer_bytes, footer_bytes / 2).unwrap(),
+            1
+        );
+    }
+
+    #[test]
+    fn footer_admission_keeps_small_rollup_when_singleton_tail_can_cover_excess() {
+        let sources = vec![
+            source(100_000),
+            capsule_run_source(32),
+            source(1),
+            source(1),
+        ];
+        let footer_bytes = serde_json::to_vec(&sources).unwrap().len();
+
+        assert_eq!(
+            footer_admission_suffix_start(&sources, footer_bytes, footer_bytes - 1).unwrap(),
+            2
+        );
+    }
+
+    #[test]
+    fn footer_admission_keeps_minimal_suffix_when_expansion_exceeds_byte_budget() {
+        // Valid metadata ranges exercise the budget without allocating pack bodies.
+        let mut descriptor = serde_json::to_value(capsule_run_source(2)).unwrap();
+        let length = LAYERED_SUFFIX_BYTE_BUDGET / 2;
+        for index in 0..2 {
+            let offset = index as u64 * (length + 16);
+            let member = &mut descriptor["members"][index];
+            member["pack"]["offset"] = offset.into();
+            member["pack"]["length"] = length.into();
+            for (step, name) in ["index", "reverse_index", "locator"]
+                .into_iter()
+                .enumerate()
+            {
+                member[name]["offset"] = (offset + length + step as u64).into();
+            }
+        }
+        let control = 2 * (length + 16);
+        descriptor["control_offset"] = control.into();
+        descriptor["object_size"] = (control + 8).into();
+        let heavy = serde_json::from_value::<PackSourceDescriptor>(descriptor).unwrap();
+        let heavy = PackSourceDescriptor::new(
+            heavy.kind(),
+            heavy.object_hash(),
+            heavy.object_size(),
+            heavy.control_offset(),
+            heavy.control_size(),
+            heavy.control_hash(),
+            heavy.members().to_vec(),
+        )
+        .unwrap();
+        let sources = vec![source(100_000), heavy, source(1), source(1)];
+
+        let footer_bytes = serde_json::to_vec(&sources).unwrap().len();
+
+        assert_eq!(
+            footer_admission_suffix_start(&sources, footer_bytes, 0).unwrap(),
+            2
+        );
     }
 
     #[test]

@@ -173,5 +173,158 @@ class CellarBoundaryTests(unittest.TestCase):
         self.assertFalse(self.check_source("#[cfg(test)] mod tests { use crab_ltx::CellReplica; }\n"))
 
 
+class PushOwnershipTests(unittest.TestCase):
+    def check_sources(self, sources, checker):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for relative, text in sources.items():
+                path = root / relative
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(text, encoding="utf-8")
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                return checker(root)
+
+    def test_head_policy_requires_root_authority_and_rejects_local_substitution(self):
+        valid = "current_branch_is_denied(config, root.head(), &spec.dst)"
+        sources = {path: valid for path in GATES.GIT_PUSH_HEAD_SCAN_PATHS}
+        self.assertTrue(self.check_sources(sources, GATES.check_git_push_head_authority))
+        for path in sources:
+            with self.subTest(missing=path):
+                missing = {key: value for key, value in sources.items() if key != path}
+                self.assertFalse(self.check_sources(missing, GATES.check_git_push_head_authority))
+            for pattern in GATES.GIT_PUSH_HEAD_FORBIDDEN_PATTERNS:
+                with self.subTest(path=path, pattern=pattern):
+                    changed = dict(sources, **{path: valid + "\n" + pattern})
+                    self.assertFalse(self.check_sources(changed, GATES.check_git_push_head_authority))
+        sources["crab/src/git/capsule_push.rs"] = ""
+        self.assertFalse(self.check_sources(sources, GATES.check_git_push_head_authority))
+
+    def test_tag_delegation_is_required_and_raw_peeling_rejected_on_all_push_owners(self):
+        sources = {path: GATES.GIT_TAG_PEEL_REQUIRED_DELEGATIONS.get(path, "")
+                   for path in GATES.GIT_TAG_PEEL_SCAN_PATHS}
+        self.assertTrue(self.check_sources(sources, GATES.check_git_tag_peel_delegation))
+        for path in sources:
+            with self.subTest(missing=path):
+                missing = {key: value for key, value in sources.items() if key != path}
+                self.assertFalse(self.check_sources(missing, GATES.check_git_tag_peel_delegation))
+            for pattern in GATES.GIT_TAG_PEEL_FORBIDDEN_PATTERNS:
+                with self.subTest(path=path, pattern=pattern):
+                    changed = dict(sources, **{path: sources[path] + "\n" + pattern})
+                    self.assertFalse(self.check_sources(changed, GATES.check_git_tag_peel_delegation))
+        for path in GATES.GIT_TAG_PEEL_REQUIRED_DELEGATIONS:
+            with self.subTest(delegation=path):
+                self.assertFalse(self.check_sources(dict(sources, **{path: ""}), GATES.check_git_tag_peel_delegation))
+
+
+
+class PackLayoutOwnershipTests(unittest.TestCase):
+    def fixture(self, root):
+        for name, patterns in GATES.STORAGE_PACK_LAYOUT_REQUIRED_DELEGATIONS.items():
+            path = root / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text("\n".join(patterns), encoding="utf-8")
+
+    def check(self, root):
+        with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+            return GATES.check_storage_pack_layout_delegation(root)
+
+    def test_repack_requires_current_capsule_delegations(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root)
+            path = root / "crab/src/cmd/repack.rs"
+            original = path.read_text(encoding="utf-8")
+            self.assertTrue(self.check(root))
+            for required in GATES.STORAGE_PACK_LAYOUT_REQUIRED_DELEGATIONS["crab/src/cmd/repack.rs"]:
+                with self.subTest(required=required):
+                    path.write_text(original.replace(required, ""), encoding="utf-8")
+                    self.assertFalse(self.check(root))
+
+    def test_pack_paths_and_manifest_repack_cannot_return(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root)
+            path = root / "crab/src/cmd/repack.rs"
+            original = path.read_text(encoding="utf-8")
+            forbidden = (*GATES.STORAGE_PACK_LAYOUT_FORBIDDEN_PATTERNS, *GATES.STORAGE_PACK_LAYOUT_FORBIDDEN_DELEGATIONS["crab/src/cmd/repack.rs"])
+            for pattern in forbidden:
+                with self.subTest(pattern=pattern):
+                    path.write_text(original + "\n" + pattern, encoding="utf-8")
+                    self.assertFalse(self.check(root))
+
+    def test_push_policy_remains_scanned_without_a_retired_materializer(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root)
+            path = root / "crab/src/git/push.rs"
+            self.assertTrue(self.check(root))
+            forbidden = (
+                *GATES.STORAGE_PACK_LAYOUT_FORBIDDEN_PATTERNS,
+                *GATES.STORAGE_PACK_LAYOUT_FORBIDDEN_DELEGATIONS["crab/src/git/push.rs"],
+            )
+            for pattern in forbidden:
+                with self.subTest(pattern=pattern):
+                    path.write_text(pattern, encoding="utf-8")
+                    self.assertFalse(self.check(root))
+
+    def test_every_pack_layout_owner_is_required(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.fixture(root)
+            for name in GATES.STORAGE_PACK_LAYOUT_REQUIRED_DELEGATIONS:
+                with self.subTest(owner=name):
+                    path = root / name
+                    original = path.read_text(encoding="utf-8")
+                    path.unlink()
+                    self.assertFalse(self.check(root))
+                    path.write_text(original, encoding="utf-8")
+
+
+
+class ReadRetentionScopeTests(unittest.TestCase):
+    def check_scope(self, source, *, optional=True, features=None, hydration=True):
+        metadata = {"packages": [{
+            "name": "crab-read",
+            "features": {"hydration": ["dep:crab-coordination"] if hydration else []},
+            "dependencies": [
+                {"name": "object_store", "kind": None, "optional": False,
+                 "uses_default_features": False, "features": []},
+                {"name": "crab-coordination", "kind": None, "optional": optional,
+                 "uses_default_features": False,
+                 "features": ["object-store-lock"] if features is None else features},
+            ],
+        }]}
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            path = root / "crates/crab-read/src/hydrator.rs"
+            path.parent.mkdir(parents=True)
+            path.write_text(source)
+            with contextlib.redirect_stdout(io.StringIO()), contextlib.redirect_stderr(io.StringIO()):
+                return GATES.check_read_module_scope(root, metadata)
+
+    def test_only_hydration_inherits_the_retention_runtime(self):
+        self.assertTrue(self.check_scope(""))
+        for options in ({"optional": False}, {"features": ["coordinator-dynamodb"]}, {"hydration": False}):
+            with self.subTest(options=options):
+                self.assertFalse(self.check_scope("", **options))
+
+    def test_readers_pin_but_cannot_register_or_acquire_write_authority(self):
+        for source, expected in (
+            ("use crab_coordination::read_retention_runtime::RetainedRead;", True),
+            ("use crab_coordination::read_retention_runtime::ReadRetentionPin;", True),
+            ("source: crab_coordination::CoordinationError,", True),
+            ("use crab_coordination::read_retention::ReadRetentionLease;", False),
+            ("use crab_coordination::read_retention_runtime::ReadRetentionSession;", False),
+            ("use crab_coordination::read_retention_runtime::*;", False),
+            ("use crab_coordination::push_lock::PushLock;", False),
+            ("use crab_coordination::{GcFenceLease};", False),
+        ):
+            with self.subTest(source=source):
+                self.assertEqual(self.check_scope(source), expected)
+
+    def test_test_claims_do_not_allow_product_credentials(self):
+        self.assertTrue(self.check_scope("#[cfg(test)]\nmod tests {\nuse crab_coordination::read_retention::ReadRetentionLease;\n}"))
+        self.assertFalse(self.check_scope("#[cfg(test)]\nmod tests {\nuse crab_auth::AuthConfig;\n}"))
+
 if __name__ == "__main__":
     unittest.main()

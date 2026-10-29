@@ -24,7 +24,7 @@ use crab_metadata::{
         XorbCatalogEntry, XorbChunkEntry,
     },
     git_object_locator::GitObjectKind,
-    git_visibility::{GitCatalogVisibilityIndex, GitVisibilityEdit, GitVisibilityIndex},
+    git_visibility::{GitVisibilityEdit, GitVisibilityIndex},
 };
 use crab_remote_git::{OperationContext, OperationKind, RemoteGitRepository};
 use gix_hash::ObjectId;
@@ -88,11 +88,11 @@ pub struct Options<P> {
 /// Validated ref edits and immutable pack/visibility preparation.
 pub struct Prepared {
     repository: RemoteGitRepository,
-    pub(crate) layout: crab_storage::StoreLayout<crab_storage::Store>,
+    layout: crab_storage::StoreLayout<crab_storage::Store>,
     plan: ValidatedRefUpdates,
     visibility: BTreeMap<String, GitVisibilityEdit>,
     pack: Option<PreparedPack>,
-    pub(crate) content: Option<PreparedContent>,
+    content: Option<PreparedContent>,
     updates: Vec<RefUpdate>,
 }
 
@@ -496,7 +496,7 @@ pub struct PackBinding {
 }
 
 impl PackBinding {
-    /// Return the Blake3 identity used by the canonical repository pack path.
+    /// Return the Blake3 identity of the normalized Git pack.
     #[must_use]
     pub fn pack_id(&self) -> &str {
         &self.pack_id
@@ -507,15 +507,6 @@ impl PackBinding {
     pub const fn size(&self) -> u64 {
         self.size
     }
-}
-
-/// Uploaded immutable artifacts ready for journal publication.
-pub struct Artifacts<'a> {
-    pub(crate) prepared: &'a Prepared,
-    pub(crate) snapshot: &'a crab_metadata::manifest_store::RepositorySnapshot,
-    pub(crate) edits: Vec<crab_metadata::ref_journal::RefJournalEdit>,
-    pub(crate) packs: Vec<crab_metadata::manifests::PackManifestEntry>,
-    pub(crate) shards: Vec<String>,
 }
 
 /// Uploaded capsule-protocol artifacts ready for per-ref publication.
@@ -541,45 +532,6 @@ pub enum CapsuleCommitOutcome {
         transaction_id: String,
         source: Box<crab_write::WriteError>,
     },
-}
-
-impl Artifacts<'_> {
-    /// Commit these uploaded artifacts against their admitted repository snapshot.
-    ///
-    /// Revalidate authorization and repository policy before calling. Keep the
-    /// original ref leases and GC fences held and await completion: a marker
-    /// error may require reconciliation, and cancellation cannot undo a commit.
-    /// Planned commits also require the admitted operation lease; options retain
-    /// that plan's identity through the journal intent and receipt boundary.
-    pub async fn commit(
-        self,
-        head: Option<String>,
-        options: crab_write::journal::CommitOptions<'_>,
-    ) -> Result<crate::publication::CommitOutcome> {
-        if !self
-            .prepared
-            .repository
-            .is_current(options.cancellation())
-            .await?
-        {
-            return Err(Error::Request(
-                "Repository changed before publication; retry",
-            ));
-        }
-        let layout = &self.prepared.layout;
-        let result = crab_write::journal::commit_edits(
-            layout.store(),
-            layout,
-            self.snapshot,
-            self.edits,
-            head,
-            self.packs,
-            self.shards,
-            options,
-        )
-        .await;
-        crate::publication::journal_outcome(result).map_err(Into::into)
-    }
 }
 
 impl Prepared {
@@ -849,219 +801,27 @@ impl Prepared {
         }
         Ok(())
     }
-
-    /// Upload the validated pack and visibility evidence before journal commitment.
-    ///
-    /// The caller must hold ref leases and GC fences, supply the admitted snapshot,
-    /// and revalidate authorization and that snapshot before committing. Content
-    /// dependencies are verified before any artifact upload.
-    /// Failure can leave unreferenced immutable objects; no refs are changed here.
-    pub async fn upload<'a>(
-        &'a self,
-        snapshot: &'a crab_metadata::manifest_store::RepositorySnapshot,
-        limits: crab_read::dependency_proof::DependencyProofLimits,
-        holders: &BTreeMap<String, String>,
-        cancel: &CancellationToken,
-    ) -> Result<Artifacts<'a>> {
-        use crab_metadata::{
-            git_visibility, manifests::PackManifestEntry, ref_journal::RefJournalEdit,
-        };
-        if !self.repository.matches_snapshot(snapshot) {
-            return Err(Error::Request(
-                "Artifact snapshot differs from the prepared repository version",
-            ));
-        }
-        let layout = &self.layout;
-        let store = layout.store();
-        let prepared_files = self
-            .content
-            .as_ref()
-            .map(|content| {
-                content
-                    .files
-                    .iter()
-                    .map(|file| file.file_hash)
-                    .collect::<std::collections::BTreeSet<_>>()
-            })
-            .unwrap_or_default();
-        self.upload_lfs(cancel).await?;
-        crab_read::dependency_proof::verify_dependencies_except_crab(
-            layout,
-            snapshot,
-            self.plan.pointers(),
-            &prepared_files,
-            limits,
-            cancel,
-        )
-        .await
-        .map_err(|error| Error::Dependency(Box::new(error)))?;
-        let mut shards = Vec::new();
-        if let Some(content) = &self.content {
-            for xorb in &content.xorbs {
-                store
-                    .put_multipart_file_retry(
-                        &layout.xorb_path(&crab_xet::hash::MerkleHash::from(xorb.protocol_hash)),
-                        &xorb.path,
-                        xorb.size,
-                        xorb.body_hash,
-                        8 * 1024 * 1024,
-                        cancel,
-                        None,
-                    )
-                    .await?;
-            }
-            for shard in &content.shards {
-                let hash = crab_xet::hash::MerkleHash::from(shard.protocol_hash);
-                store
-                    .put_multipart_file_retry(
-                        &layout.shard_path(&hash),
-                        &shard.path,
-                        shard.size,
-                        shard.body_hash,
-                        8 * 1024 * 1024,
-                        cancel,
-                        None,
-                    )
-                    .await?;
-                shards.push(hash.hex());
-            }
-        }
-        let mut packs = Vec::new();
-        if let Some(pack) = &self.pack {
-            let binding = self
-                .pack_binding()
-                .ok_or(Error::Request("prepared pack identity disappeared"))?;
-            let pack_id = binding.pack_id().to_owned();
-            store
-                .put_multipart_file_retry(
-                    &layout.pack_path(&pack_id),
-                    pack.pack_path(),
-                    pack.size(),
-                    *pack.content_hash().as_bytes(),
-                    8 * 1024 * 1024,
-                    cancel,
-                    None,
-                )
-                .await?;
-            let mut evidence = vec![(pack.kinds_path(), layout.pack_kind_metadata_path(&pack_id))];
-            // Protected receive rebuilds indexes from the staged pack. Its plan
-            // accepts only objects rooted by candidate metadata, so local index
-            // helpers must remain client-side for a staging-write store.
-            if store.staging_write_prefix().is_none() {
-                evidence.extend([
-                    (pack.index_path(), layout.pack_index_path(&pack_id)),
-                    (
-                        pack.reverse_path(),
-                        layout.pack_reverse_index_path(&pack_id),
-                    ),
-                ]);
-            }
-            for (source, target) in evidence {
-                if cancel.is_cancelled() {
-                    return Err(Error::Cancelled);
-                }
-                let bytes = tokio::fs::read(source).await?;
-                store.put_exact(&target, bytes.into()).await?;
-            }
-            packs.push(PackManifestEntry {
-                pack_id: pack_id.clone(),
-                content_hash: pack_id,
-                size: pack.size(),
-                object_count: pack.object_count().into(),
-                ref_tips: self
-                    .updates
-                    .iter()
-                    .filter_map(|update| update.new.map(|oid| oid.to_string()))
-                    .collect(),
-            });
-        }
-        let mut edits = Vec::new();
-        for update in &self.updates {
-            if cancel.is_cancelled() {
-                return Err(Error::Cancelled);
-            }
-            let evidence = match self.visibility.get(&update.name) {
-                Some(proof) => Some(git_visibility::upload_edit(store, layout, proof).await?),
-                None => None,
-            };
-            edits.push(RefJournalEdit {
-                ref_name: update.name.clone(),
-                old_oid: update.old.map(|oid| oid.to_string()),
-                new_oid: update.new.map(|oid| oid.to_string()),
-                peeled_oid: self
-                    .plan
-                    .peeled()
-                    .get(&update.name)
-                    .map(ToString::to_string),
-                lock_holder: holders.get(&update.name).cloned(),
-                visibility_evidence_hash: evidence,
-            });
-        }
-        Ok(Artifacts {
-            prepared: self,
-            snapshot,
-            edits,
-            packs,
-            shards,
-        })
-    }
-}
-
-impl Artifacts<'_> {
-    /// Build and stage the server-verified protected publication plan.
-    pub async fn stage_protected_plan(
-        self,
-        push_id: &str,
-        upload_prefix: &str,
-        ref_updates: Vec<crab_auth::PushRefUpdate>,
-        cancel: &CancellationToken,
-    ) -> Result<crate::protected::ProtectedPushPlan> {
-        crate::protected::stage_plan(self, push_id, upload_prefix, ref_updates, cancel).await
-    }
 }
 
 pub(crate) type Result<T> = std::result::Result<T, Error>;
 
 struct Source<'a> {
     operation: &'a OperationContext,
-    proof: Option<VisibilityProof>,
+    proof: Option<GitVisibilityIndex>,
     refs: Vec<String>,
     prior: Option<(String, ObjectId)>,
     handle: tokio::runtime::Handle,
 }
 
-enum VisibilityProof {
-    Catalog(GitCatalogVisibilityIndex),
-    Materialized(GitVisibilityIndex),
-}
-
 type SourceResult<T> = std::result::Result<T, Box<dyn std::error::Error + Send + Sync>>;
 
 impl Source<'_> {
-    fn ordinal(&self, oid: &ObjectId) -> SourceResult<Option<u32>> {
-        if !matches!(self.proof, Some(VisibilityProof::Catalog(_))) {
-            return Ok(None);
-        }
-        Ok(self
-            .handle
-            .block_on(self.operation.catalog_object_ordinals(&[*oid]))?
-            .into_iter()
-            .next()
-            .flatten())
-    }
     fn visible(&self, oid: &ObjectId) -> SourceResult<bool> {
-        match &self.proof {
-            Some(VisibilityProof::Catalog(proof)) => {
-                Ok(self.ordinal(oid)?.is_some_and(|ordinal| {
-                    proof.contains_ordinal_for_refs(self.refs.iter().map(String::as_str), ordinal)
-                }))
-            }
-            Some(VisibilityProof::Materialized(proof)) => {
-                let oid = oid.as_bytes().try_into()?;
-                Ok(proof.contains_for_refs(self.refs.iter().map(String::as_str), &oid))
-            }
-            None => Ok(false),
-        }
+        let Some(proof) = &self.proof else {
+            return Ok(false);
+        };
+        let oid = oid.as_bytes().try_into()?;
+        Ok(proof.contains_for_refs(self.refs.iter().map(String::as_str), &oid))
     }
 
     fn prior_objects(&self, maximum: usize) -> Result<Vec<String>> {
@@ -1069,48 +829,24 @@ impl Source<'_> {
         let Some(name) = name else {
             return Err(Error::Request("Additive visibility has no captured base"));
         };
-        match &self.proof {
-            Some(VisibilityProof::Materialized(proof)) => {
-                if proof.object_count_for_refs([name]) > maximum {
-                    return Err(Error::Request(
-                        "Visibility base exceeds the graph object limit",
-                    ));
-                }
-                proof.objects_for_ref(name).ok_or(Error::Request(
-                    "Visibility base is absent from its captured proof",
-                ))
-            }
-            Some(VisibilityProof::Catalog(proof)) => {
-                if proof.object_count_for_refs([name]) > maximum {
-                    return Err(Error::Request(
-                        "Visibility base exceeds the graph object limit",
-                    ));
-                }
-                let ordinals = proof.ordinals_for_refs([name]);
-                let objects = self
-                    .handle
-                    .block_on(self.operation.catalog_object_ids_by_ordinal(&ordinals))?;
-                if objects.len() != ordinals.len() || objects.iter().any(Option::is_none) {
-                    return Err(Error::Request(
-                        "Visibility base has missing catalog objects",
-                    ));
-                }
-                Ok(objects
-                    .into_iter()
-                    .flatten()
-                    .map(|oid| oid.to_string())
-                    .collect())
-            }
-            None => Err(Error::Request("Visibility base has no captured proof")),
+        let proof = self
+            .proof
+            .as_ref()
+            .ok_or(Error::Request("Visibility base has no captured proof"))?;
+        if proof.object_count_for_refs([name]) > maximum {
+            return Err(Error::Request(
+                "Visibility base exceeds the graph object limit",
+            ));
         }
+        proof.objects_for_ref(name).ok_or(Error::Request(
+            "Visibility base is absent from its captured proof",
+        ))
     }
 
     fn contains_ref(&self, name: &str) -> bool {
-        match &self.proof {
-            Some(VisibilityProof::Catalog(proof)) => proof.contains_ref(name),
-            Some(VisibilityProof::Materialized(proof)) => proof.contains_ref(name),
-            None => false,
-        }
+        self.proof
+            .as_ref()
+            .is_some_and(|proof| proof.contains_ref(name))
     }
 }
 
@@ -1135,8 +871,8 @@ impl GraphSource for Source<'_> {
         if kind.is_some() {
             return Ok(kind);
         }
-        // Older imported catalogs may omit kind metadata. Reading this proven
-        // visible object establishes its kind without expanding its closure.
+        // Indexed kinds are optional. Only a proven visible body's verified
+        // read may establish its kind without expanding the allowed closure.
         Ok(Some(
             self.handle.block_on(self.operation.read_object(*oid))?.kind,
         ))
@@ -1162,52 +898,20 @@ impl VisibilitySource for Source<'_> {
         let Some((name, _)) = &self.prior else {
             return Ok(false);
         };
-        match &self.proof {
-            Some(VisibilityProof::Catalog(proof)) => Ok(self
-                .ordinal(oid)?
-                .is_some_and(|ordinal| proof.contains_ordinal_in_ref(name, ordinal))),
-            Some(VisibilityProof::Materialized(proof)) => {
-                let oid = oid.as_bytes().try_into()?;
-                Ok(proof.contains_in_ref(name, &oid))
-            }
-            None => Ok(false),
-        }
+        let Some(proof) = &self.proof else {
+            return Ok(false);
+        };
+        let oid = oid.as_bytes().try_into()?;
+        Ok(proof.contains_in_ref(name, &oid))
     }
-}
-
-/// Validate an incoming graph and prepare immutable publication artifacts.
-///
-/// The caller owns authorization, ref/GC leases and the temporary directory.
-/// Await completion after cancellation so the reader and blocking work drain.
-pub async fn prepare(
-    repository: RemoteGitRepository,
-    directory: std::path::PathBuf,
-    input: Option<BufReader<File>>,
-    updates: Vec<RefUpdate>,
-    visibility_bases: BTreeMap<String, (String, ObjectId)>,
-    cancel: &CancellationToken,
-    options: Options<impl Fn(&str) -> RefPolicy + Send + 'static>,
-) -> Result<Prepared> {
-    let space = ScratchSpace::new(&directory, options.pack);
-    prepare_with_layout_binding(
-        repository,
-        space,
-        input,
-        updates,
-        visibility_bases,
-        cancel,
-        options,
-        VisibilityBinding::RepositoryCatalog,
-    )
-    .await
 }
 
 /// Validate an incoming graph against a repository opened from one capsule view.
 ///
-/// The caller must retain that exact authenticated view and pass it to
-/// [`Prepared::upload_capsule`]. The origin layout is intentionally distinct
-/// from the view's private in-memory Git reader, so this entry point does not
-/// apply the v1 transport-identity check.
+/// The caller retains that exact authenticated view and passes it to
+/// [`Prepared::upload_capsule`]. Its origin layout is distinct from the captured
+/// view's private Git reader. Await cancellation and reader cleanup before
+/// releasing scratch space, ref leases or GC fences.
 pub async fn prepare_capsule(
     repository: RemoteGitRepository,
     visibility: GitVisibilityIndex,
@@ -1218,60 +922,13 @@ pub async fn prepare_capsule(
     cancel: &CancellationToken,
     options: Options<impl Fn(&str) -> RefPolicy + Send + 'static>,
 ) -> Result<Prepared> {
-    prepare_with_layout_binding(
-        repository,
-        space,
-        input,
-        updates,
-        visibility_bases,
-        cancel,
-        options,
-        VisibilityBinding::Capsule(Box::new(visibility)),
-    )
-    .await
-}
-
-enum VisibilityBinding {
-    RepositoryCatalog,
-    Capsule(Box<GitVisibilityIndex>),
-}
-
-async fn prepare_with_layout_binding<P>(
-    repository: RemoteGitRepository,
-    space: ScratchSpace,
-    input: Option<BufReader<File>>,
-    updates: Vec<RefUpdate>,
-    visibility_bases: BTreeMap<String, (String, ObjectId)>,
-    cancel: &CancellationToken,
-    options: Options<P>,
-    visibility_binding: VisibilityBinding,
-) -> Result<Prepared>
-where
-    P: Fn(&str) -> RefPolicy + Send + 'static,
-{
-    if matches!(&visibility_binding, VisibilityBinding::RepositoryCatalog)
-        && !repository.matches_store_layout(&options.layout)
-    {
-        return Err(Error::Request(
-            "Preparation layout differs from the validated repository",
-        ));
-    }
     let base: BTreeMap<_, _> = repository
         .refs()
         .entries
         .iter()
         .map(|reference| (reference.name.clone(), reference.target))
         .collect();
-    let proof = if base.is_empty() {
-        None
-    } else {
-        Some(match visibility_binding {
-            VisibilityBinding::RepositoryCatalog => {
-                VisibilityProof::Catalog(repository.catalog_visibility_index(cancel).await?)
-            }
-            VisibilityBinding::Capsule(visibility) => VisibilityProof::Materialized(*visibility),
-        })
-    };
+    let proof = (!base.is_empty()).then_some(visibility);
     let operation = repository
         .operation(OperationKind::Repository, cancel)
         .await?;

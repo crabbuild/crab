@@ -3,7 +3,7 @@
 //!
 //! This is **not** `cmd::repack` (git-pack consolidation). Xorb optimization
 //! operates on content-addressed xorbs, not git packs. The existing
-//! `crab repack` command and its `RepackConfig` are untouched.
+//! `crab repack` command remains the Git pack maintenance entry point.
 //!
 //! # Submodules
 //!
@@ -14,7 +14,7 @@
 //!   wall-clock, API cost).
 //! - [`executor`] — streaming source-xorb → dest-xorb pipeline.
 //! - [`journal`] — WAL-mode SQLite journal for crash-safe resume.
-//! - [`reconcile`] — atomic capsule-catalog or legacy-manifest reconciliation.
+//! - [`reconcile`] — atomic Capsule-catalog reconciliation.
 
 pub mod executor;
 pub mod inference;

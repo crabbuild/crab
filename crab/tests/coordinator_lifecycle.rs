@@ -14,7 +14,8 @@ use tokio::sync::Mutex;
 
 use crab::vfs::coordinator::{Coordinator, CoordinatorConfig};
 use crab::vfs::ipc_client::IpcClient;
-use crab::vfs::ipc_server::{IpcRequest, IpcServer};
+use crab::vfs::ipc_protocol::IpcRequest;
+use crab::vfs::ipc_server::IpcServer;
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -32,7 +33,7 @@ struct TestCoordinator {
 impl TestCoordinator {
     async fn start(tmp: &tempfile::TempDir) -> Self {
         let config = CoordinatorConfig::with_base_dir(tmp.path().to_path_buf());
-        let coordinator = Coordinator::start(config.clone()).unwrap();
+        let coordinator = Coordinator::start(config.clone(), None).unwrap();
         let cancel_token = coordinator.cancel_token().clone();
         let coordinator = Arc::new(Mutex::new(coordinator));
 
@@ -177,7 +178,7 @@ async fn start_second_start_verify_already_running_error() {
 
     // Attempt to start a second coordinator with the same config.
     let second_config = CoordinatorConfig::with_base_dir(tmp.path().to_path_buf());
-    let result = Coordinator::start(second_config);
+    let result = Coordinator::start(second_config, None);
 
     assert!(result.is_err(), "second start should fail");
     let err_msg = result.err().unwrap().to_string();
@@ -210,7 +211,7 @@ async fn sigkill_coordinator_next_start_cleans_stale_files() {
 
     // Start a new coordinator — it should clean up the stale files and
     // start successfully.
-    let coordinator = Coordinator::start(config.clone()).unwrap();
+    let coordinator = Coordinator::start(config.clone(), None).unwrap();
 
     // The new coordinator should have written its own PID.
     let pid_contents = std::fs::read_to_string(config.pid_path()).unwrap();

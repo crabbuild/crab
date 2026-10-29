@@ -27,10 +27,12 @@ Crab supports manual fenced failover with a read-only automation plan:
   the same decision and applies one safe action, such as fencing writes. It
   returns a blocked no-op for `hold` or `monitor`.
 - `crab replica failover fence --apply` increments the coordinator epoch and
-  marks writes unhealthy.
+  marks writes unhealthy, including when replacing an existing fence.
 - New active-active pushes fail closed while writes are fenced.
 - `crab replica repair --from-coordinator` reconciles regional manifests from
-  coordinator truth after referenced objects exist in the target region.
+  coordinator truth after referenced objects exist in the target region. It
+  reads committed gaps and acknowledges durable regional Capsule publication
+  while writes remain fenced; it never resumes admission implicitly.
 - `crab replica failover plan --repair-verified --json` recommends resume only
   after the coordinator is fenced and repair proof is present.
 - `crab replica failover run --apply --repair-verified --json` can apply that
@@ -63,7 +65,26 @@ support to true.
 - GC and repair read coordinator transaction state before deleting or
   materializing objects.
 - Resume is allowed only after external provider failover checks, object
-  replication checks, and coordinator-backed repair are complete.
+  replication checks, and coordinator-backed repair are complete. All GC runs
+  for the repository must also be stopped and drained before resume: it is an
+  administrative override, not automatic cleanup of a running operation.
+
+## Repo GC ownership and recovery
+
+Repo GC atomically closes coordinator write admission and captures in-flight
+object protection. It releases only its acquired epoch after deletion work
+drains. A later operator fence has a different epoch and survives GC cleanup.
+An already-fenced coordinator rejects GC admission without changing the fence.
+
+Repair still acquires regional object-store GC writer claims before publication.
+A regional sweep excludes that publication; an admitted repair drains its I/O
+before releasing its claims. Acknowledgement can compact a committed coordinator
+record, but cannot remove protection already captured by a running GC operation.
+
+Process loss leaves coordinator admission fenced. Recover with the existing
+verified operator resume flow after stopping and draining all GC runs and
+completing the checks above. Do not reset coordinator state or resume while a
+sweep is active; either would invalidate the sweep's protection contract.
 
 ## Future Automated Failover Requirements
 

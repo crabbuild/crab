@@ -2437,6 +2437,7 @@ dependencies = [
  "serde",
  "serde_json",
  "sha1 0.11.0",
+ "sha1dc",
  "sha2 0.10.9",
  "tempfile",
  "thiserror 2.0.18",
@@ -2501,11 +2502,13 @@ dependencies = [
  "bytes",
  "crab-cache",
  "crab-cache-store",
+ "crab-coordination",
  "crab-diff",
  "crab-git",
  "crab-lfs",
  "crab-metadata",
  "crab-remote-git",
+ "crab-staging",
  "crab-storage",
  "crab-types",
  "crab-xet",
@@ -2777,6 +2780,7 @@ dependencies = [
  "tokio",
  "tokio-util",
  "tracing",
+ "uuid",
 ]
 
 [[package]]
@@ -2820,6 +2824,8 @@ dependencies = [
  "crab-cache",
  "crab-cache-store",
  "crab-git",
+ "crab-lfs",
+ "crab-metadata",
  "crab-read",
  "crab-staging",
  "crab-storage",
@@ -2833,6 +2839,7 @@ dependencies = [
  "gix-odb",
  "gix-traverse",
  "libc",
+ "lru 0.12.5",
  "nfs3_server",
  "nfs3_types",
  "nix 0.29.0",
@@ -6687,8 +6694,6 @@ dependencies = [
 [[package]]
 name = "nfs3_server"
 version = "0.11.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "96d135ac708765b71461a1465cf4a25f009a44d33d9d15ab07e0c00d446d4a0c"
 dependencies = [
  "anyhow",
  "nfs3_types",
@@ -9215,6 +9220,12 @@ dependencies = [
  "digest 0.10.7",
  "sha1 0.10.6",
 ]
+
+[[package]]
+name = "sha1dc"
+version = "0.1.5"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c5b0ebf6537e3e8db8bb7d21ecb6d7399738c953c757945c6b95e46c4e95df7b"
 
 [[package]]
 name = "sha2"

@@ -25,6 +25,10 @@ use tokio_util::sync::CancellationToken;
 
 use crate::{ReadError, Result};
 
+#[path = "capsule_payload.rs"]
+mod payload;
+use payload::{GitPackBody, LayeredPayloadRead, SectionKind, fetch_layered_payload_windows};
+
 #[cfg(feature = "hydration")]
 mod dependency;
 #[cfg(feature = "hydration")]
@@ -36,6 +40,14 @@ pub use dependency::{
 #[cfg(all(test, feature = "hydration"))]
 mod visibility_tests;
 
+#[cfg(test)]
+#[path = "capsule_intake_tests.rs"]
+mod intake_tests;
+
+#[cfg(test)]
+#[path = "capsule_staging_tests.rs"]
+mod staging_tests;
+
 const LAYERED_SIDECAR_COALESCE_GAP_BYTES: u64 = 64 * 1024;
 const LAYERED_SIDECAR_MAX_EXTRA_BYTES: u64 = 4 * 1024 * 1024;
 const LAYERED_SIDECAR_MAX_WINDOW_BYTES: u64 = 16 * 1024 * 1024;
@@ -43,9 +55,6 @@ const LAYERED_PACK_MAX_WINDOW_BYTES: u64 = 64 * 1024 * 1024;
 const LAYERED_FULL_MAX_WINDOW_BYTES: u64 = 64 * 1024 * 1024;
 const LAYERED_REPACK_IN_MEMORY_FRONTIER_BYTES: u64 = LAYERED_FULL_MAX_WINDOW_BYTES;
 const LAYERED_SIDECAR_READ_CONCURRENCY: usize = 8;
-const LAYERED_LARGE_RANGE_THRESHOLD_BYTES: u64 = 128 * 1024 * 1024;
-const LAYERED_LARGE_RANGE_CHUNK_BYTES: u64 = 128 * 1024 * 1024;
-const LAYERED_LARGE_RANGE_READ_CONCURRENCY: usize = 6;
 const LAYERED_INLINE_FRONTIER_MAX_BYTES: u64 = 128 * 1024 * 1024;
 
 /// Caller-owned memory admission for one capsule-protocol repository view.
@@ -91,6 +100,82 @@ pub struct CapsuleDependencyProof {
     pub reachable_lfs_objects: u64,
     /// Total declared bytes of those distinct, verified LFS bodies.
     pub reachable_lfs_bytes: u64,
+}
+
+/// One physical repository root and its transaction-consistent ref heads.
+///
+/// Retain this capture when changing read detail after discovery: reopening
+/// mutable heads could replace the refs already advertised to a client.
+pub struct CapsuleRepositoryCapture {
+    layout: StoreLayout<Store>,
+    root: crab_metadata::capsule_protocol::RootSnapshot,
+    heads: Vec<crab_metadata::capsule_protocol::CapsuleRefHead>,
+    active: BTreeSet<String>,
+}
+
+impl CapsuleRepositoryCapture {
+    /// Capture stable ref heads belonging to this authenticated root and origin.
+    pub async fn from_root(
+        layout: StoreLayout<Store>,
+        root: crab_metadata::capsule_protocol::RootSnapshot,
+    ) -> Result<Self> {
+        let (heads, active) = capture_ref_heads(&layout, root.record().root()).await?;
+        Ok(Self {
+            layout,
+            root,
+            heads,
+            active,
+        })
+    }
+
+    /// Return the physical origin retained with this capture.
+    #[must_use]
+    pub fn layout(&self) -> &StoreLayout<Store> {
+        &self.layout
+    }
+
+    /// Materialize payload-free refs from the captured heads.
+    pub fn ref_view(&self) -> Result<CapsuleRefView> {
+        let visible =
+            materialize_visible_ref_heads(self.root.record().root(), &self.heads, &self.active)
+                .map_err(metadata_control_error)?;
+        Ok(CapsuleRefView {
+            root: self.root.clone(),
+            refs: visible.refs,
+            peeled_refs: visible.peeled_refs,
+            visible_ref_transactions: visible.transactions,
+            push_ref_head_bases: BTreeMap::new(),
+        })
+    }
+
+    /// Open checkpoint footer and run controls without recapturing mutable refs.
+    pub async fn layered_control_view(
+        &self,
+        limits: CapsuleReadLimits,
+    ) -> Result<CapsuleRepositoryView> {
+        assemble_layered_control_view(
+            &self.layout,
+            self.root.clone(),
+            limits,
+            &self.heads,
+            &self.active,
+            ControlRead::Fetch,
+        )
+        .await
+    }
+
+    /// Open complete metadata without Git bodies or a second ref-head capture.
+    pub async fn metadata_view(&self, limits: CapsuleReadLimits) -> Result<CapsuleRepositoryView> {
+        assemble_layered_control_view(
+            &self.layout,
+            self.root.clone(),
+            limits,
+            &self.heads,
+            &self.active,
+            ControlRead::Complete,
+        )
+        .await
+    }
 }
 
 /// One authenticated repository root and every post-checkpoint capsule it names.
@@ -1257,11 +1342,19 @@ impl CapsuleRepositoryView {
         }
         if object_index.is_none()
             && checkpoint.is_some_and(|value| !value.is_control_only())
-            && !all_members.is_empty()
+            && !frontier_pack_ids.is_empty()
         {
+            // Frontier metadata remains admitted at opening. Historical packs
+            // use checkpoint member admission and lazy verified indexes instead
+            // of reloading the complete sidecar inventory for each base read.
+            let frontier_members = all_members
+                .iter()
+                .filter(|member| frontier_pack_ids.contains(&member.pack_id.to_string()))
+                .cloned()
+                .collect::<Vec<_>>();
             inline_locators.extend(
                 physical_locators_for_members(
-                    &all_members,
+                    &frontier_members,
                     &metadata_layout,
                     max_input_bytes,
                     cancellation,
@@ -1755,7 +1848,7 @@ pub async fn install_git_packs_with_candidates(
 
 #[derive(Debug, Clone)]
 struct GitPackPayload {
-    pack: Option<Bytes>,
+    pack: Option<GitPackBody>,
     index: Bytes,
     reverse_index: Bytes,
     locator: Bytes,
@@ -1777,7 +1870,7 @@ fn payloads_from_capsule(capsule: Capsule) -> Result<Vec<GitPackPayload>> {
             let locator = capsule.section_bytes(descriptor.locator_section())?;
             let content_hash = blake3::hash(&pack).to_hex().to_string();
             Ok(GitPackPayload {
-                pack: Some(pack),
+                pack: Some(GitPackBody::Resident(pack)),
                 index,
                 reverse_index,
                 locator,
@@ -1806,7 +1899,22 @@ async fn install_git_pack_payloads(
         } else {
             payloads
         };
-        let mut total = 0_u64;
+        // Admit the complete batch before publishing any pack or kind sidecar;
+        // a later over-budget member must not leave an installed prefix.
+        let total = payloads
+            .iter()
+            .filter_map(|payload| payload.pack.as_ref())
+            .try_fold(0_u64, |total, pack| {
+                total.checked_add(pack.len()).ok_or_else(|| {
+                    ReadError::internal("capsule-protocol Git intake size overflowed")
+                })
+            })?;
+        if max_input_bytes > 0 && total > max_input_bytes {
+            return Err(ReadError::CapsuleReadLimit {
+                resource: "Git pack intake",
+                maximum: max_input_bytes,
+            });
+        }
         let mut installed = Vec::new();
         for GitPackPayload {
             pack,
@@ -1820,25 +1928,13 @@ async fn install_git_pack_payloads(
             external_delta_bases,
         } in payloads
         {
-            let has_download = pack.is_some();
             let final_pack = pack_dir.join(format!("pack-{content_hash}.pack"));
             let final_index = pack_dir.join(format!("pack-{content_hash}.idx"));
             let final_reverse = pack_dir.join(format!("pack-{content_hash}.rev"));
             let pack_size = match pack.as_ref() {
-                Some(pack) => pack.len() as u64,
+                Some(pack) => pack.len(),
                 None => std::fs::metadata(&final_pack)?.len(),
             };
-            if has_download {
-                total = total.checked_add(pack_size).ok_or_else(|| {
-                    ReadError::internal("capsule-protocol Git intake size overflowed")
-                })?;
-                if max_input_bytes > 0 && total > max_input_bytes {
-                    return Err(ReadError::CapsuleReadLimit {
-                        resource: "Git pack intake",
-                        maximum: max_input_bytes,
-                    });
-                }
-            }
             // Complete capsule views may carry bodies already installed by a
             // previous read. Reuse only after the existing hash/sidecar checks;
             // receipt of the same payload is not a destination conflict.
@@ -1848,22 +1944,18 @@ async fn install_git_pack_payloads(
                 pack
             };
             let needs_install = pack.is_some();
-            let (_temporary, pack_path, index_path, reverse_path) = if let Some(pack) = pack {
-                if native_repository && !external_delta_bases.is_empty() {
-                    crab_git::pack::verify_pack_sha1(&pack)?;
-                    let expected = ObjectId::from_hex(git_checksum.as_bytes())
-                        .map_err(|error| corrupt_path("capsule Git pack", error.to_string()))?;
-                    if !pack.ends_with(expected.as_bytes()) {
-                        return Err(corrupt_path("capsule Git pack", "thin pack checksum does not match its descriptor"));
-                    }
-                }
+            let (_temporary, pack_path, index_path, reverse_path) = if let Some(pack) = &pack {
                 let temporary = tempfile::Builder::new()
                     .prefix(".crab-capsule-pack-")
                     .tempdir_in(&pack_dir)?;
-                let pack_path = temporary.path().join("pack.pack");
+                let pack_path = pack.materialize(temporary.path())?;
+                if native_repository && !external_delta_bases.is_empty()
+                    && crab_git::pack::verify_pack_file_sha1(&pack_path)? != git_checksum
+                {
+                    return Err(corrupt_path("capsule Git pack", "thin pack checksum does not match its descriptor"));
+                }
                 let index_path = temporary.path().join("pack.idx");
                 let reverse_path = temporary.path().join("pack.rev");
-                std::fs::write(&pack_path, &pack)?;
                 std::fs::write(&index_path, &index)?;
                 std::fs::write(&reverse_path, &reverse_index)?;
                 (
@@ -2376,6 +2468,8 @@ async fn install_layered_cold_clone_packs_from_store(
 /// All source members are verified; thin members are repaired against their
 /// authenticated dependencies before local publication. The caller must pin
 /// the checkpoint and protect its sources from concurrent collection.
+/// Dropping the future cancels staging; keep the runtime alive for owned workers
+/// to drain before cleaning the destination.
 pub async fn install_layered_checkpoint(
     checkpoint: &LayeredCheckpoint,
     router: &StoreLayout<Store>,
@@ -2941,11 +3035,28 @@ async fn install_layered_git_packs_from_store_selected_with_sources(
             maximum: max_input_bytes,
         });
     }
-    let (fetched_windows, mut fetched_bytes) = tokio::select! {
-        biased;
-        () = cancel.cancelled() => return Err(ReadError::Cancelled),
-        result = fetch_layered_payload_windows(router.store(), sidecar_windows) => result?,
+    let mut staging = tempfile::Builder::new();
+    staging.prefix(".crab-layered-payload-");
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt as _;
+        staging.permissions(std::fs::Permissions::from_mode(0o700));
+    }
+    let directory = Arc::new(staging.tempdir_in(&pack_dir)?);
+    let mode = match &payload_plan {
+        LayeredPayloadWindowPlan::Combined(_) => LayeredPayloadWindowMode::Full,
+        LayeredPayloadWindowPlan::Separate { .. } => LayeredPayloadWindowMode::Sidecars,
     };
+    let sidecar_read = fetch_layered_payload_windows(
+        router.store(),
+        &members,
+        sidecar_windows,
+        mode,
+        &directory,
+        cancel,
+    )
+    .await?;
+    let mut fetched_bytes = sidecar_read.bytes;
     let fetched_input_bytes = fetched_bytes
         .checked_add(cached_payload_bytes)
         .ok_or_else(|| ReadError::internal("layered payload byte count overflowed"))?;
@@ -2955,10 +3066,6 @@ async fn install_layered_git_packs_from_store_selected_with_sources(
             maximum: max_input_bytes,
         });
     }
-    let sidecar_read = LayeredPayloadRead {
-        windows: sidecar_windows,
-        bytes: &fetched_windows,
-    };
 
     if let Some((allowed, required)) = admission {
         let mut covered = BTreeSet::new();
@@ -2971,8 +3078,7 @@ async fn install_layered_git_packs_from_store_selected_with_sources(
                 // installed self-contained pack.
                 local_layered_member_admission(&pack_dir, member_read)?
             } else {
-                let (start, body) = sidecar_read.member_window(member_index)?;
-                let index = layered_range_bytes(body, start, member.index())?;
+                let index = sidecar_read.sidecar(member_index, SectionKind::Index)?;
                 let object_ids = crab_git::pack_locator::sorted_object_ids_from_index_bytes(&index)
                     .map_err(|error| corrupt_path("capsule Git locator", error.to_string()))?;
                 (object_ids.0, object_ids.1.to_string())
@@ -3013,7 +3119,7 @@ async fn install_layered_git_packs_from_store_selected_with_sources(
         return match &payload_plan {
             LayeredPayloadWindowPlan::Combined(_) => build_layered_payload_install(
                 &members,
-                sidecar_read,
+                &sidecar_read,
                 None,
                 capsules,
                 &cached_payloads,
@@ -3035,13 +3141,17 @@ async fn install_layered_git_packs_from_store_selected_with_sources(
                         maximum: max_input_bytes,
                     });
                 }
-                let (pack_bytes, pack_read) = tokio::select! {
-                    biased;
-                    () = cancel.cancelled() => return Err(ReadError::Cancelled),
-                    result = fetch_layered_payload_windows(router.store(), packs) => result?,
-                };
+                let pack_read = fetch_layered_payload_windows(
+                    router.store(),
+                    &members,
+                    packs,
+                    LayeredPayloadWindowMode::Packs,
+                    &directory,
+                    cancel,
+                )
+                .await?;
                 fetched_bytes = fetched_bytes
-                    .checked_add(pack_read)
+                    .checked_add(pack_read.bytes)
                     .ok_or_else(|| ReadError::internal("layered payload byte count overflowed"))?;
                 let fetched_input_bytes = fetched_bytes
                     .checked_add(cached_payload_bytes)
@@ -3052,14 +3162,10 @@ async fn install_layered_git_packs_from_store_selected_with_sources(
                         maximum: max_input_bytes,
                     });
                 }
-                let pack_read = LayeredPayloadRead {
-                    windows: packs,
-                    bytes: &pack_bytes,
-                };
                 build_layered_payload_install(
                     &members,
-                    sidecar_read,
-                    Some(pack_read),
+                    &sidecar_read,
+                    Some(&pack_read),
                     capsules,
                     &cached_payloads,
                     git_dir,
@@ -3074,7 +3180,7 @@ async fn install_layered_git_packs_from_store_selected_with_sources(
 
     build_layered_payload_install(
         &members,
-        sidecar_read,
+        &sidecar_read,
         None,
         capsules,
         &cached_payloads,
@@ -3155,8 +3261,8 @@ fn local_layered_member_admission(
 
 async fn build_layered_payload_install(
     members: &[LayeredPayloadMemberRead],
-    sidecars: LayeredPayloadRead<'_>,
-    packs: Option<LayeredPayloadRead<'_>>,
+    sidecars: &LayeredPayloadRead,
+    packs: Option<&LayeredPayloadRead>,
     capsules: &[Capsule],
     cached_payloads: &BTreeMap<String, GitPackPayload>,
     git_dir: &Path,
@@ -3187,18 +3293,13 @@ async fn build_layered_payload_install(
             payloads.push(payload.clone());
             continue;
         }
-        let (start, sidecar_body) = sidecars.member_window(member_index)?;
-        let index = layered_range_bytes(sidecar_body, start, member.index())?;
-        let reverse_index = layered_range_bytes(sidecar_body, start, member.reverse_index())?;
-        let locator = layered_range_bytes(sidecar_body, start, member.locator())?;
+        let index = sidecars.sidecar(member_index, SectionKind::Index)?;
+        let reverse_index = sidecars.sidecar(member_index, SectionKind::ReverseIndex)?;
+        let locator = sidecars.sidecar(member_index, SectionKind::Locator)?;
         let pack = if member_read.complete_local {
             None
         } else {
-            let (pack_start, pack_body) = match &packs {
-                Some(packs) => packs.member_window(member_index)?,
-                None => (start, sidecar_body),
-            };
-            Some(layered_range_bytes(pack_body, pack_start, member.pack())?)
+            Some(packs.unwrap_or(sidecars).pack(member_index)?)
         };
         let verified_identity = pack
             .as_ref()
@@ -3258,7 +3359,7 @@ fn verified_layered_pack_identity(
 }
 
 fn capsule_payload_matches_member(payload: &GitPackPayload, member: &PackMemberDescriptor) -> bool {
-    let Some(pack) = payload.pack.as_ref() else {
+    let Some(GitPackBody::Resident(pack)) = payload.pack.as_ref() else {
         return false;
     };
     let matches_range = |bytes: &Bytes, range: &PackRange| {
@@ -3281,7 +3382,12 @@ fn same_git_pack_payload(left: &GitPackPayload, right: &GitPackPayload) -> bool 
             .pack
             .as_ref()
             .zip(right.pack.as_ref())
-            .is_none_or(|(left, right)| left == right)
+            .is_none_or(|(left, right)| match (left, right) {
+                (GitPackBody::Resident(left), GitPackBody::Resident(right)) => left == right,
+                // Staged bodies were hashed into private files. Their length and
+                // authenticated content identity avoid another complete disk scan.
+                _ => left.len() == right.len(),
+            })
         && left.index == right.index
         && left.reverse_index == right.reverse_index
         && left.locator == right.locator
@@ -3292,121 +3398,21 @@ fn same_git_pack_payload(left: &GitPackPayload, right: &GitPackPayload) -> bool 
 
 fn git_pack_payload_bytes(payload: &GitPackPayload) -> Result<u64> {
     [
-        payload.pack.as_ref().map(|bytes| bytes.len()),
-        Some(payload.index.len()),
-        Some(payload.reverse_index.len()),
-        Some(payload.locator.len()),
+        payload.index.len(),
+        payload.reverse_index.len(),
+        payload.locator.len(),
     ]
     .into_iter()
-    .flatten()
-    .try_fold(0_u64, |total, length| {
-        let length = u64::try_from(length)
-            .map_err(|_| ReadError::internal("layered payload length cannot be represented"))?;
-        total
-            .checked_add(length)
-            .ok_or_else(|| ReadError::internal("layered payload byte count overflowed"))
-    })
-}
-
-async fn fetch_layered_payload_windows(
-    store: &Store,
-    windows: &[LayeredPayloadWindow],
-) -> Result<(BTreeMap<usize, Bytes>, u64)> {
-    // Own range descriptors before suspension so server-spawned readers do not
-    // retain a lifetime-dependent iterator closure in their Send future.
-    let requests = windows
-        .iter()
-        .map(|window| (window.path.clone(), window.range.clone()))
-        .collect::<Vec<_>>();
-    let fetched = futures_util::stream::iter(requests.into_iter().enumerate().map(
-        |(window_index, (path, range))| {
-            let store = store.clone();
-            async move {
-                let bytes = read_layered_source_range(&store, &path, range).await?;
-                Ok::<_, ReadError>((window_index, bytes))
-            }
+    .try_fold(
+        payload.pack.as_ref().map_or(0, GitPackBody::len),
+        |total, length| {
+            let length = u64::try_from(length)
+                .map_err(|_| ReadError::internal("layered payload length cannot be represented"))?;
+            total
+                .checked_add(length)
+                .ok_or_else(|| ReadError::internal("layered payload byte count overflowed"))
         },
-    ))
-    .buffer_unordered(LAYERED_SIDECAR_READ_CONCURRENCY)
-    .try_collect::<Vec<_>>()
-    .await?
-    .into_iter()
-    .collect::<BTreeMap<usize, Bytes>>();
-    let bytes = fetched.values().try_fold(0_u64, |total, bytes| {
-        total
-            .checked_add(bytes.len() as u64)
-            .ok_or_else(|| ReadError::internal("layered payload byte count overflowed"))
-    })?;
-    Ok((fetched, bytes))
-}
-
-async fn read_layered_source_range(
-    store: &Store,
-    path: &object_store::path::Path,
-    range: std::ops::Range<u64>,
-) -> Result<Bytes> {
-    let expected = range
-        .end
-        .checked_sub(range.start)
-        .ok_or_else(|| corrupt_path("capsule Git pack", "source range underflowed"))?;
-    if expected <= LAYERED_LARGE_RANGE_THRESHOLD_BYTES {
-        return read_layered_source_range_single(store, path, range).await;
-    }
-
-    let mut ranges = Vec::new();
-    let mut start = range.start;
-    while start < range.end {
-        let end = start
-            .saturating_add(LAYERED_LARGE_RANGE_CHUNK_BYTES)
-            .min(range.end);
-        ranges.push(start..end);
-        start = end;
-    }
-    let mut fetched =
-        futures_util::stream::iter(ranges.into_iter().enumerate().map(|(index, subrange)| {
-            let store = store.clone();
-            let path = path.clone();
-            async move {
-                let bytes = read_layered_source_range_single(&store, &path, subrange).await?;
-                Ok::<_, ReadError>((index, bytes))
-            }
-        }))
-        .buffer_unordered(LAYERED_LARGE_RANGE_READ_CONCURRENCY)
-        .try_collect::<Vec<_>>()
-        .await?;
-    fetched.sort_unstable_by_key(|(index, _)| *index);
-    let capacity = usize::try_from(expected)
-        .map_err(|_| corrupt_path("capsule Git pack", "layered source range is too large"))?;
-    let mut assembled = Vec::with_capacity(capacity);
-    for (_, bytes) in fetched {
-        assembled.extend_from_slice(&bytes);
-    }
-    if assembled.len() as u64 != expected {
-        return Err(corrupt_path(
-            "capsule Git pack",
-            "layered source range reassembly returned an unexpected length",
-        ));
-    }
-    Ok(Bytes::from(assembled))
-}
-
-async fn read_layered_source_range_single(
-    store: &Store,
-    path: &object_store::path::Path,
-    range: std::ops::Range<u64>,
-) -> Result<Bytes> {
-    let expected = range
-        .end
-        .checked_sub(range.start)
-        .ok_or_else(|| corrupt_path("capsule Git pack", "source range underflowed"))?;
-    let bytes = store.range_get(path, range).await?;
-    if bytes.len() as u64 != expected {
-        return Err(corrupt_path(
-            "capsule Git pack",
-            "layered source range returned an unexpected length",
-        ));
-    }
-    Ok(bytes)
+    )
 }
 
 #[derive(Clone)]
@@ -3428,26 +3434,6 @@ struct LayeredPayloadWindow {
     range: std::ops::Range<u64>,
     member_indices: Vec<usize>,
     useful_bytes: u64,
-}
-
-struct LayeredPayloadRead<'a> {
-    windows: &'a [LayeredPayloadWindow],
-    bytes: &'a BTreeMap<usize, Bytes>,
-}
-
-impl LayeredPayloadRead<'_> {
-    fn member_window(&self, member_index: usize) -> Result<(u64, &Bytes)> {
-        let window_index = payload_window_for_member(self.windows, member_index)?;
-        let window = self
-            .windows
-            .get(window_index)
-            .ok_or_else(|| ReadError::internal("layered payload window disappeared"))?;
-        let body = self
-            .bytes
-            .get(&window_index)
-            .ok_or_else(|| ReadError::internal("layered payload bytes disappeared"))?;
-        Ok((window.range.start, body))
-    }
 }
 
 enum LayeredPayloadWindowPlan {
@@ -3747,16 +3733,6 @@ fn layered_payload_window_bytes(windows: &[LayeredPayloadWindow]) -> Result<u64>
     })
 }
 
-fn payload_window_for_member(
-    windows: &[LayeredPayloadWindow],
-    member_index: usize,
-) -> Result<usize> {
-    windows
-        .iter()
-        .position(|window| window.member_indices.contains(&member_index))
-        .ok_or_else(|| ReadError::internal("layered member has no payload window"))
-}
-
 fn layered_range_bytes(
     body: &Bytes,
     body_offset: u64,
@@ -3824,31 +3800,29 @@ async fn physical_locators_for_members(
             maximum: max_bytes,
         });
     }
-    let (fetched, _) = tokio::select! {
-        biased;
-        () = cancel.cancelled() => return Err(ReadError::Cancelled),
-        result = fetch_layered_payload_windows(layout.store(), &windows) => result?,
-    };
+    let workspace = Arc::new(tempfile::tempdir()?);
+    let fetched = fetch_layered_payload_windows(
+        layout.store(),
+        &payload_members,
+        &windows,
+        LayeredPayloadWindowMode::Sidecars,
+        &workspace,
+        cancel,
+    )
+    .await?;
     let members = members.to_vec();
     let cancel = cancel.clone();
     // The worker owns its fetched bytes and scratch files through parsing.
     // Cancellation cannot release caller scratch paths while gix still maps them.
     tokio::task::spawn_blocking(move || {
-        let workspace = tempfile::tempdir()?;
         let mut entries = Vec::new();
         for (position, member) in members.iter().enumerate() {
             if cancel.is_cancelled() {
                 return Err(ReadError::Cancelled);
             }
-            let window_index = payload_window_for_member(&windows, position)?;
-            let window = &windows[window_index];
-            let body = fetched
-                .get(&window_index)
-                .ok_or_else(|| corrupt_path("capsule Git locator", "sidecar window missing"))?;
-            let index = layered_range_bytes(body, window.range.start, member.member.index())?;
-            let reverse =
-                layered_range_bytes(body, window.range.start, member.member.reverse_index())?;
-            let locator = layered_range_bytes(body, window.range.start, member.member.locator())?;
+            let index = fetched.sidecar(position, SectionKind::Index)?;
+            let reverse = fetched.sidecar(position, SectionKind::ReverseIndex)?;
+            let locator = fetched.sidecar(position, SectionKind::Locator)?;
             let index_path = workspace
                 .path()
                 .join(format!("{}-layered.idx", member.pack_id));
@@ -4192,8 +4166,8 @@ pub async fn open_view_from_root_for_repack(
         router,
         snapshot,
         limits,
-        heads,
-        active,
+        &heads,
+        &active,
         ControlRead::Complete,
     )
     .await
@@ -4345,8 +4319,8 @@ pub async fn open_view_from_root_with_metadata(
         router,
         snapshot,
         limits,
-        heads,
-        active,
+        &heads,
+        &active,
         ControlRead::Complete,
     )
     .await
@@ -4362,7 +4336,7 @@ pub async fn open_git_view_from_root(
     limits: CapsuleReadLimits,
 ) -> Result<CapsuleRepositoryView> {
     let (heads, active) = capture_ref_heads(router, snapshot.record().root()).await?;
-    assemble_layered_control_view(router, snapshot, limits, heads, active, ControlRead::Git).await
+    assemble_layered_control_view(router, snapshot, limits, &heads, &active, ControlRead::Git).await
 }
 
 #[derive(Clone, Copy)]
@@ -4395,8 +4369,8 @@ async fn assemble_view(
             router,
             snapshot,
             limits,
-            heads,
-            active,
+            &heads,
+            &active,
             if matches!(checkpoint_load, CheckpointLoad::LayeredControl) {
                 ControlRead::Fetch
             } else {
@@ -4625,14 +4599,14 @@ async fn assemble_layered_control_view(
     router: &StoreLayout<Store>,
     snapshot: crab_metadata::capsule_protocol::RootSnapshot,
     limits: CapsuleReadLimits,
-    heads: Vec<crab_metadata::capsule_protocol::CapsuleRefHead>,
-    active: BTreeSet<String>,
+    heads: &[crab_metadata::capsule_protocol::CapsuleRefHead],
+    active: &BTreeSet<String>,
     read: ControlRead,
 ) -> Result<CapsuleRepositoryView> {
     let footer_only = matches!(read, ControlRead::Fetch);
     let mut refs = snapshot.record().root().refs().clone();
     let mut peeled_refs = snapshot.record().root().peeled_refs().clone();
-    let visible = materialize_visible_ref_heads(snapshot.record().root(), &heads, &active)
+    let visible = materialize_visible_ref_heads(snapshot.record().root(), heads, active)
         .map_err(metadata_control_error)?;
     let expected_refs = visible.refs;
     let expected_peeled = visible.peeled_refs;
@@ -5703,58 +5677,6 @@ mod tests {
                 .unwrap();
 
         assert_eq!(result, LayeredMemberPreAdmission::NeedsSidecars);
-    }
-
-    #[tokio::test]
-    async fn layered_payload_reads_can_run_in_spawned_tasks() {
-        let store = Store::new(Arc::new(InMemory::new()));
-        let path = object_store::path::Path::from("runs/spawned");
-        let body = Bytes::from_static(b"first-second");
-        store.put(&path, body.clone()).await.unwrap();
-        let windows = vec![LayeredPayloadWindow {
-            path,
-            range: 0..body.len() as u64,
-            member_indices: vec![0],
-            useful_bytes: body.len() as u64,
-        }];
-
-        let (fetched, _) =
-            tokio::spawn(async move { fetch_layered_payload_windows(&store, &windows).await })
-                .await
-                .unwrap()
-                .unwrap();
-
-        assert_eq!(fetched, BTreeMap::from([(0, body)]));
-    }
-
-    #[tokio::test]
-    async fn dense_layered_admission_reads_one_range_per_source() {
-        let (members, source_size) = dense_layered_payload_members(16, 64 * 1024);
-        let selected = (0..members.len()).collect::<BTreeSet<_>>();
-        let pre_admitted = selected.clone();
-        let LayeredPayloadWindowPlan::Combined(windows) =
-            plan_layered_admission_payload_windows(&members, &selected, &pre_admitted, 0).unwrap()
-        else {
-            panic!("authenticated dense members should share one combined source window");
-        };
-        let observer = Arc::new(RecordingObserver::default());
-        let store = Store::new(Arc::new(InMemory::new())).with_storage_observer(observer.clone());
-        let path = members[0].member.source_path.clone();
-        store
-            .put(&path, Bytes::from(vec![0; source_size as usize]))
-            .await
-            .unwrap();
-        observer.observations.lock().unwrap().clear();
-
-        let (_, bytes_read) = fetch_layered_payload_windows(&store, &windows)
-            .await
-            .unwrap();
-
-        let observations = observer.observations.lock().unwrap();
-        assert_eq!(bytes_read, source_size);
-        assert_eq!(observations.len(), 1);
-        assert_eq!(observations[0].operation, StorageOperation::Range);
-        assert_eq!(observations[0].bytes_read, source_size);
     }
 
     #[test]

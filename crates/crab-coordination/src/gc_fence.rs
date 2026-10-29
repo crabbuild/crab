@@ -30,6 +30,90 @@ pub struct GcWriterEpoch {
     pub epoch: u64,
 }
 
+/// Read-only observation used to register a captured root against destructive GC.
+///
+/// Observe both physical repository and global domains before capture, publish
+/// the private retention claim, then validate both before admitting reads. GC
+/// must capture retained claims after acquiring its sweep admission.
+pub struct GcReadBarrier {
+    store: Arc<dyn ObjectStore>,
+    domain: String,
+    history: Option<(String, u64)>,
+}
+
+impl GcReadBarrier {
+    /// Observe sweep history without acquiring a writer slot or writing a clock.
+    pub async fn observe(store: Arc<dyn ObjectStore>, domain: &str) -> Result<Self> {
+        let history = read_sweep_history(&store, domain).await?;
+        Ok(Self {
+            store,
+            domain: domain.to_owned(),
+            history,
+        })
+    }
+
+    /// Reject registration if any sweep crossed the capture or remains uncertain.
+    pub async fn validate(&self) -> Result<()> {
+        if read_sweep_history(&self.store, &self.domain).await? == self.history {
+            return Ok(());
+        }
+        Err(CoordinationError::CasConflict {
+            path: gc_fence_path(&self.domain)?,
+            expected_etag: None,
+        })
+    }
+}
+
+async fn read_sweep_history(
+    store: &Arc<dyn ObjectStore>,
+    domain: &str,
+) -> Result<Option<(String, u64)>> {
+    let path = gc_fence_path(domain)?;
+    let body = match get_with_version(store, &Path::from(path.as_str())).await {
+        Ok((body, _)) => body,
+        Err(object_store::Error::NotFound { .. }) => return Ok(None),
+        Err(source) => return Err(store_error(&path, source)),
+    };
+    let state = deserialize_state(&path, &body)?;
+    state.validate(&path)?;
+    let holder = state
+        .sweep
+        .as_ref()
+        .map(|holder| holder.holder.as_str())
+        .or_else(|| {
+            state
+                .quarantine
+                .iter()
+                .find(|entry| entry.mode == GcFenceModeWire::Sweep)
+                .map(|entry| entry.holder.as_str())
+        })
+        .or_else(|| {
+            state
+                .quarantine_block_until_backend
+                .map(|_| "quarantine-capacity")
+        });
+    if let Some(holder) = holder {
+        // Readers cannot clear expired sweep uncertainty. Its existing owner
+        // or administrative recovery must drain it before new capture succeeds.
+        return Err(CoordinationError::GcFenceHeld {
+            domain: domain.to_owned(),
+            holder: holder.to_owned(),
+            sweep: true,
+            epoch: state.epoch,
+        });
+    }
+    // Writer admission/release advance both counters together. Sweeps and
+    // quarantine advance only total history; renewal advances neither. This
+    // detects complete sweep cycles without invalidating on ordinary writers.
+    let epoch = state.epoch.checked_sub(state.writer_epoch).ok_or_else(|| {
+        CoordinationError::GcFenceMalformed {
+            path,
+            reason: "writer history exceeds total history".to_owned(),
+        }
+    })?;
+    Ok(Some((state.incarnation, epoch)))
+}
+
 /// Default lifetime for one GC fence claim.
 pub const DEFAULT_GC_FENCE_TTL: Duration = Duration::from_secs(300);
 /// Maximum number of concurrent writer holders recorded in one domain.
@@ -349,6 +433,17 @@ impl Clone for GcFenceLease {
 }
 
 impl GcFenceLease {
+    /// Sample provider time while holding exclusive GC admission for claim retirement.
+    pub async fn read_retention_time(&self) -> Result<i64> {
+        if self.inner.mode != GcFenceMode::Sweep || self.inner.released.load(Ordering::Acquire) {
+            return Err(CoordinationError::GcFenceLost {
+                domain: self.inner.domain.clone(),
+                holder: self.inner.holder.clone(),
+            });
+        }
+        backend_unix_time(&self.inner.store, &Path::from(self.inner.path.as_str())).await
+    }
+
     /// Acquires shared writer admission for `domain`.
     pub async fn acquire_writer(
         store: &Arc<dyn ObjectStore>,
@@ -447,6 +542,22 @@ impl GcFenceLease {
                 }
             };
 
+            let existing_writer = (mode == GcFenceMode::Writer)
+                .then(|| state.writers.iter().find(|record| record.holder == holder))
+                .flatten();
+            if mode == GcFenceMode::Writer
+                && (existing_writer.is_some_and(|record| record.expires_at_backend <= now)
+                    || state
+                        .quarantine
+                        .iter()
+                        .any(|record| record.holder == holder))
+            {
+                return Err(CoordinationError::GcFenceLost {
+                    domain: domain.to_owned(),
+                    holder,
+                });
+            }
+            let retrying_writer = existing_writer.is_some();
             state.prune_expired(now)?;
             if recover_expired_sweep {
                 let before = state.quarantine.len();
@@ -465,7 +576,10 @@ impl GcFenceLease {
                     epoch: state.epoch,
                 });
             }
-            if mode == GcFenceMode::Writer && state.writers.len() >= GC_FENCE_MAX_WRITERS {
+            if mode == GcFenceMode::Writer
+                && !retrying_writer
+                && state.writers.len() >= GC_FENCE_MAX_WRITERS
+            {
                 return Err(CoordinationError::GcFenceHeld {
                     domain: domain.to_owned(),
                     holder: "writer-capacity".to_owned(),
@@ -474,6 +588,7 @@ impl GcFenceLease {
                 });
             }
             if mode == GcFenceMode::Writer
+                && !retrying_writer
                 && state
                     .quarantine
                     .iter()
@@ -489,7 +604,12 @@ impl GcFenceLease {
                 });
             }
 
-            insert_holder(&mut state, &holder, mode, now, ttl)?;
+            // A conditional write can commit before its response is lost.
+            // Refresh this request's active claim without duplicating it or
+            // advancing writer history; expired claims remain lost.
+            if !replace_holder_expiry(&mut state, &holder, mode, now, ttl) {
+                insert_holder(&mut state, &holder, mode, now, ttl)?;
+            }
             let body = serialize_state(&path, &state)?;
             match update(store, &Path::from(path.as_str()), body, etag).await {
                 Ok(new_etag) => {
@@ -1122,6 +1242,174 @@ mod tests {
 
     fn memory_store() -> Arc<dyn ObjectStore> {
         Arc::new(InMemory::new())
+    }
+
+    #[tokio::test]
+    async fn read_barrier_ignores_writers_but_rejects_completed_sweeps() {
+        let store = memory_store();
+        let initial = GcFenceLease::acquire_writer(&store, "repo", Duration::from_secs(30))
+            .await
+            .unwrap();
+        initial.release().await.unwrap();
+        let capture = GcReadBarrier::observe(store.clone(), "repo").await.unwrap();
+        for committed in [false, true] {
+            let writer = GcFenceLease::acquire_writer(&store, "repo", Duration::from_secs(30))
+                .await
+                .unwrap();
+            writer.renew().await.unwrap();
+            capture.validate().await.unwrap();
+            if committed {
+                writer.release_committed_writer().await.unwrap();
+            } else {
+                writer.release().await.unwrap();
+            }
+            capture.validate().await.unwrap();
+        }
+        let sweep = GcFenceLease::acquire_sweep(&store, "repo", Duration::from_secs(30))
+            .await
+            .unwrap();
+        assert!(capture.validate().await.is_err());
+        sweep.release().await.unwrap();
+        assert!(matches!(
+            capture.validate().await,
+            Err(CoordinationError::CasConflict { .. })
+        ));
+    }
+
+    #[tokio::test]
+    async fn read_barrier_rejects_recreated_domains_and_unresolved_sweep_state() {
+        let store = memory_store();
+        let domain = "repo";
+        let path = Path::from(gc_fence_path(domain).unwrap());
+        let absent = GcReadBarrier::observe(store.clone(), domain).await.unwrap();
+        let clean = GcFenceState::empty();
+        store
+            .put(
+                &path,
+                serialize_state(path.as_ref(), &clean).unwrap().into(),
+            )
+            .await
+            .unwrap();
+        assert!(absent.validate().await.is_err());
+        let old = GcReadBarrier::observe(store.clone(), domain).await.unwrap();
+        let recreated = GcFenceState::empty();
+        store
+            .put(
+                &path,
+                serialize_state(path.as_ref(), &recreated).unwrap().into(),
+            )
+            .await
+            .unwrap();
+        assert!(old.validate().await.is_err());
+        for kind in [
+            "expired sweep",
+            "expired quarantine",
+            "capacity",
+            "counter underflow",
+        ] {
+            let mut state = GcFenceState::empty();
+            match kind {
+                "expired sweep" => {
+                    state.sweep = Some(GcFenceHolder {
+                        holder: "sweep".to_owned(),
+                        expires_at_backend: 1,
+                        lease_secs: 30,
+                    })
+                }
+                "expired quarantine" => state.quarantine.push(GcFenceQuarantine {
+                    holder: "sweep".to_owned(),
+                    mode: GcFenceModeWire::Sweep,
+                    expired_at_backend: 1,
+                    quarantine_until_backend: 2,
+                }),
+                "capacity" => state.quarantine_block_until_backend = Some(1),
+                _ => state.writer_epoch = 1,
+            }
+            store
+                .put(
+                    &path,
+                    serialize_state(path.as_ref(), &state).unwrap().into(),
+                )
+                .await
+                .unwrap();
+            assert!(
+                GcReadBarrier::observe(store.clone(), domain).await.is_err(),
+                "{kind}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn writer_retry_after_committed_acquisition_retains_one_holder() {
+        let store = memory_store();
+        let domain = "repo";
+        let path = Path::from(gc_fence_path(domain).unwrap());
+        let holder = generate_holder_id();
+        let ttl = Duration::from_secs(30);
+        let now = backend_unix_time(&store, &path).await.unwrap();
+        let mut committed = GcFenceState::empty();
+        insert_holder(&mut committed, &holder, GcFenceMode::Writer, now, ttl).unwrap();
+        store
+            .put(
+                &path,
+                serialize_state(path.as_ref(), &committed).unwrap().into(),
+            )
+            .await
+            .unwrap();
+        // A conditional write may commit before its response is lost. The next
+        // CAS iteration must recognize this request's already-installed claim.
+        let lease = GcFenceLease::acquire_with_holder(
+            &store,
+            domain,
+            GcFenceMode::Writer,
+            ttl,
+            holder,
+            false,
+        )
+        .await
+        .unwrap();
+        let (body, _) = get_with_version(&store, &path).await.unwrap();
+        let observed = deserialize_state(path.as_ref(), &body).unwrap();
+        observed.validate(path.as_ref()).unwrap();
+        lease.release().await.unwrap();
+        assert_eq!(
+            (observed.writers.len(), observed.writer_epoch),
+            (1, committed.writer_epoch)
+        );
+    }
+
+    #[tokio::test]
+    async fn writer_retry_refuses_expired_or_quarantined_claims() {
+        for quarantined in [false, true] {
+            let store = memory_store();
+            let domain = "repo";
+            let path = Path::from(gc_fence_path(domain).unwrap());
+            let holder = generate_holder_id();
+            let ttl = Duration::from_secs(30);
+            let now = backend_unix_time(&store, &path).await.unwrap();
+            let mut state = GcFenceState::empty();
+            insert_holder(&mut state, &holder, GcFenceMode::Writer, now, ttl).unwrap();
+            state.writers[0].expires_at_backend = now - 1;
+            if quarantined {
+                state.prune_expired(now).unwrap();
+            }
+            let before = serialize_state(path.as_ref(), &state).unwrap();
+            store.put(&path, before.clone().into()).await.unwrap();
+            let retry = GcFenceLease::acquire_with_holder(
+                &store,
+                domain,
+                GcFenceMode::Writer,
+                ttl,
+                holder,
+                false,
+            )
+            .await;
+            let (after, _) = get_with_version(&store, &path).await.unwrap();
+            assert!(
+                matches!(retry, Err(CoordinationError::GcFenceLost { .. })) && after == before,
+                "quarantined={quarantined}"
+            );
+        }
     }
 
     #[tokio::test]

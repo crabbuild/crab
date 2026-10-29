@@ -610,7 +610,7 @@ fn generate_pack_files_via_git(
     max_input_size: u64,
 ) -> Result<Vec<PackedFileData>> {
     use std::io::Write;
-    use std::process::{Command, Stdio};
+    use std::process::Stdio;
 
     let output_root = match git_dir {
         Some(git_dir) => git_dir.to_owned(),
@@ -619,13 +619,10 @@ fn generate_pack_files_via_git(
     let output_dir = Arc::new(
         tempfile::Builder::new()
             .prefix("crab-push-pack-set-")
-            .tempdir_in(output_root)?,
+            .tempdir_in(&output_root)?,
     );
     let base_name = output_dir.path().join("pack");
-    let mut command = Command::new("git");
-    if let Some(git_dir) = git_dir {
-        command.arg("--git-dir").arg(git_dir);
-    }
+    let mut command = crab_git::raw_object_command(&output_root);
     command.args(["pack-objects", "--quiet"]);
     if revisions {
         command.arg("--revs");

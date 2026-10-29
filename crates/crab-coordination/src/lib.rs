@@ -15,6 +15,10 @@ pub mod push_admission;
 pub mod push_lock;
 #[cfg(feature = "object-store-lock")]
 pub mod read_admission;
+#[cfg(feature = "object-store-lock")]
+pub mod read_retention;
+#[cfg(feature = "object-store-lock")]
+pub mod read_retention_runtime;
 pub mod spanner_coordinator;
 pub mod write_coordinator;
 

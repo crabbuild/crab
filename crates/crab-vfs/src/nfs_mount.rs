@@ -138,6 +138,7 @@ impl NfsPreflightReport {
 /// Running NFS server plus mount lifecycle channels.
 pub struct NfsMountedSession {
     server_handle: tokio::task::JoinHandle<Result<()>>,
+    server_cancel: CancellationToken,
     mount_rx: mpsc::Receiver<bool>,
     mountpoint: PathBuf,
     engine: Arc<VfsEngine>,
@@ -146,6 +147,7 @@ pub struct NfsMountedSession {
     write_journal: Arc<NfsWriteJournal>,
     protocol_stats: Arc<NfsProtocolStats>,
     control_endpoint: Option<String>,
+    control_listener: Option<nfs_control::BoundControlListener>,
     read_only: bool,
     auto_refresh_interval: Option<Duration>,
     runtime: Option<Arc<Mutex<NfsMountRuntime>>>,
@@ -153,6 +155,11 @@ pub struct NfsMountedSession {
 }
 
 impl NfsMountedSession {
+    /// Return the endpoint selected for this serving process.
+    pub fn control_endpoint(&self) -> Option<&str> {
+        self.control_endpoint.as_deref()
+    }
+
     pub fn runtime_snapshot(&self) -> NfsRuntimeSnapshot {
         NfsRuntimeSnapshot {
             read_leases: self.read_leases.snapshot(),
@@ -164,8 +171,9 @@ impl NfsMountedSession {
         }
     }
 
-    fn control_state(&self) -> NfsControlState {
+    fn control_state(&self, shutdown: CancellationToken) -> NfsControlState {
         NfsControlState {
+            shutdown,
             mountpoint: self.mountpoint.clone(),
             read_only: self.read_only,
             read_leases: Arc::clone(&self.read_leases),
@@ -208,17 +216,39 @@ pub async fn mount(
     listener.with_export_name(EXPORT_NAME);
     let port = listener.get_listen_port();
     let ip = listener.get_listen_ip();
+    let report = preflight(config, ip, port);
+    for warning in &report.warnings {
+        warn!(
+            key = %warning.key,
+            detail = %warning.detail,
+            "NFS preflight warning"
+        );
+    }
+    report.ensure_ready()?;
+    // Bind before the client becomes visible. Status can then queue safely
+    // until the owner starts serving, and failed native setup releases the bind.
+    let control_listener = match control_endpoint.as_deref() {
+        Some(endpoint) => Some(nfs_control::bind_server(endpoint).await?),
+        None => None,
+    };
 
     let (mount_tx, mount_rx) = mpsc::channel::<bool>(1);
     listener.set_mount_listener(mount_tx);
 
     info!(ip = %ip, port, "NFS server listening");
-    let server_handle =
-        tokio::spawn(async move { listener.handle_forever().await.map_err(CrabError::Io) });
+    let server_cancel = CancellationToken::new();
+    let shutdown = server_cancel.clone();
+    let server_handle = tokio::spawn(async move {
+        listener
+            .handle_until_cancelled(shutdown.cancelled_owned())
+            .await
+            .map_err(CrabError::Io)
+    });
 
     let native_mount_start = Instant::now();
     if let Err(error) = mount_native_nfs(config, ip, port) {
-        server_handle.abort();
+        drop(mount_rx);
+        server_cancel.cancel();
         let _ = server_handle.await;
         return Err(error);
     }
@@ -236,6 +266,7 @@ pub async fn mount(
 
     Ok(NfsMountedSession {
         server_handle,
+        server_cancel,
         mount_rx,
         mountpoint: config.mountpoint.clone(),
         engine: engine_for_drain,
@@ -244,6 +275,7 @@ pub async fn mount(
         write_journal,
         protocol_stats,
         control_endpoint,
+        control_listener,
         read_only: config.read_only,
         auto_refresh_interval: config.auto_refresh_interval,
         runtime: runtime.map(|runtime| Arc::new(Mutex::new(runtime))),
@@ -256,16 +288,17 @@ pub async fn run_until_cancelled(
     mut session: NfsMountedSession,
     cancel: CancellationToken,
 ) -> Result<()> {
-    let control_state = session.control_state();
-    let control_handle = nfs_control::spawn_server(
-        session.control_endpoint.clone(),
-        control_state.clone(),
-        cancel.clone(),
-    );
+    let control_cancel = CancellationToken::new();
+    let control_state = session.control_state(cancel.clone());
+    let mut control_handle = session
+        .control_listener
+        .take()
+        .map(|listener| listener.spawn(control_state.clone(), control_cancel.clone()));
     let refresh_handle = session
         .auto_refresh_interval
         .map(|interval| nfs_control::spawn_auto_refresh(control_state, interval, cancel.clone()));
     let mut server_error = None;
+    let mut control_joined = false;
     let server_joined = loop {
         tokio::select! {
             () = cancel.cancelled() => {
@@ -294,52 +327,111 @@ pub async fn run_until_cancelled(
                     }
                     Err(error) if error.is_cancelled() => break true,
                     Err(error) => {
-                        server_error = Some(CrabError::Internal(format!("NFS server task failed: {error}")));
+                        server_error = Some(CrabError::ReadTask(error));
                         break true;
                     }
                 }
             }
+            result = async {
+                match control_handle.as_mut() {
+                    Some(handle) => handle.await,
+                    None => std::future::pending().await,
+                }
+            } => {
+                control_joined = true;
+                server_error = result
+                    .map_err(CrabError::ReadTask)
+                    .and_then(std::convert::identity)
+                    .err();
+                break false;
+            }
             () = tokio::time::sleep(Duration::from_secs(2)) => {
-                if !is_mounted(&session.mountpoint) {
-                    info!(mountpoint = %session.mountpoint.display(), "NFS mount disappeared");
-                    break false;
+                match is_mounted(&session.mountpoint) {
+                    Ok(false) => {
+                        info!(mountpoint = %session.mountpoint.display(), "NFS mount disappeared");
+                        break false;
+                    }
+                    Ok(true) => {}
+                    Err(error) => warn!(%error, "NFS mount state unavailable; retaining serving owner"),
                 }
             }
         }
     };
 
     let shutdown_start = Instant::now();
+    // The owner no longer polls mount events. Closing releases admitted MOUNT/
+    // UMOUNT sends on the bounded channel before the data listener joins RPCs.
+    session.mount_rx.close();
+    // Stop new controls before draining accepted connections. Regular NFS WRITE
+    // callbacks remain available to finish admitted client writeback and commits.
+    session.engine.close_control_admission();
     cancel.cancel();
     if let Some(handle) = refresh_handle {
         // Refresh awaits blocking snapshot work; cancellation stops future
         // polls, while joining retains ownership through the current refresh.
-        let _ = handle.await;
+        if let Err(error) = handle.await {
+            server_error.get_or_insert(CrabError::ReadTask(error));
+        }
     }
-    if let Some(handle) = control_handle {
-        handle.abort();
-        let _ = handle.await;
-    }
+    // Admitted controls may need NFS WRITE callbacks. Drain them while the
+    // data listener is serving, before asking the native client to detach.
+    session.engine.drain_controls().await;
     // Flush overlay state and unmount while the local NFS server can still
     // answer the kernel client. Forced macOS unmounts require root even when
     // the user owns the mount, so they are reserved for stale CLI cleanup.
-    let write_journal_drain_start = Instant::now();
-    let write_journal_drain_result = session.write_journal.sync_all(&session.engine);
-    let write_journal_drain_ms = duration_millis(write_journal_drain_start.elapsed());
     let native_unmount_start = Instant::now();
     let mut native_unmount_attempted = false;
-    let native_unmount_result = if is_mounted(&session.mountpoint) {
-        native_unmount_attempted = true;
-        unmount_native_nfs(&session.mountpoint)
-    } else {
-        Ok(())
-    };
+    loop {
+        match is_mounted(&session.mountpoint) {
+            Ok(false) => break,
+            Ok(true) => {
+                native_unmount_attempted = true;
+                let mountpoint = session.mountpoint.clone();
+                let result = tokio::task::spawn_blocking(move || unmount_native_nfs(&mountpoint))
+                    .await
+                    .map_err(CrabError::ReadTask)
+                    .and_then(std::convert::identity);
+                if let Err(error) = result {
+                    warn!(%error, mountpoint = %session.mountpoint.display(), "NFS unmount pending; retaining serving owner");
+                } else {
+                    continue;
+                }
+            }
+            Err(error) => warn!(%error, "NFS mount state unavailable; retaining serving owner"),
+        }
+        // Uncertain state cannot release the serving owner or its cache lease.
+        tokio::time::sleep(Duration::from_secs(2)).await;
+    }
     let native_unmount_ms = duration_millis(native_unmount_start.elapsed());
     // The select branch may already have consumed the join result. Only join
     // here when shutdown was triggered by cancellation or native unmount.
     if !server_joined {
-        session.server_handle.abort();
-        let _ = (&mut session.server_handle).await;
+        session.server_cancel.cancel();
+        if let Err(error) = (&mut session.server_handle)
+            .await
+            .map_err(CrabError::ReadTask)
+            .and_then(std::convert::identity)
+        {
+            server_error.get_or_insert(error);
+        }
     }
+    control_cancel.cancel();
+    if !control_joined
+        && let Some(handle) = control_handle
+        && let Err(error) = handle
+            .await
+            .map_err(CrabError::ReadTask)
+            .and_then(std::convert::identity)
+    {
+        // The control owner joins its admitted handlers and removes its socket.
+        // Aborting it skips cleanup and can detach blocking runtime work.
+        server_error.get_or_insert(error);
+    }
+    // Admitted unstable WRITE callbacks can complete during listener drain.
+    // Flush only after every RPC/control owner has stopped touching the journal.
+    let write_journal_drain_start = Instant::now();
+    let write_journal_drain_result = session.write_journal.sync_all(&session.engine);
+    let write_journal_drain_ms = duration_millis(write_journal_drain_start.elapsed());
     session.engine.shutdown_background().await;
     let stats = session.runtime_snapshot();
     debug!(
@@ -381,7 +473,6 @@ pub async fn run_until_cancelled(
         "draining NFS mount runtime state"
     );
     write_journal_drain_result?;
-    native_unmount_result?;
     if let Some(error) = server_error {
         return Err(error);
     }
@@ -566,7 +657,19 @@ fn check_mountpoint(config: &NfsMountConfig, report: &mut NfsPreflightReport) {
     {
         match windows_mount_target(&config.mountpoint) {
             Ok(target) => {
-                if is_mounted(&config.mountpoint) {
+                let mounted = match is_mounted(&config.mountpoint) {
+                    Ok(mounted) => mounted,
+                    Err(error) => {
+                        report.mountpoint_ready = false;
+                        report.block(
+                            "NFS mount state unavailable",
+                            error.to_string(),
+                            "Restore access to the native mount table before mounting.",
+                        );
+                        return;
+                    }
+                };
+                if mounted {
                     report.mountpoint_ready = false;
                     report.block(
                         "Windows NFS drive already mounted",
@@ -615,7 +718,19 @@ fn check_mountpoint(config: &NfsMountConfig, report: &mut NfsPreflightReport) {
             );
             return;
         }
-        if is_mounted(&config.mountpoint) {
+        let mounted = match is_mounted(&config.mountpoint) {
+            Ok(mounted) => mounted,
+            Err(error) => {
+                report.mountpoint_ready = false;
+                report.block(
+                    "NFS mount state unavailable",
+                    error.to_string(),
+                    "Restore access to the native mount table before mounting.",
+                );
+                return;
+            }
+        };
+        if mounted {
             report.mountpoint_ready = false;
             report.block(
                 "NFS mountpoint is already mounted",
@@ -684,16 +799,6 @@ fn check_mount_privilege(report: &mut NfsPreflightReport) {
 fn check_mount_privilege(_report: &mut NfsPreflightReport) {}
 
 fn mount_native_nfs(config: &NfsMountConfig, ip: IpAddr, port: u16) -> Result<()> {
-    let report = preflight(config, ip, port);
-    for warning in &report.warnings {
-        warn!(
-            key = %warning.key,
-            detail = %warning.detail,
-            "NFS preflight warning"
-        );
-    }
-    report.ensure_ready()?;
-
     #[cfg(windows)]
     let mountpoint = windows_mount_target(&config.mountpoint)?;
     #[cfg(not(windows))]
@@ -897,7 +1002,7 @@ fn unmount_native_nfs(mountpoint: &Path) -> Result<()> {
                 output.status
             )));
         }
-        if is_mounted(mountpoint) {
+        if is_mounted(mountpoint)? {
             return Err(CrabError::Internal(format!(
                 "NFS unmount command succeeded but {} remains mounted",
                 mountpoint.display()
@@ -907,111 +1012,34 @@ fn unmount_native_nfs(mountpoint: &Path) -> Result<()> {
     }
 }
 
-pub fn is_mounted(mountpoint: &Path) -> bool {
-    #[cfg(target_os = "linux")]
+/// Query the exact target in the native mount table, preserving query failures.
+pub fn is_mounted(mountpoint: &Path) -> Result<bool> {
+    #[cfg(unix)]
     {
-        std::fs::read_to_string("/proc/mounts")
-            .map(|mounts| linux_mounts_contains(&mounts, mountpoint))
-            .unwrap_or(false)
+        crate::native_mounts::contains(mountpoint)
     }
-
-    #[cfg(target_os = "macos")]
-    {
-        use std::ffi::CStr;
-        use std::os::unix::ffi::OsStrExt;
-
-        // SAFETY: getfsstat initializes at most the capacity-sized buffer;
-        // C strings are fixed fields in every initialized statfs entry.
-        // MNT_NOWAIT avoids entering a stalled NFS client during health checks.
-        unsafe {
-            let count = libc::getfsstat(std::ptr::null_mut(), 0, libc::MNT_NOWAIT);
-            if count <= 0 {
-                return false;
-            }
-            let mut mounts = Vec::<libc::statfs>::with_capacity(count as usize);
-            let bytes = count.saturating_mul(std::mem::size_of::<libc::statfs>() as i32);
-            let count = libc::getfsstat(mounts.as_mut_ptr(), bytes, libc::MNT_NOWAIT);
-            if count <= 0 {
-                return false;
-            }
-            mounts.set_len(count as usize);
-            mounts.iter().any(|stat| {
-                let target = CStr::from_ptr(stat.f_mntonname.as_ptr());
-                let fstype = CStr::from_ptr(stat.f_fstypename.as_ptr());
-                target.to_bytes() == mountpoint.as_os_str().as_bytes()
-                    && fstype.to_bytes() == b"nfs"
-            })
-        }
-    }
-
     #[cfg(windows)]
     {
-        let Ok(target) = windows_mount_target(mountpoint) else {
-            return false;
-        };
-        let Ok(mount_exe) = windows_system_command("mount.exe") else {
-            return false;
-        };
-        let Ok(output) = Command::new(mount_exe).output() else {
-            return false;
-        };
+        let target = windows_mount_target(mountpoint)?;
+        let mount_exe = windows_system_command("mount.exe")?;
+        let output = Command::new(mount_exe).output()?;
         if !output.status.success() {
-            return false;
+            return Err(std::io::Error::other("Windows NFS mount table query failed").into());
         }
-        windows_mount_output_contains(&String::from_utf8_lossy(&output.stdout), &target)
+        Ok(windows_mount_output_contains(
+            &String::from_utf8_lossy(&output.stdout),
+            &target,
+        ))
     }
-
-    #[cfg(not(any(target_os = "macos", target_os = "linux", windows)))]
+    #[cfg(not(any(unix, windows)))]
     {
         let _ = mountpoint;
-        false
+        Err(std::io::Error::new(
+            std::io::ErrorKind::Unsupported,
+            "NFS mount table is unavailable",
+        )
+        .into())
     }
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn linux_mounts_contains(mounts: &str, mountpoint: &Path) -> bool {
-    let needle = mountpoint.to_string_lossy();
-    mounts.lines().any(|line| {
-        line.split_whitespace()
-            .nth(1)
-            .is_some_and(|field| decode_linux_mount_field(field) == needle)
-    })
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn decode_linux_mount_field(field: &str) -> String {
-    let bytes = field.as_bytes();
-    let mut decoded = Vec::with_capacity(bytes.len());
-    let mut index = 0;
-    while index < bytes.len() {
-        if bytes[index] == b'\\'
-            && index + 3 < bytes.len()
-            && let Some(value) = decode_octal_escape(&bytes[index + 1..index + 4])
-        {
-            decoded.push(value);
-            index += 4;
-            continue;
-        }
-        decoded.push(bytes[index]);
-        index += 1;
-    }
-    String::from_utf8_lossy(&decoded).into_owned()
-}
-
-#[cfg(any(target_os = "linux", test))]
-fn decode_octal_escape(digits: &[u8]) -> Option<u8> {
-    if digits.len() != 3 || !digits.iter().all(u8::is_ascii_digit) {
-        return None;
-    }
-    let mut value = 0u16;
-    for digit in digits {
-        let octal = digit.checked_sub(b'0')?;
-        if octal > 7 {
-            return None;
-        }
-        value = value * 8 + u16::from(octal);
-    }
-    u8::try_from(value).ok()
 }
 
 #[cfg(any(windows, test))]
@@ -1073,6 +1101,14 @@ fn sudo_noninteractive_available() -> bool {
 }
 
 #[cfg(test)]
+#[path = "nfs_mount_data_tests.rs"]
+mod data_lifecycle_tests;
+
+#[cfg(all(test, unix))]
+#[path = "nfs_mount_control_tests.rs"]
+mod control_lifecycle_tests;
+
+#[cfg(test)]
 #[expect(
     clippy::unwrap_used,
     reason = "test setup and assertions fail on unexpected errors"
@@ -1080,25 +1116,35 @@ fn sudo_noninteractive_available() -> bool {
 mod tests {
     use super::*;
 
-    fn synthetic_session(
+    pub(super) fn idle_server() -> (CancellationToken, tokio::task::JoinHandle<Result<()>>) {
+        let cancel = CancellationToken::new();
+        let shutdown = cancel.clone();
+        let server = tokio::spawn(async move {
+            shutdown.cancelled().await;
+            Ok(())
+        });
+        (cancel, server)
+    }
+
+    pub(super) fn synthetic_session(
         root: &Path,
         server_handle: tokio::task::JoinHandle<Result<()>>,
+        server_cancel: CancellationToken,
         mount_rx: mpsc::Receiver<bool>,
     ) -> NfsMountedSession {
         let snapshot = Arc::new(
             crate::snapshot::SnapshotStore::open_or_create(&root.join("snapshot.db")).unwrap(),
         );
-        let resolver = Arc::new(crate::resolver::FuseResolver::new(
-            Arc::clone(&snapshot),
-            None,
-            0,
-            0,
-        ));
+        let resolver = Arc::new(
+            crate::resolver::FuseResolver::new(Arc::clone(&snapshot), None, 0, 0, None, None)
+                .unwrap(),
+        );
         let cache = Arc::new(crate::ChunkCache::open(root.join("chunks"), None).unwrap());
         let hydration = crate::pipeline::create_hydration(
             cache,
             Arc::new(crate::verified_set::VerifiedSet::default()),
             CancellationToken::new(),
+            None,
             None,
             None,
             None,
@@ -1120,6 +1166,7 @@ mod tests {
         );
         NfsMountedSession {
             server_handle,
+            server_cancel,
             mount_rx,
             mountpoint: root.join("not-mounted"),
             engine: Arc::clone(&engine),
@@ -1128,6 +1175,7 @@ mod tests {
             write_journal: adapter.write_journal(),
             protocol_stats: adapter.protocol_stats(),
             control_endpoint: None,
+            control_listener: None,
             read_only: true,
             auto_refresh_interval: None,
             runtime: Some(Arc::new(Mutex::new(NfsMountRuntime {
@@ -1140,10 +1188,12 @@ mod tests {
                     head_oid: String::new(),
                     head_ref: "refs/heads/main".into(),
                     generation: 0,
+                    read_context: None,
                 },
                 config: crate::pipeline::PipelineConfig {
                     source: root.display().to_string(),
                     git_dir: root.join("missing.git"),
+                    git_metadata: crate::pipeline::GitMetadataOwnership::Borrowed,
                     ref_name: None,
                     read_only: true,
                     cache_dir: root.to_owned(),
@@ -1157,9 +1207,9 @@ mod tests {
     #[tokio::test(flavor = "multi_thread")]
     async fn cancellation_waits_for_admitted_auto_refresh() {
         let root = tempfile::tempdir().unwrap();
-        let server = tokio::spawn(std::future::pending::<Result<()>>());
+        let (server_cancel, server) = idle_server();
         let (_sender, receiver) = mpsc::channel(1);
-        let mut session = synthetic_session(root.path(), server, receiver);
+        let mut session = synthetic_session(root.path(), server, server_cancel, receiver);
         session.auto_refresh_interval = Some(Duration::from_millis(1));
         let runtime = Arc::clone(session.runtime.as_ref().unwrap());
         let locked_runtime = Arc::clone(&runtime);
@@ -1206,13 +1256,15 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let ownership = Arc::new(());
         let guard = Arc::clone(&ownership);
+        let server_cancel = CancellationToken::new();
+        let shutdown = server_cancel.clone();
         let server = tokio::spawn(async move {
-            std::future::pending::<()>().await;
+            shutdown.cancelled().await;
             drop(guard);
             Ok(())
         });
         let (_sender, receiver) = mpsc::channel(1);
-        let session = synthetic_session(root.path(), server, receiver);
+        let session = synthetic_session(root.path(), server, server_cancel, receiver);
         let cancel = CancellationToken::new();
         cancel.cancel();
         run_until_cancelled(session, cancel).await.unwrap();
@@ -1222,9 +1274,10 @@ mod tests {
     #[tokio::test]
     async fn completed_listener_is_not_joined_twice() {
         let root = tempfile::tempdir().unwrap();
+        let server_cancel = CancellationToken::new();
         let server = tokio::spawn(async { Ok(()) });
         let (_sender, receiver) = mpsc::channel(1);
-        let session = synthetic_session(root.path(), server, receiver);
+        let session = synthetic_session(root.path(), server, server_cancel, receiver);
         assert!(
             run_until_cancelled(session, CancellationToken::new())
                 .await
@@ -1235,6 +1288,7 @@ mod tests {
     #[tokio::test]
     async fn listener_error_survives_cleanup() {
         let root = tempfile::tempdir().unwrap();
+        let server_cancel = CancellationToken::new();
         let server = tokio::spawn(async {
             Err(CrabError::Io(std::io::Error::new(
                 std::io::ErrorKind::ConnectionReset,
@@ -1242,7 +1296,7 @@ mod tests {
             )))
         });
         let (_sender, receiver) = mpsc::channel(1);
-        let session = synthetic_session(root.path(), server, receiver);
+        let session = synthetic_session(root.path(), server, server_cancel, receiver);
         let result = run_until_cancelled(session, CancellationToken::new()).await;
         assert!(
             matches!(result, Err(CrabError::Io(error)) if error.kind() == std::io::ErrorKind::ConnectionReset)
@@ -1252,10 +1306,10 @@ mod tests {
     #[tokio::test]
     async fn aborted_listener_is_not_joined_twice() {
         let root = tempfile::tempdir().unwrap();
-        let server = tokio::spawn(std::future::pending::<Result<()>>());
+        let (server_cancel, server) = idle_server();
         server.abort();
         let (_sender, receiver) = mpsc::channel(1);
-        let session = synthetic_session(root.path(), server, receiver);
+        let session = synthetic_session(root.path(), server, server_cancel, receiver);
         assert!(
             run_until_cancelled(session, CancellationToken::new())
                 .await
@@ -1370,39 +1424,6 @@ mod tests {
             blocker.key == "NFS mountpoint does not exist"
                 && blocker.detail == mountpoint.display().to_string()
         }));
-    }
-
-    #[test]
-    fn linux_mounts_parser_matches_exact_mountpoint() {
-        let mounts = "\
-127.0.0.1:/crab /mnt/crab nfs rw,vers=3 0 0\n\
-127.0.0.1:/crab /mnt/crab-extra nfs rw,vers=3 0 0\n";
-
-        assert!(linux_mounts_contains(mounts, Path::new("/mnt/crab")));
-        assert!(!linux_mounts_contains(mounts, Path::new("/mnt/missing")));
-    }
-
-    #[test]
-    fn linux_mounts_parser_decodes_escaped_mountpoint_fields() {
-        let mounts = "\
-127.0.0.1:/crab /mnt/Crab\\040Mount\\011One nfs rw,vers=3 0 0\n\
-127.0.0.1:/crab /mnt/Crab\\040Mount\\011One-extra nfs rw,vers=3 0 0\n";
-
-        assert!(linux_mounts_contains(
-            mounts,
-            Path::new("/mnt/Crab Mount\tOne")
-        ));
-        assert!(!linux_mounts_contains(
-            mounts,
-            Path::new("/mnt/Crab Mount\t")
-        ));
-    }
-
-    #[test]
-    fn linux_mount_field_decoder_leaves_invalid_escapes_literal() {
-        assert_eq!(decode_linux_mount_field(r"/mnt/a\040b"), "/mnt/a b");
-        assert_eq!(decode_linux_mount_field(r"/mnt/a\999b"), r"/mnt/a\999b");
-        assert_eq!(decode_linux_mount_field(r"/mnt/a\04"), r"/mnt/a\04");
     }
 
     #[test]

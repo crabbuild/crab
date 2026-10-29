@@ -38,10 +38,12 @@ authenticated source directory; the hard 64-source or 8 MiB footer limit can
 force a suffix roll-up. Member-heavy runs can exhaust footer bytes before the
 source-count limit. Every publication path admits the required source metadata
 before its root CAS, retaining physical work accounting across consolidation.
-Footer-byte admission replaces the newest member-heavy run, or the smallest
-two-source suffix, until required metadata fits; larger merges remain background
-work. Source-count admission uses the compressed-byte geometric cut to amortize
-work across later checkpoints. Keeping a fixed
+When removing the entire singleton tail cannot free enough footer bytes,
+footer admission includes that tail with the newest member-heavy run within the
+existing 512 MiB suffix budget, avoiding repeated small roll-ups and delta-base
+reads. Other candidates retain minimal footer admission; larger
+merges remain background work. Source-count admission uses the compressed-byte
+geometric cut to amortize work across later checkpoints. Keeping a fixed
 63-source prefix would repeatedly rewrite the growing tail during continuous
 writes. The existing 512 MiB suffix budget still defers a larger geometric
 merge in favor of the minimum consolidation required for format admission.
@@ -51,6 +53,9 @@ newer per-ref heads. The shared maintenance pass retains the successful root-CAS
 receipt and complete checkpoint between phases; it does not reread its own
 publication. The metadata owner and HTTP server use this two-phase pass, with
 separate CAS and cancellation boundaries.
+
+Cancellation during pack intake returns `CheckpointError::Cancelled`, as do
+phase-boundary checks; already-completed logical publication remains visible.
 
 Explicit CLI repack consolidates the
 selected suffix and checkpoints its pinned view with one root CAS. Small
@@ -93,6 +98,15 @@ or the input inventory if neither phase published. It deliberately excludes
 later ref-head updates instead of rescanning them for CLI statistics.
 
 ## Capsule preparation and publication
+
+`prepare_capsule` is the incoming-graph preparation entry point. Its Git reader
+and visibility proof must come from the same captured Capsule view; the caller
+retains that capture, scratch space, ref leases and GC fences through completion.
+Manifest preparation, `Prepared::upload`, the journal `Artifacts::commit` and its
+protected-plan staging API are removed without wrappers. Current SDK consumers
+use `upload_capsule` and `CapsuleArtifacts` for direct and protected publication.
+The older CLI publisher still uses separate journal helpers and the manifest
+plan type; retiring that owner remains work.
 
 Capsule preparation resolves outgoing pointer files and only the prepared
 shard/xorb identities against a captured paged catalog. Ordinary Git and LFS-only

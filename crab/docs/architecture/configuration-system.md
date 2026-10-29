@@ -106,6 +106,12 @@ persist = true
 path = ".crab/perf-state.json"
 ```
 
+Remote helpers resolve repository/project configuration from Git's selected
+metadata, including when a daemon starts them from an unrelated working
+directory. Relative `[perf].path` values and the default audit log belong to
+that repository's shared local state root; absolute performance paths remain
+absolute. Parse-only rejections before repository admission create no telemetry.
+
 ### User Config (`~/.config/crab/config.toml`)
 
 Same format, applies to all repositories. Useful for global defaults like

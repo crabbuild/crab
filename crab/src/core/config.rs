@@ -960,8 +960,8 @@ const DEFAULT_PUSH_LOCK_WAIT_SECS: u64 = 0;
 /// Default maximum manifest CAS retries for push finalization.
 const DEFAULT_PUSH_MAX_CAS_RETRIES: u32 = 64;
 
-/// Default concurrency for HEAD-check resume requests in push step 6.
-const DEFAULT_PUSH_HEAD_CHECK_CONCURRENCY: usize = 64;
+/// Default bound for concurrent canonical-origin metadata checks.
+pub(crate) const DEFAULT_PUSH_HEAD_CHECK_CONCURRENCY: usize = 64;
 
 /// Default: adaptive upload concurrency is off (use fixed semaphore).
 const DEFAULT_PUSH_ADAPTIVE_CONCURRENCY: bool = false;

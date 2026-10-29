@@ -12,13 +12,13 @@
 use std::borrow::Cow;
 use std::collections::BTreeMap;
 use std::path::Path;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicI64, Ordering};
+use std::sync::{Arc, RwLock};
 
 use tracing::{debug, trace};
 
 use crate::core::error::{CrabError, Result};
-use crate::snapshot::{BaseNode, NodeType, SnapshotStore};
+use crate::hydration::HydrationService;
+use crate::snapshot::{BaseNode, NodeType, SnapshotPin, SnapshotStore};
 
 // ---------------------------------------------------------------------------
 // Overlay abstraction (placeholder until task 51 lands)
@@ -220,47 +220,103 @@ pub struct ReaddirEntry {
 pub struct FuseResolver {
     snapshot: Arc<SnapshotStore>,
     overlay: Option<Arc<dyn OverlayLookup>>,
-    generation: AtomicI64,
-    commit_time: AtomicI64,
+    current: RwLock<Arc<SnapshotView>>,
+}
+
+pub(crate) struct SnapshotView {
+    pub(crate) generation: i64,
+    commit_time: i64,
+    pub(crate) hydration: Option<Arc<HydrationService>>,
+    pub(crate) head: Option<(String, String)>,
+    pub(crate) tracked_ref: Option<String>,
+    _pin: SnapshotPin,
+}
+
+impl SnapshotView {
+    pub(crate) fn attributes(&self, node: &ResolvedNode) -> (u32, u64, NodeType, i64) {
+        let mtime = match node {
+            ResolvedNode::Overlay(entry) => entry.mtime_ns / 1_000_000_000,
+            ResolvedNode::Base(_) if self.commit_time != 0 => self.commit_time,
+            ResolvedNode::Base(_) => self.generation,
+        };
+        (node.mode(), node.size(), node.node_type(), mtime)
+    }
 }
 
 impl FuseResolver {
     /// Create a new resolver.
     ///
     /// `overlay` may be `None` for a read-only mount (before the overlay
-    /// store is wired in).
+    /// store is wired in). Returns an error if `generation` is unavailable.
     pub fn new(
         snapshot: Arc<SnapshotStore>,
         overlay: Option<Arc<dyn OverlayLookup>>,
         generation: i64,
         commit_time: i64,
-    ) -> Self {
-        Self {
+        hydration: Option<Arc<HydrationService>>,
+        tracked_ref: Option<String>,
+    ) -> Result<Self> {
+        let (pin, head) = snapshot.pin_generation(generation)?;
+        Ok(Self {
             snapshot,
             overlay,
-            generation: AtomicI64::new(generation),
-            commit_time: AtomicI64::new(commit_time),
-        }
+            current: RwLock::new(Arc::new(SnapshotView {
+                generation,
+                commit_time,
+                hydration,
+                head,
+                tracked_ref,
+                _pin: pin,
+            })),
+        })
+    }
+
+    pub(crate) fn capture_view(&self) -> Arc<SnapshotView> {
+        Arc::clone(
+            &self
+                .current
+                .read()
+                .unwrap_or_else(std::sync::PoisonError::into_inner),
+        )
     }
 
     /// Current snapshot generation.
     pub fn generation(&self) -> i64 {
-        self.generation.load(Ordering::Acquire)
+        self.capture_view().generation
     }
 
-    /// Atomically swap the generation (used by the refresh loop).
-    pub fn set_generation(&self, generation: i64) {
-        self.generation.store(generation, Ordering::Release);
+    /// Atomically install a retained snapshot and its commit timestamp.
+    pub fn set_generation(
+        &self,
+        generation: i64,
+        commit_time: i64,
+        hydration: Option<Arc<HydrationService>>,
+        tracked_ref: Option<String>,
+    ) -> Result<()> {
+        let (pin, head) = self.snapshot.pin_generation(generation)?;
+        let view = Arc::new(SnapshotView {
+            generation,
+            commit_time,
+            hydration,
+            head,
+            tracked_ref,
+            _pin: pin,
+        });
+        *self
+            .current
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = view;
+        Ok(())
+    }
+
+    /// Return the HEAD identity installed with the current read view.
+    pub fn head(&self) -> Option<(String, String)> {
+        self.capture_view().head.clone()
     }
 
     /// HEAD commit timestamp (unix seconds) used as mtime for base files.
     pub fn commit_time(&self) -> i64 {
-        self.commit_time.load(Ordering::Acquire)
-    }
-
-    /// Update the commit timestamp (used by the refresh loop).
-    pub fn set_commit_time(&self, ts: i64) {
-        self.commit_time.store(ts, Ordering::Release);
+        self.capture_view().commit_time
     }
 
     /// Resolve a path to either an overlay entry or a base node.
@@ -268,6 +324,11 @@ impl FuseResolver {
     /// Overlay takes precedence. Overlay deletion markers produce
     /// `NotFound`.
     pub fn resolve_path(&self, path: &str) -> Result<ResolvedNode> {
+        let view = self.capture_view();
+        self.resolve_path_in(&view, path)
+    }
+
+    pub(crate) fn resolve_path_in(&self, view: &SnapshotView, path: &str) -> Result<ResolvedNode> {
         let path = clean_path(path);
 
         // 1. Check overlay first (local writes take precedence).
@@ -281,7 +342,7 @@ impl FuseResolver {
                 });
             }
             if let Some(base_path) = ov.base_path(&path) {
-                let current_gen = self.generation();
+                let current_gen = view.generation;
                 let Some(base) = self.snapshot.get_node(current_gen, &base_path)? else {
                     return Err(CrabError::NotFound {
                         path: path.into_owned(),
@@ -295,7 +356,7 @@ impl FuseResolver {
         }
 
         // 2. Fall back to base snapshot.
-        let current_gen = self.generation();
+        let current_gen = view.generation;
         if let Some(node) = self.snapshot.get_node(current_gen, &path)? {
             trace!(path = %path, generation = current_gen, "resolved from snapshot");
             return Ok(ResolvedNode::Base(node));
@@ -310,22 +371,9 @@ impl FuseResolver {
     ///
     /// Returns `(mode, size, node_type, mtime_unix_secs)`.
     pub fn getattr(&self, path: &str) -> Result<(u32, u64, NodeType, i64)> {
-        let node = self.resolve_path(path)?;
-        match &node {
-            ResolvedNode::Overlay(e) => {
-                let mode = normalize_overlay_mode(e.mode, e.node_type);
-                // Overlay entries carry their own mtime.
-                let mtime = e.mtime_ns / 1_000_000_000;
-                Ok((mode, e.size, e.node_type, mtime))
-            }
-            ResolvedNode::Base(n) => {
-                let mode = normalize_mode(n.mode, n.node_type);
-                // Base files use the HEAD commit timestamp for stable mtime.
-                let ct = self.commit_time();
-                let mtime = if ct != 0 { ct } else { self.generation() };
-                Ok((mode, n.size, n.node_type, mtime))
-            }
-        }
+        let view = self.capture_view();
+        let node = self.resolve_path_in(&view, path)?;
+        Ok(view.attributes(&node))
     }
 
     /// List directory entries, merging snapshot children with overlay
@@ -336,10 +384,11 @@ impl FuseResolver {
     pub fn readdir(&self, path: &str) -> Result<Vec<ReaddirEntry>> {
         const PAGE_SIZE: usize = 512;
 
+        let view = self.capture_view();
         let mut entries = Vec::new();
         let mut after_name = None;
         loop {
-            let page = self.readdir_page(path, after_name.as_deref(), PAGE_SIZE)?;
+            let page = self.readdir_page_in(&view, path, after_name.as_deref(), PAGE_SIZE)?;
             let page_len = page.len();
             after_name = page.last().map(|entry| entry.name.clone());
             entries.extend(page);
@@ -358,11 +407,22 @@ impl FuseResolver {
         after_name: Option<&str>,
         limit: usize,
     ) -> Result<Vec<ReaddirEntry>> {
+        let view = self.capture_view();
+        self.readdir_page_in(&view, path, after_name, limit)
+    }
+
+    fn readdir_page_in(
+        &self,
+        view: &SnapshotView,
+        path: &str,
+        after_name: Option<&str>,
+        limit: usize,
+    ) -> Result<Vec<ReaddirEntry>> {
         if limit == 0 {
             return Ok(Vec::new());
         }
         let path = clean_path(path);
-        let current_gen = self.generation();
+        let current_gen = view.generation;
         let batch_size = limit.max(64);
         let mut cursor = after_name.map(str::to_owned);
         let mut result = Vec::with_capacity(limit);
@@ -656,8 +716,79 @@ mod tests {
             None, // no overlay
             1,
             1_700_000_000, // commit time
-        );
+            None,
+            None,
+        )
+        .unwrap();
         (dir, resolver)
+    }
+
+    #[test]
+    fn live_resolver_retains_its_tree_across_new_publications() {
+        let (_dir, resolver) = temp_resolver(&[make_file_node("original.txt", 50)]);
+        for index in 2..=4 {
+            resolver
+                .snapshot
+                .publish_generation(
+                    &format!("commit-{index}"),
+                    "refs/heads/main",
+                    &[make_file_node("replacement.txt", index)],
+                )
+                .unwrap();
+        }
+        assert_eq!(resolver.resolve_path("original.txt").unwrap().size(), 50);
+    }
+
+    #[test]
+    fn captured_view_retains_nodes_and_children_until_last_owner_exits() {
+        let (_dir, resolver) = temp_resolver(&[make_file_node("original.txt", 50)]);
+        let first = resolver.capture_view();
+        let second = Arc::clone(&first);
+        for index in 2..=4 {
+            resolver
+                .snapshot
+                .publish_generation(
+                    &format!("commit-{index}"),
+                    "refs/heads/main",
+                    &[make_file_node("replacement.txt", index)],
+                )
+                .unwrap();
+        }
+        resolver.set_generation(4, 400, None, None).unwrap();
+        drop(first);
+        assert_eq!(
+            second.head.as_ref().map(|head| head.0.as_str()),
+            Some("aabbccdd")
+        );
+        assert_eq!(resolver.head().unwrap().0, "commit-4");
+        assert_eq!(
+            resolver.readdir_page_in(&second, "", None, 10).unwrap()[0].name,
+            "original.txt"
+        );
+        drop(second);
+        resolver
+            .snapshot
+            .publish_generation("commit-5", "refs/heads/main", &[])
+            .unwrap();
+        assert!(
+            resolver
+                .snapshot
+                .get_node(1, "original.txt")
+                .unwrap()
+                .is_none()
+                && resolver.snapshot.list_children(1, "").unwrap().is_empty()
+        );
+        assert!(resolver.set_generation(1, 100, None, None).is_err());
+    }
+
+    #[test]
+    fn unavailable_generation_does_not_replace_live_view() {
+        let (_dir, resolver) = temp_resolver(&[make_file_node("original.txt", 50)]);
+        assert!(resolver.set_generation(99, 99, None, None).is_err());
+        assert_eq!(
+            (resolver.generation(), resolver.commit_time()),
+            (1, 1_700_000_000)
+        );
     }
 
     #[test]
@@ -846,7 +977,9 @@ mod tests {
         let overlay = Arc::new(TestOverlay {
             entries: overlay_entries,
         });
-        let resolver = FuseResolver::new(Arc::new(store), Some(overlay), 1, 1_700_000_000);
+        let resolver =
+            FuseResolver::new(Arc::new(store), Some(overlay), 1, 1_700_000_000, None, None)
+                .unwrap();
         (dir, resolver)
     }
 

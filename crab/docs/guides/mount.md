@@ -140,11 +140,26 @@ crab mount --repo crab://bucket/repo --mountpoint /mnt/view
 echo "Mount is ready"
 ```
 
+Cancelling NFS startup waits for the helper to detach and finish admitted work.
+If a client keeps the mount busy, cleanup warns after ten seconds and continues
+waiting. Close files and leave the mounted directory in other terminals so
+ordinary unmount can complete. A late readiness reply cannot turn cancelled
+startup into success.
+
 ### Foreground
 
 With `--foreground`, the CLI itself becomes the mount process. It blocks until
 you press Ctrl+C. Useful for debugging, one-off browsing, or when you don't
 want a persistent coordinator.
+
+On Unix, the core CLI replaces itself with the FUSE helper when delegation is
+needed, retaining its PID. Foreground FUSE shutdown waits for ordinary unmount
+and callback completion. If another process holds the mount busy, close its
+files and leave the mounted directory so shutdown can finish. Starting a FUSE
+mount at an occupied target fails without force-clearing the existing mount.
+
+Foreground NFS mounts appear in `crab mount list` and accept status, overlay,
+commit, and unmount commands from another terminal.
 
 ```bash
 crab mount --repo crab://bucket/repo --mountpoint /mnt/view --foreground
@@ -306,6 +321,15 @@ crab mount commit --mountpoint /mnt/models -m "Update generated artifacts" --pus
 crab mount reset --mountpoint /mnt/models --overlay --yes
 ```
 
+Export requires a new destination directory outside the mount and its cache,
+with an existing parent directory. Existing destinations are rejected to prevent
+symlinks or aliases from overwriting unpublished source bytes.
+
+Live exports run inside the mount helper and retain the captured engine view
+through copying. Metadata-only renames hydrate through canonical reads rather
+than through the mounted path, and pointer exports pin local staged content for
+the whole file. Losing the caller does not release the helper's copy guards.
+
 `crab mount commit` freezes overlay writes while it snapshots the overlay,
 checks that the mounted base ref has not moved, creates a Git commit, refreshes
 the mounted snapshot, and clears the overlay after a successful local commit.
@@ -315,10 +339,20 @@ to the same path or intersecting directory subtree are serialized. Commit,
 export, and reset drain in-flight mutations before taking a stable overlay
 snapshot.
 
-For large crab-tracked files, commit streams overlay file content directly into
-Crab staging when `.gitattributes` is stable, then writes pointer files into the
-Git index. If `.gitattributes` changed in the overlay, commit first materializes
-the publish worktree so Git attributes are resolved against the new tree.
+On macOS NFS, synchronize writable memory mappings with `msync(MS_SYNC)` before
+running overlay diff, export, commit, reset, refresh, or switch. The current
+writeback request can leave mapped changes in the client cache, so a live diff
+can report no changes until the application synchronizes its mapping. A waiting
+volume sync or ordinary file fsync does not close this gap.
+
+For Crab- and Git LFS-tracked files, commit resolves the effective attributes
+against the prepared Git index, including nested rules and attribute edits.
+It streams backing content directly to the corresponding local staging/object
+store, then writes the pointer into Git. LFS payloads are installed before their
+pointers; mount clones do not need an external LFS filter driver. Commit without
+push retains local payloads for reads and remount. LFS extensions are unsupported
+in VFS; publication fails while preserving the ref and overlay when extension
+configuration is present.
 
 With `--push`, Crab pushes from the detached publish worktree before moving the
 local ref. A failed push leaves the overlay and transaction state retryable with

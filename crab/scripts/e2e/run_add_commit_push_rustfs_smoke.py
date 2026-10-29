@@ -126,11 +126,14 @@ def capsule_staged_proof_complete(stderr: str, count: int) -> bool:
     proof, adoption = events
     if proof.get("message") != proof_message or adoption.get("message") != adoption_message:
         return False
+    # Receipt-generation counters belonged to the removed manifest proof path.
+    # Reject that event shape rather than treating it as Capsule evidence.
+    retired = {"generation_verified", "placement_mismatches", "origin_proof_mismatches"}
+    if retired.intersection(proof):
+        return False
     expected = {
         "planned": count, "indexed": count, "matched": count,
-        "capsule_source_verified": count, "generation_verified": 0,
-        "payload_verified": count, "placement_mismatches": 0,
-        "origin_proof_mismatches": 0,
+        "capsule_source_verified": count, "payload_verified": count,
     }
     adopted = {"planned_existing": count, "stale_existing": 0, "global_existing": 0}
     return all(

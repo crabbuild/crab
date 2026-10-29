@@ -184,6 +184,30 @@ impl<S> StoreLayout<S> {
         self.repo_path("v2/root")
     }
 
+    /// Prefix containing private captured-read owners and their immutable descriptors.
+    #[must_use]
+    pub fn read_retention_prefix(&self) -> ObjectPath {
+        self.repo_path("v2/readers")
+    }
+
+    /// Prefix authorized to one captured-read owner.
+    #[must_use]
+    pub fn read_retention_owner_prefix(&self, owner: &str) -> ObjectPath {
+        self.repo_path(&format!("v2/readers/{owner}"))
+    }
+
+    /// Conditional lifetime claim for one captured-read owner.
+    #[must_use]
+    pub fn read_retention_claim_path(&self, owner: &str) -> ObjectPath {
+        self.repo_path(&format!("v2/readers/{owner}/claim"))
+    }
+
+    /// Immutable descriptor page belonging to one captured-read owner.
+    #[must_use]
+    pub fn read_retention_object_path(&self, owner: &str, hash: &str) -> ObjectPath {
+        self.repo_path(&format!("v2/readers/{owner}/objects/{hash}"))
+    }
+
     /// Path to the optional, exact-state-bound Git browse indexes.
     #[must_use]
     pub fn capsule_browse_indexes_path(&self) -> ObjectPath {

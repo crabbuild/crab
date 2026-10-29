@@ -1,8 +1,6 @@
 //! Shared publication mechanics; authentication and product policy stay with callers.
 pub mod capsule_protocol;
-pub mod catalog;
 pub mod generation;
-pub mod initialize;
 pub mod journal;
 mod namespace;
 pub use namespace::{with_ref_namespace, with_ref_namespaces, with_ref_namespaces_wait};
@@ -13,12 +11,6 @@ pub enum WriteError {
     /// The clock cannot produce a valid persisted timestamp.
     #[error("invalid timestamp: {0}")]
     Timestamp(#[from] crab_types::time::TimestampError),
-    #[error("initial HEAD must be a valid refs/heads/ branch: {head}")]
-    InitialHead {
-        head: String,
-        #[source]
-        source: Option<crab_git::refname::RefNameError>,
-    },
     #[error(transparent)]
     Namespace(#[from] crab_git::refname::RefNamespaceError),
     #[error("generation {generation} has no verified Git visibility proof")]
@@ -95,11 +87,6 @@ pub enum WriteError {
     #[error("invalid manifest {field} hash")]
     ManifestHash {
         field: &'static str,
-        #[source]
-        source: Box<dyn std::error::Error + Send + Sync>,
-    },
-    #[error("invalid pack identity")]
-    PackIdentity {
         #[source]
         source: Box<dyn std::error::Error + Send + Sync>,
     },

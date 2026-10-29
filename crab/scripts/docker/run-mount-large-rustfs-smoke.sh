@@ -411,6 +411,10 @@ mountpoint -q "$RW"
 grep -F "127.0.0.1:/crab $RW nfs" /proc/mounts >/e2e/mount-rw-native.txt
 record_duration_since rw_mount_ready_ms "$phase_start_ms"
 
+# Remount must preserve the remote advance already observed by auto-refresh.
+sha256sum "$RW/models/auto-refresh.bin" | awk '{print $1}' > /e2e/remount-auto-refresh.sha256
+cmp /e2e/auto-refresh.sha256 /e2e/remount-auto-refresh.sha256
+
 phase_start_ms="$(now_ms)"
 python3 <<'PY'
 import pathlib

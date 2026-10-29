@@ -282,7 +282,7 @@ pub struct MetricsSnapshot {
     pub metadb_batch_get_count: u64,
     /// Total `Db::write` calls across both SlateDB instances.
     pub metadb_batch_write_count: u64,
-    /// Repairable metadata batches buffered before an explicit flush.
+    /// Historical buffered-write count retained in cumulative perf-state output.
     pub metadb_buffered_batch_write_count: u64,
     /// Explicit WAL durability flushes issued after durable metadata writes.
     pub metadb_wal_flush_count: u64,
@@ -472,7 +472,6 @@ pub struct Metrics {
     metadb_get_hits: AtomicU64,
     metadb_batch_get_count: AtomicU64,
     metadb_batch_write_count: AtomicU64,
-    metadb_buffered_batch_write_count: AtomicU64,
     metadb_wal_flush_count: AtomicU64,
     metadb_memtable_flush_count: AtomicU64,
     metadb_write_bytes: AtomicU64,
@@ -1111,11 +1110,6 @@ impl Metrics {
         self.metadb_batch_write_count.fetch_add(1, Relaxed);
     }
 
-    /// Record a repairable batch buffered until an explicit flush boundary.
-    pub fn inc_metadb_buffered_batch_write_count(&self) {
-        self.metadb_buffered_batch_write_count.fetch_add(1, Relaxed);
-    }
-
     /// Record one explicit SlateDB WAL flush.
     pub fn inc_metadb_wal_flush_count(&self) {
         self.metadb_wal_flush_count.fetch_add(1, Relaxed);
@@ -1312,7 +1306,9 @@ impl Metrics {
             metadb_get_hits: self.metadb_get_hits.load(Relaxed),
             metadb_batch_get_count: self.metadb_batch_get_count.load(Relaxed),
             metadb_batch_write_count: self.metadb_batch_write_count.load(Relaxed),
-            metadb_buffered_batch_write_count: self.metadb_buffered_batch_write_count.load(Relaxed),
+            // The v1.2.4 perf-state format retains cumulative historical totals;
+            // current operations no longer submit buffered metadata batches.
+            metadb_buffered_batch_write_count: 0,
             metadb_wal_flush_count: self.metadb_wal_flush_count.load(Relaxed),
             metadb_memtable_flush_count: self.metadb_memtable_flush_count.load(Relaxed),
             metadb_write_bytes: self.metadb_write_bytes.load(Relaxed),
@@ -2276,6 +2272,25 @@ mod tests {
         let value: serde_json::Value =
             serde_json::from_slice(&std::fs::read(path).expect("read state")).expect("parse state");
         assert_eq!(value["samples"], serde_json::json!([0.25]));
+    }
+
+    #[test]
+    fn current_deltas_preserve_historical_buffered_write_totals() {
+        let temp = tempfile::tempdir().expect("tempdir");
+        let path = temp.path().join("perf-state.json");
+        std::fs::write(&path, r#"{"metadb_buffered_batch_write_count":8}"#)
+            .expect("seed historical counters");
+        let metrics = Metrics::new();
+        metrics.add_bytes_uploaded(64);
+        persist_metrics_delta(&path, &metrics.snapshot().summary()).expect("persist current delta");
+
+        let mut expected = MetricsSummary::zeroed();
+        expected.metadb_buffered_batch_write_count = 8;
+        expected.bytes_uploaded = 64;
+        assert_eq!(
+            load_metrics_summary(&path).expect("load counters"),
+            expected
+        );
     }
 
     #[test]

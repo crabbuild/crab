@@ -269,7 +269,6 @@ async fn commit_active_active_candidate(
             name: edit.ref_name().to_owned(),
             expected: edit.expected_old().map(str::to_owned),
             new: edit.new_oid().map(str::to_owned),
-            force: false,
         })
         .collect::<Vec<_>>();
     let mut uploaded_objects = replication_objects.iter().cloned().collect::<BTreeSet<_>>();
@@ -409,7 +408,6 @@ pub(super) async fn verify_capsule_candidate(
                     return Err(conflict("capsule base root differs from prepare record"));
                 }
                 let (changed_paths, pointers) = verify_capsule_git_candidate(
-                    ctx.store(),
                     ctx.router(),
                     &source_view,
                     candidate,

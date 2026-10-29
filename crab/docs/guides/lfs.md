@@ -395,6 +395,11 @@ invocation.
 crab lfs pre-push
 ```
 
+The hook excludes history reachable from the repository's visible Capsule refs.
+It requires a valid Capsule root; a missing or corrupt root fails before LFS
+payload transfers. Manifest refs and a missing-root empty history are not
+publication authority. Initialize a fresh remote with `crab init <url>` first.
+
 ---
 
 ## crab lfs post-checkout / post-commit / post-merge

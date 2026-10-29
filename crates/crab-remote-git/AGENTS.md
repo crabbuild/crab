@@ -5,21 +5,23 @@ Root `AGENTS.md` and `crates/AGENTS.md` apply. Read
 
 ## Purpose and ownership
 
-Owns bounded filesystem-free Git reads from committed manifests, catalogs, and immutable packs. Caller authorization and resolved placement identity precede repository opening; logical Xet hydration belongs to crab-read.
+Owns bounded filesystem-free Git reads from caller-validated captured metadata, authenticated catalogs, and immutable packs. Caller authorization and resolved placement identity precede repository opening; logical Xet hydration belongs to crab-read.
 
 ## Read first
 
 1. `crates/crab-remote-git/src/lib.rs` — supported public API.
-2. `crates/crab-remote-git/src/repository.rs` — `RemoteGitRepository::open / RepositoryIdentity`: identity and opening handshake.
+2. `crates/crab-remote-git/src/repository.rs` — `RemoteGitRepository::from_snapshot / RepositoryIdentity`: identity and immutable capture binding.
 3. `crates/crab-remote-git/src/snapshot.rs` — `RemoteGitSnapshot`: pinned commit/tree operations.
 4. `crates/crab-remote-git/src/tree_listing.rs` — bounded prefix/continuation blob pages in canonical Git path order.
 5. `crates/crab-remote-git/src/operation.rs` — `OperationContext::finish`: budgets, cancellation, and explicit finish.
 6. `crates/crab-remote-git/src/reader.rs` — `RemoteGitReader::read_with_session`: object lookup and verified decoding.
 
-Trace one path: HTTP repository opening in `crates/crab-server/src/server/mod.rs`
-→ `RemoteGitRepository::open` in `crates/crab-remote-git/src/repository.rs`
-→ manifest/catalog acquisition from `crates/crab-metadata/src/manifest_store.rs`
-and `crates/crab-metadata/src/git_object_locator`.
+Trace one path: service capture in `crates/crab-remote/src/browse_indexes.rs`
+→ `CapsuleRepositoryView::git_repository_from_store` in
+`crates/crab-read/src/capsule_protocol.rs`
+→ `RemoteGitRepository::from_snapshot_with_lookup_sources` in
+`crates/crab-remote-git/src/repository.rs`. The caller owns live Capsule authority;
+this crate opens no stored manifest or ref journal.
 
 ## Common changes
 
@@ -32,7 +34,7 @@ and `crates/crab-metadata/src/git_object_locator`.
 
 ## Invariants
 
-- Keep repository identity and generation/catalog coverage checks in the open path; locator presence alone is not a visibility proof.
+- Keep repository identity, captured inventory and lookup-source binding checks in snapshot construction; locator presence alone is not a visibility proof.
   Source: `crates/crab-remote-git/src/repository.rs`.
 - Finish each OperationContext with its semantic result so the locator session closes and close failures remain observable. Runtime shutdown is a separate process-lifecycle obligation.
   Source: `crates/crab-remote-git/src/operation.rs`.

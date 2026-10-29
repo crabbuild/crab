@@ -159,7 +159,7 @@ crab-diff = { workspace = true }
 crab-git = { workspace = true }
 crab-lfs = { workspace = true }
 crab-metadata = { workspace = true, features = ["storage", "file-index-reader", "local-index", "remote-index"] }
-crab-read = { workspace = true, features = ["hydration"] }
+crab-read = { workspace = true, features = ["local-staging"] }
 crab-write = { workspace = true }
 crab-remote = { workspace = true, features = ["local", "publication"] }
 crab-remote-git = { workspace = true }

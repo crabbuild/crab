@@ -774,6 +774,12 @@ still requires the plan's remaining public mutation and workflow surfaces.
 
 ## Public direct initialization progress — incomplete SDK
 
+Historical evidence below describes the retired manifest-only initializer.
+Current CLI, SDK, gateway and view-service initialization uses
+`crab_write::capsule_protocol::initialize`; the old repository initializer and
+its `InitialHead` error are removed in VFS hardening checkpoint 46. Valid legacy
+metadata remains in negative fixtures to prove Capsule admission fails closed.
+
 The `write` feature exposes lazy `Client::initialize_remote(locator, head)`
 requests. The canonical `crab-write::initialize` owner validates fully qualified
 branch HEADs, creates metadata roots conditionally and adopts valid existing
@@ -1156,6 +1162,10 @@ and test lint passing. First-import manifest CAS and complete lifecycle
 extraction remain separate work.
 
 ## Initial-import publication boundary
+
+Historical boundary: the initial-manifest publisher below is retired. Current
+CLI and SDK initialization/publication use the rooted Capsule protocol; no
+manifest-only first-import API remains in `crab-write`.
 
 The direct CLI first-import path now calls
 `crab-write::initialize::publish_initial_manifest` after uploading its segmented

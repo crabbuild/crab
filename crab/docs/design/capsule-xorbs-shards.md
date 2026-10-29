@@ -1,13 +1,12 @@
 # Protocol v2 Xorb and Shard Integration
 
-Current development checkpoint format is `CRBCKP06`: visibility dictionaries,
-ref closures and transitions use authenticated pages rooted in the footer.
-Git views load those pages lazily; explicit catalog access remains a complete
-async bulk read. See [indexed remote reads](../architecture/indexed-remote-reads.md#checkpoint-visibility-pages-in-progress)
-for proof and remaining gates. `CRBCKP05` records below describe the preceding
-format and its historical qualification; they do not qualify v6. Readers reject
-retired v5 pointers, and fresh-prefix v6 live qualification remains pending.
-
+Current development checkpoint format is `CRBCKP09` (format 9), with a
+copy-on-write paged catalog and authenticated visibility. See
+[indexed remote reads](../architecture/indexed-remote-reads.md#copy-on-write-checkpoint-catalog-format-9-under-qualification)
+for its implementation and qualification gates. Earlier checkpoint-format records
+below describe historical sources; they do not qualify format 9. Readers reject
+retired checkpoint formats. Complete current-format production qualification
+remains open.
 
 ## Document metadata
 
@@ -673,16 +672,24 @@ safe immutable candidates and returns a conflict.
 The checkpoint history segment retains the displaced checkpoint and capsule
 frontier. Source shards are not deleted by compaction, and the monotonic
 registry continues to retain their roots until separately proven registry and
-history cleanup permits reclamation. A present corrupt v2 root fails closed;
-only an absent v2 root selects the v1 shard-list path.
+history cleanup permits reclamation. Missing or corrupt v2 roots fail closed
+for apply and dry-run; no v1 shard-list path remains.
 
 ### 11.4 Xorb layout optimization
 
-`crab optimize xorbs` selects v2 authority before the legacy manifest. Its
-plan contains only Xorbs reachable from shards named by the authenticated file
-catalog; it never treats another repository's objects in the shared global
-namespace as optimization input. A corrupt present v2 root fails closed, while
-an absent root retains the v1 inventory path.
+`crab optimize xorbs` requires a Capsule root for planning, apply and resume.
+Apply and resume check that root before opening the local journal or acquiring
+maintenance admission. Its plan contains only Xorbs reachable from shards named
+by the authenticated file catalog; no global inventory or legacy manifest can
+supply authority. Missing and corrupt roots fail closed. Offline profile display,
+abort and confirmed journal removal remain local operations.
+
+Apply holds the same repository maintenance lease as compaction, including both
+GC writer fences, until execution, checkpoint resolution and journal completion
+finish. Late cancellation after a completed run does not turn it into rejection.
+Execution and reconciliation require a real store/layout; no no-store success
+path remains. The local released journal's partial-page repair is independent
+of the retired stored pack-v1 protocol and still requires rooted admission.
 
 Apply verifies each source Xorb, uploads immutable destination Xorbs, and
 records the source-to-destination mapping in its resumable journal. On every
@@ -920,7 +927,7 @@ fixture/report subsequently disappeared; the removal's cause is unconfirmed.
 A later read-only inventory of the surviving GA bucket confirmed three xorbs,
 three shards, committed v2 source objects, and no `.crab/chunk_index_db/` objects.
 
-The production path explains the missing discovery:
+At that audited source, the production path explained the missing discovery:
 
 - `cmd/add.rs::open_add_remote_classifier` constructs `AddRemoteChunkClassifier`.
 - `git/push.rs::lookup_proven_remote_chunks_for_add` queries the global committed
@@ -965,12 +972,22 @@ cross-repository partial overlap, unpublished/stale hints, failed publication,
 missing/corrupt xorbs, and exact cold reconstruction. No production repair or
 full-parity claim is made here.
 
-The add-time classifier now lazily opens and reuses one read-only chunk-index
-handle per `crab add`; a missing manifest is memoized for that invocation, so
-later file batches do not repeat the same absence probe. Candidate proof and
-publication validation are unchanged. The regression test and serial Crab
-library suite pass; the effect on the full 100-GiB request trace is pending a
-fresh exact-source run.
+Current add-time discovery uses one lazily initialized `CapsuleChunkIndex` per
+`crab add`. An absent global hint root is memoized for that invocation without
+persisting per-chunk negatives; a miss in an available index can be cached. No
+legacy repository layout, manifest or receipt database selects another index.
+Persisted candidates use a separate Capsule cache namespace; ambiguous old
+entries are not migrated. The bounded hint records remain advisory: current source roots, catalog membership,
+exact placement/proof IDs and physical provider identity certify reuse.
+
+Capsule push revalidates exact staged placement IDs through the same Capsule
+index and source catalogs. Missing Capsule evidence cannot authorize importing
+pack-v1 receipts or downloading old receipt-only payloads. Local recipe authority
+can supply unproven chunks; otherwise preparation errors before ref publication.
+This read-only proof path no longer opens a legacy MetaDb session. Current
+cross-repository full/partial-hint reuse and source/origin refusal tests protect
+that boundary; optimized whole-workload request and memory qualification remains
+open. Older measurements above retain their original audited scope.
 
 ### 16.1 V1 product-parity inventory
 
@@ -1032,7 +1049,7 @@ retains the failed full driver separately from successful bounded proofs.
 | Mirror plans and reconciliation | V2 intent/terminal receipts, marker repair, hook delivery, interruption, cache exclusion, deletion approval, and metadata-staleness behavior are qualified on RustFS | Complete authorization and hosted-provider behavior | Repeated crash-resume and duplicate-delivery runs with exact final refs and no partial transaction |
 | Git LFS and backup/restore | Canonical v2 push publishes and verifies reachable LFS dependencies before ref visibility. Direct LFS pre-push selects v2 authority first and reads transaction-consistent remote tips from the root and ref heads without downloading capsule payloads; a corrupt v2 root fails closed, while v1 fallback occurs only when the v2 root is absent. Mirror-hook push plus fresh hydrated clone are qualified on RustFS. The server scopes shared `.crab/` data beneath its configured root; its restore gate forces an atomic branch-and-tag publication, copies that root into a distinct bucket, hashes every object, requires the v2 root, per-ref heads, activation evidence, capsule and LFS body, rejects v1 root authority, and verifies both Git object IDs plus strict fsck after restore | Qualify direct LFS endpoint modes; add an authenticated per-repository export inventory covering v2 authority, every per-ref head and activation record, retained history, external shard/xorb closure, LFS bodies, GC roots, and application state; then qualify Xet hydrate after source deletion | Xet and LFS push/clone plus inventory-driven backup/delete/restore/fresh-clone/fsck/hydrate on a v2-only repository with hundreds of independently advancing refs |
 | Repository lifecycle, locks, releases, workflows, ship, and app mutations | Several paths publish through the canonical v2 server transaction, but the complete shipped command/route set is not yet audited | Bind every mutation to a v2 view and transaction; remove or explicitly retire every manifest/journal path | Create/update/delete, archive/freeze, lock races, release lifecycle, workflow restart, and ship E2E against a v2-only repository |
-| Diagnostics, accounting, and administration | V2 fsck/GC and checkpoint-history inspection/pruning have canonical paths, and the ordinary doctor remote check diagnoses v2 authority without requiring v1 metadata. `crab metadb diagnose` now selects a present v2 root exclusively, uses a payload-free root/ref probe by default, and authenticates the complete stable checkpoint/capsule/catalog/visibility/Git-pack view plus every shard and xorb under `--deep`. `crab metadb rebuild` verifies the same complete external closure and publishes one exact-view checkpoint without creating legacy metadata. `crab metadb owner` fingerprints the transaction-consistent root/ref view and publishes exact-root-CAS checkpoints from that same pinned view. Recovery file-index verification likewise selects v2 first and checks the authenticated pointer catalog without acquiring a legacy writer or creating SlateDB state. `crab compact` and `crab optimize xorbs` now select v2 authority, derive inputs only from the authenticated catalog, verify their complete replacement shard/Xorb closure, and publish replacement catalogs as exact-view checkpoints without creating v1 metadata. Cost inventory counts the complete configured repository prefix, including v2 roots, ref heads, transactions, capsules, checkpoints, releases, and workflow objects, alongside shared xorb/shard storage without attributing sibling repositories. `crab stat classes` now resolves the configured remote and reports live provider-class totals from the same bounded inventory walker. Plain hydration `status`, local logs/audit/stat, and local cache/staging usage are format-neutral; `du --remote` already walks the configured repository prefix plus shared content. Combined optimize orchestration, workflow/DAG inspection, and related remote administration still have mixed or unproven authority | Define every remaining remote answer from the pinned v2 root/ref/checkpoint/capsule closure or retire the command; never synthesize a v1 manifest. Reduce continuous-owner ref-head polling amplification with root-authenticated aggregate activity evidence without reintroducing a contended mutable root. Add command-level proof for the format-neutral surfaces instead of treating them as protocol adapters | Command-by-command golden outputs, corruption injection, cancellation, bounded-memory scans, and proof that no v1 metadata is read or recreated |
+| Diagnostics, accounting, and administration | V2 fsck/GC and checkpoint-history inspection/pruning have canonical paths, and the ordinary doctor remote check diagnoses v2 authority without requiring v1 metadata. `crab metadb diagnose` now selects a present v2 root exclusively, uses a payload-free root/ref probe by default, and authenticates the complete stable checkpoint/capsule/catalog/visibility/Git-pack view plus every shard and xorb under `--deep`. `crab metadb rebuild` verifies the same complete external closure and publishes one exact-view checkpoint without creating legacy metadata. `crab metadb owner` fingerprints the transaction-consistent root/ref view and publishes exact-root-CAS checkpoints from that same pinned view. Recovery file-index verification likewise selects v2 first and checks the authenticated pointer catalog without acquiring a legacy writer or creating SlateDB state. `crab compact` (also `crab optimize shards`) requires a v2 root before maintenance admission, derives inputs only from its authenticated catalog, and publishes a verified replacement catalog by exact-root CAS. Missing roots are errors for apply and dry-run; no shard-list fallback remains. Cancellation after committed CAS preserves success. `crab optimize xorbs` requires Capsule authority for planning, apply and resume, admits the root before journal creation or maintenance writes, and publishes only a verified replacement checkpoint; its global inventory and manifest publication fallbacks are removed. Cost inventory counts the complete configured repository prefix, including v2 roots, ref heads, transactions, capsules, checkpoints, releases, and workflow objects, alongside shared xorb/shard storage without attributing sibling repositories. `crab stat classes` now resolves the configured remote and reports live provider-class totals from the same bounded inventory walker. Plain hydration `status`, local logs/audit/stat, and local cache/staging usage are format-neutral; `du --remote` already walks the configured repository prefix plus shared content. Combined optimize orchestration, workflow/DAG inspection, and related remote administration still have mixed or unproven authority | Define every remaining remote answer from the pinned v2 root/ref/checkpoint/capsule closure or retire the command; never synthesize a v1 manifest. Reduce continuous-owner ref-head polling amplification with root-authenticated aggregate activity evidence without reintroducing a contended mutable root. Add command-level proof for the format-neutral surfaces instead of treating them as protocol adapters | Command-by-command golden outputs, corruption injection, cancellation, bounded-memory scans, and proof that no v1 metadata is read or recreated |
 | Local cache, worktree, hydrate/dehydrate, and pointer tooling | Core reconstruction uses the shared v2 file index. Post-clone/fetch shard warming selects v2 authority first, derives the complete shard set from the authenticated pointer catalog without a duplicate root read, and fails closed on corrupt v2 metadata; v1 fallback occurs only when the v2 root is absent. Native Git pack retention uses the authenticated pack-body hash and length independently of checkpoint generation; a hit proves bytes, not authorization, and sidecars still come from the selected origin for caller validation. Many remaining operations are local and format-neutral | Qualify the final cache implementation over the complete replay; audit remote refresh, invalidation, accounting, prune, multi-worktree and recovery edges against v2 view identity | Cold/warm/missing/corrupt cache, multiple worktrees, interrupted hydrate/dehydrate, prune, pointer conversion matrix, and catalog request/byte counts over long histories |
 
 This table is a capability inventory, not permission to leave unlisted entry

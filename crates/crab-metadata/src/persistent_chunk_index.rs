@@ -472,7 +472,7 @@ impl PersistentChunkIndex {
 
     /// Load all chunk entries from the persistent index into memory.
     ///
-    /// Used at startup to populate the in-memory `ChunkIndex` mirror.
+    /// Materializes every row; use keyed lookups on hot paths.
     ///
     /// # Errors
     /// Returns `MetadataError::Internal` on SQLite read failures.

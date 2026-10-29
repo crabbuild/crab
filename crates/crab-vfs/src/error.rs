@@ -47,11 +47,27 @@ pub enum VfsError {
     #[error("VFS read error: {0}")]
     Read(#[from] crab_read::ReadError),
 
+    #[error("VFS LFS error: {0}")]
+    Lfs(#[from] crab_lfs::LfsError),
+
     #[error("VFS staging error: {0}")]
     Staging(#[from] crab_staging::StagingError),
 
     #[error("VFS storage error: {0}")]
     Storage(#[from] crab_storage::StorageError),
+
+    #[error("VFS Git ref error: {0}")]
+    GitRef(#[from] crab_git::ref_resolve::RefResolveError),
+
+    #[error("VFS Git object operation {operation} failed: {source}")]
+    GitObject {
+        operation: String,
+        #[source]
+        source: Box<dyn std::error::Error + Send + Sync>,
+    },
+
+    #[error("VFS read task failed: {0}")]
+    ReadTask(#[source] tokio::task::JoinError),
 
     #[error("VFS URL error: {0}")]
     Url(#[from] crab_git::UrlError),

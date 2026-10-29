@@ -66,6 +66,37 @@ weakens hidden-ref authorization.
 
 Source: `crab/src/git/remote_helper.rs`
 
+Remote ref discovery has no local Git owner requirement. The helper captures a
+shared state root only for an actual push, before opening staging or preparing
+push authorization. Read-only sessions neither load nor save `.crab/push-state`; current helper
+publication derives its frontier from the captured Capsule view. Explicit Git-directory configuration, push telemetry ownership and local
+object installation for fetch remain unchanged.
+
+Git's [helper invocation contract](https://git-scm.com/docs/gitremote-helpers#_invocation)
+provides repository context when available. Its
+[transport implementation](https://github.com/git/git/blob/v2.51.0/transport-helper.c#L140-L142)
+sets `GIT_DIR` only when a local Git directory exists; ref discovery must not
+assume one.
+
+Add-time chunk reuse and staged publication share `git::chunk_reuse::ChunkVerifier`.
+It owns only the origin/cache, metadata-check bound and cancellation token;
+classification never constructs the legacy push orchestrator. Exact placement IDs
+must still belong to a current source Capsule shard/catalog and match a fresh
+canonical-origin identity. `git::xorb_proof` owns bounded footer/metadata parsing
+and identity-bound cache checks. Neither cached validity nor a staged ID alone
+certifies a replaced object. The shared default metadata concurrency remains 64.
+
+The helper applies atomic mode, compare-and-swap ref leases and mirror-plan
+identity directly to `PushConfig`. Protected-push preparation can strengthen
+that same config before Capsule admission. Helper protocol replies remain on
+stdout; the final structured push result uses the existing JSONL stderr stream.
+
+Both the CLI and Git helper publish through `git::capsule_push`. The obsolete
+Native entry and its manifest fixtures are removed. Command-level follow-tag
+selection stays in `cmd::push`, using shared strict tag peeling and physical
+commit reachability. The generic manifest publisher and its remaining callers
+still require retirement; removing one entry does not complete pack-v1 removal.
+
 ### Direct object-store support contract
 
 This matrix applies to `crab://bucket/repository` remotes backed directly by
@@ -75,14 +106,14 @@ and ETag evidence before Crab claims provider parity.
 
 | Git operation or capability | Direct S3-compatible remote | Automated evidence | RustFS evidence |
 |---|---|---|---|
-| Ref list / `git ls-remote` | Supported; an uninitialized remote reports `CRAB-E0032` with the `crab init <REMOTE>` recovery step, while malformed layout or manifest data fails as corruption | `git::remote_helper` manifest and resolved-session tests | missing, valid, and malformed manifest cases |
+| Ref list / `git ls-remote` | Supported outside a local Git repository, without creating push state; an uninitialized remote reports `CRAB-E0032` with the `crab init <REMOTE>` recovery step, while malformed Capsule data fails as corruption | `git::remote_helper` admission and resolved-session tests | missing, valid, and malformed Capsule cases |
 | Clone | Supported | `remote_helper_transcript`, `e2e_fetch_fsck` | fresh ordinary-Git and `crab clone` cases |
 | Fetch into an existing clone | Supported | resolved helper session and `e2e_fetch_fsck` | second-clone branch update case |
-| Push / branch update | Supported | `e2e_add_commit_push`, helper transcript tests | ordinary Git and Crab CLI cases |
+| Push / branch update | Supported | current Capsule publisher and CLI smoke | ordinary Git and Crab CLI cases |
 | Force push | Supported when explicitly requested | push decision tests | force-update case |
-| Branch deletion | Supported | helper delete-ref tests | delete/list/fresh-clone case |
-| Atomic multi-ref push | Supported; one rejected ref aborts the batch | helper atomic-abort tests | two-ref rejection case |
-| `git push --follow-tags` / `crab push --follow-tags` | Supported; Git sends selected tag refs, while the native CLI discovers eligible annotated tags | native follow-tags and multi-ref manifest tests | annotated-tag object and ref verification |
+| Branch deletion | Supported | Capsule delete-policy tests | delete/list/fresh-clone case |
+| Atomic multi-ref push | Supported; one rejected ref aborts the batch | Capsule atomic-batch tests | two-ref rejection case |
+| `git push --follow-tags` / `crab push --follow-tags` | Supported; Git sends selected tag refs, while the native CLI discovers eligible annotated tags | command follow-tag and Capsule multi-ref tests | annotated-tag object and ref verification |
 | Fetch tag following (`option followtags`) | Supported by complete-pack installation | resolved helper session installs an annotated tag object | tag fetch/clone verification |
 | Remote-helper `include-tag` option | Unsupported; it is not a defined remote-helper option | option contract test | not advertised |
 | Depth-based shallow clone/fetch | Supported through a bounded commit-graph summary; requests beyond its retained edge safely complete as a full fetch | shallow fetch, compaction-edge, deepen, and unshallow tests | depth, deepen, and unshallow cases |
@@ -344,11 +375,11 @@ invalid predecessor takes the existing complete-pack rebuild path; the owner
 reports that distinction as `commit_graph_incremental` versus
 `commit_graph_rebuild` so qualification can measure pack-read avoidance.
 
-`crab metadb rebuild` is the repository-scoped migration and repair boundary.
-It ignores the retired `git_locator_db/` namespace, reconstructs the catalog
-from manifest-pinned immutable packs, and publishes coverage only after every
-row and the exact visibility proof are durable. Re-running it is safe; an
-interrupted attempt never advances the digest-named checkpoint.
+Current `crab metadb` commands require Capsule authority. Rebuild captures one
+view inside the maintenance/GC fence, authenticates the complete metadata and
+content closure, and publishes a checkpoint by exact root CAS. It does not
+reconstruct manifest-backed locator databases or migrate retired namespaces.
+Missing or corrupt source bytes require verified history, a replica, or backup.
 
 Catalog writers disable SlateDB's periodic background garbage collector because
 each helper is short-lived and SlateDB's first timer tick runs immediately.

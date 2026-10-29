@@ -7,7 +7,8 @@
 //! FUSE callbacks are synchronous (called from fuser's background threads).
 //! Async engine/resolver calls are bridged via `Handle::block_on`.
 //!
-//! Threading model: fuser dispatches callbacks on its own thread pool.
+//! Threading model: Linux mounts use a bounded fuser callback pool;
+//! other platforms retain fuser's single dispatcher.
 //! `block_on` is safe here because the tokio runtime runs on separate
 //! threads — fuser threads never run tokio tasks, so there's no
 //! deadlock risk from blocking. The hydration service's synchronous
@@ -26,10 +27,10 @@ use fuser::{
     ReplyStatfs, ReplyWrite, ReplyXattr, Request, WriteFlags,
 };
 use tokio::runtime::Handle;
-use tracing::{debug, trace, warn};
+use tracing::{debug, warn};
 
 use crate::core::error::CrabError;
-use crate::engine::{VfsEngine, VfsReadLease};
+use crate::engine::{VfsEngine, VfsOpenFile};
 use crate::resolver::{FuseResolver, ReaddirEntry, ResolvedNode};
 use crate::snapshot::NodeType;
 
@@ -71,6 +72,9 @@ struct InodeRef {
     #[allow(dead_code, reason = "used for future readlink and type-checking")]
     node_type: NodeType,
     refcnt: u64,
+    opens: u64,
+    linked: bool,
+    file: Option<Arc<OpenNode>>,
 }
 
 impl InodeTable {
@@ -87,6 +91,9 @@ impl InodeTable {
                 path: Arc::clone(&root_path),
                 node_type: NodeType::Dir,
                 refcnt: 1,
+                opens: 0,
+                linked: true,
+                file: None,
             },
         );
         by_path.insert(root_path, ROOT_INO);
@@ -97,6 +104,9 @@ impl InodeTable {
                 path: Arc::clone(&git_path),
                 node_type: NodeType::File,
                 refcnt: 1,
+                opens: 0,
+                linked: true,
+                file: None,
             },
         );
         by_path.insert(git_path, GITFILE_INO);
@@ -124,6 +134,9 @@ impl InodeTable {
                 path: Arc::clone(&arc_path),
                 node_type,
                 refcnt: 1,
+                opens: 0,
+                linked: true,
+                file: None,
             },
         );
         self.by_path.insert(arc_path, ino);
@@ -132,7 +145,10 @@ impl InodeTable {
 
     /// Return a cheap Arc clone of the path — no string copy.
     fn get_path(&self, ino: u64) -> Option<Arc<str>> {
-        self.by_ino.get(&ino).map(|r| Arc::clone(&r.path))
+        self.by_ino
+            .get(&ino)
+            .filter(|r| r.linked)
+            .map(|r| Arc::clone(&r.path))
     }
 
     fn ino_for_path(&self, path: &str) -> Option<u64> {
@@ -140,11 +156,18 @@ impl InodeTable {
     }
 
     fn rename_path(&mut self, old_path: &str, new_path: &str) {
+        if old_path == new_path {
+            return;
+        }
+        self.detach_path(new_path);
         let old_prefix = format!("{old_path}/");
         let updates = self
             .by_ino
             .iter()
             .filter_map(|(ino, inode_ref)| {
+                if !inode_ref.linked {
+                    return None;
+                }
                 let path = inode_ref.path.as_ref();
                 if path == old_path {
                     Some((*ino, new_path.to_owned()))
@@ -160,9 +183,62 @@ impl InodeTable {
                 self.by_path.remove(&inode_ref.path);
                 let arc_path: Arc<str> = Arc::from(moved_path.as_str());
                 inode_ref.path = Arc::clone(&arc_path);
+                if let Some(node) = &inode_ref.file {
+                    node.set_path(Some(Arc::clone(&arc_path)));
+                }
                 self.by_path.insert(arc_path, ino);
             }
         }
+    }
+
+    fn detach_inode(&mut self, ino: u64) {
+        if let Some(inode) = self.by_ino.get_mut(&ino) {
+            if self.by_path.get(&inode.path) == Some(&ino) {
+                self.by_path.remove(&inode.path);
+            }
+            inode.linked = false;
+            if let Some(node) = &inode.file {
+                node.set_path(None);
+            }
+        }
+    }
+
+    fn detach_path(&mut self, path: &str) {
+        let prefix = format!("{path}/");
+        for inode in self.by_ino.values_mut() {
+            if inode.linked && (inode.path.as_ref() == path || inode.path.starts_with(&prefix)) {
+                self.by_path.remove(&inode.path);
+                inode.linked = false;
+                if let Some(node) = &inode.file {
+                    node.set_path(None);
+                }
+            }
+        }
+    }
+
+    fn open_node(&mut self, ino: u64) -> Option<Arc<OpenNode>> {
+        let inode = self.by_ino.get_mut(&ino)?;
+        let node = match &inode.file {
+            Some(node) => Arc::clone(node),
+            None if inode.linked => Arc::new(OpenNode {
+                path: std::sync::RwLock::new(Some(Arc::clone(&inode.path))),
+                file: tokio::sync::Mutex::new(None),
+            }),
+            None => return None,
+        };
+        inode.file = Some(Arc::clone(&node));
+        inode.opens += 1;
+        Some(node)
+    }
+
+    fn release_open(&mut self, ino: u64) {
+        if let Some(inode) = self.by_ino.get_mut(&ino) {
+            inode.opens = inode.opens.saturating_sub(1);
+            if inode.opens == 0 {
+                inode.file = None;
+            }
+        }
+        self.forget(ino, 0);
     }
 
     fn forget(&mut self, ino: u64, nlookup: u64) {
@@ -171,10 +247,12 @@ impl InodeTable {
         }
         if let Some(r) = self.by_ino.get_mut(&ino) {
             r.refcnt = r.refcnt.saturating_sub(nlookup);
-            if r.refcnt == 0 {
+            if r.refcnt == 0 && r.opens == 0 {
                 let path = Arc::clone(&r.path);
                 self.by_ino.remove(&ino);
-                self.by_path.remove(&path);
+                if self.by_path.get(&path) == Some(&ino) {
+                    self.by_path.remove(&path);
+                }
             }
         }
     }
@@ -236,14 +314,48 @@ struct HandleTable {
     next_handle: u64,
 }
 
-struct FileHandle {
-    path: Arc<str>,
-    read_lease: Option<VfsReadLease>,
+struct OpenNode {
+    path: std::sync::RwLock<Option<Arc<str>>>,
+    // All descriptors of an inode share promotion and content changes. Take
+    // this lock before the engine publication gate; controls never take it.
+    file: tokio::sync::Mutex<Option<VfsOpenFile>>,
 }
 
-struct FileHandleSnapshot {
-    path: Arc<str>,
-    read_lease: Option<VfsReadLease>,
+impl OpenNode {
+    fn path(&self) -> Option<Arc<str>> {
+        self.path
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .clone()
+    }
+    fn set_path(&self, path: Option<Arc<str>>) {
+        *self
+            .path
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner) = path;
+    }
+}
+
+struct OpenNodePin {
+    ino: u64,
+    node: Arc<OpenNode>,
+    inodes: Arc<std::sync::RwLock<InodeTable>>,
+}
+
+impl Drop for OpenNodePin {
+    fn drop(&mut self) {
+        self.inodes
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .release_open(self.ino);
+    }
+}
+
+#[derive(Clone)]
+struct FileHandle {
+    pin: Arc<OpenNodePin>,
+    readable: bool,
+    writable: bool,
 }
 
 struct DirHandle {
@@ -260,11 +372,17 @@ impl HandleTable {
         }
     }
 
-    fn alloc_file(&mut self, path: Arc<str>, read_lease: Option<VfsReadLease>) -> u64 {
+    fn alloc_file(&mut self, pin: Arc<OpenNodePin>, readable: bool, writable: bool) -> u64 {
         let fh = self.next_handle;
         self.next_handle += 1;
-        self.file_handles
-            .insert(fh, FileHandle { path, read_lease });
+        self.file_handles.insert(
+            fh,
+            FileHandle {
+                pin,
+                readable,
+                writable,
+            },
+        );
         fh
     }
 
@@ -275,31 +393,17 @@ impl HandleTable {
         fh
     }
 
-    fn get_file_path(&self, fh: u64) -> Option<Arc<str>> {
-        self.file_handles.get(&fh).map(|h| Arc::clone(&h.path))
-    }
-
-    fn get_file(&self, fh: u64) -> Option<FileHandleSnapshot> {
-        self.file_handles.get(&fh).map(|h| FileHandleSnapshot {
-            path: Arc::clone(&h.path),
-            read_lease: h.read_lease.clone(),
-        })
-    }
-
-    fn replace_file_read_lease(&mut self, fh: u64, read_lease: VfsReadLease) {
-        if let Some(handle) = self.file_handles.get_mut(&fh) {
-            handle.read_lease = Some(read_lease);
-        }
-    }
-
-    fn clear_file_read_lease(&mut self, fh: u64) {
-        if let Some(handle) = self.file_handles.get_mut(&fh) {
-            handle.read_lease = None;
-        }
+    fn get_file(&self, ino: u64, fh: u64) -> Option<FileHandle> {
+        self.file_handles
+            .get(&fh)
+            .filter(|handle| handle.pin.ino == ino)
+            .cloned()
     }
 
     fn get_dir_entries(&self, fh: u64) -> Option<&[(ReaddirEntry, u64)]> {
-        self.dir_handles.get(&fh).map(|h| h.entries.as_slice())
+        self.dir_handles
+            .get(&fh)
+            .map(|handle| handle.entries.as_slice())
     }
 
     fn release_file(&mut self, fh: u64) {
@@ -322,6 +426,7 @@ pub struct CrabFs {
     inodes: Arc<std::sync::RwLock<InodeTable>>,
     handles: std::sync::RwLock<HandleTable>,
     rt: Handle,
+    namespace: tokio::sync::RwLock<()>,
     /// Cached uid/gid — these never change during the process lifetime.
     uid: u32,
     gid: u32,
@@ -364,6 +469,7 @@ impl CrabFs {
             inodes: Arc::new(std::sync::RwLock::new(InodeTable::new())),
             handles: std::sync::RwLock::new(HandleTable::new()),
             rt,
+            namespace: tokio::sync::RwLock::new(()),
             uid,
             gid,
         }
@@ -387,45 +493,132 @@ impl CrabFs {
         inodes.get_path(ino)
     }
 
-    fn exact_getattr(&self, path: &str) -> crate::core::error::Result<(u32, u64, NodeType, i64)> {
-        let (mode, size, node_type, mtime) = self.resolver.getattr(path)?;
-        if node_type != NodeType::File || size != 0 {
-            return Ok((mode, size, node_type, mtime));
+    fn file_handle(&self, ino: u64, fh: u64) -> Option<FileHandle> {
+        self.handles
+            .read()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get_file(ino, fh)
+    }
+
+    fn pin_file(&self, ino: u64) -> crate::Result<Arc<OpenNodePin>> {
+        let node = self
+            .inodes
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .open_node(ino)
+            .ok_or_else(|| std::io::Error::from_raw_os_error(libc::ENOENT))?;
+        Ok(Arc::new(OpenNodePin {
+            ino,
+            node,
+            inodes: Arc::clone(&self.inodes),
+        }))
+    }
+
+    async fn prepare_file(&self, pin: &OpenNodePin, read: bool, write: bool) -> crate::Result<()> {
+        let mut state = pin.node.file.lock().await;
+        let path = pin.node.path();
+        if state.is_none() {
+            let path = path
+                .as_deref()
+                .ok_or_else(|| std::io::Error::from_raw_os_error(libc::ENOENT))?;
+            *state = Some(self.engine.open_file(path, read, write).await?);
+        } else if let Some(file) = state.as_mut() {
+            let _view = self.engine.namespace_read().await;
+            let path = self.linked_path(pin, file)?;
+            let path = path
+                .as_deref()
+                .ok_or_else(|| std::io::Error::from_raw_os_error(libc::ENOENT))?;
+            file.enable_access(&self.engine, Some(path), read, write)
+                .await?;
         }
-        let size = self.engine.exact_file_size(path)?;
-        Ok((mode, size, node_type, mtime))
+        Ok(())
     }
 
-    fn handle_path(&self, fh: u64) -> Option<Arc<str>> {
-        let handles = self.handles.read().unwrap_or_else(|e| {
-            warn!("handles RwLock was poisoned; recovering");
-            e.into_inner()
-        });
-        handles.get_file_path(fh)
+    fn linked_path(
+        &self,
+        pin: &OpenNodePin,
+        file: &VfsOpenFile,
+    ) -> crate::Result<Option<Arc<str>>> {
+        let path = pin.node.path();
+        if let Some(path) = &path
+            && !file.matches_path(&self.engine, path)?
+        {
+            self.inodes
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .detach_inode(pin.ino);
+            pin.node.set_path(None);
+            return Ok(None);
+        }
+        Ok(path)
     }
 
-    fn file_handle(&self, fh: u64) -> Option<FileHandleSnapshot> {
-        let handles = self.handles.read().unwrap_or_else(|e| {
-            warn!("handles RwLock was poisoned; recovering");
-            e.into_inner()
-        });
-        handles.get_file(fh)
+    fn open_pin(&self, ino: u64) -> Option<Arc<OpenNodePin>> {
+        let mut inodes = self
+            .inodes
+            .write()
+            .unwrap_or_else(std::sync::PoisonError::into_inner);
+        inodes.by_ino.get(&ino)?.file.as_ref()?;
+        let node = inodes.open_node(ino)?;
+        // Metadata operations retain the inode through a concurrent final
+        // release/forget, rather than reattaching content through a reused name.
+        Some(Arc::new(OpenNodePin {
+            ino,
+            node,
+            inodes: Arc::clone(&self.inodes),
+        }))
     }
 
-    fn replace_file_read_lease(&self, fh: u64, read_lease: VfsReadLease) {
-        let mut handles = self.handles.write().unwrap_or_else(|e| {
-            warn!("handles RwLock was poisoned; recovering");
-            e.into_inner()
-        });
-        handles.replace_file_read_lease(fh, read_lease);
+    async fn open_node_attr(&self, ino: u64, node: &OpenNode) -> crate::Result<FileAttr> {
+        let _namespace = self.namespace.read().await;
+        let state = node.file.lock().await;
+        let _view = self.engine.namespace_read().await;
+        let file = state
+            .as_ref()
+            .ok_or_else(|| CrabError::Internal("open inode has no content".into()))?;
+        let mut path = node.path();
+        if let Some(current) = &path
+            && !file.matches_path(&self.engine, current)?
+        {
+            self.inodes
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .detach_inode(ino);
+            node.set_path(None);
+            path = None;
+        }
+        let (mode, size, kind, mtime) = file.attributes()?;
+        let (mode, mtime) = match path.as_deref() {
+            Some(path) => {
+                let (mode, _, _, mtime) = self.engine.getattr(path)?;
+                (mode, mtime)
+            }
+            None => (mode, mtime),
+        };
+        let mut attr = self.make_attr(ino, mode, size, kind, mtime);
+        if path.is_none() {
+            attr.nlink = 0;
+        }
+        Ok(attr)
     }
 
-    fn clear_file_read_lease(&self, fh: u64) {
-        let mut handles = self.handles.write().unwrap_or_else(|e| {
-            warn!("handles RwLock was poisoned; recovering");
-            e.into_inner()
+    fn reply_sync(&self, ino: u64, fh: u64, datasync: bool, reply: ReplyEmpty) {
+        let Some(handle) = self.file_handle(ino, fh) else {
+            reply.error(Errno::EBADF);
+            return;
+        };
+        let synced = self.rt.block_on(async {
+            let state = handle.pin.node.file.lock().await;
+            match state.as_ref() {
+                Some(file) => self.engine.sync_open_file(file, datasync),
+                None if handle.pin.ino == GITFILE_INO => Ok(()),
+                None => Err(CrabError::Internal("open inode has no content".into())),
+            }
         });
-        handles.clear_file_read_lease(fh);
+        match synced {
+            Ok(()) => reply.ok(),
+            Err(error) => reply.error(file_errno(&error)),
+        }
     }
 
     fn child_path(&self, parent: u64, name: &OsStr) -> Option<String> {
@@ -543,6 +736,15 @@ fn configure_readahead(config: &mut KernelConfig, target: u32) {
 impl Filesystem for CrabFs {
     fn init(&mut self, _req: &Request, config: &mut KernelConfig) -> std::io::Result<()> {
         configure_readahead(config, FUSE_TARGET_MAX_READAHEAD);
+        // Writable mounts use direct I/O to keep descriptors coherent through
+        // COW. Linux requires this capability for shared mmap of those files.
+        #[cfg(target_os = "linux")]
+        if config
+            .add_capabilities(InitFlags::FUSE_DIRECT_IO_ALLOW_MMAP)
+            .is_ok()
+        {
+            debug!("enabled shared mmap for FUSE direct I/O files");
+        }
         if config
             .add_capabilities(InitFlags::FUSE_ATOMIC_O_TRUNC)
             .is_ok()
@@ -560,28 +762,52 @@ impl Filesystem for CrabFs {
             return;
         }
 
-        let Some(child_path) = self.child_path(parent, name) else {
-            reply.error(Errno::ENOENT);
-            return;
-        };
-
-        match self.exact_getattr(&child_path) {
-            Ok((mode, size, node_type, mtime)) => {
-                let ino = {
-                    let Ok(mut inodes) = self.inodes.write() else {
-                        reply.error(Errno::EIO);
-                        return;
-                    };
-                    inodes.get_or_alloc(&child_path, node_type)
-                };
-                let attr = self.make_attr(ino, mode, size, node_type, mtime);
+        let found = self.rt.block_on(async {
+            let _namespace = self.namespace.read().await;
+            let child_path = self
+                .child_path(parent, name)
+                .ok_or_else(|| std::io::Error::from_raw_os_error(libc::ENOENT))?;
+            let existing = {
+                let inodes = self
+                    .inodes
+                    .read()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                inodes.ino_for_path(&child_path).and_then(|ino| {
+                    inodes
+                        .by_ino
+                        .get(&ino)
+                        .and_then(|inode| inode.file.clone())
+                        .map(|node| (ino, node))
+                })
+            };
+            let state = match &existing {
+                Some((_, node)) => Some(node.file.lock().await),
+                None => None,
+            };
+            let _view = self.engine.namespace_read().await;
+            let attrs = self.engine.getattr(&child_path)?;
+            if let (Some((ino, _)), Some(state)) = (&existing, &state)
+                && let Some(file) = state.as_ref()
+                && !file.matches_path(&self.engine, &child_path)?
+            {
+                self.inodes
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .detach_inode(*ino);
+            }
+            let ino = self
+                .inodes
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .get_or_alloc(&child_path, attrs.2);
+            Ok::<_, CrabError>((ino, attrs))
+        });
+        match found {
+            Ok((ino, (mode, size, kind, mtime))) => {
+                let attr = self.make_attr(ino, mode, size, kind, mtime);
                 reply.entry(&ENTRY_TTL, &attr, Generation(0));
             }
-            Err(CrabError::NotFound { .. }) => reply.error(Errno::ENOENT),
-            Err(e) => {
-                warn!(path = %child_path, error = %e, "lookup failed");
-                reply.error(Errno::EIO);
-            }
+            Err(error) => reply.error(file_errno(&error)),
         }
     }
 
@@ -591,8 +817,18 @@ impl Filesystem for CrabFs {
         }
     }
 
-    fn getattr(&self, _req: &Request, ino: INodeNo, _fh: Option<FuseFileHandle>, reply: ReplyAttr) {
+    fn getattr(&self, _req: &Request, ino: INodeNo, fh: Option<FuseFileHandle>, reply: ReplyAttr) {
         let ino = u64::from(ino);
+        let handle = match fh {
+            Some(fh) => match self.file_handle(ino, u64::from(fh)) {
+                Some(handle) => Some(handle),
+                None => {
+                    reply.error(Errno::EBADF);
+                    return;
+                }
+            },
+            None => None,
+        };
 
         if ino == GITFILE_INO {
             reply.attr(&GITFILE_TTL, &self.gitfile_attr());
@@ -622,12 +858,24 @@ impl Filesystem for CrabFs {
             return;
         }
 
+        if let Some(pin) = handle
+            .map(|handle| handle.pin)
+            .or_else(|| self.open_pin(ino))
+        {
+            match self.rt.block_on(self.open_node_attr(ino, &pin.node)) {
+                Ok(attr) => reply.attr(&ENTRY_TTL, &attr),
+                Err(error) => reply.error(file_errno(&error)),
+            }
+            return;
+        }
+
+        let _namespace = self.rt.block_on(self.namespace.read());
         let Some(path) = self.inode_path(ino) else {
             reply.error(Errno::ENOENT);
             return;
         };
 
-        match self.exact_getattr(&path) {
+        match self.engine.getattr(&path) {
             Ok((mode, size, node_type, mtime)) => {
                 let attr = self.make_attr(ino, mode, size, node_type, mtime);
                 reply.attr(&ENTRY_TTL, &attr);
@@ -651,7 +899,7 @@ impl Filesystem for CrabFs {
         _atime: Option<fuser::TimeOrNow>,
         mtime: Option<fuser::TimeOrNow>,
         _ctime: Option<SystemTime>,
-        _fh: Option<FuseFileHandle>,
+        fh: Option<FuseFileHandle>,
         _crtime: Option<SystemTime>,
         _chgtime: Option<SystemTime>,
         _bkuptime: Option<SystemTime>,
@@ -659,6 +907,80 @@ impl Filesystem for CrabFs {
         reply: ReplyAttr,
     ) {
         let ino = u64::from(ino);
+        // Serialize the open-inode check with open and namespace changes. An
+        // unopened file must not gain a captured reader halfway through truncate.
+        let namespace = self.rt.block_on(self.namespace.write());
+        let handle = match fh {
+            Some(fh) => match self.file_handle(ino, u64::from(fh)) {
+                Some(handle) if size.is_none() || handle.writable => Some(handle),
+                _ => {
+                    reply.error(Errno::EBADF);
+                    return;
+                }
+            },
+            None => None,
+        };
+        if let Some(pin) = handle
+            .map(|handle| handle.pin)
+            .or_else(|| self.open_pin(ino))
+        {
+            if uid.is_some() || gid.is_some() {
+                reply.error(Errno::EROFS);
+                return;
+            }
+            if ino == GITFILE_INO {
+                reply.error(Errno::EROFS);
+                return;
+            }
+            let changed = self.rt.block_on(async {
+                if size.is_some() && fh.is_none() {
+                    self.prepare_file(&pin, false, true).await?;
+                }
+                let mut state = pin.node.file.lock().await;
+                let file = state
+                    .as_mut()
+                    .ok_or_else(|| CrabError::Internal("open inode has no content".into()))?;
+                let path = self.linked_path(&pin, file)?;
+                if let Some(mode) = mode {
+                    self.engine
+                        .set_open_file_mode(file, path.as_deref(), mode)
+                        .await?;
+                }
+                if let Some(size) = size {
+                    self.engine
+                        .truncate_open_file(file, path.as_deref(), size)
+                        .await?;
+                }
+                if let Some(mtime) = mtime {
+                    let ns = match mtime {
+                        fuser::TimeOrNow::SpecificTime(time) => {
+                            match time.duration_since(UNIX_EPOCH) {
+                                Ok(duration) => i64::try_from(duration.as_nanos())
+                                    .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?,
+                                Err(error) => -i64::try_from(error.duration().as_nanos())
+                                    .map_err(|_| std::io::Error::from_raw_os_error(libc::EINVAL))?,
+                            }
+                        }
+                        fuser::TimeOrNow::Now => std::time::SystemTime::now()
+                            .duration_since(UNIX_EPOCH)
+                            .map_or(0, |time| time.as_nanos() as i64),
+                    };
+                    self.engine
+                        .set_open_file_mtime(file, path.as_deref(), ns)
+                        .await?;
+                }
+                Ok::<_, CrabError>(())
+            });
+            drop(namespace);
+            match changed {
+                Ok(()) => match self.rt.block_on(self.open_node_attr(ino, &pin.node)) {
+                    Ok(attr) => reply.attr(&ENTRY_TTL, &attr),
+                    Err(error) => reply.error(file_errno(&error)),
+                },
+                Err(error) => reply.error(file_errno(&error)),
+            }
+            return;
+        }
 
         let Some(path) = self.inode_path(ino) else {
             reply.error(Errno::ENOENT);
@@ -728,7 +1050,7 @@ impl Filesystem for CrabFs {
             }
         }
 
-        match self.exact_getattr(&path) {
+        match self.engine.getattr(&path) {
             Ok((mode, size, node_type, mt)) => {
                 let attr = self.make_attr(ino, mode, size, node_type, mt);
                 reply.attr(&ENTRY_TTL, &attr);
@@ -739,6 +1061,7 @@ impl Filesystem for CrabFs {
 
     fn opendir(&self, _req: &Request, ino: INodeNo, _flags: OpenFlags, reply: ReplyOpen) {
         let ino = u64::from(ino);
+        let _namespace = self.rt.block_on(self.namespace.read());
 
         let Some(path) = self.inode_path(ino) else {
             reply.error(Errno::ENOENT);
@@ -901,53 +1224,46 @@ impl Filesystem for CrabFs {
 
     fn open(&self, _req: &Request, ino: INodeNo, flags: OpenFlags, reply: ReplyOpen) {
         let ino = u64::from(ino);
-
-        let Some(path) = self.inode_path(ino) else {
-            reply.error(Errno::ENOENT);
+        let readable = open_allows_read(flags);
+        let writable = open_allows_write(flags);
+        if ino == GITFILE_INO && writable {
+            reply.error(Errno::EROFS);
             return;
-        };
-        if open_requests_truncate(flags) {
-            match self.rt.block_on(self.engine.truncate(&path, 0)) {
-                Ok(()) => {}
-                Err(CrabError::Forbidden { .. }) => {
-                    reply.error(Errno::EROFS);
-                    return;
-                }
-                Err(CrabError::NotFound { .. }) => {
-                    reply.error(Errno::ENOENT);
-                    return;
-                }
-                Err(e) => {
-                    warn!(path = %path, error = %e, "open truncate failed");
-                    reply.error(Errno::EIO);
-                    return;
-                }
-            }
         }
-        let read_lease = if ino == GITFILE_INO || !open_allows_read(flags) {
-            None
-        } else {
-            match self.engine.open_read(&path) {
-                Ok(lease) => Some(lease),
-                Err(CrabError::NotFound { .. }) => {
-                    reply.error(Errno::ENOENT);
-                    return;
-                }
-                Err(e) => {
-                    warn!(path = %path, error = %e, "open read lease failed");
-                    reply.error(Errno::EIO);
-                    return;
+        let opened = self.rt.block_on(async {
+            let _namespace = self.namespace.read().await;
+            let pin = self.pin_file(ino)?;
+            if ino != GITFILE_INO {
+                self.prepare_file(&pin, readable, writable).await?;
+                if open_requests_truncate(flags) {
+                    let mut state = pin.node.file.lock().await;
+                    let file = state
+                        .as_mut()
+                        .ok_or_else(|| CrabError::Internal("open inode has no content".into()))?;
+                    let path = self.linked_path(&pin, file)?;
+                    self.engine
+                        .truncate_open_file(file, path.as_deref(), 0)
+                        .await?;
                 }
             }
-        };
-        let fh = {
-            let Ok(mut handles) = self.handles.write() else {
-                reply.error(Errno::EIO);
-                return;
-            };
-            handles.alloc_file(path, read_lease)
-        };
-        reply.opened(FuseFileHandle(fh), fopen_flags(flags));
+            Ok::<_, CrabError>(pin)
+        });
+        match opened {
+            Ok(pin) => {
+                let fh = self
+                    .handles
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .alloc_file(pin, readable, writable);
+                let cache = if self.engine.overlay().is_some() {
+                    FopenFlags::FOPEN_DIRECT_IO
+                } else {
+                    fopen_flags(flags)
+                };
+                reply.opened(FuseFileHandle(fh), cache);
+            }
+            Err(error) => reply.error(file_errno(&error)),
+        }
     }
 
     fn read(
@@ -964,6 +1280,15 @@ impl Filesystem for CrabFs {
         let ino = u64::from(ino);
         let fh = u64::from(fh);
 
+        let Some(handle) = self.file_handle(ino, fh) else {
+            reply.error(Errno::EBADF);
+            return;
+        };
+        if !handle.readable {
+            reply.error(Errno::EBADF);
+            return;
+        }
+
         if ino == GITFILE_INO {
             let content = &self.gitfile_content;
             let start = (offset as usize).min(content.len());
@@ -972,45 +1297,22 @@ impl Filesystem for CrabFs {
             return;
         }
 
-        let Some(handle) = self.file_handle(fh) else {
-            reply.error(Errno::EBADF);
-            return;
-        };
-        let path = handle.path;
-
         let read = self.rt.block_on(async {
-            let lease = match handle.read_lease {
-                Some(lease) => lease,
-                None => self.engine.open_read(&path)?,
-            };
-            match self.engine.read_at(&lease, offset, size).await {
-                Ok(data) => Ok((data, None)),
-                Err(error) if VfsEngine::is_stale_read_lease_error(&error) => {
-                    let retry_lease = self.engine.open_read(&path)?;
-                    let data = self.engine.read_at(&retry_lease, offset, size).await?;
-                    Ok((data, Some(retry_lease)))
-                }
-                Err(error) => Err(error),
-            }
+            let state = handle.pin.node.file.lock().await;
+            let file = state
+                .as_ref()
+                .ok_or_else(|| CrabError::Internal("open inode has no content".into()))?;
+            self.engine.read_open_file(file, offset, size).await
         });
         match read {
-            Ok((data, replacement_lease)) => {
-                if let Some(lease) = replacement_lease {
-                    self.replace_file_read_lease(fh, lease);
-                }
-                trace!(path = %path, offset, size, bytes = data.len(), "fuse read ok");
-                reply.data(&data);
-            }
-            Err(CrabError::NotFound { .. }) => reply.error(Errno::ENOENT),
-            Err(e) => {
-                warn!(path = %path, error = %e, "read failed");
-                reply.error(Errno::EIO);
-            }
+            Ok(bytes) => reply.data(&bytes),
+            Err(error) => reply.error(file_errno(&error)),
         }
     }
 
     fn readlink(&self, _req: &Request, ino: INodeNo, reply: ReplyData) {
         let ino = u64::from(ino);
+        let _namespace = self.rt.block_on(self.namespace.read());
 
         let Some(path) = self.inode_path(ino) else {
             reply.error(Errno::ENOENT);
@@ -1059,13 +1361,17 @@ impl Filesystem for CrabFs {
     fn release(
         &self,
         _req: &Request,
-        _ino: INodeNo,
+        ino: INodeNo,
         fh: FuseFileHandle,
         _flags: OpenFlags,
         _lock_owner: Option<LockOwner>,
         _flush: bool,
         reply: ReplyEmpty,
     ) {
+        if self.file_handle(u64::from(ino), u64::from(fh)).is_none() {
+            reply.error(Errno::EBADF);
+            return;
+        }
         if let Ok(mut handles) = self.handles.write() {
             handles.release_file(u64::from(fh));
         }
@@ -1075,7 +1381,7 @@ impl Filesystem for CrabFs {
     fn write(
         &self,
         _req: &Request,
-        _ino: INodeNo,
+        ino: INodeNo,
         fh: FuseFileHandle,
         offset: u64,
         data: &[u8],
@@ -1084,22 +1390,33 @@ impl Filesystem for CrabFs {
         _lock_owner: Option<LockOwner>,
         reply: ReplyWrite,
     ) {
+        // Control quiescence must include callbacks waiting for inode ownership,
+        // before they reach the engine's mutation gate.
+        let _writeback = self.rt.block_on(self.engine.begin_native_writeback());
         let fh = u64::from(fh);
 
-        let Some(path) = self.handle_path(fh) else {
+        let Some(handle) = self.file_handle(u64::from(ino), fh) else {
             reply.error(Errno::EBADF);
             return;
         };
-        match self.rt.block_on(self.engine.write(&path, offset, data)) {
-            Ok(n) => {
-                self.clear_file_read_lease(fh);
-                reply.written(n as u32);
-            }
-            Err(CrabError::Forbidden { .. }) => reply.error(Errno::EROFS),
-            Err(e) => {
-                warn!(path = %path, error = %e, "write failed");
-                reply.error(Errno::EIO);
-            }
+        if !handle.writable {
+            reply.error(Errno::EBADF);
+            return;
+        }
+        let written = self.rt.block_on(async {
+            let _namespace = self.namespace.read().await;
+            let mut state = handle.pin.node.file.lock().await;
+            let file = state
+                .as_mut()
+                .ok_or_else(|| CrabError::Internal("open inode has no content".into()))?;
+            let path = self.linked_path(&handle.pin, file)?;
+            self.engine
+                .write_open_file(file, path.as_deref(), offset, data)
+                .await
+        });
+        match written {
+            Ok(size) => reply.written(size as u32),
+            Err(error) => reply.error(file_errno(&error)),
         }
     }
 
@@ -1114,44 +1431,40 @@ impl Filesystem for CrabFs {
         reply: ReplyCreate,
     ) {
         let parent = u64::from(parent);
-
-        let Some(child_path) = self.child_path(parent, name) else {
-            reply.error(Errno::ENOENT);
-            return;
-        };
-        match self.rt.block_on(self.engine.create(&child_path, mode)) {
-            Ok(_entry) => {
-                let arc_path: Arc<str> = Arc::from(child_path.as_str());
-                let ino = {
-                    let Ok(mut inodes) = self.inodes.write() else {
-                        reply.error(Errno::EIO);
-                        return;
-                    };
-                    inodes.get_or_alloc(&child_path, NodeType::File)
-                };
-                let read_lease = if raw_open_flags_allow_read(flags) {
-                    match self.engine.open_read(&child_path) {
-                        Ok(lease) => Some(lease),
-                        Err(error) => {
-                            warn!(
-                                path = %child_path,
-                                error = %error,
-                                "create read lease failed"
-                            );
-                            None
-                        }
-                    }
-                } else {
-                    None
-                };
-                let fh = {
-                    let Ok(mut handles) = self.handles.write() else {
-                        reply.error(Errno::EIO);
-                        return;
-                    };
-                    handles.alloc_file(arc_path, read_lease)
-                };
-                let attr = self.make_attr(ino, mode | 0o100_000, 0, NodeType::File, now_unix());
+        let readable = raw_open_flags_allow_read(flags);
+        let writable = open_allows_write(OpenFlags(flags));
+        let created = self.rt.block_on(async {
+            let _namespace = self.namespace.write().await;
+            let child_path = self
+                .child_path(parent, name)
+                .ok_or_else(|| std::io::Error::from_raw_os_error(libc::ENOENT))?;
+            let entry = self.engine.create(&child_path, mode).await?;
+            let ino = {
+                let mut inodes = self
+                    .inodes
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner);
+                inodes.detach_path(&child_path);
+                inodes.get_or_alloc(&child_path, NodeType::File)
+            };
+            let pin = self.pin_file(ino)?;
+            self.prepare_file(&pin, readable, writable).await?;
+            Ok::<_, CrabError>((ino, pin, entry))
+        });
+        match created {
+            Ok((ino, pin, entry)) => {
+                let fh = self
+                    .handles
+                    .write()
+                    .unwrap_or_else(std::sync::PoisonError::into_inner)
+                    .alloc_file(pin, readable, writable);
+                let attr = self.make_attr(
+                    ino,
+                    entry.mode,
+                    entry.size,
+                    NodeType::File,
+                    entry.mtime_ns / 1_000_000_000,
+                );
                 reply.created(
                     &ENTRY_TTL,
                     &attr,
@@ -1160,28 +1473,27 @@ impl Filesystem for CrabFs {
                     FopenFlags::FOPEN_DIRECT_IO,
                 );
             }
-            Err(CrabError::Forbidden { .. }) => reply.error(Errno::EROFS),
-            Err(e) => {
-                warn!(error = %e, "create failed");
-                reply.error(Errno::EIO);
-            }
+            Err(error) => reply.error(file_errno(&error)),
         }
     }
 
     fn unlink(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
         let parent = u64::from(parent);
-
-        let Some(child_path) = self.child_path(parent, name) else {
-            reply.error(Errno::ENOENT);
-            return;
-        };
-        match self.rt.block_on(self.engine.unlink(&child_path)) {
+        let removed = self.rt.block_on(async {
+            let _namespace = self.namespace.write().await;
+            let child_path = self
+                .child_path(parent, name)
+                .ok_or_else(|| std::io::Error::from_raw_os_error(libc::ENOENT))?;
+            self.engine.unlink(&child_path).await?;
+            self.inodes
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .detach_path(&child_path);
+            Ok::<_, CrabError>(())
+        });
+        match removed {
             Ok(()) => reply.ok(),
-            Err(CrabError::Forbidden { .. }) => reply.error(Errno::EROFS),
-            Err(e) => {
-                warn!(path = %child_path, error = %e, "unlink failed");
-                reply.error(Errno::EIO);
-            }
+            Err(error) => reply.error(file_errno(&error)),
         }
     }
 
@@ -1195,28 +1507,25 @@ impl Filesystem for CrabFs {
         reply: ReplyEntry,
     ) {
         let parent = u64::from(parent);
-
-        let Some(child_path) = self.child_path(parent, name) else {
-            reply.error(Errno::ENOENT);
-            return;
-        };
-        match self.rt.block_on(self.engine.mkdir(&child_path, mode)) {
-            Ok(()) => {
-                let ino = {
-                    let Ok(mut inodes) = self.inodes.write() else {
-                        reply.error(Errno::EIO);
-                        return;
-                    };
-                    inodes.get_or_alloc(&child_path, NodeType::Dir)
-                };
+        let created = self.rt.block_on(async {
+            let _namespace = self.namespace.write().await;
+            let child_path = self
+                .child_path(parent, name)
+                .ok_or_else(|| std::io::Error::from_raw_os_error(libc::ENOENT))?;
+            self.engine.mkdir(&child_path, mode).await?;
+            let mut inodes = self
+                .inodes
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            inodes.detach_path(&child_path);
+            Ok::<_, CrabError>(inodes.get_or_alloc(&child_path, NodeType::Dir))
+        });
+        match created {
+            Ok(ino) => {
                 let attr = self.make_attr(ino, mode | 0o040_000, 4096, NodeType::Dir, now_unix());
                 reply.entry(&ENTRY_TTL, &attr, Generation(0));
             }
-            Err(CrabError::Forbidden { .. }) => reply.error(Errno::EROFS),
-            Err(e) => {
-                warn!(error = %e, "mkdir failed");
-                reply.error(Errno::EIO);
-            }
+            Err(error) => reply.error(file_errno(&error)),
         }
     }
 
@@ -1230,64 +1539,62 @@ impl Filesystem for CrabFs {
     ) {
         let parent = u64::from(parent);
 
-        let Some(name_str) = name.to_str() else {
-            reply.error(Errno::ENOENT);
-            return;
-        };
-        let Some(child_path) = self.child_path(parent, OsStr::new(name_str)) else {
-            reply.error(Errno::ENOENT);
-            return;
-        };
         let Some(target) = link.to_str() else {
             reply.error(Errno::ENOENT);
             return;
         };
-        match self
-            .rt
-            .block_on(self.engine.create_symlink(&child_path, target, 0o777))
-        {
-            Ok(entry) => {
-                let ino = {
-                    let Ok(mut inodes) = self.inodes.write() else {
-                        reply.error(Errno::EIO);
-                        return;
-                    };
-                    inodes.get_or_alloc(&child_path, NodeType::Symlink)
-                };
+        let created = self.rt.block_on(async {
+            let _namespace = self.namespace.write().await;
+            let child_path = self
+                .child_path(parent, name)
+                .ok_or_else(|| std::io::Error::from_raw_os_error(libc::ENOENT))?;
+            let entry = self
+                .engine
+                .create_symlink(&child_path, target, 0o777)
+                .await?;
+            let mut inodes = self
+                .inodes
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+            inodes.detach_path(&child_path);
+            let ino = inodes.get_or_alloc(&child_path, NodeType::Symlink);
+            Ok::<_, CrabError>((ino, entry))
+        });
+        match created {
+            Ok((ino, entry)) => {
                 let attr = self.make_attr(
                     ino,
                     entry.mode,
                     entry.size,
                     NodeType::Symlink,
-                    entry.mtime_ns,
+                    entry.mtime_ns / 1_000_000_000,
                 );
                 reply.entry(&ENTRY_TTL, &attr, Generation(0));
             }
-            Err(CrabError::Forbidden { .. }) => reply.error(Errno::EROFS),
-            Err(e) => {
-                warn!(error = %e, "symlink failed");
-                reply.error(Errno::EIO);
-            }
+            Err(error) => reply.error(file_errno(&error)),
         }
     }
 
     fn rmdir(&self, _req: &Request, parent: INodeNo, name: &OsStr, reply: ReplyEmpty) {
         let parent = u64::from(parent);
-
-        let Some(child_path) = self.child_path(parent, name) else {
-            reply.error(Errno::ENOENT);
-            return;
-        };
-        match self.rt.block_on(self.engine.rmdir(&child_path)) {
+        let removed = self.rt.block_on(async {
+            let _namespace = self.namespace.write().await;
+            let child_path = self
+                .child_path(parent, name)
+                .ok_or_else(|| std::io::Error::from_raw_os_error(libc::ENOENT))?;
+            self.engine.rmdir(&child_path).await?;
+            self.inodes
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .detach_path(&child_path);
+            Ok::<_, CrabError>(())
+        });
+        match removed {
             Ok(()) => reply.ok(),
             Err(CrabError::Forbidden { path }) if path.starts_with("directory not empty:") => {
                 reply.error(Errno::ENOTEMPTY);
             }
-            Err(CrabError::Forbidden { .. }) => reply.error(Errno::EROFS),
-            Err(e) => {
-                warn!(path = %child_path, error = %e, "rmdir failed");
-                reply.error(Errno::EIO);
-            }
+            Err(error) => reply.error(file_errno(&error)),
         }
     }
 
@@ -1298,75 +1605,65 @@ impl Filesystem for CrabFs {
         name: &OsStr,
         newparent: INodeNo,
         newname: &OsStr,
-        _flags: RenameFlags,
+        flags: RenameFlags,
         reply: ReplyEmpty,
     ) {
         let parent = u64::from(parent);
         let newparent = u64::from(newparent);
-
-        let Some(old_path) = self.child_path(parent, name) else {
-            reply.error(Errno::ENOENT);
-            return;
-        };
-        let Some(new_path) = self.child_path(newparent, newname) else {
-            reply.error(Errno::ENOENT);
-            return;
-        };
-        match self.rt.block_on(self.engine.rename(&old_path, &new_path)) {
-            Ok(()) => {
-                if let Ok(mut inodes) = self.inodes.write() {
-                    inodes.rename_path(&old_path, &new_path);
-                }
-                reply.ok();
+        let replace = match rename_replaces(flags) {
+            Ok(replace) => replace,
+            Err(error) => {
+                reply.error(error);
+                return;
             }
-            Err(CrabError::Forbidden { .. }) => reply.error(Errno::EROFS),
-            Err(e) => {
-                warn!(old_path, new_path, error = %e, "rename failed");
-                reply.error(Errno::EIO);
+        };
+        let renamed = self.rt.block_on(async {
+            let _namespace = self.namespace.write().await;
+            let old_path = self
+                .child_path(parent, name)
+                .ok_or_else(|| std::io::Error::from_raw_os_error(libc::ENOENT))?;
+            let new_path = self
+                .child_path(newparent, newname)
+                .ok_or_else(|| std::io::Error::from_raw_os_error(libc::ENOENT))?;
+            if replace {
+                self.engine.rename(&old_path, &new_path).await?;
+            } else {
+                self.engine.rename_no_replace(&old_path, &new_path).await?;
             }
+            self.inodes
+                .write()
+                .unwrap_or_else(std::sync::PoisonError::into_inner)
+                .rename_path(&old_path, &new_path);
+            Ok::<_, CrabError>(())
+        });
+        match renamed {
+            Ok(()) => reply.ok(),
+            Err(error) => reply.error(file_errno(&error)),
         }
     }
 
     fn flush(
         &self,
         _req: &Request,
-        _ino: INodeNo,
+        ino: INodeNo,
         fh: FuseFileHandle,
         _lock_owner: LockOwner,
         reply: ReplyEmpty,
     ) {
         let fh = u64::from(fh);
 
-        // Best-effort: sync the overlay backing file if one is open.
-        if let Some(ref ov) = *self.engine.overlay()
-            && let Some(path) = self.handle_path(fh)
-            && let Some(backing) = ov.get_backing_path(&path)
-            && let Ok(file) = std::fs::File::open(&backing)
-        {
-            let _ = file.sync_all();
-        }
-        reply.ok();
+        self.reply_sync(u64::from(ino), fh, false, reply);
     }
 
     fn fsync(
         &self,
         _req: &Request,
-        _ino: INodeNo,
+        ino: INodeNo,
         fh: FuseFileHandle,
-        _datasync: bool,
+        datasync: bool,
         reply: ReplyEmpty,
     ) {
-        let fh = u64::from(fh);
-
-        // Best-effort: sync the overlay backing file if one is open.
-        if let Some(ref ov) = *self.engine.overlay()
-            && let Some(path) = self.handle_path(fh)
-            && let Some(backing) = ov.get_backing_path(&path)
-            && let Ok(file) = std::fs::File::open(&backing)
-        {
-            let _ = file.sync_all();
-        }
-        reply.ok();
+        self.reply_sync(u64::from(ino), u64::from(fh), datasync, reply);
     }
 
     fn statfs(&self, _req: &Request, _ino: INodeNo, reply: ReplyStatfs) {
@@ -1426,6 +1723,37 @@ fn fopen_flags(flags: OpenFlags) -> FopenFlags {
     }
 }
 
+fn file_errno(error: &CrabError) -> Errno {
+    match error {
+        CrabError::NotFound { .. } => Errno::ENOENT,
+        CrabError::Forbidden { .. } => Errno::EROFS,
+        CrabError::Io(error) if error.kind() == std::io::ErrorKind::AlreadyExists => Errno::EEXIST,
+        CrabError::Io(error) => error.raw_os_error().map_or(Errno::EIO, Errno::from_i32),
+        _ => Errno::EIO,
+    }
+}
+
+fn rename_replaces(flags: RenameFlags) -> Result<bool, Errno> {
+    #[cfg(target_os = "linux")]
+    if flags == RenameFlags::RENAME_NOREPLACE {
+        return Ok(false);
+    }
+    if flags.is_empty() {
+        Ok(true)
+    } else {
+        // Exchange/whiteout require different namespace transactions. Treating
+        // either as ordinary rename would silently remove a destination inode.
+        Err(Errno::EINVAL)
+    }
+}
+
+fn open_allows_write(flags: OpenFlags) -> bool {
+    matches!(
+        flags.acc_mode(),
+        OpenAccMode::O_WRONLY | OpenAccMode::O_RDWR
+    )
+}
+
 fn open_allows_read(flags: OpenFlags) -> bool {
     matches!(
         flags.acc_mode(),
@@ -1450,14 +1778,60 @@ fn open_requests_truncate(flags: OpenFlags) -> bool {
 #[allow(clippy::unwrap_used, reason = "test assertions")]
 mod tests {
     use super::*;
-    use crate::engine::ReadSourceKey;
 
-    fn test_lease(path: &str) -> VfsReadLease {
-        VfsReadLease::for_test(ReadSourceKey::BaseEmpty {
-            generation: 1,
-            overlay_version: 0,
-            path: path.to_owned(),
-        })
+    #[test]
+    fn final_inflight_handle_releases_forgotten_inode() {
+        let inodes = Arc::new(std::sync::RwLock::new(InodeTable::new()));
+        let (ino, node) = {
+            let mut table = inodes.write().unwrap();
+            let ino = table.get_or_alloc("held", NodeType::File);
+            (ino, table.open_node(ino).unwrap())
+        };
+        let mut handles = HandleTable::new();
+        let fh = handles.alloc_file(
+            Arc::new(OpenNodePin {
+                ino,
+                node,
+                inodes: inodes.clone(),
+            }),
+            true,
+            false,
+        );
+        let inflight = handles.get_file(ino, fh).unwrap();
+        inodes.write().unwrap().forget(ino, 1);
+        handles.release_file(fh);
+        assert!(inodes.read().unwrap().by_ino.contains_key(&ino));
+        drop(inflight);
+        assert!(!inodes.read().unwrap().by_ino.contains_key(&ino));
+    }
+
+    #[test]
+    fn forgetting_replaced_inode_preserves_replacement_mapping() {
+        let mut inodes = InodeTable::new();
+        let old = inodes.get_or_alloc("same", NodeType::File);
+        let node = inodes.open_node(old).unwrap();
+        inodes.detach_path("same");
+        let new = inodes.get_or_alloc("same", NodeType::File);
+        inodes.forget(old, 1);
+        inodes.release_open(old);
+        assert_eq!(
+            (node.path(), inodes.ino_for_path("same")),
+            (None, Some(new))
+        );
+    }
+
+    #[test]
+    fn handle_is_valid_only_for_its_open_inode() {
+        let inodes = Arc::new(std::sync::RwLock::new(InodeTable::new()));
+        let (ino, node) = {
+            let mut table = inodes.write().unwrap();
+            let ino = table.get_or_alloc("file", NodeType::File);
+            (ino, table.open_node(ino).unwrap())
+        };
+        let mut handles = HandleTable::new();
+        let fh = handles.alloc_file(Arc::new(OpenNodePin { ino, node, inodes }), true, false);
+        assert!(handles.get_file(ino + 1, fh).is_none());
+        assert!(handles.get_file(ino, fh).is_some());
     }
 
     #[test]
@@ -1507,29 +1881,6 @@ mod tests {
         assert_eq!(target.parent.0, dir);
         assert_eq!(target.name, OsString::from("missing.bin"));
         assert!(target.inode.is_none());
-    }
-
-    #[test]
-    fn file_handles_store_replace_and_clear_read_leases() {
-        let mut handles = HandleTable::new();
-        let original = test_lease("model.bin");
-        let fh = handles.alloc_file(Arc::from("model.bin"), Some(original.clone()));
-
-        let opened = handles.get_file(fh).unwrap();
-        assert_eq!(opened.path.as_ref(), "model.bin");
-        assert_eq!(opened.read_lease.as_ref().unwrap().key(), original.key());
-
-        let replacement = test_lease("model-after-write.bin");
-        handles.replace_file_read_lease(fh, replacement.clone());
-        let replaced = handles.get_file(fh).unwrap();
-        assert_eq!(
-            replaced.read_lease.as_ref().unwrap().key(),
-            replacement.key()
-        );
-
-        handles.clear_file_read_lease(fh);
-        let cleared = handles.get_file(fh).unwrap();
-        assert!(cleared.read_lease.is_none());
     }
 
     #[test]

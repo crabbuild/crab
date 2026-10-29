@@ -66,6 +66,13 @@ Trace one path: `crab/src/cmd/add.rs` (`close_staging_before_indexing`) →
   callers establish remote commit; the guard retains deferred committed journals
   and preserves unpublished leases on cancellation. Read `src/push_snapshot.rs`
   and the capsule consumer before changing this boundary.
+- Open unpublished files may transfer a read snapshot into `StagedFilePin`.
+  Its ready marker's OS lock retains recipe ownership without global staging
+  admission or publication authority. Maintenance preserves live pins; reads
+  reacquire shared admission before touching payloads. Dropping a pin removes
+  metadata only; maintenance owns physical reclamation. `list_inflight` includes
+  both operation markers and ready pins, but ready pins do not block retirement.
+  Sources: `src/file_reader.rs`, `src/push_snapshot.rs`, `src/lib.rs`.
 
 ## Features and platform
 

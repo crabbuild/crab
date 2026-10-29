@@ -1,27 +1,24 @@
 # crab-write
 
-Shared Git publication mechanics for Crab. This crate owns catalog publication,
-ref-journal commit and compaction extracted from CLI push, reader repair and generation-owner
-paths. Those CLI callers use these implementations; HTTP receive can compose it without depending
-on the CLI or another server.
+Shared Capsule publication and captured browse-index mechanics for Crab.
+Product callers own authorization, ref leases, dependency proof and GC fencing;
+this crate owns conditional publication, recovery and immutable index mechanics.
 
 ## Publication flow
 
 ```text
-commit_edits                 durable journal refs; catalog may still lag
-     ↓
-make_readable                elected generation owner, with caller GC fences
-     ├── compact_for_owner   fold journal into the manifest
-     ├── maintain_catalog    publish the generation-bound object catalog
-     └── visibility check    recheck the manifest and active journal
-     ↓
-Some(manifest): ready        None: capture fresh state and try another pass
+caller: authenticate, capture Capsule authority, retain leases and GC fences
+  -> capsule_protocol::prepare_publication
+  -> capsule_protocol::publish_prepared: resolve conditional ref commit
+  -> separate captured browse/checkpoint maintenance under renewed ownership
 ```
 
 A commit error may be uncertain; resolve that outcome before proceeding or
-reporting rejection. Read readiness is a separate result from ref durability.
+reporting rejection. Derived read readiness is separate from ref durability.
+Stored manifest/ref-journal generation maintenance and live remote-Git opening
+have been removed. Retained journal mechanics are separate retirement
+work; they do not provide a v1 fallback to Capsule product callers.
 
-Protocol v2 uses `capsule_protocol::publish` instead of the v1 journal.
 Callers with cancellation-sensitive immutable preparation can use
 `prepare_publication` then `publish_prepared`, checking their lease token between
 them. Publication must be awaited through outcome resolution, even if renewal
@@ -81,7 +78,7 @@ validation and protection remain caller responsibilities; the writer retains
 the ref-authority epoch, conditional publication and uncertain-outcome checks.
 It does not rewrite source packs or publish an embedded checkpoint.
 
-## Initialization
+## Captured browse maintenance
 
 `generation::browse::build_graph` consumes a pinned, origin-backed capsule Git
 reader and exact snapshot. It persists a reusable attribution prefix before the
@@ -91,8 +88,7 @@ every 32 commits. Completion replaces the partial record through the returned
 CAS token; cached readers observe both phases without a ref change.
 
 Graph construction writes paged descriptor version 3, reuses unchanged paged layers
-and performs bounded-directory carries. Released manifest maintenance retains
-the eager version-1 encoding. The capsule owner rebuilds an eager browse graph
+and performs bounded-directory carries. The Capsule owner rebuilds an eager browse graph
 even when its state digest is otherwise current, preserving reusable attribution
 through the existing checkpoint boundary.
 
@@ -102,73 +98,21 @@ descriptor can become readiness. Graph discovery
 drains a separate bounded operation per batch.
 
 `generation::with_generation_owner` shares renewed owner election and
-global/repository GC fences between v1 maintenance and the v2 orchestrator;
+global/repository GC fences for the Capsule browse orchestrator;
 all acquired leases are released on returned failure or cancellation. The
 orchestrator rechecks capsule activity and conditionally publishes the small
 derived record. None of this is a foreground ref-publication prerequisite.
+Generation maintenance never reads a stored v1 manifest or writes a legacy
+generation CAS.
 
-`initialize::initialize_repository` owns canonical empty-repository creation for
-the CLI and HTTP server. It creates the layout only for an empty repository prefix,
-conditionally publishes the generation-zero manifest, and adopts concurrent or
-previous initialization after validating the persisted canonical roots.
+## Initialization
 
-## Catalog publication
-
-`catalog::publish_inventory` accepts a caller-owned locator writer, a committed
-inventory/coverage anchor and optional validated local index evidence. Missing
-evidence is read from storage: the pack trailer, bounded Git index/reverse index,
-and optional kind sidecar. The public publication path does not download full
-packs, run Git, create an object database or clone a repository.
-
-Current-pack rows are written before obsolete slots are swept. A sweep that
-changes the object universe requires rebuilding and replaying the dense ordinal
-catalog; repacks retaining every object avoid that rebuild. A caller may defer
-rebuild work to the generation owner. Coverage advances only after the current
-manifest still matches the supplied generation and pack-index hash.
-
-`LocatorPackEvidence::from_local` validates immutable local index sidecars before
-they enter publication. Their files must remain unchanged until the call ends.
-The remote path validates the same checksums/counts and uses the same writer.
-Storage, metadata, Git, worker and file errors retain their sources.
-
-## Generation maintenance
-
-`generation::maintain_catalog` owns the catalog lease, renewal, planning reader,
-writer, checkpoint and close lifecycle. Supply a captured manifest and its complete
-pack inventory. The function checks the generation/index/visibility identity before
-planning and again after closing the writer. A superseded sample returns `None`;
-a current sample returns advancement and catalog/sweep statistics.
-
-The CLI owner reports superseded samples before writing a generation receipt or running later
-maintenance. Its continuous loop retries immediately; a one-shot run reports the
-superseded sample and exits.
-
-After ref-journal compaction, the CLI's continuous
-owner instead requires a clean elapsed quiet window of at least one polling interval
-and five seconds before it starts repository-sized derived maintenance. Once that
-work is complete, unchanged manifest identity uses
-the last verified maintenance snapshot until the periodic revalidation.
-
-The shared anchor parser also serves native push, repack and history recovery; malformed index
-hashes retain their source errors.
-
-`generation::ensure_catalog_readable` owns generation election and both GC-writer
-fences while compacting committed ref-journal entries and advancing exact-object
-catalog coverage. It is the bounded-cadence path for continuously active services;
-it deliberately omits commit-graph traversal. `generation::ensure_readable` uses
-the same lifecycle and additionally builds the commit graph for a quiet generation.
-
-`generation::maintain_commit_graph` derives a missing generation-bound split
-commit graph through bounded `crab-remote-git` batches after catalog readiness.
-It reuses the preceding generation's validated graph when available, uploads
-immutable graph objects first and attaches the descriptor only if the manifest's
-Git identity is still current. It does not materialize packs or create a checkout.
-
-The lifecycle returns a `Send` future suitable for an owned Tokio task. Metadata
-point lookups capture owned keys before constructing their concurrent batch, so
-borrowed iterator entries do not make publication unspawnable. This retains the
-existing concurrency bound and request ordering; the extra key storage is linear
-in the caller's bounded batch, with 21 bytes per key.
+`capsule_protocol::initialize` creates the unborn Capsule root for CLI, SDK,
+gateway and view-service callers. Existing valid roots are adopted without
+changing HEAD. A nonempty prefix without a Capsule root is rejected unchanged;
+initialization does not upgrade stored pack-v1 repositories in place. The old
+manifest-only repository initializer is removed. The unused initial-manifest and mutable inventory publishers are removed.
+Retained journal mechanics remain separate retirement work.
 
 ## Journal compaction
 
@@ -193,7 +137,7 @@ transactions that were already committed.
 
 ## Journal commit
 
-`journal::commit_edits` is the CLI's shared journal commit path. It validates a
+`journal::commit_edits` is a retained journal commit primitive. It validates a
 complete batch and checks each expected old OID against a caller-supplied snapshot
 before writing anything. It then reads per-ref causal parents and uses the metadata
 journal's prepared heads and single atomic active marker.
@@ -245,14 +189,7 @@ Callers must retain and renew their edited-ref leases throughout this work.
 
 ## Caller responsibilities
 
-For the lower-level `catalog::publish_inventory`, the caller must supply the
-complete inventory for its anchor and hold the locator writer lease and required
-GC fences. It owns cancellation, lease renewal,
-writer close on every outcome, and any checkpoint needed after publication. The
-shared function neither changes refs nor closes the supplied writer. Keep the
-writer alive while awaiting the operation; cancellation must still close it.
-
-Await journal and catalog lifecycle operations to completion; do not abort their task or drop their
+Await journal lifecycle operations to completion; do not abort their task or drop their
 future to enforce a deadline. They own stateful writes and lease cleanup. The
 caller still owns the generation-owner election and any required GC fences.
 
@@ -282,10 +219,9 @@ push can acknowledge a fully readable generation.
 
 | Contract | Executable evidence |
 | --- | --- |
-| Invalid local evidence and remote-only byte reconstruction | [Catalog tests](tests/catalog.rs) |
-| Catalog close/release, cancellation, superseded generations, read readiness | [Generation tests](tests/generation.rs) |
+| Renewed owner election and GC admission release after error/cancellation | [Generation tests](tests/generation.rs) |
 | Atomic batches, namespace conflicts, holder-safe cleanup, failed compaction and retry | [Journal tests](tests/journal.rs) |
-| Canonical initialization and adoption | [Initialization tests](src/initialize.rs) |
+| Capsule initialization, publication and recovery | [Capsule protocol tests](src/capsule_protocol.rs) |
 | Original error retained when cleanup also fails | [Error precedence test](src/lib.rs) |
 
 Run these focused tests from the repository root. Replace `crab-write-dev` with
@@ -294,7 +230,7 @@ following root `AGENTS.md`:
 
 ```sh
 CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-write-dev \
-  cargo test -p crab-write --locked --lib --test catalog --test generation --test journal
+  cargo test -p crab-write --locked --lib --test generation --test journal
 CARGO_TARGET_DIR=/Volumes/Workspace/crabbuild-target/crab-write-dev \
   cargo clippy -p crab-write --locked --all-targets -- -D warnings
 ```

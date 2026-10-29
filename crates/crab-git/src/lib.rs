@@ -59,3 +59,18 @@ pub use walk::{
     LfsPointerBlob, PointerBlob, ReachableSet, WalkError, walk_reachable, walk_reachable_bounded,
     walk_reachable_by_ref, walk_reachable_by_ref_bounded,
 };
+
+/// Create a Git command for physical objects and their unmodified ancestry.
+///
+/// Requires an explicit Git directory. Local replacements, grafts and shallow
+/// boundaries cannot change this view; callers own transport and process lifetime.
+#[must_use]
+pub fn raw_object_command(git_dir: &std::path::Path) -> std::process::Command {
+    let mut command = std::process::Command::new("git");
+    command
+        .args(["--no-replace-objects", "--git-dir"])
+        .arg(git_dir)
+        .args(["--shallow-file", ""])
+        .env("GIT_GRAFT_FILE", "");
+    command
+}

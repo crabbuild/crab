@@ -14,6 +14,12 @@ capsule metadata capture and Git repository views without the hydration/cache
 stack. The SDK's `remote` feature uses that metadata-only path; its `content`
 and `write` features enable hydration.
 
+Hydration can carry a caller-registered retained capture. Its read pin follows
+the shared Xet client through background source tasks, so cancellation cannot
+release remote dependencies while a worker still needs them. Closed or expired
+retention rejects new reconstruction, including warm cache hits; provider failures
+remain typed errors. Capture registration and authorization stay with the caller.
+
 ## Why it exists
 
 Several product surfaces need the same read guarantees: fetch, hydrate, path
@@ -46,6 +52,12 @@ Replica selection reports readiness, generations, fallbacks, and routing
 choices so callers can distinguish an unavailable replica from a corrupt
 object.
 
+Replica readiness requires authenticated Capsule roots and matching captured
+views. A manifest-only Crab pack v1 repository cannot supply readiness authority;
+there is no legacy manifest/index probe. An initialized empty Capsule repository
+remains a valid view. Deep checks verify the external payloads named by its
+captured catalog before selecting the replica.
+
 ### Captured Git views
 
 `capsule_protocol::open_git_view_from_root` captures complete refs and catalog
@@ -59,8 +71,13 @@ cold. Frontier and physical delta dependencies retain their existing admission
 paths. Selected indexes and reconstructed object bytes remain independently
 verified under the operation's cancellation and byte budget.
 Maintenance and writers requiring exact admission sets continue using the
-complete metadata entry point. Checkpoint visibility, catalog and source/ref
-enumeration are still eager; total bounded opening remains unqualified.
+complete metadata entry point. Opening its Git reader reuses checkpoint member
+admission without reading historical pack sidecars. Frontier sidecars retain
+opening admission. Selected historical reads still verify indexes, entry CRCs
+and reconstructed object IDs; explicit physical-index construction and deep
+integrity checks retain complete validation.
+Checkpoint visibility, catalog and source/ref enumeration are still eager;
+total bounded opening remains unqualified.
 
 Selected-ref control reads retain only their bounded in-flight names and return
 `Send` futures for multithreaded callers. They do not fetch capsule payloads.
@@ -102,11 +119,29 @@ metadata's shared file lookup. A lookup loads only its selected file dependency
 closure, preserving the captured publication order and immutable descriptor
 checks. It never substitutes a later catalog or mutable file-index session.
 
+The opt-in `local-staging` feature enables `hydration` and supplies `PointerReader`
+for writable mounts.
+Published files stay on their captured remote catalog. Files outside that
+capture can read retained local recipes, including committed versions not yet
+pushed. Range reads verify selected chunks and coverage; full reconstruction
+also verifies the file hash. Local recipe corruption remains an error, and
+staging admission cannot shadow a file already owned by the captured catalog.
+This does not recapture catalogs during refresh; the mount still owns coherent
+Git/catalog generation transitions and the lifetime of captured roots.
+
+`PointerReader::pin_file` applies that same source selection for open-file
+lifetime. A staged source transfers a recipe pin without retaining staging's
+global shared lock; a captured remote source needs no local pin. The caller
+retains the returned pin until the open file closes or successfully acquires
+native backing. This local ownership does not retain remote objects against GC.
+
 `install_git_packs_with_candidates_from_store` combines a captured view's
 origin-backed packs with verified candidate capsules. Candidates participate
 in the same pack intake limit and external-delta ordering, so protected receive
 can use a paged view without materializing its catalog. The caller binds each
 candidate to the captured root; installation does not grant visibility.
+Resident pack-body intake is admitted for the whole batch before publishing
+packs or maintenance kind sidecars. Exceeding that limit leaves existing files intact.
 Maintenance installation retains each authenticated `.kinds` sidecar beside its
 raw pack so checkpointing can preserve kinds without decoding historical bodies.
 
@@ -156,6 +191,18 @@ Cache write errors remain best-effort and cannot replace valid origin output.
 Cancellation/drop stops pending write attempts. This is not a persistence
 promise when caching is unavailable, over budget, or concurrently evicted,
 nor an aggregate filesystem-latency bound.
+
+`PointerReader` also accepts a resolved local LFS storage directory. Its LFS
+range API uses session-owned verified local sources and the captured
+remote runtime only when opening the local object reports absence. Corruption,
+configuration and I/O errors remain failures. Extensions requiring smudge are
+unsupported. Resolve Git settings outside filesystem callbacks; reads never
+spawn Git. Remote reads share reconstruction buffer/download admission and
+consume canonical verified streams through EOF. Callers supply an
+`LfsReadSession` and drain it after outstanding read futures finish or drop.
+The session retains bounded opened files and block proofs only after complete
+SHA-256/size verification. Later ranges verify covered blocks; replacement
+paths and timestamps cannot authorize cached bytes.
 
 ### Errors and output ownership
 
@@ -390,9 +437,8 @@ without ACKing it. The ordinary authorization, object budget, and complete
 pack plan still run before any pack bytes are sent. Unknown, ambiguous, or
 incomplete chains continue negotiation.
 
-Publication must recheck capsule activity against a freshly loaded root;
-`RemoteGitRepository::is_current` checks the v1 manifest and is not a v2
-freshness check.
+Publication must recheck Capsule activity against freshly loaded root/ref-head
+authority. The removed manifest-ETag API cannot establish this freshness.
 
 `git_repository_from_store` retains the supplied origin before and after the
 first checkpoint, so placement checks and derived-index readers share the
@@ -444,6 +490,22 @@ before publishing pack files. Body and sidecar ranges share one pre-I/O byte
 budget. Its result reports complete visibility only after the downloaded index
 OID union exactly matches the authenticated closure and includes every captured
 ref/peeled tip; metadata alone is not installation proof.
+
+Historical, incremental, and maintenance range reads stream selected pack sections
+into private files and authenticate every section before installation. Sidecars
+remain resident; body memory no longer grows with the total selected pack bytes.
+The existing storage stream bounds large-range transfer buffers separately.
+Source sizes, exact ranges, complete stream EOF, hashes, and the aggregate intake
+budget are still checked. Resident Capsule bodies supplied by a caller retain
+that caller's memory cost.
+
+These reads use storage's streaming retry contract: opening a request is
+retryable; a body failure after delivery fails the operation, drains private
+writes, and permits a fresh caller retry. Large parallel ranges retry their
+complete bounded buffers before delivery. They do not use the collected-range
+signed-download accelerator. Explicit cancellation drains active workers before
+returning. If the installer future is abandoned, its workers retain staging
+until they drain; keep Tokio alive and the destination intact through cleanup.
 
 Duplicate pack bodies are installed once, including repeated members in one compacted run. Native
 installation and remote object reads use metadata's content comparison to reject
@@ -636,3 +698,11 @@ streams the full checkpoint catalog, resolves reachable file bindings from
 that same immutable checkpoint and shares the Git/whole-file/LFS byte proof.
 Proof counts include the encoded bytes of distinct verified shard/xorb bodies;
 logical recipe occurrences and repeated references do not increase that total.
+
+
+### Inspect a captured Capsule repository
+
+`cargo run --locked -p crab-read --example inspect_remote -- <bucket> <prefix> <path>...`
+opens the native Capsule view, reads selected Git paths with bounded operations,
+and drains the owned runtime on success or failure. The example lives with the
+capture owner; crab-remote-git no longer provides a live stored-manifest opener.

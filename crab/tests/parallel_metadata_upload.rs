@@ -1,28 +1,8 @@
-//! Integration tests for Commit 2 of the `crab-push-perf-tier2` spec:
-//! the parallel step-9 shard/file-index PUT loop in
-//! `PushPipeline::upload_shard_and_file_index`.
+//! Bounded concurrent PUT behavior through the shared Store adapter.
 //!
-//! These tests validate the `buffer_unordered(concurrency).try_collect()`
-//! pattern that Commit 2 introduced, using the same `Store::put` entry
-//! point (and therefore the same retry/CAS wrapping) the production path
-//! relies on. The `PushPipeline` itself is not driven end-to-end because
-//! its fatal metadata-PUT path — the subject under test — needs seeded
-//! `shard_results` / `file_shard_index` / `pointers` mutexes that are
-//! private to the `push` module. Exposing those would add permanent API
-//! surface for a narrow test benefit; validating the pattern against a
-//! latency/error-injecting `ObjectStore` is strictly equivalent because
-//! the parallel fan-out semantics live entirely in `buffer_unordered` +
-//! `try_collect`, not in any `PushPipeline`-specific code.
-//!
-//! Tests:
-//!
-//! * `parallel_puts_complete_within_wall_clock_budget` — 100 PUTs at
-//!   20 ms each through a concurrency-16 `buffer_unordered` must finish
-//!   well under the 2 s serial baseline.
-//! * `error_short_circuits_with_bounded_collateral` — a single PUT that
-//!   errors surfaces via `try_collect` without waiting for the rest, and
-//!   the number of sibling PUTs that ran to completion before the error
-//!   propagated is bounded by `concurrency`.
+//! The latency fixture detects serialization in the adapter; the error fixture
+//! requires fatal permission failures to retain their path and bound completed
+//! siblings. These tests exercise Store behavior, not publisher wiring.
 
 #![allow(
     clippy::unwrap_used,
@@ -49,21 +29,16 @@ use object_store::{
 use crab::core::error::CrabError;
 use crab::storage::store::Store;
 
-/// Concurrency used by both tests — matches `PushConfig::default().upload_concurrency`.
+/// Fan-out used by both Store adapter tests.
 const CONCURRENCY: usize = 16;
-
-// ---------------------------------------------------------------------------
-// Latency + error injecting ObjectStore wrapper
-// ---------------------------------------------------------------------------
 
 /// `ObjectStore` wrapper that sleeps `latency` before every `put_opts`
 /// and optionally fails one specific path with a pre-canned error.
 ///
 /// All non-put methods delegate to the inner store unchanged. The only
-/// interception points relevant to step 9's PUT loop are `put_opts`
+/// interception points relevant to the PUT loop are `put_opts`
 /// (used by `Store::put` via `PutMode::Create`) and its multipart
-/// sibling (included for completeness but not exercised here — step 9
-/// PUTs are always single-shot).
+/// sibling; these small fixture bodies use single-shot PUTs.
 struct InjectingStore {
     inner: Arc<InMemory>,
     /// Delay applied before every `put_opts` call.
@@ -74,7 +49,7 @@ struct InjectingStore {
     /// retry, so the error reaches `try_collect` on its first attempt.
     fail_path: Option<ObjectPath>,
     /// Counts successful completions of `put_opts` (i.e. calls that
-    /// reached the inner store and returned `Ok`). Read by test 2.8 to
+    /// reached the inner store and returned `Ok`). Used to
     /// bound the number of sibling PUTs that completed before the error
     /// short-circuit propagated.
     completed_puts: Arc<AtomicUsize>,
@@ -179,21 +154,14 @@ impl ObjectStore for InjectingStore {
     }
 }
 
-// ---------------------------------------------------------------------------
-// Shared helpers
-// ---------------------------------------------------------------------------
-
 /// Build a content-addressed `(ObjectPath, Bytes)` plan. Bodies are
 /// small and deterministic — the tests care about count and ordering,
 /// not payload size.
 fn build_plan(count: usize) -> Vec<(ObjectPath, Bytes)> {
     (0..count)
         .map(|i| {
-            // Content-addressed path layout matches what
-            // `StoreLayout::shard_path` produces for the parallel PUT
-            // loop — a single content-addressed prefix with a unique
-            // hex suffix per entry. The exact layout doesn't affect
-            // what's under test; uniqueness does.
+            // Unique keys keep deduplication from bypassing the backend PUTs;
+            // the test measures adapter fan-out independently of object format.
             let hex: String = (0..32).map(|b| format!("{:02x}", b ^ (i as u8))).collect();
             let path = ObjectPath::from(format!(".crab/shards/{hex}"));
             let body = Bytes::from(vec![i as u8; 64]);
@@ -202,9 +170,7 @@ fn build_plan(count: usize) -> Vec<(ObjectPath, Bytes)> {
         .collect()
 }
 
-/// Drive the parallel PUT fan-out with the exact stream shape used in
-/// `PushPipeline::upload_shard_and_file_index`:
-/// `stream::iter(...).buffer_unordered(concurrency).try_collect()`.
+/// Drive bounded fan-out through the shared Store PUT and error mapping.
 async fn run_parallel_puts(
     store: Store,
     plan: Vec<(ObjectPath, Bytes)>,
@@ -220,11 +186,7 @@ async fn run_parallel_puts(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Tests
-// ---------------------------------------------------------------------------
-
-/// Task 2.7 — 100 PUTs at 20 ms each finish in well under the serial
+/// One hundred PUTs at 20 ms each finish in well under the serial
 /// wall-clock (100 × 20 ms = 2 s). Budget is
 /// `(100 / 16) × 20 ms × 2 = 250 ms` — the `× 2` gives generous headroom
 /// for scheduler jitter, blake3 hashing on the 64-byte bodies, and
@@ -268,21 +230,10 @@ async fn parallel_puts_complete_within_wall_clock_budget() {
     );
 }
 
-/// Task 2.8 — a single injected error surfaces unchanged through
-/// `try_collect` without waiting for the remaining PUTs to complete.
+/// A fatal permission failure propagates without running the full plan.
 ///
-/// `object_store` does not expose per-request cancellation, so the
-/// futures that `buffer_unordered` had already pushed to the
-/// under-the-hood join set continue running to completion after
-/// `try_collect` short-circuits. The contract documented by Commit 2's
-/// design is: **at most `concurrency - 1` sibling PUTs may land on the
-/// remote before the error propagates.** The weaker bound
-/// `completed_before_error <= concurrency` is what the test asserts —
-/// it tolerates the race where the failing PUT resolves before any
-/// sibling has completed (yielding 0 collateral) and the race where
-/// every in-flight sibling finishes just before the error surfaces
-/// (yielding `concurrency - 1`; the `<= concurrency` bound includes a
-/// one-slot safety margin for scheduler quirks).
+/// The completed sibling count stays within the admitted fan-out. Provider-side
+/// completion after a dropped request is outside this in-memory fixture.
 #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
 async fn error_short_circuits_with_bounded_collateral() {
     const COUNT: usize = 100;

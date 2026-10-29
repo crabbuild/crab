@@ -1,8 +1,7 @@
 //! Regression tests for the P0-4 pack-intake size cap.
 //!
-//! Exercise four behaviours:
-//!   * An aggregate closure over the limit is atomically split into bounded
-//!     packs; derived locator acceleration remains repairable by the owner/read path.
+//! Exercise pack generation and installation limits. Current Capsule aggregate
+//! publication coverage lives in `capsule_push_data_tests.rs`.
 //!   * A pack that exceeds `receive.maxInputSize` is rejected quickly,
 //!     well under the 5-minute `INDEX_PACK_TIMEOUT`, and surfaces as
 //!     `RefPushOutcome::Rejected(PushRejectReason::PackTooLarge)`.
@@ -13,18 +12,11 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
-use std::sync::Arc;
 use std::time::{Duration, Instant};
 
 use crab::core::error::CrabError;
 use crab::git::pack::{PushPackConfig, generate_push_pack, install_pack_locally};
-use crab::git::push::{PushConfig, PushRejectReason, RefUpdate, run_push_batch};
-use crab::git::remote_helper::PushSpec;
-use crab::metadata::manifest::{read_bulk_pack_list, read_manifest};
-use crab::storage::StoreLayout;
-use crab::storage::store::Store;
-use object_store::ObjectStoreExt;
-use object_store::path::Path as ObjectPath;
+use crab::git::push::{PushRejectReason, RefUpdate};
 use tokio_util::sync::CancellationToken;
 
 /// Fresh git repo with a single commit. Unlike the lib-internal
@@ -113,149 +105,6 @@ fn ref_for(commit_sha: &str) -> Vec<RefUpdate> {
         new_sha: commit_sha.to_owned(),
         force: false,
     }]
-}
-
-fn incompressible_bytes(seed: u64, len: usize) -> Vec<u8> {
-    let mut state = 0x9e37_79b9_7f4a_7c15_u64 ^ seed;
-    (0..len)
-        .map(|_| {
-            state ^= state << 13;
-            state ^= state >> 7;
-            state ^= state << 17;
-            state as u8
-        })
-        .collect()
-}
-
-#[tokio::test(flavor = "multi_thread")]
-async fn oversized_aggregate_is_atomically_published_as_bounded_packs() {
-    let source = tempfile::tempdir().expect("source tempdir");
-    run_git(source.path(), &["init", "--initial-branch=main"]);
-    run_git(source.path(), &["config", "user.email", "test@example.com"]);
-    run_git(source.path(), &["config", "user.name", "Test"]);
-    for index in 0..4 {
-        std::fs::write(
-            source.path().join(format!("blob-{index}.bin")),
-            incompressible_bytes(index, 700 * 1024),
-        )
-        .expect("write fixture blob");
-    }
-    run_git(source.path(), &["add", "."]);
-    run_git(source.path(), &["commit", "-m", "large fixture"]);
-    let source_head = String::from_utf8(
-        Command::new("git")
-            .args(["rev-parse", "HEAD"])
-            .current_dir(source.path())
-            .env_remove("GIT_DIR")
-            .output()
-            .expect("source rev-parse")
-            .stdout,
-    )
-    .expect("source HEAD UTF-8")
-    .trim()
-    .to_owned();
-
-    let inner: Arc<dyn object_store::ObjectStore> = Arc::new(object_store::memory::InMemory::new());
-    let store = Store::new(Arc::clone(&inner));
-    let router = StoreLayout::new(store.clone(), "bounded-pack-set".to_owned());
-    crab::core::remote_layout::initialize(&store, &router)
-        .await
-        .expect("initialize canonical layout");
-    crab::cmd::init::create_initial_manifest(&store, &router, "refs/heads/main")
-        .await
-        .expect("initialize canonical manifest");
-    let mut config = PushConfig::default();
-    config.git_dir = Some(source.path().join(".git"));
-    config.receive_max_input_size = 1024 * 1024;
-    let specs = vec![PushSpec {
-        force: false,
-        src: "refs/heads/main".to_owned(),
-        dst: "refs/heads/main".to_owned(),
-    }];
-
-    let result = run_push_batch(
-        &specs,
-        &config,
-        Some(store.clone()),
-        None,
-        None,
-        router.clone(),
-        None,
-        CancellationToken::new(),
-        None,
-    )
-    .await;
-    assert!(result.all_ok(), "split pack-set push failed: {result:?}");
-
-    let (manifest, _) = read_manifest(&store, &router)
-        .await
-        .expect("read committed manifest");
-    assert_eq!(manifest.generation, 1, "push must commit exactly once");
-    assert_eq!(
-        manifest.refs.get("refs/heads/main"),
-        Some(&source_head),
-        "the only manifest CAS must publish the requested ref"
-    );
-    let packs = read_bulk_pack_list(&store, &router, &manifest.pack_index_hash)
-        .await
-        .expect("read committed pack set");
-    assert!(packs.len() > 1, "fixture must publish multiple packs");
-    assert!(
-        packs
-            .iter()
-            .all(|pack| pack.size <= config.receive_max_input_size),
-        "every committed pack must respect receive.maxInputSize"
-    );
-
-    let reconstructed = tempfile::tempdir().expect("reconstructed tempdir");
-    run_git(reconstructed.path(), &["init", "--bare"]);
-    let pack_dir = reconstructed.path().join("objects/pack");
-    for pack in &packs {
-        let pack_bytes = inner
-            .get(&router.pack_path(&pack.pack_id))
-            .await
-            .expect("read committed pack")
-            .bytes()
-            .await
-            .expect("read committed pack bytes");
-        let index_bytes = inner
-            .get(&router.pack_index_path(&pack.pack_id))
-            .await
-            .expect("read committed pack index")
-            .bytes()
-            .await
-            .expect("read committed pack index bytes");
-        assert_eq!(pack_bytes.len() as u64, pack.size);
-        std::fs::write(
-            pack_dir.join(format!("pack-{}.pack", pack.pack_id)),
-            pack_bytes,
-        )
-        .expect("write reconstructed pack");
-        std::fs::write(
-            pack_dir.join(format!("pack-{}.idx", pack.pack_id)),
-            index_bytes,
-        )
-        .expect("write reconstructed pack index");
-        assert!(
-            inner
-                .head(&ObjectPath::from(format!(
-                    "bounded-pack-set/packs/pack-{}.meta",
-                    pack.pack_id
-                )))
-                .await
-                .is_ok(),
-            "every committed pack must have metadata"
-        );
-    }
-    run_git(
-        reconstructed.path(),
-        &["update-ref", "refs/heads/main", &source_head],
-    );
-    run_git(
-        reconstructed.path(),
-        &["symbolic-ref", "HEAD", "refs/heads/main"],
-    );
-    run_git(reconstructed.path(), &["fsck", "--full"]);
 }
 
 /// Pack exceeding the limit is rejected as `PackTooLarge`, fast.

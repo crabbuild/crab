@@ -20,7 +20,7 @@ async fn shutdown_removes_daemon_files() {
     let tmp = tempfile::tempdir().unwrap();
     let config = CoordinatorConfig::with_base_dir(tmp.path().to_path_buf());
 
-    let mut coordinator = Coordinator::start(config.clone()).unwrap();
+    let mut coordinator = Coordinator::start(config.clone(), None).unwrap();
 
     // Verify files were created during startup.
     assert!(
@@ -57,7 +57,7 @@ async fn shutdown_with_no_mounts_completes_immediately() {
     let tmp = tempfile::tempdir().unwrap();
     let config = CoordinatorConfig::with_base_dir(tmp.path().to_path_buf());
 
-    let mut coordinator = Coordinator::start(config.clone()).unwrap();
+    let mut coordinator = Coordinator::start(config.clone(), None).unwrap();
 
     let start = std::time::Instant::now();
     coordinator.shutdown_graceful().await;
@@ -79,7 +79,7 @@ fn sync_shutdown_removes_daemon_files() {
     let tmp = tempfile::tempdir().unwrap();
     let config = CoordinatorConfig::with_base_dir(tmp.path().to_path_buf());
 
-    let mut coordinator = Coordinator::start(config.clone()).unwrap();
+    let mut coordinator = Coordinator::start(config.clone(), None).unwrap();
 
     assert!(config.lock_path().exists());
     assert!(config.pid_path().exists());
@@ -103,7 +103,7 @@ async fn shutdown_cancels_all_mount_child_tokens() {
     let tmp = tempfile::tempdir().unwrap();
     let config = CoordinatorConfig::with_base_dir(tmp.path().to_path_buf());
 
-    let mut coordinator = Coordinator::start(config.clone()).unwrap();
+    let mut coordinator = Coordinator::start(config.clone(), None).unwrap();
 
     // Create child tokens as if mounts were registered.
     let child_a = coordinator.child_cancel_token();
@@ -139,7 +139,7 @@ async fn full_lifecycle_start_shutdown_verify() {
     let config = CoordinatorConfig::with_base_dir(tmp.path().to_path_buf());
 
     // Start.
-    let coordinator = Coordinator::start(config.clone()).unwrap();
+    let coordinator = Coordinator::start(config.clone(), None).unwrap();
     let cancel_token = coordinator.cancel_token().clone();
     let coordinator = Arc::new(Mutex::new(coordinator));
 

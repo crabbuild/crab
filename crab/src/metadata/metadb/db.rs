@@ -654,23 +654,14 @@ impl Db {
 
     /// Commit a pre-built [`slatedb::WriteBatch`] atomically.
     ///
-    /// Any failure is mapped to [`MetaDbError::Write`]. SlateDB's
-    /// `write` returns a `WriteHandle` on success which we discard —
-    /// crab does not track per-write durability handles; WAL flush
-    /// semantics are driven by the session-level close path.
+    /// Submit without awaiting durability, then explicitly flush the WAL before
+    /// returning success. The session disables timer flushes, so awaiting a write
+    /// handle first could wait for a flush this caller has not issued.
+    /// Any failure is mapped to [`MetaDbError::Write`].
     ///
     /// Fails fast with [`MetaDbError::ReadOnly`] when called on a
     /// handle opened via [`Self::open_readonly`].
     pub async fn write(&self, batch: slatedb::WriteBatch) -> Result<()> {
-        self.write_inner(batch, true).await
-    }
-
-    /// Buffer one repairable acceleration batch until the caller's flush boundary.
-    pub(crate) async fn write_buffered(&self, batch: slatedb::WriteBatch) -> Result<()> {
-        self.write_inner(batch, false).await
-    }
-
-    async fn write_inner(&self, batch: slatedb::WriteBatch, durable: bool) -> Result<()> {
         let db = match &self.inner {
             Inner::Writer(db) => Arc::clone(db),
             Inner::Reader(_) => {
@@ -685,45 +676,32 @@ impl Db {
         let start = std::time::Instant::now();
         if let Some(m) = self.metrics.as_ref() {
             m.inc_metadb_batch_write_count();
-            if !durable {
-                m.inc_metadb_buffered_batch_write_count();
-            }
         }
-        let res = db
-            .write_with_options(
-                batch,
-                &slatedb::config::WriteOptions {
-                    await_durable: false,
-                    ..slatedb::config::WriteOptions::default()
-                },
-            )
-            .instrument(span.clone())
-            .await
-            .map_err(|source| {
-                CrabError::from(MetaDbError::Write {
-                    db: String::from(self.label),
-                    source,
-                })
-            });
-        let res = match (res, durable) {
-            (Ok(_), true) => {
-                let result = db.flush().await.map_err(|source| {
-                    CrabError::from(MetaDbError::Write {
-                        db: String::from(self.label),
-                        source,
-                    })
-                });
-                if result.is_ok()
-                    && let Some(metrics) = self.metrics.as_ref()
-                {
-                    metrics.inc_metadb_wal_flush_count();
-                }
-                result
-            }
-            (Ok(_), false) => Ok(()),
-            (Err(error), _) => Err(error),
-        };
+        db.write_with_options(
+            batch,
+            &slatedb::config::WriteOptions {
+                await_durable: false,
+                ..slatedb::config::WriteOptions::default()
+            },
+        )
+        .instrument(span.clone())
+        .await
+        .map_err(|source| {
+            CrabError::from(MetaDbError::Write {
+                db: String::from(self.label),
+                source,
+            })
+        })?;
+        let res = db.flush().await.map_err(|source| {
+            CrabError::from(MetaDbError::Write {
+                db: String::from(self.label),
+                source,
+            })
+        });
         if res.is_ok() {
+            if let Some(metrics) = self.metrics.as_ref() {
+                metrics.inc_metadb_wal_flush_count();
+            }
             let _enter = span.enter();
             tracing::trace!(
                 db = self.label,
@@ -975,38 +953,6 @@ mod tests {
             assert_eq!(got.as_ref(), v.as_bytes());
         }
 
-        db.close().await.expect("close");
-    }
-
-    #[tokio::test]
-    async fn buffered_writes_do_not_trigger_timer_wal_flushes() {
-        let store = stub_store();
-        let path = ObjectPath::from("t/buffered");
-        let wal_prefix = ObjectPath::from("t/buffered/wal");
-        let metrics = Arc::new(crate::core::metrics::Metrics::new());
-        let db = Db::open_with_metrics(
-            Arc::clone(&store),
-            path,
-            "chunk_index_db",
-            Arc::clone(&metrics),
-        )
-        .await
-        .expect("open");
-        let initial_wals = store.list(Some(&wal_prefix)).count().await;
-
-        for index in 0_u8..8 {
-            let mut batch = slatedb::WriteBatch::new();
-            batch.put([index].as_slice(), [index].as_slice());
-            db.write_buffered(batch).await.expect("buffered write");
-        }
-        tokio::time::sleep(std::time::Duration::from_millis(150)).await;
-
-        assert_eq!(store.list(Some(&wal_prefix)).count().await, initial_wals);
-        db.flush_memtable().await.expect("explicit batch flush");
-        let snapshot = metrics.snapshot();
-        assert_eq!(snapshot.metadb_buffered_batch_write_count, 8);
-        assert_eq!(snapshot.metadb_wal_flush_count, 0);
-        assert_eq!(snapshot.metadb_memtable_flush_count, 1);
         db.close().await.expect("close");
     }
 

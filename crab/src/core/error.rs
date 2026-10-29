@@ -1093,15 +1093,22 @@ impl From<crab_read::upload_pack_wire::WireError> for CrabError {
     }
 }
 
+impl From<crab_remote_git::Error> for CrabError {
+    fn from(source: crab_remote_git::Error) -> Self {
+        Self::Read(ReadFailure(crab_read::ReadError::RemoteGit(source)))
+    }
+}
+
 impl From<crab_read::ReadError> for CrabError {
     fn from(error: crab_read::ReadError) -> Self {
         match error {
+            crab_read::ReadError::Staging(source) => Self::from(source),
             crab_read::ReadError::Pointer(source) => Self::from(source),
             crab_read::ReadError::Cache(source) => Self::from(source),
             crab_read::ReadError::CacheStore(source) => Self::from(source),
             crab_read::ReadError::Storage(source) => Self::from(source),
             crab_read::ReadError::Metadata(source) => Self::from(source),
-            crab_read::ReadError::RemoteGit(source) => Self::Protocol(source.to_string()),
+            crab_read::ReadError::RemoteGit(source) => Self::from(source),
             crab_read::ReadError::GitWalk(source) => Self::from(source),
             crab_read::ReadError::Lfs(source) => Self::from(source),
             crab_read::ReadError::Xet(source) => Self::from(source),
@@ -1130,6 +1137,7 @@ impl From<crab_read::ReadError> for CrabError {
             },
             crab_read::ReadError::Cancelled => Self::Cancelled,
             error @ (crab_read::ReadError::Availability { .. }
+            | crab_read::ReadError::Retention(_)
             | crab_read::ReadError::GitPack(_)
             | crab_read::ReadError::Runtime(_)
             | crab_read::ReadError::ResolutionTask(_)
@@ -1210,8 +1218,13 @@ impl From<crab_vfs::VfsError> for CrabError {
             crab_vfs::VfsError::NotFound { path } => Self::NotFound { path },
             crab_vfs::VfsError::Cache(source) => Self::from(source),
             crab_vfs::VfsError::Read(source) => Self::from(source),
+            crab_vfs::VfsError::Lfs(source) => Self::from(source),
             crab_vfs::VfsError::Staging(source) => Self::from(source),
             crab_vfs::VfsError::Storage(source) => Self::from(source),
+            crab_vfs::VfsError::GitRef(source) => Self::Io(std::io::Error::other(source)),
+            source @ (crab_vfs::VfsError::GitObject { .. } | crab_vfs::VfsError::ReadTask(_)) => {
+                Self::Io(std::io::Error::other(source))
+            }
             crab_vfs::VfsError::Url(source) => Self::from(source),
             crab_vfs::VfsError::Pointer(source) => Self::from(source),
             source @ (crab_vfs::VfsError::Database(_) | crab_vfs::VfsError::Json(_)) => {
@@ -1963,6 +1976,30 @@ impl From<crab_storage::error::StorageError> for CrabError {
     }
 }
 
+impl From<crab_remote::checkpoint::CheckpointError> for CrabError {
+    fn from(error: crab_remote::checkpoint::CheckpointError) -> Self {
+        use crab_remote::checkpoint::CheckpointError;
+        match error {
+            CheckpointError::Cancelled => Self::Cancelled,
+            CheckpointError::Read(source) => source.into(),
+            CheckpointError::Repack(source) => source.into(),
+            CheckpointError::Pack(source) => source.into(),
+            CheckpointError::Metadata(source) => source.into(),
+            source @ CheckpointError::SourceInventoryRecord(_) => {
+                Self::Io(std::io::Error::other(source))
+            }
+            CheckpointError::Storage(source) => source.into(),
+            CheckpointError::Write(source) => source.into(),
+            CheckpointError::Io(source) => source.into(),
+            CheckpointError::Worker(source) => Self::Io(std::io::Error::other(source)),
+            error @ (CheckpointError::AccountingOverflow
+            | CheckpointError::GitInit { .. }
+            | CheckpointError::OutputLimit { .. }
+            | CheckpointError::InvalidPackPath { .. }) => Self::Internal(error.to_string()),
+        }
+    }
+}
+
 impl From<crab_remote::publication::Error> for CrabError {
     fn from(error: crab_remote::publication::Error) -> Self {
         match error {
@@ -1999,7 +2036,7 @@ impl From<crab_write::WriteError> for CrabError {
             crab_write::WriteError::Storage(source) => Self::from(source),
             crab_write::WriteError::Coordination(source) => Self::from(source),
             crab_write::WriteError::Metadata(source) => Self::from(source),
-            crab_write::WriteError::RemoteGit(source) => Self::Io(std::io::Error::other(source)),
+            crab_write::WriteError::RemoteGit(source) => Self::from(source),
             crab_write::WriteError::Git(source) => Self::from(source),
             crab_write::WriteError::GitLocator(source) => Self::from(source),
             crab_write::WriteError::Io(source) => Self::Io(source),
@@ -2009,14 +2046,12 @@ impl From<crab_write::WriteError> for CrabError {
             crab_write::WriteError::Internal(message) => Self::Internal(message),
             crab_write::WriteError::Cancelled => Self::Cancelled,
             error @ (crab_write::WriteError::Namespace(_)
-            | crab_write::WriteError::InitialHead { .. }
             | crab_write::WriteError::CapsuleCommitUncertain { .. }
             | crab_write::WriteError::CapsuleCheckpointCommitUncertain { .. }
             | crab_write::WriteError::CapsuleMaintenanceCommitUncertain { .. }
             | crab_write::WriteError::CapsuleHeadCommitUncertain { .. }
             | crab_write::WriteError::Worker(_)
             | crab_write::WriteError::VisibilityUnavailable { .. }
-            | crab_write::WriteError::PackIdentity { .. }
             | crab_write::WriteError::ManifestHash { .. }) => {
                 Self::Io(std::io::Error::other(error))
             }
@@ -2186,6 +2221,19 @@ impl From<crab_coordination::error::CoordinationError> for CrabError {
             crab_coordination::error::CoordinationError::GcFenceMalformed { path, reason } => {
                 Self::CorruptObject { path, reason }
             }
+            crab_coordination::error::CoordinationError::ReadRetentionLost { path } => {
+                Self::Configuration {
+                    key: path,
+                    origin: "captured read retention was lost; reopen the mount".to_owned(),
+                }
+            }
+            error @ crab_coordination::error::CoordinationError::ReadRetentionFailed(_) => {
+                Self::Io(std::io::Error::other(error))
+            }
+            crab_coordination::error::CoordinationError::ReadRetentionMalformed {
+                path,
+                reason,
+            } => Self::CorruptObject { path, reason },
         }
     }
 }
@@ -3950,6 +3998,83 @@ mod tests {
     use super::*;
 
     #[test]
+    fn checkpoint_uncertain_publication_keeps_evidence_without_blind_retry() {
+        let error = CrabError::from(crab_remote::checkpoint::CheckpointError::Write(
+            crab_write::WriteError::CapsuleCheckpointCommitUncertain {
+                checkpoint_hash: "a".repeat(64),
+                source: Box::new(crab_storage::StorageError::NetworkTransient {
+                    source: object_store::Error::Generic {
+                        store: "fixture",
+                        source: std::io::Error::new(
+                            std::io::ErrorKind::ConnectionReset,
+                            "uncertain checkpoint update",
+                        )
+                        .into(),
+                    },
+                }),
+                verification: Some(Box::new(crab_write::WriteError::Cancelled)),
+            },
+        ));
+        assert!(!error.is_retryable());
+        let CrabError::Io(io) = &error else {
+            panic!("uncertain publication lost its typed cause: {error:?}");
+        };
+        let source = io
+            .get_ref()
+            .unwrap()
+            .downcast_ref::<crab_write::WriteError>()
+            .unwrap();
+        assert!(
+            matches!(source, crab_write::WriteError::CapsuleCheckpointCommitUncertain { checkpoint_hash, verification, .. } if checkpoint_hash == &"a".repeat(64) && matches!(verification.as_deref(), Some(crab_write::WriteError::Cancelled)))
+        );
+    }
+
+    #[tokio::test]
+    async fn checkpoint_worker_failure_retains_join_cause() {
+        let worker = tokio::spawn(std::future::pending::<()>());
+        worker.abort();
+        let error = CrabError::from(crab_remote::checkpoint::CheckpointError::Worker(
+            worker.await.unwrap_err(),
+        ));
+        let CrabError::Io(io) = error else {
+            panic!("worker failure lost its typed cause: {error:?}");
+        };
+        assert!(
+            io.get_ref()
+                .unwrap()
+                .downcast_ref::<tokio::task::JoinError>()
+                .unwrap()
+                .is_cancelled()
+        );
+    }
+
+    #[test]
+    fn checkpoint_provider_error_keeps_retry_classification_and_cause() {
+        let error = CrabError::from(crab_remote::checkpoint::CheckpointError::Storage(
+            crab_storage::StorageError::NetworkTransient {
+                source: object_store::Error::Generic {
+                    store: "fixture",
+                    source: std::io::Error::new(
+                        std::io::ErrorKind::ConnectionReset,
+                        "provider connection reset",
+                    )
+                    .into(),
+                },
+            },
+        ));
+        assert!(
+            matches!(&error, CrabError::NetworkTransient(_)),
+            "{error:?}"
+        );
+        assert!(
+            std::error::Error::source(&error)
+                .unwrap()
+                .to_string()
+                .contains("provider connection reset")
+        );
+    }
+
+    #[test]
     fn hydration_failure_preserves_cause_diagnostics() {
         use std::error::Error;
 
@@ -4042,16 +4167,23 @@ mod tests {
     }
 
     #[test]
-    fn physical_index_json_source_survives_cli_conversion() {
+    fn metadata_json_sources_survive_cli_conversion() {
         use std::error::Error;
 
-        let source = serde_json::from_slice::<serde_json::Value>(b"{").unwrap_err();
-        let error =
-            CrabError::from(crab_metadata::error::MetadataError::GitObjectIndexRecord { source });
-        assert!(
-            std::iter::successors(error.source(), |source| (*source).source())
-                .any(|source| source.downcast_ref::<serde_json::Error>().is_some())
-        );
+        let source = || serde_json::from_slice::<serde_json::Value>(b"{").unwrap_err();
+        for error in [
+            CrabError::from(crab_metadata::error::MetadataError::GitObjectIndexRecord {
+                source: source(),
+            }),
+            CrabError::from(
+                crab_remote::checkpoint::CheckpointError::SourceInventoryRecord(source()),
+            ),
+        ] {
+            assert!(
+                std::iter::successors(error.source(), |source| (*source).source())
+                    .any(|source| source.downcast_ref::<serde_json::Error>().is_some())
+            );
+        }
     }
 
     #[test]

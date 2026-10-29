@@ -10,22 +10,27 @@ use std::time::Duration;
 
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
-use tracing::{debug, info};
+use tracing::debug;
+#[cfg(feature = "fuse")]
+use tracing::info;
 
 use crate::core::error::{CrabError, Result};
-use crate::ipc_server::{IpcRequest, IpcResponse};
+use crate::ipc_protocol::{IpcRequest, IpcResponse};
 
 // ---------------------------------------------------------------------------
 // Constants
 // ---------------------------------------------------------------------------
 
 /// Budget for connection retry backoff after spawning the coordinator.
+#[cfg(feature = "fuse")]
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(5);
 
 /// Initial backoff delay between connection retries.
+#[cfg(feature = "fuse")]
 const INITIAL_BACKOFF: Duration = Duration::from_millis(100);
 
 /// Backoff multiplier for each retry attempt.
+#[cfg(feature = "fuse")]
 const BACKOFF_MULTIPLIER: u32 = 2;
 
 /// Timeout for writing a request and reading its response.
@@ -73,7 +78,7 @@ pub enum IpcClientError {
 }
 
 impl IpcClientError {
-    fn can_retry_connect(&self) -> bool {
+    pub(crate) fn is_unavailable(&self) -> bool {
         matches!(self, Self::ConnectionFailed { source, .. }
             if matches!(source.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused))
     }
@@ -81,7 +86,7 @@ impl IpcClientError {
 
 impl From<IpcClientError> for CrabError {
     fn from(e: IpcClientError) -> Self {
-        CrabError::Internal(e.to_string())
+        CrabError::Io(std::io::Error::other(e))
     }
 }
 
@@ -133,11 +138,12 @@ impl IpcClient {
     /// with exponential backoff. Other connection errors return immediately.
     /// The coordinator owns stale socket cleanup under its daemon lock.
     /// The five-second retry budget does not bound individual connection attempts.
+    #[cfg(feature = "fuse")]
     pub async fn connect_or_spawn(socket_path: &Path) -> std::result::Result<Self, IpcClientError> {
         // First attempt: try to connect directly.
         match Self::connect(socket_path).await {
             Ok(client) => return Ok(client),
-            Err(error) if error.can_retry_connect() => {
+            Err(error) if error.is_unavailable() => {
                 debug!("coordinator not running, spawning");
             }
             Err(e) => return Err(e),
@@ -166,7 +172,7 @@ impl IpcClient {
                     );
                     return Ok(client);
                 }
-                Err(error) if error.can_retry_connect() => {
+                Err(error) if error.is_unavailable() => {
                     debug!(
                         attempt,
                         delay_ms = delay.as_millis(),
@@ -255,6 +261,7 @@ impl IpcClient {
 /// Runs `crab coordinator start` (or the equivalent internal mechanism)
 /// as a detached child process. The coordinator will bind the Unix socket
 /// once it's ready.
+#[cfg(feature = "fuse")]
 fn spawn_coordinator() -> std::result::Result<(), IpcClientError> {
     use std::process::Command;
 
@@ -308,6 +315,7 @@ pub fn default_socket_path() -> Result<PathBuf> {
 ///
 /// Used by `crab mount` in background mode. Connects to the coordinator
 /// (spawning it if needed), sends the mount request, and prints the result.
+#[cfg(feature = "fuse")]
 pub async fn try_ipc_mount(
     repo: &str,
     mountpoint: &str,
@@ -315,13 +323,15 @@ pub async fn try_ipc_mount(
     read_only: bool,
     no_refresh: bool,
 ) -> Result<()> {
+    // Resolve client-relative paths before the coordinator interprets the request.
+    let source = crate::source::MountSource::canonical_input(repo)?;
     let socket_path = default_socket_path()?;
     let mut client = IpcClient::connect_or_spawn(&socket_path)
         .await
         .map_err(CrabError::from)?;
 
     let request = IpcRequest::Mount {
-        remote: repo.to_owned(),
+        remote: source,
         mountpoint: mountpoint.to_owned(),
         r#ref: git_ref.to_owned(),
         read_only,
@@ -489,26 +499,6 @@ pub async fn try_ipc_invalidate(mountpoint: &str, paths: Vec<String>) -> Result<
     Err(CrabError::Internal(format!("invalidate failed: {msg}")))
 }
 
-/// Ask the coordinator to inspect the live writable overlay for a mounted path.
-pub async fn try_ipc_overlay_diff(mountpoint: &str) -> Result<crate::publish::OverlayDiff> {
-    let socket_path = default_socket_path()?;
-    let mut client = IpcClient::connect(&socket_path)
-        .await
-        .map_err(CrabError::from)?;
-
-    let request = IpcRequest::DiffOverlay {
-        mountpoint: mountpoint.to_owned(),
-    };
-    let response = client.send(&request).await.map_err(CrabError::from)?;
-    if response.ok {
-        return response
-            .overlay_diff
-            .ok_or_else(|| CrabError::Internal("diff response missing overlay diff".into()));
-    }
-    let msg = response.error.unwrap_or_else(|| "unknown error".to_owned());
-    Err(CrabError::Internal(format!("diff failed: {msg}")))
-}
-
 /// Ask the coordinator to reset the live writable overlay for a mounted path.
 pub async fn try_ipc_reset_overlay(mountpoint: &str) -> Result<crate::publish::OverlayDiff> {
     let socket_path = default_socket_path()?;
@@ -541,7 +531,7 @@ pub async fn try_ipc_reset_overlay(mountpoint: &str) -> Result<crate::publish::O
 )]
 mod tests {
     use super::*;
-    use crate::ipc_server::{IpcRequest, IpcResponse};
+    use crate::ipc_protocol::{IpcRequest, IpcResponse};
 
     #[test]
     fn serialize_mount_request_for_ipc() {
@@ -730,6 +720,23 @@ mod tests {
         assert!(msg.contains("test error"));
     }
 
+    #[test]
+    fn ipc_error_conversion_retains_transport_source() {
+        let error =
+            IpcClientError::ReadFailed(std::io::Error::from(std::io::ErrorKind::ConnectionReset));
+        let CrabError::Io(error) = CrabError::from(error) else {
+            panic!("IPC error must retain its source");
+        };
+        let client = error
+            .get_ref()
+            .and_then(|source| source.downcast_ref::<IpcClientError>())
+            .unwrap();
+        let source = std::error::Error::source(client)
+            .and_then(|source| source.downcast_ref::<std::io::Error>())
+            .unwrap();
+        assert_eq!(source.kind(), std::io::ErrorKind::ConnectionReset);
+    }
+
     #[tokio::test]
     async fn client_connect_fails_on_missing_socket() {
         let tmp = tempfile::tempdir().unwrap();
@@ -747,6 +754,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "fuse")]
     async fn connect_or_spawn_preserves_connection_path_errors() {
         let directory = tempfile::tempdir().unwrap();
         let file = directory.path().join("file");
@@ -765,6 +773,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "fuse")]
     async fn connect_or_spawn_leaves_socket_cleanup_to_coordinator() {
         for socket in [false, true] {
             let directory = tempfile::tempdir().unwrap();
@@ -784,6 +793,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "fuse")]
     async fn client_send_and_receive() {
         use std::sync::Arc;
         use tokio::sync::Mutex;
@@ -793,7 +803,7 @@ mod tests {
 
         // Set up a minimal coordinator for the IPC server.
         let config = crate::coordinator::CoordinatorConfig::with_base_dir(tmp.path().to_path_buf());
-        let coordinator = crate::coordinator::Coordinator::start(config).unwrap();
+        let coordinator = crate::coordinator::Coordinator::start(config, None).unwrap();
         let cancel_token = coordinator.cancel_token().clone();
         let coordinator = Arc::new(Mutex::new(coordinator));
 
@@ -918,6 +928,7 @@ mod tests {
     }
 
     #[tokio::test]
+    #[cfg(feature = "fuse")]
     async fn connect_or_spawn_refuses_to_remove_regular_file() {
         let tmp = tempfile::tempdir().unwrap();
         let socket_path = tmp.path().join("daemon.sock");

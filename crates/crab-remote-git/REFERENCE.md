@@ -3,21 +3,19 @@
 [Start with the crate README](README.md) for the usage path and ownership map.
 
 `crab-remote-git` is the canonical filesystem-free read API for Git data stored
-by Crab. It reads committed manifests, immutable pack inventories, exact object
-locations, pack ranges, and typed Git objects directly from `crab-storage`. It
+by Crab. It consumes caller-validated captured metadata and reads immutable pack
+inventories, exact object locations, pack ranges, and typed Git objects from
+`crab-storage`. It
 does not clone a repository or create a local object database.
 
 ## Consistency model
 
-A repository handle is pinned to one validated tuple:
-
-- manifest generation;
-- immutable pack-inventory hash;
-- exact object-locator coverage.
-
-Opening retries that complete handshake once when publication races a reader.
-An older or absent locator returns `RepositoryIndexing`; inconsistent newer
-metadata fails closed. A snapshot then pins a reachable commit and root tree.
+A repository handle pins the caller's validated materialized Git state,
+immutable inventory and authenticated lookup sources. A snapshot then pins a
+reachable commit and root tree. Live root/ref-head capture, freshness checks and
+remote retention belong to the product's crab-read Capsule owner. This crate
+has no stored manifest/ref-journal opening handshake or manifest-ETag freshness
+API. It never repairs or publishes metadata while opening a captured view.
 
 The caller supplies `RepositoryIdentity`, including the current physical
 placement generation. This identity scopes every shared cache and single-flight
@@ -30,13 +28,10 @@ The supported entry points are:
 
 - `RemoteGitRuntime`: process-wide bounded caches, origin/decode admission, and
   metrics;
-- `RemoteGitRepository::open`: generation-consistent repository open;
 - `RemoteGitRepository::from_snapshot`: immutable committed-journal repository
   view without locator publication, for callers that own retention and freshness;
 - `RemoteGitRepository::from_snapshot_with_catalog_tail`: the same immutable
   view with opportunistic exact base-catalog lookup and journal-pack-first misses;
-- `RemoteGitRepository::is_current`: metadata-only manifest identity check for
-  safely reusing a pinned immutable handle;
 - `RemoteGitRepository::operation`: one typed operation kind,
   cancellation-aware locator session, protected correlation ID, and aggregate
   work budget;
@@ -104,8 +99,8 @@ unfinished context. Keep the Tokio runtime alive until cleanup finishes.
 Object storage is the correctness authority. Runtime memory is disposable and
 bounded. Exact locators avoid pack scans, range reads avoid complete pack
 downloads, immutable reads are single-flight, and object, parsed-object,
-manifest, inventory, negative, blame-result, and pack-index caches are byte
-bounded. Cached blame results remain subject to the current operation's
+negative, blame-result, and pack-index caches are byte bounded. There are no
+mutable-manifest or duplicate inventory caches in this runtime. Cached blame results remain subject to the current operation's
 logical, traversal, history, blame, and response limits; a warm result cannot
 bypass a stricter caller budget.
 
@@ -129,11 +124,10 @@ Archive traversal produces one entry at a time; its pending tree work is bounded
 by the verified tree-object limit.
 
 Services may keep a bounded cache of cloned immutable repository handles.
-`is_current` detects manifest changes only. Services that must observe
-uncompacted commits capture a validated repository snapshot and open it through
-`from_snapshot`; its snapshot digest isolates journal-specific cache entries. A
-changed snapshot requires a new immutable handle; cached state is never refreshed
-in place. High-throughput services may use `from_snapshot_with_catalog_tail`. It
+The Capsule capture owner revalidates root/ref-head identity before reuse.
+Captured snapshot digests isolate state-specific cache entries; changed metadata
+requires a new immutable handle. Cached state never refreshes in place.
+High-throughput services may use `from_snapshot_with_catalog_tail`. It
 reads the immutable pack inventory named by the latest catalog checkpoint and
 proves that inventory is a subset of the pinned snapshot. Object lookups use that
 catalog and search only the remaining pack tail on a miss. If no checkpoint can

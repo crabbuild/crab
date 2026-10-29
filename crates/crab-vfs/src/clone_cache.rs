@@ -13,12 +13,9 @@ use std::fs::{File, OpenOptions};
 #[cfg(unix)]
 use std::os::fd::AsRawFd;
 use std::path::{Path, PathBuf};
-use std::process::Command;
-
-use sha2::{Digest, Sha256};
-use tracing::{debug, error, info, warn};
 
 use crate::core::error::{CrabError, Result};
+use sha2::{Digest, Sha256};
 
 // ---------------------------------------------------------------------------
 // Cache hash computation
@@ -76,6 +73,32 @@ pub fn cache_dir_for_url(url: &str) -> Result<PathBuf> {
     Ok(home.join(".crab").join("mounts").join("repos").join(hash))
 }
 
+/// Select the single Git metadata owner within a mount cache.
+/// Fresh caches use `.git`; existing bare metadata retains its refs and staging
+/// namespace. Reject mixed owners rather than choosing or replacing history.
+pub fn git_dir(cache_dir: &Path) -> Result<PathBuf> {
+    let nested = cache_dir.join(".git");
+    let root_metadata =
+        cache_dir.join("HEAD").try_exists()? || cache_dir.join("objects").try_exists()?;
+    if root_metadata && nested.try_exists()? {
+        return Err(CrabError::Configuration {
+            key: format!(
+                "mount cache has multiple Git metadata owners at {}",
+                cache_dir.display()
+            ),
+            origin: "crab mount".into(),
+        });
+    }
+    // Both current mount modes have produced bare Git metadata. Retaining its
+    // actual directory preserves unpushed refs and the derived staging owner;
+    // creating a second clone would orphan them under the same overlay cache.
+    Ok(if root_metadata {
+        cache_dir.to_path_buf()
+    } else {
+        nested
+    })
+}
+
 /// Cross-process guard for mutable mount cache ownership.
 #[derive(Debug)]
 pub struct MountCacheLock {
@@ -84,6 +107,17 @@ pub struct MountCacheLock {
 
 impl MountCacheLock {
     pub fn acquire(cache_dir: &Path) -> Result<Self> {
+        Self::try_acquire(cache_dir)?.ok_or_else(|| CrabError::Configuration {
+            key: format!(
+                "mount cache is already in use at {}; unmount the active mount before starting another mount for this repository",
+                cache_dir.display()
+            ),
+            origin: "crab mount".into(),
+        })
+    }
+
+    /// Acquire mutable cache ownership, returning None while another owner holds it.
+    pub fn try_acquire(cache_dir: &Path) -> Result<Option<Self>> {
         let path = mount_cache_lock_path(cache_dir);
         if let Some(parent) = path.parent() {
             std::fs::create_dir_all(parent).map_err(CrabError::Io)?;
@@ -96,9 +130,10 @@ impl MountCacheLock {
             .open(&path)
             .map_err(CrabError::Io)?;
 
-        lock_mount_cache_file(&file, cache_dir, &path)?;
-
-        Ok(Self { _file: file })
+        if !lock_mount_cache_file(&file, cache_dir, &path)? {
+            return Ok(None);
+        }
+        Ok(Some(Self { _file: file }))
     }
 }
 
@@ -122,23 +157,17 @@ fn mount_cache_lock_path(cache_dir: &Path) -> PathBuf {
 }
 
 #[cfg(unix)]
-fn lock_mount_cache_file(file: &File, cache_dir: &Path, lock_path: &Path) -> Result<()> {
+fn lock_mount_cache_file(file: &File, cache_dir: &Path, lock_path: &Path) -> Result<bool> {
     let fd = file.as_raw_fd();
     // SAFETY: flock with LOCK_EX|LOCK_NB on a valid file descriptor is safe.
     let ret = unsafe { libc::flock(fd, libc::LOCK_EX | libc::LOCK_NB) };
     if ret == 0 {
-        return Ok(());
+        return Ok(true);
     }
 
     let error = std::io::Error::last_os_error();
     if error.kind() == std::io::ErrorKind::WouldBlock {
-        return Err(CrabError::Configuration {
-            key: format!(
-                "mount cache is already in use at {}; unmount the active mount before starting another mount for this repository",
-                cache_dir.display()
-            ),
-            origin: "crab mount".into(),
-        });
+        return Ok(false);
     }
 
     Err(CrabError::Io(std::io::Error::new(
@@ -152,8 +181,8 @@ fn lock_mount_cache_file(file: &File, cache_dir: &Path, lock_path: &Path) -> Res
 }
 
 #[cfg(not(unix))]
-fn lock_mount_cache_file(_file: &File, _cache_dir: &Path, _lock_path: &Path) -> Result<()> {
-    Ok(())
+fn lock_mount_cache_file(_file: &File, _cache_dir: &Path, _lock_path: &Path) -> Result<bool> {
+    Ok(true)
 }
 
 /// Resolve the user's home directory.
@@ -170,124 +199,6 @@ fn home_dir() -> Result<PathBuf> {
 // Blobless clone management
 // ---------------------------------------------------------------------------
 
-/// Ensure a blobless bare clone exists at `cache_dir` for the given URL.
-///
-/// If the cache directory already contains a bare git repo (detected by
-/// the presence of a `HEAD` file), runs `git fetch --all` to update it.
-/// Otherwise, performs a fresh blobless clone.
-///
-/// Returns the path to the git directory (same as `cache_dir` for bare repos).
-///
-/// # Auth
-///
-/// All environment variables are inherited by the git subprocess, which
-/// means AWS credentials (`AWS_*`), GCP tokens (`GOOGLE_*`, `CLOUDSDK_*`),
-/// Azure credentials (`AZURE_*`), and git credential helpers (`GIT_*`)
-/// are automatically available to git for authentication.
-pub fn ensure_blobless_clone(url: &str, branch: Option<&str>, cache_dir: &Path) -> Result<PathBuf> {
-    let head_file = cache_dir.join("HEAD");
-
-    if head_file.exists() {
-        // Existing bare repo — fetch updates.
-        info!(
-            cache_dir = %cache_dir.display(),
-            "updating existing blobless clone"
-        );
-        git_fetch_all(cache_dir)?;
-    } else {
-        // Fresh clone needed.
-        info!(
-            cache_dir = %cache_dir.display(),
-            branch = branch.unwrap_or("HEAD"),
-            "performing blobless clone"
-        );
-        git_clone_blobless(url, branch, cache_dir)?;
-    }
-
-    Ok(cache_dir.to_path_buf())
-}
-
-/// Run `git fetch --all` in an existing bare repo.
-fn git_fetch_all(git_dir: &Path) -> Result<()> {
-    debug!(git_dir = %git_dir.display(), "running git fetch origin");
-
-    let output = Command::new("git")
-        .args(["fetch", "origin"])
-        .env("GIT_DIR", git_dir)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(|e| {
-            error!(error = %e, "failed to spawn git fetch");
-            CrabError::Io(e)
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let err_msg = parse_git_error(&stderr);
-        error!(error = %err_msg, "git fetch failed");
-        return Err(classify_git_error(&stderr));
-    }
-
-    debug!("git fetch complete");
-    Ok(())
-}
-
-/// Perform a fresh blobless bare clone.
-fn git_clone_blobless(url: &str, branch: Option<&str>, cache_dir: &Path) -> Result<()> {
-    // Ensure parent directory exists.
-    if let Some(parent) = cache_dir.parent() {
-        std::fs::create_dir_all(parent).map_err(|e| {
-            error!(path = %parent.display(), error = %e, "failed to create cache parent dir");
-            CrabError::Io(e)
-        })?;
-    }
-
-    let mut args = vec!["clone", "--bare", "--filter=blob:none", "--single-branch"];
-
-    // Add --branch if specified; otherwise git uses the remote's HEAD.
-    let branch_val;
-    if let Some(b) = branch {
-        // Strip refs/heads/ prefix if present — git clone --branch
-        // expects a short branch name.
-        branch_val = b.strip_prefix("refs/heads/").unwrap_or(b).to_owned();
-        args.push("--branch");
-        args.push(&branch_val);
-    }
-
-    args.push(url);
-
-    let cache_dir_str = cache_dir.to_string_lossy().to_string();
-    args.push(&cache_dir_str);
-
-    debug!(url = %url, args = ?args, "spawning git clone");
-
-    let output = Command::new("git")
-        .args(&args)
-        .stdin(std::process::Stdio::null())
-        .output()
-        .map_err(|e| {
-            error!(error = %e, "failed to spawn git clone");
-            CrabError::Io(e)
-        })?;
-
-    if !output.status.success() {
-        let stderr = String::from_utf8_lossy(&output.stderr);
-        let err_msg = parse_git_error(&stderr);
-        error!(error = %err_msg, "blobless clone failed");
-
-        // Clean up partial clone directory on failure.
-        if cache_dir.exists() {
-            warn!(path = %cache_dir.display(), "cleaning up partial clone");
-            let _ = std::fs::remove_dir_all(cache_dir);
-        }
-
-        return Err(classify_git_error(&stderr));
-    }
-
-    info!("blobless clone complete");
-    Ok(())
-}
-
 // ---------------------------------------------------------------------------
 // Error classification
 // ---------------------------------------------------------------------------
@@ -303,72 +214,6 @@ pub enum CloneCacheError {
 
     #[error("remote not found: check the URL")]
     RemoteNotFound,
-}
-
-/// Parse git stderr into a human-friendly error message.
-fn parse_git_error(stderr: &str) -> String {
-    let lower = stderr.to_ascii_lowercase();
-
-    if is_auth_error(&lower) {
-        "authentication failed: check your credentials".to_owned()
-    } else if is_network_error(&lower) {
-        "network error: could not reach remote".to_owned()
-    } else if is_remote_not_found(&lower) {
-        "remote not found: check the URL".to_owned()
-    } else {
-        // Fall back to the raw stderr (trimmed).
-        stderr.trim().to_owned()
-    }
-}
-
-/// Classify git stderr into a structured `CrabError`.
-fn classify_git_error(stderr: &str) -> CrabError {
-    let lower = stderr.to_ascii_lowercase();
-
-    if is_auth_error(&lower) {
-        CrabError::AuthFailed {
-            path: "git remote".into(),
-        }
-    } else if is_network_error(&lower) {
-        CrabError::Internal("network error: could not reach remote".into())
-    } else if is_remote_not_found(&lower) {
-        CrabError::NotFound {
-            path: "git remote".into(),
-        }
-    } else {
-        CrabError::Internal(format!("git operation failed: {}", stderr.trim()))
-    }
-}
-
-/// Check if stderr indicates an authentication failure.
-fn is_auth_error(stderr_lower: &str) -> bool {
-    stderr_lower.contains("authentication failed")
-        || stderr_lower.contains("could not read username")
-        || stderr_lower.contains("invalid credentials")
-        || stderr_lower.contains("401")
-        || stderr_lower.contains("403")
-        || stderr_lower.contains("permission denied")
-        || stderr_lower.contains("access denied")
-}
-
-/// Check if stderr indicates a network error.
-fn is_network_error(stderr_lower: &str) -> bool {
-    stderr_lower.contains("could not resolve host")
-        || stderr_lower.contains("connection refused")
-        || stderr_lower.contains("connection timed out")
-        || stderr_lower.contains("network is unreachable")
-        || stderr_lower.contains("no route to host")
-        || stderr_lower.contains("ssl")
-        || stderr_lower.contains("tls")
-        || stderr_lower.contains("unable to access")
-}
-
-/// Check if stderr indicates the remote was not found.
-fn is_remote_not_found(stderr_lower: &str) -> bool {
-    stderr_lower.contains("repository not found")
-        || stderr_lower.contains("does not appear to be a git repository")
-        || stderr_lower.contains("not found")
-        || stderr_lower.contains("404")
 }
 
 // ---------------------------------------------------------------------------
@@ -473,6 +318,22 @@ mod tests {
     }
 
     #[test]
+    fn mixed_git_owners_are_rejected_without_replacing_history() {
+        let root = tempfile::tempdir().unwrap();
+        let nested = root.path().join(".git");
+        std::fs::create_dir(&nested).unwrap();
+        std::fs::write(root.path().join("HEAD"), b"root owner").unwrap();
+        std::fs::write(nested.join("HEAD"), b"nested owner").unwrap();
+        let result = git_dir(root.path());
+        assert!(matches!(result, Err(CrabError::Configuration { .. })));
+        assert_eq!(
+            std::fs::read(root.path().join("HEAD")).unwrap(),
+            b"root owner"
+        );
+        assert_eq!(std::fs::read(nested.join("HEAD")).unwrap(), b"nested owner");
+    }
+
+    #[test]
     fn mount_cache_lock_uses_sibling_lock_dir_without_creating_cache() {
         let tmp = tempfile::tempdir().unwrap();
         let cache_dir = tmp.path().join("repos").join("repo-cache");
@@ -508,6 +369,7 @@ mod tests {
         let cache_dir = tmp.path().join("repos").join("repo-cache");
 
         let lock = MountCacheLock::acquire(&cache_dir).unwrap();
+        assert!(MountCacheLock::try_acquire(&cache_dir).unwrap().is_none());
         let conflict = MountCacheLock::acquire(&cache_dir).unwrap_err();
         assert!(
             conflict
@@ -518,131 +380,9 @@ mod tests {
 
         drop(lock);
 
+        let handoff = MountCacheLock::try_acquire(&cache_dir).unwrap().unwrap();
+        assert!(MountCacheLock::try_acquire(&cache_dir).unwrap().is_none());
+        drop(handoff);
         MountCacheLock::acquire(&cache_dir).unwrap();
-    }
-
-    // --- Error classification ---
-
-    #[test]
-    fn classify_auth_401() {
-        let err = classify_git_error("fatal: Authentication failed for 'https://example.com/repo'");
-        let msg = err.to_string();
-        assert!(msg.contains("authentication failed"), "got: {msg}");
-    }
-
-    #[test]
-    fn classify_auth_permission_denied() {
-        let err = classify_git_error("fatal: Permission denied (publickey).");
-        let msg = err.to_string();
-        assert!(msg.contains("authentication failed"), "got: {msg}");
-    }
-
-    #[test]
-    fn classify_network_resolve() {
-        let err = classify_git_error(
-            "fatal: unable to access 'https://example.com/repo': Could not resolve host: example.com",
-        );
-        let msg = err.to_string();
-        assert!(msg.contains("network error"), "got: {msg}");
-    }
-
-    #[test]
-    fn classify_network_connection_refused() {
-        let err = classify_git_error(
-            "fatal: unable to access 'https://example.com/repo': Connection refused",
-        );
-        let msg = err.to_string();
-        assert!(msg.contains("network error"), "got: {msg}");
-    }
-
-    #[test]
-    fn classify_remote_not_found() {
-        let err = classify_git_error("fatal: repository 'https://example.com/repo' not found");
-        let msg = err.to_string();
-        assert!(msg.contains("not found"), "got: {msg}");
-    }
-
-    #[test]
-    fn classify_not_git_repo() {
-        let err = classify_git_error(
-            "fatal: 'https://example.com/repo' does not appear to be a git repository",
-        );
-        let msg = err.to_string();
-        assert!(msg.contains("not found"), "got: {msg}");
-    }
-
-    #[test]
-    fn classify_unknown_error_falls_through() {
-        let err = classify_git_error("fatal: some unknown error happened");
-        let msg = err.to_string();
-        assert!(msg.contains("git operation failed"), "got: {msg}");
-    }
-
-    // --- parse_git_error ---
-
-    #[test]
-    fn parse_auth_error_message() {
-        let msg = parse_git_error("fatal: Authentication failed for 'https://example.com'");
-        assert_eq!(msg, "authentication failed: check your credentials");
-    }
-
-    #[test]
-    fn parse_network_error_message() {
-        let msg = parse_git_error("fatal: Could not resolve host: example.com");
-        assert_eq!(msg, "network error: could not reach remote");
-    }
-
-    #[test]
-    fn parse_not_found_message() {
-        let msg = parse_git_error("fatal: repository 'https://example.com/repo' not found");
-        assert_eq!(msg, "remote not found: check the URL");
-    }
-
-    #[test]
-    fn parse_unknown_preserves_stderr() {
-        let msg = parse_git_error("  fatal: something weird  ");
-        assert_eq!(msg, "fatal: something weird");
-    }
-
-    // --- ensure_blobless_clone (integration-style, filesystem only) ---
-
-    #[test]
-    fn ensure_clone_detects_existing_bare_repo() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cache_dir = tmp.path().join("repo-cache");
-        std::fs::create_dir_all(&cache_dir).unwrap();
-
-        // Simulate an existing bare repo by creating a HEAD file.
-        std::fs::write(cache_dir.join("HEAD"), "ref: refs/heads/main\n").unwrap();
-
-        // This will attempt git fetch which will fail (no real remote),
-        // but it proves the detection logic works.
-        let result = ensure_blobless_clone(
-            "https://example.com/nonexistent.git",
-            Some("main"),
-            &cache_dir,
-        );
-
-        // We expect an error from git fetch (no real remote configured),
-        // but the important thing is it took the fetch path, not clone.
-        assert!(result.is_err());
-    }
-
-    #[test]
-    fn ensure_clone_attempts_fresh_clone_when_no_head() {
-        let tmp = tempfile::tempdir().unwrap();
-        let cache_dir = tmp.path().join("fresh-cache");
-
-        // No HEAD file exists, so it should attempt a clone.
-        // This will fail (invalid URL) but proves the clone path is taken.
-        let result = ensure_blobless_clone(
-            "https://invalid-host-that-does-not-exist.example/repo.git",
-            Some("main"),
-            &cache_dir,
-        );
-
-        assert!(result.is_err());
-        // The partial clone directory should have been cleaned up.
-        // (It may not exist at all if git failed before creating it.)
     }
 }

@@ -36,6 +36,11 @@ Discovery honors a nonempty `GIT_DIR` as a native OS path, without requiring
 Unicode or checking that the directory exists. An absent or empty override
 uses upward discovery. Linked-worktree `commondir` parsing remains separate.
 
+`raw_object_command` reads physical objects and actual parent links. It ignores
+local replacement refs, grafts and shallow markers so packing, visibility and
+ancestry checks agree on the stored graph. Callers retain transport, lazy-fetch
+and process-lifetime policy. Shallow fetch repacking keeps its explicit frontier.
+
 The main surfaces are:
 
 - `url`, `discover`, `ref_resolve`, `refname`, and `worktree` for repository
@@ -69,6 +74,11 @@ Committed suffix consolidation reuses authenticated pack artifacts directly.
 It retains the generated workspace and streaming identity instead of installing,
 copying and hashing those bodies again. Native thin-pack repair fetches bases
 outside each source pack; in-pack REF bases remain compressed.
+
+Generated objects use `sha1dc` for hardware-accelerated SHA-1 with collision
+detection. Their IDs include the standard Git loose-object header; a detected
+collision returns the existing Gitoxide collision error and standard digest.
+Incoming packs and other Gitoxide hashing retain their existing verification.
 
 ## Usage
 

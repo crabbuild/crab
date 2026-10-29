@@ -6,8 +6,6 @@ use std::future::Future;
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
-use crab_metadata::git_object_locator::GitPackInventoryEntry;
-use crab_metadata::manifests::Manifest;
 use crab_xet::hash::MerkleHash;
 use gix_hash::ObjectId;
 use tokio::sync::{Mutex, OwnedSemaphorePermit, Semaphore, watch};
@@ -52,16 +50,6 @@ pub struct RuntimeOptions {
     pub max_blame_cache_entries: usize,
     /// Maximum estimated bytes shared by immutable blame results and blob comparisons.
     pub max_blame_cache_bytes: usize,
-    /// Maximum short-lived manifest entries retained in memory.
-    pub max_manifest_cache_entries: usize,
-    /// Maximum estimated manifest bytes retained in memory.
-    pub max_manifest_cache_bytes: usize,
-    /// Lifetime before a manifest body must be fetched again.
-    pub manifest_cache_ttl: Duration,
-    /// Maximum content-addressed inventories retained in memory.
-    pub max_inventory_cache_entries: usize,
-    /// Maximum estimated inventory bytes retained in memory.
-    pub max_inventory_cache_bytes: usize,
     /// Maximum exact misses retained across generations.
     pub max_negative_cache_entries: usize,
     /// Maximum identity-key bytes retained for exact misses.
@@ -89,14 +77,6 @@ pub struct RuntimeSnapshot {
     pub blame_entries: usize,
     /// Estimated resident blame-result and blob-comparison bytes.
     pub blame_bytes: usize,
-    /// Retained manifest pointers.
-    pub manifest_entries: usize,
-    /// Estimated resident manifest bytes.
-    pub manifest_bytes: usize,
-    /// Retained immutable pack inventories.
-    pub inventory_entries: usize,
-    /// Estimated resident inventory bytes.
-    pub inventory_bytes: usize,
     /// Retained exact negative object results.
     pub negative_entries: usize,
     /// Estimated resident negative-cache bytes.
@@ -124,11 +104,6 @@ impl Default for RuntimeOptions {
             max_parsed_cache_bytes: 64 * 1024 * 1024,
             max_blame_cache_entries: 256,
             max_blame_cache_bytes: 32 * 1024 * 1024,
-            max_manifest_cache_entries: 1_024,
-            max_manifest_cache_bytes: 16 * 1024 * 1024,
-            manifest_cache_ttl: Duration::from_secs(2),
-            max_inventory_cache_entries: 1_024,
-            max_inventory_cache_bytes: 64 * 1024 * 1024,
             max_negative_cache_entries: 4_096,
             max_negative_cache_bytes: 1024 * 1024,
             negative_cache_ttl: Duration::from_secs(5),
@@ -156,14 +131,6 @@ impl RuntimeOptions {
                 name: "negative_cache_ttl",
             });
         }
-        if self.max_manifest_cache_entries > 0
-            && self.max_manifest_cache_bytes > 0
-            && self.manifest_cache_ttl.is_zero()
-        {
-            return Err(Error::InvalidLimit {
-                name: "manifest_cache_ttl",
-            });
-        }
         Ok(self)
     }
 }
@@ -179,12 +146,6 @@ pub(crate) struct ObjectCacheKey {
 pub(crate) struct PackIndexCacheKey {
     identity: RepositoryIdentity,
     pack_id: MerkleHash,
-}
-
-#[derive(Clone, PartialEq, Eq, Hash)]
-struct InventoryCacheKey {
-    identity: RepositoryIdentity,
-    pack_index_hash: MerkleHash,
 }
 
 #[derive(Clone, PartialEq, Eq, Hash)]
@@ -255,13 +216,6 @@ struct GeneratedPackFlightKey {
     options: RepositoryOptions,
 }
 
-#[derive(Clone)]
-struct CachedManifest {
-    manifest: Manifest,
-    etag: String,
-    expires: Instant,
-}
-
 impl PackIndexCacheKey {
     pub(crate) fn new(identity: &RepositoryIdentity, pack_id: MerkleHash) -> Self {
         Self {
@@ -323,9 +277,6 @@ pub struct RemoteGitRuntime {
     pack_index_cache: Mutex<BoundedLru<PackIndexCacheKey, Arc<PackIndex>>>,
     parsed_cache: Mutex<BoundedLru<ObjectCacheKey, ParsedObject>>,
     blame_cache: Mutex<BoundedLru<BlameCacheKey, BlameCacheValue>>,
-    manifest_cache: Mutex<BoundedLru<RepositoryIdentity, Arc<CachedManifest>>>,
-    inventory_cache:
-        Mutex<BoundedLru<InventoryCacheKey, Arc<HashMap<MerkleHash, GitPackInventoryEntry>>>>,
     packed_flights: Arc<ReadFlights<PackedFlightKey, Arc<PackedEntry>>>,
     pack_index_size_cache: Mutex<BoundedLru<PackIndexCacheKey, u64>>,
     pack_index_size_flights: Arc<ReadFlights<PackIndexCacheKey, u64>>,
@@ -386,14 +337,6 @@ impl RemoteGitRuntime {
                 options.max_blame_cache_entries,
                 options.max_blame_cache_bytes,
             )),
-            manifest_cache: Mutex::new(BoundedLru::new(
-                options.max_manifest_cache_entries,
-                options.max_manifest_cache_bytes,
-            )),
-            inventory_cache: Mutex::new(BoundedLru::new(
-                options.max_inventory_cache_entries,
-                options.max_inventory_cache_bytes,
-            )),
             packed_flights: ReadFlights::new(),
             pack_index_size_cache: Mutex::new(BoundedLru::new(
                 options.max_pack_index_cache_entries,
@@ -433,12 +376,6 @@ impl RemoteGitRuntime {
         let blame = self.blame_cache.lock().await;
         let (blame_entries, blame_bytes) = (blame.len(), blame.resident_bytes());
         drop(blame);
-        let manifest = self.manifest_cache.lock().await;
-        let (manifest_entries, manifest_bytes) = (manifest.len(), manifest.resident_bytes());
-        drop(manifest);
-        let inventory = self.inventory_cache.lock().await;
-        let (inventory_entries, inventory_bytes) = (inventory.len(), inventory.resident_bytes());
-        drop(inventory);
         let negative = self.negative_cache.lock().await;
         let (negative_entries, negative_bytes) = (negative.len(), negative.resident_bytes());
         drop(negative);
@@ -451,10 +388,6 @@ impl RemoteGitRuntime {
             parsed_bytes,
             blame_entries,
             blame_bytes,
-            manifest_entries,
-            manifest_bytes,
-            inventory_entries,
-            inventory_bytes,
             negative_entries,
             negative_bytes,
             active_object_flights: self.packed_flights.len().await,
@@ -569,67 +502,6 @@ impl RemoteGitRuntime {
             }
             None => false,
         }
-    }
-
-    pub(crate) async fn cached_manifest(
-        &self,
-        identity: &RepositoryIdentity,
-    ) -> Option<(Manifest, String)> {
-        let cached = self.manifest_cache.lock().await.get(identity)?;
-        (cached.expires > Instant::now()).then(|| (cached.manifest.clone(), cached.etag.clone()))
-    }
-
-    pub(crate) async fn insert_manifest(
-        &self,
-        identity: RepositoryIdentity,
-        manifest: Manifest,
-        etag: String,
-    ) {
-        let bytes = manifest_bytes(&manifest).saturating_add(etag.len());
-        let cached = Arc::new(CachedManifest {
-            manifest,
-            etag,
-            expires: Instant::now() + self.options.manifest_cache_ttl,
-        });
-        self.manifest_cache
-            .lock()
-            .await
-            .insert(identity, cached, bytes);
-    }
-
-    pub(crate) async fn cached_inventory(
-        &self,
-        identity: &RepositoryIdentity,
-        pack_index_hash: MerkleHash,
-    ) -> Option<Arc<HashMap<MerkleHash, GitPackInventoryEntry>>> {
-        self.inventory_cache.lock().await.get(&InventoryCacheKey {
-            identity: identity.clone(),
-            pack_index_hash,
-        })
-    }
-
-    pub(crate) async fn insert_inventory(
-        &self,
-        identity: RepositoryIdentity,
-        pack_index_hash: MerkleHash,
-        inventory: Arc<HashMap<MerkleHash, GitPackInventoryEntry>>,
-    ) {
-        let bytes = std::mem::size_of::<HashMap<MerkleHash, GitPackInventoryEntry>>()
-            .saturating_add(
-                inventory.capacity().saturating_mul(
-                    std::mem::size_of::<MerkleHash>()
-                        .saturating_add(std::mem::size_of::<GitPackInventoryEntry>())
-                        .saturating_add(1),
-                ),
-            );
-        self.inventory_cache.lock().await.insert(
-            InventoryCacheKey {
-                identity,
-                pack_index_hash,
-            },
-            inventory,
-            bytes,
-        );
     }
 
     pub(crate) async fn cached_commit(
@@ -1205,33 +1077,6 @@ fn blame_bytes(blame: &Blame) -> usize {
         )
 }
 
-fn manifest_bytes(manifest: &Manifest) -> usize {
-    let optional = |value: &Option<String>| value.as_ref().map_or(0, String::len);
-    std::mem::size_of::<Manifest>()
-        .saturating_add(manifest.created_at.len())
-        .saturating_add(optional(&manifest.pusher))
-        .saturating_add(manifest.session_id.len())
-        .saturating_add(manifest.head.len())
-        .saturating_add(manifest.shard_index_hash.len())
-        .saturating_add(manifest.pack_index_hash.len())
-        .saturating_add(manifest.git_validation_digest.len())
-        .saturating_add(optional(&manifest.commit_graph_hash))
-        .saturating_add(optional(&manifest.path_state_hash))
-        .saturating_add(optional(&manifest.ref_registry_hash))
-        .saturating_add(
-            manifest
-                .refs
-                .iter()
-                .chain(&manifest.peeled_refs)
-                .map(|(name, oid)| {
-                    std::mem::size_of::<(String, String)>()
-                        .saturating_add(name.len())
-                        .saturating_add(oid.len())
-                })
-                .sum::<usize>(),
-        )
-}
-
 fn tag_bytes(tag: &AnnotatedTag) -> usize {
     std::mem::size_of::<AnnotatedTag>()
         .saturating_add(tag.name.len())
@@ -1280,10 +1125,6 @@ mod tests {
             },
             RuntimeOptions {
                 negative_cache_ttl: Duration::ZERO,
-                ..RuntimeOptions::default()
-            },
-            RuntimeOptions {
-                manifest_cache_ttl: Duration::ZERO,
                 ..RuntimeOptions::default()
             },
         ] {
@@ -1468,27 +1309,6 @@ mod tests {
 
         assert!(runtime.cached_tree(&key, 9).await.is_none());
         assert!(runtime.cached_tree(&key, 10).await.is_some());
-    }
-
-    #[tokio::test]
-    async fn inventory_cache_is_content_hash_and_repository_scoped() {
-        let runtime = RemoteGitRuntime::default();
-        let identity = RepositoryIdentity::new("provider", "repository", 1).expect("identity");
-        let other = RepositoryIdentity::new("provider", "other", 1).expect("identity");
-        let hash = crab_xet::hash::compute_data_hash(b"inventory-one");
-        let other_hash = crab_xet::hash::compute_data_hash(b"inventory-two");
-        runtime
-            .insert_inventory(identity.clone(), hash, Arc::new(HashMap::new()))
-            .await;
-
-        assert!(runtime.cached_inventory(&identity, hash).await.is_some());
-        assert!(
-            runtime
-                .cached_inventory(&identity, other_hash)
-                .await
-                .is_none()
-        );
-        assert!(runtime.cached_inventory(&other, hash).await.is_none());
     }
 
     #[tokio::test]

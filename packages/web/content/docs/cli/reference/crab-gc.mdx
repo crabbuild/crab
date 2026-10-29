@@ -57,10 +57,18 @@ summary.
 Before first use of this registry layout, stop older writers, upgrade every
 writer, and run `crab gc --repair-registry --bucket <bucket>`. Destructive
 bucket GC refuses incomplete coverage and does not read the retired aggregate
-`.crab/ref-registry` object. Repair discovers both protocol-v2 capsule roots
-and legacy manifests. For v2, GC authenticates the root and pointer catalog,
-marks its external shards, and binds the deletion journal to the root digest;
-a concurrent root change invalidates the plan before deletion.
+`.crab/ref-registry` object. Repair captures existing registered identities and
+discovers Capsule roots and retired manifest markers, then requires a valid
+protocol-v2 Capsule root for every captured repository. Missing or corrupt roots abort before registry replacement; manifest
+history cannot supply replacement roots. GC authenticates the root and pointer
+catalog, marks its external shards, and binds the deletion journal to the captured
+state digest; concurrent state movement invalidates the plan before deletion.
+
+A missing root marker does not deregister a known repository. Restore its root
+before repair, or explicitly retire its registry entry with
+`crab gc --deregister <repo-prefix> --bucket <bucket>`. Repair reads registered
+identities independently of the coverage marker, so a missing or corrupt
+coverage marker can be rebuilt without discarding valid repository records.
 
 If any repository-scope object deletion or post-delete reconciliation fails,
 Crab exits non-zero with `CRAB-E0322`. Its structured error details report the

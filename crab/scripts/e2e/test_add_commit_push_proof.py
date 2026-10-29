@@ -14,9 +14,7 @@ class CapsuleProofTest(unittest.TestCase):
         return {
             "message": "revalidated staged remote placement proofs",
             "planned": 7, "indexed": 7, "matched": 7,
-            "generation_verified": 0, "capsule_source_verified": 7,
-            "payload_verified": 7, "placement_mismatches": 0,
-            "origin_proof_mismatches": 0,
+            "capsule_source_verified": 7, "payload_verified": 7,
         }
 
     def adoption(self):
@@ -27,6 +25,13 @@ class CapsuleProofTest(unittest.TestCase):
 
     def log(self, *events):
         return "\n".join(json.dumps({"fields": e}, separators=(",", ":")) for e in events)
+
+    def test_retired_receipt_counters_are_rejected(self):
+        for key in ("generation_verified", "placement_mismatches", "origin_proof_mismatches"):
+            for value in (0, 7):
+                with self.subTest(key=key, value=value):
+                    event = {**self.proof(), key: value}
+                    self.assertFalse(capsule_staged_proof_complete(self.log(event, self.adoption()), 7))
 
     def test_accepts_complete_capsule_evidence(self):
         self.assertTrue(capsule_staged_proof_complete(self.log(self.proof(), self.adoption()), 7))
@@ -45,7 +50,7 @@ class CapsuleProofTest(unittest.TestCase):
                 self.assertFalse(capsule_staged_proof_complete(self.log(self.proof(), event), 7))
 
     def test_rejects_counts_spread_across_events(self):
-        first = {**self.proof(), "generation_verified": 7, "matched": 0}
+        first = {**self.proof(), "matched": 0}
         second = {**first, "matched": 7, "payload_verified": 0}
         self.assertFalse(capsule_staged_proof_complete(self.log(first, second, self.adoption()), 7))
 

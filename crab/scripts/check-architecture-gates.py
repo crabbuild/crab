@@ -947,7 +947,6 @@ READ_MODULE_DIRECT_FORBIDDEN_PACKAGES = {
     "crab-auth",
     "crab-auth-server",
     "crab-cache-server",
-    "crab-coordination",
 }
 READ_MODULE_FORBIDDEN_PATTERNS = {
     "AmazonS3Builder",
@@ -969,12 +968,10 @@ READ_MODULE_FORBIDDEN_PATTERNS = {
     "crab-auth-server",
     "crab-auth",
     "crab-cache-server",
-    "crab-coordination",
     "crab::",
     "crab_auth_server",
     "crab_auth",
     "crab_cache_server",
-    "crab_coordination",
     "google-cloud",
     "google_cloud",
     "object_store::aws",
@@ -1115,16 +1112,19 @@ GIT_DELETED_CLI_OWNER_PATHS = (
     "crab/src/git/reject_reason.rs",
     "crab/src/git/walk.rs",
 )
-GIT_HEAD_SYMREF_SCAN_PATHS = (
+GIT_PUSH_HEAD_SCAN_PATHS = (
     "crab/src/git/push.rs",
+    "crab/src/git/capsule_push.rs",
 )
-GIT_HEAD_SYMREF_FORBIDDEN_PATTERNS = (
+GIT_PUSH_HEAD_FORBIDDEN_PATTERNS = (
     "try_find(\"HEAD\")",
     "resolve_local_head_at(",
+    "resolve_head_symref",
 )
+GIT_TAG_PEEL_SCAN_PATHS = (*GIT_PUSH_HEAD_SCAN_PATHS, "crab/src/cmd/push.rs")
 GIT_TAG_PEEL_REQUIRED_DELEGATIONS = {
-    "crab/src/git/push.rs": "crab_git::tag::peeled_tag_refs_at",
-    "crab/src/git/push_native.rs": "crab_git::tag::annotated_tag_refs_strict_at",
+    "crab/src/git/capsule_push.rs": "crab_git::tag::peeled_revision_targets_at",
+    "crab/src/cmd/push.rs": "crab_git::tag::annotated_tag_refs_strict_at",
 }
 GIT_TAG_PEEL_FORBIDDEN_PATTERNS = (
     "peel_to_commit",
@@ -1133,7 +1133,8 @@ GIT_TAG_PEEL_FORBIDDEN_PATTERNS = (
     "find_object(",
 )
 STORAGE_PACK_LAYOUT_REQUIRED_DELEGATIONS = {
-    "crab/src/git/push.rs": ("pack_path(", "pack_metadata_path("),
+    # Push policy no longer materializes remote packs; keep scanning its source.
+    "crab/src/git/push.rs": (),
     "crab/src/git/remote_helper.rs": ("pack_path(", "pack_index_path("),
     # Snapshot readers use the range-backed v2 installer; pack naming and
     # selection remain owned by crab-read.
@@ -1145,24 +1146,38 @@ STORAGE_PACK_LAYOUT_REQUIRED_DELEGATIONS = {
         "pack_metadata_path(",
     ),
     "crab/src/cmd/repack.rs": (
-        "repo_pack_path(",
-        "repo_pack_index_path(",
-        "repo_pack_reverse_index_path(",
+        "root: crab_metadata::capsule_protocol::RootSnapshot,",
+        "crab_storage::StoreLayout::with_global_prefix(",
+        "crab_read::capsule_protocol::open_view_from_root_with_metadata(",
+        "crab_remote::checkpoint::repack_capsule_repository_from_view(",
     ),
-    "crab/src/replication/mod.rs": ("pack_path(", "pack_metadata_path("),
+    "crab/src/replication/mod.rs": ("check_capsule_read_replica_readiness(",),
     "crates/crab-auth-server/src/receive.rs": (
-        "pack_path(",
-        "pack_metadata_path(",
-    ),
-    "crates/crab-auth-server/src/receive/finalize.rs": (
-        "pack_path(",
-        "pack_metadata_path(",
+        "canonical_global_content_path(",
+        "content_hash_from_path(",
     ),
     "crates/crab-auth-server/src/receive/git_workspace.rs": (
-        "pack_path(",
-        "pack_metadata_path(",
+        "crab_read::capsule_protocol::install_git_packs_with_candidates_from_store(",
     ),
-    "crates/crab-auth-server/src/view.rs": ("pack_path(", "pack_metadata_path("),
+    "crates/crab-auth-server/src/view.rs": (
+        "ViewGitWorkspace::create(",
+        "publish_filtered_capsule_view(",
+    ),
+}
+STORAGE_PACK_LAYOUT_FORBIDDEN_DELEGATIONS = {
+    "crab/src/git/push.rs": (
+        "read_manifest(",
+        "write_manifest_cas(",
+        "materialize_remote_git_packs(",
+        "run_bounded_pack_materialization(",
+        "rebuild_split_commit_graph_from_remote_packs_if_current(",
+        "rebuild_shallow_closure_index_from_remote_packs_if_current(",
+    ),
+    "crab/src/cmd/repack.rs": (
+        "read_manifest(",
+        "write_manifest_cas(",
+        "upload_segmented_bulk(",
+    ),
 }
 STORAGE_PACK_LAYOUT_FORBIDDEN_PATTERNS = (
     'repo_path(&format!("packs/pack-',
@@ -1903,11 +1918,13 @@ WORKSPACE_DEPENDENCY_POLICY = {
         "normal": {
             "crab-cache",
             "crab-cache-store",
+            "crab-coordination",
             "crab-diff",
             "crab-git",
             "crab-lfs",
             "crab-metadata",
             "crab-remote-git",
+            "crab-staging",
             "crab-storage",
             "crab-types",
             "crab-xet",
@@ -1943,13 +1960,14 @@ WORKSPACE_DEPENDENCY_POLICY = {
             "crab-cache",
             "crab-cache-store",
             "crab-git",
+            "crab-lfs",
             "crab-read",
             "crab-staging",
             "crab-storage",
             "crab-types",
             "crab-xet",
         },
-        "dev": {"crab-storage"},
+        "dev": {"crab-metadata", "crab-storage"},
     },
     "crab-workflow": {
         "normal": {"crab-coordination", "crab-storage", "crab-types"}
@@ -1983,10 +2001,10 @@ WORKSPACE_DEPENDENCY_PATHS = {
     "crab-xet": "crates/crab-xet",
 }
 WORKSPACE_XET_DEPENDENCY_VERSIONS = {
-    "xet-client": "1.6.0",
-    "xet-core-structures": "1.6.0",
-    "xet-data": "1.6.0",
-    "xet-runtime": "1.6.0",
+    "xet-client": "=1.6.0",
+    "xet-core-structures": "=1.6.0",
+    "xet-data": "=1.6.0",
+    "xet-runtime": "=1.6.0",
 }
 WORKSPACE_GITOXIDE_DEPENDENCIES = {
     "gix": "0.83.0",
@@ -4138,6 +4156,14 @@ def check_read_module_scope(root: Path, metadata: dict) -> bool:
         if object_store["features"]:
             violations.append("crab-read: object_store must stay featureless")
 
+    coordination = normal_dependency(package, "crab-coordination")
+    if (coordination is None or not coordination["optional"]
+            or coordination["uses_default_features"]
+            or set(coordination["features"]) != {"object-store-lock"}):
+        violations.append("crab-read: retention must use optional object-store-lock coordination only")
+    if "dep:crab-coordination" not in package.get("features", {}).get("hydration", []):
+        violations.append("crab-read: coordination must remain hydration-gated")
+
     for name in READ_MODULE_DIRECT_FORBIDDEN_PACKAGES:
         if normal_dependency(package, name) is not None:
             violations.append(f"crab-read: {name} must not be a normal dependency")
@@ -4160,7 +4186,17 @@ def check_read_module_scope(root: Path, metadata: dict) -> bool:
                 text = candidate.read_text(encoding="utf-8")
             except UnicodeDecodeError:
                 continue
+            test_lines = rust_test_only_lines(text) if candidate.suffix == ".rs" else set()
             for index, line in enumerate(text.splitlines(), start=1):
+                if candidate.suffix == ".rs" and index not in test_lines:
+                    modules = re.findall(r"\bcrab_coordination(?:::([A-Za-z_]\w*))?", line)
+                    invalid_module = any(module not in {"read_retention_runtime", "CoordinationError"} for module in modules)
+                    owns_capture = re.search(
+                        r"\b(?:ReadRetentionLease|ReadRetentionSession|ReadRetentionCapture|GcReadBarrier|GcFenceLease|PushLock|WriteCoordinator)\b"
+                        r"|crab_coordination::read_retention_runtime::\*", line,
+                    )
+                    if invalid_module or owns_capture:
+                        violations.append(f"{rel(root, candidate)}:{index}: capture registration and write coordination belong to callers")
                 if any(pattern in line for pattern in READ_MODULE_FORBIDDEN_PATTERNS):
                     violations.append(f"{rel(root, candidate)}:{index}: {line.strip()}")
 
@@ -4325,29 +4361,32 @@ def check_git_module_scope(root: Path, metadata: dict) -> bool:
     return False
 
 
-def check_git_head_symref_delegation(root: Path) -> bool:
+def check_git_push_head_authority(root: Path) -> bool:
     violations: list[str] = []
 
-    for scan_path in GIT_HEAD_SYMREF_SCAN_PATHS:
+    for scan_path in GIT_PUSH_HEAD_SCAN_PATHS:
         path = root / scan_path
         if not path.is_file():
+            violations.append(f"{scan_path}: push owner source is missing")
             continue
         text = path.read_text(encoding="utf-8")
-        if "crab_git::ref_resolve::resolve_head_symref" not in text:
+        if scan_path == "crab/src/git/capsule_push.rs" and (
+            "current_branch_is_denied(config, root.head(), &spec.dst)" not in text
+        ):
             violations.append(
-                f"{rel(root, path)}: local HEAD symref resolution must delegate to crab-git"
+                f"{rel(root, path)}: current-branch policy must use captured Capsule root HEAD"
             )
         for index, line in enumerate(text.splitlines(), start=1):
-            if any(pattern in line for pattern in GIT_HEAD_SYMREF_FORBIDDEN_PATTERNS):
+            if any(pattern in line for pattern in GIT_PUSH_HEAD_FORBIDDEN_PATTERNS):
                 violations.append(
-                    f"{rel(root, path)}:{index}: local HEAD symref lookup belongs in crab-git"
+                    f"{rel(root, path)}:{index}: push policy must not substitute local HEAD for remote root HEAD"
                 )
 
     if not violations:
-        print("ok: push local HEAD symref resolution delegates to crab-git")
+        print("ok: push HEAD policy uses Capsule root authority")
         return True
 
-    print("error: push local HEAD symref ownership drifted:", file=sys.stderr)
+    print("error: push HEAD authority drifted:", file=sys.stderr)
     for violation in violations:
         print(f"  {violation}", file=sys.stderr)
     return False
@@ -4356,12 +4395,14 @@ def check_git_head_symref_delegation(root: Path) -> bool:
 def check_git_tag_peel_delegation(root: Path) -> bool:
     violations: list[str] = []
 
-    for scan_path, required in GIT_TAG_PEEL_REQUIRED_DELEGATIONS.items():
+    for scan_path in GIT_TAG_PEEL_SCAN_PATHS:
         path = root / scan_path
         if not path.is_file():
+            violations.append(f"{scan_path}: push owner source is missing")
             continue
         text = path.read_text(encoding="utf-8")
-        if required not in text:
+        required = GIT_TAG_PEEL_REQUIRED_DELEGATIONS.get(scan_path)
+        if required is not None and required not in text:
             violations.append(f"{rel(root, path)}: annotated tag peeling must delegate to crab-git")
         for index, line in enumerate(text.splitlines(), start=1):
             if any(pattern in line for pattern in GIT_TAG_PEEL_FORBIDDEN_PATTERNS):
@@ -4385,15 +4426,20 @@ def check_storage_pack_layout_delegation(root: Path) -> bool:
     for scan_path, required_patterns in STORAGE_PACK_LAYOUT_REQUIRED_DELEGATIONS.items():
         path = root / scan_path
         if not path.is_file():
+            violations.append(f"{scan_path}: pack layout owner source is missing")
             continue
         text = path.read_text(encoding="utf-8")
         for required in required_patterns:
             if required not in text:
                 violations.append(
-                    f"{rel(root, path)}: pack object layout must delegate to crab-storage"
+                    f"{rel(root, path)}: pack object layout must retain its delegated owner"
                 )
+        forbidden = (
+            *STORAGE_PACK_LAYOUT_FORBIDDEN_PATTERNS,
+            *STORAGE_PACK_LAYOUT_FORBIDDEN_DELEGATIONS.get(scan_path, ()),
+        )
         for index, line in enumerate(text.splitlines(), start=1):
-            if any(pattern in line for pattern in STORAGE_PACK_LAYOUT_FORBIDDEN_PATTERNS):
+            if any(pattern in line for pattern in forbidden):
                 violations.append(
                     f"{rel(root, path)}:{index}: pack object layout belongs in crab-storage"
                 )
@@ -4517,7 +4563,10 @@ def check_lfs_module_scope(root: Path, metadata: dict) -> bool:
             except UnicodeDecodeError:
                 continue
             for index, line in enumerate(text.splitlines(), start=1):
-                if any(pattern in line for pattern in LFS_MODULE_FORBIDDEN_PATTERNS):
+                # Git LFS owns this documented storage override. Other environment
+                # reads and all CLI/provider policy remain forbidden.
+                scoped_line = re.sub(r'\benv::var\("GIT_LFS_DIR"\)', "", line)
+                if any(pattern in scoped_line for pattern in LFS_MODULE_FORBIDDEN_PATTERNS):
                     violations.append(f"{rel(root, candidate)}:{index}: {line.strip()}")
 
     if not violations:
@@ -4946,7 +4995,7 @@ def main() -> int:
         check_read_fetch_admission_delegation(root),
         check_read_ref_advertisement_delegation(root),
         check_git_module_scope(root, metadata),
-        check_git_head_symref_delegation(root),
+        check_git_push_head_authority(root),
         check_git_tag_peel_delegation(root),
         check_storage_pack_layout_delegation(root),
         check_diff_module_scope(root, args.cargo, metadata),

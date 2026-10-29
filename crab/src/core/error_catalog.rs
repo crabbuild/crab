@@ -1218,10 +1218,10 @@ pub fn lookup(code: &str) -> Option<ErrorExplanation> {
   - The pointing commit was pushed before the shard containing the\n\
     file was uploaded successfully (partial push, or corruption)",
             remediation: "\
-  Run `crab metadb rebuild --db file_index` to re-read every shard\n\
-  under `.crab/shards/` and repopulate the file-index entries. If\n\
-  the file was added in a recent push, verify that push finished\n\
-  successfully and try re-pushing.",
+  Run `crab metadb diagnose --deep` against the affected repository.\n\
+  Restore missing authoritative bindings or content from verified\n\
+  retained history, a replica, or a backup. Checkpoint rebuild does\n\
+  not invent catalog entries by scanning unrelated bucket objects.",
         }),
         "CRAB-E0507" => Some(ErrorExplanation {
             code: "CRAB-E0507",
@@ -1231,10 +1231,10 @@ pub fn lookup(code: &str) -> Option<ErrorExplanation> {
   - Byte-level corruption in an SSTable or WAL segment that survived\n\
     checksum verification (rare)",
             remediation: "\
-  Run `crab fsck` against the affected metadb. For isolated value\n\
-  corruption, `crab metadb rebuild --db {file_index|chunk_index}`\n\
-  rebuilds the affected database by re-reading every shard under\n\
-  `.crab/shards/` (content-addressed, idempotent).",
+  Run `crab metadb diagnose --deep` and preserve the failing object\n\
+  path. Restore corrupt authoritative bytes from verified history,\n\
+  a replica, or a backup, then repeat diagnosis. Run `crab metadb\n\
+  rebuild` only after the complete source closure verifies.",
         }),
         "CRAB-E0508" => Some(ErrorExplanation {
             code: "CRAB-E0508",

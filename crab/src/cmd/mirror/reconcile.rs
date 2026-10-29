@@ -777,12 +777,10 @@ async fn apply_plan(
         }
     }
     if !plan.actions.is_empty() {
-        let command = git_command_from_vec(push_args, Some(cache_dir), &options, true)
-            .env(crate::git::push_native::MIRROR_GIT_ONLY_ENV, "1".into())
-            .env(
-                crate::git::push_native::MIRROR_PLAN_ID_ENV,
-                plan.plan_id.clone().into(),
-            );
+        let command = git_command_from_vec(push_args, Some(cache_dir), &options, true).env(
+            crab_remote::local::PUBLICATION_PLAN_ID_ENV,
+            plan.plan_id.clone().into(),
+        );
         let push_result = run_required(runner, command, options.mode);
         if let Err(push_error) = push_result {
             match resolve_plan_commit(store, &router, &plan).await? {

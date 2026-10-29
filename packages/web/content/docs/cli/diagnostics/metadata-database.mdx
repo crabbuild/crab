@@ -1,156 +1,105 @@
 ---
-title: "Metadata Database"
-description: "How Crab's SlateDB metadata subsystem works — the file index and chunk index databases that power deduplication and hydration."
+title: "Metadata diagnostics"
+description: "Verify Capsule authority and reachable content, inspect the local cache, and choose a bounded recovery action."
 meta:
   contentType: Troubleshooting
-  goal: "Diagnose Metadata Database problems and choose a safe recovery step."
+  goal: "Identify the failing authority, payload, or cache boundary."
   audience: "Crab operators investigating a failure or unexpected state."
 ---
 
-## The Metadata Subsystem
+# Metadata diagnostics
 
-Crab maintains two SlateDB databases that map content to storage locations. These databases are what make deduplication and hydration fast — without them, every operation would need to scan all shards.
+Capsule v2 stores authenticated catalogs in checkpoints and capsules selected
+by `v2/root` and transaction-consistent ref heads. Missing or corrupt authority
+fails closed. Metadata commands do not select a legacy database when the root
+is absent.
 
-![Metadata subsystem — push and hydrate use a per-repository File Index and bucket-shared Chunk Index, with local in-memory and SQLite caches in front of chunk lookups.](./metadata-database-flow.svg)
+<DocsPathDiagram
+  id="metadata-authority-path"
+  title="Verify one captured repository view"
+  caption="Root and ref heads select the catalogs and content to verify. Recovery must restore authenticated source bytes."
+  steps={[
+    { label: "Capture", detail: "root + ref heads", tone: "control" },
+    { label: "Authenticate", detail: "capsules + catalogs", tone: "control" },
+    { label: "Read", detail: "Git + shards + xorbs", tone: "data" },
+    { label: "Verify", detail: "complete closure", tone: "safe" },
+  ]}
+/>
 
-## Two Databases
-
-| Database | Location | Maps | Purpose |
-|----------|----------|------|---------|
-| **File Index** | `{repo_prefix}/file_index_db/` | `file_hash → shard_hash` | Find which shard contains a file's metadata |
-| **Chunk Index** | `.crab/chunk_index_db/` | `chunk_hash → xorb_ref` | Find which xorb contains a specific chunk (dedup) |
-
-The file index is per-repository. The chunk index is shared globally across all repositories in a bucket, enabling cross-repo deduplication.
-
-### Local Cache
-
-A two-tier local cache sits in front of the remote chunk index:
-- **In-memory LRU** — fastest lookups for hot chunks
-- **SQLite file** — persistent bucket-scoped cache at `~/.cache/crab/buckets/{bucket-hash}/chunk-index.sqlite`
-
-## Diagnosing Issues
-
-### Check database health
+## Identify the failing boundary
 
 ```bash
-crab metadb diagnose --deep
+crab metadb diagnose --json
+crab doctor --metadb --json
+crab metadb diagnose --deep --json
 ```
 
-Read-only health snapshot — reports open state, format version, epoch, and path for each database. Add `--deep` to scan every metadata row and enumerate the backing object store. Deep diagnosis validates committed/receipt namespaces and flags malformed compacted-SST names as warnings; it never deletes remote objects. Safe to run concurrently with pushes.
+Default diagnosis authenticates root/ref state and reports generation, digests,
+visible refs/capsules, and checkpoint presence. It does not download stable Git
+packs. Doctor adds local cache health. Configuration, authority, storage, and
+cache failures return non-zero instead of reporting empty legacy databases or
+an absent corrupt cache.
+
+Deep diagnosis checks catalogs, canonical shards and xorbs, visibility, and the
+reachable Git closure from one captured view. A final activity probe rejects
+results if repository state changed during verification. Retry during a stable
+window. These checks do not change remote authority.
+
+## Verify and checkpoint
 
 ```bash
-crab metadb diagnose --db chunk_index
-crab metadb diagnose --db file_index --json
+crab metadb rebuild --json
 ```
 
-### Check local cache state
+Rebuild acquires maintenance and GC writer fences, captures authority, and
+verifies the complete closure before publishing a checkpoint. Publication uses
+an exact root compare-and-swap. Conflicting maintenance fails; concurrent ref
+updates remain as an authenticated suffix. Empty repositories and already
+covered capsule frontiers need no new checkpoint.
+
+Use this for checkpoint maintenance after source integrity is established.
+Missing authoritative metadata, shards, xorbs, or Git content require verified
+history, a replica, or a backup. Rebuild cannot restore absent bytes by listing
+unrelated objects. The former `--db` selector and `metadb compact` are removed.
+
+## Maintain a team repository
+
+```bash
+crab metadb owner --interval 30 --jsonl
+crab metadb owner --once
+```
+
+One renewable owner lease serializes maintenance. Continuous operation waits
+for unchanged root/ref activity for at least one polling interval and five
+seconds, then checkpoints eligible frontiers and repacks eligible checkpoints.
+`--once` is eager. Quiet polling still captures independent ref heads; request
+cost scales with ref count. See [command reference](/docs/cli/reference/crab-metadb)
+for thresholds and telemetry.
+
+## Inspect the local cache
 
 ```bash
 crab metadb cache stats
 ```
 
-Shows the SQLite path, combined database/WAL/shared-memory size, entry count,
-installed shard count, and GC generation cursor. The read-only inspection does
-not create, migrate, repair, or load the cache into memory.
+The read-only SQLite inspection reports chunk and installed-shard counts,
+GC generation, and the main database-file size. It does not load all rows,
+create a missing cache, migrate schema, or replace corrupt bytes. WAL and
+shared-memory sidecars are excluded from the reported size.
 
-### Run a durable Git index owner
+Stop Crab processes using this bucket before `crab metadb cache clear`. The
+current clear command removes the database file; the next operation starts
+cold. Remote content is unchanged.
 
-For concurrent team pushes, keep one repository-scoped owner under a process
-supervisor:
+## Choose recovery from the evidence
 
-```bash
-crab metadb owner --interval 30 --jsonl
-```
+| Finding | Next action |
+| --- | --- |
+| Root missing or corrupt | Verify repository/provider configuration; restore authenticated authority from retained history, replica, or backup |
+| Deep diagnosis reports missing content | Restore the exact authenticated object, then repeat deep diagnosis and an independent hydration |
+| Activity changed during diagnosis | Retry against a stable repository window |
+| Cache unreadable or schema invalid | Preserve the failing path and error; stop users of that cache before removal and cold reopening |
+| Healthy source, checkpoint maintenance needed | Run rebuild or the owner, then repeat diagnosis |
 
-It reuses one exclusive locator writer across generations and publishes
-immutable read checkpoints before visibility repair. Push clients only pay an
-owner-lease probe and do not each rebuild the shared locator. During sustained
-pushes, the owner drains ref-journal transactions before derived maintenance and
-requires an elapsed quiet window of at least one polling interval and five seconds
-before starting repository-sized catalog, commit-graph, or repack work. Once
-maintenance converges, unchanged manifest
-identity reports the last verified inventory snapshot without rescanning the
-repository on every poll. If the owner is between generations or unavailable,
-complete-pack fetch remains available and a client can resume the canonical
-repair path after the lease expires.
-
-## Rebuilding from Shards
-
-When a database is corrupted (unreadable manifest, damaged WAL, or accidental deletion), rebuild it from the source shards:
-
-```bash
-crab metadb rebuild --db chunk_index
-crab metadb rebuild --db file_index
-crab metadb rebuild --db both
-```
-
-Rebuild is idempotent — every write is content-addressed, so running it multiple times produces the same result. An interrupted run can be restarted without cleanup. Any manifest-named shard, xorb-placement, or Git-pack validation failure exits non-zero and prevents generation-receipt publication.
-
-## Compacting the Databases
-
-```bash
-crab metadb compact --db both
-```
-
-This acquires a renewable repository maintenance lease and runs SlateDB's
-size-tiered compactor until the current scheduler work drains. File and chunk
-indexes run sequentially. Cancellation, an existing active compaction, or a new
-compaction failure exits non-zero; a database with no eligible work is reported
-as already policy-satisfied.
-
-### When to rebuild
-
-- `crab metadb diagnose` reports a manifest or WAL read failure
-- `crab push` aborts with `MetaDbError::Open` due to corruption
-- A database prefix was accidentally deleted from the bucket
-
-### When NOT to rebuild
-
-Rebuild is not a migration tool. Fresh repositories never need it — `Db::open` creates databases automatically on the first push.
-
-## Clearing the Local Cache
-
-```bash
-crab metadb cache clear
-```
-
-Transactionally removes cached chunk and shard rows, forcing a cold re-warm on
-the next operation. The remote state is untouched, and the local SQLite file,
-schema, and GC cursor remain intact for live shared handles.
-
-## Troubleshooting
-
-| Symptom | Likely cause | Action |
-|---------|--------------|--------|
-| Push fails with `MetaDbError::Open` | SlateDB manifest unreadable or wrong credentials | Run `crab doctor --metadb`, check credentials, rebuild if corrupt |
-| Hydrate reports `FileNotFoundInFileIndexDb` | File never pushed, or file_index_db missing entries | Verify file was pushed (check shards), rebuild file_index if needed |
-| Push is slow, no dedup happening | Local cache empty or wiped | Run `crab pull` to warm cache, verify with `crab metadb cache stats` |
-| Cache wiped unexpectedly | GC bumped remote generation beyond grace window | Expected after `crab gc` — cache refills on next pull/push |
-
-## Configuration
-
-```toml
-# .crab/local.toml
-[metadb.file_index]
-compaction_threshold = 4
-wal_flush_size = 4194304          # 4 MiB
-bloom_bits_per_key = 10
-
-[metadb.chunk_index]
-compaction_threshold = 4
-wal_flush_size = 67108864         # 64 MiB
-bloom_bits_per_key = 10
-in_memory_ceiling_bytes = 1073741824  # 1 GiB
-cache_gc_grace = 3
-```
-
-All settings can be overridden with `CRAB_METADB_*` environment variables (e.g., `CRAB_METADB_CHUNK_INDEX_IN_MEMORY_CEILING_BYTES`).
-The shipped `wal_flush_size` key controls SlateDB's L0 SST target size; Crab
-flushes WAL durability explicitly at commit boundaries. File-index and
-chunk-index values are applied independently, and all three database tunables
-must be non-zero.
-
-## Command Help
-
-For complete command syntax and flags, run `crab metadb --help` or
-`crab metadb <subcommand> --help`.
+Retain JSON output, first error, binary version, and the final independent
+hydration result with the incident record.

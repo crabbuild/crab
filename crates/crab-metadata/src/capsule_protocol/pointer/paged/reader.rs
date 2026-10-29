@@ -74,6 +74,19 @@ impl PointerCatalogLookup {
         Ok(self)
     }
 
+    pub(in crate::capsule_protocol) fn retained_members(
+        &self,
+    ) -> Result<BTreeMap<object_store::path::Path, BTreeMap<String, u64>>> {
+        let mut selected = BTreeMap::new();
+        for run in &self.runs {
+            let (path, members) = run.retained_members(&self.ranks);
+            if !members.is_empty() && selected.insert(path.clone(), members).is_some() {
+                return Err(corrupt("captured catalog repeats a physical run"));
+            }
+        }
+        Ok(selected)
+    }
+
     fn work(&self) -> PageWork {
         PageWork::new(self.maximum, 0)
     }

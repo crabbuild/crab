@@ -9,6 +9,16 @@ use crate::{Result, StoreLayout};
 pub struct MountReadContext {
     pub store_layout: StoreLayout,
     pub hydrator: Arc<crab_read::ShardHydrator>,
+    pub catalog: Arc<dyn MountCatalogCapture>,
+}
+
+/// Captures a new immutable catalog while sharing the configured read resources.
+#[async_trait::async_trait]
+pub trait MountCatalogCapture: Send + Sync {
+    async fn capture(&self) -> Result<Arc<crab_read::ShardHydrator>>;
+
+    /// Drain retained captures after backend requests and hydration workers stop.
+    async fn shutdown(&self) -> Result<()>;
 }
 
 /// Resolves credentials, replica routing, and hydration configuration for a mount source.

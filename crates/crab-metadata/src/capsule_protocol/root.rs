@@ -9,7 +9,9 @@ use crate::validation::{validate_content_hash, validate_sha1};
 use super::{HistorySegmentPointer, valid_ref_name, valid_ref_namespace};
 
 const ROOT_MAGIC: &[u8; 8] = b"CRBROOT2";
-const ROOT_VERSION: u32 = 4;
+// Older collectors do not mark retained readers. A format cutover makes them
+// reject the repository before they can reclaim an active mount's dependencies.
+const ROOT_VERSION: u32 = 5;
 const ROOT_HEADER_BYTES: usize = ROOT_MAGIC.len() + 4 + 8;
 const ROOT_DIGEST_BYTES: usize = 32;
 /// Maximum encoded repository-root size accepted by readers and writers.
@@ -1228,6 +1230,23 @@ mod tests {
         let error = RootRecord::decode(Bytes::from(bytes)).expect_err("corruption must fail");
 
         assert!(matches!(error, MetadataError::CorruptObject { .. }));
+    }
+
+    #[test]
+    fn root_rejects_envelopes_and_payloads_without_read_retention() {
+        let root = RepositoryRoot::initial(&"1".repeat(64), "refs/heads/main").unwrap();
+        for (envelope_version, payload_version) in [(4_u32, ROOT_VERSION), (ROOT_VERSION, 4)] {
+            let mut payload = serde_json::to_value(&root).unwrap();
+            payload["version"] = serde_json::json!(payload_version);
+            let payload = serde_json::to_vec(&payload).unwrap();
+            let mut bytes = ROOT_MAGIC.to_vec();
+            bytes.extend_from_slice(&envelope_version.to_be_bytes());
+            bytes.extend_from_slice(&(payload.len() as u64).to_be_bytes());
+            bytes.extend_from_slice(&payload);
+            bytes.extend_from_slice(blake3::hash(&bytes).as_bytes());
+            assert!(matches!(RootRecord::decode(bytes.into()),
+                Err(MetadataError::CorruptObject { reason, .. }) if reason.contains("version")));
+        }
     }
 
     fn advance_with_synthetic_run(record: &RootRecord, sequence: u64) -> Result<RootRecord> {

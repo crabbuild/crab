@@ -7,7 +7,7 @@ multi-region ref commits.
 
 ## Why it exists
 
-Crab stores immutable objects, but refs, manifests, and transaction state are
+Crab stores immutable objects, but ref heads and transaction state are
 mutable. Uploading objects is not enough: two writers must not publish
 conflicting ref updates, and garbage collection must not delete objects still
 owned by an in-flight transaction. This crate centralizes those rules so push,
@@ -47,6 +47,33 @@ its holder with a direct CAS and does not need the backend-clock probes that
 protect abandoned uploads with quarantine. Error and cancellation paths must
 continue using ordinary release.
 
+GC writer acquisition retries refresh an already-installed active claim without
+adding another holder or advancing writer history. Expired and quarantined claims
+remain lost. Generated holder IDs retain a diagnostic PID and use UUID entropy
+across hosts and container namespaces; PIDs and wall clocks alone are insufficient.
+Malformed stored fence state remains an error and is never silently repaired.
+
+Read retention uses a private conditional claim for each immutable capture.
+`GcReadBarrier` observes both repository and global sweep history before capture;
+the caller validates both after creating the claim, before admitting reads.
+`ReadRetentionLease` changes its sequence on renewal so content-derived ETags
+cannot let stale retirement overwrite a fresh renewal. Cancelled, uncertain or
+late renewals permanently lose local ownership. Callers must stop and drain
+reads before release; this primitive does not run a renewal worker.
+`ReadRetentionSession` owns that worker and tracks capture admission through
+claim registration. Captured views retain renewal through clones; operation
+pins retain claims through child workers after the caller stops waiting.
+Shutdown closes admission, cancels reads, and waits for pins and releases.
+Renewal continues during normal draining. Lease loss stops reads, preserves the
+provider error, and never replaces an uncertain claim with a fresh owner.
+
+Repository GC conditionally retires expired claims, retains their roots through
+the existing uncertainty quarantine, then reclaims aged private objects. Global
+GC planning conservatively retains active and retired roots until that cleanup.
+Linux RustFS qualification covers retained cold reads, renewal, native NFS/FUSE
+teardown and subsequent repository GC reclamation. Managed issuer authority,
+other providers/platforms and existing-store rollout remain production gates.
+
 ### Lease lifecycle
 
 `while_renewing` borrows a `PushLock` and polls work alongside lease renewal.
@@ -64,6 +91,13 @@ Await the wrapper to completion, then explicitly release the lease on both
 success and error paths. The operation must cooperate with the cancellation
 token and close its own resources before returning. Without a token, renewal
 failure still waits for the operation; the wrapper cannot stop it for the caller.
+
+CLI repair, diagnostics publication and experiment writes use the product GC
+admission owner to await work before releasing repository and global fences.
+Cancellation stops repair before regional publication begins; an entered
+publication drains through commit resolution. A cancelled repair can require an
+idempotent retry to acknowledge already-visible regional state. Storage failures
+remain the primary error even when cancellation also reaches cleanup.
 
 ### Admission and active-active writes
 
@@ -84,9 +118,33 @@ ref lookup, GC safety snapshots, repair snapshots, and write fencing. The
 provider-specific DynamoDB, Spanner, and Cosmos DB implementations share the
 same CAS-backed state contract.
 
+Write fencing closes new transaction admission, not repair of committed
+authority. Repair snapshots and materialization acknowledgements remain
+available while fenced, including for transactions committed in an earlier
+epoch. Acknowledgements still require committed state and a valid target region;
+callers must finish durable regional publication first. Neither repair operation
+resumes writes or changes the fence epoch/reason. Provider topology admission,
+state decoding and backend read/CAS failures still fail closed.
+
+Repo GC uses `acquire_gc_fence` to capture protected objects and close write
+admission in one atomic state mutation. A pre-existing fence is rejected
+unchanged. After deletion work drains, `release_gc_fence` releases only the
+acquired epoch. Every operator fence advances the epoch, even when already
+fenced, so GC cleanup cannot resume a later operator fence. Epoch exhaustion
+fails without mutation. Advisory GC snapshots do not grant deletion authority.
+
+A process lost after GC admission leaves writes fenced; there is no automatic
+expiry or reset. Operator resume remains an explicit recovery override under
+the existing `--repair-verified` contract. Before using it, stop and drain all
+GC runs for the repository as well as verifying provider failover, object
+replication and coordinator-backed repair. Resume during an active sweep
+invalidates its exclusion guarantee. Automatic GC cleanup never uses this
+administrative override.
+
 For production publication, use `commit_uploaded_push_refs` after uploading
-immutable objects, then persist the regional v1 manifest projection or materialize
-the exact v2 capsule transaction before calling `mark_region_materialized`:
+immutable objects, then materialize the exact v2 Capsule transaction before
+calling `mark_region_materialized`. Requests and repair gaps require an exact
+Capsule descriptor; no manifest-generation planner or projection path remains:
 
 ```text
 upload objects → commit_uploaded_push_refs → persist regional authority
@@ -97,9 +155,27 @@ Protocol-v2 requests carry the exact base-root, transaction, activation, capsule
 hash, and run size. Coordinator outcomes assign a monotonic commit sequence so repair
 replays regional gaps in consensus order rather than operation-ID order.
 
-`commit_uploaded_push` combines the coordinator transitions and immediately
-marks the writer region materialized. It does not write a manifest projection;
-the in-memory example below exercises coordinator state only.
+Stored coordinator state declares `format: "capsule_v2"`. Unversioned state,
+missing Capsule descriptors, retired manifest-generation fields and force-CAS
+bypasses are rejected. DynamoDB, Spanner and Cosmos DB decode the whole state
+before returning refs, repair gaps or GC protection; invalid state is an error,
+never an empty protection set. This includes unversioned records containing
+refs after their transaction history has been compacted.
+
+There is no automatic conversion or compatibility reader. Clearing rejected
+state would discard in-flight protection and is not a repair. New native
+repositories use fresh coordinator authority. The CAS record version remains
+separate from this format discriminator.
+
+The coordinator always compares exact old refs; Git force policy is evaluated
+before the native transaction is prepared. `CommitOutcome` and CLI audit metadata
+report `commit_sequence` when available. The shipped managed API v1 has no
+sequence field, so its client metadata leaves the sequence absent instead of
+inventing one; its retained diagnostic wire field does not authorize v1 data.
+Direct commit replay
+validates the exact request before returning an existing outcome. Only the caller
+that has completed regional publication may mark that region materialized;
+the old combined commit/materialize helper is removed.
 
 ## Usage
 
@@ -107,26 +183,37 @@ Use the in-memory coordinator to exercise the transaction contract in a test
 or local integration:
 
 ```rust
-use crab_coordination::{CommitRequest, InMemoryWriteCoordinator, commit_uploaded_push};
+use crab_coordination::{
+    CommitRequest, CoordinatedCapsulePublication, InMemoryWriteCoordinator,
+    commit_uploaded_push_refs,
+};
 
 async fn example() -> Result<(), Box<dyn std::error::Error>> {
     let coordinator = InMemoryWriteCoordinator::new();
-    let outcome = commit_uploaded_push(
+    let run_hash = "4".repeat(64);
+    let outcome = commit_uploaded_push_refs(
         &coordinator,
         CommitRequest {
             operation_id: "push-123".into(),
             writer: "writer-a".into(),
             region: "west".into(),
-            manifest_generation: 7,
-            capsule_publication: None,
+            capsule_publication: CoordinatedCapsulePublication {
+                base_root_digest: "1".repeat(64),
+                transaction_id: "2".repeat(64),
+                activation_id: "3".repeat(64),
+                run_hash: run_hash.clone(),
+                run_size: 1024,
+            },
             refs: vec![],
-            uploaded_objects: vec!["objects/manifest-7".into()],
+            uploaded_objects: vec![format!("repo/v2/capsules/44/{run_hash}")],
             target_regions: vec!["west".into()],
         },
     )
     .await?;
 
-    assert_eq!(outcome.operation_id, "push-123");
+    assert_eq!(outcome.commit_sequence, 1);
+    // This state-machine example does not publish a regional Capsule.
+    // A product caller must do that before marking its region materialized.
     Ok(())
 }
 ```
@@ -148,7 +235,7 @@ crab-coordination = { workspace = true, features = ["coordinator-dynamodb"] }
 
 - [`crab-storage`](../crab-storage/README.md) owns object access and CAS
   primitives; this crate owns the mutation protocol built on them.
-- [`crab-metadata`](../crab-metadata/README.md) owns manifests and indexes;
-  coordination decides when a new manifest generation becomes authoritative.
+- [`crab-metadata`](../crab-metadata/README.md) owns Capsule records and indexes;
+  coordination orders exact native transactions before regional materialization.
 - [`crab-auth-store`](../crab-auth-store/README.md) supplies scoped stores;
   credential validity is separate from write serialization.

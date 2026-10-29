@@ -21,6 +21,7 @@ pub(crate) mod native_content;
 pub(crate) use failure::Failure;
 
 #[cfg(test)]
+#[path = "mutation_tests.rs"]
 mod tests;
 
 #[cfg(test)]

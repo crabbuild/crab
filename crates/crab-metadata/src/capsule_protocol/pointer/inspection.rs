@@ -217,7 +217,7 @@ pub(in crate::capsule_protocol) struct Inspector {
 }
 
 impl Inspector {
-    pub(super) fn new(maximum: u64) -> Self {
+    pub(in crate::capsule_protocol) fn new(maximum: u64) -> Self {
         Self {
             space: None,
             rows: Reducer::new(),
@@ -270,7 +270,11 @@ impl Inspector {
         }
         self.add(Entry::new(2, identity, rank, value)?).await
     }
-    async fn delta(&mut self, catalog: PointerCatalog, rank: u64) -> Result<()> {
+    pub(in crate::capsule_protocol) async fn delta(
+        &mut self,
+        catalog: PointerCatalog,
+        rank: u64,
+    ) -> Result<()> {
         catalog.validate(false, false)?;
         for (hash, entry) in catalog.files {
             self.file(&hash, entry, rank).await?;
@@ -283,7 +287,10 @@ impl Inspector {
         }
         Ok(())
     }
-    pub(super) async fn finish(self, prior: Result<()>) -> Result<PointerCatalogInspection> {
+    pub(in crate::capsule_protocol) async fn finish(
+        self,
+        prior: Result<()>,
+    ) -> Result<PointerCatalogInspection> {
         let Some(space) = self.space else {
             prior?;
             return Ok(PointerCatalogInspection {

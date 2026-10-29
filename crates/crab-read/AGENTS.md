@@ -33,6 +33,8 @@ For object download changes continue into `crates/crab-read/src/store_client.rs`
 
 ## Invariants
 
+- Replica readiness requires authenticated Capsule roots and exact captured
+  views. A missing root never selects a legacy manifest/index readiness path.
 - Requests naming hidden refs remain rejected even when arbitrary wants are enabled. This does not imply that the same SHA is denied under every other name; inspect policy and advertisement together.
   Source: `crates/crab-read/src/fetch_admission.rs`.
 - `verify_captured_installed_pointer_bytes` proves reachable Git/Crab/LFS bytes
@@ -63,7 +65,23 @@ For object download changes continue into `crates/crab-read/src/store_client.rs`
 
 ## Features and platform
 
-Default `hydration` enables dependency proofs, cache/index integration and verified reconstruction. Without default features, only capsule metadata capture, Git views and base errors are available. Test both profiles. Hydration fixtures cannot prove live replica selection or mounted read behavior; qualify those affected consumers separately.
+Default `hydration` enables dependency proofs, cache/index integration and
+verified reconstruction. Without default features, only capsule metadata capture,
+Git views and base errors are available. Test both profiles.
+`local-staging` adds `PointerReader` and its staging dependency and implies
+`hydration`; remote-only consumers retain their dependency boundary.
+`PointerReader::pin_file` lets open-file owners retain an unpublished recipe
+without retaining global staging admission. It shares canonical source selection;
+a local pin never replaces authenticated captured remote ownership.
+`PointerReader` accepts resolved local LFS storage separately from Crab staging.
+Its LFS range path selects the captured remote only for absent local payloads;
+selected local corruption and I/O errors fail. Callers own an `LfsReadSession`
+whose local source cache retains bounded authenticated block proofs and opened
+files; it never trusts timestamps or reopens a retained pathname. Drain it after
+outstanding read futures finish/drop. Remote LFS shares
+buffer/download admission with reconstruction and consumes verified stream EOF.
+Hydration fixtures cannot prove live replica selection or mounted read behavior;
+qualify those affected consumers separately.
 
 ## Verification
 

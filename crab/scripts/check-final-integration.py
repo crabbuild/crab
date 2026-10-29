@@ -59,13 +59,13 @@ INTEGRATION_TESTS = (
         ),
     ),
     CargoTestCheck(
-        "auth receive Module reads staged Git pack",
+        "auth receive verifies and commits staged Capsule content",
         (
             "test",
             "-p",
             "crab-auth-server",
             "--lib",
-            "compute_changed_paths_reads_staged_git_pack",
+            "protected_capsule_receive_verifies_commits_and_retries",
         ),
     ),
     CargoTestCheck(

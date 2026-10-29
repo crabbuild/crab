@@ -492,6 +492,7 @@ pub(crate) struct RemoteGitReader {
 }
 
 impl RemoteGitReader {
+    #[cfg(test)]
     pub(crate) fn from_pinned(
         store: Store,
         repo_prefix: impl Into<String>,

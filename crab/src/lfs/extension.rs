@@ -20,7 +20,7 @@ pub(crate) struct LfsExtension {
 }
 
 pub(crate) struct StagedCleanExtensionOutput {
-    pub(crate) staged: crate::lfs::cache::StagedObject,
+    pub(crate) staged: crab_lfs::local::StagedObject,
     pub(crate) pointer_extensions: Vec<PointerExtension>,
 }
 
@@ -171,7 +171,7 @@ pub(crate) fn smudge_content(
 /// Runs clean extensions as file-to-file transforms so clean never
 /// materializes a full LFS object in memory.
 pub(crate) fn clean_staged_with_extensions(
-    mut staged: crate::lfs::cache::StagedObject,
+    mut staged: crab_lfs::local::StagedObject,
     lfs_dir: &Path,
     file_name: &str,
     extensions: &[LfsExtension],
@@ -186,7 +186,7 @@ pub(crate) fn clean_staged_with_extensions(
             staged.path(),
             lfs_dir,
         )?;
-        let next = crate::lfs::cache::StagedObject::from_temp(output)?;
+        let next = crab_lfs::local::StagedObject::from_temp(output)?;
         if oid_in != *next.oid() {
             let priority = u8::try_from(pointer_extensions.len()).map_err(|source| {
                 CrabError::Configuration {
@@ -532,7 +532,7 @@ mod tests {
         let content = b"abc\ndef";
 
         let lfs_dir = tempfile::tempdir().unwrap();
-        let mut writer = crate::lfs::cache::ObjectWriter::new(lfs_dir.path()).unwrap();
+        let mut writer = crab_lfs::local::ObjectWriter::new(lfs_dir.path()).unwrap();
         writer.write_all(content).unwrap();
         let cleaned = clean_staged_with_extensions(
             writer.finish().unwrap(),

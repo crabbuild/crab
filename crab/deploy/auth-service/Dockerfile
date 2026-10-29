@@ -22,6 +22,7 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 
 COPY Cargo.toml Cargo.lock ./
+COPY vendor/nfs3_server/ vendor/nfs3_server/
 COPY crates/ crates/
 COPY crab/ crab/
 RUN cargo build --release --locked -p crab-auth-server \

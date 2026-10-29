@@ -27,9 +27,7 @@ use crate::git::push::{
     configure_active_active_push_coordinator, duplicate_destination_result,
     record_push_audit_event,
 };
-use crate::git::push_native::NativePushConfig;
 use crate::git::push_staging::PushStaging;
-use crate::git::push_state::PushState;
 use crate::storage::StoreLayout;
 use crab_metadata::commit_graph::CommitGraphTraversal;
 #[cfg(test)]
@@ -415,8 +413,12 @@ enum Batch {
     Push(Vec<PushItem>),
 }
 
-fn batch_requires_repository(batch: &Batch) -> bool {
-    !matches!(batch, Batch::Push(items) if items.iter().all(|item| matches!(item, PushItem::Rejected { .. })))
+fn batch_requires_repository(batch: &Batch, options: &HelperOptions) -> bool {
+    // An atomic parse rejection cannot publish siblings. It must not acquire
+    // store, staging or auth state merely to report that known rejection.
+    !matches!(batch, Batch::Push(items) if
+        items.iter().all(|item| matches!(item, PushItem::Rejected { .. }))
+        || (options.atomic && items.iter().any(|item| matches!(item, PushItem::Rejected { .. }))))
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -537,12 +539,15 @@ struct SessionCache {
     config: crate::core::config::Config,
     /// Primary v2 root retained from `list for-push` as the publication CAS base.
     capsule_root: Option<crab_metadata::capsule_protocol::RootSnapshot>,
+    /// One provider, layout and captured root across wire and classic read batches.
+    read_repository: Option<crate::replication::ReadStoreSelection>,
+    // Ref heads can advance while Root stays fixed. Discovery and every fetch
+    // detail level must retain the same validated heads and activation set.
+    read_capture: Option<crab_read::capsule_protocol::CapsuleRepositoryCapture>,
     /// Materialized v2 refs and capsules retained across one Git protocol session.
     capsule_view: Option<crab_read::capsule_protocol::CapsuleRepositoryView>,
     /// Payload-free primary ref state retained from `list for-push`.
-    capsule_ref_view: Option<crab_read::capsule_protocol::CapsuleRefView>,
-    /// A separately validated canonical-v1 repository uses its existing reader.
-    legacy_v1: bool,
+    push_ref_view: Option<crab_read::capsule_protocol::CapsuleRefView>,
     metrics: Arc<Metrics>,
     persisted_metrics: MetricsSummary,
 }
@@ -554,8 +559,9 @@ impl SessionCache {
             config,
             capsule_root: None,
             capsule_view: None,
-            capsule_ref_view: None,
-            legacy_v1: false,
+            read_capture: None,
+            read_repository: None,
+            push_ref_view: None,
             metrics: Arc::new(Metrics::new()),
             persisted_metrics: MetricsSummary::zeroed(),
         }
@@ -565,13 +571,14 @@ impl SessionCache {
         &self.config
     }
 
-    fn persist_pending_metrics(&mut self) -> Result<()> {
+    fn persist_pending_metrics(&mut self, repo_root: &std::path::Path) -> Result<()> {
         if !self.config.perf_persist {
             return Ok(());
         }
         let current = self.metrics.snapshot().summary();
         let delta = current.delta_since(&self.persisted_metrics);
-        persist_metrics_delta(std::path::Path::new(&self.config.perf_path), &delta)?;
+        let path = repo_root.join(&self.config.perf_path);
+        persist_metrics_delta(&path, &delta)?;
         self.persisted_metrics = current;
         Ok(())
     }
@@ -581,23 +588,9 @@ fn resolve_remote_helper_config() -> Result<crate::core::config::Config> {
     // Git may launch a nested promisor helper while a push is still running.
     // That helper can start outside the worktree, so resolve the shared repo
     // config from Git's explicit directory instead of trusting its cwd.
-    let repo_root = super::discover::discover_git_dir()
-        .ok()
-        .map(|git_dir| repo_root_from_git_dir(&git_dir));
-    let mut config = repo_root.as_deref().map_or_else(
-        crate::core::config::Config::resolve_local,
-        crate::core::config::Config::resolve_for_repo,
-    )?;
-    if let Ok(cwd) = std::env::current_dir()
-        && let Some(project) = crate::core::project_config::ProjectConfig::load_for_repo(&cwd)?
-    {
-        if config.remote_url.is_none() {
-            config.remote_url = Some(project.remote.url.clone());
-        }
-        if let Some(replication) = project.replication {
-            config.replication = Some(replication);
-        }
-    }
+    let git_dir = super::discover::discover_git_dir()?;
+    let repo_root = repo_root_from_git_dir(&git_dir);
+    let mut config = crate::core::config::Config::resolve_for_repo(&repo_root)?;
     apply_internal_remote_helper_overrides(&mut config);
     Ok(config)
 }
@@ -689,7 +682,6 @@ pub async fn run_remote_helper(
     let mut options = HelperOptions::default();
     let mut line_buf = String::new();
     let mut preflight_cache = SessionCache::new(config.clone());
-    let mut preflight_push_state = PushState::default();
     let first_repository_batch = loop {
         let Some(batch) = read_batch(
             &mut reader,
@@ -702,7 +694,7 @@ pub async fn run_remote_helper(
         else {
             return Ok(());
         };
-        if batch_requires_repository(&batch) {
+        if batch_requires_repository(&batch, &options) {
             break batch;
         }
         Box::pin(dispatch_batch(
@@ -714,7 +706,7 @@ pub async fn run_remote_helper(
             "",
             &mut preflight_cache,
             remote_name,
-            &mut preflight_push_state,
+            None,
             progress_mode,
             jsonl_stderr_stream.as_ref(),
             Some(invocation_url.as_str()),
@@ -759,17 +751,12 @@ pub async fn run_remote_helper(
             }
         };
 
-    // Load push state for incremental walk (used by native push pipeline).
-    let repo_root = push_state_repo_root();
     let mut cache = SessionCache::new(config);
-    cache.legacy_v1 = resolved.capsule_root.is_none();
-    cache.capsule_root = resolved.capsule_root;
+    cache.capsule_root = Some(resolved.capsule_root);
     let context = RemoteHelperContext {
         store: resolved.store,
         prefix: resolved.repository_prefix,
         cache,
-        push_state: PushState::load(&repo_root),
-        push_state_repo_root: repo_root,
         progress_mode,
         jsonl_stderr_stream,
         invocation_url,
@@ -795,8 +782,6 @@ struct RemoteHelperContext {
     store: crate::storage::store::Store,
     prefix: String,
     cache: SessionCache,
-    push_state: PushState,
-    push_state_repo_root: std::path::PathBuf,
     progress_mode: OutputMode,
     jsonl_stderr_stream: Option<Arc<Mutex<JsonlStream<Stderr>>>>,
     invocation_url: String,
@@ -846,8 +831,6 @@ where
             store,
             prefix,
             mut cache,
-            mut push_state,
-            push_state_repo_root,
             progress_mode,
             jsonl_stderr_stream,
             invocation_url,
@@ -855,31 +838,22 @@ where
             caching_store,
             mut replica_discovery_pending,
         } = context;
-        // Protocol v2 advertises and serves one immutable repository view. Keep
-        // the selected store and layout together so the handoff cannot drift.
-        let mut pinned_read_store = None;
-
         loop {
-            let batch = match pending_batch.take() {
-                Some(batch) => batch,
-                None => {
-                    let Some(batch) = read_batch(
-                        &mut reader,
-                        &mut line_buf,
-                        &mut options,
-                        &mut writer,
-                        &cancel,
-                    )
-                    .await?
-                    else {
-                        // Save push state on clean exit.
-                        if let Err(e) = push_state.save(&push_state_repo_root) {
-                            tracing::warn!(error = %e, "failed to save push state");
-                        }
-                        return Ok(());
-                    };
-                    batch
-                }
+            let batch = if let Some(batch) = pending_batch.take() {
+                batch
+            } else {
+                let Some(batch) = read_batch(
+                    &mut reader,
+                    &mut line_buf,
+                    &mut options,
+                    &mut writer,
+                    &cancel,
+                )
+                .await?
+                else {
+                    return Ok(());
+                };
+                batch
             };
             let uses_read_routing = match &batch {
                 Batch::Capabilities | Batch::List { for_push: false } | Batch::Fetch(_) => true,
@@ -900,29 +874,32 @@ where
                 let hidden_ref_patterns = cache.config().transfer_hide_refs.clone();
                 let fetch_policy = fetch_admission_policy(cache.config());
                 let result = if service == "git-upload-pack" {
-                    let (read_store, read_router) = pinned_read_store_for_batch(
-                        &mut pinned_read_store,
+                    let selected = pinned_read_store_for_batch(
+                        &mut cache.read_repository,
                         &store,
                         &prefix,
+                        cache.capsule_root.as_ref(),
                         Some(invocation_url.as_str()),
-                        cache.config(),
+                        &cache.config,
                         &cancel,
                     )
-                    .await;
+                    .await?;
                     // Bind the cache facade to the selected primary or replica.
                     // Reusing the primary facade after replica routing would read
                     // a different repository view than the pinned layout.
-                    let stateless_store =
-                        cache_aware_storage_for_selected_read(&read_store, &cache.config().cache);
+                    let stateless_store = cache_aware_storage_for_selected_read(
+                        &selected.store,
+                        &cache.config().cache,
+                    );
                     crate::git::upload_pack_wire::serve(
                         &mut reader,
                         &mut writer,
                         &stateless_store,
-                        read_router.repo_prefix(),
+                        selected.router.repo_prefix(),
                         &hidden_ref_patterns,
                         &fetch_policy,
                         options.progress,
-                        cache.capsule_root.take(),
+                        selected.capsule_root,
                         &cache.git_runtime,
                         &cancel,
                     )
@@ -935,31 +912,22 @@ where
                     writer.flush().await?;
                     Ok(())
                 };
-                if let Err(error) = push_state.save(&push_state_repo_root) {
-                    tracing::warn!(error = %error, "failed to save push state");
-                }
                 return result;
             }
-            if matches!(batch, Batch::Capabilities) {
-                let (read_store, read_router) = pinned_read_store_for_batch(
-                    &mut pinned_read_store,
-                    &store,
-                    &prefix,
-                    Some(invocation_url.as_str()),
-                    cache.config(),
-                    &cancel,
-                )
-                .await;
-                dispatch_capabilities(&mut writer, &read_store, &read_router, &mut cache, &cancel)
-                    .await?;
-                continue;
-            }
-            // Fetch/list never need local staging. Open one reader per push batch
-            // so a damaged local index cannot block reads or retain a session lock.
-            let staging = if matches!(batch, Batch::Push(_)) && !options.dry_run {
-                open_staging_for_push().await?
+            // Ref discovery may run outside Git. Capture a shared state owner
+            // only for a real push, before staging/auth admission. Read-only
+            // sessions must not require metadata or rewrite push-state files.
+            let repo_root = if matches!(batch, Batch::Push(_))
+                && !options.dry_run
+                && batch_requires_repository(&batch, &options)
+            {
+                Some(push_repo_root()?)
             } else {
-                PushStaging::Missing
+                None
+            };
+            let staging = match repo_root.as_ref() {
+                Some(root) => PushStaging::open(root.join(".crab").join("staging")).await?,
+                None => PushStaging::Missing,
             };
             Box::pin(dispatch_batch(
                 &batch,
@@ -970,7 +938,7 @@ where
                 &prefix,
                 &mut cache,
                 remote_name,
-                &mut push_state,
+                repo_root.as_deref(),
                 progress_mode,
                 jsonl_stderr_stream.as_ref(),
                 Some(invocation_url.as_str()),
@@ -1026,37 +994,14 @@ async fn load_replica_discovery_for_session(
     Ok(())
 }
 
-async fn open_staging_for_push() -> Result<PushStaging> {
-    let Some(root) = push_staging_root() else {
-        return Ok(PushStaging::Missing);
-    };
-    PushStaging::open(root).await
-}
-
-fn push_staging_root() -> Option<std::path::PathBuf> {
-    crate::git::worktree::WorktreeContext::resolve()
-        .ok()
-        .map(|ctx| ctx.shared_staging_dir())
-        .or_else(|| super::discover::resolve_crab_dir().map(|dir| dir.join("staging")))
-        .or_else(|| {
-            let git_dir = super::discover::discover_git_dir().ok()?;
-            shared_staging_dir_from_git_dir(&git_dir)
-        })
-}
-
-fn shared_staging_dir_from_git_dir(git_dir: &std::path::Path) -> Option<std::path::PathBuf> {
-    let common_dir = super::discover::resolve_common_dir(git_dir);
-    let repo_root = common_dir.parent()?;
-    Some(repo_root.join(".crab").join("staging"))
-}
-
-fn push_state_repo_root() -> std::path::PathBuf {
-    crate::git::worktree::WorktreeContext::resolve()
-        .ok()
-        .map(|ctx| ctx.main_worktree_root)
-        .or_else(super::discover::resolve_main_worktree_root)
-        .or_else(|| std::env::current_dir().ok())
-        .unwrap_or_default()
+fn push_repo_root() -> Result<std::path::PathBuf> {
+    // Git can provide GIT_DIR alone while cwd belongs to another repository.
+    // Both staging and telemetry must follow the selected shared metadata.
+    let common_dir = super::discover::discover_common_git_dir()?.canonicalize()?;
+    common_dir
+        .parent()
+        .map(std::path::Path::to_path_buf)
+        .ok_or_else(|| CrabError::Protocol("Git common directory has no parent".into()))
 }
 
 /// Read commands until a blank line, returning the collected batch.
@@ -1414,33 +1359,30 @@ fn parse_ref_lease(value: &str) -> Result<(String, Option<String>)> {
 
 async fn dispatch_capabilities<W: tokio::io::AsyncWrite + Unpin>(
     writer: &mut W,
-    store: &crate::storage::store::Store,
     router: &StoreLayout,
+    root: &crab_metadata::capsule_protocol::RootSnapshot,
     cache: &mut SessionCache,
     _cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<()> {
     tracing::debug!("responding to capabilities");
-    // The terminal upload-pack wire serves both authenticated capsule roots
-    // and verified legacy manifests. Advertising it for legacy repositories
-    // preserves clone/fetch without pretending the legacy store is v2.
-    //
-    // A new clone does not have a local object base. The classic
-    // remote-helper fetch contract can install authenticated layered packs
-    // directly. Filter and shallow options arrive after capabilities, so the
-    // classic path must also honor them through the canonical planner.
     let mut v2_ready = true;
-    if !cache.legacy_v1 && local_git_object_store_is_empty() {
-        let layout = crab_storage::StoreLayout::with_global_prefix(
-            store.as_storage().clone(),
-            router.repo_prefix().to_owned(),
-            router.global_prefix().to_owned(),
-        );
-        match open_capsule_fetch_view_minimal(store, router, cache.config(), None).await {
-            Ok(view) => {
-                let direct = view
-                    .layered_cold_clone_packs(&layout, capsule_fetch_maximum(cache.config()))?
-                    .is_some();
-                if direct {
+    if local_git_object_store_is_empty() {
+        let captured_before_probe = cache.read_capture.is_some();
+        let maximum = capsule_fetch_maximum(cache.config());
+        let probe = async {
+            let capture = capsule_read_capture(&mut cache.read_capture, router, root).await?;
+            let view = open_capsule_fetch_view_minimal(capture, maximum, None).await?;
+            let direct = view
+                .layered_cold_clone_packs(capture.layout(), maximum)
+                .map(|packs| packs.is_some());
+            Ok::<_, CrabError>((view, direct))
+        }
+        .await;
+        match probe {
+            Ok((view, direct)) => {
+                // Preserve the eligibility validator's fatal error boundary;
+                // optional probe misses must not hide descriptor corruption.
+                if direct? {
                     cache.capsule_view = Some(view);
                     v2_ready = false;
                     tracing::debug!(
@@ -1449,11 +1391,13 @@ async fn dispatch_capabilities<W: tokio::io::AsyncWrite + Unpin>(
                 }
             }
             Err(error) => {
-                tracing::debug!(
-                    error = %error,
-                    "cold-clone capability probe unavailable; keeping protocol-v2"
-                );
+                tracing::debug!(%error, "cold-clone capability probe unavailable; keeping protocol-v2");
             }
+        }
+        // Only a cached direct view will supply later discovery. A declined probe
+        // must not freeze refs before Git receives any advertisement.
+        if v2_ready && !captured_before_probe {
+            cache.read_capture = None;
         }
     }
     let caps = format_capabilities_with_v2(true, v2_ready);
@@ -1463,7 +1407,7 @@ async fn dispatch_capabilities<W: tokio::io::AsyncWrite + Unpin>(
 }
 
 fn local_git_object_store_is_empty() -> bool {
-    let Ok(git_dir) = super::discover::discover_git_dir() else {
+    let Ok(git_dir) = super::discover::discover_common_git_dir() else {
         return false;
     };
     let objects = git_dir.join("objects");
@@ -1524,7 +1468,7 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
     prefix: &str,
     cache: &mut SessionCache,
     _remote_name: &str,
-    _push_state: &mut PushState,
+    repo_root: Option<&std::path::Path>,
     progress_mode: OutputMode,
     jsonl_stderr_stream: Option<&Arc<Mutex<JsonlStream<Stderr>>>>,
     remote_url: Option<&str>,
@@ -1540,8 +1484,24 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
         }
         Batch::Capabilities => {
             if let Some(store) = store {
-                let router = StoreLayout::new(store.clone(), prefix.to_owned());
-                dispatch_capabilities(writer, store, &router, cache, cancel).await?;
+                let selected = pinned_read_store_for_batch(
+                    &mut cache.read_repository,
+                    store,
+                    prefix,
+                    cache.capsule_root.as_ref(),
+                    remote_url,
+                    &cache.config,
+                    cancel,
+                )
+                .await?;
+                dispatch_capabilities(
+                    writer,
+                    &selected.router,
+                    &selected.capsule_root,
+                    cache,
+                    cancel,
+                )
+                .await?;
             } else {
                 let caps = format_capabilities_with_v2(false, false);
                 writer.write_all(caps.as_bytes()).await?;
@@ -1551,15 +1511,9 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
         Batch::List { for_push } => {
             tracing::debug!(for_push, "list requested");
             let output = if let Some(s) = store {
-                if cache.legacy_v1 {
-                    let cfg = cache.config();
-                    let (read_store, router) =
-                        read_store_for_list_batch(s, prefix, remote_url, cfg, *for_push, cancel)
-                            .await;
-                    read_remote_refs(&read_store, &router, &cfg.transfer_hide_refs).await?
-                } else if *for_push {
+                if *for_push {
                     let hidden_ref_patterns = cache.config().transfer_hide_refs.clone();
-                    let (output, view) = match cache.capsule_ref_view.take() {
+                    let (output, view) = match cache.push_ref_view.take() {
                         Some(view) => {
                             (list_output_from_ref_view(&view, &hidden_ref_patterns), view)
                         }
@@ -1575,44 +1529,35 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                             .map_err(map_missing_capsule_root)?
                         }
                     };
-                    cache.capsule_ref_view = Some(view);
+                    cache.push_ref_view = Some(view);
                     output
                 } else {
-                    let (read_store, router, hidden_ref_patterns, may_reuse_primary_root) = {
-                        let cfg = cache.config();
-                        let selected = read_store_for_list_batch(
-                            s, prefix, remote_url, cfg, *for_push, cancel,
-                        )
-                        .await;
-                        let may_reuse_primary_root = *for_push
-                            || cfg
-                                .replication
-                                .as_ref()
-                                .is_none_or(|replication| !replication.has_read_replicas());
-                        (
-                            selected.0,
-                            selected.1,
-                            cfg.transfer_hide_refs.clone(),
-                            may_reuse_primary_root,
-                        )
-                    };
-                    let (output, view) = match cache.capsule_ref_view.take() {
-                        Some(view) if may_reuse_primary_root => {
-                            (list_output_from_ref_view(&view, &hidden_ref_patterns), view)
+                    let selected = match cache.read_repository.clone() {
+                        Some(selected) => selected,
+                        None => {
+                            let selected = read_store_for_list_batch(
+                                s,
+                                prefix,
+                                cache.capsule_root.as_ref(),
+                                remote_url,
+                                cache.config(),
+                                false,
+                                cancel,
+                            )
+                            .await?;
+                            cache.read_repository = Some(selected.clone());
+                            selected
                         }
-                        _ => read_remote_refs_payload_free_with_snapshot(
-                            &read_store,
-                            &router,
-                            &hidden_ref_patterns,
-                            may_reuse_primary_root
-                                .then(|| cache.capsule_root.clone())
-                                .flatten(),
-                        )
-                        .await
-                        .map_err(map_missing_capsule_root)?,
                     };
-                    cache.capsule_ref_view = Some(view);
-                    output
+                    let capture = capsule_read_capture(
+                        &mut cache.read_capture,
+                        &selected.router,
+                        &selected.capsule_root,
+                    )
+                    .await
+                    .map_err(map_missing_capsule_root)?;
+                    let view = capture.ref_view()?;
+                    list_output_from_ref_view(&view, &cache.config.transfer_hide_refs)
                 }
             } else {
                 ListOutput {
@@ -1718,28 +1663,31 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                     return Ok(());
                 }
 
+                // Parse-only rejections need no repository. Every actual push
+                // must carry its captured owner before setup can write any state.
+                let requires_repository = batch_requires_repository(batch, options);
+                if requires_repository && repo_root.is_none() {
+                    return Err(CrabError::Protocol(
+                        "push batch has no local repository owner".into(),
+                    ));
+                }
                 let config = cache.config().clone();
-                let mut base_config = PushConfig::from_config(&config);
-                let mut push_setup_error = if specs.is_empty() {
-                    None
-                } else {
+                let mut push_config = PushConfig::from_config(&config);
+                let mut push_setup_error = if requires_repository {
                     configure_active_active_push_coordinator(
                         &config,
                         remote_url,
                         prefix,
-                        &mut base_config,
+                        &mut push_config,
                     )
                     .await
                     .err()
+                } else {
+                    None
                 };
-                let mut native_config = native_push_config_for_helper(
-                    base_config,
-                    options,
-                    progress_mode,
-                    jsonl_stderr_stream,
-                );
+                let mut push_config = push_config_for_helper(push_config, options);
                 let mut push_store = store.cloned();
-                if !specs.is_empty() && push_setup_error.is_none() {
+                if requires_repository && push_setup_error.is_none() {
                     if let Some(repository) = managed_repository {
                         match store {
                             Some(read_store) => {
@@ -1755,8 +1703,8 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                                 .await
                                 {
                                     Ok(protected) => {
-                                        native_config.push.atomic = true;
-                                        native_config.push.protected_push = Some(protected.session);
+                                        push_config.atomic = true;
+                                        push_config.protected_push = Some(protected.session);
                                         push_store = Some(protected.store);
                                     }
                                     Err(error) => push_setup_error = Some(error),
@@ -1785,8 +1733,8 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                             .await
                             {
                                 Ok(protected) => {
-                                    native_config.push.atomic = true;
-                                    native_config.push.protected_push = Some(protected.session);
+                                    push_config.atomic = true;
+                                    push_config.protected_push = Some(protected.session);
                                     push_store = Some(protected.store);
                                 }
                                 Err(e) => push_setup_error = Some(e),
@@ -1809,7 +1757,7 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
 
                 // Parse-time rejections participate in the atomic contract;
                 // valid siblings must not reach a pipeline that could commit.
-                let atomic_parse_blocker = if native_config.push.atomic {
+                let atomic_parse_blocker = if push_config.atomic {
                     pre_rejected.first().map(|(dst, _)| dst.clone())
                 } else {
                     None
@@ -1841,11 +1789,11 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                                 origin: "push requires a resolved object store".to_owned(),
                             })?;
                     match crate::git::capsule_push::run(
-                        &native_config.push,
+                        &push_config,
                         &specs,
                         push_store,
                         &router,
-                        cache.capsule_ref_view.take(),
+                        cache.push_ref_view.take(),
                         &config.transfer_hide_refs,
                         staging.reader(),
                         caching_store,
@@ -1855,7 +1803,7 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                     .await
                     {
                         Ok((r, view)) => {
-                            cache.capsule_ref_view = view;
+                            cache.push_ref_view = view;
                             r
                         }
                         // Partial outcomes carry per-ref state the pipeline
@@ -1879,27 +1827,30 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
 
                 // Merge parse-time rejections into the outcome map.
                 // Pipeline outcomes never key on a pre-rejected `dst`
-                // (those specs were filtered out before
-                // `run_native_push`), so there is no collision to
-                // resolve — a simple insert preserves both sides.
+                // (those specs were filtered out before publication), so
+                // inserting preserves both sides without a collision.
                 for (dst, reason) in pre_rejected {
                     result
                         .outcomes
                         .insert(dst, RefPushOutcome::Rejected(reason));
                 }
-                if let Err(err) = record_push_audit_event(
-                    &default_log_path(),
-                    remote_url,
-                    prefix,
-                    &ordered_specs,
-                    &result,
-                    None,
-                ) {
-                    warn!(%err, "failed to append push audit event");
-                }
-
-                if let Err(error) = cache.persist_pending_metrics() {
-                    warn!(%error, "failed to persist performance counters");
+                if let Some(repo_root) = repo_root {
+                    // Daemon helpers may run from /. Telemetry belongs to the
+                    // same selected repository as local state, never that cwd.
+                    let audit_path = repo_root.join(default_log_path());
+                    if let Err(err) = record_push_audit_event(
+                        &audit_path,
+                        remote_url,
+                        prefix,
+                        &ordered_specs,
+                        &result,
+                        None,
+                    ) {
+                        warn!(%err, "failed to append push audit event");
+                    }
+                    if let Err(error) = cache.persist_pending_metrics(repo_root) {
+                        warn!(%error, "failed to persist performance counters");
+                    }
                 }
 
                 let response = format_push_response(&result, &ordered_specs);
@@ -1932,37 +1883,11 @@ fn reject_specs_for_error(specs: &[PushSpec], err: &CrabError) -> PushResult {
     PushResult::new(outcomes)
 }
 
-fn native_push_config_for_helper(
-    base_config: PushConfig,
-    options: &HelperOptions,
-    progress_mode: OutputMode,
-    jsonl_stderr_stream: Option<&Arc<Mutex<JsonlStream<Stderr>>>>,
-) -> NativePushConfig {
-    let mut native_config = NativePushConfig::new(base_config);
-    native_config.progress = options.progress;
-    native_config.color = options.progress && crate::git::progress::is_tty();
-    native_config.emit_summary = false;
-    native_config.push.atomic = options.atomic;
-    native_config
-        .push
-        .expected_refs
-        .clone_from(&options.expected_refs);
-
-    // Git owns stdout for remote helpers. Human-readable phase progress
-    // can go to stderr, but the final stdout summary would be parsed as
-    // helper protocol instead of user text.
-    if progress_mode == OutputMode::Jsonl {
-        native_config.output_mode = Some(progress_mode);
-        native_config.jsonl_progress_stream = jsonl_stderr_stream
-            .map(Arc::clone)
-            .map(crate::git::push_native::NativePushProgressStream::Stderr);
-    }
-    native_config.mirror_git_only =
-        std::env::var_os(crate::git::push_native::MIRROR_GIT_ONLY_ENV).is_some();
-    native_config.push.mirror_plan_id =
-        std::env::var(crate::git::push_native::MIRROR_PLAN_ID_ENV).ok();
-
-    native_config
+fn push_config_for_helper(mut config: PushConfig, options: &HelperOptions) -> PushConfig {
+    config.atomic = options.atomic;
+    config.expected_refs.clone_from(&options.expected_refs);
+    config.mirror_plan_id = std::env::var(crab_remote::local::PUBLICATION_PLAN_ID_ENV).ok();
+    config
 }
 
 fn build_push_result_event(
@@ -2046,24 +1971,34 @@ where
     let mut fetch_result = FetchBatchResult::default();
     if let Some(s) = store {
         let cfg = cache.config().clone();
-        let (read_store, router) =
-            read_store_for_batch_with_selector(s, prefix, remote_url, &cfg, cancel, select_read)
-                .await;
+        let selected = match cache.read_repository.clone() {
+            Some(selected) => selected,
+            None => {
+                let selected = read_store_for_batch_with_selector(
+                    s,
+                    prefix,
+                    cache.capsule_root.as_ref(),
+                    remote_url,
+                    &cfg,
+                    cancel,
+                    select_read,
+                )
+                .await?;
+                cache.read_repository = Some(selected.clone());
+                selected
+            }
+        };
+        let router = selected.router;
+        let root = selected.capsule_root;
         // Classic, constrained and raw-object fetches share one admission
         // owner. Direct pack installation must not bypass the repository's
         // reader limit or acquire a separate ticket for each pack source.
         fetch_result = crate::git::upload_pack_wire::with_read_admission(
-            read_store.as_storage(),
+            router.store().as_storage(),
             router.repo_prefix(),
             cancel,
             Box::pin(fetch_packs(
-                &read_store,
-                &router,
-                entries,
-                options,
-                &cfg,
-                cache,
-                cancel,
+                &router, &root, entries, options, &cfg, cache, cancel,
             )),
         )
         .await?;
@@ -2108,14 +2043,16 @@ fn list_read_authority(for_push: bool) -> ListReadAuthority {
 async fn read_store_for_list_batch(
     primary_store: &crate::storage::store::Store,
     prefix: &str,
+    primary_root: Option<&crab_metadata::capsule_protocol::RootSnapshot>,
     remote_url: Option<&str>,
     config: &crate::core::config::Config,
     for_push: bool,
     cancel: &tokio_util::sync::CancellationToken,
-) -> (crate::storage::store::Store, StoreLayout) {
+) -> Result<crate::replication::ReadStoreSelection> {
     read_store_for_list_batch_with_selector(
         primary_store,
         prefix,
+        primary_root,
         remote_url,
         config,
         for_push,
@@ -2130,12 +2067,13 @@ async fn read_store_for_list_batch(
 async fn read_store_for_list_batch_with_selector<F, Fut>(
     primary_store: &crate::storage::store::Store,
     prefix: &str,
+    primary_root: Option<&crab_metadata::capsule_protocol::RootSnapshot>,
     remote_url: Option<&str>,
     config: &crate::core::config::Config,
     for_push: bool,
     cancel: &tokio_util::sync::CancellationToken,
     select_read: F,
-) -> (crate::storage::store::Store, StoreLayout)
+) -> Result<crate::replication::ReadStoreSelection>
 where
     F: FnOnce(
         crate::core::config::Config,
@@ -2148,11 +2086,14 @@ where
         // Git asks `list for-push` before sending updates. That ref
         // advertisement is part of write admission, so stale replicas are
         // unsafe even when they are healthy enough for clone/fetch reads.
-        ListReadAuthority::Primary => primary_store_for_batch(primary_store, prefix),
+        ListReadAuthority::Primary => {
+            primary_store_for_batch(primary_store, prefix, primary_root, cancel).await
+        }
         ListReadAuthority::ReplicaEligible => {
             read_store_for_batch_with_selector(
                 primary_store,
                 prefix,
+                primary_root,
                 remote_url,
                 config,
                 cancel,
@@ -2163,24 +2104,45 @@ where
     }
 }
 
-fn primary_store_for_batch(
+async fn primary_store_for_batch(
     primary_store: &crate::storage::store::Store,
     prefix: &str,
-) -> (crate::storage::store::Store, StoreLayout) {
-    (
-        primary_store.clone(),
-        StoreLayout::new(primary_store.clone(), prefix.to_owned()),
-    )
+    primary_root: Option<&crab_metadata::capsule_protocol::RootSnapshot>,
+    cancel: &tokio_util::sync::CancellationToken,
+) -> Result<crate::replication::ReadStoreSelection> {
+    let router = StoreLayout::new(primary_store.clone(), prefix.to_owned());
+    let capsule_root = match primary_root {
+        Some(root) => root.clone(),
+        None => {
+            let layout = crab_storage::StoreLayout::with_global_prefix(
+                primary_store.as_storage().clone(),
+                router.repo_prefix().to_owned(),
+                router.global_prefix().to_owned(),
+            );
+            tokio::select! {
+                biased;
+                () = cancel.cancelled() => return Err(CrabError::Cancelled),
+                result = crab_write::capsule_protocol::open_root(&layout) => result?,
+            }
+        }
+    };
+    Ok(crate::replication::ReadStoreSelection {
+        store: primary_store.clone(),
+        router,
+        source: crate::replication::ReadSource::Primary,
+        capsule_root,
+    })
 }
 
 async fn read_store_for_batch_with_selector<F, Fut>(
     primary_store: &crate::storage::store::Store,
     prefix: &str,
+    primary_root: Option<&crab_metadata::capsule_protocol::RootSnapshot>,
     remote_url: Option<&str>,
     config: &crate::core::config::Config,
     cancel: &tokio_util::sync::CancellationToken,
     select_read: F,
-) -> (crate::storage::store::Store, StoreLayout)
+) -> Result<crate::replication::ReadStoreSelection>
 where
     F: FnOnce(
         crate::core::config::Config,
@@ -2192,20 +2154,20 @@ where
     // Managed grants already bind this store to one physical repository view.
     // Re-parsing the logical URL as a direct bucket would bypass that scope.
     if primary_store.storage_scope().is_some() {
-        return primary_store_for_batch(primary_store, prefix);
+        return primary_store_for_batch(primary_store, prefix, primary_root, cancel).await;
     }
     if config
         .replication
         .as_ref()
         .is_none_or(|replication| !replication.has_read_replicas())
     {
-        return primary_store_for_batch(primary_store, prefix);
+        return primary_store_for_batch(primary_store, prefix, primary_root, cancel).await;
     }
     let Some(url) = remote_url else {
-        return primary_store_for_batch(primary_store, prefix);
+        return primary_store_for_batch(primary_store, prefix, primary_root, cancel).await;
     };
     let Ok(parsed) = crate::git::url::CrabUrl::parse(url) else {
-        return primary_store_for_batch(primary_store, prefix);
+        return primary_store_for_batch(primary_store, prefix, primary_root, cancel).await;
     };
 
     match select_read(config.clone(), parsed, cancel.clone()).await {
@@ -2213,27 +2175,29 @@ where
             if let crate::replication::ReadSource::Replica { name } = &selection.source {
                 tracing::debug!(replica = %name, "selected read replica for remote-helper batch");
             }
-            (selection.store, selection.router)
+            Ok(selection)
         }
         Err(e) => {
             tracing::debug!(error = %e, "replica read selection failed; using primary");
-            primary_store_for_batch(primary_store, prefix)
+            primary_store_for_batch(primary_store, prefix, primary_root, cancel).await
         }
     }
 }
 
 async fn pinned_read_store_for_batch(
-    pinned: &mut Option<(crate::storage::store::Store, StoreLayout)>,
+    pinned: &mut Option<crate::replication::ReadStoreSelection>,
     primary_store: &crate::storage::store::Store,
     prefix: &str,
+    primary_root: Option<&crab_metadata::capsule_protocol::RootSnapshot>,
     remote_url: Option<&str>,
     config: &crate::core::config::Config,
     cancel: &tokio_util::sync::CancellationToken,
-) -> (crate::storage::store::Store, StoreLayout) {
+) -> Result<crate::replication::ReadStoreSelection> {
     pinned_read_store_for_batch_with_selector(
         pinned,
         primary_store,
         prefix,
+        primary_root,
         remote_url,
         config,
         cancel,
@@ -2245,14 +2209,15 @@ async fn pinned_read_store_for_batch(
 }
 
 async fn pinned_read_store_for_batch_with_selector<F, Fut>(
-    pinned: &mut Option<(crate::storage::store::Store, StoreLayout)>,
+    pinned: &mut Option<crate::replication::ReadStoreSelection>,
     primary_store: &crate::storage::store::Store,
     prefix: &str,
+    primary_root: Option<&crab_metadata::capsule_protocol::RootSnapshot>,
     remote_url: Option<&str>,
     config: &crate::core::config::Config,
     cancel: &tokio_util::sync::CancellationToken,
     select_read: F,
-) -> (crate::storage::store::Store, StoreLayout)
+) -> Result<crate::replication::ReadStoreSelection>
 where
     F: FnOnce(
         crate::core::config::Config,
@@ -2261,21 +2226,22 @@ where
     ) -> Fut,
     Fut: Future<Output = Result<crate::replication::ReadStoreSelection>>,
 {
-    if let Some((store, router)) = pinned {
-        return (store.clone(), router.clone());
+    if let Some(selected) = pinned {
+        return Ok(selected.clone());
     }
 
     let selected = read_store_for_batch_with_selector(
         primary_store,
         prefix,
+        primary_root,
         remote_url,
         config,
         cancel,
         select_read,
     )
-    .await;
+    .await?;
     *pinned = Some(selected.clone());
-    selected
+    Ok(selected)
 }
 
 fn cache_aware_storage_for_selected_read(
@@ -2306,7 +2272,6 @@ pub fn format_capabilities(has_commit_graph: bool) -> String {
 
 /// Build the remote-helper capability response, including the terminal
 /// upload-pack wire when the selected repository has a verified read path.
-/// Legacy manifests use the same wire with their own snapshot authority.
 pub fn format_capabilities_with_v2(has_commit_graph: bool, v2_ready: bool) -> String {
     let mut caps = String::from("fetch\npush\noption\ncheck-connectivity\n");
     if has_commit_graph {
@@ -2322,44 +2287,18 @@ pub fn format_capabilities_with_v2(has_commit_graph: bool, v2_ready: bool) -> St
     caps
 }
 
-/// Read refs from the compacted manifest plus committed journal overlay.
+#[cfg(test)]
 async fn read_remote_refs(
     store: &crate::storage::store::Store,
     router: &StoreLayout,
     hidden_ref_patterns: &[String],
 ) -> Result<ListOutput> {
-    read_remote_refs_with_snapshot(store, router, hidden_ref_patterns, None)
+    read_remote_refs_payload_free_with_snapshot(store, router, hidden_ref_patterns, None)
         .await
         .map(|(output, _)| output)
 }
 
-async fn read_remote_refs_with_snapshot(
-    store: &crate::storage::store::Store,
-    router: &StoreLayout,
-    hidden_ref_patterns: &[String],
-    root: Option<crab_metadata::capsule_protocol::RootSnapshot>,
-) -> Result<(
-    ListOutput,
-    crab_read::capsule_protocol::CapsuleRepositoryView,
-)> {
-    let layout = crab_storage::StoreLayout::with_global_prefix(
-        store.as_storage().clone(),
-        router.repo_prefix().to_owned(),
-        router.global_prefix().to_owned(),
-    );
-    let limits = crab_read::capsule_protocol::CapsuleReadLimits {
-        max_capsule_bytes: u64::MAX,
-        max_frontier_bytes: u64::MAX,
-    };
-    let view = match root {
-        Some(root) => {
-            crab_read::capsule_protocol::open_view_from_root(&layout, root, limits).await?
-        }
-        None => crab_read::capsule_protocol::open_view(&layout, limits).await?,
-    };
-    Ok((list_output_from_view(&view, hidden_ref_patterns), view))
-}
-
+#[cfg(test)]
 async fn read_remote_refs_payload_free_with_snapshot(
     store: &crate::storage::store::Store,
     router: &StoreLayout,
@@ -2398,41 +2337,22 @@ async fn read_remote_refs_for_push_with_snapshot(
     Ok((list_output_from_ref_view(&view, hidden_ref_patterns), view))
 }
 
-fn list_output_from_view(
-    view: &crab_read::capsule_protocol::CapsuleRepositoryView,
-    hidden_ref_patterns: &[String],
-) -> ListOutput {
-    let root = view.root().root();
-    let advertisement = crab_read::capsule_ref_advertisement(view, hidden_ref_patterns);
-
-    let refs = advertisement
-        .refs
-        .into_iter()
-        .map(|entry| RefEntry {
-            sha: entry.sha,
-            ref_name: entry.ref_name,
-            peeled: entry.peeled,
-        })
-        .collect();
-
-    tracing::debug!(
-        ref_count = view.refs().len(),
-        generation = root.generation(),
-        head_symref = ?advertisement.head_symref,
-        "read remote refs from capsule-protocol root"
-    );
-
-    ListOutput {
-        refs,
-        head_symref: advertisement.head_symref,
-    }
-}
-
 fn list_output_from_ref_view(
     view: &crab_read::capsule_protocol::CapsuleRefView,
     hidden_ref_patterns: &[String],
 ) -> ListOutput {
     let advertisement = crab_read::capsule_ref_view_advertisement(view, hidden_ref_patterns);
+    tracing::debug!(
+        ref_count = view.refs().len(),
+        head_symref = ?advertisement.head_symref,
+        "read remote refs from payload-free capsule ref view"
+    );
+    list_output_from_advertisement(advertisement)
+}
+
+fn list_output_from_advertisement(
+    advertisement: crab_read::ManifestRefAdvertisement,
+) -> ListOutput {
     let refs = advertisement
         .refs
         .into_iter()
@@ -2442,13 +2362,6 @@ fn list_output_from_ref_view(
             peeled: entry.peeled,
         })
         .collect();
-
-    tracing::debug!(
-        ref_count = view.refs().len(),
-        head_symref = ?advertisement.head_symref,
-        "read remote refs from payload-free capsule ref view"
-    );
-
     ListOutput {
         refs,
         head_symref: advertisement.head_symref,
@@ -2740,8 +2653,8 @@ fn remote_graph_oid(value: &str) -> Result<[u8; 20]> {
 /// fetch pipeline.
 ///
 async fn fetch_packs(
-    store: &crate::storage::store::Store,
     router: &StoreLayout,
+    root: &crab_metadata::capsule_protocol::RootSnapshot,
     entries: &[FetchEntry],
     options: &HelperOptions,
     config: &crate::core::config::Config,
@@ -2761,42 +2674,48 @@ async fn fetch_packs(
                 "raw object fetch cannot carry shallow constraints".to_owned(),
             ));
         }
+    }
+    if !raw_object_fetch {
+        if fetch_options.filter.is_some() {
+            return Err(CrabError::Protocol(
+                "filtered fetch requires protocol v2".to_owned(),
+            ));
+        }
+        if fetch_options.deepen_relative && fetch_options.depth.is_none() {
+            return Err(CrabError::Protocol(
+                "relative deepening requires a depth".to_owned(),
+            ));
+        }
+        if fetch_options.depth.is_some()
+            && (fetch_options.deepen_since.is_some() || !fetch_options.deepen_not.is_empty())
+        {
+            return Err(CrabError::Protocol(
+                "depth cannot be combined with deepen-since or deepen-not".to_owned(),
+            ));
+        }
+        if fetch_options.deepen_relative
+            && (fetch_options.deepen_since.is_some() || !fetch_options.deepen_not.is_empty())
+        {
+            return Err(CrabError::Protocol(
+                "deepen-relative cannot be combined with deepen-since or deepen-not".to_owned(),
+            ));
+        }
+    }
+    let cached_view = cache.capsule_view.take();
+    let capture = capsule_read_capture(&mut cache.read_capture, router, root).await?;
+    if raw_object_fetch {
         fetch_capsule_promisor_objects(
-            store,
             router,
+            capture,
             entries,
             config,
             options.filter_requested || fetch_options.filter.is_some(),
-            cache.capsule_view.take(),
+            cached_view,
             &runtime,
             cancel,
         )
         .await?;
         return Ok(FetchBatchResult::default());
-    }
-    if fetch_options.filter.is_some() {
-        return Err(CrabError::Protocol(
-            "filtered fetch requires protocol v2".to_owned(),
-        ));
-    }
-    if fetch_options.deepen_relative && fetch_options.depth.is_none() {
-        return Err(CrabError::Protocol(
-            "relative deepening requires a depth".to_owned(),
-        ));
-    }
-    if fetch_options.depth.is_some()
-        && (fetch_options.deepen_since.is_some() || !fetch_options.deepen_not.is_empty())
-    {
-        return Err(CrabError::Protocol(
-            "depth cannot be combined with deepen-since or deepen-not".to_owned(),
-        ));
-    }
-    if fetch_options.deepen_relative
-        && (fetch_options.deepen_since.is_some() || !fetch_options.deepen_not.is_empty())
-    {
-        return Err(CrabError::Protocol(
-            "deepen-relative cannot be combined with deepen-since or deepen-not".to_owned(),
-        ));
     }
     if fetch_options.depth.is_some()
         || fetch_options.deepen_since.is_some()
@@ -2806,12 +2725,12 @@ async fn fetch_packs(
         || !config.transfer_hide_refs.is_empty()
     {
         fetch_capsule_constrained_pack(
-            store,
             router,
+            capture,
             entries,
             options,
             config,
-            cache.capsule_view.take(),
+            cached_view,
             &runtime,
             cancel,
         )
@@ -2819,11 +2738,11 @@ async fn fetch_packs(
         return Ok(FetchBatchResult::default());
     }
     fetch_capsule_packs(
-        store,
         router,
+        capture,
         entries,
         config,
-        cache.capsule_view.take(),
+        cached_view,
         options.check_connectivity,
         &runtime,
         cancel,
@@ -2839,22 +2758,33 @@ fn capsule_fetch_maximum(config: &crate::core::config::Config) -> u64 {
     }
 }
 
-async fn open_capsule_fetch_view(
-    store: &crate::storage::store::Store,
+async fn capsule_read_capture<'a>(
+    captured: &'a mut Option<crab_read::capsule_protocol::CapsuleRepositoryCapture>,
     router: &StoreLayout,
-    config: &crate::core::config::Config,
+    root: &crab_metadata::capsule_protocol::RootSnapshot,
+) -> Result<&'a crab_read::capsule_protocol::CapsuleRepositoryCapture> {
+    if captured.is_none() {
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            router.store().as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
+        );
+        *captured = Some(
+            crab_read::capsule_protocol::CapsuleRepositoryCapture::from_root(layout, root.clone())
+                .await?,
+        );
+    }
+    captured
+        .as_ref()
+        .ok_or_else(|| CrabError::Internal("read capture was not retained".to_owned()))
+}
+
+async fn open_capsule_fetch_view(
+    capture: &crab_read::capsule_protocol::CapsuleRepositoryCapture,
+    maximum: u64,
     cached_view: Option<crab_read::capsule_protocol::CapsuleRepositoryView>,
 ) -> Result<crab_read::capsule_protocol::CapsuleRepositoryView> {
-    let layout = crab_storage::StoreLayout::with_global_prefix(
-        store.as_storage().clone(),
-        router.repo_prefix().to_owned(),
-        router.global_prefix().to_owned(),
-    );
-    let limits = crab_read::capsule_protocol::CapsuleReadLimits {
-        max_capsule_bytes: capsule_fetch_maximum(config),
-        max_frontier_bytes: capsule_fetch_maximum(config),
-    };
-    let (root, previous) = if let Some(view) = cached_view {
+    if let Some(view) = cached_view {
         let footer_only = view
             .layered_checkpoint()
             .is_some_and(|checkpoint| checkpoint.is_control_only())
@@ -2864,57 +2794,36 @@ async fn open_capsule_fetch_view(
         if !footer_only {
             return Ok(view);
         }
-        (view.root_snapshot().clone(), Some(view))
-    } else {
-        (
-            crab_write::capsule_protocol::open_root(&layout).await?,
-            None,
-        )
-    };
-    let complete =
-        crab_read::capsule_protocol::open_view_from_root_with_control(&layout, root, limits)
-            .await?;
-    // Loading visibility also captures ref heads. Do not combine a later
-    // ref generation with the footer-only view already advertised to Git.
-    if let Some(previous) = previous
-        && (complete.refs() != previous.refs()
-            || complete.peeled_refs() != previous.peeled_refs()
-            || complete.visible_ref_transactions() != previous.visible_ref_transactions())
-    {
-        return Err(CrabError::Protocol(
-            "ref heads changed while loading fetch visibility; retry the fetch".to_owned(),
-        ));
     }
-    Ok(complete)
+    capture
+        .metadata_view(crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: maximum,
+            max_frontier_bytes: maximum,
+        })
+        .await
+        .map_err(Into::into)
 }
 
 async fn open_capsule_fetch_view_minimal(
-    store: &crate::storage::store::Store,
-    router: &StoreLayout,
-    config: &crate::core::config::Config,
+    capture: &crab_read::capsule_protocol::CapsuleRepositoryCapture,
+    maximum: u64,
     cached_view: Option<crab_read::capsule_protocol::CapsuleRepositoryView>,
 ) -> Result<crab_read::capsule_protocol::CapsuleRepositoryView> {
     if let Some(view) = cached_view {
         return Ok(view);
     }
-    let layout = crab_storage::StoreLayout::with_global_prefix(
-        store.as_storage().clone(),
-        router.repo_prefix().to_owned(),
-        router.global_prefix().to_owned(),
-    );
-    let limits = crab_read::capsule_protocol::CapsuleReadLimits {
-        max_capsule_bytes: capsule_fetch_maximum(config),
-        max_frontier_bytes: capsule_fetch_maximum(config),
-    };
-    let root = crab_write::capsule_protocol::open_root(&layout).await?;
-    crab_read::capsule_protocol::open_view_from_root_with_layered_control(&layout, root, limits)
+    capture
+        .layered_control_view(crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: maximum,
+            max_frontier_bytes: maximum,
+        })
         .await
         .map_err(Into::into)
 }
 
 async fn fetch_capsule_packs(
-    store: &crate::storage::store::Store,
     router: &StoreLayout,
+    capture: &crab_read::capsule_protocol::CapsuleRepositoryCapture,
     entries: &[FetchEntry],
     config: &crate::core::config::Config,
     cached_view: Option<crab_read::capsule_protocol::CapsuleRepositoryView>,
@@ -2922,15 +2831,18 @@ async fn fetch_capsule_packs(
     runtime: &Arc<crab_remote_git::RemoteGitRuntime>,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<FetchBatchResult> {
+    let store = router.store();
     let maximum = capsule_fetch_maximum(config);
     let git_dir_started = std::time::Instant::now();
-    let git_dir = super::discover::discover_git_dir()?;
+    // Fetch owns shared objects, config and shallow state. A linked worktree's
+    // private Git directory would hide installed packs from Git and its siblings.
+    let git_dir = super::discover::discover_common_git_dir()?;
     let git_dir_discovery_ms = git_dir_started.elapsed().as_millis() as u64;
     let haves_started = std::time::Instant::now();
     let haves = local_fetch_have_tips(&git_dir)?;
     let local_haves_ms = haves_started.elapsed().as_millis() as u64;
     let view_started = std::time::Instant::now();
-    let mut view = open_capsule_fetch_view_minimal(store, router, config, cached_view).await?;
+    let mut view = open_capsule_fetch_view_minimal(capture, maximum, cached_view).await?;
     let view_open_ms = view_started.elapsed().as_millis() as u64;
     let advertisement = crab_read::capsule_ref_advertisement(&view, &config.transfer_hide_refs);
     let visible = advertisement
@@ -2949,32 +2861,22 @@ async fn fetch_capsule_packs(
     // Warm layered fetches must not reinstall the stable inventory. Without
     // local haves there is no authorized delta base, so install complete packs.
     if haves.is_empty() || view.layered_checkpoint().is_none() {
-        let layout = crab_storage::StoreLayout::with_global_prefix(
-            store.as_storage().clone(),
-            router.repo_prefix().to_owned(),
-            router.global_prefix().to_owned(),
-        );
+        let layout = capture.layout();
         let direct_layered_cold_clone =
-            haves.is_empty() && view.layered_cold_clone_packs(&layout, maximum)?.is_some();
+            haves.is_empty() && view.layered_cold_clone_packs(layout, maximum)?.is_some();
         if haves.is_empty()
             && view.root().root().checkpoint().is_none()
             && !direct_layered_cold_clone
         {
-            // An uncheckpointed root may contain several runs.  Its control
-            // view is enough to advertise refs, but not to install every
-            // authenticated source.  Promote only this fallback to the
-            // complete reader; the one-run path above stays range-only.
-            let limits = crab_read::capsule_protocol::CapsuleReadLimits {
-                max_capsule_bytes: maximum,
-                max_frontier_bytes: maximum,
-            };
-            view = crab_read::capsule_protocol::open_view_from_root(
-                &layout,
-                view.root_snapshot().clone(),
-                limits,
-            )
-            .await
-            .map_err(CrabError::from)?;
+            // The installer consumes authenticated source ranges directly. Reopening
+            // heads or loading every Git body would change admission and duplicate
+            // the payloads that the installer is about to read.
+            view = capture
+                .metadata_view(crab_read::capsule_protocol::CapsuleReadLimits {
+                    max_capsule_bytes: maximum,
+                    max_frontier_bytes: maximum,
+                })
+                .await?;
         }
         let pack_cache = match crab_cache_store::CachingStore::new(store.clone(), &config.cache) {
             Ok(cache) => Some(cache),
@@ -2985,7 +2887,7 @@ async fn fetch_capsule_packs(
         };
         let installed = crab_read::capsule_protocol::install_git_packs_from_store(
             &view,
-            &layout,
+            layout,
             &git_dir,
             maximum,
             pack_cache.as_ref(),
@@ -3170,7 +3072,7 @@ async fn fetch_capsule_incremental_packs(
         )
         .await
     }
-    .map_err(|error| CrabError::Protocol(format!("incremental fetch planning failed: {error}")))?;
+    .map_err(CrabError::from)?;
     let planning_ms = planning_started.elapsed().as_millis() as u64;
     let mut member_admission_ms = 0;
     let mut direct_install_ms = 0;
@@ -3206,20 +3108,14 @@ async fn fetch_capsule_incremental_packs(
         } else {
             let selected =
                 crab_read::capsule_protocol::layered_fetch_pack_selection(view, &plan.object_ids)
-                    .map_err(|error| {
-                    CrabError::Protocol(format!("incremental fetch admission failed: {error}"))
-                })?;
+                    .map_err(CrabError::from)?;
             match selected {
                 Some(selected) => (Some(selected), "frontier_admission"),
                 None => {
                     let pack_ids = repository
                         .pack_ids_for_objects(&plan.object_ids, cancel)
                         .await
-                        .map_err(|error| {
-                            CrabError::Protocol(format!(
-                                "incremental fetch locator admission failed: {error}"
-                            ))
-                        })?;
+                        .map_err(CrabError::from)?;
                     let selected = pack_ids
                         .into_iter()
                         .map(|pack_id| pack_id.to_string())
@@ -3323,9 +3219,7 @@ async fn fetch_capsule_incremental_packs(
                 .generate_pack_with_bases(&plan.object_ids, &[], cancel)
                 .await
         }
-        .map_err(|error| {
-            CrabError::Protocol(format!("incremental fetch pack generation failed: {error}"))
-        })?;
+        .map_err(CrabError::from)?;
         pack_generation_ms = pack_generation_started.elapsed().as_millis() as u64;
         let pack_dir = git_dir.join("objects").join("pack");
         let lock_wait_started = std::time::Instant::now();
@@ -3518,9 +3412,8 @@ async fn capsule_git_repository(
     let provider = format!("{:?}:{}:{}", bucket.cloud, bucket.host, bucket.container);
     let identity =
         crab_remote_git::RepositoryIdentity::new(provider, router.repo_prefix().to_owned(), 1)
-            .map_err(|error| CrabError::Protocol(error.to_string()))?;
-    let options = crab_read::upload_pack_repository_options()
-        .map_err(|error| CrabError::Protocol(error.to_string()))?;
+            .map_err(CrabError::from)?;
+    let options = crab_read::upload_pack_repository_options().map_err(CrabError::from)?;
     let layout = crab_storage::StoreLayout::with_global_prefix(
         store.as_storage().clone(),
         router.repo_prefix().to_owned(),
@@ -3540,8 +3433,8 @@ async fn capsule_git_repository(
 }
 
 async fn fetch_capsule_constrained_pack(
-    store: &crate::storage::store::Store,
     router: &StoreLayout,
+    capture: &crab_read::capsule_protocol::CapsuleRepositoryCapture,
     entries: &[FetchEntry],
     options: &HelperOptions,
     config: &crate::core::config::Config,
@@ -3549,6 +3442,7 @@ async fn fetch_capsule_constrained_pack(
     runtime: &Arc<crab_remote_git::RemoteGitRuntime>,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<()> {
+    let store = router.store();
     let fetch_options = &options.fetch_options;
     let wants = entries
         .iter()
@@ -3561,7 +3455,7 @@ async fn fetch_capsule_constrained_pack(
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    let view = open_capsule_fetch_view(store, router, config, cached_view).await?;
+    let view = open_capsule_fetch_view(capture, capsule_fetch_maximum(config), cached_view).await?;
     let advertisement = crab_read::capsule_ref_advertisement(&view, &config.transfer_hide_refs);
     let visible = advertisement
         .refs
@@ -3581,7 +3475,7 @@ async fn fetch_capsule_constrained_pack(
         .iter()
         .map(|reference| reference.ref_name.clone())
         .collect::<Vec<_>>();
-    let git_dir = super::discover::discover_git_dir()?;
+    let git_dir = super::discover::discover_common_git_dir()?;
     let existing_shallow = crate::git::shallow::read_shallow_file(&git_dir)
         .await?
         .into_iter()
@@ -3621,9 +3515,7 @@ async fn fetch_capsule_constrained_pack(
     let pack = repository
         .generate_pack_cached(&plan.object_ids, cache_key, cancel)
         .await
-        .map_err(|error| {
-            CrabError::Protocol(format!("constrained fetch pack generation failed: {error}"))
-        })?;
+        .map_err(CrabError::from)?;
     let pack_dir = git_dir.join("objects").join("pack");
     let _install_lock = crate::git::fetch::acquire_fetch_install_lock(&pack_dir).await?;
     let pack_kind = if options.filter.is_some() {
@@ -3714,8 +3606,8 @@ fn classify_raw_object_fetch(entries: &[FetchEntry]) -> Result<bool> {
 }
 
 async fn fetch_capsule_promisor_objects(
-    store: &crate::storage::store::Store,
     router: &StoreLayout,
+    capture: &crab_read::capsule_protocol::CapsuleRepositoryCapture,
     entries: &[FetchEntry],
     config: &crate::core::config::Config,
     filtered_promisor: bool,
@@ -3723,6 +3615,7 @@ async fn fetch_capsule_promisor_objects(
     runtime: &Arc<crab_remote_git::RemoteGitRuntime>,
     cancel: &tokio_util::sync::CancellationToken,
 ) -> Result<()> {
+    let store = router.store();
     let started = std::time::Instant::now();
     let wants = entries
         .iter()
@@ -3735,7 +3628,7 @@ async fn fetch_capsule_promisor_objects(
             })
         })
         .collect::<Result<Vec<_>>>()?;
-    let view = open_capsule_fetch_view(store, router, config, cached_view).await?;
+    let view = open_capsule_fetch_view(capture, capsule_fetch_maximum(config), cached_view).await?;
     let advertisement = crab_read::capsule_ref_advertisement(&view, &config.transfer_hide_refs);
     let visible_refs = advertisement
         .refs
@@ -3775,9 +3668,7 @@ async fn fetch_capsule_promisor_objects(
     let pack = repository
         .generate_pack(&plan.object_ids, cancel)
         .await
-        .map_err(|error| {
-            CrabError::Protocol(format!("promisor pack generation failed: {error}"))
-        })?;
+        .map_err(CrabError::from)?;
     tracing::info!(
         storage_protocol_version = 2,
         transport = "remote-helper-fetch",
@@ -3790,7 +3681,7 @@ async fn fetch_capsule_promisor_objects(
         lazy_fetch_latency_ms = started.elapsed().as_millis() as u64,
         "capsule-protocol promisor pack generated"
     );
-    let git_dir = super::discover::discover_git_dir()?;
+    let git_dir = super::discover::discover_common_git_dir()?;
     let pack_dir = git_dir.join("objects").join("pack");
     let canonical_name = format!("promisor-{}", pack.checksum_hex());
     let pack_was_present = pack_dir
@@ -3971,6 +3862,10 @@ fn linked_worktree_root_from_git_dir(git_dir: &std::path::Path) -> Option<std::p
 }
 
 #[cfg(test)]
+#[path = "remote_helper_capture_tests.rs"]
+mod capture_tests;
+
+#[cfg(test)]
 mod tests {
     use super::*;
     use crate::test::git_repo::{CacheDirGuard, CleanGitEnvGuard, GIT_DIR_MUTEX, TEST_GIT_REPO};
@@ -4059,7 +3954,7 @@ mod tests {
         }
     }
 
-    struct GitEnvCwdGuard {
+    pub(super) struct GitEnvCwdGuard {
         _lock: MutexGuard<'static, ()>,
         prev_git_dir: Option<String>,
         prev_git_work_tree: Option<String>,
@@ -4068,7 +3963,7 @@ mod tests {
     }
 
     impl GitEnvCwdGuard {
-        fn set(
+        pub(super) fn set(
             cwd: &std::path::Path,
             git_dir: &std::path::Path,
             work_tree: &std::path::Path,
@@ -4120,17 +4015,11 @@ mod tests {
         }
     }
 
-    fn test_context(
-        store: crate::storage::store::Store,
-        prefix: &str,
-        push_state_repo_root: std::path::PathBuf,
-    ) -> RemoteHelperContext {
+    fn test_context(store: crate::storage::store::Store, prefix: &str) -> RemoteHelperContext {
         RemoteHelperContext {
             store,
             prefix: prefix.to_owned(),
             cache: SessionCache::new(crate::core::config::Config::default()),
-            push_state: PushState::default(),
-            push_state_repo_root,
             progress_mode: OutputMode::Text,
             jsonl_stderr_stream: None,
             invocation_url: format!("crab://bucket/{prefix}"),
@@ -4206,49 +4095,241 @@ mod tests {
 
     /// Run the production protocol loop with a resolved in-memory context.
     async fn run(input: &str) -> String {
-        let push_state_root = tempfile::tempdir().expect("push state tempdir");
         let store = crate::storage::store::Store::new(std::sync::Arc::new(
             object_store::memory::InMemory::new(),
         ));
         initialize_test_remote(&store, "remote-helper-unit").await;
-        let context = test_context(
-            store,
-            "remote-helper-unit",
-            push_state_root.path().to_path_buf(),
-        );
+        let context = test_context(store, "remote-helper-unit");
         let (output, result) =
             run_with_context(input, context, tokio_util::sync::CancellationToken::new()).await;
         result.expect("remote helper protocol session");
         output
     }
 
+    #[test]
+    fn helper_config_does_not_read_an_unrelated_cwd_project() {
+        let temporary = tempfile::tempdir().unwrap();
+        let selected = temporary.path().join("selected");
+        let unrelated = temporary.path().join("unrelated");
+        std::fs::create_dir_all(&selected).unwrap();
+        std::fs::create_dir_all(&unrelated).unwrap();
+        run_git(&selected, &["init", "-q"]);
+        std::fs::create_dir_all(selected.join(".crab")).unwrap();
+        std::fs::write(
+            selected.join(".crab/local.toml"),
+            "[uploadpack]\nallowReachableSHA1InWant = true\n",
+        )
+        .unwrap();
+        std::fs::write(unrelated.join("crab.toml"), "invalid = [").unwrap();
+        let git_dir = selected.join(".git");
+        let _guard = GitEnvCwdGuard::set(&unrelated, &git_dir, &selected);
+        let config = resolve_remote_helper_config().unwrap();
+        assert!(config.uploadpack_allow_reachable_sha_in_want);
+    }
+
+    #[test]
+    fn metrics_paths_preserve_repository_relative_and_absolute_configuration() {
+        let temporary = tempfile::tempdir().unwrap();
+        let owner = temporary.path().join("selected");
+        let absolute = temporary.path().join("absolute.json");
+        for (path, enabled) in [
+            ("metrics/state.json".to_owned(), true),
+            (absolute.to_str().unwrap().to_owned(), true),
+            ("disabled/state.json".to_owned(), false),
+        ] {
+            let config = crate::core::config::Config {
+                perf_path: path.clone(),
+                perf_persist: enabled,
+                ..Default::default()
+            };
+            let mut cache = SessionCache::new(config);
+            cache.metrics.add_bytes_uploaded(7);
+            cache.persist_pending_metrics(&owner).unwrap();
+            cache.metrics.add_bytes_uploaded(5);
+            cache.persist_pending_metrics(&owner).unwrap();
+            let output = owner.join(path);
+            let actual = output.exists().then(|| {
+                crate::core::metrics::load_metrics_summary(&output)
+                    .unwrap()
+                    .bytes_uploaded
+            });
+            assert_eq!(actual, enabled.then_some(12));
+        }
+    }
+
+    #[tokio::test]
+    async fn parse_only_rejection_does_not_create_cwd_telemetry() {
+        let temporary = tempfile::tempdir().unwrap();
+        let _guard = GitEnvCwdGuard::set(
+            temporary.path(),
+            &temporary.path().join(".git"),
+            temporary.path(),
+        );
+        for (input, atomic_abort) in [
+            ("push refs/tags/v1^{}:refs/tags/v1^{}\n\n", false),
+            (
+                "option atomic true\npush refs/heads/main:refs/heads/main\npush refs/tags/v1^{}:refs/tags/v1^{}\n\n",
+                true,
+            ),
+        ] {
+            let (writer, mut read) = duplex(64 * 1024);
+            let io = DuplexIo {
+                reader: BufReader::new(Cursor::new(input.as_bytes().to_vec())),
+                writer,
+            };
+            let url = test_url();
+            let helper = Box::pin(run_remote_helper(
+                "origin",
+                &url,
+                io,
+                tokio_util::sync::CancellationToken::new(),
+            ));
+            let mut bytes = Vec::new();
+            let (result, received) = tokio::join!(helper, read.read_to_end(&mut bytes));
+            result.unwrap();
+            received.unwrap();
+            let output = String::from_utf8(bytes).unwrap();
+            assert_eq!(
+                (
+                    output.contains("bad-refname"),
+                    output.contains("atomic-abort"),
+                    temporary.path().join(".crab").exists()
+                ),
+                (true, atomic_abort, false)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn read_only_sessions_do_not_write_push_state() {
+        let root = tempfile::tempdir().unwrap();
+        let _guard = GitEnvCwdGuard::set(root.path(), &root.path().join(".git"), root.path());
+        let store =
+            crate::storage::store::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        initialize_test_remote(&store, "read-only-session").await;
+        for (input, expected) in [
+            ("list\n", "\n"),
+            ("list for-push\n", "\n"),
+            ("stateless-connect git-receive-pack\n", "fallback\n"),
+        ] {
+            let context = test_context(store.clone(), "read-only-session");
+            let (output, result) =
+                run_with_context(input, context, tokio_util::sync::CancellationToken::new()).await;
+            result.unwrap();
+            assert_eq!(
+                (output.as_str(), root.path().join(".crab").exists()),
+                (expected, false)
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn actual_push_requires_a_captured_repository_owner() {
+        let batch = Batch::Push(vec![PushItem::Spec(PushSpec {
+            force: false,
+            src: "refs/heads/main".into(),
+            dst: "refs/heads/main".into(),
+        })]);
+        let mut cache = SessionCache::new(crate::core::config::Config::default());
+        let mut writer = Vec::new();
+        let cancel = tokio_util::sync::CancellationToken::new();
+        let result = dispatch_batch(
+            &batch,
+            &HelperOptions::default(),
+            &mut writer,
+            None,
+            &PushStaging::Missing,
+            "",
+            &mut cache,
+            "origin",
+            None,
+            OutputMode::Text,
+            None,
+            None,
+            None,
+            None,
+            &cancel,
+        )
+        .await;
+        assert!(
+            matches!(result, Err(CrabError::Protocol(message)) if message == "push batch has no local repository owner")
+                && writer.is_empty()
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn push_telemetry_stays_with_the_selected_repository() {
+        let temporary = tempfile::tempdir().unwrap();
+        let selected = temporary.path().join("selected");
+        let unrelated = temporary.path().join("unrelated");
+        std::fs::create_dir_all(&selected).unwrap();
+        std::fs::create_dir_all(&unrelated).unwrap();
+        run_git(&selected, &["init", "-q", "-b", "main"]);
+        run_git(
+            &selected,
+            &["config", "user.email", "audit@example.invalid"],
+        );
+        run_git(&selected, &["config", "user.name", "Telemetry test"]);
+        std::fs::write(selected.join("base.txt"), b"selected repository bytes").unwrap();
+        run_git(&selected, &["add", "."]);
+        run_git(&selected, &["commit", "-qm", "seed"]);
+        let git_dir = selected.join(".git");
+        let _guard = GitEnvCwdGuard::set(&unrelated, &git_dir, &selected);
+        let store =
+            crate::storage::store::Store::new(Arc::new(object_store::memory::InMemory::new()));
+        initialize_test_remote(&store, "telemetry-owner").await;
+        let context = test_context(store, "telemetry-owner");
+        let (output, result) = Box::pin(run_with_context(
+            "push refs/heads/main:refs/heads/main\n\n",
+            context,
+            tokio_util::sync::CancellationToken::new(),
+        ))
+        .await;
+        result.unwrap();
+        assert_eq!(
+            (
+                output,
+                selected.join(".crab/perf-state.json").is_file(),
+                selected.join(default_log_path()).is_file(),
+                unrelated.join(".crab").exists()
+            ),
+            ("ok refs/heads/main\n\n".to_owned(), true, true, false),
+        );
+    }
+
     #[tokio::test]
     async fn helper_exit_closes_its_owned_git_runtime() {
         for (input, cancelled) in [("", false), ("unknown-command\n", false), ("", true)] {
-            let directory = tempfile::tempdir().unwrap();
             let store =
                 crate::storage::store::Store::new(Arc::new(object_store::memory::InMemory::new()));
             let prefix = "helper-runtime-shutdown";
             let layout =
                 crab_storage::StoreLayout::new(store.as_storage().clone(), prefix.to_owned());
-            crab_metadata::layout_descriptor::ensure_canonical_layout(store.as_storage(), &layout)
+            crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
                 .await
                 .unwrap();
-            let manifest = crab_metadata::manifests::Manifest::default_for_repo("refs/heads/main");
-            crab_metadata::manifest_store::create_manifest(store.as_storage(), &layout, &manifest)
-                .await
-                .unwrap();
-            let context = test_context(store.clone(), prefix, directory.path().to_owned());
-            let repository = crab_remote_git::RemoteGitRepository::open(
-                store.as_storage().clone(),
-                layout,
-                crab_remote_git::RepositoryIdentity::new("memory", prefix, 1).unwrap(),
-                Arc::clone(&context.cache.git_runtime),
-                crab_remote_git::RepositoryOptions::default(),
-                &tokio_util::sync::CancellationToken::new(),
+            let context = test_context(store.clone(), prefix);
+            let view = crab_read::capsule_protocol::open_view(
+                &layout,
+                crab_read::capsule_protocol::CapsuleReadLimits {
+                    max_capsule_bytes: 8 * 1024 * 1024,
+                    max_frontier_bytes: 8 * 1024 * 1024,
+                },
             )
             .await
             .unwrap();
+            let repository = view
+                .git_repository_from_store(
+                    layout,
+                    crab_remote_git::RepositoryIdentity::new("memory", prefix, 1).unwrap(),
+                    Arc::clone(&context.cache.git_runtime),
+                    crab_remote_git::RepositoryOptions::default(),
+                    8 * 1024 * 1024,
+                    &tokio_util::sync::CancellationToken::new(),
+                    None,
+                )
+                .await
+                .unwrap();
             let cancellation = tokio_util::sync::CancellationToken::new();
             if cancelled {
                 cancellation.cancel();
@@ -4280,30 +4361,6 @@ mod tests {
             env!("CARGO_PKG_VERSION")
         );
         assert_eq!(output, expected);
-    }
-
-    #[tokio::test]
-    async fn legacy_repository_capabilities_advertise_compatible_terminal_wire() {
-        let push_state_root = tempfile::tempdir().expect("push state tempdir");
-        let store = crate::storage::store::Store::new(std::sync::Arc::new(
-            object_store::memory::InMemory::new(),
-        ));
-        initialize_test_remote(&store, "remote-helper-legacy-capabilities").await;
-        let mut context = test_context(
-            store,
-            "remote-helper-legacy-capabilities",
-            push_state_root.path().to_path_buf(),
-        );
-        context.cache.legacy_v1 = true;
-        let (output, result) = run_with_context(
-            "capabilities\n",
-            context,
-            tokio_util::sync::CancellationToken::new(),
-        )
-        .await;
-
-        result.expect("legacy capabilities response");
-        assert!(output.lines().any(|line| line == "stateless-connect"));
     }
 
     #[tokio::test]
@@ -4352,11 +4409,11 @@ mod tests {
         std::fs::write(staging.join("index.db"), b"not a SQLite database")
             .expect("write damaged index");
         let _git_guard = GitEnvCwdGuard::set(repo, &repo.join(".git"), repo);
-        assert!(open_staging_for_push().await.is_err());
+        assert!(PushStaging::open(staging).await.is_err());
         let store =
             crate::storage::store::Store::new(Arc::new(object_store::memory::InMemory::new()));
         initialize_test_remote(&store, "damaged-staging-read").await;
-        let context = test_context(store, "damaged-staging-read", repo.to_path_buf());
+        let context = test_context(store, "damaged-staging-read");
 
         let (output, result) = run_with_context(
             "list\nlist for-push\n",
@@ -4394,9 +4451,10 @@ mod tests {
         let config = config_with_read_replica();
         let cancel = tokio_util::sync::CancellationToken::new();
 
-        let (read_store, router) = read_store_for_list_batch_with_selector(
+        let selected = read_store_for_list_batch_with_selector(
             &primary_store,
             "org/repo",
+            None,
             Some("crab://primary/org/repo"),
             &config,
             false,
@@ -4405,7 +4463,13 @@ mod tests {
                 let replica_store = replica_store.clone();
                 let replica_router = replica_router.clone();
                 async move {
+                    let layout = crab_storage::StoreLayout::new(
+                        replica_store.as_storage().clone(),
+                        replica_router.repo_prefix().to_owned(),
+                    );
+                    let capsule_root = crab_metadata::capsule_protocol::load_root(&layout).await?;
                     Ok(crate::replication::ReadStoreSelection {
+                        capsule_root,
                         store: replica_store,
                         router: replica_router,
                         source: crate::replication::ReadSource::Replica {
@@ -4415,7 +4479,10 @@ mod tests {
                 }
             },
         )
-        .await;
+        .await
+        .expect("select rooted read store");
+        let read_store = selected.store;
+        let router = selected.router;
 
         let output = read_remote_refs(&read_store, &router, &[])
             .await
@@ -4437,9 +4504,10 @@ mod tests {
         let config = crate::core::config::Config::default();
         let cancel = tokio_util::sync::CancellationToken::new();
 
-        let (read_store, router) = read_store_for_list_batch_with_selector(
+        let selected = read_store_for_list_batch_with_selector(
             &primary_store,
             "org/repo",
+            None,
             Some("crab://primary/org/repo"),
             &config,
             true,
@@ -4450,7 +4518,10 @@ mod tests {
                 ))
             },
         )
-        .await;
+        .await
+        .expect("select rooted read store");
+        let read_store = selected.store;
+        let router = selected.router;
 
         let output = read_remote_refs(&read_store, &router, &[])
             .await
@@ -4478,9 +4549,10 @@ mod tests {
         let config = crate::core::config::Config::default();
         let cancel = tokio_util::sync::CancellationToken::new();
 
-        let (read_store, router) = read_store_for_list_batch_with_selector(
+        let selected = read_store_for_list_batch_with_selector(
             &primary_store,
             "org/repo",
+            None,
             Some("crab://crab.crab.test/acme/models"),
             &config,
             false,
@@ -4491,7 +4563,10 @@ mod tests {
                 ))
             },
         )
-        .await;
+        .await
+        .expect("select rooted read store");
+        let read_store = selected.store;
+        let router = selected.router;
 
         let output = read_remote_refs(&read_store, &router, &[])
             .await
@@ -4516,9 +4591,10 @@ mod tests {
         let selector_called = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
         let selector_called_in_closure = std::sync::Arc::clone(&selector_called);
 
-        let (read_store, router) = read_store_for_batch_with_selector(
+        let selected = read_store_for_batch_with_selector(
             &primary_store,
             "org/repo",
+            None,
             Some("crab://primary/org/repo"),
             &config,
             &cancel,
@@ -4527,7 +4603,10 @@ mod tests {
                 async { Err(CrabError::Internal("selector must not run".into())) }
             },
         )
-        .await;
+        .await
+        .expect("select rooted read store");
+        let read_store = selected.store;
+        let router = selected.router;
 
         let output = read_remote_refs(&read_store, &router, &[])
             .await
@@ -4558,20 +4637,27 @@ mod tests {
         let selector_calls = std::sync::Arc::new(std::sync::atomic::AtomicUsize::new(0));
         let mut pinned = None;
 
-        for _ in 0..2 {
+        for attempt in 0..2 {
             let selector_calls = std::sync::Arc::clone(&selector_calls);
             let replica_store = replica_store.clone();
             let replica_router = replica_router.clone();
-            let (read_store, router) = pinned_read_store_for_batch_with_selector(
+            let selected = pinned_read_store_for_batch_with_selector(
                 &mut pinned,
                 &primary_store,
                 "org/repo",
+                None,
                 Some("crab://primary/org/repo"),
                 &config,
                 &cancel,
                 move |_, _, _| async move {
                     selector_calls.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+                    let layout = crab_storage::StoreLayout::new(
+                        replica_store.as_storage().clone(),
+                        replica_router.repo_prefix().to_owned(),
+                    );
+                    let capsule_root = crab_metadata::capsule_protocol::load_root(&layout).await?;
                     Ok(crate::replication::ReadStoreSelection {
+                        capsule_root,
                         store: replica_store,
                         router: replica_router,
                         source: crate::replication::ReadSource::Replica {
@@ -4580,18 +4666,77 @@ mod tests {
                     })
                 },
             )
-            .await;
-            let output = read_remote_refs(&read_store, &router, &[])
-                .await
-                .expect("read pinned replica refs");
+            .await
+            .expect("select rooted read store");
+            let read_store = selected.store;
+            let router = selected.router;
+            let (output, _) = read_remote_refs_payload_free_with_snapshot(
+                &read_store,
+                &router,
+                &[],
+                Some(selected.capsule_root),
+            )
+            .await
+            .expect("read pinned replica refs");
             assert_eq!(
                 output.refs[0].sha,
                 "2222222222222222222222222222222222222222"
             );
             assert_eq!(router.repo_prefix(), "replica/repo");
+            if attempt == 0 {
+                read_store
+                    .delete(&router.capsule_root_path())
+                    .await
+                    .expect("remove mutable root after capture");
+            }
         }
 
         assert_eq!(selector_calls.load(std::sync::atomic::Ordering::SeqCst), 1);
+    }
+
+    #[tokio::test]
+    async fn replica_read_advertisement_cannot_supply_push_admission() {
+        let (primary, _) = memory_store_with_manifest("refs/heads/main", &"1".repeat(40)).await;
+        let (replica, router) = memory_store_with_manifest_at_prefix(
+            "replica/repo",
+            "refs/heads/main",
+            &"2".repeat(40),
+        )
+        .await;
+        let layout = crab_storage::StoreLayout::new(
+            replica.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+        );
+        let capsule_root = crab_metadata::capsule_protocol::load_root(&layout)
+            .await
+            .expect("replica root");
+        let mut context = test_context(primary, "org/repo");
+        context.cache.read_repository = Some(crate::replication::ReadStoreSelection {
+            store: replica,
+            router,
+            capsule_root,
+            source: crate::replication::ReadSource::Replica {
+                name: "west".to_owned(),
+            },
+        });
+        let (output, result) = run_with_context(
+            "list\n\nlist for-push\n\n",
+            context,
+            tokio_util::sync::CancellationToken::new(),
+        )
+        .await;
+        result.expect("read and push advertisements");
+        let refs = output
+            .lines()
+            .filter(|line| line.ends_with(" refs/heads/main"))
+            .collect::<Vec<_>>();
+        assert_eq!(
+            refs,
+            vec![
+                format!("{} refs/heads/main", "2".repeat(40)),
+                format!("{} refs/heads/main", "1".repeat(40))
+            ]
+        );
     }
 
     #[tokio::test]
@@ -4664,7 +4809,13 @@ mod tests {
                 let replica_store = replica_store.clone();
                 let replica_router = replica_router.clone();
                 async move {
+                    let layout = crab_storage::StoreLayout::new(
+                        replica_store.as_storage().clone(),
+                        replica_router.repo_prefix().to_owned(),
+                    );
+                    let capsule_root = crab_metadata::capsule_protocol::load_root(&layout).await?;
                     Ok(crate::replication::ReadStoreSelection {
+                        capsule_root,
                         store: replica_store,
                         router: replica_router,
                         source: crate::replication::ReadSource::Replica {
@@ -4689,6 +4840,24 @@ mod tests {
         assert_eq!(lines.next(), Some("connectivity-ok"));
         assert_eq!(lines.next(), Some(""));
         assert_eq!(lines.next(), None);
+        let mut repeated = Vec::new();
+        dispatch_fetch_batch_with_selector(
+            &entries,
+            &options,
+            &mut repeated,
+            Some(&primary_store),
+            "org/repo",
+            &mut cache,
+            Some("crab://primary/org/repo"),
+            &cancel,
+            |_, _, _| async {
+                Err(CrabError::Internal(
+                    "read source must remain pinned".to_owned(),
+                ))
+            },
+        )
+        .await
+        .expect("repeat fetch from the admitted replica without selecting again");
     }
 
     #[tokio::test]
@@ -4877,7 +5046,7 @@ mod tests {
         ));
     }
 
-    fn run_git(repo: &std::path::Path, args: &[&str]) -> Vec<u8> {
+    pub(super) fn run_git(repo: &std::path::Path, args: &[&str]) -> Vec<u8> {
         run_git_with_env(repo, args, &[])
     }
 
@@ -4903,7 +5072,7 @@ mod tests {
         output.stdout
     }
 
-    fn git_object_exists(repo: &std::path::Path, object: &str) -> bool {
+    pub(super) fn git_object_exists(repo: &std::path::Path, object: &str) -> bool {
         std::process::Command::new("git")
             .args(["cat-file", "-e", object])
             .current_dir(repo)
@@ -5255,7 +5424,7 @@ mod tests {
         (store, router, blob)
     }
 
-    async fn capsule_history_fixture() -> (
+    pub(super) async fn capsule_history_fixture() -> (
         tempfile::TempDir,
         crate::storage::store::Store,
         StoreLayout,
@@ -5498,11 +5667,7 @@ mod tests {
             } else {
                 TEST_GIT_REPO.commit_sha.clone()
             };
-            let context = test_context(
-                store.clone(),
-                router.repo_prefix(),
-                target.path().join("push-state"),
-            );
+            let context = test_context(store.clone(), router.repo_prefix());
             let input = format!("fetch {tip} refs/heads/main\n\n");
             let (_, result) =
                 run_with_context(&input, context, tokio_util::sync::CancellationToken::new()).await;
@@ -5549,11 +5714,7 @@ mod tests {
         let git_dir = target.path().join(".git");
         let _guard = GitEnvCwdGuard::set(target.path(), &git_dir, target.path());
         let tip = commits.last().expect("history tip");
-        let mut context = test_context(
-            store,
-            router.repo_prefix(),
-            target.path().join("push-state"),
-        );
+        let mut context = test_context(store, router.repo_prefix());
         context.cache = SessionCache::new(crate::core::config::Config {
             transfer_hide_refs: vec!["refs/tags/v1".to_owned()],
             ..Default::default()
@@ -5585,11 +5746,7 @@ mod tests {
             let input = format!(
                 "capabilities\nlist\noption filter blob:none\n{depth_option}fetch {tip} refs/heads/main\n\n"
             );
-            let context = test_context(
-                store.clone(),
-                router.repo_prefix(),
-                target.path().join("push-state"),
-            );
+            let context = test_context(store.clone(), router.repo_prefix());
             let (_, result) =
                 run_with_context(&input, context, tokio_util::sync::CancellationToken::new()).await;
             result.expect("classic filtered fetch uses the canonical planner");
@@ -5623,11 +5780,7 @@ mod tests {
             // A later helper process must recover the promised bytes without
             // widening ref visibility or changing the shallow boundary.
             let input = format!("option filter blob:none\nfetch {blob} {blob}\n\n");
-            let context = test_context(
-                store.clone(),
-                router.repo_prefix(),
-                target.path().join("push-state"),
-            );
+            let context = test_context(store.clone(), router.repo_prefix());
             let (_, result) =
                 run_with_context(&input, context, tokio_util::sync::CancellationToken::new()).await;
             result.expect("recover promised blob");
@@ -5654,11 +5807,7 @@ mod tests {
         let tip = commits.last().expect("history tip");
 
         let input = format!("option depth 1\nfetch {tip} refs/heads/main\n\n");
-        let context = test_context(
-            store.clone(),
-            router.repo_prefix(),
-            target.path().join("push-state"),
-        );
+        let context = test_context(store.clone(), router.repo_prefix());
         let (output, result) =
             run_with_context(&input, context, tokio_util::sync::CancellationToken::new()).await;
         result.expect("fetch depth-one capsule history");
@@ -5674,11 +5823,7 @@ mod tests {
         let input = format!(
             "option depth 1\noption deepen-relative true\noption followtags true\nfetch {tip} refs/heads/main\n\n"
         );
-        let context = test_context(
-            store.clone(),
-            router.repo_prefix(),
-            target.path().join("push-state"),
-        );
+        let context = test_context(store.clone(), router.repo_prefix());
         let (output, result) =
             run_with_context(&input, context, tokio_util::sync::CancellationToken::new()).await;
         result.expect("deepen capsule history");
@@ -5694,11 +5839,7 @@ mod tests {
         assert!(git_object_exists(target.path(), &tag));
 
         let input = format!("option depth 0\nfetch {tip} refs/heads/main\n\n");
-        let context = test_context(
-            store.clone(),
-            router.repo_prefix(),
-            target.path().join("push-state"),
-        );
+        let context = test_context(store.clone(), router.repo_prefix());
         let (output, result) =
             run_with_context(&input, context, tokio_util::sync::CancellationToken::new()).await;
         result.expect("unshallow capsule history");
@@ -5713,11 +5854,7 @@ mod tests {
         let _full_guard =
             GitEnvCwdGuard::set(full_target.path(), &full_git_dir, full_target.path());
         let input = format!("option depth 0\nfetch {tip} refs/heads/main\n\n");
-        let context = test_context(
-            store,
-            router.repo_prefix(),
-            full_target.path().join("push-state"),
-        );
+        let context = test_context(store, router.repo_prefix());
         let (output, result) =
             run_with_context(&input, context, tokio_util::sync::CancellationToken::new()).await;
         result.expect("fetch depth-zero capsule history into a full repository");
@@ -5736,11 +5873,7 @@ mod tests {
         let tip = commits.last().expect("history tip");
 
         let input = format!("option deepen-not refs/tags/v1\nfetch {tip} refs/heads/main\n\n");
-        let context = test_context(
-            store,
-            router.repo_prefix(),
-            target.path().join("push-state"),
-        );
+        let context = test_context(store, router.repo_prefix());
         let (output, result) =
             run_with_context(&input, context, tokio_util::sync::CancellationToken::new()).await;
         result.expect("excluded-ref shallow fetch");
@@ -5773,11 +5906,7 @@ mod tests {
         let tip = commits.last().expect("history tip");
 
         let input = format!("option deepen-since {cutoff}\nfetch {tip} refs/heads/main\n\n");
-        let context = test_context(
-            store,
-            router.repo_prefix(),
-            target.path().join("push-state"),
-        );
+        let context = test_context(store, router.repo_prefix());
         let (output, result) =
             run_with_context(&input, context, tokio_util::sync::CancellationToken::new()).await;
         result.expect("timestamp-bounded shallow fetch");
@@ -5803,11 +5932,7 @@ mod tests {
             let _guard = GitEnvCwdGuard::set(target.path(), &git_dir, target.path());
             let tip = commits.last().expect("history tip");
             let input = format!("option {selector}\nfetch {tip} refs/heads/main\n\n");
-            let context = test_context(
-                store.clone(),
-                router.repo_prefix(),
-                target.path().join("push-state"),
-            );
+            let context = test_context(store.clone(), router.repo_prefix());
             let (_, result) =
                 run_with_context(&input, context, tokio_util::sync::CancellationToken::new()).await;
             let error = result.expect_err("empty shallow selection must fail");
@@ -5828,17 +5953,97 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn linked_worktree_fetches_install_shared_state() {
+        let (source, store, router, commits, _) = capsule_history_fixture().await;
+        let tip = commits.last().unwrap();
+        let blob = String::from_utf8(run_git(source.path(), &["rev-parse", "HEAD:history.txt"]))
+            .unwrap()
+            .trim()
+            .to_owned();
+        for mode in ["promisor", "full", "filtered", "shallow", "incremental"] {
+            let target = tempfile::tempdir().unwrap();
+            run_git(target.path(), &["init", "-q", "-b", "main"]);
+            run_git(
+                target.path(),
+                &[
+                    "-c",
+                    "user.name=Crab Tests",
+                    "-c",
+                    "user.email=tests@crab.invalid",
+                    "commit",
+                    "-q",
+                    "--allow-empty",
+                    "-m",
+                    "local base",
+                ],
+            );
+            if mode == "incremental" {
+                let refspec = format!("{}:refs/remotes/origin/main", commits[0]);
+                run_git(
+                    target.path(),
+                    &["fetch", source.path().to_str().unwrap(), &refspec],
+                );
+            }
+            run_git(target.path(), &["checkout", "--detach"]);
+            run_git(target.path(), &["branch", "-D", "main"]);
+            let linked = target.path().join("linked");
+            run_git(
+                target.path(),
+                &["worktree", "add", "--detach", linked.to_str().unwrap()],
+            );
+            let private = std::path::PathBuf::from(
+                String::from_utf8(run_git(&linked, &["rev-parse", "--absolute-git-dir"]))
+                    .unwrap()
+                    .trim(),
+            );
+            let _guard = GitEnvCwdGuard::set(&linked, &private, &linked);
+            let context = test_context(store.clone(), router.repo_prefix());
+            let input = match mode {
+                "promisor" => format!("option filter blob:none\nfetch {blob} {blob}\n\n"),
+                "filtered" => format!("option filter blob:none\nfetch {tip} refs/heads/main\n\n"),
+                "shallow" => format!("option depth 1\nfetch {tip} refs/heads/main\n\n"),
+                _ => format!("fetch {tip} refs/heads/main\n\n"),
+            };
+            let (_, result) =
+                run_with_context(&input, context, tokio_util::sync::CancellationToken::new()).await;
+            result.unwrap_or_else(|error| panic!("{mode} fetch failed: {error}"));
+            let wanted = if mode == "promisor" { &blob } else { tip };
+            let expected = run_git(source.path(), &["cat-file", "-p", wanted]);
+            let boundary = crate::git::shallow::read_shallow_file(&target.path().join(".git"))
+                .await
+                .unwrap();
+            assert_eq!(
+                (
+                    run_git(&linked, &["cat-file", "-p", wanted]),
+                    run_git(target.path(), &["cat-file", "-p", wanted]),
+                    private.join("objects").exists(),
+                    private.join("shallow").exists(),
+                    boundary,
+                ),
+                (
+                    expected.clone(),
+                    expected,
+                    false,
+                    false,
+                    if mode == "shallow" {
+                        vec![tip.clone()]
+                    } else {
+                        vec![]
+                    },
+                ),
+                "{mode} must publish shared state visible to both worktrees",
+            );
+        }
+    }
+
+    #[tokio::test]
     async fn capsule_promisor_fetch_installs_the_authorized_object() {
         let (store, router, blob) = capsule_promisor_fixture().await;
         let target = tempfile::tempdir().expect("target repository");
         run_git(target.path(), &["init", "-q"]);
         let git_dir = target.path().join(".git");
         let _guard = GitEnvCwdGuard::set(target.path(), &git_dir, target.path());
-        let context = test_context(
-            store,
-            router.repo_prefix(),
-            target.path().join("push-state"),
-        );
+        let context = test_context(store, router.repo_prefix());
         let input = format!("option filter blob:none\nfetch {blob} {blob}\n\n");
 
         let (output, result) =
@@ -5878,9 +6083,16 @@ mod tests {
             ref_name: blob,
         }];
 
+        let layout = crab_storage::StoreLayout::new(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+        );
+        let root = crab_write::capsule_protocol::open_root(&layout)
+            .await
+            .unwrap();
         let error = fetch_packs(
-            &store,
             &router,
+            &root,
             &entries,
             &HelperOptions {
                 filter_requested: true,
@@ -5933,7 +6145,7 @@ mod tests {
     async fn push_batch_honors_dispatch_cancellation_token() {
         let _guard = GitWorktreeGuard::new();
         let mut cache = SessionCache::new(crate::core::config::Config::default());
-        let mut push_state = PushState::default();
+        let repo_root = TEST_GIT_REPO.git_dir.parent().unwrap();
         let cancel = tokio_util::sync::CancellationToken::new();
         cancel.cancel();
         let batch = Batch::Push(vec![PushItem::Spec(PushSpec {
@@ -5955,7 +6167,7 @@ mod tests {
             "remote-helper-cancel",
             &mut cache,
             "origin",
-            &mut push_state,
+            Some(repo_root),
             OutputMode::Text,
             None,
             Some("crab://bucket/remote-helper-cancel"),
@@ -6095,7 +6307,6 @@ mod tests {
         config.metadb.chunk_index.local_path =
             Some(tmp.path().join("metadb-cache/chunk-index.sqlite"));
         let mut cache = SessionCache::new(config);
-        let mut push_state = PushState::default();
         let cancel = tokio_util::sync::CancellationToken::new();
         let mut writer = Vec::new();
         let batch = Batch::Push(vec![PushItem::Spec(PushSpec {
@@ -6104,7 +6315,7 @@ mod tests {
             dst: "refs/heads/main".to_owned(),
         })]);
 
-        dispatch_batch(
+        Box::pin(dispatch_batch(
             &batch,
             &HelperOptions::default(),
             &mut writer,
@@ -6113,14 +6324,14 @@ mod tests {
             "remote-helper-dispatch",
             &mut cache,
             "origin",
-            &mut push_state,
+            Some(&repo),
             OutputMode::Text,
             None,
             Some("crab://bucket/remote-helper-dispatch"),
             None,
             None,
             &cancel,
-        )
+        ))
         .await
         .expect("dispatch push batch");
 
@@ -6191,7 +6402,7 @@ mod tests {
                 .expect("reopen staging readonly"),
         );
         let mut writer = Vec::new();
-        dispatch_batch(
+        Box::pin(dispatch_batch(
             &batch,
             &HelperOptions::default(),
             &mut writer,
@@ -6200,14 +6411,14 @@ mod tests {
             "remote-helper-dispatch",
             &mut cache,
             "origin",
-            &mut push_state,
+            Some(&repo),
             OutputMode::Text,
             None,
             Some("crab://bucket/remote-helper-dispatch"),
             None,
             None,
             &cancel,
-        )
+        ))
         .await
         .expect("dispatch incremental pointer push");
         assert_eq!(
@@ -6257,15 +6468,11 @@ mod tests {
             .expect("hydrate incrementally deduplicated v2 pointer");
         assert_eq!(reconstructed, updated_content);
 
-        let repack_workspace = tempfile::tempdir().expect("pointer repack workspace");
         crate::cmd::repack::run_repack_from_root(
             &store,
             "remote-helper-dispatch",
             view.root_snapshot().clone(),
-            &crate::cmd::repack::RepackConfig {
-                workspace_root: repack_workspace.path().to_owned(),
-                ..crate::cmd::repack::RepackConfig::default()
-            },
+            false,
             &cancel,
         )
         .await
@@ -6281,16 +6488,13 @@ mod tests {
                 .checkpoint()
                 .unwrap()
                 .format(),
-            5
+            9
         );
         let repeated = crate::cmd::repack::run_repack_from_root(
             &store,
             "remote-helper-dispatch",
             checkpoint_root,
-            &crate::cmd::repack::RepackConfig {
-                workspace_root: repack_workspace.path().to_owned(),
-                ..crate::cmd::repack::RepackConfig::default()
-            },
+            false,
             &cancel,
         )
         .await
@@ -6347,32 +6551,47 @@ mod tests {
             .expect("hydrate pointer after checkpoint");
         assert_eq!(reconstructed, updated_content);
 
-        // These are advisory placement hints, not discovery or durability proof.
-        // The v2 writer must verify origin bytes under GC admission before reuse.
-        let mut remote_candidates = std::collections::HashMap::new();
-        for (xorb_hash, entry) in updated_catalog.xorbs() {
-            let xorb_hash =
-                crab_xet::hash::MerkleHash::from_hex(xorb_hash).expect("catalog xorb hash");
-            for (chunk_index, chunk) in entry.chunks().iter().enumerate() {
-                let chunk_hash =
-                    crab_xet::hash::MerkleHash::from_hex(chunk.hash()).expect("catalog chunk hash");
-                let identity =
-                    *blake3::hash(format!("{xorb_hash}:{chunk_index}:{chunk_hash}").as_bytes())
-                        .as_bytes();
-                remote_candidates.insert(
-                    chunk_hash,
+        // Use published proof identities, as add does. Invented IDs are stale
+        // authority and cannot justify deleting the local payload copy.
+        let chunk_hashes = updated_catalog
+            .xorbs()
+            .values()
+            .flat_map(|entry| entry.chunks())
+            .map(|chunk| {
+                crab_xet::hash::MerkleHash::from_hex(chunk.hash()).expect("catalog chunk hash")
+            })
+            .collect::<Vec<_>>();
+        let candidates = crab_metadata::capsule_protocol::CapsuleChunkIndex::new(&layout)
+            .candidates(
+                store.as_storage(),
+                &chunk_hashes,
+                crab_metadata::capsule_protocol::MAX_CATALOG_BYTES,
+            )
+            .await
+            .expect("load published remote candidates");
+        let remote_candidates = candidates
+            .placements
+            .into_iter()
+            .map(|(hash, placement)| {
+                (
+                    crab_xet::hash::MerkleHash::from(hash),
                     crab_staging::push_plan::ExistingChunkCandidate {
                         xorb_ref: crab_xet::xorb::format::XorbRef {
-                            xorb_hash,
-                            chunk_index: u32::try_from(chunk_index).expect("chunk index"),
-                            uncompressed_size: chunk.uncompressed_size(),
+                            xorb_hash: crab_xet::hash::MerkleHash::from(placement.xorb_hash),
+                            chunk_index: placement.chunk_index,
+                            uncompressed_size: placement.uncompressed_size,
                         },
-                        placement_id: identity,
-                        origin_proof_id: identity,
+                        placement_id: placement.placement_id(),
+                        origin_proof_id: placement.origin_proof_id,
                     },
-                );
-            }
-        }
+                )
+            })
+            .collect::<std::collections::HashMap<_, _>>();
+        assert!(
+            chunk_hashes
+                .iter()
+                .all(|hash| remote_candidates.contains_key(hash))
+        );
 
         drop(_git_guard);
         let consumer = tmp.path().join("consumer");
@@ -6417,9 +6636,8 @@ mod tests {
         consumer_config.metadb.chunk_index.local_path =
             Some(tmp.path().join("consumer-metadb/chunk-index.sqlite"));
         let mut consumer_cache = SessionCache::new(consumer_config);
-        let mut consumer_push_state = PushState::default();
         let mut consumer_writer = Vec::new();
-        dispatch_batch(
+        Box::pin(dispatch_batch(
             &batch,
             &HelperOptions::default(),
             &mut consumer_writer,
@@ -6428,14 +6646,14 @@ mod tests {
             "remote-helper-cold-consumer",
             &mut consumer_cache,
             "origin",
-            &mut consumer_push_state,
+            Some(&consumer),
             OutputMode::Text,
             None,
             Some("crab://bucket/remote-helper-cold-consumer"),
             None,
             None,
             &cancel,
-        )
+        ))
         .await
         .expect("dispatch cross-repository pointer push");
         assert_eq!(
@@ -6510,7 +6728,7 @@ mod tests {
         let prefix = "resolved-protocol-session";
         initialize_test_remote(&store, prefix).await;
 
-        let push_context = test_context(store.clone(), prefix, tmp.path().join("push-state-push"));
+        let push_context = test_context(store.clone(), prefix);
         let push_input = concat!(
             "capabilities\n",
             "list for-push\n",
@@ -6556,7 +6774,7 @@ mod tests {
             .join(&tag_oid[2..]);
         std::fs::remove_file(&loose_tag).expect("remove source tag object before fetch");
 
-        let fetch_context = test_context(store, prefix, tmp.path().join("push-state-fetch"));
+        let fetch_context = test_context(store, prefix);
         let fetch_input = format!(
             "option followtags true\nlist\nfetch {commit} refs/heads/main\nfetch {commit} refs/heads/dev\n\n"
         );
@@ -6592,11 +6810,10 @@ mod tests {
 
     #[tokio::test]
     async fn protocol_session_store_failure_returns_error_without_success() {
-        let tmp = tempfile::tempdir().expect("session tempdir");
         let store = crate::storage::store::Store::new(std::sync::Arc::new(ReadFailingStore {
             inner: object_store::memory::InMemory::new(),
         }));
-        let context = test_context(store, "read-failure", tmp.path().to_path_buf());
+        let context = test_context(store, "read-failure");
 
         let (output, result) = run_with_context(
             "list\n",
@@ -6733,17 +6950,16 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn ref_lease_option_reaches_native_push_and_rejects_conflicting_repeat() {
+    async fn ref_lease_option_reaches_capsule_push_and_rejects_conflicting_repeat() {
         let mut options = HelperOptions::default();
         let mut writer = Vec::new();
         let value = format!("refs/heads/main:{}", "a".repeat(40));
         handle_option("cas", &value, &mut options, &mut writer)
             .await
             .unwrap();
-        let native =
-            native_push_config_for_helper(PushConfig::default(), &options, OutputMode::Text, None);
+        let config = push_config_for_helper(PushConfig::default(), &options);
         assert_eq!(
-            native.push.expected_refs.get("refs/heads/main"),
+            config.expected_refs.get("refs/heads/main"),
             Some(&Some("a".repeat(40)))
         );
         let conflicting = format!("refs/heads/main:{}", "b".repeat(40));
@@ -6755,20 +6971,15 @@ mod tests {
     }
 
     #[test]
-    fn helper_native_push_config_does_not_treat_fetch_followtags_as_push_mode() {
+    fn helper_push_config_applies_atomic_option() {
         let options = HelperOptions {
             atomic: true,
-            followtags: true,
             ..HelperOptions::default()
         };
 
-        let config =
-            native_push_config_for_helper(PushConfig::default(), &options, OutputMode::Text, None);
+        let config = push_config_for_helper(PushConfig::default(), &options);
 
-        assert!(config.progress);
-        assert!(!config.emit_summary);
-        assert!(config.push.atomic);
-        assert!(!config.followtags);
+        assert!(config.atomic);
     }
 
     #[test]
@@ -7007,10 +7218,9 @@ mod tests {
 
     #[tokio::test]
     async fn dry_run_previews_without_remote_state_or_auth_preparation() {
-        let root = tempfile::tempdir().expect("push state tempdir");
         let store =
             crate::storage::store::Store::new(Arc::new(object_store::memory::InMemory::new()));
-        let mut context = test_context(store.clone(), "preview", root.path().to_path_buf());
+        let mut context = test_context(store.clone(), "preview");
         context.cache.config.auth.provider = crate::core::config::AuthProvider::CrabAuth;
         let (output, result) = run_with_context(
             "option dry-run true\npush refs/heads/main:refs/heads/main\npush :refs/heads/retired\n\n",
@@ -7297,7 +7507,7 @@ mod tests {
             coordinator_epoch: 9,
             writer: "west".into(),
             writer_region: "us-west-2".into(),
-            manifest_generation: 3,
+            commit_sequence: Some(3),
             commit_state: PushTransactionState::Materialized,
         });
 
@@ -7387,10 +7597,9 @@ mod tests {
         let input = format!(
             "option filter blob:none\noption filter blob:depth=1\nfetch {tip} refs/heads/main\n\n"
         );
-        let state = tempfile::tempdir().expect("push state");
         let store =
             crate::storage::store::Store::new(Arc::new(object_store::memory::InMemory::new()));
-        let context = test_context(store, "org/unsupported-filter", state.path().to_owned());
+        let context = test_context(store, "org/unsupported-filter");
         let (output, result) =
             run_with_context(&input, context, tokio_util::sync::CancellationToken::new()).await;
         assert_eq!(output, "ok\nunsupported\n");
@@ -8342,33 +8551,58 @@ mod tests {
     }
 
     #[test]
-    fn push_state_repo_root_uses_repo_root_from_nested_cwd() {
-        let _git_env = CleanGitEnvGuard::new();
-        let tmp = tempfile::tempdir().unwrap();
-        let status = std::process::Command::new("git")
-            .args(["init", "-q"])
-            .current_dir(tmp.path())
-            .status()
-            .expect("run git init");
-        assert!(status.success());
-
-        let nested = tmp.path().join("src/deep");
-        std::fs::create_dir_all(&nested).unwrap();
-
-        let saved_cwd = std::env::current_dir().ok();
-        std::env::set_current_dir(&nested).unwrap();
-        let root = push_state_repo_root().canonicalize().unwrap();
-        let expected = tmp.path().canonicalize().unwrap();
-
-        if let Some(cwd) = saved_cwd {
-            let _ = std::env::set_current_dir(cwd);
+    fn explicit_git_dir_selects_push_roots_over_unrelated_cwd() {
+        let unrelated = tempfile::tempdir().unwrap();
+        run_git(unrelated.path(), &["init", "-q"]);
+        for kind in ["main", "bare", "linked"] {
+            let target = tempfile::tempdir().unwrap();
+            let mut git_dir = target.path().join(".git");
+            if kind == "bare" {
+                run_git(target.path(), &["init", "--bare", "-q", ".git"]);
+            } else {
+                run_git(target.path(), &["init", "-q"]);
+            }
+            if kind == "linked" {
+                run_git(
+                    target.path(),
+                    &[
+                        "-c",
+                        "user.name=Crab Tests",
+                        "-c",
+                        "user.email=tests@crab.invalid",
+                        "commit",
+                        "-q",
+                        "--allow-empty",
+                        "-m",
+                        "base",
+                    ],
+                );
+                let linked = target.path().join("linked");
+                run_git(
+                    target.path(),
+                    &["worktree", "add", "--detach", linked.to_str().unwrap()],
+                );
+                git_dir = std::path::PathBuf::from(
+                    String::from_utf8(run_git(&linked, &["rev-parse", "--absolute-git-dir"]))
+                        .unwrap()
+                        .trim(),
+                );
+            }
+            let expected = target.path().canonicalize().unwrap();
+            let _guard = GitEnvCwdGuard::set(unrelated.path(), &git_dir, target.path());
+            // SAFETY: the guard holds GIT_DIR_MUTEX and restores this variable.
+            // Native Git can supply GIT_DIR alone when the publisher uses --git-dir.
+            unsafe { std::env::remove_var("GIT_WORK_TREE") };
+            assert_eq!(
+                push_repo_root().unwrap(),
+                expected,
+                "{kind}: explicit Git metadata owns both push roots",
+            );
         }
-
-        assert_eq!(root, expected);
     }
 
     #[test]
-    fn push_staging_root_uses_shared_staging_from_nested_cwd() {
+    fn push_repo_root_uses_repo_root_from_nested_cwd() {
         let _git_env = CleanGitEnvGuard::new();
         let tmp = tempfile::tempdir().unwrap();
         let status = std::process::Command::new("git")
@@ -8383,8 +8617,8 @@ mod tests {
 
         let saved_cwd = std::env::current_dir().ok();
         std::env::set_current_dir(&nested).unwrap();
-        let root = push_staging_root().unwrap();
-        let expected = tmp.path().canonicalize().unwrap().join(".crab/staging");
+        let root = push_repo_root().unwrap().canonicalize().unwrap();
+        let expected = tmp.path().canonicalize().unwrap();
 
         if let Some(cwd) = saved_cwd {
             let _ = std::env::set_current_dir(cwd);

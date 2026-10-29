@@ -16,6 +16,8 @@ mod layered;
 #[cfg(feature = "storage")]
 mod plan;
 mod pointer;
+#[cfg(feature = "storage")]
+mod read_capture;
 mod ref_head;
 #[cfg(feature = "storage")]
 mod ref_view;
@@ -78,6 +80,8 @@ pub use pointer::{
     PointerCatalogCounts, PointerCatalogEntry, PointerCatalogInspection, PointerCatalogLookup,
     PointerCatalogObject, PointerCatalogShardInspection, inspect_pointer_catalog,
 };
+#[cfg(feature = "storage")]
+pub use read_capture::{RetainedReadCapture, store_read_capture};
 pub use ref_head::{
     CAPSULE_REF_COMPACTION_FAN_IN, CAPSULE_REF_ROLLUP_WINDOW, CapsuleRefHead, CapsuleRefState,
     MAX_CAPSULE_REF_FRONTIER, MAX_CAPSULE_REF_HEADS, capsule_ref_name_from_key,

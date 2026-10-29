@@ -120,6 +120,7 @@ struct MutationMetrics {
     duration: Histogram,
     queue_wait: Histogram,
     checkpoints_scheduled: Counter,
+    checkpoints_skipped: Counter,
     checkpoints_coalesced: Counter,
     checkpoints_superseded: Counter,
     checkpoints_published: Counter,
@@ -290,6 +291,10 @@ impl Metrics {
         if coalesced {
             self.inner.mutations.checkpoints_coalesced.increment(1);
         }
+    }
+
+    pub(crate) fn record_checkpoint_skipped(&self) {
+        self.inner.mutations.checkpoints_skipped.increment(1);
     }
 
     pub(crate) fn record_checkpoint_superseded(&self) {
@@ -625,6 +630,10 @@ impl MutationMetrics {
                 &Key::from_static_name("crab_s3_gateway_attribute_checkpoints_scheduled_total"),
                 &METADATA,
             ),
+            checkpoints_skipped: recorder.register_counter(
+                &Key::from_static_name("crab_s3_gateway_attribute_checkpoints_skipped_total"),
+                &METADATA,
+            ),
             checkpoints_coalesced: recorder.register_counter(
                 &Key::from_static_name("crab_s3_gateway_attribute_checkpoints_coalesced_total"),
                 &METADATA,
@@ -939,6 +948,11 @@ fn describe_metrics(recorder: &impl Recorder) {
         recorder,
         "crab_s3_gateway_attribute_checkpoints_scheduled_total",
         "Commit-bound attribute checkpoints submitted to background publication.",
+    );
+    describe_counter(
+        recorder,
+        "crab_s3_gateway_attribute_checkpoints_skipped_total",
+        "Attribute checkpoints skipped before copying because the process pool is full.",
     );
     describe_counter(
         recorder,

@@ -111,19 +111,17 @@ pub struct ActiveActivePushPlan {
     pub request: CommitRequest,
 }
 
-/// One regional manifest repair action derived from coordinator truth.
+/// One regional Capsule repair action derived from coordinator truth.
 #[derive(Debug, Clone, Serialize, JsonSchema, PartialEq, Eq)]
 pub struct ActiveActiveRepairAction {
     pub operation_id: String,
-    pub manifest_generation: u64,
     pub commit_sequence: u64,
     pub region: String,
     pub writer: ActiveActiveWriterConfig,
     pub source_region: String,
     pub refs: Vec<CoordinatedRefUpdate>,
     pub uploaded_objects: Vec<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub capsule_publication: Option<CoordinatedCapsulePublication>,
+    pub capsule_publication: CoordinatedCapsulePublication,
 }
 
 /// Repair plan for committed active-active transactions not materialized everywhere.
@@ -263,58 +261,6 @@ pub fn active_active_coordinator_resource(url: &str) -> Result<ActiveActiveCoord
     })
 }
 
-/// Build the coordinator commit request for an active-active push.
-pub fn plan_active_active_push(
-    replication: &ActiveActiveReplicationConfig,
-    preferred_writer: Option<&str>,
-    manifest_generation: u64,
-    refs: Vec<CoordinatedRefUpdate>,
-    uploaded_objects: Vec<String>,
-) -> Result<ActiveActivePushPlan> {
-    validate_active_active_config(replication)?;
-
-    if refs.is_empty() {
-        return Err(CoordinationError::Configuration {
-            key: "replication.active_active.refs".into(),
-            origin: "active-active push requires at least one ref update".into(),
-        });
-    }
-
-    let coordinator =
-        replication
-            .coordinator
-            .as_ref()
-            .ok_or_else(|| CoordinationError::Configuration {
-                key: "replication.coordinator".into(),
-                origin: "active-active mode requires a managed coordinator".into(),
-            })?;
-    let writer = select_active_active_writer(replication, preferred_writer)?;
-    let target_regions = active_active_target_regions(replication);
-    let operation_id = active_active_operation_id(
-        &writer,
-        &coordinator.url,
-        manifest_generation,
-        &refs,
-        &uploaded_objects,
-        &target_regions,
-    );
-
-    Ok(ActiveActivePushPlan {
-        coordinator_url: coordinator.url.clone(),
-        request: CommitRequest {
-            operation_id,
-            writer: writer.name.clone(),
-            region: writer.region.clone(),
-            manifest_generation,
-            capsule_publication: None,
-            refs,
-            uploaded_objects,
-            target_regions,
-        },
-        writer,
-    })
-}
-
 /// Build a coordinator request bound to one exact protocol-v2 capsule run.
 pub fn plan_active_active_capsule_push(
     replication: &ActiveActiveReplicationConfig,
@@ -354,8 +300,7 @@ pub fn plan_active_active_capsule_push(
         operation_id,
         writer: writer.name.clone(),
         region: writer.region.clone(),
-        manifest_generation: 0,
-        capsule_publication: Some(publication),
+        capsule_publication: publication,
         refs,
         uploaded_objects,
         target_regions,
@@ -368,7 +313,7 @@ pub fn plan_active_active_capsule_push(
     })
 }
 
-/// Plan regional manifest repairs from a coordinator snapshot.
+/// Plan regional Capsule repairs from a coordinator snapshot.
 pub fn plan_active_active_repair(
     replication: &ActiveActiveReplicationConfig,
     snapshot: &CoordinatorRepairSnapshot,
@@ -377,10 +322,10 @@ pub fn plan_active_active_repair(
 
     let mut actions = Vec::with_capacity(snapshot.materialization_gaps.len());
     for gap in &snapshot.materialization_gaps {
+        validate_coordinated_capsule_publication(&gap.capsule_publication)?;
         let writer = active_active_writer_for_region(replication, &gap.region)?;
         actions.push(ActiveActiveRepairAction {
             operation_id: gap.operation_id.clone(),
-            manifest_generation: gap.manifest_generation,
             commit_sequence: gap.commit_sequence,
             region: gap.region.clone(),
             writer,
@@ -509,27 +454,6 @@ pub fn active_active_writer_name_for_remote(
     })
 }
 
-fn active_active_operation_id(
-    writer: &ActiveActiveWriterConfig,
-    coordinator_url: &str,
-    manifest_generation: u64,
-    refs: &[CoordinatedRefUpdate],
-    uploaded_objects: &[String],
-    target_regions: &[String],
-) -> String {
-    let mut hasher = blake3::Hasher::new();
-    hash_field(&mut hasher, "format", "crab-active-active-push-v1");
-    hash_field(&mut hasher, "writer.name", &writer.name);
-    hash_field(&mut hasher, "writer.region", &writer.region);
-    hash_field(&mut hasher, "writer.url", &writer.url);
-    hash_field(&mut hasher, "coordinator.url", coordinator_url);
-    hasher.update(&manifest_generation.to_le_bytes());
-
-    hash_operation_sets(&mut hasher, refs, uploaded_objects, target_regions);
-
-    format!("crab-op-{}", hasher.finalize().to_hex())
-}
-
 fn active_active_capsule_operation_id(
     writer: &ActiveActiveWriterConfig,
     coordinator_url: &str,
@@ -577,13 +501,11 @@ fn hash_operation_sets(
             .cmp(&right.name)
             .then_with(|| left.expected.cmp(&right.expected))
             .then_with(|| left.new.cmp(&right.new))
-            .then_with(|| left.force.cmp(&right.force))
     });
     for update in refs {
         hash_field(hasher, "ref.name", &update.name);
         hash_optional_field(hasher, "ref.expected", update.expected.as_deref());
         hash_optional_field(hasher, "ref.new", update.new.as_deref());
-        hasher.update(&[u8::from(update.force)]);
     }
     let mut uploaded_objects = uploaded_objects.to_vec();
     uploaded_objects.sort();

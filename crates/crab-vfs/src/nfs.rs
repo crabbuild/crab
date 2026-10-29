@@ -158,27 +158,12 @@ impl CrabNfsFs {
             ROOT_ID => Ok(self.root_attr()),
             GITFILE_ID => Ok(self.gitfile_attr()),
             _ => {
-                let (mode, mut size, node_type, mtime) =
-                    self.resolver.getattr(path).map_err(to_nfs)?;
-                if self.path_has_unknown_blob_size(path)? {
-                    size = self.engine.exact_file_size(path).map_err(to_nfs)?;
-                }
+                let (mode, size, node_type, mtime) = self.engine.getattr(path).map_err(to_nfs)?;
                 Ok(make_nfs_attr(
                     self.uid, self.gid, id, mode, size, node_type, mtime,
                 ))
             }
         }
-    }
-
-    fn path_has_unknown_blob_size(&self, path: &str) -> Result<bool, nfsstat3> {
-        let node = self.resolver.resolve_path(path).map_err(to_nfs)?;
-        Ok(matches!(
-            node,
-            ResolvedNode::Base(ref base)
-                if base.node_type == NodeType::File
-                    && base.size == 0
-                    && base.object_oid.is_some()
-        ))
     }
 
     fn root_attr(&self) -> fattr3 {
@@ -959,6 +944,7 @@ impl NfsFileSystem for CrabNfsFs {
         data: &[u8],
         stable: stable_how,
     ) -> Result<(fattr3, stable_how), nfsstat3> {
+        let _writeback = self.engine.begin_native_writeback().await;
         if self.read_only {
             return Err(nfsstat3::NFS3ERR_ROFS);
         }
@@ -2003,7 +1989,8 @@ impl NfsDirectoryPageLoader {
             return Ok(Some(attr));
         }
         let path = candidate.path.as_deref().ok_or(nfsstat3::NFS3ERR_IO)?;
-        let node = self.resolver.resolve_path(path).map_err(to_nfs)?;
+        let view = self.resolver.capture_view();
+        let node = self.resolver.resolve_path_in(&view, path).map_err(to_nfs)?;
         if matches!(
             node,
             ResolvedNode::Base(ref base)
@@ -2013,7 +2000,7 @@ impl NfsDirectoryPageLoader {
         ) {
             return Ok(None);
         }
-        let (mode, size, node_type, mtime) = self.resolver.getattr(path).map_err(to_nfs)?;
+        let (mode, size, node_type, mtime) = view.attributes(&node);
         Ok(Some(make_nfs_attr(
             self.uid,
             self.gid,
@@ -2507,15 +2494,16 @@ mod tests {
             )))
         }
 
-        fn update_size_and_mtime(
+        fn mutate_content(
             &self,
-            path: &str,
-            _size: u64,
+            _path: Option<&str>,
+            _file: &std::fs::File,
             _mtime_ns: i64,
+            _mutation: &mut dyn FnMut(&std::fs::File) -> crate::Result<()>,
         ) -> crate::core::error::Result<()> {
-            Err(CrabError::Internal(format!(
-                "test overlay cannot update size and mtime for {path}"
-            )))
+            Err(CrabError::Internal(
+                "test overlay cannot mutate content".into(),
+            ))
         }
 
         fn promote_from_file(
@@ -2532,10 +2520,6 @@ mod tests {
 
         fn backing_path_for(&self, path: &str) -> PathBuf {
             PathBuf::from(path)
-        }
-
-        fn backing_tmp_path_for(&self, path: &str) -> PathBuf {
-            PathBuf::from(format!("{path}.tmp"))
         }
 
         fn create_symlink(
@@ -2574,7 +2558,6 @@ mod tests {
             Arc::new(NoopShardLoader),
             Arc::new(NoopXorbFetcher),
             None,
-            None,
             Some(1),
             CancellationToken::new(),
         )
@@ -2584,7 +2567,8 @@ mod tests {
         let root = tempfile::tempdir().unwrap();
         let snapshot =
             Arc::new(SnapshotStore::open_or_create(&root.path().join("snapshot.sqlite")).unwrap());
-        let resolver = Arc::new(FuseResolver::new(Arc::clone(&snapshot), None, 0, 0));
+        let resolver =
+            Arc::new(FuseResolver::new(Arc::clone(&snapshot), None, 0, 0, None, None).unwrap());
         let cache = tempfile::tempdir().unwrap();
         let hydration = test_hydration(&cache);
         let overlay = Arc::new(SyncOnlyOverlay::new(fail_path));
@@ -2620,17 +2604,23 @@ mod tests {
         );
         let overlay_lookup: Arc<dyn OverlayLookup> = overlay_store.clone();
         let overlay_writer: Arc<dyn OverlayWriter> = overlay_store;
-        let resolver = Arc::new(FuseResolver::new(
-            Arc::clone(&snapshot),
-            Some(overlay_lookup),
-            1,
-            0,
-        ));
         let cache = tempfile::tempdir().unwrap();
+        let hydration = test_hydration(&cache);
+        let resolver = Arc::new(
+            FuseResolver::new(
+                Arc::clone(&snapshot),
+                Some(overlay_lookup),
+                1,
+                0,
+                Some(Arc::clone(&hydration)),
+                None,
+            )
+            .unwrap(),
+        );
         let engine = Arc::new(VfsEngine::new(
             Arc::clone(&resolver),
             Some(overlay_writer),
-            test_hydration(&cache),
+            hydration,
             None,
             Some(snapshot),
         ));
@@ -3166,7 +3156,7 @@ mod tests {
                 node_type: NodeType::File,
                 mode: 0o100_644,
                 object_oid: Some("pointer-blob-oid".to_owned()),
-                pointer: Some(pointer.clone()),
+                pointer: Some(crate::blob::FilePointer::Crab(pointer.clone())),
                 size: pointer.size,
             },
         ]);

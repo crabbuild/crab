@@ -390,7 +390,7 @@ enum Cmd {
         /// Remove a repo's entry from the ref-registry.
         #[arg(long, conflicts_with = "repair_registry")]
         deregister: Option<String>,
-        /// Rebuild the bucket ref-registry from every current repo manifest.
+        /// Rebuild bucket GC roots from registered and discovered repositories.
         #[arg(long, conflicts_with = "deregister")]
         repair_registry: bool,
         /// Backfill and verify durable shard reachability closures.
@@ -415,7 +415,7 @@ enum Cmd {
         #[arg(long, conflicts_with = "json")]
         jsonl: bool,
     },
-    /// Compact shards: merge small shards into fewer large ones.
+    /// Compact shards from an authenticated Capsule repository.
     Compact {
         /// Repo prefix (e.g. `org/models`).
         #[arg(long)]
@@ -1145,7 +1145,7 @@ enum OptimizeCmd {
     Plan(crab::cmd::optimize::OptimizePlanArgs),
     /// Apply the combined cost optimization workflow.
     Apply(crab::cmd::optimize::OptimizeApplyArgs),
-    /// Rewrite content-addressed xorbs for the selected size/grouping profile.
+    /// Rewrite Xorb layout in an authenticated Capsule repository.
     Xorbs(crab::cmd::optimize::xorbs::OptimizeXorbsArgs),
     /// Consolidate remote Git pack files.
     Packs {
@@ -1159,7 +1159,7 @@ enum OptimizeCmd {
         #[arg(long, conflicts_with = "json")]
         jsonl: bool,
     },
-    /// Compact metadata shards into fewer larger shards.
+    /// Compact authenticated Capsule metadata shards.
     Shards {
         /// Repo prefix (e.g. `org/models`).
         #[arg(long)]
@@ -1253,11 +1253,8 @@ enum OptimizeCacheCmd {
 
 #[derive(Subcommand)]
 enum OptimizeIndexesCmd {
-    /// Print metadata database snapshots and optional deep integrity checks.
+    /// Diagnose Capsule authority and optional complete content integrity.
     Diagnose {
-        /// Target database (defaults to both).
-        #[arg(long, value_enum, default_value_t = crab::cmd::metadb::DbSelector::Both)]
-        db: crab::cmd::metadb::DbSelector,
         /// Structured JSON output.
         #[arg(long)]
         json: bool,
@@ -1265,20 +1262,11 @@ enum OptimizeIndexesCmd {
         #[arg(long)]
         deep: bool,
     },
-    /// Rebuild metadata databases from durable shards.
+    /// Verify Capsule content and publish a current metadata checkpoint.
     Rebuild {
-        /// Target database.
-        #[arg(long, value_enum, default_value_t = crab::cmd::metadb::DbSelector::Both)]
-        db: crab::cmd::metadb::DbSelector,
         /// Structured JSON output.
         #[arg(long)]
         json: bool,
-    },
-    /// Compact one or both metadata databases.
-    Compact {
-        /// Target database.
-        #[arg(long, value_enum, default_value_t = crab::cmd::metadb::DbSelector::Both)]
-        db: crab::cmd::metadb::DbSelector,
     },
     /// Report local chunk-index cache state.
     CacheStats,
@@ -1459,9 +1447,7 @@ impl OptimizeCmd {
                 OptimizeIndexesCmd::Warm { json, jsonl, .. } => {
                     OutputMode::from_flags(*json, *jsonl)
                 }
-                OptimizeIndexesCmd::Compact { .. }
-                | OptimizeIndexesCmd::CacheStats
-                | OptimizeIndexesCmd::CacheClear => OutputMode::Text,
+                OptimizeIndexesCmd::CacheStats | OptimizeIndexesCmd::CacheClear => OutputMode::Text,
             },
             Self::WorkflowCache(command) => match command {
                 OptimizeWorkflowCacheCmd::Push(args) => args.output_mode(),
@@ -1494,7 +1480,6 @@ impl OptimizeCmd {
             Self::Indexes(command) => match command {
                 OptimizeIndexesCmd::Diagnose { .. } => "metadb.diagnose",
                 OptimizeIndexesCmd::Rebuild { .. } => "metadb.rebuild",
-                OptimizeIndexesCmd::Compact { .. } => "metadb.compact",
                 OptimizeIndexesCmd::CacheStats => "metadb.cache.stats",
                 OptimizeIndexesCmd::CacheClear => "metadb.cache.clear",
                 OptimizeIndexesCmd::Warm { .. } => "fetch",
@@ -1761,7 +1746,7 @@ enum MountCmd {
         /// Path to the mounted filesystem.
         #[arg(long, short = 'm', value_name = "PATH", default_value = ".")]
         mountpoint: std::path::PathBuf,
-        /// Destination directory.
+        /// New directory outside the mount and its cache; parent must exist.
         #[arg(long, value_name = "PATH")]
         to: std::path::PathBuf,
         /// Output as JSON object.
@@ -5220,7 +5205,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
                 let _span = tracing::info_span!("unmount", path = %mp.display()).entered();
                 #[cfg(any(feature = "fuse", feature = "nfs"))]
                 {
-                    if let Ok(true) = crab::cmd::mount::try_mount_control_unmount(mp).await {
+                    if crab::cmd::mount::try_mount_control_unmount(mp).await? {
                         return Ok(ExitCode::SUCCESS);
                     }
                 }
@@ -5404,22 +5389,15 @@ async fn run_optimize_command(
             }
         },
         OptimizeCmd::Indexes(command) => match command {
-            OptimizeIndexesCmd::Diagnose { db, json, deep } => {
+            OptimizeIndexesCmd::Diagnose { json, deep } => {
                 run_metadb_command(
-                    crab::cmd::metadb::MetadbCommand::Diagnose { db, json, deep },
+                    crab::cmd::metadb::MetadbCommand::Diagnose { json, deep },
                     cancel,
                 )
                 .await
             }
-            OptimizeIndexesCmd::Rebuild { db, json } => {
-                run_metadb_command(
-                    crab::cmd::metadb::MetadbCommand::Rebuild { db, json },
-                    cancel,
-                )
-                .await
-            }
-            OptimizeIndexesCmd::Compact { db } => {
-                run_metadb_command(crab::cmd::metadb::MetadbCommand::Compact { db }, cancel).await
+            OptimizeIndexesCmd::Rebuild { json } => {
+                run_metadb_command(crab::cmd::metadb::MetadbCommand::Rebuild { json }, cancel).await
             }
             OptimizeIndexesCmd::CacheStats => {
                 run_metadb_command(
@@ -5713,17 +5691,8 @@ async fn run_repack_command(
     let (store, root) =
         crab::auth::build_repository_url_store_with_root(&config, parsed, "repack", cancel).await?;
 
-    let repack_config = crab::cmd::repack::RepackConfig {
-        lock_ttl: std::time::Duration::from_secs(config.push_lock_ttl_secs),
-        dry_run,
-        download_concurrency: config.download_concurrency,
-        max_cas_retries: config.push_max_cas_retries,
-        workspace_root: crab::cache::default_cache_root().join("maintenance"),
-    };
-
     let outcome =
-        crab::cmd::repack::run_repack_from_root(&store, &prefix, root, &repack_config, cancel)
-            .await?;
+        crab::cmd::repack::run_repack_from_root(&store, &prefix, root, dry_run, cancel).await?;
     let summary = outcome.to_summary();
 
     match mode {

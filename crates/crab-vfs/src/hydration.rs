@@ -13,14 +13,12 @@
 
 use std::cmp::Ordering;
 use std::collections::{BinaryHeap, HashMap};
-use std::io::SeekFrom;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering as AtomicOrdering};
 use std::sync::{Arc, Mutex};
 
 use bytes::{Bytes, BytesMut};
 use dashmap::DashMap;
-use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tokio::sync::{Mutex as AsyncMutex, Notify};
 use tokio_util::sync::CancellationToken;
 use tokio_util::task::TaskTracker;
@@ -28,8 +26,10 @@ use tracing::{Instrument, debug, trace, warn};
 
 use crate::ChunkCache;
 use crate::StoreLayout;
+use crate::blob::{FilePointer, PointerIdentity};
 use crate::core::error::{CrabError, Result};
 use crate::data_plane::{FileIndexResolver, ReconstructionTerm, ShardLoader, XorbFetcher};
+use crate::memory_cache::MemoryCache;
 use crate::verified_set::VerifiedSet;
 use crab_cache::LocalCache;
 use crab_types::pointer::Pointer;
@@ -55,7 +55,8 @@ const DEFAULT_CONCURRENCY: usize = 4;
 /// Remote read path reconstructs at most this much extra data per cache miss.
 const READ_THROUGH_WINDOW_SIZE: u64 = 8 * 1024 * 1024;
 const MAX_READ_WINDOW_PREFETCH_KEYS: usize = 4096;
-const MAX_VERIFIED_READ_WINDOW_KEYS: usize = 4096;
+const MAX_READ_WINDOW_BYTES: usize = 64 * 1024 * 1024;
+const MAX_READ_WINDOW_ENTRIES: usize = 128;
 
 // ---------------------------------------------------------------------------
 // HydrationTask
@@ -115,9 +116,71 @@ struct InflightEntry {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 struct ReadWindowKey {
-    file_hash: [u8; 32],
+    file_hash: PointerIdentity,
     start: u64,
     end: u64,
+}
+
+struct ReadWindowInflight {
+    lock: Arc<AsyncMutex<()>>,
+    readers: usize,
+}
+
+struct ReadWindowClaim<'a> {
+    inflight: &'a DashMap<ReadWindowKey, ReadWindowInflight>,
+    key: ReadWindowKey,
+    lock: Arc<AsyncMutex<()>>,
+}
+
+impl<'a> ReadWindowClaim<'a> {
+    fn new(
+        inflight: &'a DashMap<ReadWindowKey, ReadWindowInflight>,
+        key: ReadWindowKey,
+    ) -> (Self, bool) {
+        use dashmap::mapref::entry::Entry;
+        let (lock, joined) = match inflight.entry(key) {
+            Entry::Occupied(mut occupied) => {
+                let entry = occupied.get_mut();
+                entry.readers += 1;
+                (Arc::clone(&entry.lock), true)
+            }
+            Entry::Vacant(vacant) => {
+                let lock = Arc::new(AsyncMutex::new(()));
+                vacant.insert(ReadWindowInflight {
+                    lock: Arc::clone(&lock),
+                    readers: 1,
+                });
+                (lock, false)
+            }
+        };
+        (
+            Self {
+                inflight,
+                key,
+                lock,
+            },
+            joined,
+        )
+    }
+}
+
+impl Drop for ReadWindowClaim<'_> {
+    fn drop(&mut self) {
+        use dashmap::mapref::entry::Entry;
+        let Entry::Occupied(mut occupied) = self.inflight.entry(self.key) else {
+            return;
+        };
+        let entry = occupied.get_mut();
+        if !Arc::ptr_eq(&entry.lock, &self.lock) {
+            return;
+        }
+        // Count retiring requests under the map lock. Arc strong counts can
+        // still include another claim whose destructor has released that lock.
+        entry.readers -= 1;
+        if entry.readers == 0 {
+            occupied.remove();
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -219,6 +282,11 @@ enum BackgroundState {
 /// share background task ownership; await [`Self::shutdown`] after unmounting
 /// to finish their cache work. Foreground request lifetime belongs to the backend.
 pub struct HydrationService {
+    pointer_reader: Option<Arc<crab_read::PointerReader>>,
+    state: Arc<HydrationState>,
+}
+
+struct HydrationState {
     /// Priority queue of pending hydration tasks.
     queue: Mutex<BinaryHeap<HydrationTask>>,
     /// Monotonic counter for FIFO ordering within the same priority.
@@ -236,14 +304,10 @@ pub struct HydrationService {
     shard_loader: Arc<dyn ShardLoader>,
     /// Fetches byte ranges from xorbs on object storage.
     xorb_fetcher: Arc<dyn XorbFetcher>,
-    /// Shared read-side hydrator for full pointer reconstruction.
-    read_hydrator: Option<Arc<crab_read::ShardHydrator>>,
-    /// Disk cache for remote range windows reconstructed through read_hydrator.
-    read_range_cache_dir: Option<PathBuf>,
+    /// Immutable verified windows; persistent caching belongs to the shared reader.
+    read_windows: Mutex<MemoryCache<ReadWindowKey>>,
     /// Inflight dedup for remote range windows.
-    read_range_inflight: DashMap<ReadWindowKey, Arc<AsyncMutex<()>>>,
-    /// Read windows whose persisted BLAKE3 sidecar was verified this session.
-    read_range_verified: DashMap<ReadWindowKey, ()>,
+    read_range_inflight: DashMap<ReadWindowKey, ReadWindowInflight>,
     /// Read windows already requested speculatively this session.
     read_window_prefetch_seen: DashMap<ReadWindowKey, ()>,
     /// Counters for foreground range reads and cache pressure.
@@ -261,15 +325,16 @@ pub struct HydrationService {
     background_tasks: TaskTracker,
     /// Stops background queue workers without cancelling foreground reads.
     background_cancel: CancellationToken,
+    lfs_session: crab_lfs::LfsReadSession,
 }
 
 impl std::fmt::Debug for HydrationService {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        let queue_depth = self.queue.lock().map_or(0, |q| q.len());
+        let queue_depth = self.state.queue.lock().map_or(0, |q| q.len());
         f.debug_struct("HydrationService")
-            .field("concurrency", &self.concurrency)
+            .field("concurrency", &self.state.concurrency)
             .field("queue_depth", &queue_depth)
-            .field("inflight_count", &self.inflight.len())
+            .field("inflight_count", &self.state.inflight.len())
             .finish_non_exhaustive()
     }
 }
@@ -278,40 +343,57 @@ impl HydrationService {
     /// Create a new hydration service.
     ///
     /// Call [`Self::spawn_workers`] to start the background worker pool.
-    #[expect(clippy::too_many_arguments, reason = "wires VFS dependency graph")]
     pub fn new(
         cache: Arc<ChunkCache>,
         verified: Arc<VerifiedSet>,
         file_index_resolver: Arc<dyn FileIndexResolver>,
         shard_loader: Arc<dyn ShardLoader>,
         xorb_fetcher: Arc<dyn XorbFetcher>,
-        read_hydrator: Option<Arc<crab_read::ShardHydrator>>,
-        read_range_cache_dir: Option<PathBuf>,
+        pointer_reader: Option<Arc<crab_read::PointerReader>>,
         concurrency: Option<usize>,
         cancel: CancellationToken,
     ) -> Arc<Self> {
         Arc::new(Self {
-            queue: Mutex::new(BinaryHeap::new()),
-            seq: Mutex::new(0),
-            inflight: DashMap::new(),
-            cache,
-            verified,
-            file_index_resolver,
-            shard_loader,
-            xorb_fetcher,
-            read_hydrator,
-            read_range_cache_dir,
-            read_range_inflight: DashMap::new(),
-            read_range_verified: DashMap::new(),
-            read_window_prefetch_seen: DashMap::new(),
-            read_stats: HydrationReadStats::default(),
-            terms_cache: Mutex::new(HashMap::new()),
-            concurrency: concurrency.unwrap_or(DEFAULT_CONCURRENCY),
-            work_ready: Arc::new(Notify::new()),
-            background_cancel: cancel.child_token(),
-            cancel,
-            background_state: Mutex::new(BackgroundState::Ready),
-            background_tasks: TaskTracker::new(),
+            pointer_reader,
+            state: Arc::new(HydrationState {
+                queue: Mutex::new(BinaryHeap::new()),
+                seq: Mutex::new(0),
+                inflight: DashMap::new(),
+                cache,
+                verified,
+                file_index_resolver,
+                shard_loader,
+                xorb_fetcher,
+                read_windows: Mutex::new(MemoryCache::new(
+                    MAX_READ_WINDOW_BYTES,
+                    MAX_READ_WINDOW_ENTRIES,
+                )),
+                read_range_inflight: DashMap::new(),
+                read_window_prefetch_seen: DashMap::new(),
+                read_stats: HydrationReadStats::default(),
+                terms_cache: Mutex::new(HashMap::new()),
+                concurrency: concurrency.unwrap_or(DEFAULT_CONCURRENCY),
+                work_ready: Arc::new(Notify::new()),
+                background_cancel: cancel.child_token(),
+                cancel,
+                background_state: Mutex::new(BackgroundState::Ready),
+                background_tasks: TaskTracker::new(),
+                lfs_session: crab_lfs::LfsReadSession::default(),
+            }),
+        })
+    }
+
+    #[cfg(feature = "fuse")]
+    pub(crate) fn chunk_cache(&self) -> &Arc<ChunkCache> {
+        &self.state.cache
+    }
+
+    pub(crate) fn for_reader(&self, reader: Arc<crab_read::PointerReader>) -> Arc<Self> {
+        // Catalogs belong to immutable views; admission, retention and shutdown
+        // belong to the mount and must not multiply across refreshed views.
+        Arc::new(Self {
+            pointer_reader: Some(reader),
+            state: Arc::clone(&self.state),
         })
     }
 
@@ -320,20 +402,24 @@ impl HydrationService {
     /// Await [`Self::shutdown`] to finish both workers and read-window prefetch.
     pub fn spawn_workers(self: &Arc<Self>) {
         let mut state = self
+            .state
             .background_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if !matches!(*state, BackgroundState::Ready) || self.cancel.is_cancelled() {
+        if !matches!(*state, BackgroundState::Ready) || self.state.cancel.is_cancelled() {
             return;
         }
         *state = BackgroundState::Running;
-        for worker_id in 0..self.concurrency {
+        for worker_id in 0..self.state.concurrency {
             let service = Arc::clone(self);
-            self.background_tasks.spawn(async move {
+            self.state.background_tasks.spawn(async move {
                 service.worker_loop(worker_id).await;
             });
         }
-        debug!(workers = self.concurrency, "hydration workers spawned");
+        debug!(
+            workers = self.state.concurrency,
+            "hydration workers spawned"
+        );
     }
 
     /// Close background admission and request queue-worker cancellation.
@@ -342,14 +428,15 @@ impl HydrationService {
     /// [`Self::shutdown`] before releasing cache ownership in an async owner.
     pub fn request_shutdown(&self) {
         let mut state = self
+            .state
             .background_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
         *state = BackgroundState::Stopped;
         // TaskTracker::close alone permits new spawns. The admission lock keeps
         // every accepted spawn before closure, so an empty tracker is final.
-        self.background_tasks.close();
-        self.background_cancel.cancel();
+        self.state.background_tasks.close();
+        self.state.background_cancel.cancel();
         self.drain_queue();
     }
 
@@ -362,108 +449,112 @@ impl HydrationService {
     /// can resume waiting safely.
     pub async fn shutdown(&self) {
         self.request_shutdown();
-        self.background_tasks.wait().await;
+        self.state.background_tasks.wait().await;
+        self.state.lfs_session.close().await;
     }
 
     /// Enqueue background hydration unless shutdown has closed admission.
     pub fn enqueue(&self, task: HydrationTask) {
         let state = self
+            .state
             .background_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if matches!(*state, BackgroundState::Stopped) || self.cancel.is_cancelled() {
+        if matches!(*state, BackgroundState::Stopped) || self.state.cancel.is_cancelled() {
             return;
         }
-        if let Ok(mut q) = self.queue.lock() {
+        if let Ok(mut q) = self.state.queue.lock() {
             trace!(path = %task.path, priority = task.priority, "enqueuing hydration task");
             q.push(task);
         }
-        self.work_ready.notify_one();
+        self.state.work_ready.notify_one();
     }
 
     /// Current queue depth (for metrics / status reporting).
     pub fn queue_depth(&self) -> usize {
-        self.queue.lock().map_or(0, |q| q.len())
+        self.state.queue.lock().map_or(0, |q| q.len())
     }
 
     /// Snapshot foreground hydration read counters for mount diagnostics.
     pub fn read_stats_snapshot(&self) -> HydrationReadStatsSnapshot {
-        self.read_stats.snapshot()
+        self.state.read_stats.snapshot()
     }
 
     /// Number of inflight chunk fetches.
     pub fn inflight_count(&self) -> usize {
-        self.inflight.len()
+        self.state.inflight.len()
     }
 
     /// Opportunistically cache the next read-through window after a sequential read.
     pub fn prefetch_next_read_window(
         self: &Arc<Self>,
-        pointer: Pointer,
+        pointer: FilePointer,
         offset: u64,
         size: u32,
     ) -> bool {
-        let window = next_read_window_for_range(pointer.size, offset, size);
+        let window = next_read_window_for_range(pointer.size(), offset, size);
         self.prefetch_read_window_for(pointer, window)
     }
 
     pub fn prefetch_read_window(
         self: &Arc<Self>,
-        pointer: Pointer,
+        pointer: FilePointer,
         offset: u64,
         size: u32,
     ) -> bool {
-        let window = read_window_for_range(pointer.size, offset, size);
+        let window = read_window_for_range(pointer.size(), offset, size);
         self.prefetch_read_window_for(pointer, window)
     }
 
     fn prefetch_read_window_for(
         self: &Arc<Self>,
-        pointer: Pointer,
+        pointer: FilePointer,
         window: Option<ReadWindow>,
     ) -> bool {
-        self.read_stats.record_read_window_prefetch_request();
+        self.state.read_stats.record_read_window_prefetch_request();
 
-        let Some(hydrator) = self.read_hydrator.clone() else {
-            self.read_stats.record_read_window_prefetch_skipped();
-            return false;
-        };
-        let Some(cache_root) = self.read_range_cache_dir.clone() else {
-            self.read_stats.record_read_window_prefetch_skipped();
+        let Some(hydrator) = self
+            .pointer_reader
+            .clone()
+            .filter(|reader| reader.has_remote())
+        else {
+            self.state.read_stats.record_read_window_prefetch_skipped();
             return false;
         };
         let Some(window) = window else {
-            self.read_stats.record_read_window_prefetch_skipped();
+            self.state.read_stats.record_read_window_prefetch_skipped();
             return false;
         };
 
         let key = ReadWindowKey {
-            file_hash: pointer.file_hash,
+            file_hash: pointer.identity(),
             start: window.window_start,
             end: window.window_end,
         };
-        let cache_path = read_window_cache_path(&cache_root, &key);
         let state = self
+            .state
             .background_state
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
-        if matches!(*state, BackgroundState::Stopped) || self.cancel.is_cancelled() {
-            self.read_stats.record_read_window_prefetch_skipped();
+        if matches!(*state, BackgroundState::Stopped) || self.state.cancel.is_cancelled() {
+            self.state.read_stats.record_read_window_prefetch_skipped();
             return false;
         }
         if !self.claim_read_window_prefetch(key) {
-            self.read_stats.record_read_window_prefetch_skipped();
+            self.state.read_stats.record_read_window_prefetch_skipped();
             return false;
         }
         let service = Arc::clone(self);
-        self.read_stats.record_read_window_prefetch_scheduled();
-        self.background_tasks.spawn(async move {
+        self.state
+            .read_stats
+            .record_read_window_prefetch_scheduled();
+        self.state.background_tasks.spawn(async move {
             if let Err(error) = service
-                .ensure_read_window_cached(&hydrator, &pointer, &key, &cache_path)
+                .read_verified_window(&hydrator, &pointer, &key)
                 .await
             {
                 service.release_failed_read_window_prefetch(key);
-                service.read_stats.record_read_window_prefetch_error();
+                service.state.read_stats.record_read_window_prefetch_error();
                 debug!(
                     error = %error,
                     window_start = key.start,
@@ -476,12 +567,12 @@ impl HydrationService {
     }
 
     fn claim_read_window_prefetch(&self, key: ReadWindowKey) -> bool {
-        if self.read_window_prefetch_seen.len() >= MAX_READ_WINDOW_PREFETCH_KEYS {
-            self.read_window_prefetch_seen.clear();
+        if self.state.read_window_prefetch_seen.len() >= MAX_READ_WINDOW_PREFETCH_KEYS {
+            self.state.read_window_prefetch_seen.clear();
         }
 
         use dashmap::mapref::entry::Entry;
-        match self.read_window_prefetch_seen.entry(key) {
+        match self.state.read_window_prefetch_seen.entry(key) {
             Entry::Occupied(_) => false,
             Entry::Vacant(vacant) => {
                 vacant.insert(());
@@ -491,7 +582,7 @@ impl HydrationService {
     }
 
     fn release_failed_read_window_prefetch(&self, key: ReadWindowKey) {
-        self.read_window_prefetch_seen.remove(&key);
+        self.state.read_window_prefetch_seen.remove(&key);
     }
 
     // -----------------------------------------------------------------------
@@ -507,22 +598,28 @@ impl HydrationService {
     /// 2. Map byte range `[offset, offset+size)` to chunk indices
     /// 3. For each chunk: cache → inflight → fetch via Range GET
     /// 4. Assemble requested byte range from chunk data, trim to exact range
-    pub async fn read_range(&self, pointer: &Pointer, offset: u64, size: u32) -> Result<Bytes> {
-        self.read_stats.record_read_range_request(size);
+    pub async fn read_range(&self, pointer: &FilePointer, offset: u64, size: u32) -> Result<Bytes> {
+        self.state.read_stats.record_read_range_request(size);
         let span = tracing::debug_span!(
             "hydration_read_range",
             offset,
             size,
-            file_size = pointer.size,
+            file_size = pointer.size(),
         );
 
         let result = async move {
-            if let Some(hydrator) = &self.read_hydrator {
+            if let Some(hydrator) = &self.pointer_reader {
                 return self
                     .read_range_via_hydrator(hydrator, pointer, offset, size)
                     .await;
             }
 
+            let FilePointer::Crab(pointer) = pointer else {
+                return Err(CrabError::Configuration {
+                    key: "LFS content has no configured reader".into(),
+                    origin: "VFS hydration".into(),
+                });
+            };
             let terms = self.resolve_terms(pointer)?;
 
             if terms.is_empty() {
@@ -568,154 +665,170 @@ impl HydrationService {
         .await;
 
         if let Ok(bytes) = &result {
-            self.read_stats.record_read_range_response(bytes.len());
+            self.state
+                .read_stats
+                .record_read_range_response(bytes.len());
         }
         result
     }
 
     async fn read_range_via_hydrator(
         &self,
-        hydrator: &crab_read::ShardHydrator,
-        pointer: &Pointer,
+        hydrator: &crab_read::PointerReader,
+        pointer: &FilePointer,
         offset: u64,
         size: u32,
     ) -> Result<Bytes> {
-        let Some(window) = read_window_for_range(pointer.size, offset, size) else {
+        let Some(window) = read_window_for_range(pointer.size(), offset, size) else {
             return Ok(Bytes::new());
         };
 
-        let Some(cache_root) = &self.read_range_cache_dir else {
-            let bytes = hydrator
-                .reconstruct_range_from_pointer(
-                    &pointer.serialize(),
-                    window.request_start,
-                    window.request_end,
+        if let FilePointer::Crab(pointer) = pointer
+            && !hydrator.has_remote()
+        {
+            // Local staging already supports bounded chunk ranges. Expanding a
+            // small read to a remote-size window adds avoidable local I/O.
+            return Ok(hydrator
+                .read_range(
+                    pointer,
+                    window.request_start..window.request_end,
+                    &self.state.cancel,
                 )
-                .await?;
-            self.read_stats.record_read_window_remote_fetch(bytes.len());
-            return Ok(Bytes::from(bytes));
-        };
+                .await?
+                .bytes);
+        }
 
         let key = ReadWindowKey {
-            file_hash: pointer.file_hash,
+            file_hash: pointer.identity(),
             start: window.window_start,
             end: window.window_end,
         };
-        let cache_path = read_window_cache_path(cache_root, &key);
 
-        self.ensure_read_window_cached(hydrator, pointer, &key, &cache_path)
-            .await?;
-
-        let offset_in_window = window.request_start - window.window_start;
-        let request_len = usize::try_from(window.request_end - window.request_start)
-            .map_err(|_| CrabError::Internal("read range is too large".into()))?;
-        read_cached_window_slice(&cache_path, offset_in_window, request_len).await
+        let bytes = self.read_verified_window(hydrator, pointer, &key).await?;
+        let start = (window.request_start - window.window_start) as usize;
+        let end = (window.request_end - window.window_start) as usize;
+        // A small kernel reply must not retain an entire evicted window.
+        Ok(Bytes::copy_from_slice(&bytes[start..end]))
     }
 
-    async fn ensure_read_window_cached(
+    async fn read_verified_window(
         &self,
-        hydrator: &crab_read::ShardHydrator,
-        pointer: &Pointer,
+        hydrator: &crab_read::PointerReader,
+        pointer: &FilePointer,
         key: &ReadWindowKey,
-        cache_path: &Path,
-    ) -> Result<()> {
-        let expected_len = usize::try_from(key.end - key.start)
-            .map_err(|_| CrabError::Internal("read cache window is too large".into()))?;
-
-        if self
-            .cached_read_window_complete(key, cache_path, expected_len)
-            .await?
-        {
-            self.read_stats.record_read_window_cache_hit();
-            return Ok(());
+    ) -> Result<Bytes> {
+        if let Some(bytes) = self.cached_read_window(key) {
+            self.state.read_stats.record_read_window_cache_hit();
+            return Ok(bytes);
         }
-        self.read_stats.record_read_window_cache_miss();
+        self.state.read_stats.record_read_window_cache_miss();
 
-        use dashmap::mapref::entry::Entry;
-        let (lock, joined_inflight) = match self.read_range_inflight.entry(*key) {
-            Entry::Occupied(occupied) => (Arc::clone(occupied.get()), true),
-            Entry::Vacant(vacant) => {
-                let lock = Arc::new(AsyncMutex::new(()));
-                vacant.insert(Arc::clone(&lock));
-                (lock, false)
+        let (claim, joined_inflight) = ReadWindowClaim::new(&self.state.read_range_inflight, *key);
+        if joined_inflight {
+            self.state.read_stats.record_read_window_inflight_wait();
+        }
+        // The guard drops before its claim, including cancellation while
+        // waiting. Queued readers retain the same lock until the last exits.
+        let _guard = claim.lock.lock().await;
+        if let Some(bytes) = self.cached_read_window(key) {
+            return Ok(bytes);
+        }
+        if self.state.cancel.is_cancelled() {
+            return Err(CrabError::Cancelled);
+        }
+        let read = match pointer {
+            FilePointer::Crab(pointer) => {
+                hydrator
+                    .read_range(pointer, key.start..key.end, &self.state.cancel)
+                    .await?
+            }
+            FilePointer::Lfs(pointer) => {
+                hydrator
+                    .read_lfs_range(
+                        pointer,
+                        key.start..key.end,
+                        &self.state.cancel,
+                        &self.state.lfs_session,
+                    )
+                    .await?
             }
         };
-        if joined_inflight {
-            self.read_stats.record_read_window_inflight_wait();
+        let expected_len = usize::try_from(key.end - key.start)
+            .map_err(|_| CrabError::Internal("read window is too large".into()))?;
+        if read.bytes.len() != expected_len {
+            return Err(CrabError::CorruptObject {
+                path: format!("read window {}", key.file_hash),
+                reason: format!("expected {expected_len} bytes, got {}", read.bytes.len()),
+            });
         }
-        let _guard = lock.lock().await;
-
-        let result = async {
-            if self
-                .cached_read_window_complete(key, cache_path, expected_len)
-                .await?
-            {
-                return Ok(());
-            }
-
-            if self.cancel.is_cancelled() {
-                return Err(CrabError::Cancelled);
-            }
-
-            let bytes = hydrator
-                .reconstruct_range_from_pointer(&pointer.serialize(), key.start, key.end)
-                .await?;
-            self.read_stats.record_read_window_remote_fetch(bytes.len());
-            if bytes.len() != expected_len {
-                return Err(CrabError::CorruptObject {
-                    path: format!("read cache window {}", hex_encode(&key.file_hash)),
-                    reason: format!("expected {expected_len} bytes, got {}", bytes.len()),
-                });
-            }
-
-            write_cached_window(cache_path, &bytes).await?;
-            self.mark_read_window_verified(*key);
-            Ok(())
+        if read.from_store {
+            self.state
+                .read_stats
+                .record_read_window_remote_fetch(read.bytes.len());
         }
-        .await;
-
-        self.read_range_inflight.remove(key);
-        result
+        self.state
+            .read_windows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .insert(*key, &read.bytes);
+        Ok(read.bytes)
     }
 
-    async fn cached_read_window_complete(
+    fn cached_read_window(&self, key: &ReadWindowKey) -> Option<Bytes> {
+        self.state
+            .read_windows
+            .lock()
+            .unwrap_or_else(std::sync::PoisonError::into_inner)
+            .get(key)
+    }
+
+    pub(crate) async fn pin_file(
         &self,
-        key: &ReadWindowKey,
-        cache_path: &Path,
-        expected_len: usize,
-    ) -> Result<bool> {
-        if self.read_range_verified.contains_key(key) {
-            if cached_window_length_matches(cache_path, expected_len).await? {
-                return Ok(true);
-            }
-            self.read_range_verified.remove(key);
-            return Ok(false);
+        pointer: &FilePointer,
+    ) -> Result<Option<crab_staging::StagedFilePin>> {
+        match &self.pointer_reader {
+            Some(reader) => match pointer {
+                FilePointer::Crab(pointer) => reader.pin_file(pointer).await.map_err(Into::into),
+                FilePointer::Lfs(_) => Ok(None),
+            },
+            None => Ok(None),
         }
-
-        if !cached_window_complete(cache_path, expected_len).await? {
-            return Ok(false);
-        }
-
-        self.mark_read_window_verified(*key);
-        Ok(true)
-    }
-
-    fn mark_read_window_verified(&self, key: ReadWindowKey) {
-        if self.read_range_verified.len() >= MAX_VERIFIED_READ_WINDOW_KEYS {
-            self.read_range_verified.clear();
-        }
-        self.read_range_verified.insert(key, ());
     }
 
     /// Reconstruct a complete pointer-backed file to `dest`.
     ///
     /// Returns `Ok(None)` when the legacy term-based path must be used.
-    pub async fn reconstruct_to_path(&self, pointer: &Pointer, dest: &Path) -> Result<Option<u64>> {
-        let Some(hydrator) = &self.read_hydrator else {
+    pub async fn reconstruct_to_path(
+        &self,
+        pointer: &FilePointer,
+        dest: &Path,
+    ) -> Result<Option<u64>> {
+        let Some(hydrator) = &self.pointer_reader else {
             return Ok(None);
         };
-        let bytes = hydrator.reconstruct_to_path(pointer, dest).await?;
-        Ok(Some(bytes))
+        if let FilePointer::Crab(pointer) = pointer {
+            let bytes = hydrator
+                .reconstruct_to_path(pointer, dest, &self.state.cancel)
+                .await?;
+            return Ok(Some(bytes));
+        }
+        use tokio::io::AsyncWriteExt;
+        let mut output = tokio::fs::File::create(dest).await?;
+        let mut offset = 0;
+        while offset < pointer.size() {
+            let size = (pointer.size() - offset).min(READ_THROUGH_WINDOW_SIZE) as u32;
+            let bytes = self.read_range(pointer, offset, size).await?;
+            if bytes.is_empty() {
+                return Err(CrabError::CorruptObject {
+                    path: pointer.identity().to_string(),
+                    reason: "pointer content ended before its declared size".into(),
+                });
+            }
+            output.write_all(&bytes).await?;
+            offset += bytes.len() as u64;
+        }
+        output.sync_all().await?;
+        Ok(Some(offset))
     }
 
     // -----------------------------------------------------------------------
@@ -746,7 +859,7 @@ impl HydrationService {
     /// Resolve a pointer to its reconstruction terms, caching the result.
     pub fn resolve_terms(&self, pointer: &Pointer) -> Result<Vec<ReconstructionTerm>> {
         // Check the per-file cache first.
-        if let Ok(cache) = self.terms_cache.lock()
+        if let Ok(cache) = self.state.terms_cache.lock()
             && let Some(terms) = cache.get(&pointer.file_hash)
         {
             return Ok(terms.clone());
@@ -757,6 +870,7 @@ impl HydrationService {
 
         // Load reconstruction terms from the shard.
         let terms = self
+            .state
             .shard_loader
             .load_reconstruction_terms(&shard_hash, &pointer.file_hash)?;
 
@@ -770,7 +884,7 @@ impl HydrationService {
         }
 
         // Cache for subsequent reads of the same file.
-        if let Ok(mut cache) = self.terms_cache.lock() {
+        if let Ok(mut cache) = self.state.terms_cache.lock() {
             cache.insert(pointer.file_hash, terms.clone());
         }
 
@@ -780,6 +894,7 @@ impl HydrationService {
     /// Resolve the shard hash for a pointer (file-index with fallback).
     fn resolve_shard(&self, pointer: &Pointer) -> Result<[u8; 32]> {
         if let Some(shard_hash) = self
+            .state
             .file_index_resolver
             .resolve_file_index(&pointer.file_hash, pointer.shard_hint.as_ref())?
         {
@@ -787,6 +902,7 @@ impl HydrationService {
         }
 
         if let Some(shard_hash) = self
+            .state
             .file_index_resolver
             .scan_shard_list_for_file(&pointer.file_hash)?
         {
@@ -818,26 +934,26 @@ impl HydrationService {
         //    own blake3 check is redundant — the chunk was already verified
         //    during this process lifetime (V8.3). If not in the verified set,
         //    the cache verifies on first read and we record the result (V8.4).
-        if let Some(cached) = self.cache.get(&chunk_hash) {
-            if !self.verified.contains(&chunk_hash) {
-                self.verified.insert(chunk_hash);
+        if let Some(cached) = self.state.cache.get(&chunk_hash) {
+            if !self.state.verified.contains(&chunk_hash) {
+                self.state.verified.insert(chunk_hash);
             }
-            self.read_stats.record_chunk_cache_hit();
+            self.state.read_stats.record_chunk_cache_hit();
             trace!("cache hit for chunk");
             return Ok(cached);
         }
 
-        self.read_stats.record_chunk_cache_miss();
+        self.state.read_stats.record_chunk_cache_miss();
         trace!("cache miss for chunk");
 
         // 2. Atomic check-and-insert via DashMap::entry().
         //    If another thread is already fetching, we get their entry and wait.
         //    If we're first, we insert a new entry and become the fetcher.
         let is_fetcher;
-        let entry = match self.inflight.entry(chunk_hash) {
+        let entry = match self.state.inflight.entry(chunk_hash) {
             Entry::Occupied(occ) => {
                 is_fetcher = false;
-                self.read_stats.record_chunk_inflight_wait();
+                self.state.read_stats.record_chunk_inflight_wait();
                 Arc::clone(occ.get())
             }
             Entry::Vacant(vac) => {
@@ -853,7 +969,7 @@ impl HydrationService {
             entry.wait().await;
 
             if entry.succeeded() == Some(true)
-                && let Some(cached) = self.cache.get(&chunk_hash)
+                && let Some(cached) = self.state.cache.get(&chunk_hash)
             {
                 return Ok(cached);
             }
@@ -868,7 +984,7 @@ impl HydrationService {
 
         let ok = result.is_ok();
         entry.complete(ok);
-        self.inflight.remove(&chunk_hash);
+        self.state.inflight.remove(&chunk_hash);
 
         result
     }
@@ -876,9 +992,10 @@ impl HydrationService {
     /// Actually fetch a chunk from the xorb via Range GET, verify, and cache.
     fn do_fetch_chunk(&self, term: &ReconstructionTerm, chunk_hash: &MerkleHash) -> Result<Bytes> {
         let raw = self
+            .state
             .xorb_fetcher
             .fetch_range(&term.xorb_hash, term.offset..term.offset + term.length)?;
-        self.read_stats.record_chunk_remote_fetch(raw.len());
+        self.state.read_stats.record_chunk_remote_fetch(raw.len());
 
         // Blake3 verification.
         let actual = *blake3::hash(&raw).as_bytes();
@@ -890,12 +1007,12 @@ impl HydrationService {
         }
 
         // Record as verified for this process lifetime (V8.2).
-        self.verified.insert(*chunk_hash);
+        self.state.verified.insert(*chunk_hash);
 
         let data = Bytes::from(raw);
 
         // Store in cache for reuse.
-        self.cache.put(*chunk_hash, data.clone());
+        self.state.cache.put(*chunk_hash, data.clone());
 
         Ok(data)
     }
@@ -909,27 +1026,27 @@ impl HydrationService {
         debug!(worker_id, "hydration worker started");
         loop {
             // Check cancellation between tasks.
-            if self.background_cancel.is_cancelled() {
+            if self.state.background_cancel.is_cancelled() {
                 debug!(worker_id, "hydration worker cancelled, draining queue");
                 self.drain_queue();
                 break;
             }
 
             tokio::select! {
-                () = self.background_cancel.cancelled() => {
+                () = self.state.background_cancel.cancelled() => {
                     debug!(worker_id, "hydration worker cancelled");
                     self.drain_queue();
                     break;
                 }
-                () = self.work_ready.notified() => {
+                () = self.state.work_ready.notified() => {
                     // Drain all available work before waiting again.
                     while self.step_one(worker_id) {
-                        if self.background_cancel.is_cancelled() {
+                        if self.state.background_cancel.is_cancelled() {
                             self.drain_queue();
                             return;
                         }
                         // Re-notify so other workers can help if items remain.
-                        self.work_ready.notify_one();
+                        self.state.work_ready.notify_one();
                     }
                 }
             }
@@ -940,7 +1057,7 @@ impl HydrationService {
     /// Pop and process one task from the queue. Returns `true` if work was done.
     fn step_one(&self, worker_id: usize) -> bool {
         let task = {
-            let Ok(mut q) = self.queue.lock() else {
+            let Ok(mut q) = self.state.queue.lock() else {
                 return false;
             };
             q.pop()
@@ -971,7 +1088,7 @@ impl HydrationService {
 
     /// Hydrate all chunks of a file into the cache (background prefetch path).
     fn hydrate_file(&self, task: &HydrationTask) -> Result<()> {
-        if self.read_hydrator.is_some() {
+        if self.pointer_reader.is_some() {
             return Ok(());
         }
 
@@ -983,7 +1100,7 @@ impl HydrationService {
             };
 
             // Skip if already cached.
-            if self.cache.contains(&chunk_hash) {
+            if self.state.cache.contains(&chunk_hash) {
                 continue;
             }
 
@@ -1002,7 +1119,7 @@ impl HydrationService {
 
     /// Drain the queue on cancellation.
     fn drain_queue(&self) {
-        if let Ok(mut q) = self.queue.lock() {
+        if let Ok(mut q) = self.state.queue.lock() {
             let count = q.len();
             q.clear();
             if count > 0 {
@@ -1014,6 +1131,7 @@ impl HydrationService {
     /// Get the next monotonic sequence number.
     fn next_seq(&self) -> u64 {
         let mut seq = self
+            .state
             .seq
             .lock()
             .unwrap_or_else(std::sync::PoisonError::into_inner);
@@ -1404,97 +1522,6 @@ fn next_read_window_for_range(file_size: u64, offset: u64, size: u32) -> Option<
     read_window_for_range(file_size, current.window_end, size.max(1))
 }
 
-fn read_window_cache_path(root: &Path, key: &ReadWindowKey) -> PathBuf {
-    let file_hash = hex_encode(&key.file_hash);
-    root.join(&file_hash[..2])
-        .join(file_hash)
-        .join(format!("{}-{}.bin", key.start, key.end))
-}
-
-async fn cached_window_complete(path: &Path, expected_len: usize) -> Result<bool> {
-    if !cached_window_length_matches(path, expected_len).await? {
-        return Ok(false);
-    }
-
-    let path = path.to_owned();
-    tokio::task::spawn_blocking(move || verify_cached_window(&path))
-        .await
-        .map_err(|error| CrabError::Internal(format!("read cache verification failed: {error}")))?
-}
-
-async fn cached_window_length_matches(path: &Path, expected_len: usize) -> Result<bool> {
-    match tokio::fs::metadata(path).await {
-        Ok(metadata) => Ok(metadata.len() == expected_len as u64),
-        Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(false),
-        Err(e) => Err(e.into()),
-    }
-}
-
-fn verify_cached_window(path: &Path) -> Result<bool> {
-    use std::io::Read;
-
-    let digest_path = read_window_digest_path(path);
-    let expected = match std::fs::read(digest_path) {
-        Ok(expected) if expected.len() == blake3::OUT_LEN => expected,
-        Ok(_) => return Ok(false),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(false),
-        Err(error) => return Err(error.into()),
-    };
-
-    let mut file = std::fs::File::open(path)?;
-    let mut hasher = blake3::Hasher::new();
-    let mut buffer = vec![0; 1024 * 1024];
-    loop {
-        let read = file.read(&mut buffer)?;
-        if read == 0 {
-            break;
-        }
-        hasher.update(&buffer[..read]);
-    }
-
-    Ok(hasher.finalize().as_bytes() == expected.as_slice())
-}
-
-async fn read_cached_window_slice(path: &Path, offset: u64, len: usize) -> Result<Bytes> {
-    let mut file = tokio::fs::File::open(path).await?;
-    file.seek(SeekFrom::Start(offset)).await?;
-    let mut buf = vec![0; len];
-    file.read_exact(&mut buf).await?;
-    Ok(Bytes::from(buf))
-}
-
-async fn write_cached_window(path: &Path, bytes: &[u8]) -> Result<()> {
-    let path = path.to_owned();
-    let bytes = bytes.to_vec();
-    tokio::task::spawn_blocking(move || write_cached_window_blocking(&path, &bytes))
-        .await
-        .map_err(|error| CrabError::Internal(format!("read cache write failed: {error}")))?
-}
-
-fn write_cached_window_blocking(path: &Path, bytes: &[u8]) -> Result<()> {
-    use std::io::Write;
-
-    let parent = path.parent().unwrap_or(Path::new("."));
-    std::fs::create_dir_all(parent)?;
-
-    let mut data = tempfile::NamedTempFile::new_in(parent)?;
-    data.write_all(bytes)?;
-    data.flush()?;
-
-    let digest_path = read_window_digest_path(path);
-    let mut digest = tempfile::NamedTempFile::new_in(parent)?;
-    digest.write_all(blake3::hash(bytes).as_bytes())?;
-    digest.flush()?;
-
-    data.persist(path).map_err(|error| error.error)?;
-    digest.persist(digest_path).map_err(|error| error.error)?;
-    Ok(())
-}
-
-fn read_window_digest_path(path: &Path) -> PathBuf {
-    path.with_extension("blake3")
-}
-
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
@@ -1521,6 +1548,130 @@ mod tests {
     use crab_xet::xorb::builder::{RunId, XorbBuilder};
     use crab_xet::xorb::format::Chunk;
     use object_store::memory::InMemory;
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn lfs_windows_cannot_authorize_a_crab_pointer_with_the_same_hash_bytes() {
+        use sha2::{Digest, Sha256};
+        let root = tempfile::tempdir().unwrap();
+        let stored = crate::test_support::StoredPointer::new(
+            &root.path().join("shared"),
+            Bytes::from_static(b"Crab catalog seed"),
+        )
+        .await;
+        let content = Bytes::from_static(b"verified LFS bytes");
+        let lfs = crab_git::LfsPointer {
+            oid: Sha256::digest(&content).into(),
+            size: content.len() as u64,
+            extensions: Vec::new(),
+        };
+        let layout = &stored.context.store_layout;
+        crab_lfs::LfsObjectStore::new(layout.store().clone(), layout.repo_prefix())
+            .put(&lfs.oid, content.clone())
+            .await
+            .unwrap();
+        let service = window_service(root.path(), &stored, CancellationToken::new());
+        let actual = service
+            .read_range(&FilePointer::Lfs(lfs.clone()), 0, 1024)
+            .await
+            .unwrap();
+        assert_eq!(actual, content);
+        let crab = Pointer {
+            file_hash: lfs.oid,
+            size: lfs.size,
+            shard_hint: None,
+        };
+        let crossed = service.read_range(&FilePointer::Crab(crab), 0, 1024).await;
+        service.shutdown().await;
+        assert!(crossed.is_err());
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn local_lfs_corruption_is_not_hidden_by_a_valid_remote() {
+        use sha2::{Digest, Sha256};
+        let root = tempfile::tempdir().unwrap();
+        let stored = crate::test_support::StoredPointer::new(
+            &root.path().join("shared"),
+            Bytes::from_static(b"Crab catalog seed"),
+        )
+        .await;
+        let content = Bytes::from_static(b"verified LFS bytes");
+        let pointer = crab_git::LfsPointer {
+            oid: Sha256::digest(&content).into(),
+            size: content.len() as u64,
+            extensions: Vec::new(),
+        };
+        let layout = &stored.context.store_layout;
+        crab_lfs::LfsObjectStore::new(layout.store().clone(), layout.repo_prefix())
+            .put(&pointer.oid, content.clone())
+            .await
+            .unwrap();
+        let storage = root.path().join("local-lfs");
+        let path = crab_lfs::local::object_path(&storage, &pointer.oid);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, vec![b'X'; content.len()]).unwrap();
+        let service = window_service(root.path(), &stored, CancellationToken::new()).for_reader(
+            Arc::new(crab_read::PointerReader::new(
+                Some(stored.context.hydrator.clone()),
+                None,
+                Some(storage),
+            )),
+        );
+        let selected = FilePointer::Lfs(pointer);
+        let corrupt = service.read_range(&selected, 0, 1024).await;
+        assert!(corrupt.is_err());
+        std::fs::remove_file(path).unwrap();
+        let remote = service.read_range(&selected, 0, 1024).await;
+        service.shutdown().await;
+        assert_eq!(remote.unwrap(), content);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn verified_local_lfs_blocks_reject_later_corruption_before_remote_selection() {
+        use sha2::{Digest, Sha256};
+        let root = tempfile::tempdir().unwrap();
+        let stored = crate::test_support::StoredPointer::new(
+            &root.path().join("shared"),
+            Bytes::from_static(b"Crab seed"),
+        )
+        .await;
+        let content = vec![b'q'; READ_THROUGH_WINDOW_SIZE as usize + 128];
+        let pointer = crab_git::LfsPointer {
+            oid: Sha256::digest(&content).into(),
+            size: content.len() as u64,
+            extensions: Vec::new(),
+        };
+        let layout = &stored.context.store_layout;
+        crab_lfs::LfsObjectStore::new(layout.store().clone(), layout.repo_prefix())
+            .put(&pointer.oid, Bytes::copy_from_slice(&content))
+            .await
+            .unwrap();
+        let storage = root.path().join("local-lfs");
+        let path = crab_lfs::local::object_path(&storage, &pointer.oid);
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(&path, &content).unwrap();
+        let service = window_service(root.path(), &stored, CancellationToken::new()).for_reader(
+            Arc::new(crab_read::PointerReader::new(
+                Some(stored.context.hydrator.clone()),
+                None,
+                Some(storage),
+            )),
+        );
+        let selected = FilePointer::Lfs(pointer);
+        service.read_range(&selected, 0, 32).await.unwrap();
+        let mut changed = content.clone();
+        changed[READ_THROUGH_WINDOW_SIZE as usize + 64] = b'X';
+        std::fs::write(&path, changed).unwrap();
+        let corrupt = service
+            .read_range(&selected, READ_THROUGH_WINDOW_SIZE, 32)
+            .await;
+        std::fs::write(path, &content).unwrap();
+        let repaired = service
+            .read_range(&selected, READ_THROUGH_WINDOW_SIZE, 32)
+            .await
+            .unwrap();
+        service.shutdown().await;
+        assert!(corrupt.is_err() && repaired == Bytes::from_static(&[b'q'; 32]));
+    }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn chunk_completion_releases_all_registered_readers() {
@@ -1571,20 +1722,23 @@ mod tests {
         use std::task::Poll;
 
         let tmp = tempfile::tempdir().unwrap();
-        let payload = Bytes::from_static(b"prefetch must finish its cache write");
+        let payload = Bytes::from_static(b"prefetch must finish caching verified bytes");
         let stored =
             crate::test_support::StoredPointer::new(&tmp.path().join("shared"), payload.clone())
                 .await;
         let service = window_service(tmp.path(), &stored, CancellationToken::new());
         let key = ReadWindowKey {
-            file_hash: stored.pointer.file_hash,
+            file_hash: crate::blob::PointerIdentity::Crab(stored.pointer.file_hash),
             start: 0,
             end: stored.pointer.size,
         };
-        let lock = Arc::new(AsyncMutex::new(()));
-        let held = lock.lock().await;
-        service.read_range_inflight.insert(key, Arc::clone(&lock));
-        assert!(service.prefetch_read_window(stored.pointer.clone(), 0, 4));
+        let (claim, _) = ReadWindowClaim::new(&service.state.read_range_inflight, key);
+        let held = claim.lock.lock().await;
+        assert!(service.prefetch_read_window(
+            crate::blob::FilePointer::Crab(stored.pointer.clone()),
+            0,
+            4
+        ));
         assert!(
             tokio::time::timeout(std::time::Duration::from_millis(10), service.shutdown())
                 .await
@@ -1607,23 +1761,33 @@ mod tests {
         .await
         .unwrap();
 
-        // A completed shutdown includes the prefetch's persisted cache write;
+        // A completed shutdown includes the prefetch's immutable verified bytes;
         // stopping background work must not cancel a remaining foreground read.
         stored.origin.block_body_reads_for(&stored.xorb_path);
         assert_eq!(
-            service.read_range(&stored.pointer, 0, 1024).await.unwrap(),
+            service
+                .read_range(
+                    &crate::blob::FilePointer::Crab(stored.pointer.clone()),
+                    0,
+                    1024
+                )
+                .await
+                .unwrap(),
             payload
         );
-        assert!(service.background_tasks.is_empty());
+        assert!(service.state.background_tasks.is_empty());
     }
 
     #[tokio::test(flavor = "multi_thread")]
     async fn worker_pool_starts_once_and_shutdown_releases_service_ownership() {
-        let (_tmp, service) = test_service_without_read_window_cache();
+        let (_tmp, service) = test_service_without_pointer_reader();
         let observer = Arc::downgrade(&service);
         service.spawn_workers();
         service.spawn_workers();
-        assert_eq!(service.background_tasks.len(), service.concurrency);
+        assert_eq!(
+            service.state.background_tasks.len(),
+            service.state.concurrency
+        );
         service.shutdown().await;
         drop(service);
         assert!(observer.upgrade().is_none());
@@ -1631,7 +1795,7 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn shutdown_serializes_with_worker_startup_and_rejects_late_queue_work() {
-        let (_tmp, service) = test_service_without_read_window_cache();
+        let (_tmp, service) = test_service_without_pointer_reader();
         let barrier = Arc::new(tokio::sync::Barrier::new(9));
         let mut attempts = Vec::new();
         for _ in 0..8 {
@@ -1656,7 +1820,7 @@ mod tests {
             seq: 1,
         });
         assert_eq!(
-            (service.background_tasks.len(), service.queue_depth()),
+            (service.state.background_tasks.len(), service.queue_depth()),
             (0, 0)
         );
     }
@@ -1672,10 +1836,21 @@ mod tests {
         let cancel = CancellationToken::new();
         let service = window_service(tmp.path(), &stored, cancel.clone());
         service.shutdown().await;
-        assert!(!service.prefetch_read_window(stored.pointer.clone(), 0, 4));
+        assert!(!service.prefetch_read_window(
+            crate::blob::FilePointer::Crab(stored.pointer.clone()),
+            0,
+            4
+        ));
         assert!(!cancel.is_cancelled());
         assert_eq!(
-            service.read_range(&stored.pointer, 0, 10).await.unwrap(),
+            service
+                .read_range(
+                    &crate::blob::FilePointer::Crab(stored.pointer.clone()),
+                    0,
+                    10
+                )
+                .await
+                .unwrap(),
             Bytes::from_static(b"foreground")
         );
     }
@@ -1691,9 +1866,75 @@ mod tests {
             cancel,
             Some(stored.context.store_layout.clone()),
             Some(stored.context.hydrator.clone()),
-            Some(root.join("windows")),
+            None,
+            None,
         )
         .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn warm_pointer_reads_ignore_disposable_window_files() {
+        let tmp = tempfile::tempdir().unwrap();
+        let payload = Bytes::from_static(b"verified pointer content");
+        let stored =
+            crate::test_support::StoredPointer::new(&tmp.path().join("shared"), payload.clone())
+                .await;
+        let service = window_service(tmp.path(), &stored, CancellationToken::new());
+        assert_eq!(
+            service
+                .read_range(
+                    &crate::blob::FilePointer::Crab(stored.pointer.clone()),
+                    0,
+                    1024
+                )
+                .await
+                .unwrap(),
+            payload
+        );
+        let hash = hex_encode(&stored.pointer.file_hash);
+        let stale = tmp
+            .path()
+            .join("windows")
+            .join(&hash[..2])
+            .join(hash)
+            .join(format!("0-{}.bin", payload.len()));
+        std::fs::create_dir_all(stale.parent().unwrap()).unwrap();
+        // Previous mounts can leave mutable window files behind. Their names
+        // and lengths cannot authorize bytes for a content-addressed pointer.
+        std::fs::write(&stale, vec![b'x'; payload.len()]).unwrap();
+        let actual = service
+            .read_range(
+                &crate::blob::FilePointer::Crab(stored.pointer.clone()),
+                0,
+                1024,
+            )
+            .await;
+        service.shutdown().await;
+        assert_eq!(actual.unwrap(), payload);
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn disposable_window_directory_cannot_break_origin_reads() {
+        let tmp = tempfile::tempdir().unwrap();
+        let payload = Bytes::from_static(b"healthy origin content");
+        let stored =
+            crate::test_support::StoredPointer::new(&tmp.path().join("shared"), payload.clone())
+                .await;
+        std::fs::write(tmp.path().join("windows"), b"preserve this file").unwrap();
+        let service = window_service(tmp.path(), &stored, CancellationToken::new());
+        let actual = service
+            .read_range(
+                &crate::blob::FilePointer::Crab(stored.pointer.clone()),
+                0,
+                1024,
+            )
+            .await;
+        service.shutdown().await;
+        assert_eq!(actual.unwrap(), payload);
+        assert_eq!(
+            std::fs::read(tmp.path().join("windows")).unwrap(),
+            b"preserve this file"
+        );
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1707,7 +1948,11 @@ mod tests {
         let cancel = CancellationToken::new();
         let service = window_service(tmp.path(), &stored, cancel.clone());
         cancel.cancel();
-        assert!(!service.prefetch_read_window(stored.pointer.clone(), 0, 4));
+        assert!(!service.prefetch_read_window(
+            crate::blob::FilePointer::Crab(stored.pointer.clone()),
+            0,
+            4
+        ));
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -1719,7 +1964,7 @@ mod tests {
                 .map(|index| (index % 251) as u8)
                 .collect::<Vec<_>>(),
         );
-        for window_cache_enabled in [false, true] {
+        for evict_windows in [false, true] {
             let tmp = tempfile::tempdir().unwrap();
             let stored =
                 StoredPointer::new(&tmp.path().join("shared-cache"), content.clone()).await;
@@ -1727,23 +1972,36 @@ mod tests {
             std::fs::write(&unavailable, b"preserve me").unwrap();
             let chunks =
                 Arc::new(ChunkCache::open(unavailable.join("chunks"), Some(1024)).unwrap());
-            let window_root = window_cache_enabled.then(|| tmp.path().join("windows"));
             let service = crate::pipeline::create_hydration(
                 chunks,
                 Arc::new(VerifiedSet::new(16)),
                 CancellationToken::new(),
                 Some(stored.context.store_layout.clone()),
                 Some(stored.context.hydrator.clone()),
-                window_root,
+                None,
+                None,
             )
             .unwrap();
 
+            // Prime every chunk before disabling origin. A new window may
+            // include cold chunks even when its xorb was previously fetched.
             assert_eq!(
-                service.read_range(&stored.pointer, 0, 1).await.unwrap(),
-                content.slice(..1)
+                service
+                    .read_range(
+                        &crate::blob::FilePointer::Crab(stored.pointer.clone()),
+                        0,
+                        content.len() as u32
+                    )
+                    .await
+                    .unwrap(),
+                content
             );
             assert_eq!(stored.xorb_body_requests(), 1);
             stored.origin.block_body_reads_for(&stored.xorb_path);
+            if evict_windows {
+                *service.state.read_windows.lock().unwrap() =
+                    MemoryCache::new(MAX_READ_WINDOW_BYTES, MAX_READ_WINDOW_ENTRIES);
+            }
 
             for (offset, size) in [
                 (7, 17),
@@ -1753,7 +2011,11 @@ mod tests {
             ] {
                 let end = (offset + u64::from(size)).min(stored.pointer.size);
                 let bytes = service
-                    .read_range(&stored.pointer, offset, size)
+                    .read_range(
+                        &crate::blob::FilePointer::Crab(stored.pointer.clone()),
+                        offset,
+                        size,
+                    )
                     .await
                     .unwrap();
                 assert_eq!(bytes, content.slice(offset as usize..end as usize));
@@ -1761,6 +2023,46 @@ mod tests {
             assert_eq!(stored.xorb_body_requests(), 1);
             assert_eq!(std::fs::read(&unavailable).unwrap(), b"preserve me");
         }
+    }
+
+    #[test]
+    fn verified_windows_evict_least_recently_used_bytes_within_budget() {
+        let key = |index| ReadWindowKey {
+            file_hash: crate::blob::PointerIdentity::Crab([index; 32]),
+            start: 0,
+            end: READ_THROUGH_WINDOW_SIZE,
+        };
+        let mut cache = MemoryCache::new(MAX_READ_WINDOW_BYTES, MAX_READ_WINDOW_ENTRIES);
+        let payload = Bytes::from(vec![b'a'; READ_THROUGH_WINDOW_SIZE as usize]);
+        for index in 0..8 {
+            cache.insert(key(index), &payload);
+        }
+        let retained_reader = cache.get(&key(0)).unwrap();
+        cache.insert(key(8), &payload);
+        assert!(
+            cache.retained_bytes() <= MAX_READ_WINDOW_BYTES
+                && cache.get(&key(0)).is_some()
+                && cache.get(&key(1)).is_none()
+                && cache.get(&key(8)).is_some()
+                && retained_reader == payload,
+            "eviction must preserve recent windows and already admitted readers"
+        );
+    }
+
+    #[test]
+    fn tiny_verified_windows_cannot_grow_entry_metadata_without_bound() {
+        let mut cache = MemoryCache::new(MAX_READ_WINDOW_BYTES, MAX_READ_WINDOW_ENTRIES);
+        for start in 0..MAX_READ_WINDOW_ENTRIES as u64 + 17 {
+            cache.insert(
+                ReadWindowKey {
+                    file_hash: crate::blob::PointerIdentity::Crab([0; 32]),
+                    start,
+                    end: start + 1,
+                },
+                &Bytes::from_static(b"a"),
+            );
+        }
+        assert!(cache.len() <= MAX_READ_WINDOW_ENTRIES);
     }
 
     #[tokio::test(flavor = "multi_thread")]
@@ -2054,16 +2356,54 @@ mod tests {
         );
     }
 
-    #[tokio::test]
-    async fn cached_window_rejects_same_length_corruption() {
+    #[tokio::test(flavor = "multi_thread")]
+    async fn cancelled_window_read_releases_inflight_entry() {
+        struct Gate(tokio::sync::Notify);
+        #[async_trait::async_trait]
+        impl crab_read::XorbAvailability for Gate {
+            async fn ensure_available(
+                &self,
+                _path: &object_store::path::Path,
+            ) -> crab_read::Result<()> {
+                self.0.notify_one();
+                std::future::pending().await
+            }
+        }
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("window.bin");
-        write_cached_window(&path, b"original").await.unwrap();
-        assert!(cached_window_complete(&path, 8).await.unwrap());
-
-        tokio::fs::write(&path, b"corrupt!").await.unwrap();
-
-        assert!(!cached_window_complete(&path, 8).await.unwrap());
+        let mut stored = crate::test_support::StoredPointer::new(
+            &dir.path().join("shared"),
+            Bytes::from_static(b"original"),
+        )
+        .await;
+        let gate = Arc::new(Gate(tokio::sync::Notify::new()));
+        let hydrator = stored
+            .context
+            .hydrator
+            .as_ref()
+            .clone()
+            .with_availability(gate.clone());
+        stored.context.hydrator = Arc::new(hydrator);
+        let service = window_service(dir.path(), &stored, CancellationToken::new());
+        let read_service = service.clone();
+        let task = tokio::spawn(async move {
+            read_service
+                .read_range(
+                    &crate::blob::FilePointer::Crab(stored.pointer.clone()),
+                    0,
+                    8,
+                )
+                .await
+        });
+        tokio::time::timeout(std::time::Duration::from_secs(5), gate.0.notified())
+            .await
+            .unwrap();
+        task.abort();
+        let _ = task.await;
+        service.shutdown().await;
+        assert!(
+            service.state.read_range_inflight.is_empty(),
+            "cancelled read retained its window entry after shutdown"
+        );
     }
 
     #[test]
@@ -2104,12 +2444,16 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread")]
-    async fn prefetch_next_read_window_skips_when_window_cache_is_unavailable() {
-        let (_cache_dir, service) = test_service_without_read_window_cache();
+    async fn prefetch_next_read_window_skips_without_pointer_reader() {
+        let (_cache_dir, service) = test_service_without_pointer_reader();
         let mut pointer = test_pointer();
         pointer.size = READ_THROUGH_WINDOW_SIZE * 2;
 
-        assert!(!service.prefetch_next_read_window(pointer, 0, 4096));
+        assert!(!service.prefetch_next_read_window(
+            crate::blob::FilePointer::Crab(pointer),
+            0,
+            4096
+        ));
 
         let snapshot = service.read_stats_snapshot();
         assert_eq!(snapshot.read_window_prefetch_requests, 1);
@@ -2119,9 +2463,9 @@ mod tests {
 
     #[test]
     fn read_window_prefetch_claims_each_window_once_until_failure() {
-        let (_cache_dir, service) = test_service_without_read_window_cache();
+        let (_cache_dir, service) = test_service_without_pointer_reader();
         let key = ReadWindowKey {
-            file_hash: [0xAB; 32],
+            file_hash: crate::blob::PointerIdentity::Crab([0xAB; 32]),
             start: READ_THROUGH_WINDOW_SIZE,
             end: READ_THROUGH_WINDOW_SIZE * 2,
         };
@@ -2136,18 +2480,18 @@ mod tests {
 
     #[test]
     fn read_window_prefetch_claims_compact_when_key_set_fills() {
-        let (_cache_dir, service) = test_service_without_read_window_cache();
+        let (_cache_dir, service) = test_service_without_pointer_reader();
 
         for i in 0..=MAX_READ_WINDOW_PREFETCH_KEYS {
             let key = ReadWindowKey {
-                file_hash: [0xCD; 32],
+                file_hash: crate::blob::PointerIdentity::Crab([0xCD; 32]),
                 start: i as u64 * READ_THROUGH_WINDOW_SIZE,
                 end: (i as u64 + 1) * READ_THROUGH_WINDOW_SIZE,
             };
             assert!(service.claim_read_window_prefetch(key));
         }
 
-        assert_eq!(service.read_window_prefetch_seen.len(), 1);
+        assert_eq!(service.state.read_window_prefetch_seen.len(), 1);
     }
 
     // --- helpers ---
@@ -2160,7 +2504,7 @@ mod tests {
         }
     }
 
-    fn test_service_without_read_window_cache() -> (tempfile::TempDir, Arc<HydrationService>) {
+    fn test_service_without_pointer_reader() -> (tempfile::TempDir, Arc<HydrationService>) {
         let cache_dir = tempfile::tempdir().unwrap();
         let service = HydrationService::new(
             Arc::new(
@@ -2170,7 +2514,6 @@ mod tests {
             Arc::new(NoopFileIndexResolver),
             Arc::new(NoopShardLoader),
             Arc::new(NoopXorbFetcher),
-            None,
             None,
             Some(1),
             CancellationToken::new(),

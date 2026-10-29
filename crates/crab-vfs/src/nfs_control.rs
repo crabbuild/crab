@@ -11,6 +11,7 @@ use std::time::Duration;
 use rand::Rng as _;
 use serde::{Deserialize, Serialize};
 use tokio::io::{AsyncBufReadExt, AsyncRead, AsyncWrite, AsyncWriteExt, BufReader};
+use tokio::task::JoinSet;
 use tokio_util::sync::CancellationToken;
 use tracing::{debug, info, warn};
 
@@ -28,7 +29,7 @@ use crate::pipeline::{PipelineConfig, PipelineOutput};
 use crate::read_lease_pool::{ReadLeasePool, ReadLeasePoolSnapshot};
 
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
-const COMMIT_REQUEST_TIMEOUT: Duration = Duration::from_mins(30);
+const PUBLISH_REQUEST_TIMEOUT: Duration = Duration::from_mins(30);
 const IDLE_TIMEOUT: Duration = Duration::from_secs(30);
 pub const CONTROL_ENDPOINT_ENV: &str = "CRAB_NFS_CONTROL_ENDPOINT";
 #[cfg(any(not(unix), test))]
@@ -38,6 +39,8 @@ const TCP_CONTROL_PORT_RANGE: u16 = 16_384;
 
 #[derive(Clone)]
 pub struct NfsControlState {
+    /// Request native detachment without closing the transport before it completes.
+    pub shutdown: CancellationToken,
     pub mountpoint: PathBuf,
     pub read_only: bool,
     pub read_leases: Arc<ReadLeasePool>,
@@ -68,6 +71,8 @@ pub enum NfsControlRequest {
     Status,
     Refresh,
     SwitchRef { r#ref: String },
+    DiffOverlay,
+    ExportOverlay { destination: PathBuf },
     ResetOverlay,
     Commit { message: String, push: bool },
     Shutdown,
@@ -95,6 +100,8 @@ pub struct NfsControlResponse {
     pub commit_result: Option<crate::publish::OverlayCommitResult>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub pid: Option<u32>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cache_dir: Option<PathBuf>,
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize, PartialEq, Eq)]
@@ -267,7 +274,7 @@ pub struct NfsWriteJournalPathStatus {
 }
 
 impl NfsControlResponse {
-    fn ok() -> Self {
+    fn shutdown_ok(cache_dir: Option<PathBuf>) -> Self {
         Self {
             ok: true,
             error: None,
@@ -275,6 +282,7 @@ impl NfsControlResponse {
             update: None,
             overlay_diff: None,
             commit_result: None,
+            cache_dir,
             pid: None,
         }
     }
@@ -287,6 +295,7 @@ impl NfsControlResponse {
             update: None,
             overlay_diff: None,
             commit_result: None,
+            cache_dir: None,
             pid: None,
         }
     }
@@ -299,6 +308,7 @@ impl NfsControlResponse {
             update: None,
             overlay_diff: None,
             commit_result: None,
+            cache_dir: None,
             pid: Some(std::process::id()),
         }
     }
@@ -311,6 +321,7 @@ impl NfsControlResponse {
             update: None,
             overlay_diff: None,
             commit_result: None,
+            cache_dir: None,
             pid: Some(std::process::id()),
         }
     }
@@ -323,11 +334,12 @@ impl NfsControlResponse {
             update: Some(update),
             overlay_diff: None,
             commit_result: None,
+            cache_dir: None,
             pid: Some(std::process::id()),
         }
     }
 
-    fn reset_ok(diff: crate::publish::OverlayDiff) -> Self {
+    fn overlay_diff_ok(diff: crate::publish::OverlayDiff) -> Self {
         Self {
             ok: true,
             error: None,
@@ -335,6 +347,7 @@ impl NfsControlResponse {
             update: None,
             overlay_diff: Some(diff),
             commit_result: None,
+            cache_dir: None,
             pid: Some(std::process::id()),
         }
     }
@@ -347,6 +360,7 @@ impl NfsControlResponse {
             update: None,
             overlay_diff: None,
             commit_result: Some(result),
+            cache_dir: None,
             pid: Some(std::process::id()),
         }
     }
@@ -677,25 +691,29 @@ pub fn probe_endpoint_available(endpoint: Option<&str>) -> Result<()> {
 
 #[cfg(unix)]
 fn probe_unix_endpoint(endpoint: &str) -> Result<()> {
-    use std::os::unix::fs::{FileTypeExt, PermissionsExt};
+    use std::os::unix::fs::FileTypeExt;
     use std::os::unix::net::{UnixListener, UnixStream};
 
     let path = unix_path_from_endpoint(endpoint)?;
-    if let Some(parent) = path.parent() {
-        std::fs::create_dir_all(parent).map_err(CrabError::Io)?;
-        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-            .map_err(CrabError::Io)?;
-    }
+    let _ownership = lock_unix_endpoint(&path)?;
 
     match std::fs::symlink_metadata(&path) {
         Ok(meta) => {
             let file_type = meta.file_type();
             if file_type.is_socket() {
-                if UnixStream::connect(&path).is_ok() {
-                    return Err(CrabError::Configuration {
-                        key: format!("NFS control endpoint already has a listener: {endpoint}"),
-                        origin: "crab mount --backend=nfs".into(),
-                    });
+                match UnixStream::connect(&path) {
+                    Ok(_) => {
+                        return Err(CrabError::Configuration {
+                            key: format!("NFS control endpoint already has a listener: {endpoint}"),
+                            origin: "crab mount --backend=nfs".into(),
+                        });
+                    }
+                    Err(error)
+                        if matches!(
+                            error.kind(),
+                            std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused
+                        ) => {}
+                    Err(error) => return Err(error.into()),
                 }
                 std::fs::remove_file(&path).map_err(CrabError::Io)?;
             } else if file_type.is_file() && meta.len() == 0 {
@@ -715,12 +733,12 @@ fn probe_unix_endpoint(endpoint: &str) -> Result<()> {
     }
 
     let listener = UnixListener::bind(&path).map_err(CrabError::Io)?;
+    let owner = std::fs::symlink_metadata(&path)?;
+    // The same endpoint lease covers probing, binding and unlink. It prevents
+    // another process from replacing the path during the bind/listen window.
+    let result = remove_owned_unix_socket(&path, &owner);
     drop(listener);
-    match std::fs::remove_file(&path) {
-        Ok(()) => Ok(()),
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
-        Err(error) => Err(CrabError::Io(error)),
-    }
+    result.map_err(CrabError::Io)
 }
 
 fn probe_tcp_endpoint(endpoint: &str) -> Result<()> {
@@ -779,40 +797,75 @@ fn tcp_control_port_from_hash(hash: &str) -> u16 {
     TCP_CONTROL_PORT_BASE + (value % TCP_CONTROL_PORT_RANGE)
 }
 
-pub fn spawn_server(
-    endpoint: Option<String>,
-    state: NfsControlState,
-    cancel: CancellationToken,
-) -> Option<tokio::task::JoinHandle<Result<()>>> {
-    let Some(endpoint) = endpoint else {
-        return None;
-    };
-    Some(tokio::spawn(async move {
-        if let Err(error) = run_server(&endpoint, state, cancel).await {
-            warn!(
-                endpoint = %display_control_endpoint(&endpoint),
-                error = %error,
-                "NFS control server stopped with error"
-            );
-            return Err(error);
-        }
-        Ok(())
-    }))
+/// Bound control endpoint retained through startup and serving.
+pub struct BoundControlListener {
+    listener: ControlListener,
+    // Keep diagnostic identity without another copy of a TCP authentication token.
+    endpoint: String,
 }
 
-async fn run_server(
-    endpoint: &str,
-    state: NfsControlState,
-    cancel: CancellationToken,
-) -> Result<()> {
+enum ControlListener {
+    Tcp(tokio::net::TcpListener, String),
+    #[cfg(unix)]
+    Unix(tokio::net::UnixListener, UnixEndpointLease),
+}
+
+impl BoundControlListener {
+    /// Serve an already bound endpoint until cancellation and handler drain.
+    pub fn spawn(
+        self,
+        state: NfsControlState,
+        cancel: CancellationToken,
+    ) -> tokio::task::JoinHandle<Result<()>> {
+        tokio::spawn(async move {
+            let endpoint = self.endpoint;
+            let result = match self.listener {
+                ControlListener::Tcp(listener, token) => {
+                    run_tcp_listener(listener, token, state, cancel).await
+                }
+                #[cfg(unix)]
+                ControlListener::Unix(listener, ownership) => {
+                    run_unix_listener(listener, ownership, state, cancel).await
+                }
+            };
+            if let Err(error) = &result {
+                warn!(
+                    endpoint = %display_control_endpoint(&endpoint),
+                    %error,
+                    "NFS control server stopped with error"
+                );
+            }
+            result
+        })
+    }
+}
+
+/// Bind and own a control endpoint before native mount visibility.
+pub async fn bind_server(endpoint: &str) -> Result<BoundControlListener> {
+    let diagnostic_endpoint = display_control_endpoint(endpoint);
     if endpoint.starts_with("tcp:") {
-        return run_tcp_server(endpoint, state, cancel).await;
+        let endpoint = tcp_endpoint_from_endpoint(endpoint)?;
+        let listener = tokio::net::TcpListener::bind(endpoint.addr).await?;
+        return Ok(BoundControlListener {
+            listener: ControlListener::Tcp(listener, endpoint.token),
+            endpoint: diagnostic_endpoint,
+        });
     }
 
     if endpoint.starts_with("unix:") {
         #[cfg(unix)]
         {
-            return run_unix_server(endpoint, state, cancel).await;
+            let path = unix_path_from_endpoint(endpoint)?;
+            let mut ownership = lock_unix_endpoint(&path)?;
+            // Preflight owns stale cleanup; binding cannot unlink a new owner.
+            let listener = tokio::net::UnixListener::bind(&path)?;
+            let owner = std::fs::symlink_metadata(&path)?;
+            ownership.socket = Some((path, owner));
+            info!(endpoint, "NFS control server listening");
+            return Ok(BoundControlListener {
+                listener: ControlListener::Unix(listener, ownership),
+                endpoint: diagnostic_endpoint,
+            });
         }
         #[cfg(not(unix))]
         {
@@ -836,68 +889,134 @@ async fn run_server(
 }
 
 #[cfg(unix)]
-async fn run_unix_server(
-    endpoint: &str,
+async fn run_unix_listener(
+    listener: tokio::net::UnixListener,
+    mut ownership: UnixEndpointLease,
     state: NfsControlState,
     cancel: CancellationToken,
 ) -> Result<()> {
-    use std::os::unix::fs::FileTypeExt;
-    use std::os::unix::fs::PermissionsExt;
-
-    use tokio::net::UnixListener;
-
-    let path = unix_path_from_endpoint(endpoint)?;
-    if let Some(parent) = path.parent() {
-        tokio::fs::create_dir_all(parent).await?;
-        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))
-            .map_err(CrabError::Io)?;
-    }
-    if path.exists()
-        && let Ok(meta) = tokio::fs::metadata(&path).await
-    {
-        let ft = meta.file_type();
-        if ft.is_socket() || (ft.is_file() && meta.len() == 0) {
-            tokio::fs::remove_file(&path).await?;
-        }
-    }
-
-    let listener = UnixListener::bind(&path)?;
-    info!(endpoint, "NFS control server listening");
-
-    loop {
+    let mut connections = JoinSet::new();
+    let result = loop {
         tokio::select! {
-            () = cancel.cancelled() => break,
-            accepted = listener.accept() => {
-                match accepted {
-                    Ok((stream, _addr)) => {
-                        let state = state.clone();
-                        let cancel = cancel.clone();
-                        tokio::spawn(async move {
-                            if let Err(error) = handle_unix_connection(stream, state, cancel).await {
-                                debug!(error = %error, "NFS control connection ended");
-                            }
-                        });
-                    }
-                    Err(error) => {
-                        warn!(error = %error, "failed to accept NFS control connection");
-                    }
+            biased;
+            () = cancel.cancelled() => break Ok(()),
+            Some(result) = connections.join_next(), if !connections.is_empty() => {
+                if let Err(error) = result {
+                    break Err(CrabError::ReadTask(error));
                 }
             }
+            accepted = listener.accept() => {
+                let (stream, _) = match accepted {
+                    Ok(connection) => connection,
+                    Err(error) => break Err(error.into()),
+                };
+                let state = state.clone();
+                let cancel = cancel.clone();
+                connections.spawn(async move {
+                    let (reader, writer) = stream.into_split();
+                    if let Err(error) = handle_connection(reader, writer, state, cancel, None).await {
+                        debug!(error = %error, "NFS control connection ended");
+                    }
+                });
+            }
         }
-    }
-
-    let _ = tokio::fs::remove_file(&path).await;
-    Ok(())
+    };
+    cancel.cancel();
+    let drained = drain_control_connections(&mut connections).await;
+    // Retain endpoint ownership through connection drain and unlink. Neither
+    // preflight nor another server may replace this path before cleanup finishes.
+    let cleanup = ownership.clear_socket().map_err(CrabError::Io);
+    drop(listener);
+    drop(ownership);
+    result.and(drained).and(cleanup)
 }
 
-async fn run_tcp_server(
-    endpoint: &str,
-    state: NfsControlState,
-    cancel: CancellationToken,
-) -> Result<()> {
-    let endpoint = tcp_endpoint_from_endpoint(endpoint)?;
-    let listener = tokio::net::TcpListener::bind(endpoint.addr).await?;
-    run_tcp_listener(listener, endpoint.token, state, cancel).await
+#[cfg(unix)]
+struct UnixEndpointLease {
+    file: std::fs::File,
+    socket: Option<(PathBuf, std::fs::Metadata)>,
+}
+
+#[cfg(unix)]
+impl UnixEndpointLease {
+    fn clear_socket(&mut self) -> std::io::Result<()> {
+        match self.socket.take() {
+            Some((path, owner)) => remove_owned_unix_socket(&path, &owner),
+            None => Ok(()),
+        }
+    }
+}
+
+#[cfg(unix)]
+impl Drop for UnixEndpointLease {
+    fn drop(&mut self) {
+        // A prepared listener can be dropped before its serving task starts.
+        // Retire only its socket while the endpoint lease is still exclusive.
+        if let Err(error) = self.clear_socket() {
+            warn!(%error, "failed to remove NFS control socket");
+        }
+        // A forked child can retain this open-file description until exec.
+        // The serving owner joins handlers and cleans its socket before drop;
+        // explicitly unlock so unrelated children cannot extend its lease.
+        if let Err(error) = fs4::fs_std::FileExt::unlock(&self.file) {
+            tracing::warn!(%error, "failed to release NFS control endpoint lease");
+        }
+    }
+}
+
+#[cfg(unix)]
+fn lock_unix_endpoint(path: &Path) -> std::io::Result<UnixEndpointLease> {
+    use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+
+    if let Some(parent) = path.parent() {
+        std::fs::create_dir_all(parent)?;
+        std::fs::set_permissions(parent, std::fs::Permissions::from_mode(0o700))?;
+    }
+    // Persistent lease files must keep one inode across owners; unlinking one
+    // would let a replacement bypass a process still holding its descriptor.
+    let mut lock_path = path.as_os_str().to_owned();
+    lock_path.push(".lock");
+    let file = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW | libc::O_NONBLOCK)
+        .open(PathBuf::from(lock_path))?;
+    if !file.metadata()?.is_file() {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidInput,
+            "NFS control endpoint lease is not a regular file",
+        ));
+    }
+    if !fs4::fs_std::FileExt::try_lock_exclusive(&file)? {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::WouldBlock,
+            "NFS control endpoint already has an owner",
+        ));
+    }
+    Ok(UnixEndpointLease { file, socket: None })
+}
+
+#[cfg(unix)]
+fn remove_owned_unix_socket(path: &Path, owner: &std::fs::Metadata) -> std::io::Result<()> {
+    use std::os::unix::fs::{FileTypeExt, MetadataExt};
+
+    let current = match std::fs::symlink_metadata(path) {
+        Ok(metadata) => metadata,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error),
+    };
+    if !current.file_type().is_socket()
+        || current.dev() != owner.dev()
+        || current.ino() != owner.ino()
+    {
+        return Ok(());
+    }
+    match std::fs::remove_file(path) {
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => Ok(()),
+        result => result,
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -914,48 +1033,71 @@ async fn run_tcp_listener(
 ) -> Result<()> {
     let addr = listener.local_addr()?;
     info!(endpoint = %addr, "NFS TCP control server listening");
-
-    loop {
+    let mut connections = JoinSet::new();
+    let result = loop {
         tokio::select! {
-            () = cancel.cancelled() => break,
-            accepted = listener.accept() => {
-                match accepted {
-                    Ok((stream, peer)) => {
-                        if !peer.ip().is_loopback() {
-                            debug!(peer = %peer, "rejected non-loopback NFS control connection");
-                            continue;
-                        }
-                        let state = state.clone();
-                        let cancel = cancel.clone();
-                        let token = token.clone();
-                        tokio::spawn(async move {
-                            if let Err(error) = handle_tcp_connection(stream, token, state, cancel).await {
-                                debug!(error = %error, "NFS TCP control connection ended");
-                            }
-                        });
-                    }
-                    Err(error) => {
-                        warn!(error = %error, "failed to accept NFS TCP control connection");
-                    }
+            biased;
+            () = cancel.cancelled() => break Ok(()),
+            Some(result) = connections.join_next(), if !connections.is_empty() => {
+                if let Err(error) = result {
+                    break Err(CrabError::ReadTask(error));
                 }
+            }
+            accepted = listener.accept() => {
+                let (stream, peer) = match accepted {
+                    Ok(connection) => connection,
+                    Err(error) => break Err(error.into()),
+                };
+                if !peer.ip().is_loopback() {
+                    debug!(peer = %peer, "rejected non-loopback NFS control connection");
+                    continue;
+                }
+                let state = state.clone();
+                let cancel = cancel.clone();
+                let token = Some(token.clone());
+                connections.spawn(async move {
+                    let (reader, writer) = stream.into_split();
+                    if let Err(error) = handle_connection(reader, writer, state, cancel, token).await {
+                        debug!(error = %error, "NFS control connection ended");
+                    }
+                });
             }
         }
-    }
-
-    Ok(())
+    };
+    cancel.cancel();
+    let drained = drain_control_connections(&mut connections).await;
+    result.and(drained)
 }
 
-#[cfg(unix)]
-async fn handle_unix_connection(
-    stream: tokio::net::UnixStream,
+async fn drain_control_connections(connections: &mut JoinSet<()>) -> Result<()> {
+    // Dropping a JoinSet aborts its tasks. Even listener failures must retain
+    // admitted handlers until their blocking work and final replies finish.
+    let mut result = Ok(());
+    while let Some(joined) = connections.join_next().await {
+        if let Err(error) = joined
+            && result.is_ok()
+        {
+            result = Err(CrabError::ReadTask(error));
+        }
+    }
+    result
+}
+
+async fn handle_connection<R, W>(
+    reader: R,
+    mut writer: W,
     state: NfsControlState,
     cancel: CancellationToken,
-) -> std::io::Result<()> {
-    let (reader, mut writer) = stream.into_split();
+    token: Option<String>,
+) -> std::io::Result<()>
+where
+    R: AsyncRead + Unpin,
+    W: AsyncWrite + Unpin,
+{
     let mut lines = BufReader::new(reader).lines();
-
     loop {
         let line = tokio::select! {
+            biased;
             () = cancel.cancelled() => return Ok(()),
             result = tokio::time::timeout(IDLE_TIMEOUT, lines.next_line()) => {
                 match result {
@@ -966,42 +1108,19 @@ async fn handle_unix_connection(
                 }
             }
         };
-        let response = match serde_json::from_str::<NfsControlRequest>(&line) {
-            Ok(request) => dispatch_request(request, &state, &cancel).await,
+        let request = if let Some(expected) = &token {
+            serde_json::from_str::<NfsTcpControlRequest>(&line)
+                .map(|request| (request.token == *expected).then_some(request.request))
+        } else {
+            serde_json::from_str::<NfsControlRequest>(&line).map(Some)
+        };
+        let response = match request {
+            Ok(Some(request)) => dispatch_request(request, &state).await,
+            Ok(None) => NfsControlResponse::err("unauthorized NFS control request"),
             Err(error) => NfsControlResponse::err(format!("invalid request: {error}")),
         };
-        write_response(&mut writer, &response).await?;
-    }
-}
-
-async fn handle_tcp_connection(
-    stream: tokio::net::TcpStream,
-    token: String,
-    state: NfsControlState,
-    cancel: CancellationToken,
-) -> std::io::Result<()> {
-    let (reader, mut writer) = stream.into_split();
-    let mut lines = BufReader::new(reader).lines();
-
-    loop {
-        let line = tokio::select! {
-            () = cancel.cancelled() => return Ok(()),
-            result = tokio::time::timeout(IDLE_TIMEOUT, lines.next_line()) => {
-                match result {
-                    Ok(Ok(Some(line))) => line,
-                    Ok(Ok(None)) => return Ok(()),
-                    Ok(Err(error)) => return Err(error),
-                    Err(_) => return Ok(()),
-                }
-            }
-        };
-        let response = match serde_json::from_str::<NfsTcpControlRequest>(&line) {
-            Ok(request) if request.token == token => {
-                dispatch_request(request.request, &state, &cancel).await
-            }
-            Ok(_) => NfsControlResponse::err("unauthorized NFS control request"),
-            Err(error) => NfsControlResponse::err(format!("invalid request: {error}")),
-        };
+        // Admitted operations and their final replies finish after cancellation,
+        // including the shutdown acknowledgement needed by the CLI cache handoff.
         write_response(&mut writer, &response).await?;
     }
 }
@@ -1009,7 +1128,6 @@ async fn handle_tcp_connection(
 async fn dispatch_request(
     request: NfsControlRequest,
     state: &NfsControlState,
-    cancel: &CancellationToken,
 ) -> NfsControlResponse {
     match request {
         NfsControlRequest::Ping => NfsControlResponse::ping_ok(),
@@ -1025,8 +1143,18 @@ async fn dispatch_request(
             Ok(update) => NfsControlResponse::update_ok(update),
             Err(error) => NfsControlResponse::err(error.to_string()),
         },
+        NfsControlRequest::DiffOverlay => match inspect_overlay_runtime(state).await {
+            Ok(diff) => NfsControlResponse::overlay_diff_ok(diff),
+            Err(error) => NfsControlResponse::err(error.to_string()),
+        },
+        NfsControlRequest::ExportOverlay { destination } => {
+            match export_overlay_runtime(state, destination).await {
+                Ok(diff) => NfsControlResponse::overlay_diff_ok(diff),
+                Err(error) => NfsControlResponse::err(error.to_string()),
+            }
+        }
         NfsControlRequest::ResetOverlay => match reset_overlay_runtime(state).await {
-            Ok(diff) => NfsControlResponse::reset_ok(diff),
+            Ok(diff) => NfsControlResponse::overlay_diff_ok(diff),
             Err(error) => NfsControlResponse::err(error.to_string()),
         },
         NfsControlRequest::Commit { message, push } => {
@@ -1036,13 +1164,85 @@ async fn dispatch_request(
             }
         }
         NfsControlRequest::Shutdown => {
-            cancel.cancel();
-            NfsControlResponse::ok()
+            let cache_dir = state
+                .runtime
+                .as_ref()
+                .map(|runtime| {
+                    lock_runtime(runtime).map(|runtime| runtime.config.cache_dir.clone())
+                })
+                .transpose();
+            match cache_dir {
+                Ok(cache_dir) => {
+                    state.shutdown.cancel();
+                    NfsControlResponse::shutdown_ok(cache_dir)
+                }
+                Err(error) => NfsControlResponse::err(error.to_string()),
+            }
         }
     }
 }
 
+fn overlay_target(
+    state: &NfsControlState,
+) -> Result<(Arc<VfsEngine>, Arc<crate::overlay::OverlayStore>, PathBuf)> {
+    if state.read_only {
+        return Err(CrabError::Forbidden {
+            path: format!("read-only mount: {}", state.mountpoint.display()),
+        });
+    }
+    let runtime = state
+        .runtime
+        .as_ref()
+        .ok_or_else(|| CrabError::Internal("NFS overlay runtime unavailable".into()))?;
+    let runtime = lock_runtime(runtime)?;
+    let overlay = runtime
+        .output
+        .overlay
+        .clone()
+        .ok_or_else(|| CrabError::Internal("NFS overlay unavailable".into()))?;
+    Ok((
+        Arc::clone(&runtime.output.engine),
+        overlay,
+        runtime.config.cache_dir.clone(),
+    ))
+}
+
+async fn inspect_overlay_runtime(state: &NfsControlState) -> Result<crate::publish::OverlayDiff> {
+    let (engine, overlay, _) = overlay_target(state)?;
+    crate::mount_runtime::inspect_overlay_runtime(engine, overlay, state.mountpoint.clone()).await
+}
+
+async fn export_overlay_runtime(
+    state: &NfsControlState,
+    destination: PathBuf,
+) -> Result<crate::publish::OverlayDiff> {
+    let (engine, overlay, cache_dir) = overlay_target(state)?;
+    crate::mount_runtime::export_overlay_runtime(
+        engine,
+        overlay,
+        cache_dir,
+        state.mountpoint.clone(),
+        destination,
+    )
+    .await
+}
+
 async fn reset_overlay_runtime(state: &NfsControlState) -> Result<crate::publish::OverlayDiff> {
+    let engine = Arc::clone(
+        state
+            .engine
+            .as_ref()
+            .ok_or_else(|| CrabError::Internal("NFS reset engine unavailable".into()))?,
+    );
+    let state = state.clone();
+    engine
+        .run_control(async move { reset_overlay_runtime_owned(&state).await })
+        .await
+}
+
+async fn reset_overlay_runtime_owned(
+    state: &NfsControlState,
+) -> Result<crate::publish::OverlayDiff> {
     if state.read_only {
         return Err(CrabError::Forbidden {
             path: format!("read-only mount: {}", state.mountpoint.display()),
@@ -1056,15 +1256,12 @@ async fn reset_overlay_runtime(state: &NfsControlState) -> Result<crate::publish
         .engine
         .as_ref()
         .ok_or_else(|| CrabError::Internal("NFS control reset engine unavailable".into()))?;
-    let _reset = engine.begin_overlay_reset().await;
+    let _reset = crate::mount_runtime::begin_mount_update(engine, &state.mountpoint).await?;
     state.write_journal.sync_all(engine)?;
-    let overlay =
-        {
-            let runtime = lock_runtime(runtime)?;
-            runtime.output.overlay.clone().ok_or_else(|| {
-                CrabError::Internal("NFS control reset overlay unavailable".into())
-            })?
-        };
+    let (output, _) = snapshot_runtime(runtime).await?;
+    let overlay = output
+        .overlay
+        .ok_or_else(|| CrabError::Internal("NFS control reset overlay unavailable".into()))?;
     let diff = tokio::task::spawn_blocking(move || crate::publish::reset_overlay_store(&overlay))
         .await
         .map_err(|error| CrabError::Internal(format!("NFS reset task failed: {error}")))??;
@@ -1073,6 +1270,23 @@ async fn reset_overlay_runtime(state: &NfsControlState) -> Result<crate::publish
 }
 
 async fn commit_runtime(
+    state: &NfsControlState,
+    message: String,
+    push: bool,
+) -> Result<crate::publish::OverlayCommitResult> {
+    let engine = Arc::clone(
+        state
+            .engine
+            .as_ref()
+            .ok_or_else(|| CrabError::Internal("NFS commit engine unavailable".into()))?,
+    );
+    let state = state.clone();
+    engine
+        .run_control(async move { commit_runtime_owned(&state, message, push).await })
+        .await
+}
+
+async fn commit_runtime_owned(
     state: &NfsControlState,
     message: String,
     push: bool,
@@ -1091,39 +1305,15 @@ async fn commit_runtime(
         .as_ref()
         .ok_or_else(|| CrabError::Internal("NFS control commit engine unavailable".into()))?;
     let engine = Arc::clone(engine);
-    let _reset = engine.begin_overlay_reset().await;
+    let reset = crate::mount_runtime::begin_mount_update(&engine, &state.mountpoint).await?;
     state.write_journal.sync_all(&engine)?;
-    let runtime = Arc::clone(runtime);
-    let result = tokio::task::spawn_blocking(move || {
-        let mut runtime = lock_runtime(&runtime)?;
-        let head_ref = runtime.output.head_ref.clone();
-        let result = crate::publish::commit_overlay_with_snapshot(
-            &crate::publish::OverlayCommitOptions {
-                cache_dir: runtime.config.cache_dir.clone(),
-                git_dir: runtime.config.git_dir.clone(),
-                ref_name: head_ref.clone(),
-                message,
-                push,
-            },
-            Some(runtime.output.snapshot.as_ref()),
-        )?;
-        if let Some(head_oid) = result.commit_oid.as_deref() {
-            let git_dir = runtime.config.git_dir.clone();
-            if let Err(error) = crate::mount_runtime::adopt_published_snapshot(
-                &mut runtime.output,
-                &git_dir,
-                head_oid,
-                &head_ref,
-            ) {
-                return Err(CrabError::Internal(format!(
-                    "commit {head_oid} succeeded but live mount adoption failed: {error}; run `crab mount refresh`"
-                )));
-            }
-        }
-        Ok::<crate::publish::OverlayCommitResult, CrabError>(result)
-    })
-    .await
-    .map_err(|error| CrabError::Internal(format!("NFS commit task failed: {error}")))??;
+    let (mut output, config) = snapshot_runtime(runtime).await?;
+    let result =
+        crate::mount_runtime::commit_mount_runtime(&mut output, &config, &reset, message, push)
+            .await?;
+    if result.commit_oid.is_some() {
+        lock_runtime(runtime)?.output = output;
+    }
 
     if result.commit_oid.is_some() {
         invalidate_generation_caches(&state.read_leases, &state.directory_pages);
@@ -1136,25 +1326,20 @@ async fn refresh_runtime(state: &NfsControlState) -> Result<NfsControlUpdate> {
         .runtime
         .as_ref()
         .ok_or_else(|| CrabError::Internal("NFS control refresh unavailable".into()))?;
-    let mountpoint = state.mountpoint.clone();
-    let read_leases = Arc::clone(&state.read_leases);
-    let directory_pages = Arc::clone(&state.directory_pages);
-    let runtime = Arc::clone(runtime);
-    tokio::task::spawn_blocking(move || {
-        let mut runtime = lock_runtime(&runtime)?;
-        let config = runtime.config.clone();
-        let update =
-            crate::mount_runtime::refresh_mount_runtime(&mut runtime.output, &config, &mountpoint)?;
-        invalidate_generation_caches(&read_leases, &directory_pages);
-        Ok(NfsControlUpdate {
-            mountpoint: mountpoint.display().to_string(),
-            head_oid: update.head_oid,
-            head_ref: update.head_ref,
-            generation: update.generation,
-        })
+    let (mut output, config) = snapshot_runtime(runtime).await?;
+    let update =
+        crate::mount_runtime::refresh_mount_runtime(&mut output, &config, &state.mountpoint)
+            .await?;
+    if output.resolver.generation() == update.generation {
+        lock_runtime(runtime)?.output = output;
+    }
+    invalidate_generation_caches(&state.read_leases, &state.directory_pages);
+    Ok(NfsControlUpdate {
+        mountpoint: state.mountpoint.display().to_string(),
+        head_oid: update.head_oid,
+        head_ref: update.head_ref,
+        generation: update.generation,
     })
-    .await
-    .map_err(|error| CrabError::Internal(format!("NFS refresh task failed: {error}")))?
 }
 
 pub(crate) fn spawn_auto_refresh(
@@ -1185,30 +1370,26 @@ async fn switch_runtime(state: &NfsControlState, new_ref: String) -> Result<NfsC
         .runtime
         .as_ref()
         .ok_or_else(|| CrabError::Internal("NFS control switch unavailable".into()))?;
-    let mountpoint = state.mountpoint.clone();
-    let read_leases = Arc::clone(&state.read_leases);
-    let directory_pages = Arc::clone(&state.directory_pages);
-    let runtime = Arc::clone(runtime);
-    tokio::task::spawn_blocking(move || {
-        let mut runtime = lock_runtime(&runtime)?;
-        let mut config = runtime.config.clone();
-        let update = crate::mount_runtime::switch_mount_runtime(
-            &mut runtime.output,
-            &mut config,
-            &mountpoint,
-            &new_ref,
-        )?;
+    let (mut output, mut config) = snapshot_runtime(runtime).await?;
+    let update = crate::mount_runtime::switch_mount_runtime(
+        &mut output,
+        &mut config,
+        &state.mountpoint,
+        &new_ref,
+    )
+    .await?;
+    if output.resolver.generation() == update.generation {
+        let mut runtime = lock_runtime(runtime)?;
+        runtime.output = output;
         runtime.config = config;
-        invalidate_generation_caches(&read_leases, &directory_pages);
-        Ok(NfsControlUpdate {
-            mountpoint: mountpoint.display().to_string(),
-            head_oid: update.head_oid,
-            head_ref: update.head_ref,
-            generation: update.generation,
-        })
+    }
+    invalidate_generation_caches(&state.read_leases, &state.directory_pages);
+    Ok(NfsControlUpdate {
+        mountpoint: state.mountpoint.display().to_string(),
+        head_oid: update.head_oid,
+        head_ref: update.head_ref,
+        generation: update.generation,
     })
-    .await
-    .map_err(|error| CrabError::Internal(format!("NFS switch task failed: {error}")))?
 }
 
 fn invalidate_generation_caches(
@@ -1222,12 +1403,26 @@ fn invalidate_generation_caches(
     directory_pages.invalidate_all();
 }
 
+async fn snapshot_runtime(
+    runtime: &Arc<Mutex<NfsMountRuntime>>,
+) -> Result<(PipelineOutput, PipelineConfig)> {
+    let runtime = Arc::clone(runtime);
+    // A contended synchronous runtime lock must not occupy a Tokio worker;
+    // teardown needs that worker to cancel and join the admitted operation.
+    tokio::task::spawn_blocking(move || {
+        let runtime = lock_runtime(&runtime)?;
+        Ok((runtime.output.clone(), runtime.config.clone()))
+    })
+    .await
+    .map_err(CrabError::ReadTask)?
+}
+
 fn runtime_head(runtime: &Arc<Mutex<NfsMountRuntime>>) -> Result<(Option<String>, Option<String>)> {
     let runtime = lock_runtime(runtime)?;
-    Ok((
-        Some(runtime.output.head_oid.clone()),
-        Some(runtime.output.head_ref.clone()),
-    ))
+    Ok(match runtime.output.resolver.head() {
+        Some((oid, selected_ref)) => (Some(oid), Some(selected_ref)),
+        None => (None, None),
+    })
 }
 
 fn lock_runtime(
@@ -1242,11 +1437,15 @@ async fn write_response<W>(writer: &mut W, response: &NfsControlResponse) -> std
 where
     W: AsyncWriteExt + Unpin,
 {
-    let mut json = serde_json::to_string(response)
-        .map_err(|error| std::io::Error::other(format!("serialize error: {error}")))?;
-    json.push('\n');
-    writer.write_all(json.as_bytes()).await?;
-    writer.flush().await
+    let mut json = serde_json::to_vec(response).map_err(std::io::Error::other)?;
+    json.push(b'\n');
+    let write = async {
+        writer.write_all(&json).await?;
+        writer.flush().await
+    };
+    tokio::time::timeout(REQUEST_TIMEOUT, write)
+        .await
+        .map_err(|error| std::io::Error::new(std::io::ErrorKind::TimedOut, error))?
 }
 
 pub async fn status(endpoint: &str) -> Result<NfsControlStatus> {
@@ -1275,10 +1474,11 @@ pub async fn ping(endpoint: &str) -> Result<()> {
     ))
 }
 
-pub async fn shutdown(endpoint: &str) -> Result<()> {
+/// Request shutdown and return the running helper's cache identity when present.
+pub async fn shutdown(endpoint: &str) -> Result<Option<PathBuf>> {
     let response = request(endpoint, &NfsControlRequest::Shutdown).await?;
     if response.ok {
-        return Ok(());
+        return Ok(response.cache_dir);
     }
     Err(CrabError::Internal(response.error.unwrap_or_else(|| {
         "NFS control shutdown failed".to_owned()
@@ -1301,13 +1501,35 @@ pub async fn switch_ref(endpoint: &str, git_ref: &str) -> Result<NfsControlUpdat
     control_update_from_response(response, "NFS control switch failed")
 }
 
+/// Inspect the running helper's writable overlay state.
+pub async fn inspect_overlay(endpoint: &str) -> Result<crate::publish::OverlayDiff> {
+    let response = request(endpoint, &NfsControlRequest::DiffOverlay).await?;
+    overlay_diff_from_response(response)
+}
+
+/// Export the running helper's overlay under its owned read boundary.
+pub async fn export_overlay(
+    endpoint: &str,
+    destination: &Path,
+) -> Result<crate::publish::OverlayDiff> {
+    let request = NfsControlRequest::ExportOverlay {
+        destination: destination.to_owned(),
+    };
+    let response = request_with_timeout(endpoint, &request, PUBLISH_REQUEST_TIMEOUT).await?;
+    overlay_diff_from_response(response)
+}
+
 pub async fn reset_overlay(endpoint: &str) -> Result<crate::publish::OverlayDiff> {
     let response = request(endpoint, &NfsControlRequest::ResetOverlay).await?;
+    overlay_diff_from_response(response)
+}
+
+fn overlay_diff_from_response(response: NfsControlResponse) -> Result<crate::publish::OverlayDiff> {
     if !response.ok {
         return Err(CrabError::Internal(
             response
                 .error
-                .unwrap_or_else(|| "NFS control reset failed".to_owned()),
+                .unwrap_or_else(|| "NFS overlay request failed".to_owned()),
         ));
     }
     response
@@ -1326,7 +1548,7 @@ pub async fn commit(
             message: message.to_owned(),
             push,
         },
-        COMMIT_REQUEST_TIMEOUT,
+        PUBLISH_REQUEST_TIMEOUT,
     )
     .await?;
     if !response.ok {
@@ -1472,6 +1694,10 @@ fn unix_path_from_endpoint(endpoint: &str) -> Result<PathBuf> {
         })?;
     Ok(PathBuf::from(path))
 }
+
+#[cfg(test)]
+#[path = "nfs_control_connection_tests.rs"]
+mod connection_lifecycle_tests;
 
 #[cfg(test)]
 #[expect(
@@ -1642,10 +1868,33 @@ mod tests {
     #[test]
     #[cfg(unix)]
     fn control_probe_replaces_stale_unix_socket_before_bind() {
+        const CHILD_ROOT: &str = "CRAB_VFS_TEST_STALE_SOCKET_CHILD";
+        if let Some(root) = std::env::var_os(CHILD_ROOT) {
+            let listener =
+                std::os::unix::net::UnixListener::bind(PathBuf::from(root).join("stale.sock"))
+                    .unwrap();
+            drop(listener);
+            return;
+        }
         let tmp = tempfile::tempdir().unwrap();
         let path = tmp.path().join("stale.sock");
-        let listener = std::os::unix::net::UnixListener::bind(&path).unwrap();
-        drop(listener);
+        // Concurrent Git fixtures may fork while a listener is open, retaining
+        // its fd until exec. Create the stale socket in an isolated process so
+        // successful exit proves every listening descriptor has closed.
+        let child = std::process::Command::new(std::env::current_exe().unwrap())
+            .args([
+                "--exact",
+                "nfs_control::tests::control_probe_replaces_stale_unix_socket_before_bind",
+                "--nocapture",
+            ])
+            .env(CHILD_ROOT, tmp.path())
+            .output()
+            .unwrap();
+        assert!(
+            child.status.success() && path.exists(),
+            "stale socket setup: {}",
+            String::from_utf8_lossy(&child.stderr)
+        );
         let endpoint = format!("unix:{}", path.display());
 
         probe_endpoint_available(Some(&endpoint)).unwrap();
@@ -1710,6 +1959,7 @@ mod tests {
         let endpoint = format!("unix:{}", socket_path.display());
         let cancel = CancellationToken::new();
         let state = NfsControlState {
+            shutdown: cancel.clone(),
             mountpoint: mountpoint.clone(),
             read_only: true,
             read_leases: ReadLeasePool::new(4, 4096),
@@ -1724,9 +1974,12 @@ mod tests {
                 startup_ms: 8,
             },
         };
-        let handle = spawn_server(Some(endpoint.clone()), state, cancel.clone()).unwrap();
+        let handle = bind_server(&endpoint)
+            .await
+            .unwrap()
+            .spawn(state, cancel.clone());
 
-        let status = wait_for_status(&endpoint).await;
+        let status = status(&endpoint).await.unwrap();
 
         let dir_mode = std::fs::metadata(&socket_dir).unwrap().permissions().mode() & 0o777;
         assert_eq!(dir_mode, 0o700);
@@ -1764,6 +2017,7 @@ mod tests {
         let endpoint = format!("tcp:{addr}?token=test-token");
         let cancel = CancellationToken::new();
         let state = NfsControlState {
+            shutdown: cancel.clone(),
             mountpoint: mountpoint.clone(),
             read_only: true,
             read_leases: ReadLeasePool::new(4, 4096),
@@ -1790,7 +2044,7 @@ mod tests {
             Some("unauthorized NFS control request")
         );
 
-        let status = wait_for_status(&endpoint).await;
+        let status = status(&endpoint).await.unwrap();
 
         assert_eq!(status.mountpoint, mountpoint.display().to_string());
         assert!(status.read_only);
@@ -1801,16 +2055,6 @@ mod tests {
         shutdown(&endpoint).await.unwrap();
         assert!(cancel.is_cancelled());
         handle.await.unwrap().unwrap();
-    }
-
-    async fn wait_for_status(endpoint: &str) -> NfsControlStatus {
-        for _ in 0..20 {
-            if let Ok(status) = status(endpoint).await {
-                return status;
-            }
-            tokio::time::sleep(Duration::from_millis(25)).await;
-        }
-        status(endpoint).await.unwrap()
     }
 
     #[tokio::test]

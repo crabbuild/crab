@@ -6,11 +6,6 @@ use std::sync::{Arc, Mutex, MutexGuard};
 
 use crab::cache::LocalCache;
 use crab::core::config::CacheConfig;
-use crab::git::push::{PushConfig, RefPushOutcome, run_push_batch};
-use crab::git::push_native::{NativePushConfig, NativePushInputs, run_native_push};
-use crab::git::push_state::PushState;
-use crab::git::remote_helper::PushSpec;
-use crab::metadata::manifest::Manifest;
 use crab::storage::{Store, StoreLayout};
 use crab_cache_store::CachingStore;
 use crab_staging::StagingAreaReadOnly;
@@ -124,55 +119,47 @@ fn deterministic_content(size: usize) -> Vec<u8> {
     data
 }
 
-async fn push_refs_to_memory(repo: &Path, scratch: &Path, refs: &[&str]) -> (Store, StoreLayout) {
+async fn push_refs_to_memory(repo: &Path, refs: &[&str]) -> (Store, StoreLayout) {
     let staging = StagingAreaReadOnly::open(repo.join(".crab/staging"))
         .await
         .expect("open staging readonly");
     let store = Store::new(Arc::new(InMemory::new()));
     let router = StoreLayout::new(store.clone(), "smoke/add-commit-push".to_owned());
-    initialize_memory_repository(&store, &router).await;
-    let mut config = PushConfig {
-        git_dir: Some(repo.join(".git")),
-        ..PushConfig::default()
-    };
-    config.metadb.chunk_index.local_path = Some(scratch.join("metadb-cache/chunk-index.sqlite"));
-    let specs = refs
-        .iter()
-        .map(|reference| PushSpec {
-            force: false,
-            src: (*reference).to_owned(),
-            dst: (*reference).to_owned(),
-        })
-        .collect::<Vec<_>>();
+    let staging = Arc::new(staging);
+    for reference in refs {
+        let stats = publish_memory_ref(repo, &store, &router, &staging, reference)
+            .await
+            .expect("publish Capsule ref");
+        assert_eq!((stats.refs_pushed, stats.refs_failed), (1, 0));
+    }
 
-    let result = run_push_batch(
-        &specs,
-        &config,
-        Some(store.clone()),
-        None,
-        Some(Arc::new(staging)),
-        router.clone(),
-        None,
-        CancellationToken::new(),
-        None,
+    let layout = crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    let view = crab_read::capsule_protocol::open_view(
+        &layout,
+        crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: 16 * 1024 * 1024,
+            max_frontier_bytes: 16 * 1024 * 1024,
+        },
     )
-    .await;
-
+    .await
+    .expect("open published Capsule view");
     for reference in refs {
-        let outcome = result.outcomes.get(*reference).expect("ref outcome");
-        assert!(matches!(outcome, RefPushOutcome::Ok), "{outcome:?}");
+        let output = require_git_ok(repo, &["rev-parse", reference]).expect("local ref");
+        let tip = String::from_utf8(output.stdout).expect("ref OID");
+        assert_eq!(
+            view.refs().get(*reference).map(String::as_str),
+            Some(tip.trim())
+        );
     }
-
-    let (manifest_bytes, _) = store
-        .get_with_etag(&router.manifest_path())
+    let catalog = view
+        .pointer_catalog()
         .await
-        .expect("manifest uploaded");
-    let manifest: Manifest = serde_json::from_slice(&manifest_bytes).expect("manifest json");
-    assert_eq!(manifest.generation, 1);
-    for reference in refs {
-        assert!(manifest.refs.contains_key(*reference));
-    }
-    assert!(!manifest.shard_index_hash.is_empty());
+        .expect("published pointer catalog");
+    assert!(!catalog.files().is_empty());
 
     let xorbs = store
         .list_prefix(&crab_storage::global_content_prefix(
@@ -195,103 +182,17 @@ async fn push_refs_to_memory(repo: &Path, scratch: &Path, refs: &[&str]) -> (Sto
     (store, router)
 }
 
-async fn native_push_main_follow_tags_to_memory(
-    repo: &Path,
-    scratch: &Path,
-    tag_ref: &str,
-    tag_sha: &str,
-) {
-    let staging = StagingAreaReadOnly::open(repo.join(".crab/staging"))
-        .await
-        .expect("open staging readonly");
-    let store = Store::new(Arc::new(InMemory::new()));
-    let router = StoreLayout::new(store.clone(), "smoke/follow-tags".to_owned());
-    initialize_memory_repository(&store, &router).await;
-    let mut push_config = PushConfig {
-        git_dir: Some(repo.join(".git")),
-        ..PushConfig::default()
-    };
-    push_config.metadb.chunk_index.local_path =
-        Some(scratch.join("follow-tags-metadb/chunk-index.sqlite"));
-    let mut native_config = NativePushConfig::new(push_config);
-    native_config.followtags = true;
-    native_config.progress = false;
-    native_config.emit_summary = false;
-
-    let specs = vec![PushSpec {
-        force: false,
-        src: "refs/heads/main".to_owned(),
-        dst: "refs/heads/main".to_owned(),
-    }];
-    let mut push_state = PushState::default();
-    let result = run_native_push(
-        &native_config,
-        &specs,
-        NativePushInputs::new(
-            Some(store.clone()),
-            None,
-            crab::git::push_staging::PushStaging::Ready(Arc::new(staging)),
-            router.clone(),
-            &mut push_state,
-            "origin",
-            "crab://bucket/repo",
-            None,
-            CancellationToken::new(),
-        ),
-    )
-    .await
-    .expect("native follow-tags push");
-
-    assert!(matches!(
-        result.outcomes.get("refs/heads/main"),
-        Some(RefPushOutcome::Ok)
-    ));
-    assert!(matches!(
-        result.outcomes.get(tag_ref),
-        Some(RefPushOutcome::Ok)
-    ));
-
-    let (manifest_bytes, _) = store
-        .get_with_etag(&router.manifest_path())
-        .await
-        .expect("manifest uploaded");
-    let manifest: Manifest = serde_json::from_slice(&manifest_bytes).expect("manifest json");
-    assert_eq!(
-        manifest.generation, 1,
-        "branch and synthesized tag must publish through one first-generation CAS"
-    );
-    assert_eq!(
-        manifest.refs.get(tag_ref).map(String::as_str),
-        Some(tag_sha)
-    );
-}
-
-fn assert_main_push_uploads(repo: &Path, scratch: &Path) {
+fn assert_main_push_uploads(repo: &Path) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
         .expect("tokio runtime");
     runtime.block_on(async {
-        let _ = push_refs_to_memory(repo, scratch, &["refs/heads/main"]).await;
+        let _ = push_refs_to_memory(repo, &["refs/heads/main"]).await;
     });
 }
 
-fn assert_native_follow_tags_pushes_annotated_tag(
-    repo: &Path,
-    scratch: &Path,
-    tag_ref: &str,
-    tag_sha: &str,
-) {
-    let runtime = tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-        .expect("tokio runtime");
-    runtime.block_on(async {
-        native_push_main_follow_tags_to_memory(repo, scratch, tag_ref, tag_sha).await;
-    });
-}
-
-fn assert_shallow_first_push_rejects_with_boundary(repo: &Path, scratch: &Path) {
+fn assert_shallow_first_push_rejects_without_publication(repo: &Path) {
     let runtime = tokio::runtime::Builder::new_current_thread()
         .enable_all()
         .build()
@@ -299,53 +200,84 @@ fn assert_shallow_first_push_rejects_with_boundary(repo: &Path, scratch: &Path) 
     runtime.block_on(async {
         let store = Store::new(Arc::new(InMemory::new()));
         let router = StoreLayout::new(store.clone(), "smoke/shallow-boundary".to_owned());
-        initialize_memory_repository(&store, &router).await;
-        let mut config = PushConfig {
-            git_dir: Some(repo.join(".git")),
-            ..PushConfig::default()
-        };
-        config.metadb.chunk_index.local_path =
-            Some(scratch.join("shallow-metadb/chunk-index.sqlite"));
-        let specs = vec![PushSpec {
-            force: false,
-            src: "refs/heads/main".to_owned(),
-            dst: "refs/heads/main".to_owned(),
-        }];
-
-        let result = run_push_batch(
-            &specs,
-            &config,
-            Some(store),
-            None,
-            None,
-            router,
-            None,
-            CancellationToken::new(),
-            None,
-        )
-        .await;
-
-        let outcome = result
-            .outcomes
-            .get("refs/heads/main")
-            .expect("main outcome");
-        assert!(
-            matches!(
-                outcome,
-                RefPushOutcome::Rejected(crab::git::push::PushRejectReason::ShallowBoundary { .. })
-            ),
-            "expected shallow-boundary rejection, got {outcome:?}"
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
         );
+        let repository_id = blake3::hash(router.repo_prefix().as_bytes())
+            .to_hex()
+            .to_string();
+        let before =
+            crab_write::capsule_protocol::initialize(&layout, &repository_id, "refs/heads/main")
+                .await
+                .expect("initialize unborn Capsule root");
+        let staging_dir = repo.join(".crab/staging");
+        crab_staging::StagingArea::open(staging_dir.clone())
+            .await
+            .expect("create empty staging")
+            .close()
+            .await
+            .expect("close empty staging");
+        let staging = Arc::new(StagingAreaReadOnly::open(staging_dir).await.unwrap());
+        let boundary = std::fs::read(repo.join(".git/shallow")).expect("shallow boundary");
+        let result = publish_memory_ref(repo, &store, &router, &staging, "refs/heads/main").await;
+        assert!(
+            result.is_err(),
+            "incomplete history must be rejected: {result:?}"
+        );
+        let after = crab_metadata::capsule_protocol::load_root(&layout)
+            .await
+            .unwrap();
+        assert_eq!(before.record().digest(), after.record().digest());
+        let view = crab_read::capsule_protocol::open_view(
+            &layout,
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: 16 * 1024 * 1024,
+                max_frontier_bytes: 16 * 1024 * 1024,
+            },
+        )
+        .await
+        .expect("unchanged Capsule view");
+        assert!(view.refs().is_empty());
+        assert_eq!(std::fs::read(repo.join(".git/shallow")).unwrap(), boundary);
     });
 }
 
-async fn initialize_memory_repository(store: &Store, router: &StoreLayout) {
-    crab::core::remote_layout::initialize(store, router)
-        .await
-        .expect("publish canonical v1 layout");
-    crab::cmd::init::create_initial_manifest(store, router, "refs/heads/main")
-        .await
-        .expect("publish generation-0 manifest");
+async fn publish_memory_ref(
+    repo: &Path,
+    store: &Store,
+    router: &StoreLayout,
+    staging: &Arc<StagingAreaReadOnly>,
+    reference: &str,
+) -> crab::core::error::Result<crab::import::publish::PublishStats> {
+    let branch = reference
+        .strip_prefix("refs/heads/")
+        .expect("branch ref")
+        .to_owned();
+    let output = require_git_ok(repo, &["rev-parse", reference]).expect("local ref");
+    let head_commit_oid = String::from_utf8(output.stdout)
+        .expect("ref OID")
+        .trim()
+        .to_owned();
+    let target = crab::import::ingest::ResolvedStore {
+        store: store.clone(),
+        bucket: store.bucket_identity(),
+        prefix: router.repo_prefix().to_owned(),
+    };
+    let inputs = crab::import::publish::PublishInputs {
+        target,
+        repo_prefix: router.repo_prefix().to_owned(),
+        staging: Arc::clone(staging),
+        branch,
+        head_commit_oid,
+        git_dir: repo.join(".git"),
+        metrics: None,
+        cancel: CancellationToken::new(),
+    };
+    // This public stage shares Capsule preparation with CLI/helper pushes;
+    // external fixtures need no exported internal push orchestrator.
+    crab::import::publish::run_publish(inputs).await
 }
 
 fn assert_staging_chunk_count_at_least(repo: &Path, pointer: &Pointer, min_chunks: usize) {
@@ -400,10 +332,21 @@ fn assert_prepared_only_recipe_state(
         };
 
         let file_hash = MerkleHash::from(pointer.file_hash);
+        // Git clean delegates verified payload ownership; only the outer Git
+        // writer knows index success. Push selects that lease by this pointer.
+        assert!(
+            staging
+                .published_recipe_for_file(&file_hash)
+                .unwrap()
+                .is_none(),
+            "external Git clean must not claim a completed native index transaction"
+        );
         let recipe = staging
-            .published_recipe_for_file(&file_hash)
-            .expect("load published prepared recipe")
-            .expect("prepared recipe should be published after git add");
+            .external_recipes_for_files(&[file_hash])
+            .expect("load delegated prepared recipe")
+            .remove(&file_hash)
+            .flatten()
+            .expect("Git-selected pointer must retain a delegated prepared recipe");
         assert!(
             !staging
                 .has_complete_segment_authority_for_recipe(&recipe)
@@ -515,7 +458,7 @@ fn assert_push_hydrates(repo: &Path, scratch: &Path, refs: &[&str], files: &[(&[
         .build()
         .expect("tokio runtime");
     runtime.block_on(async {
-        let (store, router) = push_refs_to_memory(repo, scratch, refs).await;
+        let (store, router) = push_refs_to_memory(repo, refs).await;
         let hydrate_cache = Arc::new(LocalCache::new(scratch.join("hydrate-cache")));
         let caching_store = CachingStore::new_with_local_cache(
             store.clone(),
@@ -575,7 +518,7 @@ fn crab_add_commit_then_push_in_memory_store() {
     let _ = indexed_crab_pointer(&repo, "model.bin");
 
     require_git_ok(&repo, &["commit", "-qm", "add model pointer"]).expect("commit pointer");
-    assert_main_push_uploads(&repo, tmp.path());
+    assert_main_push_uploads(&repo);
 }
 
 #[test]
@@ -603,35 +546,7 @@ fn git_add_commit_then_push_in_memory_store() {
     let _ = indexed_crab_pointer(&repo, "model.bin");
 
     require_git_ok(&repo, &["commit", "-qm", "add model pointer"]).expect("commit pointer");
-    assert_main_push_uploads(&repo, tmp.path());
-}
-
-#[test]
-fn native_push_follow_tags_pushes_annotated_tag_in_memory_store() {
-    let tmp = tempfile::tempdir().expect("tempdir");
-    let repo = tmp.path().join("repo");
-    let cache_dir = tmp.path().join("cache");
-    let _cache_guard = CacheEnvGuard::new(&cache_dir);
-
-    let Some(()) = init_repo(&repo) else {
-        return;
-    };
-    let Some(()) = configure_crab_filter(&repo) else {
-        return;
-    };
-    commit_crab_attributes(&repo);
-
-    std::fs::write(repo.join("model.bin"), b"follow tags smoke\n").expect("write model");
-    require_git_ok(&repo, &["add", "model.bin"]).expect("git add model");
-    let _ = indexed_crab_pointer(&repo, "model.bin");
-    require_git_ok(&repo, &["commit", "-qm", "add release pointer"]).expect("commit pointer");
-    require_git_ok(&repo, &["tag", "-a", "v1.0", "-m", "release"]).expect("annotated tag");
-    let tag_sha = require_git_ok(&repo, &["rev-parse", "refs/tags/v1.0"])
-        .map(|out| String::from_utf8(out.stdout).expect("tag sha utf8"))
-        .map(|sha| sha.trim().to_owned())
-        .expect("tag sha");
-
-    assert_native_follow_tags_pushes_annotated_tag(&repo, tmp.path(), "refs/tags/v1.0", &tag_sha);
+    assert_main_push_uploads(&repo);
 }
 
 #[test]
@@ -675,7 +590,7 @@ fn shallow_clone_first_push_rejects_with_shallow_boundary() {
         shallow.join(".git/shallow").exists(),
         "test must use a real shallow clone"
     );
-    assert_shallow_first_push_rejects_with_boundary(&shallow, tmp.path());
+    assert_shallow_first_push_rejects_without_publication(&shallow);
 }
 
 #[test]

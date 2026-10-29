@@ -311,3 +311,157 @@ async fn cancelled_native_install_removes_private_files_without_publishing_git_p
         }
     }
 }
+
+#[derive(Debug)]
+struct InterruptedRead(Arc<dyn object_store::ObjectStore>);
+
+impl std::fmt::Display for InterruptedRead {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("InterruptedRead")
+    }
+}
+
+#[async_trait::async_trait]
+impl object_store::ObjectStore for InterruptedRead {
+    async fn put_opts(
+        &self,
+        path: &object_store::path::Path,
+        body: object_store::PutPayload,
+        options: object_store::PutOptions,
+    ) -> object_store::Result<object_store::PutResult> {
+        self.0.put_opts(path, body, options).await
+    }
+
+    async fn put_multipart_opts(
+        &self,
+        path: &object_store::path::Path,
+        options: object_store::PutMultipartOptions,
+    ) -> object_store::Result<Box<dyn object_store::MultipartUpload>> {
+        self.0.put_multipart_opts(path, options).await
+    }
+
+    async fn get_opts(
+        &self,
+        path: &object_store::path::Path,
+        options: object_store::GetOptions,
+    ) -> object_store::Result<object_store::GetResult> {
+        if options.head {
+            return self.0.get_opts(path, options).await;
+        }
+        let response = self.0.get_opts(path, options).await?;
+        let meta = response.meta.clone();
+        let range = response.range.clone();
+        let attributes = response.attributes.clone();
+        let extensions = response.extensions.clone();
+        let bytes = response.bytes().await?;
+        let first = bytes.slice(..bytes.len().min(1));
+        let failure = object_store::Error::Generic {
+            store: "interrupted fixture",
+            source: Box::new(std::io::Error::new(
+                std::io::ErrorKind::ConnectionReset,
+                "fixture body interrupted",
+            )),
+        };
+        Ok(object_store::GetResult {
+            payload: object_store::GetResultPayload::Stream(Box::pin(futures_util::stream::iter(
+                [Ok(first), Err(failure)],
+            ))),
+            meta,
+            range,
+            attributes,
+            extensions,
+        })
+    }
+
+    fn delete_stream(
+        &self,
+        paths: futures_util::stream::BoxStream<
+            'static,
+            object_store::Result<object_store::path::Path>,
+        >,
+    ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::path::Path>>
+    {
+        self.0.delete_stream(paths)
+    }
+
+    fn list(
+        &self,
+        prefix: Option<&object_store::path::Path>,
+    ) -> futures_util::stream::BoxStream<'static, object_store::Result<object_store::ObjectMeta>>
+    {
+        self.0.list(prefix)
+    }
+
+    async fn list_with_delimiter(
+        &self,
+        prefix: Option<&object_store::path::Path>,
+    ) -> object_store::Result<object_store::ListResult> {
+        self.0.list_with_delimiter(prefix).await
+    }
+
+    async fn copy_opts(
+        &self,
+        from: &object_store::path::Path,
+        to: &object_store::path::Path,
+        options: object_store::CopyOptions,
+    ) -> object_store::Result<()> {
+        self.0.copy_opts(from, to, options).await
+    }
+}
+
+#[tokio::test]
+async fn interrupted_checkpoint_body_preserves_its_cause_and_drains_before_retry() {
+    let (layout, _) = fixture().await;
+    let captured = checkpoint(&layout).await;
+    let checkpoint = captured.layered_checkpoint().unwrap();
+    let broken = StoreLayout::new(
+        Store::new(Arc::new(InterruptedRead(layout.store().inner().clone()))),
+        layout.repo_prefix().to_owned(),
+    );
+    let directory = tempfile::tempdir().unwrap();
+    crab_git::initialize_bare_git_dir(directory.path()).unwrap();
+
+    let error = crab_read::capsule_protocol::install_layered_checkpoint(
+        checkpoint,
+        &broken,
+        directory.path(),
+        LIMIT,
+    )
+    .await
+    .unwrap_err();
+
+    let mut cause: Option<&(dyn std::error::Error + 'static)> = Some(&error);
+    let mut connection_reset = false;
+    while let Some(source) = cause {
+        connection_reset |= source
+            .downcast_ref::<std::io::Error>()
+            .is_some_and(|error| error.kind() == std::io::ErrorKind::ConnectionReset);
+        cause = source.source();
+    }
+    assert!(connection_reset, "{error:?}");
+    assert_eq!(
+        std::fs::read_dir(directory.path().join("objects/pack"))
+            .unwrap()
+            .count(),
+        0
+    );
+    crab_read::capsule_protocol::install_layered_checkpoint(
+        checkpoint,
+        &layout,
+        directory.path(),
+        LIMIT,
+    )
+    .await
+    .unwrap();
+    for (name, expected) in BLOBS {
+        let oid = crab_remote::objects::object_id(gix_object::Kind::Blob, expected).unwrap();
+        let output = std::process::Command::new("git")
+            .arg("--git-dir")
+            .arg(directory.path())
+            .args(["cat-file", "blob", &oid.to_string()])
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{name}");
+        assert_eq!(output.stdout, *expected);
+    }
+}
