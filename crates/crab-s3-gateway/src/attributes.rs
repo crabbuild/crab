@@ -399,6 +399,7 @@ fn estimated_object_bytes(path: &str, attributes: &ObjectAttributes) -> usize {
 pub(crate) struct Cache {
     layout: StoreLayout<Store>,
     commits: Mutex<HashMap<ObjectId, Arc<Mutex<ReadState>>>>,
+    checkpoint_versions: Mutex<HashMap<String, (ObjectId, crab_storage::ETag)>>,
 }
 
 struct ReadState {
@@ -414,6 +415,7 @@ impl Cache {
         Self {
             layout,
             commits: Mutex::new(HashMap::new()),
+            checkpoint_versions: Mutex::new(HashMap::new()),
         }
     }
 
@@ -642,49 +644,75 @@ pub(crate) async fn publish_checkpoint(
     checkpoint: &PreparedCheckpoint,
 ) -> crate::Result<bool> {
     let path = checkpoint_slot_path(&repository.layout, &checkpoint.slot)?;
+    // A confirmed predecessor's token avoids decoding its full namespace again.
+    // The CAS still detects other writers; a conflict rereads and validates
+    // their checkpoint before deciding whether this one can replace it.
+    let mut confirmed = repository
+        .attributes
+        .checkpoint_versions
+        .lock()
+        .await
+        .get(&checkpoint.slot)
+        .filter(|(commit, _)| Some(*commit) == checkpoint.expected_existing)
+        .map(|(_, version)| version.clone());
     for _ in 0..MAX_CHECKPOINT_PUBLISH_ATTEMPTS {
-        let existing = repository
-            .store
-            .get_with_etag_bounded(&path, MAX_MANIFEST_BYTES)
-            .await;
-        let etag = match existing {
-            Ok((bytes, etag)) => {
-                let stored = parse_checkpoint(&bytes)?;
-                let commit = stored
-                    .commit
-                    .parse::<ObjectId>()
-                    .map_err(|_| crate::Error::Config("invalid S3 attribute checkpoint commit"))?;
-                if commit == checkpoint.commit {
-                    return Ok(true);
+        let etag = if let Some(version) = confirmed.take() {
+            Some(version)
+        } else {
+            let existing = repository
+                .store
+                .get_with_etag_bounded(&path, MAX_MANIFEST_BYTES)
+                .await;
+            match existing {
+                Ok((bytes, etag)) => {
+                    let stored = parse_checkpoint(&bytes)?;
+                    let commit = stored.commit.parse::<ObjectId>().map_err(|_| {
+                        crate::Error::Config("invalid S3 attribute checkpoint commit")
+                    })?;
+                    if commit == checkpoint.commit {
+                        return Ok(true);
+                    }
+                    // The prepared checkpoint carries its manifest's process-local
+                    // predecessor. Equality proves that lineage; ETag CAS below still
+                    // rejects a concurrent slot replacement.
+                    if checkpoint.expected_existing != Some(commit)
+                        && !checkpoint_is_newer(repository, checkpoint, commit).await?
+                    {
+                        return Ok(false);
+                    }
+                    Some(etag)
                 }
-                // The prepared checkpoint carries its manifest's process-local
-                // predecessor. Equality proves that lineage; ETag CAS below still
-                // rejects a concurrent slot replacement.
-                if checkpoint.expected_existing != Some(commit)
-                    && !checkpoint_is_newer(repository, checkpoint, commit).await?
-                {
-                    return Ok(false);
-                }
-                Some(etag)
+                Err(crab_storage::StorageError::NotFound { .. }) => None,
+                Err(error) => return Err(error.into()),
             }
-            Err(crab_storage::StorageError::NotFound { .. }) => None,
-            Err(error) => return Err(error.into()),
         };
         let result = match etag {
-            Some(etag) => repository
-                .store
-                .update(&path, checkpoint.bytes.clone(), etag)
-                .await
-                .map(|_| ()),
+            Some(etag) => {
+                repository
+                    .store
+                    .update(&path, checkpoint.bytes.clone(), etag)
+                    .await
+            }
             None => {
                 repository
                     .store
-                    .create_strict(&path, checkpoint.bytes.clone())
+                    .create_strict_with_etag(&path, checkpoint.bytes.clone())
                     .await
             }
         };
         match result {
-            Ok(()) => return Ok(true),
+            Ok(version) => {
+                if version.e_tag.is_some() || version.version.is_some() {
+                    let mut versions = repository.attributes.checkpoint_versions.lock().await;
+                    if versions.len() >= MAX_CACHED_COMMITS
+                        && !versions.contains_key(&checkpoint.slot)
+                    {
+                        versions.clear();
+                    }
+                    versions.insert(checkpoint.slot.clone(), (checkpoint.commit, version));
+                }
+                return Ok(true);
+            }
             Err(crab_storage::StorageError::StateConflict { .. }) => continue,
             Err(error) => return Err(error.into()),
         }
@@ -912,6 +940,83 @@ mod tests {
             0,
             PutAttributes::default(),
         )
+    }
+
+    fn checkpoint_repository(store: Store) -> Repository {
+        let config = serde_json::from_value(serde_json::json!({
+            "name": "repository",
+            "provider": "local",
+            "bucket": "memory",
+            "prefix": "checkpoint-test",
+        }))
+        .unwrap();
+        Repository::new(config, store).unwrap()
+    }
+
+    #[tokio::test]
+    async fn checkpoint_successors_do_not_read_the_confirmed_predecessor_body() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+
+        let reads = Arc::new(AtomicUsize::new(0));
+        let observed = Arc::clone(&reads);
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()))
+            .with_read_byte_observer(Arc::new(move |bytes| {
+                observed.fetch_add(bytes as usize, Ordering::Relaxed);
+            }));
+        let repository = checkpoint_repository(store.clone());
+        let mut manifest = Manifest::empty_complete();
+        let mut last = ObjectId::empty_tree(gix_hash::Kind::Sha1);
+        manifest.mark_checkpoint(last);
+        let first = prepare_checkpoint("refs/heads/main", last, &manifest)
+            .unwrap()
+            .unwrap();
+        assert!(publish_checkpoint(&repository, &first).await.unwrap());
+        reads.store(0, Ordering::Relaxed);
+
+        for index in 1..=3 {
+            last = ObjectId::from_hex(format!("{index:040x}").as_bytes()).unwrap();
+            manifest.mark_checkpoint(last);
+            let next = prepare_checkpoint("refs/heads/main", last, &manifest)
+                .unwrap()
+                .unwrap();
+            assert!(publish_checkpoint(&repository, &next).await.unwrap());
+        }
+
+        let read_bytes = reads.load(Ordering::Relaxed);
+        let path = checkpoint_slot_path(&repository.layout, &first.slot).unwrap();
+        let (bytes, _) = store
+            .get_with_etag_bounded(&path, MAX_MANIFEST_BYTES)
+            .await
+            .unwrap();
+        let stored = parse_checkpoint(&bytes).unwrap();
+        assert_eq!((read_bytes, stored.commit), (0, last.to_string()));
+    }
+
+    #[tokio::test]
+    async fn checkpoint_version_conflicts_revalidate_before_replacing_corrupt_state() {
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
+        let repository = checkpoint_repository(store.clone());
+        let mut manifest = Manifest::empty_complete();
+        let first = ObjectId::empty_tree(gix_hash::Kind::Sha1);
+        manifest.mark_checkpoint(first);
+        let prepared = prepare_checkpoint("refs/heads/main", first, &manifest)
+            .unwrap()
+            .unwrap();
+        assert!(publish_checkpoint(&repository, &prepared).await.unwrap());
+        let path = checkpoint_slot_path(&repository.layout, &prepared.slot).unwrap();
+        let corrupt = Bytes::from_static(b"corrupt checkpoint");
+        store.put_overwrite(&path, corrupt.clone()).await.unwrap();
+
+        manifest.mark_checkpoint(ObjectId::empty_blob(gix_hash::Kind::Sha1));
+        let next = prepare_checkpoint("refs/heads/main", manifest.checkpoint.unwrap(), &manifest)
+            .unwrap()
+            .unwrap();
+        let result = publish_checkpoint(&repository, &next).await;
+        let (remaining, _) = store
+            .get_with_etag_bounded(&path, MAX_MANIFEST_BYTES)
+            .await
+            .unwrap();
+        assert!(matches!(result, Err(crate::Error::Attributes { .. })) && remaining == corrupt);
     }
 
     #[test]
