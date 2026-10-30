@@ -22,6 +22,8 @@ use crate::git::push::{
 };
 use crate::git::remote_helper::PushSpec;
 
+mod shared_visibility;
+
 const POINTER_SCAN_ALLOCATION_BYTES: usize = 64 * 1024 * 1024;
 
 /// Publish one remote-helper push batch through per-ref capsule heads.
@@ -353,12 +355,26 @@ async fn run_inner(
     }
 
     let staging_snapshot = capture_staging_snapshot(staging, &prepared.pointers)?;
-    let visibility_delta = prepare_visibility_delta(
-        &common_git_dir,
-        &edits,
-        &fast_forward_refs,
-        prepared.visibility_objects.as_deref(),
-    )?;
+    // A shared graph can inspect a large physical history. Keep that blocking
+    // work off the async runtime so cancellation and lease supervision can run.
+    let visibility_git_dir = common_git_dir.clone();
+    let visibility_edits = edits.clone();
+    let visibility_fast_forwards = fast_forward_refs.clone();
+    let visibility_pack_objects = prepared.visibility_objects.clone();
+    let visibility_cancel = cancel.clone();
+    let visibility_delta = tokio::task::spawn_blocking(move || {
+        prepare_visibility_delta(
+            &visibility_git_dir,
+            &visibility_edits,
+            &visibility_fast_forwards,
+            visibility_pack_objects.as_deref(),
+            &visibility_cancel,
+        )
+    })
+    .await
+    .map_err(|error| {
+        CrabError::Internal(format!("Git visibility preparation worker failed: {error}"))
+    })??;
     tracing::debug!(
         git_packs = prepared.packs.len(),
         pointers = prepared.pointers.len(),
@@ -818,7 +834,9 @@ fn prepare_visibility_delta(
     edits: &[crab_metadata::capsule_protocol::CapsuleRefEdit],
     fast_forward_refs: &BTreeSet<String>,
     fast_forward_pack_objects: Option<&[gix_hash::ObjectId]>,
+    cancel: &CancellationToken,
 ) -> Result<Option<crab_metadata::capsule_protocol::CapsuleVisibilityDelta>> {
+    check_cancelled(cancel)?;
     let maximum = usize::try_from(crab_metadata::git_visibility::MAX_GIT_VISIBILITY_OBJECTS)
         .map_err(|_| CrabError::Internal("Git visibility limit does not fit usize".to_owned()))?;
     let rewritten_old_refs = edits
@@ -829,13 +847,32 @@ fn prepare_visibility_delta(
                 .map(|oid| (edit.ref_name().to_owned(), oid.to_owned()))
         })
         .collect();
-    let available_old_tips = locally_available_remote_tips(git_dir, &rewritten_old_refs)?;
+    let available_old_tips = locally_available_remote_tips(git_dir, &rewritten_old_refs)?
+        .into_iter()
+        .collect::<BTreeSet<_>>();
+    let mut shared = shared_visibility::prepare_replacements(
+        git_dir,
+        edits,
+        fast_forward_refs,
+        &available_old_tips,
+        cancel,
+    )?;
     let mut visibility = BTreeMap::new();
     for edit in edits {
+        check_cancelled(cancel)?;
         let Some(new_oid) = edit.new_oid() else {
             continue;
         };
-        let evidence = if let Some(pack_objects) = fast_forward_pack_objects
+        let evidence = if let Some(added) = shared.remove(edit.ref_name()) {
+            crab_metadata::git_visibility::GitVisibilityEdit {
+                version: crab_metadata::git_visibility::GIT_VISIBILITY_EDIT_VERSION,
+                old_oid: edit.expected_old().map(str::to_owned),
+                new_oid: new_oid.to_owned(),
+                replaces: true,
+                added,
+                removed: crab_metadata::git_visibility::GitVisibilityObjects::default(),
+            }
+        } else if let Some(pack_objects) = fast_forward_pack_objects
             && edits.len() == 1
             && fast_forward_refs.contains(edit.ref_name())
             && let Some(old_oid) = edit.expected_old()
@@ -851,8 +888,7 @@ fn prepare_visibility_delta(
                 Vec::new(),
             )
         } else if let Some(old_oid) = edit.expected_old()
-            && (fast_forward_refs.contains(edit.ref_name())
-                || available_old_tips.iter().any(|tip| tip == old_oid))
+            && (fast_forward_refs.contains(edit.ref_name()) || available_old_tips.contains(old_oid))
         {
             let added = super::push::enumerate_visibility_difference(
                 git_dir,

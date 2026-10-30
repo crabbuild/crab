@@ -805,9 +805,20 @@ Preparing pending controls caches only retention from the pinned checkpoint;
 unapplied controls cannot supply new bases. Ordinary point queries continue to
 use bounded pages without downloading the complete proof.
 
-This qualifies the transaction codec, point reads and bulk reconciliation.
-Native push preparation, layered checkpoint sharing, complete-index bulk import
-and the actual RustFS all-ref push still require integration and qualification.
+Native push prepares multiple complete replacement closures with one bounded
+physical Git graph. It verifies structural checksums, handles nested tags and
+non-commit roots, excludes gitlinks and preserves physical ancestry despite
+local replacements, grafts or shallow markers. It transposes memberships
+in blocks into exact pooled chunks without expanding per-ref OID strings. The
+single-ref pack-member and fast-forward delta paths remain available. Preparation
+runs on a blocking worker with cancellation checks so runtime supervision can
+continue. Pack admission still verifies the blob payloads.
+
+The retained fixture's production graph matches every OID and every membership
+bit from the independently native-qualified archive. This qualifies graph
+preparation, the transaction codec, point reads and bulk reconciliation.
+Layered checkpoint sharing, complete-index bulk import and the actual RustFS
+all-ref push still require integration and qualification.
 
 ### 10.4 Shallow, partial, and lazy fetch
 

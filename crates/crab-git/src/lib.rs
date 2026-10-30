@@ -22,6 +22,7 @@ pub mod ref_resolve;
 pub mod refname;
 pub mod reject_reason;
 pub mod repack;
+pub mod shared_visibility;
 pub mod tag;
 pub mod url;
 pub mod walk;
