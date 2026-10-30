@@ -4,6 +4,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use std::time::Instant;
 
 use bytes::Bytes;
 use crab_git::pack::VerifiedPackIdentity;
@@ -156,6 +157,7 @@ pub async fn publish_capsule_checkpoint(
     cancel: &CancellationToken,
 ) -> Result<CheckpointOutcome, CheckpointError> {
     check_cancelled(cancel)?;
+    let started = Instant::now();
     let root = crab_write::capsule_protocol::open_root(layout).await?;
     let limits = crab_read::capsule_protocol::CapsuleReadLimits {
         max_capsule_bytes: maximum_bytes,
@@ -163,6 +165,7 @@ pub async fn publish_capsule_checkpoint(
     };
     let view = crab_read::capsule_protocol::open_view_from_root_with_metadata(layout, root, limits)
         .await?;
+    checkpoint_phase("capture", started);
     publish_capsule_checkpoint_from_view(layout, &view, threshold, maximum_bytes, cancel).await
 }
 
@@ -380,11 +383,13 @@ pub async fn publish_capsule_checkpoint_from_view(
     if view.capsule_count()? < u64::from(threshold) {
         return Ok(CheckpointOutcome::default());
     }
+    let started = Instant::now();
     let catalog = CatalogWrite::Durable(
         prepare_capsule_catalog_from_view(layout, view, maximum_bytes)
             .await?
             .map(Box::new),
     );
+    checkpoint_phase("catalog", started);
     Ok(
         publish_checkpoint(layout, view, catalog, maximum_bytes, cancel)
             .await?
@@ -488,6 +493,7 @@ async fn publish_checkpoint(
     cancel: &CancellationToken,
 ) -> Result<CheckpointPublication, CheckpointError> {
     check_cancelled(cancel)?;
+    let started = Instant::now();
     let mut sources = checkpoint_sources(view);
     if sources.is_empty() {
         return Ok(CheckpointPublication::default());
@@ -518,6 +524,7 @@ async fn publish_checkpoint(
         member_oids.extend(consolidation.member_oids);
         work = consolidation.work;
     }
+    checkpoint_phase("source_admission", started);
     let mut publication = publish_layered_sources(
         layout,
         view,
@@ -629,12 +636,15 @@ async fn publish_layered_sources(
     maximum_bytes: u64,
     cancel: &CancellationToken,
 ) -> Result<CheckpointPublication, CheckpointError> {
+    let started = Instant::now();
     let visibility_index = view.git_visibility_index().await?;
+    checkpoint_phase("visibility_index", started);
     let generation = view.root().root().generation();
     let root_digest = view.root().digest();
     let mut work = CheckpointOutcome::default();
     let checkpoint = loop {
         check_cancelled(cancel)?;
+        let started = Instant::now();
         let catalog_digest = source_catalog_digest(&sources)?;
         let member_admission = layered_member_admission(
             &visibility_index,
@@ -647,6 +657,8 @@ async fn publish_layered_sources(
             &catalog_digest,
             member_admission,
         )?;
+        checkpoint_phase("visibility_snapshot", started);
+        let started = Instant::now();
         let checkpoint = match catalog.clone() {
             CatalogWrite::New(catalog) => LayeredCheckpoint::build(
                 generation,
@@ -663,6 +675,7 @@ async fn publish_layered_sources(
                 Some(visibility),
             ),
         };
+        checkpoint_phase("encode", started);
         match checkpoint {
             Ok(checkpoint) => break checkpoint,
             Err(crab_metadata::error::MetadataError::CheckpointFooterSize { bytes, maximum })
@@ -674,10 +687,12 @@ async fn publish_layered_sources(
             {
                 // A few member-heavy runs can exhaust the footer below its source
                 // count limit. Admit the replacement before any root publication.
+                let started = Instant::now();
                 let start = footer_admission_suffix_start(&sources, bytes, maximum)?;
                 let consolidation =
                     consolidate_layered_suffix(layout, view, sources, start, maximum_bytes, cancel)
                         .await?;
+                checkpoint_phase("footer_consolidation", started);
                 sources = consolidation.sources;
                 member_oids.extend(consolidation.member_oids);
                 work = work.combine(consolidation.work)?;
@@ -691,6 +706,7 @@ async fn publish_layered_sources(
         });
     }
     check_cancelled(cancel)?;
+    let started = Instant::now();
     let result = if view.visible_ref_transactions().is_empty() {
         crab_write::capsule_protocol::publish_layered_checkpoint(
             layout,
@@ -710,6 +726,7 @@ async fn publish_layered_sources(
         )
         .await
     };
+    checkpoint_phase("publish", started);
     let committed = match result {
         Ok(root) => Some((root, checkpoint)),
         Err(crab_write::WriteError::CapsuleRootChanged { .. }) => None,
@@ -717,6 +734,14 @@ async fn publish_layered_sources(
     };
     work.published = committed.is_some();
     Ok(CheckpointPublication { work, committed })
+}
+
+fn checkpoint_phase(phase: &'static str, started: Instant) {
+    tracing::info!(
+        phase,
+        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+        "Git checkpoint phase completed"
+    );
 }
 
 fn footer_admission_suffix_start(
