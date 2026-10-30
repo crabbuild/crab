@@ -4,6 +4,9 @@ use crate::git_visibility::{
     GIT_VISIBILITY_EDIT_VERSION, MAX_GIT_VISIBILITY_INDEX_BYTES, decode_oid, encode_oid,
 };
 use crate::pages::{Kind, PageRef, Writer};
+use crate::shared_visibility as shared;
+
+const SHARED_VERSION: u32 = 4;
 
 #[cfg(feature = "storage")]
 mod reader;
@@ -21,6 +24,8 @@ pub(crate) struct Descriptor {
     body_bytes: u64,
     body_hash: [u8; 32],
     refs: PageRef,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    shared: Option<shared::Descriptor>,
 }
 
 /// Authenticated scalar edit metadata and opaque added/removed set roots.
@@ -33,9 +38,24 @@ pub struct VisibilityEditHeader {
     replaces: bool,
     added: Option<PageRef>,
     removed: Option<PageRef>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    shared: Option<SharedEdits>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+struct SharedEdits {
+    binding: [u8; 32],
+    added: Option<shared::SetRoot>,
+    removed: Option<shared::SetRoot>,
 }
 
 pub(super) fn encode(delta: &CapsuleVisibilityDelta) -> Result<Bytes> {
+    if delta.edits.values().any(|edit| {
+        edit.added.shared_dictionary().is_some() || edit.removed.shared_dictionary().is_some()
+    }) {
+        return encode_shared(delta);
+    }
     // Admit encoded OID work before allocating row buffers. Ref headers and page
     // directories are checked against the same proof-byte ceiling after encoding.
     let minimum = delta.edits.iter().try_fold(0u64, |total, (_, edit)| {
@@ -57,6 +77,7 @@ pub(super) fn encode(delta: &CapsuleVisibilityDelta) -> Result<Bytes> {
             replaces: edit.replaces,
             added,
             removed,
+            shared: None,
         };
         let key = blake3::hash(name.as_bytes()).as_bytes().to_vec();
         let value = serde_json::to_vec(&row)
@@ -66,11 +87,57 @@ pub(super) fn encode(delta: &CapsuleVisibilityDelta) -> Result<Bytes> {
         }
     }
     let refs = writer.tree(Kind::VisibilityRefs, refs.into_iter().collect())?;
+    finish(writer, refs, None)
+}
+
+fn encode_shared(delta: &CapsuleVisibilityDelta) -> Result<Bytes> {
+    let prepared = shared::Prepared::new(
+        delta
+            .edits
+            .values()
+            .flat_map(|edit| [&edit.added, &edit.removed]),
+    )?;
+    let mut writer = Writer::default();
+    let (descriptor, sets) = prepared.encode(&mut writer)?;
+    let binding = descriptor.binding()?;
+    let mut sets = sets.into_iter();
+    let mut refs = BTreeMap::new();
+    for (name, edit) in &delta.edits {
+        let row = VisibilityEditHeader {
+            name: name.clone(),
+            old_oid: edit.old_oid.clone(),
+            new_oid: edit.new_oid.clone(),
+            replaces: edit.replaces,
+            added: None,
+            removed: None,
+            shared: Some(SharedEdits {
+                binding,
+                added: sets.next().expect("one added set per edit"),
+                removed: sets.next().expect("one removed set per edit"),
+            }),
+        };
+        let key = blake3::hash(name.as_bytes()).as_bytes().to_vec();
+        let value = serde_json::to_vec(&row)
+            .map_err(|source| MetadataError::CapsuleVisibilityRecord { source })?;
+        if refs.insert(key, value).is_some() {
+            return Err(contract_error("visibility ref-name hash collision"));
+        }
+    }
+    let refs = writer.tree(Kind::VisibilityRefs, refs.into_iter().collect())?;
+    finish(writer, refs, Some(descriptor))
+}
+
+fn finish(mut writer: Writer, refs: PageRef, shared: Option<shared::Descriptor>) -> Result<Bytes> {
     let descriptor = Descriptor {
-        version: VISIBILITY_DELTA_VERSION,
+        version: if shared.is_some() {
+            SHARED_VERSION
+        } else {
+            VISIBILITY_DELTA_VERSION
+        },
         body_bytes: writer.bytes.len() as u64,
         body_hash: *blake3::hash(&writer.bytes).as_bytes(),
         refs,
+        shared,
     };
     let header = serde_json::to_vec(&descriptor)
         .map_err(|error| MetadataError::CapsuleVisibilityRecord { source: error })?;
@@ -102,10 +169,34 @@ pub(super) fn decode(bytes: &[u8]) -> Result<CapsuleVisibilityDelta> {
         "capsule visibility refs",
         &mut visited,
     )?;
+    let mut shared_decode = descriptor
+        .shared
+        .as_ref()
+        .map(|shared| shared::Decoded::new(body, shared, &mut visited))
+        .transpose()?;
     let mut edits = BTreeMap::new();
     let mut change_bytes = 0u64;
     for (key, value) in refs {
-        let row = VisibilityEditHeader::decode(&key, &value, descriptor.body_bytes)?;
+        let row = VisibilityEditHeader::decode(&key, &value, &descriptor)?;
+        if let (Some(decoded), Some(shared_descriptor), Some(sets)) =
+            (&mut shared_decode, &descriptor.shared, &row.shared)
+        {
+            let added = decoded.set(body, shared_descriptor, sets.added.as_ref(), &mut visited)?;
+            let removed =
+                decoded.set(body, shared_descriptor, sets.removed.as_ref(), &mut visited)?;
+            let edit = GitVisibilityEdit {
+                version: GIT_VISIBILITY_EDIT_VERSION,
+                old_oid: row.old_oid,
+                new_oid: row.new_oid,
+                replaces: row.replaces,
+                added,
+                removed,
+            };
+            if edits.insert(row.name, edit).is_some() {
+                return Err(corrupt("visibility ref repeats"));
+            }
+            continue;
+        }
         let count = row.added.as_ref().map_or(0, |root| u64::from(root.count))
             + row.removed.as_ref().map_or(0, |root| u64::from(root.count));
         change_bytes = change_bytes
@@ -173,6 +264,12 @@ fn objects(
 }
 
 impl Descriptor {
+    fn supported(&self) -> bool {
+        matches!(
+            (self.version, self.shared.is_some()),
+            (VISIBILITY_DELTA_VERSION, false) | (SHARED_VERSION, true)
+        )
+    }
     pub(crate) fn decode(bytes: &[u8]) -> Result<Self> {
         if bytes.len() < TRAILER_BYTES
             || bytes.len() as u64 > MAX_GIT_VISIBILITY_INDEX_BYTES
@@ -194,7 +291,7 @@ impl Descriptor {
             .ok_or_else(|| corrupt("visibility descriptor range is invalid"))?;
         let descriptor: Self = serde_json::from_slice(&bytes[start..end])
             .map_err(|error| MetadataError::CapsuleVisibilityRecord { source: error })?;
-        if descriptor.version != VISIBILITY_DELTA_VERSION || descriptor.body_bytes != start as u64 {
+        if !descriptor.supported() || descriptor.body_bytes != start as u64 {
             return Err(corrupt(
                 "visibility descriptor version or body span is invalid",
             ));
@@ -206,7 +303,7 @@ impl Descriptor {
     pub(crate) fn validate_region(&self, length: u64) -> Result<()> {
         let header = serde_json::to_vec(self)
             .map_err(|source| MetadataError::CapsuleVisibilityRecord { source })?;
-        if self.version != VISIBILITY_DELTA_VERSION
+        if !self.supported()
             || header.len() > MAX_HEADER_BYTES
             || self
                 .body_bytes
@@ -218,6 +315,9 @@ impl Descriptor {
             return Err(corrupt(
                 "visibility descriptor differs from its section span",
             ));
+        }
+        if let Some(shared) = &self.shared {
+            shared.validate(self.body_bytes)?;
         }
         self.refs.validate(Kind::VisibilityRefs, self.body_bytes)?;
         if self.refs.count as usize > crate::git_visibility::MAX_GIT_VISIBILITY_REFS {
@@ -243,14 +343,32 @@ impl VisibilityEditHeader {
     }
     /// Return the exact authenticated added-set count.
     pub fn added_count(&self) -> u32 {
-        self.added.as_ref().map_or(0, |root| root.count)
+        self.shared.as_ref().map_or_else(
+            || self.added.as_ref().map_or(0, |root| root.count),
+            |sets| sets.added.as_ref().map_or(0, |root| root.count),
+        )
     }
     /// Return the exact authenticated removed-set count.
     pub fn removed_count(&self) -> u32 {
-        self.removed.as_ref().map_or(0, |root| root.count)
+        self.shared.as_ref().map_or_else(
+            || self.removed.as_ref().map_or(0, |root| root.count),
+            |sets| sets.removed.as_ref().map_or(0, |root| root.count),
+        )
     }
     /// Compare rooted addition identities without treating locations as identities.
     pub fn same_additions(&self, other: &Self) -> bool {
+        match (&self.shared, &other.shared) {
+            (Some(a), Some(b)) => {
+                return a.binding == b.binding
+                    && match (&a.added, &b.added) {
+                        (None, None) => true,
+                        (Some(a), Some(b)) => a.same(b),
+                        _ => false,
+                    };
+            }
+            (None, None) => {}
+            _ => return false,
+        }
         match (&self.added, &other.added) {
             (None, None) => true,
             (Some(a), Some(b)) => {
@@ -267,7 +385,7 @@ impl VisibilityEditHeader {
 }
 
 impl VisibilityEditHeader {
-    fn decode(key: &[u8], bytes: &[u8], body_bytes: u64) -> Result<Self> {
+    fn decode(key: &[u8], bytes: &[u8], descriptor: &Descriptor) -> Result<Self> {
         let row: Self = serde_json::from_slice(bytes)
             .map_err(|error| MetadataError::CapsuleVisibilityRecord { source: error })?;
         if !row.name.starts_with("refs/")
@@ -280,6 +398,37 @@ impl VisibilityEditHeader {
             decode_oid(old)?;
         }
         decode_oid(&row.new_oid)?;
+        if let Some(shared_descriptor) = &descriptor.shared {
+            let sets = row
+                .shared
+                .as_ref()
+                .ok_or_else(|| corrupt("shared visibility header has no sets"))?;
+            if row.added.is_some()
+                || row.removed.is_some()
+                || sets.binding != shared_descriptor.binding()?
+            {
+                return Err(corrupt(
+                    "shared visibility header has mixed or unbound roots",
+                ));
+            }
+            let count = sets.added.as_ref().map_or(0, |root| u64::from(root.count))
+                + sets
+                    .removed
+                    .as_ref()
+                    .map_or(0, |root| u64::from(root.count));
+            if count > crate::git_visibility::MAX_GIT_VISIBILITY_OBJECTS
+                || (row.replaces && (sets.removed.is_some() || sets.added.is_none()))
+            {
+                return Err(corrupt("shared visibility edit counts are invalid"));
+            }
+            for root in [&sets.added, &sets.removed].into_iter().flatten() {
+                root.validate(shared_descriptor, descriptor.body_bytes)?;
+            }
+            return Ok(row);
+        }
+        if row.shared.is_some() {
+            return Err(corrupt("legacy visibility header contains shared roots"));
+        }
         let count = row.added.as_ref().map_or(0, |root| u64::from(root.count))
             + row.removed.as_ref().map_or(0, |root| u64::from(root.count));
         if count > crate::git_visibility::MAX_GIT_VISIBILITY_OBJECTS
@@ -288,7 +437,7 @@ impl VisibilityEditHeader {
             return Err(corrupt("visibility edit counts are invalid"));
         }
         for root in [&row.added, &row.removed].into_iter().flatten() {
-            root.validate(Kind::VisibilityChanges, body_bytes)?;
+            root.validate(Kind::VisibilityChanges, descriptor.body_bytes)?;
         }
         Ok(row)
     }
@@ -378,6 +527,7 @@ mod tests {
             replaces: false,
             added: Some(changes.clone()),
             removed: Some(changes),
+            shared: None,
         };
         let refs = writer
             .tree(
@@ -393,6 +543,7 @@ mod tests {
             body_bytes: 0,
             body_hash: [0; 32],
             refs,
+            shared: None,
         };
         assert!(decode(&wire(writer.bytes, descriptor)).is_err());
     }
@@ -427,5 +578,136 @@ mod tests {
             let expected = CapsuleVisibilityDelta::new(BTreeMap::from([("refs/heads/main".into(),edit)])).unwrap();
             proptest::prop_assert_eq!(decode(&encode(&expected).unwrap()).unwrap(),expected);
         }
+    }
+
+    fn shared_fixture(first: u8) -> CapsuleVisibilityDelta {
+        use crate::git_visibility::{
+            GitVisibilityDictionary, GitVisibilityObjects, VISIBILITY_CHUNK_BYTES,
+        };
+        use std::sync::Arc;
+        let dictionary = GitVisibilityDictionary::new(vec![
+            format!("{first:040x}"),
+            format!("{:040x}", first + 1),
+        ])
+        .unwrap();
+        let mut bits = [0; VISIBILITY_CHUNK_BYTES];
+        bits[0] = 3;
+        let objects =
+            GitVisibilityObjects::from_shared_chunks(dictionary, vec![Arc::new(bits)]).unwrap();
+        CapsuleVisibilityDelta::new(
+            [("refs/heads/a", first), ("refs/heads/b", first + 1)]
+                .into_iter()
+                .map(|(name, tip)| {
+                    (
+                        name.into(),
+                        GitVisibilityEdit {
+                            version: GIT_VISIBILITY_EDIT_VERSION,
+                            old_oid: None,
+                            new_oid: format!("{tip:040x}"),
+                            replaces: true,
+                            added: objects.clone(),
+                            removed: GitVisibilityObjects::default(),
+                        },
+                    )
+                })
+                .collect(),
+        )
+        .unwrap()
+    }
+    #[test]
+    fn shared_codec_rejects_mixed_versions_unclaimed_bytes_and_unbound_headers() {
+        let delta = shared_fixture(1);
+        let bytes = delta.encode().unwrap();
+        let descriptor = Descriptor::decode(&bytes).unwrap();
+        let body = &bytes[..descriptor.body_bytes as usize];
+        assert_eq!(decode(&bytes).unwrap(), delta);
+        let rows = crate::pages::scan(
+            body,
+            &descriptor.refs,
+            Kind::VisibilityRefs,
+            "test",
+            &mut BTreeMap::new(),
+        )
+        .unwrap();
+        let (key, value) = &rows[0];
+        let row = VisibilityEditHeader::decode(key, value, &descriptor).unwrap();
+        for mutation in ["binding", "absent", "mixed", "zero_count"] {
+            let mut changed = row.clone();
+            match mutation {
+                "binding" => changed.shared.as_mut().unwrap().binding[0] ^= 1,
+                "absent" => changed.shared = None,
+                "mixed" => changed.added = Some(descriptor.refs.clone()),
+                "zero_count" => {
+                    changed
+                        .shared
+                        .as_mut()
+                        .unwrap()
+                        .added
+                        .as_mut()
+                        .unwrap()
+                        .count = 0
+                }
+                _ => unreachable!(),
+            }
+            assert!(
+                VisibilityEditHeader::decode(
+                    key,
+                    &serde_json::to_vec(&changed).unwrap(),
+                    &descriptor
+                )
+                .is_err(),
+                "{mutation}"
+            );
+        }
+        let mut version = descriptor.clone();
+        version.version = VISIBILITY_DELTA_VERSION;
+        assert!(decode(&wire(body.to_vec(), version)).is_err());
+        let mut missing = descriptor.clone();
+        missing.shared = None;
+        assert!(decode(&wire(body.to_vec(), missing)).is_err());
+        let mut extra = body.to_vec();
+        extra.push(0);
+        assert!(decode(&wire(extra, descriptor)).is_err());
+    }
+    #[cfg(feature = "storage")]
+    #[test]
+    fn equal_local_chunk_numbers_do_not_make_different_oid_dictionaries_equal_sets() {
+        let headers = |delta: &CapsuleVisibilityDelta| {
+            let bytes = delta.encode().unwrap();
+            let descriptor = Descriptor::decode(&bytes).unwrap();
+            crate::pages::scan(
+                &bytes[..descriptor.body_bytes as usize],
+                &descriptor.refs,
+                Kind::VisibilityRefs,
+                "test",
+                &mut BTreeMap::new(),
+            )
+            .unwrap()
+            .into_iter()
+            .map(|(key, value)| VisibilityEditHeader::decode(&key, &value, &descriptor).unwrap())
+            .collect::<Vec<_>>()
+        };
+        let a = headers(&shared_fixture(1));
+        let b = headers(&shared_fixture(3));
+        assert!(a[0].same_additions(&a[1]));
+        assert_eq!(
+            a[0].shared
+                .as_ref()
+                .unwrap()
+                .added
+                .as_ref()
+                .unwrap()
+                .root
+                .hash,
+            b[0].shared
+                .as_ref()
+                .unwrap()
+                .added
+                .as_ref()
+                .unwrap()
+                .root
+                .hash
+        );
+        assert!(!a[0].same_additions(&b[0]));
     }
 }

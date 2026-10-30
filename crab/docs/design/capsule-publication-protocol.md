@@ -774,6 +774,32 @@ passed; the remaining wall time was local Git negotiation/indexing, not a
 repository-wide object-store walk. A true full clone, shallow/deepen request,
 filter, or incomplete transition proof still uses its strict bounded fallback.
 
+#### Shared transaction visibility sets
+
+Visibility schema 4 represents large multi-ref changes with one sorted OID
+dictionary, a canonical pool of 1,024-bit membership chunks, and exact set roots
+for each ref's added and removed objects. Small sets use sparse ordinals. The
+forward and reverse dictionary pages bind each ordinal to exactly one OID;
+point reads check both directions before using a membership bit. Set identity
+includes the dictionary and chunk-pool roots, so equal local chunk numbers in
+different capsules cannot authorize the same objects implicitly.
+
+Complete decoding checks counts, padding, ordering, disjoint changes and new-tip
+membership, then requires canonical re-encoding. Dictionaries, chunks and
+repeated sets share immutable ownership. Sparse sets remain sparse when decoded.
+Both cold and cached point reads charge the same bounded page-work budget and
+preserve absent-ref results, OID misses, request order and duplicates.
+
+The existing schema-3 encoder and its expanded-work bound remain in place for
+list-based changes. Shared changes select schema 4; both readers enforce the
+same 128 MiB encoded ceiling. The retained `git/git` fixture covers 4,380 refs
+and 854,492 distinct objects. Its complete transaction visibility section is
+126,570,956 bytes and round-trips every canonical OID in every ref closure.
+
+This qualifies the transaction codec and its point-read path. Native push
+preparation, layered checkpoint sharing, bulk visibility reconciliation and
+the actual RustFS all-ref push still require integration and qualification.
+
 ### 10.4 Shallow, partial, and lazy fetch
 
 Shallow fetch applies Git's requested history boundaries before pack

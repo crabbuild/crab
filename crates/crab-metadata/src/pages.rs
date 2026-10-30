@@ -76,6 +76,11 @@ pub(crate) enum Kind {
     RunCatalogXorbs = 28,
     RunCatalogChunks = 29,
     CapsuleChunkHints = 30,
+    VisibilityDictionary = 31,
+    VisibilityOrdinals = 32,
+    VisibilityChunkPool = 33,
+    VisibilitySetChunks = 34,
+    VisibilitySparseSet = 35,
 }
 
 impl Kind {
@@ -87,7 +92,10 @@ impl Kind {
             | Self::CommitAncestryRoots
             | Self::RunAdmissionCounts
             | Self::CheckpointTransitions
-            | Self::CatalogXorbChunks => true,
+            | Self::CatalogXorbChunks
+            | Self::VisibilityOrdinals
+            | Self::VisibilityChunkPool
+            | Self::VisibilitySetChunks => true,
             #[cfg(feature = "remote-index")]
             Self::PackSlots => true,
             _ => false,
@@ -113,7 +121,8 @@ impl Kind {
             | Self::RunAdmission
             | Self::VisibilityChanges
             | Self::CheckpointObjects
-            | Self::CheckpointSets => 20,
+            | Self::CheckpointSets
+            | Self::VisibilityDictionary => 20,
             #[cfg(feature = "remote-index")]
             Self::PackInventory => 32,
             #[cfg(feature = "remote-index")]
@@ -380,7 +389,7 @@ pub(crate) fn decode(
         #[cfg(feature = "remote-index")]
         Kind::ObjectLocators | Kind::PackOffsets | Kind::PackInventory | Kind::PackSlots => "git_object_index",
         Kind::RunAdmission | Kind::RunAdmissionCounts => "capsule_admission",
-        Kind::VisibilityRefs | Kind::VisibilityChanges => "capsule_visibility",
+        Kind::VisibilityRefs | Kind::VisibilityChanges | Kind::VisibilityDictionary | Kind::VisibilityOrdinals | Kind::VisibilityChunkPool | Kind::VisibilitySetChunks | Kind::VisibilitySparseSet => "capsule_visibility",
         Kind::CheckpointObjects | Kind::CheckpointRefs | Kind::CheckpointSets | Kind::CheckpointTransitions => "checkpoint_visibility_pages",
         Kind::CatalogFiles | Kind::CatalogShards | Kind::CatalogXorbs | Kind::CatalogChunks | Kind::CatalogXorbChunks | Kind::CatalogShardXorbs | Kind::RunCatalogFiles | Kind::RunCatalogShards | Kind::RunCatalogXorbs | Kind::RunCatalogChunks => "pointer_catalog_pages",
         _ => "path_state",

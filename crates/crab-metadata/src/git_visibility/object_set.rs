@@ -8,6 +8,11 @@ use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::SerializeSeq}
 pub const VISIBILITY_CHUNK_BYTES: usize = 128;
 const CHUNK_BITS: usize = VISIBILITY_CHUNK_BYTES * 8;
 
+pub(crate) type SharedVisibilityParts<'a> = (
+    &'a Arc<GitVisibilityDictionary>,
+    &'a [Arc<[u8; VISIBILITY_CHUNK_BYTES]>],
+);
+
 /// A sorted, validated dictionary that can be shared across one visibility transaction.
 #[derive(Debug, PartialEq, Eq)]
 pub struct GitVisibilityDictionary {
@@ -15,6 +20,10 @@ pub struct GitVisibilityDictionary {
 }
 
 impl GitVisibilityDictionary {
+    pub(crate) fn objects(&self) -> &[String] {
+        &self.objects
+    }
+
     /// Validate canonical OIDs once before any memberships can borrow this dictionary.
     pub fn new(objects: Vec<String>) -> Result<Arc<Self>> {
         if objects.len() as u64 > MAX_GIT_VISIBILITY_OBJECTS {
@@ -28,7 +37,7 @@ impl GitVisibilityDictionary {
 #[derive(Debug, Clone)]
 struct Shared {
     dictionary: Arc<GitVisibilityDictionary>,
-    chunks: Vec<Arc<[u8; VISIBILITY_CHUNK_BYTES]>>,
+    chunks: Arc<[Arc<[u8; VISIBILITY_CHUNK_BYTES]>]>,
     count: usize,
 }
 
@@ -44,6 +53,10 @@ pub struct GitVisibilityObjects(Storage);
 enum Storage {
     List(Vec<String>),
     Shared(Shared),
+    Sparse {
+        dictionary: Arc<GitVisibilityDictionary>,
+        positions: Arc<[u32]>,
+    },
 }
 
 impl GitVisibilityObjects {
@@ -78,9 +91,63 @@ impl GitVisibilityObjects {
             .sum();
         Ok(Self(Storage::Shared(Shared {
             dictionary,
-            chunks,
+            chunks: chunks.into(),
             count,
         })))
+    }
+
+    /// Admit canonical sparse ordinals without allocating a dictionary-sized bitmap.
+    pub fn from_shared_ordinals(
+        dictionary: Arc<GitVisibilityDictionary>,
+        positions: Vec<u32>,
+    ) -> Result<Self> {
+        if positions.windows(2).any(|pair| pair[0] >= pair[1])
+            || positions
+                .last()
+                .is_some_and(|position| *position as usize >= dictionary.objects.len())
+        {
+            return Err(corrupt(
+                "sparse visibility ordinals are unordered or outside their dictionary",
+            ));
+        }
+        Ok(Self(Storage::Sparse {
+            dictionary,
+            positions: positions.into(),
+        }))
+    }
+
+    pub(crate) fn sharing_identity(&self) -> Option<(usize, usize, usize)> {
+        match &self.0 {
+            Storage::List(_) => None,
+            Storage::Shared(set) => Some((
+                Arc::as_ptr(&set.dictionary) as usize,
+                set.chunks.as_ptr() as usize,
+                set.chunks.len(),
+            )),
+            Storage::Sparse {
+                dictionary,
+                positions,
+            } => Some((
+                Arc::as_ptr(dictionary) as usize,
+                positions.as_ptr() as usize,
+                positions.len(),
+            )),
+        }
+    }
+
+    pub(crate) fn shared_dictionary(&self) -> Option<&Arc<GitVisibilityDictionary>> {
+        match &self.0 {
+            Storage::List(_) => None,
+            Storage::Shared(set) => Some(&set.dictionary),
+            Storage::Sparse { dictionary, .. } => Some(dictionary),
+        }
+    }
+
+    pub(crate) fn shared_parts(&self) -> Option<SharedVisibilityParts<'_>> {
+        match &self.0 {
+            Storage::List(_) | Storage::Sparse { .. } => None,
+            Storage::Shared(set) => Some((&set.dictionary, &set.chunks)),
+        }
     }
 
     #[must_use]
@@ -88,6 +155,7 @@ impl GitVisibilityObjects {
         match &self.0 {
             Storage::List(objects) => objects.len(),
             Storage::Shared(set) => set.count,
+            Storage::Sparse { positions, .. } => positions.len(),
         }
     }
 
@@ -100,6 +168,13 @@ impl GitVisibilityObjects {
     pub fn iter(&self) -> GitVisibilityObjectIter<'_> {
         GitVisibilityObjectIter(match &self.0 {
             Storage::List(objects) => Iter::List(objects.iter()),
+            Storage::Sparse {
+                dictionary,
+                positions,
+            } => Iter::Sparse {
+                dictionary,
+                positions: positions.iter(),
+            },
             Storage::Shared(set) => Iter::Shared {
                 set,
                 byte: 0,
@@ -115,6 +190,13 @@ impl GitVisibilityObjects {
             Storage::List(objects) => objects
                 .binary_search_by(|value| value.as_str().cmp(oid))
                 .is_ok(),
+            Storage::Sparse {
+                dictionary,
+                positions,
+            } => dictionary
+                .objects
+                .binary_search_by(|value| value.as_str().cmp(oid))
+                .is_ok_and(|position| positions.binary_search(&(position as u32)).is_ok()),
             Storage::Shared(set) => set
                 .dictionary
                 .objects
@@ -131,6 +213,19 @@ impl GitVisibilityObjects {
     pub fn binary_search(&self, oid: &str) -> std::result::Result<usize, usize> {
         match &self.0 {
             Storage::List(objects) => objects.binary_search_by(|value| value.as_str().cmp(oid)),
+            Storage::Sparse {
+                dictionary,
+                positions,
+            } => {
+                let index = dictionary
+                    .objects
+                    .binary_search_by(|value| value.as_str().cmp(oid));
+                let rank = positions.binary_search(&(index.unwrap_or_else(|index| index) as u32));
+                match (index, rank) {
+                    (Ok(_), Ok(rank)) => Ok(rank),
+                    (_, Ok(rank) | Err(rank)) => Err(rank),
+                }
+            }
             Storage::Shared(set) => {
                 let dictionary_position = set
                     .dictionary
@@ -165,7 +260,7 @@ impl GitVisibilityObjects {
             Storage::List(objects) => validate_sorted_oids(objects.iter(), field),
             // Construction proved dictionary order, all ordinals and padding. Both
             // the dictionary and chunks are immutable and privately retained.
-            Storage::Shared(_) => Ok(()),
+            Storage::Shared(_) | Storage::Sparse { .. } => Ok(()),
         }
     }
 
@@ -179,11 +274,15 @@ impl GitVisibilityObjects {
             return a
                 .chunks
                 .iter()
-                .zip(&b.chunks)
+                .zip(b.chunks.iter())
                 .all(|(a, b)| a.iter().zip(b.iter()).all(|(a, b)| a & b == 0));
         }
         // Lists may not yet be validated. Callers validate before comparing sets.
-        self.iter().all(|oid| !other.contains(oid))
+        if self.len() <= other.len() {
+            self.iter().all(|oid| !other.contains(oid))
+        } else {
+            other.iter().all(|oid| !self.contains(oid))
+        }
     }
 }
 
@@ -218,6 +317,10 @@ impl<const N: usize> PartialEq<[String; N]> for GitVisibilityObjects {
 pub struct GitVisibilityObjectIter<'a>(Iter<'a>);
 enum Iter<'a> {
     List(std::slice::Iter<'a, String>),
+    Sparse {
+        dictionary: &'a GitVisibilityDictionary,
+        positions: std::slice::Iter<'a, u32>,
+    },
     Shared {
         set: &'a Shared,
         byte: usize,
@@ -230,6 +333,12 @@ impl<'a> Iterator for GitVisibilityObjectIter<'a> {
     fn next(&mut self) -> Option<Self::Item> {
         match &mut self.0 {
             Iter::List(objects) => objects.next(),
+            Iter::Sparse {
+                dictionary,
+                positions,
+            } => positions
+                .next()
+                .map(|position| &dictionary.objects[*position as usize]),
             Iter::Shared {
                 set,
                 byte,
@@ -251,6 +360,7 @@ impl<'a> Iterator for GitVisibilityObjectIter<'a> {
     fn size_hint(&self) -> (usize, Option<usize>) {
         let remaining = match &self.0 {
             Iter::List(objects) => objects.len(),
+            Iter::Sparse { positions, .. } => positions.len(),
             Iter::Shared { remaining, .. } => *remaining,
         };
         (remaining, Some(remaining))
@@ -343,6 +453,36 @@ mod tests {
             );
         }
     }
+    #[test]
+    fn sparse_ordinals_match_bitmap_and_list_without_dictionary_sized_storage() {
+        let dictionary = dictionary(2051);
+        let positions = vec![0, 7, 8, 1023, 1024, 2048, 2050];
+        let sparse =
+            GitVisibilityObjects::from_shared_ordinals(dictionary.clone(), positions.clone())
+                .unwrap();
+        let bitmap = objects(
+            dictionary.clone(),
+            &positions
+                .iter()
+                .map(|position| *position as usize)
+                .collect::<Vec<_>>(),
+        );
+        assert_eq!(sparse, bitmap);
+        assert_eq!(sparse.iter().len(), positions.len());
+        assert!(sparse.shared_parts().is_none());
+        assert_eq!(sparse.sharing_identity(), sparse.clone().sharing_identity());
+        for position in 0..2053 {
+            let oid = format!("{position:040x}");
+            assert_eq!(sparse.binary_search(&oid), bitmap.binary_search(&oid));
+            assert_eq!(sparse.contains(&oid), bitmap.contains(&oid));
+        }
+        for invalid in [vec![2, 1], vec![1, 1], vec![2051]] {
+            assert!(
+                GitVisibilityObjects::from_shared_ordinals(dictionary.clone(), invalid).is_err()
+            );
+        }
+    }
+
     #[test]
     fn empty_and_exact_chunk_dictionaries_have_no_padding_alias() {
         let empty = objects(dictionary(0), &[]);
