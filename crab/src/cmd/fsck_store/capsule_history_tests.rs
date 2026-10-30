@@ -435,6 +435,57 @@ impl StorageObserver for SourceReads {
 }
 
 #[tokio::test]
+async fn paged_checker_verifies_current_and_historical_source_bodies_once() {
+    for corrupt in [false, true] {
+        let (layout, mut root, run) = history_fixture().await;
+        let source = PackSourceDescriptor::from_capsule_run(&run).unwrap();
+        for _ in 0..2 {
+            root = checkpoint(
+                &layout,
+                root,
+                source.clone(),
+                run_pointer(&run, run.newest_base_root_digest()),
+                PointerCatalog::new(),
+            )
+            .await;
+        }
+        if corrupt {
+            // Preserve authenticated controls; only the unrequested pack body
+            // changes, so a successful paged capture cannot certify integrity.
+            let mut bytes = run.bytes().to_vec();
+            bytes[source.members()[0].pack().offset() as usize] ^= 1;
+            layout
+                .store()
+                .inner()
+                .put(&layout.capsule_path(run.hash()), Bytes::from(bytes).into())
+                .await
+                .unwrap();
+        }
+        crab_read::capsule_protocol::open_git_view_from_root(
+            &layout,
+            root.clone(),
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: MAX_FSCK_CAPSULE_BYTES,
+                max_frontier_bytes: MAX_FSCK_FRONTIER_BYTES,
+            },
+        )
+        .await
+        .unwrap();
+        let reads = Arc::new(SourceReads {
+            size: run.bytes().len() as u64,
+            count: AtomicUsize::new(0),
+        });
+        let store =
+            Store::from_storage(layout.store().clone().with_storage_observer(reads.clone()));
+        let result =
+            StoreChecker::for_capsule_repository(store, layout.repo_prefix().to_owned(), root)
+                .await;
+        assert_eq!(result.is_err(), corrupt);
+        assert_eq!(reads.count.load(Ordering::Relaxed), 1);
+    }
+}
+
+#[tokio::test]
 async fn retained_checkpoints_and_run_pointers_read_shared_source_once() {
     let (layout, mut root, run) = history_fixture().await;
     for _ in 0..3 {

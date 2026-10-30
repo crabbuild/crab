@@ -126,7 +126,9 @@ impl StoreChecker {
             router.repo_prefix().to_owned(),
             router.global_prefix().to_owned(),
         );
-        let view = crab_read::capsule_protocol::open_view_from_root(
+        // Reconcile exact visibility through authenticated pages. Expanding every
+        // ref closure here repeats shared history before any integrity phase runs.
+        let view = crab_read::capsule_protocol::open_git_view_from_root(
             &layout,
             root,
             crab_read::capsule_protocol::CapsuleReadLimits {
@@ -143,7 +145,23 @@ impl StoreChecker {
             .await?
             .finish(Ok::<_, crab_metadata::error::MetadataError>(()))
             .await?;
-        let source_lifetime = verify_capsule_history(&layout, view.root().root()).await?;
+        let sources = view
+            .layered_checkpoint()
+            .into_iter()
+            .flat_map(|checkpoint| checkpoint.sources())
+            .chain(view.capsule_run_sources())
+            .cloned()
+            .collect::<Vec<_>>();
+        // A paged capture does not read pack bodies. Verify current and retained
+        // sources together before constructing the checker, including every run
+        // pointer binding, without reading shared immutable bodies repeatedly.
+        let source_lifetime = verify_capsule_sources(
+            &layout,
+            view.root().root(),
+            view.capsule_run_pointers(),
+            &sources,
+        )
+        .await?;
         Ok(Self {
             store,
             prefix,
@@ -215,7 +233,7 @@ impl StoreChecker {
             self.router.global_prefix().to_owned(),
         );
         let current = crab_write::capsule_protocol::open_root(&layout).await?;
-        let current = crab_read::capsule_protocol::open_view_from_root_with_control(
+        let current = crab_read::capsule_protocol::open_git_view_from_root(
             &layout,
             current,
             crab_read::capsule_protocol::CapsuleReadLimits {
@@ -888,9 +906,19 @@ impl StoreChecker {
     }
 }
 
+#[cfg(test)]
 async fn verify_capsule_history(
     layout: &crab_storage::StoreLayout<crab_storage::Store>,
     root: &crab_metadata::capsule_protocol::RepositoryRoot,
+) -> Result<crab_metadata::capsule_protocol::RetainedCapsuleSources> {
+    verify_capsule_sources(layout, root, &[], &[]).await
+}
+
+async fn verify_capsule_sources(
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    root: &crab_metadata::capsule_protocol::RepositoryRoot,
+    current_runs: &[crab_metadata::capsule_protocol::CapsulePointer],
+    current_sources: &[crab_metadata::capsule_protocol::PackSourceDescriptor],
 ) -> Result<crab_metadata::capsule_protocol::RetainedCapsuleSources> {
     let segments = match root.history() {
         Some(history) => {
@@ -906,6 +934,22 @@ async fn verify_capsule_history(
     };
     let mut checkpoints = BTreeMap::new();
     let mut runs = BTreeMap::new();
+    if let Some(pointer) = root.checkpoint() {
+        insert_history_pointer(
+            &mut checkpoints,
+            pointer.hash(),
+            pointer.clone(),
+            "current checkpoint",
+        )?;
+    }
+    for pointer in current_runs {
+        insert_history_pointer(
+            &mut runs,
+            pointer.hash(),
+            pointer.clone(),
+            "current capsule run",
+        )?;
+    }
     let heads = layout
         .store()
         .list_prefix(&layout.capsule_source_heads_prefix())
@@ -930,6 +974,22 @@ async fn verify_capsule_history(
         }
     }
     let mut sources = BTreeMap::new();
+    for source in current_sources {
+        let path = match source.kind() {
+            crab_metadata::capsule_protocol::PackSourceKind::CapsuleRun => {
+                layout.capsule_path(source.object_hash())
+            }
+            crab_metadata::capsule_protocol::PackSourceKind::PackLayer => {
+                layout.capsule_pack_layer_path(source.object_hash())
+            }
+        };
+        insert_history_pointer(
+            &mut sources,
+            path.as_ref(),
+            source.clone(),
+            "current pack source",
+        )?;
+    }
     let stop = std::sync::atomic::AtomicBool::new(false);
     let mut checkpoints = futures_util::stream::iter(checkpoints.into_values())
         .take_while(|_| {
