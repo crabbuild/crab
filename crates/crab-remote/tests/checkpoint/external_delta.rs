@@ -536,6 +536,20 @@ async fn suffix_aliases_keep_an_acyclic_pack_when_the_full_anchor_is_stable() {
     publish_dependent_blob(&layout, "changed", &base, &changed).await;
     publish_dependent_blob(&layout, "revisited", &changed, &base).await;
     let before = checkpoint(&layout).await;
+    let deferred = crab_remote::checkpoint::repack_capsule_checkpoint_from_root_with_scratch_limit(
+        &layout,
+        before.root_snapshot().clone(),
+        LIMIT,
+        64 * 1024 * 1024,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !deferred.published,
+        "cyclic aliases still require a verified rewrite"
+    );
+    assert_eq!(view(&layout).await.root().digest(), before.root().digest());
     crab_remote::checkpoint::repack_capsule_checkpoint_from_root(
         &layout,
         before.root_snapshot().clone(),
