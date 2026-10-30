@@ -306,6 +306,7 @@ jobs:
             crab/scripts/e2e/test_s3_gateway_qualification_report.py \
             crab/scripts/e2e/test_s3_gateway_workload.py \
             crab/scripts/e2e/test_s3_gateway_ecosystem.py
+          python3 -B -m unittest crab/scripts/e2e/test_s3_gateway_orphan_cleanup.py
           python3 -B crab/scripts/e2e/s3_gateway_boto3.py --help >/dev/null
           python3 -B crab/scripts/e2e/s3_gateway_ecosystem.py --help >/dev/null
 
