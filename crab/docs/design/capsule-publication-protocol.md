@@ -796,9 +796,18 @@ same 128 MiB encoded ceiling. The retained `git/git` fixture covers 4,380 refs
 and 854,492 distinct objects. Its complete transaction visibility section is
 126,570,956 bytes and round-trips every canonical OID in every ref closure.
 
-This qualifies the transaction codec and its point-read path. Native push
-preparation, layered checkpoint sharing, bulk visibility reconciliation and
-the actual RustFS all-ref push still require integration and qualification.
+Bulk captured reconciliation admits the complete shared proof once through the
+same canonical decoder, then reuses its immutable memberships. It accounts for
+the union dictionary once per proof, while still checking each edit's old tip,
+new tip and removals against that ref's captured closure. Retained dictionary
+objects never grant ref membership, including after removal or ref deletion.
+Preparing pending controls caches only retention from the pinned checkpoint;
+unapplied controls cannot supply new bases. Ordinary point queries continue to
+use bounded pages without downloading the complete proof.
+
+This qualifies the transaction codec, point reads and bulk reconciliation.
+Native push preparation, layered checkpoint sharing, complete-index bulk import
+and the actual RustFS all-ref push still require integration and qualification.
 
 ### 10.4 Shallow, partial, and lazy fetch
 

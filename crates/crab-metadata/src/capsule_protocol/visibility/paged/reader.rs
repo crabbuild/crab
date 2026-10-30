@@ -196,6 +196,91 @@ impl CapsuleVisibilityReader {
         Ok(self.complete.get_or_init(|| delta).clone())
     }
 
+    /// Validate the complete compact shared proof once for bulk reconciliation.
+    /// Canonical decoding proves that this dictionary is exactly the union of
+    /// the edit sets. Merely scanning dictionary pages cannot prove that fact.
+    pub(crate) async fn prepare_reconciliation(
+        &self,
+        store: &Store,
+    ) -> Result<
+        Option<(
+            [u8; 32],
+            std::sync::Arc<crate::git_visibility::GitVisibilityDictionary>,
+        )>,
+    > {
+        let Some(shared) = &self.descriptor.shared else {
+            return Ok(None);
+        };
+        let delta = self.materialize(store).await?;
+        let dictionary = delta
+            .edits()
+            .values()
+            .find_map(|edit| edit.added.shared_dictionary())
+            .ok_or_else(|| corrupt("decoded shared proof has no dictionary"))?;
+        let identity = shared.dictionary.as_ref().map_or([0; 32], |root| root.hash);
+        Ok(Some((identity, dictionary.clone())))
+    }
+
+    // Bulk reconciliation has already admitted and canonically decoded the
+    // complete shared proof. Reuse exact immutable sets rather than rereading
+    // its dictionaries per ref. Ordinary point reads retain their page budget.
+    pub(crate) async fn lookup_reconciled(
+        &self,
+        store: &Store,
+        name: &str,
+        oids: &[[u8; 20]],
+    ) -> Result<Option<Vec<Option<VisibilityChange>>>> {
+        if self.descriptor.shared.is_some()
+            && let Some(delta) = self.complete.get()
+        {
+            let Some(edit) = delta.edits().get(name) else {
+                return Ok(None);
+            };
+            let bytes = (oids.len() as u64)
+                .checked_mul(64)
+                .ok_or_else(|| corrupt("visibility query materialization overflows"))?;
+            PageWork::new(self.maximum, 0).admit_materialized(bytes)?;
+            return Ok(Some(
+                oids.iter()
+                    .map(|oid| {
+                        let oid = encode_oid(oid);
+                        if edit.added.contains(&oid) {
+                            Some(VisibilityChange::Added)
+                        } else if edit.removed.contains(&oid) {
+                            Some(VisibilityChange::Removed)
+                        } else {
+                            None
+                        }
+                    })
+                    .collect(),
+            ));
+        }
+        self.lookup(store, name, oids).await
+    }
+
+    pub(crate) async fn objects_reconciled(
+        &self,
+        store: &Store,
+        name: &str,
+        direction: VisibilityChange,
+    ) -> Result<Vec<[u8; 20]>> {
+        if self.descriptor.shared.is_some()
+            && let Some(delta) = self.complete.get()
+        {
+            let edit = delta
+                .edits()
+                .get(name)
+                .ok_or_else(|| corrupt("required visibility ref is absent"))?;
+            let objects = match direction {
+                VisibilityChange::Added => &edit.added,
+                VisibilityChange::Removed => &edit.removed,
+            };
+            PageWork::new(self.maximum, 0).admit_materialized(objects.len() as u64 * 20)?;
+            return objects.iter().map(|oid| decode_oid(oid)).collect();
+        }
+        self.objects(store, name, direction).await
+    }
+
     /// Return requested changes in input order, or an authenticated absent-ref result.
     ///
     /// OID misses remain distinct from missing refs. The caller admits input/output
@@ -551,6 +636,32 @@ mod tests {
                 .await
                 .unwrap(),
             None
+        );
+        let prepared = reader
+            .prepare_reconciliation(layout.store())
+            .await
+            .unwrap()
+            .unwrap();
+        assert_eq!(prepared.1.objects().len(), 2051);
+        for name in [
+            "refs/heads/main",
+            "refs/heads/alias",
+            "refs/heads/replace",
+            "refs/heads/missing",
+        ] {
+            assert_eq!(
+                reader
+                    .lookup_reconciled(layout.store(), name, &oids)
+                    .await
+                    .unwrap(),
+                reader.lookup(layout.store(), name, &oids).await.unwrap()
+            );
+        }
+        assert!(
+            reader
+                .lookup_reconciled(layout.store(), "refs/heads/main", &vec![[0; 20]; 140_000])
+                .await
+                .is_err()
         );
         let headers = reader
             .headers(layout.store(), &["refs/heads/main", "refs/heads/replace"])

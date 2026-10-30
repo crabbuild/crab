@@ -4,7 +4,9 @@ use crate::capsule_protocol::{
     LayeredVisibilityReader, VisibilityChange, VisibilityEditHeader,
 };
 use crate::error::{MetadataError, Result};
-use crate::git_visibility::{GitVisibilityIndex, MAX_GIT_VISIBILITY_OBJECTS, decode_oid};
+use crate::git_visibility::{
+    GitVisibilityDictionary, GitVisibilityIndex, MAX_GIT_VISIBILITY_OBJECTS, decode_oid, encode_oid,
+};
 use crab_storage::Store;
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -103,10 +105,7 @@ impl Initial {
     }
     async fn dictionary(&self, store: &Store, oids: &[[u8; 20]]) -> Result<Vec<bool>> {
         match self {
-            Self::Complete(index) => Ok(oids
-                .iter()
-                .map(|oid| index.objects().binary_search(oid).is_ok())
-                .collect()),
+            Self::Complete(index) => Ok(oids.iter().map(|oid| index.retains(oid)).collect()),
             Self::Paged(reader) => Ok(reader.dictionary_contains(store, oids).await?),
         }
     }
@@ -122,6 +121,7 @@ pub struct CapturedVisibility {
     initial_absent: BTreeSet<[u8; 20]>,
     dictionary_roots: Vec<(Arc<CapsuleVisibilityReader>, String, VisibilityEditHeader)>,
     dictionary_count: u64,
+    shared_dictionaries: BTreeMap<[u8; 32], Arc<GitVisibilityDictionary>>,
 }
 
 impl CapturedVisibility {
@@ -176,6 +176,7 @@ impl CapturedVisibility {
             initial_absent: BTreeSet::new(),
             dictionary_roots: Vec::new(),
             dictionary_count,
+            shared_dictionaries: BTreeMap::new(),
         }
     }
 
@@ -204,7 +205,7 @@ impl CapturedVisibility {
                     .map(|position| oids[*position])
                     .collect::<Vec<_>>();
                 let changes = reader
-                    .lookup(&self.store, name, &keys)
+                    .lookup_reconciled(&self.store, name, &keys)
                     .await?
                     .ok_or_else(|| {
                         corrupt_path("capsule Git visibility", "required edit is absent")
@@ -240,20 +241,23 @@ impl CapturedVisibility {
             let Some((reader, headers)) = self.headers(control).await? else {
                 continue;
             };
+            if let Some((_, dictionary)) = reader.prepare_reconciliation(&self.store).await? {
+                for object in dictionary.objects() {
+                    added.insert(decode_oid(object)?);
+                    check_dictionary_size(added.len() as u64)?;
+                }
+                continue;
+            }
             for (edit, header) in control.transaction().edits().iter().zip(headers) {
                 if header.is_none() {
                     continue;
                 }
-                added.extend(
-                    reader
-                        .objects(&self.store, edit.ref_name(), VisibilityChange::Added)
-                        .await?,
-                );
-                if added.len() as u64 > MAX_GIT_VISIBILITY_OBJECTS {
-                    return Err(corrupt_path(
-                        "capsule Git visibility",
-                        "visibility object dictionary is too large",
-                    ));
+                for object in reader
+                    .objects_reconciled(&self.store, edit.ref_name(), VisibilityChange::Added)
+                    .await?
+                {
+                    added.insert(object);
+                    check_dictionary_size(added.len() as u64)?;
                 }
             }
         }
@@ -275,7 +279,15 @@ impl CapturedVisibility {
     async fn dictionary_contains(&self, oids: &[[u8; 20]]) -> Result<Vec<bool>> {
         let mut result = oids
             .iter()
-            .map(|oid| self.dictionary.contains(oid))
+            .map(|oid| {
+                self.dictionary.contains(oid)
+                    || (!self.shared_dictionaries.is_empty() && {
+                        let oid = encode_oid(oid);
+                        self.shared_dictionaries
+                            .values()
+                            .any(|dictionary| dictionary.objects().binary_search(&oid).is_ok())
+                    })
+            })
             .collect::<Vec<_>>();
         let (positions, missing): (Vec<_>, Vec<_>) = oids
             .iter()
@@ -301,7 +313,7 @@ impl CapturedVisibility {
                 .map(|index| oids[*index])
                 .collect::<Vec<_>>();
             let changes = reader
-                .lookup(&self.store, name, &keys)
+                .lookup_reconciled(&self.store, name, &keys)
                 .await?
                 .ok_or_else(|| {
                     corrupt_path(
@@ -419,6 +431,7 @@ impl CapturedVisibility {
             }
             return Ok(());
         };
+        let shared_dictionary = reader.prepare_reconciliation(&self.store).await?;
         for (edit, header) in control.transaction().edits().iter().zip(headers) {
             let Some(header) = header else {
                 self.refs.remove(edit.ref_name());
@@ -441,7 +454,7 @@ impl CapturedVisibility {
             }
             let new = decode_oid(header.new_oid())?;
             let change = reader
-                .lookup(&self.store, edit.ref_name(), &[new])
+                .lookup_reconciled(&self.store, edit.ref_name(), &[new])
                 .await?
                 .ok_or_else(|| corrupt_path("capsule Git visibility", "required edit is absent"))?;
             let visible = match change[0] {
@@ -457,11 +470,11 @@ impl CapturedVisibility {
                 ));
             }
             let removed = reader
-                .objects(&self.store, edit.ref_name(), VisibilityChange::Removed)
+                .objects_reconciled(&self.store, edit.ref_name(), VisibilityChange::Removed)
                 .await?;
             if !removed.is_empty() {
                 reader
-                    .lookup(&self.store, edit.ref_name(), &removed)
+                    .lookup_reconciled(&self.store, edit.ref_name(), &removed)
                     .await?
                     .ok_or_else(|| {
                         corrupt_path("capsule Git visibility", "required edit is absent")
@@ -473,37 +486,39 @@ impl CapturedVisibility {
                     "visibility edit removes an object outside the prior closure",
                 ));
             }
-            // A first rooted set supplies its exact dictionary count. Later equal
-            // roots add no objects; actual differing deltas admit their additions.
-            let shared = self
-                .dictionary_roots
-                .iter()
-                .any(|(_, _, prior)| header.same_additions(prior));
-            if header.added_count() > 0 && self.dictionary_count == 0 {
-                self.dictionary_count = u64::from(header.added_count());
-                self.dictionary_roots.push((
-                    reader.clone(),
-                    edit.ref_name().to_owned(),
-                    header.clone(),
-                ));
-            } else if !shared {
-                let added = reader
-                    .objects(&self.store, edit.ref_name(), VisibilityChange::Added)
-                    .await?;
-                let present = self.dictionary_contains(&added).await?;
-                for (object, present) in added.into_iter().zip(present) {
-                    if !present {
-                        self.initial_absent.remove(&object);
-                        self.dictionary.insert(object);
-                        self.dictionary_count += 1;
+            if shared_dictionary.is_none() {
+                // A first rooted set supplies its exact dictionary count. Later equal
+                // roots add no objects; actual differing deltas admit their additions.
+                let shared = self
+                    .dictionary_roots
+                    .iter()
+                    .any(|(_, _, prior)| header.same_additions(prior));
+                if header.added_count() > 0 && self.dictionary_count == 0 {
+                    self.dictionary_count = u64::from(header.added_count());
+                    self.dictionary_roots.push((
+                        reader.clone(),
+                        edit.ref_name().to_owned(),
+                        header.clone(),
+                    ));
+                } else if !shared {
+                    let added = reader
+                        .objects_reconciled(&self.store, edit.ref_name(), VisibilityChange::Added)
+                        .await?;
+                    let present = self.dictionary_contains(&added).await?;
+                    for (object, present) in added.into_iter().zip(present) {
+                        if !present {
+                            self.initial_absent.remove(&object);
+                            self.dictionary.insert(object);
+                            self.dictionary_count += 1;
+                        }
                     }
                 }
-            }
-            if self.dictionary_count > MAX_GIT_VISIBILITY_OBJECTS {
-                return Err(corrupt_path(
-                    "capsule Git visibility",
-                    "visibility object dictionary is too large",
-                ));
+                if self.dictionary_count > MAX_GIT_VISIBILITY_OBJECTS {
+                    return Err(corrupt_path(
+                        "capsule Git visibility",
+                        "visibility object dictionary is too large",
+                    ));
+                }
             }
             let index = self.layers.len();
             self.layers.push(Layer {
@@ -513,8 +528,46 @@ impl CapturedVisibility {
             });
             self.refs.insert(edit.ref_name().to_owned(), index);
         }
+        if let Some((identity, dictionary)) = shared_dictionary
+            && !self.shared_dictionaries.contains_key(&identity)
+        {
+            let additional = if self.dictionary_count == 0 {
+                dictionary.objects().len() as u64
+            } else {
+                let oids = dictionary
+                    .objects()
+                    .iter()
+                    .map(|oid| decode_oid(oid))
+                    .collect::<Result<Vec<_>>>()?;
+                self.dictionary_contains(&oids)
+                    .await?
+                    .into_iter()
+                    .filter(|present| !present)
+                    .count() as u64
+            };
+            self.dictionary_count =
+                self.dictionary_count
+                    .checked_add(additional)
+                    .ok_or_else(|| {
+                        corrupt_path("capsule Git visibility", "dictionary count overflows")
+                    })?;
+            check_dictionary_size(self.dictionary_count)?;
+            // Only applied, fully checked edit sets can contribute retention.
+            // The dictionary itself never supplies a prior ref closure.
+            self.shared_dictionaries.insert(identity, dictionary);
+        }
         Ok(())
     }
+}
+
+fn check_dictionary_size(count: u64) -> Result<()> {
+    if count > MAX_GIT_VISIBILITY_OBJECTS {
+        return Err(corrupt_path(
+            "capsule Git visibility",
+            "visibility object dictionary is too large",
+        ));
+    }
+    Ok(())
 }
 
 /// Validate publication evidence and check its prior ref dependencies.

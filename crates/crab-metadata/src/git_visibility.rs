@@ -962,10 +962,16 @@ fn validate_catalog_transitions(
 }
 
 impl GitVisibilityIndex {
-    /// Return the complete sorted SHA-1 dictionary for this visibility proof.
+    /// Return the retained SHA-1 dictionary in its current ordinal order.
     #[must_use]
     pub fn objects(&self) -> &[GitVisibilityOid] {
         &self.objects
+    }
+
+    /// Dictionary retention is independent of current per-ref authorization.
+    #[cfg(feature = "storage")]
+    pub(crate) fn retains(&self, oid: &GitVisibilityOid) -> bool {
+        self.positions.contains_key(oid)
     }
 
     /// Build a normalized proof from ref-rooted object sets.

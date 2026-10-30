@@ -310,3 +310,129 @@ async fn retained_git_repository_shared_point_reads_stay_bounded() {
     .unwrap();
     println!("{evidence}");
 }
+
+#[cfg(feature = "storage")]
+#[tokio::test]
+#[ignore = "requires the retained git/git all-ref membership fixture and encoded proof"]
+async fn retained_git_repository_shared_reconciliation_stays_bounded() {
+    use crab_metadata::capsule_protocol::{
+        CapsulePointer, CapsuleRun, CapturedVisibility, VisibilityReconciliation,
+        apply_control_refs, load_capsule_run_git_control, order_ref_controls,
+    };
+    use crab_metadata::git_visibility::GitVisibilityIndex;
+    use crab_storage::{Store, StoreLayout};
+    use std::sync::atomic::{AtomicU64, Ordering};
+    let root = PathBuf::from(
+        std::env::var_os("CRAB_SHARED_VISIBILITY_FIXTURE")
+            .expect("explicit fixture directory required"),
+    );
+    let report: serde_json::Value =
+        serde_json::from_slice(&std::fs::read(root.join("report.json")).unwrap()).unwrap();
+    let codec: serde_json::Value = serde_json::from_slice(
+        &std::fs::read(root.join("shared-capsule-codec-report.json")).unwrap(),
+    )
+    .unwrap();
+    let encoded = Bytes::from(std::fs::read(root.join("shared-capsule-visibility.bin")).unwrap());
+    assert_eq!(
+        blake3::hash(&encoded).to_hex().to_string(),
+        codec["encoded_blake3"].as_str().unwrap()
+    );
+    let expected = report["refs"]
+        .as_object()
+        .unwrap()
+        .iter()
+        .map(|(name, value)| (name.clone(), value["tip"].as_str().unwrap().to_owned()))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(expected.len(), 4380);
+    let transaction = CapsuleTransaction::new(
+        &"1".repeat(64),
+        expected
+            .iter()
+            .map(|(name, oid)| CapsuleRefEdit::new(name, None, Some(oid.clone()), None))
+            .collect(),
+    )
+    .unwrap();
+    let capsule = Capsule::build(
+        &transaction,
+        vec![],
+        vec![CapsuleSection::new(
+            CapsuleSectionKind::VisibilityDelta,
+            encoded.clone(),
+        )],
+    )
+    .unwrap();
+    let run = CapsuleRun::leaf(capsule).unwrap();
+    let observed = Arc::new(AtomicU64::new(0));
+    let limit = Arc::new(AtomicU64::new(u64::MAX));
+    let counter = observed.clone();
+    let admission = limit.clone();
+    let store = Store::new(Arc::new(object_store::memory::InMemory::new()))
+        .with_read_byte_observer(Arc::new(move |bytes| {
+            let total = counter.fetch_add(bytes, Ordering::Relaxed) + bytes;
+            assert!(
+                total <= admission.load(Ordering::Relaxed),
+                "reconciliation repeated full ref closures: read {total} bytes"
+            );
+        }));
+    let layout = StoreLayout::new(store, "repositories/retained-shared-reconciliation".into());
+    layout
+        .store()
+        .create_strict(&layout.capsule_path(run.hash()), run.bytes().clone())
+        .await
+        .unwrap();
+    let pointer = CapsulePointer::new(
+        run.hash(),
+        run.bytes().len() as u64,
+        run.control_offset(),
+        run.control_size(),
+        run.footer_hash(),
+        run.level(),
+        run.transaction_ids(),
+        run.newest_base_root_digest(),
+    )
+    .unwrap();
+    let (_, controls) = load_capsule_run_git_control(&layout, &pointer)
+        .await
+        .unwrap();
+    assert_eq!(controls.len(), 1);
+    let initial =
+        GitVisibilityIndex::new(0, "0".repeat(64), "0".repeat(64), BTreeMap::new()).unwrap();
+    let mut captured = VisibilityReconciliation::Paged(Box::new(CapturedVisibility::new(
+        layout.store().clone(),
+        initial,
+        std::iter::empty(),
+    )));
+    let pending = controls
+        .into_iter()
+        .map(|control| (control.transaction_id().to_owned(), control))
+        .collect();
+    observed.store(0, Ordering::Relaxed);
+    let budget = encoded.len() as u64 * 2;
+    limit.store(budget, Ordering::Relaxed);
+    let started = Instant::now();
+    let ordered = order_ref_controls(
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        &mut captured,
+        &BTreeMap::new(),
+        pending,
+    )
+    .await
+    .unwrap();
+    assert_eq!(ordered.len(), 1);
+    let mut refs = BTreeMap::new();
+    let mut peeled = BTreeMap::new();
+    for control in ordered {
+        apply_control_refs(&control, &mut refs, &mut peeled).unwrap();
+    }
+    assert_eq!(refs, expected);
+    let read = observed.load(Ordering::Relaxed);
+    assert!(read <= budget);
+    let evidence = serde_json::json!({"schema":"crab.shared-capsule-reconciliation-qualification","status":"passed","refs":refs.len(),"backend_bytes_read":read,"read_budget_bytes":budget,"full_proof_bytes":encoded.len(),"elapsed_ms":started.elapsed().as_millis(),"checks":["paged control loader","public control ordering and captured reconciliation","all4380 exact ref tips","bounded total proof reads"],"scope":"Offline in-memory metadata reconciliation; not RustFS all-ref publication or final throughput qualification."});
+    std::fs::write(
+        root.join("shared-capsule-reconciliation-report.json"),
+        serde_json::to_vec_pretty(&evidence).unwrap(),
+    )
+    .unwrap();
+    println!("{evidence}");
+}
