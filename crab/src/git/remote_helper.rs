@@ -59,7 +59,7 @@ struct PushResultRefPayload {
 
 /// A ref entry returned by the object store: a SHA and its ref name.
 ///
-/// `peeled` carries the target-commit SHA for annotated tags so the
+/// `peeled` carries the final target-object SHA for annotated tags so the
 /// `list` response can emit the `{peeled} {ref}^{{}}\n` line git
 /// expects for tag disambiguation. Non-tag refs and lightweight tags
 /// leave it `None`.
