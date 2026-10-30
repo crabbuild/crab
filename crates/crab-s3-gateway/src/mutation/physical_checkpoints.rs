@@ -35,13 +35,18 @@ impl CheckpointScheduler {
                 // take seconds. Keep that CPU work off request runtime workers,
                 // and await its owner even when shutdown cancels publication.
                 let started = Instant::now();
+                let metrics = scheduler.metrics.clone();
                 let result = tokio::task::spawn_blocking(move || {
                     handle.block_on(async {
+                        let maximum_scratch_bytes = metrics.background_scratch_budget(
+                            MAX_WARM_BRANCH_STATE_BYTES as u64,
+                        )?;
                         let fences = GcWriterFences::acquire(&repository, &cancellation).await?;
-                        let result = crab_remote::checkpoint::repack_capsule_checkpoint_from_root(
+                        let result = crab_remote::checkpoint::repack_capsule_checkpoint_from_root_with_scratch_limit(
                             &repository.layout,
                             root,
                             MAX_CAPSULE_READ_BYTES,
+                            maximum_scratch_bytes,
                             &cancellation,
                         )
                         .await
@@ -256,13 +261,13 @@ mod tests {
             cancel.child_token(),
             Metrics::new().unwrap(),
         );
-        for index in 0..64 {
+        for index in 0..64_u32 {
             coordinated_put(
                 &coordinator,
                 &repository,
                 &cancel,
                 &format!("object-{index}"),
-                b"before",
+                &index.to_le_bytes(),
             )
             .await;
         }

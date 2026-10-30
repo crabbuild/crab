@@ -18,6 +18,9 @@ use crab_metadata::capsule_protocol::{PackMemberDescriptor, PackRange, PackSourc
 use crab_storage::{Store, StoreLayout};
 use tokio_util::sync::CancellationToken;
 
+mod scratch;
+pub use scratch::repack_capsule_checkpoint_from_root_with_scratch_limit;
+
 const LAYERED_MAX_PHYSICAL_SOURCES: usize = 64;
 // One run can expand to hundreds of local packs; bound clone/index work after roll-up.
 const LAYERED_PACK_MEMBER_TARGET: usize = 8;
@@ -105,6 +108,8 @@ struct CheckpointPublication {
 pub enum CheckpointError {
     #[error("checkpoint pack-body accounting overflowed")]
     AccountingOverflow,
+    #[error("bounded checkpoint maintenance requires native rewriting")]
+    MaintenanceRequiresRewrite,
     #[error("checkpoint consolidation cancelled")]
     Cancelled,
     #[error("capsule repository read failed")]
@@ -630,12 +635,46 @@ async fn repack_checkpoint_from_view(
 async fn publish_layered_sources(
     layout: &StoreLayout<Store>,
     view: &crab_read::capsule_protocol::CapsuleRepositoryView,
-    mut sources: Vec<PackSourceDescriptor>,
-    mut member_oids: BTreeMap<String, Vec<Vec<[u8; 20]>>>,
+    sources: Vec<PackSourceDescriptor>,
+    member_oids: BTreeMap<String, Vec<Vec<[u8; 20]>>>,
     catalog: CatalogWrite,
     maximum_bytes: u64,
     cancel: &CancellationToken,
 ) -> Result<CheckpointPublication, CheckpointError> {
+    publish_layered_sources_with_policy(
+        layout,
+        view,
+        sources,
+        member_oids,
+        catalog,
+        PublicationPolicy {
+            maximum_bytes,
+            cancel,
+            allow_footer_consolidation: true,
+        },
+    )
+    .await
+}
+
+struct PublicationPolicy<'a> {
+    maximum_bytes: u64,
+    cancel: &'a CancellationToken,
+    allow_footer_consolidation: bool,
+}
+
+async fn publish_layered_sources_with_policy(
+    layout: &StoreLayout<Store>,
+    view: &crab_read::capsule_protocol::CapsuleRepositoryView,
+    mut sources: Vec<PackSourceDescriptor>,
+    mut member_oids: BTreeMap<String, Vec<Vec<[u8; 20]>>>,
+    catalog: CatalogWrite,
+    policy: PublicationPolicy<'_>,
+) -> Result<CheckpointPublication, CheckpointError> {
+    let PublicationPolicy {
+        maximum_bytes,
+        cancel,
+        allow_footer_consolidation,
+    } = policy;
     let started = Instant::now();
     let visibility_index = view.git_visibility_index().await?;
     checkpoint_phase("visibility_index", started);
@@ -679,11 +718,12 @@ async fn publish_layered_sources(
         match checkpoint {
             Ok(checkpoint) => break checkpoint,
             Err(crab_metadata::error::MetadataError::CheckpointFooterSize { bytes, maximum })
-                if sources
-                    .iter()
-                    .map(|source| source.members().len())
-                    .sum::<usize>()
-                    > 1 =>
+                if allow_footer_consolidation
+                    && sources
+                        .iter()
+                        .map(|source| source.members().len())
+                        .sum::<usize>()
+                        > 1 =>
             {
                 // A few member-heavy runs can exhaust the footer below its source
                 // count limit. Admit the replacement before any root publication.
@@ -795,6 +835,38 @@ async fn consolidate_layered_suffix(
     maximum_bytes: u64,
     cancel: &CancellationToken,
 ) -> Result<LayeredConsolidation, CheckpointError> {
+    consolidate_layered_suffix_with_policy(
+        layout,
+        view,
+        sources,
+        selected_start,
+        ConsolidationPolicy {
+            maximum_bytes,
+            cancel,
+            compressed_only: false,
+        },
+    )
+    .await
+}
+
+struct ConsolidationPolicy<'a> {
+    maximum_bytes: u64,
+    cancel: &'a CancellationToken,
+    compressed_only: bool,
+}
+
+async fn consolidate_layered_suffix_with_policy(
+    layout: &StoreLayout<Store>,
+    view: &crab_read::capsule_protocol::CapsuleRepositoryView,
+    sources: Vec<PackSourceDescriptor>,
+    selected_start: usize,
+    policy: ConsolidationPolicy<'_>,
+) -> Result<LayeredConsolidation, CheckpointError> {
+    let ConsolidationPolicy {
+        maximum_bytes,
+        cancel,
+        compressed_only,
+    } = policy;
     if selected_start >= sources.len() {
         return Err(CheckpointError::Repack(
             crab_git::repack::RepackError::SourceIntegrity {
@@ -851,13 +923,31 @@ async fn consolidate_layered_suffix(
         .await?;
     check_cancelled(cancel)?;
     let sources_for_repack = repack_sources(installed, &mut delta_base_ids)?;
-    // Internal bases usually move with the selected bodies. Overlapping OIDs
-    // or cyclic aliases still need verified anchors for native Git's rewrite.
-    delta_base_ids.extend(crab_git::repack::selected_pack_ref_delta_base_ids(
-        &sources_for_repack,
-    )?);
-    let delta_bases =
-        read_layered_delta_bases(layout, view, &delta_base_ids, maximum_bytes, cancel).await?;
+    if compressed_only
+        && !crab_git::repack::supports_compressed_committed_consolidation(&sources_for_repack)?
+    {
+        return Err(CheckpointError::MaintenanceRequiresRewrite);
+    }
+    // Compressed concatenation preserves REF_DELTA streams and derives their
+    // remaining dependencies from entry headers. Only native rewriting needs
+    // inflated anchors; loading them for the compressed path can install a
+    // repository-sized scratch object database without consuming those bodies.
+    let required_bases = crab_git::repack::selected_pack_ref_delta_base_ids(&sources_for_repack)?;
+    let declared_bases = delta_base_ids.len();
+    let started = Instant::now();
+    let delta_bases = if required_bases.is_empty() {
+        Vec::new()
+    } else {
+        delta_base_ids.extend(required_bases);
+        read_layered_delta_bases(layout, view, &delta_base_ids, maximum_bytes, cancel).await?
+    };
+    tracing::info!(
+        phase = "base_resolution",
+        declared_bases,
+        inflated_bases = delta_bases.len(),
+        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+        "Git checkpoint phase completed"
+    );
     let pack_bytes_read = sources_for_repack.iter().try_fold(0_u64, |total, source| {
         total
             .checked_add(source.size)

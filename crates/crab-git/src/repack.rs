@@ -593,7 +593,7 @@ fn consolidate_pack_suffix_with_options(
             // Object admission is already committed. Revalidate the same body
             // and sidecar contracts without installing another scratch Git DB.
             if !deduplicate::requirements(sources)?.rewrite {
-                return concatenate_verified_sources(sources, &object_ids, delta_bases);
+                return concatenate_verified_sources(sources, &object_ids);
             }
         }
     }
@@ -652,7 +652,7 @@ fn consolidate_pack_suffix_with_options(
     // verification above plus the rebuilt index and exact OID comparison prove
     // the replacement object universe without reinflating every growing tree.
     if source_objects_are_disjoint {
-        return concatenate_verified_sources(sources, &expected_oids, delta_bases);
+        return concatenate_verified_sources(sources, &expected_oids);
     }
 
     let pack_generation_started = Instant::now();
@@ -738,7 +738,6 @@ fn consolidate_pack_suffix_with_options(
 fn concatenate_verified_sources(
     sources: &[RepackSource],
     expected_oids: &[gix_hash::ObjectId],
-    delta_bases: &[RepackDeltaBase],
 ) -> Result<GeometricRepackedRepository, RepackError> {
     let concatenated = concatenate_complete_pack_inventory_inner(sources, false)?;
     let checksum =
@@ -768,14 +767,15 @@ fn concatenate_verified_sources(
         Some(expected_oids),
         Some(identity),
     )?;
-    if !delta_bases.is_empty() {
-        generated.external_delta_bases = generated_external_delta_bases(
-            generated.pack_path(),
-            generated.index_path(),
-            generated.reverse_index_path(),
-            generated.pack_size,
-        )?;
-    }
+    // A thin union can retain dependencies on the stable prefix even when
+    // callers correctly avoid inflating unused base bodies. Derive the exact
+    // dependency bindings from authenticated index/header ranges every time.
+    generated.external_delta_bases = generated_external_delta_bases(
+        generated.pack_path(),
+        generated.index_path(),
+        generated.reverse_index_path(),
+        generated.pack_size,
+    )?;
     Ok(GeometricRepackedRepository {
         _workspace: concatenated._workspace,
         packs: vec![generated],
@@ -1211,6 +1211,18 @@ fn source_pack_inventory_object_ids(
     }
     source_oids.sort_unstable();
     Ok(source_oids)
+}
+
+/// Inspect whether committed sources can retain their compressed entries.
+///
+/// This is a strategy decision, not admission: the consolidation owner still
+/// verifies every committed body/index identity before producing a replacement.
+pub fn supports_compressed_committed_consolidation(
+    sources: &[RepackSource],
+) -> Result<bool, RepackError> {
+    let inventory = source_pack_inventory_object_ids(sources)?;
+    Ok(!inventory.windows(2).any(|pair| pair[0] == pair[1])
+        && !deduplicate::requirements(sources)?.rewrite)
 }
 
 /// Return REF_DELTA bases needed by native selected-pack consolidation.
@@ -3069,6 +3081,19 @@ mod tests {
             }],
             2,
         )?;
+        // Compressed consolidation does not need inflated base bodies. Its
+        // replacement must still advertise every dependency on stable packs.
+        let without_inflation =
+            consolidate_committed_pack_suffix_with_delta_bases(&dependent_sources, &[], 2)?;
+        assert_eq!(
+            without_inflation.packs()[0].pack_id,
+            dependent_repacked.packs()[0].pack_id
+        );
+        assert_eq!(
+            without_inflation.packs()[0].external_delta_bases(),
+            dependent_repacked.packs()[0].external_delta_bases()
+        );
+        let dependent_repacked = without_inflation;
         let base_sources = [
             source_descriptor(base_pack.pack_path().to_owned())?,
             source_descriptor(base_auxiliary.pack_path().to_owned())?,

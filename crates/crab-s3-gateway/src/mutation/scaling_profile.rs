@@ -1,5 +1,5 @@
 //! Explicit CPU-scaling diagnosis; this is not a RustFS qualification substitute.
-use super::tests::{capsule_fixture, coordinated_put, read};
+use super::tests::{capsule_fixture, read};
 use super::{Coordinator, Metrics};
 use crate::attributes::ManifestListingItem;
 use std::{
@@ -15,6 +15,29 @@ fn payload(writer: usize, round: usize) -> Vec<u8> {
     bytes[..8].copy_from_slice(&(writer as u64).to_le_bytes());
     bytes[8..16].copy_from_slice(&(round as u64).to_le_bytes());
     bytes
+}
+async fn put_result(
+    coordinator: &Coordinator,
+    repository: &crate::gateway::Repository,
+    cancel: &tokio_util::sync::CancellationToken,
+    path: &str,
+    body: &[u8],
+) -> super::Result<super::Outcome> {
+    coordinator
+        .apply(
+            repository,
+            "refs/heads/main",
+            &crab_remote_git::GitPath::new(path.as_bytes().to_vec()).unwrap(),
+            super::Change::Put {
+                bytes: bytes::Bytes::copy_from_slice(body),
+                track_lfs: false,
+                attributes: Box::default(),
+                condition: super::PutCondition::None,
+            },
+            "user",
+            cancel,
+        )
+        .await
 }
 fn key(writer: usize, round: usize) -> String {
     format!("qualification/small-write/profile/writer-{writer:02}/object-{round:08}")
@@ -48,22 +71,37 @@ async fn native_namespace_cpu_scaling_at_ci_object_count() {
     );
     let mut samples = Vec::with_capacity(ROUNDS);
     let started = Instant::now();
+    let mut failure = None;
+    let mut acknowledged = 0;
     for round in 0..ROUNDS {
         let before = Instant::now();
         let coordinator = &coordinator;
         let repository = &repository;
         let cancel = &cancel;
-        futures_util::future::join_all((0..WRITERS).map(|writer| async move {
-            coordinated_put(
+        let outcomes = futures_util::future::join_all((0..WRITERS).map(|writer| async move {
+            put_result(
                 coordinator,
                 repository,
                 cancel,
                 &key(writer, round),
                 &payload(writer, round),
             )
-            .await;
+            .await
         }))
         .await;
+        acknowledged += outcomes.iter().filter(|result| result.is_ok()).count();
+        let errors = outcomes
+            .into_iter()
+            .filter_map(|result| result.err())
+            .map(|error| format!("{error:?}"))
+            .collect::<Vec<_>>();
+        if !errors.is_empty() {
+            failure = Some(
+                serde_json::json!({"status":"failed","round":round,"acknowledged":acknowledged,"errors":errors}),
+            );
+            cancel.cancel();
+            break;
+        }
         samples.push(before.elapsed().as_secs_f64() * 1000.0);
         if (round + 1) % 500 == 0 || round + 1 == ROUNDS {
             let row = serde_json::json!({"acknowledged":(round+1)*WRITERS,"elapsed_ms":started.elapsed().as_millis(),"warm_state_bytes":coordinator.admission.warm_bytes.load(Ordering::Acquire),"recent_batches":summary(&samples[samples.len().saturating_sub(500)..])});
@@ -78,6 +116,14 @@ async fn native_namespace_cpu_scaling_at_ci_object_count() {
     let elapsed = started.elapsed().as_millis();
     coordinator.shutdown().await;
     runtime.shutdown().await;
+    if let Some(failure) = failure {
+        std::fs::write(
+            root.join("failure.json"),
+            serde_json::to_vec_pretty(&failure).unwrap(),
+        )
+        .unwrap();
+        panic!("native scaling diagnostic rejected writes; owners drained; see failure.json");
+    }
     let cold = crate::gateway::Repository::new(repository.config.clone(), repository.store.clone())
         .unwrap();
     let view = crab_read::capsule_protocol::open_view(
