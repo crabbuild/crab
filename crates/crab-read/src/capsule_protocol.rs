@@ -4493,7 +4493,7 @@ async fn assemble_view(
                         &visibility,
                         &source,
                         run.admission(),
-                    );
+                    )?;
                 }
             }
             capsule_run_sources.push(source);
@@ -4798,7 +4798,7 @@ async fn assemble_layered_control_view(
                         visibility,
                         &source,
                         run.admission(),
-                    );
+                    )?;
                 }
             }
             capsule_run_sources.push(source);
@@ -4952,7 +4952,7 @@ fn extend_frontier_object_admission(
     visibility: &crab_metadata::capsule_protocol::CapsuleVisibilityDelta,
     source: &PackSourceDescriptor,
     run_admission: Option<&crab_metadata::capsule_protocol::CapsuleRunAdmission>,
-) {
+) -> Result<()> {
     let all_pack_ids = source
         .members()
         .iter()
@@ -4962,39 +4962,53 @@ fn extend_frontier_object_admission(
     all_pack_ids.sort_unstable();
     all_pack_ids.dedup();
     if all_pack_ids.is_empty() {
-        return;
+        return Ok(());
     }
-    for edit in visibility.edits().values() {
-        for oid in &edit.added {
-            let Ok(oid) = gix_hash::ObjectId::from_hex(oid.as_bytes()) else {
-                continue;
-            };
-            let Ok(oid) = oid.as_bytes().try_into() else {
-                continue;
-            };
-            let entry = admission.entry(oid).or_default();
-            let pack_ids = run_admission
-                .and_then(|run_admission| run_admission.object_members(&oid))
-                .map(|members| {
-                    members
-                        .iter()
-                        .filter_map(|member| {
-                            source
-                                .members()
-                                .get(usize::try_from(*member).ok()?)
-                                .map(|member| member.pack().blake3().to_owned())
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .filter(|pack_ids| !pack_ids.is_empty())
-                .unwrap_or_else(|| all_pack_ids.clone());
-            for pack_id in &pack_ids {
-                if !entry.iter().any(|candidate| candidate == pack_id) {
-                    entry.push(pack_id.clone());
-                }
+    let Some(first) = visibility.edits().values().next() else {
+        return Ok(());
+    };
+    // Repeated histories share exact membership chunks. Join those bits once
+    // before resolving source/member bindings, instead of redoing each OID for
+    // every ref. Dictionary retention by itself never grants membership.
+    let union;
+    let added = if visibility.edits().len() == 1 {
+        &first.added
+    } else {
+        union = crab_metadata::git_visibility::GitVisibilityObjects::union(
+            visibility.edits().values().map(|edit| &edit.added),
+        )?;
+        &union
+    };
+    for oid in added {
+        let Ok(oid) = gix_hash::ObjectId::from_hex(oid.as_bytes()) else {
+            continue;
+        };
+        let Ok(oid) = oid.as_bytes().try_into() else {
+            continue;
+        };
+        let entry = admission.entry(oid).or_default();
+        let pack_ids = run_admission
+            .and_then(|run_admission| run_admission.object_members(&oid))
+            .map(|members| {
+                members
+                    .iter()
+                    .filter_map(|member| {
+                        source
+                            .members()
+                            .get(usize::try_from(*member).ok()?)
+                            .map(|member| member.pack().blake3().to_owned())
+                    })
+                    .collect::<Vec<_>>()
+            })
+            .filter(|pack_ids| !pack_ids.is_empty())
+            .unwrap_or_else(|| all_pack_ids.clone());
+        for pack_id in &pack_ids {
+            if !entry.iter().any(|candidate| candidate == pack_id) {
+                entry.push(pack_id.clone());
             }
         }
     }
+    Ok(())
 }
 
 fn state_digest(root: &RootRecord, transactions: &BTreeMap<String, String>) -> String {

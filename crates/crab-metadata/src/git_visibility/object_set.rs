@@ -164,6 +164,66 @@ impl GitVisibilityObjects {
         self.len() == 0
     }
 
+    /// Union exact memberships without expanding shared sets into repeated OID lists.
+    /// Objects retained only by a dictionary remain absent unless a set contains them.
+    pub fn union<'a>(sets: impl IntoIterator<Item = &'a Self>) -> Result<Self> {
+        let sets = sets
+            .into_iter()
+            .filter(|set| !set.is_empty())
+            .collect::<Vec<_>>();
+        for set in &sets {
+            set.validate("union")?;
+        }
+        let Some(first) = sets.first() else {
+            return Ok(Vec::new().into());
+        };
+        if sets.len() == 1 {
+            return Ok((*first).clone());
+        }
+        if let Some(dictionary) = first.shared_dictionary().cloned()
+            && sets.iter().all(|set| {
+                set.shared_dictionary()
+                    .is_some_and(|other| Arc::ptr_eq(&dictionary, other))
+            })
+        {
+            let mut chunks =
+                vec![[0_u8; VISIBILITY_CHUNK_BYTES]; dictionary.objects.len().div_ceil(CHUNK_BITS)];
+            for set in sets {
+                match &set.0 {
+                    Storage::Shared(shared) => {
+                        for (output, input) in chunks.iter_mut().zip(shared.chunks.iter()) {
+                            for (output, input) in output.iter_mut().zip(input.iter()) {
+                                *output |= input;
+                            }
+                        }
+                    }
+                    Storage::Sparse { positions, .. } => {
+                        for position in positions.iter().copied() {
+                            let position = position as usize;
+                            chunks[position / CHUNK_BITS][position % CHUNK_BITS / 8] |=
+                                1 << (position % 8);
+                        }
+                    }
+                    Storage::List(_) => return Err(corrupt("visibility union dictionary changed")),
+                }
+            }
+            return Self::from_shared_chunks(
+                dictionary,
+                chunks.into_iter().map(Arc::new).collect(),
+            );
+        }
+        let mut objects = std::collections::BTreeSet::new();
+        for set in sets {
+            for oid in set {
+                objects.insert(oid);
+                if objects.len() as u64 > MAX_GIT_VISIBILITY_OBJECTS {
+                    return Err(corrupt("visibility union contains too many objects"));
+                }
+            }
+        }
+        Ok(objects.into_iter().cloned().collect::<Vec<_>>().into())
+    }
+
     /// Iterate exact OIDs in canonical order without allocating per-ref strings.
     pub fn iter(&self) -> GitVisibilityObjectIter<'_> {
         GitVisibilityObjectIter(match &self.0 {
@@ -413,6 +473,40 @@ mod tests {
         .unwrap()
     }
     #[test]
+    fn union_keeps_shared_dictionary_gaps_and_sparse_boundaries_exact() {
+        let dictionary = dictionary(3500);
+        let first = objects(dictionary.clone(), &[0, 1024, 3499]);
+        let second =
+            GitVisibilityObjects::from_shared_ordinals(dictionary.clone(), vec![1023, 2048])
+                .unwrap();
+        let union = GitVisibilityObjects::union([&first, &second, &first]).unwrap();
+        let expected = [0, 1023, 1024, 2048, 3499].map(|index| format!("{index:040x}"));
+        assert_eq!(union, expected);
+        assert!(!union.contains(&format!("{:040x}", 1)));
+        assert!(Arc::ptr_eq(union.shared_dictionary().unwrap(), &dictionary));
+        assert_eq!(
+            serde_json::to_vec(&union).unwrap(),
+            serde_json::to_vec(&expected).unwrap()
+        );
+        assert_eq!(first, [0, 1024, 3499].map(|index| format!("{index:040x}")));
+    }
+
+    #[test]
+    fn union_handles_distinct_dictionaries_lists_empty_sets_and_invalid_inputs() {
+        let first = objects(dictionary(3500), &[1024, 3499]);
+        let second = objects(dictionary(16), &[5]);
+        let list: GitVisibilityObjects = vec![format!("{:040x}", 5), format!("{:040x}", 7)].into();
+        let empty: GitVisibilityObjects = Vec::new().into();
+        assert_eq!(
+            GitVisibilityObjects::union([&first, &second, &list, &empty]).unwrap(),
+            [5, 7, 1024, 3499].map(|index| format!("{index:040x}"))
+        );
+        assert!(GitVisibilityObjects::union([&empty]).unwrap().is_empty());
+        let invalid: GitVisibilityObjects = vec!["invalid".to_owned()].into();
+        assert!(GitVisibilityObjects::union([&invalid]).is_err());
+    }
+
+    #[test]
     fn memberships_preserve_dictionary_gaps_chunk_boundaries_and_json() {
         let dictionary = dictionary(2051);
         let set = objects(dictionary.clone(), &[0, 7, 8, 1023, 1024, 2048, 2050]);
@@ -550,6 +644,22 @@ mod tests {
         assert!(invalid.validate("added").is_err());
     }
     proptest::proptest! {
+        #[test]
+        fn union_matches_sorted_set_union_for_shared_sparse_and_list_memberships(
+            first in proptest::collection::btree_set(0usize..3500, 0..100),
+            second in proptest::collection::btree_set(0usize..3500, 0..100),
+            third in proptest::collection::btree_set(0usize..3500, 0..100),
+        ) {
+            let dictionary = dictionary(3500);
+            let a = objects(dictionary.clone(), &first.iter().copied().collect::<Vec<_>>());
+            let b = GitVisibilityObjects::from_shared_ordinals(dictionary, second.iter().map(|p| *p as u32).collect()).unwrap();
+            let c: GitVisibilityObjects = third.iter().map(|p| format!("{p:040x}")).collect::<Vec<_>>().into();
+            let expected: GitVisibilityObjects = first.union(&second).map(|p| format!("{p:040x}")).collect::<Vec<_>>().into();
+            proptest::prop_assert_eq!(GitVisibilityObjects::union([&a, &b]).unwrap(), expected);
+            let expected: GitVisibilityObjects = first.iter().chain(&second).chain(&third).copied().collect::<std::collections::BTreeSet<_>>().into_iter().map(|p| format!("{p:040x}")).collect::<Vec<_>>().into();
+            proptest::prop_assert_eq!(GitVisibilityObjects::union([&a, &b, &c]).unwrap(), expected);
+        }
+
         #[test]
         fn shared_membership_matches_a_sorted_oid_list(positions in proptest::collection::btree_set(0usize..3500, 0..500)) {
             let set = objects(dictionary(3500), &positions.iter().copied().collect::<Vec<_>>());
