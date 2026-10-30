@@ -584,7 +584,9 @@ pub(crate) fn table_ids(descriptor: &Descriptor, block: usize, value: &[u8]) -> 
         return Err(corrupt("visibility chunk table has wrong coverage"));
     }
     value
-        .chunks_exact(4)
+        .as_chunks::<4>()
+        .0
+        .iter()
         .map(|bytes| {
             let index = ordinal(bytes)?;
             if index as usize >= descriptor.chunk_count() {
