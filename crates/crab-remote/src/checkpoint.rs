@@ -18,6 +18,7 @@ use crab_metadata::capsule_protocol::{PackMemberDescriptor, PackRange, PackSourc
 use crab_storage::{Store, StoreLayout};
 use tokio_util::sync::CancellationToken;
 
+mod base_verification;
 mod scratch;
 pub use scratch::repack_capsule_checkpoint_from_root_with_scratch_limit;
 
@@ -928,15 +929,34 @@ async fn consolidate_layered_suffix_with_policy(
     {
         return Err(CheckpointError::MaintenanceRequiresRewrite);
     }
-    // Compressed concatenation preserves REF_DELTA streams and derives their
-    // remaining dependencies from entry headers. Only native rewriting needs
-    // inflated anchors; loading them for the compressed path can install a
-    // repository-sized scratch object database without consuming those bodies.
+    // Compressed concatenation preserves REF_DELTA streams. Re-verify their
+    // admitted external source/dependency bytes in a fixed-size buffer instead
+    // of reconstructing historical objects that this strategy does not consume.
+    // Native rewriting and older checkpoints still use verified inflated bases.
     let required_bases = crab_git::repack::selected_pack_ref_delta_base_ids(&sources_for_repack)?;
     let declared_bases = delta_base_ids.len();
     let started = Instant::now();
+    let mut verified_source_bytes = 0;
     let delta_bases = if required_bases.is_empty() {
-        Vec::new()
+        match base_verification::verify_sources(
+            layout,
+            view,
+            &delta_base_ids,
+            maximum_bytes,
+            cancel,
+        )
+        .await?
+        {
+            Some(bytes) => {
+                verified_source_bytes = bytes;
+                Vec::new()
+            }
+            None if compressed_only => return Err(CheckpointError::MaintenanceRequiresRewrite),
+            None => {
+                read_layered_delta_bases(layout, view, &delta_base_ids, maximum_bytes, cancel)
+                    .await?
+            }
+        }
     } else {
         delta_base_ids.extend(required_bases);
         read_layered_delta_bases(layout, view, &delta_base_ids, maximum_bytes, cancel).await?
@@ -945,6 +965,7 @@ async fn consolidate_layered_suffix_with_policy(
         phase = "base_resolution",
         declared_bases,
         inflated_bases = delta_bases.len(),
+        bytes = verified_source_bytes,
         elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
         "Git checkpoint phase completed"
     );
