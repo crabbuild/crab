@@ -64,16 +64,16 @@ fn object_set(
     objects: &[[u8; 20]],
     positions: &[u32],
 ) -> Result<Option<PageRef>> {
-    let rows = positions
-        .iter()
-        .map(|position| {
-            objects
-                .get(*position as usize)
-                .map(|oid| (oid.to_vec(), Vec::new()))
-                .ok_or_else(|| corrupt("checkpoint visibility ordinal is outside its dictionary"))
-        })
-        .collect::<Result<_>>()?;
-    optional_tree(writer, Kind::CheckpointSets, rows)
+    if positions.is_empty() {
+        return Ok(None);
+    }
+    let rows = positions.iter().map(|position| {
+        objects
+            .get(*position as usize)
+            .map(|oid| (oid.as_slice(), &[][..]))
+            .ok_or_else(|| corrupt("checkpoint visibility ordinal is outside its dictionary"))
+    });
+    writer.tree_from_iter(Kind::CheckpointSets, rows).map(Some)
 }
 
 fn transitions(
@@ -101,27 +101,19 @@ fn transitions(
 pub(super) fn encode(snapshot: &LayeredVisibilitySnapshot) -> Result<Bytes> {
     snapshot.validate()?;
     let mut writer = Writer::default();
-    let dictionary = snapshot
-        .objects
-        .iter()
-        .enumerate()
-        .map(|(index, oid)| {
-            let value = snapshot
-                .member_admission
-                .as_ref()
-                .map(|members| {
-                    let member = members[index];
-                    [
-                        member.source_index.to_be_bytes(),
-                        member.member_index.to_be_bytes(),
-                    ]
-                    .concat()
-                })
-                .unwrap_or_default();
-            (oid.to_vec(), value)
-        })
-        .collect();
-    let objects = optional_tree(&mut writer, Kind::CheckpointObjects, dictionary)?;
+    let objects = if snapshot.objects.is_empty() {
+        None
+    } else if let Some(members) = &snapshot.member_admission {
+        let dictionary = snapshot.objects.iter().zip(members).map(|(oid, member)| {
+            let source = member.source_index.to_be_bytes();
+            let position = member.member_index.to_be_bytes();
+            Ok((oid, [source[0], source[1], position[0], position[1]]))
+        });
+        Some(writer.tree_from_iter(Kind::CheckpointObjects, dictionary)?)
+    } else {
+        let dictionary = snapshot.objects.iter().map(|oid| Ok((oid, &[][..])));
+        Some(writer.tree_from_iter(Kind::CheckpointObjects, dictionary)?)
+    };
     let mut refs = BTreeMap::new();
     for (name, positions) in &snapshot.refs {
         let objects = object_set(&mut writer, &snapshot.objects, positions)?;

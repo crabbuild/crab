@@ -178,27 +178,62 @@ pub(crate) struct Writer {
 impl Writer {
     pub(crate) fn tree(&mut self, kind: Kind, rows: Rows) -> Result<PageRef> {
         validate_rows(kind, &rows)?;
+        self.tree_from_iter(kind, rows.into_iter().map(Ok))
+    }
+
+    /// Encode borrowed or inline rows without allocating one buffer per key/value.
+    /// Ordering and width checks span page boundaries, just as for owned rows.
+    pub(crate) fn tree_from_iter<K: AsRef<[u8]>, V: AsRef<[u8]>>(
+        &mut self,
+        kind: Kind,
+        rows: impl IntoIterator<Item = Result<(K, V)>>,
+    ) -> Result<PageRef> {
         let mut level = Vec::new();
-        let mut pending = Vec::new();
-        let mut size = HEADER;
+        let mut pending = header(kind, 0, 0);
+        let mut count = 0_u32;
+        let mut first = Vec::new();
+        let mut previous = Vec::new();
         for row in rows {
+            let (key, value) = row?;
+            let (key, value) = (key.as_ref(), value.as_ref());
+            if key.len() != kind.key_bytes() || (!previous.is_empty() && previous.as_slice() >= key)
+            {
+                return Err(corruption("page keys are empty, invalid or unordered"));
+            }
+            if kind.is_positional()
+                && !previous.is_empty()
+                && integer(&previous)?.checked_add(1) != Some(integer(key)?)
+            {
+                return Err(corruption("positional leaf has a key gap"));
+            }
             let row_bytes = kind
                 .key_bytes()
                 .checked_add(4)
-                .and_then(|n| n.checked_add(row.1.len()))
+                .and_then(|n| n.checked_add(value.len()))
                 .ok_or_else(|| corruption("metadata row size overflows"))?;
             if row_bytes > MAX_BYTES - HEADER {
                 return Err(corruption("metadata row exceeds the page bound"));
             }
-            if !pending.is_empty() && size + row_bytes > TARGET_BYTES {
-                level.push(self.leaf(kind, std::mem::take(&mut pending))?);
-                size = HEADER;
+            if count > 0 && pending.len() + row_bytes > TARGET_BYTES {
+                pending[10..HEADER].copy_from_slice(&count.to_le_bytes());
+                level.push(self.append(pending, 0, count, first, previous.clone())?);
+                pending = header(kind, 0, 0);
+                count = 0;
+                first = Vec::new();
             }
-            size += row_bytes;
-            pending.push(row);
+            if count == 0 {
+                first.extend_from_slice(key);
+            }
+            pending.extend_from_slice(key);
+            put_u32(&mut pending, value.len())?;
+            pending.extend_from_slice(value);
+            count += 1;
+            previous.clear();
+            previous.extend_from_slice(key);
         }
-        if !pending.is_empty() {
-            level.push(self.leaf(kind, pending)?);
+        if count > 0 {
+            pending[10..HEADER].copy_from_slice(&count.to_le_bytes());
+            level.push(self.append(pending, 0, count, first, previous)?);
         }
         let fanout = (TARGET_BYTES - HEADER) / ref_bytes(kind);
         while level.len() > 1 {
@@ -211,28 +246,6 @@ impl Writer {
         level
             .pop()
             .ok_or_else(|| corruption("empty metadata page tree"))
-    }
-
-    fn leaf(&mut self, kind: Kind, rows: Rows) -> Result<PageRef> {
-        let first = rows
-            .first()
-            .ok_or_else(|| corruption("empty page"))?
-            .0
-            .clone();
-        let last = rows
-            .last()
-            .ok_or_else(|| corruption("empty page"))?
-            .0
-            .clone();
-        let count =
-            u32::try_from(rows.len()).map_err(|_| corruption("page row count overflows"))?;
-        let mut bytes = header(kind, 0, count);
-        for (key, value) in rows {
-            bytes.extend_from_slice(&key);
-            put_u32(&mut bytes, value.len())?;
-            bytes.extend_from_slice(&value);
-        }
-        self.append(bytes, 0, count, first, last)
     }
 
     fn branch(&mut self, kind: Kind, children: &[PageRef]) -> Result<PageRef> {
@@ -573,6 +586,33 @@ mod tests {
         (0..count)
             .map(|index| (index.to_be_bytes().to_vec(), vec![7; value_bytes]))
             .collect()
+    }
+
+    #[test]
+    fn streamed_pages_reject_cross_page_ordering_gaps_and_input_errors() {
+        let boundary = (TARGET_BYTES - HEADER) / (4 + 4 + 1000);
+        for invalid in [0, boundary as u32 - 1, boundary as u32 + 1] {
+            let mut writer = Writer::default();
+            let rows = (0..boundary as u32)
+                .chain(std::iter::once(invalid))
+                .map(|key| Ok((key.to_be_bytes(), [7; 1000])));
+            assert!(writer.tree_from_iter(Kind::Records, rows).is_err());
+        }
+        let mut writer = Writer::default();
+        let rows = (0..boundary as u32)
+            .map(|key| Ok((key.to_be_bytes(), [7; 1000])))
+            .chain(std::iter::once(Err(corruption("input failed"))));
+        assert!(writer.tree_from_iter(Kind::Records, rows).is_err());
+        assert!(
+            Writer::default()
+                .tree_from_iter(Kind::Records, [Ok(([0; 3], []))])
+                .is_err()
+        );
+        assert!(
+            Writer::default()
+                .tree_from_iter(Kind::Records, [Ok(([0; 4], vec![0; MAX_BYTES]))])
+                .is_err()
+        );
     }
 
     #[test]
