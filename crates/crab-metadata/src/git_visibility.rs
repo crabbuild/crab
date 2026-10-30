@@ -354,6 +354,17 @@ impl GitVisibilityClosure {
     fn add_positions(&mut self, additions: &[u32], object_count: usize) -> Result<()> {
         match self {
             Self::Sparse(positions) => {
+                // New dictionary ordinals append after the admitted history.
+                // Retain that allocation instead of merging/copying the whole
+                // transition for every captured fast-forward control.
+                if positions
+                    .last()
+                    .zip(additions.first())
+                    .is_none_or(|(last, first)| last < first)
+                {
+                    positions.extend_from_slice(additions);
+                    return Ok(());
+                }
                 let mut merged =
                     Vec::with_capacity(positions.len().saturating_add(additions.len()));
                 let mut left_index = 0;
@@ -4362,6 +4373,18 @@ mod tests {
 
     proptest! {
         #[test]
+        fn sparse_additions_match_sorted_set_union(
+            original in prop::collection::btree_set(0_u32..512, 0..128),
+            additions in prop::collection::btree_set(0_u32..512, 0..128),
+        ) {
+            let expected = original.union(&additions).copied().collect::<Vec<_>>();
+            let mut closure = GitVisibilityClosure::Sparse(original.into_iter().collect());
+            closure.add_positions(&additions.into_iter().collect::<Vec<_>>(), 512)
+                .expect("sorted admitted additions");
+            prop_assert_eq!(closure.positions(), expected);
+        }
+
+        #[test]
         fn bitmap_queries_match_sorted_closure_sets(
             closures in prop::collection::vec(prop::collection::vec(0_u8..64, 0..64), 1..8),
             selected in prop::collection::vec(0_usize..16, 0..16),
@@ -4568,6 +4591,25 @@ mod tests {
             .map(|index| (format!("refs/heads/{index}"), Vec::new()))
             .collect();
         assert!(GitVisibilityIndex::new(4, "a".repeat(64), "c".repeat(64), refs).is_err());
+    }
+
+    #[test]
+    fn sparse_visibility_appends_and_overlapping_additions_keep_exact_membership() {
+        let mut closure = GitVisibilityClosure::Sparse(vec![1, 3, 5]);
+        closure
+            .add_positions(&[7, 9], 16)
+            .expect("append sorted new ordinals");
+        closure
+            .add_positions(&[3, 6, 9, 10], 16)
+            .expect("merge existing and new ordinals");
+        closure
+            .add_positions(&[], 16)
+            .expect("empty additions preserve membership");
+        assert_eq!(closure.positions(), vec![1, 3, 5, 6, 7, 9, 10]);
+        assert_eq!(
+            closure.validate(16).expect("canonical sparse membership"),
+            7
+        );
     }
 
     #[test]
