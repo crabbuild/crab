@@ -23,6 +23,7 @@ mod publication_scaling_tests;
 
 mod compaction;
 use compaction::compact_ref_frontier;
+mod ref_commit;
 
 /// Derive the exact object IDs for each capsule Git-pack member.
 pub fn capsule_member_oids(capsule: &Capsule) -> Result<Vec<Vec<[u8; 20]>>> {
@@ -1278,25 +1279,13 @@ async fn commit_multi_ref(
             _ => return Err(source.into()),
         },
     };
-    let mut written = Vec::with_capacity(prepared.len());
-    for item in prepared {
-        let new_state = item
-            .candidate
-            .visible(&std::collections::BTreeSet::new())
-            .clone();
-        let candidate = item.original.head.prepare(
-            item.original.visible.clone(),
-            activation_id.to_owned(),
-            new_state,
-        )?;
-        match write_ref_head(router, &item.original, &candidate).await {
-            Ok(etag) => written.push((item.original, candidate, etag)),
-            Err(error) => {
-                abort_transaction(router, &path, &preparing, record_etag).await;
-                rollback_ref_heads(router, &written).await;
-                return Err(error);
-            }
-        }
+    let (written, error) = ref_commit::write_heads(router, activation_id, prepared).await;
+    if let Some(error) = error {
+        // Every started write has settled before abort and conditional cleanup.
+        // Otherwise a late successful write could escape the rollback inventory.
+        abort_transaction(router, &path, &preparing, record_etag).await;
+        rollback_ref_heads(router, &written).await;
+        return Err(error);
     }
 
     let committed = preparing.commit()?;
