@@ -1428,6 +1428,7 @@ jobs:
             > "${RUNNER_TEMP}/crab-s3-gateway-evidence/native-metrics.prom"
           python3 - "${RUNNER_TEMP}/crab-s3-gateway-evidence/native-service-errors.txt" <<'PY'
           from collections import deque
+          from datetime import datetime
           from pathlib import Path
           import json
           import re
@@ -1440,18 +1441,27 @@ jobs:
               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
           )
           selected = deque(maxlen=100)
-          phases = deque(maxlen=30000)
+          phases = deque(maxlen=100000)
           phase_count = 0
           for line in process.stdout:
               line = re.sub(r"\x1b\[[0-9;]*m", "", line)
               if re.search(r"\b(?:ERROR|WARN)\b", line):
                   selected.append(line[:4096])
-              if "Git preparation phase completed" in line or "Git mutation phase completed" in line:
-                  phase = re.search(r'\bphase="(build|encode|sidecars|content_hash)"', line)
+              if any(message in line for message in (
+                  "Git preparation phase completed",
+                  "Git mutation phase completed",
+                  "Git capsule publication phase finished",
+              )):
+                  phase = re.search(r'\bphase="(build|encode|sidecars|content_hash|upload|ref_cas|ref_transaction)"', line)
                   elapsed = re.search(r'\belapsed_ms=([0-9.eE+-]+)', line)
                   if phase and elapsed:
                       # Persist only fixed phase names and numeric measurements.
                       row = {"phase": phase[1], "elapsed_ms": float(elapsed[1])}
+                      timestamp = re.match(r"(\d{4}-\d{2}-\d{2}T[0-9:.]+Z)\s", line)
+                      if timestamp:
+                          row["timestamp_unix_seconds"] = datetime.fromisoformat(
+                              timestamp[1].replace("Z", "+00:00")
+                          ).timestamp()
                       for field in ("objects", "bytes", "commits"):
                           value = re.search(rf'\b{field}=([0-9]+)', line)
                           if value:
