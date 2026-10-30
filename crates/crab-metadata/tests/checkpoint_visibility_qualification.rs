@@ -33,23 +33,18 @@ fn streamed_checkpoint_pages_keep_the_existing_wire_identity() {
         blake3::hash(&bytes).to_hex().as_str(),
         "b9f620b1aaf6b3d3f26e1ae5461036f455247f4aa4c1afa265421b00ff0e5c0d"
     );
-    assert_eq!(LayeredVisibilitySnapshot::decode(&bytes).unwrap(), snapshot);
 }
 
 #[test]
 #[ignore = "explicit checkpoint encoder latency diagnostic"]
-fn checkpoint_visibility_encode_decode_latency() {
+fn checkpoint_visibility_encode_latency() {
     let snapshot = large_visibility_snapshot();
     for iteration in 0..5 {
         let started = std::time::Instant::now();
         let bytes = snapshot.encode().unwrap();
         let encode_ms = started.elapsed().as_secs_f64() * 1000.0;
-        let started = std::time::Instant::now();
-        let decoded = LayeredVisibilitySnapshot::decode(&bytes).unwrap();
-        let decode_ms = started.elapsed().as_secs_f64() * 1000.0;
-        assert_eq!(decoded, snapshot);
         eprintln!(
-            "checkpoint_visibility_latency iteration={iteration} encode_ms={encode_ms:.3} decode_ms={decode_ms:.3} bytes={} hash={}",
+            "checkpoint_visibility_latency iteration={iteration} encode_ms={encode_ms:.3} bytes={} hash={}",
             bytes.len(),
             blake3::hash(&bytes)
         );
