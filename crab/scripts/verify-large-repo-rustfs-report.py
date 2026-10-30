@@ -140,6 +140,14 @@ def verify_telemetry(value: Any, field: str) -> None:
         "locator_ordinal_metadata_scan",
     ):
         require_nonnegative_int(value.get(name), f"{field}.{name}")
+    for name in (
+        "authenticated_pack_installs", "authenticated_pack_install_ms",
+        "authenticated_pack_verification_ms", "authenticated_pack_publication_ms",
+        "authenticated_pack_bytes", "authenticated_pack_objects",
+        "incomplete_pack_visibility", "incomplete_pack_install_evidence",
+    ):
+        if name in value:
+            require_nonnegative_int(value[name], f"{field}.{name}")
     if "source_download_ms" in value:
         require_nonnegative_int(value["source_download_ms"], f"{field}.source_download_ms")
     if "source_inventory_check_ms" in value:
@@ -156,6 +164,42 @@ def verify_stage(name: str, stage: Any) -> None:
         verify_resources(stage["resources"], f"stages.{name}.resources")
     if "telemetry" in stage:
         verify_telemetry(stage["telemetry"], f"stages.{name}.telemetry")
+
+
+def verify_full_clone_telemetry(telemetry: dict[str, Any]) -> None:
+    direct = require_nonnegative_int(
+        telemetry.get("authenticated_pack_installs", 0), "authenticated_pack_installs"
+    )
+    if direct:
+        # Native installation does not generate a response pack. Require its
+        # completed identity/visibility proof instead of inventing repack work.
+        for field in (
+            "authenticated_pack_install_ms", "authenticated_pack_bytes",
+            "authenticated_pack_objects",
+        ):
+            require(
+                require_nonnegative_int(telemetry.get(field), field) > 0,
+                f"full report is missing authenticated-install telemetry: {field}",
+            )
+        for field in ("authenticated_pack_verification_ms", "authenticated_pack_publication_ms"):
+            elapsed = require_nonnegative_int(telemetry.get(field), field)
+            require(elapsed <= telemetry["authenticated_pack_install_ms"],
+                f"authenticated-install phase exceeds completed duration: {field}")
+        require(
+            require_nonnegative_int(telemetry.get("incomplete_pack_visibility"), "incomplete_pack_visibility") == 0,
+            "full clone installation did not prove complete authenticated visibility",
+        )
+        require(
+            require_nonnegative_int(telemetry.get("incomplete_pack_install_evidence"), "incomplete_pack_install_evidence") == 0,
+            "full clone installation omitted required verification telemetry",
+        )
+        return
+    for field in (
+        "upload_pack_duration_ms", "visibility_plan_ms", "pack_generation_ms",
+        "response_bytes", "storage_requests", "storage_bytes",
+    ):
+        require(telemetry.get(field, 0) > 0,
+            f"full report is missing full-clone telemetry: {field}")
 
 
 def verify_full_visibility_telemetry(stages: dict[str, Any]) -> None:
@@ -812,19 +856,7 @@ def verify_report(
     if profile == "full":
         verify_full_visibility_telemetry(stages)
         verify_locator_sweep_telemetry(stages)
-        clone_telemetry = stages["full_clone_cold"].get("telemetry", {})
-        for field in (
-            "upload_pack_duration_ms",
-            "visibility_plan_ms",
-            "pack_generation_ms",
-            "response_bytes",
-            "storage_requests",
-            "storage_bytes",
-        ):
-            require(
-                clone_telemetry.get(field, 0) > 0,
-                f"full report is missing full-clone telemetry: {field}",
-            )
+        verify_full_clone_telemetry(stages["full_clone_cold"].get("telemetry", {}))
 
     team_load = report.get("team_load")
     if require_team_load:

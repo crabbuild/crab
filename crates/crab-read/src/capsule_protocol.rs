@@ -2323,6 +2323,7 @@ async fn install_layered_cold_clone_packs_from_store(
     let temporary = staging.tempdir_in(&pack_dir)?;
     let mut staged = Vec::with_capacity(admitted.len());
     let mut object_ids = Vec::new();
+    let mut verified_pack_bytes = 0_u64;
     for (ordinal, (admitted, (source, member))) in
         admitted.into_iter().zip(source_members).enumerate()
     {
@@ -2416,12 +2417,16 @@ async fn install_layered_cold_clone_packs_from_store(
             object_count: admitted.object_count,
             identity: verified_identity,
         });
+        verified_pack_bytes = verified_pack_bytes.saturating_add(pack_length);
     }
     // Validate the complete downloaded union before any pack becomes visible.
     // Repeated objects across stable layers are valid and counted only once.
+    let verification_started = std::time::Instant::now();
     object_ids.sort_unstable();
     object_ids.dedup();
     let complete_visibility = view.verify_cold_clone_visibility(&object_ids)?;
+    let visibility_verification_ms = verification_started.elapsed().as_millis() as u64;
+    let installation_started = std::time::Instant::now();
     let mut paths = Vec::with_capacity(staged.len());
     let mut installed_hashes = BTreeSet::new();
     for pack in staged {
@@ -2457,6 +2462,19 @@ async fn install_layered_cold_clone_packs_from_store(
     if cancel.is_cancelled() {
         return Err(ReadError::Cancelled);
     }
+    // Direct installation produces no response pack. Report its actual verified
+    // work so qualification cannot confuse omitted repacking with missing proof.
+    tracing::info!(
+        telemetry_event = "authenticated_pack_install",
+        installed_packs = paths.len(),
+        verified_pack_bytes,
+        verified_objects = object_ids.len(),
+        complete_visibility,
+        visibility_verification_ms,
+        installation_ms = installation_started.elapsed().as_millis() as u64,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "authenticated Git pack installation completed"
+    );
     Ok(Some(InstalledGitPacks {
         paths,
         complete_visibility,
