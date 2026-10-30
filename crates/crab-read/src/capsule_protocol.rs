@@ -490,16 +490,20 @@ impl CapsuleRepositoryView {
     /// must not use a partial chain as an authorization proof.
     pub async fn tip_bound_transitions(&self) -> Result<CapsuleTipBoundTransitions> {
         let mut transitions = self.tip_bound_transitions.clone();
-        if let Some(layout) = &self.metadata_layout {
-            let controls = try_join_all(
+        let controls = if let Some(layout) = &self.metadata_layout {
+            try_join_all(
                 self.tip_bound_controls
                     .iter()
                     .map(|control| control.materialize_visibility(layout.store())),
             )
-            .await?;
-            for (name, values) in build_tip_bound_transitions(&[], &controls)? {
-                transitions.entry(name).or_default().extend(values);
-            }
+            .await?
+        } else {
+            // Footer views already retain complete authenticated controls. Keep
+            // their shared sets compact until a fetch asks for expanded hints.
+            self.tip_bound_controls.clone()
+        };
+        for (name, values) in build_tip_bound_transitions(&[], &controls)? {
+            transitions.entry(name).or_default().extend(values);
         }
         Ok(transitions)
     }
@@ -1686,35 +1690,54 @@ impl CapsuleRepositoryView {
     }
 }
 
+fn tip_bound_transition_endpoints(
+    transaction: &crab_metadata::capsule_protocol::CapsuleTransaction,
+    ref_name: &str,
+    edit: &crab_metadata::git_visibility::GitVisibilityEdit,
+) -> Result<(Option<ObjectId>, ObjectId)> {
+    let transaction_edit = transaction
+        .edits()
+        .iter()
+        .find(|candidate| candidate.ref_name() == ref_name)
+        .ok_or_else(|| {
+            corrupt_path(
+                "capsule Git visibility",
+                "visibility transition has no matching ref edit",
+            )
+        })?;
+    // Creation may borrow another committed ref's closure. Ordering and
+    // visibility application already authenticate that base; only an
+    // existing ref requires its own expected-old tip here.
+    if transaction_edit
+        .expected_old()
+        .is_some_and(|old| Some(old) != edit.old_oid.as_deref())
+        || transaction_edit.new_oid() != Some(edit.new_oid.as_str())
+    {
+        return Err(corrupt_path(
+            "capsule Git visibility",
+            "visibility transition does not match its ref edit",
+        ));
+    }
+    let parse_oid = |value: &str| {
+        ObjectId::from_hex(value.as_bytes()).map_err(|_| {
+            corrupt_path(
+                "capsule Git visibility",
+                "visibility transition contains an invalid object ID",
+            )
+        })
+    };
+    let old_oid = edit.old_oid.as_deref().map(parse_oid).transpose()?;
+    let new_oid = parse_oid(&edit.new_oid)?;
+    Ok((old_oid, new_oid))
+}
+
 fn append_tip_bound_transitions(
     output: &mut CapsuleTipBoundTransitions,
     transaction: &crab_metadata::capsule_protocol::CapsuleTransaction,
     delta: &crab_metadata::capsule_protocol::CapsuleVisibilityDelta,
 ) -> Result<()> {
     for (ref_name, edit) in delta.edits() {
-        let transaction_edit = transaction
-            .edits()
-            .iter()
-            .find(|candidate| candidate.ref_name() == ref_name)
-            .ok_or_else(|| {
-                corrupt_path(
-                    "capsule Git visibility",
-                    "visibility transition has no matching ref edit",
-                )
-            })?;
-        // Creation may borrow another committed ref's closure. Ordering and
-        // visibility application already authenticate that base; only an
-        // existing ref requires its own expected-old tip here.
-        if transaction_edit
-            .expected_old()
-            .is_some_and(|old| Some(old) != edit.old_oid.as_deref())
-            || transaction_edit.new_oid() != Some(edit.new_oid.as_str())
-        {
-            return Err(corrupt_path(
-                "capsule Git visibility",
-                "visibility transition does not match its ref edit",
-            ));
-        }
+        let (old_oid, new_oid) = tip_bound_transition_endpoints(transaction, ref_name, edit)?;
         let parse_oid = |value: &str| {
             ObjectId::from_hex(value.as_bytes()).map_err(|_| {
                 corrupt_path(
@@ -1723,8 +1746,6 @@ fn append_tip_bound_transitions(
                 )
             })
         };
-        let old_oid = edit.old_oid.as_deref().map(parse_oid).transpose()?;
-        let new_oid = parse_oid(&edit.new_oid)?;
         let added = edit
             .added
             .iter()
@@ -4714,7 +4735,17 @@ async fn assemble_layered_control_view(
             checkpoint.visibility_transitions(),
         )?;
     }
-    if !matches!(read, ControlRead::Git) {
+    if footer_only {
+        // Validate transaction bindings now without expanding every shared
+        // membership into per-ref ObjectId vectors during capability discovery.
+        for control in &all_capsule_controls {
+            if let Some(delta) = control.visibility_delta()? {
+                for (name, edit) in delta.edits() {
+                    tip_bound_transition_endpoints(control.transaction(), name, edit)?;
+                }
+            }
+        }
+    } else if matches!(read, ControlRead::Complete) {
         for (ref_name, transitions) in build_tip_bound_transitions(&[], &all_capsule_controls)? {
             tip_bound_transitions
                 .entry(ref_name)
@@ -4788,7 +4819,7 @@ async fn assemble_layered_control_view(
             capsule_controls: Vec::new(),
             tip_bound_transitions,
             metadata_layout: None,
-            tip_bound_controls: Vec::new(),
+            tip_bound_controls: all_capsule_controls,
             refs: expected_refs,
             peeled_refs: expected_peeled,
             visible_ref_transactions,
@@ -5356,6 +5387,14 @@ mod tests {
     }
 
     async fn seed_one_capsule(inner: Arc<InMemory>, pointer_transaction_id: Option<String>) {
+        seed_one_capsule_with_visibility(inner, pointer_transaction_id, None).await;
+    }
+
+    async fn seed_one_capsule_with_visibility(
+        inner: Arc<InMemory>,
+        pointer_transaction_id: Option<String>,
+        visibility: Option<CapsuleVisibilityDelta>,
+    ) {
         let store = Store::new(inner);
         let router = StoreLayout::new(store.clone(), "repositories/test".to_owned());
         let initial = RootRecord::encode(
@@ -5385,7 +5424,15 @@ mod tests {
                 )
                 .unwrap(),
             ],
-            Vec::new(),
+            visibility
+                .map(|delta| {
+                    CapsuleSection::new(
+                        CapsuleSectionKind::VisibilityDelta,
+                        delta.encode().unwrap(),
+                    )
+                })
+                .into_iter()
+                .collect(),
         )
         .unwrap();
         let run = CapsuleRun::leaf(capsule).unwrap();
@@ -6439,6 +6486,54 @@ mod tests {
                 complete.git_visibility_index().await.unwrap()
             );
         }
+    }
+
+    #[tokio::test]
+    async fn layered_control_rejects_mismatched_transition_before_hint_expansion() {
+        let inner = Arc::new(InMemory::new());
+        let delta = CapsuleVisibilityDelta::new(BTreeMap::from([(
+            "refs/heads/main".to_owned(),
+            GitVisibilityEdit::from_replacement_objects(None, "6".repeat(40), vec!["6".repeat(40)]),
+        )]))
+        .unwrap();
+        seed_one_capsule_with_visibility(inner.clone(), None, Some(delta)).await;
+        let router = StoreLayout::new(Store::new(inner), "repositories/test".to_owned());
+        let result = open_view_from_root_with_layered_control(
+            &router,
+            load_root(&router).await.unwrap(),
+            TEST_LIMITS,
+        )
+        .await;
+        let Err(error) = result else {
+            panic!("mismatched transition must reject the view");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("visibility transition does not match its ref edit")
+        );
+    }
+
+    #[tokio::test]
+    async fn layered_control_defers_transition_objects_until_requested() {
+        let inner = Arc::new(InMemory::new());
+        seed_prepared_multi_ref(inner.clone(), true, true).await;
+        let router = StoreLayout::new(Store::new(inner), "repositories/test".to_owned());
+        let root = load_root(&router).await.unwrap();
+        let view = open_view_from_root_with_layered_control(&router, root.clone(), TEST_LIMITS)
+            .await
+            .unwrap();
+        assert!(
+            view.tip_bound_transitions.is_empty(),
+            "capability discovery must retain compact controls without expanding memberships"
+        );
+        let complete = open_view_from_root_with_metadata(&router, root, TEST_LIMITS)
+            .await
+            .unwrap();
+        let expected = complete.tip_bound_transitions().await.unwrap();
+        assert_eq!(expected.len(), 2);
+        assert_eq!(view.tip_bound_transitions().await.unwrap(), expected);
+        assert_eq!(view.tip_bound_transitions().await.unwrap(), expected);
     }
 
     #[tokio::test]
