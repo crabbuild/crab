@@ -142,8 +142,8 @@ pub(super) fn decode(bytes: &[u8]) -> Result<CapsuleVisibilityDelta> {
             old_oid: row.old_oid,
             new_oid: row.new_oid,
             replaces: row.replaces,
-            added,
-            removed,
+            added: added.into(),
+            removed: removed.into(),
         };
         if edits.insert(row.name, edit).is_some() {
             return Err(corrupt("visibility ref repeats"));
@@ -158,7 +158,10 @@ pub(super) fn decode(bytes: &[u8]) -> Result<CapsuleVisibilityDelta> {
     Ok(delta)
 }
 
-fn objects(writer: &mut Writer, oids: &[String]) -> Result<Option<PageRef>> {
+fn objects(
+    writer: &mut Writer,
+    oids: &crate::git_visibility::GitVisibilityObjects,
+) -> Result<Option<PageRef>> {
     if oids.is_empty() {
         return Ok(None);
     }

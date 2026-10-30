@@ -12,6 +12,9 @@ use serde::{Deserialize, Serialize};
 use crate::error::{MetadataError, Result};
 use crate::manifests::Manifest;
 
+mod object_set;
+pub use object_set::{GitVisibilityDictionary, GitVisibilityObjects, VISIBILITY_CHUNK_BYTES};
+
 /// Current serialized visibility-index format.
 pub const GIT_VISIBILITY_INDEX_VERSION: u32 = 1;
 
@@ -41,9 +44,9 @@ pub struct GitVisibilityEdit {
     /// Whether `added` is the complete new closure rather than a delta.
     pub replaces: bool,
     /// Objects added to the prior closure, or the complete replacement closure.
-    pub added: Vec<String>,
+    pub added: GitVisibilityObjects,
     /// Objects removed from the prior closure. Empty for replacement evidence.
-    pub removed: Vec<String>,
+    pub removed: GitVisibilityObjects,
 }
 
 impl GitVisibilityEdit {
@@ -60,8 +63,8 @@ impl GitVisibilityEdit {
             old_oid,
             new_oid,
             replaces: false,
-            added: new.difference(old).cloned().collect(),
-            removed: old.difference(new).cloned().collect(),
+            added: new.difference(old).cloned().collect::<Vec<_>>().into(),
+            removed: old.difference(new).cloned().collect::<Vec<_>>().into(),
         }
     }
 
@@ -82,8 +85,8 @@ impl GitVisibilityEdit {
             old_oid,
             new_oid,
             replaces: false,
-            added,
-            removed,
+            added: added.into(),
+            removed: removed.into(),
         }
     }
 
@@ -107,8 +110,8 @@ impl GitVisibilityEdit {
             old_oid,
             new_oid,
             replaces: true,
-            added,
-            removed: Vec::new(),
+            added: added.into(),
+            removed: Vec::new().into(),
         }
     }
 
@@ -135,16 +138,12 @@ impl GitVisibilityEdit {
         if object_count > MAX_GIT_VISIBILITY_OBJECTS {
             return Err(corrupt("visibility edit contains too many objects"));
         }
-        validate_sorted_oids(&self.added, "added")?;
-        validate_sorted_oids(&self.removed, "removed")?;
-        if self
-            .added
-            .iter()
-            .any(|oid| self.removed.binary_search(oid).is_ok())
-        {
+        self.added.validate("added")?;
+        self.removed.validate("removed")?;
+        if !self.added.is_disjoint(&self.removed) {
             return Err(corrupt("visibility edit adds and removes the same object"));
         }
-        if self.replaces && !self.added.iter().any(|oid| oid == &self.new_oid) {
+        if self.replaces && !self.added.contains(&self.new_oid) {
             return Err(corrupt("visibility edit does not add its new ref tip"));
         }
         Ok(())
@@ -193,7 +192,10 @@ impl GitVisibilityEdit {
     }
 }
 
-fn validate_sorted_oids(objects: &[String], field: &str) -> Result<()> {
+fn validate_sorted_oids<'a>(
+    objects: impl IntoIterator<Item = &'a String>,
+    field: &str,
+) -> Result<()> {
     let mut previous: Option<&str> = None;
     for object in objects {
         validate_oid(object)?;
