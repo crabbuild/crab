@@ -33,6 +33,58 @@ pub async fn repack_capsule_checkpoint_from_root_with_scratch_limit(
         },
     )
     .await?;
+    repack_compacted_view_with_scratch_limit(
+        layout,
+        &view,
+        maximum_bytes,
+        maximum_scratch_bytes,
+        cancel,
+    )
+    .await
+}
+
+/// Reuse a committed complete checkpoint without fetching or decoding it again.
+///
+/// Metadata is authenticated against every field of the root pointer. Newer ref
+/// heads remain excluded and publication still uses that exact root CAS.
+pub async fn repack_capsule_checkpoint_from_receipt_with_scratch_limit(
+    layout: &StoreLayout<Store>,
+    root: crab_metadata::capsule_protocol::RootSnapshot,
+    checkpoint: LayeredCheckpoint,
+    maximum_bytes: u64,
+    maximum_scratch_bytes: u64,
+    cancel: &CancellationToken,
+) -> Result<CheckpointOutcome, CheckpointError> {
+    check_cancelled(cancel)?;
+    let view = crab_read::capsule_protocol::compacted_view_from_checkpoint(
+        layout,
+        root,
+        checkpoint,
+        crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: maximum_bytes,
+            max_frontier_bytes: maximum_bytes,
+        },
+    )?;
+    if maximum_scratch_bytes <= FIXED_SCRATCH_BYTES {
+        return Ok(CheckpointOutcome::default());
+    }
+    repack_compacted_view_with_scratch_limit(
+        layout,
+        &view,
+        maximum_bytes,
+        maximum_scratch_bytes,
+        cancel,
+    )
+    .await
+}
+
+async fn repack_compacted_view_with_scratch_limit(
+    layout: &StoreLayout<Store>,
+    view: &crab_read::capsule_protocol::CapsuleRepositoryView,
+    maximum_bytes: u64,
+    maximum_scratch_bytes: u64,
+    cancel: &CancellationToken,
+) -> Result<CheckpointOutcome, CheckpointError> {
     let checkpoint = view.layered_checkpoint().ok_or_else(|| {
         layered_admission_error("bounded physical maintenance requires a checkpoint")
     })?;
@@ -54,7 +106,7 @@ pub async fn repack_capsule_checkpoint_from_root_with_scratch_limit(
     };
     let consolidation = match consolidate_layered_suffix_with_policy(
         layout,
-        &view,
+        view,
         checkpoint.sources().to_vec(),
         start,
         ConsolidationPolicy {
@@ -71,7 +123,7 @@ pub async fn repack_capsule_checkpoint_from_root_with_scratch_limit(
     };
     let publication = publish_layered_sources_with_policy(
         layout,
-        &view,
+        view,
         consolidation.sources,
         consolidation.member_oids,
         CatalogWrite::Durable(checkpoint.catalog().cloned().map(Box::new)),

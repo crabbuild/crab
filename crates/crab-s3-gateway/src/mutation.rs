@@ -1609,7 +1609,7 @@ async fn prepare_and_upload_batch(
     if frontier.is_some_and(|frontier| {
         frontier.count >= FOREGROUND_CAPSULE_THRESHOLD || frontier.bytes >= FOREGROUND_CAPSULE_BYTES
     }) {
-        let checkpointed = crab_remote::checkpoint::publish_capsule_checkpoint(
+        let checkpointed = crab_remote::checkpoint::publish_capsule_checkpoint_with_receipt(
             &repository.layout,
             // Admission is due by count or bytes. Recheck only that some
             // frontier remains after another writer's concurrent checkpoint.
@@ -1618,17 +1618,24 @@ async fn prepare_and_upload_batch(
             cancel,
         )
         .await?;
+        // Charge immutable metadata before the next I/O. Queue retention shares
+        // the existing attribute-manifest budget; misses retain the cold path.
+        let retained = checkpointed.committed.and_then(|(_, checkpoint)| {
+            request
+                .checkpoints
+                .and_then(|scheduler| scheduler.retain_checkpoint(checkpoint))
+        });
         repository.read_views.invalidate().await;
         current_view = None;
         base = Box::new(crab_metadata::capsule_protocol::load_root(&repository.layout).await?);
-        if checkpointed.published
+        if checkpointed.work.published
             && base.record().root().checkpoint().is_some_and(|pointer| {
                 pointer.control_size() >= PHYSICAL_CHECKPOINT_CONTROL_BYTES
                     && pointer.pack_count() >= PHYSICAL_CHECKPOINT_MIN_PACKS
             })
             && let Some(checkpoints) = request.checkpoints
         {
-            checkpoints.schedule_physical(repository, (*base).clone());
+            checkpoints.schedule_physical(repository, (*base).clone(), retained);
         }
         cached = revalidate_cached_branch(repository, request.branch, &base, cached).await?;
     }

@@ -106,6 +106,161 @@ async fn maintenance_reuses_committed_checkpoint_without_reloading_authority() {
 }
 
 #[tokio::test]
+async fn checkpoint_receipt_avoids_checkpoint_reload_under_the_same_scratch_limit() {
+    let (layout, observations) = fixture().await;
+    let receipt = crab_remote::checkpoint::publish_capsule_checkpoint_with_receipt(
+        &layout,
+        1,
+        LIMIT,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert!(receipt.work.published);
+    let (root, checkpoint) = receipt.committed.unwrap();
+    assert!(
+        checkpoint
+            .matches_pointer(root.record().root().checkpoint().unwrap())
+            .unwrap()
+    );
+    assert!(checkpoint.retained_metadata_bytes().unwrap() >= checkpoint.bytes().len());
+    // Enough to enter maintenance, but too little for two source members. Both
+    // paths must defer identical physical work without changing the root.
+    let scratch = 32 * 1024 * 1024 + 1;
+    observations.0.lock().unwrap().clear();
+    let warm = crab_remote::checkpoint::repack_capsule_checkpoint_from_receipt_with_scratch_limit(
+        &layout,
+        root.clone(),
+        checkpoint,
+        LIMIT,
+        scratch,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert!(!warm.published);
+    assert!(
+        observations
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|r| r.operation != StorageOperation::Get)
+    );
+    observations.0.lock().unwrap().clear();
+    let cold = crab_remote::checkpoint::repack_capsule_checkpoint_from_root_with_scratch_limit(
+        &layout,
+        root.clone(),
+        LIMIT,
+        scratch,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(warm, cold);
+    assert_eq!(
+        observations
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.operation == StorageOperation::Get)
+            .count(),
+        1
+    );
+    assert_eq!(
+        crab_write::capsule_protocol::open_root(&layout)
+            .await
+            .unwrap()
+            .record(),
+        root.record()
+    );
+}
+
+#[tokio::test]
+async fn checkpoint_receipt_rejects_another_root_before_storage_io() {
+    let (layout, observations) = fixture().await;
+    let first = crab_remote::checkpoint::publish_capsule_checkpoint_with_receipt(
+        &layout,
+        1,
+        LIMIT,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap()
+    .committed
+    .unwrap()
+    .1;
+    publish_blob(&layout, "later-receipt").await;
+    let (root, _) = crab_remote::checkpoint::publish_capsule_checkpoint_with_receipt(
+        &layout,
+        1,
+        LIMIT,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap()
+    .committed
+    .unwrap();
+    observations.0.lock().unwrap().clear();
+    let result =
+        crab_remote::checkpoint::repack_capsule_checkpoint_from_receipt_with_scratch_limit(
+            &layout,
+            root,
+            first,
+            LIMIT,
+            64 * 1024 * 1024,
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(result.is_err());
+    assert!(observations.0.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn retained_checkpoint_physical_publication_preserves_exact_refs_and_visibility() {
+    let (layout, observations) = fixture().await;
+    let before = view(&layout).await;
+    let (root, checkpoint) = crab_remote::checkpoint::publish_capsule_checkpoint_with_receipt(
+        &layout,
+        1,
+        LIMIT,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap()
+    .committed
+    .unwrap();
+    observations.0.lock().unwrap().clear();
+    let work = crab_remote::checkpoint::repack_capsule_checkpoint_from_receipt_with_scratch_limit(
+        &layout,
+        root,
+        checkpoint,
+        LIMIT,
+        64 * 1024 * 1024,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert!(work.published);
+    assert!(
+        observations
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|r| r.operation != StorageOperation::Get)
+    );
+    let after = view(&layout).await;
+    assert_eq!(after.refs(), before.refs());
+    assert_eq!(after.git_pack_count(), 1);
+    assert_eq!(
+        after.git_visibility_index().await.unwrap().ref_closures(),
+        before.git_visibility_index().await.unwrap().ref_closures()
+    );
+}
+
+#[tokio::test]
 async fn query_view_cannot_publish_checkpoint_without_member_admission() {
     let (layout, _) = fixture().await;
     let root = crab_write::capsule_protocol::open_root(&layout)

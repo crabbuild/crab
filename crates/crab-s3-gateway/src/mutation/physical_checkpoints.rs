@@ -1,11 +1,31 @@
 //! Bounded checkpoint ownership for published checkpoints during sustained writes.
 use super::*;
 
+pub(super) struct RetainedPhysicalCheckpoint {
+    checkpoint: crab_metadata::capsule_protocol::LayeredCheckpoint,
+    _permit: tokio::sync::OwnedSemaphorePermit,
+}
+
 impl CheckpointScheduler {
+    pub(super) fn retain_checkpoint(
+        &self,
+        checkpoint: crab_metadata::capsule_protocol::LayeredCheckpoint,
+    ) -> Option<RetainedPhysicalCheckpoint> {
+        let bytes = u32::try_from(checkpoint.retained_metadata_bytes()?).ok()?;
+        let permit = Arc::clone(&self.manifest_bytes)
+            .try_acquire_many_owned(bytes)
+            .ok()?;
+        Some(RetainedPhysicalCheckpoint {
+            checkpoint,
+            _permit: permit,
+        })
+    }
+
     pub(super) fn schedule_physical(
         self: &Arc<Self>,
         repository: &Repository,
         root: crab_metadata::capsule_protocol::RootSnapshot,
+        retained: Option<RetainedPhysicalCheckpoint>,
     ) {
         let key = repository.config.name.clone();
         {
@@ -42,15 +62,24 @@ impl CheckpointScheduler {
                             MAX_WARM_BRANCH_STATE_BYTES as u64,
                         )?;
                         let fences = GcWriterFences::acquire(&repository, &cancellation).await?;
-                        let result = crab_remote::checkpoint::repack_capsule_checkpoint_from_root_with_scratch_limit(
-                            &repository.layout,
-                            root,
-                            MAX_CAPSULE_READ_BYTES,
-                            maximum_scratch_bytes,
-                            &cancellation,
-                        )
-                        .await
-                        .map_err(Error::from);
+                        let retained = retained.filter(|retained| {
+                            root.record().root().checkpoint().is_some_and(|pointer| {
+                                retained.checkpoint.matches_pointer(pointer).is_ok_and(|matches| matches)
+                            })
+                        });
+                        let result = if let Some(retained) = retained {
+                            let RetainedPhysicalCheckpoint { checkpoint, _permit } = retained;
+                            tracing::info!("S3 physical checkpoint reuses committed metadata");
+                            crab_remote::checkpoint::repack_capsule_checkpoint_from_receipt_with_scratch_limit(
+                                &repository.layout, root, checkpoint, MAX_CAPSULE_READ_BYTES,
+                                maximum_scratch_bytes, &cancellation,
+                            ).await.map_err(Error::from)
+                        } else {
+                            crab_remote::checkpoint::repack_capsule_checkpoint_from_root_with_scratch_limit(
+                                &repository.layout, root, MAX_CAPSULE_READ_BYTES,
+                                maximum_scratch_bytes, &cancellation,
+                            ).await.map_err(Error::from)
+                        };
                         fences.release().await;
                         if result.as_ref().is_ok_and(|work| work.published) {
                             repository.read_views.invalidate().await;
@@ -75,6 +104,9 @@ impl CheckpointScheduler {
                         tracing::warn!(%error, "S3 physical checkpoint maintenance worker failed")
                     }
                 }
+            } else {
+                // Release queued metadata before announcing drained shutdown.
+                drop(retained);
             }
             scheduler
                 .physical_repositories
@@ -142,6 +174,66 @@ mod tests {
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn retained_checkpoint_shares_the_existing_manifest_budget() {
+        let (repository, runtime, cancel) = capsule_fixture().await;
+        let coordinator = Coordinator::new(
+            Arc::clone(&runtime),
+            Default::default(),
+            cancel.child_token(),
+            Metrics::new().unwrap(),
+        );
+        coordinated_put(&coordinator, &repository, &cancel, "retained", b"data").await;
+        coordinator.shutdown().await;
+        let (root, checkpoint) = crab_remote::checkpoint::publish_capsule_checkpoint_with_receipt(
+            &repository.layout,
+            1,
+            MAX_CAPSULE_READ_BYTES,
+            &cancel,
+        )
+        .await
+        .unwrap()
+        .committed
+        .unwrap();
+        let bytes = checkpoint.retained_metadata_bytes().unwrap();
+        let scheduler = Arc::new(CheckpointScheduler::new(
+            cancel.child_token(),
+            Metrics::new().unwrap(),
+        ));
+        let retained = scheduler.retain_checkpoint(checkpoint.clone()).unwrap();
+        assert_eq!(
+            scheduler.manifest_bytes.available_permits(),
+            MAX_WARM_BRANCH_STATE_BYTES - bytes
+        );
+        drop(retained);
+        assert_eq!(
+            scheduler.manifest_bytes.available_permits(),
+            MAX_WARM_BRANCH_STATE_BYTES
+        );
+        let _occupied = Arc::clone(&scheduler.manifest_bytes)
+            .acquire_many_owned(MAX_WARM_BRANCH_STATE_BYTES as u32)
+            .await
+            .unwrap();
+        assert!(scheduler.retain_checkpoint(checkpoint.clone()).is_none());
+        drop(_occupied);
+        let _blocked = Arc::clone(&scheduler.physical_permits)
+            .acquire_owned()
+            .await
+            .unwrap();
+        let retained = scheduler.retain_checkpoint(checkpoint).unwrap();
+        scheduler.schedule_physical(&repository, root, Some(retained));
+        assert_eq!(
+            scheduler.manifest_bytes.available_permits(),
+            MAX_WARM_BRANCH_STATE_BYTES - bytes
+        );
+        scheduler.shutdown().await;
+        assert_eq!(
+            scheduler.manifest_bytes.available_permits(),
+            MAX_WARM_BRANCH_STATE_BYTES
+        );
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
     async fn physical_jobs_coalesce_bound_admission_and_drain_on_shutdown() {
         let (repository, runtime, cancel) = capsule_fixture().await;
         let root = crab_metadata::capsule_protocol::load_root(&repository.layout)
@@ -152,13 +244,13 @@ mod tests {
             .acquire_owned()
             .await
             .unwrap();
-        scheduler.schedule_physical(&repository, root.clone());
-        scheduler.schedule_physical(&repository, root.clone());
+        scheduler.schedule_physical(&repository, root.clone(), None);
+        scheduler.schedule_physical(&repository, root.clone(), None);
         assert_eq!(scheduler.active.load(Ordering::Acquire), 1);
         for index in 0..MAX_TRACKED_REFS {
             let mut other = repository.clone();
             other.config.name = format!("physical-job-{index}");
-            scheduler.schedule_physical(&other, root.clone());
+            scheduler.schedule_physical(&other, root.clone(), None);
         }
         assert_eq!(scheduler.active.load(Ordering::Acquire), MAX_TRACKED_REFS);
         tokio::time::timeout(Duration::from_secs(5), scheduler.shutdown())
@@ -166,7 +258,7 @@ mod tests {
             .unwrap();
         assert_eq!(scheduler.active.load(Ordering::Acquire), 0);
         assert!(scheduler.physical_repositories.lock().unwrap().is_empty());
-        scheduler.schedule_physical(&repository, root);
+        scheduler.schedule_physical(&repository, root, None);
         assert_eq!(scheduler.active.load(Ordering::Acquire), 0);
         runtime.shutdown().await;
     }
@@ -190,17 +282,23 @@ mod tests {
             )
             .await;
         }
-        let root = checkpoint(&repository, &cancel).await;
-        let before = crab_metadata::capsule_protocol::load_layered_checkpoint(
+        let (root, before) = crab_remote::checkpoint::publish_capsule_checkpoint_with_receipt(
             &repository.layout,
-            root.record().root().checkpoint().unwrap(),
+            1,
             MAX_CAPSULE_READ_BYTES,
+            &cancel,
         )
         .await
+        .unwrap()
+        .committed
         .unwrap();
+        let retained = coordinator
+            .checkpoints
+            .retain_checkpoint(before.clone())
+            .unwrap();
         coordinator
             .checkpoints
-            .schedule_physical(&repository, root.clone());
+            .schedule_physical(&repository, root.clone(), Some(retained));
         for index in 64..104_u32 {
             coordinated_put(
                 &coordinator,
@@ -278,7 +376,7 @@ mod tests {
             .unwrap();
         coordinator
             .checkpoints
-            .schedule_physical(&repository, old_root);
+            .schedule_physical(&repository, old_root, None);
         coordinated_put(&coordinator, &repository, &cancel, "newer", b"retained").await;
         let new_root = checkpoint(&repository, &cancel).await;
         drop(blocked);

@@ -180,6 +180,47 @@ impl LayeredVisibilitySnapshot {
         self.member_admission.as_deref()
     }
 
+    fn retained_bytes(&self) -> usize {
+        let mut bytes = std::mem::size_of::<Self>()
+            .saturating_add(self.catalog_digest.capacity())
+            .saturating_add(self.objects.capacity().saturating_mul(20))
+            .saturating_add(self.member_admission.as_ref().map_or(0, |members| {
+                members
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<LayeredObjectMember>())
+            }));
+        // Include map nodes and spare vector capacity, including repeated sets
+        // whose shared wire pages can be much smaller than their resident values.
+        if !self.refs.is_empty() {
+            bytes = bytes.saturating_add(1024);
+        }
+        for (name, positions) in &self.refs {
+            bytes = bytes
+                .saturating_add(128)
+                .saturating_add(name.capacity())
+                .saturating_add(positions.capacity().saturating_mul(4));
+        }
+        for map in [&self.transitions, &self.incremental_history] {
+            if !map.is_empty() {
+                bytes = bytes.saturating_add(1024);
+            }
+            for (name, transitions) in map {
+                bytes = bytes
+                    .saturating_add(128)
+                    .saturating_add(name.capacity())
+                    .saturating_add(
+                        transitions
+                            .capacity()
+                            .saturating_mul(std::mem::size_of::<GitVisibilityOrdinalTransition>()),
+                    );
+                for transition in transitions {
+                    bytes = bytes.saturating_add(transition.objects.capacity().saturating_mul(4));
+                }
+            }
+        }
+        bytes
+    }
+
     /// Return the stable digest of the complete visibility object dictionary.
     ///
     /// The digest is stored in the checkpoint footer so a cold reader can
@@ -992,6 +1033,7 @@ struct LayerSectionLocation {
 #[derive(Debug, Clone)]
 pub struct LayeredCheckpoint {
     bytes: Bytes,
+    owned_buffer_bytes: Option<usize>,
     hash: String,
     footer_hash: String,
     footer: CheckpointFooter,
@@ -1180,7 +1222,9 @@ impl LayeredCheckpoint {
         body.extend_from_slice(&(footer_bytes.len() as u64).to_be_bytes());
         body.extend_from_slice(blake3::hash(&footer_bytes).as_bytes());
         body.extend_from_slice(CHECKPOINT_MAGIC);
+        let owned_buffer_bytes = body.capacity();
         let mut checkpoint = Self::decode(Bytes::from(body))?;
+        checkpoint.owned_buffer_bytes = Some(owned_buffer_bytes);
         checkpoint.catalog_objects = catalog_objects;
         Ok(checkpoint)
     }
@@ -1205,6 +1249,7 @@ impl LayeredCheckpoint {
             object_size,
             control_offset,
             control_only: false,
+            owned_buffer_bytes: None,
             catalog_objects: BTreeMap::new(),
             visibility: Arc::new(OnceLock::new()),
         })
@@ -1270,6 +1315,7 @@ impl LayeredCheckpoint {
             object_size,
             control_offset: footer_start,
             control_only: true,
+            owned_buffer_bytes: None,
             catalog_objects: BTreeMap::new(),
             visibility: Arc::new(OnceLock::new()),
         })
@@ -1338,6 +1384,43 @@ impl LayeredCheckpoint {
     #[must_use]
     pub const fn is_control_only(&self) -> bool {
         self.control_only
+    }
+
+    /// Conservatively charge encoded buffers, footer data and decoded visibility.
+    ///
+    /// Only locally built checkpoints have a known backing-buffer allocation;
+    /// decoded inputs may be small slices retaining much larger buffers. This
+    /// retention estimate does not replace pointer or visibility authentication.
+    #[must_use]
+    pub fn retained_metadata_bytes(&self) -> Option<usize> {
+        let owned_buffer_bytes = self.owned_buffer_bytes?;
+        if self.control_only {
+            return None;
+        }
+        let visibility = if self
+            .footer
+            .sections
+            .iter()
+            .any(|section| section.kind == CapsuleSectionKind::VisibilityOrdinalSnapshot)
+        {
+            self.visibility.get()?.retained_bytes()
+        } else {
+            0
+        };
+        let control: usize = self.control_size().try_into().ok()?;
+        let mut bytes = std::mem::size_of::<Self>()
+            .saturating_add(owned_buffer_bytes)
+            .saturating_add(control.saturating_mul(4))
+            .saturating_add(visibility);
+        if !self.catalog_objects.is_empty() {
+            bytes = bytes.saturating_add(1024);
+        }
+        for object in self.catalog_objects.values() {
+            bytes = bytes
+                .saturating_add(256)
+                .saturating_add(object.len().saturating_mul(2));
+        }
+        Some(bytes)
     }
 
     /// Verify every identity field of the root's authenticated checkpoint pointer.

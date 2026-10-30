@@ -20,7 +20,10 @@ use tokio_util::sync::CancellationToken;
 
 mod base_verification;
 mod scratch;
-pub use scratch::repack_capsule_checkpoint_from_root_with_scratch_limit;
+pub use scratch::{
+    repack_capsule_checkpoint_from_receipt_with_scratch_limit,
+    repack_capsule_checkpoint_from_root_with_scratch_limit,
+};
 
 const LAYERED_MAX_PHYSICAL_SOURCES: usize = 64;
 // One run can expand to hundreds of local packs; bound clone/index work after roll-up.
@@ -95,10 +98,16 @@ pub struct CapsuleRepackOutcome {
     pub bytes_after: u64,
 }
 
-#[derive(Default)]
-struct CheckpointPublication {
-    work: CheckpointOutcome,
-    committed: Option<(
+/// Logical checkpoint work and the exact immutable metadata committed by its CAS.
+///
+/// Retaining this receipt permits physical maintenance to reuse validated metadata.
+/// Consumers must bind the checkpoint to its committed root before using it.
+#[derive(Debug, Default)]
+pub struct CheckpointPublication {
+    /// Work completed even when a competing root replacement wins publication.
+    pub work: CheckpointOutcome,
+    /// The exact committed root and its complete, authenticated checkpoint.
+    pub committed: Option<(
         crab_metadata::capsule_protocol::RootSnapshot,
         LayeredCheckpoint,
     )>,
@@ -162,6 +171,23 @@ pub async fn publish_capsule_checkpoint(
     maximum_bytes: u64,
     cancel: &CancellationToken,
 ) -> Result<CheckpointOutcome, CheckpointError> {
+    Ok(
+        publish_capsule_checkpoint_with_receipt(layout, threshold, maximum_bytes, cancel)
+            .await?
+            .work,
+    )
+}
+
+/// Publish a logical checkpoint while retaining its exact committed metadata.
+///
+/// Admission, cancellation and root CAS rules match [`publish_capsule_checkpoint`].
+/// A CAS loss yields no receipt; retaining metadata never confers publication authority.
+pub async fn publish_capsule_checkpoint_with_receipt(
+    layout: &StoreLayout<Store>,
+    threshold: u32,
+    maximum_bytes: u64,
+    cancel: &CancellationToken,
+) -> Result<CheckpointPublication, CheckpointError> {
     check_cancelled(cancel)?;
     let started = Instant::now();
     let root = crab_write::capsule_protocol::open_root(layout).await?;
@@ -172,7 +198,7 @@ pub async fn publish_capsule_checkpoint(
     let view = crab_read::capsule_protocol::open_view_from_root_with_metadata(layout, root, limits)
         .await?;
     checkpoint_phase("capture", started);
-    publish_capsule_checkpoint_from_view(layout, &view, threshold, maximum_bytes, cancel).await
+    checkpoint_publication_from_view(layout, &view, threshold, maximum_bytes, cancel).await
 }
 
 /// Run logical checkpointing followed by independently pinned physical maintenance.
@@ -385,9 +411,23 @@ pub async fn publish_capsule_checkpoint_from_view(
     maximum_bytes: u64,
     cancel: &CancellationToken,
 ) -> Result<CheckpointOutcome, CheckpointError> {
+    Ok(
+        checkpoint_publication_from_view(layout, view, threshold, maximum_bytes, cancel)
+            .await?
+            .work,
+    )
+}
+
+async fn checkpoint_publication_from_view(
+    layout: &StoreLayout<Store>,
+    view: &crab_read::capsule_protocol::CapsuleRepositoryView,
+    threshold: u32,
+    maximum_bytes: u64,
+    cancel: &CancellationToken,
+) -> Result<CheckpointPublication, CheckpointError> {
     check_cancelled(cancel)?;
     if view.capsule_count()? < u64::from(threshold) {
-        return Ok(CheckpointOutcome::default());
+        return Ok(CheckpointPublication::default());
     }
     let started = Instant::now();
     let catalog = CatalogWrite::Durable(
@@ -396,11 +436,7 @@ pub async fn publish_capsule_checkpoint_from_view(
             .map(Box::new),
     );
     checkpoint_phase("catalog", started);
-    Ok(
-        publish_checkpoint(layout, view, catalog, maximum_bytes, cancel)
-            .await?
-            .work,
-    )
+    publish_checkpoint(layout, view, catalog, maximum_bytes, cancel).await
 }
 
 /// Publish one checkpoint from a pinned view with a replacement pointer catalog.

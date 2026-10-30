@@ -1,5 +1,9 @@
 //! Wire compatibility and explicit latency checks for checkpoint visibility.
-use crab_metadata::capsule_protocol::{LayeredObjectMember, LayeredVisibilitySnapshot};
+use bytes::Bytes;
+use crab_metadata::capsule_protocol::{
+    CapsuleGitPack, LayeredCheckpoint, LayeredObjectMember, LayeredVisibilitySnapshot, PackLayer,
+    PointerCatalog, source_catalog_digest,
+};
 use crab_metadata::git_visibility::GitVisibilityIndex;
 use std::collections::BTreeMap;
 
@@ -33,6 +37,68 @@ fn streamed_checkpoint_pages_keep_the_existing_wire_identity() {
         blake3::hash(&bytes).to_hex().as_str(),
         "b9f620b1aaf6b3d3f26e1ae5461036f455247f4aa4c1afa265421b00ff0e5c0d"
     );
+}
+
+fn repeated_sets_checkpoint(refs: usize) -> LayeredCheckpoint {
+    let index = GitVisibilityIndex::new(
+        1,
+        "1".repeat(64),
+        "2".repeat(64),
+        (0..refs)
+            .map(|r| {
+                (
+                    format!("refs/heads/branch-{r}"),
+                    (0..2000).map(|oid| format!("{oid:040x}")).collect(),
+                )
+            })
+            .collect(),
+    )
+    .unwrap();
+    let pack = CapsuleGitPack::new(
+        Bytes::from_static(b"pack"),
+        Bytes::from_static(b"index"),
+        Bytes::from_static(b"reverse"),
+        Bytes::from_static(b"locator"),
+        "1".repeat(40),
+        2000,
+    )
+    .unwrap();
+    let source = PackLayer::build(&pack)
+        .unwrap()
+        .source_descriptor()
+        .unwrap();
+    let digest = source_catalog_digest(std::slice::from_ref(&source)).unwrap();
+    let snapshot = LayeredVisibilitySnapshot::from_index_with_member_admission(
+        &index,
+        &digest,
+        vec![LayeredObjectMember::new(0, 0); 2000],
+    )
+    .unwrap();
+    LayeredCheckpoint::build(
+        1,
+        &"3".repeat(64),
+        vec![source],
+        PointerCatalog::new(),
+        Some(snapshot),
+    )
+    .unwrap()
+}
+
+#[test]
+fn retention_charge_includes_repeated_sets_and_excludes_unknown_backing_buffers() {
+    let one = repeated_sets_checkpoint(1);
+    let repeated = repeated_sets_checkpoint(64);
+    assert!(
+        repeated.retained_metadata_bytes().unwrap()
+            >= one.retained_metadata_bytes().unwrap() + 63 * 2000 * 4
+    );
+    let mut oversized = vec![0; repeated.bytes().len() + 1024 * 1024];
+    oversized[..repeated.bytes().len()].copy_from_slice(repeated.bytes());
+    let input = Bytes::from(oversized).slice(..repeated.bytes().len());
+    let decoded = LayeredCheckpoint::decode(input).unwrap();
+    assert_eq!(decoded, repeated);
+    decoded.visibility_ordinal_snapshot().unwrap();
+    assert!(decoded.retained_metadata_bytes().is_none());
 }
 
 #[test]
