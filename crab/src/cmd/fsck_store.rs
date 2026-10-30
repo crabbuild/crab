@@ -1112,20 +1112,18 @@ async fn install_capsule_git_packs(
     git_dir: std::path::PathBuf,
     max_input_bytes: u64,
 ) -> crab_read::Result<Vec<std::path::PathBuf>> {
-    if view.layered_checkpoint().is_some() {
-        crab_read::capsule_protocol::install_git_packs_from_store(
-            &view,
-            &layout,
-            &git_dir,
-            max_input_bytes,
-            None,
-            &CancellationToken::new(),
-        )
-        .await
-        .map(|installed| installed.paths)
-    } else {
-        crab_read::capsule_protocol::install_git_packs(&view, &git_dir, max_input_bytes).await
-    }
+    // Paged frontier captures own authenticated source ranges even before a
+    // checkpoint exists. The shared installer also handles resident capsules.
+    crab_read::capsule_protocol::install_git_packs_from_store(
+        &view,
+        &layout,
+        &git_dir,
+        max_input_bytes,
+        None,
+        &CancellationToken::new(),
+    )
+    .await
+    .map(|installed| installed.paths)
 }
 
 async fn check_capsule_git_connectivity(

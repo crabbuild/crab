@@ -436,10 +436,10 @@ impl StorageObserver for SourceReads {
 
 #[tokio::test]
 async fn paged_checker_verifies_current_and_historical_source_bodies_once() {
-    for corrupt in [false, true] {
+    for (checkpoints, corrupt) in [(1, false), (1, true), (2, false), (2, true)] {
         let (layout, mut root, run) = history_fixture().await;
         let source = PackSourceDescriptor::from_capsule_run(&run).unwrap();
-        for _ in 0..2 {
+        for _ in 0..checkpoints {
             root = checkpoint(
                 &layout,
                 root,
