@@ -15,8 +15,15 @@ use crate::{Result, WriteError};
 
 pub use crab_metadata::capsule_protocol::RootSnapshot;
 
+// Bound backend admission fanout while retaining exact transaction edit order.
+const REF_PREPARATION_CONCURRENCY: usize = 32;
+
+#[cfg(test)]
+mod publication_scaling_tests;
+
 mod compaction;
 use compaction::compact_ref_frontier;
+mod ref_commit;
 
 /// Derive the exact object IDs for each capsule Git-pack member.
 pub fn capsule_member_oids(capsule: &Capsule) -> Result<Vec<Vec<[u8; 20]>>> {
@@ -276,7 +283,7 @@ pub async fn prepare_publication_with_ref_head_bases(
     validate_capsule_binding(&base, transaction, capsule)?;
     let transaction_id = transaction.id()?;
     let root = base.record().root();
-    let snapshots = try_join_all(transaction.edits().iter().map(|edit| {
+    let snapshots = futures_util::stream::iter(transaction.edits().iter().cloned().map(|edit| {
         let captured = push_ref_head_bases.get(edit.ref_name()).cloned();
         async move {
             match captured {
@@ -287,6 +294,8 @@ pub async fn prepare_publication_with_ref_head_bases(
             }
         }
     }))
+    .buffered(REF_PREPARATION_CONCURRENCY)
+    .try_collect::<Vec<_>>()
     .await?;
     for (edit, snapshot) in transaction.edits().iter().zip(&snapshots) {
         if snapshot.visible.oid() != edit.expected_old() {
@@ -305,19 +314,19 @@ pub async fn prepare_publication_with_ref_head_bases(
     // other async work schedulable while encoding a large publication.
     let capsule = capsule.clone();
     let run = tokio::task::spawn_blocking(move || capsule_leaf_run(&capsule)).await??;
-    let prepared = try_join_all(transaction.edits().iter().zip(snapshots).map(
-        |(edit, snapshot)| {
-            prepare_ref_successor(
-                router,
-                snapshot,
-                edit,
-                &transaction_id,
-                run.clone(),
-                base.record().root().generation(),
-            )
-        },
-    ))
-    .await?;
+    let leaf = &run;
+    let generation = base.record().root().generation();
+    let transaction_key = transaction_id.as_str();
+    let prepared =
+        futures_util::stream::iter(transaction.edits().iter().cloned().zip(snapshots).map(
+            move |(edit, snapshot)| async move {
+                prepare_ref_successor(router, snapshot, &edit, transaction_key, leaf, generation)
+                    .await
+            },
+        ))
+        .buffered(REF_PREPARATION_CONCURRENCY)
+        .try_collect::<Vec<_>>()
+        .await?;
     let mut immutable_runs = vec![run.clone()];
     immutable_runs.extend(
         prepared
@@ -558,12 +567,16 @@ pub async fn materialize_coordinated_repair(
     descriptor: &crab_coordination::write_coordinator::CoordinatedCapsulePublication,
 ) -> Result<CoordinatedRepairOutcome> {
     let (run, _, transaction) = load_coordinated_publication(router, descriptor).await?;
-    let snapshots = try_join_all(
+    let root = base.record().root();
+    let snapshots = futures_util::stream::iter(
         transaction
             .edits()
             .iter()
-            .map(|edit| read_ref_head(router, base.record().root(), edit.ref_name())),
+            .cloned()
+            .map(move |edit| async move { read_ref_head(router, root, edit.ref_name()).await }),
     )
+    .buffered(REF_PREPARATION_CONCURRENCY)
+    .try_collect::<Vec<_>>()
     .await?;
     if snapshots.iter().all(|snapshot| {
         ref_state_contains_transaction(&snapshot.visible, &descriptor.transaction_id)
@@ -587,19 +600,19 @@ pub async fn materialize_coordinated_repair(
             });
         }
     }
-    let prepared = try_join_all(transaction.edits().iter().zip(snapshots).map(
-        |(edit, snapshot)| {
-            prepare_ref_successor(
-                router,
-                snapshot,
-                edit,
-                &descriptor.transaction_id,
-                run.clone(),
-                base.record().root().generation(),
-            )
-        },
-    ))
-    .await?;
+    let leaf = &run;
+    let generation = base.record().root().generation();
+    let transaction_key = descriptor.transaction_id.as_str();
+    let prepared =
+        futures_util::stream::iter(transaction.edits().iter().cloned().zip(snapshots).map(
+            move |(edit, snapshot)| async move {
+                prepare_ref_successor(router, snapshot, &edit, transaction_key, leaf, generation)
+                    .await
+            },
+        ))
+        .buffered(REF_PREPARATION_CONCURRENCY)
+        .try_collect::<Vec<_>>()
+        .await?;
     let compacted = prepared
         .iter()
         .filter_map(|(_, run)| run.clone())
@@ -845,7 +858,14 @@ pub async fn validate_ref_namespace(
             names.push(name);
         }
     }
-    let heads = try_join_all(names.iter().map(|name| read_ref_head(router, root, name))).await?;
+    let heads = futures_util::stream::iter(
+        names
+            .into_iter()
+            .map(move |name| async move { read_ref_head(router, root, &name).await }),
+    )
+    .buffered(REF_PREPARATION_CONCURRENCY)
+    .try_collect::<Vec<_>>()
+    .await?;
     let mut refs = root.refs().clone();
     for head in heads {
         match head.visible.oid() {
@@ -1128,7 +1148,9 @@ async fn prepare_ref_successor(
     snapshot: RefHeadSnapshot,
     edit: &crab_metadata::capsule_protocol::CapsuleRefEdit,
     transaction_id: &str,
-    leaf: CapsuleRun,
+    // The immutable leaf owns the full object/member admission map. Sharing it
+    // avoids copying repository-sized evidence once for every edited ref.
+    leaf: &CapsuleRun,
     generation: u64,
 ) -> Result<(PreparedRefHead, Option<CapsuleRun>)> {
     let mut frontier = snapshot.visible.frontier().to_vec();
@@ -1142,7 +1164,7 @@ async fn prepare_ref_successor(
         leaf.transaction_ids(),
         leaf.newest_base_root_digest(),
     )?);
-    let compacted = compact_ref_frontier(router, &mut frontier, &leaf).await?;
+    let compacted = compact_ref_frontier(router, &mut frontier, leaf).await?;
     if compacted.is_some() {
         let remaining = frontier
             .iter()
@@ -1257,25 +1279,13 @@ async fn commit_multi_ref(
             _ => return Err(source.into()),
         },
     };
-    let mut written = Vec::with_capacity(prepared.len());
-    for item in prepared {
-        let new_state = item
-            .candidate
-            .visible(&std::collections::BTreeSet::new())
-            .clone();
-        let candidate = item.original.head.prepare(
-            item.original.visible.clone(),
-            activation_id.to_owned(),
-            new_state,
-        )?;
-        match write_ref_head(router, &item.original, &candidate).await {
-            Ok(etag) => written.push((item.original, candidate, etag)),
-            Err(error) => {
-                abort_transaction(router, &path, &preparing, record_etag).await;
-                rollback_ref_heads(router, &written).await;
-                return Err(error);
-            }
-        }
+    let (written, error) = ref_commit::write_heads(router, activation_id, prepared).await;
+    if let Some(error) = error {
+        // Every started write has settled before abort and conditional cleanup.
+        // Otherwise a late successful write could escape the rollback inventory.
+        abort_transaction(router, &path, &preparing, record_etag).await;
+        rollback_ref_heads(router, &written).await;
+        return Err(error);
     }
 
     let committed = preparing.commit()?;
@@ -2150,7 +2160,7 @@ mod tests {
         .unwrap()
     }
 
-    fn capsule(transaction: &CapsuleTransaction) -> Capsule {
+    pub(super) fn capsule(transaction: &CapsuleTransaction) -> Capsule {
         Capsule::build(
             transaction,
             vec![
@@ -2739,7 +2749,7 @@ mod tests {
             snapshot,
             &transaction.edits()[0],
             &transaction_id,
-            leaf,
+            &leaf,
             base.record().root().generation(),
         )
         .await

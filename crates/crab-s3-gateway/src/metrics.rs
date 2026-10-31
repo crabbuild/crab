@@ -414,6 +414,13 @@ impl Metrics {
         self.inner.filesystem.reserve(bytes)
     }
 
+    pub(crate) fn background_scratch_budget(
+        &self,
+        foreground_bytes: u64,
+    ) -> Result<u64, ScratchCapacityError> {
+        self.inner.filesystem.background_budget(foreground_bytes)
+    }
+
     pub(crate) fn storage_observer(&self) -> Arc<dyn crab_storage::StorageObserver> {
         self.inner.backend.observer()
     }

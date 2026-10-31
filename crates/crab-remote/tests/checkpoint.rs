@@ -106,6 +106,161 @@ async fn maintenance_reuses_committed_checkpoint_without_reloading_authority() {
 }
 
 #[tokio::test]
+async fn checkpoint_receipt_avoids_checkpoint_reload_under_the_same_scratch_limit() {
+    let (layout, observations) = fixture().await;
+    let receipt = crab_remote::checkpoint::publish_capsule_checkpoint_with_receipt(
+        &layout,
+        1,
+        LIMIT,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert!(receipt.work.published);
+    let (root, checkpoint) = receipt.committed.unwrap();
+    assert!(
+        checkpoint
+            .matches_pointer(root.record().root().checkpoint().unwrap())
+            .unwrap()
+    );
+    assert!(checkpoint.retained_metadata_bytes().unwrap() >= checkpoint.bytes().len());
+    // Enough to enter maintenance, but too little for two source members. Both
+    // paths must defer identical physical work without changing the root.
+    let scratch = 32 * 1024 * 1024 + 1;
+    observations.0.lock().unwrap().clear();
+    let warm = crab_remote::checkpoint::repack_capsule_checkpoint_from_receipt_with_scratch_limit(
+        &layout,
+        root.clone(),
+        checkpoint,
+        LIMIT,
+        scratch,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert!(!warm.published);
+    assert!(
+        observations
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|r| r.operation != StorageOperation::Get)
+    );
+    observations.0.lock().unwrap().clear();
+    let cold = crab_remote::checkpoint::repack_capsule_checkpoint_from_root_with_scratch_limit(
+        &layout,
+        root.clone(),
+        LIMIT,
+        scratch,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert_eq!(warm, cold);
+    assert_eq!(
+        observations
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|r| r.operation == StorageOperation::Get)
+            .count(),
+        1
+    );
+    assert_eq!(
+        crab_write::capsule_protocol::open_root(&layout)
+            .await
+            .unwrap()
+            .record(),
+        root.record()
+    );
+}
+
+#[tokio::test]
+async fn checkpoint_receipt_rejects_another_root_before_storage_io() {
+    let (layout, observations) = fixture().await;
+    let first = crab_remote::checkpoint::publish_capsule_checkpoint_with_receipt(
+        &layout,
+        1,
+        LIMIT,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap()
+    .committed
+    .unwrap()
+    .1;
+    publish_blob(&layout, "later-receipt").await;
+    let (root, _) = crab_remote::checkpoint::publish_capsule_checkpoint_with_receipt(
+        &layout,
+        1,
+        LIMIT,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap()
+    .committed
+    .unwrap();
+    observations.0.lock().unwrap().clear();
+    let result =
+        crab_remote::checkpoint::repack_capsule_checkpoint_from_receipt_with_scratch_limit(
+            &layout,
+            root,
+            first,
+            LIMIT,
+            64 * 1024 * 1024,
+            &CancellationToken::new(),
+        )
+        .await;
+    assert!(result.is_err());
+    assert!(observations.0.lock().unwrap().is_empty());
+}
+
+#[tokio::test]
+async fn retained_checkpoint_physical_publication_preserves_exact_refs_and_visibility() {
+    let (layout, observations) = fixture().await;
+    let before = view(&layout).await;
+    let (root, checkpoint) = crab_remote::checkpoint::publish_capsule_checkpoint_with_receipt(
+        &layout,
+        1,
+        LIMIT,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap()
+    .committed
+    .unwrap();
+    observations.0.lock().unwrap().clear();
+    let work = crab_remote::checkpoint::repack_capsule_checkpoint_from_receipt_with_scratch_limit(
+        &layout,
+        root,
+        checkpoint,
+        LIMIT,
+        64 * 1024 * 1024,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert!(work.published);
+    assert!(
+        observations
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .all(|r| r.operation != StorageOperation::Get)
+    );
+    let after = view(&layout).await;
+    assert_eq!(after.refs(), before.refs());
+    assert_eq!(after.git_pack_count(), 1);
+    assert_eq!(
+        after.git_visibility_index().await.unwrap().ref_closures(),
+        before.git_visibility_index().await.unwrap().ref_closures()
+    );
+}
+
+#[tokio::test]
 async fn query_view_cannot_publish_checkpoint_without_member_admission() {
     let (layout, _) = fixture().await;
     let root = crab_write::capsule_protocol::open_root(&layout)
@@ -571,10 +726,16 @@ async fn publish_blob(layout: &StoreLayout<Store>, name: &str) -> String {
 
 fn blob_pack(bytes: &[u8]) -> (String, CapsuleGitPack) {
     let oid = crab_remote::objects::object_id(gix_object::Kind::Blob, bytes).unwrap();
+    (oid.to_string(), blob_group_pack(&[bytes]))
+}
+
+fn blob_group_pack(blobs: &[&[u8]]) -> CapsuleGitPack {
     let mut pack = Vec::new();
     crab_git::pack_writer::write_pack(
         &mut pack,
-        std::iter::once(Ok((gix_object::Kind::Blob, bytes.len() as u64, bytes))),
+        blobs
+            .iter()
+            .map(|bytes| Ok((gix_object::Kind::Blob, bytes.len() as u64, *bytes))),
         LIMIT,
         || false,
     )
@@ -591,22 +752,31 @@ fn blob_pack(bytes: &[u8]) -> (String, CapsuleGitPack) {
     )
     .unwrap();
     let checksum = gix_hash::ObjectId::from_hex(installed.git_sha1.as_bytes()).unwrap();
-    let kinds =
-        crab_git::pack_locator::encode_pack_kind_metadata(checksum, &[gix_object::Kind::Blob])
-            .unwrap();
-    let pack = CapsuleGitPack::new(
+    let kinds = crab_git::pack_locator::encode_pack_kind_metadata(
+        checksum,
+        &vec![gix_object::Kind::Blob; blobs.len()],
+    )
+    .unwrap();
+    CapsuleGitPack::new(
         Bytes::from(pack),
         Bytes::from(std::fs::read(installed.idx_path).unwrap()),
         Bytes::from(std::fs::read(installed.rev_path).unwrap()),
         Bytes::from(kinds),
         installed.git_sha1,
-        1,
+        blobs.len() as u64,
     )
-    .unwrap();
-    (oid.to_string(), pack)
+    .unwrap()
 }
 
 async fn publish_blobs(layout: &StoreLayout<Store>, blobs: &[(&str, &[u8])]) -> Vec<String> {
+    publish_blobs_in_packs(layout, blobs, false).await
+}
+
+async fn publish_blobs_in_packs(
+    layout: &StoreLayout<Store>,
+    blobs: &[(&str, &[u8])],
+    combined: bool,
+) -> Vec<String> {
     let root = crab_write::capsule_protocol::open_root(layout)
         .await
         .unwrap();
@@ -627,8 +797,15 @@ async fn publish_blobs(layout: &StoreLayout<Store>, blobs: &[(&str, &[u8])]) -> 
             ref_name,
             GitVisibilityEdit::from_replacement_objects(None, oid.clone(), vec![oid.clone()]),
         );
-        packs.push(pack);
+        if !combined {
+            packs.push(pack);
+        }
         oids.push(oid);
+    }
+    if combined {
+        packs.push(blob_group_pack(
+            &blobs.iter().map(|(_, bytes)| *bytes).collect::<Vec<_>>(),
+        ));
     }
     let transaction = CapsuleTransaction::new(root.record().digest(), edits).unwrap();
     let visibility = CapsuleVisibilityDelta::new(visibility).unwrap();
@@ -1355,6 +1532,73 @@ async fn duplicate_only_suffix_can_be_consolidated() {
         &layout,
         &after,
         &[("first", b"same content"), ("second", b"same content")],
+    )
+    .await;
+}
+
+#[tokio::test]
+async fn bounded_overlap_consolidation_preserves_cold_bytes_without_reading_stable_sources() {
+    let (layout, observations) = empty_fixture().await;
+    let stable = (0..8192_u32)
+        .flat_map(|ordinal| *blake3::hash(&ordinal.to_le_bytes()).as_bytes())
+        .collect::<Vec<_>>();
+    publish_blobs(&layout, &[("stable", &stable)]).await;
+    publish_blobs_in_packs(
+        &layout,
+        &[("b-shared", b"shared"), ("b-new", b"new b")],
+        true,
+    )
+    .await;
+    publish_blobs_in_packs(
+        &layout,
+        &[("c-shared", b"shared"), ("c-new", b"new c")],
+        true,
+    )
+    .await;
+    let before = checkpoint(&layout).await;
+    let checkpoint = before.layered_checkpoint().unwrap();
+    assert_eq!(checkpoint.sources().len(), 3);
+    let stable_source = checkpoint.sources()[0].clone();
+    let previous_reads = observations.2.requests().len();
+    let work = crab_remote::checkpoint::repack_capsule_checkpoint_from_receipt_with_scratch_limit(
+        &layout,
+        before.root_snapshot().clone(),
+        checkpoint.clone(),
+        LIMIT,
+        64 * 1024 * 1024,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        work.published,
+        "overlapping OIDs must not defer bounded maintenance"
+    );
+    assert!(
+        observations.2.requests()[previous_reads..]
+            .iter()
+            .all(|request| {
+                request.location != layout.capsule_path(stable_source.object_hash()).as_ref()
+            }),
+        "compressed overlap must not reconstruct unrelated stable history"
+    );
+    let after = view(&layout).await;
+    assert_eq!(after.layered_checkpoint().unwrap().sources().len(), 2);
+    assert_eq!(after.refs(), before.refs());
+    assert_eq!(
+        after.git_visibility_index().await.unwrap().ref_closures(),
+        before.git_visibility_index().await.unwrap().ref_closures()
+    );
+    verify_git_blobs(
+        &layout,
+        &after,
+        &[
+            ("stable", &stable),
+            ("b-shared", b"shared"),
+            ("b-new", b"new b"),
+            ("c-shared", b"shared"),
+            ("c-new", b"new c"),
+        ],
     )
     .await;
 }

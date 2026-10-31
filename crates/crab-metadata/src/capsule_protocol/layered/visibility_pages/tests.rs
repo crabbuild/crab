@@ -318,3 +318,297 @@ async fn checkpoint_clones_share_the_verified_complete_visibility_proof() {
         cloned.visibility_ordinal_snapshot().unwrap().unwrap(),
     ));
 }
+
+#[tokio::test]
+async fn overlapping_ref_checkpoints_keep_memberships_compact() {
+    let count = 32_768u32;
+    let objects = (1..=count)
+        .map(|value| format!("{value:040x}"))
+        .collect::<Vec<_>>();
+    let mut index = GitVisibilityIndex::new(
+        1,
+        "1".repeat(64),
+        "2".repeat(64),
+        (0..100)
+            .map(|position| {
+                let mut closure = objects.clone();
+                closure.remove(position);
+                (format!("refs/heads/shared-{position}"), closure)
+            })
+            .collect(),
+    )
+    .unwrap();
+    // Keep an object in the dictionary after the last authorizing ref is deleted.
+    index
+        .apply_ref_edit(
+            "refs/heads/deleted".to_owned(),
+            &crate::git_visibility::GitVisibilityEdit::from_delta_objects(
+                None,
+                format!("{:040x}", count + 1),
+                vec![format!("{:040x}", count + 1)],
+                Vec::new(),
+            ),
+        )
+        .unwrap();
+    index.remove_ref("refs/heads/deleted");
+    index
+        .apply_ref_edit(
+            "refs/heads/sparse".to_owned(),
+            &crate::git_visibility::GitVisibilityEdit::from_delta_objects(
+                None,
+                objects[0].clone(),
+                vec![objects[0].clone()],
+                Vec::new(),
+            ),
+        )
+        .unwrap();
+    index
+        .apply_ref_edit(
+            "refs/heads/shared-0".to_owned(),
+            &crate::git_visibility::GitVisibilityEdit::from_delta_objects(
+                Some(format!("{count:040x}")),
+                format!("{:040x}", count - 1),
+                Vec::new(),
+                Vec::new(),
+            ),
+        )
+        .unwrap();
+    let sources = (1..=2)
+        .map(|number| {
+            let pack = CapsuleGitPack::new(
+                Bytes::from(format!("pack-{number}")),
+                Bytes::from_static(b"index"),
+                Bytes::from_static(b"reverse"),
+                Bytes::from_static(b"locator"),
+                format!("{number:040x}"),
+                u64::from(count) + 1,
+            )
+            .unwrap();
+            PackLayer::build(&pack)
+                .unwrap()
+                .source_descriptor()
+                .unwrap()
+        })
+        .collect::<Vec<_>>();
+    let digest = source_catalog_digest(&sources).unwrap();
+    let mut members = vec![LayeredObjectMember::new(0, 0); count as usize + 1];
+    members[0] = LayeredObjectMember::new(1, 0);
+    let snapshot =
+        LayeredVisibilitySnapshot::from_index_with_member_admission(&index, &digest, members)
+            .unwrap();
+    assert!(
+        snapshot.retained_bytes() < 2 * 1024 * 1024,
+        "resident closures expanded per membership"
+    );
+    let encoded = snapshot.encode().unwrap();
+    let descriptor = Descriptor::decode(&encoded).unwrap();
+    assert_eq!(descriptor.version, 2);
+    let mut legacy = descriptor.clone();
+    legacy.version = 1;
+    assert!(legacy.validate(encoded.len() as u64).is_err());
+    let mut missing = descriptor.clone();
+    missing.shared = None;
+    assert!(missing.validate(encoded.len() as u64).is_err());
+    let mut unknown = descriptor.clone();
+    unknown.version = 3;
+    assert!(unknown.validate(encoded.len() as u64).is_err());
+    assert!(encoded.len() < 4 * 1024 * 1024);
+    let decoded = LayeredVisibilitySnapshot::decode(&encoded).unwrap();
+    assert_eq!(decoded, snapshot);
+    assert!(decoded.retained_bytes() < 2 * 1024 * 1024);
+    let restored = decoded
+        .to_index(1, &"1".repeat(64), &"2".repeat(64), &digest)
+        .unwrap();
+    for position in 0..100 {
+        let name = format!("refs/heads/shared-{position}");
+        assert!(!restored.contains_hex_in_ref(&name, &format!("{:040x}", position + 1)));
+        assert!(restored.contains_hex_in_ref(&name, &format!("{count:040x}")));
+        assert!(!restored.contains_hex_in_ref(&name, &format!("{:040x}", count + 1)));
+    }
+    assert_eq!(restored.objects().len(), count as usize + 1);
+    assert!(restored.contains_hex_in_ref("refs/heads/sparse", &objects[0]));
+    assert!(!restored.contains_hex_in_ref("refs/heads/sparse", &objects[1]));
+    let store = Store::new(Arc::new(InMemory::new()));
+    let layout = StoreLayout::new(store.clone(), "shared-checkpoint".to_owned());
+    let hash = "a".repeat(64);
+    store
+        .put_overwrite(&layout.capsule_checkpoint_path(&hash), encoded.clone())
+        .await
+        .unwrap();
+    let reader = LayeredVisibilityReader::new(
+        &layout,
+        &hash,
+        PackRange::new(0, &encoded).unwrap(),
+        Descriptor::decode(&encoded).unwrap(),
+        sources.clone(),
+        128 * 1024 * 1024,
+    )
+    .unwrap();
+    let queries = [
+        object(1),
+        object(count),
+        object(count + 1),
+        object(count + 2),
+        object(count),
+    ];
+    assert_eq!(
+        reader
+            .contains_in_ref(&store, "refs/heads/shared-0", &queries)
+            .await
+            .unwrap(),
+        Some(vec![false, true, false, false, true])
+    );
+    assert_eq!(
+        reader
+            .contains_in_ref(&store, "refs/heads/deleted", &queries)
+            .await
+            .unwrap(),
+        None
+    );
+    assert_eq!(
+        reader.object_members(&store, &queries).await.unwrap(),
+        vec![
+            Some(&sources[1].members()[0]),
+            Some(&sources[0].members()[0]),
+            Some(&sources[0].members()[0]),
+            None,
+            Some(&sources[0].members()[0])
+        ]
+    );
+    assert_eq!(
+        reader.dictionary_contains(&store, &queries).await.unwrap(),
+        vec![true, true, true, false, true]
+    );
+    assert!(admission_chunk(&descriptor, 0, &[0; 1023]).is_err());
+    assert!(admission_chunk(&descriptor, 129, &[0; 4]).is_err());
+    let mut uncovered = descriptor.clone();
+    uncovered.objects = None;
+    assert!(uncovered.validate(encoded.len() as u64).is_err());
+    let mut without_admission = snapshot.clone();
+    without_admission.member_admission = None;
+    let unbound = without_admission.encode().unwrap();
+    assert_eq!(
+        LayeredVisibilitySnapshot::decode(&unbound).unwrap(),
+        without_admission
+    );
+    let unbound_hash = "b".repeat(64);
+    store
+        .put_overwrite(
+            &layout.capsule_checkpoint_path(&unbound_hash),
+            unbound.clone(),
+        )
+        .await
+        .unwrap();
+    let unbound_reader = LayeredVisibilityReader::new(
+        &layout,
+        &unbound_hash,
+        PackRange::new(0, &unbound).unwrap(),
+        Descriptor::decode(&unbound).unwrap(),
+        sources.clone(),
+        128 * 1024 * 1024,
+    )
+    .unwrap();
+    assert_eq!(
+        unbound_reader
+            .contains_in_ref(&store, "refs/heads/shared-0", &queries)
+            .await
+            .unwrap(),
+        Some(vec![false, true, false, false, true])
+    );
+    assert_eq!(
+        unbound_reader
+            .object_members(&store, &queries)
+            .await
+            .unwrap(),
+        vec![None; queries.len()]
+    );
+    let body = &encoded[..descriptor.body_bytes as usize];
+    let rows = crate::pages::scan(
+        body,
+        descriptor.refs.as_ref().unwrap(),
+        Kind::CheckpointRefs,
+        "test",
+        &mut BTreeMap::new(),
+    )
+    .unwrap();
+    let (key, value) = &rows[0];
+    let mut mixed: RefRow = serde_json::from_slice(value).unwrap();
+    mixed.objects = descriptor.shared.as_ref().unwrap().dictionary.clone();
+    assert!(RefRow::decode(key, &json(&mixed).unwrap(), &descriptor).is_err());
+    let mut corrupted = encoded.to_vec();
+    corrupted[descriptor
+        .shared
+        .as_ref()
+        .unwrap()
+        .chunks
+        .as_ref()
+        .unwrap()
+        .offset as usize] ^= 1;
+    assert!(LayeredVisibilitySnapshot::decode(&corrupted).is_err());
+    store
+        .put_overwrite(&layout.capsule_checkpoint_path(&hash), corrupted.into())
+        .await
+        .unwrap();
+    let cold = LayeredVisibilityReader::new(
+        &layout,
+        &hash,
+        PackRange::new(0, &encoded).unwrap(),
+        descriptor,
+        sources,
+        128 * 1024 * 1024,
+    )
+    .unwrap();
+    assert!(
+        cold.contains_in_ref(&store, "refs/heads/shared-0", &[object(count)])
+            .await
+            .is_err()
+    );
+}
+
+#[test]
+fn shared_checkpoint_remaps_dense_dictionary_without_widening_refs() {
+    use crate::git_visibility::GitVisibilityEdit;
+    let mut index =
+        GitVisibilityIndex::new(1, "1".repeat(64), "2".repeat(64), BTreeMap::new()).unwrap();
+    for (name, values) in [
+        ("refs/heads/high", (2049..=4096)),
+        ("refs/heads/low", (1..=2048)),
+    ] {
+        let values = values
+            .map(|value| format!("{value:040x}"))
+            .collect::<Vec<_>>();
+        index
+            .apply_ref_edit(
+                name.to_owned(),
+                &GitVisibilityEdit::from_delta_objects(None, values[0].clone(), values, Vec::new()),
+            )
+            .unwrap();
+    }
+    let digest = "3".repeat(64);
+    let snapshot = LayeredVisibilitySnapshot::from_index(&index, &digest).unwrap();
+    assert!(snapshot.objects.windows(2).all(|pair| pair[0] < pair[1]));
+    let restored = snapshot
+        .to_index(1, &"1".repeat(64), &"2".repeat(64), &digest)
+        .unwrap();
+    for value in 1..=4096 {
+        let oid = format!("{value:040x}");
+        assert_eq!(
+            restored.contains_hex_in_ref("refs/heads/high", &oid),
+            value >= 2049
+        );
+        assert_eq!(
+            restored.contains_hex_in_ref("refs/heads/low", &oid),
+            value <= 2048
+        );
+    }
+}
+
+#[tokio::test]
+async fn locally_built_checkpoint_buffer_matches_final_bytes() {
+    let (_, checkpoint, _, _) = fixture(1000, 128 * 1024 * 1024).await;
+    assert_eq!(
+        checkpoint.owned_buffer_bytes,
+        Some(checkpoint.bytes().len()),
+        "appending footer data must not double the retained metadata allocation"
+    );
+}

@@ -941,7 +941,8 @@ impl RemoteGitRepository {
             inventory_objects,
             object_ids.len(),
             SELECTED_PACK_ASSEMBLY_MIN_OBJECTS,
-        ) || inventory_bytes > operation.max_fetched_bytes()
+        ) || (object_ids.len() as u64).saturating_mul(2) < inventory_objects
+            || inventory_bytes > operation.max_fetched_bytes()
         {
             return Ok(None);
         }
@@ -1230,6 +1231,11 @@ impl RemoteGitRepository {
         let inventory_objects = inventory
             .iter()
             .fold(0_u64, |total, pack| total.saturating_add(pack.object_count));
+        // A large branch can cover less than half a repository's union. Keep
+        // that selection on the file-backed exact-object repack path instead
+        // of accumulating decoded objects in the conservative batch writer.
+        // Selected source admission and fetched/response byte limits still
+        // apply; the output index must contain exactly the requested OIDs.
         if !Self::selected_pack_repack_candidate(
             inventory_objects,
             object_ids.len(),
@@ -1428,7 +1434,6 @@ impl RemoteGitRepository {
         let selected_objects = u64::try_from(selected_objects).unwrap_or(u64::MAX);
         selected_objects >= u64::try_from(minimum_objects).unwrap_or(u64::MAX)
             && selected_objects < inventory_objects
-            && selected_objects.saturating_mul(2) >= inventory_objects
     }
 
     /// Reuse or publish one immutable generation- and authorization-bound pack.
@@ -3895,7 +3900,10 @@ mod tests {
     }
 
     #[test]
-    fn selected_pack_repack_requires_a_large_dense_filter() {
+    fn selected_pack_repack_admits_large_branches_below_half_the_inventory() {
+        assert!(RemoteGitRepository::selected_pack_repack_candidate(
+            854_496, 408_915, 100_000,
+        ));
         assert!(RemoteGitRepository::selected_pack_repack_candidate(
             200_000, 100_000, 100_000,
         ));

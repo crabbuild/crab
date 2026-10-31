@@ -573,8 +573,8 @@ fn consolidate_pack_suffix_with_options(
         }
     }
     if matches!(validation, ConsolidationValidation::Committed) {
-        let object_ids = source_pack_inventory_object_ids(sources)?;
-        if !object_ids.windows(2).any(|pair| pair[0] == pair[1]) {
+        let mut object_ids = source_pack_inventory_object_ids(sources)?;
+        if !deduplicate::requirements(sources)?.rewrite {
             for source in sources {
                 let verification = source.verified_identity.map_or(
                     crate::pack::PackInstallVerification::Unverified,
@@ -592,9 +592,8 @@ fn consolidate_pack_suffix_with_options(
             }
             // Object admission is already committed. Revalidate the same body
             // and sidecar contracts without installing another scratch Git DB.
-            if !deduplicate::requirements(sources)?.rewrite {
-                return concatenate_verified_sources(sources, &object_ids, delta_bases);
-            }
+            object_ids.dedup();
+            return concatenate_verified_sources(sources, &object_ids);
         }
     }
 
@@ -652,7 +651,7 @@ fn consolidate_pack_suffix_with_options(
     // verification above plus the rebuilt index and exact OID comparison prove
     // the replacement object universe without reinflating every growing tree.
     if source_objects_are_disjoint {
-        return concatenate_verified_sources(sources, &expected_oids, delta_bases);
+        return concatenate_verified_sources(sources, &expected_oids);
     }
 
     let pack_generation_started = Instant::now();
@@ -738,9 +737,8 @@ fn consolidate_pack_suffix_with_options(
 fn concatenate_verified_sources(
     sources: &[RepackSource],
     expected_oids: &[gix_hash::ObjectId],
-    delta_bases: &[RepackDeltaBase],
 ) -> Result<GeometricRepackedRepository, RepackError> {
-    let concatenated = concatenate_complete_pack_inventory_inner(sources, false)?;
+    let (concatenated, index) = concatenate_complete_pack_inventory_inner(sources, false)?;
     let checksum =
         gix_hash::ObjectId::from_hex(concatenated.git_sha1.as_bytes()).map_err(|error| {
             RepackError::SourceIntegrity {
@@ -759,7 +757,11 @@ fn concatenate_verified_sources(
         content_hash: concatenated.pack_hash,
     };
     let index_path = concatenated.pack_path.with_extension("idx");
-    write_concatenated_pack_index(sources, &index_path, checksum)?;
+    if let Some(mut index) = index {
+        write_pack_index_v2(&mut index, &index_path, checksum)?;
+    } else {
+        write_concatenated_pack_index(sources, &index_path, checksum)?;
+    }
     // The writer just hashed and flushed this private output. Transfer its
     // workspace directly instead of copying and rehashing the complete body.
     let mut generated = verified_generated_pack(
@@ -768,14 +770,15 @@ fn concatenate_verified_sources(
         Some(expected_oids),
         Some(identity),
     )?;
-    if !delta_bases.is_empty() {
-        generated.external_delta_bases = generated_external_delta_bases(
-            generated.pack_path(),
-            generated.index_path(),
-            generated.reverse_index_path(),
-            generated.pack_size,
-        )?;
-    }
+    // A thin union can retain dependencies on the stable prefix even when
+    // callers correctly avoid inflating unused base bodies. Derive the exact
+    // dependency bindings from authenticated index/header ranges every time.
+    generated.external_delta_bases = generated_external_delta_bases(
+        generated.pack_path(),
+        generated.index_path(),
+        generated.reverse_index_path(),
+        generated.pack_size,
+    )?;
     Ok(GeometricRepackedRepository {
         _workspace: concatenated._workspace,
         packs: vec![generated],
@@ -792,13 +795,13 @@ fn concatenate_verified_sources(
 pub fn concatenate_complete_pack_inventory(
     sources: &[RepackSource],
 ) -> Result<ConcatenatedPack, RepackError> {
-    concatenate_complete_pack_inventory_inner(sources, true)
+    concatenate_complete_pack_inventory_inner(sources, true).map(|(pack, _)| pack)
 }
 
 fn concatenate_complete_pack_inventory_inner(
     sources: &[RepackSource],
     validate_sources: bool,
-) -> Result<ConcatenatedPack, RepackError> {
+) -> Result<(ConcatenatedPack, Option<Vec<PackIndexEntry>>), RepackError> {
     if sources.is_empty() {
         return Err(RepackError::SourceIntegrity {
             pack_id: "complete-pack-concatenation".to_owned(),
@@ -897,9 +900,16 @@ fn concatenate_complete_pack_inventory_inner(
     pack_sha1.update(pack_header);
     let mut content_hasher = blake3::Hasher::new();
     content_hasher.update(&pack_header);
+    let mut index = None;
     if has_duplicates {
-        let written =
-            deduplicate::write_body(sources, &mut output, &mut pack_sha1, &mut content_hasher)?;
+        let (written, entries) = deduplicate::write_body(
+            sources,
+            &mut output,
+            &mut pack_sha1,
+            &mut content_hasher,
+            !validate_sources,
+        )?;
+        index = entries;
         if written != total_objects {
             return Err(RepackError::SourceIntegrity {
                 pack_id: "complete-pack-concatenation".to_owned(),
@@ -950,15 +960,18 @@ fn concatenate_complete_pack_inventory_inner(
     let pack_size = std::fs::metadata(&output_path)
         .map_err(|source| io_error(format!("stat {}", output_path.display()), source))?
         .len();
-    Ok(ConcatenatedPack {
-        _workspace: workspace,
-        pack_path: output_path,
-        pack_id: blake3::Hash::from_bytes(pack_hash).to_hex().to_string(),
-        pack_hash,
-        pack_size,
-        object_count: total_objects,
-        git_sha1: checksum.iter().map(|byte| format!("{byte:02x}")).collect(),
-    })
+    Ok((
+        ConcatenatedPack {
+            _workspace: workspace,
+            pack_path: output_path,
+            pack_id: blake3::Hash::from_bytes(pack_hash).to_hex().to_string(),
+            pack_hash,
+            pack_size,
+            object_count: total_objects,
+            git_sha1: checksum.iter().map(|byte| format!("{byte:02x}")).collect(),
+        },
+        index,
+    ))
 }
 
 fn write_concatenated_pack_index(
@@ -1213,19 +1226,28 @@ fn source_pack_inventory_object_ids(
     Ok(source_oids)
 }
 
+/// Inspect whether committed sources can retain their compressed entries.
+///
+/// This is a strategy decision, not admission: the consolidation owner still
+/// verifies every committed body/index identity before producing a replacement.
+pub fn supports_compressed_committed_consolidation(
+    sources: &[RepackSource],
+) -> Result<bool, RepackError> {
+    Ok(!deduplicate::requirements(sources)?.rewrite)
+}
+
 /// Return REF_DELTA bases needed by native selected-pack consolidation.
 ///
-/// Acyclic disjoint packs retain their compressed entries. Duplicate OIDs or
-/// cyclic selected aliases require native rewriting with verified anchors.
+/// Acyclic packs retain their compressed entries, including repeated OIDs.
+/// Cyclic selected aliases require native rewriting with verified anchors.
 /// Indexed header ranges avoid inflating historical objects during inspection;
 /// returned bases make thin-pack repair independent of source order. Source
 /// bodies must already match their committed identities.
 pub fn selected_pack_ref_delta_base_ids(
     sources: &[RepackSource],
 ) -> Result<Vec<gix_hash::ObjectId>, RepackError> {
-    let inventory = source_pack_inventory_object_ids(sources)?;
     let requirements = deduplicate::requirements(sources)?;
-    if !requirements.rewrite && !inventory.windows(2).any(|pair| pair[0] == pair[1]) {
+    if !requirements.rewrite {
         return Ok(Vec::new());
     }
     Ok(requirements.external_bases.into_iter().collect())
@@ -2276,8 +2298,8 @@ mod tests {
             .collect::<Vec<_>>();
         assert_eq!(
             commands.len(),
-            3,
-            "exercise full, response, and committed consolidation"
+            2,
+            "full and response paths rewrite; committed overlap stays compressed"
         );
         assert!(
             commands
@@ -2449,6 +2471,32 @@ mod tests {
                     .map(|(entry, _)| entry.compressed.clone().unwrap()),
             );
             let sources = [first, complete];
+            assert!(supports_compressed_committed_consolidation(&sources).unwrap());
+            assert!(
+                selected_pack_ref_delta_base_ids(&sources)
+                    .unwrap()
+                    .is_empty()
+            );
+            let committed =
+                consolidate_committed_pack_suffix_with_delta_bases(&sources, &[], 2).unwrap();
+            let committed_pack = &committed.packs()[0];
+            assert_eq!(committed_pack.object_count, 3);
+            assert_eq!(
+                entries(committed_pack.pack_path())
+                    .into_iter()
+                    .map(|entry| entry.compressed.unwrap())
+                    .collect::<Vec<_>>(),
+                payloads,
+                "committed overlap must retain each compressed payload"
+            );
+            run_git(
+                Command::new("git")
+                    .args(["verify-pack", "-v"])
+                    .arg(committed_pack.index_path())
+                    .stdout(Stdio::null()),
+                "verify committed overlapping pack and rebuilt index",
+            )
+            .unwrap();
             let merged = concatenate_complete_pack_inventory(&sources).unwrap();
             assert_eq!(merged.object_count, 3, "{delta_option}");
             let merged_entries = entries(merged.pack_path());
@@ -2987,10 +3035,7 @@ mod tests {
             source_descriptor(overlapping_a.pack_path().to_owned())?,
             source_descriptor(overlapping_b.pack_path().to_owned())?,
         ];
-        assert_eq!(
-            selected_pack_ref_delta_base_ids(&rewrite_sources)?,
-            vec![base_oid]
-        );
+        assert!(selected_pack_ref_delta_base_ids(&rewrite_sources)?.is_empty());
         let rewritten = consolidate_committed_pack_suffix_with_delta_bases(
             &rewrite_sources,
             &[RepackDeltaBase {
@@ -3069,6 +3114,19 @@ mod tests {
             }],
             2,
         )?;
+        // Compressed consolidation does not need inflated base bodies. Its
+        // replacement must still advertise every dependency on stable packs.
+        let without_inflation =
+            consolidate_committed_pack_suffix_with_delta_bases(&dependent_sources, &[], 2)?;
+        assert_eq!(
+            without_inflation.packs()[0].pack_id,
+            dependent_repacked.packs()[0].pack_id
+        );
+        assert_eq!(
+            without_inflation.packs()[0].external_delta_bases(),
+            dependent_repacked.packs()[0].external_delta_bases()
+        );
+        let dependent_repacked = without_inflation;
         let base_sources = [
             source_descriptor(base_pack.pack_path().to_owned())?,
             source_descriptor(base_auxiliary.pack_path().to_owned())?,

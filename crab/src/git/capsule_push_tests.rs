@@ -151,8 +151,14 @@ async fn publish_ref_edits_with_visibility(
     let root = crab_write::capsule_protocol::open_root(layout)
         .await
         .expect("open root");
-    let visibility = prepare_visibility_delta(git_dir, &edits, &BTreeSet::new(), None)
-        .expect("prepare Git visibility");
+    let visibility = prepare_visibility_delta(
+        git_dir,
+        &edits,
+        &BTreeSet::new(),
+        None,
+        &CancellationToken::new(),
+    )
+    .expect("prepare Git visibility");
     let transaction =
         crab_metadata::capsule_protocol::CapsuleTransaction::new(root.record().digest(), edits)
             .expect("build ref transaction");
@@ -724,10 +730,15 @@ fn new_ref_visibility_is_self_contained() {
         None,
     )];
 
-    let visibility =
-        prepare_visibility_delta(&source.path().join(".git"), &edits, &BTreeSet::new(), None)
-            .expect("prepare Git visibility")
-            .expect("new ref has visibility evidence");
+    let visibility = prepare_visibility_delta(
+        &source.path().join(".git"),
+        &edits,
+        &BTreeSet::new(),
+        None,
+        &CancellationToken::new(),
+    )
+    .expect("prepare Git visibility")
+    .expect("new ref has visibility evidence");
     let evidence = visibility
         .edits()
         .get(ref_name)
@@ -772,10 +783,15 @@ async fn fast_forward_visibility_reuses_proven_ancestry_for_empty_removals() {
         .visibility_objects
         .as_deref()
         .expect("single-ref pack is an exact visibility delta");
-    let visibility =
-        prepare_visibility_delta(&git_dir, &edits, &fast_forward_refs, Some(pack_objects))
-            .expect("prepare fast-forward visibility")
-            .expect("existing ref has visibility evidence");
+    let visibility = prepare_visibility_delta(
+        &git_dir,
+        &edits,
+        &fast_forward_refs,
+        Some(pack_objects),
+        &CancellationToken::new(),
+    )
+    .expect("prepare fast-forward visibility")
+    .expect("existing ref has visibility evidence");
     let evidence = visibility
         .edits()
         .get(ref_name)
@@ -852,9 +868,15 @@ async fn sibling_ref_objects_are_not_used_as_a_fast_forward_visibility_delta() {
         None,
     )];
     let fast_forward_refs = BTreeSet::from([ref_name.to_owned()]);
-    let visibility = prepare_visibility_delta(&git_dir, &edits, &fast_forward_refs, None)
-        .expect("prepare full fast-forward visibility")
-        .expect("existing ref has visibility evidence");
+    let visibility = prepare_visibility_delta(
+        &git_dir,
+        &edits,
+        &fast_forward_refs,
+        None,
+        &CancellationToken::new(),
+    )
+    .expect("prepare full fast-forward visibility")
+    .expect("existing ref has visibility evidence");
     let evidence = visibility
         .edits()
         .get(ref_name)
@@ -884,9 +906,15 @@ fn non_fast_forward_visibility_keeps_removed_objects() {
         Some(new_oid.clone()),
         None,
     )];
-    let visibility = prepare_visibility_delta(&git_dir, &edits, &BTreeSet::new(), None)
-        .expect("prepare non-fast-forward visibility")
-        .expect("existing ref has visibility evidence");
+    let visibility = prepare_visibility_delta(
+        &git_dir,
+        &edits,
+        &BTreeSet::new(),
+        None,
+        &CancellationToken::new(),
+    )
+    .expect("prepare non-fast-forward visibility")
+    .expect("existing ref has visibility evidence");
     let evidence = visibility
         .edits()
         .get(ref_name)
@@ -1526,3 +1554,76 @@ async fn single_ref_successor_extends_committed_multi_ref_history() {
 
 #[path = "capsule_push_policy_tests.rs"]
 mod policy;
+
+#[tokio::test]
+async fn multi_ref_visibility_preparation_preserves_exact_shared_replacements_and_small_deltas() {
+    let source = tempfile::tempdir().unwrap();
+    git(source.path(), &["init", "--initial-branch=main"]);
+    git(source.path(), &["config", "user.name", "Crab Test"]);
+    git(
+        source.path(),
+        &["config", "user.email", "crab@example.invalid"],
+    );
+    let old = commit(source.path(), "first");
+    let new = commit(source.path(), "second");
+    let directory = source.path().join(".git");
+    let edits = vec![
+        crab_metadata::capsule_protocol::CapsuleRefEdit::new(
+            "refs/heads/main",
+            Some(old.clone()),
+            Some(new.clone()),
+            None,
+        ),
+        crab_metadata::capsule_protocol::CapsuleRefEdit::new(
+            "refs/heads/new",
+            None,
+            Some(new.clone()),
+            None,
+        ),
+        crab_metadata::capsule_protocol::CapsuleRefEdit::new(
+            "refs/tags/old",
+            None,
+            Some(old.clone()),
+            None,
+        ),
+    ];
+    let delta = prepare_visibility_delta(
+        &directory,
+        &edits,
+        &BTreeSet::from(["refs/heads/main".to_owned()]),
+        None,
+        &CancellationToken::new(),
+    )
+    .unwrap()
+    .unwrap();
+    for (name, tip) in [("refs/heads/new", &new), ("refs/tags/old", &old)] {
+        let evidence = &delta.edits()[name];
+        assert!(evidence.replaces);
+        assert!(evidence.old_oid.is_none());
+        let expected = git(
+            source.path(),
+            &["rev-list", "--objects", "--no-object-names", tip],
+        )
+        .lines()
+        .map(str::to_owned)
+        .collect::<BTreeSet<_>>();
+        assert_eq!(
+            evidence.added.iter().cloned().collect::<BTreeSet<_>>(),
+            expected
+        );
+    }
+    let main = &delta.edits()["refs/heads/main"];
+    assert!(!main.replaces);
+    assert_eq!(main.old_oid.as_ref(), Some(&old));
+    assert!(main.removed.is_empty());
+    assert!(!main.added.contains(&old));
+    assert!(main.added.contains(&new));
+    let bytes = delta.encode().unwrap();
+    assert!(bytes.len() < 128 * 1024 * 1024);
+    let cancelled = CancellationToken::new();
+    cancelled.cancel();
+    assert!(matches!(
+        prepare_visibility_delta(&directory, &edits, &BTreeSet::new(), None, &cancelled),
+        Err(CrabError::Cancelled)
+    ));
+}

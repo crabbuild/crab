@@ -135,6 +135,25 @@ impl LayeredVisibilityReader {
         oids: &[[u8; 20]],
         work: &mut PageWork,
     ) -> Result<Vec<bool>> {
+        if let Some(shared) = &self.descriptor.shared {
+            let positions = shared::Reader::new(
+                store,
+                &self.path,
+                &self.cache,
+                self.range.offset(),
+                self.descriptor.body_bytes,
+                shared,
+            )?
+            .positions(oids, work)
+            .await?;
+            if self.descriptor.member_admission {
+                self.admission_members(store, &positions, work).await?;
+            }
+            return Ok(positions
+                .into_iter()
+                .map(|position| position.is_some())
+                .collect());
+        }
         let keys = oids.iter().map(|oid| oid.to_vec()).collect::<Vec<_>>();
         self.rows(
             store,
@@ -168,6 +187,23 @@ impl LayeredVisibilityReader {
         store: &Store,
         oids: &[[u8; 20]],
     ) -> Result<Vec<Option<&PackMemberDescriptor>>> {
+        if let Some(shared) = &self.descriptor.shared {
+            if !self.descriptor.member_admission {
+                return Ok(vec![None; oids.len()]);
+            }
+            let mut work = self.work();
+            let positions = shared::Reader::new(
+                store,
+                &self.path,
+                &self.cache,
+                self.range.offset(),
+                self.descriptor.body_bytes,
+                shared,
+            )?
+            .positions(oids, &mut work)
+            .await?;
+            return self.admission_members(store, &positions, &mut work).await;
+        }
         let keys = oids.iter().map(|oid| oid.to_vec()).collect::<Vec<_>>();
         self.rows(
             store,
@@ -195,6 +231,59 @@ impl LayeredVisibilityReader {
         .collect()
     }
 
+    async fn admission_members(
+        &self,
+        store: &Store,
+        positions: &[Option<u32>],
+        work: &mut PageWork,
+    ) -> Result<Vec<Option<&PackMemberDescriptor>>> {
+        let blocks = positions
+            .iter()
+            .flatten()
+            .map(|position| *position as usize / ADMISSION_CHUNK_OBJECTS)
+            .collect::<std::collections::BTreeSet<_>>();
+        let keys = blocks
+            .iter()
+            .map(|block| (*block as u32).to_be_bytes().to_vec())
+            .collect::<Vec<_>>();
+        let rows = self
+            .rows(
+                store,
+                self.descriptor.objects.as_ref(),
+                Kind::CheckpointAdmissionChunks,
+                &keys,
+                work,
+            )
+            .await?;
+        let chunks = blocks
+            .into_iter()
+            .zip(rows)
+            .map(|(block, value)| {
+                let value =
+                    value.ok_or_else(|| corrupt("checkpoint admission chunk is missing"))?;
+                admission_chunk(&self.descriptor, block, &value)?;
+                Ok((block, value))
+            })
+            .collect::<Result<BTreeMap<_, _>>>()?;
+        positions
+            .iter()
+            .map(|position| {
+                let Some(position) = position else {
+                    return Ok(None);
+                };
+                let position = *position as usize;
+                let bytes = &chunks[&(position / ADMISSION_CHUNK_OBJECTS)];
+                let offset = (position % ADMISSION_CHUNK_OBJECTS) * 4;
+                let member = member(&bytes[offset..offset + 4], true)?.expect("admitted member");
+                member.validate_sources(&self.sources)?;
+                Ok(Some(
+                    &self.sources[usize::from(member.source_index())].members()
+                        [usize::from(member.member_index())],
+                ))
+            })
+            .collect()
+    }
+
     /// Inspect one actual ref closure, preserving requested order and absent-ref distinction.
     pub async fn contains_in_ref(
         &self,
@@ -211,9 +300,20 @@ impl LayeredVisibilityReader {
         else {
             return Ok(None);
         };
-        let keys = oids.iter().map(|oid| oid.to_vec()).collect::<Vec<_>>();
-        let present = self
-            .rows(
+        let present = if let Some(shared) = &self.descriptor.shared {
+            shared::Reader::new(
+                store,
+                &self.path,
+                &self.cache,
+                self.range.offset(),
+                self.descriptor.body_bytes,
+                shared,
+            )?
+            .lookup(row.shared.as_ref(), oids, &mut work)
+            .await?
+        } else {
+            let keys = oids.iter().map(|oid| oid.to_vec()).collect::<Vec<_>>();
+            self.rows(
                 store,
                 row.objects.as_ref(),
                 Kind::CheckpointSets,
@@ -228,7 +328,8 @@ impl LayeredVisibilityReader {
                 }
                 Ok(value.is_some())
             })
-            .collect::<Result<Vec<_>>>()?;
+            .collect::<Result<Vec<_>>>()?
+        };
         // Loaded closure hits must also belong to the retained dictionary. The
         // dictionary alone cannot grant membership in this or another ref.
         let hits = oids

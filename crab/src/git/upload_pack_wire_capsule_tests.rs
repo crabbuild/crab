@@ -309,6 +309,25 @@ async fn complete_view_promotion_keeps_advertised_capsule_ref_state() {
     let root = crab_write::capsule_protocol::open_root(&layout)
         .await
         .unwrap();
+    let capture = crab_read::capsule_protocol::CapsuleRepositoryCapture::from_root(
+        layout.clone(),
+        root.clone(),
+    )
+    .await
+    .unwrap();
+    let mut view = capture
+        .metadata_view(crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: LIMIT,
+            max_frontier_bytes: LIMIT,
+        })
+        .await
+        .unwrap();
+    let expected = view.git_visibility_index().await.unwrap();
+    let snapshot = view.git_snapshot().unwrap();
+    assert_eq!(view.take_git_visibility_index().await.unwrap(), expected);
+    assert!(view.layered_checkpoint().unwrap().is_control_only());
+    assert_eq!(view.git_visibility_index().await.unwrap(), expected);
+    assert_eq!(view.git_snapshot().unwrap(), snapshot);
     let root_digest = root.record().digest().to_owned();
     let (client, server) = tokio::io::duplex(8192);
     let server_layout = layout.clone();

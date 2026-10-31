@@ -448,6 +448,14 @@ class LargeRepositoryQualification:
             "locator_ordinal_scan": 0,
             "locator_ordinal_metadata": 0,
             "locator_ordinal_metadata_scan": 0,
+            "authenticated_pack_installs": 0,
+            "authenticated_pack_install_ms": 0,
+            "authenticated_pack_verification_ms": 0,
+            "authenticated_pack_publication_ms": 0,
+            "authenticated_pack_bytes": 0,
+            "authenticated_pack_objects": 0,
+            "incomplete_pack_visibility": 0,
+            "incomplete_pack_install_evidence": 0,
         }
         for line in path.read_text(encoding="utf-8", errors="replace").splitlines():
             try:
@@ -457,6 +465,22 @@ class LargeRepositoryQualification:
             fields = event.get("fields")
             if not isinstance(fields, dict):
                 continue
+            if fields.get("telemetry_event") == "authenticated_pack_install":
+                required = (
+                    "installed_packs", "elapsed_ms", "visibility_verification_ms",
+                    "installation_ms", "verified_pack_bytes", "verified_objects",
+                )
+                telemetry["incomplete_pack_install_evidence"] += int(not all(
+                    type(fields.get(name)) is int and fields[name] >= 0
+                    for name in required
+                ))
+                telemetry["authenticated_pack_installs"] += int(fields.get("installed_packs", 0))
+                telemetry["authenticated_pack_install_ms"] += int(fields.get("elapsed_ms", 0))
+                telemetry["authenticated_pack_verification_ms"] += int(fields.get("visibility_verification_ms", 0))
+                telemetry["authenticated_pack_publication_ms"] += int(fields.get("installation_ms", 0))
+                telemetry["authenticated_pack_bytes"] += int(fields.get("verified_pack_bytes", 0))
+                telemetry["authenticated_pack_objects"] += int(fields.get("verified_objects", 0))
+                telemetry["incomplete_pack_visibility"] += int(fields.get("complete_visibility") is not True)
             lookup_mode = {
                 "scan": "locator_scan",
                 "full_scan": "locator_full_scan",

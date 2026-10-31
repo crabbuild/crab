@@ -176,6 +176,19 @@ Protected keys and authenticated closure traversal are tracked separately.
 Complete checkpoint visibility proofs are authenticated once and shared across
 immutable checkpoint clones. Building a checkpoint retains its validated proof;
 control-only readers keep the visibility body cold.
+Checkpoint visibility page descriptor 1 remains readable and keeps its existing
+canonical encoding for ordinary checkpoints. Descriptor 2 handles large repeated
+ref memberships with the shared dictionary, interned bitmap chunks and sparse
+sets used by capsule visibility schema 4. Each ref has its own authenticated set
+root; retained dictionary entries never grant ref access. Its single dictionary
+also retains objects whose last ref was deleted. Source/member bindings use
+fixed-width ordinal chunks, with exact coverage and final-chunk length checks,
+so they do not duplicate the OID dictionary. New readers
+accept both descriptors and reject mixed or unknown versions. The existing
+128 MiB proof ceiling, source/member bindings and checkpoint CAS are unchanged.
+In-memory snapshots retain sparse closures or bitmaps through ordinal remapping
+and restoration, instead of expanding every membership into a separate u32.
+
 Checkpoint footer history projects its recent suffix from validated ordinals
 without rebuilding the complete visibility index. Hints consume only the bytes
 remaining after required control metadata within the 8 MiB footer bound. Large

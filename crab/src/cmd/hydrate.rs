@@ -1409,7 +1409,13 @@ fn persist_verified_temp(
             verified_stat.len
         )));
     }
-    let file = tmp.persist(dest).map_err(|e| e.error)?;
+    // Rust's rename supports replacing an open destination on Windows.
+    // Keep tempfile's Windows attribute normalization, and retain cleanup
+    // ownership until the atomic replacement succeeds.
+    let mut temporary_path = tempfile::TempPath::try_from_path(tmp.path().to_path_buf())?;
+    let (file, _) = tmp.keep().map_err(|error| error.error)?;
+    std::fs::rename(&temporary_path, dest)?;
+    temporary_path.disable_cleanup(true);
     published_write(&file, verified_stat)
 }
 
@@ -4945,9 +4951,12 @@ mod tests {
                 path
             })
             .collect::<Vec<_>>();
+        let mut input_paths = tempfile::NamedTempFile::new().unwrap();
+        input_paths.write_all(paths.join("\n").as_bytes()).unwrap();
+        input_paths.write_all(b"\n").unwrap();
         let output = Command::new("git")
-            .args(["hash-object", "-w"])
-            .args(&paths)
+            .args(["hash-object", "-w", "--stdin-paths"])
+            .stdin(std::fs::File::open(input_paths.path()).unwrap())
             .current_dir(root)
             .env_remove("GIT_DIR")
             .env_remove("GIT_WORK_TREE")
@@ -5168,6 +5177,19 @@ mod tests {
         assert!(!linked.join(".gitattributes").exists());
     }
 
+    fn hydrated_fixture_entry(
+        path: &Path,
+        pointer: &Pointer,
+    ) -> Option<crate::cache::hydrated_pointer::HydratedEntry> {
+        let stat = crate::cmd::stream_stage::VerifiedIndexStat::from_path_no_follow(path).unwrap();
+        let entry =
+            crate::cache::hydrated_pointer::entry_for_verified_stat(stat, &pointer.serialize());
+        // Metadata-only cache reuse is deliberately disabled outside Unix;
+        // Windows creation time cannot prove that content has not changed.
+        assert_eq!(entry.is_some(), cfg!(unix));
+        entry
+    }
+
     #[tokio::test]
     async fn linked_worktree_hydrate_materializes_content_and_updates_own_cache() {
         let fixture = GitFixture::new();
@@ -5216,8 +5238,8 @@ mod tests {
             crate::cache::hydrated_pointer::cache_path_for_worktree_root(root).unwrap();
         assert_ne!(linked_cache_path, main_cache_path);
         let cache = crate::cache::HydratedPointerCache::load_sync(&linked_cache_path);
-        assert_eq!(cache.len(), 1);
-        assert!(cache.get("models/model.bin").is_some());
+        assert_eq!(cache.len(), usize::from(cfg!(unix)));
+        assert_eq!(cache.get("models/model.bin").is_some(), cfg!(unix));
     }
 
     #[tokio::test]
@@ -5250,11 +5272,10 @@ mod tests {
         std::fs::write(&source, &content).unwrap();
         let source_cache =
             crate::cache::hydrated_pointer::cache_path_for_worktree_root(root).unwrap();
-        let source_entry =
-            crate::cache::hydrated_pointer::entry_for_path(&source, &pointer.serialize()).unwrap();
+        let source_entry = hydrated_fixture_entry(&source, &pointer);
         crate::cache::HydratedPointerCache::update_on_disk(
             &source_cache,
-            [("models/model.bin".to_owned(), source_entry)],
+            source_entry.map(|entry| ("models/model.bin".to_owned(), entry)),
         )
         .unwrap();
 
@@ -5578,7 +5599,11 @@ mod tests {
         let published = temporary.persist(&dest).unwrap();
         let mut replacement = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
         replacement.write_all(b"replaced").unwrap();
-        replacement.persist(&dest).unwrap();
+        // Keep the original descriptor open across atomic pathname replacement.
+        // std::fs::rename uses POSIX replacement semantics on supported Windows;
+        // tempfile::persist uses MoveFileExW, which cannot replace an open file.
+        let replacement = replacement.into_temp_path();
+        std::fs::rename(&replacement, &dest).unwrap();
 
         let proof = published_write(&published, verified).unwrap();
 
@@ -5629,6 +5654,46 @@ mod tests {
         assert!(content == vec![0xAA; 65536] || content == vec![0xBB; 65536]);
         assert!(proofs.contains(&current));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn atomic_write_replaces_open_destination_and_keeps_its_descriptor_proof() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("model.bin");
+        let original = b"previous verified content";
+        std::fs::write(&dest, original).unwrap();
+        let mut previous = std::fs::File::open(&dest).unwrap();
+        let previous_stat =
+            crate::cmd::stream_stage::VerifiedIndexStat::from_file(&previous).unwrap();
+        let replacement = vec![0xAA; 65536];
+
+        let proof = atomic_write_with_progress(&dest, &replacement, None).unwrap();
+
+        let mut previous_content = Vec::new();
+        std::io::Read::read_to_end(&mut previous, &mut previous_content).unwrap();
+        assert_eq!(previous_content, original);
+        assert_eq!(std::fs::read(&dest).unwrap(), replacement);
+        assert_ne!(proof, previous_stat);
+        assert_eq!(
+            Some(proof),
+            crate::cmd::stream_stage::VerifiedIndexStat::from_path_no_follow(&dest)
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn atomic_write_failed_replacement_cleans_only_its_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("model.bin");
+        std::fs::create_dir(&dest).unwrap();
+        let original = dest.join("original");
+        std::fs::write(&original, b"preserved").unwrap();
+
+        assert!(atomic_write_with_progress(&dest, b"replacement", None).is_err());
+
+        assert_eq!(std::fs::read(&original).unwrap(), b"preserved");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        assert_eq!(std::fs::read_dir(&dest).unwrap().count(), 1);
     }
 
     #[cfg(unix)]
@@ -5855,51 +5920,55 @@ mod tests {
         std::fs::write(&source, &content).unwrap();
         let cache_path =
             crate::cache::hydrated_pointer::cache_path_for_worktree_root(root).unwrap();
-        let entry =
-            crate::cache::hydrated_pointer::entry_for_path(&source, &pointer.serialize()).unwrap();
+        let entry = hydrated_fixture_entry(&source, &pointer);
         crate::cache::HydratedPointerCache::update_on_disk(
             &cache_path,
-            [("models/model.bin".to_owned(), entry)],
+            entry.map(|entry| ("models/model.bin".to_owned(), entry)),
         )
         .unwrap();
 
         let index = sibling_cow_candidates(&linked);
         assert_eq!(
             index.candidates(&pointer),
-            [std::fs::canonicalize(&source).unwrap()]
+            if cfg!(unix) {
+                vec![std::fs::canonicalize(&source).unwrap()]
+            } else {
+                Vec::new()
+            }
         );
 
         std::fs::write(root.join("models/renamed.bin"), &content).unwrap();
-        let renamed_entry = crate::cache::hydrated_pointer::entry_for_path(
-            &root.join("models/renamed.bin"),
-            &pointer.serialize(),
-        )
-        .unwrap();
+        let renamed_entry = hydrated_fixture_entry(&root.join("models/renamed.bin"), &pointer);
         let other_content = b"content from a different branch";
         let other_pointer = pointer_for_content(other_content);
         std::fs::write(root.join("models/other.bin"), other_content).unwrap();
-        let other_entry = crate::cache::hydrated_pointer::entry_for_path(
-            &root.join("models/other.bin"),
-            &other_pointer.serialize(),
-        )
-        .unwrap();
+        let other_entry = hydrated_fixture_entry(&root.join("models/other.bin"), &other_pointer);
         crate::cache::HydratedPointerCache::update_on_disk(
             &cache_path,
             [
                 ("models/renamed.bin".to_owned(), renamed_entry),
                 ("models/other.bin".to_owned(), other_entry),
-            ],
+            ]
+            .into_iter()
+            .filter_map(|(path, entry)| entry.map(|entry| (path, entry))),
         )
         .unwrap();
         let index = sibling_cow_candidates(&linked);
-        assert_eq!(index.candidates(&pointer).len(), 2);
-        assert_eq!(index.candidates(&other_pointer).len(), 1);
+        assert_eq!(
+            index.candidates(&pointer).len(),
+            2 * usize::from(cfg!(unix))
+        );
+        assert_eq!(
+            index.candidates(&other_pointer).len(),
+            usize::from(cfg!(unix))
+        );
 
         std::fs::write(&source, b"source changed after cache fingerprint").unwrap();
         std::fs::remove_file(root.join("models/renamed.bin")).unwrap();
         let index = sibling_cow_candidates(&linked);
         assert!(index.candidates(&pointer).is_empty());
 
+        std::fs::create_dir_all(cache_path.parent().unwrap()).unwrap();
         std::fs::write(&cache_path, b"{corrupt cache").unwrap();
         let index = sibling_cow_candidates(&linked);
         assert!(index.candidates(&other_pointer).is_empty());
@@ -5937,16 +6006,15 @@ mod tests {
         std::fs::write(&source, &content).unwrap();
         let cache_path =
             crate::cache::hydrated_pointer::cache_path_for_worktree_root(&source_root).unwrap();
-        let entry =
-            crate::cache::hydrated_pointer::entry_for_path(&source, &pointer.serialize()).unwrap();
+        let entry = hydrated_fixture_entry(&source, &pointer);
         crate::cache::HydratedPointerCache::update_on_disk(
             &cache_path,
-            [("model.bin".to_owned(), entry)],
+            entry.map(|entry| ("model.bin".to_owned(), entry)),
         )
         .unwrap();
         assert_eq!(
             sibling_cow_candidates(&current).candidates(&pointer).len(),
-            1
+            usize::from(cfg!(unix))
         );
 
         std::fs::rename(&source_root, linked_parent.path().join("source-moved")).unwrap();

@@ -266,22 +266,54 @@ async fn repack_preserves_gc_fence_failure_without_publishing() {
 }
 
 #[tokio::test]
-async fn dry_run_reads_metadata_without_loading_small_frontier_pack_bodies() {
-    let body = (0..8192_u32)
-        .flat_map(|index| *blake3::hash(&index.to_le_bytes()).as_bytes())
-        .collect::<Vec<_>>();
-    let (layout, sizes, observations) =
-        fixture_with_bodies([b"stable prefix".to_vec(), body]).await;
+async fn apply_and_preview_views_bound_the_aggregate_resident_frontier() {
+    let body = |start, count| {
+        (start..start + count)
+            .flat_map(|index: u32| *blake3::hash(&index.to_le_bytes()).as_bytes())
+            .collect::<Vec<_>>()
+    };
+    for frontier in [
+        vec![body(0, 8192)],
+        vec![body(8192, 1280), body(9472, 1280)],
+    ] {
+        assert_frontier_bodies_remain_cold(frontier).await;
+    }
+}
+
+async fn assert_frontier_bodies_remain_cold(frontier: Vec<Vec<u8>>) {
+    let bodies = std::iter::once(b"stable prefix".to_vec()).chain(frontier);
+    let (layout, sizes, observations) = fixture_with_bodies(bodies).await;
+    let frontier_pack_bytes = sizes[1..].iter().sum::<u64>();
+    assert!(frontier_pack_bytes > 64 * 1024);
+    if sizes.len() == 3 {
+        assert!(sizes[1..].iter().all(|size| *size < 64 * 1024));
+    }
     let root = crab_write::capsule_protocol::open_root(&layout)
         .await
         .unwrap();
     let before = root.record().digest().to_owned();
     observations.0.lock().unwrap().clear();
-    // This is the apply-view entry point used by the former preview path.
-    // Its small-frontier body retention remains useful for real consolidation.
+    // Apply retains complete visibility and member admission for consolidation,
+    // while both captures leave pack bodies at their immutable origins.
     let apply_view = open_repack_view(&layout, root.clone(), LIMIT)
         .await
         .unwrap();
+    assert_eq!(apply_view.git_pack_count(), sizes.len());
+    assert!(apply_view.capsules().is_empty());
+    let visibility = apply_view.git_visibility_index().await.unwrap();
+    assert_eq!(visibility.ref_count(), sizes.len());
+    for (name, tip) in apply_view.refs() {
+        assert!(visibility.contains_hex_in_ref(name, tip));
+    }
+    assert_eq!(
+        apply_view
+            .capsule_run_member_oids()
+            .values()
+            .flat_map(|members| members.iter())
+            .map(Vec::len)
+            .sum::<usize>(),
+        sizes.len() - 1
+    );
     drop(apply_view);
     let apply_bytes = observations
         .0
@@ -308,13 +340,15 @@ async fn dry_run_reads_metadata_without_loading_small_frontier_pack_bodies() {
         .map(|item| item.bytes_read)
         .sum::<u64>();
     println!(
-        "preview body admission: apply_view_bytes={apply_bytes} preview_bytes={preview_bytes} frontier_pack_bytes={}",
-        sizes[1]
+        "preview body admission: apply_view_bytes={apply_bytes} preview_bytes={preview_bytes} frontier_pack_bytes={frontier_pack_bytes}"
     );
-    assert!(apply_bytes >= sizes[1]);
-    assert!(preview_bytes < sizes[1]);
+    assert!(apply_bytes < frontier_pack_bytes);
+    assert!(preview_bytes < frontier_pack_bytes);
     assert_eq!((outcome.bytes_read, outcome.bytes_written), (0, 0));
-    assert_eq!((outcome.packs_before, outcome.packs_after), (2, 2));
+    assert_eq!(
+        (outcome.packs_before, outcome.packs_after),
+        (sizes.len(), sizes.len())
+    );
     let current = crab_write::capsule_protocol::open_root(&layout)
         .await
         .unwrap();

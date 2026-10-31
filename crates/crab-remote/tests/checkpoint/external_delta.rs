@@ -407,93 +407,120 @@ async fn suffix_internal_delta_bases_are_not_reconstructed_from_origin() {
     .await;
 }
 
-#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
-async fn external_base_repack_verifies_bytes_and_fails_closed_on_corruption_or_cancellation() {
-    for scenario in ["valid", "corrupt-base", "cancel-base"] {
-        let (layout, observations) = empty_fixture().await;
-        let base = (0..8192_u32)
-            .flat_map(|ordinal| *blake3::hash(&ordinal.to_le_bytes()).as_bytes())
-            .collect::<Vec<_>>();
-        publish_blobs(&layout, &[("base", &base)]).await;
-        checkpoint(&layout).await;
-        let mut first = base.clone();
-        first[base.len() / 2] ^= 1;
-        let mut second = base.clone();
-        second[base.len() / 2] ^= 2;
-        publish_dependent_blob(&layout, "first", &base, &first).await;
-        publish_dependent_blob(&layout, "second", &base, &second).await;
-        let before = checkpoint(&layout).await;
-        let sources = before.layered_checkpoint().unwrap().sources();
-        assert_eq!(sources.len(), 3);
-        let stable = sources[0].clone();
-        assert!(
-            sources[1..]
-                .iter()
-                .flat_map(|source| source.members())
-                .all(|member| !member.external_delta_bases().is_empty())
-        );
-        let cancel = CancellationToken::new();
-        if scenario == "corrupt-base" {
-            let path = layout.capsule_path(stable.object_hash());
-            let (bytes, _) = layout.store().get_with_etag(&path).await.unwrap();
-            let mut corrupt = bytes.to_vec();
-            // Corrupt the first object's entry, not the pack header outside a
-            // selective base read. The authenticated entry must be rejected.
-            corrupt[stable.members()[0].pack().offset() as usize + 12] ^= 1;
-            layout
-                .store()
-                .inner()
-                .put(&path, Bytes::from(corrupt).into())
-                .await
-                .unwrap();
-        } else if scenario == "cancel-base" {
-            *observations.1.lock().unwrap() = Some(cancel.clone());
-        }
-        observations.0.lock().unwrap().clear();
-        let result = tokio::time::timeout(
-            Duration::from_secs(10),
-            crab_remote::checkpoint::repack_capsule_checkpoint_from_root(
-                &layout,
-                before.root_snapshot().clone(),
-                LIMIT,
-                &cancel,
-            ),
+async fn repack_for_base_verification(
+    layout: &StoreLayout<Store>,
+    root: crab_metadata::capsule_protocol::RootSnapshot,
+    cancel: &CancellationToken,
+    bounded: bool,
+) -> Result<crab_remote::checkpoint::CheckpointOutcome, crab_remote::checkpoint::CheckpointError> {
+    if bounded {
+        crab_remote::checkpoint::repack_capsule_checkpoint_from_root_with_scratch_limit(
+            layout,
+            root,
+            LIMIT,
+            128 * 1024 * 1024,
+            cancel,
         )
         .await
-        .expect("external-base maintenance must return after cancellation or failure");
-        *observations.1.lock().unwrap() = None;
-        if scenario != "valid" {
-            if scenario == "cancel-base" {
-                assert!(
-                    cancel.is_cancelled(),
-                    "the base-read cancellation hook must run"
-                );
-            }
-            assert!(result.is_err(), "{scenario}");
-            let current = crab_write::capsule_protocol::open_root(&layout)
-                .await
-                .unwrap();
-            assert_eq!(
-                current.record().digest(),
-                before.root().digest(),
-                "{scenario}"
+    } else {
+        crab_remote::checkpoint::repack_capsule_checkpoint_from_root(layout, root, LIMIT, cancel)
+            .await
+    }
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn external_base_repack_verifies_bytes_and_fails_closed_on_corruption_or_cancellation() {
+    for bounded in [false, true] {
+        for scenario in ["valid", "corrupt-base", "extended-base", "cancel-base"] {
+            let (layout, observations) = empty_fixture().await;
+            let base = (0..8192_u32)
+                .flat_map(|ordinal| *blake3::hash(&ordinal.to_le_bytes()).as_bytes())
+                .collect::<Vec<_>>();
+            publish_blobs(&layout, &[("base", &base)]).await;
+            checkpoint(&layout).await;
+            let mut first = base.clone();
+            first[base.len() / 2] ^= 1;
+            let mut second = base.clone();
+            second[base.len() / 2] ^= 2;
+            publish_dependent_blob(&layout, "first", &base, &first).await;
+            publish_dependent_blob(&layout, "second", &base, &second).await;
+            let before = checkpoint(&layout).await;
+            let sources = before.layered_checkpoint().unwrap().sources();
+            assert_eq!(sources.len(), 3);
+            let stable = sources[0].clone();
+            assert!(
+                sources[1..]
+                    .iter()
+                    .flat_map(|source| source.members())
+                    .all(|member| !member.external_delta_bases().is_empty())
             );
-            continue;
+            let cancel = CancellationToken::new();
+            if scenario == "corrupt-base" || scenario == "extended-base" {
+                let path = layout.capsule_path(stable.object_hash());
+                let (bytes, _) = layout.store().get_with_etag(&path).await.unwrap();
+                let mut corrupt = bytes.to_vec();
+                // Corrupt the first object's entry, not the pack header outside a
+                // selective base read. The authenticated entry must be rejected.
+                if scenario == "extended-base" {
+                    corrupt.push(0);
+                } else {
+                    corrupt[stable.members()[0].pack().offset() as usize + 12] ^= 1;
+                }
+                layout
+                    .store()
+                    .inner()
+                    .put(&path, Bytes::from(corrupt).into())
+                    .await
+                    .unwrap();
+            } else if scenario == "cancel-base" {
+                *observations.1.lock().unwrap() = Some(cancel.clone());
+            }
+            observations.0.lock().unwrap().clear();
+            let result = tokio::time::timeout(
+                Duration::from_secs(10),
+                repack_for_base_verification(
+                    &layout,
+                    before.root_snapshot().clone(),
+                    &cancel,
+                    bounded,
+                ),
+            )
+            .await
+            .expect("external-base maintenance must return after cancellation or failure");
+            *observations.1.lock().unwrap() = None;
+            if scenario != "valid" {
+                if scenario == "cancel-base" {
+                    assert!(
+                        cancel.is_cancelled(),
+                        "the base-read cancellation hook must run"
+                    );
+                }
+                assert!(result.is_err(), "{scenario}");
+                let current = crab_write::capsule_protocol::open_root(&layout)
+                    .await
+                    .unwrap();
+                assert_eq!(
+                    current.record().digest(),
+                    before.root().digest(),
+                    "{scenario}"
+                );
+                continue;
+            }
+            assert!(result.unwrap().published);
+            let after = view(&layout).await;
+            let sources = after.layered_checkpoint().unwrap().sources();
+            assert_eq!(sources.len(), 2);
+            assert_eq!(sources[0], stable);
+            assert_eq!(sources[1].members()[0].object_count(), 2);
+            assert_eq!(sources[1].members()[0].external_delta_bases().len(), 1);
+            assert_eq!(after.refs(), before.refs());
+            verify_git_blobs(
+                &layout,
+                &after,
+                &[("base", &base), ("first", &first), ("second", &second)],
+            )
+            .await;
         }
-        assert!(result.unwrap().published);
-        let after = view(&layout).await;
-        let sources = after.layered_checkpoint().unwrap().sources();
-        assert_eq!(sources.len(), 2);
-        assert_eq!(sources[0], stable);
-        assert_eq!(sources[1].members()[0].object_count(), 2);
-        assert_eq!(sources[1].members()[0].external_delta_bases().len(), 1);
-        assert_eq!(after.refs(), before.refs());
-        verify_git_blobs(
-            &layout,
-            &after,
-            &[("base", &base), ("first", &first), ("second", &second)],
-        )
-        .await;
     }
 }
 
@@ -509,6 +536,20 @@ async fn suffix_aliases_keep_an_acyclic_pack_when_the_full_anchor_is_stable() {
     publish_dependent_blob(&layout, "changed", &base, &changed).await;
     publish_dependent_blob(&layout, "revisited", &changed, &base).await;
     let before = checkpoint(&layout).await;
+    let deferred = crab_remote::checkpoint::repack_capsule_checkpoint_from_root_with_scratch_limit(
+        &layout,
+        before.root_snapshot().clone(),
+        LIMIT,
+        64 * 1024 * 1024,
+        &CancellationToken::new(),
+    )
+    .await
+    .unwrap();
+    assert!(
+        !deferred.published,
+        "cyclic aliases still require a verified rewrite"
+    );
+    assert_eq!(view(&layout).await.root().digest(), before.root().digest());
     crab_remote::checkpoint::repack_capsule_checkpoint_from_root(
         &layout,
         before.root_snapshot().clone(),
@@ -546,4 +587,83 @@ async fn suffix_aliases_keep_an_acyclic_pack_when_the_full_anchor_is_stable() {
         "{}",
         String::from_utf8_lossy(&output.stderr)
     );
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+async fn external_base_verification_rejects_transitive_source_corruption() {
+    for bounded in [false, true] {
+        for corrupt_anchor in [false, true] {
+            let (layout, _) = empty_fixture().await;
+            let anchor = (0..8192_u32)
+                .flat_map(|ordinal| *blake3::hash(&ordinal.to_le_bytes()).as_bytes())
+                .collect::<Vec<_>>();
+            publish_blobs(&layout, &[("anchor", &anchor)]).await;
+            checkpoint(&layout).await;
+            let mut base = anchor.clone();
+            for byte in &mut base[..anchor.len() / 2] {
+                *byte ^= 0xa5;
+            }
+            publish_dependent_blob(&layout, "base", &anchor, &base).await;
+            checkpoint(&layout).await;
+            let mut first = base.clone();
+            first[base.len() - 1] ^= 1;
+            let mut second = base.clone();
+            second[base.len() - 1] ^= 2;
+            publish_dependent_blob(&layout, "first", &base, &first).await;
+            publish_dependent_blob(&layout, "second", &base, &second).await;
+            let before = checkpoint(&layout).await;
+            let sources = before.layered_checkpoint().unwrap().sources();
+            assert_eq!(sources.len(), 4);
+            assert!(!sources[1].members()[0].external_delta_bases().is_empty());
+            if corrupt_anchor {
+                let source = &sources[0];
+                let path = layout.capsule_path(source.object_hash());
+                let (bytes, _) = layout.store().get_with_etag(&path).await.unwrap();
+                let mut bytes = bytes.to_vec();
+                bytes[source.members()[0].pack().offset() as usize + 12] ^= 1;
+                layout
+                    .store()
+                    .inner()
+                    .put(&path, Bytes::from(bytes).into())
+                    .await
+                    .unwrap();
+            }
+            let result = repack_for_base_verification(
+                &layout,
+                before.root_snapshot().clone(),
+                &CancellationToken::new(),
+                bounded,
+            )
+            .await;
+            if corrupt_anchor {
+                assert!(
+                    result.is_err(),
+                    "transitive corruption must fail: bounded={bounded}"
+                );
+                let root = crab_write::capsule_protocol::open_root(&layout)
+                    .await
+                    .unwrap();
+                assert_eq!(root.record().digest(), before.root().digest());
+            } else {
+                assert!(result.unwrap().published);
+                let after = view(&layout).await;
+                assert_eq!(
+                    after.layered_checkpoint().unwrap().sources().len(),
+                    3,
+                    "the external base must stay outside the selected suffix"
+                );
+                verify_git_blobs(
+                    &layout,
+                    &after,
+                    &[
+                        ("anchor", &anchor),
+                        ("base", &base),
+                        ("first", &first),
+                        ("second", &second),
+                    ],
+                )
+                .await;
+            }
+        }
+    }
 }

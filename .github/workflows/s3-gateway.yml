@@ -306,6 +306,7 @@ jobs:
             crab/scripts/e2e/test_s3_gateway_qualification_report.py \
             crab/scripts/e2e/test_s3_gateway_workload.py \
             crab/scripts/e2e/test_s3_gateway_ecosystem.py
+          python3 -B -m unittest crab/scripts/e2e/test_s3_gateway_orphan_cleanup.py
           python3 -B crab/scripts/e2e/s3_gateway_boto3.py --help >/dev/null
           python3 -B crab/scripts/e2e/s3_gateway_ecosystem.py --help >/dev/null
 
@@ -1428,6 +1429,7 @@ jobs:
             > "${RUNNER_TEMP}/crab-s3-gateway-evidence/native-metrics.prom"
           python3 - "${RUNNER_TEMP}/crab-s3-gateway-evidence/native-service-errors.txt" <<'PY'
           from collections import deque
+          from datetime import datetime
           from pathlib import Path
           import json
           import re
@@ -1440,19 +1442,37 @@ jobs:
               stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True,
           )
           selected = deque(maxlen=100)
-          phases = deque(maxlen=30000)
+          phases = deque(maxlen=100000)
           phase_count = 0
           for line in process.stdout:
               line = re.sub(r"\x1b\[[0-9;]*m", "", line)
               if re.search(r"\b(?:ERROR|WARN)\b", line):
                   selected.append(line[:4096])
-              if "Git preparation phase completed" in line or "Git mutation phase completed" in line:
-                  phase = re.search(r'\bphase="(build|encode|sidecars|content_hash)"', line)
+              if any(message in line for message in (
+                  "Git preparation phase completed",
+                  "Git mutation phase completed",
+                  "Git capsule publication phase finished",
+                  "Git checkpoint phase completed",
+                  "S3 physical checkpoint maintenance finished",
+                  "S3 physical checkpoint metadata retention",
+                  "S3 physical checkpoint reuses committed metadata",
+              )):
+                  phase = re.search(r'\bphase="(build|encode|sidecars|content_hash|upload|ref_cas|ref_transaction|capture|catalog|source_admission|visibility_index|visibility_snapshot|footer_consolidation|publish|base_resolution|metadata_retention|metadata_reuse)"', line)
                   elapsed = re.search(r'\belapsed_ms=([0-9.eE+-]+)', line)
-                  if phase and elapsed:
+                  phase_name = phase[1] if phase else None
+                  if phase_name and "Git checkpoint phase completed" in line:
+                      phase_name = f"checkpoint_{phase_name}"
+                  if "S3 physical checkpoint maintenance finished" in line:
+                      phase_name = "physical_checkpoint"
+                  if phase_name and elapsed:
                       # Persist only fixed phase names and numeric measurements.
-                      row = {"phase": phase[1], "elapsed_ms": float(elapsed[1])}
-                      for field in ("objects", "bytes", "commits"):
+                      row = {"phase": phase_name, "elapsed_ms": float(elapsed[1])}
+                      timestamp = re.match(r"(\d{4}-\d{2}-\d{2}T[0-9:.]+Z)\s", line)
+                      if timestamp:
+                          row["timestamp_unix_seconds"] = datetime.fromisoformat(
+                              timestamp[1].replace("Z", "+00:00")
+                          ).timestamp()
+                      for field in ("objects", "bytes", "commits", "pack_bytes_read", "pack_bytes_written", "declared_bases", "inflated_bases", "index_workers", "required_bytes", "available_bytes", "retained"):
                           value = re.search(rf'\b{field}=([0-9]+)', line)
                           if value:
                               row[field] = int(value[1])

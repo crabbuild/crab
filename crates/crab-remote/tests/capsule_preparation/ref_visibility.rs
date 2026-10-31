@@ -154,8 +154,9 @@ async fn branch_survives_source_deletion(
         .await
         .unwrap();
     let evidence = &control.visibility_delta().unwrap().unwrap().edits()[borrowed];
+    let added = evidence.added.iter().cloned().collect::<Vec<_>>();
     assert_eq!(
-        (evidence.replaces, &evidence.old_oid, &evidence.added),
+        (evidence.replaces, &evidence.old_oid, &added),
         (true, &None, &expected_objects),
     );
     if !delete_before_commit {

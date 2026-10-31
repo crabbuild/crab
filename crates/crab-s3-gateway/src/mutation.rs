@@ -25,6 +25,11 @@ use crate::{
     repository::CapsuleFrontier,
 };
 
+#[cfg(test)]
+mod scaling_profile;
+
+mod physical_checkpoints;
+use physical_checkpoints::revalidate_cached_branch;
 mod tree_appends;
 use tree_appends::PreparedAppends;
 
@@ -51,6 +56,10 @@ const FOREGROUND_CAPSULE_THRESHOLD: u32 =
 const FOREGROUND_CAPSULE_BYTES: u64 = MAX_CAPSULE_READ_BYTES / 2;
 const TREE_PAGE_SIZE: usize = 4_096;
 const CHECKPOINT_PUBLICATION_CONCURRENCY: usize = 4;
+// Consolidate before the 8 MiB checkpoint footer forces physical work into
+// foreground admission. Small checkpoints benefit from retaining their packs.
+const PHYSICAL_CHECKPOINT_CONTROL_BYTES: u64 = 4 * 1024 * 1024;
+const PHYSICAL_CHECKPOINT_MIN_PACKS: u32 = 1_024;
 const GENERATED_TREE_DELTA_DEPTH: u32 = 8;
 const GENERATED_TREE_ANCHOR_REUSE_BATCHES: u32 = 64;
 const MAX_GENERATED_TREE_DELTA_BYTES: usize = 32 * 1024 * 1024;
@@ -621,6 +630,8 @@ struct CheckpointRefState {
 }
 
 struct CheckpointScheduler {
+    physical_repositories: std::sync::Mutex<HashSet<String>>,
+    physical_permits: Arc<Semaphore>,
     refs: std::sync::Mutex<HashMap<String, CheckpointRefState>>,
     permits: Arc<Semaphore>,
     manifest_bytes: Arc<Semaphore>,
@@ -634,6 +645,8 @@ impl CheckpointScheduler {
     fn new(cancellation: CancellationToken, metrics: Metrics) -> Self {
         Self {
             refs: std::sync::Mutex::new(HashMap::new()),
+            physical_repositories: std::sync::Mutex::new(HashSet::new()),
+            physical_permits: Arc::new(Semaphore::new(1)),
             permits: Arc::new(Semaphore::new(CHECKPOINT_PUBLICATION_CONCURRENCY)),
             manifest_bytes: Arc::new(Semaphore::new(MAX_WARM_BRANCH_STATE_BYTES)),
             cancellation,
@@ -1486,6 +1499,10 @@ async fn apply_with_fences(
                 {
                     checkpoints.schedule(repository, request.branch, commit, &prepared.attributes);
                 }
+                let frontier = prepared.capsule_frontier.map(|mut frontier| {
+                    frontier.bytes = frontier_bytes;
+                    frontier
+                });
                 if let Some(state) = request.state {
                     state.store(
                         tip,
@@ -1493,10 +1510,7 @@ async fn apply_with_fences(
                         prepared.attributes,
                         prepared.tree,
                         prepared.batches_since_checkpoint,
-                        prepared.capsule_frontier.map(|mut frontier| {
-                            frontier.bytes = frontier_bytes;
-                            frontier
-                        }),
+                        frontier,
                     );
                 }
                 request
@@ -1565,6 +1579,13 @@ async fn prepare_and_upload_batch(
 ) -> Result<PreparedBatch> {
     let mut base = Box::new(crab_metadata::capsule_protocol::load_root(&repository.layout).await?);
     let mut cached = request.state.and_then(BranchState::take_latest);
+    if cached.as_ref().is_some_and(|cached| {
+        cached
+            .capsule_frontier
+            .is_none_or(|frontier| !frontier.matches_root(base.record()))
+    }) {
+        cached = revalidate_cached_branch(repository, request.branch, &base, cached, None).await?;
+    }
     let mut current_view = if cached.is_none() {
         Some(
             repository
@@ -1588,7 +1609,7 @@ async fn prepare_and_upload_batch(
     if frontier.is_some_and(|frontier| {
         frontier.count >= FOREGROUND_CAPSULE_THRESHOLD || frontier.bytes >= FOREGROUND_CAPSULE_BYTES
     }) {
-        crab_remote::checkpoint::publish_capsule_checkpoint(
+        let checkpointed = crab_remote::checkpoint::publish_capsule_checkpoint_with_receipt(
             &repository.layout,
             // Admission is due by count or bytes. Recheck only that some
             // frontier remains after another writer's concurrent checkpoint.
@@ -1597,36 +1618,37 @@ async fn prepare_and_upload_batch(
             cancel,
         )
         .await?;
+        // Charge immutable metadata before the next I/O. Queue retention shares
+        // the existing attribute-manifest budget; misses retain the cold path.
+        let (published_checkpoint, retained) = match checkpointed.committed {
+            Some((root, checkpoint)) => (
+                Some(root),
+                request
+                    .checkpoints
+                    .and_then(|scheduler| scheduler.retain_checkpoint(checkpoint)),
+            ),
+            None => (None, None),
+        };
         repository.read_views.invalidate().await;
         current_view = None;
         base = Box::new(crab_metadata::capsule_protocol::load_root(&repository.layout).await?);
-        cached = match cached {
-            Some(mut cached) => {
-                let view = crab_read::capsule_protocol::open_view_from_root_with_layered_control(
-                    &repository.layout,
-                    (*base).clone(),
-                    crab_read::capsule_protocol::CapsuleReadLimits {
-                        max_capsule_bytes: MAX_CAPSULE_READ_BYTES,
-                        max_frontier_bytes: MAX_CAPSULE_READ_BYTES,
-                    },
-                )
-                .await?;
-                if view.refs().get(request.branch) == cached.tip.map(|tip| tip.to_string()).as_ref()
-                {
-                    cached.transaction =
-                        view.visible_ref_transactions().get(request.branch).cloned();
-                    cached.capsule_frontier = Some(CapsuleFrontier {
-                        count: view.ref_capsule_count(request.branch),
-                        bytes: view.ref_frontier_bytes(request.branch),
-                    });
-                    cached.tree.forget_pack_provenance();
-                    Some(cached)
-                } else {
-                    None
-                }
-            }
-            None => None,
-        };
+        if checkpointed.work.published
+            && base.record().root().checkpoint().is_some_and(|pointer| {
+                pointer.control_size() >= PHYSICAL_CHECKPOINT_CONTROL_BYTES
+                    && pointer.pack_count() >= PHYSICAL_CHECKPOINT_MIN_PACKS
+            })
+            && let Some(checkpoints) = request.checkpoints
+        {
+            checkpoints.schedule_physical(repository, (*base).clone(), retained);
+        }
+        cached = revalidate_cached_branch(
+            repository,
+            request.branch,
+            &base,
+            cached,
+            published_checkpoint.as_ref(),
+        )
+        .await?;
     }
     if let Some(cached) = cached {
         // The ref lease revalidates this optimistic parent before publication;
@@ -4694,6 +4716,11 @@ mod tests {
             cancel.child_token(),
             Metrics::new().unwrap(),
         );
+        // A slow background owner must never weaken foreground admission.
+        let _blocked = Arc::clone(&coordinator.checkpoints.physical_permits)
+            .acquire_owned()
+            .await
+            .unwrap();
         let path = crab_remote_git::GitPath::new(b"object".to_vec()).unwrap();
         for index in 0..FOREGROUND_CAPSULE_THRESHOLD {
             coordinator
@@ -4788,6 +4815,7 @@ mod tests {
             read(&repository, Arc::clone(&runtime), &cancel, "object").await,
             Bytes::from_static(b"after-checkpoint")
         );
+        coordinator.shutdown().await;
         runtime.shutdown().await;
     }
 

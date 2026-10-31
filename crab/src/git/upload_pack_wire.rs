@@ -673,6 +673,7 @@ where
                     let admitted = match open_capsule_repository_from_capture(
                         &capture,
                         footer_only,
+                        fetch.done && negotiated_haves.is_empty(),
                         runtime,
                         cancellation,
                     )
@@ -698,8 +699,12 @@ where
                     // Ref heads are mutable even while the root digest stays fixed.
                     // Promotion must reuse this session's capture or a concurrent
                     // push can invalidate an object already advertised to Git.
+                    // The capture pins that authority independently of the prior
+                    // repository's large lookup and visibility allocations.
+                    drop(fetch_snapshot.take());
                     let admitted = match open_capsule_repository_from_capture(
                         &capture,
+                        false,
                         false,
                         runtime,
                         cancellation,
@@ -939,10 +944,12 @@ fn merge_negotiated_haves(
 /// proof only when the exact one-pack stream can be sent directly. A
 /// multi-member clone uses complete captured metadata so protocol-v2 can
 /// consolidate authenticated source packs without retaining their payloads
-/// before cache lookup or the bounded pack downloader.
+/// before cache lookup or the bounded pack downloader. Choose that view before
+/// opening the repository so cold clones do not build two lookup states.
 async fn open_capsule_repository_from_capture(
     capture: &crab_read::capsule_protocol::CapsuleRepositoryCapture,
     footer_only: bool,
+    cold_clone: bool,
     runtime: &Arc<RemoteGitRuntime>,
     cancellation: &CancellationToken,
 ) -> Result<(
@@ -950,6 +957,7 @@ async fn open_capsule_repository_from_capture(
     UploadPackVisibilityProof,
     Option<crab_read::capsule_protocol::LayeredColdClonePack>,
 )> {
+    let started = std::time::Instant::now();
     let layout = capture.layout();
     let store = layout.store();
     let prefix = layout.repo_prefix();
@@ -959,15 +967,28 @@ async fn open_capsule_repository_from_capture(
         max_capsule_bytes: maximum,
         max_frontier_bytes: maximum,
     };
-    let (view, direct_pack, tip_bound) = if footer_only {
-        let footer_view = capture.layered_control_view(limits).await?;
-        let direct_pack = footer_view
-            .layered_cold_clone_pack(layout, options.operation_limits().max_response_bytes)
-            .map_err(CrabError::from)?;
-        (footer_view, direct_pack, true)
-    } else {
-        (capture.metadata_view(limits).await?, None, false)
-    };
+    let (mut view, direct_pack, tip_bound) =
+        if footer_only && (!cold_clone || capture.may_have_layered_cold_clone_packs()) {
+            let footer_view = capture.layered_control_view(limits).await?;
+            let direct_pack = footer_view
+                .layered_cold_clone_pack(layout, options.operation_limits().max_response_bytes)
+                .map_err(CrabError::from)?;
+            if cold_clone && direct_pack.is_none() {
+                drop(footer_view);
+                (capture.metadata_view(limits).await?, None, false)
+            } else {
+                (footer_view, direct_pack, true)
+            }
+        } else {
+            (capture.metadata_view(limits).await?, None, false)
+        };
+    tracing::debug!(
+        footer_only,
+        cold_clone,
+        tip_bound,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "upload-pack captured view opened"
+    );
     let bucket = store.bucket_identity();
     let provider = format!("{:?}:{}:{}", bucket.cloud, bucket.host, bucket.container);
     let identity =
@@ -977,8 +998,12 @@ async fn open_capsule_repository_from_capture(
             transitions: Arc::new(view.tip_bound_transitions().await?),
         }
     } else {
-        UploadPackVisibilityProof::Materialized(view.git_visibility_index().await?)
+        UploadPackVisibilityProof::Materialized(view.take_git_visibility_index().await?)
     };
+    tracing::debug!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "upload-pack visibility proof opened"
+    );
     let repository = view
         .git_repository_from_store(
             layout.clone(),
@@ -990,6 +1015,10 @@ async fn open_capsule_repository_from_capture(
             None,
         )
         .await?;
+    tracing::debug!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "upload-pack repository opened"
+    );
     let lease_provider = ObjectStoreGeneratedPackLeaseProvider {
         store: Arc::clone(store.inner()),
         prefix: prefix.to_owned(),

@@ -724,6 +724,47 @@ def valid_cache_service() -> dict[str, Any]:
 
 
 class ReportVerificationTests(unittest.TestCase):
+    def test_native_pack_install_uses_completed_verification_evidence(self) -> None:
+        event = {"fields": {
+            "telemetry_event": "authenticated_pack_install", "installed_packs": 2,
+            "verified_pack_bytes": 1024, "verified_objects": 40,
+            "complete_visibility": True, "visibility_verification_ms": 3,
+            "installation_ms": 4, "elapsed_ms": 20,
+        }}
+        path = self.root / "direct-install.log"
+        path.write_text(json.dumps(event) + "\n")
+        qualification = QUALIFICATION.LargeRepositoryQualification.__new__(
+            QUALIFICATION.LargeRepositoryQualification
+        )
+        telemetry = qualification.telemetry_from_log(path)
+        VERIFY.verify_full_clone_telemetry(telemetry)
+        self.assertEqual((telemetry["authenticated_pack_installs"],
+            telemetry["authenticated_pack_bytes"], telemetry["pack_generation_ms"]), (2, 1024, 0))
+        del event["fields"]["visibility_verification_ms"]
+        path.write_text(json.dumps(event) + "\n")
+        with self.assertRaisesRegex(VERIFY.VerificationError, "omitted required"):
+            VERIFY.verify_full_clone_telemetry(qualification.telemetry_from_log(path))
+
+    def test_native_pack_install_rejects_incomplete_or_missing_proof(self) -> None:
+        valid = {
+            "authenticated_pack_installs": 2, "authenticated_pack_install_ms": 20,
+            "authenticated_pack_bytes": 1024, "authenticated_pack_objects": 40,
+            "authenticated_pack_verification_ms": 3, "authenticated_pack_publication_ms": 4,
+            "incomplete_pack_visibility": 0, "incomplete_pack_install_evidence": 0,
+        }
+        cases = [
+            ("incomplete_pack_visibility", 1), ("authenticated_pack_bytes", 0),
+            ("incomplete_pack_install_evidence", 1),
+            ("authenticated_pack_objects", 0), ("authenticated_pack_verification_ms", 21),
+            ("authenticated_pack_publication_ms", -1), ("authenticated_pack_installs", True),
+        ]
+        for field, value in cases:
+            with self.subTest(field=field), self.assertRaises(VERIFY.VerificationError):
+                VERIFY.verify_full_clone_telemetry({**valid, field: value})
+        for field in valid:
+            with self.subTest(missing=field), self.assertRaises(VERIFY.VerificationError):
+                VERIFY.verify_full_clone_telemetry({k: v for k, v in valid.items() if k != field})
+
     def setUp(self) -> None:
         self.temporary = tempfile.TemporaryDirectory()
         self.root = Path(self.temporary.name)

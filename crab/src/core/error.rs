@@ -1993,6 +1993,7 @@ impl From<crab_remote::checkpoint::CheckpointError> for CrabError {
             CheckpointError::Io(source) => source.into(),
             CheckpointError::Worker(source) => Self::Io(std::io::Error::other(source)),
             error @ (CheckpointError::AccountingOverflow
+            | CheckpointError::MaintenanceRequiresRewrite
             | CheckpointError::GitInit { .. }
             | CheckpointError::OutputLimit { .. }
             | CheckpointError::InvalidPackPath { .. }) => Self::Internal(error.to_string()),

@@ -33,11 +33,43 @@ struct CachedReadView {
 pub(crate) struct CapsuleFrontier {
     pub count: u32,
     pub bytes: u64,
+    root_digest: [u8; 32],
+}
+
+impl CapsuleFrontier {
+    // This is the folded position, not a capture of subsequent ref-head writes.
+    // Publication must still validate the optimistic parent under its ref lease.
+    pub(crate) fn from_checkpoint(
+        root: &crab_metadata::capsule_protocol::RootRecord,
+    ) -> Option<Self> {
+        (root.root().checkpoint().is_some() && root.root().capsule_frontier().is_empty()).then(
+            || Self {
+                root_digest: *blake3::hash(root.digest().as_bytes()).as_bytes(),
+                ..Self::default()
+            },
+        )
+    }
+
+    pub(crate) fn from_view(
+        view: &crab_read::capsule_protocol::CapsuleRepositoryView,
+        branch: &str,
+    ) -> Self {
+        Self {
+            count: view.ref_capsule_count(branch),
+            bytes: view.ref_frontier_bytes(branch),
+            root_digest: *blake3::hash(view.root().digest().as_bytes()).as_bytes(),
+        }
+    }
+
+    pub(crate) fn matches_root(&self, root: &crab_metadata::capsule_protocol::RootRecord) -> bool {
+        self.root_digest == *blake3::hash(root.digest().as_bytes()).as_bytes()
+    }
 }
 
 /// Immutable Capsule repository state shared by requests.
 pub(crate) struct ReadView {
     state_digest: String,
+    root_digest: [u8; 32],
     remote: RemoteGitRepository,
     capsule_frontiers: HashMap<String, CapsuleFrontier>,
     snapshots: Mutex<HashMap<String, Arc<OnceCell<RemoteGitSnapshot>>>>,
@@ -52,7 +84,10 @@ impl ReadView {
         self.capsule_frontiers
             .get(ref_name)
             .copied()
-            .unwrap_or_default()
+            .unwrap_or(CapsuleFrontier {
+                root_digest: self.root_digest,
+                ..CapsuleFrontier::default()
+            })
     }
 
     pub(crate) async fn snapshot(
@@ -244,18 +279,11 @@ impl ReadViewCache {
         )
         .await?;
         let state_digest = capsule.state_digest();
+        let root_digest = *blake3::hash(capsule.root().digest().as_bytes()).as_bytes();
         let capsule_frontiers = capsule
             .refs()
             .keys()
-            .map(|name| {
-                (
-                    name.clone(),
-                    CapsuleFrontier {
-                        count: capsule.ref_capsule_count(name),
-                        bytes: capsule.ref_frontier_bytes(name),
-                    },
-                )
-            })
+            .map(|name| (name.clone(), CapsuleFrontier::from_view(&capsule, name)))
             .collect();
         let remote = capsule
             .git_repository_from_store(
@@ -270,6 +298,7 @@ impl ReadViewCache {
             .await?;
         let view = Arc::new(ReadView {
             state_digest,
+            root_digest,
             remote,
             capsule_frontiers,
             snapshots: Mutex::new(HashMap::new()),
