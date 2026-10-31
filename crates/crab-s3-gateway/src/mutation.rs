@@ -28,6 +28,9 @@ use crate::{
 #[cfg(test)]
 mod scaling_profile;
 
+#[cfg(test)]
+mod manifest_checkpoint_tests;
+
 mod physical_checkpoints;
 use physical_checkpoints::revalidate_cached_branch;
 mod tree_appends;

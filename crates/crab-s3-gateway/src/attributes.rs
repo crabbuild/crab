@@ -177,10 +177,14 @@ impl Checksums {
     }
 }
 
+type SharedObjects = BTreeMap<Arc<str>, Arc<ObjectAttributes>>;
+
 #[derive(Clone, Debug, Default)]
 pub(crate) struct Manifest {
-    objects: BTreeMap<String, ObjectAttributes>,
-    estimated_bytes: usize,
+    // Checkpoint jobs retain an immutable generation. Writers copy only the
+    // ordered pointer map when shared, never every path and attribute payload.
+    objects: Arc<SharedObjects>,
+    estimated_wire_bytes: usize,
     complete: bool,
     checkpoint: Option<ObjectId>,
     previous_checkpoint: Option<ObjectId>,
@@ -198,7 +202,22 @@ struct CheckpointPayload<'a> {
     version: u32,
     commit: String,
     complete: bool,
-    objects: &'a BTreeMap<String, ObjectAttributes>,
+    objects: CheckpointObjects<'a>,
+}
+
+// Keep the existing ordered JSON map without enabling serde's Arc feature or
+// changing stored checkpoint types. Sharing is an in-memory ownership detail.
+struct CheckpointObjects<'a>(&'a SharedObjects);
+
+impl Serialize for CheckpointObjects<'_> {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap as _;
+        let mut map = serializer.serialize_map(Some(self.0.len()))?;
+        for (path, attributes) in self.0 {
+            map.serialize_entry(path.as_ref(), attributes.as_ref())?;
+        }
+        map.end()
+    }
 }
 
 #[derive(Deserialize)]
@@ -256,12 +275,17 @@ struct Delta {
 
 impl Manifest {
     fn from_objects(objects: BTreeMap<String, ObjectAttributes>, complete: bool) -> Self {
-        let estimated_bytes = objects.iter().fold(0usize, |total, (path, attributes)| {
+        let estimated_wire_bytes = objects.iter().fold(0usize, |total, (path, attributes)| {
             total.saturating_add(estimated_object_bytes(path, attributes))
         });
         Self {
-            objects,
-            estimated_bytes,
+            objects: Arc::new(
+                objects
+                    .into_iter()
+                    .map(|(path, attributes)| (Arc::<str>::from(path), Arc::new(attributes)))
+                    .collect(),
+            ),
+            estimated_wire_bytes,
             complete,
             checkpoint: None,
             previous_checkpoint: None,
@@ -279,6 +303,7 @@ impl Manifest {
         self.objects
             .get(path)
             .filter(|attributes| attributes.blob_oid == oid.to_string())
+            .map(Arc::as_ref)
     }
 
     pub(crate) fn update(&mut self, path: String, attributes: Option<ObjectAttributes>) {
@@ -299,7 +324,13 @@ impl Manifest {
     }
 
     pub(crate) fn estimated_bytes(&self) -> usize {
-        self.estimated_bytes
+        // Charge each retained generation in full, including both Arc headers.
+        // Sharing must not enlarge the existing admission or retention pools.
+        self.estimated_wire_bytes.saturating_add(
+            self.objects
+                .len()
+                .saturating_mul(4 * std::mem::size_of::<usize>()),
+        )
     }
 
     pub(crate) fn is_complete(&self) -> bool {
@@ -323,14 +354,14 @@ impl Manifest {
             return None;
         }
         let bounds = match after {
-            Some(after) => (Excluded(after.to_owned()), Unbounded),
-            None => (Included(prefix.to_owned()), Unbounded),
+            Some(after) => (Excluded(after), Unbounded),
+            None => (Included(prefix), Unbounded),
         };
         let mut items = Vec::with_capacity(limit.saturating_add(1));
         let mut last_prefix = None;
-        for (path, attributes) in self.objects.range(bounds) {
+        for (path, attributes) in self.objects.range::<str, _>(bounds) {
             if !path.starts_with(prefix) {
-                if path.as_str() > prefix {
+                if path.as_ref() > prefix {
                     break;
                 }
                 continue;
@@ -352,8 +383,8 @@ impl Manifest {
             } else {
                 last_prefix = None;
                 items.push(ManifestListingItem::Object {
-                    path: path.clone(),
-                    attributes: attributes.into(),
+                    path: path.to_string(),
+                    attributes: attributes.as_ref().into(),
                 });
             }
             if items.len() > limit {
@@ -367,20 +398,23 @@ impl Manifest {
 
     fn apply(&mut self, changes: BTreeMap<String, Option<ObjectAttributes>>) {
         for (path, attributes) in changes {
+            let objects = Arc::make_mut(&mut self.objects);
             match attributes {
                 Some(attributes) => {
                     let added = estimated_object_bytes(&path, &attributes);
-                    if let Some(previous) = self.objects.insert(path.clone(), attributes) {
-                        self.estimated_bytes = self
-                            .estimated_bytes
+                    if let Some(previous) =
+                        objects.insert(Arc::<str>::from(path.as_str()), Arc::new(attributes))
+                    {
+                        self.estimated_wire_bytes = self
+                            .estimated_wire_bytes
                             .saturating_sub(estimated_object_bytes(&path, &previous));
                     }
-                    self.estimated_bytes = self.estimated_bytes.saturating_add(added);
+                    self.estimated_wire_bytes = self.estimated_wire_bytes.saturating_add(added);
                 }
                 None => {
-                    if let Some(previous) = self.objects.remove(&path) {
-                        self.estimated_bytes = self
-                            .estimated_bytes
+                    if let Some(previous) = objects.remove(path.as_str()) {
+                        self.estimated_wire_bytes = self
+                            .estimated_wire_bytes
                             .saturating_sub(estimated_object_bytes(&path, &previous));
                     }
                 }
@@ -612,7 +646,7 @@ pub(crate) fn prepare_checkpoint(
                 version: VERSION,
                 commit: commit.to_string(),
                 complete: manifest.complete,
-                objects: &manifest.objects,
+                objects: CheckpointObjects(&manifest.objects),
             },
         )
         .map_err(|source| crate::Error::Attributes { source })?;
@@ -632,7 +666,7 @@ pub(crate) fn prepare_checkpoint(
 }
 
 pub(crate) fn checkpoint_eligible(manifest: &Manifest) -> bool {
-    u64::try_from(manifest.estimated_bytes()).unwrap_or(u64::MAX) <= MAX_CHECKPOINT_DECODED_BYTES
+    u64::try_from(manifest.estimated_wire_bytes).unwrap_or(u64::MAX) <= MAX_CHECKPOINT_DECODED_BYTES
 }
 
 pub(crate) fn checkpoint_slot(branch: &str) -> String {
@@ -1061,7 +1095,14 @@ mod tests {
         let mut manifest = Manifest::default();
         manifest.update("object".to_owned(), Some(attributes("first")));
         manifest.update("object".to_owned(), Some(attributes("replacement")));
-        let rebuilt = Manifest::from_objects(manifest.objects.clone(), false);
+        let rebuilt = Manifest::from_objects(
+            manifest
+                .objects
+                .iter()
+                .map(|(path, attributes)| (path.to_string(), attributes.as_ref().clone()))
+                .collect(),
+            false,
+        );
         assert_eq!(manifest.estimated_bytes(), rebuilt.estimated_bytes());
 
         manifest.update("object".to_owned(), None);
@@ -1069,10 +1110,63 @@ mod tests {
     }
 
     #[test]
+    fn shared_entry_accounting_preserves_the_wire_size_limit() {
+        let mut manifest = Manifest::empty_complete();
+        manifest.update("object".to_owned(), Some(attributes("value")));
+        let entry_headers = 4 * std::mem::size_of::<usize>();
+        assert_eq!(
+            manifest.estimated_bytes(),
+            manifest.estimated_wire_bytes + entry_headers
+        );
+        // The retained in-memory representation must not narrow the existing
+        // encoded checkpoint limit or escape retention-pool accounting.
+        manifest.estimated_wire_bytes = MAX_CHECKPOINT_DECODED_BYTES as usize - 1;
+        assert!(manifest.estimated_bytes() > MAX_CHECKPOINT_DECODED_BYTES as usize);
+        assert!(checkpoint_eligible(&manifest));
+        manifest.estimated_wire_bytes = MAX_CHECKPOINT_DECODED_BYTES as usize + 1;
+        assert!(!checkpoint_eligible(&manifest));
+    }
+
+    #[test]
+    fn shared_checkpoint_objects_preserve_the_original_ordered_json_bytes() {
+        #[derive(Serialize)]
+        struct OriginalPayload<'a> {
+            version: u32,
+            commit: String,
+            complete: bool,
+            objects: &'a BTreeMap<String, ObjectAttributes>,
+        }
+        let mut objects = BTreeMap::new();
+        for path in ["z/last", "unicode/é", "escaped/\"back\\slash", "a/first"] {
+            let mut value = attributes(path);
+            value.metadata = BTreeMap::from([("name".to_owned(), "quotes \" and \\".to_owned())]);
+            value.tags = BTreeMap::from([("tag".to_owned(), "value".to_owned())]);
+            objects.insert(path.to_owned(), value);
+        }
+        let commit = ObjectId::empty_tree(gix_hash::Kind::Sha1);
+        let expected = serde_json::to_vec(&OriginalPayload {
+            version: VERSION,
+            commit: commit.to_string(),
+            complete: true,
+            objects: &objects,
+        })
+        .unwrap();
+        let manifest = Manifest::from_objects(objects, true);
+        let checkpoint = prepare_checkpoint("refs/heads/main", commit, &manifest)
+            .unwrap()
+            .unwrap();
+        let mut actual = Vec::new();
+        GzDecoder::new(checkpoint.bytes.as_ref())
+            .read_to_end(&mut actual)
+            .unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
     fn oversized_manifest_skips_checkpoint_before_serialization() {
         let manifest = Manifest {
-            objects: BTreeMap::new(),
-            estimated_bytes: MAX_CHECKPOINT_DECODED_BYTES as usize + 1,
+            objects: Default::default(),
+            estimated_wire_bytes: MAX_CHECKPOINT_DECODED_BYTES as usize + 1,
             complete: false,
             ..Manifest::default()
         };
@@ -1162,7 +1256,7 @@ mod tests {
             version: VERSION,
             commit: commit.to_string(),
             complete: true,
-            objects: &manifest.objects,
+            objects: CheckpointObjects(&manifest.objects),
         };
         let expected = serde_json::to_vec(&payload).unwrap();
         let checkpoint = prepare_checkpoint("refs/heads/main", commit, &manifest)
