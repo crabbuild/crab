@@ -957,6 +957,7 @@ async fn open_capsule_repository_from_capture(
     UploadPackVisibilityProof,
     Option<crab_read::capsule_protocol::LayeredColdClonePack>,
 )> {
+    let started = std::time::Instant::now();
     let layout = capture.layout();
     let store = layout.store();
     let prefix = layout.repo_prefix();
@@ -980,6 +981,13 @@ async fn open_capsule_repository_from_capture(
     } else {
         (capture.metadata_view(limits).await?, None, false)
     };
+    tracing::debug!(
+        footer_only,
+        cold_clone,
+        tip_bound,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "upload-pack captured view opened"
+    );
     let bucket = store.bucket_identity();
     let provider = format!("{:?}:{}:{}", bucket.cloud, bucket.host, bucket.container);
     let identity =
@@ -991,6 +999,10 @@ async fn open_capsule_repository_from_capture(
     } else {
         UploadPackVisibilityProof::Materialized(view.git_visibility_index().await?)
     };
+    tracing::debug!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "upload-pack visibility proof opened"
+    );
     let repository = view
         .git_repository_from_store(
             layout.clone(),
@@ -1002,6 +1014,10 @@ async fn open_capsule_repository_from_capture(
             None,
         )
         .await?;
+    tracing::debug!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "upload-pack repository opened"
+    );
     let lease_provider = ObjectStoreGeneratedPackLeaseProvider {
         store: Arc::clone(store.inner()),
         prefix: prefix.to_owned(),

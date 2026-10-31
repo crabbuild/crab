@@ -4647,6 +4647,7 @@ async fn assemble_layered_control_view(
     active: &BTreeSet<String>,
     read: ControlRead,
 ) -> Result<CapsuleRepositoryView> {
+    let started = std::time::Instant::now();
     let footer_only = matches!(read, ControlRead::Fetch);
     let mut refs = snapshot.record().root().refs().clone();
     let mut peeled_refs = snapshot.record().root().peeled_refs().clone();
@@ -4680,6 +4681,12 @@ async fn assemble_layered_control_view(
         }
         None => None,
     };
+    tracing::debug!(
+        footer_only,
+        frontier_runs = pointers.len(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "layered control checkpoint opened"
+    );
     // Tiny maintenance frontiers avoid serial footer/control reads while
     // retaining at most 64 KiB across all runs. Larger maintenance frontiers
     // keep their bodies cold regardless of each individual run's size.
@@ -4723,6 +4730,12 @@ async fn assemble_layered_control_view(
         }
         runs.insert(hash, (control, capsules));
     }
+    tracing::debug!(
+        footer_only,
+        frontier_runs = runs.len(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "layered control frontier opened"
+    );
     let catalog_sources = if footer_only {
         None
     } else {
@@ -4815,6 +4828,12 @@ async fn assemble_layered_control_view(
             capsule_run_sources.push(source);
         }
     }
+    tracing::debug!(
+        footer_only,
+        frontier_objects = frontier_object_admission.len(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "layered control object admission assembled"
+    );
     let selected = select_ref_control_frontiers(snapshot.record().root(), &ref_frontiers, &runs)
         .map_err(metadata_control_error)?;
     let mut root_capsules = selected.root_controls;
@@ -4877,6 +4896,10 @@ async fn assemble_layered_control_view(
     } else {
         VisibilityReconciliation::Complete(visibility_index_for_checkpoint(checkpoint.as_ref())?)
     };
+    tracing::debug!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "layered control base visibility opened"
+    );
     for capsule in &root_capsules {
         visibility
             .apply(capsule)
@@ -4892,6 +4915,10 @@ async fn assemble_layered_control_view(
     )
     .await
     .map_err(metadata_control_error)?;
+    tracing::debug!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "layered control ref visibility reconciled"
+    );
     for capsule in &ordered {
         apply_control_refs(capsule, &mut refs, &mut peeled_refs).map_err(metadata_control_error)?;
     }
