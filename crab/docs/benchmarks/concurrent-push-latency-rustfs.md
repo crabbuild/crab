@@ -58,6 +58,8 @@ Local checks passed:
 
 ## Remaining scope
 
+The follow-up [concurrent-push bottleneck diagnosis](concurrent-push-bottleneck-rustfs.md) isolates shared backend write/flush capacity, ref-discovery amplification, and client overhead. It explains the concurrency slowdown without turning the mixed paired results above into a measured optimization win.
+
 Publication and storage work remain material at high concurrency. The CLI path already discovers selected refs, so ref-capture retry reuse primarily benefits normal Git discovery. This change does not remove the initial full ref census.
 
 New-ref creation, continuous unsynchronized writers, the previously slow standard empty cold clone, WAN/provider behavior, and large-file throughput require separate measurement. LFS/Xet test coverage above should not be read as a large-file performance result.
