@@ -551,6 +551,51 @@ fn direct_parent_proves_fast_forward() {
 }
 
 #[test]
+fn direct_parent_uses_physical_history_despite_local_overrides() {
+    let source = tempfile::tempdir().expect("source repository");
+    git(source.path(), &["init", "--initial-branch=main"]);
+    git(source.path(), &["config", "user.name", "Crab Test"]);
+    git(
+        source.path(),
+        &["config", "user.email", "crab@example.invalid"],
+    );
+    let root = commit(source.path(), "root");
+    let parent = commit(source.path(), "parent");
+    let child = commit(source.path(), "child");
+    git(source.path(), &["replace", &child, &root]);
+    let git_dir = source.path().join(".git");
+    std::fs::write(git_dir.join("shallow"), format!("{child}\n")).unwrap();
+    std::fs::write(git_dir.join("info/grafts"), format!("{child} {root}\n")).unwrap();
+
+    assert!(has_direct_parent(&git_dir, &parent, &child));
+    assert!(!has_direct_parent(&git_dir, &root, &child));
+}
+
+#[test]
+fn direct_parent_requires_authenticated_commit_bodies() {
+    let source = tempfile::tempdir().expect("source repository");
+    git(source.path(), &["init", "--initial-branch=main"]);
+    git(source.path(), &["config", "user.name", "Crab Test"]);
+    git(
+        source.path(),
+        &["config", "user.email", "crab@example.invalid"],
+    );
+    let parent = commit(source.path(), "parent");
+    let child = commit(source.path(), "child");
+    let tree = git(source.path(), &["rev-parse", "HEAD^{tree}"]);
+    let other = git(
+        source.path(),
+        &["commit-tree", &tree, "-p", &parent, "-m", "other"],
+    );
+    let git_dir = source.path().join(".git");
+    let loose = |oid: &str| git_dir.join("objects").join(&oid[..2]).join(&oid[2..]);
+    std::fs::remove_file(loose(&child)).unwrap();
+    std::fs::copy(loose(&other), loose(&child)).unwrap();
+
+    assert!(!has_direct_parent(&git_dir, &parent, &child));
+}
+
+#[test]
 fn non_direct_ancestry_and_divergence_keep_the_git_graph_check() {
     let source = tempfile::tempdir().expect("source repository");
     git(source.path(), &["init", "--initial-branch=main"]);
@@ -577,6 +622,88 @@ fn non_direct_ancestry_and_divergence_keep_the_git_graph_check() {
         is_ancestor(&git_dir, &main_tip, &side_tip).unwrap(),
         Some(false)
     );
+}
+
+#[test]
+fn generated_object_inventory_preserves_order_and_physical_pointer_bytes() {
+    let source = tempfile::tempdir().unwrap();
+    git(source.path(), &["init", "--initial-branch=main"]);
+    git(source.path(), &["config", "user.name", "Crab Test"]);
+    git(
+        source.path(),
+        &["config", "user.email", "crab@example.invalid"],
+    );
+    let pointer = crab_types::pointer::Pointer {
+        file_hash: [7; 32],
+        size: 1234,
+        shard_hint: Some([8; 32]),
+    };
+    std::fs::write(source.path().join("pointer"), pointer.serialize()).unwrap();
+    std::fs::write(source.path().join("large"), vec![b'x'; 1024 * 1024]).unwrap();
+    git(source.path(), &["add", "."]);
+    git(source.path(), &["commit", "-m", "inventory"]);
+    let oid = |spec| {
+        gix_hash::ObjectId::from_hex(git(source.path(), &["rev-parse", spec]).as_bytes()).unwrap()
+    };
+    let pointer_oid = oid("HEAD:pointer");
+    let large_oid = oid("HEAD:large");
+    let ids = [oid("HEAD"), large_oid, oid("HEAD^{tree}"), pointer_oid];
+    git(
+        source.path(),
+        &["replace", &pointer_oid.to_string(), &large_oid.to_string()],
+    );
+    for packed in [false, true] {
+        if packed {
+            git(source.path(), &["gc", "--prune=now"]);
+        }
+        let inventory = inspect_generated_objects(&source.path().join(".git"), &ids).unwrap();
+        assert_eq!(
+            inventory.kinds,
+            [
+                gix_object::Kind::Commit,
+                gix_object::Kind::Blob,
+                gix_object::Kind::Tree,
+                gix_object::Kind::Blob
+            ]
+        );
+        assert_eq!(inventory.pointers, [pointer.clone()]);
+    }
+    assert!(
+        inspect_generated_objects(
+            &source.path().join(".git"),
+            &[gix_hash::ObjectId::from_hex(b"ffffffffffffffffffffffffffffffffffffffff").unwrap()]
+        )
+        .is_err()
+    );
+}
+
+#[test]
+fn generated_object_inventory_rejects_a_pointer_with_a_forged_object_id() {
+    let source = tempfile::tempdir().unwrap();
+    git(source.path(), &["init", "--initial-branch=main"]);
+    let pointer = crab_types::pointer::Pointer {
+        file_hash: [7; 32],
+        size: 1234,
+        shard_hint: None,
+    };
+    std::fs::write(source.path().join("pointer"), pointer.serialize()).unwrap();
+    let oid = git(source.path(), &["hash-object", "-w", "pointer"]);
+    let forged = "f".repeat(40);
+    let git_dir = source.path().join(".git");
+    let target_dir = git_dir.join("objects/ff");
+    std::fs::create_dir_all(&target_dir).unwrap();
+    std::fs::copy(
+        git_dir.join("objects").join(&oid[..2]).join(&oid[2..]),
+        target_dir.join(&forged[2..]),
+    )
+    .unwrap();
+    let error = inspect_generated_objects(
+        &git_dir,
+        &[gix_hash::ObjectId::from_hex(forged.as_bytes()).unwrap()],
+    )
+    .err()
+    .unwrap();
+    assert!(matches!(error, CrabError::CorruptObject { .. }));
 }
 
 #[test]
