@@ -1,6 +1,6 @@
 //! Verified Git-pack consolidation for capsule-protocol checkpoints.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -1138,7 +1138,15 @@ fn layered_member_admission(
     existing: Option<&LayeredCheckpoint>,
     member_oids: &BTreeMap<String, Vec<Vec<[u8; 20]>>>,
 ) -> Result<Vec<LayeredObjectMember>, CheckpointError> {
-    let mut by_oid = BTreeMap::<[u8; 20], LayeredObjectMember>::new();
+    let mut by_oid = HashMap::<[u8; 20], LayeredObjectMember>::with_capacity(index.objects().len());
+    let mut source_positions = HashMap::with_capacity(sources.len());
+    for (position, source) in sources.iter().enumerate() {
+        // Preserve the first matching descriptor, including on malformed input
+        // that the complete checkpoint validator will subsequently reject.
+        source_positions
+            .entry(source.object_hash())
+            .or_insert(position);
+    }
 
     if let Some(existing) = existing
         && let Some(snapshot) = existing.visibility_ordinal_snapshot()?
@@ -1156,10 +1164,7 @@ fn layered_member_admission(
                 .ok_or_else(|| {
                     layered_admission_error("existing visibility source admission is invalid")
                 })?;
-            let Some(source_index) = sources
-                .iter()
-                .position(|source| source.object_hash() == old_source.object_hash())
-            else {
+            let Some(&source_index) = source_positions.get(old_source.object_hash()) else {
                 continue;
             };
             if sources[source_index]
@@ -1206,6 +1211,8 @@ fn layered_member_admission(
         }
     }
 
+    // Lookup iteration order is irrelevant: the authenticated dictionary alone
+    // determines output order, and newly admitted members still override old ones.
     index
         .objects()
         .iter()
@@ -1633,6 +1640,133 @@ mod tests {
             members,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn large_member_admission_preserves_source_order_and_replacement() {
+        const SOURCES: usize = 32;
+        const OBJECTS: usize = SOURCES * 8192;
+
+        fn counted_source(length: usize, count: usize) -> PackSourceDescriptor {
+            let mut value = serde_json::to_value(source(length)).unwrap();
+            value["members"][0]["object_count"] = (count as u64).into();
+            let descriptor: PackSourceDescriptor = serde_json::from_value(value).unwrap();
+            PackSourceDescriptor::new(
+                descriptor.kind(),
+                descriptor.object_hash(),
+                descriptor.object_size(),
+                descriptor.control_offset(),
+                descriptor.control_size(),
+                descriptor.control_hash(),
+                descriptor.members().to_vec(),
+            )
+            .unwrap()
+        }
+
+        fn index(count: usize) -> crab_metadata::git_visibility::GitVisibilityIndex {
+            crab_metadata::git_visibility::GitVisibilityIndex::new(
+                4,
+                "b".repeat(64),
+                "c".repeat(64),
+                BTreeMap::from([(
+                    "refs/heads/main".to_owned(),
+                    (1..=count)
+                        .map(|ordinal| format!("{ordinal:040x}"))
+                        .collect(),
+                )]),
+            )
+            .unwrap()
+        }
+
+        let original_index = index(OBJECTS);
+        let original_sources = (1..=SOURCES)
+            .map(|length| counted_source(length, OBJECTS / SOURCES))
+            .collect::<Vec<_>>();
+        let admission = (0..OBJECTS)
+            .map(|ordinal| LayeredObjectMember::new((ordinal % SOURCES) as u16, 0))
+            .collect();
+        let visibility = LayeredVisibilitySnapshot::from_index_with_member_admission(
+            &original_index,
+            &source_catalog_digest(&original_sources).unwrap(),
+            admission,
+        )
+        .unwrap();
+        let original = LayeredCheckpoint::build_with_catalog_root(
+            4,
+            &"d".repeat(64),
+            original_sources.clone(),
+            None,
+            Some(visibility),
+        )
+        .unwrap();
+
+        // Retained source positions change. A newly admitted member supplies
+        // both a second copy of one old object and one newly visible object.
+        let updated_index = index(OBJECTS + 1);
+        let mut sources = original_sources.into_iter().rev().collect::<Vec<_>>();
+        let added = counted_source(SOURCES + 1, 2);
+        let added_hash = added.object_hash().to_owned();
+        sources.push(added);
+        let member_oids = BTreeMap::from([(
+            added_hash.clone(),
+            vec![vec![
+                updated_index.objects()[0],
+                updated_index.objects()[OBJECTS],
+            ]],
+        )]);
+        let expected = (0..=OBJECTS)
+            .map(|ordinal| {
+                let source = if ordinal == 0 || ordinal == OBJECTS {
+                    SOURCES
+                } else {
+                    SOURCES - 1 - ordinal % SOURCES
+                };
+                LayeredObjectMember::new(source as u16, 0)
+            })
+            .collect::<Vec<_>>();
+
+        let mut measurements = Vec::new();
+        for _ in 0..3 {
+            let started = Instant::now();
+            let actual =
+                layered_member_admission(&updated_index, &sources, Some(&original), &member_oids)
+                    .unwrap();
+            measurements.push(started.elapsed().as_secs_f64() * 1000.0);
+            assert_eq!(actual, expected);
+        }
+        println!(
+            "checkpoint member admission: objects={} sources={} elapsed_ms={measurements:?}",
+            OBJECTS + 1,
+            sources.len(),
+        );
+
+        let catalog_digest = source_catalog_digest(&sources).unwrap();
+        let actual =
+            layered_member_admission(&updated_index, &sources, Some(&original), &member_oids)
+                .unwrap();
+        let actual = LayeredVisibilitySnapshot::from_index_with_member_admission(
+            &updated_index,
+            &catalog_digest,
+            actual,
+        )
+        .unwrap();
+        let expected = LayeredVisibilitySnapshot::from_index_with_member_admission(
+            &updated_index,
+            &catalog_digest,
+            expected,
+        )
+        .unwrap();
+        assert_eq!(actual.encode().unwrap(), expected.encode().unwrap());
+
+        let mut missing = member_oids.clone();
+        missing.get_mut(&added_hash).unwrap()[0][1] = updated_index.objects()[1];
+        assert!(
+            layered_member_admission(&updated_index, &sources, Some(&original), &missing).is_err()
+        );
+        missing.get_mut(&added_hash).unwrap()[0].pop();
+        assert!(
+            layered_member_admission(&updated_index, &sources, Some(&original), &missing).is_err()
+        );
     }
 
     #[test]
