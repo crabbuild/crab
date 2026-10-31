@@ -39,7 +39,7 @@ fn streamed_checkpoint_pages_keep_the_existing_wire_identity() {
     );
 }
 
-fn repeated_sets_checkpoint(refs: usize) -> LayeredCheckpoint {
+fn repeated_sets_checkpoint(refs: usize, objects_per_ref: usize) -> LayeredCheckpoint {
     let index = GitVisibilityIndex::new(
         1,
         "1".repeat(64),
@@ -48,9 +48,15 @@ fn repeated_sets_checkpoint(refs: usize) -> LayeredCheckpoint {
             .map(|r| {
                 (
                     format!("refs/heads/branch-{r}"),
-                    (0..2000).map(|oid| format!("{oid:040x}")).collect(),
+                    (0..objects_per_ref)
+                        .map(|oid| format!("{oid:040x}"))
+                        .collect(),
                 )
             })
+            .chain(std::iter::once((
+                "refs/heads/dictionary".to_owned(),
+                (0..2000).map(|oid| format!("{oid:040x}")).collect(),
+            )))
             .collect(),
     )
     .unwrap();
@@ -86,19 +92,26 @@ fn repeated_sets_checkpoint(refs: usize) -> LayeredCheckpoint {
 
 #[test]
 fn retention_charge_includes_repeated_sets_and_excludes_unknown_backing_buffers() {
-    let one = repeated_sets_checkpoint(1);
-    let repeated = repeated_sets_checkpoint(64);
-    assert!(
-        repeated.retained_metadata_bytes().unwrap()
-            >= one.retained_metadata_bytes().unwrap() + 63 * 2000 * 4
-    );
-    let mut oversized = vec![0; repeated.bytes().len() + 1024 * 1024];
-    oversized[..repeated.bytes().len()].copy_from_slice(repeated.bytes());
-    let input = Bytes::from(oversized).slice(..repeated.bytes().len());
-    let decoded = LayeredCheckpoint::decode(input).unwrap();
-    assert_eq!(decoded, repeated);
-    decoded.visibility_ordinal_snapshot().unwrap();
-    assert!(decoded.retained_metadata_bytes().is_none());
+    // Dense closures retain bitmaps; sparse closures retain u32 ordinals.
+    // Remove encoded/footer charges before comparing decoded allocations:
+    // shared wire pages can be smaller even while resident memberships grow.
+    let decoded_charge = |checkpoint: &LayeredCheckpoint| {
+        checkpoint.retained_metadata_bytes().unwrap()
+            - checkpoint.bytes().len()
+            - checkpoint.control_size() as usize * 4
+    };
+    for (objects_per_ref, minimum_set_bytes) in [(2000, 2000_usize.div_ceil(8)), (62, 62 * 4)] {
+        let one = repeated_sets_checkpoint(1, objects_per_ref);
+        let repeated = repeated_sets_checkpoint(64, objects_per_ref);
+        assert!(decoded_charge(&repeated) >= decoded_charge(&one) + 63 * minimum_set_bytes);
+        let mut oversized = vec![0; repeated.bytes().len() + 1024 * 1024];
+        oversized[..repeated.bytes().len()].copy_from_slice(repeated.bytes());
+        let input = Bytes::from(oversized).slice(..repeated.bytes().len());
+        let decoded = LayeredCheckpoint::decode(input).unwrap();
+        assert_eq!(decoded, repeated);
+        decoded.visibility_ordinal_snapshot().unwrap();
+        assert!(decoded.retained_metadata_bytes().is_none());
+    }
 }
 
 #[test]

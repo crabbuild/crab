@@ -946,11 +946,12 @@ async fn consolidate_layered_suffix_with_policy(
     // Pack identities may occur in both the stable prefix and selected suffix.
     // Restrict physical sources as well as members so duplicates cannot pull
     // stable bodies into maintenance or move their authenticated member slots.
+    let capsules = view.repack_capsules()?;
     let installed =
         crab_read::capsule_protocol::install_layered_git_packs_from_store_sources_selected(
             &sources[selected_start..],
             &[],
-            view.capsules(),
+            &capsules,
             layout,
             &git_dir,
             maximum_bytes,

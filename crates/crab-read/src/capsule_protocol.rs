@@ -55,6 +55,7 @@ const LAYERED_PACK_MAX_WINDOW_BYTES: u64 = 64 * 1024 * 1024;
 const LAYERED_FULL_MAX_WINDOW_BYTES: u64 = 64 * 1024 * 1024;
 const LAYERED_SIDECAR_READ_CONCURRENCY: usize = 8;
 const LAYERED_INLINE_FRONTIER_MAX_BYTES: u64 = 128 * 1024 * 1024;
+const REPACK_INLINE_FRONTIER_MAX_BYTES: u64 = 64 * 1024;
 
 /// Caller-owned memory admission for one capsule-protocol repository view.
 #[derive(Debug, Clone, Copy)]
@@ -403,6 +404,29 @@ impl CapsuleRepositoryView {
     #[must_use]
     pub fn capsules(&self) -> &[Capsule] {
         &self.capsules
+    }
+
+    /// Reuse complete tiny frontier runs during selected-pack maintenance.
+    ///
+    /// Larger retained fetch runs stay at their authenticated origins for
+    /// maintenance. This bounds additional decoding across the whole frontier,
+    /// while existing selected-member validation still checks every payload.
+    pub fn repack_capsules(&self) -> Result<std::borrow::Cow<'_, [Capsule]>> {
+        let retained_bytes = self
+            .capsule_run_bytes
+            .values()
+            .try_fold(0_usize, |total, bytes| total.checked_add(bytes.len()));
+        if self.capsule_run_bytes.is_empty()
+            || retained_bytes.is_none_or(|bytes| bytes > REPACK_INLINE_FRONTIER_MAX_BYTES as usize)
+        {
+            return Ok(std::borrow::Cow::Borrowed(&self.capsules));
+        }
+        let mut capsules = self.capsules.clone();
+        for bytes in self.capsule_run_bytes.values() {
+            let run = CapsuleRun::decode(bytes.clone())?;
+            capsules.extend_from_slice(run.capsules());
+        }
+        Ok(std::borrow::Cow::Owned(capsules))
     }
 
     /// Return authenticated control-only capsules loaded for a layered view.
@@ -4170,7 +4194,10 @@ pub async fn open_view_from_root(
     .await
 }
 
-/// Open pinned repack controls without retaining pack bodies or fetch-transition copies.
+/// Open pinned repack controls without fetch-transition copies.
+///
+/// Retain at most 64 KiB of complete frontier runs for maintenance payload reuse;
+/// larger frontiers keep their pack bodies cold.
 pub async fn open_view_from_root_for_repack(
     router: &StoreLayout<Store>,
     snapshot: crab_metadata::capsule_protocol::RootSnapshot,
@@ -4653,13 +4680,19 @@ async fn assemble_layered_control_view(
         }
         None => None,
     };
-    // Retain complete small frontiers for pack-index and entry reads. Larger
-    // frontiers keep bounded suffix/range reads instead of resident pack bodies.
-    let inline_frontier = footer_only
+    // Tiny maintenance frontiers avoid serial footer/control reads while
+    // retaining at most 64 KiB across all runs. Larger maintenance frontiers
+    // keep their bodies cold regardless of each individual run's size.
+    let inline_maximum = if matches!(read, ControlRead::Repack) {
+        REPACK_INLINE_FRONTIER_MAX_BYTES
+    } else {
+        LAYERED_INLINE_FRONTIER_MAX_BYTES
+    };
+    let inline_frontier = (footer_only || matches!(read, ControlRead::Repack))
         && pointers
             .iter()
             .try_fold(0_u64, |total, pointer| total.checked_add(pointer.size()))
-            .is_some_and(|total| total <= LAYERED_INLINE_FRONTIER_MAX_BYTES);
+            .is_some_and(|total| total <= inline_maximum);
     let loaded = try_join_all(pointers.iter().map(|pointer| async {
         if inline_frontier {
             let run = load_run(router, pointer).await?;
