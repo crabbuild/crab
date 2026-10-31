@@ -1574,7 +1574,13 @@ impl CapsuleRepositoryView {
                 apply_capsule_control_visibility_index(&complete, &mut index)?;
             }
         }
+        self.bind_git_visibility_index(index)
+    }
 
+    fn bind_git_visibility_index(
+        &self,
+        mut index: crab_metadata::git_visibility::GitVisibilityIndex,
+    ) -> Result<crab_metadata::git_visibility::GitVisibilityIndex> {
         let packs = self.git_pack_manifest_entries()?;
         let manifest = self.git_manifest(&packs)?;
         if index.ref_count() != manifest.refs.len()
@@ -1598,6 +1604,20 @@ impl CapsuleRepositoryView {
             &manifest.git_validation_digest,
         )?;
         Ok(index)
+    }
+
+    /// Transfer a reconciled visibility proof to a caller that owns this view.
+    ///
+    /// Shared views retain independent proofs. Later reads reconstruct the same
+    /// captured state when its reconciled cache has been transferred.
+    pub async fn take_git_visibility_index(
+        &mut self,
+    ) -> Result<crab_metadata::git_visibility::GitVisibilityIndex> {
+        let Some(index) = self.reconciled_visibility.take() else {
+            return self.git_visibility_index().await;
+        };
+        let index = Arc::try_unwrap(index).unwrap_or_else(|shared| (*shared).clone());
+        self.bind_git_visibility_index(index)
     }
 
     /// Materialize visibility after one candidate capsule without publishing it.
@@ -6181,6 +6201,57 @@ mod tests {
                 edited.remove_ref(name);
             }
             assert_eq!(clone.git_visibility_index().await.unwrap(), expected);
+        }
+    }
+
+    #[tokio::test]
+    async fn owned_visibility_transfer_reuses_dictionary_and_preserves_captured_state() {
+        for committed in [false, true] {
+            let inner = Arc::new(InMemory::new());
+            seed_prepared_multi_ref(inner.clone(), committed, committed).await;
+            let router = StoreLayout::new(Store::new(inner), "repositories/test".into());
+            let root = load_root(&router).await.unwrap();
+            let mut view = open_view_from_root_with_metadata(&router, root, TEST_LIMITS)
+                .await
+                .unwrap();
+            let expected = view.git_visibility_index().await.unwrap();
+            let snapshot = view.git_snapshot().unwrap();
+            let dictionary = view
+                .reconciled_visibility
+                .as_ref()
+                .unwrap()
+                .objects()
+                .as_ptr();
+            let taken = view.take_git_visibility_index().await.unwrap();
+            assert_eq!(taken.objects().as_ptr(), dictionary);
+            assert_eq!(taken, expected);
+            assert_eq!(view.git_visibility_index().await.unwrap(), expected);
+            assert_eq!(view.git_snapshot().unwrap(), snapshot);
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_and_paged_visibility_transfer_preserves_independent_proofs() {
+        let inner = Arc::new(InMemory::new());
+        seed_prepared_multi_ref(inner.clone(), true, true).await;
+        let router = StoreLayout::new(Store::new(inner), "repositories/test".into());
+        let root = load_root(&router).await.unwrap();
+        for paged in [false, true] {
+            let mut view = if paged {
+                open_git_view_from_root(&router, root.clone(), TEST_LIMITS).await
+            } else {
+                open_view_from_root_with_metadata(&router, root.clone(), TEST_LIMITS).await
+            }
+            .unwrap();
+            let other = view.clone();
+            let expected = other.git_visibility_index().await.unwrap();
+            let mut taken = view.take_git_visibility_index().await.unwrap();
+            assert_eq!(taken, expected);
+            for name in view.refs().keys() {
+                taken.remove_ref(name);
+            }
+            assert_eq!(view.git_visibility_index().await.unwrap(), expected);
+            assert_eq!(other.git_visibility_index().await.unwrap(), expected);
         }
     }
 

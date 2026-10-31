@@ -967,7 +967,7 @@ async fn open_capsule_repository_from_capture(
         max_capsule_bytes: maximum,
         max_frontier_bytes: maximum,
     };
-    let (view, direct_pack, tip_bound) = if footer_only {
+    let (mut view, direct_pack, tip_bound) = if footer_only {
         let footer_view = capture.layered_control_view(limits).await?;
         let direct_pack = footer_view
             .layered_cold_clone_pack(layout, options.operation_limits().max_response_bytes)
@@ -997,7 +997,7 @@ async fn open_capsule_repository_from_capture(
             transitions: Arc::new(view.tip_bound_transitions().await?),
         }
     } else {
-        UploadPackVisibilityProof::Materialized(view.git_visibility_index().await?)
+        UploadPackVisibilityProof::Materialized(view.take_git_visibility_index().await?)
     };
     tracing::debug!(
         elapsed_ms = started.elapsed().as_millis() as u64,
