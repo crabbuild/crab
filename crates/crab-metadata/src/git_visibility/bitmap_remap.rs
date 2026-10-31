@@ -159,8 +159,10 @@ mod tests {
     fn assert_mapping(bitmap: Vec<u8>, ordinals: &[u32]) {
         let plan = BitmapRemap::new(ordinals).unwrap();
         let expected = oracle(&bitmap, ordinals);
-        let actual = GitVisibilityClosure::Bitmap(bitmap).remap(&plan).unwrap();
-        assert_eq!(actual, GitVisibilityClosure::Bitmap(expected));
+        let actual = GitVisibilityClosure::Bitmap(bitmap.into())
+            .remap(&plan)
+            .unwrap();
+        assert_eq!(actual, GitVisibilityClosure::Bitmap(expected.into()));
         actual.validate(ordinals.len()).unwrap();
     }
 
@@ -223,9 +225,13 @@ mod tests {
         assert!(BitmapRemap::new(&[u32::MAX]).is_err());
         let ordinals = (0..9).collect::<Vec<_>>();
         let plan = BitmapRemap::new(&ordinals).unwrap();
-        assert!(GitVisibilityClosure::Bitmap(vec![0]).remap(&plan).is_err());
         assert!(
-            GitVisibilityClosure::Bitmap(vec![0, 2])
+            GitVisibilityClosure::Bitmap(vec![0].into())
+                .remap(&plan)
+                .is_err()
+        );
+        assert!(
+            GitVisibilityClosure::Bitmap(vec![0, 2].into())
                 .remap(&plan)
                 .is_err()
         );

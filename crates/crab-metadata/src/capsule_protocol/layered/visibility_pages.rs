@@ -587,7 +587,7 @@ fn shared_sets(
     }
     // This final set makes the shared dictionary cover retained, currently
     // unreachable objects. Its root is never assigned to a visible ref.
-    let retained = GitVisibilityClosure::Bitmap(retained);
+    let retained = GitVisibilityClosure::Bitmap(Arc::new(retained));
     for closure in snapshot.refs.values().chain(std::iter::once(&retained)) {
         if closure.len() as usize <= snapshot.objects.len().div_ceil(shared::CHUNK_BITS) {
             sets.push(GitVisibilityObjects::from_shared_ordinals(
@@ -597,8 +597,8 @@ fn shared_sets(
             continue;
         }
         let bitmap;
-        let bits = match closure {
-            GitVisibilityClosure::Bitmap(bits) => bits,
+        let bits: &[u8] = match closure {
+            GitVisibilityClosure::Bitmap(bits) => bits.as_slice(),
             GitVisibilityClosure::Sparse(positions) => {
                 let mut bits = vec![0; snapshot.objects.len().div_ceil(8)];
                 for position in positions {
@@ -636,7 +636,7 @@ fn closure_from_shared(
                 .flat_map(|chunk| chunk.iter().copied())
                 .take(objects.len().div_ceil(8)),
         );
-        let closure = GitVisibilityClosure::Bitmap(bits);
+        let closure = GitVisibilityClosure::Bitmap(Arc::new(bits));
         closure.validate(objects.len())?;
         Ok(closure)
     } else {

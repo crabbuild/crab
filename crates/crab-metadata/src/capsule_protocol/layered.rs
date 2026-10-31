@@ -200,7 +200,10 @@ impl LayeredVisibilitySnapshot {
                 .saturating_add(name.capacity())
                 .saturating_add(match positions {
                     GitVisibilityClosure::Sparse(values) => values.capacity().saturating_mul(4),
-                    GitVisibilityClosure::Bitmap(values) => values.capacity(),
+                    GitVisibilityClosure::Bitmap(values) => values
+                        .capacity()
+                        .saturating_add(std::mem::size_of::<Vec<u8>>())
+                        .saturating_add(2 * std::mem::size_of::<usize>()),
                 });
         }
         for map in [&self.transitions, &self.incremental_history] {

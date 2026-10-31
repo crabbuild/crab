@@ -6,6 +6,7 @@
 //! stores that closure in one generation-bound, immutable object.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::Arc;
 
 use serde::{Deserialize, Serialize};
 
@@ -217,7 +218,9 @@ pub type GitVisibilityOid = [u8; 20];
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum GitVisibilityClosure {
     Sparse(Vec<u32>),
-    Bitmap(Vec<u8>),
+    // Captured snapshots share immutable membership bytes. Ref edits and
+    // dictionary growth detach only the buffers they actually change.
+    Bitmap(Arc<Vec<u8>>),
 }
 
 const MAX_VISIBILITY_TRANSITIONS_PER_REF: usize = 64;
@@ -260,7 +263,7 @@ impl GitVisibilityClosure {
                 .ok_or_else(|| corrupt("visibility closure position is outside its dictionary"))?;
             *byte |= 1 << (position % 8);
         }
-        Ok(Self::Bitmap(bitmap))
+        Ok(Self::Bitmap(Arc::new(bitmap)))
     }
 
     pub(crate) fn validate(&self, object_count: usize) -> Result<u64> {
@@ -339,7 +342,7 @@ impl GitVisibilityClosure {
                 }
             }
             Self::Bitmap(bitmap) => {
-                for (output, input) in union.iter_mut().zip(bitmap) {
+                for (output, input) in union.iter_mut().zip(bitmap.iter()) {
                     *output |= input;
                 }
             }
@@ -353,7 +356,7 @@ impl GitVisibilityClosure {
                 remap_ordinal_positions(positions.clone(), remap.ordinals())?,
                 remap.ordinals().len(),
             ),
-            Self::Bitmap(bitmap) => Ok(Self::Bitmap(remap.apply(bitmap))),
+            Self::Bitmap(bitmap) => Ok(Self::Bitmap(Arc::new(remap.apply(bitmap)))),
         }
     }
 
@@ -364,7 +367,19 @@ impl GitVisibilityClosure {
         }
     }
 
+    fn resize_bitmap(&mut self, bitmap_len: usize) {
+        if let Self::Bitmap(bitmap) = self
+            && bitmap.len() != bitmap_len
+        {
+            Arc::make_mut(bitmap).resize(bitmap_len, 0);
+        }
+    }
+
     fn add_positions(&mut self, additions: &[u32], object_count: usize) -> Result<()> {
+        self.resize_bitmap(object_count.div_ceil(8));
+        if additions.is_empty() {
+            return Ok(());
+        }
         match self {
             Self::Sparse(positions) => {
                 // New dictionary ordinals append after the admitted history.
@@ -415,7 +430,7 @@ impl GitVisibilityClosure {
                 *positions = merged;
             }
             Self::Bitmap(bitmap) => {
-                bitmap.resize(object_count.div_ceil(8), 0);
+                let bitmap = Arc::make_mut(bitmap);
                 for position in additions {
                     let position = usize::try_from(*position).map_err(|_| {
                         corrupt("visibility closure position cannot be represented")
@@ -431,6 +446,9 @@ impl GitVisibilityClosure {
     }
 
     fn remove_positions(&mut self, removals: &[u32]) -> Result<()> {
+        if removals.is_empty() {
+            return Ok(());
+        }
         match self {
             Self::Sparse(positions) => {
                 for position in removals {
@@ -441,6 +459,7 @@ impl GitVisibilityClosure {
                 }
             }
             Self::Bitmap(bitmap) => {
+                let bitmap = Arc::make_mut(bitmap);
                 for position in removals {
                     let position = usize::try_from(*position).map_err(|_| {
                         corrupt("visibility closure position cannot be represented")
@@ -774,22 +793,16 @@ impl GitCatalogVisibilityIndex {
             .map_err(|_| corrupt("Git object catalog count cannot be represented"))?;
         let bitmap_len = object_count.div_ceil(8);
         for closure in self.refs.values_mut() {
-            if let GitVisibilityClosure::Bitmap(bitmap) = closure {
-                bitmap.resize(bitmap_len, 0);
-            }
+            closure.resize_bitmap(bitmap_len);
         }
         for transitions in self.transitions.values_mut() {
             for transition in transitions {
-                if let GitVisibilityClosure::Bitmap(bitmap) = &mut transition.objects {
-                    bitmap.resize(bitmap_len, 0);
-                }
+                transition.objects.resize_bitmap(bitmap_len);
             }
         }
         for transitions in self.incremental_history.values_mut() {
             for transition in transitions {
-                if let GitVisibilityClosure::Bitmap(bitmap) = &mut transition.objects {
-                    bitmap.resize(bitmap_len, 0);
-                }
+                transition.objects.resize_bitmap(bitmap_len);
             }
         }
         Ok(())
@@ -1671,7 +1684,7 @@ impl GitVisibilityIndex {
                         .flat_map(|chunk| chunk.iter().copied())
                         .take(objects.len().div_ceil(8)),
                 );
-                GitVisibilityClosure::Bitmap(bitmap)
+                GitVisibilityClosure::Bitmap(Arc::new(bitmap))
             } else {
                 GitVisibilityClosure::from_positions(
                     edit.added
@@ -1836,22 +1849,16 @@ impl GitVisibilityIndex {
         if self.objects.len() != previous_object_count {
             let bitmap_len = self.objects.len().div_ceil(8);
             for closure in self.refs.values_mut() {
-                if let GitVisibilityClosure::Bitmap(bitmap) = closure {
-                    bitmap.resize(bitmap_len, 0);
-                }
+                closure.resize_bitmap(bitmap_len);
             }
             for transitions in self.incremental_history.values_mut() {
                 for transition in transitions {
-                    if let GitVisibilityClosure::Bitmap(bitmap) = &mut transition.objects {
-                        bitmap.resize(bitmap_len, 0);
-                    }
+                    transition.objects.resize_bitmap(bitmap_len);
                 }
             }
             for transitions in self.transitions.values_mut() {
                 for transition in transitions {
-                    if let GitVisibilityClosure::Bitmap(bitmap) = &mut transition.objects {
-                        bitmap.resize(bitmap_len, 0);
-                    }
+                    transition.objects.resize_bitmap(bitmap_len);
                 }
             }
         }
