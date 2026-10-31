@@ -1635,7 +1635,9 @@ impl CapsuleRepositoryView {
     /// Transfer a reconciled visibility proof to a caller that owns this view.
     ///
     /// Shared views retain independent proofs. Later reads reconstruct the same
-    /// captured state when its reconciled cache has been transferred.
+    /// captured state when its reconciled cache has been transferred. A complete
+    /// checkpoint becomes a footer with authenticated paged lookup, so opening
+    /// the physical repository need not retain a second decoded visibility body.
     pub async fn take_git_visibility_index(
         &mut self,
     ) -> Result<crab_metadata::git_visibility::GitVisibilityIndex> {
@@ -1643,7 +1645,26 @@ impl CapsuleRepositoryView {
             return self.git_visibility_index().await;
         };
         let index = Arc::try_unwrap(index).unwrap_or_else(|shared| (*shared).clone());
-        self.bind_git_visibility_index(index)
+        let index = self.bind_git_visibility_index(index)?;
+        if let (Some(layout), Some(checkpoint)) = (&self.metadata_layout, &self.checkpoint)
+            && !checkpoint.is_control_only()
+        {
+            let maximum = self
+                .root
+                .record()
+                .root()
+                .checkpoint()
+                .ok_or_else(|| ReadError::internal("checkpoint view has no root pointer"))?
+                .size();
+            if let Some(reader) = checkpoint.visibility_reader(layout, maximum)? {
+                self.checkpoint_visibility = Some(Arc::new(reader));
+                self.checkpoint = self
+                    .checkpoint
+                    .take()
+                    .map(LayeredCheckpoint::into_control_only);
+            }
+        }
+        Ok(index)
     }
 
     /// Materialize visibility after one candidate capsule without publishing it.

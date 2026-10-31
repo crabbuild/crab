@@ -1392,6 +1392,17 @@ impl LayeredCheckpoint {
         self.control_only
     }
 
+    /// Drop materialized bodies and caches while retaining validated control metadata.
+    #[must_use]
+    pub fn into_control_only(mut self) -> Self {
+        self.bytes = Bytes::new();
+        self.owned_buffer_bytes = None;
+        self.control_only = true;
+        self.catalog_objects.clear();
+        self.visibility = Arc::new(OnceLock::new());
+        self
+    }
+
     /// Conservatively charge encoded buffers, footer data and decoded visibility.
     ///
     /// Only locally built checkpoints have a known backing-buffer allocation;
@@ -2035,6 +2046,64 @@ mod tests {
         assert_eq!(decoded.hash(), checkpoint.hash());
         assert_eq!(decoded.pack_count().unwrap(), 1);
         assert!(decoded.bytes().len() < 16 * 1024);
+    }
+
+    #[test]
+    fn checkpoint_control_demotion_releases_body_and_decoded_visibility() {
+        let source = PackLayer::build(&pack())
+            .unwrap()
+            .source_descriptor()
+            .unwrap();
+        let index = GitVisibilityIndex::new(
+            3,
+            "0".repeat(64),
+            "0".repeat(64),
+            BTreeMap::from([("refs/heads/main".to_owned(), vec!["2".repeat(40)])]),
+        )
+        .unwrap();
+        let visibility = LayeredVisibilitySnapshot::from_index(
+            &index,
+            &source_catalog_digest(std::slice::from_ref(&source)).unwrap(),
+        )
+        .unwrap();
+        let checkpoint = LayeredCheckpoint::build(
+            3,
+            &"a".repeat(64),
+            vec![source],
+            PointerCatalog::new(),
+            Some(visibility),
+        )
+        .unwrap();
+        let expected = LayeredCheckpoint::decode_control(
+            checkpoint
+                .bytes()
+                .slice(checkpoint.control_offset() as usize..),
+            checkpoint.bytes().len() as u64,
+            checkpoint.control_offset(),
+            checkpoint.hash(),
+            checkpoint.footer_hash(),
+        )
+        .unwrap();
+        for shared in [false, true] {
+            let decoded = LayeredCheckpoint::decode(checkpoint.bytes().clone()).unwrap();
+            decoded.visibility_ordinal_snapshot().unwrap();
+            let cache = Arc::downgrade(&decoded.visibility);
+            let other = shared.then(|| decoded.clone());
+            let control = decoded.into_control_only();
+            assert_eq!(cache.upgrade().is_some(), shared);
+            assert_eq!(control, expected);
+            assert!(control.bytes().is_empty());
+            assert!(control.visibility_ordinal_snapshot().is_err());
+            if let Some(other) = other {
+                assert_eq!(
+                    other
+                        .visibility_index(3, &"0".repeat(64), &"0".repeat(64))
+                        .unwrap()
+                        .unwrap(),
+                    index
+                );
+            }
+        }
     }
 
     #[test]
