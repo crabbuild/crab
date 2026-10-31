@@ -133,10 +133,30 @@ pub(super) async fn revalidate_cached_branch(
     branch: &str,
     base: &crab_metadata::capsule_protocol::RootSnapshot,
     cached: Option<CachedBranchState>,
+    published_checkpoint: Option<&crab_metadata::capsule_protocol::RootSnapshot>,
 ) -> Result<Option<CachedBranchState>> {
     let Some(mut cached) = cached else {
         return Ok(None);
     };
+    if published_checkpoint
+        .is_some_and(|published| published.record().digest() == base.record().digest())
+        && base.record().root().refs().get(branch) == cached.tip.map(|tip| tip.to_string()).as_ref()
+        && let Some(frontier) = CapsuleFrontier::from_checkpoint(base.record())
+    {
+        // Our successful logical checkpoint already verified these bytes. A
+        // different root or branch tip must use the complete read path below.
+        // Later ref-head writes remain subject to the existing parent/transaction
+        // validation under the publication lease, including no-op mutations.
+        cached.transaction = base
+            .record()
+            .root()
+            .compacted_ref_transactions()
+            .get(branch)
+            .cloned();
+        cached.capsule_frontier = Some(frontier);
+        cached.tree.forget_pack_provenance();
+        return Ok(Some(cached));
+    }
     let view = crab_read::capsule_protocol::open_view_from_root_with_layered_control(
         &repository.layout,
         base.clone(),
@@ -162,24 +182,253 @@ mod tests {
     use super::*;
     use crate::mutation::tests::{capsule_fixture, coordinated_put, read};
 
+    #[derive(Default)]
+    struct Operations(AtomicUsize);
+
+    impl crab_storage::StorageObserver for Operations {
+        fn started(&self, _: crab_storage::StorageOperation) {
+            self.0.fetch_add(1, Ordering::Relaxed);
+        }
+
+        fn finished(&self, _: crab_storage::StorageObservation) {}
+    }
+
+    fn take_cached(coordinator: &Coordinator, repository: &Repository) -> CachedBranchState {
+        let key = format!("{}\0refs/heads/main", repository.config.name);
+        coordinator.admission.refs.lock().unwrap()[&key]
+            .state
+            .take_latest()
+            .unwrap()
+    }
+
+    fn observe(repository: &mut Repository) -> Arc<Operations> {
+        let operations = Arc::new(Operations::default());
+        repository.layout = crab_storage::StoreLayout::with_global_prefix(
+            repository
+                .layout
+                .store()
+                .clone()
+                .with_storage_observer(operations.clone()),
+            repository.layout.repo_prefix().to_owned(),
+            repository.layout.global_prefix().to_owned(),
+        );
+        operations
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn committed_logical_checkpoint_reuses_verified_branch_without_storage_reads() {
+        let (mut repository, runtime, cancel) = capsule_fixture().await;
+        let coordinator = Coordinator::new(
+            Arc::clone(&runtime),
+            Default::default(),
+            cancel.child_token(),
+            Metrics::new().unwrap(),
+        );
+        coordinated_put(&coordinator, &repository, &cancel, "before", b"retained").await;
+        let cached = take_cached(&coordinator, &repository);
+        assert!(
+            cached
+                .tree
+                .directories
+                .values()
+                .any(|directory| directory.delta_anchor.is_some())
+        );
+        let root = checkpoint(&repository, &cancel).await;
+        let operations = observe(&mut repository);
+        let cached = revalidate_cached_branch(
+            &repository,
+            "refs/heads/main",
+            &root,
+            Some(cached),
+            Some(&root),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(
+            operations.0.load(Ordering::Relaxed),
+            0,
+            "the successful logical checkpoint already verified this exact root and branch"
+        );
+        assert_eq!(
+            cached.transaction.as_ref(),
+            root.record()
+                .root()
+                .compacted_ref_transactions()
+                .get("refs/heads/main")
+        );
+        let frontier = cached.capsule_frontier.unwrap();
+        assert!(frontier.matches_root(root.record()));
+        assert_eq!((frontier.count, frontier.bytes), (0, 0));
+        assert!(
+            cached
+                .tree
+                .directories
+                .values()
+                .all(|directory| directory.delta_anchor.is_none()
+                    && directory.delta_ancestors.is_empty())
+        );
+        coordinator.shutdown().await;
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn checkpoint_reuse_falls_back_for_a_different_root_or_branch_tip() {
+        let (mut repository, runtime, cancel) = capsule_fixture().await;
+        let coordinator = Coordinator::new(
+            Arc::clone(&runtime),
+            Default::default(),
+            cancel.child_token(),
+            Metrics::new().unwrap(),
+        );
+        coordinated_put(&coordinator, &repository, &cancel, "before", b"before").await;
+        let old_cached = take_cached(&coordinator, &repository);
+        let old_root = checkpoint(&repository, &cancel).await;
+        coordinated_put(&coordinator, &repository, &cancel, "newer", b"newer").await;
+        let current_cached = take_cached(&coordinator, &repository);
+        let current_root = checkpoint(&repository, &cancel).await;
+        let operations = observe(&mut repository);
+
+        let current = revalidate_cached_branch(
+            &repository,
+            "refs/heads/main",
+            &current_root,
+            Some(current_cached),
+            Some(&old_root),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert!(
+            operations.0.load(Ordering::Relaxed) > 0,
+            "a different root must reload authenticated checkpoint metadata even when the tip matches"
+        );
+        assert_eq!(
+            current.tip.unwrap().to_string(),
+            current_root.record().root().refs()["refs/heads/main"]
+        );
+
+        operations.0.store(0, Ordering::Relaxed);
+        assert!(
+            revalidate_cached_branch(
+                &repository,
+                "refs/heads/main",
+                &current_root,
+                Some(old_cached),
+                Some(&current_root),
+            )
+            .await
+            .unwrap()
+            .is_none()
+        );
+        assert!(
+            operations.0.load(Ordering::Relaxed) > 0,
+            "an exact receipt must not bless a cached tree for a different branch tip"
+        );
+        coordinator.shutdown().await;
+        runtime.shutdown().await;
+    }
+
+    #[tokio::test(flavor = "multi_thread", worker_threads = 2)]
+    async fn checkpoint_reuse_preserves_competing_ref_writes_before_publication() {
+        let (mut repository, runtime, cancel) = capsule_fixture().await;
+        let coordinator = Coordinator::new(
+            Arc::clone(&runtime),
+            Default::default(),
+            cancel.child_token(),
+            Metrics::new().unwrap(),
+        );
+        coordinated_put(&coordinator, &repository, &cancel, "before", b"before").await;
+        let cached = take_cached(&coordinator, &repository);
+        let committed_root = checkpoint(&repository, &cancel).await;
+
+        let competitor = Coordinator::new(
+            Arc::clone(&runtime),
+            Default::default(),
+            cancel.child_token(),
+            Metrics::new().unwrap(),
+        );
+        coordinated_put(&competitor, &repository, &cancel, "competing", b"competing").await;
+        let base = crab_metadata::capsule_protocol::load_root(&repository.layout)
+            .await
+            .unwrap();
+        assert_eq!(
+            base.record().digest(),
+            committed_root.record().digest(),
+            "ordinary publication advances a ref head without replacing the root"
+        );
+        let operations = observe(&mut repository);
+        let cached = revalidate_cached_branch(
+            &repository,
+            "refs/heads/main",
+            &base,
+            Some(cached),
+            Some(&committed_root),
+        )
+        .await
+        .unwrap()
+        .unwrap();
+        assert_eq!(operations.0.load(Ordering::Relaxed), 0);
+        let lease = RefLease::acquire(&repository, "refs/heads/main", &cancel)
+            .await
+            .unwrap();
+        let current = prepared_parent_is_current(
+            &repository,
+            "refs/heads/main",
+            cached.tip,
+            cached.transaction.as_deref(),
+        )
+        .await
+        .unwrap();
+        lease.release().await;
+        assert!(
+            !current,
+            "the live parent check must reject the optimistic checkpoint position"
+        );
+
+        let key = format!("{}\0refs/heads/main", repository.config.name);
+        let queue = Arc::clone(&coordinator.admission.refs.lock().unwrap()[&key]);
+        queue.state.store(
+            cached.tip,
+            cached.transaction,
+            Arc::try_unwrap(cached.manifest).unwrap_or_else(|manifest| (*manifest).clone()),
+            cached.tree,
+            cached.batches_since_checkpoint,
+            cached.capsule_frontier,
+        );
+        coordinated_put(&coordinator, &repository, &cancel, "after", b"after").await;
+        coordinator.shutdown().await;
+        competitor.shutdown().await;
+        runtime.shutdown().await;
+
+        let cold = Repository::new(repository.config.clone(), repository.store.clone()).unwrap();
+        let cold_runtime = Arc::new(crab_remote_git::RemoteGitRuntime::default());
+        for name in ["before", "competing", "after"] {
+            assert_eq!(
+                read(&cold, Arc::clone(&cold_runtime), &cancel, name)
+                    .await
+                    .as_ref(),
+                name.as_bytes()
+            );
+        }
+        cold_runtime.shutdown().await;
+    }
+
     async fn checkpoint(
         repository: &Repository,
         cancel: &CancellationToken,
     ) -> crab_metadata::capsule_protocol::RootSnapshot {
-        assert!(
-            crab_remote::checkpoint::publish_capsule_checkpoint(
-                &repository.layout,
-                1,
-                MAX_CAPSULE_READ_BYTES,
-                cancel,
-            )
-            .await
-            .unwrap()
-            .published
-        );
-        crab_metadata::capsule_protocol::load_root(&repository.layout)
-            .await
-            .unwrap()
+        crab_remote::checkpoint::publish_capsule_checkpoint_with_receipt(
+            &repository.layout,
+            1,
+            MAX_CAPSULE_READ_BYTES,
+            cancel,
+        )
+        .await
+        .unwrap()
+        .committed
+        .unwrap()
+        .0
     }
 
     #[tokio::test(flavor = "multi_thread", worker_threads = 2)]

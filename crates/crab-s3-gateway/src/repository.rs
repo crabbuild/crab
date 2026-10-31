@@ -37,6 +37,19 @@ pub(crate) struct CapsuleFrontier {
 }
 
 impl CapsuleFrontier {
+    // This is the folded position, not a capture of subsequent ref-head writes.
+    // Publication must still validate the optimistic parent under its ref lease.
+    pub(crate) fn from_checkpoint(
+        root: &crab_metadata::capsule_protocol::RootRecord,
+    ) -> Option<Self> {
+        (root.root().checkpoint().is_some() && root.root().capsule_frontier().is_empty()).then(
+            || Self {
+                root_digest: *blake3::hash(root.digest().as_bytes()).as_bytes(),
+                ..Self::default()
+            },
+        )
+    }
+
     pub(crate) fn from_view(
         view: &crab_read::capsule_protocol::CapsuleRepositoryView,
         branch: &str,

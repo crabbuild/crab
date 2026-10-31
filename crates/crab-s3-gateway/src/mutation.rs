@@ -1584,7 +1584,7 @@ async fn prepare_and_upload_batch(
             .capsule_frontier
             .is_none_or(|frontier| !frontier.matches_root(base.record()))
     }) {
-        cached = revalidate_cached_branch(repository, request.branch, &base, cached).await?;
+        cached = revalidate_cached_branch(repository, request.branch, &base, cached, None).await?;
     }
     let mut current_view = if cached.is_none() {
         Some(
@@ -1620,11 +1620,15 @@ async fn prepare_and_upload_batch(
         .await?;
         // Charge immutable metadata before the next I/O. Queue retention shares
         // the existing attribute-manifest budget; misses retain the cold path.
-        let retained = checkpointed.committed.and_then(|(_, checkpoint)| {
-            request
-                .checkpoints
-                .and_then(|scheduler| scheduler.retain_checkpoint(checkpoint))
-        });
+        let (published_checkpoint, retained) = match checkpointed.committed {
+            Some((root, checkpoint)) => (
+                Some(root),
+                request
+                    .checkpoints
+                    .and_then(|scheduler| scheduler.retain_checkpoint(checkpoint)),
+            ),
+            None => (None, None),
+        };
         repository.read_views.invalidate().await;
         current_view = None;
         base = Box::new(crab_metadata::capsule_protocol::load_root(&repository.layout).await?);
@@ -1637,7 +1641,14 @@ async fn prepare_and_upload_batch(
         {
             checkpoints.schedule_physical(repository, (*base).clone(), retained);
         }
-        cached = revalidate_cached_branch(repository, request.branch, &base, cached).await?;
+        cached = revalidate_cached_branch(
+            repository,
+            request.branch,
+            &base,
+            cached,
+            published_checkpoint.as_ref(),
+        )
+        .await?;
     }
     if let Some(cached) = cached {
         // The ref lease revalidates this optimistic parent before publication;
