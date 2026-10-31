@@ -139,6 +139,21 @@ env:
 jobs:
   unit-and-transcript:
     name: Protocol unit and transcript tests
+    needs: [cli-and-transcript, reader-and-storage]
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Require complete protocol test coverage
+        env:
+          CLI_RESULT: ${{ needs.cli-and-transcript.result }}
+          READER_RESULT: ${{ needs.reader-and-storage.result }}
+        run: |
+          test "$CLI_RESULT" = success
+          test "$READER_RESULT" = success
+
+  cli-and-transcript:
+    name: Protocol CLI and transcript tests
     runs-on: ubuntu-latest
     timeout-minutes: 30
     steps:
@@ -159,14 +174,13 @@ jobs:
           prefix-key: crab-protocol-debug0-v1
           workspaces: ". -> target/crab-protocol-v2"
 
-      - name: Run protocol and reader tests
+      - name: Run protocol CLI and transcript tests
         env:
           # The Linux test runner's default worker stack is too small for
           # the largest async protocol fixtures; keep valid coverage from
           # becoming a stack-overflow false negative.
           RUST_MIN_STACK: "8388608"
         run: |
-          cargo test -p crab-cache --features local-cache --locked
           cargo test -p crab --lib cmd::mirror --locked --features gix-transport,testing
           cargo test -p crab --lib git::process::tests --locked --features gix-transport
           cargo test -p crab --lib lfs::publication::tests --locked --features gix-transport
@@ -189,24 +203,14 @@ jobs:
           cargo test -p crab --bin crab pull_machine_errors_keep_the_selected_mode_and_schema --locked --features gix-transport
           cargo test -p crab --lib cmd::push::followtag_tests --locked --features gix-transport
           cargo test -p crab --lib git::push_staging::tests --locked --features gix-transport
-          cargo test -p crab-staging --locked --test push_snapshot_guard --test publication_history_recovery
-          cargo test -p crab-auth --lib protected_push --locked --features crab-auth-client
           cargo test -p crab --lib git::index::tests --locked --features gix-transport
           cargo test -p crab --lib publication_recovery --locked --features gix-transport
           cargo test -p crab --lib git::capsule_push::tests --locked --features gix-transport -- --nocapture
-          cargo test -p crab-write --lib capsule_protocol:: --locked
           cargo test -p crab --lib git::remote_helper::tests::list_session_does_not_open_a_damaged_staging_index --locked --features gix-transport
           cargo test -p crab --lib git::remote_helper::tests::capsule_promisor_fetch_ --locked --features gix-transport
-          cargo test -p crab-metadata --lib file_index_lookup --locked --features file-index-reader
-          cargo test -p crab-metadata --lib git_visibility::tests --locked --features remote-index
-          cargo test -p crab-metadata --lib ref_journal::tests --locked --features remote-index
-          cargo test -p crab-coordination --lib push_lock::tests --locked --features object-store-lock
-          cargo test -p crab-coordination --lib gc_fence:: --locked --features object-store-lock
           cargo test -p crab --lib cmd::gc::journal::tests --locked --features gix-transport
           cargo test -p crab --bin crab gc_fence_migration_requires_explicit --locked --features gix-transport
-          cargo check -p crab-coordination --locked --no-default-features
           cargo test -p crab --lib coordination::heartbeat::tests --locked --features gix-transport
-          cargo test -p crab-git -p crab-metadata -p crab-read -p crab-remote-git -p crab-vfs --locked
           cargo test -p crab --locked --features gix-transport \
             --test v2_fetch_transport --test remote_helper_transcript --test pre_push_input
 
@@ -228,6 +232,47 @@ jobs:
             crates/crab-remote-git/src/operation.rs \
             crates/crab-remote-git/src/reader.rs \
             crates/crab-remote-git/src/repository.rs
+
+  reader-and-storage:
+    name: Protocol reader and storage tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install Linux system dependencies
+        run: sudo apt-get update -y && sudo apt-get install -y libfuse3-dev
+
+      - name: Cache protocol test dependencies
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          prefix-key: crab-protocol-readers-debug0-v1
+          workspaces: ". -> target/crab-protocol-v2"
+
+      - name: Run protocol reader and storage tests
+        env:
+          # The Linux test runner's default worker stack is too small for
+          # the largest async protocol fixtures; keep valid coverage from
+          # becoming a stack-overflow false negative.
+          RUST_MIN_STACK: "8388608"
+        run: |
+          cargo test -p crab-cache --features local-cache --locked
+          cargo test -p crab-staging --locked --test push_snapshot_guard --test publication_history_recovery
+          cargo test -p crab-auth --lib protected_push --locked --features crab-auth-client
+          cargo test -p crab-write --lib capsule_protocol:: --locked
+          cargo test -p crab-metadata --lib file_index_lookup --locked --features file-index-reader
+          cargo test -p crab-metadata --lib git_visibility::tests --locked --features remote-index
+          cargo test -p crab-metadata --lib ref_journal::tests --locked --features remote-index
+          cargo test -p crab-coordination --lib push_lock::tests --locked --features object-store-lock
+          cargo test -p crab-coordination --lib gc_fence:: --locked --features object-store-lock
+          cargo check -p crab-coordination --locked --no-default-features
+          cargo test -p crab-git -p crab-metadata -p crab-read -p crab-remote-git -p crab-vfs --locked
 
   cross-platform-contract:
     name: Protocol contract (${{ matrix.os }})
