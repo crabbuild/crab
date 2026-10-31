@@ -5591,15 +5591,13 @@ mod tests {
         let verified =
             crate::cmd::stream_stage::VerifiedIndexStat::from_file(temporary.as_file()).unwrap();
         let published = temporary.persist(&dest).unwrap();
-        // A persisted tempfile keeps restrictive sharing on Windows. Reopen
-        // the same inode with ordinary sharing so replacement can race this
-        // still-live original descriptor on every supported platform.
-        let shared_published = std::fs::File::open(&dest).unwrap();
-        drop(published);
-        let published = shared_published;
         let mut replacement = tempfile::NamedTempFile::new_in(dir.path()).unwrap();
         replacement.write_all(b"replaced").unwrap();
-        replacement.persist(&dest).unwrap();
+        // Keep the original descriptor open across atomic pathname replacement.
+        // std::fs::rename uses POSIX replacement semantics on supported Windows;
+        // tempfile::persist uses MoveFileExW, which cannot replace an open file.
+        let replacement = replacement.into_temp_path();
+        std::fs::rename(&replacement, &dest).unwrap();
 
         let proof = published_write(&published, verified).unwrap();
 
