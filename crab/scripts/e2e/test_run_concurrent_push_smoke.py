@@ -210,6 +210,8 @@ class UpstreamHandler(BaseHTTPRequestHandler):
     put_status = 200
     reject_put_before_body = False
     get_status = 200
+    get_body = b""
+    get_declared_length: int | None = None
     disconnect_get = False
     close_idle_get = False
     idle_closed = threading.Event()
@@ -220,8 +222,12 @@ class UpstreamHandler(BaseHTTPRequestHandler):
             self.close_connection = True
             return
         self.send_response(self.get_status)
-        self.send_header("Content-Length", "0")
+        length = self.get_declared_length
+        self.send_header("Content-Length", str(len(self.get_body) if length is None else length))
         self.end_headers()
+        self.wfile.write(self.get_body)
+        if length is not None and length != len(self.get_body):
+            self.close_connection = True
         if self.close_idle_get:
             self.connection.shutdown(socket.SHUT_WR)
             self.close_connection = True
@@ -260,6 +266,8 @@ class RequestCountingProxyTest(unittest.TestCase):
         UpstreamHandler.put_status = 200
         UpstreamHandler.reject_put_before_body = False
         UpstreamHandler.get_status = 200
+        UpstreamHandler.get_body = b""
+        UpstreamHandler.get_declared_length = None
         UpstreamHandler.disconnect_get = False
         UpstreamHandler.close_idle_get = False
         UpstreamHandler.idle_closed.clear()
@@ -300,6 +308,41 @@ class RequestCountingProxyTest(unittest.TestCase):
             self.proxy.snapshot()["classes"],
             {"git_object_catalog_db/manifest:put": 1},
         )
+
+    def test_truncated_stream_closes_downstream_without_appending_another_response(self) -> None:
+        UpstreamHandler.get_body = b"short"
+        UpstreamHandler.get_declared_length = 128
+        with patch("run_concurrent_push_smoke.PROXY_BUFFER_LIMIT_BYTES", 8):
+            client = http.client.HTTPConnection("127.0.0.1", self.proxy.server.server_port, timeout=2)
+            try:
+                client.request("GET", "/crab/e2e-concurrent-push/run/packs/truncated")
+                response = client.getresponse()
+                self.assertEqual(response.status, 200)
+                with self.assertRaises(http.client.IncompleteRead) as incomplete:
+                    response.read()
+                self.assertEqual(incomplete.exception.partial, b"short")
+            finally:
+                client.close()
+        snapshot = self.proxy.snapshot()
+        self.assertEqual(snapshot["requests"], 1)
+        self.assertEqual(snapshot["proxy_errors"], {"IncompleteRead": 1})
+
+    def test_complete_stream_preserves_bytes_and_connection_reuse(self) -> None:
+        UpstreamHandler.get_body = b"verified streamed body" * 8
+        with patch("run_concurrent_push_smoke.PROXY_BUFFER_LIMIT_BYTES", 8):
+            client = http.client.HTTPConnection("127.0.0.1", self.proxy.server.server_port, timeout=2)
+            try:
+                for _ in range(2):
+                    client.request("GET", "/crab/e2e-concurrent-push/run/packs/complete")
+                    response = client.getresponse()
+                    self.assertEqual(response.status, 200)
+                    self.assertEqual(response.read(), UpstreamHandler.get_body)
+            finally:
+                client.close()
+        self.assertEqual(len(set(UpstreamHandler.request_ports)), 1)
+        snapshot = self.proxy.snapshot()
+        self.assertEqual(snapshot["requests"], 2)
+        self.assertEqual(snapshot["proxy_errors"], {})
 
     def test_reuses_client_and_upstream_connections_without_hiding_requests(self) -> None:
         endpoint = urllib.parse.urlsplit(self.proxy.url)

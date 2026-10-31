@@ -175,6 +175,8 @@ class RequestCountingProxy:
                 upstream_path = proxy.upstream.path.rstrip("/") + self.path
                 connection = self.upstream_connection
                 recorded = False
+                response_started = False
+                written_bytes = 0
                 try:
                     if proxy.consume_ref_journal_fault(
                         self.command, self.path, "before-upstream"
@@ -300,6 +302,7 @@ class RequestCountingProxy:
                         )
                         return
                     proxy.gate_ref_journal_response(self.command, self.path, status)
+                    response_started = True
                     self.send_response_only(status, response.reason)
                     for key, value in response_headers:
                         lower = key.lower()
@@ -331,12 +334,18 @@ class RequestCountingProxy:
                         if response_body is not None:
                             if response_body:
                                 self.wfile.write(response_body)
+                                written_bytes = len(response_body)
                         else:
                             while True:
                                 chunk = response.read(PROXY_STREAM_CHUNK_BYTES)
                                 if not chunk:
                                     break
                                 self.wfile.write(chunk)
+                                written_bytes += len(chunk)
+                            if written_bytes != response_bytes:
+                                raise http.client.IncompleteRead(
+                                    b"", max(0, response_bytes - written_bytes)
+                                )
                     if not recorded:
                         proxy.record(
                             self.command,
@@ -362,13 +371,19 @@ class RequestCountingProxy:
                             self.path,
                             self.headers,
                             length,
-                            len(message),
+                            written_bytes if response_started else len(message),
                             502,
                             elapsed_ms=round(
                                 (time.perf_counter_ns() - request_started) / 1_000_000
                             ),
                             proxy_error=proxy_error,
                         )
+                    if response_started:
+                        # The original status and length are already on the wire.
+                        # EOF lets the client retry a truncated body immediately;
+                        # another HTTP response would become corrupt payload bytes.
+                        self.close_connection = True
+                        return
                     try:
                         self.send_response(502)
                         self.send_header("Content-Type", "text/plain")
