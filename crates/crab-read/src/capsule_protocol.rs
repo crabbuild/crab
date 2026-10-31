@@ -53,7 +53,6 @@ const LAYERED_SIDECAR_MAX_EXTRA_BYTES: u64 = 4 * 1024 * 1024;
 const LAYERED_SIDECAR_MAX_WINDOW_BYTES: u64 = 16 * 1024 * 1024;
 const LAYERED_PACK_MAX_WINDOW_BYTES: u64 = 64 * 1024 * 1024;
 const LAYERED_FULL_MAX_WINDOW_BYTES: u64 = 64 * 1024 * 1024;
-const LAYERED_REPACK_IN_MEMORY_FRONTIER_BYTES: u64 = LAYERED_FULL_MAX_WINDOW_BYTES;
 const LAYERED_SIDECAR_READ_CONCURRENCY: usize = 8;
 const LAYERED_INLINE_FRONTIER_MAX_BYTES: u64 = 128 * 1024 * 1024;
 
@@ -4171,7 +4170,7 @@ pub async fn open_view_from_root(
     .await
 }
 
-/// Open a pinned repack view, retaining only a small frontier's pack bodies in memory.
+/// Open pinned repack controls without retaining pack bodies or fetch-transition copies.
 pub async fn open_view_from_root_for_repack(
     router: &StoreLayout<Store>,
     snapshot: crab_metadata::capsule_protocol::RootSnapshot,
@@ -4179,35 +4178,13 @@ pub async fn open_view_from_root_for_repack(
 ) -> Result<CapsuleRepositoryView> {
     let root = snapshot.record().root();
     let (heads, active) = capture_ref_heads(router, root).await?;
-    let pointers = materialize_visible_ref_heads(root, &heads, &active)
-        .map_err(metadata_control_error)?
-        .pointers;
-    let frontier_bytes = pointers.iter().try_fold(0_u64, |total, pointer| {
-        total
-            .checked_add(pointer.size())
-            .ok_or(ReadError::CapsuleReadLimit {
-                resource: "frontier bytes",
-                maximum: limits.max_frontier_bytes,
-            })
-    })?;
-    if frontier_bytes <= LAYERED_REPACK_IN_MEMORY_FRONTIER_BYTES {
-        return assemble_view(
-            router,
-            snapshot,
-            limits,
-            heads,
-            active,
-            CheckpointLoad::Complete,
-        )
-        .await;
-    }
     assemble_layered_control_view(
         router,
         snapshot,
         limits,
         &heads,
         &active,
-        ControlRead::Complete,
+        ControlRead::Repack,
     )
     .await
 }
@@ -4381,6 +4358,7 @@ pub async fn open_git_view_from_root(
 #[derive(Clone, Copy)]
 enum ControlRead {
     Complete,
+    Repack,
     Git,
     Fetch,
 }
@@ -4666,7 +4644,7 @@ async fn assemble_layered_control_view(
         .collect();
     let checkpoint = match snapshot.record().root().checkpoint() {
         Some(pointer) => {
-            let checkpoint = if !matches!(read, ControlRead::Complete) {
+            let checkpoint = if !matches!(read, ControlRead::Complete | ControlRead::Repack) {
                 load_layered_checkpoint_control(router, pointer, limits).await?
             } else {
                 load_layered_checkpoint(router, pointer, limits).await?

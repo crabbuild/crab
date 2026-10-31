@@ -446,6 +446,10 @@ pub(crate) struct Decoded {
     empty: GitVisibilityObjects,
 }
 impl Decoded {
+    pub(crate) fn dictionary(&self) -> &Arc<GitVisibilityDictionary> {
+        &self.dictionary
+    }
+
     pub(crate) fn new(body: &[u8], descriptor: &Descriptor, seen: &mut Seen) -> Result<Self> {
         descriptor.validate(body.len() as u64)?;
         let reverse = scan(

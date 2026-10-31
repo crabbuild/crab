@@ -653,6 +653,23 @@ pub fn apply_transaction_visibility_index(
     delta: Option<&CapsuleVisibilityDelta>,
     index: &mut crate::git_visibility::GitVisibilityIndex,
 ) -> Result<()> {
+    if let Some(delta) = delta
+        && transaction.edits().len() == delta.edits().len()
+        && transaction.edits().iter().all(|edit| {
+            edit.expected_old().is_none()
+                && edit.new_oid().is_some_and(|new| {
+                    delta
+                        .edits()
+                        .get(edit.ref_name())
+                        .is_some_and(|visibility| {
+                            visibility.old_oid.is_none() && visibility.new_oid == new
+                        })
+                })
+        })
+        && index.apply_initial_shared_ref_edits(delta.edits())?
+    {
+        return Ok(());
+    }
     let evidence = delta.map(|delta| delta.edits());
     let mut matched = 0;
     for edit in transaction.edits() {

@@ -1454,8 +1454,10 @@ jobs:
                   "Git capsule publication phase finished",
                   "Git checkpoint phase completed",
                   "S3 physical checkpoint maintenance finished",
+                  "S3 physical checkpoint metadata retention",
+                  "S3 physical checkpoint reuses committed metadata",
               )):
-                  phase = re.search(r'\bphase="(build|encode|sidecars|content_hash|upload|ref_cas|ref_transaction|capture|catalog|source_admission|visibility_index|visibility_snapshot|footer_consolidation|publish|base_resolution)"', line)
+                  phase = re.search(r'\bphase="(build|encode|sidecars|content_hash|upload|ref_cas|ref_transaction|capture|catalog|source_admission|visibility_index|visibility_snapshot|footer_consolidation|publish|base_resolution|metadata_retention|metadata_reuse)"', line)
                   elapsed = re.search(r'\belapsed_ms=([0-9.eE+-]+)', line)
                   phase_name = phase[1] if phase else None
                   if phase_name and "Git checkpoint phase completed" in line:
@@ -1470,7 +1472,7 @@ jobs:
                           row["timestamp_unix_seconds"] = datetime.fromisoformat(
                               timestamp[1].replace("Z", "+00:00")
                           ).timestamp()
-                      for field in ("objects", "bytes", "commits", "pack_bytes_read", "pack_bytes_written", "declared_bases", "inflated_bases"):
+                      for field in ("objects", "bytes", "commits", "pack_bytes_read", "pack_bytes_written", "declared_bases", "inflated_bases", "required_bytes", "available_bytes", "retained"):
                           value = re.search(rf'\b{field}=([0-9]+)', line)
                           if value:
                               row[field] = int(value[1])

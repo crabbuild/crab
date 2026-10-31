@@ -81,6 +81,7 @@ pub(crate) enum Kind {
     VisibilityChunkPool = 33,
     VisibilitySetChunks = 34,
     VisibilitySparseSet = 35,
+    CheckpointAdmissionChunks = 36,
 }
 
 impl Kind {
@@ -95,7 +96,8 @@ impl Kind {
             | Self::CatalogXorbChunks
             | Self::VisibilityOrdinals
             | Self::VisibilityChunkPool
-            | Self::VisibilitySetChunks => true,
+            | Self::VisibilitySetChunks
+            | Self::CheckpointAdmissionChunks => true,
             #[cfg(feature = "remote-index")]
             Self::PackSlots => true,
             _ => false,

@@ -266,7 +266,7 @@ async fn repack_preserves_gc_fence_failure_without_publishing() {
 }
 
 #[tokio::test]
-async fn dry_run_reads_metadata_without_loading_small_frontier_pack_bodies() {
+async fn apply_and_preview_views_keep_small_frontier_pack_bodies_cold() {
     let body = (0..8192_u32)
         .flat_map(|index| *blake3::hash(&index.to_le_bytes()).as_bytes())
         .collect::<Vec<_>>();
@@ -277,11 +277,27 @@ async fn dry_run_reads_metadata_without_loading_small_frontier_pack_bodies() {
         .unwrap();
     let before = root.record().digest().to_owned();
     observations.0.lock().unwrap().clear();
-    // This is the apply-view entry point used by the former preview path.
-    // Its small-frontier body retention remains useful for real consolidation.
+    // Apply retains complete visibility and member admission for consolidation,
+    // while both captures leave pack bodies at their immutable origins.
     let apply_view = open_repack_view(&layout, root.clone(), LIMIT)
         .await
         .unwrap();
+    assert_eq!(apply_view.git_pack_count(), 2);
+    assert!(apply_view.capsules().is_empty());
+    let visibility = apply_view.git_visibility_index().await.unwrap();
+    assert_eq!(visibility.ref_count(), 2);
+    for (name, tip) in apply_view.refs() {
+        assert!(visibility.contains_hex_in_ref(name, tip));
+    }
+    assert_eq!(
+        apply_view
+            .capsule_run_member_oids()
+            .values()
+            .flat_map(|members| members.iter())
+            .map(Vec::len)
+            .sum::<usize>(),
+        1
+    );
     drop(apply_view);
     let apply_bytes = observations
         .0
@@ -311,7 +327,7 @@ async fn dry_run_reads_metadata_without_loading_small_frontier_pack_bodies() {
         "preview body admission: apply_view_bytes={apply_bytes} preview_bytes={preview_bytes} frontier_pack_bytes={}",
         sizes[1]
     );
-    assert!(apply_bytes >= sizes[1]);
+    assert!(apply_bytes < sizes[1]);
     assert!(preview_bytes < sizes[1]);
     assert_eq!((outcome.bytes_read, outcome.bytes_written), (0, 0));
     assert_eq!((outcome.packs_before, outcome.packs_after), (2, 2));

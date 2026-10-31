@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::capsule_protocol::{CapsuleGitPack, CapsuleRun, CapsuleSectionKind, PointerCatalog};
 use crate::error::{MetadataError, Result};
 use crate::git_visibility::{
-    GitVisibilityCheckpointTransition, GitVisibilityIndex, GitVisibilityOid,
+    GitVisibilityCheckpointTransition, GitVisibilityClosure, GitVisibilityIndex, GitVisibilityOid,
     GitVisibilityOrdinalTransition, MAX_CHECKPOINT_FOOTER_TRANSITIONS_PER_REF, encode_oid,
 };
 use crate::validation::{validate_content_hash, validate_sha1};
@@ -60,7 +60,7 @@ pub struct LayeredVisibilitySnapshot {
     catalog_digest: String,
     objects: Vec<GitVisibilityOid>,
     member_admission: Option<Vec<LayeredObjectMember>>,
-    refs: BTreeMap<String, Vec<u32>>,
+    refs: BTreeMap<String, GitVisibilityClosure>,
     transitions: BTreeMap<String, Vec<GitVisibilityOrdinalTransition>>,
     incremental_history: BTreeMap<String, Vec<GitVisibilityOrdinalTransition>>,
 }
@@ -198,7 +198,10 @@ impl LayeredVisibilitySnapshot {
             bytes = bytes
                 .saturating_add(128)
                 .saturating_add(name.capacity())
-                .saturating_add(positions.capacity().saturating_mul(4));
+                .saturating_add(match positions {
+                    GitVisibilityClosure::Sparse(values) => values.capacity().saturating_mul(4),
+                    GitVisibilityClosure::Bitmap(values) => values.capacity(),
+                });
         }
         for map in [&self.transitions, &self.incremental_history] {
             if !map.is_empty() {
@@ -351,7 +354,7 @@ impl LayeredVisibilitySnapshot {
         }
         for (name, closure) in &self.refs {
             validate_visibility_ref(name)?;
-            validate_positions(closure, object_count)?;
+            closure.validate(object_count)?;
         }
         validate_transition_map(&self.transitions, &self.refs, object_count, 64)?;
         validate_transition_map(
@@ -419,7 +422,7 @@ fn validate_position_order(positions: &[u32]) -> Result<()> {
 
 fn validate_transition_map(
     transitions: &BTreeMap<String, Vec<GitVisibilityOrdinalTransition>>,
-    refs: &BTreeMap<String, Vec<u32>>,
+    refs: &BTreeMap<String, GitVisibilityClosure>,
     object_count: usize,
     maximum: usize,
 ) -> Result<()> {
@@ -439,8 +442,8 @@ fn validate_transition_map(
                 || usize::try_from(entry.to_ordinal)
                     .ok()
                     .is_none_or(|value| value >= object_count)
-                || reference.binary_search(&entry.from_ordinal).is_err()
-                || reference.binary_search(&entry.to_ordinal).is_err()
+                || !reference.contains(entry.from_ordinal)
+                || !reference.contains(entry.to_ordinal)
             {
                 return Err(corrupt(
                     "layered visibility transition endpoints are invalid",
@@ -450,7 +453,7 @@ fn validate_transition_map(
             if entry
                 .objects
                 .iter()
-                .any(|position| reference.binary_search(position).is_err())
+                .any(|position| !reference.contains(*position))
             {
                 return Err(corrupt(
                     "layered visibility transition escapes its ref closure",
@@ -1218,6 +1221,9 @@ impl LayeredCheckpoint {
             footer_bytes = serde_json::to_vec(&footer)
                 .map_err(|source| MetadataError::CapsuleVisibilityRecord { source })?;
         }
+        // Appending the footer to a full visibility buffer must not double its
+        // retained capacity and unnecessarily exclude it from the bounded pool.
+        body.reserve_exact(footer_bytes.len() + TRAILER_BYTES);
         body.extend_from_slice(&footer_bytes);
         body.extend_from_slice(&(footer_bytes.len() as u64).to_be_bytes());
         body.extend_from_slice(blake3::hash(&footer_bytes).as_bytes());

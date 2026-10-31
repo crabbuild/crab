@@ -1148,7 +1148,7 @@ STORAGE_PACK_LAYOUT_REQUIRED_DELEGATIONS = {
     "crab/src/cmd/repack.rs": (
         "root: crab_metadata::capsule_protocol::RootSnapshot,",
         "crab_storage::StoreLayout::with_global_prefix(",
-        "crab_read::capsule_protocol::open_view_from_root_with_metadata(",
+        "crab_read::capsule_protocol::open_git_view_from_root(",
         "crab_remote::checkpoint::repack_capsule_repository_from_view(",
     ),
     "crab/src/replication/mod.rs": ("check_capsule_read_replica_readiness(",),

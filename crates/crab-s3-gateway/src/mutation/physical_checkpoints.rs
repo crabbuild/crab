@@ -12,10 +12,19 @@ impl CheckpointScheduler {
         checkpoint: crab_metadata::capsule_protocol::LayeredCheckpoint,
     ) -> Option<RetainedPhysicalCheckpoint> {
         let bytes = u32::try_from(checkpoint.retained_metadata_bytes()?).ok()?;
+        let available_bytes = self.manifest_bytes.available_permits();
         let permit = Arc::clone(&self.manifest_bytes)
             .try_acquire_many_owned(bytes)
-            .ok()?;
-        Some(RetainedPhysicalCheckpoint {
+            .ok();
+        tracing::info!(
+            phase = "metadata_retention",
+            elapsed_ms = 0_u64,
+            required_bytes = u64::from(bytes),
+            available_bytes,
+            retained = u64::from(permit.is_some()),
+            "S3 physical checkpoint metadata retention"
+        );
+        permit.map(|permit| RetainedPhysicalCheckpoint {
             checkpoint,
             _permit: permit,
         })
@@ -69,7 +78,7 @@ impl CheckpointScheduler {
                         });
                         let result = if let Some(retained) = retained {
                             let RetainedPhysicalCheckpoint { checkpoint, _permit } = retained;
-                            tracing::info!("S3 physical checkpoint reuses committed metadata");
+                            tracing::info!(phase = "metadata_reuse", elapsed_ms = 0_u64, "S3 physical checkpoint reuses committed metadata");
                             crab_remote::checkpoint::repack_capsule_checkpoint_from_receipt_with_scratch_limit(
                                 &repository.layout, root, checkpoint, MAX_CAPSULE_READ_BYTES,
                                 maximum_scratch_bytes, &cancellation,

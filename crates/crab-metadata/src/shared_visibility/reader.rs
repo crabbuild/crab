@@ -75,7 +75,11 @@ impl<'a> Reader<'a> {
             )
             .await
     }
-    async fn positions(&self, oids: &[[u8; 20]], work: &mut PageWork) -> Result<Vec<Option<u32>>> {
+    pub(crate) async fn positions(
+        &self,
+        oids: &[[u8; 20]],
+        work: &mut PageWork,
+    ) -> Result<Vec<Option<u32>>> {
         let keys = oids.iter().map(|oid| oid.to_vec()).collect::<Vec<_>>();
         let rows = self
             .rows(
