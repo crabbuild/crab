@@ -220,6 +220,32 @@ impl Serialize for CheckpointObjects<'_> {
     }
 }
 
+struct DecodedCheckpointWriter<'a, W> {
+    inner: &'a mut W,
+    maximum: u64,
+    written: u64,
+    exceeded: bool,
+}
+
+impl<W: std::io::Write> std::io::Write for DecodedCheckpointWriter<'_, W> {
+    fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
+        if self.exceeded || bytes.len() as u64 > self.maximum.saturating_sub(self.written) {
+            self.exceeded = true;
+            return Err(std::io::Error::new(
+                std::io::ErrorKind::FileTooLarge,
+                "S3 attribute checkpoint exceeds its decoded-byte limit",
+            ));
+        }
+        let written = self.inner.write(bytes)?;
+        self.written += written as u64;
+        Ok(written)
+    }
+
+    fn flush(&mut self) -> std::io::Result<()> {
+        self.inner.flush()
+    }
+}
+
 #[derive(Deserialize)]
 #[serde(deny_unknown_fields)]
 struct StoredCheckpoint {
@@ -632,25 +658,50 @@ pub(crate) fn prepare_checkpoint(
     commit: ObjectId,
     manifest: &Manifest,
 ) -> crate::Result<Option<PreparedCheckpoint>> {
+    prepare_checkpoint_with_decoded_limit(branch, commit, manifest, MAX_CHECKPOINT_DECODED_BYTES)
+}
+
+fn prepare_checkpoint_with_decoded_limit(
+    branch: &str,
+    commit: ObjectId,
+    manifest: &Manifest,
+    maximum_decoded_bytes: u64,
+) -> crate::Result<Option<PreparedCheckpoint>> {
     if !checkpoint_eligible(manifest) {
         return Ok(None);
     }
     let mut encoder = GzEncoder::new(Vec::new(), Compression::fast());
     {
+        let mut bounded = DecodedCheckpointWriter {
+            inner: &mut encoder,
+            maximum: maximum_decoded_bytes,
+            written: 0,
+            exceeded: false,
+        };
         // JSON emits many tiny fields. Buffer them before gzip so compressor
-        // setup and output-buffer clearing do not repeat for each field.
-        let mut buffered = BufWriter::with_capacity(64 * 1024, &mut encoder);
-        serde_json::to_writer(
-            &mut buffered,
-            &CheckpointPayload {
-                version: VERSION,
-                commit: commit.to_string(),
-                complete: manifest.complete,
-                objects: CheckpointObjects(&manifest.objects),
-            },
-        )
-        .map_err(|source| crate::Error::Attributes { source })?;
-        buffered.flush()?;
+        // setup and byte-limit accounting do not repeat for each field. The
+        // actual JSON limit also includes escaping, separators and its header.
+        let serialized: crate::Result<()> = (|| {
+            let mut buffered = BufWriter::with_capacity(64 * 1024, &mut bounded);
+            serde_json::to_writer(
+                &mut buffered,
+                &CheckpointPayload {
+                    version: VERSION,
+                    commit: commit.to_string(),
+                    complete: manifest.complete,
+                    objects: CheckpointObjects(&manifest.objects),
+                },
+            )
+            .map_err(|source| crate::Error::Attributes { source })?;
+            buffered.flush()?;
+            Ok(())
+        })();
+        if bounded.exceeded {
+            // Optional acceleration may be skipped; never publish a checkpoint
+            // that the bounded reader cannot reopen. Delta replay stays valid.
+            return Ok(None);
+        }
+        serialized?;
     }
     let bytes = encoder.finish()?;
     if bytes.len() as u64 > MAX_MANIFEST_BYTES {
@@ -1160,6 +1211,46 @@ mod tests {
             .read_to_end(&mut actual)
             .unwrap();
         assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn checkpoint_limits_actual_json_bytes_including_escaped_keys() {
+        let commit = ObjectId::empty_tree(gix_hash::Kind::Sha1);
+        let mut manifest = Manifest::empty_complete();
+        manifest.update(
+            format!("escaped/{}", "\"\\".repeat(64)),
+            Some(attributes("value")),
+        );
+        let payload = serde_json::to_vec(&CheckpointPayload {
+            version: VERSION,
+            commit: commit.to_string(),
+            complete: true,
+            objects: CheckpointObjects(&manifest.objects),
+        })
+        .unwrap();
+        let actual_bytes = payload.len() as u64;
+        let estimate = manifest.estimated_wire_bytes as u64;
+        assert!(estimate < actual_bytes);
+        let maximum = (actual_bytes + estimate) / 2;
+        assert!(
+            prepare_checkpoint_with_decoded_limit("refs/heads/main", commit, &manifest, maximum,)
+                .unwrap()
+                .is_none(),
+            "JSON escaping must not permit an unreadable oversized checkpoint"
+        );
+        let exact = prepare_checkpoint_with_decoded_limit(
+            "refs/heads/main",
+            commit,
+            &manifest,
+            actual_bytes,
+        )
+        .unwrap()
+        .unwrap();
+        let mut decoded = Vec::new();
+        GzDecoder::new(exact.bytes.as_ref())
+            .read_to_end(&mut decoded)
+            .unwrap();
+        assert_eq!(decoded, payload);
     }
 
     #[test]
