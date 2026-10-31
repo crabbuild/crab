@@ -673,6 +673,7 @@ where
                     let admitted = match open_capsule_repository_from_capture(
                         &capture,
                         footer_only,
+                        fetch.done && negotiated_haves.is_empty(),
                         runtime,
                         cancellation,
                     )
@@ -698,8 +699,12 @@ where
                     // Ref heads are mutable even while the root digest stays fixed.
                     // Promotion must reuse this session's capture or a concurrent
                     // push can invalidate an object already advertised to Git.
+                    // The capture pins that authority independently of the prior
+                    // repository's large lookup and visibility allocations.
+                    drop(fetch_snapshot.take());
                     let admitted = match open_capsule_repository_from_capture(
                         &capture,
+                        false,
                         false,
                         runtime,
                         cancellation,
@@ -939,10 +944,12 @@ fn merge_negotiated_haves(
 /// proof only when the exact one-pack stream can be sent directly. A
 /// multi-member clone uses complete captured metadata so protocol-v2 can
 /// consolidate authenticated source packs without retaining their payloads
-/// before cache lookup or the bounded pack downloader.
+/// before cache lookup or the bounded pack downloader. Choose that view before
+/// opening the repository so cold clones do not build two lookup states.
 async fn open_capsule_repository_from_capture(
     capture: &crab_read::capsule_protocol::CapsuleRepositoryCapture,
     footer_only: bool,
+    cold_clone: bool,
     runtime: &Arc<RemoteGitRuntime>,
     cancellation: &CancellationToken,
 ) -> Result<(
@@ -964,7 +971,12 @@ async fn open_capsule_repository_from_capture(
         let direct_pack = footer_view
             .layered_cold_clone_pack(layout, options.operation_limits().max_response_bytes)
             .map_err(CrabError::from)?;
-        (footer_view, direct_pack, true)
+        if cold_clone && direct_pack.is_none() {
+            drop(footer_view);
+            (capture.metadata_view(limits).await?, None, false)
+        } else {
+            (footer_view, direct_pack, true)
+        }
     } else {
         (capture.metadata_view(limits).await?, None, false)
     };
