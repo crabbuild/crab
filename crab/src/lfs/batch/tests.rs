@@ -484,8 +484,6 @@ fn local_object_path_format() {
     oid[0] = 0xab;
     oid[1] = 0xcd;
     let path = local_object_path_for(&dir, &oid);
-    let path_str = path.to_string_lossy();
     let hex = hex_encode(&oid);
-    assert!(path_str.contains("/objects/ab/cd/"));
-    assert!(path_str.ends_with(&hex));
+    assert_eq!(path, dir.join("objects").join("ab").join("cd").join(hex));
 }

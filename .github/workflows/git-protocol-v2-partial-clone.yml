@@ -259,6 +259,9 @@ jobs:
       - name: Run native cache lifecycle contracts
         run: cargo test -p crab-cache --features local-cache --locked
 
+      - name: Run native staging segment contracts
+        run: cargo test -p crab-staging --lib segment::tests --locked
+
       - name: Run native mirror and subprocess contracts
         run: >-
           cargo test -p crab --lib cmd::mirror --locked --no-default-features

@@ -1008,14 +1008,14 @@ mod tests {
         // Write the test file to a temp location.
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), data).unwrap();
-        let tmp_path = tmp.path().to_string_lossy().to_string();
+        let tmp_path = serde_json::to_string(tmp.path()).unwrap();
 
         // Phase 1: upload.
         let upload_input = format!(
             r#"{{"event":"init","operation":"upload","remote":"origin","concurrent":true,"concurrenttransfers":1}}"#,
         ) + "\n"
             + &format!(
-                r#"{{"event":"upload","oid":"{oid_hex}","size":{},"path":"{tmp_path}"}}"#,
+                r#"{{"event":"upload","oid":"{oid_hex}","size":{},"path":{tmp_path}}}"#,
                 data.len(),
             )
             + "\n"
@@ -1138,13 +1138,13 @@ mod tests {
 
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), data).unwrap();
-        let tmp_path = tmp.path().to_string_lossy().to_string();
+        let tmp_path = serde_json::to_string(tmp.path()).unwrap();
 
         let input = format!(
             r#"{{"event":"init","operation":"upload","remote":"origin","concurrent":true,"concurrenttransfers":1}}"#,
         ) + "\n"
             + &format!(
-                r#"{{"event":"upload","oid":"{oid_hex}","size":{},"path":"{tmp_path}"}}"#,
+                r#"{{"event":"upload","oid":"{oid_hex}","size":{},"path":{tmp_path}}}"#,
                 data.len(),
             )
             + "\n"
@@ -1211,15 +1211,13 @@ mod tests {
 
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), &data).unwrap();
-        let tmp_path = tmp.path().to_string_lossy().to_string();
+        let tmp_path = serde_json::to_string(tmp.path()).unwrap();
 
         // Upload the large file.
         let upload_input = format!(
             r#"{{"event":"init","operation":"upload","remote":"origin","concurrent":true,"concurrenttransfers":1}}"#,
         ) + "\n"
-            + &format!(
-                r#"{{"event":"upload","oid":"{oid_hex}","size":{size},"path":"{tmp_path}"}}"#,
-            )
+            + &format!(r#"{{"event":"upload","oid":"{oid_hex}","size":{size},"path":{tmp_path}}}"#,)
             + "\n"
             + r#"{"event":"terminate"}"#
             + "\n";
@@ -1338,19 +1336,19 @@ mod tests {
         let tmp2 = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp1.path(), data1).unwrap();
         std::fs::write(tmp2.path(), data2).unwrap();
-        let path1 = tmp1.path().to_string_lossy().to_string();
-        let path2 = tmp2.path().to_string_lossy().to_string();
+        let path1 = serde_json::to_string(tmp1.path()).unwrap();
+        let path2 = serde_json::to_string(tmp2.path()).unwrap();
 
         let input = format!(
             r#"{{"event":"init","operation":"upload","remote":"origin","concurrenttransfers":4}}"#,
         ) + "\n"
             + &format!(
-                r#"{{"event":"upload","oid":"{oid1_hex}","size":{},"path":"{path1}"}}"#,
+                r#"{{"event":"upload","oid":"{oid1_hex}","size":{},"path":{path1}}}"#,
                 data1.len()
             )
             + "\n"
             + &format!(
-                r#"{{"event":"upload","oid":"{oid2_hex}","size":{},"path":"{path2}"}}"#,
+                r#"{{"event":"upload","oid":"{oid2_hex}","size":{},"path":{path2}}}"#,
                 data2.len()
             )
             + "\n"
@@ -1590,11 +1588,11 @@ mod tests {
         std::fs::write(file.path(), data).unwrap();
         let input = format!(
             r#"{{"event":"init","operation":"upload"}}
-{{"event":"upload","oid":"{oid_hex}","size":{},"path":"{}"}}
+{{"event":"upload","oid":"{oid_hex}","size":{},"path":{}}}
 {{"event":"terminate"}}
 "#,
             data.len() + 1,
-            file.path().display()
+            serde_json::to_string(file.path()).unwrap()
         );
         let reader = BufReader::new(Cursor::new(input.into_bytes()));
         let output = SharedOutput::new();
@@ -1641,14 +1639,14 @@ mod tests {
         std::fs::write(file.path(), data).unwrap();
         let input = format!(
             r#"{{"event":"init","operation":"upload","concurrenttransfers":1}}
-{{"event":"upload","oid":"{oid_hex}","size":{},"path":"{}"}}
-{{"event":"upload","oid":"{oid_hex}","size":{},"path":"{}"}}
+{{"event":"upload","oid":"{oid_hex}","size":{},"path":{}}}
+{{"event":"upload","oid":"{oid_hex}","size":{},"path":{}}}
 {{"event":"terminate"}}
 "#,
             data.len(),
-            file.path().display(),
+            serde_json::to_string(file.path()).unwrap(),
             data.len(),
-            file.path().display()
+            serde_json::to_string(file.path()).unwrap()
         );
         let reader = BufReader::new(Cursor::new(input.into_bytes()));
         let output = SharedOutput::new();
@@ -1669,7 +1667,7 @@ mod tests {
         let store = test_store();
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), b"content").unwrap();
-        let path = tmp.path().to_string_lossy().to_string();
+        let path = serde_json::to_string(tmp.path()).unwrap();
 
         // OID with wrong length (not 64 chars).
         let bad_oid = "tooshort";
@@ -1677,7 +1675,7 @@ mod tests {
         let input = format!(
             r#"{{"event":"init","operation":"upload","remote":"origin","concurrenttransfers":1}}"#,
         ) + "\n"
-            + &format!(r#"{{"event":"upload","oid":"{bad_oid}","size":7,"path":"{path}"}}"#)
+            + &format!(r#"{{"event":"upload","oid":"{bad_oid}","size":7,"path":{path}}}"#)
             + "\n"
             + r#"{"event":"terminate"}"#
             + "\n";
@@ -1716,7 +1714,7 @@ mod tests {
         let store = test_store();
         let tmp = tempfile::NamedTempFile::new().unwrap();
         std::fs::write(tmp.path(), b"content").unwrap();
-        let path = tmp.path().to_string_lossy().to_string();
+        let path = serde_json::to_string(tmp.path()).unwrap();
 
         // 64 chars but contains non-hex characters.
         let bad_oid = "gggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggggg";
@@ -1724,7 +1722,7 @@ mod tests {
         let input = format!(
             r#"{{"event":"init","operation":"upload","remote":"origin","concurrenttransfers":1}}"#,
         ) + "\n"
-            + &format!(r#"{{"event":"upload","oid":"{bad_oid}","size":7,"path":"{path}"}}"#)
+            + &format!(r#"{{"event":"upload","oid":"{bad_oid}","size":7,"path":{path}}}"#)
             + "\n"
             + r#"{"event":"terminate"}"#
             + "\n";
