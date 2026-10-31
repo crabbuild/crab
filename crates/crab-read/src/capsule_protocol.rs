@@ -444,6 +444,10 @@ impl CapsuleRepositoryView {
             .try_fold(0_usize, |total, bytes| total.checked_add(bytes.len()));
         if self.capsule_run_bytes.is_empty()
             || retained_bytes.is_none_or(|bytes| bytes > REPACK_INLINE_FRONTIER_MAX_BYTES as usize)
+            || self
+                .capsule_run_pointers
+                .iter()
+                .any(|pointer| !self.capsule_run_bytes.contains_key(pointer.hash()))
         {
             return Ok(std::borrow::Cow::Borrowed(&self.capsules));
         }
@@ -4457,6 +4461,122 @@ enum ControlRead {
     Fetch,
 }
 
+/// Bound retained fetch bodies while favoring runs with more transactions per byte.
+/// Maintenance keeps its aggregate, all-or-none limit. The returned flags retain
+/// pointer order; selecting a body never changes control validation or application.
+fn inline_control_runs(
+    read: ControlRead,
+    runs: impl IntoIterator<Item = (u64, usize)>,
+) -> Vec<bool> {
+    let runs = runs.into_iter().collect::<Vec<_>>();
+    let mut inline = vec![false; runs.len()];
+    match read {
+        ControlRead::Fetch => {
+            let mut order = (0..runs.len()).collect::<Vec<_>>();
+            order.sort_by(|&left, &right| {
+                let (left_bytes, left_transactions) = runs[left];
+                let (right_bytes, right_transactions) = runs[right];
+                ((right_transactions as u128) * u128::from(left_bytes))
+                    .cmp(&((left_transactions as u128) * u128::from(right_bytes)))
+                    .then_with(|| left.cmp(&right))
+            });
+            let mut remaining = LAYERED_INLINE_FRONTIER_MAX_BYTES;
+            for index in order {
+                if let Some(next) = remaining.checked_sub(runs[index].0) {
+                    inline[index] = true;
+                    remaining = next;
+                }
+            }
+        }
+        ControlRead::Repack => {
+            if runs
+                .iter()
+                .try_fold(0_u64, |total, (size, _)| total.checked_add(*size))
+                .is_some_and(|total| total <= REPACK_INLINE_FRONTIER_MAX_BYTES)
+            {
+                inline.fill(true);
+            }
+        }
+        ControlRead::Complete | ControlRead::Git => {}
+    }
+    inline
+}
+
+#[cfg(test)]
+mod inline_control_tests {
+    use super::*;
+
+    #[test]
+    fn fetch_reads_compacted_runs_within_the_existing_body_budget() {
+        let mib = 1024 * 1024;
+        let mut runs = vec![(9 * mib, 1), (353 * mib, 500)];
+        runs.extend(std::iter::repeat_n((12 * mib, 500), 10));
+        runs.push((24 * 1024, 1));
+        let inline = inline_control_runs(ControlRead::Fetch, runs.iter().copied());
+        assert_eq!(inline, [vec![false, false], vec![true; 11]].concat());
+        let retained = runs
+            .iter()
+            .zip(&inline)
+            .filter(|(_, inline)| **inline)
+            .map(|((bytes, _), _)| bytes)
+            .sum::<u64>();
+        assert_eq!(retained, 120 * mib + 24 * 1024);
+        assert!(retained <= LAYERED_INLINE_FRONTIER_MAX_BYTES);
+    }
+
+    #[test]
+    fn fetch_selection_preserves_order_and_handles_exact_and_overflowing_sizes() {
+        let budget = LAYERED_INLINE_FRONTIER_MAX_BYTES;
+        assert_eq!(
+            inline_control_runs(ControlRead::Fetch, [(budget, 500)]),
+            [true]
+        );
+        assert_eq!(
+            inline_control_runs(
+                ControlRead::Fetch,
+                [(budget + 1, 500), (budget / 2, 1), (budget / 2, 1)]
+            ),
+            [false, true, true],
+        );
+        assert_eq!(
+            inline_control_runs(ControlRead::Fetch, [(budget, 1), (budget, 1)]),
+            [true, false],
+        );
+        assert_eq!(
+            inline_control_runs(
+                ControlRead::Fetch,
+                [(u64::MAX, usize::MAX), (u64::MAX, usize::MAX)]
+            ),
+            [false, false],
+        );
+        assert!(inline_control_runs(ControlRead::Fetch, []).is_empty());
+    }
+
+    #[test]
+    fn maintenance_and_git_control_keep_their_existing_body_policy() {
+        let budget = REPACK_INLINE_FRONTIER_MAX_BYTES;
+        assert_eq!(
+            inline_control_runs(ControlRead::Repack, [(budget / 2, 1), (budget / 2, 500)]),
+            [true, true],
+        );
+        for runs in [
+            vec![(budget, 1), (1, 500)],
+            vec![(u64::MAX, 1), (u64::MAX, 1)],
+        ] {
+            assert_eq!(
+                inline_control_runs(ControlRead::Repack, runs),
+                [false, false]
+            );
+        }
+        for read in [ControlRead::Complete, ControlRead::Git] {
+            assert_eq!(
+                inline_control_runs(read, [(0, 1), (1, 500)]),
+                [false, false]
+            );
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 enum CheckpointLoad {
     Complete,
@@ -4754,34 +4874,34 @@ async fn assemble_layered_control_view(
         elapsed_ms = started.elapsed().as_millis() as u64,
         "layered control checkpoint opened"
     );
-    // Tiny maintenance frontiers avoid serial footer/control reads while
-    // retaining at most 64 KiB across all runs. Larger maintenance frontiers
-    // keep their bodies cold regardless of each individual run's size.
-    let inline_maximum = if matches!(read, ControlRead::Repack) {
-        REPACK_INLINE_FRONTIER_MAX_BYTES
-    } else {
-        LAYERED_INLINE_FRONTIER_MAX_BYTES
-    };
-    let inline_frontier = (footer_only || matches!(read, ControlRead::Repack))
-        && pointers
+    let inline = inline_control_runs(
+        read,
+        pointers
             .iter()
-            .try_fold(0_u64, |total, pointer| total.checked_add(pointer.size()))
-            .is_some_and(|total| total <= inline_maximum);
-    let loaded = try_join_all(pointers.iter().map(|pointer| async {
-        if inline_frontier {
-            let run = load_run(router, pointer).await?;
-            let (control, capsules) = run.verified_controls()?;
-            Ok::<_, ReadError>((control, capsules, Some(run.bytes().clone())))
-        } else {
-            let (control, capsules) = if matches!(read, ControlRead::Git) {
-                crab_metadata::capsule_protocol::load_capsule_run_git_control(router, pointer)
-                    .await?
-            } else {
-                load_run_control(router, pointer).await?
-            };
-            Ok((control, capsules, None))
-        }
-    }))
+            .map(|pointer| (pointer.size(), pointer.transaction_ids().len())),
+    );
+    let loaded = try_join_all(
+        pointers
+            .iter()
+            .zip(inline)
+            .map(|(pointer, inline)| async move {
+                if inline {
+                    let run = load_run(router, pointer).await?;
+                    let (control, capsules) = run.verified_controls()?;
+                    Ok::<_, ReadError>((control, capsules, Some(run.bytes().clone())))
+                } else {
+                    let (control, capsules) = if matches!(read, ControlRead::Git) {
+                        crab_metadata::capsule_protocol::load_capsule_run_git_control(
+                            router, pointer,
+                        )
+                        .await?
+                    } else {
+                        load_run_control(router, pointer).await?
+                    };
+                    Ok((control, capsules, None))
+                }
+            }),
+    )
     .await?;
     let mut runs = BTreeMap::new();
     let mut capsule_run_bytes = BTreeMap::new();
@@ -5474,6 +5594,42 @@ mod tests {
         max_capsule_bytes: 1024 * 1024,
         max_frontier_bytes: 8 * 1024 * 1024,
     };
+
+    #[tokio::test]
+    async fn partial_retained_runs_do_not_become_complete_repack_input() {
+        let inner = Arc::new(InMemory::new());
+        seed_one_capsule(inner.clone(), None).await;
+        let router = StoreLayout::new(Store::new(inner), "repositories/test".to_owned());
+        let root = load_root(&router).await.unwrap();
+        let capture = CapsuleRepositoryCapture::from_root(router, root)
+            .await
+            .unwrap();
+        let mut view = capture.layered_control_view(TEST_LIMITS).await.unwrap();
+        assert!(matches!(
+            view.repack_capsules().unwrap(),
+            std::borrow::Cow::Owned(capsules) if capsules.len() == 1
+        ));
+
+        // Model another admitted source whose body was not selected for retention.
+        // The complete tiny cached run cannot stand in for this missing source.
+        let pointer = &view.capsule_run_pointers[0];
+        let uncached = CapsulePointer::new(
+            "f".repeat(64),
+            pointer.size(),
+            pointer.control_offset(),
+            pointer.control_size(),
+            pointer.footer_hash(),
+            pointer.level(),
+            pointer.transaction_ids().to_vec(),
+            pointer.newest_base_root_digest(),
+        )
+        .unwrap();
+        view.capsule_run_pointers.push(uncached);
+        assert!(matches!(
+            view.repack_capsules().unwrap(),
+            std::borrow::Cow::Borrowed(capsules) if capsules.is_empty()
+        ));
+    }
 
     #[derive(Default)]
     struct RecordingObserver {
@@ -6848,27 +7004,28 @@ mod tests {
                 &[layer.source_descriptor().unwrap()]
             );
             assert!(view.layered_checkpoint().unwrap().is_control_only());
-            let observations = observer.observations.lock().unwrap();
-            assert_eq!(
-                observations.iter().map(|read| read.bytes_read).sum::<u64>(),
-                root.bytes().len() as u64 + checkpoint.bytes().len() as u64
-                    - checkpoint.control_offset()
-            );
-            let operations = observations
-                .iter()
-                .filter(|observation| observation.outcome == StorageOutcome::Success)
-                .map(|observation| observation.operation)
-                .collect::<Vec<_>>();
-            assert_eq!(
-                operations,
-                vec![
-                    StorageOperation::Get,
-                    StorageOperation::List,
-                    StorageOperation::List,
-                    StorageOperation::Range
-                ]
-            );
-            drop(observations);
+            {
+                let observations = observer.observations.lock().unwrap();
+                assert_eq!(
+                    observations.iter().map(|read| read.bytes_read).sum::<u64>(),
+                    root.bytes().len() as u64 + checkpoint.bytes().len() as u64
+                        - checkpoint.control_offset()
+                );
+                let operations = observations
+                    .iter()
+                    .filter(|observation| observation.outcome == StorageOutcome::Success)
+                    .map(|observation| observation.operation)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    operations,
+                    vec![
+                        StorageOperation::Get,
+                        StorageOperation::List,
+                        StorageOperation::List,
+                        StorageOperation::Range
+                    ]
+                );
+            }
 
             let mut capture = CapsuleRepositoryCapture::from_root(
                 router.clone(),
