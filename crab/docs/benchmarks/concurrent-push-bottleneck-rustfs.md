@@ -33,7 +33,7 @@ The completed controls have zero failures. Conditional requests and sharing one 
 
 Live macOS `sample` call trees show RustFS workers waiting in `fcntl`, directory creation and rename operations. Two sampled caller offsets were `0x5df4bf0` and `0x8257160`. Disassembly of the installed binary, after accounting for its image load address, shows `mov w1, #0x33` immediately before `fcntl`; the latter function is identified as `std::fs::File::sync_all`. The local SDK and [Apple’s published header](https://github.com/apple-oss-distributions/xnu/blob/main/bsd/sys/fcntl.h) identify command 51 as `F_FULLFSYNC`, which flushes filesystem state and requests a media flush.
 
-This proves active full-flush work in the live write path. It does not separately quantify filesystem locks, metadata work and device-flush time, nor prove the number of flushes per PUT. The executable is pinned by SHA-256 in the [data file](concurrent-push-bottleneck-rustfs.json).
+This proves active full-flush work in the live write path. It does not separately quantify filesystem locks, metadata work and device-flush time, nor prove the number of flushes per PUT. The sampled RustFS executable was version `1.0.0-rc.1`.
 
 ## Why one client is fast and 50 wait
 

@@ -27,7 +27,7 @@ Medians pool both trials per variant. Throughput is successful measured pushes d
 | git | 10 | 160 | 915.8 ms | 1071.6 ms | -17.0% | 8.92 | 7.51 | -15.8% |
 | git | 50 | 600 | 3679.8 ms | 3704.9 ms | -0.7% | 11.58 | 11.66 | +0.7% |
 
-Per-trial medians, p95/p99, sample counts and binary/source hashes are retained in [the machine-readable results](concurrent-push-latency-rustfs.json). Interpret small changes alongside the spread between trials.
+Interpret small changes alongside the spread between trials.
 
 The 300 ms p50 target at 50 concurrent agents is not met. High-concurrency gains are small and variable; these runs do not establish a capacity increase or a higher concurrency limit.
 
@@ -66,4 +66,4 @@ New-ref creation, continuous unsynchronized writers, the previously slow standar
 
 Further work should measure ownership transfer during capture to avoid cloning large decoded ref heads, prove pointer-free introduced-object ranges before skipping redundant LFS discovery, and profile the durable publication path on a quiet host. These are opportunities, not measured improvements in this PR.
 
-The task retains the identical offline RustFS input, immutable commit plan, both binaries, paired runner, raw per-push/per-wave timings, resource logs, and physical audit outputs outside the source tree. Credentials are excluded from this report and its JSON.
+The task retains the identical offline RustFS input, immutable commit plan, both binaries, paired runner, raw per-push/per-wave timings, resource logs, and physical audit outputs outside the source tree. Credentials are excluded from this report.
