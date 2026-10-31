@@ -1410,9 +1410,14 @@ fn local_git_object_store_is_empty() -> bool {
     let Ok(git_dir) = super::discover::discover_common_git_dir() else {
         return false;
     };
+    local_git_object_store_is_empty_at(&git_dir)
+}
+
+fn local_git_object_store_is_empty_at(git_dir: &std::path::Path) -> bool {
     let objects = git_dir.join("objects");
     let Ok(entries) = std::fs::read_dir(&objects) else {
-        return true;
+        // Require a readable object database before probing clone optimizations.
+        return false;
     };
     let alternates = objects.join("info").join("alternates");
     if std::fs::read_to_string(alternates)
@@ -3872,6 +3877,44 @@ mod tests {
     use std::io::Cursor;
     use std::sync::MutexGuard;
     use tokio::io::{AsyncReadExt, BufReader, duplex};
+
+    #[test]
+    fn cold_clone_probe_requires_existing_object_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let git_dir = dir.path().join(".git");
+        assert!(!local_git_object_store_is_empty_at(&git_dir));
+        std::fs::create_dir(&git_dir).unwrap();
+        assert!(!local_git_object_store_is_empty_at(&git_dir));
+        std::fs::write(git_dir.join("objects"), b"not a directory").unwrap();
+        assert!(!local_git_object_store_is_empty_at(&git_dir));
+    }
+
+    #[test]
+    fn cold_clone_probe_allows_existing_empty_object_database() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("objects/pack")).unwrap();
+        std::fs::create_dir_all(dir.path().join("objects/info")).unwrap();
+        assert!(local_git_object_store_is_empty_at(dir.path()));
+    }
+
+    #[test]
+    fn cold_clone_probe_rejects_local_objects_and_alternates() {
+        let dir = tempfile::tempdir().unwrap();
+        let objects = dir.path().join("objects");
+        std::fs::create_dir_all(objects.join("pack")).unwrap();
+        std::fs::create_dir_all(objects.join("info")).unwrap();
+        let pack = objects.join("pack/input.pack");
+        std::fs::write(&pack, b"local pack").unwrap();
+        assert!(!local_git_object_store_is_empty_at(dir.path()));
+        std::fs::remove_file(pack).unwrap();
+        std::fs::create_dir(objects.join("ab")).unwrap();
+        let loose = objects.join("ab/object");
+        std::fs::write(&loose, b"local object").unwrap();
+        assert!(!local_git_object_store_is_empty_at(dir.path()));
+        std::fs::remove_file(loose).unwrap();
+        std::fs::write(objects.join("info/alternates"), b"alternate-objects\n").unwrap();
+        assert!(!local_git_object_store_is_empty_at(dir.path()));
+    }
 
     struct DuplexIo {
         reader: BufReader<std::io::Cursor<Vec<u8>>>,
