@@ -128,6 +128,9 @@ concurrency:
 env:
   CARGO_TERM_COLOR: always
   CARGO_TARGET_DIR: ${{ github.workspace }}/target/crab-protocol-v2
+  CARGO_PROFILE_DEV_DEBUG: 0
+  CARGO_PROFILE_TEST_DEBUG: 0
+  CARGO_INCREMENTAL: 0
   CRAB_RELEASE_ARCHIVE: crab-protocol-v2-linux-x86_64.tar.gz
   # Keep the producer/consumer name stable when GitHub reruns only failed jobs.
   # The release build is shared by every attempt of this workflow run.
@@ -149,6 +152,12 @@ jobs:
 
       - name: Install Linux system dependencies
         run: sudo apt-get update -y && sudo apt-get install -y libfuse3-dev
+
+      - name: Cache protocol test dependencies
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          prefix-key: crab-protocol-debug0-v1
+          workspaces: ". -> target/crab-protocol-v2"
 
       - name: Run protocol and reader tests
         env:
@@ -184,7 +193,7 @@ jobs:
           cargo test -p crab-auth --lib protected_push --locked --features crab-auth-client
           cargo test -p crab --lib git::index::tests --locked --features gix-transport
           cargo test -p crab --lib publication_recovery --locked --features gix-transport
-          cargo test -p crab --lib git::capsule_push::tests --locked --features gix-transport
+          cargo test -p crab --lib git::capsule_push::tests --locked --features gix-transport -- --nocapture
           cargo test -p crab-write --lib capsule_protocol:: --locked
           cargo test -p crab --lib git::remote_helper::tests::list_session_does_not_open_a_damaged_staging_index --locked --features gix-transport
           cargo test -p crab --lib git::remote_helper::tests::capsule_promisor_fetch_ --locked --features gix-transport
@@ -238,6 +247,12 @@ jobs:
       - name: Record native Git version
         run: git --version
 
+      - name: Cache protocol test dependencies
+        uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32
+        with:
+          prefix-key: crab-protocol-debug0-v1
+          workspaces: ". -> target/crab-protocol-v2"
+
       - name: Run native cache lifecycle contracts
         run: cargo test -p crab-cache --features local-cache --locked
 
@@ -267,7 +282,7 @@ jobs:
           cargo test -p crab --lib cmd::install::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
           cargo test -p crab --lib cmd::lfs::install::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
           cargo test -p crab --lib cmd::push::followtag_tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
-          cargo test -p crab --lib git::capsule_push::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib git::capsule_push::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport -- --nocapture
           cargo test -p crab --lib git::push_staging::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
           cargo test -p crab-staging --locked --test push_snapshot_guard --test publication_history_recovery
           cargo test -p crab-auth --lib protected_push --locked --features crab-auth-client
