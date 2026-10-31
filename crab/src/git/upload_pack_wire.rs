@@ -967,20 +967,21 @@ async fn open_capsule_repository_from_capture(
         max_capsule_bytes: maximum,
         max_frontier_bytes: maximum,
     };
-    let (mut view, direct_pack, tip_bound) = if footer_only {
-        let footer_view = capture.layered_control_view(limits).await?;
-        let direct_pack = footer_view
-            .layered_cold_clone_pack(layout, options.operation_limits().max_response_bytes)
-            .map_err(CrabError::from)?;
-        if cold_clone && direct_pack.is_none() {
-            drop(footer_view);
-            (capture.metadata_view(limits).await?, None, false)
+    let (mut view, direct_pack, tip_bound) =
+        if footer_only && (!cold_clone || capture.may_have_layered_cold_clone_packs()) {
+            let footer_view = capture.layered_control_view(limits).await?;
+            let direct_pack = footer_view
+                .layered_cold_clone_pack(layout, options.operation_limits().max_response_bytes)
+                .map_err(CrabError::from)?;
+            if cold_clone && direct_pack.is_none() {
+                drop(footer_view);
+                (capture.metadata_view(limits).await?, None, false)
+            } else {
+                (footer_view, direct_pack, true)
+            }
         } else {
-            (footer_view, direct_pack, true)
-        }
-    } else {
-        (capture.metadata_view(limits).await?, None, false)
-    };
+            (capture.metadata_view(limits).await?, None, false)
+        };
     tracing::debug!(
         footer_only,
         cold_clone,

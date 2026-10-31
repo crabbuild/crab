@@ -1371,15 +1371,18 @@ async fn dispatch_capabilities<W: tokio::io::AsyncWrite + Unpin>(
         let maximum = capsule_fetch_maximum(cache.config());
         let probe = async {
             let capture = capsule_read_capture(&mut cache.read_capture, router, root).await?;
+            if !capture.may_have_layered_cold_clone_packs() {
+                return Ok::<_, CrabError>(None);
+            }
             let view = open_capsule_fetch_view_minimal(capture, maximum, None).await?;
             let direct = view
                 .layered_cold_clone_packs(capture.layout(), maximum)
                 .map(|packs| packs.is_some());
-            Ok::<_, CrabError>((view, direct))
+            Ok::<_, CrabError>(Some((view, direct)))
         }
         .await;
         match probe {
-            Ok((view, direct)) => {
+            Ok(Some((view, direct))) => {
                 // Preserve the eligibility validator's fatal error boundary;
                 // optional probe misses must not hide descriptor corruption.
                 if direct? {
@@ -1390,6 +1393,7 @@ async fn dispatch_capabilities<W: tokio::io::AsyncWrite + Unpin>(
                     );
                 }
             }
+            Ok(None) => {}
             Err(error) => {
                 tracing::debug!(%error, "cold-clone capability probe unavailable; keeping protocol-v2");
             }

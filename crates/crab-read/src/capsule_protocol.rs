@@ -134,6 +134,32 @@ impl CapsuleRepositoryCapture {
         &self.layout
     }
 
+    /// Whether this capture may admit a direct layered cold clone.
+    ///
+    /// A negative answer selects complete fetch admission without opening a
+    /// discarded control view. A positive answer still requires every existing
+    /// pack descriptor, visibility and dependency check.
+    #[must_use]
+    pub fn may_have_layered_cold_clone_packs(&self) -> bool {
+        let root = self.root.record().root();
+        if root.checkpoint().is_none() {
+            return true;
+        }
+        // Validated ref states bind their position to the newest frontier
+        // transaction. A newer visible position therefore leaves a suffix
+        // that checkpoint packs alone cannot cover.
+        root.capsule_frontier().is_empty()
+            && self.heads.iter().all(|head| {
+                head.visible(&self.active)
+                    .transaction_id()
+                    .is_none_or(|transaction| {
+                        root.compacted_ref_transactions()
+                            .get(head.ref_name())
+                            .is_some_and(|compacted| compacted == transaction)
+                    })
+            })
+    }
+
     /// Materialize payload-free refs from the captured heads.
     pub fn ref_view(&self) -> Result<CapsuleRefView> {
         let visible =
@@ -6764,7 +6790,7 @@ mod tests {
                 .root()
                 .install_checkpoint(
                     current.record().digest(),
-                    checkpoint_pointer,
+                    checkpoint_pointer.clone(),
                     Some(history.pointer().unwrap()),
                 )
                 .unwrap();
@@ -6821,6 +6847,97 @@ mod tests {
                     StorageOperation::Range
                 ]
             );
+            drop(observations);
+
+            let mut capture = CapsuleRepositoryCapture::from_root(
+                router.clone(),
+                load_root(&router).await.unwrap(),
+            )
+            .await
+            .unwrap();
+            observer.observations.lock().unwrap().clear();
+            assert!(capture.may_have_layered_cold_clone_packs());
+            let base = crab_metadata::capsule_protocol::CapsuleRefHead::from_root(
+                "refs/heads/main",
+                capture.root.record().root().ref_epoch().to_owned(),
+                Some("2".repeat(40)),
+                None,
+            )
+            .unwrap();
+            capture.heads = vec![base.clone()];
+            assert!(capture.may_have_layered_cold_clone_packs());
+            let prior = current.record().root().capsule_frontier()[0].clone();
+            let compacted_root = current
+                .record()
+                .root()
+                .install_ref_checkpoint(
+                    current.record().digest(),
+                    checkpoint_pointer,
+                    history.pointer().unwrap(),
+                    current.record().root().refs().clone(),
+                    current.record().root().peeled_refs().clone(),
+                    BTreeMap::from([(
+                        "refs/heads/main".to_owned(),
+                        prior.transaction_ids()[0].clone(),
+                    )]),
+                )
+                .unwrap();
+            capture.root = current
+                .committed_successor(
+                    RootRecord::encode(compacted_root).unwrap(),
+                    current.etag().clone(),
+                )
+                .unwrap();
+            let compacted = base
+                .successor_state(
+                    &capture.active,
+                    Some("2".repeat(40)),
+                    None,
+                    prior.transaction_ids()[0].clone(),
+                    vec![prior.clone()],
+                )
+                .unwrap();
+            capture.heads = vec![base.commit(compacted).unwrap()];
+            assert!(capture.may_have_layered_cold_clone_packs());
+            let next_id = "7".repeat(64);
+            let next = CapsulePointer::new(
+                prior.hash(),
+                prior.size(),
+                prior.control_offset(),
+                prior.control_size(),
+                prior.footer_hash(),
+                prior.level(),
+                vec![next_id.clone()],
+                prior.newest_base_root_digest(),
+            )
+            .unwrap();
+            for oid in [None, Some("3".repeat(40))] {
+                let state = base
+                    .successor_state(
+                        &BTreeSet::new(),
+                        oid,
+                        None,
+                        next_id.clone(),
+                        vec![next.clone()],
+                    )
+                    .unwrap();
+                capture.heads = vec![base.commit(state.clone()).unwrap()];
+                capture.active.clear();
+                assert!(!capture.may_have_layered_cold_clone_packs());
+                let activation = "6".repeat(64);
+                capture.heads = vec![
+                    base.prepare(
+                        base.visible(&BTreeSet::new()).clone(),
+                        activation.clone(),
+                        state,
+                    )
+                    .unwrap(),
+                ];
+                assert!(capture.may_have_layered_cold_clone_packs());
+                capture.active.insert(activation);
+                assert!(!capture.may_have_layered_cold_clone_packs());
+            }
+            assert!(observer.observations.lock().unwrap().is_empty());
         }
     }
 
