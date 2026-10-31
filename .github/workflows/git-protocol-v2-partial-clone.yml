@@ -233,6 +233,9 @@ jobs:
     name: Protocol contract (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
     strategy:
       fail-fast: false
       matrix:
