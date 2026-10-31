@@ -998,10 +998,19 @@ async fn consolidate_layered_suffix_with_policy(
         delta_base_ids.extend(required_bases);
         read_layered_delta_bases(layout, view, &delta_base_ids, maximum_bytes, cancel).await?
     };
+    // Compressed-only maintenance runs beside foreground writes. One index
+    // worker avoids competing with their CPU preparation pool; explicit
+    // foreground maintenance keeps its usual parallelism.
+    let index_concurrency = if compressed_only {
+        1
+    } else {
+        std::thread::available_parallelism().map_or(1, |parallelism| parallelism.get().min(8))
+    };
     tracing::info!(
         phase = "base_resolution",
         declared_bases,
         inflated_bases = delta_bases.len(),
+        index_workers = index_concurrency,
         bytes = verified_source_bytes,
         elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
         "Git checkpoint phase completed"
@@ -1011,8 +1020,6 @@ async fn consolidate_layered_suffix_with_policy(
             .checked_add(source.size)
             .ok_or(CheckpointError::AccountingOverflow)
     })?;
-    let index_concurrency =
-        std::thread::available_parallelism().map_or(1, |parallelism| parallelism.get().min(8));
     let worker_cancel = cancel.clone();
     let packs = tokio::task::spawn_blocking(move || {
         let replacement = crab_git::repack::consolidate_committed_pack_suffix_with_delta_bases(

@@ -1472,7 +1472,7 @@ jobs:
                           row["timestamp_unix_seconds"] = datetime.fromisoformat(
                               timestamp[1].replace("Z", "+00:00")
                           ).timestamp()
-                      for field in ("objects", "bytes", "commits", "pack_bytes_read", "pack_bytes_written", "declared_bases", "inflated_bases", "required_bytes", "available_bytes", "retained"):
+                      for field in ("objects", "bytes", "commits", "pack_bytes_read", "pack_bytes_written", "declared_bases", "inflated_bases", "index_workers", "required_bytes", "available_bytes", "retained"):
                           value = re.search(rf'\b{field}=([0-9]+)', line)
                           if value:
                               row[field] = int(value[1])
