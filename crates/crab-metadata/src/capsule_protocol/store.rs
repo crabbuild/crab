@@ -16,6 +16,9 @@ use crate::error::Result;
 mod tests;
 
 #[cfg(test)]
+mod ref_capture_tests;
+
+#[cfg(test)]
 mod catalog_order_tests;
 
 /// A verified stored root and the provider token protecting its next update.
@@ -520,38 +523,69 @@ pub async fn capture_ref_heads(
     router: &StoreLayout<Store>,
     root: &super::RepositoryRoot,
 ) -> Result<(Vec<CapsuleRefHead>, BTreeSet<String>)> {
+    // Retain only the preceding attempt's bodies. A provider identity from the
+    // next listing must still match before a body can be reused. Empty tokens
+    // and S3's mutable null version do not identify content; always GET those
+    // bodies again unless an ETag identifies them. Activations are never cached.
+    let mut previous = BTreeMap::<object_store::path::Path, (CapsuleRefHead, ETag)>::new();
     for _ in 0..8 {
         let before = list_ref_head_objects(router).await?;
         let head_router = router.clone();
+        let cached_heads = &previous;
         let loaded = futures_util::stream::iter(before.iter().cloned().map(move |object| {
             let router = head_router.clone();
+            let cached = cached_heads
+                .get(&object.location)
+                .filter(|(_, etag)| {
+                    (object.e_tag.as_deref().is_some_and(|etag| !etag.is_empty())
+                        || object
+                            .version
+                            .as_deref()
+                            .is_some_and(|version| !version.is_empty() && version != "null"))
+                        && listed_version_matches(&object, etag)
+                })
+                .cloned();
             async move {
-                let (bytes, etag) = router.store().get_with_etag(&object.location).await?;
-                let head = CapsuleRefHead::decode(&bytes)?;
-                if router.capsule_ref_head_path(&capsule_ref_name_key(head.ref_name()))
-                    != object.location
-                {
-                    return Err(corrupt(
-                        &object.location,
-                        "capsule ref-head key does not match its ref name",
-                    ));
-                }
-                Ok::<_, MetadataError>((head, listed_version_matches(&object, &etag)))
+                let (head, etag) = match cached {
+                    Some(cached) => cached,
+                    None => {
+                        let (bytes, etag) = router.store().get_with_etag(&object.location).await?;
+                        let head = CapsuleRefHead::decode(&bytes)?;
+                        if router.capsule_ref_head_path(&capsule_ref_name_key(head.ref_name()))
+                            != object.location
+                        {
+                            return Err(corrupt(
+                                &object.location,
+                                "capsule ref-head key does not match its ref name",
+                            ));
+                        }
+                        (head, etag)
+                    }
+                };
+                Ok::<_, MetadataError>((object, head, etag))
             }
         }))
         .buffer_unordered(32)
         .try_collect::<Vec<_>>()
         .await?;
-        if loaded.iter().any(|(_, matched)| !matched) {
+        let matched = loaded
+            .iter()
+            .all(|(object, _, etag)| listed_version_matches(object, etag));
+        previous = loaded
+            .into_iter()
+            .map(|(object, head, etag)| (object.location, (head, etag)))
+            .collect();
+        if !matched {
             continue;
         }
         // Restore retires old ref heads without deleting them. Filter before
         // resolving activations: retired records cannot authorize catalog data
         // or require dependencies that no longer belong to this root's epoch.
-        let mut heads = loaded
-            .into_iter()
+        let mut heads = previous
+            .values()
             .map(|(head, _)| head)
             .filter(|head| head.ref_epoch() == root.ref_epoch())
+            .cloned()
             .collect::<Vec<_>>();
         heads.sort_unstable_by(|left, right| left.ref_name().cmp(right.ref_name()));
         let active = resolve_referenced_activations(router, &heads).await?;

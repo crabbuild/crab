@@ -381,8 +381,6 @@ pub(super) fn is_missing_object_error(stderr: &str) -> bool {
 /// Default maximum concurrent xorb uploads.
 const DEFAULT_UPLOAD_CONCURRENCY: usize = 16;
 
-/// Default concurrency for HEAD-check resume (step 6).
-
 /// Default retry budget for transient HEAD/LIST failures in step 6.
 ///
 /// Matches the `Config::max_retries` default; a standalone constant keeps

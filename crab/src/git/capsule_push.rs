@@ -22,7 +22,7 @@ use crate::git::push::{
 };
 use crate::git::remote_helper::PushSpec;
 
-const POINTER_SCAN_ALLOCATION_BYTES: usize = 64 * 1024 * 1024;
+const LOCAL_OBJECT_ALLOCATION_BYTES: usize = 64 * 1024 * 1024;
 
 /// Publish one remote-helper push batch through per-ref capsule heads.
 ///
@@ -965,39 +965,36 @@ fn has_direct_parent(git_dir: &Path, old_oid: &str, new_oid: &str) -> bool {
     ) else {
         return false;
     };
-    let old_commit = format!("{old_oid}^{{commit}}");
-    let old_exists = crab_git::raw_object_command(git_dir)
-        .args(["cat-file", "-e", &old_commit])
-        .env("GIT_NO_LAZY_FETCH", "1")
-        .env("GIT_ALLOW_PROTOCOL", "")
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .status();
-    if !old_exists.is_ok_and(|status| status.success()) {
-        return false;
-    }
-    let new_oid = new_oid.to_string();
-    let output = crab_git::raw_object_command(git_dir)
-        .args(["rev-list", "--parents", "-n", "1", &new_oid])
-        .env("GIT_NO_LAZY_FETCH", "1")
-        .env("GIT_ALLOW_PROTOCOL", "")
-        .output();
-    let Ok(output) = output else {
+    // Read physical objects directly: no replacement refs, grafts, shallow
+    // boundary or lazy fetch may manufacture the edge used by admission.
+    let Ok(objects) = gix_odb::at_opts(
+        git_dir.join("objects"),
+        [],
+        gix_odb::store::init::Options {
+            alloc_limit_bytes: Some(LOCAL_OBJECT_ALLOCATION_BYTES),
+            ..Default::default()
+        },
+    ) else {
         return false;
     };
-    if !output.status.success() {
-        return false;
-    }
-    let Ok(output) = String::from_utf8(output.stdout) else {
+    let mut buffer = Vec::new();
+    let Ok(Some(parent)) = objects.try_find(&old_oid, &mut buffer) else {
         return false;
     };
-    let mut fields = output.split_whitespace();
-    if fields.next() != Some(new_oid.as_str()) {
+    if parent.kind != gix_object::Kind::Commit
+        || parent.verify_checksum(&old_oid).is_err()
+        || gix_object::CommitRef::from_bytes(parent.data, gix_hash::Kind::Sha1).is_err()
+    {
         return false;
     }
-    fields
-        .filter_map(|parent| gix_hash::ObjectId::from_hex(parent.as_bytes()).ok())
-        .any(|parent| parent == old_oid)
+    let Ok(Some(child)) = objects.try_find(&new_oid, &mut buffer) else {
+        return false;
+    };
+    if child.kind != gix_object::Kind::Commit || child.verify_checksum(&new_oid).is_err() {
+        return false;
+    }
+    gix_object::CommitRef::from_bytes(child.data, gix_hash::Kind::Sha1)
+        .is_ok_and(|commit| commit.parents().any(|parent| parent == old_oid))
 }
 
 fn validate_candidate_namespace(
@@ -1127,25 +1124,13 @@ async fn prepare_generated_git_packs(
         if let Some(objects) = &mut visibility_objects {
             objects.extend(object_ids.iter().copied());
         }
-        let kinds = crab_git::object_kinds_from_git_dir(git_dir, &object_ids)?;
-        pointers.extend(collect_pointers(git_dir, &object_ids, &kinds)?);
-        let ordered_kinds = object_ids
-            .iter()
-            .map(|oid| {
-                kinds
-                    .get(oid)
-                    .copied()
-                    .ok_or_else(|| CrabError::CorruptObject {
-                        path: generated.pack_path.display().to_string(),
-                        reason: format!("Git object-kind query omitted {oid}"),
-                    })
-            })
-            .collect::<Result<Vec<_>>>()?;
+        let inventory = inspect_generated_objects(git_dir, &object_ids)?;
+        pointers.extend(inventory.pointers);
         let checksum =
             gix_hash::ObjectId::from_hex(installed.git_sha1.as_bytes()).map_err(|error| {
                 CrabError::Internal(format!("generated pack checksum is invalid: {error}"))
             })?;
-        let locator = crab_git::pack_locator::encode_pack_kind_metadata(checksum, &ordered_kinds)
+        let locator = crab_git::pack_locator::encode_pack_kind_metadata(checksum, &inventory.kinds)
             .map_err(crab_git::pack::PackError::from)?;
         packs.push(crab_metadata::capsule_protocol::CapsuleGitPack::new(
             Bytes::from(std::fs::read(
@@ -1182,36 +1167,43 @@ fn locally_available_remote_tips(
         .collect())
 }
 
-fn collect_pointers(
+struct GeneratedObjectInventory {
+    kinds: Vec<gix_object::Kind>,
+    pointers: Vec<crab_types::pointer::Pointer>,
+}
+
+// Native index-pack has already validated the generated pack. Inspect local
+// physical headers once for its ordered locator kinds and small pointer blobs.
+fn inspect_generated_objects(
     git_dir: &Path,
     object_ids: &[gix_hash::ObjectId],
-    kinds: &HashMap<gix_hash::ObjectId, gix_object::Kind>,
-) -> Result<Vec<crab_types::pointer::Pointer>> {
+) -> Result<GeneratedObjectInventory> {
     let objects = gix_odb::at_opts(
         git_dir.join("objects"),
         [],
         gix_odb::store::init::Options {
-            alloc_limit_bytes: Some(POINTER_SCAN_ALLOCATION_BYTES),
+            alloc_limit_bytes: Some(LOCAL_OBJECT_ALLOCATION_BYTES),
             ..Default::default()
         },
     )
     .map_err(|error| CrabError::Internal(format!("failed to open local Git objects: {error}")))?;
     let mut buffer = Vec::new();
     let mut pointers = Vec::new();
-    for oid in object_ids
-        .iter()
-        .filter(|oid| kinds.get(*oid) == Some(&gix_object::Kind::Blob))
-    {
+    let mut kinds = Vec::with_capacity(object_ids.len());
+    for oid in object_ids {
         let header = objects
             .try_header(oid)
             .map_err(|error| {
-                CrabError::Internal(format!("failed to inspect Git blob {oid}: {error}"))
+                CrabError::Internal(format!("failed to inspect Git object {oid}: {error}"))
             })?
             .ok_or_else(|| CrabError::CorruptObject {
                 path: git_dir.display().to_string(),
                 reason: format!("generated pack object {oid} is missing locally"),
             })?;
-        if header.size > crab_types::pointer::MAX_POINTER_SIZE as u64 {
+        kinds.push(header.kind);
+        if header.kind != gix_object::Kind::Blob
+            || header.size > crab_types::pointer::MAX_POINTER_SIZE as u64
+        {
             continue;
         }
         let data = objects
@@ -1232,7 +1224,7 @@ fn collect_pointers(
             pointers.push(pointer);
         }
     }
-    Ok(pointers)
+    Ok(GeneratedObjectInventory { kinds, pointers })
 }
 
 fn map_push_pack_error(error: CrabError) -> CrabError {
