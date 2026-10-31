@@ -1409,7 +1409,13 @@ fn persist_verified_temp(
             verified_stat.len
         )));
     }
-    let file = tmp.persist(dest).map_err(|e| e.error)?;
+    // Rust's rename supports replacing an open destination on Windows.
+    // Keep tempfile's Windows attribute normalization, and retain cleanup
+    // ownership until the atomic replacement succeeds.
+    let mut temporary_path = tempfile::TempPath::try_from_path(tmp.path().to_path_buf())?;
+    let (file, _) = tmp.keep().map_err(|error| error.error)?;
+    std::fs::rename(&temporary_path, dest)?;
+    temporary_path.disable_cleanup(true);
     published_write(&file, verified_stat)
 }
 
@@ -5648,6 +5654,46 @@ mod tests {
         assert!(content == vec![0xAA; 65536] || content == vec![0xBB; 65536]);
         assert!(proofs.contains(&current));
         assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn atomic_write_replaces_open_destination_and_keeps_its_descriptor_proof() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("model.bin");
+        let original = b"previous verified content";
+        std::fs::write(&dest, original).unwrap();
+        let mut previous = std::fs::File::open(&dest).unwrap();
+        let previous_stat =
+            crate::cmd::stream_stage::VerifiedIndexStat::from_file(&previous).unwrap();
+        let replacement = vec![0xAA; 65536];
+
+        let proof = atomic_write_with_progress(&dest, &replacement, None).unwrap();
+
+        let mut previous_content = Vec::new();
+        std::io::Read::read_to_end(&mut previous, &mut previous_content).unwrap();
+        assert_eq!(previous_content, original);
+        assert_eq!(std::fs::read(&dest).unwrap(), replacement);
+        assert_ne!(proof, previous_stat);
+        assert_eq!(
+            Some(proof),
+            crate::cmd::stream_stage::VerifiedIndexStat::from_path_no_follow(&dest)
+        );
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+    }
+
+    #[test]
+    fn atomic_write_failed_replacement_cleans_only_its_temporary_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let dest = dir.path().join("model.bin");
+        std::fs::create_dir(&dest).unwrap();
+        let original = dest.join("original");
+        std::fs::write(&original, b"preserved").unwrap();
+
+        assert!(atomic_write_with_progress(&dest, b"replacement", None).is_err());
+
+        assert_eq!(std::fs::read(&original).unwrap(), b"preserved");
+        assert_eq!(std::fs::read_dir(dir.path()).unwrap().count(), 1);
+        assert_eq!(std::fs::read_dir(&dest).unwrap().count(), 1);
     }
 
     #[cfg(unix)]
