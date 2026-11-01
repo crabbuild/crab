@@ -1,9 +1,9 @@
 # Crab v2 team and large-file qualification
 
-Status: **5,000-commit cold readback and large-file byte checks pass; complete
-repository health and team-scale performance are not qualified**. The final
-read-only object-store fsck failed with three errors; diagnostic classification
-is pending.
+Status: **5,000-commit cold readback and large-file byte checks pass; team-scale
+performance is not qualified**. The complete object-store audit found three
+expired read-admission leases left by interrupted tests, with no Git-object or
+data-chain findings. Built-in recovery of those leases is being verified.
 
 ## Scope and provenance
 
@@ -47,7 +47,8 @@ the user's manual-demo data. No bucket-wide Crab GC was invoked.
 | Independent final consumer mode | Four source-backed clients, three commits each: 19 checks pass | `cold-final-driver-smoke/artifacts/report.json` |
 | 1,000 developer branch publications | All 1,000 acknowledged; later direct-origin audit matches every exact source tip | `medium-team-1000/artifacts/report.json`, `team-1000-ack-audit.json` |
 | Four additional rounds | All 4,000 updates pass; independent cold clone matches 1,000 final tips and files, passes strict Git fsck, and contains all 15,001 baseline/developer commits | `team-5000-direct/artifacts/report.json` |
-| Complete team object-store audit | Failed with three errors, zero repairs and zero repair failures. The count-only JSON receipt does not classify the issues; a JSONL diagnostic run retains that missing evidence | `team-final-fsck-retry.json`, `team-final-fsck-retry-exit.json` |
+| Complete team object-store audit | Three expired read-admission leases; no Git-object or data-chain findings. Both audits report failure with zero repairs. Recovery remains a separate check | `team-final-fsck-retry.json`, `team-fsck-diagnostic.jsonl` |
+| Bounded-reader follow-up, 64 clients | All 140 checks pass: 64 publications, 64 updates, concurrent protocol-v2 readbacks/pulls and fsck; uses the follow-up binary identified below | `bounded-frontier-64/artifacts/report.json` |
 | Concurrent 1,000-client readback | Failed; queued work stopped after repeated real transfer failures. It is not a complete 5,000-commit pass | `medium-team-1000/artifacts/report.json` |
 | Parallel 1,000-client preparation | Failed on two remote-root GETs; no developer branches published in this attempt | `medium-team-1000-parallel/artifacts/report.json` |
 | Direct single-branch read at 1,000 refs | Correct bytes and protocol v2; fetch took 256.654 seconds | `medium-team-1000-direct/artifacts/report.json` |
@@ -107,6 +108,25 @@ after it across complete, metadata, Git and fetch views, including lazy
 transition materialization. All 63 targeted capsule tests pass. This limits
 active work; it does not eliminate retained full-view memory, history-byte
 amplification or the remaining team-capacity qualification gaps.
+
+The follow-up also preserves `Send` across the buffered read futures; the
+regression asserts that contract in both feature profiles. Crate lint and the
+private FUSE/NFS `make install` pass at `2a8dfa31e0b`. Its binary SHA-256 is
+`c64ea71f386680362eea30806996269b10ab293ca4502bd67e04b5bdffc763a1`;
+`bounded-frontier-build-retry-report.json` records the build receipt. Its live
+64-client smoke passes all 140 checks. The same 5,001-run team audit was observed
+with 32 TCP sockets (`team-fsck-bounded-resource-observation.json`); this is a
+point sample, not a peak-memory or latency result. Full team-store recovery
+for that binary remains in progress.
+
+The team fixture still has generation-zero compacted authority with no
+checkpoint; its refs live in per-ref heads (`team-root-shape.json`).
+`crab/src/git/upload_pack_wire.rs::serve_admitted` gates the ordinary tip-bound
+fetch path on checkpoint presence, so this fixture opens complete metadata.
+The classic helper's `fetch_capsule_packs` also treats an absent checkpoint as
+a full-install case. Their contribution to read cost needs a shared-path fix
+and a controlled before/after measurement; the concurrency bound alone does
+not resolve it.
 
 Kubernetes has 141,757 reachable commits and a 1.30 GiB packed ODB. It passes
 full strict Git fsck with no diagnostics; source HEAD/worktree status are
