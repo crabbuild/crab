@@ -19,6 +19,8 @@ use crate::push_lock::{
     store_error, update,
 };
 
+#[cfg(test)]
+mod renewal_tests;
 mod upgrade;
 pub use upgrade::upgrade_gc_fence;
 
@@ -666,8 +668,6 @@ impl GcFenceLease {
                 holder: self.inner.holder.clone(),
             });
         }
-        let now =
-            backend_unix_time(&self.inner.store, &Path::from(self.inner.path.as_str())).await?;
         let mut etag = self.inner.etag.lock().await;
         let Some(current_etag) = etag.clone() else {
             return Err(CoordinationError::GcFenceLost {
@@ -675,53 +675,55 @@ impl GcFenceLease {
                 holder: self.inner.holder.clone(),
             });
         };
-        let (body, observed_etag) =
-            get_with_version(&self.inner.store, &Path::from(self.inner.path.as_str()))
-                .await
-                .map_err(|source| store_error(&self.inner.path, source))?;
-        let mut state = deserialize_state(&self.inner.path, &body)?;
-        state.validate(&self.inner.path)?;
-        if state.incarnation != self.inner.incarnation
-            || (self.inner.mode == GcFenceMode::Sweep && state.epoch != self.inner.epoch)
-        {
-            return Err(CoordinationError::GcFenceLost {
-                domain: self.inner.domain.clone(),
-                holder: self.inner.holder.clone(),
-            });
-        }
-        if !replace_holder_expiry(
-            &mut state,
-            &self.inner.holder,
-            self.inner.mode,
-            now,
-            self.inner.ttl,
-        ) {
-            return Err(CoordinationError::GcFenceLost {
-                domain: self.inner.domain.clone(),
-                holder: self.inner.holder.clone(),
-            });
-        }
-        let body = serialize_state(&self.inner.path, &state)?;
-        let new_etag = match update(
-            &self.inner.store,
-            &Path::from(self.inner.path.as_str()),
-            body,
-            observed_etag,
-        )
-        .await
-        {
-            Ok(etag) => etag,
-            Err(object_store::Error::AlreadyExists { .. })
-            | Err(object_store::Error::Precondition { .. }) => {
-                return Err(CoordinationError::CasConflict {
-                    path: self.inner.path.clone(),
-                    expected_etag: current_etag.e_tag,
+        // Other shared writers legitimately change this record. Retry their
+        // CAS collisions with fresh backend time and authority; reusing the
+        // old body could erase a holder or resurrect an expired claim.
+        for _ in 0..GC_FENCE_MAX_CAS_ATTEMPTS {
+            let now =
+                backend_unix_time(&self.inner.store, &Path::from(self.inner.path.as_str())).await?;
+            let (body, observed_etag) =
+                get_with_version(&self.inner.store, &Path::from(self.inner.path.as_str()))
+                    .await
+                    .map_err(|source| store_error(&self.inner.path, source))?;
+            let mut state = deserialize_state(&self.inner.path, &body)?;
+            state.validate(&self.inner.path)?;
+            if state.incarnation != self.inner.incarnation
+                || (self.inner.mode == GcFenceMode::Sweep && state.epoch != self.inner.epoch)
+                || !replace_holder_expiry(
+                    &mut state,
+                    &self.inner.holder,
+                    self.inner.mode,
+                    now,
+                    self.inner.ttl,
+                )
+            {
+                return Err(CoordinationError::GcFenceLost {
+                    domain: self.inner.domain.clone(),
+                    holder: self.inner.holder.clone(),
                 });
             }
-            Err(source) => return Err(store_error(&self.inner.path, source)),
-        };
-        *etag = Some(new_etag);
-        Ok(())
+            let body = serialize_state(&self.inner.path, &state)?;
+            match update(
+                &self.inner.store,
+                &Path::from(self.inner.path.as_str()),
+                body,
+                observed_etag,
+            )
+            .await
+            {
+                Ok(new_etag) => {
+                    *etag = Some(new_etag);
+                    return Ok(());
+                }
+                Err(object_store::Error::AlreadyExists { .. })
+                | Err(object_store::Error::Precondition { .. }) => continue,
+                Err(source) => return Err(store_error(&self.inner.path, source)),
+            }
+        }
+        Err(CoordinationError::CasConflict {
+            path: self.inner.path.clone(),
+            expected_etag: current_etag.e_tag,
+        })
     }
 
     /// Releases this holder with a holder-checked CAS. Releasing an already

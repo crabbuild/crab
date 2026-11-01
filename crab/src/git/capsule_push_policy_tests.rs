@@ -571,6 +571,89 @@ async fn shallow_incremental_push_reuses_complete_remote_ancestry() {
     assert_eq!(std::fs::read(shallow_file).unwrap(), boundary);
 }
 
+#[tokio::test]
+async fn new_branch_reuses_default_head_objects_after_source_deletion() {
+    for (force_full_graph, hidden, source_ref, expected_objects) in [
+        (false, false, "refs/heads/trunk", 3_u64),
+        (true, false, "refs/heads/trunk", 9),
+        (false, true, "refs/heads/trunk", 9),
+        (false, false, "refs/heads/other", 9),
+    ] {
+        let fixture = PolicyFixture::new("refs/heads/trunk").await;
+        let first = commit(fixture.repository.path(), "first");
+        commit(fixture.repository.path(), "second");
+        assert!(
+            fixture
+                .push(&[policy_spec("HEAD", source_ref)], PushConfig::default())
+                .await
+                .unwrap()
+                .all_ok()
+        );
+        let limits = crab_read::capsule_protocol::CapsuleReadLimits {
+            max_capsule_bytes: 16 * 1024 * 1024,
+            max_frontier_bytes: 16 * 1024 * 1024,
+        };
+        let before = crab_read::capsule_protocol::open_view(&fixture.layout, limits)
+            .await
+            .unwrap();
+        let old_capsules = before
+            .capsules()
+            .iter()
+            .map(|capsule| capsule.hash().to_owned())
+            .collect::<BTreeSet<_>>();
+        let tip = commit(fixture.repository.path(), "third");
+        let config = PushConfig {
+            git_dir: Some(fixture.repository.path().join(".git")),
+            force_full_graph,
+            ..PushConfig::default()
+        };
+        let patterns = if hidden {
+            vec!["refs/heads/trunk".to_owned()]
+        } else {
+            Vec::new()
+        };
+        let specs = [policy_spec("HEAD", "refs/heads/main")];
+        let cancel = CancellationToken::new();
+        let (result, _) = run(
+            &config,
+            &specs,
+            &fixture.store,
+            &fixture.router,
+            None,
+            &patterns,
+            None,
+            None,
+            None,
+            &cancel,
+        )
+        .await
+        .unwrap();
+        assert!(result.all_ok());
+        let after = crab_read::capsule_protocol::open_view(&fixture.layout, limits)
+            .await
+            .unwrap();
+        let uploaded_objects = after
+            .capsules()
+            .iter()
+            .filter(|capsule| !old_capsules.contains(capsule.hash()))
+            .flat_map(|capsule| capsule.git_packs())
+            .map(|pack| pack.object_count())
+            .sum::<u64>();
+        assert_eq!(
+            uploaded_objects, expected_objects,
+            "force={force_full_graph}, hidden={hidden}, source={source_ref}"
+        );
+        assert!(
+            fixture
+                .push(&[policy_spec("", source_ref)], PushConfig::default())
+                .await
+                .unwrap()
+                .all_ok()
+        );
+        verify_complete_remote_history(&fixture, &tip, &first).await;
+    }
+}
+
 fn install_local_history_control(
     fixture: &PolicyFixture,
     tip: &str,

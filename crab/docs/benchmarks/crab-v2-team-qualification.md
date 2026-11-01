@@ -52,6 +52,8 @@ the user's manual-demo data. No bucket-wide Crab GC was invoked.
 | Team checkpoint maintenance | Repack fails after 529.058 seconds because its visibility proof exceeds the byte bound; all 1,001 exact refs remain unchanged; the queued reader phase does not run | `team-maintenance-and-1000-readers/artifacts/report.json`, `team-maintenance-failure-ref-verification.json` |
 | Mixed team smoke | Eight native publications succeed; all eight ordinary Git updates fail in LFS pre-push discovery on unavailable remote exclusion tips; serialized reproduction confirms the cause | `mixed-team-8-smoke/artifacts/report.json`, `mixed-team-missing-boundary-reproduction.json` |
 | Shared LFS discovery follow-up | Rebuilt release passes 118 checks: eight clients, 32 developer commits, alternating native/Git batches, both historical payload versions, cold bytes and clean Crab/Git audits | `mixed-team-8-lfs-fixed/artifacts/report.json`, `lfs-boundary-build-report.json` |
+| Mixed 64-client follow-up | All 256 developer commits and 846 checks pass, including independent cold historical Xet/LFS payload verification | `mixed-team-64-lfs-fixed/artifacts/report.json` |
+| Mixed 1,000-client initial cohort | Failed: 13 native commands cancel before queued work is stopped; 466 acknowledge. Separate audit confirms every exact acknowledged tip, no failed command visible, and clean complete fsck without repair | `mixed-team-lfs-fixed-controller.json`, `mixed-team-1000-partial-audit-controller.json` |
 | Complete team object-store audit | Three expired read-admission leases; no Git-object or data-chain findings. Both audits report failure with zero repairs. Recovery remains a separate check | `team-final-fsck-retry.json`, `team-fsck-diagnostic.jsonl` |
 | Complete team-store recovery | Follow-up binary passes the full audit in repair mode: three leases repaired, zero repair failures; independent origin reads verify released tombstones and unchanged holders | `team-fsck-bounded-repair.jsonl`, `team-lease-recovery-verification.json` |
 | Bounded-reader follow-up, 64 clients | All 140 checks pass: 64 publications, 64 updates, concurrent protocol-v2 readbacks/pulls and fsck; uses the follow-up binary identified below | `bounded-frontier-64/artifacts/report.json` |
@@ -297,11 +299,38 @@ The private `make install` build at `5504b40561a8` passes and has SHA-256
 Its fresh eight-client smoke passes all 118 checks in 73.556 seconds: all 32
 developer commits are acknowledged across alternating native/Git batches,
 both payload versions reconstruct exactly, and Crab/Git audits pass without
-repair. A 64-client continuation is active; the queued 1,000-client profile
-uses eight commits per developer, with its second payload version published
-through ordinary Git. Full mixed team capacity remains pending.
+repair. The 64-client continuation passes 846 checks in 554.000 seconds, with
+all 256 commits acknowledged and both historical payload versions checked.
+The 1,000-client profile requests eight commits per developer. Its initial
+cohort encounters 13 native `CRAB-E0090` cancellations before the controller
+stops queued work and drains active subprocesses. There are 479 completed push
+receipts: 466 acknowledgements and 13 failures. An independent audit confirms
+all 466 exact acknowledged tips, no failed or unattributed developer ref, and
+complete fsck with zero errors or repairs. The immutable failed parent remains
+failed; the later Git update rounds never run. This is not an 8,000-commit pass.
 This driver exercises Crab's LFS filters
 and managed hook, not unmodified Git LFS transfer-agent load.
+
+Two further source fixes are awaiting release-binary RustFS verification.
+New destinations capture the published default HEAD as a packing exclusion
+when it is visible and locally available. Independent full visibility evidence
+and retained source runs remain authoritative. The pre-fix regression uploads
+nine objects instead of three; the corrected four-case table covers ordinary,
+force-full, hidden-base and unborn-default paths, deletion of the original
+ref, complete cold ancestry and strict Git fsck. All 44 capsule-push tests pass
+(three existing large-corpus cases remain ignored).
+
+GC fence renewal previously made one CAS attempt, so legitimate shared-writer
+admission could cancel an operation without loss of its holder. A deterministic
+paused-update regression reproduces that collision. Renewal now uses the
+existing 32-attempt bound, rereading authority and backend time on each attempt;
+removed/expired claims, recreated domains and superseded sweep epochs remain
+lost. All 159 coordination tests and crate Clippy with warnings denied pass.
+The same single-attempt behavior exists on current `origin/main`; acquire and
+release already retry these collisions. CLI push and shared derived-index
+maintenance use this owner, so the fix belongs in coordination. The live failed
+cohort's cancellation logs do not identify the renewal source; this regression
+does not alone establish that all 13 cancellations have the same cause.
 
 The pinned repeat's initial 8 GiB push takes 461.613 seconds; progress spans
 441.898 seconds in uploading and 15.298 seconds in finalization. Its first

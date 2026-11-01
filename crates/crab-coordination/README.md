@@ -52,6 +52,9 @@ adding another holder or advancing writer history. Expired and quarantined claim
 remain lost. Generated holder IDs retain a diagnostic PID and use UUID entropy
 across hosts and container namespaces; PIDs and wall clocks alone are insufficient.
 Malformed stored fence state remains an error and is never silently repaired.
+Renewal retries conditional-write collisions with other shared writers using
+fresh backend time and holder checks, within the existing 32-attempt bound.
+Expiry, lost holders, recreated domains and superseded sweep epochs still fail.
 
 Read retention uses a private conditional claim for each immutable capture.
 `GcReadBarrier` observes both repository and global sweep history before capture;

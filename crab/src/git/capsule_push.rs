@@ -349,9 +349,28 @@ async fn run_inner(
     if let Some(progress) = &config.progress {
         progress.begin_git_pack();
     }
+    let mut pack_refs = remote_refs.clone();
+    if !config.force_full_graph
+        && updates.iter().any(|update| update.old_sha.is_none())
+        && !pack_refs.contains_key(root.head())
+        && !specs.iter().any(|spec| spec.dst == root.head())
+        && !hidden.is_match(root.head())
+    {
+        // New destinations have no prior tip to exclude. Capture the published
+        // default branch as a stable packing base; full visibility evidence is
+        // still computed independently from the local Git graph below.
+        let base_refs = BTreeSet::from([root.head().to_owned()]);
+        let published_base = crab_read::capsule_protocol::open_ref_view_from_root_for_refs(
+            &layout,
+            base.clone(),
+            &base_refs,
+        )
+        .await?;
+        pack_refs.extend(published_base.refs().clone());
+    }
     let prepared = prepare_git_packs(
         &common_git_dir,
-        remote_refs,
+        &pack_refs,
         &updates,
         config.receive_max_input_size,
         config.force_full_graph,
