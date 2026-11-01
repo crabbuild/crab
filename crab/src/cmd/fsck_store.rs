@@ -37,6 +37,37 @@ const MAX_FSCK_REF_BYTES: u64 = 64 * 1024;
 const MAX_FSCK_LOCK_BYTES: u64 = 64 * 1024;
 const MAX_FSCK_CAPSULE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_FSCK_FRONTIER_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+const FSCK_SOURCE_READ_BYTES: u32 = 256 * 1024 * 1024;
+const FSCK_SOURCE_READ_UNIT_BYTES: u64 = 64 * 1024;
+
+/// Bound concurrently resident immutable bodies, rather than just request count.
+/// A source larger than the target runs alone and retains its existing size limit.
+struct FsckSourceReadBudget {
+    permits: tokio::sync::Semaphore,
+    capacity: u32,
+}
+
+impl FsckSourceReadBudget {
+    fn new(maximum_bytes: u32) -> Self {
+        let capacity = maximum_bytes
+            .div_ceil(FSCK_SOURCE_READ_UNIT_BYTES as u32)
+            .max(1);
+        Self {
+            permits: tokio::sync::Semaphore::new(capacity as usize),
+            capacity,
+        }
+    }
+
+    async fn acquire(&self, bytes: u64) -> Result<tokio::sync::SemaphorePermit<'_>> {
+        let permits = bytes
+            .div_ceil(FSCK_SOURCE_READ_UNIT_BYTES)
+            .clamp(1, u64::from(self.capacity)) as u32;
+        self.permits.acquire_many(permits).await.map_err(|_| {
+            CrabError::Internal("fsck source read budget closed during verification".to_owned())
+        })
+    }
+}
+
 pub(super) const CAPSULE_GIT_SCAN_LIMITS: crab_git::walk::PointerScanLimits =
     crab_git::walk::PointerScanLimits {
         objects: 2_000_000,
@@ -920,6 +951,18 @@ async fn verify_capsule_sources(
     current_runs: &[crab_metadata::capsule_protocol::CapsulePointer],
     current_sources: &[crab_metadata::capsule_protocol::PackSourceDescriptor],
 ) -> Result<crab_metadata::capsule_protocol::RetainedCapsuleSources> {
+    let budget = FsckSourceReadBudget::new(FSCK_SOURCE_READ_BYTES);
+    verify_capsule_sources_with_read_budget(layout, root, current_runs, current_sources, &budget)
+        .await
+}
+
+async fn verify_capsule_sources_with_read_budget(
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    root: &crab_metadata::capsule_protocol::RepositoryRoot,
+    current_runs: &[crab_metadata::capsule_protocol::CapsulePointer],
+    current_sources: &[crab_metadata::capsule_protocol::PackSourceDescriptor],
+    budget: &FsckSourceReadBudget,
+) -> Result<crab_metadata::capsule_protocol::RetainedCapsuleSources> {
     let segments = match root.history() {
         Some(history) => {
             crab_metadata::capsule_protocol::load_history_chain(
@@ -996,6 +1039,7 @@ async fn verify_capsule_sources(
             futures_util::future::ready(!stop.load(std::sync::atomic::Ordering::Relaxed))
         })
         .map(|pointer| async move {
+            let _permit = budget.acquire(pointer.size()).await?;
             let checkpoint = crab_metadata::capsule_protocol::load_layered_checkpoint(
                 layout,
                 &pointer,
@@ -1048,6 +1092,7 @@ async fn verify_capsule_sources(
                 None
             };
         async move {
+            let _permit = budget.acquire(source.object_size()).await?;
             crab_read::capsule_protocol::verify_layered_source(
                 layout,
                 &source,
@@ -1062,6 +1107,7 @@ async fn verify_capsule_sources(
     .try_collect::<Vec<_>>()
     .await?;
     futures_util::stream::iter(runs.into_values().map(|pointer| async move {
+        let _permit = budget.acquire(pointer.size()).await?;
         crab_metadata::capsule_protocol::load_capsule_run(layout, &pointer)
             .await
             .map(|_| ())
