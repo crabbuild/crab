@@ -17,9 +17,13 @@ pub(crate) async fn serve(request: Request) -> Response {
     let components: Vec<_> = path.trim_end_matches('/').split('/').collect();
     let account_route = match components.as_slice() {
         ["-", "profile"] => true,
-        ["-", "users" | "organizations", id] | ["-", "organizations", id, "invitation"] => {
+        ["-", "users" | "organizations", id]
+        | ["-", "organizations", id, "invitation" | "projects"] => {
             uuid::Uuid::parse_str(id).is_ok_and(|id| !id.is_nil())
         }
+        ["-", "organizations", organization, "projects", project] => [organization, project]
+            .into_iter()
+            .all(|id| uuid::Uuid::parse_str(id).is_ok_and(|id| !id.is_nil())),
         _ => false,
     };
     let application_route = path.is_empty()
@@ -135,6 +139,26 @@ mod tests {
             (
                 "/-/organizations/01900000-0000-7000-8000-000000000001/invitation",
                 StatusCode::OK,
+            ),
+            (
+                "/-/organizations/01900000-0000-7000-8000-000000000001/projects",
+                StatusCode::OK,
+            ),
+            (
+                "/-/organizations/01900000-0000-7000-8000-000000000001/projects/01900000-0000-7000-8000-000000000002",
+                StatusCode::OK,
+            ),
+            (
+                "/-/organizations/not-a-uuid/projects",
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                "/-/organizations/01900000-0000-7000-8000-000000000001/projects/not-a-uuid",
+                StatusCode::NOT_FOUND,
+            ),
+            (
+                "/-/organizations/01900000-0000-7000-8000-000000000001/projects/00000000-0000-0000-0000-000000000000",
+                StatusCode::NOT_FOUND,
             ),
             ("/-/organizations/not-a-uuid", StatusCode::NOT_FOUND),
             (

@@ -26,6 +26,10 @@ pub(super) fn routes() -> Router<Arc<Server>> {
             "/internal/organizations/{id}/teams",
             get(team_state).post(prepare_teams),
         )
+        .route(
+            "/internal/organizations/{id}/projects",
+            post(prepare_projects),
+        )
         .layer(axum::extract::DefaultBodyLimit::max(32 * 1024))
 }
 #[derive(Deserialize)]
@@ -94,6 +98,31 @@ async fn bootstrap(
             "Organization bootstrap returned an invalid outcome",
         )),
     }
+}
+
+async fn prepare_projects(
+    State(server): State<Arc<Server>>,
+    Path(id): Path<Uuid>,
+    Json(input): Json<Caller>,
+) -> Result<Json<bool>> {
+    if server.cancellation.is_cancelled() {
+        return Err(Error::CellUnavailable);
+    }
+    let _permit = server
+        .maintenance_admission
+        .try_acquire()
+        .map_err(|_| Error::CellUnavailable)?;
+    let cells = server.cells().ok_or(Error::CellUnavailable)?;
+    let result = app::command_output(
+        cells
+            .command::<organization::projects::Prepare>(
+                Address::Organization(id),
+                app::mutation_identity()?,
+                input,
+            )
+            .await,
+    )?;
+    Ok(Json(result))
 }
 
 async fn team_state(

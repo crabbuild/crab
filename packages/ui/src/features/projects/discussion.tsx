@@ -13,10 +13,7 @@ import {
   DialogDescription,
   DialogFooter,
 } from "@/components/ui/dialog";
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select";
+import { FieldSelect } from "@/components/ui/field-select";
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
@@ -154,21 +151,24 @@ function AddMembership({
                     <FieldLabel htmlFor="discussion-project">
                       Project
                     </FieldLabel>
-                    <NativeSelect
+                    <FieldSelect
+                      label="Project"
                       id="discussion-project"
-                      value={selected}
-                      onChange={(e) => setSelected(e.target.value)}
+                      value={selected || "none"}
+                      onValueChange={(value) =>
+                        setSelected(value === "none" ? "" : value)
+                      }
                       disabled={commands.locked}
-                    >
-                      <NativeSelectOption value="">
-                        Choose a project
-                      </NativeSelectOption>
-                      {data.items.map((p) => (
-                        <NativeSelectOption key={p.id} value={p.id}>
-                          {p.definition.name}
-                        </NativeSelectOption>
-                      ))}
-                    </NativeSelect>
+                      options={{
+                        none: "Choose a project",
+                        ...Object.fromEntries(
+                          data.items.map((project) => [
+                            project.id,
+                            project.definition.name,
+                          ]),
+                        ),
+                      }}
+                    />
                   </Field>
                 </FieldGroup>
                 {data.next && (
