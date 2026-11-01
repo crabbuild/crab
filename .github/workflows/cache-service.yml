@@ -79,6 +79,11 @@ jobs:
       CACHE_SERVICE_RUSTFS_RUN_ID: gha-${{ github.run_id }}-${{ github.run_attempt }}
       CACHE_SERVICE_RUSTFS_SECRET_KEY: crab
       RUSTFS_IMAGE: rustfs/rustfs:1.0.0-beta.8-glibc
+      # The job builds release, test, and development binaries. Full debug
+      # information plus incremental state can exhaust the hosted runner disk.
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
+      CARGO_INCREMENTAL: 0
 
     steps:
       - name: Checkout

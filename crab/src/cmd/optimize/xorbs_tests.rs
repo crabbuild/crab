@@ -190,7 +190,7 @@ async fn capsule_source_enumeration_ignores_foreign_global_xorbs() {
         ],
     )
     .unwrap();
-    crab_write::capsule_protocol::publish(&layout, root, &transaction, &capsule)
+    crab_write::capsule_protocol::publish(&layout, root, &transaction, capsule)
         .await
         .unwrap();
 

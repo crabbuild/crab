@@ -111,6 +111,22 @@ impl FilesystemMetrics {
         })
     }
 
+    pub(super) fn background_budget(
+        &self,
+        foreground_bytes: u64,
+    ) -> Result<u64, ScratchCapacityError> {
+        let pending = self.pending();
+        let stats =
+            fs4::statvfs(&self.inner.path).map_err(|error| self.record_probe_failure(error))?;
+        self.record_stats(&stats);
+        Ok(background_budget(
+            stats.total_space(),
+            stats.available_space(),
+            *pending,
+            foreground_bytes,
+        ))
+    }
+
     pub(super) fn refresh(&self) {
         let pending = self.pending();
         match fs4::statvfs(&self.inner.path) {
@@ -292,6 +308,13 @@ fn describe(recorder: &impl Recorder) {
     );
 }
 
+fn background_budget(size: u64, available: u64, pending: u64, foreground: u64) -> u64 {
+    available
+        .saturating_sub(scratch_headroom(size))
+        .saturating_sub(pending)
+        .saturating_sub(foreground)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -326,5 +349,18 @@ mod tests {
         let mut pending = 90;
         assert_eq!(reserve_pending(&mut pending, 100, 5, 20).unwrap(), 10);
         assert_eq!(pending, 100);
+    }
+    #[test]
+    fn optional_work_budget_keeps_foreground_and_pending_headroom() {
+        let mib = 1024 * 1024;
+        assert_eq!(
+            background_budget(512 * mib, 512 * mib, 64 * mib, 128 * mib),
+            256 * mib
+        );
+        assert_eq!(background_budget(512 * mib, 32 * mib, 0, 128 * mib), 0);
+        assert_eq!(
+            background_budget(512 * mib, 512 * mib, u64::MAX, 128 * mib),
+            0
+        );
     }
 }

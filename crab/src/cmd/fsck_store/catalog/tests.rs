@@ -126,7 +126,7 @@ async fn fixture(
         )],
     )
     .unwrap();
-    let root = crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
+    let root = crab_write::capsule_protocol::publish(&layout, base, &transaction, capsule)
         .await
         .unwrap();
     let transaction = CapsuleTransaction::new(
@@ -140,7 +140,7 @@ async fn fixture(
     )
     .unwrap();
     let capsule = Capsule::build(&transaction, Vec::new(), Vec::new()).unwrap();
-    let root = crab_write::capsule_protocol::publish(&layout, root, &transaction, &capsule)
+    let root = crab_write::capsule_protocol::publish(&layout, root, &transaction, capsule)
         .await
         .unwrap();
     let checker = super::super::StoreChecker::for_capsule_repository(

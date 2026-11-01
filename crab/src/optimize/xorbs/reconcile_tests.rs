@@ -1071,7 +1071,7 @@ async fn capsule_finalize_publishes_rewritten_xorbs_without_legacy_manifest() {
             ],
         )
         .unwrap();
-        crab_write::capsule_protocol::publish(&layout, root, &transaction, &capsule)
+        crab_write::capsule_protocol::publish(&layout, root, &transaction, capsule)
             .await
             .unwrap();
 

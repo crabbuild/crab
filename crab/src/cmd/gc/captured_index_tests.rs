@@ -205,7 +205,7 @@ async fn publish_blob(layout: &StoreLayout<crab_storage::Store>, name: &str) -> 
         )],
     )
     .unwrap();
-    crab_write::capsule_protocol::publish(layout, root, &transaction, &capsule)
+    crab_write::capsule_protocol::publish(layout, root, &transaction, capsule)
         .await
         .unwrap();
     oid
@@ -424,7 +424,7 @@ async fn gc_preserves_cold_catalog_sessions_without_browse_indexes() {
             ));
         }
         let capsule = Capsule::build(&transaction, Vec::new(), sections).unwrap();
-        crab_write::capsule_protocol::publish(&layout, root.clone(), &transaction, &capsule)
+        crab_write::capsule_protocol::publish(&layout, root.clone(), &transaction, capsule)
             .await
             .unwrap();
         previous = Some(oid);

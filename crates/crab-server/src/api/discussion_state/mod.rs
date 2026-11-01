@@ -13,14 +13,14 @@ use axum::{
     Extension, Json, Router,
     extract::{Path, State, rejection::JsonRejection},
     middleware,
-    response::{IntoResponse, Response},
+    response::IntoResponse,
     routing::post,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-type Result<T> = std::result::Result<T, Response>;
+type Result<T> = std::result::Result<T, super::write::ResponseError>;
 
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
@@ -125,18 +125,27 @@ async fn change(
     .map_err(IntoResponse::into_response)?;
     let comment = match output {
         Outcome::Applied(comment) => comment,
-        Outcome::Rejected(state::Rejection::Archived) => return Err(rejected(Error::Archived)),
-        Outcome::Rejected(state::Rejection::NotFound) => return Err(rejected(Error::NotFound)),
-        Outcome::Rejected(state::Rejection::Forbidden) => return Err(rejected(Error::Forbidden)),
-        Outcome::Rejected(state::Rejection::Conflict) => return Err(rejected(Error::Conflict)),
-        Outcome::RequestConflict => return Err(Error::RequestConflict.into_response()),
+        Outcome::Rejected(state::Rejection::Archived) => {
+            return Err(rejected(Error::Archived).into());
+        }
+        Outcome::Rejected(state::Rejection::NotFound) => {
+            return Err(rejected(Error::NotFound).into());
+        }
+        Outcome::Rejected(state::Rejection::Forbidden) => {
+            return Err(rejected(Error::Forbidden).into());
+        }
+        Outcome::Rejected(state::Rejection::Conflict) => {
+            return Err(rejected(Error::Conflict).into());
+        }
+        Outcome::RequestConflict => return Err(Error::RequestConflict.into_response().into()),
         Outcome::Rejected(state::Rejection::InvalidState) => {
             return Err(rejected(Error::Invalid(
                 "The requested discussion state or close reason is invalid",
-            )));
+            ))
+            .into());
         }
         Outcome::Rejected(state::Rejection::MergePending) => {
-            return Err(rejected(Error::MergePending));
+            return Err(rejected(Error::MergePending).into());
         }
     };
     let value = if let Some(comment) = comment {

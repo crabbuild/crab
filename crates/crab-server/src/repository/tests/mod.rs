@@ -452,7 +452,7 @@ async fn publish_next(
         &repo.layout,
         base,
         &transaction,
-        &capsule(&transaction, old, new.clone(), pack),
+        capsule(&transaction, old, new.clone(), pack),
     )
     .await
     .unwrap();
@@ -520,7 +520,7 @@ async fn checkpoint_bounds_ref_frontier_and_next_push_starts_fresh() {
         &repo.layout,
         checkpoint,
         &transaction,
-        &capsule(&transaction, old, new, None),
+        capsule(&transaction, old, new, None),
     )
     .await
     .unwrap();

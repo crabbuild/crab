@@ -185,6 +185,9 @@ jobs:
     name: SDK shared publication and recovery
     runs-on: ubuntu-24.04
     timeout-minutes: 90
+    env:
+      CARGO_PROFILE_DEV_DEBUG: 0
+      CARGO_PROFILE_TEST_DEBUG: 0
     steps:
       - uses: actions/checkout@v4
       - uses: dtolnay/rust-toolchain@master
@@ -192,6 +195,8 @@ jobs:
           toolchain: ${{ env.SDK_MSRV }}
       - uses: Swatinem/rust-cache@v2
         with:
+          # Avoid restoring the earlier full-debug cache that exhausted disk.
+          prefix-key: sdk-publication-debug0-v1
           key: sdk-publication
       - name: Set up repository frontend toolchain
         uses: actions/setup-node@v4

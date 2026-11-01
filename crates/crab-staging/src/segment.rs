@@ -314,14 +314,51 @@ impl SegmentWriter {
         self.file.sync_data()?;
         drop(self.file);
 
-        let current = segments_dir.join("current.seg");
         let sealed_name = format!("{:016x}.seg", self.segment_id);
-        let sealed_path = segments_dir.join(&sealed_name);
-        fs::rename(&current, &sealed_path)?;
+        #[cfg(not(windows))]
+        {
+            fs::rename(
+                segments_dir.join("current.seg"),
+                segments_dir.join(&sealed_name),
+            )?;
+            File::open(segments_dir)?.sync_all()?;
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt as _;
+            use windows_sys::Win32::Storage::FileSystem::{
+                MOVEFILE_REPLACE_EXISTING, MOVEFILE_WRITE_THROUGH, MoveFileExW,
+            };
 
-        // fsync the parent directory to make the rename durable.
-        let dir_fd = File::open(segments_dir)?;
-        dir_fd.sync_all()?;
+            // Windows cannot fsync a directory opened as an ordinary file.
+            // Publish with a write-through move after flushing and closing the
+            // segment. Canonical paths also preserve extended-length support.
+            let directory = fs::canonicalize(segments_dir)?;
+            let source = directory
+                .join("current.seg")
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect::<Vec<_>>();
+            let destination = directory
+                .join(&sealed_name)
+                .as_os_str()
+                .encode_wide()
+                .chain(std::iter::once(0))
+                .collect::<Vec<_>>();
+            // SAFETY: Both paths contain a canonical existing directory and
+            // fixed filenames, are NUL-terminated, and live through the call.
+            if unsafe {
+                MoveFileExW(
+                    source.as_ptr(),
+                    destination.as_ptr(),
+                    MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+                )
+            } == 0
+            {
+                return Err(std::io::Error::last_os_error().into());
+            }
+        }
 
         debug!(
             segment_id = self.segment_id,
@@ -933,11 +970,19 @@ mod tests {
         let tmp = tempfile::tempdir().expect("tempdir");
         let segments_dir = tmp.path().join("segments");
         let mut writer = SegmentWriter::new(&segments_dir, 42, 1 << 30, 1 << 30).expect("writer");
-        writer.append(b"seal test").expect("append");
+        let locator = writer.append(b"seal test").expect("append");
         writer.seal(&segments_dir).expect("seal");
 
         assert!(!segments_dir.join("current.seg").exists());
         assert!(segments_dir.join("000000000000002a.seg").exists());
+        let reader = SegmentReader::open(&segments_dir.join("000000000000002a.seg"), 42)
+            .expect("reopen sealed segment");
+        assert_eq!(
+            reader
+                .read(locator.offset, locator.length)
+                .expect("verified sealed record"),
+            Bytes::from_static(b"seal test")
+        );
     }
 
     #[test]

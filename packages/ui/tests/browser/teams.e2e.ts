@@ -312,8 +312,8 @@ for (const mobile of [false, true])
       page.getByRole("status", { name: "Team submission result" }),
     ).toContainText("Update team member role completed.");
     await page
+      .getByRole("navigation", { name: "Team", exact: true })
       .getByRole("link", { name: "Settings", exact: true })
-      .last()
       .click();
     await page.getByLabel("Team name", { exact: true }).fill("My draft");
     state.conflict = true;

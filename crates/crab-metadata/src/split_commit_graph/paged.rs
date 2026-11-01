@@ -4,7 +4,7 @@ use serde::{Deserialize, Serialize};
 
 use super::*;
 use crate::PageRef;
-#[cfg(any(feature = "storage", test))]
+#[cfg(feature = "storage")]
 use crate::pages::Input;
 use crate::pages::{self, Kind, Writer};
 
@@ -124,7 +124,7 @@ pub(super) fn validate_roots(
     Ok(())
 }
 
-#[cfg(any(feature = "storage", test))]
+#[cfg(feature = "storage")]
 pub(super) fn record(bytes: &[u8], ordinal: u32, path: &str) -> Result<CommitGraphRecord> {
     let mut input = Input::new(bytes, path);
     let oid = input.array()?;
@@ -153,14 +153,14 @@ pub(super) fn record(bytes: &[u8], ordinal: u32, path: &str) -> Result<CommitGra
     })
 }
 
-#[cfg(any(feature = "storage", test))]
+#[cfg(feature = "storage")]
 pub(super) struct DecodedLayer {
     pub(super) graph: CommitGraphLayer,
     pub(super) roots: Vec<ancestry::Reference>,
     pub(super) nodes: BTreeMap<[u8; 32], Vec<u8>>,
 }
 
-#[cfg(any(feature = "storage", test))]
+#[cfg(feature = "storage")]
 pub(super) fn decode_layer(
     bytes: &[u8],
     reference: &CommitGraphLayerRef,

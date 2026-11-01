@@ -313,7 +313,7 @@ mod tests {
         )
         .unwrap();
         let capsule = Capsule::build(&transaction, Vec::new(), Vec::new()).unwrap();
-        crab_write::capsule_protocol::publish(&layout, root, &transaction, &capsule)
+        crab_write::capsule_protocol::publish(&layout, root, &transaction, capsule)
             .await
             .unwrap();
         assert!(

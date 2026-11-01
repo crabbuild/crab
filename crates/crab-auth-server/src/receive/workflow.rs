@@ -1050,7 +1050,7 @@ mod tests {
             ctx.router(),
             source_root,
             &source_transaction,
-            &source_capsule,
+            source_capsule,
         )
         .await?;
 
@@ -1162,7 +1162,7 @@ mod tests {
             &view_router,
             view_root,
             &view_base_transaction,
-            &view_base_capsule,
+            view_base_capsule,
         )
         .await?;
 

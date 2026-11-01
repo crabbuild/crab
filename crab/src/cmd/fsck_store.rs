@@ -37,6 +37,37 @@ const MAX_FSCK_REF_BYTES: u64 = 64 * 1024;
 const MAX_FSCK_LOCK_BYTES: u64 = 64 * 1024;
 const MAX_FSCK_CAPSULE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const MAX_FSCK_FRONTIER_BYTES: u64 = 8 * 1024 * 1024 * 1024;
+const FSCK_SOURCE_READ_BYTES: u32 = 256 * 1024 * 1024;
+const FSCK_SOURCE_READ_UNIT_BYTES: u64 = 64 * 1024;
+
+/// Bound concurrently resident immutable bodies, rather than just request count.
+/// A source larger than the target runs alone and retains its existing size limit.
+struct FsckSourceReadBudget {
+    permits: tokio::sync::Semaphore,
+    capacity: u32,
+}
+
+impl FsckSourceReadBudget {
+    fn new(maximum_bytes: u32) -> Self {
+        let capacity = maximum_bytes
+            .div_ceil(FSCK_SOURCE_READ_UNIT_BYTES as u32)
+            .max(1);
+        Self {
+            permits: tokio::sync::Semaphore::new(capacity as usize),
+            capacity,
+        }
+    }
+
+    async fn acquire(&self, bytes: u64) -> Result<tokio::sync::SemaphorePermit<'_>> {
+        let permits = bytes
+            .div_ceil(FSCK_SOURCE_READ_UNIT_BYTES)
+            .clamp(1, u64::from(self.capacity)) as u32;
+        self.permits.acquire_many(permits).await.map_err(|_| {
+            CrabError::Internal("fsck source read budget closed during verification".to_owned())
+        })
+    }
+}
+
 pub(super) const CAPSULE_GIT_SCAN_LIMITS: crab_git::walk::PointerScanLimits =
     crab_git::walk::PointerScanLimits {
         objects: 2_000_000,
@@ -126,7 +157,9 @@ impl StoreChecker {
             router.repo_prefix().to_owned(),
             router.global_prefix().to_owned(),
         );
-        let view = crab_read::capsule_protocol::open_view_from_root(
+        // Reconcile exact visibility through authenticated pages. Expanding every
+        // ref closure here repeats shared history before any integrity phase runs.
+        let view = crab_read::capsule_protocol::open_git_view_from_root(
             &layout,
             root,
             crab_read::capsule_protocol::CapsuleReadLimits {
@@ -143,7 +176,23 @@ impl StoreChecker {
             .await?
             .finish(Ok::<_, crab_metadata::error::MetadataError>(()))
             .await?;
-        let source_lifetime = verify_capsule_history(&layout, view.root().root()).await?;
+        let sources = view
+            .layered_checkpoint()
+            .into_iter()
+            .flat_map(|checkpoint| checkpoint.sources())
+            .chain(view.capsule_run_sources())
+            .cloned()
+            .collect::<Vec<_>>();
+        // A paged capture does not read pack bodies. Verify current and retained
+        // sources together before constructing the checker, including every run
+        // pointer binding, without reading shared immutable bodies repeatedly.
+        let source_lifetime = verify_capsule_sources(
+            &layout,
+            view.root().root(),
+            view.capsule_run_pointers(),
+            &sources,
+        )
+        .await?;
         Ok(Self {
             store,
             prefix,
@@ -215,7 +264,7 @@ impl StoreChecker {
             self.router.global_prefix().to_owned(),
         );
         let current = crab_write::capsule_protocol::open_root(&layout).await?;
-        let current = crab_read::capsule_protocol::open_view_from_root_with_control(
+        let current = crab_read::capsule_protocol::open_git_view_from_root(
             &layout,
             current,
             crab_read::capsule_protocol::CapsuleReadLimits {
@@ -888,9 +937,31 @@ impl StoreChecker {
     }
 }
 
+#[cfg(test)]
 async fn verify_capsule_history(
     layout: &crab_storage::StoreLayout<crab_storage::Store>,
     root: &crab_metadata::capsule_protocol::RepositoryRoot,
+) -> Result<crab_metadata::capsule_protocol::RetainedCapsuleSources> {
+    verify_capsule_sources(layout, root, &[], &[]).await
+}
+
+async fn verify_capsule_sources(
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    root: &crab_metadata::capsule_protocol::RepositoryRoot,
+    current_runs: &[crab_metadata::capsule_protocol::CapsulePointer],
+    current_sources: &[crab_metadata::capsule_protocol::PackSourceDescriptor],
+) -> Result<crab_metadata::capsule_protocol::RetainedCapsuleSources> {
+    let budget = FsckSourceReadBudget::new(FSCK_SOURCE_READ_BYTES);
+    verify_capsule_sources_with_read_budget(layout, root, current_runs, current_sources, &budget)
+        .await
+}
+
+async fn verify_capsule_sources_with_read_budget(
+    layout: &crab_storage::StoreLayout<crab_storage::Store>,
+    root: &crab_metadata::capsule_protocol::RepositoryRoot,
+    current_runs: &[crab_metadata::capsule_protocol::CapsulePointer],
+    current_sources: &[crab_metadata::capsule_protocol::PackSourceDescriptor],
+    budget: &FsckSourceReadBudget,
 ) -> Result<crab_metadata::capsule_protocol::RetainedCapsuleSources> {
     let segments = match root.history() {
         Some(history) => {
@@ -906,6 +977,22 @@ async fn verify_capsule_history(
     };
     let mut checkpoints = BTreeMap::new();
     let mut runs = BTreeMap::new();
+    if let Some(pointer) = root.checkpoint() {
+        insert_history_pointer(
+            &mut checkpoints,
+            pointer.hash(),
+            pointer.clone(),
+            "current checkpoint",
+        )?;
+    }
+    for pointer in current_runs {
+        insert_history_pointer(
+            &mut runs,
+            pointer.hash(),
+            pointer.clone(),
+            "current capsule run",
+        )?;
+    }
     let heads = layout
         .store()
         .list_prefix(&layout.capsule_source_heads_prefix())
@@ -930,12 +1017,29 @@ async fn verify_capsule_history(
         }
     }
     let mut sources = BTreeMap::new();
+    for source in current_sources {
+        let path = match source.kind() {
+            crab_metadata::capsule_protocol::PackSourceKind::CapsuleRun => {
+                layout.capsule_path(source.object_hash())
+            }
+            crab_metadata::capsule_protocol::PackSourceKind::PackLayer => {
+                layout.capsule_pack_layer_path(source.object_hash())
+            }
+        };
+        insert_history_pointer(
+            &mut sources,
+            path.as_ref(),
+            source.clone(),
+            "current pack source",
+        )?;
+    }
     let stop = std::sync::atomic::AtomicBool::new(false);
     let mut checkpoints = futures_util::stream::iter(checkpoints.into_values())
         .take_while(|_| {
             futures_util::future::ready(!stop.load(std::sync::atomic::Ordering::Relaxed))
         })
         .map(|pointer| async move {
+            let _permit = budget.acquire(pointer.size()).await?;
             let checkpoint = crab_metadata::capsule_protocol::load_layered_checkpoint(
                 layout,
                 &pointer,
@@ -988,6 +1092,7 @@ async fn verify_capsule_history(
                 None
             };
         async move {
+            let _permit = budget.acquire(source.object_size()).await?;
             crab_read::capsule_protocol::verify_layered_source(
                 layout,
                 &source,
@@ -1002,6 +1107,7 @@ async fn verify_capsule_history(
     .try_collect::<Vec<_>>()
     .await?;
     futures_util::stream::iter(runs.into_values().map(|pointer| async move {
+        let _permit = budget.acquire(pointer.size()).await?;
         crab_metadata::capsule_protocol::load_capsule_run(layout, &pointer)
             .await
             .map(|_| ())
@@ -1047,25 +1153,23 @@ fn insert_history_pointer<T: Clone + PartialEq>(
 }
 
 async fn install_capsule_git_packs(
-    view: crab_read::capsule_protocol::CapsuleRepositoryView,
+    view: &crab_read::capsule_protocol::CapsuleRepositoryView,
     layout: crab_storage::StoreLayout<crab_storage::Store>,
     git_dir: std::path::PathBuf,
     max_input_bytes: u64,
 ) -> crab_read::Result<Vec<std::path::PathBuf>> {
-    if view.layered_checkpoint().is_some() {
-        crab_read::capsule_protocol::install_git_packs_from_store(
-            &view,
-            &layout,
-            &git_dir,
-            max_input_bytes,
-            None,
-            &CancellationToken::new(),
-        )
-        .await
-        .map(|installed| installed.paths)
-    } else {
-        crab_read::capsule_protocol::install_git_packs(&view, &git_dir, max_input_bytes).await
-    }
+    // Paged frontier captures own authenticated source ranges even before a
+    // checkpoint exists. The shared installer also handles resident capsules.
+    crab_read::capsule_protocol::install_git_packs_from_store(
+        view,
+        &layout,
+        &git_dir,
+        max_input_bytes,
+        None,
+        &CancellationToken::new(),
+    )
+    .await
+    .map(|installed| installed.paths)
 }
 
 async fn check_capsule_git_connectivity(
@@ -1087,8 +1191,10 @@ async fn check_capsule_git_connectivity(
         .iter()
         .map(|(name, oid)| (name.clone(), oid.clone()))
         .collect::<Vec<_>>();
+    // The checker retains this authenticated view through every phase. Borrow
+    // it during installation instead of duplicating all frontier metadata.
     install_capsule_git_packs(
-        state.view.clone(),
+        &state.view,
         layout,
         workspace.path().to_owned(),
         MAX_FSCK_FRONTIER_BYTES,
@@ -1895,7 +2001,7 @@ mod tests {
             )],
         )
         .unwrap();
-        let root = crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
+        let root = crab_write::capsule_protocol::publish(&layout, base, &transaction, capsule)
             .await
             .unwrap();
         let cleanup_transaction = CapsuleTransaction::new(
@@ -1913,7 +2019,7 @@ mod tests {
             &layout,
             root,
             &cleanup_transaction,
-            &cleanup_capsule,
+            cleanup_capsule,
         )
         .await
         .unwrap();
@@ -2060,7 +2166,7 @@ mod tests {
         )
         .unwrap();
         let capsule = Capsule::build(&transaction, vec![pack], Vec::new()).unwrap();
-        let root = crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
+        let root = crab_write::capsule_protocol::publish(&layout, base, &transaction, capsule)
             .await
             .unwrap();
         let checker = StoreChecker::for_capsule_repository(store, prefix, root)

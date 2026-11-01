@@ -28,6 +28,11 @@ async function fixture(page: Page) {
     const request = route.request();
     const url = new URL(request.url()),
       path = url.pathname;
+    if (
+      request.method() === "GET" &&
+      /^\/api\/repos\/team\/project\/(issues|pulls)\/\d+\/projects$/.test(path)
+    )
+      return route.fulfill({ json: { items: [], can_manage: canManage } });
     if (path.endsWith("/conversation")) return conversationPage(route);
     if (path === "/api/session")
       return route.fulfill({

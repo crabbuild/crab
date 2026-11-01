@@ -1215,6 +1215,38 @@ mod tests {
             .unwrap();
         assert_eq!(disabled.stdout, b"\n");
 
+        // A blocked required filter must reject staging. Select both states
+        // explicitly so inherited Git LFS settings cannot change this fixture.
+        tools
+            .run_git(
+                Some(root.path()),
+                ["config", "filter.lfs.required", "true"],
+                true,
+                &cancel,
+            )
+            .await
+            .unwrap();
+        let rejected = tools
+            .run_git(Some(root.path()), ["add", "first.bin"], false, &cancel)
+            .await
+            .unwrap_err();
+        assert!(matches!(rejected, LocalError::Exit(_)));
+        assert!(!root.path().join("driver-ran").exists());
+        let staged = tools
+            .run_git(Some(root.path()), ["ls-files", "first.bin"], false, &cancel)
+            .await
+            .unwrap();
+        assert!(staged.stdout.is_empty());
+        tools
+            .run_git(
+                Some(root.path()),
+                ["config", "filter.lfs.required", "false"],
+                true,
+                &cancel,
+            )
+            .await
+            .unwrap();
+
         tools
             .run_git(
                 Some(root.path()),

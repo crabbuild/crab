@@ -59,6 +59,10 @@ jobs:
     name: Offline feature and evidence gates
     runs-on: ubuntu-latest
     timeout-minutes: 60
+    env:
+      # Keep feature variants and evidence test archives within runner disk
+      # capacity while retaining file/line backtraces and runtime checks.
+      CARGO_PROFILE_DEV_DEBUG: line-tables-only
 
     steps:
       - name: Checkout

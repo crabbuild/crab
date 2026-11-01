@@ -262,7 +262,7 @@ impl CapsuleArtifacts {
             ));
         }
         let (transaction, capsule) = self.encode(None).await?;
-        let run = crab_write::capsule_protocol::capsule_leaf_run(&capsule)?;
+        let run = crab_write::capsule_protocol::capsule_leaf_run(capsule)?;
         let store = self.layout.store();
         store
             .put(&self.layout.capsule_path(run.hash()), run.bytes().clone())
@@ -339,7 +339,7 @@ impl CapsuleArtifacts {
                         &commit_layout,
                         base,
                         &transaction,
-                        &capsule,
+                        capsule,
                     )
                     .await?;
                     // Namespace renewal joins caller cancellation. Recheck that
@@ -356,7 +356,7 @@ impl CapsuleArtifacts {
                 &self.layout,
                 self.base,
                 &transaction,
-                &capsule,
+                capsule,
             )
             .await;
             match prepared {

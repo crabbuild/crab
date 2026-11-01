@@ -84,7 +84,7 @@ pub(super) async fn commit_capsule_candidate(
         let Some(active_active) = active_active else {
             return Ok(None);
         };
-        let run = crab_write::capsule_protocol::capsule_leaf_run(&capsule)?;
+        let run = crab_write::capsule_protocol::capsule_leaf_run(capsule)?;
         let descriptor = crab_write::capsule_protocol::coordinated_publication_descriptor(
             transaction.base_root_digest(),
             &transaction.id()?,
@@ -173,7 +173,7 @@ pub(super) async fn commit_capsule_candidate(
                     &repo_prefix,
                     base,
                     &transaction,
-                    &capsule,
+                    capsule,
                     active_active.as_ref(),
                     &replication_objects,
                     &scoped,
@@ -188,7 +188,7 @@ pub(super) async fn commit_capsule_candidate(
             ctx.repo_prefix(),
             base,
             &transaction,
-            &capsule,
+            capsule,
             active_active,
             replication_objects,
             cancel,
@@ -214,7 +214,7 @@ async fn publish_verified_candidate(
     repo_prefix: &str,
     base: crab_metadata::capsule_protocol::RootSnapshot,
     transaction: &crab_metadata::capsule_protocol::CapsuleTransaction,
-    capsule: &Capsule,
+    capsule: Capsule,
     active_active: Option<&ActiveActiveReceiveConfig>,
     replication_objects: &[String],
     cancel: &tokio_util::sync::CancellationToken,
@@ -526,7 +526,9 @@ pub(super) async fn verify_capsule_candidate(
     }
     let mut replication_objects = replication_objects;
     replication_objects.remove(ctx.router().capsule_path(&plan.run_hash).as_ref());
-    let publication_run = crab_write::capsule_protocol::capsule_leaf_run(&publication)?;
+    // Verification retains the capsule for the later fenced commit; the
+    // replication closure also needs its canonical leaf identity now.
+    let publication_run = crab_write::capsule_protocol::capsule_leaf_run(publication.clone())?;
     replication_objects.insert(
         ctx.router()
             .capsule_path(publication_run.hash())
@@ -704,7 +706,7 @@ mod tests {
             "repo",
             base,
             &transaction,
-            &capsule,
+            capsule,
             None,
             &[],
             &cancel,

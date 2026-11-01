@@ -6,6 +6,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import subprocess
 import sys
 import time
@@ -62,15 +63,37 @@ def _run(
     environment: dict[str, str] | None = None,
     check: bool = True,
 ) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
+    result = subprocess.run(
         command,
-        check=check,
+        check=False,
         env=environment,
         stdout=subprocess.PIPE,
         stderr=subprocess.PIPE,
         text=True,
         timeout=COMMAND_TIMEOUT_SECONDS,
     )
+    if check and result.returncode:
+        detail = result.stderr
+        for name, value in (environment or os.environ).items():
+            if len(value) >= 4 and any(
+                marker in name.upper()
+                for marker in ("SECRET", "TOKEN", "PASSWORD", "ACCESS_KEY", "PRIVATE_KEY")
+            ):
+                detail = detail.replace(value, "<redacted>")
+        detail = re.sub(r"https?://\S+", "<endpoint>", detail)
+        detail = re.sub(r"(?im)authorization\s*[:=].*", "Authorization: <redacted>", detail)
+        detail = re.sub(r"(?i)(x-amz-signature\s*=)[^\s&]+", r"\1<redacted>", detail)
+        action = Path(command[0]).name
+        if "s3api" in command:
+            index = command.index("s3api") + 1
+            if index < len(command):
+                action += f" {command[index]}"
+        elif len(command) > 1:
+            action += f" {command[1]}"
+        raise QualificationError(
+            f"{action} failed with exit {result.returncode}: {detail[-1024:].strip()}"
+        )
+    return result
 
 
 class AwsClient:

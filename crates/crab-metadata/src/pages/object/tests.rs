@@ -2,6 +2,42 @@ use super::*;
 #[cfg(feature = "storage")]
 use crate::pages::PageWork;
 
+#[cfg(feature = "storage")]
+#[test]
+fn established_tag31_object_pages_keep_distinct_layouts() {
+    let cases = [
+        (
+            Kind::VisibilityDictionary,
+            Kind::CapsuleChunkFilters,
+            vec![(b"abcdefghijklmnopqrst".to_vec(), b"payload!".to_vec())],
+            b"CRABOP01\x1f\0\x01\0\0\0abcdefghijklmnopqrst\x08\0\0\0payload!".as_slice(),
+        ),
+        (
+            Kind::CapsuleChunkFilters,
+            Kind::VisibilityDictionary,
+            vec![(0_u32.to_be_bytes().to_vec(), b"filters!".to_vec())],
+            b"CRABOP01\x1f\0\x01\0\0\0\0\0\0\0\x08\0\0\0filters!".as_slice(),
+        ),
+    ];
+    for (kind, other, rows, expected) in cases {
+        let mut builder = Builder::default();
+        let root = builder.tree(kind, rows.clone()).unwrap().unwrap();
+        let body = &builder.objects[&root.hash];
+        assert_eq!(body.as_ref(), expected);
+        assert!(matches!(decode(body, &root, kind), Ok(Node::Leaf(actual)) if actual == rows));
+        assert!(decode(body, &root, other).is_err());
+        let mut forged = root.clone();
+        forged.first = vec![0; other.key_bytes()];
+        forged.last = forged.first.clone();
+        assert!(decode(body, &forged, other).is_err());
+        let mut wrong_tag = body.to_vec();
+        wrong_tag[8] = 37;
+        let mut resigned = root.clone();
+        resigned.hash = *blake3::hash(&wrong_tag).as_bytes();
+        assert!(decode(&wrong_tag, &resigned, kind).is_err());
+    }
+}
+
 fn rows(count: u32) -> Rows {
     (0..count)
         .map(|index| (index.to_be_bytes().to_vec(), vec![7; 96]))

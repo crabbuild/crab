@@ -69,7 +69,7 @@ async fn publish_v2_shard(router: &StoreLayout, shard_data: &'static [u8]) -> Me
         )],
     )
     .unwrap();
-    crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
+    crab_write::capsule_protocol::publish(&layout, base, &transaction, capsule)
         .await
         .unwrap();
     shard_hash

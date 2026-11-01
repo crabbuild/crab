@@ -11,6 +11,7 @@
 //! - Single-stage watch mode (transitive deps only)
 
 #![cfg(feature = "watch")]
+#![recursion_limit = "256"]
 
 use std::fs;
 use std::path::Path;

@@ -75,12 +75,31 @@ pub(crate) enum Kind {
     RunCatalogShards = 27,
     RunCatalogXorbs = 28,
     RunCatalogChunks = 29,
-    CapsuleChunkHints = 30,
     #[cfg(feature = "storage")]
-    CapsuleChunkFilters = 31,
+    CapsuleChunkHints = 30,
+    VisibilityDictionary = 31,
+    VisibilityOrdinals = 32,
+    VisibilityChunkPool = 33,
+    VisibilitySetChunks = 34,
+    VisibilitySparseSet = 35,
+    CheckpointAdmissionChunks = 36,
+    #[cfg(feature = "storage")]
+    CapsuleChunkFilters = 37,
 }
 
 impl Kind {
+    // Packed chunk filters and visibility dictionaries independently established
+    // wire tag 31 in distinct authenticated containers. Keep their logical kinds
+    // separate while preserving both encodings. References bind their different
+    // key widths; full page decoding and coverage checks remain mandatory.
+    fn wire_tag(self) -> u8 {
+        match self {
+            #[cfg(feature = "storage")]
+            Self::CapsuleChunkFilters => 31,
+            _ => self as u8,
+        }
+    }
+
     fn is_positional(self) -> bool {
         match self {
             #[cfg(feature = "storage")]
@@ -91,7 +110,11 @@ impl Kind {
             | Self::CommitAncestryRoots
             | Self::RunAdmissionCounts
             | Self::CheckpointTransitions
-            | Self::CatalogXorbChunks => true,
+            | Self::CatalogXorbChunks
+            | Self::VisibilityOrdinals
+            | Self::VisibilityChunkPool
+            | Self::VisibilitySetChunks
+            | Self::CheckpointAdmissionChunks => true,
             #[cfg(feature = "remote-index")]
             Self::PackSlots => true,
             _ => false,
@@ -117,13 +140,15 @@ impl Kind {
             | Self::RunAdmission
             | Self::VisibilityChanges
             | Self::CheckpointObjects
-            | Self::CheckpointSets => 20,
+            | Self::CheckpointSets
+            | Self::VisibilityDictionary => 20,
             #[cfg(feature = "remote-index")]
             Self::PackInventory => 32,
             #[cfg(feature = "remote-index")]
             Self::ObjectLocators => 20,
             #[cfg(feature = "remote-index")]
             Self::PackOffsets => 12,
+            #[cfg(feature = "storage")]
             Self::CapsuleChunkHints => 33,
             _ => 4,
         }
@@ -173,27 +198,62 @@ pub(crate) struct Writer {
 impl Writer {
     pub(crate) fn tree(&mut self, kind: Kind, rows: Rows) -> Result<PageRef> {
         validate_rows(kind, &rows)?;
+        self.tree_from_iter(kind, rows.into_iter().map(Ok))
+    }
+
+    /// Encode borrowed or inline rows without allocating one buffer per key/value.
+    /// Ordering and width checks span page boundaries, just as for owned rows.
+    pub(crate) fn tree_from_iter<K: AsRef<[u8]>, V: AsRef<[u8]>>(
+        &mut self,
+        kind: Kind,
+        rows: impl IntoIterator<Item = Result<(K, V)>>,
+    ) -> Result<PageRef> {
         let mut level = Vec::new();
-        let mut pending = Vec::new();
-        let mut size = HEADER;
+        let mut pending = header(kind, 0, 0);
+        let mut count = 0_u32;
+        let mut first = Vec::new();
+        let mut previous = Vec::new();
         for row in rows {
+            let (key, value) = row?;
+            let (key, value) = (key.as_ref(), value.as_ref());
+            if key.len() != kind.key_bytes() || (!previous.is_empty() && previous.as_slice() >= key)
+            {
+                return Err(corruption("page keys are empty, invalid or unordered"));
+            }
+            if kind.is_positional()
+                && !previous.is_empty()
+                && integer(&previous)?.checked_add(1) != Some(integer(key)?)
+            {
+                return Err(corruption("positional leaf has a key gap"));
+            }
             let row_bytes = kind
                 .key_bytes()
                 .checked_add(4)
-                .and_then(|n| n.checked_add(row.1.len()))
+                .and_then(|n| n.checked_add(value.len()))
                 .ok_or_else(|| corruption("metadata row size overflows"))?;
             if row_bytes > MAX_BYTES - HEADER {
                 return Err(corruption("metadata row exceeds the page bound"));
             }
-            if !pending.is_empty() && size + row_bytes > TARGET_BYTES {
-                level.push(self.leaf(kind, std::mem::take(&mut pending))?);
-                size = HEADER;
+            if count > 0 && pending.len() + row_bytes > TARGET_BYTES {
+                pending[10..HEADER].copy_from_slice(&count.to_le_bytes());
+                level.push(self.append(pending, 0, count, first, previous.clone())?);
+                pending = header(kind, 0, 0);
+                count = 0;
+                first = Vec::new();
             }
-            size += row_bytes;
-            pending.push(row);
+            if count == 0 {
+                first.extend_from_slice(key);
+            }
+            pending.extend_from_slice(key);
+            put_u32(&mut pending, value.len())?;
+            pending.extend_from_slice(value);
+            count += 1;
+            previous.clear();
+            previous.extend_from_slice(key);
         }
-        if !pending.is_empty() {
-            level.push(self.leaf(kind, pending)?);
+        if count > 0 {
+            pending[10..HEADER].copy_from_slice(&count.to_le_bytes());
+            level.push(self.append(pending, 0, count, first, previous)?);
         }
         let fanout = (TARGET_BYTES - HEADER) / ref_bytes(kind);
         while level.len() > 1 {
@@ -206,28 +266,6 @@ impl Writer {
         level
             .pop()
             .ok_or_else(|| corruption("empty metadata page tree"))
-    }
-
-    fn leaf(&mut self, kind: Kind, rows: Rows) -> Result<PageRef> {
-        let first = rows
-            .first()
-            .ok_or_else(|| corruption("empty page"))?
-            .0
-            .clone();
-        let last = rows
-            .last()
-            .ok_or_else(|| corruption("empty page"))?
-            .0
-            .clone();
-        let count =
-            u32::try_from(rows.len()).map_err(|_| corruption("page row count overflows"))?;
-        let mut bytes = header(kind, 0, count);
-        for (key, value) in rows {
-            bytes.extend_from_slice(&key);
-            put_u32(&mut bytes, value.len())?;
-            bytes.extend_from_slice(&value);
-        }
-        self.append(bytes, 0, count, first, last)
     }
 
     fn branch(&mut self, kind: Kind, children: &[PageRef]) -> Result<PageRef> {
@@ -290,7 +328,7 @@ impl Writer {
 
 fn header(kind: Kind, height: u8, count: u32) -> Vec<u8> {
     let mut bytes = MAGIC.to_vec();
-    bytes.extend_from_slice(&[kind as u8, height]);
+    bytes.extend_from_slice(&[kind.wire_tag(), height]);
     bytes.extend_from_slice(&count.to_le_bytes());
     bytes
 }
@@ -306,7 +344,7 @@ pub(crate) fn decode(
     if bytes.len() != reference.bytes as usize
         || *blake3::hash(bytes).as_bytes() != reference.hash
         || bytes.get(..8) != Some(MAGIC.as_slice())
-        || bytes.get(8) != Some(&(kind as u8))
+        || bytes.get(8) != Some(&kind.wire_tag())
         || bytes.get(9) != Some(&reference.height)
     {
         return corrupt_at(path, "metadata page identity or header mismatch");
@@ -384,7 +422,7 @@ pub(crate) fn decode(
         #[cfg(feature = "remote-index")]
         Kind::ObjectLocators | Kind::PackOffsets | Kind::PackInventory | Kind::PackSlots => "git_object_index",
         Kind::RunAdmission | Kind::RunAdmissionCounts => "capsule_admission",
-        Kind::VisibilityRefs | Kind::VisibilityChanges => "capsule_visibility",
+        Kind::VisibilityRefs | Kind::VisibilityChanges | Kind::VisibilityDictionary | Kind::VisibilityOrdinals | Kind::VisibilityChunkPool | Kind::VisibilitySetChunks | Kind::VisibilitySparseSet => "capsule_visibility",
         Kind::CheckpointObjects | Kind::CheckpointRefs | Kind::CheckpointSets | Kind::CheckpointTransitions => "checkpoint_visibility_pages",
         Kind::CatalogFiles | Kind::CatalogShards | Kind::CatalogXorbs | Kind::CatalogChunks | Kind::CatalogXorbChunks | Kind::CatalogShardXorbs | Kind::RunCatalogFiles | Kind::RunCatalogShards | Kind::RunCatalogXorbs | Kind::RunCatalogChunks => "pointer_catalog_pages",
         _ => "path_state",
@@ -564,10 +602,76 @@ impl Page {
 mod tests {
     use super::*;
 
+    #[cfg(feature = "storage")]
+    #[test]
+    fn established_tag31_pages_keep_distinct_layouts() {
+        let cases = [
+            (
+                Kind::VisibilityDictionary,
+                Kind::CapsuleChunkFilters,
+                vec![(b"abcdefghijklmnopqrst".to_vec(), b"payload!".to_vec())],
+                b"CRABPP01\x1f\0\x01\0\0\0abcdefghijklmnopqrst\x08\0\0\0payload!".as_slice(),
+            ),
+            (
+                Kind::CapsuleChunkFilters,
+                Kind::VisibilityDictionary,
+                vec![(0_u32.to_be_bytes().to_vec(), b"filters!".to_vec())],
+                b"CRABPP01\x1f\0\x01\0\0\0\0\0\0\0\x08\0\0\0filters!".as_slice(),
+            ),
+        ];
+        for (kind, other, rows, expected) in cases {
+            let mut writer = Writer::default();
+            let root = writer.tree(kind, rows.clone()).unwrap();
+            let body = writer.bytes.as_slice();
+            let size = body.len() as u64;
+            assert_eq!(body, expected);
+            assert!(
+                matches!(decode(body, &root, kind, size, "fixture"), Ok(Page::Leaf(actual)) if actual == rows)
+            );
+            assert!(decode(body, &root, other, size, "fixture").is_err());
+            let mut forged = root.clone();
+            forged.first = vec![0; other.key_bytes()];
+            forged.last = forged.first.clone();
+            assert!(decode(body, &forged, other, size, "fixture").is_err());
+            let mut wrong_tag = body.to_vec();
+            wrong_tag[8] = 37;
+            let mut resigned = root.clone();
+            resigned.hash = *blake3::hash(&wrong_tag).as_bytes();
+            assert!(decode(&wrong_tag, &resigned, kind, size, "fixture").is_err());
+        }
+    }
+
     fn rows(count: u32, value_bytes: usize) -> Rows {
         (0..count)
             .map(|index| (index.to_be_bytes().to_vec(), vec![7; value_bytes]))
             .collect()
+    }
+
+    #[test]
+    fn streamed_pages_reject_cross_page_ordering_gaps_and_input_errors() {
+        let boundary = (TARGET_BYTES - HEADER) / (4 + 4 + 1000);
+        for invalid in [0, boundary as u32 - 1, boundary as u32 + 1] {
+            let mut writer = Writer::default();
+            let rows = (0..boundary as u32)
+                .chain(std::iter::once(invalid))
+                .map(|key| Ok((key.to_be_bytes(), [7; 1000])));
+            assert!(writer.tree_from_iter(Kind::Records, rows).is_err());
+        }
+        let mut writer = Writer::default();
+        let rows = (0..boundary as u32)
+            .map(|key| Ok((key.to_be_bytes(), [7; 1000])))
+            .chain(std::iter::once(Err(corruption("input failed"))));
+        assert!(writer.tree_from_iter(Kind::Records, rows).is_err());
+        assert!(
+            Writer::default()
+                .tree_from_iter(Kind::Records, [Ok(([0; 3], []))])
+                .is_err()
+        );
+        assert!(
+            Writer::default()
+                .tree_from_iter(Kind::Records, [Ok(([0; 4], vec![0; MAX_BYTES]))])
+                .is_err()
+        );
     }
 
     #[test]

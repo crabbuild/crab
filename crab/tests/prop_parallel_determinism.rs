@@ -5,6 +5,8 @@
 //! parallelism=1 (serial) and parallelism=4 (parallel), and asserts
 //! that output files are byte-identical.
 
+#![recursion_limit = "256"]
+
 use std::fs;
 use std::path::{Path, PathBuf};
 

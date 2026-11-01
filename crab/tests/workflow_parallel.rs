@@ -4,6 +4,8 @@
 //! `parallelism = 1` produces serial behavior, and that JSONL
 //! output from concurrent stages is well-formed.
 
+#![recursion_limit = "256"]
+
 use std::fs;
 use std::path::Path;
 use std::sync::Mutex;

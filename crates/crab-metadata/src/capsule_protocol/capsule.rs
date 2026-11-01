@@ -327,24 +327,26 @@ impl Capsule {
                 .map(|section| (section.kind, section.bytes)),
         );
 
-        let mut body = Vec::new();
+        let mut payload_bytes = 0_usize;
         let mut locations = Vec::with_capacity(encoded_sections.len());
-        for (kind, bytes) in encoded_sections {
+        for (kind, bytes) in &encoded_sections {
             if bytes.is_empty() {
                 return Err(contract_error("capsule sections must not be empty"));
             }
-            let offset = u64::try_from(body.len()).map_err(|_| {
+            let offset = u64::try_from(payload_bytes).map_err(|_| {
                 contract_error("capsule section offset cannot be represented as u64")
             })?;
             let length = u64::try_from(bytes.len()).map_err(|_| {
                 contract_error("capsule section length cannot be represented as u64")
             })?;
-            body.extend_from_slice(&bytes);
+            payload_bytes = payload_bytes
+                .checked_add(bytes.len())
+                .ok_or_else(|| contract_error("capsule payload length overflowed"))?;
             locations.push(CapsuleSectionLocation {
-                kind,
+                kind: *kind,
                 offset,
                 length,
-                blake3: blake3::hash(&bytes).to_hex().to_string(),
+                blake3: blake3::hash(bytes).to_hex().to_string(),
             });
         }
 
@@ -365,6 +367,16 @@ impl Capsule {
         }
         let footer_length = u64::try_from(footer_bytes.len())
             .map_err(|_| contract_error("capsule footer length cannot be represented as u64"))?;
+        // Size the complete wire object before copying large pack sections.
+        // Appending even a small footer must not reallocate the entire payload.
+        let capacity = payload_bytes
+            .checked_add(footer_bytes.len())
+            .and_then(|bytes| bytes.checked_add(CAPSULE_TRAILER_BYTES))
+            .ok_or_else(|| contract_error("capsule encoded length overflowed"))?;
+        let mut body = Vec::with_capacity(capacity);
+        for (_, bytes) in encoded_sections {
+            body.extend_from_slice(&bytes);
+        }
         body.extend_from_slice(&footer_bytes);
         body.extend_from_slice(&footer_length.to_be_bytes());
         body.extend_from_slice(blake3::hash(&footer_bytes).as_bytes());
@@ -412,6 +424,44 @@ impl Capsule {
     #[must_use]
     pub fn bytes(&self) -> &Bytes {
         &self.bytes
+    }
+
+    pub(super) fn append_bytes(self, suffix: &[u8]) -> Result<(Self, Bytes)> {
+        let Self {
+            bytes,
+            hash,
+            footer,
+        } = self;
+        let length = bytes.len();
+        let capacity = length
+            .checked_add(suffix.len())
+            .ok_or_else(|| contract_error("extended capsule length overflowed"))?;
+        // A newly built capsule owns its payload. Transfer that allocation to
+        // the run; shared snapshots must retain their original immutable bytes.
+        let mut body = if bytes.is_unique() {
+            Vec::from(bytes)
+        } else {
+            let mut body = Vec::with_capacity(capacity);
+            body.extend_from_slice(&bytes);
+            body
+        };
+        body.reserve_exact(suffix.len());
+        body.extend_from_slice(suffix);
+        let bytes = Bytes::from(body);
+        let prefix = bytes.slice(..length);
+        if blake3::hash(&prefix).to_hex().as_str() != hash {
+            return Err(corrupt(
+                "extended capsule prefix differs from its verified identity",
+            ));
+        }
+        Ok((
+            Self {
+                bytes: prefix,
+                hash,
+                footer,
+            },
+            bytes,
+        ))
     }
 
     pub(super) fn relocate(mut self, bytes: Bytes) -> Result<Self> {

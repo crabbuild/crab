@@ -5538,7 +5538,7 @@ mod tests {
         )
         .unwrap();
         let capsule = Capsule::build(&transaction, Vec::new(), Vec::new()).unwrap();
-        crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
+        crab_write::capsule_protocol::publish(&layout, base, &transaction, capsule)
             .await
             .unwrap();
         let view = crab_read::capsule_protocol::open_view(
@@ -5709,7 +5709,7 @@ mod tests {
         )
         .unwrap();
         let capsule = Capsule::build(&transaction, Vec::new(), Vec::new()).unwrap();
-        crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
+        crab_write::capsule_protocol::publish(&layout, base, &transaction, capsule)
             .await
             .unwrap();
         let captured = crab_read::capsule_protocol::open_view(

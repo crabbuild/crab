@@ -34,7 +34,7 @@ async fn checkpoint_admits_member_heavy_sources_below_the_source_count_limit() {
             )],
         )
         .unwrap();
-        crab_write::capsule_protocol::publish(&layout, root, &transaction, &capsule)
+        crab_write::capsule_protocol::publish(&layout, root, &transaction, capsule)
             .await
             .unwrap();
     }
@@ -329,7 +329,7 @@ async fn frontier_delta_base_placement_does_not_probe_unrelated_member_indexes()
         )],
     )
     .unwrap();
-    crab_write::capsule_protocol::publish(&layout, root, &transaction, &capsule)
+    crab_write::capsule_protocol::publish(&layout, root, &transaction, capsule)
         .await
         .unwrap();
     let complete = view(&layout).await;

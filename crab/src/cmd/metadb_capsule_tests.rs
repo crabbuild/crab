@@ -89,7 +89,7 @@ async fn blob_repository(body: &[u8]) -> StoreLayout<Store> {
         )],
     )
     .unwrap();
-    crab_write::capsule_protocol::publish(&layout, root, &transaction, &capsule)
+    crab_write::capsule_protocol::publish(&layout, root, &transaction, capsule)
         .await
         .unwrap();
     layout

@@ -1107,22 +1107,40 @@ async fn release_if_holder_checked(
     holder: &str,
 ) -> Result<bool> {
     let object_path = Path::from(path);
-    let (body, etag) = match get_with_version(store, &object_path).await {
-        Ok(lock) => lock,
-        Err(object_store::Error::NotFound { .. }) => return Ok(true),
-        Err(source) => return Err(store_error(path, source)),
-    };
-    let payload = deserialize_payload(path, &body)?;
-    if payload.holder != holder {
-        return Ok(false);
+    for attempt in 0..COORDINATION_RETRY_MAX_ATTEMPTS {
+        let (body, etag) = match get_with_version(store, &object_path).await {
+            Ok(lock) => lock,
+            Err(object_store::Error::NotFound { .. }) => return Ok(true),
+            Err(source) => return Err(store_error(path, source)),
+        };
+        let payload = deserialize_payload(path, &body)?;
+        if payload.holder != holder {
+            return Ok(false);
+        }
+        if payload.is_released() {
+            return Ok(true);
+        }
+        let previous_etag = etag.e_tag.clone();
+        let body = serialize_payload(path, &PushLockPayload::released(holder))?;
+        match update(store, &object_path, body, etag).await {
+            Ok(_) | Err(object_store::Error::NotFound { .. }) => return Ok(true),
+            Err(object_store::Error::AlreadyExists { .. })
+            | Err(object_store::Error::Precondition { .. }) => {
+                // A late renewal can advance the token without changing holders.
+                // Re-read and recheck ownership before retrying; a lost CAS alone
+                // does not prove that this claim was released or replaced.
+                if attempt + 1 == COORDINATION_RETRY_MAX_ATTEMPTS {
+                    return Err(CoordinationError::CasConflict {
+                        path: path.to_owned(),
+                        expected_etag: previous_etag,
+                    });
+                }
+                tokio::time::sleep(coordination_retry_delay(path, holder, attempt)).await;
+            }
+            Err(source) => return Err(store_error(path, source)),
+        }
     }
-    let body = serialize_payload(path, &PushLockPayload::released(holder))?;
-    match update(store, &object_path, body, etag).await {
-        Ok(_) | Err(object_store::Error::NotFound { .. }) => Ok(true),
-        Err(object_store::Error::AlreadyExists { .. })
-        | Err(object_store::Error::Precondition { .. }) => Ok(false),
-        Err(source) => Err(store_error(path, source)),
-    }
+    unreachable!("coordination release has a nonzero attempt bound")
 }
 
 async fn expire_stale_lock_at(
@@ -1272,9 +1290,38 @@ mod tests {
         fail_next_get: AtomicBool,
         fail_next_update: AtomicBool,
         claim_before_update: AtomicBool,
+        renew_release_races: AtomicUsize,
     }
 
     impl RequestCountingStore {
+        fn with_release_races(races: usize) -> Arc<Self> {
+            Arc::new(Self {
+                inner: Arc::new(InMemory::new()),
+                requests: Arc::new(AtomicUsize::new(0)),
+                fail_next_create: AtomicBool::new(false),
+                fail_next_get: AtomicBool::new(false),
+                fail_next_update: AtomicBool::new(false),
+                claim_before_update: AtomicBool::new(false),
+                renew_release_races: AtomicUsize::new(races),
+            })
+        }
+
+        fn consume_release_race(&self) -> bool {
+            let mut remaining = self.renew_release_races.load(Ordering::Acquire);
+            while remaining > 0 {
+                match self.renew_release_races.compare_exchange_weak(
+                    remaining,
+                    remaining - 1,
+                    Ordering::AcqRel,
+                    Ordering::Acquire,
+                ) {
+                    Ok(_) => return true,
+                    Err(actual) => remaining = actual,
+                }
+            }
+            false
+        }
+
         fn fail_next_create(&self) {
             self.fail_next_create.store(true, Ordering::Release);
         }
@@ -1329,6 +1376,22 @@ mod tests {
                 .unwrap();
                 self.inner
                     .put_opts(location, successor.into(), options.clone())
+                    .await?;
+            }
+            if matches!(&options.mode, PutMode::Update(_)) && self.consume_release_race() {
+                let mut current: PushLockPayload =
+                    serde_json::from_slice(&self.inner.get(location).await?.bytes().await?)
+                        .unwrap();
+                current.expires_at += 1;
+                // A renewal keeps the holder but advances the conditional token
+                // after release read it and before its tombstone CAS arrives.
+                self.inner
+                    .put(
+                        location,
+                        serialize_payload(location.as_ref(), &current)
+                            .unwrap()
+                            .into(),
+                    )
                     .await?;
             }
             self.inner.put_opts(location, payload, options).await
@@ -1436,6 +1499,7 @@ mod tests {
             fail_next_get: AtomicBool::new(false),
             fail_next_update: AtomicBool::new(false),
             claim_before_update: AtomicBool::new(false),
+            renew_release_races: AtomicUsize::new(0),
         });
         let mut context = PushLockAcquireContext::new(Arc::clone(&store));
         for operation in 0..3 {
@@ -1480,6 +1544,7 @@ mod tests {
             fail_next_get: AtomicBool::new(false),
             fail_next_update: AtomicBool::new(false),
             claim_before_update: AtomicBool::new(false),
+            renew_release_races: AtomicUsize::new(0),
         });
         let store: Arc<dyn ObjectStore> = metered.clone();
         let lock = PushLock::acquire_internal(
@@ -1512,6 +1577,7 @@ mod tests {
             fail_next_get: AtomicBool::new(false),
             fail_next_update: AtomicBool::new(false),
             claim_before_update: AtomicBool::new(false),
+            renew_release_races: AtomicUsize::new(0),
         });
         let store: Arc<dyn ObjectStore> = metered.clone();
         let mut lock = PushLock::acquire_internal(
@@ -1541,6 +1607,7 @@ mod tests {
             fail_next_get: AtomicBool::new(false),
             fail_next_update: AtomicBool::new(false),
             claim_before_update: AtomicBool::new(false),
+            renew_release_races: AtomicUsize::new(0),
         });
         let store: Arc<dyn ObjectStore> = metered.clone();
         let mut lock = PushLock::acquire_internal(
@@ -1681,6 +1748,72 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn checked_release_retries_same_holder_renewal_race() {
+        let backend = RequestCountingStore::with_release_races(1);
+        let store: Arc<dyn ObjectStore> = backend.clone();
+        let mut lock = PushLock::acquire_ref_default(&store, "org/repo", "refs/heads/main")
+            .await
+            .unwrap();
+        let path = Path::from(lock.path());
+        // A cancelled renewal can leave the owner without its newest CAS token.
+        lock.etag = None;
+        lock.release().await.unwrap();
+        let body = backend
+            .inner
+            .get(&path)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        assert!(
+            serde_json::from_slice::<PushLockPayload>(&body)
+                .unwrap()
+                .is_released()
+        );
+    }
+
+    #[tokio::test]
+    async fn checked_release_reports_exhausted_same_holder_races() {
+        let backend =
+            RequestCountingStore::with_release_races(COORDINATION_RETRY_MAX_ATTEMPTS as usize + 1);
+        let store: Arc<dyn ObjectStore> = backend.clone();
+        let mut lock = PushLock::acquire_ref_default(&store, "org/repo", "refs/heads/main")
+            .await
+            .unwrap();
+        lock.etag = None;
+        assert!(
+            lock.release().await.is_err(),
+            "unfinished release must not report success"
+        );
+        assert!(backend.renew_release_races.load(Ordering::Acquire) > 0);
+    }
+
+    #[tokio::test]
+    async fn checked_release_racing_takeover_preserves_successor() {
+        let backend = RequestCountingStore::with_release_races(0);
+        let store: Arc<dyn ObjectStore> = backend.clone();
+        let mut lock = PushLock::acquire_ref_default(&store, "org/repo", "refs/heads/main")
+            .await
+            .unwrap();
+        let path = Path::from(lock.path());
+        lock.etag = None;
+        backend.claim_before_update.store(true, Ordering::Release);
+        lock.release().await.unwrap();
+        let body = backend
+            .inner
+            .get(&path)
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap();
+        let payload: PushLockPayload = serde_json::from_slice(&body).unwrap();
+        assert_eq!(payload.holder, "successor");
+        assert!(!payload.is_released());
+    }
+
+    #[tokio::test]
     async fn checked_ref_release_requires_current_holder() {
         let store = memory_store();
         let lock = PushLock::acquire_ref_default(&store, "org/repo", "refs/heads/main")
@@ -1790,6 +1923,7 @@ mod tests {
             fail_next_get: AtomicBool::new(false),
             fail_next_update: AtomicBool::new(false),
             claim_before_update: AtomicBool::new(false),
+            renew_release_races: AtomicUsize::new(0),
         });
         let mut context = PushLockAcquireContext::new(metered_store);
 
@@ -1833,6 +1967,7 @@ mod tests {
             fail_next_get: AtomicBool::new(false),
             fail_next_update: AtomicBool::new(false),
             claim_before_update: AtomicBool::new(false),
+            renew_release_races: AtomicUsize::new(0),
         });
         let mut context = PushLockAcquireContext::new(metered_store);
 
@@ -1868,6 +2003,7 @@ mod tests {
             fail_next_get: AtomicBool::new(false),
             fail_next_update: AtomicBool::new(false),
             claim_before_update: AtomicBool::new(true),
+            renew_release_races: AtomicUsize::new(0),
         });
         let mut context = PushLockAcquireContext::new(metered);
         let result = context
@@ -1927,6 +2063,7 @@ mod tests {
             fail_next_get: AtomicBool::new(false),
             fail_next_update: AtomicBool::new(false),
             claim_before_update: AtomicBool::new(false),
+            renew_release_races: AtomicUsize::new(0),
         });
         let metered_store: Arc<dyn ObjectStore> = metered.clone();
         let mut context = PushLockAcquireContext::new(metered_store);
@@ -1964,6 +2101,7 @@ mod tests {
             fail_next_get: AtomicBool::new(false),
             fail_next_update: AtomicBool::new(false),
             claim_before_update: AtomicBool::new(false),
+            renew_release_races: AtomicUsize::new(0),
         });
         let metered_store: Arc<dyn ObjectStore> = metered.clone();
         let mut context = PushLockAcquireContext::new(metered_store);
@@ -2064,6 +2202,7 @@ mod tests {
             fail_next_get: AtomicBool::new(false),
             fail_next_update: AtomicBool::new(false),
             claim_before_update: AtomicBool::new(false),
+            renew_release_races: AtomicUsize::new(0),
         });
         let mut context = PushLockAcquireContext::new(metered_store);
 

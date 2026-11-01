@@ -24,6 +24,12 @@ Callers with cancellation-sensitive immutable preparation can use
 them. Publication must be awaited through outcome resolution, even if renewal
 fails after that boundary.
 
+Preparation consumes its verified capsule so a leaf run can extend the owned
+payload allocation instead of retaining another full copy. Callers retaining a
+separate immutable snapshot clone explicitly; that snapshot stays unchanged.
+The capsule prefix identity, admission indexes and canonical run bytes remain
+verified before immutable upload and conditional publication.
+
 `PreparedCapsulePublication::ref_frontier_bytes` reports the exact physical run
 bytes in a prepared ref successor, after native compaction. Product callers can
 enforce their read budget before publication without estimating append sizes.

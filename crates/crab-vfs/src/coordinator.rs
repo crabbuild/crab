@@ -218,7 +218,7 @@ pub struct Coordinator {
     /// Path to the Unix socket.
     socket_path: PathBuf,
     /// Advisory lock file (held for lifetime).
-    _lock_file: File,
+    _lock_file: DaemonLock,
     /// Configuration.
     config: CoordinatorConfig,
     /// Timestamp when the coordinator started (for uptime calculation).
@@ -989,13 +989,24 @@ fn unmount_session_logged(session: Option<fuser::BackgroundSession>, mountpoint:
 // Lock acquisition
 // ---------------------------------------------------------------------------
 
+#[derive(Debug)]
+struct DaemonLock(File);
+
+impl Drop for DaemonLock {
+    fn drop(&mut self) {
+        // A forked child can retain the open description until exec. Release
+        // coordinator ownership when this guard ends, even while that copy lives.
+        let _ = self.0.unlock();
+    }
+}
+
 /// Acquire an advisory flock on the daemon lock file.
 ///
 /// Uses `LOCK_EX | LOCK_NB` (non-blocking exclusive lock). If another
 /// coordinator already holds the lock, returns an error immediately
 /// rather than blocking.
 #[cfg(unix)]
-fn acquire_daemon_lock(path: &Path) -> Result<File> {
+fn acquire_daemon_lock(path: &Path) -> Result<DaemonLock> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| {
             CrabError::Internal(format!(
@@ -1026,11 +1037,11 @@ fn acquire_daemon_lock(path: &Path) -> Result<File> {
         )));
     }
 
-    Ok(file)
+    Ok(DaemonLock(file))
 }
 
 #[cfg(not(unix))]
-fn acquire_daemon_lock(path: &Path) -> Result<File> {
+fn acquire_daemon_lock(path: &Path) -> Result<DaemonLock> {
     // On non-Unix platforms, skip locking (best-effort).
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).map_err(|e| {
@@ -1049,6 +1060,7 @@ fn acquire_daemon_lock(path: &Path) -> Result<File> {
         .map_err(|e| {
             CrabError::Internal(format!("failed to open lock file {}: {e}", path.display()))
         })
+        .map(DaemonLock)
 }
 
 // ---------------------------------------------------------------------------
@@ -1180,6 +1192,23 @@ mod tests {
         assert!(result.is_err());
         let err_msg = format!("{}", result.unwrap_err());
         assert!(err_msg.contains("another coordinator is already running"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn lock_release_does_not_wait_for_inherited_descriptors() {
+        let directory = tempfile::tempdir().unwrap();
+        let path = directory.path().join("daemon.lock");
+        let owner = acquire_daemon_lock(&path).unwrap();
+        let inherited = owner.0.try_clone().unwrap();
+        assert!(acquire_daemon_lock(&path).is_err());
+        drop(owner);
+
+        let successor = acquire_daemon_lock(&path).unwrap();
+        drop(inherited);
+        assert!(acquire_daemon_lock(&path).is_err());
+        drop(successor);
+        assert!(acquire_daemon_lock(&path).is_ok());
     }
 
     #[test]

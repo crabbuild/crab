@@ -376,8 +376,9 @@ mod tests {
     #[test]
     fn git_storage_selection_includes_linked_worktree_configuration() {
         let root = tempfile::tempdir().unwrap();
-        let source = root.path().join("source");
-        let linked = root.path().join("linked");
+        let root_path = root.path().canonicalize().unwrap();
+        let source = root_path.join("source");
+        let linked = root_path.join("linked");
         let git = |args: &[&str]| {
             let result = std::process::Command::new("git")
                 .arg("-C")
@@ -407,7 +408,7 @@ mod tests {
             "-m",
             "base",
         ]);
-        let include = root.path().join("included.config");
+        let include = root_path.join("included.config");
         std::fs::write(&include, "[lfs]\n storage = payloads\n").unwrap();
         git(&["config", "include.path", include.to_str().unwrap()]);
         git(&["worktree", "add", "-b", "linked", linked.to_str().unwrap()]);
