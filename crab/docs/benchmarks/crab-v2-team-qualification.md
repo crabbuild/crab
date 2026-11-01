@@ -408,11 +408,26 @@ qualification. Review found a same-journal resumption race in that candidate;
 the failing regression is retained, and the final source rejects adoption of
 another acquisition. Its 165 coordination tests, all-targets crate Clippy,
 minimal-feature check, CLI consumer check and documentation links pass.
-Private full CLI build, live migration and fresh mixed-team qualification remain
-pending. Evidence: `gc-independent-probe-report.json`,
+Private FUSE/NFS install at `d57bf520441e` succeeds in 538.097 seconds;
+release SHA-256 is
+`3acdca9b5ab11f79ae6c5e87b54049137d57712fab39f29f36b3a8fb0f93c1a6`.
+A real schema-2 fixture first passes 38 checks with the previous release. Its
+separate migration verification passes 77 checks: both physical domains preserve
+incarnation/history, inspection and reapply leave bytes unchanged, the old
+writer refuses schema 3 without publishing, and the new writer publishes.
+Independent consumers verify every historical Git/Xet/LFS byte before and after
+repack; complete fsck is clean without repair. That completed driver uses GC
+dry-run only. A later planned extension was not loaded by its already-started
+subprocess; source-ref deletion and actual repository GC remain separate work.
+The fresh eight-client mixed run passes 118 checks and 32 acknowledged commits
+in 63.769 seconds. Its 64-client rerun is active; the 1,000-client profile is
+queued, not qualified. Evidence: `gc-independent-probe-report.json`,
 `gc-independent-64-probe-report.json`,
 `independent-gc-resumable-context-before.log`,
-`independent-gc-final-identity-tests.log`.
+`independent-gc-final-identity-tests.log`,
+`independent-gc-release-build-report.json`,
+`gc-migration-verification-controller.json`,
+`mixed-team-independent-gc-controller.json`.
 
 The shared-base page prototype encodes dictionary/set pages for 1,000 refs,
 1,620,211 common objects and 30 private objects per ref into 86,093,652 bytes.
