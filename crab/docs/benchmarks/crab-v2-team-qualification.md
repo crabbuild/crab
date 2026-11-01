@@ -42,17 +42,43 @@ survival checks. Both historical payload versions, checkpoint and full no-repair
 audits pass. Real warm fetches under requested protocol versions 0 and 2 pass
 exact-tip/Git integrity checks and a separate cold-cache historical Xet hash
 check, but each fetch still reads 1,044,186,371 bytes in 6,311 requests. Its
-requested-ref transition follow-up remains under validation.
+requested-ref transition follow-up is recorded below.
 Evidence: `frontier-fetch-live-proof.json`, `frontier-fetch-live-read-probe.json`.
+
+The `9aaa4f05821f` private install passes actual warm fetch integrity and cold
+historical Xet bytes. Real Git protocol-v2 now also fetches the configured
+reachable historical want rejected by `a4cd9ae8cf4e`, with exact ordinary-file
+SHA-256 and strict fsck. Warm fetches still consume 6,591 requests and
+1,063,056,488 response bytes each. Tracing selects 12 objects through the
+transition planner, but view setup takes 38.449 seconds before planning.
+The scoped transition regression covered the Git metadata view; fetch setup
+still eagerly loaded unrelated visibility and up to 128 MiB of run bodies.
+Extending that regression to fetch mode reproduces the missing lazy boundary.
+The follow-up uses authenticated paged fetch controls, validates every scalar
+ref binding and leaves complete visibility reads to requested transitions.
+Its live performance remains unqualified until a new private build is measured.
+Evidence: `selected-transition-live-proof.json`,
+`selected-transition-traced-read.json`, `fetch-view-lazy-before.log`.
 
 The same runtime rejects the first mixed push containing a 2 GiB ordinary Git
 blob: its 2,148,138,761-byte pack exceeds Crab's default 2,147,483,648-byte
 per-pack admission limit. No ref publishes. Separate staging verification,
 unchanged staging inventory and a full remote audit without repair pass; this
 does not exercise Xet/LFS publication. The original lifecycle remains failed.
-A separate profile with 256 MiB ordinary Git and 2 GiB each Xet/LFS is running;
-no product limit changes. Evidence: `mixed-history-2g-frontier-fetch/report.json`,
-`frontier-raw-limit-rejection-audit.json`, `frontier-normalized-large-controller.json`.
+A separate profile with 256 MiB ordinary Git and 2 GiB each Xet/LFS passes all
+23 lifecycle checks, including partial edits, rename/delete/merge, native/Git
+push, checkpoint, independent cold historical hashes and full no-repair audit.
+No product limit changes. The subsequent 1,000-commit Kubernetes replay fails
+at bootstrap's 300-second pack-install guard, before any incremental pushes.
+Its trace shows Git still indexing after timeout removes its temporary output
+directory. A separate diagnostic regenerates the same 1,620,211-object seed
+and indexes its 1,235,932,295-byte pack with object validation in 167.587 seconds.
+The stack sample shows decompression and existing-object comparison; shared
+host load differs, and the original qualification remains failed.
+Evidence: `mixed-history-2g-frontier-fetch/report.json`,
+`frontier-raw-limit-rejection-audit.json`, `frontier-normalized-large-controller.json`,
+`frontier-normalized-large-proof.json`, `frontier-normalized-k8s-controller.json`,
+`frontier-k8s-index-timeout-diagnosis.json`, `k8s-index-isolation.json`.
 
 Current root-5/checkpoint-9 runtime `4c01b9127c90` passes fresh eight-client
 and 64-client mixed Git/Xet/LFS runs: 120 and 848 checks, 32 and 256 commits,

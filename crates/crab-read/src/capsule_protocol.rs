@@ -53,7 +53,6 @@ const LAYERED_SIDECAR_MAX_WINDOW_BYTES: u64 = 16 * 1024 * 1024;
 const LAYERED_PACK_MAX_WINDOW_BYTES: u64 = 64 * 1024 * 1024;
 const LAYERED_FULL_MAX_WINDOW_BYTES: u64 = 64 * 1024 * 1024;
 const LAYERED_SIDECAR_READ_CONCURRENCY: usize = 8;
-const LAYERED_INLINE_FRONTIER_MAX_BYTES: u64 = 128 * 1024 * 1024;
 // Per-ref frontiers are bounded individually, but their union grows with the
 // team. Bound active run loads instead of launching every history at once.
 // Buffered futures own their pointers/controls to keep public reads Send.
@@ -1767,7 +1766,8 @@ impl CapsuleRepositoryView {
 fn tip_bound_transition_endpoints(
     transaction: &crab_metadata::capsule_protocol::CapsuleTransaction,
     ref_name: &str,
-    edit: &crab_metadata::git_visibility::GitVisibilityEdit,
+    old: Option<&str>,
+    new: &str,
 ) -> Result<(Option<ObjectId>, ObjectId)> {
     let transaction_edit = transaction
         .edits()
@@ -1784,8 +1784,8 @@ fn tip_bound_transition_endpoints(
     // existing ref requires its own expected-old tip here.
     if transaction_edit
         .expected_old()
-        .is_some_and(|old| Some(old) != edit.old_oid.as_deref())
-        || transaction_edit.new_oid() != Some(edit.new_oid.as_str())
+        .is_some_and(|expected| Some(expected) != old)
+        || transaction_edit.new_oid() != Some(new)
     {
         return Err(corrupt_path(
             "capsule Git visibility",
@@ -1800,9 +1800,38 @@ fn tip_bound_transition_endpoints(
             )
         })
     };
-    let old_oid = edit.old_oid.as_deref().map(parse_oid).transpose()?;
-    let new_oid = parse_oid(&edit.new_oid)?;
+    let old_oid = old.map(parse_oid).transpose()?;
+    let new_oid = parse_oid(new)?;
     Ok((old_oid, new_oid))
+}
+
+async fn validate_tip_bound_control(store: &Store, control: &CapsuleControl) -> Result<()> {
+    let transaction = control.transaction();
+    if let Some(reader) = control.paged_visibility() {
+        let names = transaction
+            .edits()
+            .iter()
+            .filter(|edit| edit.new_oid().is_some())
+            .map(|edit| edit.ref_name())
+            .collect::<Vec<_>>();
+        if reader.ref_count() as usize != names.len() {
+            return Err(corrupt_path(
+                "capsule Git visibility",
+                "visibility evidence has missing or uncommitted refs",
+            ));
+        }
+        let headers = reader.headers(store, &names).await?;
+        for (name, header) in names.into_iter().zip(headers) {
+            let header = header.ok_or_else(|| {
+                corrupt_path(
+                    "capsule Git visibility",
+                    "required visibility ref is absent",
+                )
+            })?;
+            tip_bound_transition_endpoints(transaction, name, header.old_oid(), header.new_oid())?;
+        }
+    }
+    Ok(())
 }
 
 fn append_tip_bound_transitions(
@@ -1811,7 +1840,12 @@ fn append_tip_bound_transitions(
     delta: &crab_metadata::capsule_protocol::CapsuleVisibilityDelta,
 ) -> Result<()> {
     for (ref_name, edit) in delta.edits() {
-        let (old_oid, new_oid) = tip_bound_transition_endpoints(transaction, ref_name, edit)?;
+        let (old_oid, new_oid) = tip_bound_transition_endpoints(
+            transaction,
+            ref_name,
+            edit.old_oid.as_deref(),
+            &edit.new_oid,
+        )?;
         output
             .entry(ref_name.clone())
             .or_default()
@@ -4421,45 +4455,19 @@ enum ControlRead {
     Fetch,
 }
 
-/// Bound retained fetch bodies while favoring runs with more transactions per byte.
-/// Maintenance keeps its aggregate, all-or-none limit. The returned flags retain
-/// pointer order; selecting a body never changes control validation or application.
+// Only maintenance retains small complete runs. Fetch metadata must leave all
+// Git bodies and unrelated visibility sets cold until a request selects them.
 fn inline_control_runs(
     read: ControlRead,
     runs: impl IntoIterator<Item = (u64, usize)>,
 ) -> Vec<bool> {
     let runs = runs.into_iter().collect::<Vec<_>>();
-    let mut inline = vec![false; runs.len()];
-    match read {
-        ControlRead::Fetch => {
-            let mut order = (0..runs.len()).collect::<Vec<_>>();
-            order.sort_by(|&left, &right| {
-                let (left_bytes, left_transactions) = runs[left];
-                let (right_bytes, right_transactions) = runs[right];
-                ((right_transactions as u128) * u128::from(left_bytes))
-                    .cmp(&((left_transactions as u128) * u128::from(right_bytes)))
-                    .then_with(|| left.cmp(&right))
-            });
-            let mut remaining = LAYERED_INLINE_FRONTIER_MAX_BYTES;
-            for index in order {
-                if let Some(next) = remaining.checked_sub(runs[index].0) {
-                    inline[index] = true;
-                    remaining = next;
-                }
-            }
-        }
-        ControlRead::Repack => {
-            if runs
-                .iter()
-                .try_fold(0_u64, |total, (size, _)| total.checked_add(*size))
-                .is_some_and(|total| total <= REPACK_INLINE_FRONTIER_MAX_BYTES)
-            {
-                inline.fill(true);
-            }
-        }
-        ControlRead::Complete | ControlRead::CompleteForGit | ControlRead::Git => {}
-    }
-    inline
+    let retain = matches!(read, ControlRead::Repack)
+        && runs
+            .iter()
+            .try_fold(0_u64, |total, (size, _)| total.checked_add(*size))
+            .is_some_and(|total| total <= REPACK_INLINE_FRONTIER_MAX_BYTES);
+    vec![retain; runs.len()]
 }
 
 #[cfg(test)]
@@ -4467,53 +4475,7 @@ mod inline_control_tests {
     use super::*;
 
     #[test]
-    fn fetch_reads_compacted_runs_within_the_existing_body_budget() {
-        let mib = 1024 * 1024;
-        let mut runs = vec![(9 * mib, 1), (353 * mib, 500)];
-        runs.extend(std::iter::repeat_n((12 * mib, 500), 10));
-        runs.push((24 * 1024, 1));
-        let inline = inline_control_runs(ControlRead::Fetch, runs.iter().copied());
-        assert_eq!(inline, [vec![false, false], vec![true; 11]].concat());
-        let retained = runs
-            .iter()
-            .zip(&inline)
-            .filter(|(_, inline)| **inline)
-            .map(|((bytes, _), _)| bytes)
-            .sum::<u64>();
-        assert_eq!(retained, 120 * mib + 24 * 1024);
-        assert!(retained <= LAYERED_INLINE_FRONTIER_MAX_BYTES);
-    }
-
-    #[test]
-    fn fetch_selection_preserves_order_and_handles_exact_and_overflowing_sizes() {
-        let budget = LAYERED_INLINE_FRONTIER_MAX_BYTES;
-        assert_eq!(
-            inline_control_runs(ControlRead::Fetch, [(budget, 500)]),
-            [true]
-        );
-        assert_eq!(
-            inline_control_runs(
-                ControlRead::Fetch,
-                [(budget + 1, 500), (budget / 2, 1), (budget / 2, 1)]
-            ),
-            [false, true, true],
-        );
-        assert_eq!(
-            inline_control_runs(ControlRead::Fetch, [(budget, 1), (budget, 1)]),
-            [true, false],
-        );
-        assert_eq!(
-            inline_control_runs(
-                ControlRead::Fetch,
-                [(u64::MAX, usize::MAX), (u64::MAX, usize::MAX)]
-            ),
-            [false, false],
-        );
-        assert!(inline_control_runs(ControlRead::Fetch, []).is_empty());
-    }
-
-    #[test]
-    fn maintenance_and_git_control_keep_their_existing_body_policy() {
+    fn only_maintenance_retains_complete_frontier_bodies() {
         let budget = REPACK_INLINE_FRONTIER_MAX_BYTES;
         assert_eq!(
             inline_control_runs(ControlRead::Repack, [(budget / 2, 1), (budget / 2, 500)]),
@@ -4532,6 +4494,7 @@ mod inline_control_tests {
             ControlRead::Complete,
             ControlRead::CompleteForGit,
             ControlRead::Git,
+            ControlRead::Fetch,
         ] {
             assert_eq!(
                 inline_control_runs(read, [(0, 1), (1, 500)]),
@@ -4861,7 +4824,7 @@ async fn assemble_layered_control_view(
                 let (control, capsules) = run.verified_controls()?;
                 Ok::<_, ReadError>((control, capsules, Some(run.bytes().clone())))
             } else {
-                let (control, capsules) = if matches!(read, ControlRead::Git) {
+                let (control, capsules) = if matches!(read, ControlRead::Git | ControlRead::Fetch) {
                     crab_metadata::capsule_protocol::load_capsule_run_git_control(router, &pointer)
                         .await?
                 } else {
@@ -4918,15 +4881,15 @@ async fn assemble_layered_control_view(
         )?;
     }
     if footer_only {
-        // Validate transaction bindings now without expanding every shared
-        // membership into per-ref ObjectId vectors during capability discovery.
-        for control in &all_capsule_controls {
-            if let Some(delta) = control.visibility_delta()? {
-                for (name, edit) in delta.edits() {
-                    tip_bound_transition_endpoints(control.transaction(), name, edit)?;
-                }
-            }
-        }
+        // Header bindings are required for every captured ref, while only wanted
+        // refs need complete OID sets. Use the same authenticated paged controls
+        // as Git metadata reads rather than eagerly reading their whole suffix.
+        futures_util::stream::iter(all_capsule_controls.clone().into_iter().map(
+            |control| async move { validate_tip_bound_control(router.store(), &control).await },
+        ))
+        .buffered(CAPSULE_FRONTIER_READ_CONCURRENCY)
+        .try_collect::<Vec<_>>()
+        .await?;
     } else if matches!(read, ControlRead::Complete | ControlRead::CompleteForGit) {
         for (ref_name, transitions) in build_tip_bound_transitions(&[], &all_capsule_controls)? {
             tip_bound_transitions
@@ -4972,7 +4935,7 @@ async fn assemble_layered_control_view(
                 capsule_run_member_oids.insert(pointer.hash().to_owned(), member_oids);
             }
             for capsule in capsules {
-                if !matches!(read, ControlRead::Git)
+                if !matches!(read, ControlRead::Git | ControlRead::Fetch)
                     && let Some(visibility) = capsule.visibility_delta()?
                 {
                     extend_frontier_object_admission(
@@ -5006,7 +4969,7 @@ async fn assemble_layered_control_view(
             capsules: Vec::new(),
             capsule_controls: Vec::new(),
             tip_bound_transitions,
-            metadata_layout: None,
+            metadata_layout: Some(router.clone()),
             tip_bound_controls: all_capsule_controls,
             refs: expected_refs,
             peeled_refs: expected_peeled,
@@ -5578,10 +5541,9 @@ mod tests {
         seed_one_capsule(inner.clone(), None).await;
         let router = StoreLayout::new(Store::new(inner), "repositories/test".to_owned());
         let root = load_root(&router).await.unwrap();
-        let capture = CapsuleRepositoryCapture::from_root(router, root)
+        let mut view = open_view_from_root_for_repack(&router, root, TEST_LIMITS)
             .await
             .unwrap();
-        let mut view = capture.layered_control_view(TEST_LIMITS).await.unwrap();
         assert!(matches!(
             view.repack_capsules().unwrap(),
             std::borrow::Cow::Owned(capsules) if capsules.len() == 1
@@ -6943,36 +6905,6 @@ mod tests {
         assert_eq!(expected.len(), 2);
         assert_eq!(view.tip_bound_transitions(&names).await.unwrap(), expected);
         assert_eq!(view.tip_bound_transitions(&names).await.unwrap(), expected);
-    }
-
-    #[tokio::test]
-    async fn bounded_layered_control_reads_the_complete_frontier_once() {
-        let inner = Arc::new(InMemory::new());
-        seed_one_capsule(inner.clone(), None).await;
-        let observer = Arc::new(RecordingObserver::default());
-        let store = Store::new(inner).with_storage_observer(observer.clone());
-        let router = StoreLayout::new(store, "repositories/test".to_owned());
-        let root = load_root(&router).await.unwrap();
-        let expected = vec![
-            root.record().bytes().len() as u64,
-            root.record().root().capsule_frontier()[0].size(),
-        ];
-
-        open_view_from_root_with_layered_control(&router, root, TEST_LIMITS)
-            .await
-            .unwrap();
-        let observed = observer
-            .observations
-            .lock()
-            .unwrap()
-            .iter()
-            .filter(|observation| {
-                observation.operation == StorageOperation::Get
-                    && observation.outcome == StorageOutcome::Success
-            })
-            .map(|observation| observation.bytes_read)
-            .collect::<Vec<_>>();
-        assert_eq!(observed, expected);
     }
 
     #[tokio::test]

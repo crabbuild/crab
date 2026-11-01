@@ -65,6 +65,10 @@ Paged transition materialization uses the same bound and preserves input order.
 Fetch callers expand transitions only for the planner's requested visible refs;
 unrelated transaction histories stay cold. Protocol-v2 negotiation adds new
 wanted refs from the same capture and retains already loaded transitions.
+Fetch setup uses authenticated paged controls and checks every scalar ref-edit
+binding without preloading run bodies or unrelated visibility sets. Requested
+transition sections retain complete hash and object-set validation. Actual pack
+downloads own payload reads; maintenance alone retains small complete runs.
 Historical non-tip wants require complete visibility under the caller's policy;
 their ordinary wire shape does not make them advertised tips.
 This limits active work across the union of per-ref histories; full views still

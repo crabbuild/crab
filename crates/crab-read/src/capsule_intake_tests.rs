@@ -307,7 +307,7 @@ async fn large_ref_frontiers_bound_active_reads_without_dropping_refs() {
         let peak = reads.peak.load(Ordering::SeqCst);
         assert!((2..=32).contains(&peak), "{mode}: {peak} concurrent reads");
         assert_eq!(reads.active.load(Ordering::SeqCst), 0, "{mode}");
-        if mode == "git" {
+        if matches!(mode, "git" | "fetch") {
             reads.total.store(0, Ordering::SeqCst);
             let selected = vec!["refs/heads/developer-042".to_owned()];
             let transitions = send(view.tip_bound_transitions(&selected)).await.unwrap();
