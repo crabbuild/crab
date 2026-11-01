@@ -1107,7 +1107,7 @@ fn insert_history_pointer<T: Clone + PartialEq>(
 }
 
 async fn install_capsule_git_packs(
-    view: crab_read::capsule_protocol::CapsuleRepositoryView,
+    view: &crab_read::capsule_protocol::CapsuleRepositoryView,
     layout: crab_storage::StoreLayout<crab_storage::Store>,
     git_dir: std::path::PathBuf,
     max_input_bytes: u64,
@@ -1115,7 +1115,7 @@ async fn install_capsule_git_packs(
     // Paged frontier captures own authenticated source ranges even before a
     // checkpoint exists. The shared installer also handles resident capsules.
     crab_read::capsule_protocol::install_git_packs_from_store(
-        &view,
+        view,
         &layout,
         &git_dir,
         max_input_bytes,
@@ -1145,8 +1145,10 @@ async fn check_capsule_git_connectivity(
         .iter()
         .map(|(name, oid)| (name.clone(), oid.clone()))
         .collect::<Vec<_>>();
+    // The checker retains this authenticated view through every phase. Borrow
+    // it during installation instead of duplicating all frontier metadata.
     install_capsule_git_packs(
-        state.view.clone(),
+        &state.view,
         layout,
         workspace.path().to_owned(),
         MAX_FSCK_FRONTIER_BYTES,
