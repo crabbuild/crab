@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useState } from "react";
 import { SearchIcon, SortAscIcon, SortDescIcon } from "@primer/octicons-react";
 import { Button } from "@/components/ui/button";
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupInput,
+} from "@/components/ui/input-group";
 import { displayCell, type TableData } from "../model";
 
 const PAGE_SIZE = 100;
@@ -63,10 +68,9 @@ export function DataTable({ data, name }: { data: TableData; name: string }) {
   return (
     <section className="data-explorer" aria-label={`${name} data explorer`}>
       <header className="data-explorer-toolbar">
-        <label className="data-search">
-          <SearchIcon aria-hidden="true" />
-          <span className="sr-only">Search rows</span>
-          <input
+        <InputGroup className="data-search">
+          <InputGroupInput
+            aria-label="Search rows"
             type="search"
             value={query}
             placeholder="Search loaded rows"
@@ -75,7 +79,10 @@ export function DataTable({ data, name }: { data: TableData; name: string }) {
               setPage(0);
             }}
           />
-        </label>
+          <InputGroupAddon>
+            <SearchIcon aria-hidden="true" />
+          </InputGroupAddon>
+        </InputGroup>
         <span className="muted">
           {filtered.length.toLocaleString()} loaded
           {data.totalRows !== data.rows.length
@@ -101,9 +108,10 @@ export function DataTable({ data, name }: { data: TableData; name: string }) {
                   key={`${column}:${columnIndex}`}
                   scope="col"
                 >
-                  <button
+                  <Button
                     className="data-sort"
-                    type="button"
+                    variant="ghost"
+                    size="xs"
                     onClick={() => {
                       setSort((current) => ({
                         column: columnIndex,
@@ -119,11 +127,11 @@ export function DataTable({ data, name }: { data: TableData; name: string }) {
                     <span>{column}</span>
                     {sort?.column === columnIndex &&
                       (sort.direction === "ascending" ? (
-                        <SortAscIcon aria-hidden="true" />
+                        <SortAscIcon data-icon="inline-end" />
                       ) : (
-                        <SortDescIcon aria-hidden="true" />
+                        <SortDescIcon data-icon="inline-end" />
                       ))}
-                  </button>
+                  </Button>
                 </th>
               ))}
             </tr>

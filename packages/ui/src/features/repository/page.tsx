@@ -171,12 +171,24 @@ export function RepositoryPage({
       : revision;
   const path = resolvedRoute?.path ?? "";
   const kind = resolvedRoute?.kind ?? "Tree";
-  const [showTree, setShowTree] = useState(Boolean(path));
+  const [showTree, setShowTree] = useState(
+    view === "create"
+      ? matchMedia("(min-width: 641px)").matches
+      : Boolean(path),
+  );
   const [searchFocusRequest, setSearchFocusRequest] = useState(0);
   const [treePaneWidth, setTreePaneWidth] = useState(DEFAULT_TREE_PANE_WIDTH);
   const [treePaneMax, setTreePaneMax] = useState(MAX_TREE_PANE_WIDTH);
   const fileLayout = useRef<HTMLDivElement>(null);
-  useEffect(() => setShowTree(Boolean(path)), [path]);
+  useEffect(
+    () =>
+      setShowTree(
+        view === "create"
+          ? matchMedia("(min-width: 641px)").matches
+          : Boolean(path),
+      ),
+    [path, view],
+  );
   useLayoutEffect(() => {
     const layout = fileLayout.current;
     if (!layout || !showTree) return;
@@ -195,7 +207,8 @@ export function RepositoryPage({
     return () => observer.disconnect();
   }, [showTree]);
   const overview = view === "code" && !path && !showTree;
-  const fileWorkspace = (view === "code" || view === "blame") && !overview;
+  const fileWorkspace =
+    (view === "code" || view === "blame" || view === "create") && !overview;
   const issuesView =
     view === "issues" || view === "labels" || view === "milestones";
   const discussionNavigation =
@@ -578,22 +591,6 @@ export function RepositoryPage({
                           Write access to a branch is required to upload files.
                         </div>
                       )
-                    ) : view === "create" ? (
-                      canWrite && branch ? (
-                        <CreateFile
-                          repo={repo}
-                          branch={branch.name}
-                          expectedHead={branch.oid}
-                          directoryHex={
-                            kind === "Tree" ? path : parentHex(path)
-                          }
-                          csrf={csrf}
-                        />
-                      ) : (
-                        <div className="notice error" role="alert">
-                          Write access to a branch is required to create files.
-                        </div>
-                      )
                     ) : view === "edit" && canChangeFile ? (
                       <EditFile
                         repo={repo}
@@ -601,6 +598,8 @@ export function RepositoryPage({
                         expectedHead={branch.oid}
                         pathHex={path}
                         csrf={csrf}
+                        theme={theme}
+                        codeThemes={codeThemes}
                       />
                     ) : view === "delete" && canChangeFile ? (
                       <DeleteFile
@@ -775,88 +774,118 @@ export function RepositoryPage({
                             id="repository-file-content"
                             className={`code-main${kind === "Blob" ? " code-main-file" : ""}`}
                           >
-                            {!showTree && !overview && (
-                              <FileNavigation
-                                repo={repo}
-                                refs={data}
-                                revision={selected?.name ?? revision ?? rev}
-                                archiveRevision={rev}
-                                rev={navigationRevision ?? rev}
-                                path={path}
-                                kind={kind}
-                                view={view}
-                                onOpenTree={() => setShowTree(true)}
-                                onSearch={focusFileSearch}
-                              />
-                            )}
-                            {!overview && showTree && (
-                              <FileBreadcrumb
-                                repo={repo}
-                                rev={navigationRevision ?? rev}
-                                path={path}
-                              />
-                            )}
-                            {kind !== "Tree" && (
-                              <LatestCommit
-                                revision={navigationRevision ?? rev}
-                                repo={repo}
-                                rev={rev}
-                                path={path}
-                                kind={kind}
-                              />
-                            )}
-                            <Suspense
-                              fallback={
-                                <div className="notice" role="status">
-                                  <Spinner /> Loading repository content…
-                                </div>
-                              }
-                            >
-                              {kind === "Tree" ? (
-                                <Directory
-                                  revision={navigationRevision ?? rev}
-                                  key={`${rev}:${path}`}
+                            {view === "create" ? (
+                              canWrite && branch ? (
+                                <CreateFile
+                                  key={`${branch.name}:${path}`}
                                   repo={repo}
-                                  rev={rev}
-                                  path={path}
-                                  theme={theme}
-                                  codeThemes={codeThemes}
-                                  onEntry={selectEntry}
-                                  header={
-                                    <LatestCommit
-                                      revision={navigationRevision ?? rev}
-                                      repo={repo}
-                                      rev={rev}
-                                      path={path}
-                                      kind="Tree"
-                                    />
+                                  branch={branch.name}
+                                  expectedHead={branch.oid}
+                                  directoryHex={
+                                    kind === "Tree" ? path : parentHex(path)
                                   }
-                                />
-                              ) : kind === "Submodule" ? (
-                                <div className="notice">
-                                  This entry points to a commit in a submodule.
-                                </div>
-                              ) : (
-                                <FileView
-                                  key={`${rev}:${path}`}
-                                  repo={repo}
-                                  rev={rev}
-                                  revision={navigationRevision ?? rev}
-                                  blameView={view === "blame"}
-                                  path={path}
-                                  name={displayHex(path)}
+                                  csrf={csrf}
                                   theme={theme}
                                   codeThemes={codeThemes}
-                                  write={
-                                    canChangeFile
-                                      ? {
-                                          branch: branch.name,
-                                        }
+                                  onOpenTree={
+                                    !showTree
+                                      ? () => setShowTree(true)
                                       : undefined
                                   }
                                 />
-                              )}
-                            </Suspense>
+                              ) : (
+                                <div className="notice error" role="alert">
+                                  Write access to a branch is required to create
+                                  files.
+                                </div>
+                              )
+                            ) : (
+                              <>
+                                {!showTree && !overview && (
+                                  <FileNavigation
+                                    repo={repo}
+                                    refs={data}
+                                    revision={selected?.name ?? revision ?? rev}
+                                    archiveRevision={rev}
+                                    rev={navigationRevision ?? rev}
+                                    path={path}
+                                    kind={kind}
+                                    view={view}
+                                    onOpenTree={() => setShowTree(true)}
+                                    onSearch={focusFileSearch}
+                                  />
+                                )}
+                                {!overview && showTree && (
+                                  <FileBreadcrumb
+                                    repo={repo}
+                                    rev={navigationRevision ?? rev}
+                                    path={path}
+                                  />
+                                )}
+                                {kind !== "Tree" && (
+                                  <LatestCommit
+                                    revision={navigationRevision ?? rev}
+                                    repo={repo}
+                                    rev={rev}
+                                    path={path}
+                                    kind={kind}
+                                  />
+                                )}
+                                <Suspense
+                                  fallback={
+                                    <div className="notice" role="status">
+                                      <Spinner /> Loading repository content…
+                                    </div>
+                                  }
+                                >
+                                  {kind === "Tree" ? (
+                                    <Directory
+                                      revision={navigationRevision ?? rev}
+                                      key={`${rev}:${path}`}
+                                      repo={repo}
+                                      rev={rev}
+                                      path={path}
+                                      theme={theme}
+                                      codeThemes={codeThemes}
+                                      onEntry={selectEntry}
+                                      header={
+                                        <LatestCommit
+                                          revision={navigationRevision ?? rev}
+                                          repo={repo}
+                                          rev={rev}
+                                          path={path}
+                                          kind="Tree"
+                                        />
+                                      }
+                                    />
+                                  ) : kind === "Submodule" ? (
+                                    <div className="notice">
+                                      This entry points to a commit in a
+                                      submodule.
+                                    </div>
+                                  ) : (
+                                    <FileView
+                                      key={`${rev}:${path}`}
+                                      repo={repo}
+                                      rev={rev}
+                                      revision={navigationRevision ?? rev}
+                                      blameView={view === "blame"}
+                                      path={path}
+                                      name={displayHex(path)}
+                                      theme={theme}
+                                      codeThemes={codeThemes}
+                                      write={
+                                        canChangeFile
+                                          ? {
+                                              branch: branch.name,
+                                            }
+                                          : undefined
+                                      }
+                                    />
+                                  )}
+                                </Suspense>
+                              </>
+                            )}
                           </div>
                           {overview && (
                             <aside

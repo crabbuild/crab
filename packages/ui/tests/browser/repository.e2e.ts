@@ -902,6 +902,10 @@ for (const theme of ["light", "dark"] as const) {
         ready: page.locator(".file-panel"),
       },
       {
+        location: "/team/project/delete/main/README.md",
+        ready: page.getByRole("heading", { name: "Delete README.md" }),
+      },
+      {
         location: `/team/project/commit/${oid}`,
         ready: page.getByRole("heading", {
           name: "3 changed files",
@@ -1641,6 +1645,97 @@ test("long file breadcrumbs keep complete entry names on one line and leave copy
   await expectNoAccessibilityViolations(page);
 });
 
+test("SQL workbench shares form controls and keeps chart axes keyboard accessible", async ({
+  page,
+}) => {
+  await routePreviewFiles(page, {
+    "metrics.csv": {
+      text: null,
+      bytes: strToU8(
+        "name,category,score,count\nalpha,primary,0.91,2\nbeta,secondary,0.98,5\n",
+      ),
+    },
+  });
+  await page.goto("/team/project/blob/main/metrics.csv");
+  const workbench = page.getByRole("region", {
+    name: "metrics.csv query workbench",
+  });
+  await expect(workbench.getByRole("cell", { name: "alpha" })).toBeVisible();
+  const editor = workbench.getByRole("textbox", { name: "SQL query" });
+  const surface = workbench.locator(".sql-editor");
+  const search = workbench.locator(".data-search");
+  await workbench.getByRole("searchbox", { name: "Search rows" }).fill("beta");
+  await expect(workbench.getByRole("cell", { name: "alpha" })).toHaveCount(0);
+  await workbench.getByRole("searchbox", { name: "Search rows" }).clear();
+  await expect(surface).toHaveCSS(
+    "border-radius",
+    await search.evaluate((node) => getComputedStyle(node).borderRadius),
+  );
+  await expect(surface).toHaveCSS("border-width", "1px");
+  await editor.focus();
+  await expect(surface).toHaveCSS("box-shadow", /0px 0px 0px 2px/);
+  await expect(workbench.locator(".cm-editor")).toHaveCSS(
+    "outline-style",
+    "none",
+  );
+  await workbench.getByRole("button", { name: "Chart", exact: true }).click();
+  const label = workbench.getByRole("combobox", { name: "Label", exact: true });
+  const value = workbench.getByRole("combobox", { name: "Value", exact: true });
+
+  for (const [width, theme] of [
+    [1280, "light"],
+    [390, "dark"],
+  ] as const) {
+    await page.setViewportSize({ width, height: 900 });
+    await selectTheme(page, theme);
+    await label.press("ArrowDown");
+    const category = page.getByRole("option", {
+      name: "category",
+      exact: true,
+    });
+    await category.focus();
+    await category.press("Enter");
+    await expect(label).toBeFocused();
+    await expect(label).toHaveText("category");
+    await expect(workbench.locator(".data-chart-label").first()).toHaveText(
+      "primary",
+    );
+    await value.press("ArrowDown");
+    await expect(
+      page.getByRole("option", { name: "category", exact: true }),
+    ).toHaveCount(0);
+    const count = page.getByRole("option", { name: "count", exact: true });
+    await count.focus();
+    await count.press("Enter");
+    await expect(value).toBeFocused();
+    await expect(
+      workbench.getByRole("img", { name: "primary: 2", exact: true }),
+    ).toBeVisible();
+    await expect(
+      workbench.locator(
+        "select:visible, input:not([data-slot]):visible, button:not([data-slot]):visible",
+      ),
+    ).toHaveCount(0);
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+    expect(
+      await editor
+        .locator(".cm-line")
+        .first()
+        .evaluate((line) => {
+          return (
+            getComputedStyle(line, "::selection").color ===
+            getComputedStyle(line).color
+          );
+        }),
+    ).toBe(true);
+    await expectNoAccessibilityViolations(page);
+  }
+});
+
 test("format-aware previews explore data, office files, media, and databases locally", async ({
   page,
 }) => {
@@ -1798,6 +1893,15 @@ test("format-aware previews explore data, office files, media, and databases loc
   await expect(sqliteCompletion).toBeVisible();
   await sqliteCompletion.click();
   await expect(sqliteEditor).toHaveText("SELECT score");
+  await sqliteWorkbench
+    .getByRole("searchbox", { name: "Filter columns" })
+    .fill("score");
+  await expect(
+    sqliteWorkbench.getByTitle("Insert model into the query"),
+  ).toHaveCount(0);
+  await sqliteWorkbench
+    .getByRole("searchbox", { name: "Filter columns" })
+    .clear();
   await sqliteWorkbench.getByRole("button", { name: "top_runs" }).click();
   await sqliteWorkbench.getByRole("button", { name: "Sample rows" }).click();
   await expect(sqliteEditor).toContainText('FROM "top_runs"');
@@ -2265,6 +2369,136 @@ test("one directory click selects, expands, and loads its children", async ({
   ).toHaveCount(0);
 });
 
+test("inline file creation keeps editor settings and drafts through preview and commit review", async ({
+  page,
+}) => {
+  await page.goto("/team/project/new/main/src");
+  await expect(page.locator('[aria-label="Repository files"]')).toBeVisible();
+  const filename = page.getByRole("textbox", {
+    name: "File name",
+    exact: true,
+  });
+  const editor = page.getByRole("textbox", {
+    name: "File content",
+    exact: true,
+  });
+  const commit = page.getByRole("button", {
+    name: "Commit changes…",
+    exact: true,
+  });
+  await expect(commit).toBeDisabled();
+  await filename.fill("guide.md");
+  await page.getByRole("combobox", { name: "Tab size", exact: true }).click();
+  await page.getByRole("option", { name: "4", exact: true }).click();
+  await editor.fill("alpha");
+  await editor.press("Home");
+  await editor.press("Tab");
+  await expect(editor).toHaveText(/^ {4}alpha$/);
+  await editor.press("ControlOrMeta+z");
+  await expect(editor).toHaveText("alpha");
+  await page
+    .getByRole("combobox", { name: "Line wrapping", exact: true })
+    .click();
+  await page.getByRole("option", { name: "Soft wrap", exact: true }).click();
+  await expect(editor).toHaveCSS("white-space", "break-spaces");
+  const draft = "# Draft guide\n\n[Readme](../README.md)\n";
+  await editor.fill(draft);
+  await page.getByRole("tab", { name: "Preview", exact: true }).click();
+  await expect(
+    page.getByRole("heading", { name: "Draft guide" }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("link", { name: "Readme", exact: true }),
+  ).toHaveAttribute("href", "/team/project/blob/main/README.md");
+  await page.getByRole("tab", { name: "Edit", exact: true }).click();
+  await expect(editor.locator(".cm-line")).toHaveText(draft.split("\n"));
+  await editor.focus();
+  await editor.press("Escape");
+  await editor.press("Tab");
+  await expect(editor).not.toBeFocused();
+  await commit.click();
+  const dialog = page.getByRole("dialog", {
+    name: "Commit changes",
+    exact: true,
+  });
+  await expect(dialog.getByLabel("Commit message")).toHaveValue(
+    "Create guide.md",
+  );
+  await dialog.getByLabel("Commit message").fill("Add the draft guide");
+  await dialog
+    .getByRole("button", { name: "Cancel changes", exact: true })
+    .click();
+  await expect(commit).toBeFocused();
+  await expect(editor.locator(".cm-line")).toHaveText(draft.split("\n"));
+  await commit.click();
+  await expect(dialog.getByLabel("Commit message")).toHaveValue(
+    "Add the draft guide",
+  );
+  await page.route(
+    (url) => url.pathname.endsWith("/contents"),
+    async (route) => {
+      if (route.request().method() !== "POST") return route.fallback();
+      expect(route.request().postDataJSON()).toEqual({
+        branch: "refs/heads/main",
+        expected_head: oid,
+        path_hex: pathHex("src/guide.md"),
+        content: draft,
+        message: "Add the draft guide",
+      });
+      await route.fulfill({
+        status: 409,
+        json: {
+          error: {
+            message: "The branch changed. Your draft is still available.",
+          },
+        },
+      });
+    },
+  );
+  await dialog
+    .getByRole("button", { name: "Commit changes", exact: true })
+    .click();
+  await expect(dialog.getByRole("alert")).toContainText("The branch changed");
+  await dialog
+    .getByRole("button", { name: "Cancel changes", exact: true })
+    .click();
+  await expect(editor.locator(".cm-line")).toHaveText(draft.split("\n"));
+  for (const [width, theme] of [
+    [1280, "light"],
+    [390, "dark"],
+  ] as const) {
+    await page.setViewportSize({ width, height: 900 });
+    await selectTheme(page, theme);
+    expect(
+      await page.evaluate(
+        () => document.documentElement.scrollWidth <= innerWidth,
+      ),
+    ).toBe(true);
+    await expectNoAccessibilityViolations(page);
+    await commit.click();
+    await dialog.evaluate((element) =>
+      Promise.all(
+        element.getAnimations().map((animation) => animation.finished),
+      ),
+    );
+    await expectNoAccessibilityViolations(page);
+    await dialog
+      .getByRole("button", { name: "Cancel changes", exact: true })
+      .click();
+    expect(
+      await editor
+        .locator(".cm-line")
+        .first()
+        .evaluate((line) => {
+          return (
+            getComputedStyle(line, "::selection").color ===
+            getComputedStyle(line).color
+          );
+        }),
+    ).toBe(true);
+  }
+});
+
 test("file-tree add menu commits a file and keeps GitHub control spacing", async ({
   context,
   page,
@@ -2290,6 +2524,9 @@ test("file-tree add menu commits a file and keeps GitHub control spacing", async
   ).toBeLessThanOrEqual(360);
   await page.getByLabel("File name").fill("NEW.md");
   await page.getByLabel("File content").fill("Created from Crab\n");
+  await page
+    .getByRole("button", { name: "Commit changes…", exact: true })
+    .click();
   await page.getByLabel("Commit message").fill("Create NEW.md");
   await page.getByRole("button", { name: "Commit changes" }).click();
   await expect(page).toHaveURL(/\/blob\/main\/NEW\.md$/);
@@ -2411,6 +2648,20 @@ test("branch file actions edit and delete through reviewable commit pages", asyn
   await expect(page.locator(".delete-file-summary")).toContainText(
     "remain available in the repository history",
   );
+  const direct = page.getByRole("radio", { name: "Commit directly to main" });
+  const propose = page.getByRole("radio", {
+    name: "Create a new branch for this commit and start a pull request",
+  });
+  await direct.focus();
+  await direct.press("ArrowDown");
+  await expect(propose).toBeChecked();
+  await expect(page.getByLabel("New branch name")).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Propose changes" }),
+  ).toBeDisabled();
+  await propose.press("ArrowUp");
+  await expect(direct).toBeChecked();
+  await expect(page.getByLabel("New branch name")).toHaveCount(0);
   await page.getByLabel("Commit message").fill("Delete README");
   await page.getByRole("button", { name: "Commit changes" }).click();
   await expect(page).toHaveURL("/team/project/tree/main");

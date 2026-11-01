@@ -33,6 +33,7 @@ import {
   lineNumbers,
 } from "@codemirror/view";
 import { tags } from "@lezer/highlight";
+import { InputGroup } from "@/components/ui/input-group";
 import type { QueryFormat, QueryRelation } from "./query";
 
 export type SqlEditorHandle = {
@@ -79,20 +80,22 @@ const editorTheme = EditorView.theme({
   "&": {
     backgroundColor: "var(--background)",
     color: "var(--foreground)",
-    fontSize: "13px",
+    fontSize: "var(--text-caption)",
   },
+  // InputGroup owns the shared border and focus ring, including the gutter.
+  "&.cm-focused": { outline: "none" },
   // Browser editing can retain a resolved inline color from a syntax span.
   // Keep ordinary line text theme-aware after replacement and appearance changes.
   ".cm-line": { color: "var(--foreground) !important" },
   ".cm-content": {
-    caretColor: "var(--info)",
+    caretColor: "var(--foreground)",
     fontFamily: "var(--font-mono)",
     lineHeight: "20px",
     minHeight: "116px",
     padding: "10px 0",
   },
   ".cm-cursor, .cm-dropCursor": {
-    borderLeftColor: "var(--info)",
+    borderLeftColor: "var(--foreground)",
   },
   ".cm-gutters": {
     backgroundColor: "var(--muted)",
@@ -100,7 +103,7 @@ const editorTheme = EditorView.theme({
     color: "var(--muted-foreground)",
   },
   ".cm-activeLine, .cm-activeLineGutter": {
-    backgroundColor: "color-mix(in srgb, var(--info) 10%, transparent)",
+    backgroundColor: "var(--muted)",
   },
   ".cm-selectionBackground, ::selection": {
     backgroundColor: "var(--secondary) !important",
@@ -117,7 +120,7 @@ const editorTheme = EditorView.theme({
     padding: "4px 8px",
   },
   ".cm-tooltip-autocomplete > ul > li[aria-selected]": {
-    backgroundColor: "color-mix(in srgb, var(--info) 10%, transparent)",
+    backgroundColor: "var(--accent)",
     color: "var(--foreground)",
   },
   ".cm-completionDetail": {
@@ -175,6 +178,7 @@ export const SqlEditor = forwardRef<SqlEditorHandle, Props>(function SqlEditor(
         languageConfig.of(language(format, relations, defaultRelation)),
         EditorView.lineWrapping,
         EditorView.contentAttributes.of({
+          "data-slot": "input-group-control",
           "aria-describedby": describedBy,
           "aria-label": "SQL query",
           "aria-multiline": "true",
@@ -246,5 +250,9 @@ export const SqlEditor = forwardRef<SqlEditorHandle, Props>(function SqlEditor(
     [],
   );
 
-  return <div className="sql-editor" ref={container} />;
+  return (
+    <InputGroup className="sql-editor h-auto min-h-29 items-stretch overflow-hidden">
+      <div className="min-w-0 flex-1" ref={container} />
+    </InputGroup>
+  );
 });

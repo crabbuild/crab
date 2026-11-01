@@ -331,7 +331,11 @@ export function FileView({
                   <CodeIcon data-icon="inline-start" />
                 </Button>
               )}
-              <a href={endpoint(repo, "blob", { rev, path_hex: path })}>Raw</a>
+              <Button asChild variant="outline">
+                <a href={endpoint(repo, "blob", { rev, path_hex: path })}>
+                  Raw
+                </a>
+              </Button>
               {content.text !== null && (
                 <Button
                   aria-label={
@@ -351,15 +355,16 @@ export function FileView({
                   <CopyIcon data-icon="inline-start" />
                 </Button>
               )}
-              <a
-                className="file-icon-button"
-                href={endpoint(repo, "blob", { rev, path_hex: path })}
-                download={name.split("/").pop()}
-                aria-label="Download raw file"
-                title="Download raw file"
-              >
-                <DownloadIcon />
-              </a>
+              <Button asChild variant="outline" size="icon-sm">
+                <a
+                  href={endpoint(repo, "blob", { rev, path_hex: path })}
+                  download={name.split("/").pop()}
+                  aria-label="Download raw file"
+                  title="Download raw file"
+                >
+                  <DownloadIcon data-icon="inline-start" />
+                </a>
+              </Button>
               {write &&
                 content.text !== null &&
                 content.classification === "OrdinaryGit" && (
@@ -385,7 +390,7 @@ export function FileView({
                 <Button
                   aria-label="Delete this file"
                   size="icon-sm"
-                  variant="destructive"
+                  variant="outline"
                   onClick={() =>
                     navigate(
                       repoHref(repo, {
