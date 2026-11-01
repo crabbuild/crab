@@ -286,11 +286,11 @@ fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResul
             if !next.valid(&project.definition) || repository.is_some() != next.subject.is_some() {
                 return Ok(rejected("Check the work item and its repository"));
             }
-            if let Some(repository) = repository {
-                if !input.source_allowed || !repositories(context, project_id)?.contains(repository)
-                {
-                    return Ok(rejected("Choose accessible work from a linked repository"));
-                }
+            if let Some(repository) = repository
+                && (!input.source_allowed
+                    || !repositories(context, project_id)?.contains(repository))
+            {
+                return Ok(rejected("Choose accessible work from a linked repository"));
             }
             let old = item(context, project_id, next.id)?;
             if old.as_ref().is_some_and(|old| {

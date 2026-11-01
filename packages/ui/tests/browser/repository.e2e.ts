@@ -2277,50 +2277,53 @@ test("deep links expand the active path and select its file", async ({
   page,
 }) => {
   await page.goto(`/team/project/blob/main/src/index.ts`);
-  const state = await page
-    .locator('[aria-label="Repository files"]')
-    .evaluate((tree) => {
-      const rows = [
-        ...(tree.shadowRoot?.querySelectorAll('[role="treeitem"]') ?? []),
-      ];
-      const active = rows.find(
-        (row) => row.getAttribute("aria-selected") === "true",
-      );
-      const folder = rows.find(
-        (row) => row.getAttribute("data-item-type") === "folder",
-      );
-      const folderContent = folder?.querySelector(
-        '[data-item-section="content"]',
-      );
-      const selectedStyle = active ? getComputedStyle(active) : null;
-      const selectedRail = active ? getComputedStyle(active, "::after") : null;
-      const tokenProbe = document.createElement("span");
-      tokenProbe.style.backgroundColor = "var(--secondary)";
-      tokenProbe.style.color = "var(--info)";
-      tree.closest(".app-shell")?.append(tokenProbe);
-      const neutralBackground = getComputedStyle(tokenProbe).backgroundColor;
-      const accentColor = getComputedStyle(tokenProbe).color;
-      tokenProbe.remove();
-      return {
-        active: active?.getAttribute("aria-label"),
-        activeHeight: active?.getBoundingClientRect().height,
-        activeBackground: selectedStyle?.backgroundColor,
-        activeRailBackground: selectedRail?.backgroundColor,
-        activeRailLeft: selectedRail?.left,
-        activeRailWidth: selectedRail?.width,
-        activeIconToken: active
-          ?.querySelector("[data-icon-token]")
-          ?.getAttribute("data-icon-token"),
-        neutralBackground,
-        accentColor,
-        expanded: rows
-          .filter((row) => row.getAttribute("aria-expanded") === "true")
-          .map((row) => row.getAttribute("aria-label")),
-        folderIconWidth: folderContent
-          ? getComputedStyle(folderContent, "::before").width
-          : null,
-      };
-    });
+  const tree = page.locator('[aria-label="Repository files"]');
+  // Directory loading and the selection frame finish after the tree mounts.
+  await expect(
+    tree.getByRole("treeitem", { name: "index.ts", exact: true }),
+  ).toHaveAttribute("aria-selected", "true");
+  const state = await tree.evaluate((tree) => {
+    const rows = [
+      ...(tree.shadowRoot?.querySelectorAll('[role="treeitem"]') ?? []),
+    ];
+    const active = rows.find(
+      (row) => row.getAttribute("aria-selected") === "true",
+    );
+    const folder = rows.find(
+      (row) => row.getAttribute("data-item-type") === "folder",
+    );
+    const folderContent = folder?.querySelector(
+      '[data-item-section="content"]',
+    );
+    const selectedStyle = active ? getComputedStyle(active) : null;
+    const selectedRail = active ? getComputedStyle(active, "::after") : null;
+    const tokenProbe = document.createElement("span");
+    tokenProbe.style.backgroundColor = "var(--secondary)";
+    tokenProbe.style.color = "var(--info)";
+    tree.closest(".app-shell")?.append(tokenProbe);
+    const neutralBackground = getComputedStyle(tokenProbe).backgroundColor;
+    const accentColor = getComputedStyle(tokenProbe).color;
+    tokenProbe.remove();
+    return {
+      active: active?.getAttribute("aria-label"),
+      activeHeight: active?.getBoundingClientRect().height,
+      activeBackground: selectedStyle?.backgroundColor,
+      activeRailBackground: selectedRail?.backgroundColor,
+      activeRailLeft: selectedRail?.left,
+      activeRailWidth: selectedRail?.width,
+      activeIconToken: active
+        ?.querySelector("[data-icon-token]")
+        ?.getAttribute("data-icon-token"),
+      neutralBackground,
+      accentColor,
+      expanded: rows
+        .filter((row) => row.getAttribute("aria-expanded") === "true")
+        .map((row) => row.getAttribute("aria-label")),
+      folderIconWidth: folderContent
+        ? getComputedStyle(folderContent, "::before").width
+        : null,
+    };
+  });
   expect(state.active).toBe("index.ts");
   expect(state.activeHeight).toBe(32);
   expect(state.activeBackground).toBe(state.neutralBackground);
