@@ -3,29 +3,37 @@ use super::*;
 
 pub(super) fn build(
     body: &mut Vec<u8>,
+    body_offset: u64,
     level: u8,
-    capsules: &[RunCapsuleLocation],
+    capsules: &[Capsule],
+    locations: &[RunCapsuleLocation],
 ) -> Result<Option<RunSectionLocation>> {
-    if level == 0 || capsules.iter().all(|capsule| capsule.visibility.is_none()) {
+    if capsules.len() != locations.len() {
+        return Err(contract_error("visibility pool capsule count differs"));
+    }
+    if level == 0 || locations.iter().all(|capsule| capsule.visibility.is_none()) {
         return Ok(None);
     }
     let offset = body.len();
-    for range in capsules
-        .iter()
-        .filter_map(|capsule| capsule.visibility.as_ref())
-    {
-        let start = usize::try_from(range.offset)
-            .map_err(|_| contract_error("visibility pool offset cannot be represented"))?;
-        let end = range
+    for (capsule, location) in capsules.iter().zip(locations) {
+        let Some(range) = &location.visibility else {
+            continue;
+        };
+        let start = range
             .offset
-            .checked_add(range.length)
+            .checked_sub(location.offset)
+            .and_then(|offset| usize::try_from(offset).ok())
+            .ok_or_else(|| contract_error("visibility pool offset cannot be represented"))?;
+        let end = u64::try_from(start)
+            .ok()
+            .and_then(|start| start.checked_add(range.length))
             .and_then(|end| usize::try_from(end).ok())
-            .filter(|end| *end <= offset)
+            .filter(|end| *end <= capsule.bytes().len())
             .ok_or_else(|| contract_error("visibility pool source is outside its capsules"))?;
-        body.extend_from_within(start..end);
+        body.extend_from_slice(&capsule.bytes()[start..end]);
     }
     Ok(Some(RunSectionLocation {
-        offset: offset as u64,
+        offset: checked_run_body_offset(body_offset, offset)?,
         length: (body.len() - offset) as u64,
         hash: blake3::hash(&body[offset..]).to_hex().to_string(),
     }))

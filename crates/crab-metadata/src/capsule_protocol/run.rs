@@ -1008,14 +1008,16 @@ impl CapsuleRun {
         admission: Option<CapsuleRunAdmission>,
     ) -> Result<Self> {
         validate_level_count(level, capsules.len())?;
-        let mut body = Vec::new();
+        let mut capsule_bytes = 0_usize;
         let mut locations = Vec::with_capacity(capsules.len());
         for capsule in &capsules {
-            let offset = u64::try_from(body.len())
+            let offset = u64::try_from(capsule_bytes)
                 .map_err(|_| contract_error("capsule run offset cannot be represented"))?;
             let length = u64::try_from(capsule.bytes().len())
                 .map_err(|_| contract_error("capsule run length cannot be represented"))?;
-            body.extend_from_slice(capsule.bytes());
+            capsule_bytes = capsule_bytes
+                .checked_add(capsule.bytes().len())
+                .ok_or_else(|| contract_error("capsule run payload length overflowed"))?;
             let transaction =
                 section_location(capsule, offset, CapsuleSectionKind::RefTransaction)?
                     .ok_or_else(|| contract_error("capsule run transaction section is missing"))?;
@@ -1043,42 +1045,60 @@ impl CapsuleRun {
                 },
             });
         }
-        let capsule_end = body.len() as u64;
+        let capsule_end = u64::try_from(capsule_bytes)
+            .map_err(|_| contract_error("capsule run payload length cannot be represented"))?;
         let git_packs = pack_members(&capsules, &locations)?;
+        // Assemble only the metadata suffix until the complete wire size is
+        // known. Growing a buffer that already holds large packs duplicates
+        // those packs transiently and can exceed the command's memory bound.
+        let mut metadata = Vec::new();
         // Preserve canonical capsule sections for recovery and whole-member
         // installation. A compacted run duplicates only its indexes here so
         // ordinary lookups do not range-read across every intervening pack.
         let index_pool = if level > 0 && !git_packs.is_empty() {
-            let offset = body.len();
-            for member in &git_packs {
+            let offset = metadata.len();
+            let sections = capsules.iter().flat_map(|capsule| {
+                capsule
+                    .git_packs()
+                    .iter()
+                    .map(move |pack| capsule.section_bytes(pack.index_section()))
+            });
+            for (member, section) in git_packs.iter().zip(sections) {
                 let start = usize::try_from(member.index().offset())
                     .map_err(|_| contract_error("capsule run index offset overflows"))?;
                 let length = usize::try_from(member.index().length())
                     .map_err(|_| contract_error("capsule run index length overflows"))?;
                 let end = start
                     .checked_add(length)
-                    .filter(|end| *end <= offset)
+                    .filter(|end| *end <= capsule_bytes)
                     .ok_or_else(|| contract_error("capsule run index range is invalid"))?;
-                body.extend_from_within(start..end);
+                let section = section?;
+                if section.len() != end - start {
+                    return Err(contract_error("capsule run index section length differs"));
+                }
+                metadata.extend_from_slice(&section);
             }
             Some(RunSectionLocation {
-                offset: offset as u64,
-                length: (body.len() - offset) as u64,
-                hash: blake3::hash(&body[offset..]).to_hex().to_string(),
+                offset: checked_run_body_offset(capsule_end, offset)?,
+                length: (metadata.len() - offset) as u64,
+                hash: blake3::hash(&metadata[offset..]).to_hex().to_string(),
             })
         } else {
             None
         };
-        let visibility_pool = visibility_pool::build(&mut body, level, &locations)?;
-        let catalog = CatalogPages::build(&capsules)?.map(|(bytes, descriptor)| {
-            let range = RunSectionLocation {
-                offset: body.len() as u64,
-                length: bytes.len() as u64,
-                hash: blake3::hash(&bytes).to_hex().to_string(),
-            };
-            body.extend_from_slice(&bytes);
-            (range, descriptor)
-        });
+        let visibility_pool =
+            visibility_pool::build(&mut metadata, capsule_end, level, &capsules, &locations)?;
+        let catalog = CatalogPages::build(&capsules)?
+            .map(|(bytes, descriptor)| {
+                let range = RunSectionLocation {
+                    offset: checked_run_body_offset(capsule_end, metadata.len())?,
+                    length: bytes.len() as u64,
+                    hash: blake3::hash(&bytes).to_hex().to_string(),
+                };
+                metadata.extend_from_slice(&bytes);
+                Ok::<_, MetadataError>((range, descriptor))
+            })
+            .transpose()?;
         let admission = admission
             .filter(|admission| !admission.members.is_empty())
             .map(|admission| {
@@ -1092,11 +1112,10 @@ impl CapsuleRun {
                     ));
                 }
                 let bytes = admission.encode(git_packs.len())?;
-                let offset = u64::try_from(body.len())
-                    .map_err(|_| contract_error("capsule run admission offset overflowed"))?;
+                let offset = checked_run_body_offset(capsule_end, metadata.len())?;
                 let length = u64::try_from(bytes.len())
                     .map_err(|_| contract_error("capsule run admission length overflowed"))?;
-                body.extend_from_slice(&bytes);
+                metadata.extend_from_slice(&bytes);
                 Ok((
                     admission,
                     RunSectionLocation {
@@ -1120,8 +1139,19 @@ impl CapsuleRun {
             admission_pages: admission
                 .as_ref()
                 .map(|(_, range)| {
-                    let start = range.offset as usize;
-                    AdmissionPages::decode(&body[start..start + range.length as usize])
+                    let start = range
+                        .offset
+                        .checked_sub(capsule_end)
+                        .and_then(|start| usize::try_from(start).ok())
+                        .ok_or_else(|| contract_error("capsule run admission offset overflowed"))?;
+                    let end = usize::try_from(range.length)
+                        .ok()
+                        .and_then(|length| start.checked_add(length))
+                        .ok_or_else(|| contract_error("capsule run admission length overflowed"))?;
+                    let bytes = metadata.get(start..end).ok_or_else(|| {
+                        contract_error("capsule run admission is outside its metadata")
+                    })?;
+                    AdmissionPages::decode(bytes)
                 })
                 .transpose()?,
         };
@@ -1135,7 +1165,7 @@ impl CapsuleRun {
         }
         // Keep the wire layout checks shared with downloaded runs. Payload and
         // page commitments already come from verified capsules and their builders.
-        let body_end = body.len() as u64;
+        let body_end = checked_run_body_offset(capsule_end, metadata.len())?;
         let index_end = validate_index_pool(&footer, capsule_end, body_end)?;
         let visibility_end = visibility_pool::validate(&footer, index_end, body_end)?;
         let catalog_end = validate_catalog(&footer, visibility_end, body_end)?;
@@ -1146,6 +1176,17 @@ impl CapsuleRun {
         }
         let footer_length = u64::try_from(footer_bytes.len())
             .map_err(|_| contract_error("capsule run footer length cannot be represented"))?;
+        let capacity = capsule_bytes
+            .checked_add(metadata.len())
+            .and_then(|bytes| bytes.checked_add(footer_bytes.len()))
+            .and_then(|bytes| bytes.checked_add(RUN_TRAILER_BYTES))
+            .ok_or_else(|| contract_error("capsule run encoded length overflowed"))?;
+        let mut body = Vec::with_capacity(capacity);
+        for capsule in &capsules {
+            body.extend_from_slice(capsule.bytes());
+        }
+        body.extend_from_slice(&metadata);
+        drop(metadata);
         body.extend_from_slice(&footer_bytes);
         body.extend_from_slice(&footer_length.to_be_bytes());
         body.extend_from_slice(blake3::hash(&footer_bytes).as_bytes());
@@ -1495,6 +1536,13 @@ fn level_for_count(count: usize) -> Result<u8> {
         .map_err(|_| contract_error("capsule run level cannot be represented"))
 }
 
+fn checked_run_body_offset(prefix: u64, bytes: usize) -> Result<u64> {
+    u64::try_from(bytes)
+        .ok()
+        .and_then(|bytes| prefix.checked_add(bytes))
+        .ok_or_else(|| contract_error("capsule run body offset overflowed"))
+}
+
 fn pack_members(
     capsules: &[Capsule],
     locations: &[RunCapsuleLocation],
@@ -1835,6 +1883,113 @@ mod tests {
     use crate::capsule_protocol::{
         CapsuleGitPack, CapsuleRefEdit, CapsuleSection, CapsuleTransaction,
     };
+
+    fn encoding_fixture(version: u8) -> Capsule {
+        let oid = format!("{version:040x}");
+        let transaction = CapsuleTransaction::for_plan(
+            &"1".repeat(64),
+            &format!("{version:064x}"),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some(oid.clone()),
+                None,
+            )],
+        )
+        .unwrap();
+        let visibility = CapsuleVisibilityDelta::new(BTreeMap::from([(
+            "refs/heads/main".to_owned(),
+            crate::git_visibility::GitVisibilityEdit::from_replacement_objects(
+                None,
+                oid.clone(),
+                vec![oid],
+            ),
+        )]))
+        .unwrap();
+        let pack = CapsuleGitPack::new(
+            Bytes::from(vec![version; 131_072]),
+            Bytes::from_static(b"index"),
+            Bytes::from_static(b"reverse"),
+            Bytes::from_static(b"locator"),
+            "4".repeat(40),
+            1,
+        )
+        .unwrap();
+        Capsule::build(
+            &transaction,
+            vec![pack],
+            vec![
+                CapsuleSection::new(
+                    CapsuleSectionKind::VisibilityDelta,
+                    visibility.encode().unwrap(),
+                ),
+                CapsuleSection::new(
+                    CapsuleSectionKind::CatalogDelta,
+                    PointerCatalog::new().encode_delta().unwrap(),
+                ),
+            ],
+        )
+        .unwrap()
+    }
+
+    fn encoding_leaf(version: u8) -> CapsuleRun {
+        let mut oid = [0_u8; 20];
+        oid[19] = version;
+        CapsuleRun::leaf_with_member_oids(encoding_fixture(version), vec![vec![oid]]).unwrap()
+    }
+
+    #[test]
+    fn allocation_changes_preserve_published_leaf_and_compacted_wire_bytes() {
+        // Captured from the published encoder before changing its allocation
+        // strategy. These include pack indexes, visibility and admission pools.
+        let merged = CapsuleRun::compact(vec![encoding_leaf(1), encoding_leaf(2)]).unwrap();
+        let upper = CapsuleRun::compact(vec![
+            merged.clone(),
+            CapsuleRun::compact(vec![encoding_leaf(3), encoding_leaf(4)]).unwrap(),
+        ])
+        .unwrap();
+        for (run, hash, bytes, control_offset, control_size) in [
+            (
+                CapsuleRun::leaf(encoding_fixture(1)).unwrap(),
+                "cf45524747b360c7d8ff1610a613841a1c37e037029bb79e071a8be890eeb5ad",
+                137_450,
+                134_142,
+                3_308,
+            ),
+            (
+                encoding_leaf(1),
+                "62fb33dd4e8e2d46160c85b255d495126ffa5c46f4bca0f4472937aa50fe6526",
+                138_472,
+                134_142,
+                4_330,
+            ),
+            (
+                merged,
+                "703d3c1e5df70d8aabca8872a4b5faed8f5506e2dc1efc2704aa3fa6ed2defe9",
+                278_102,
+                270_434,
+                7_668,
+            ),
+            (
+                upper,
+                "3085a90d060eb10c153594db323c7d063b2e6f22bd99ba30240b157c0ff57164",
+                554_790,
+                540_844,
+                13_946,
+            ),
+        ] {
+            assert_eq!(run.hash(), hash);
+            assert_eq!(run.bytes().len(), bytes);
+            assert_eq!(run.control_offset(), control_offset);
+            assert_eq!(run.control_size(), control_size);
+            let decoded = CapsuleRun::decode(run.bytes().clone()).unwrap();
+            assert_eq!(decoded.hash(), hash);
+            assert_eq!(
+                PackSourceDescriptor::from_capsule_run(&decoded).unwrap(),
+                PackSourceDescriptor::from_capsule_run(&run).unwrap()
+            );
+        }
+    }
 
     fn capsule(base: char, transaction: char) -> Capsule {
         let transaction = CapsuleTransaction::new(
