@@ -1,6 +1,25 @@
 import { Badge } from "@/components/ui/badge";
 import { Spinner } from "@/components/ui/spinner";
 import { Button } from "@/components/ui/button";
+import {
+  Collapsible,
+  CollapsibleContent,
+  CollapsibleTrigger,
+} from "@/components/ui/collapsible";
+import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
+import {
+  InputGroup,
+  InputGroupAddon,
+  InputGroupInput,
+} from "@/components/ui/input-group";
+import {
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import { useEffect, useId, useMemo, useRef, useState } from "react";
 import {
   ColumnsIcon,
@@ -108,6 +127,7 @@ function isNumericColumn(data: TableData, column: number) {
 }
 
 function ResultChart({ data }: { data: TableData }) {
+  const id = useId();
   const numeric = useMemo(
     () =>
       data.columns.flatMap((_, index) =>
@@ -138,35 +158,52 @@ function ResultChart({ data }: { data: TableData }) {
   const zero = ((0 - minimum) / span) * 100;
   return (
     <section className="data-chart" aria-label="Query result chart">
-      <div className="data-chart-controls">
-        <label>
-          Label
-          <select
-            value={x}
-            onChange={(event) => setX(Number(event.target.value))}
+      <FieldGroup className="data-chart-controls">
+        <Field>
+          <FieldLabel htmlFor={`${id}-label`}>Label</FieldLabel>
+          <Select
+            value={String(x)}
+            onValueChange={(value) => setX(Number(value))}
           >
-            {data.columns.map((column, index) => (
-              <option key={`${column}:${index}`} value={index}>
-                {column}
-              </option>
-            ))}
-          </select>
-        </label>
-        <label>
-          Value
-          <select
-            value={y}
-            onChange={(event) => setY(Number(event.target.value))}
+            <SelectTrigger id={`${id}-label`} className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent position="popper" align="start">
+              <SelectGroup>
+                {data.columns.map((column, index) => (
+                  <SelectItem key={`${column}:${index}`} value={String(index)}>
+                    {column}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+        </Field>
+        <Field>
+          <FieldLabel htmlFor={`${id}-value`}>Value</FieldLabel>
+          <Select
+            value={String(y)}
+            onValueChange={(value) => setY(Number(value))}
           >
-            {numeric.map((index) => (
-              <option key={`${data.columns[index]}:${index}`} value={index}>
-                {data.columns[index]}
-              </option>
-            ))}
-          </select>
-        </label>
+            <SelectTrigger id={`${id}-value`} className="w-full">
+              <SelectValue />
+            </SelectTrigger>
+            <SelectContent position="popper" align="start">
+              <SelectGroup>
+                {numeric.map((index) => (
+                  <SelectItem
+                    key={`${data.columns[index]}:${index}`}
+                    value={String(index)}
+                  >
+                    {data.columns[index]}
+                  </SelectItem>
+                ))}
+              </SelectGroup>
+            </SelectContent>
+          </Select>
+        </Field>
         <span className="muted">First {rows.length} result rows</span>
-      </div>
+      </FieldGroup>
       <div className="data-chart-bars">
         {rows.map((row, index) => {
           const value = values[index];
@@ -238,30 +275,33 @@ function Schema({
           </span>
         </div>
         {(fieldCount > 8 || relations.length > 1) && (
-          <label className="data-schema-search">
-            <span className="sr-only">Filter columns</span>
-            <ColumnsIcon aria-hidden="true" />
-            <input
+          <InputGroup>
+            <InputGroupInput
+              aria-label="Filter columns"
               type="search"
               value={query}
               placeholder="Filter columns"
               onChange={(event) => setQuery(event.target.value)}
             />
-          </label>
+            <InputGroupAddon>
+              <ColumnsIcon aria-hidden="true" />
+            </InputGroupAddon>
+          </InputGroup>
         )}
       </header>
       <ol className="data-schema-relations">
         {visible.map((relation) => (
           <li className="data-schema-relation" key={relation.name}>
             <div>
-              <button
-                type="button"
+              <Button
+                variant={relation.name === selected ? "secondary" : "ghost"}
+                size="xs"
                 aria-current={relation.name === selected ? "true" : undefined}
                 title={`Use ${relation.name} for query presets`}
                 onClick={() => onSelect(relation.name)}
               >
-                {relation.name}
-              </button>
+                <code className="truncate">{relation.name}</code>
+              </Button>
               <small>
                 {relation.type} · {relation.fields.length.toLocaleString()}
               </small>
@@ -269,15 +309,17 @@ function Schema({
             <ol>
               {relation.fields.map((field) => (
                 <li key={field.name}>
-                  <button
-                    type="button"
+                  <Button
+                    variant="ghost"
+                    size="xs"
+                    className="h-auto"
                     title={`Insert ${field.name} into the query`}
                     onClick={() => onInsert(field.name)}
                   >
                     <span>{field.name}</span>
                     <code>{field.type.toLowerCase()}</code>
                     <small>{field.nullable ? "nullable" : "required"}</small>
-                  </button>
+                  </Button>
                 </li>
               ))}
             </ol>
@@ -519,8 +561,9 @@ export function DataWorkbench({ bytes, format, name, size, url }: Props) {
         />
         <div className="data-query-actions">
           <div className="data-query-presets" aria-label="Query examples">
-            <button
-              type="button"
+            <Button
+              variant="ghost"
+              size="xs"
               onClick={() =>
                 setQuery(
                   selectedRelation
@@ -530,9 +573,10 @@ export function DataWorkbench({ bytes, format, name, size, url }: Props) {
               }
             >
               Sample rows
-            </button>
-            <button
-              type="button"
+            </Button>
+            <Button
+              variant="ghost"
+              size="xs"
               onClick={() =>
                 setQuery(
                   `SELECT count(*) AS rows\nFROM ${sqlIdentifier(selectedRelation?.name ?? "data")}`,
@@ -540,9 +584,10 @@ export function DataWorkbench({ bytes, format, name, size, url }: Props) {
               }
             >
               Count rows
-            </button>
-            <button
-              type="button"
+            </Button>
+            <Button
+              variant="ghost"
+              size="xs"
               disabled={!selectedRelation?.fields.length}
               onClick={() => {
                 if (session && selectedRelation)
@@ -555,7 +600,7 @@ export function DataWorkbench({ bytes, format, name, size, url }: Props) {
               }}
             >
               Profile columns
-            </button>
+            </Button>
           </div>
           <div className="data-query-primary-actions">
             {busy ? (
@@ -588,44 +633,57 @@ export function DataWorkbench({ bytes, format, name, size, url }: Props) {
             )}
           </div>
         </div>
-        <details className="data-query-history">
-          <summary>
-            <HistoryIcon aria-hidden="true" /> Recent runs
-            <span>{history.length}</span>
-          </summary>
-          {history.length ? (
-            <div>
-              <ol>
-                {history.map((item) => (
-                  <li key={item.id} className={item.status}>
-                    <button type="button" onClick={() => setQuery(item.query)}>
-                      <code>
-                        {item.query.split("\n", 1)[0] || "Empty query"}
-                      </code>
-                      <small>
-                        {item.mode === "explain" ? "Explain" : "Query"} ·{" "}
-                        {item.status}
-                        {item.rows !== undefined &&
-                          ` · ${item.rows.toLocaleString()} ${item.rows === 1 ? "row" : "rows"}`}
-                        {item.elapsedMs !== undefined &&
-                          ` · ${item.elapsedMs.toFixed(0)} ms`}
-                        {` · ${new Intl.DateTimeFormat(undefined, {
-                          hour: "numeric",
-                          minute: "2-digit",
-                        }).format(item.at)}`}
-                      </small>
-                    </button>
-                  </li>
-                ))}
-              </ol>
-              <button type="button" onClick={() => setHistory([])}>
-                Clear history
-              </button>
-            </div>
-          ) : (
-            <p>Successful, failed, and stopped queries appear here.</p>
-          )}
-        </details>
+        <Collapsible className="data-query-history">
+          <CollapsibleTrigger asChild>
+            <Button variant="ghost" size="xs" className="my-2">
+              <HistoryIcon data-icon="inline-start" /> Recent runs
+              <Badge variant="secondary">{history.length}</Badge>
+            </Button>
+          </CollapsibleTrigger>
+          <CollapsibleContent>
+            {history.length ? (
+              <div className="data-query-history-content">
+                <ol>
+                  {history.map((item) => (
+                    <li key={item.id} className={item.status}>
+                      <Button
+                        variant="ghost"
+                        size="xs"
+                        className="h-auto"
+                        onClick={() => setQuery(item.query)}
+                      >
+                        <code>
+                          {item.query.split("\n", 1)[0] || "Empty query"}
+                        </code>
+                        <small>
+                          {item.mode === "explain" ? "Explain" : "Query"} ·{" "}
+                          {item.status}
+                          {item.rows !== undefined &&
+                            ` · ${item.rows.toLocaleString()} ${item.rows === 1 ? "row" : "rows"}`}
+                          {item.elapsedMs !== undefined &&
+                            ` · ${item.elapsedMs.toFixed(0)} ms`}
+                          {` · ${new Intl.DateTimeFormat(undefined, {
+                            hour: "numeric",
+                            minute: "2-digit",
+                          }).format(item.at)}`}
+                        </small>
+                      </Button>
+                    </li>
+                  ))}
+                </ol>
+                <Button
+                  variant="ghost"
+                  size="xs"
+                  onClick={() => setHistory([])}
+                >
+                  Clear history
+                </Button>
+              </div>
+            ) : (
+              <p>Successful, failed, and stopped queries appear here.</p>
+            )}
+          </CollapsibleContent>
+        </Collapsible>
       </div>
       {error && (
         <div className="data-query-error" role="alert">

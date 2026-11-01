@@ -1,46 +1,94 @@
-//! Immutable paged capsule hints under one conditional global root.
+//! Verified packed hint runs under one conditional global root.
 use super::*;
-use crate::pages::object::{Node, ObjectPages, Reference};
-use crate::pages::{Kind, PageWork, Rows};
+use crate::pages::{Kind, PageCache, PageWork, Rows};
 use bytes::Bytes;
 use crab_storage::{StorageError, Store, StoreLayout};
 use object_store::path::Path;
 use std::collections::{BTreeMap, BTreeSet};
 
-const ROOT_BYTES: u64 = 4096;
+mod filter;
+mod migration;
+mod run;
+pub use migration::migrate_capsule_chunk_candidates;
+use run::{Run, merge, row_value};
+
+const ROOT_BYTES: u64 = 64 * 1024;
+const LEVELS: usize = 32;
 const READ_ATTEMPTS: usize = 3;
 const WRITE_ATTEMPTS: usize = crab_storage::cas::DEFAULT_MAX_ATTEMPTS as usize;
 const KIND: Kind = Kind::CapsuleChunkHints;
 type Request = (MerkleHash, [u8; 33], Option<[u8; 32]>);
 
-#[derive(Serialize, Deserialize)]
+#[derive(Deserialize)]
+struct Version {
+    version: u32,
+}
+
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Root {
     version: u32,
-    records: Reference,
+    sequence: u64,
+    levels: Vec<Option<Run>>,
 }
 
-/// Bounded global capsule-hint access without legacy database initialization.
-///
-/// Each lookup captures a current root. Hints do not authorize payload reuse;
-/// callers still prove current source membership and exact physical origin.
+impl Root {
+    fn decode(body: &[u8]) -> Result<Self> {
+        let version: Version = serde_json::from_slice(body)
+            .map_err(|source| MetadataError::PointerCatalogRecord { source })?;
+        if version.version != 2 {
+            return Err(corrupt(
+                "capsule hint index requires crab doctor --migrate-chunk-index",
+            ));
+        }
+        let root: Self = serde_json::from_slice(body)
+            .map_err(|source| MetadataError::PointerCatalogRecord { source })?;
+        if root.sequence == 0
+            || root.levels.is_empty()
+            || root.levels.len() > LEVELS
+            || root.levels.last().is_none_or(Option::is_none)
+        {
+            return Err(corrupt("capsule hint root shape is invalid"));
+        }
+        for (level, run) in root.levels.iter().enumerate() {
+            if let Some(run) = run {
+                run.validate()?;
+                if run.level() != level {
+                    return Err(corrupt("capsule hint run is in the wrong size tier"));
+                }
+            }
+        }
+        Ok(root)
+    }
+
+    fn encode(&self) -> Result<Bytes> {
+        let bytes = serde_json::to_vec(self)
+            .map_err(|source| MetadataError::PointerCatalogRecord { source })?;
+        if bytes.len() as u64 > ROOT_BYTES {
+            return Err(corrupt("capsule hint root exceeds its byte bound"));
+        }
+        Ok(Bytes::from(bytes))
+    }
+}
+
+/// Bounded global hints whose immutable runs never authorize payload reuse.
 #[derive(Debug)]
 pub struct CapsuleChunkIndex {
     root: Path,
-    pages: ObjectPages,
+    prefix: Path,
 }
 
 impl CapsuleChunkIndex {
-    /// Bind page identities to one caller-selected global scope.
+    /// Bind hint identities to one caller-selected global scope.
     #[must_use]
     pub fn new(layout: &StoreLayout<Store>) -> Self {
         Self {
             root: layout.capsule_chunk_index_path(),
-            pages: ObjectPages::new(layout.capsule_chunk_pages_prefix()),
+            prefix: layout.capsule_chunk_pages_prefix(),
         }
     }
 
-    /// Report an advertised root without loading its page dependencies.
+    /// Report an advertised root without loading its immutable dependencies.
     pub async fn available(&self, store: &Store, maximum_bytes: u64) -> Result<bool> {
         Ok(self
             .load(store, &mut PageWork::new(maximum_bytes, 0))
@@ -99,7 +147,7 @@ impl CapsuleChunkIndex {
                 return Ok(CapsuleChunkCandidates::default());
             };
             match self
-                .records(store, &root.records, requests, &mut work)
+                .records(store, &root, requests, &mut work, attempt)
                 .await
             {
                 Err(
@@ -108,15 +156,11 @@ impl CapsuleChunkIndex {
                     },
                 ) => {
                     let current = self.load(store, &mut work).await?;
-                    if current
-                        .as_ref()
-                        .is_none_or(|(current, _)| current.records == root.records)
-                    {
+                    if current.as_ref().is_none_or(|(current, _)| current == &root) {
                         return Err(error);
                     }
-                    // These heads are floating advisory discovery, not a pinned
-                    // repository view. A superseded root can lose old pages to GC;
-                    // restart the entire query without requiring writes from readers.
+                    // Floating hints may lose superseded runs to GC. Recapture
+                    // the entire query; readers must never require a write grant.
                     if attempt + 1 == READ_ATTEMPTS {
                         return Err(StorageError::StateConflict {
                             path: self.root.to_string(),
@@ -133,20 +177,97 @@ impl CapsuleChunkIndex {
         .into())
     }
 
+    async fn lookup(
+        &self,
+        store: &Store,
+        root: &Root,
+        keys: &[Vec<u8>],
+        caches: &[PageCache],
+        work: &mut PageWork,
+        attempt: usize,
+    ) -> Result<Vec<Option<Vec<u8>>>> {
+        let mut output: Vec<Option<(u64, Vec<u8>)>> = vec![None; keys.len()];
+        for (index, run) in root.levels.iter().enumerate() {
+            let Some(run) = run else {
+                continue;
+            };
+            let path = run.path(&self.prefix);
+            let possible = run
+                .filter_candidates(
+                    store,
+                    &path,
+                    &caches[index],
+                    attempt * LEVELS + index,
+                    keys,
+                    work,
+                )
+                .await?;
+            let positions = possible
+                .iter()
+                .enumerate()
+                .filter_map(|(index, possible)| possible.then_some(index))
+                .collect::<Vec<_>>();
+            if positions.is_empty() {
+                continue;
+            }
+            let selected_keys = positions
+                .iter()
+                .map(|index| keys[*index].clone())
+                .collect::<Vec<_>>();
+            let values = caches[index]
+                .lookup(
+                    store,
+                    &path,
+                    attempt * LEVELS + index,
+                    0..run.bytes,
+                    &run.records,
+                    KIND,
+                    &selected_keys,
+                    work,
+                )
+                .await?;
+            for (position, value) in positions.into_iter().zip(values) {
+                let key = &keys[position];
+                let selected = &mut output[position];
+                let Some(value) = value else {
+                    continue;
+                };
+                let (sequence, raw) = row_value(key, &value, root.sequence)?;
+                work.admit_materialized((key.len() + value.len() + 96) as u64)?;
+                if let Some((prior_sequence, prior)) = selected {
+                    if (key[0] != 0x06 || *prior_sequence == sequence) && prior.as_slice() != raw {
+                        return Err(corrupt("capsule hint identity has conflicting values"));
+                    }
+                    if *prior_sequence >= sequence {
+                        continue;
+                    }
+                }
+                *selected = Some((sequence, raw.to_vec()));
+            }
+        }
+        Ok(output
+            .into_iter()
+            .map(|value| value.map(|(_, bytes)| bytes))
+            .collect())
+    }
+
     async fn records(
         &self,
         store: &Store,
-        root: &Reference,
+        root: &Root,
         requests: &[Request],
         work: &mut PageWork,
+        attempt: usize,
     ) -> Result<CapsuleChunkCandidates> {
+        let caches = (0..root.levels.len())
+            .map(|_| PageCache::default())
+            .collect::<Vec<_>>();
         let keys = requests
             .iter()
             .map(|(_, key, _)| key.to_vec())
             .collect::<Vec<_>>();
         let values = self
-            .pages
-            .lookup(store, Some(root), KIND, &keys, work)
+            .lookup(store, root, &keys, &caches, work, attempt)
             .await?;
         let mut output = CapsuleChunkCandidates::default();
         let mut anchors = BTreeSet::new();
@@ -178,8 +299,7 @@ impl CapsuleChunkIndex {
             .map(|id| capsule_chunk_anchor_key(id).to_vec())
             .collect::<Vec<_>>();
         let values = self
-            .pages
-            .lookup(store, Some(root), KIND, &keys, work)
+            .lookup(store, root, &keys, &caches, work, attempt)
             .await?;
         for (id, value) in anchors.into_iter().zip(values) {
             let value =
@@ -196,7 +316,7 @@ impl CapsuleChunkIndex {
         store: &Store,
         work: &mut PageWork,
     ) -> Result<Option<(Root, crab_storage::store::ETag)>> {
-        let body = match store
+        let (body, etag) = match store
             .get_with_etag_bounded(&self.root, ROOT_BYTES.min(work.maximum))
             .await
         {
@@ -204,20 +324,13 @@ impl CapsuleChunkIndex {
             Err(StorageError::NotFound { .. }) => return Ok(None),
             Err(error) => return Err(error.into()),
         };
-        work.admit_object(*blake3::hash(&body.0).as_bytes(), body.0.len() as u64)?;
-        let root: Root = serde_json::from_slice(&body.0)
-            .map_err(|source| MetadataError::PointerCatalogRecord { source })?;
-        if root.version != 1 {
-            return Err(corrupt("capsule hint root version is unsupported"));
-        }
-        root.records.validate(KIND)?;
-        Ok(Some((root, body.1)))
+        work.admit_object(*blake3::hash(&body).as_bytes(), body.len() as u64)?;
+        Ok(Some((Root::decode(&body)?, etag)))
     }
 
-    /// Authenticate a current root and every immutable page before maintenance.
+    /// Authenticate the complete physical hint closure before GC.
     ///
-    /// The caller holds global sweep admission through marking and deletion.
-    /// The root digest participates in the caller's plan revalidation.
+    /// The caller holds global sweep admission; hints are not payload roots.
     pub async fn objects(
         &self,
         store: &Store,
@@ -227,25 +340,29 @@ impl CapsuleChunkIndex {
         let Some((root, _)) = self.load(store, &mut work).await? else {
             return Ok((None, Vec::new()));
         };
-        let mut pending = vec![root.records.clone()];
-        let mut objects = BTreeMap::new();
-        while let Some((reference, node)) = self
-            .pages
-            .next_page(store, &mut pending, KIND, &mut work)
-            .await?
-        {
-            if let Node::Leaf(rows) = node.as_ref() {
-                for (key, value) in rows {
-                    validate_row(key, value)?;
+        let mut objects = Vec::new();
+        let mut identities = BTreeMap::new();
+        for run in root.levels.iter().flatten() {
+            for (key, value) in run
+                .read(store, &self.prefix, root.sequence, &mut work)
+                .await?
+            {
+                let (sequence, raw) = row_value(&key, &value, root.sequence)?;
+                let sequence = if key[0] == 0x06 { sequence } else { 0 };
+                let digest = *blake3::hash(raw).as_bytes();
+                if let Some(prior) = identities.insert((key, sequence), digest)
+                    && prior != digest
+                {
+                    return Err(corrupt(
+                        "capsule hint closure contains conflicting identities",
+                    ));
                 }
             }
-            objects.insert(self.pages.path(&reference.hash), u64::from(reference.bytes));
+            objects.push((run.path(&self.prefix), run.bytes));
         }
-        let body = serde_json::to_vec(&root)
-            .map_err(|source| MetadataError::PointerCatalogRecord { source })?;
         Ok((
-            Some(blake3::hash(&body).to_hex().to_string()),
-            objects.into_iter().collect(),
+            Some(blake3::hash(&root.encode()?).to_hex().to_string()),
+            objects,
         ))
     }
 
@@ -259,53 +376,94 @@ impl CapsuleChunkIndex {
         if rows.is_empty() {
             return Ok(());
         }
-        let mut work = PageWork::new(maximum, 0);
+        for (key, value) in &rows {
+            validate_row(key, value)?;
+        }
         let keys = rows.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>();
+        let mut work = PageWork::new(maximum, 0);
         for attempt in 0..WRITE_ATTEMPTS {
             if cancelled() {
                 return Err(MetadataError::CapsuleHintCancelled);
             }
             let snapshot = self.load(store, &mut work).await?;
-            let root = snapshot.as_ref().map(|(root, _)| &root.records);
-            let previous = self
-                .pages
-                .lookup(store, root, KIND, &keys, &mut work)
-                .await?;
-            for ((key, incoming), previous) in rows.iter().zip(previous) {
-                if let Some(previous) = previous {
-                    validate_row(key, &previous)?;
-                    if key[0] != 0x06 && previous != *incoming {
-                        return Err(corrupt(
-                            "immutable capsule hint identity has conflicting bytes",
-                        ));
-                    }
-                }
-            }
-            let Some(records) = self
-                .pages
-                .edit(store, root, KIND, rows.clone(), &mut work)
-                .await?
-            else {
-                return Err(corrupt("nonempty capsule hints produced no root"));
+            let previous = if let Some((root, _)) = &snapshot {
+                let caches = (0..root.levels.len())
+                    .map(|_| PageCache::default())
+                    .collect::<Vec<_>>();
+                self.lookup(store, root, &keys, &caches, &mut work, attempt)
+                    .await?
+            } else {
+                vec![None; rows.len()]
             };
-            if root == Some(&records) {
+            let sequence = snapshot
+                .as_ref()
+                .map_or(Some(1), |(root, _)| root.sequence.checked_add(1))
+                .ok_or_else(|| corrupt("capsule hint sequence overflows"))?;
+            let mut versioned = BTreeMap::new();
+            for ((key, value), prior) in rows.iter().zip(previous) {
+                if key[0] != 0x06 && prior.as_ref().is_some_and(|prior| prior != value) {
+                    return Err(corrupt(
+                        "immutable capsule hint identity has conflicting bytes",
+                    ));
+                }
+                if prior.as_ref() == Some(value) {
+                    continue;
+                }
+                let mut encoded = sequence.to_le_bytes().to_vec();
+                encoded.extend_from_slice(value);
+                versioned.insert(key.clone(), encoded);
+            }
+            if versioned.is_empty() {
                 return Ok(());
             }
-            let body = Bytes::from(
-                serde_json::to_vec(&Root {
-                    version: 1,
-                    records,
-                })
-                .map_err(|source| MetadataError::PointerCatalogRecord { source })?,
-            );
-            if body.len() as u64 > ROOT_BYTES {
-                return Err(corrupt("capsule hint root exceeds its byte bound"));
-            }
-            // Every edited immutable page is read-back verified by ObjectPages
-            // before the conditional root transition can advertise it.
+            let mut levels = snapshot
+                .as_ref()
+                .map_or_else(Vec::new, |(root, _)| root.levels.clone());
+            let (run, body) = loop {
+                let (run, body) = Run::build(&versioned)?;
+                let level = run.level();
+                if level >= LEVELS {
+                    return Err(corrupt("capsule hint run exceeds its size tiers"));
+                }
+                if levels.len() <= level {
+                    levels.resize(level + 1, None);
+                }
+                let Some(prior) = levels[level].take() else {
+                    break (run, body);
+                };
+                // Row sequences survive compaction: a large new publication must
+                // not let an older head shadow a newer head in an unmerged tier.
+                let prior = prior
+                    .read(store, &self.prefix, sequence - 1, &mut work)
+                    .await?;
+                merge(&mut versioned, prior, sequence)?;
+                if cancelled() {
+                    return Err(MetadataError::CapsuleHintCancelled);
+                }
+            };
+            work.admit_object(run.hash, run.bytes)?;
             if cancelled() {
                 return Err(MetadataError::CapsuleHintCancelled);
             }
+            store
+                .put_if_absent_verified(&run.path(&self.prefix), body)
+                .await?;
+            let level = run.level();
+            levels[level] = Some(run);
+            while levels.last().is_some_and(Option::is_none) {
+                levels.pop();
+            }
+            let root = Root {
+                version: 2,
+                sequence,
+                levels,
+            };
+            // Verify the whole packed run before advertising its page references.
+            // Global GC admission remains held through this root CAS by callers.
+            if cancelled() {
+                return Err(MetadataError::CapsuleHintCancelled);
+            }
+            let body = root.encode()?;
             let result = match snapshot {
                 Some((_, etag)) => store.update(&self.root, body, etag).await.map(|_| ()),
                 None => store.create_strict(&self.root, body).await,

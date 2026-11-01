@@ -193,13 +193,17 @@ test("shared form tokens align controls, preserve contrast in both themes and fo
       border: getComputedStyle(node).borderTopColor,
       background: getComputedStyle(document.body).backgroundColor,
       font: getComputedStyle(node).fontSize,
-      radius: getComputedStyle(node).borderTopLeftRadius,
     }));
     expect(
       contrastRatio(control.border, control.background),
     ).toBeGreaterThanOrEqual(3);
     expect(control.font).toBe("14px");
-    expect(control.radius).toBe("8px");
+    const radii = await Promise.all(
+      [username, name, submit].map((control) =>
+        control.evaluate((node) => getComputedStyle(node).borderTopLeftRadius),
+      ),
+    );
+    expect(new Set(radii).size).toBe(1);
     await expectNoAccessibilityViolations(page);
   }
   const bounds = await Promise.all([

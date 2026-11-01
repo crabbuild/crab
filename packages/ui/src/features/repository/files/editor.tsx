@@ -1,17 +1,25 @@
-import {
-  InputGroup,
-  InputGroupInput,
-  InputGroupAddon,
-} from "@/components/ui/input-group";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
+import { Alert, AlertTitle, AlertDescription } from "@/components/ui/alert";
+import {
+  CommitDialog,
+  CommitPanel,
+  proposedBranch,
+  useCommitTarget,
+} from "./commit";
+import { CodeEditor } from "./code-editor";
+import { DialogTrigger } from "@/components/ui/dialog";
+import { Badge } from "@/components/ui/badge";
+import { Link } from "@/components/navigation/link";
+import { RepositoryMarkdown } from "./markdown";
+import type { CodeThemes } from "@/lib/code-theme";
 import { repoHref } from "@/lib/repository-route";
 import { useState } from "react";
 
 import {
   FileAddedIcon,
-  GitBranchIcon,
   PencilIcon,
+  SidebarExpandIcon,
   TrashIcon,
   UploadIcon,
   XIcon,
@@ -34,6 +42,11 @@ type BaseProps = {
   csrf: string;
 };
 
+type TextEditorProps = BaseProps & {
+  theme: "light" | "dark";
+  codeThemes: CodeThemes;
+};
+
 type ResponseBody = {
   branch?: string;
   commit?: string;
@@ -45,35 +58,6 @@ type ResponseBody = {
 const MAX_UPLOAD_FILES = 100;
 const MAX_UPLOAD_FILE_BYTES = 900 * 1024;
 const MAX_UPLOAD_BYTES = 4 * 1024 * 1024;
-
-type CommitTarget = {
-  mode: "direct" | "pull";
-  setMode: (mode: "direct" | "pull") => void;
-  newBranch: string;
-  setNewBranch: (branch: string) => void;
-  protected: boolean;
-};
-
-function useCommitTarget(repo: Repository, branch: string): CommitTarget {
-  const protectedBranch = repo.protected_branches.some(
-    (rule) => `refs/heads/${rule.branch}` === branch,
-  );
-  const [mode, setMode] = useState<"direct" | "pull">(
-    protectedBranch ? "pull" : "direct",
-  );
-  const [newBranch, setNewBranch] = useState("");
-  return {
-    mode,
-    setMode,
-    newBranch,
-    setNewBranch,
-    protected: protectedBranch,
-  };
-}
-
-function proposedBranch(target: CommitTarget) {
-  return target.mode === "pull" ? target.newBranch.trim() : undefined;
-}
 
 function commitDestination(
   repo: Repository,
@@ -140,130 +124,17 @@ export async function changeContent(
   return result;
 }
 
-function CommitPanel({
-  message,
-  setMessage,
-  placeholder,
-  saving,
-  error,
-  cancel,
-  branch,
-  target,
-  danger = false,
-}: {
-  message: string;
-  setMessage: (message: string) => void;
-  placeholder: string;
-  saving: boolean;
-  error?: string;
-  cancel: () => void;
-  branch: string;
-  target: CommitTarget;
-  danger?: boolean;
-}) {
-  return (
-    <section className="create-file-commit" aria-labelledby="commit-heading">
-      <h3 id="commit-heading">Commit changes</h3>
-      <label htmlFor="commit-message">Commit message</label>
-      <Input
-        id="commit-message"
-        placeholder={placeholder}
-        value={message}
-        required
-        onChange={(event) => setMessage(event.target.value)}
-      />
-      <fieldset className="commit-target" disabled={saving}>
-        <legend>Choose a branch for your changes</legend>
-        <label>
-          <input
-            type="radio"
-            name="commit-target"
-            checked={target.mode === "direct"}
-            disabled={target.protected}
-            onChange={() => target.setMode("direct")}
-          />
-          <span>
-            <strong>
-              Commit directly to {branch.slice("refs/heads/".length)}
-            </strong>
-            {target.protected && (
-              <small>
-                This branch requires changes through a pull request.
-              </small>
-            )}
-          </span>
-        </label>
-        <label>
-          <input
-            type="radio"
-            name="commit-target"
-            checked={target.mode === "pull"}
-            onChange={() => target.setMode("pull")}
-          />
-          <span>
-            <strong>
-              Create a new branch for this commit and start a pull request
-            </strong>
-            <small>
-              You can review the diff before opening the pull request.
-            </small>
-          </span>
-        </label>
-        {target.mode === "pull" && (
-          <div className="commit-branch-name">
-            <InputGroup>
-              <InputGroupInput
-                aria-label="New branch name"
-                placeholder="my-change"
-                value={target.newBranch}
-                required
-                onChange={(event) => target.setNewBranch(event.target.value)}
-              />
-              <InputGroupAddon>
-                <GitBranchIcon aria-hidden="true" />
-              </InputGroupAddon>
-            </InputGroup>
-          </div>
-        )}
-      </fieldset>
-      {error && (
-        <p className="error" role="alert">
-          {error}
-        </p>
-      )}
-      <div className="create-file-actions">
-        <Button
-          variant={
-            danger && target.mode === "direct" ? "destructive" : "default"
-          }
-          type="submit"
-          disabled={
-            saving || (target.mode === "pull" && !target.newBranch.trim())
-          }
-        >
-          {saving
-            ? target.mode === "pull"
-              ? "Proposing…"
-              : "Committing…"
-            : target.mode === "pull"
-              ? "Propose changes"
-              : "Commit changes"}
-        </Button>
-        <Button variant="outline" type="button" onClick={cancel}>
-          Cancel changes
-        </Button>
-      </div>
-    </section>
-  );
-}
-
 export function CreateFile({
   repo,
   branch,
   expectedHead,
   directoryHex,
   csrf,
-}: BaseProps & { directoryHex: string }) {
+  theme,
+  codeThemes,
+  onOpenTree,
+}: TextEditorProps & { directoryHex: string; onOpenTree?: () => void }) {
+  const [commitOpen, setCommitOpen] = useState(false);
   const [name, setName] = useState("");
   const [content, setContent] = useState("");
   const [message, setMessage] = useState("");
@@ -303,42 +174,117 @@ export function CreateFile({
     }
   }
 
+  function openCommit(open: boolean) {
+    if (open && !name.trim()) return;
+    if (open && !message.trim())
+      setMessage(`Create ${name.trim().split("/").at(-1)}`);
+    setCommitOpen(open);
+  }
+
   return (
-    <form className="create-file" onSubmit={submit}>
-      <EditorHeading
-        icon={<FileAddedIcon size={24} />}
-        title="Create new file"
-        branch={branch}
-      />
-      <div className="create-file-path">
-        <span className="muted">
-          {repo.name}/{directory ? `${directory}/` : ""}
-        </span>
-        <Input
-          aria-label="File name"
-          placeholder="Name your file…"
-          value={name}
-          required
-          autoFocus
-          onChange={(event) => setName(event.target.value)}
+    <CommitDialog
+      open={commitOpen}
+      onOpenChange={openCommit}
+      onSubmit={submit}
+      filename={name.trim()}
+      message={message}
+      setMessage={setMessage}
+      placeholder="Create a new file"
+      saving={saving}
+      error={error}
+      branch={branch}
+      target={target}
+    >
+      <form
+        className="inline-create-file"
+        onSubmit={(event) => {
+          event.preventDefault();
+          openCommit(true);
+        }}
+      >
+        <h2 className="sr-only">Create new file</h2>
+        <div className="inline-file-header">
+          <div className="inline-file-name">
+            {onOpenTree && (
+              <Button
+                variant="outline"
+                size="icon"
+                onClick={onOpenTree}
+                aria-label="Open file tree"
+                aria-expanded={false}
+              >
+                <SidebarExpandIcon data-icon="inline-start" />
+              </Button>
+            )}
+            <Link href={repoHref(repo, { rev: branch })}>{repo.name}</Link>
+            <span aria-hidden="true">/</span>
+            {directory && (
+              <>
+                <Link
+                  href={repoHref(repo, {
+                    rev: branch,
+                    path: directoryHex,
+                    kind: "Tree",
+                  })}
+                >
+                  {directory}
+                </Link>
+                <span aria-hidden="true">/</span>
+              </>
+            )}
+            <Input
+              aria-label="File name"
+              placeholder="Name your file…"
+              value={name}
+              required
+              autoFocus
+              onChange={(event) => setName(event.target.value)}
+            />
+            <span className="inline-file-branch">
+              in{" "}
+              <Badge variant="secondary">
+                {branch.slice("refs/heads/".length)}
+              </Badge>
+            </span>
+          </div>
+          <div className="inline-file-actions">
+            <Button
+              variant="outline"
+              onClick={() =>
+                navigate(
+                  repoHref(repo, {
+                    rev: branch,
+                    path: directoryHex || undefined,
+                    kind: directoryHex ? "Tree" : undefined,
+                  }),
+                )
+              }
+            >
+              Cancel changes
+            </Button>
+            <DialogTrigger asChild>
+              <Button disabled={!name.trim() || saving}>Commit changes…</Button>
+            </DialogTrigger>
+          </div>
+        </div>
+        <CodeEditor
+          label="File content"
+          content={content}
+          setContent={setContent}
+          preview={
+            <DraftPreview
+              repo={repo}
+              branch={branch}
+              expectedHead={expectedHead}
+              theme={theme}
+              codeThemes={codeThemes}
+              pathHex={joinPath(directoryHex, name)}
+              content={content}
+            />
+          }
         />
-      </div>
-      <CodeEditor
-        label="File content"
-        content={content}
-        setContent={setContent}
-      />
-      <CommitPanel
-        message={message}
-        setMessage={setMessage}
-        placeholder="Create a new file"
-        saving={saving}
-        error={error}
-        branch={branch}
-        target={target}
-        cancel={() => navigate(repoHref(repo, { rev: branch }))}
-      />
-    </form>
+      </form>
+    </CommitDialog>
   );
 }
 
@@ -511,7 +457,9 @@ export function EditFile({
   expectedHead,
   pathHex,
   csrf,
-}: BaseProps & { pathHex: string }) {
+  theme,
+  codeThemes,
+}: TextEditorProps & { pathHex: string }) {
   const state = useRequest<Content>(
     endpoint(repo, "file", { rev: expectedHead, path_hex: pathHex }),
   );
@@ -531,6 +479,8 @@ export function EditFile({
             expectedHead={expectedHead}
             pathHex={pathHex}
             csrf={csrf}
+            theme={theme}
+            codeThemes={codeThemes}
             original={content}
           />
         )
@@ -546,7 +496,9 @@ function EditFileForm({
   pathHex,
   csrf,
   original,
-}: BaseProps & { pathHex: string; original: Content }) {
+  theme,
+  codeThemes,
+}: TextEditorProps & { pathHex: string; original: Content }) {
   const [content, setContent] = useState(original.text ?? "");
   const [message, setMessage] = useState("");
   const [saving, setSaving] = useState(false);
@@ -600,6 +552,17 @@ function EditFileForm({
         label="File content"
         content={content}
         setContent={setContent}
+        preview={
+          <DraftPreview
+            repo={repo}
+            branch={branch}
+            expectedHead={expectedHead}
+            theme={theme}
+            codeThemes={codeThemes}
+            pathHex={pathHex}
+            content={content}
+          />
+        }
         autoFocus
       />
       <CommitPanel
@@ -696,13 +659,17 @@ function DeleteFileForm({
         title={`Delete ${path}`}
         branch={branch}
       />
-      <div className="delete-file-summary">
-        <TrashIcon size={24} />
-        <div>
-          <strong>This commit will delete {path}.</strong>
-          <p>The file will remain available in the repository history.</p>
-        </div>
-      </div>
+      <Alert
+        variant="destructive"
+        className="delete-file-summary"
+        role="status"
+      >
+        <TrashIcon aria-hidden="true" />
+        <AlertTitle>This commit will delete {path}.</AlertTitle>
+        <AlertDescription>
+          The file will remain available in the repository history.
+        </AlertDescription>
+      </Alert>
       <CommitPanel
         message={message}
         setMessage={setMessage}
@@ -743,27 +710,28 @@ function EditorHeading({
   );
 }
 
-function CodeEditor({
-  label,
+function DraftPreview({
+  repo,
+  branch,
+  expectedHead,
+  pathHex,
   content,
-  setContent,
-  autoFocus = false,
-}: {
-  label: string;
-  content: string;
-  setContent: (content: string) => void;
-  autoFocus?: boolean;
-}) {
-  return (
-    <div className="create-file-editor">
-      <div className="create-file-editor-tab">Edit file</div>
-      <textarea
-        aria-label={label}
-        value={content}
-        onChange={(event) => setContent(event.target.value)}
-        spellCheck={false}
-        autoFocus={autoFocus}
-      />
-    </div>
-  );
+  theme,
+  codeThemes,
+}: Omit<TextEditorProps, "csrf"> & { pathHex: string; content: string }) {
+  if (!content) return <p className="muted">Nothing to preview yet.</p>;
+  if (/\.(?:md|markdown|mdx)$/i.test(displayHex(pathHex)))
+    return (
+      <RepositoryMarkdown
+        repo={repo}
+        rev={expectedHead}
+        revision={branch}
+        directory={parentHex(pathHex)}
+        theme={theme}
+        codeThemes={codeThemes}
+      >
+        {content}
+      </RepositoryMarkdown>
+    );
+  return <pre>{content}</pre>;
 }

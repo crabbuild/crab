@@ -20,10 +20,21 @@ fn fixture(
     HashMap<MerkleHash, OriginReceipt>,
     Vec<MerkleHash>,
 ) {
-    let xorb = MerkleHash::from([seed; 4]);
     let hashes = (0..count)
         .map(|index| MerkleHash::from([u64::from(index), seed, 9, 7]))
         .collect::<Vec<_>>();
+    fixture_from_hashes(seed, hashes)
+}
+
+fn fixture_from_hashes(
+    seed: u64,
+    hashes: Vec<MerkleHash>,
+) -> (
+    PointerCatalog,
+    HashMap<MerkleHash, OriginReceipt>,
+    Vec<MerkleHash>,
+) {
+    let xorb = MerkleHash::from([seed; 4]);
     let mut catalog = PointerCatalog::new();
     catalog
         .insert_xorb(
@@ -58,6 +69,46 @@ fn layout() -> StoreLayout<Store> {
         Store::new(Arc::new(object_store::memory::InMemory::new())),
         "source".to_owned(),
     )
+}
+
+#[tokio::test]
+async fn scattered_publications_bound_object_writes_as_history_grows() {
+    let observations = Arc::new(Observations::default());
+    let layout = StoreLayout::new(
+        Store::new(Arc::new(object_store::memory::InMemory::new()))
+            .with_storage_observer(observations.clone()),
+        "source".to_owned(),
+    );
+    for seed in 1_u64..=12 {
+        let hashes = (0..3000_u64)
+            .map(|index| {
+                let mut input = seed.to_le_bytes().to_vec();
+                input.extend_from_slice(&index.to_le_bytes());
+                MerkleHash::from(*blake3::hash(&input).as_bytes())
+            })
+            .collect();
+        let (catalog, origins, _) = fixture_from_hashes(seed, hashes);
+        observations.0.lock().unwrap().clear();
+        write_capsule_chunk_candidates(&layout, &catalog, &origins, &|| false)
+            .await
+            .unwrap();
+        let writes = observations
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|o| o.operation == StorageOperation::Put)
+            .count();
+        assert!(writes <= 2, "publication {seed}: {writes} object writes");
+        let reads = observations
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .filter(|o| matches!(o.operation, StorageOperation::Get | StorageOperation::Range))
+            .count();
+        assert!(reads <= 64, "publication {seed}: {reads} object reads");
+    }
 }
 
 #[tokio::test]
@@ -113,10 +164,11 @@ async fn unchanged_root_missing_or_corrupt_pages_remain_errors() {
         .await
         .unwrap()
         .unwrap();
-    let path = index.pages.path(&root.records.hash);
+    let run = root.levels.iter().flatten().next().unwrap();
+    let path = run.path(&index.prefix);
     let (body, _) = layout
         .store()
-        .get_with_etag_bounded(&path, u64::from(root.records.bytes))
+        .get_with_etag_bounded(&path, run.bytes)
         .await
         .unwrap();
     layout.store().delete(&path).await.unwrap();
@@ -145,12 +197,20 @@ async fn unchanged_root_missing_or_corrupt_pages_remain_errors() {
 
 #[tokio::test]
 async fn cancellation_after_page_writes_does_not_advertise_partial_hints() {
-    use std::sync::atomic::{AtomicUsize, Ordering};
-    let layout = layout();
+    let observations = Arc::new(Observations::default());
+    let layout = StoreLayout::new(
+        Store::new(Arc::new(object_store::memory::InMemory::new()))
+            .with_storage_observer(observations.clone()),
+        "source".to_owned(),
+    );
     let (catalog, origins, _) = fixture(1, 3);
-    let calls = AtomicUsize::new(0);
     let result = write_capsule_chunk_candidates(&layout, &catalog, &origins, &|| {
-        calls.fetch_add(1, Ordering::Relaxed) >= 2
+        observations
+            .0
+            .lock()
+            .unwrap()
+            .iter()
+            .any(|o| o.operation == StorageOperation::Put)
     })
     .await;
     assert!(matches!(result, Err(MetadataError::CapsuleHintCancelled)));
@@ -210,3 +270,5 @@ async fn hint_reads_and_selected_writes_do_not_follow_unrelated_history() {
 }
 
 mod races;
+
+mod packed;

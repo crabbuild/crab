@@ -9,6 +9,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, Instant};
 
 use clap::Parser;
@@ -74,7 +75,7 @@ pub struct PushArgs {
     #[arg(long)]
     pub follow_tags: bool,
 
-    /// Show per-step timing and per-file progress.
+    /// Include transfer object counts in the live progress display.
     #[arg(long, short = 'v')]
     pub verbose: bool,
 
@@ -82,7 +83,7 @@ pub struct PushArgs {
     #[arg(long)]
     pub no_incremental: bool,
 
-    /// Disable colored output and ANSI escape codes.
+    /// Disable ANSI color in the progress display.
     #[arg(long)]
     pub no_color: bool,
 
@@ -416,7 +417,8 @@ pub(crate) async fn run_push_prepared_refspecs(
         verbose: false,
         no_incremental: false,
         no_color: true,
-        json: false,
+        // Hook and recovery callers own output; do not add a second display.
+        json: true,
         jsonl: false,
     };
     execute_push(&args, cancel, false, None, expected_refs.as_ref()).await
@@ -552,6 +554,21 @@ async fn run_push_once(
 
     // Build push config from resolved Config + CLI overrides.
     let mut push_config = PushConfig::from_config(&config);
+    let progress_stream = (mode == OutputMode::Jsonl).then(|| {
+        Arc::new(Mutex::new(JsonlStream::new(
+            "push.event",
+            "1.0",
+            std::io::stdout(),
+        )))
+    });
+    push_config.progress = Some(Arc::new(
+        crate::git::progress::NativePushProgress::with_mode(
+            !args.no_color && console::colors_enabled_stderr(),
+            args.verbose,
+            mode,
+            progress_stream,
+        ),
+    ));
     if let Some(context) = &explicit_context {
         push_config.git_dir = Some(context.per_worktree_git_dir.clone());
     }

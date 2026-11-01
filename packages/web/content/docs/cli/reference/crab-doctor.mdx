@@ -62,11 +62,28 @@ For conceptual background, see [Health Check](/docs/cli/diagnostics/health-check
 | `--json` | `false` | Emit structured JSON output |
 | `--cost` | `false` | Run the cost optimizer report instead of standard checks |
 | `--metadb` | `false` | Report SlateDB metadata state instead of standard checks |
+| `--migrate-chunk-index` | `false` | Migrate the development global chunk-hint index to verified packed runs |
 | `--support-bundle` | `false` | Collect a redacted cache-service support bundle |
 | `--cache-service-active-probe` | `false` | Run an opt-in cache-service write/read/range/cleanup probe |
 | `--output <PATH>` | | Write the support bundle as pretty JSON |
 
 ## Examples
+
+### Migrate a development chunk-hint index
+
+After upgrading all clients and publishers, run this once from a repository
+with administrator credentials for its object-store bucket:
+
+```bash
+crab doctor --migrate-chunk-index
+```
+
+The migration preserves existing hint records and exact placement IDs. It holds
+global GC writer admission, verifies the replacement before a conditional root
+update, and leaves old objects for normal grace-period collection. Repeating the
+command is safe. It does not change committed Git refs or file data. Normal
+read-only discovery requires no write permission; migration is an administrative
+operation for the unreleased development index format.
 
 ### Run all checks
 

@@ -297,6 +297,9 @@ enum Cmd {
         /// Structured JSON output (envelope format).
         #[arg(long)]
         json: bool,
+        /// Migrate development chunk hints to verified packed runs.
+        #[arg(long, conflicts_with_all = ["cost", "metadb", "support_bundle", "cache_service_active_probe"])]
+        migrate_chunk_index: bool,
         /// Run the cost optimizer report instead of the standard health check.
         #[arg(long, conflicts_with_all = ["metadb", "support_bundle"])]
         cost: bool,
@@ -3657,6 +3660,7 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
         }
         Some(Cmd::Doctor {
             json,
+            migrate_chunk_index,
             cost,
             metadb,
             support_bundle,
@@ -3677,7 +3681,9 @@ async fn run_cli_stub(cli: Cli, cancel: CancellationToken) -> Result<ExitCode> {
             )
             .entered();
             let mode = OutputMode::from_flags(json, false);
-            if cost {
+            if migrate_chunk_index {
+                crab::cmd::doctor::migrate_chunk_index(mode, &cancel).await?;
+            } else if cost {
                 let config = Config::resolve_local()?;
                 crab::cmd::doctor::run_cost_report(
                     mode,
