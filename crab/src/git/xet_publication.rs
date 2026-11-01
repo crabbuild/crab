@@ -58,18 +58,11 @@ pub(crate) async fn prepare_delta(
         return Ok((PointerCatalog::new(), XetPublicationStats::default()));
     }
     let concurrency = upload_concurrency.clamp(1, MAX_IN_FLIGHT_XORBS);
-    let view = crab_read::capsule_protocol::open_git_view_from_root(
-        layout,
-        base.clone(),
-        crab_read::capsule_protocol::CapsuleReadLimits {
-            max_capsule_bytes: 2 * 1024 * 1024 * 1024,
-            max_frontier_bytes: 8 * 1024 * 1024 * 1024,
-        },
-    )
-    .await?;
+    // Xet planning needs captured catalog roots, not Git pack intake or
+    // physical placement inventory. Keep capture and query budgets with metadata.
     let lookup =
-        view.pointer_catalog_lookup(layout, crab_metadata::capsule_protocol::MAX_CATALOG_BYTES)?;
-    drop(view);
+        crab_metadata::capsule_protocol::load_pointer_catalog_lookup_from_root(layout, base)
+            .await?;
 
     let mut pointer_sizes = BTreeMap::<MerkleHash, u64>::new();
     for pointer in pointers {

@@ -112,9 +112,13 @@ the inherited base when its source ref later moves, and dictionary retention
 never supplies visibility for a new ref. Deletion-only capsules remove their
 live ref closure even without an OID payload, in both full-body and control reads.
 
-Initial rooted additions use their
-authenticated count; differing actual delta additions/removals remain admitted
-work.
+Captured layers query authenticated membership without building a global OID
+dictionary. Expected-old links, new-tip membership, complete removal validation
+and per-query page-byte admission remain required. Complete
+`GitVisibilityIndex` construction owns the distinct-object dictionary limit;
+bulk readers and checkpoint writers still enforce it before exposing a complete
+proof. Each stored visibility section retains its byte/ref/object bounds and
+canonical decoder.
 
 `git_visibility_index`, `candidate_git_visibility` and
 `tip_bound_transitions` asynchronously materialize captured controls only when

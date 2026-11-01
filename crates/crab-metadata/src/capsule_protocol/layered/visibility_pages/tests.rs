@@ -248,7 +248,7 @@ async fn fixture(
 }
 
 #[tokio::test]
-async fn paged_control_replay_batches_checkpoint_dictionary_reads() {
+async fn paged_control_replay_keeps_unrequested_checkpoint_history_cold() {
     use crate::capsule_protocol::{
         Capsule, CapsuleRefEdit, CapsuleRun, CapsuleSection, CapsuleSectionKind,
         CapsuleTransaction, CapsuleVisibilityDelta, CapturedVisibility, VisibilityReconciliation,

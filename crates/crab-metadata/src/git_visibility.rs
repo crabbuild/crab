@@ -1015,12 +1015,6 @@ impl GitVisibilityIndex {
         &self.objects
     }
 
-    /// Dictionary retention is independent of current per-ref authorization.
-    #[cfg(feature = "storage")]
-    pub(crate) fn retains(&self, oid: &GitVisibilityOid) -> bool {
-        self.positions.contains_key(oid)
-    }
-
     /// Build a normalized proof from ref-rooted object sets.
     pub fn new(
         generation: u64,
