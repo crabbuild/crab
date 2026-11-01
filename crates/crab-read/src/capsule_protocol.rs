@@ -208,8 +208,10 @@ pub struct CapsuleRepositoryView {
     catalog_sources: Option<Vec<crab_metadata::capsule_protocol::RunCatalogSource>>,
     capsule_run_bytes: BTreeMap<String, Bytes>,
     capsule_run_indexes: BTreeMap<String, Vec<PackRange>>,
-    capsule_run_member_oids: BTreeMap<String, Vec<Vec<[u8; 20]>>>,
-    frontier_object_admission: BTreeMap<[u8; 20], Vec<String>>,
+    // Fetch and integrity callers clone captured views. Share these immutable
+    // tables so each clone does not copy the complete team placement inventory.
+    capsule_run_member_oids: Arc<BTreeMap<String, Vec<Vec<[u8; 20]>>>>,
+    frontier_object_admission: Arc<BTreeMap<[u8; 20], BTreeSet<String>>>,
 }
 
 impl std::fmt::Debug for CapsuleRepositoryView {
@@ -482,7 +484,7 @@ impl CapsuleRepositoryView {
     /// Return exact frontier object-to-source-member candidates derived from
     /// authenticated visibility deltas.
     #[must_use]
-    pub fn frontier_object_admission(&self) -> &BTreeMap<[u8; 20], Vec<String>> {
+    pub fn frontier_object_admission(&self) -> &BTreeMap<[u8; 20], BTreeSet<String>> {
         &self.frontier_object_admission
     }
 
@@ -1230,6 +1232,8 @@ impl CapsuleRepositoryView {
         // A ready physical index resolves every placement before hint paths run.
         // Checkpoint visibility decoding already validates source/member bounds.
         // Only unindexed placement needs the complete admission dictionary here.
+        // Candidate membership is a set; the reader orders selected inventory.
+        // Linear duplicate scans multiply work across overlapping team histories.
         let mut preferred_object_admission_by_oid =
             object_index.is_none().then(std::collections::HashMap::new);
         if let Some(admission_by_oid) = preferred_object_admission_by_oid.as_mut()
@@ -1254,8 +1258,8 @@ impl CapsuleRepositoryView {
                     .map_err(|error| corrupt_path("layered visibility", error.to_string()))?;
                 admission_by_oid
                     .entry(*oid)
-                    .or_insert_with(Vec::new)
-                    .push(pack_id);
+                    .or_insert_with(BTreeSet::new)
+                    .insert(pack_id);
             }
         }
         for (oid, pack_ids) in self.frontier_object_admission() {
@@ -1263,10 +1267,10 @@ impl CapsuleRepositoryView {
                 let pack_id = crab_xet::hash::MerkleHash::from_hex(pack_id)
                     .map_err(|error| corrupt_path("frontier admission", error.to_string()))?;
                 if let Some(admission) = preferred_object_admission_by_oid.as_mut() {
-                    let entry = admission.entry(*oid).or_insert_with(Vec::new);
-                    if !entry.contains(&pack_id) {
-                        entry.push(pack_id);
-                    }
+                    admission
+                        .entry(*oid)
+                        .or_insert_with(BTreeSet::new)
+                        .insert(pack_id);
                 }
             }
         }
@@ -1278,17 +1282,20 @@ impl CapsuleRepositoryView {
                 .map_err(|error| corrupt_path("capsule run admission", error.to_string()))?;
             if let Some(admission) = preferred_object_admission_by_oid.as_mut() {
                 for oid in object_ids {
-                    let entry = admission.entry(oid).or_insert_with(Vec::new);
-                    if !entry.contains(&pack_id) {
-                        entry.push(pack_id);
-                    }
+                    admission
+                        .entry(oid)
+                        .or_insert_with(BTreeSet::new)
+                        .insert(pack_id);
                 }
             }
         }
         let admitted_pack_ids = preferred_object_admission_by_oid
             .iter()
             .flat_map(|admission| admission.values())
-            .flat_map(|pack_ids| pack_ids.iter().map(ToString::to_string))
+            .flat_map(|pack_ids| pack_ids.iter().copied())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|pack_id| pack_id.to_string())
             .collect::<BTreeSet<_>>();
         let frontier_pack_ids = self
             .capsule_run_sources
@@ -1500,7 +1507,12 @@ impl CapsuleRepositoryView {
         if let Some(admission) = preferred_object_admission_by_oid
             && !admission.is_empty()
         {
-            lookup_sources = lookup_sources.with_preferred_object_admission(admission);
+            lookup_sources = lookup_sources.with_preferred_object_admission(
+                admission
+                    .into_iter()
+                    .map(|(oid, packs)| (oid, packs.into_iter().collect()))
+                    .collect(),
+            );
         }
         crab_remote_git::RemoteGitRepository::from_snapshot_with_lookup_sources(
             layout,
@@ -4279,8 +4291,8 @@ pub fn compacted_view_from_checkpoint(
         catalog_sources: Some(Vec::new()),
         capsule_run_bytes: BTreeMap::new(),
         capsule_run_indexes: BTreeMap::new(),
-        capsule_run_member_oids: BTreeMap::new(),
-        frontier_object_admission: BTreeMap::new(),
+        capsule_run_member_oids: Arc::default(),
+        frontier_object_admission: Arc::default(),
     })
 }
 
@@ -4600,8 +4612,8 @@ async fn assemble_view(
         catalog_sources,
         capsule_run_bytes: BTreeMap::new(),
         capsule_run_indexes,
-        capsule_run_member_oids,
-        frontier_object_admission,
+        capsule_run_member_oids: Arc::new(capsule_run_member_oids),
+        frontier_object_admission: Arc::new(frontier_object_admission),
     })
 }
 
@@ -4793,8 +4805,8 @@ async fn assemble_layered_control_view(
             catalog_sources,
             capsule_run_bytes,
             capsule_run_indexes,
-            capsule_run_member_oids,
-            frontier_object_admission,
+            capsule_run_member_oids: Arc::new(capsule_run_member_oids),
+            frontier_object_admission: Arc::new(frontier_object_admission),
         });
     }
     let journal_capsules =
@@ -4882,8 +4894,8 @@ async fn assemble_layered_control_view(
         catalog_sources,
         capsule_run_bytes,
         capsule_run_indexes,
-        capsule_run_member_oids,
-        frontier_object_admission,
+        capsule_run_member_oids: Arc::new(capsule_run_member_oids),
+        frontier_object_admission: Arc::new(frontier_object_admission),
     })
 }
 
@@ -4911,7 +4923,7 @@ fn member_oids_for_capsule_run(run: &CapsuleRun) -> Option<Vec<Vec<[u8; 20]>>> {
 }
 
 fn extend_frontier_object_admission(
-    admission: &mut BTreeMap<[u8; 20], Vec<String>>,
+    admission: &mut BTreeMap<[u8; 20], BTreeSet<String>>,
     visibility: &crab_metadata::capsule_protocol::CapsuleVisibilityDelta,
     source: &PackSourceDescriptor,
     run_admission: Option<&crab_metadata::capsule_protocol::CapsuleRunAdmission>,
@@ -4951,11 +4963,7 @@ fn extend_frontier_object_admission(
                 })
                 .filter(|pack_ids| !pack_ids.is_empty())
                 .unwrap_or_else(|| all_pack_ids.clone());
-            for pack_id in &pack_ids {
-                if !entry.iter().any(|candidate| candidate == pack_id) {
-                    entry.push(pack_id.clone());
-                }
-            }
+            entry.extend(pack_ids);
         }
     }
 }

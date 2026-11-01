@@ -9,6 +9,90 @@ use std::io::Cursor;
 
 const BLOBS: [&[u8]; 2] = [b"first intake member", b"second intake member"];
 
+#[test]
+fn overlapping_frontiers_preserve_exact_member_sets() {
+    use crab_metadata::capsule_protocol::{
+        CapsuleSection, CapsuleSectionKind, CapsuleVisibilityDelta,
+    };
+    use crab_metadata::git_visibility::GitVisibilityEdit;
+
+    let common = (1..=128)
+        .map(|value| format!("{value:040x}"))
+        .collect::<Vec<_>>();
+    let mut admission = BTreeMap::new();
+    let mut expected = BTreeMap::<[u8; 20], BTreeSet<String>>::new();
+    let mut all_members = BTreeSet::new();
+    let mut merge_time = std::time::Duration::ZERO;
+    for index in 0..1_000 {
+        let name = format!("refs/heads/developer-{index}");
+        let tip = format!("{:040x}", index + 1_000_000);
+        let mut objects = common.clone();
+        objects.push(tip.clone());
+        let delta = CapsuleVisibilityDelta::new(BTreeMap::from([(
+            name.clone(),
+            GitVisibilityEdit::from_replacement_objects(None, tip.clone(), objects),
+        )]))
+        .unwrap();
+        let transaction = CapsuleTransaction::new(
+            &"1".repeat(64),
+            vec![CapsuleRefEdit::new(name, None, Some(tip.clone()), None)],
+        )
+        .unwrap();
+        // This merge handles placement metadata; the pack reader separately
+        // proves Git bytes. Each branch has its own immutable pack identity.
+        let pack = CapsuleGitPack::new(
+            Bytes::from(format!("pack-{index}")),
+            Bytes::from_static(b"index"),
+            Bytes::from_static(b"reverse"),
+            Bytes::from_static(b"locator"),
+            "4".repeat(40),
+            129,
+        )
+        .unwrap();
+        let capsule = Capsule::build(
+            &transaction,
+            vec![pack],
+            vec![CapsuleSection::new(
+                CapsuleSectionKind::VisibilityDelta,
+                delta.encode().unwrap(),
+            )],
+        )
+        .unwrap();
+        let run = CapsuleRun::leaf(capsule).unwrap();
+        let source = PackSourceDescriptor::from_capsule_run(&run).unwrap();
+        let member = source.members()[0].pack().blake3().to_owned();
+        all_members.insert(member.clone());
+        expected.insert(
+            ObjectId::from_hex(tip.as_bytes())
+                .unwrap()
+                .as_bytes()
+                .try_into()
+                .unwrap(),
+            BTreeSet::from([member]),
+        );
+        let started = std::time::Instant::now();
+        extend_frontier_object_admission(&mut admission, &delta, &source, None);
+        extend_frontier_object_admission(&mut admission, &delta, &source, None);
+        merge_time += started.elapsed();
+    }
+    eprintln!("1000 overlapping sources, 128 shared OIDs, repeated merge: {merge_time:?}");
+    for oid in common {
+        expected.insert(
+            ObjectId::from_hex(oid.as_bytes())
+                .unwrap()
+                .as_bytes()
+                .try_into()
+                .unwrap(),
+            all_members.clone(),
+        );
+    }
+    let actual = admission
+        .into_iter()
+        .map(|(oid, members)| (oid, members.into_iter().collect::<BTreeSet<_>>()))
+        .collect::<BTreeMap<_, _>>();
+    assert_eq!(actual, expected);
+}
+
 #[tokio::test(flavor = "multi_thread")]
 async fn large_ref_frontiers_bound_active_reads_without_dropping_refs() {
     use crab_metadata::capsule_protocol::{

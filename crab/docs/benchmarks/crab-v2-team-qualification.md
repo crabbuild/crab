@@ -3,7 +3,8 @@
 Status: **5,000-commit cold readback and large-file byte checks pass; team-scale
 performance is not qualified**. The complete object-store audit found three
 expired read-admission leases left by interrupted tests, with no Git-object or
-data-chain findings. Built-in recovery of those leases is being verified.
+data-chain findings. Built-in recovery passed; all three released tombstones
+were independently read back with their original holders preserved.
 
 ## Scope and provenance
 
@@ -48,6 +49,7 @@ the user's manual-demo data. No bucket-wide Crab GC was invoked.
 | 1,000 developer branch publications | All 1,000 acknowledged; later direct-origin audit matches every exact source tip | `medium-team-1000/artifacts/report.json`, `team-1000-ack-audit.json` |
 | Four additional rounds | All 4,000 updates pass; independent cold clone matches 1,000 final tips and files, passes strict Git fsck, and contains all 15,001 baseline/developer commits | `team-5000-direct/artifacts/report.json` |
 | Complete team object-store audit | Three expired read-admission leases; no Git-object or data-chain findings. Both audits report failure with zero repairs. Recovery remains a separate check | `team-final-fsck-retry.json`, `team-fsck-diagnostic.jsonl` |
+| Complete team-store recovery | Follow-up binary passes the full audit in repair mode: three leases repaired, zero repair failures; independent origin reads verify released tombstones and unchanged holders | `team-fsck-bounded-repair.jsonl`, `team-lease-recovery-verification.json` |
 | Bounded-reader follow-up, 64 clients | All 140 checks pass: 64 publications, 64 updates, concurrent protocol-v2 readbacks/pulls and fsck; uses the follow-up binary identified below | `bounded-frontier-64/artifacts/report.json` |
 | Concurrent 1,000-client readback | Failed; queued work stopped after repeated real transfer failures. It is not a complete 5,000-commit pass | `medium-team-1000/artifacts/report.json` |
 | Parallel 1,000-client preparation | Failed on two remote-root GETs; no developer branches published in this attempt | `medium-team-1000-parallel/artifacts/report.json` |
@@ -116,8 +118,9 @@ private FUSE/NFS `make install` pass at `2a8dfa31e0b`. Its binary SHA-256 is
 `bounded-frontier-build-retry-report.json` records the build receipt. Its live
 64-client smoke passes all 140 checks. The same 5,001-run team audit was observed
 with 32 TCP sockets (`team-fsck-bounded-resource-observation.json`); this is a
-point sample, not a peak-memory or latency result. Full team-store recovery
-for that binary remains in progress.
+point sample, not a peak-memory or latency result. The full team-store recovery
+audit passes with three repaired leases and zero repair failures. Independent
+origin reads verify all three released tombstones and their preserved holders.
 
 The team fixture still has generation-zero compacted authority with no
 checkpoint; its refs live in per-ref heads (`team-root-shape.json`).
@@ -127,6 +130,18 @@ The classic helper's `fetch_capsule_packs` also treats an absent checkpoint as
 a full-install case. Their contribution to read cost needs a shared-path fix
 and a controlled before/after measurement; the concurrency bound alone does
 not resolve it.
+
+The next admission follow-up replaces repeated linear candidate deduplication
+with membership sets and shares immutable admission tables across view clones.
+The remote reader already orders selected inventory independently of candidate
+insertion order. An overlap regression preserves every member binding across
+1,000 sources, 128 common OIDs and repeated insertion. Its local debug-profile
+merge sample fell from 1.828 seconds to 0.483 seconds; this is not an end-to-end
+latency result. Eleven minimal-feature tests, 64 targeted capsule tests, four
+publication-enabled consumer tests and crate lint pass. The same team fixture's
+pre-change single-branch fetch takes 328.815 seconds with exact tip/file readback
+and strict Git fsck (`team-fetch5000-bounded-before-sets/report.json`). A release
+build and the corresponding after-change fetch are still required.
 
 Kubernetes has 141,757 reachable commits and a 1.30 GiB packed ODB. It passes
 full strict Git fsck with no diagnostics; source HEAD/worktree status are
