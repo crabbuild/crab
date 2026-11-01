@@ -26,10 +26,23 @@ components. Use semantic roles rather than palette colors in feature code.
 - Surfaces: `background` for content, `muted` for subtle separation, `secondary`
   for selection, and `popover` for overlays. Status colors retain their meaning
   in both themes. `border` separates surfaces; `input` defines visible control
-  boundaries; `ring` indicates keyboard focus. Primitive controls own their focus
-  treatment, while plain links and buttons use the shared fallback.
+  boundaries with at least 3:1 contrast; `input-hover` strengthens hover edges.
+  `ring` supplies neutral keyboard focus with a 2px ring at 25% opacity and a
+  solid control edge. Primitive controls own their focus treatment; native form
+  controls share the same tokens, while plain links use a visible outline.
+  Keep focus and selection neutral; blue remains the information/link color.
+  `destructive` and `destructive-foreground` pair for solid action buttons.
+  `destructive-muted`, `destructive-muted-foreground`, and `destructive-border`
+  pair for warnings, errors, and badges. Use these surface roles for callouts
+  instead of drawing saturated action-colored borders.
 - Corners: 4px small, 6px medium, 8px default, and 12px raised surfaces. Use radius
-  tokens and `rounded-*` utilities; use `radius-full` for pills.
+  tokens and `rounded-*` utilities; controls use the medium radius, panels use
+  the default, and pills use `radius-full`.
+
+The theme follows [Geist's semantic color roles](https://vercel.com/geist/colors)
+through [shadcn CSS variables](https://ui.shadcn.com/docs/theming). Light surfaces
+stay white with subtle neutral separation; dark cards and popovers are raised
+above the canvas. `color-scheme` keeps native controls and scrollbars in theme.
 
 Review changes in both themes, at desktop and mobile widths, with keyboard focus,
 long content, empty/loading/error states, and native write recovery intact.
@@ -96,6 +109,12 @@ Build the UI before building `crab-server`; its build script embeds `dist/`.
   mobile layouts stack the tree above the file. Symbol and line-hash navigation
   scroll the document vertically without changing horizontal source scrolling.
   Breadcrumbs scroll horizontally while Copy path stays visible.
+  File creation shares the repository tree workspace, with an inline filename
+  and branch header. `files/code-editor.tsx` owns line numbers, undo history,
+  indentation and wrapping controls, and draft preview for both Create and Edit.
+  Markdown previews resolve relative links against the draft's directory.
+  `files/commit.tsx` shares commit fields across the creation review dialog and
+  existing edit/upload/delete panels; cancelling review preserves the draft.
 - `src/features/settings/`, `releases/`, and `imports/`: feature screens with
   local forms and helpers. Labels and milestones own their selection controls.
 - `src/app/`: bootstrap, session, error boundary, and appearance controls. The
@@ -127,7 +146,12 @@ and direction and discards the previous page cursor.
 
 Use the primitive APIs directly: buttons contain icons with `data-icon`, inputs
 with addons use `InputGroup`, menus compose their groups/items, and forms use
-`Field`/`FieldGroup`. The shared Button defaults to `type="button"`; mutations
+`Field`/`FieldGroup`. Use `Select` for styled option menus rather than browser
+dropdowns. Workbench controls use these shared components, including search,
+chart axes, schema actions, presets, and collapsible run history. Its CodeMirror
+SQL editor is a custom `input-group-control` inside `InputGroup`, which owns the
+single border and focus ring while CodeMirror retains completion and shortcuts.
+The shared Button defaults to `type="button"`; mutations
 must opt into `type="submit"`. Keep native permission, version and replay checks
 in the server even when the UI disables an action.
 

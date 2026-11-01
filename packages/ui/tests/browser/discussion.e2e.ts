@@ -224,11 +224,11 @@ test("comment edits restore focus and Markdown preview posts reset to Write", as
     const style = getComputedStyle(textarea);
     return {
       boxShadow: style.boxShadow,
-      outlineWidth: style.outlineWidth,
+      outlineStyle: style.outlineStyle,
     };
   });
-  expect(focusBorder.outlineWidth).toBe("0px");
-  expect(focusBorder.boxShadow).toMatch(/1px inset$/);
+  expect(focusBorder.outlineStyle).toBe("none");
+  expect(focusBorder.boxShadow).toContain("0px 0px 0px 2px");
   await card.getByRole("button", { name: "Cancel edit", exact: true }).click();
   await expect(edit).toBeFocused();
   await edit.click();

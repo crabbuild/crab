@@ -19,6 +19,7 @@ import { navigate, type Refs, type Repository } from "@/lib/api";
 import { CloneMenu } from "@/features/git-access";
 import { RevisionPicker } from "./refs/picker";
 import { Link } from "@/components/navigation/link";
+import { useRef } from "react";
 
 export function RepositoryRefControls({
   repo,
@@ -170,6 +171,7 @@ function AddFileMenu({
   onCreateFile: () => void;
   onUploadFiles: () => void;
 }) {
+  const selectedAction = useRef<(() => void) | undefined>(undefined);
   return (
     <DropdownMenu>
       <DropdownMenuTrigger asChild>
@@ -189,13 +191,28 @@ function AddFileMenu({
           </Button>
         )}
       </DropdownMenuTrigger>
-      <DropdownMenuContent className="w-44">
+      <DropdownMenuContent
+        className="w-44"
+        onCloseAutoFocus={(event) => {
+          const action = selectedAction.current;
+          selectedAction.current = undefined;
+          if (!action) return;
+          // Mount the editor after the menu releases its focus scope, so the
+          // filename receives autofocus instead of the still-mounted trigger.
+          event.preventDefault();
+          action();
+        }}
+      >
         <DropdownMenuGroup>
-          <DropdownMenuItem onSelect={onCreateFile}>
+          <DropdownMenuItem
+            onSelect={() => (selectedAction.current = onCreateFile)}
+          >
             <FileAddedIcon />
             Create new file
           </DropdownMenuItem>
-          <DropdownMenuItem onSelect={onUploadFiles}>
+          <DropdownMenuItem
+            onSelect={() => (selectedAction.current = onUploadFiles)}
+          >
             <UploadIcon />
             Upload files
           </DropdownMenuItem>
