@@ -129,9 +129,7 @@ async fn explicit_migration_preserves_every_record_and_is_idempotent() {
         .await
         .unwrap()
         .unwrap();
-    let caches = (0..root.levels.len())
-        .map(|_| PageCache::default())
-        .collect::<Vec<_>>();
+    let mut caches = Vec::new();
     let keys = expected
         .iter()
         .map(|(key, _)| key.clone())
@@ -141,7 +139,7 @@ async fn explicit_migration_preserves_every_record_and_is_idempotent() {
             layout.store(),
             &root,
             &keys,
-            &caches,
+            &mut caches,
             &mut PageWork::new(16 * 1024 * 1024, 0),
             0,
         )

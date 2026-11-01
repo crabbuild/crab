@@ -451,6 +451,20 @@ boundary or the final source. Evidence: `gc-suspended-writer-before.log`,
 `gc-expiry-final-consumer.log`, `gc-expiry-build-report.json`,
 `expiry-single-smoke-controller.json`.
 
+A controlled conditional-root collision exposes repeated hint reads: the
+publisher fetches three pages from an unchanged large run, loses its root CAS
+to a real competing publisher, then fetches the same three pages again.
+The retry cache now stays bound to each complete immutable run descriptor;
+unchanged tiers reuse verified pages, while replaced tiers get fresh caches and
+admission identities. There is still at most one bounded cache per size tier;
+compaction inputs and speculative run uploads are unchanged. The regression
+also replaces a run in an occupied tier and checks the final head values.
+All 27 chunk-hint tests pass, including corruption, exact placements, migration,
+GC closure and cancellation tests. Twelve isolated repetitions of the collision
+regression pass. This is request-count proof, not a team-scale speedup or latest
+runtime qualification. Evidence: `hint-retry-cache-before.log`,
+`hint-retry-cache-tests.log`, `hint-retry-cache-repeated-fixed.log`.
+
 The shared-base page prototype encodes dictionary/set pages for 1,000 refs,
 1,620,211 common objects and 30 private objects per ref into 86,093,652 bytes.
 Every reconstructed synthetic membership is checked, including a retained-only

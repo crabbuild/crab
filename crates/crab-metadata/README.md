@@ -72,6 +72,8 @@ omitted from new runs. Size-tiered compaction uploads only the final merged run
 before one root CAS. Per-row
 publication sequences preserve head precedence across mixed-size compaction
 and CAS retries; exact placement identities and source anchors remain immutable.
+Publication retries retain bounded page caches for unchanged run descriptors;
+replacing a tier's run resets its cache and page-admission identity together.
 Authenticated blocked Bloom pages skip absent keys without opening unrelated
 record pages. Missing or corrupt filter pages are errors, never negative hints.
 Readers need no write grant and retain aggregate read/materialization bounds.
