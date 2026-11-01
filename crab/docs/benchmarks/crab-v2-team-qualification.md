@@ -1,8 +1,9 @@
 # Crab v2 team and large-file qualification
 
-Status: **5,000-commit and large-file correctness checks pass; team-scale read
-performance and large-repository bootstrap are not qualified**. A final read-only
-object-store fsck is running.
+Status: **5,000-commit cold readback and large-file byte checks pass; complete
+repository health and team-scale performance are not qualified**. The final
+read-only object-store fsck failed with three errors; diagnostic classification
+is pending.
 
 ## Scope and provenance
 
@@ -16,8 +17,8 @@ tree `aca03af2d65078886659760ef646b0e192aa05f1`, version 2.0.0. Its private
 `make install` binary has SHA-256
 `ba5144f848cdd6aa2432d7f3f4da857d66d95780532a3c1d8bc434360fe443fd`.
 The later `crab-v2` commit `9a9305950f5` changes UI files only; it is not an
-additional runtime qualification. No Rust/product implementation is changed by
-this qualification PR.
+additional runtime qualification. The results below describe that frozen binary;
+the bounded-read follow-up described below requires separate live qualification.
 
 Host: macOS ARM64, 12 logical CPUs, 32 GiB RAM, workspace volume, other work
 sharing CPU and IO. Native RustFS 1.0.0-rc.1 and Git LFS 3.7.1. The original
@@ -46,6 +47,7 @@ the user's manual-demo data. No bucket-wide Crab GC was invoked.
 | Independent final consumer mode | Four source-backed clients, three commits each: 19 checks pass | `cold-final-driver-smoke/artifacts/report.json` |
 | 1,000 developer branch publications | All 1,000 acknowledged; later direct-origin audit matches every exact source tip | `medium-team-1000/artifacts/report.json`, `team-1000-ack-audit.json` |
 | Four additional rounds | All 4,000 updates pass; independent cold clone matches 1,000 final tips and files, passes strict Git fsck, and contains all 15,001 baseline/developer commits | `team-5000-direct/artifacts/report.json` |
+| Complete team object-store audit | Failed with three errors, zero repairs and zero repair failures. The count-only JSON receipt does not classify the issues; a JSONL diagnostic run retains that missing evidence | `team-final-fsck-retry.json`, `team-final-fsck-retry-exit.json` |
 | Concurrent 1,000-client readback | Failed; queued work stopped after repeated real transfer failures. It is not a complete 5,000-commit pass | `medium-team-1000/artifacts/report.json` |
 | Parallel 1,000-client preparation | Failed on two remote-root GETs; no developer branches published in this attempt | `medium-team-1000-parallel/artifacts/report.json` |
 | Direct single-branch read at 1,000 refs | Correct bytes and protocol v2; fetch took 256.654 seconds | `medium-team-1000-direct/artifacts/report.json` |
@@ -67,8 +69,9 @@ p50/p95/p99 was 8.530/12.439/13.792 seconds; queue-plus-service p95 was 562.729
 seconds. Every queued developer state is counted; this is not 1,000 simultaneous
 OS processes. Existing-ref update rounds in the direct continuation completed
 1,000 pushes each in approximately 80–87 seconds for its first three rounds,
-with service p95 of 1.891–2.152 seconds. These are busy-host observations, not
-isolated provider benchmarks or an eight-hour open-loop load test.
+with service p95 of 1.891–2.152 seconds. The fourth round took 157.970 seconds,
+with service p95/p99 of 4.330/12.939 seconds. These are busy-host observations,
+not isolated provider benchmarks or an eight-hour open-loop load test.
 
 New native branches amplify bytes: a 100-branch cohort transferred 699,897,711
 request-body bytes, or 6,998,977 bytes per tiny-file publication, at nine requests
@@ -93,6 +96,17 @@ boundary includes `crates/crab-metadata/src/capsule_protocol/catalog_capture.rs`
 and `store.rs::load_capsule_run_git_control`. The current evidence does not
 attribute all cost to one function. Per-ref capture, admission, visibility and
 catalog lifetime need profiling before selecting a fix.
+
+The final read-only audit exposed an additional resource problem: its original
+binary opened 5,001 TCP sockets while loading the 5,001-run frontier
+(`team-fsck-resources.json`). Per-ref frontier bounds do not bound their union.
+The follow-up limits complete/control run loading and lazy transition
+materialization to 32 active runs, preserving input order and existing validation.
+A 96-ref regression fails before the change at 96 simultaneous reads and passes
+after it across complete, metadata, Git and fetch views, including lazy
+transition materialization. All 63 targeted capsule tests pass. This limits
+active work; it does not eliminate retained full-view memory, history-byte
+amplification or the remaining team-capacity qualification gaps.
 
 Kubernetes has 141,757 reachable commits and a 1.30 GiB packed ODB. It passes
 full strict Git fsck with no diagnostics; source HEAD/worktree status are
@@ -158,6 +172,7 @@ skipped its live Kubernetes job. This campaign attempted the real input and
 retains its failure. The complete five-version Xet stress profile did not finish;
 its successful recovery controls cover two published versions. Multi-GiB raw
 Git blobs, 1,000 simultaneous processes, mixed-protocol 1,000-writer load,
-provider capacity and repeated isolated performance distributions remain outside
-the completed evidence. These limits prevent a claim that Crab v2 is fully
-qualified for a large team and large repository.
+provider capacity, the 10,000-developer-commits/day upper bound and repeated
+isolated performance distributions remain outside the completed evidence.
+These limits prevent a claim that Crab v2 is fully qualified for a large team
+and large repository.

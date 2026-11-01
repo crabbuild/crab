@@ -9,6 +9,163 @@ use std::io::Cursor;
 
 const BLOBS: [&[u8]; 2] = [b"first intake member", b"second intake member"];
 
+#[tokio::test(flavor = "multi_thread")]
+async fn large_ref_frontiers_bound_active_reads_without_dropping_refs() {
+    use crab_metadata::capsule_protocol::{
+        CapsuleRefHead, CapsuleVisibilityDelta, capsule_ref_name_key,
+    };
+    use crab_metadata::git_visibility::GitVisibilityEdit;
+    use crab_storage::{StorageObservation, StorageObserver, StorageOperation};
+    use object_store::throttle::{ThrottleConfig, ThrottledStore};
+    use std::sync::atomic::{AtomicUsize, Ordering};
+
+    fn send<T: Send>(future: T) -> T {
+        future
+    }
+
+    #[derive(Default)]
+    struct Reads {
+        active: AtomicUsize,
+        peak: AtomicUsize,
+    }
+    impl StorageObserver for Reads {
+        fn started(&self, operation: StorageOperation) {
+            if matches!(operation, StorageOperation::Get | StorageOperation::Range) {
+                let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
+                self.peak.fetch_max(active, Ordering::SeqCst);
+            }
+        }
+        fn finished(&self, observation: StorageObservation) {
+            if matches!(
+                observation.operation,
+                StorageOperation::Get | StorageOperation::Range
+            ) {
+                self.active.fetch_sub(1, Ordering::SeqCst);
+            }
+        }
+    }
+
+    let reads = Arc::new(Reads::default());
+    let backend = ThrottledStore::new(
+        object_store::memory::InMemory::new(),
+        ThrottleConfig {
+            wait_get_per_call: std::time::Duration::from_millis(5),
+            ..Default::default()
+        },
+    );
+    let store = Store::new(Arc::new(backend)).with_storage_observer(reads.clone());
+    let layout = StoreLayout::new(store, "intake/many-refs".into());
+    let initial =
+        RootRecord::encode(RepositoryRoot::initial(&"1".repeat(64), "refs/heads/main").unwrap())
+            .unwrap();
+    create_root(&layout, initial.clone()).await.unwrap();
+    let mut expected = BTreeMap::new();
+    for index in 0..96 {
+        let name = format!("refs/heads/developer-{index:03}");
+        let oid = format!("{:040x}", index + 1);
+        let transaction = CapsuleTransaction::new(
+            initial.digest(),
+            vec![CapsuleRefEdit::new(&name, None, Some(oid.clone()), None)],
+        )
+        .unwrap();
+        let visibility = CapsuleVisibilityDelta::new(BTreeMap::from([(
+            name.clone(),
+            GitVisibilityEdit::from_replacement_objects(None, oid.clone(), vec![oid.clone()]),
+        )]))
+        .unwrap();
+        let capsule = Capsule::build(
+            &transaction,
+            Vec::new(),
+            vec![crab_metadata::capsule_protocol::CapsuleSection::new(
+                crab_metadata::capsule_protocol::CapsuleSectionKind::VisibilityDelta,
+                visibility.encode().unwrap(),
+            )],
+        )
+        .unwrap();
+        let run = CapsuleRun::leaf(capsule).unwrap();
+        let pointer = CapsulePointer::new(
+            run.hash(),
+            run.bytes().len() as u64,
+            run.control_offset(),
+            run.control_size(),
+            run.footer_hash(),
+            run.level(),
+            run.transaction_ids(),
+            run.newest_base_root_digest(),
+        )
+        .unwrap();
+        layout
+            .store()
+            .put(&layout.capsule_path(run.hash()), run.bytes().clone())
+            .await
+            .unwrap();
+        let head = CapsuleRefHead::from_root(&name, initial.root().ref_epoch().into(), None, None)
+            .unwrap();
+        let state = head
+            .successor_state(
+                &BTreeSet::new(),
+                Some(oid.clone()),
+                None,
+                transaction.id().unwrap(),
+                vec![pointer],
+            )
+            .unwrap();
+        layout
+            .store()
+            .put(
+                &layout.capsule_ref_head_path(&capsule_ref_name_key(&name)),
+                head.commit(state).unwrap().encode().unwrap(),
+            )
+            .await
+            .unwrap();
+        expected.insert(name, oid);
+    }
+    let root = load_root(&layout).await.unwrap();
+    let limits = CapsuleReadLimits {
+        max_capsule_bytes: u64::MAX,
+        max_frontier_bytes: u64::MAX,
+    };
+    for mode in ["complete", "metadata", "git", "fetch"] {
+        reads.peak.store(0, Ordering::SeqCst);
+        let view = match mode {
+            "complete" => send(open_view_from_root(&layout, root.clone(), limits)).await,
+            "metadata" => {
+                send(open_view_from_root_with_metadata(
+                    &layout,
+                    root.clone(),
+                    limits,
+                ))
+                .await
+            }
+            "git" => send(open_git_view_from_root(&layout, root.clone(), limits)).await,
+            _ => {
+                send(open_view_from_root_with_layered_control(
+                    &layout,
+                    root.clone(),
+                    limits,
+                ))
+                .await
+            }
+        }
+        .unwrap();
+        assert_eq!(view.refs(), &expected, "{mode}");
+        let peak = reads.peak.load(Ordering::SeqCst);
+        assert!((2..=32).contains(&peak), "{mode}: {peak} concurrent reads");
+        assert_eq!(reads.active.load(Ordering::SeqCst), 0, "{mode}");
+        if mode == "git" {
+            reads.peak.store(0, Ordering::SeqCst);
+            let transitions = send(view.tip_bound_transitions()).await.unwrap();
+            assert_eq!(transitions.len(), expected.len());
+            let peak = reads.peak.load(Ordering::SeqCst);
+            assert!(
+                (2..=32).contains(&peak),
+                "transitions: {peak} concurrent reads"
+            );
+            assert_eq!(reads.active.load(Ordering::SeqCst), 0);
+        }
+    }
+}
+
 pub(super) fn git_pack(blob: &[u8]) -> (CapsuleGitPack, ObjectId) {
     let blob_oid = gix_object::compute_hash(gix_hash::Kind::Sha1, Kind::Blob, blob).unwrap();
     let mut tree = b"100644 payload\0".to_vec();

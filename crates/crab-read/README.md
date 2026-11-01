@@ -60,6 +60,11 @@ captured catalog before selecting the replica.
 
 ### Captured Git views
 
+Complete and control-only views load at most 32 frontier runs concurrently.
+Paged transition materialization uses the same bound and preserves input order.
+This limits active work across the union of per-ref histories; full views still
+retain their admitted decoded metadata and payloads until the caller releases them.
+
 `capsule_protocol::open_git_view_from_root` captures complete refs and catalog
 lookup roots while keeping catalog bodies, frontier visibility and run OID
 admission paged. It validates

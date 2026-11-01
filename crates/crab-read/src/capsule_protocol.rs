@@ -15,7 +15,6 @@ use crab_metadata::capsule_protocol::{
     select_ref_control_frontiers, select_ref_journal_controls,
 };
 use crab_storage::{Store, StoreLayout};
-use futures_util::future::try_join_all;
 use futures_util::{StreamExt, TryStreamExt};
 use gix_hash::ObjectId;
 use std::collections::{BTreeMap, BTreeSet};
@@ -56,6 +55,10 @@ const LAYERED_FULL_MAX_WINDOW_BYTES: u64 = 64 * 1024 * 1024;
 const LAYERED_REPACK_IN_MEMORY_FRONTIER_BYTES: u64 = LAYERED_FULL_MAX_WINDOW_BYTES;
 const LAYERED_SIDECAR_READ_CONCURRENCY: usize = 8;
 const LAYERED_INLINE_FRONTIER_MAX_BYTES: u64 = 128 * 1024 * 1024;
+// Per-ref frontiers are bounded individually, but their union grows with the
+// team. Bound active run loads instead of launching every history at once.
+// Buffered futures own their pointers/controls to keep public reads Send.
+const CAPSULE_FRONTIER_READ_CONCURRENCY: usize = 32;
 
 /// Caller-owned memory admission for one capsule-protocol repository view.
 #[derive(Debug, Clone, Copy)]
@@ -491,11 +494,11 @@ impl CapsuleRepositoryView {
     pub async fn tip_bound_transitions(&self) -> Result<CapsuleTipBoundTransitions> {
         let mut transitions = self.tip_bound_transitions.clone();
         if let Some(layout) = &self.metadata_layout {
-            let controls = try_join_all(
-                self.tip_bound_controls
-                    .iter()
-                    .map(|control| control.materialize_visibility(layout.store())),
-            )
+            let controls = futures_util::stream::iter(self.tip_bound_controls.iter().cloned().map(
+                |control| async move { control.materialize_visibility(layout.store()).await },
+            ))
+            .buffered(CAPSULE_FRONTIER_READ_CONCURRENCY)
+            .try_collect::<Vec<_>>()
             .await?;
             for (name, values) in build_tip_bound_transitions(&[], &controls)? {
                 transitions.entry(name).or_default().extend(values);
@@ -4408,7 +4411,14 @@ async fn assemble_view(
             None => Ok(None),
         }
     };
-    let runs = try_join_all(pointers.iter().map(|pointer| load_run(router, pointer)));
+    let runs = futures_util::stream::iter(
+        pointers
+            .iter()
+            .cloned()
+            .map(|pointer| async move { load_run(router, &pointer).await }),
+    )
+    .buffered(CAPSULE_FRONTIER_READ_CONCURRENCY)
+    .try_collect::<Vec<_>>();
     let (checkpoint, runs) = tokio::try_join!(checkpoint, runs)?;
     let root_transactions = snapshot
         .record()
@@ -4643,21 +4653,23 @@ async fn assemble_layered_control_view(
             .iter()
             .try_fold(0_u64, |total, pointer| total.checked_add(pointer.size()))
             .is_some_and(|total| total <= LAYERED_INLINE_FRONTIER_MAX_BYTES);
-    let loaded = try_join_all(pointers.iter().map(|pointer| async {
+    let loaded = futures_util::stream::iter(pointers.iter().cloned().map(|pointer| async move {
         if inline_frontier {
-            let run = load_run(router, pointer).await?;
+            let run = load_run(router, &pointer).await?;
             let (control, capsules) = run.verified_controls()?;
             Ok::<_, ReadError>((control, capsules, Some(run.bytes().clone())))
         } else {
             let (control, capsules) = if matches!(read, ControlRead::Git) {
-                crab_metadata::capsule_protocol::load_capsule_run_git_control(router, pointer)
+                crab_metadata::capsule_protocol::load_capsule_run_git_control(router, &pointer)
                     .await?
             } else {
-                load_run_control(router, pointer).await?
+                load_run_control(router, &pointer).await?
             };
             Ok((control, capsules, None))
         }
     }))
+    .buffered(CAPSULE_FRONTIER_READ_CONCURRENCY)
+    .try_collect::<Vec<_>>()
     .await?;
     let mut runs = BTreeMap::new();
     let mut capsule_run_bytes = BTreeMap::new();
