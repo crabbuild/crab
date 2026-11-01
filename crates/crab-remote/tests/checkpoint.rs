@@ -590,7 +590,7 @@ async fn compacted_frontier_uses_resident_indexes_and_verifies_payloads() {
             )],
         )
         .unwrap();
-        crab_write::capsule_protocol::publish(&layout, root, &transaction, &capsule)
+        crab_write::capsule_protocol::publish(&layout, root, &transaction, capsule)
             .await
             .unwrap();
         old_oid = Some(oid.clone());
@@ -818,7 +818,7 @@ async fn publish_blobs_in_packs(
         )],
     )
     .unwrap();
-    crab_write::capsule_protocol::publish(layout, root, &transaction, &capsule)
+    crab_write::capsule_protocol::publish(layout, root, &transaction, capsule)
         .await
         .unwrap();
     oids
@@ -1399,7 +1399,7 @@ async fn compacted_repeated_packs_preserve_member_positions_and_ref_state() {
             )],
         )
         .unwrap();
-        crab_write::capsule_protocol::publish(&layout, root, &transaction, &capsule)
+        crab_write::capsule_protocol::publish(&layout, root, &transaction, capsule)
             .await
             .unwrap();
         previous = Some(oid.clone());

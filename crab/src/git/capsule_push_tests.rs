@@ -63,7 +63,7 @@ mod cancellation {
                 &layout,
                 base,
                 &transaction,
-                &capsule,
+                capsule,
                 &[],
                 &BTreeMap::new(),
                 &cancel,
@@ -178,7 +178,7 @@ async fn publish_ref_edits_with_visibility(
     let capsule =
         crab_metadata::capsule_protocol::Capsule::build(&transaction, Vec::new(), sections)
             .expect("build ref capsule");
-    crab_write::capsule_protocol::publish(layout, root, &transaction, &capsule)
+    crab_write::capsule_protocol::publish(layout, root, &transaction, capsule)
         .await
         .expect("publish ref transaction");
 }
@@ -258,7 +258,7 @@ async fn active_active_capsule_commit_materializes_local_ref_and_retains_repair_
         &layout,
         base,
         &transaction,
-        &capsule,
+        capsule,
         &[],
         &BTreeMap::new(),
         &CancellationToken::new(),
@@ -329,7 +329,7 @@ async fn active_active_mirror_commit_publishes_receipt_and_replicates_intent() {
         &layout,
         base,
         &transaction,
-        &capsule,
+        capsule,
         &[],
         &BTreeMap::new(),
         &CancellationToken::new(),

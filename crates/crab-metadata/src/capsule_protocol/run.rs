@@ -1181,25 +1181,36 @@ impl CapsuleRun {
             .and_then(|bytes| bytes.checked_add(footer_bytes.len()))
             .and_then(|bytes| bytes.checked_add(RUN_TRAILER_BYTES))
             .ok_or_else(|| contract_error("capsule run encoded length overflowed"))?;
-        let mut body = Vec::with_capacity(capacity);
-        for capsule in &capsules {
-            body.extend_from_slice(capsule.bytes());
-        }
-        body.extend_from_slice(&metadata);
+        metadata.reserve_exact(footer_bytes.len() + RUN_TRAILER_BYTES);
+        metadata.extend_from_slice(&footer_bytes);
+        metadata.extend_from_slice(&footer_length.to_be_bytes());
+        metadata.extend_from_slice(blake3::hash(&footer_bytes).as_bytes());
+        metadata.extend_from_slice(RUN_MAGIC);
+        let (capsules, bytes) = if capsules.len() == 1 {
+            let capsule = capsules
+                .into_iter()
+                .next()
+                .ok_or_else(|| contract_error("capsule run has no capsule"))?;
+            let (capsule, bytes) = capsule.append_bytes(&metadata)?;
+            (vec![capsule], bytes)
+        } else {
+            let mut body = Vec::with_capacity(capacity);
+            for capsule in &capsules {
+                body.extend_from_slice(capsule.bytes());
+            }
+            body.extend_from_slice(&metadata);
+            let bytes = Bytes::from(body);
+            let capsules = capsules
+                .into_iter()
+                .zip(&footer.capsules)
+                .map(|(capsule, location)| {
+                    let start = location.offset as usize;
+                    capsule.relocate(bytes.slice(start..start + location.length as usize))
+                })
+                .collect::<Result<Vec<_>>>()?;
+            (capsules, bytes)
+        };
         drop(metadata);
-        body.extend_from_slice(&footer_bytes);
-        body.extend_from_slice(&footer_length.to_be_bytes());
-        body.extend_from_slice(blake3::hash(&footer_bytes).as_bytes());
-        body.extend_from_slice(RUN_MAGIC);
-        let bytes = Bytes::from(body);
-        let capsules = capsules
-            .into_iter()
-            .zip(&footer.capsules)
-            .map(|(capsule, location)| {
-                let start = location.offset as usize;
-                capsule.relocate(bytes.slice(start..start + location.length as usize))
-            })
-            .collect::<Result<Vec<_>>>()?;
         Ok(Self {
             hash: blake3::hash(&bytes).to_hex().to_string(),
             bytes,

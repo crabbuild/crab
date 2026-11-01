@@ -190,7 +190,7 @@ async fn publish_capsule_ref(
     let capsule =
         crab_metadata::capsule_protocol::Capsule::build(&transaction, Vec::new(), Vec::new())
             .unwrap();
-    crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
+    crab_write::capsule_protocol::publish(&layout, base, &transaction, capsule)
         .await
         .unwrap();
 }

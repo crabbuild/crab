@@ -100,7 +100,7 @@ async fn fixture(
         )],
     )
     .unwrap();
-    crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
+    crab_write::capsule_protocol::publish(&layout, base, &transaction, capsule)
         .await
         .unwrap();
     let root = crab_metadata::capsule_protocol::load_root(&layout)

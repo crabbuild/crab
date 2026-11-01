@@ -87,7 +87,7 @@ async fn publish_pack(
         ));
     }
     let capsule = Capsule::build(&transaction, vec![pack], sections).unwrap();
-    crab_write::capsule_protocol::publish(layout, root, &transaction, &capsule)
+    crab_write::capsule_protocol::publish(layout, root, &transaction, capsule)
         .await
         .unwrap();
 }

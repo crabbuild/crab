@@ -2001,7 +2001,7 @@ mod tests {
             )],
         )
         .unwrap();
-        let root = crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
+        let root = crab_write::capsule_protocol::publish(&layout, base, &transaction, capsule)
             .await
             .unwrap();
         let cleanup_transaction = CapsuleTransaction::new(
@@ -2019,7 +2019,7 @@ mod tests {
             &layout,
             root,
             &cleanup_transaction,
-            &cleanup_capsule,
+            cleanup_capsule,
         )
         .await
         .unwrap();
@@ -2166,7 +2166,7 @@ mod tests {
         )
         .unwrap();
         let capsule = Capsule::build(&transaction, vec![pack], Vec::new()).unwrap();
-        let root = crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
+        let root = crab_write::capsule_protocol::publish(&layout, base, &transaction, capsule)
             .await
             .unwrap();
         let checker = StoreChecker::for_capsule_repository(store, prefix, root)

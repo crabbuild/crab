@@ -1312,7 +1312,7 @@ mod tests {
         bytes: Bytes,
     ) -> (crab_storage::StoreLayout<crab_storage::Store>, RootSnapshot) {
         let (layout, base, transaction, capsule) = catalog_publication(bytes).await;
-        let base = crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
+        let base = crab_write::capsule_protocol::publish(&layout, base, &transaction, capsule)
             .await
             .unwrap();
         (layout, base)
@@ -1852,10 +1852,9 @@ mod tests {
             let (layout, base, transaction, capsule) =
                 catalog_publication(Bytes::from(bytes)).await;
             let expected_root = base.record().digest().to_owned();
-            let error =
-                crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
-                    .await
-                    .unwrap_err();
+            let error = crab_write::capsule_protocol::publish(&layout, base, &transaction, capsule)
+                .await
+                .unwrap_err();
             assert!(matches!(error, crab_write::WriteError::Metadata(
                 crab_metadata::error::MetadataError::CorruptObject { path, .. })
                 if path == "capsule-protocol pointer catalog"));

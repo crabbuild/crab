@@ -426,6 +426,44 @@ impl Capsule {
         &self.bytes
     }
 
+    pub(super) fn append_bytes(self, suffix: &[u8]) -> Result<(Self, Bytes)> {
+        let Self {
+            bytes,
+            hash,
+            footer,
+        } = self;
+        let length = bytes.len();
+        let capacity = length
+            .checked_add(suffix.len())
+            .ok_or_else(|| contract_error("extended capsule length overflowed"))?;
+        // A newly built capsule owns its payload. Transfer that allocation to
+        // the run; shared snapshots must retain their original immutable bytes.
+        let mut body = if bytes.is_unique() {
+            Vec::from(bytes)
+        } else {
+            let mut body = Vec::with_capacity(capacity);
+            body.extend_from_slice(&bytes);
+            body
+        };
+        body.reserve_exact(suffix.len());
+        body.extend_from_slice(suffix);
+        let bytes = Bytes::from(body);
+        let prefix = bytes.slice(..length);
+        if blake3::hash(&prefix).to_hex().as_str() != hash {
+            return Err(corrupt(
+                "extended capsule prefix differs from its verified identity",
+            ));
+        }
+        Ok((
+            Self {
+                bytes: prefix,
+                hash,
+                footer,
+            },
+            bytes,
+        ))
+    }
+
     pub(super) fn relocate(mut self, bytes: Bytes) -> Result<Self> {
         // Compaction copies verified capsules into one new allocation. Exact
         // equality preserves their proof without decoding or retaining old runs.

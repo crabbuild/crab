@@ -12,7 +12,7 @@ async fn publish_dependent_blob(
 ) {
     let (root, capsule) = dependent_blob_capsule(layout, name, base, target).await;
     let transaction = capsule.transaction().unwrap();
-    crab_write::capsule_protocol::publish(layout, root, &transaction, &capsule)
+    crab_write::capsule_protocol::publish(layout, root, &transaction, capsule)
         .await
         .unwrap();
 }

@@ -119,7 +119,7 @@ async fn publish_commit(
         )],
     )
     .unwrap();
-    crab_write::capsule_protocol::publish(layout, root, &transaction, &capsule)
+    crab_write::capsule_protocol::publish(layout, root, &transaction, capsule)
         .await
         .unwrap();
     if previous.is_none() {

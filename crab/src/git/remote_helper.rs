@@ -4145,7 +4145,7 @@ mod tests {
         let capsule =
             crab_metadata::capsule_protocol::Capsule::build(&transaction, Vec::new(), Vec::new())
                 .expect("build capsule-protocol test capsule");
-        crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
+        crab_write::capsule_protocol::publish(&layout, base, &transaction, capsule)
             .await
             .expect("publish capsule-protocol test refs");
     }

@@ -72,9 +72,59 @@ async fn prepared_refs(router: &StoreLayout<Store>, count: usize) -> PreparedCap
         .collect();
     let transaction = CapsuleTransaction::new(base.record().digest(), edits).unwrap();
     let capsule = super::tests::capsule(&transaction);
-    prepare_publication(router, base, &transaction, &capsule)
+    prepare_publication(router, base, &transaction, capsule)
         .await
         .unwrap()
+}
+
+#[tokio::test]
+async fn preparation_reuses_owned_capsule_bytes_and_preserves_shared_snapshots() {
+    for shared in [false, true] {
+        let router = StoreLayout::new(
+            Store::new(Arc::new(InMemory::new())),
+            "repositories/owned-capsule".to_owned(),
+        );
+        let base = initialize(&router, &"1".repeat(64), "refs/heads/main")
+            .await
+            .unwrap();
+        let transaction = CapsuleTransaction::new(
+            base.record().digest(),
+            vec![CapsuleRefEdit::new(
+                "refs/heads/main",
+                None,
+                Some("2".repeat(40)),
+                None,
+            )],
+        )
+        .unwrap();
+        let original = Capsule::build(
+            &transaction,
+            Vec::new(),
+            vec![crab_metadata::capsule_protocol::CapsuleSection::new(
+                crab_metadata::capsule_protocol::CapsuleSectionKind::FileData,
+                Bytes::from(vec![17; 1024 * 1024]),
+            )],
+        )
+        .unwrap();
+        let expected = original.bytes().to_vec();
+        let mut allocation = Vec::with_capacity(expected.len() + 1024 * 1024);
+        allocation.extend_from_slice(&expected);
+        let capsule = Capsule::decode(Bytes::from(allocation)).unwrap();
+        let pointer = capsule.bytes().as_ptr() as usize;
+        let snapshot = shared.then(|| capsule.clone());
+        let prepared = prepare_publication(&router, base, &transaction, capsule)
+            .await
+            .unwrap();
+        let run = &prepared.run;
+        assert_eq!(&run.bytes()[..expected.len()], expected);
+        assert_eq!(CapsuleRun::decode(run.bytes().clone()).unwrap(), *run);
+        if let Some(snapshot) = snapshot {
+            assert_ne!(run.bytes().as_ptr() as usize, pointer);
+            assert_eq!(snapshot.bytes().as_ref(), expected);
+        } else {
+            assert_eq!(run.bytes().as_ptr() as usize, pointer);
+        }
+    }
 }
 
 #[tokio::test]
@@ -206,7 +256,7 @@ async fn multi_ref_preparation_bounds_reads_and_preserves_exact_ref_order() {
         .collect::<Vec<_>>();
     let transaction = CapsuleTransaction::new(base.record().digest(), edits).unwrap();
     let capsule = super::tests::capsule(&transaction);
-    let prepared = prepare_publication(&router, base, &transaction, &capsule)
+    let prepared = prepare_publication(&router, base, &transaction, capsule)
         .await
         .unwrap();
     let maximum = observer.maximum.load(Ordering::Relaxed);

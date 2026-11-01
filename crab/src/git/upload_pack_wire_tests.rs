@@ -604,7 +604,7 @@ async fn ref_discovery_does_not_require_pack_payloads_or_locator_indexes() {
     let capsule =
         crab_metadata::capsule_protocol::Capsule::build(&transaction, Vec::new(), Vec::new())
             .unwrap();
-    crab_write::capsule_protocol::publish(&layout, root, &transaction, &capsule)
+    crab_write::capsule_protocol::publish(&layout, root, &transaction, capsule)
         .await
         .unwrap();
     let root = crab_write::capsule_protocol::open_root(&layout)

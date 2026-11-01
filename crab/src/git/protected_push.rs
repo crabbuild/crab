@@ -31,7 +31,7 @@ pub(crate) async fn finalize_capsule_push(
     store: &Store,
     router: &StoreLayout,
     transaction: &crab_metadata::capsule_protocol::CapsuleTransaction,
-    capsule: &crab_metadata::capsule_protocol::Capsule,
+    capsule: crab_metadata::capsule_protocol::Capsule,
     upload_concurrency: usize,
     cancel: &CancellationToken,
 ) -> Result<Option<PushCommitMetadata>> {
@@ -545,7 +545,7 @@ mod tests {
             crab_metadata::capsule_protocol::Capsule::build(&transaction, Vec::new(), Vec::new())
                 .unwrap();
         let run = crab_metadata::capsule_protocol::CapsuleRun::leaf(capsule.clone()).unwrap();
-        crab_write::capsule_protocol::publish(&layout, root, &transaction, &capsule)
+        crab_write::capsule_protocol::publish(&layout, root, &transaction, capsule)
             .await
             .unwrap();
         layout.capsule_path(run.hash())

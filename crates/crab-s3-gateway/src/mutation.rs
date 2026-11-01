@@ -2281,7 +2281,7 @@ async fn publish_prepared(
                     &commit_layout,
                     base,
                     &transaction,
-                    &capsule,
+                    capsule,
                     branch,
                     &scoped,
                 )
@@ -2294,7 +2294,7 @@ async fn publish_prepared(
             &repository.layout,
             base.clone(),
             &transaction,
-            &capsule,
+            capsule,
             branch,
             cancel,
         )
@@ -2311,7 +2311,7 @@ async fn publish_capsule_with_frontier_bytes(
     layout: &crab_storage::StoreLayout<crab_storage::Store>,
     base: crab_metadata::capsule_protocol::RootSnapshot,
     transaction: &crab_metadata::capsule_protocol::CapsuleTransaction,
-    capsule: &crab_metadata::capsule_protocol::Capsule,
+    capsule: crab_metadata::capsule_protocol::Capsule,
     branch: &str,
     cancel: &CancellationToken,
 ) -> Result<u64> {

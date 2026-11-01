@@ -118,7 +118,7 @@ async fn fixture_with_bodies(
             )],
         )
         .unwrap();
-        crab_write::capsule_protocol::publish(&layout, root, &transaction, &capsule)
+        crab_write::capsule_protocol::publish(&layout, root, &transaction, capsule)
             .await
             .unwrap();
         if ordinal == 0 {

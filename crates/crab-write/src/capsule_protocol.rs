@@ -62,13 +62,10 @@ pub fn capsule_member_oids(capsule: &Capsule) -> Result<Vec<Vec<[u8; 20]>>> {
 /// index cannot be parsed still uses the canonical run format; readers then
 /// fail closed to probing every member rather than changing publication
 /// correctness or rejecting an otherwise valid legacy fixture.
-pub fn capsule_leaf_run(capsule: &Capsule) -> Result<CapsuleRun> {
-    match capsule_member_oids(capsule) {
-        Ok(member_oids) => Ok(CapsuleRun::leaf_with_member_oids(
-            capsule.clone(),
-            member_oids,
-        )?),
-        Err(WriteError::GitLocator(_)) => Ok(CapsuleRun::leaf(capsule.clone())?),
+pub fn capsule_leaf_run(capsule: Capsule) -> Result<CapsuleRun> {
+    match capsule_member_oids(&capsule) {
+        Ok(member_oids) => Ok(CapsuleRun::leaf_with_member_oids(capsule, member_oids)?),
+        Err(WriteError::GitLocator(_)) => Ok(CapsuleRun::leaf(capsule)?),
         Err(error) => Err(error),
     }
 }
@@ -170,7 +167,7 @@ pub async fn publish(
     router: &StoreLayout<Store>,
     base: RootSnapshot,
     transaction: &CapsuleTransaction,
-    capsule: &Capsule,
+    capsule: Capsule,
 ) -> Result<RootSnapshot> {
     let push_ref_head_bases = std::collections::BTreeMap::new();
     publish_with_ref_head_bases(router, base, transaction, capsule, &push_ref_head_bases).await
@@ -181,7 +178,7 @@ pub async fn publish_with_ref_head_bases(
     router: &StoreLayout<Store>,
     base: RootSnapshot,
     transaction: &CapsuleTransaction,
-    capsule: &Capsule,
+    capsule: Capsule,
     push_ref_head_bases: &std::collections::BTreeMap<String, Option<(Bytes, ETag)>>,
 ) -> Result<RootSnapshot> {
     let prepared = prepare_publication_with_ref_head_bases(
@@ -254,12 +251,12 @@ pub fn coordinated_publication_descriptor(
     }
 }
 
-/// Upload one immutable capsule run and capture exact CAS bases for its refs.
+/// Consume a verified capsule, upload its run, and capture exact CAS bases for its refs.
 pub async fn prepare_publication(
     router: &StoreLayout<Store>,
     base: RootSnapshot,
     transaction: &CapsuleTransaction,
-    capsule: &Capsule,
+    capsule: Capsule,
 ) -> Result<PreparedCapsulePublication> {
     let push_ref_head_bases = std::collections::BTreeMap::new();
     prepare_publication_with_ref_head_bases(
@@ -277,10 +274,10 @@ pub async fn prepare_publication_with_ref_head_bases(
     router: &StoreLayout<Store>,
     base: RootSnapshot,
     transaction: &CapsuleTransaction,
-    capsule: &Capsule,
+    capsule: Capsule,
     push_ref_head_bases: &std::collections::BTreeMap<String, Option<(Bytes, ETag)>>,
 ) -> Result<PreparedCapsulePublication> {
-    validate_capsule_binding(&base, transaction, capsule)?;
+    validate_capsule_binding(&base, transaction, &capsule)?;
     let transaction_id = transaction.id()?;
     let root = base.record().root();
     let snapshots = futures_util::stream::iter(transaction.edits().iter().cloned().map(|edit| {
@@ -312,8 +309,7 @@ pub async fn prepare_publication_with_ref_head_bases(
 
     // Leaf authentication scans the full payload. Keep lease renewal and
     // other async work schedulable while encoding a large publication.
-    let capsule = capsule.clone();
-    let run = tokio::task::spawn_blocking(move || capsule_leaf_run(&capsule)).await??;
+    let run = tokio::task::spawn_blocking(move || capsule_leaf_run(capsule)).await??;
     let leaf = &run;
     let generation = base.record().root().generation();
     let transaction_key = transaction_id.as_str();
@@ -468,7 +464,7 @@ pub async fn prepare_coordinated_publication(
     router: &StoreLayout<Store>,
     base: RootSnapshot,
     transaction: &CapsuleTransaction,
-    capsule: &Capsule,
+    capsule: Capsule,
 ) -> Result<CoordinatedPreparedCapsulePublication> {
     let push_ref_head_bases = std::collections::BTreeMap::new();
     prepare_coordinated_publication_with_ref_head_bases(
@@ -486,7 +482,7 @@ pub async fn prepare_coordinated_publication_with_ref_head_bases(
     router: &StoreLayout<Store>,
     base: RootSnapshot,
     transaction: &CapsuleTransaction,
-    capsule: &Capsule,
+    capsule: Capsule,
     push_ref_head_bases: &std::collections::BTreeMap<String, Option<(Bytes, ETag)>>,
 ) -> Result<CoordinatedPreparedCapsulePublication> {
     let prepared = prepare_publication_with_ref_head_bases(
@@ -2206,7 +2202,7 @@ mod tests {
         let (started, ready) = tokio::sync::oneshot::channel();
         let publication = tokio::spawn(async move {
             started.send(()).unwrap();
-            prepare_publication(&router, base, &transaction, &capsule).await
+            prepare_publication(&router, base, &transaction, capsule).await
         });
         ready.await.unwrap();
         // Lease-renewal tasks must run while a large leaf is encoded, even
@@ -2231,9 +2227,7 @@ mod tests {
         let transaction = transaction(&base, None, &"2".repeat(40));
         let capsule = capsule(&transaction);
 
-        let published = publish(&router, base, &transaction, &capsule)
-            .await
-            .unwrap();
+        let published = publish(&router, base, &transaction, capsule).await.unwrap();
 
         assert_eq!(published.record().root().generation(), 0);
         let operations = observer
@@ -2274,9 +2268,7 @@ mod tests {
         let transaction = transaction(&base, None, &"2".repeat(40));
         let capsule = capsule(&transaction);
 
-        let published = publish(&router, base, &transaction, &capsule)
-            .await
-            .unwrap();
+        let published = publish(&router, base, &transaction, capsule).await.unwrap();
 
         assert_eq!(published.record().root().generation(), 0);
         let operations = observer
@@ -2308,7 +2300,7 @@ mod tests {
         let base = open_root(&router).await.unwrap();
         let transaction = multi_ref_transaction(&base);
 
-        let published = publish(&router, base, &transaction, &capsule(&transaction))
+        let published = publish(&router, base, &transaction, capsule(&transaction))
             .await
             .unwrap();
 
@@ -2356,7 +2348,7 @@ mod tests {
             .await
             .unwrap();
         let transaction = multi_ref_transaction(&base);
-        publish(&router, base.clone(), &transaction, &capsule(&transaction))
+        publish(&router, base.clone(), &transaction, capsule(&transaction))
             .await
             .unwrap();
 
@@ -2396,7 +2388,7 @@ mod tests {
         )
         .unwrap();
 
-        publish(&router, base, &transaction, &capsule(&transaction))
+        publish(&router, base, &transaction, capsule(&transaction))
             .await
             .unwrap();
         let receipt = crab_metadata::capsule_protocol::resolve_capsule_plan_receipt(
@@ -2455,7 +2447,7 @@ mod tests {
             &router,
             base.clone(),
             &transaction,
-            &capsule(&transaction),
+            capsule(&transaction),
         )
         .await
         .unwrap();
@@ -2523,7 +2515,7 @@ mod tests {
             &source,
             source_base,
             &transaction,
-            &capsule(&transaction),
+            capsule(&transaction),
         )
         .await
         .unwrap();
@@ -2585,7 +2577,7 @@ mod tests {
                 &source,
                 source_base.clone(),
                 &transaction,
-                &capsule(&transaction),
+                capsule(&transaction),
             )
             .await
             .unwrap();
@@ -2655,7 +2647,7 @@ mod tests {
             &source,
             source_base,
             &planned_transaction,
-            &capsule(&planned_transaction),
+            capsule(&planned_transaction),
         )
         .await
         .unwrap();
@@ -2692,7 +2684,7 @@ mod tests {
             .unwrap();
         assert_ne!(repaired.activation_id(), descriptor.activation_id);
         let later = transaction(&target_base, Some(&"2".repeat(40)), &"3".repeat(40));
-        publish(&target, target_base.clone(), &later, &capsule(&later))
+        publish(&target, target_base.clone(), &later, capsule(&later))
             .await
             .unwrap();
         let recovered = materialize_coordinated_repair(&target, target_base, &descriptor)
@@ -2810,7 +2802,7 @@ mod tests {
             crab_metadata::capsule_protocol::CapsuleTransactionStatus::Aborted
         );
 
-        publish(&router, base, &transaction, &capsule(&transaction))
+        publish(&router, base, &transaction, capsule(&transaction))
             .await
             .unwrap();
     }
@@ -2833,7 +2825,7 @@ mod tests {
             let next = format!("{sequence:040x}");
             let transaction = transaction(&base, previous.as_deref(), &next);
             published = Some(
-                publish(&router, base, &transaction, &capsule(&transaction))
+                publish(&router, base, &transaction, capsule(&transaction))
                     .await
                     .unwrap(),
             );
@@ -2852,7 +2844,7 @@ mod tests {
         let next = format!("{:040x}", 32);
         let transaction = transaction(&base, previous.as_deref(), &next);
         observer.observations.lock().unwrap().clear();
-        let published = publish(&router, base, &transaction, &capsule(&transaction))
+        let published = publish(&router, base, &transaction, capsule(&transaction))
             .await
             .unwrap();
         let publication_operations = observer
@@ -2934,7 +2926,7 @@ mod tests {
             let next = format!("{sequence:040x}");
             let transaction = transaction(&base, previous.as_deref(), &next);
             published = Some(
-                publish(&router, base, &transaction, &capsule(&transaction))
+                publish(&router, base, &transaction, capsule(&transaction))
                     .await
                     .unwrap(),
             );
@@ -2986,7 +2978,7 @@ mod tests {
             let transaction = transaction(&base, previous.as_deref(), &next);
             expected_transactions.push(transaction.id().unwrap().to_owned());
             observer.observations.lock().unwrap().clear();
-            base = publish(&router, base, &transaction, &capsule(&transaction))
+            base = publish(&router, base, &transaction, capsule(&transaction))
                 .await
                 .unwrap();
             total_requests += observer
@@ -3056,7 +3048,7 @@ mod tests {
         for sequence in 1..=64_u64 {
             let next = format!("{sequence:040x}");
             let transaction = transaction(&base, previous.as_deref(), &next);
-            base = publish(&router, base, &transaction, &capsule(&transaction))
+            base = publish(&router, base, &transaction, capsule(&transaction))
                 .await
                 .unwrap();
             previous = Some(next);
@@ -3144,7 +3136,7 @@ mod tests {
             .await
             .unwrap();
         let first = transaction(&base, None, &"2".repeat(40));
-        let base = publish(&router, base, &first, &capsule(&first))
+        let base = publish(&router, base, &first, capsule(&first))
             .await
             .unwrap();
         let visible = read_ref_head(&router, base.record().root(), "refs/heads/main")
@@ -3180,7 +3172,7 @@ mod tests {
         // A push after a checkpoint carries a checkpoint-relative frontier;
         // retiring its epoch must hide both that frontier and its catalog delta.
         let late = transaction(&checkpointed, Some(&"2".repeat(40)), &"3".repeat(40));
-        let prepared = prepare_publication(&router, checkpointed.clone(), &late, &capsule(&late))
+        let prepared = prepare_publication(&router, checkpointed.clone(), &late, capsule(&late))
             .await
             .unwrap();
         let fenced = begin_restore(
@@ -3298,7 +3290,7 @@ mod tests {
             restored_catalog
         );
         let next = transaction(&released, None, &"d".repeat(40));
-        publish(&router, released, &next, &capsule(&next))
+        publish(&router, released, &next, capsule(&next))
             .await
             .unwrap();
         assert_eq!(
@@ -3325,7 +3317,7 @@ mod tests {
             &router,
             base,
             &first_transaction,
-            &capsule(&first_transaction),
+            capsule(&first_transaction),
         )
         .await
         .unwrap();
@@ -3395,7 +3387,7 @@ mod tests {
 
         let second = transaction(&published, Some(&"2".repeat(40)), &"4".repeat(40));
         let second_id = second.id().unwrap();
-        let base = publish(&router, published, &second, &capsule(&second))
+        let base = publish(&router, published, &second, capsule(&second))
             .await
             .unwrap();
         let head = read_ref_head(&router, base.record().root(), "refs/heads/main")
@@ -3503,7 +3495,7 @@ mod tests {
             &router,
             first_base,
             &first_transaction,
-            &capsule(&first_transaction),
+            capsule(&first_transaction),
         )
         .await
         .unwrap();
@@ -3513,7 +3505,7 @@ mod tests {
             &router,
             stale_base.clone(),
             &stale_transaction,
-            &capsule(&stale_transaction),
+            capsule(&stale_transaction),
         )
         .await
         .expect_err("stale ref-head CAS must fail");
@@ -3536,9 +3528,7 @@ mod tests {
             .await
             .unwrap();
         let seed = transaction(&base, None, &"2".repeat(40));
-        base = publish(&router, base, &seed, &capsule(&seed))
-            .await
-            .unwrap();
+        base = publish(&router, base, &seed, capsule(&seed)).await.unwrap();
 
         let stale_base = base.clone();
         let captured = read_ref_head(&router, base.record().root(), "refs/heads/main")
@@ -3553,7 +3543,7 @@ mod tests {
         )]);
 
         let winner = transaction(&base, Some(&"2".repeat(40)), &"3".repeat(40));
-        base = publish(&router, base, &winner, &capsule(&winner))
+        base = publish(&router, base, &winner, capsule(&winner))
             .await
             .unwrap();
         let late = transaction(&stale_base, Some(&"2".repeat(40)), &"4".repeat(40));
@@ -3561,7 +3551,7 @@ mod tests {
             &router,
             stale_base,
             &late,
-            &capsule(&late),
+            capsule(&late),
             &ref_head_bases,
         )
         .await
@@ -3729,9 +3719,7 @@ mod tests {
                 for sequence in 1..=seed_count {
                     let old = (sequence > 1).then(|| format!("{:040x}", sequence - 1));
                     let first = transaction(&base, old.as_deref(), &format!("{sequence:040x}"));
-                    base = publish(&seed, base, &first, &capsule(&first))
-                        .await
-                        .unwrap();
+                    base = publish(&seed, base, &first, capsule(&first)).await.unwrap();
                 }
                 let fault = Arc::new(LostHeadReplyStore {
                     inner,
@@ -3772,7 +3760,7 @@ mod tests {
                     ));
                 }
                 let transaction = CapsuleTransaction::new(base.record().digest(), edits).unwrap();
-                let root = publish(&router, base, &transaction, &capsule(&transaction))
+                let root = publish(&router, base, &transaction, capsule(&transaction))
                     .await
                     .unwrap();
                 let head = read_ref_head(&router, root.record().root(), "refs/heads/main")
@@ -3800,9 +3788,7 @@ mod tests {
                 .await
                 .unwrap();
             let first = transaction(&base, None, &"2".repeat(40));
-            let base = publish(&seed, base, &first, &capsule(&first))
-                .await
-                .unwrap();
+            let base = publish(&seed, base, &first, capsule(&first)).await.unwrap();
             let fault = Arc::new(LostHeadReplyStore {
                 inner: Arc::clone(store.inner()),
                 head_path: seed
@@ -3831,7 +3817,7 @@ mod tests {
             }
             let transaction = CapsuleTransaction::new(base.record().digest(), edits).unwrap();
             let started = Instant::now();
-            let root = publish(&router, base, &transaction, &capsule(&transaction))
+            let root = publish(&router, base, &transaction, capsule(&transaction))
                 .await
                 .unwrap();
             for edit in transaction.edits() {
@@ -3880,7 +3866,7 @@ mod tests {
         let base = open_root(&router).await.unwrap();
         let transaction = transaction(&base, None, &"2".repeat(40));
 
-        let published = publish(&router, base, &transaction, &capsule(&transaction))
+        let published = publish(&router, base, &transaction, capsule(&transaction))
             .await
             .unwrap();
 
@@ -3930,7 +3916,7 @@ mod tests {
         )
         .unwrap();
 
-        let published = publish(&router, base, &transaction, &capsule(&transaction))
+        let published = publish(&router, base, &transaction, capsule(&transaction))
             .await
             .unwrap();
 
@@ -3973,7 +3959,7 @@ mod tests {
         let base = open_root(&router).await.unwrap();
         let transaction = transaction(&base, None, &"2".repeat(40));
 
-        let error = publish(&router, base, &transaction, &capsule(&transaction))
+        let error = publish(&router, base, &transaction, capsule(&transaction))
             .await
             .expect_err("a visibility write that cannot be verified must fail closed");
         assert!(matches!(
@@ -3995,7 +3981,7 @@ mod tests {
         let capsule = capsule(&transaction);
         observer.observations.lock().unwrap().clear();
 
-        let error = publish(&router, initial, &transaction, &capsule)
+        let error = publish(&router, initial, &transaction, capsule)
             .await
             .expect_err("expected-old mismatch must fail");
 

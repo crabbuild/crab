@@ -158,7 +158,7 @@ pub(crate) async fn publish_blob(
         Vec::new(),
     )
     .unwrap();
-    crab_write::capsule_protocol::publish(layout, base, &transaction, &capsule)
+    crab_write::capsule_protocol::publish(layout, base, &transaction, capsule)
         .await
         .unwrap();
 }
@@ -188,7 +188,7 @@ pub(crate) async fn publish_blob_at_current(
         Vec::new(),
     )
     .unwrap();
-    crab_write::capsule_protocol::publish(layout, base, &transaction, &capsule)
+    crab_write::capsule_protocol::publish(layout, base, &transaction, capsule)
         .await
         .unwrap();
 }

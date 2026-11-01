@@ -516,6 +516,7 @@ async fn run_inner(
                 prepared.packs,
                 sections,
             )?;
+            let capsule_size = capsule.bytes().len() as u64;
             if let Some(progress) = &config.progress {
                 progress.set_git_upload_totals(1, 0, capsule.bytes().len() as u64);
                 progress.begin_git_upload();
@@ -534,13 +535,13 @@ async fn run_inner(
                     store,
                     router,
                     &transaction,
-                    &capsule,
+                    capsule,
                     config.upload_concurrency,
                     cancel,
                 )
                 .await?;
                 if let Some(progress) = &config.progress {
-                    progress.add_git_upload_bytes(capsule.bytes().len() as u64);
+                    progress.add_git_upload_bytes(capsule_size);
                     progress.finish_git_pack_body();
                 }
                 return Ok(Some(outcome));
@@ -586,7 +587,7 @@ async fn run_inner(
                             &commit_layout,
                             base,
                             &transaction,
-                            &capsule,
+                            capsule,
                             &payload_objects,
                             &commit_push_ref_head_bases,
                             &scoped,
@@ -601,7 +602,7 @@ async fn run_inner(
                     &layout,
                     base,
                     &transaction,
-                    &capsule,
+                    capsule,
                     &payload_objects,
                     &push_ref_head_bases,
                     cancel,
@@ -769,12 +770,13 @@ async fn publish_capsule(
     layout: &crab_storage::StoreLayout<crab_storage::Store>,
     base: crab_metadata::capsule_protocol::RootSnapshot,
     transaction: &crab_metadata::capsule_protocol::CapsuleTransaction,
-    capsule: &crab_metadata::capsule_protocol::Capsule,
+    capsule: crab_metadata::capsule_protocol::Capsule,
     payload_objects: &[String],
     push_ref_head_bases: &BTreeMap<String, Option<(Bytes, crab_storage::ETag)>>,
     cancel: &CancellationToken,
 ) -> Result<CapsulePublishAttempt> {
     check_cancelled(cancel)?;
+    let capsule_size = capsule.bytes().len() as u64;
     let upload = config.progress.as_ref().and_then(|progress| {
         progress.track_upload(
             super::progress::UploadKind::Capsule,
@@ -794,7 +796,7 @@ async fn publish_capsule(
             .await?;
             drop(upload);
             if let Some(progress) = &config.progress {
-                progress.add_git_upload_bytes(capsule.bytes().len() as u64);
+                progress.add_git_upload_bytes(capsule_size);
                 progress.finish_git_pack_body();
             }
             // Ref/GC renewal may fail while immutable preparation runs. Check
@@ -830,7 +832,7 @@ async fn publish_capsule(
         .await?;
     drop(upload);
     if let Some(progress) = &config.progress {
-        progress.add_git_upload_bytes(capsule.bytes().len() as u64);
+        progress.add_git_upload_bytes(capsule_size);
         progress.finish_git_pack_body();
     }
     let descriptor = prepared.descriptor().clone();

@@ -187,7 +187,7 @@ pub(super) async fn publish(
                 ));
             }
             let capsule = Capsule::build(&transaction, packs, sections)?;
-            crab_write::capsule_protocol::publish(&router, base, &transaction, &capsule).await?;
+            crab_write::capsule_protocol::publish(&router, base, &transaction, capsule).await?;
         }
     }
 
