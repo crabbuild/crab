@@ -420,8 +420,8 @@ repack; complete fsck is clean without repair. That completed driver uses GC
 dry-run only. A later planned extension was not loaded by its already-started
 subprocess; source-ref deletion and actual repository GC remain separate work.
 The fresh eight-client mixed run passes 118 checks and 32 acknowledged commits
-in 63.769 seconds. Its 64-client rerun is active; the 1,000-client profile is
-queued, not qualified. Evidence: `gc-independent-probe-report.json`,
+in 63.769 seconds. Its 64-client rerun passes 846 checks and 256 acknowledged
+commits in 484.897 seconds. The 1,000-client profile is active, not qualified. Evidence: `gc-independent-probe-report.json`,
 `gc-independent-64-probe-report.json`,
 `independent-gc-resumable-context-before.log`,
 `independent-gc-final-identity-tests.log`,
@@ -437,11 +437,19 @@ after successful acquisition/renewal and conditionally retires past-quarantine
 slot versions before a sweep is exposed. A complete slot snapshot is validated
 before retirement, preserving duplicate-holder corruption as an error. A racing
 fresh claim survives retirement's stale CAS. All 170 coordination tests,
-all-targets Clippy and the CLI consumer check pass. A private rebuild and new
-live verification are pending. The running mixed-1,000 profile remains evidence
-for its pinned preceding binary, not this expiry boundary or the final source.
-Evidence: `gc-suspended-writer-before.log`, `gc-expiry-final-tests.log`,
-`gc-expiry-final-clippy.log`, `gc-expiry-final-consumer.log`.
+all-targets Clippy and the CLI consumer check pass. Private FUSE/NFS install
+at `3f3622f51108` succeeds in 905.280 seconds; release SHA-256 is
+`0e2c4b389f35a28e0604eeb979a2e5dafb96e8cc9d05a688404534d8933b41af`.
+Its single-client smoke passes 25 checks across native/Git publication, both
+historical Xet/LFS versions, exact cold bytes and clean complete fsck. This
+smoke and private build overlap the older mixed-team workload; no timing or
+capacity comparison is claimed. Broader verification and actual repository-GC
+retention are queued after that workload drains. The running mixed-1,000
+profile remains evidence for its pinned preceding binary, not this expiry
+boundary or the final source. Evidence: `gc-suspended-writer-before.log`,
+`gc-expiry-final-tests.log`, `gc-expiry-final-clippy.log`,
+`gc-expiry-final-consumer.log`, `gc-expiry-build-report.json`,
+`expiry-single-smoke-controller.json`.
 
 The shared-base page prototype encodes dictionary/set pages for 1,000 refs,
 1,620,211 common objects and 30 private objects per ref into 86,093,652 bytes.
