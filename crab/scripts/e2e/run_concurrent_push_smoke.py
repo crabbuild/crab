@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import argparse
 import concurrent.futures
+import hashlib
 import http.client
 import http.server
 import json
@@ -61,7 +62,7 @@ PUBLICATION_GATE_PATHS = {
 }
 REF_JOURNAL_FAULT_PHASES = {"before-upstream", "after-upstream"}
 SECRET_KEYS = {"AWS_ACCESS_KEY_ID", "AWS_SECRET_ACCESS_KEY", "AWS_SESSION_TOKEN"}
-BAD_PUSH_STATUSES = {"internal", "unpack-failed", "missing-object", "malformed-object"}
+BAD_PUSH_STATUSES = {"internal", "unpack-failed", "missing-object", "malformed-object", "missing-json"}
 PROXY_STREAM_CHUNK_BYTES = 4 * 1024 * 1024
 PROXY_BUFFER_LIMIT_BYTES = 8 * 1024 * 1024
 PROXY_REQUEST_BUFFER_LIMIT_BYTES = 64 * 1024 * 1024
@@ -656,6 +657,7 @@ class PushRecord:
     integration_retry_limit: int | None = None
     integration_retry_stages: dict[str, int] = field(default_factory=dict)
     failure_stages: dict[str, int] = field(default_factory=dict)
+    queue_ms: int = 0
 
 
 @dataclass
@@ -684,6 +686,8 @@ class SmokeReport:
     store_snapshots: list[dict[str, Any]] = field(default_factory=list)
     cost_model: dict[str, Any] = field(default_factory=dict)
     artifacts: dict[str, str] = field(default_factory=dict)
+    workload: dict[str, Any] = field(default_factory=dict)
+    push_batches: list[dict[str, Any]] = field(default_factory=list)
     updated_at: str = ""
 
 
@@ -818,7 +822,7 @@ class ConcurrentPushSmoke:
         self.store_inventory: dict[str, int] = {}
         self.report = SmokeReport(
             schema="crab.concurrent-push-smoke",
-            version="1.9",
+            version="1.10",
             run_id=self.run_id,
             status="running",
             remote_url=self.remote_url,
@@ -835,6 +839,11 @@ class ConcurrentPushSmoke:
                 ],
             },
             updated_at=utc_now(),
+            workload={"agents": args.agents, "commits_per_agent": 1 + args.branch_update_rounds,
+                      "push_workers": args.max_parallel_pushes, "reader_workers": args.max_parallel_readers,
+                      "client_preparation_workers": args.max_parallel_pushes,
+                      "consumer_mode": getattr(args, "consumer_mode", "per-branch"),
+                      "push_client": getattr(args, "push_client", "native")},
         )
 
     def build_env(self) -> dict[str, str]:
@@ -848,18 +857,30 @@ class ConcurrentPushSmoke:
                 "AWS_SECRET_ACCESS_KEY": self.args.secret_key,
                 "AWS_REGION": self.args.region,
                 "AWS_ENDPOINT_URL": endpoint_url,
+                "AWS_ENDPOINT_URL_S3": endpoint_url,
                 "AWS_ALLOW_HTTP": "true",
                 "AWS_EC2_METADATA_DISABLED": "true",
                 "AWS_VIRTUAL_HOSTED_STYLE_REQUEST": "false",
                 "GIT_TERMINAL_PROMPT": "0",
                 "GIT_MERGE_AUTOEDIT": "no",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "GIT_OPTIONAL_LOCKS": "0",
+                "CRAB_CACHE_DIR": str(self.run_root / "cache"),
+                "TMPDIR": str(self.run_root / "tmp"),
             }
         )
         env["PATH"] = str(self.bin_dir) + os.pathsep + env.get("PATH", "")
         return env
 
-    def write_report(self) -> None:
+    def write_report(self, *, force: bool = False) -> None:
         with self.report_lock:
+            # Large team runs retain every command, but serializing the growing
+            # report per command would make the driver dominate push latency.
+            now = time.monotonic()
+            if not force and now - getattr(self, "last_report_write", 0) < 1:
+                return
+            self.last_report_write = now
             self.artifacts.mkdir(parents=True, exist_ok=True)
             self.report.updated_at = utc_now()
             path = self.artifacts / "report.json"
@@ -881,7 +902,7 @@ class ConcurrentPushSmoke:
                     "timestamp": utc_now(),
                 }
             )
-            self.write_report()
+            self.write_report(force=not ok)
         if not ok:
             raise SmokeError(f"check failed: {name}")
 
@@ -889,7 +910,8 @@ class ConcurrentPushSmoke:
         with self.command_lock:
             self.command_index += 1
             index = self.command_index
-        base = f"{index:03d}-{slug(name)}"
+        label = slug(name).encode("utf-8")[:160].decode("utf-8", errors="ignore")
+        base = f"{index:03d}-{label}"
         self.logs.mkdir(parents=True, exist_ok=True)
         return self.logs / f"{base}.stdout.log", self.logs / f"{base}.stderr.log"
 
@@ -1061,10 +1083,14 @@ class ConcurrentPushSmoke:
             shutil.copy2(target, alias)
 
     def preflight(self) -> None:
+        if self.run_root.exists():
+            raise SmokeError(f"run directory already exists: {self.run_root}")
         self.run_root.mkdir(parents=True, exist_ok=True)
+        (self.run_root / "tmp").mkdir()
         self.logs.mkdir(parents=True, exist_ok=True)
         self.artifacts.mkdir(parents=True, exist_ok=True)
         self.install_helper_alias()
+        self.report.artifacts["crab_binary_sha256"] = hashlib.sha256(Path(self.args.crab_bin).read_bytes()).hexdigest()
         self.write_report()
 
         try:
@@ -1266,6 +1292,24 @@ class ConcurrentPushSmoke:
             self.write_report()
 
     def protocol_v2_clone(self, branch: str, target: Path, name: str) -> dict[str, Any]:
+        if getattr(self.args, "source", None):
+            self.shared_client(target)
+            self.run_git(target, ["config", "remote.origin.fetch",
+                                  f"+refs/heads/{branch}:refs/remotes/origin/{branch}"])
+            record = self.run_git(
+                target, ["-c", "protocol.version=2", "fetch", "origin", branch],
+                name=name, extra_env={"GIT_TRACE_PACKET": "1"},
+            )
+            self.run_git(target, ["checkout", "-B", branch, "FETCH_HEAD"])
+            self.run_git(target, ["branch", "--set-upstream-to", f"origin/{branch}"])
+            self.run_git(target, ["fsck", "--strict", "--connectivity-only"])
+            trace = Path(record.stderr_log).read_text(encoding="utf-8", errors="replace")
+            return {
+                "branch": branch, "clone_duration_ms": record.duration_ms,
+                "protocol_v2": "version 2" in trace and "command=fetch" in trace,
+                "clone_stdout_log": record.stdout_log, "clone_stderr_log": record.stderr_log,
+                "baseline_objects": "borrowed from independently verified cold baseline",
+            }
         record = self.run_git(
             self.run_root,
             [
@@ -1311,7 +1355,12 @@ class ConcurrentPushSmoke:
         max_workers = max(1, min(self.args.agents, self.args.max_parallel_readers))
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
             futures = [pool.submit(self.read_branch_tip, index) for index in range(self.args.agents)]
-            results = [future.result() for future in concurrent.futures.as_completed(futures)]
+            try:
+                results = [future.result() for future in concurrent.futures.as_completed(futures)]
+            except BaseException:
+                for future in futures:
+                    future.cancel()
+                raise
         results.sort(key=lambda result: str(result["branch"]))
         with self.report_lock:
             self.report.branch_reads = results
@@ -1332,18 +1381,27 @@ class ConcurrentPushSmoke:
         )
 
     def init_seed(self) -> None:
-        self.seed.mkdir(parents=True)
-        self.run_git(self.seed, ["init", "-b", "main"])
+        source = getattr(self.args, "source", None)
+        if source:
+            self.source_identity = self.source_state()
+            self.run_git(self.run_root, ["clone", "--shared", "--no-checkout", "--single-branch",
+                                       "--no-tags", str(source), str(self.seed)])
+            self.sparse_checkout(self.seed)
+            self.run_git(self.seed, ["checkout", "-B", "main", self.source_identity["head"]])
+            self.run_git(self.seed, ["remote", "set-url", "origin", self.remote_url])
+        else:
+            self.seed.mkdir(parents=True)
+            self.run_git(self.seed, ["init", "-b", "main"])
         self.configure_git_identity(self.seed, "seed")
         self.run_crab(
             self.seed, ["init", self.remote_url], name="crab init seed"
         )
         self.configure_crab_repo(self.seed)
-        (self.seed / "README.md").write_text(
-            f"# Concurrent push smoke\n\nrun_id: {self.run_id}\n",
-            encoding="utf-8",
-        )
-        self.run_git(self.seed, ["add", "-A"])
+        if not source:
+            (self.seed / "README.md").write_text(
+                f"# Concurrent push smoke\n\nrun_id: {self.run_id}\n", encoding="utf-8",
+            )
+            self.run_git(self.seed, ["add", "-A"])
         self.run_git(self.seed, ["commit", "-m", "seed concurrent push smoke"])
         request_before = self.request_proxy.snapshot() if self.request_proxy else None
         self.run_crab(
@@ -1362,6 +1420,62 @@ class ConcurrentPushSmoke:
             "seed", request_before, attempted_pushes=1, successful_pushes=1
         )
         self.store_snapshot("seed", attempted_pushes=1, successful_pushes=1)
+        if source:
+            baseline = self.run_root / "cold-baseline"
+            self.run_git(self.run_root, ["clone", "--no-checkout", "--single-branch", "--branch",
+                                       "main", self.remote_url, str(baseline)])
+            self.run_git(baseline, ["fsck", "--strict", "--full"])
+            expected = self.git_value(self.seed, ["rev-parse", "HEAD"])
+            self.check("cold-baseline-exact-tip", self.git_value(baseline, ["rev-parse", "HEAD"]) == expected)
+            self.report.workload.update({
+                "source": str(source), "source_identity": self.source_identity,
+                "client_model": "sparse existing clones borrowing only the cold baseline ODB",
+                "cold_baseline_has_alternates": (baseline / ".git/objects/info/alternates").exists(),
+                "source_commits": int(self.git_value(self.seed, ["rev-list", "--count", "HEAD"])),
+            })
+            self.check("cold-baseline-independent", not self.report.workload["cold_baseline_has_alternates"])
+
+    def git_value(self, repo: Path, args: list[str]) -> str:
+        record = self.run_git(repo, args)
+        return Path(record.stdout_log).read_text(encoding="utf-8").strip()
+
+    def source_state(self) -> dict[str, str]:
+        return {"head": self.git_value(self.args.source, ["rev-parse", "HEAD"]),
+                "status": self.git_value(self.args.source, ["status", "--porcelain"])}
+
+    def sparse_checkout(self, target: Path) -> None:
+        self.run_git(target, ["sparse-checkout", "init", "--cone", "--sparse-index"])
+        self.run_git(target, ["sparse-checkout", "set", "agents", "same-branch"])
+
+    def shared_client(self, target: Path) -> None:
+        self.run_git(self.run_root, ["clone", "--shared", "--no-checkout", "--single-branch",
+                                   "--branch", "main", str(self.run_root / "cold-baseline"), str(target)])
+        self.sparse_checkout(target)
+        self.run_git(target, ["checkout", "main"])
+        self.run_git(target, ["remote", "set-url", "origin", self.remote_url])
+        self.run_crab(target, ["init", self.remote_url])
+
+    def verify_cold_team(self) -> None:
+        source = getattr(self.args, "source", None)
+        if not source and getattr(self.args, "consumer_mode", "per-branch") != "cold-final":
+            return
+        target = self.run_root / "cold-final"
+        self.run_git(self.run_root, ["clone", "--no-checkout", self.remote_url, str(target)],
+                     extra_env={"CRAB_CACHE_DIR": str(self.run_root / "cold-final-cache")})
+        self.run_git(target, ["fsck", "--strict", "--full"])
+        for index in range(self.args.agents if not self.args.skip_branch_fanout else 0):
+            branch = f"agent-{index:03d}"
+            writer = self.branch_agents / f"branch-agent-{index:03d}"
+            expected = self.git_value(writer, ["rev-parse", "HEAD"])
+            actual = self.git_value(target, ["rev-parse", f"refs/remotes/origin/{branch}"])
+            self.check(f"cold-final-{branch}-exact-acknowledged-tip", actual == expected)
+            content = self.git_value(target, ["show", f"refs/remotes/origin/{branch}:agents/{branch}.txt"])
+            expected_content = (f"branch fanout agent {index}\nrun_id {self.run_id}\n"
+                + "".join(f"update round {n}\n" for n in range(1, self.args.branch_update_rounds + 1))).strip()
+            self.check(f"cold-final-{branch}-exact-content", content == expected_content)
+        if source:
+            self.check("source-checkout-preserved", self.source_state() == self.source_identity)
+        self.check("cold-final-independent", not (target / ".git/objects/info/alternates").exists())
 
     def prepare_boundary_agent(self, target: Path, name: str) -> None:
         self.run_cmd(
@@ -1948,11 +2062,14 @@ class ConcurrentPushSmoke:
     def clone_agent(self, root: Path, index: int, prefix: str) -> Path:
         root.mkdir(parents=True, exist_ok=True)
         target = root / f"{prefix}-{index:03d}"
-        self.run_cmd(
-            f"crab clone {prefix}-{index:03d}",
-            [self.args.crab_bin, "clone", self.remote_url, str(target), "--jsonl"],
-            self.run_root,
-        )
+        if getattr(self.args, "source", None):
+            self.shared_client(target)
+        else:
+            self.run_cmd(
+                f"crab clone {prefix}-{index:03d}",
+                [self.args.crab_bin, "clone", self.remote_url, str(target), "--jsonl"],
+                self.run_root,
+            )
         self.configure_git_identity(target, f"{prefix}-{index:03d}")
         self.configure_crab_repo(target)
         return target
@@ -2033,20 +2150,24 @@ class ConcurrentPushSmoke:
     ) -> PushRecord:
         audit_path = repo / ".crab" / "audit" / "events.jsonl"
         audit_offset = audit_path.stat().st_size if audit_path.is_file() else 0
-        record = self.run_cmd(
-            f"{agent} crab push",
-            self.push_args(
+        git_client = getattr(self.args, "push_client", "native") == "git"
+        args = (
+            [self.args.git_bin, "push", "--porcelain", "origin", refspec] if git_client else self.push_args(
                 refspec,
                 lock_wait_secs,
                 rebase_on_non_fast_forward=rebase_on_non_fast_forward,
                 rebase_retry_limit=rebase_retry_limit,
-            ),
+            )
+        )
+        record = self.run_cmd(
+            f"{agent} {'git' if git_client else 'crab'} push",
+            args,
             repo,
             check=False,
             timeout=self.args.push_timeout,
         )
         payload = first_json_object(Path(record.stdout_log).read_text(encoding="utf-8"), "push")
-        status = "missing-json"
+        status = "git-rejected" if git_client else "missing-json"
         retryable = None
         retry_after_secs = None
         integration_retries = None
@@ -2063,7 +2184,7 @@ class ConcurrentPushSmoke:
                 status = str(refs[0].get("status"))
                 retryable = refs[0].get("retryable")
                 retry_after_secs = refs[0].get("retry_after_secs")
-        elif record.exit_code == 0:
+        elif git_client and record.exit_code == 0:
             status = "ok"
         return PushRecord(
             agent,
@@ -2080,21 +2201,48 @@ class ConcurrentPushSmoke:
 
     def push_concurrently(self, jobs: list[tuple[str, str, Path, str]]) -> list[PushRecord]:
         max_workers = max(1, min(len(jobs), self.args.max_parallel_pushes))
+        started = time.monotonic()
+
+        def push(job: tuple[str, str, Path, str]) -> PushRecord:
+            queue_ms = int((time.monotonic() - started) * 1000)
+            result = self.run_push_job(*job)
+            result.queue_ms = queue_ms
+            return result
+
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as pool:
-            futures = [
-                pool.submit(self.run_push_job, agent, branch, repo, refspec)
-                for agent, branch, repo, refspec in jobs
-            ]
-            return [future.result() for future in concurrent.futures.as_completed(futures)]
+            futures = [pool.submit(push, job) for job in jobs]
+            try:
+                results = [future.result() for future in concurrent.futures.as_completed(futures)]
+            except BaseException:
+                for future in futures:
+                    future.cancel()
+                raise
+
+        def distribution(values: list[int]) -> dict[str, int]:
+            ordered = sorted(values)
+            return {f"p{percent}": ordered[max(0, math.ceil(len(ordered) * percent / 100) - 1)]
+                    for percent in (50, 95, 99)} | {"max": max(ordered)}
+
+        self.report.push_batches.append({"jobs": len(jobs), "workers": max_workers,
+            "elapsed_ms": int((time.monotonic() - started) * 1000),
+            "service_ms": distribution([r.command.duration_ms for r in results]),
+            "queue_ms": distribution([r.queue_ms for r in results]),
+            "queue_plus_service_ms": distribution([r.queue_ms + r.command.duration_ms for r in results]),
+            "successful": sum(r.status == "ok" and r.command.exit_code == 0 for r in results)})
+        return results
 
     def run_branch_fanout(self) -> None:
-        prepared = [self.prepare_branch_agent(i) for i in range(self.args.agents)]
+        started = time.monotonic()
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.args.max_parallel_pushes) as pool:
+            prepared = list(pool.map(self.prepare_branch_agent, range(self.args.agents)))
+        preparation_ms = int((time.monotonic() - started) * 1000)
         jobs = [
             (agent, branch, repo, f"HEAD:{branch}")
             for agent, branch, repo in prepared
         ]
         request_before = self.request_proxy.snapshot() if self.request_proxy else None
         results = self.push_concurrently(jobs)
+        self.report.push_batches[-1]["preparation_ms"] = preparation_ms
         self.request_snapshot(
             "branch-fanout",
             request_before,
@@ -2108,7 +2256,7 @@ class ConcurrentPushSmoke:
         statuses = {result.status for result in results}
         self.check(
             "branch-fanout-all-pushed",
-            statuses == {"ok"},
+            statuses == {"ok"} and all(result.command.exit_code == 0 for result in results),
             {"statuses": sorted(statuses), "count": len(results)},
         )
         refs = self.run_git(
@@ -2126,7 +2274,8 @@ class ConcurrentPushSmoke:
             len(visible) >= self.args.agents,
             {"visible": len(visible), "expected": self.args.agents},
         )
-        self.verify_branch_tip_reads()
+        if getattr(self.args, "consumer_mode", "per-branch") == "per-branch":
+            self.verify_branch_tip_reads()
         self.store_snapshot(
             "branch-fanout",
             attempted_pushes=len(results),
@@ -2137,8 +2286,9 @@ class ConcurrentPushSmoke:
         request_before = self.request_proxy.snapshot() if self.request_proxy else None
         updates: list[dict[str, Any]] = []
         for round_index in range(1, self.args.branch_update_rounds + 1):
-            jobs = []
-            for index in range(self.args.agents):
+            started = time.monotonic()
+
+            def prepare(index: int) -> tuple[str, str, Path, str]:
                 repo = self.branch_agents / f"branch-agent-{index:03d}"
                 branch = f"refs/heads/agent-{index:03d}"
                 path = repo / "agents" / f"agent-{index:03d}.txt"
@@ -2149,22 +2299,22 @@ class ConcurrentPushSmoke:
                     repo,
                     ["commit", "-m", f"agent {index:03d} update {round_index}"],
                 )
-                jobs.append(
-                    (
-                        f"branch-agent-{index:03d}-update-{round_index}",
-                        branch,
-                        repo,
-                        f"HEAD:{branch}",
-                    )
-                )
+                return f"branch-agent-{index:03d}-update-{round_index}", branch, repo, f"HEAD:{branch}"
+
+            with concurrent.futures.ThreadPoolExecutor(max_workers=self.args.max_parallel_pushes) as pool:
+                jobs = list(pool.map(prepare, range(self.args.agents)))
+            preparation_ms = int((time.monotonic() - started) * 1000)
             results = self.push_concurrently(jobs)
+            self.report.push_batches[-1]["preparation_ms"] = preparation_ms
             updates.extend(
                 {"round": round_index, **asdict(result)} for result in results
             )
+            self.report.branch_updates = updates
+            self.write_report(force=True)
             statuses = {result.status for result in results}
             self.check(
                 f"branch-update-round-{round_index}-all-pushed",
-                statuses == {"ok"},
+                statuses == {"ok"} and all(result.command.exit_code == 0 for result in results),
                 {"statuses": sorted(statuses), "count": len(results)},
             )
 
@@ -2177,7 +2327,8 @@ class ConcurrentPushSmoke:
         with self.report_lock:
             self.report.branch_updates = updates
             self.write_report()
-        self.verify_branch_update_reads()
+        if getattr(self.args, "consumer_mode", "per-branch") == "per-branch":
+            self.verify_branch_update_reads()
         self.store_snapshot(
             "branch-updates",
             attempted_pushes=len(updates),
@@ -2221,9 +2372,12 @@ class ConcurrentPushSmoke:
                 pool.submit(self.pull_branch_update, index)
                 for index in range(self.args.agents)
             ]
-            results = [
-                future.result() for future in concurrent.futures.as_completed(futures)
-            ]
+            try:
+                results = [future.result() for future in concurrent.futures.as_completed(futures)]
+            except BaseException:
+                for future in futures:
+                    future.cancel()
+                raise
         results.sort(key=lambda result: str(result["branch"]))
         with self.report_lock:
             self.report.branch_update_reads = results
@@ -2244,7 +2398,8 @@ class ConcurrentPushSmoke:
         )
 
     def run_same_branch_contention(self) -> None:
-        prepared = [self.prepare_same_branch_agent(i) for i in range(self.args.same_branch_agents)]
+        with concurrent.futures.ThreadPoolExecutor(max_workers=self.args.max_parallel_pushes) as pool:
+            prepared = list(pool.map(self.prepare_same_branch_agent, range(self.args.same_branch_agents)))
         jobs = [(agent, branch, repo, "HEAD:refs/heads/main") for agent, branch, repo in prepared]
         request_before = self.request_proxy.snapshot() if self.request_proxy else None
         results = self.push_concurrently(jobs)
@@ -2387,6 +2542,9 @@ class ConcurrentPushSmoke:
         )
 
     def run(self) -> int:
+        if self.run_root.exists():
+            print(f"FAILED: refusing to overwrite retained run: {self.run_root}")
+            return 1
         try:
             self.preflight()
             self.init_seed()
@@ -2402,6 +2560,7 @@ class ConcurrentPushSmoke:
                     self.run_branch_updates()
             if not self.args.skip_same_branch:
                 self.run_same_branch_contention()
+            self.verify_cold_team()
             self.run_fsck()
         except Exception as exc:
             with self.report_lock:
@@ -2414,14 +2573,14 @@ class ConcurrentPushSmoke:
                         "timestamp": utc_now(),
                     }
                 )
-                self.write_report()
+                self.write_report(force=True)
             print(f"FAILED: {exc}")
             print(f"report: {self.report.artifacts.get('report')}")
             return 1
         else:
             with self.report_lock:
                 self.report.status = "ok"
-                self.write_report()
+                self.write_report(force=True)
             print("OK")
             print(f"run: {self.run_root}")
             print(f"remote: {self.remote_url}")
@@ -2429,7 +2588,13 @@ class ConcurrentPushSmoke:
             return 0
         finally:
             if self.request_proxy is not None:
-                self.request_proxy.close()
+                try:
+                    path = self.artifacts / "request-meter-total.json"
+                    path.write_text(json.dumps(self.request_proxy.snapshot(include_paths=False), indent=2) + "\n")
+                    self.report.artifacts["request_meter_total"] = str(path)
+                    self.write_report(force=True)
+                finally:
+                    self.request_proxy.close()
 
 
 def parse_args() -> argparse.Namespace:
@@ -2441,13 +2606,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--secret-key", default="crab")
     parser.add_argument("--region", default="us-east-1")
     parser.add_argument("--run-id")
+    parser.add_argument("--source", type=Path, help="read-only plain Git history; clients borrow an independent cold baseline")
     parser.add_argument("--crab-bin", default=shutil.which("crab") or "crab")
+    parser.add_argument("--push-client", choices=["native", "git"], default="native")
     parser.add_argument("--git-bin", default=shutil.which("git") or "git")
     parser.add_argument("--agents", type=int, default=8)
     parser.add_argument("--branch-update-rounds", type=int, default=0)
     parser.add_argument("--same-branch-agents", type=int, default=8)
     parser.add_argument("--max-parallel-pushes", type=int, default=32)
     parser.add_argument("--max-parallel-readers", type=int, default=2)
+    parser.add_argument("--consumer-mode", choices=["per-branch", "cold-final"], default="per-branch",
+                        help="stress individual consumers or verify all final refs in one independent cold clone")
     parser.add_argument("--upload-concurrency", type=int, default=4)
     parser.add_argument("--lock-wait-secs", type=int, default=30)
     parser.add_argument("--omit-lock-wait-secs", action="store_true")
@@ -2465,6 +2634,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--no-request-capture", action="store_true")
     parser.add_argument("--max-locator-requests-per-success", type=float)
     args = parser.parse_args()
+    if args.agents < 1 or args.same_branch_agents < 1 or args.max_parallel_pushes < 1:
+        parser.error("agent and push worker counts must be positive")
+    if args.push_client == "git" and (args.rebase_on_non_fast_forward or not args.skip_same_branch):
+        parser.error("--push-client git requires --skip-same-branch and no automatic integration")
+    if args.source:
+        args.source = args.source.expanduser().resolve()
+        if not (args.source / ".git").exists():
+            parser.error("--source must name an existing Git checkout")
     if (args.crash_boundary or args.marker_faults) and args.no_request_capture:
         parser.error("--crash-boundary and --marker-faults require request capture")
     if args.branch_update_rounds < 0:

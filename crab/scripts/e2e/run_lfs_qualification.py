@@ -30,7 +30,7 @@ from urllib.parse import urlsplit, urlunsplit
 
 
 SCHEMA = "crab.lfs-qualification"
-VERSION = "1.0"
+VERSION = "1.1"
 CHUNK_SIZE = 1024 * 1024
 DEFAULT_MIN_SIZE = 1024 * 1024
 DEFAULT_MAX_SIZE = 2 * 1024 * 1024
@@ -74,9 +74,9 @@ def executable(value: str, label: str) -> str:
 
 
 def deterministic_block(seed: str, object_index: int, block_index: int) -> bytes:
-    return hashlib.sha256(
+    return hashlib.shake_256(
         f"crab-lfs:{seed}:{object_index}:{block_index}".encode("utf-8")
-    ).digest()
+    ).digest(CHUNK_SIZE)
 
 
 def write_deterministic(path: Path, size: int, seed: str, object_index: int) -> str:
@@ -88,9 +88,7 @@ def write_deterministic(path: Path, size: int, seed: str, object_index: int) -> 
     with path.open("wb") as handle:
         while remaining:
             block = deterministic_block(seed, object_index, block_index)
-            chunk = (block * ((min(remaining, CHUNK_SIZE) + len(block) - 1) // len(block)))[:
-                min(remaining, CHUNK_SIZE)
-            ]
+            chunk = block[:min(remaining, CHUNK_SIZE)]
             handle.write(chunk)
             digest.update(chunk)
             remaining -= len(chunk)
@@ -123,6 +121,8 @@ class Qualification:
             raise QualificationError("object-count must be at least path-count")
         if args.commit_count < 1 or args.path_count < 1 or args.object_count < 1:
             raise QualificationError("commit-count, path-count, and object-count must be positive")
+        if not args.commit_count <= args.object_count <= args.commit_count * args.path_count:
+            raise QualificationError("every generated object must fit a distinct committed path version")
         if args.min_size < 0 or args.max_size < args.min_size:
             raise QualificationError("size range is invalid")
         self.secrets = tuple(
@@ -143,6 +143,10 @@ class Qualification:
             "started_at": utc_now(),
             "finished_at": None,
             "profile": args.profile,
+            "candidate_binary_sha256": hash_file(Path(self.crab)),
+            "driver_sha256": hash_file(Path(__file__)),
+            "endpoint_url": redact_url(self.env.get("AWS_ENDPOINT_URL_S3", self.env.get("AWS_ENDPOINT_URL", ""))),
+            "region": self.env.get("AWS_REGION", self.env.get("AWS_DEFAULT_REGION", "")),
             "seed": args.seed,
             "remote_url": self.remote_url,
             "repository": str(self.repo),
@@ -172,6 +176,9 @@ class Qualification:
                 "GIT_COMMITTER_NAME": "Crab LFS qualification",
                 "GIT_COMMITTER_EMAIL": "crab-lfs-qualification@example.invalid",
                 "GIT_LFS_SKIP_SMUDGE": "1",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": os.devnull,
+                "CRAB_CACHE_DIR": str(self.evidence_dir / "source-cache"),
             }
         )
         return env
@@ -264,6 +271,7 @@ class Qualification:
 
     def create_history(self) -> None:
         sizes: list[int] = []
+        pending_start = 0
         for index in range(self.args.object_count):
             span = self.args.max_size - self.args.min_size
             size = self.args.min_size + ((index * 1_000_003) % (span + 1)) if span else self.args.min_size
@@ -286,6 +294,10 @@ class Qualification:
                 self.run_git(["add", "*.bin"], self.repo, f"stage objects {index + 1}")
                 self.run_git(["add", ".gitattributes", "crab.toml"], self.repo, f"stage config {index + 1}")
                 self.run_git(["commit", "-m", f"qualification commit {commit_index}"], self.repo, f"commit {commit_index}")
+                revision = self.run_git(["rev-parse", "HEAD"], self.repo, f"revision {commit_index}").strip()
+                for item in self.report["objects"][pending_start:]:
+                    item["commit"] = revision
+                pending_start = len(self.report["objects"])
         self.report["metrics"]["logical_bytes"] = sum(sizes)
         self.report["metrics"]["current_paths"] = len(list(self.repo.glob("*.bin")))
         self.save()
@@ -300,9 +312,11 @@ class Qualification:
         self.check("ref-equality", local_ref == remote_ref, {"local": local_ref, "remote": remote_ref})
         self.run_lfs(["fsck"], self.repo, "git lfs fsck")
         self.run_crab([*self.args.crab_args, "lfs", "fsck"], self.repo, "crab lfs fsck")
+        self.run_git(["fsck", "--strict", "--full"], self.repo, "source strict Git fsck")
 
     def verify_clone(self) -> None:
         clone = self.evidence_dir / "clone"
+        self.env["CRAB_CACHE_DIR"] = str(self.evidence_dir / "cold-clone-cache")
         self.run_git(["clone", self.args.remote_url, str(clone)], self.evidence_dir, "skip-smudge clone")
         self.run_crab(
             [*self.args.crab_args, "lfs", "install", "--local", "--skip-smudge", "--skip-repo"],
@@ -321,6 +335,25 @@ class Qualification:
                 path.is_file() and path.stat().st_size == item["size"] and hash_file(path) == item["oid"],
                 {"path": item["path"], "size": item["size"]},
             )
+        # A successful final checkout can hide missing payloads overwritten in
+        # older commits. Read every historical OID into this independent clone.
+        self.run_lfs(["fetch", "--all", "origin"], clone, "git lfs fetch complete history")
+        for item in self.report["objects"]:
+            if item["size"] == 0:
+                # Git LFS 3.7.1 spec.md defines empty content as its own pointer;
+                # requiring a separately downloaded object would reject valid Git.
+                body = self.run_git(["show", f"{item['commit']}:{item['path']}"], clone,
+                                    f"historical empty file {item['index']}")
+                self.check(f"historical-empty-file-{item['index']}", body == "")
+                continue
+            oid = item["oid"]
+            path = clone / ".git" / "lfs" / "objects" / oid[:2] / oid[2:4] / oid
+            self.check(
+                f"historical-object-byte-identity-{item['index']}",
+                path.is_file() and path.stat().st_size == item["size"] and hash_file(path) == oid,
+                {"oid": oid, "size": item["size"]},
+            )
+        self.run_git(["fsck", "--strict", "--full"], clone, "cold clone strict Git fsck")
 
     def run_all(self) -> None:
         started_children = resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss
