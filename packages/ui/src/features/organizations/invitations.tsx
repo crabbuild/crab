@@ -15,10 +15,7 @@ import {
 } from "@/components/ui/dialog";
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select";
+import { FieldSelect } from "@/components/ui/field-select";
 import { useRequest } from "@/lib/api";
 import type { ActorProfile } from "@/features/profile/model";
 import { MutationError } from "./feedback";
@@ -284,17 +281,14 @@ function InviteForm({
         </Field>
         <Field>
           <FieldLabel htmlFor="invitation-role">Organization role</FieldLabel>
-          <NativeSelect
+          <FieldSelect
             id="invitation-role"
+            label="Organization role"
             value={role}
             disabled={mutation.pending}
-            onChange={(event) =>
-              setRole(event.target.value as OrganizationRole)
-            }
-          >
-            <NativeSelectOption value="member">Member</NativeSelectOption>
-            <NativeSelectOption value="owner">Owner</NativeSelectOption>
-          </NativeSelect>
+            onValueChange={(role) => setRole(role as OrganizationRole)}
+            options={{ member: "Member", owner: "Owner" }}
+          />
           <p className="text-sm text-muted-foreground">
             Owners can manage members and organization settings.
           </p>

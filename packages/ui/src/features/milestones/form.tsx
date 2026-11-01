@@ -1,5 +1,8 @@
 import { useState } from "react";
 import { Button } from "@/components/ui/button";
+import { DatePicker } from "@/components/ui/date-picker";
+import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
+import { Input } from "@/components/ui/input";
 import { endpoint, navigate, useRequest, type Repository } from "@/lib/api";
 import { useMutation } from "@/components/discussion/mutations";
 import { DiscussionMarkdown } from "@/components/discussion/markdown";
@@ -66,33 +69,38 @@ export function MilestoneForm({
         Group related issues and pull requests, then follow their progress.
       </p>
       <fieldset disabled={mutation.pending}>
-        <label htmlFor="milestone-title">Title</label>
-        <input
-          id="milestone-title"
-          value={title}
-          onChange={(event) => setTitle(event.target.value)}
-          required
-          maxLength={256}
-          autoFocus
-        />
-        <label htmlFor="milestone-due">
-          Due date <span className="muted">(optional)</span>
-        </label>
-        <input
-          id="milestone-due"
-          type="date"
-          min="0001-01-01"
-          max="9999-12-31"
-          value={due}
-          onChange={(event) => setDue(event.target.value)}
-        />
-        <Editor
-          id="milestone-description"
-          label="Description (optional)"
-          value={description}
-          onChange={setDescription}
-          disabled={mutation.pending}
-        />
+        <FieldGroup>
+          <Field>
+            <FieldLabel htmlFor="milestone-title">Title</FieldLabel>
+            <Input
+              id="milestone-title"
+              value={title}
+              onChange={(event) => setTitle(event.target.value)}
+              required
+              maxLength={256}
+              autoFocus
+            />
+          </Field>
+          <Field className="sm:max-w-64">
+            <FieldLabel htmlFor="milestone-due">
+              Due date <span className="muted">(optional)</span>
+            </FieldLabel>
+            <DatePicker
+              id="milestone-due"
+              label="Due date"
+              value={due || null}
+              disabled={mutation.pending}
+              onValueChange={(date) => setDue(date ?? "")}
+            />
+          </Field>
+          <Editor
+            id="milestone-description"
+            label="Description (optional)"
+            value={description}
+            onChange={setDescription}
+            disabled={mutation.pending}
+          />
+        </FieldGroup>
       </fieldset>
       {mutation.error && (
         <p className="notice error" role="alert">

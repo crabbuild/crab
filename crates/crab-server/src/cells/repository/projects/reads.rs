@@ -1,4 +1,94 @@
 use super::*;
+
+pub(crate) struct WorkSummaries;
+#[derive(Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct WorkDetails {
+    pub work: SubjectSummary,
+    pub assignees: Vec<super::super::assignments::Assignee>,
+    pub progress: Option<hierarchy::Progress>,
+    pub parent: Option<SubjectSummary>,
+    pub links: Vec<SubjectSummary>,
+    pub more_links: bool,
+}
+fn work_details(
+    context: &mut Transaction<'_>,
+    subject: Subject,
+    assignees: Vec<super::super::assignments::Assignee>,
+) -> Result<Option<WorkDetails>> {
+    let Some(work) = subject.summary(context)? else {
+        return Ok(None);
+    };
+    let (progress, parent) = if subject.kind == SubjectKind::Issue {
+        (
+            Some(hierarchy::progress(context, subject.number)?),
+            hierarchy::parent(context, subject.number)?
+                .0
+                .map(|number| {
+                    Subject {
+                        kind: SubjectKind::Issue,
+                        number,
+                    }
+                    .summary(context)
+                })
+                .transpose()?
+                .flatten(),
+        )
+    } else {
+        (None, None)
+    };
+    let page = super::super::collaboration::links::ListLinks::execute(
+        context,
+        super::super::collaboration::links::Query {
+            subject,
+            before: None,
+            limit: 3,
+        },
+    )?
+    .ok_or(Error::Invalid("project links source is missing"))?;
+    Ok(Some(WorkDetails {
+        work,
+        assignees,
+        progress,
+        parent,
+        links: page.items.into_iter().map(|item| item.work).collect(),
+        more_links: page.next.is_some(),
+    }))
+}
+impl Read for WorkSummaries {
+    const CLASS: &'static str = super::super::CLASS;
+    const ID: u32 = 397;
+    type Input = Vec<Subject>;
+    type Output = Vec<Option<WorkDetails>>;
+    fn execute(context: &mut Transaction<'_>, input: Self::Input) -> Result<Self::Output> {
+        if input.len() > 50 {
+            return Err(Error::Invalid("work lookup is limited to 50 subjects"));
+        }
+        preparation::ensure_ready(context)?;
+        input
+            .into_iter()
+            .map(|subject| {
+                validate_number(subject.number)?;
+                let table = match subject.kind {
+                    SubjectKind::Issue => "repository_issues",
+                    SubjectKind::Pull => "repository_pulls",
+                };
+                let rows = context.query(
+                    &format!("SELECT assignees FROM {table} WHERE number=?"),
+                    &[integer(subject.number)?],
+                )?;
+                let Some(row) = rows.rows.first() else {
+                    return Ok(None);
+                };
+                let assignees = match &row[0] {
+                    SqlValue::Blob(bytes) => super::super::assignments::decode(bytes)?,
+                    _ => return Err(Error::Invalid("project source assignments are invalid")),
+                };
+                work_details(context, subject, assignees)
+            })
+            .collect()
+    }
+}
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct ProjectQuery {
@@ -145,58 +235,35 @@ impl Read for Items {
             if !entry.valid(&project.definition) {
                 return Err(Error::Invalid("stored project item is invalid"));
             }
-            let mut links = Vec::new();
-            let mut more_links = false;
-            let mut parent = None;
-            let mut progress = None;
-            let work = entry
-                .subject
-                .map(|s| s.summary(context))
-                .transpose()?
-                .flatten();
-            if let Some(subject) = entry.subject {
-                if work.is_none() {
-                    return Err(Error::Invalid("project source is missing"));
-                }
-                if subject.kind == SubjectKind::Issue {
-                    progress = Some(hierarchy::progress(context, subject.number)?);
-                    parent = hierarchy::parent(context, subject.number)?
-                        .0
-                        .map(|n| {
-                            Subject {
-                                kind: SubjectKind::Issue,
-                                number: n,
-                            }
-                            .summary(context)
-                        })
-                        .transpose()?
-                        .flatten();
-                }
-                let page = super::super::collaboration::links::ListLinks::execute(
-                    context,
-                    super::super::collaboration::links::Query {
-                        subject,
-                        before: None,
-                        limit: 3,
-                    },
-                )?
-                .ok_or(Error::Invalid("project links source is missing"))?;
-                links = page.items.into_iter().map(|item| item.work).collect();
-                more_links = page.next.is_some();
-            }
             let assignees = match row.get(1) {
                 Some(SqlValue::Blob(bytes)) => super::super::assignments::decode(bytes)?,
                 Some(SqlValue::Null) => vec![],
                 _ => return Err(Error::Invalid("project source assignments are invalid")),
             };
+            let details = if let Some(subject) = entry.subject {
+                Some(
+                    work_details(context, subject, assignees)?
+                        .ok_or(Error::Invalid("project source is missing"))?,
+                )
+            } else {
+                None
+            };
             items.push(Row {
-                assignees,
+                assignees: details
+                    .as_ref()
+                    .map(|details| details.assignees.clone())
+                    .unwrap_or_default(),
                 item: entry,
-                work,
-                progress,
-                parent,
-                links,
-                more_links,
+                work: details.as_ref().map(|details| details.work.clone()),
+                progress: details
+                    .as_ref()
+                    .and_then(|details| details.progress.clone()),
+                parent: details.as_ref().and_then(|details| details.parent.clone()),
+                links: details
+                    .as_ref()
+                    .map(|details| details.links.clone())
+                    .unwrap_or_default(),
+                more_links: details.as_ref().is_some_and(|details| details.more_links),
             });
         }
         let next = if rows.rows.len() > 50 {
@@ -286,15 +353,13 @@ impl Read for Candidates {
             Some(SubjectKind::Pull) => "is:pr",
             None => "",
         };
-        let query = Some(
-            format!("{} {suffix}", literal.unwrap_or_default())
-                .trim()
-                .to_owned(),
-        );
+        let query = format!("{} {suffix}", literal.unwrap_or_default())
+            .trim()
+            .to_owned();
         let page = super::super::ListDiscussions::execute(
             context,
             super::super::SearchInput {
-                query,
+                query: (!query.is_empty()).then_some(query),
                 limit: 20,
                 ..Default::default()
             },

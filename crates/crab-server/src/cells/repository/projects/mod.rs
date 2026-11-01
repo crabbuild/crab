@@ -19,7 +19,7 @@ mod templates;
 pub(crate) use commands::{Change, Command, Outcome, Request};
 pub(crate) use reads::{
     CandidateQuery, Candidates, GetProject, ItemQuery, Items, ListProjects, Memberships,
-    ProjectQuery,
+    ProjectQuery, WorkSummaries,
 };
 pub(crate) use templates::templates;
 
@@ -94,7 +94,7 @@ fn text_valid(value: &str, limit: usize, required: bool) -> bool {
         && value.chars().count() <= limit
         && !value.chars().any(char::is_control)
 }
-fn date_valid(value: &str) -> bool {
+pub(crate) fn date_valid(value: &str) -> bool {
     value.len() == 10
         && time::format_description::parse("[year]-[month]-[day]")
             .ok()
@@ -108,7 +108,7 @@ fn names_valid(names: &[String], maximum: usize) -> bool {
         && names.iter().collect::<BTreeSet<_>>().len() == names.len()
 }
 impl Definition {
-    fn valid(&self) -> bool {
+    pub(crate) fn valid(&self) -> bool {
         serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= 64 * 1024)
             && text_valid(&self.name, 100, true)
             && text_valid(&self.description, 1000, false)
@@ -149,7 +149,7 @@ impl Definition {
     }
 }
 impl Item {
-    fn valid(&self, definition: &Definition) -> bool {
+    pub(crate) fn valid(&self, definition: &Definition) -> bool {
         serde_json::to_vec(self).is_ok_and(|bytes| bytes.len() <= 24 * 1024)
             && !self.id.is_nil()
             && definition.statuses.contains(&self.status)

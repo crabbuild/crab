@@ -9,13 +9,18 @@ import {
   ChevronLeftIcon,
   ChevronRightIcon,
   PencilIcon,
+  LockKeyholeIcon,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select";
+  Select,
+  SelectContent,
+  SelectGroup,
+  SelectItem,
+  SelectTrigger,
+  SelectValue,
+} from "@/components/ui/select";
 import {
   Table,
   TableHeader,
@@ -29,13 +34,15 @@ import { cn } from "@/lib/utils";
 import type { Repository } from "@/lib/api";
 import { priorities, workHref, type Row, type ItemPage } from "./model";
 export function WorkIcon({ row }: { row: Row }) {
-  const Icon = !row.work
-    ? FileTextIcon
-    : row.work.subject.kind === "issue"
-      ? CircleDotIcon
-      : row.work.state === "merged"
-        ? GitMergeIcon
-        : GitPullRequestIcon;
+  const Icon = row.restricted
+    ? LockKeyholeIcon
+    : !row.work
+      ? FileTextIcon
+      : row.work.subject.kind === "issue"
+        ? CircleDotIcon
+        : row.work.state === "merged"
+          ? GitMergeIcon
+          : GitPullRequestIcon;
   return (
     <Icon
       className={cn(
@@ -46,26 +53,39 @@ export function WorkIcon({ row }: { row: Row }) {
     />
   );
 }
-export function ItemTitle({ repo, row }: { repo: Repository; row: Row }) {
+export function ItemTitle({
+  repo,
+  row,
+}: {
+  repo?: Pick<Repository, "owner" | "name">;
+  row: Row;
+}) {
+  const source = row.repository ?? repo;
   return (
     <div className="project-item-title">
       <WorkIcon row={row} />
       <div>
-        {row.work ? (
-          <Link href={workHref(repo, row.work.subject)}>{row.work.title}</Link>
+        {row.work && source ? (
+          <Link href={workHref(source, row.work.subject)}>
+            {row.work.title}
+          </Link>
         ) : (
           <strong>{row.item.title}</strong>
         )}
         <div className="project-item-meta">
           {row.work ? (
             <span>
+              {row.repository &&
+                `${row.repository.owner}/${row.repository.name} `}
               #{row.work.subject.number} · {row.work.state}
             </span>
           ) : (
-            <span>Draft note</span>
+            <span>
+              {row.restricted ? "Repository access required" : "Draft note"}
+            </span>
           )}
-          {row.parent && (
-            <Link href={workHref(repo, row.parent.subject)}>
+          {row.parent && source && (
+            <Link href={workHref(source, row.parent.subject)}>
               Sub-issue of #{row.parent.subject.number}
             </Link>
           )}
@@ -80,13 +100,21 @@ export function ItemTitle({ repo, row }: { repo: Repository; row: Row }) {
     </div>
   );
 }
-export function LinkedItems({ repo, row }: { repo: Repository; row: Row }) {
+export function LinkedItems({
+  repo,
+  row,
+}: {
+  repo?: Pick<Repository, "owner" | "name">;
+  row: Row;
+}) {
+  const source = row.repository ?? repo;
+  if (!source) return null;
   return (
     <div className="project-linked-items">
       {row.links.map((link) => (
         <Link
           key={`${link.subject.kind}:${link.subject.number}`}
-          href={workHref(repo, link.subject)}
+          href={workHref(source, link.subject)}
           title={link.title}
         >
           {link.subject.kind === "pull" ? (
@@ -98,7 +126,7 @@ export function LinkedItems({ repo, row }: { repo: Repository; row: Row }) {
         </Link>
       ))}
       {row.more_links && row.work && (
-        <Link href={workHref(repo, row.work.subject)}>More…</Link>
+        <Link href={workHref(source, row.work.subject)}>More…</Link>
       )}
     </div>
   );
@@ -110,7 +138,7 @@ export function ProjectTable({
   onEdit,
   onStatus,
 }: {
-  repo: Repository;
+  repo?: Pick<Repository, "owner" | "name">;
   page: ItemPage;
   editable: boolean;
   onEdit: (row: Row) => void;
@@ -150,16 +178,26 @@ export function ProjectTable({
               )}
             </TableCell>
             <TableCell>
-              {editable ? (
-                <NativeSelect
-                  aria-label={`Status for ${row.work?.title ?? row.item.title}`}
+              {editable && !row.restricted ? (
+                <Select
                   value={row.item.status}
-                  onChange={(e) => onStatus(row, e.target.value)}
+                  onValueChange={(status) => onStatus(row, status)}
                 >
-                  {page.project.definition.statuses.map((s) => (
-                    <NativeSelectOption key={s}>{s}</NativeSelectOption>
-                  ))}
-                </NativeSelect>
+                  <SelectTrigger
+                    aria-label={`Status for ${row.work?.title ?? row.item.title}`}
+                  >
+                    <SelectValue />
+                  </SelectTrigger>
+                  <SelectContent>
+                    <SelectGroup>
+                      {page.project.definition.statuses.map((status) => (
+                        <SelectItem key={status} value={status}>
+                          {status}
+                        </SelectItem>
+                      ))}
+                    </SelectGroup>
+                  </SelectContent>
+                </Select>
               ) : (
                 <Badge variant="secondary">{row.item.status}</Badge>
               )}
@@ -197,7 +235,7 @@ export function ProjectBoard({
   onEdit,
   onStatus,
 }: {
-  repo: Repository;
+  repo?: Pick<Repository, "owner" | "name">;
   page: ItemPage;
   editable: boolean;
   onEdit: (row: Row) => void;
@@ -206,7 +244,7 @@ export function ProjectBoard({
   const dragged = useRef<Row | null>(null);
   const [over, setOver] = useState<string>();
   return (
-    <div className="project-board" aria-label="Project board">
+    <div className="project-board" role="region" aria-label="Project board">
       {page.project.definition.statuses.map((status) => (
         <section
           key={status}
@@ -245,7 +283,7 @@ export function ProjectBoard({
                 <article
                   className="project-board-card"
                   key={row.item.id}
-                  draggable={editable}
+                  draggable={editable && !row.restricted}
                   onDragStart={() => {
                     dragged.current = row;
                   }}
@@ -298,7 +336,7 @@ export function ProjectRoadmap({
   editable,
   onEdit,
 }: {
-  repo: Repository;
+  repo?: Pick<Repository, "owner" | "name">;
   page: ItemPage;
   editable: boolean;
   onEdit: (row: Row) => void;

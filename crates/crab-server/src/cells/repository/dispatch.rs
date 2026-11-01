@@ -216,6 +216,7 @@ pub(in crate::cells) fn dispatch_read(
         projects::ListProjects::ID => invoke_read::<projects::ListProjects>(context, input),
         projects::GetProject::ID => invoke_read::<projects::GetProject>(context, input),
         projects::Candidates::ID => invoke_read::<projects::Candidates>(context, input),
+        projects::WorkSummaries::ID => invoke_read::<projects::WorkSummaries>(context, input),
         projects::Items::ID => invoke_read::<projects::Items>(context, input),
         projects::Memberships::ID => invoke_read::<projects::Memberships>(context, input),
         projects::hierarchy::GetHierarchy::ID => {

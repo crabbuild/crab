@@ -1,4 +1,5 @@
 import { ProjectCommandsProvider } from "@/features/projects/commands";
+import { OrganizationProjects } from "@/features/projects/workspace";
 import { ThemeControl, type Theme } from "@/app/theme/control";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
@@ -125,13 +126,16 @@ export function App() {
       url.pathname,
     )?.[1];
   const organizationRoute =
-    /^\/-\/organizations\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(\/invitation)?$/i.exec(
+    /^\/-\/organizations\/([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})(\/invitation|\/projects(?:\/([0-9a-f-]{36}))?)?$/i.exec(
       url.pathname,
     );
   const route =
     profileSettings || actorId || organizationRoute
       ? undefined
       : repositoryRoute(url);
+  const projectWorkspace = organizationRoute?.[2]?.startsWith("/projects")
+    ? organizationRoute[1]
+    : undefined;
   const session = useRequest<Session>("/api/session");
   const teamAccount = !session.data?.authenticated
     ? null
@@ -194,8 +198,10 @@ export function App() {
   useEffect(() => {
     document.title = repo
       ? `${repo.owner}/${repo.name} · Crab`
-      : "Repositories · Crab";
-  }, [repo]);
+      : projectWorkspace
+        ? "Projects · Crab"
+        : "Repositories · Crab";
+  }, [repo, projectWorkspace]);
   useEffect(() => {
     if (!importedRepository || !catalog.data) return;
     if (
@@ -237,8 +243,15 @@ export function App() {
                 {repo.archived && <Badge variant="outline">Archived</Badge>}
               </div>
             ) : (
-              <Link className="global-catalog-link" href="/">
-                Repositories
+              <Link
+                className="global-catalog-link"
+                href={
+                  projectWorkspace
+                    ? `/-/organizations/${projectWorkspace}/projects`
+                    : "/"
+                }
+              >
+                {projectWorkspace ? "Projects" : "Repositories"}
               </Link>
             )}
             <div className="header-actions">
@@ -378,7 +391,13 @@ export function App() {
                 </Button>
               </div>
             ) : organizationRoute ? (
-              organizationRoute[2] ? (
+              organizationRoute[2]?.startsWith("/projects") ? (
+                <OrganizationProjects
+                  organization={organizationRoute[1]}
+                  project={organizationRoute[3]}
+                  url={url}
+                />
+              ) : organizationRoute[2] ? (
                 <OrganizationInvitation
                   key={organizationRoute[1]}
                   id={organizationRoute[1]}

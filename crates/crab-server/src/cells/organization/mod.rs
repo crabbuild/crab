@@ -17,6 +17,7 @@ const MAX_VERSION: u64 = 9_007_199_254_740_991;
 
 mod commands;
 mod invitations;
+pub(crate) mod projects;
 mod reads;
 pub(crate) mod teams;
 pub(crate) use commands::{
@@ -151,6 +152,9 @@ fn record(context: &Transaction<'_>) -> Result<Option<Organization>> {
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Action {
     Created,
+    ProjectChanged {
+        project: Uuid,
+    },
     TeamCreated {
         team: Uuid,
     },
@@ -269,6 +273,9 @@ pub(in crate::cells) fn authorize(
     mutation: bool,
     input: &Value,
 ) -> Result<()> {
+    if projects::handles(operation, mutation) {
+        return projects::authorize(context, operation, mutation, input);
+    }
     if teams::handles(operation, mutation) {
         return teams::authorize(context, operation, mutation, input);
     }
@@ -294,7 +301,12 @@ pub(in crate::cells) fn authorize(
             return actor(decision.actor);
         }
         #[cfg(test)]
-        (teams::tests::WithoutTeams::ID | teams::tests::FailedStep::ID, true) => true,
+        (
+            teams::tests::WithoutTeams::ID
+            | teams::tests::FailedStep::ID
+            | projects::tests::WithoutProjects::ID,
+            true,
+        ) => true,
         _ => return Err(Error::Invalid("unknown organization operation")),
     };
     #[derive(Deserialize)]
@@ -319,6 +331,9 @@ pub(in crate::cells) fn dispatch_read(
     input: Value,
 ) -> Result<Value> {
     match operation {
+        projects::List::ID => invoke_read::<projects::List>(context, input),
+        projects::Get::ID => invoke_read::<projects::Get>(context, input),
+        projects::Items::ID => invoke_read::<projects::Items>(context, input),
         teams::GetPreparation::ID => invoke_read::<teams::GetPreparation>(context, input),
         teams::List::ID => invoke_read::<teams::List>(context, input),
         teams::Get::ID => invoke_read::<teams::Get>(context, input),
@@ -341,6 +356,12 @@ pub(in crate::cells) fn dispatch_mutation(
     input: Value,
 ) -> Result<MutationResult<Value>> {
     match operation {
+        #[cfg(test)]
+        projects::tests::WithoutProjects::ID => {
+            invoke_mutation::<projects::tests::WithoutProjects>(context, input)
+        }
+        projects::Prepare::ID => invoke_mutation::<projects::Prepare>(context, input),
+        projects::Change::ID => invoke_mutation::<projects::Change>(context, input),
         #[cfg(test)]
         teams::tests::WithoutTeams::ID => {
             invoke_mutation::<teams::tests::WithoutTeams>(context, input)
