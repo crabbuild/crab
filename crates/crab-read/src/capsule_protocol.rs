@@ -202,6 +202,26 @@ impl CapsuleRepositoryCapture {
         )
         .await
     }
+
+    /// Open complete metadata for an owned Git visibility transfer.
+    ///
+    /// This preserves complete validation and the captured ref state while
+    /// moving the decoded checkpoint proof into reconciliation. Maintenance
+    /// readers use [`Self::metadata_view`] to retain that proof for later joins.
+    pub async fn owned_git_metadata_view(
+        &self,
+        limits: CapsuleReadLimits,
+    ) -> Result<CapsuleRepositoryView> {
+        assemble_layered_control_view(
+            &self.layout,
+            self.root.clone(),
+            limits,
+            &self.heads,
+            &self.active,
+            ControlRead::CompleteForGit,
+        )
+        .await
+    }
 }
 
 /// One authenticated repository root and every post-checkpoint capsule it names.
@@ -4456,6 +4476,7 @@ pub async fn open_git_view_from_root(
 #[derive(Clone, Copy)]
 enum ControlRead {
     Complete,
+    CompleteForGit,
     Repack,
     Git,
     Fetch,
@@ -4497,7 +4518,7 @@ fn inline_control_runs(
                 inline.fill(true);
             }
         }
-        ControlRead::Complete | ControlRead::Git => {}
+        ControlRead::Complete | ControlRead::CompleteForGit | ControlRead::Git => {}
     }
     inline
 }
@@ -4568,7 +4589,11 @@ mod inline_control_tests {
                 [false, false]
             );
         }
-        for read in [ControlRead::Complete, ControlRead::Git] {
+        for read in [
+            ControlRead::Complete,
+            ControlRead::CompleteForGit,
+            ControlRead::Git,
+        ] {
             assert_eq!(
                 inline_control_runs(read, [(0, 1), (1, 500)]),
                 [false, false]
@@ -4859,7 +4884,10 @@ async fn assemble_layered_control_view(
         .collect();
     let mut checkpoint = match snapshot.record().root().checkpoint() {
         Some(pointer) => {
-            let checkpoint = if !matches!(read, ControlRead::Complete | ControlRead::Repack) {
+            let checkpoint = if !matches!(
+                read,
+                ControlRead::Complete | ControlRead::CompleteForGit | ControlRead::Repack
+            ) {
                 load_layered_checkpoint_control(router, pointer, limits).await?
             } else {
                 load_layered_checkpoint(router, pointer, limits).await?
@@ -4956,7 +4984,7 @@ async fn assemble_layered_control_view(
                 }
             }
         }
-    } else if matches!(read, ControlRead::Complete) {
+    } else if matches!(read, ControlRead::Complete | ControlRead::CompleteForGit) {
         for (ref_name, transitions) in build_tip_bound_transitions(&[], &all_capsule_controls)? {
             tip_bound_transitions
                 .entry(ref_name)
@@ -5081,7 +5109,7 @@ async fn assemble_layered_control_view(
         };
         VisibilityReconciliation::Paged(Box::new(initial))
     } else {
-        let index = if matches!(read, ControlRead::Complete) {
+        let index = if matches!(read, ControlRead::CompleteForGit) {
             match checkpoint.as_mut() {
                 Some(checkpoint) => checkpoint
                     .take_visibility_index(0, &"0".repeat(64), &"0".repeat(64))?
@@ -5089,7 +5117,7 @@ async fn assemble_layered_control_view(
                 None => visibility_index_for_checkpoint(None)?,
             }
         } else {
-            // Repack readers reuse the complete ordinal admission proof later.
+            // Maintenance readers reuse the complete ordinal admission proof later.
             visibility_index_for_checkpoint(checkpoint.as_ref())?
         };
         VisibilityReconciliation::Complete(index)
@@ -6933,7 +6961,15 @@ mod tests {
             let source = layer.source_descriptor().unwrap();
             let visibility = include_visibility.then(|| {
                 crab_metadata::capsule_protocol::LayeredVisibilitySnapshot::from_index(
-                    &visibility_index(BTreeMap::new()),
+                    &visibility_index(
+                        current
+                            .record()
+                            .root()
+                            .refs()
+                            .iter()
+                            .map(|(name, tip)| (name.clone(), vec![tip.clone()]))
+                            .collect(),
+                    ),
                     &crab_metadata::capsule_protocol::source_catalog_digest(std::slice::from_ref(
                         &source,
                     ))
@@ -7044,6 +7080,41 @@ mod tests {
             )
             .await
             .unwrap();
+            if include_visibility {
+                let complete =
+                    open_view_from_root_with_metadata(&router, capture.root.clone(), TEST_LIMITS)
+                        .await
+                        .unwrap();
+                assert!(
+                    complete
+                        .layered_checkpoint()
+                        .unwrap()
+                        .cached_visibility_bytes()
+                        .is_some_and(|bytes| bytes > 0),
+                    "complete metadata view lost its decoded checkpoint proof"
+                );
+                let captured = capture.metadata_view(TEST_LIMITS).await.unwrap();
+                assert!(
+                    captured
+                        .layered_checkpoint()
+                        .unwrap()
+                        .cached_visibility_bytes()
+                        .is_some_and(|bytes| bytes > 0)
+                );
+                let git = capture.owned_git_metadata_view(TEST_LIMITS).await.unwrap();
+                assert_eq!(
+                    git.layered_checkpoint().unwrap().cached_visibility_bytes(),
+                    None
+                );
+                assert_eq!(
+                    git.git_snapshot().unwrap(),
+                    complete.git_snapshot().unwrap()
+                );
+                assert_eq!(
+                    git.git_visibility_index().await.unwrap(),
+                    complete.git_visibility_index().await.unwrap()
+                );
+            }
             observer.observations.lock().unwrap().clear();
             assert!(capture.may_have_layered_cold_clone_packs());
             let base = crab_metadata::capsule_protocol::CapsuleRefHead::from_root(

@@ -2815,7 +2815,7 @@ async fn open_capsule_fetch_view(
         }
     }
     capture
-        .metadata_view(crab_read::capsule_protocol::CapsuleReadLimits {
+        .owned_git_metadata_view(crab_read::capsule_protocol::CapsuleReadLimits {
             max_capsule_bytes: maximum,
             max_frontier_bytes: maximum,
         })
@@ -2891,7 +2891,7 @@ async fn fetch_capsule_packs(
             // heads or loading every Git body would change admission and duplicate
             // the payloads that the installer is about to read.
             view = capture
-                .metadata_view(crab_read::capsule_protocol::CapsuleReadLimits {
+                .owned_git_metadata_view(crab_read::capsule_protocol::CapsuleReadLimits {
                     max_capsule_bytes: maximum,
                     max_frontier_bytes: maximum,
                 })

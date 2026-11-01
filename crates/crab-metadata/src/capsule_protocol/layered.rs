@@ -1447,7 +1447,7 @@ impl LayeredCheckpoint {
             .iter()
             .any(|section| section.kind == CapsuleSectionKind::VisibilityOrdinalSnapshot)
         {
-            self.visibility.get()?.retained_bytes()
+            self.cached_visibility_bytes()?
         } else {
             0
         };
@@ -1579,6 +1579,14 @@ impl LayeredCheckpoint {
             member.validate_sources(self.sources())?;
         }
         Ok(Some(self.visibility.get_or_init(|| snapshot)))
+    }
+
+    /// Return resident bytes of an already verified visibility proof without decoding it.
+    #[must_use]
+    pub fn cached_visibility_bytes(&self) -> Option<usize> {
+        self.visibility
+            .get()
+            .map(LayeredVisibilitySnapshot::retained_bytes)
     }
 
     /// Decode visibility bound to this source inventory and the caller's Git identity.

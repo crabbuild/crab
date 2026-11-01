@@ -975,12 +975,12 @@ async fn open_capsule_repository_from_capture(
                 .map_err(CrabError::from)?;
             if cold_clone && direct_pack.is_none() {
                 drop(footer_view);
-                (capture.metadata_view(limits).await?, None, false)
+                (capture.owned_git_metadata_view(limits).await?, None, false)
             } else {
                 (footer_view, direct_pack, true)
             }
         } else {
-            (capture.metadata_view(limits).await?, None, false)
+            (capture.owned_git_metadata_view(limits).await?, None, false)
         };
     tracing::debug!(
         footer_only,
