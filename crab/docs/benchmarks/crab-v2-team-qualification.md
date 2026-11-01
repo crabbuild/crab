@@ -364,8 +364,14 @@ peak RSS from 175,767,552 to 44,548,096 bytes and elapsed time from 3.441 to
 0.470 seconds. This is not a product throughput distribution. Seven focused
 tests, 35 storage-enabled layered tests and crate Clippy pass. Dense and sparse
 wire controls produce byte-identical 6,830,087-byte and 250,613-byte sections
-with the old full-feature and new minimal libraries. Private CLI verification
-remains pending. Evidence: `ordinal-export-before-rss.json`,
+with the old full-feature and new minimal libraries. Private FUSE/NFS install
+at `a4945a6722d2` passes; binary SHA-256 is
+`fb142e1939bf8c22aecface750d2300b1202e52474089f843e8a87f5e3596748`.
+All 18 live RustFS retention checks pass: native default-base publication,
+source-ref deletion, repack, independent cold history reconstruction, strict
+Git fsck and complete Crab audit without repair. GC remains dry-run only.
+Evidence: `compact-ordinals-build-report.json`,
+`compact-ordinal-verification-controller.json`, `ordinal-export-before-rss.json`,
 `ordinal-export-canonical-rss.json`, `checkpoint-wire-identity-report.json`.
 
 An isolated GC component probe confirms that retry scheduling alone is
