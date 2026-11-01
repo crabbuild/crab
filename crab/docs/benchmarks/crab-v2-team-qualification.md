@@ -1,6 +1,6 @@
 # Crab v2 team and large-file qualification
 
-Status: **5,000-commit cold readback and large-file byte checks pass; team-scale
+Status: **10,000-commit cold readback and large-file byte checks pass; team-scale
 performance is not qualified**. The complete object-store audit found three
 expired read-admission leases left by interrupted tests, with no Git-object or
 data-chain findings. Built-in recovery passed; all three released tombstones
@@ -48,6 +48,7 @@ the user's manual-demo data. No bucket-wide Crab GC was invoked.
 | Independent final consumer mode | Four source-backed clients, three commits each: 19 checks pass | `cold-final-driver-smoke/artifacts/report.json` |
 | 1,000 developer branch publications | All 1,000 acknowledged; later direct-origin audit matches every exact source tip | `medium-team-1000/artifacts/report.json`, `team-1000-ack-audit.json` |
 | Four additional rounds | All 4,000 updates pass; independent cold clone matches 1,000 final tips and files, passes strict Git fsck, and contains all 15,001 baseline/developer commits | `team-5000-direct/artifacts/report.json` |
+| 10,000 developer commits, admission follow-up | Five more 1,000-update rounds acknowledged; one independent cold consumer matches all 1,000 final tips/files and all 20,001 baseline/developer commits; 2,010 checks pass | `team-10000-admission/artifacts/report.json`, `team-10000-summary.json` |
 | Complete team object-store audit | Three expired read-admission leases; no Git-object or data-chain findings. Both audits report failure with zero repairs. Recovery remains a separate check | `team-final-fsck-retry.json`, `team-fsck-diagnostic.jsonl` |
 | Complete team-store recovery | Follow-up binary passes the full audit in repair mode: three leases repaired, zero repair failures; independent origin reads verify released tombstones and unchanged holders | `team-fsck-bounded-repair.jsonl`, `team-lease-recovery-verification.json` |
 | Bounded-reader follow-up, 64 clients | All 140 checks pass: 64 publications, 64 updates, concurrent protocol-v2 readbacks/pulls and fsck; uses the follow-up binary identified below | `bounded-frontier-64/artifacts/report.json` |
@@ -75,6 +76,14 @@ OS processes. Existing-ref update rounds in the direct continuation completed
 with service p95 of 1.891–2.152 seconds. The fourth round took 157.970 seconds,
 with service p95/p99 of 4.330/12.939 seconds. These are busy-host observations,
 not isolated provider benchmarks or an eight-hour open-loop load test.
+
+The admission follow-up adds five 1,000-update rounds on the same clients to
+reach 10,000 acknowledged developer commits. Each round uses 16 writer workers:
+79.802, 79.214, 79.165, 85.928 and 99.142 seconds, with service p95 of 1.845,
+1.940, 1.743, 1.965 and 2.360 seconds. A fresh independent all-ref clone takes
+209.409 seconds and passes strict Git fsck, all 1,000 exact tips/file contents
+and the 20,001-commit count. This covers the requested upper commit count;
+it does not establish mixed-protocol throughput or concurrent-reader capacity.
 
 New native branches amplify bytes: a 100-branch cohort transferred 699,897,711
 request-body bytes, or 6,998,977 bytes per tiny-file publication, at nine requests
@@ -157,8 +166,10 @@ updates, four reader workers, protocol-v2 readback/pulls and clean Crab fsck
 (`admission-native-64/artifacts/report.json`). Mixed Git/Xet/LFS history passes
 21 checks after native/Git publication, cold historical byte comparison,
 rename/delete/merge and clean Crab/Git fsck (`admission-mixed-history/report.json`).
-The 10,000-developer-commit continuation is in progress; it does not yet qualify
-the upper working-day bound.
+The 10,000-developer-commit continuation passes 2,010 checks, with exact
+independent cold readback of all refs/files and all 20,001 baseline/developer
+commits. Its retained `continue_team_to_10000.py` and `team-10000-summary.json`
+describe the continuation. The five-version large-Xet retry remains in progress.
 
 Kubernetes has 141,757 reachable commits and a 1.30 GiB packed ODB. It passes
 full strict Git fsck with no diagnostics; source HEAD/worktree status are
@@ -229,7 +240,7 @@ skipped its live Kubernetes job. This campaign attempted the real input and
 retains its failure. The complete five-version Xet stress profile did not finish;
 its successful recovery controls cover two published versions. Multi-GiB raw
 Git blobs, 1,000 simultaneous processes, mixed-protocol 1,000-writer load,
-provider capacity, the 10,000-developer-commits/day upper bound and repeated
-isolated performance distributions remain outside the completed evidence.
+provider capacity, an eight-hour open-loop workload and repeated isolated
+performance distributions remain outside the completed evidence.
 These limits prevent a claim that Crab v2 is fully qualified for a large team
 and large repository.
