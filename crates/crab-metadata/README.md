@@ -117,7 +117,7 @@ capsules can therefore appear in differently compacted ref frontiers without
 inflating pack counts or appearing to conflict; differing payload commitments
 remain rejected.
 
-Checkpoint format 9 (`CRBCKP09`) commits to a small catalog descriptor and
+Checkpoint format 10 (`CRBCKP10`) commits to a small catalog descriptor and
 immutable content-addressed pages under `v2/catalogs/<partition>/<hash>`.
 Descriptor version 2 (`CRBCAT02`) authenticates the roots of file bindings,
 shards, xorbs and reverse chunk placements. Internal directories and nested
@@ -202,10 +202,10 @@ transitions remain complete in authenticated visibility pages; missing hints use
 the existing verified Git traversal. Required metadata that cannot fit returns
 `CheckpointFooterSize` so the publication owner can consolidate physical sources.
 
-Retired unshipped checkpoint formats through 8 are rejected without fallback.
+Retired unshipped checkpoint formats through 9 are rejected without fallback.
 The six published release tags do not contain this capsule codec.
 This format is under qualification; earlier format-7/8 runtime receipts do not
-qualify format 9 or establish hosted-S3 performance.
+qualify format 10 or establish hosted-S3 performance.
 
 Retained browse record format 2 carries the complete checkpoint pointer and
 catalog identity; loading authenticates the footer and rejects omitted or
@@ -256,6 +256,9 @@ complete opening and history-amplification qualification remain required.
 Ref deletion removes its live visibility closure even when the capsule has no
 visibility payload. Retained dictionary objects cannot supply a new ref's base;
 complete and paged reconciliation enforce the same deletion boundary.
+Bulk visibility-set inspection uses a scan-owned fork of the reader's warm cache
+and read-ahead boundaries. Full scans do not seed long-lived per-ref caches with
+complete replacement sets; point lookups keep their existing resident limits.
 
 ### External pointer catalogs
 
@@ -444,8 +447,24 @@ shared-session initialization can retry after that dependency is repaired.
 
 Layered checkpoint visibility uses authenticated dictionary, ref-closure and
 transition pages, shared by readers and recovery. Checkpoint pointers require
-explicit format 6 (`CRBCKP06`); retired or missing formats are rejected. No
+explicit format 10 (`CRBCKP10`); retired or missing formats are rejected. No
 release tag contains this layered format; the released v1 protocol is unchanged.
+
+Visibility descriptor version 2 stores one shared base and exact per-ref
+additions/removals. Bit-sliced frequency counts select base objects only when
+sharing reduces their total row count; ties stay outside the base. Small refs
+use absolute sets when those require fewer rows. Transition sets remain absolute.
+Bulk decoding applies checked edits to compact bitmaps and still requires exact
+canonical re-encoding. Point reads reject additions inside the base and removals
+outside it, then verify visible hits against the retained dictionary and source
+admission. Retained-only objects never gain visibility.
+
+Format 9 is unshipped: all six current remote release objects and 19 historical
+local tag objects omit this codec. Existing development repositories are not
+rewritten; preserve their matching client and namespace, upgrade all clients,
+and recreate qualification fixtures in a fresh prefix. Root/history readers
+reject retired or omitted checkpoint formats before traversing dependencies.
+There is no runtime fallback or automatic authoritative conversion.
 
 Footer roots bind the visibility section, retained-object count and ordered
 source-catalog digest. `LayeredVisibilityReader` loads only pages needed for

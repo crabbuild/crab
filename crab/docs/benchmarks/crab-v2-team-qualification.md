@@ -465,13 +465,104 @@ regression pass. This is request-count proof, not a team-scale speedup or latest
 runtime qualification. Evidence: `hint-retry-cache-before.log`,
 `hint-retry-cache-tests.log`, `hint-retry-cache-repeated-fixed.log`.
 
+The private FUSE/NFS install at `b72e59c350d0` passes in 1,294.850 seconds;
+binary SHA-256 is
+`d5efcdb04ddd0a8c74c50b241e8f0b2297669b10d2e8b3c26d30c47dab9aad19`.
+Its eight-client mixed workload passes 118 checks and 32 native/Git commits,
+both historical Xet/LFS versions, exact cold bytes and a clean complete audit.
+The separate default new-branch/source-ref-deletion/repack control passes
+22 checks, including independent 10,002-commit cold ancestry after actual
+repository GC. That collector deletes zero objects; this is retention survival,
+not physical reclamation proof. Both use the shared host during the older team
+run, so neither is an isolated latency comparison. Evidence:
+`hint-retry-cache-build-report.json`, `hint-retry-cache-live-controller.json`,
+`hint-retry-cache-retention-controller.json`.
+
+The older `d57bf520441e` mixed workload acknowledges three complete rounds of
+1,000 commits: initial native publication, a Git update round, then a native
+update round. Their push batches take 6,808.325, 636.983 and 94.779 seconds;
+p95 service is 230.348, 16.082 and 1.841 seconds respectively. These rounds
+change different content and clients; they are not an implementation A/B test.
+The initial cohort makes 19,312,434 S3 attempts and reads 450.111 GiB of response
+bodies, including 18,700,984 capsule GETs and 447.858 GiB of capsule responses.
+The meter combines all capsule/control traffic and provides no exclusive phase
+attribution. Sixteen active Git commands in the next payload-edit round report
+300-second GC renewal GET failures before the planned stop of queued work;
+they subsequently cancel. This remains an incomplete, failed team workload.
+The stopped candidate is superseded by the expiry fix. Exact acknowledgement
+and cold-history auditing retains its original parent report; it does not turn
+the attempt into an eight-round pass. Evidence:
+`mixed-team-independent-gc-stop-request.json`,
+`mixed-team-independent-gc-stall-analysis.json`,
+`mixed-team-independent-gc-stop-audit-with-failures-controller.json`.
+
+A scan-cache follow-up prevents bulk visibility admission from retaining every
+decoded replacement set in long-lived per-ref reader caches. A fork reuses warm
+pages and the same read-ahead boundaries; only scan-local additions are dropped.
+The same 128-ref, 32,000-shared-OID debug probe preserves exact membership and
+dictionary count while peak RSS changes from 599,228,416 to 265,814,016 bytes.
+Elapsed time is 30.89 versus 30.71 seconds in this one paired observation; no
+latency or capacity improvement is claimed. The preceding live `b72e59c350d0`
+results do not qualify this follow-up. Evidence:
+`visibility-scan-cache-memory-provenance.json`,
+`visibility-scan-cache-before-rss.log`, `visibility-scan-cache-after-rss.log`.
+
 The shared-base page prototype encodes dictionary/set pages for 1,000 refs,
 1,620,211 common objects and 30 private objects per ref into 86,093,652 bytes.
 Every reconstructed synthetic membership is checked, including a retained-only
 object that must remain invisible. This excludes format headers, automatic
 base selection, actual Git/catalog data and migration; it is not an integrated
-checkpoint or live qualification. The 128-MiB failure remains unresolved.
+checkpoint or live qualification. The production-codec follow-up below addresses
+the synthetic encoding failure; the original maintenance receipt stays failed.
 Evidence: `checkpoint-base-probe-report.json`.
+
+The format-10 production visibility codec stores one common base plus exact
+per-ref changes, choosing absolute sets for small outlier refs. The original
+256-ref/32,000-common-OID regression now passes below 8 MiB without relaxing
+the 128 MiB bound. An explicitly run large debug test covers 1,000 developer
+refs, 1,620,211 shared OIDs, 30 scattered private OIDs per developer, a small
+historical outlier and one retained-only dictionary OID. Its complete encoded
+visibility section is 86,629,902 bytes; encoding takes 10.283 seconds and the
+complete canonical encode/decode test takes 35.57 seconds, with maximum RSS
+1,329,364,992 bytes. Every closure and retained-only exclusion is preserved.
+This is the actual production visibility codec with synthetic OIDs; it does not
+include real Git/catalog I/O, a full checkpoint footer or a team maintenance
+run. Earlier format-9 fixtures remain untouched and require their matching
+client. The six current remote release objects and 19 historical local tag
+objects omit the capsule codec. New development clients reject retired format
+9; fresh fixture/lifecycle qualification remains required. Evidence:
+`checkpoint-shared-base-evidence-map.json`,
+`checkpoint-shared-base-regression-before.log`,
+`checkpoint-shared-base-million-rss.log`, `checkpoint-release-tag-audit.json`.
+
+Exact frontier admission also stops adding unrelated pack candidates when an
+authenticated run sidecar proves an inherited OID absent. Logical visibility
+keys remain present. Runs without exact sidecars keep their coarse candidates;
+unresolved physical placement cannot select an incomplete incremental pack set.
+The new regressions fail before their fixes and pass afterward. These changes
+do not address the initial cohort's full replacement-capture traffic by
+themselves. The 249 capsule metadata tests, scalar membership property test,
+66 reader tests, 32 publication tests and strict metadata/reader Clippy pass.
+
+The independent stopped-workload audit completes all ten checks with the
+`b72e59c350d0` auditor: exact latest tips for all 1,000 developers, no failed
+round tip visible, independent cold ancestry containing all 13,001 baseline and
+acknowledged commits, strict Git fsck, and a complete Crab audit with zero
+errors or repairs. The failed workload's original receipt is unchanged. This
+does not qualify a complete eight-round mixed-team workload.
+
+A separate `b72e59c350d0` continuation passes 20 checks after an injected
+pre-ref publication failure and retry. Real repository GC first preserves a
+974,236-byte orphan within grace, then deletes that one capsule after natural
+expiry of the existing explicit one-hour minimum. Collection reports zero
+failures; exact refs, all 10,002 live commits and source file bytes survive an
+independent cold clone and clean complete audits. The default 24-hour grace,
+fences and quarantine are unchanged; no bucket GC is used. This proves Git
+capsule reclamation and live-base survival, not global Xet payload reclamation.
+The original wrapper's missing-keyword-argument failure and immutable receipt
+remain preserved separately. Evidence:
+`repo-gc-aged-orphan-continuation-v2-controller.json`,
+`repo-gc-aged-orphan-continuation/artifacts/report.json`.
 
 The pinned repeat's initial 8 GiB push takes 461.613 seconds; progress spans
 441.898 seconds in uploading and 15.298 seconds in finalization. Its first

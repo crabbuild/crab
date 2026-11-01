@@ -22,6 +22,7 @@ pub(super) struct Descriptor {
     pub(super) object_count: u32,
     member_admission: bool,
     objects: Option<PageRef>,
+    base: Option<PageRef>,
     refs: Option<PageRef>,
 }
 
@@ -29,7 +30,9 @@ pub(super) struct Descriptor {
 #[serde(deny_unknown_fields)]
 struct RefRow {
     name: String,
-    objects: Option<PageRef>,
+    relative_to_base: bool,
+    added: Option<PageRef>,
+    removed: Option<PageRef>,
     recent_present: bool,
     recent: Option<PageRef>,
     history_present: bool,
@@ -122,9 +125,24 @@ pub(super) fn encode(snapshot: &LayeredVisibilitySnapshot) -> Result<Bytes> {
         })
         .collect();
     let objects = optional_tree(&mut writer, Kind::CheckpointObjects, dictionary)?;
+    let base = GitVisibilityClosure::shared_base(snapshot.refs.values(), snapshot.objects.len());
+    let base_positions = base.positions();
+    let base_count = base_positions.len();
+    let base_root = object_set(&mut writer, &snapshot.objects, &base_positions)?;
     let mut refs = BTreeMap::new();
     for (name, positions) in &snapshot.refs {
-        let objects = object_set(&mut writer, &snapshot.objects, &positions.positions())?;
+        let mut added = positions.difference(&base, snapshot.objects.len());
+        let mut removed = base.difference(positions, snapshot.objects.len());
+        let closure_count = base_count - removed.len() + added.len();
+        // Small historical refs must not encode a removal for every shared
+        // object. Choose absolute membership on ties; dense peers share the base.
+        let relative_to_base = added.len() + removed.len() < closure_count;
+        if !relative_to_base {
+            added = positions.positions();
+            removed.clear();
+        }
+        let added = object_set(&mut writer, &snapshot.objects, &added)?;
+        let removed = object_set(&mut writer, &snapshot.objects, &removed)?;
         let recent = transitions(
             &mut writer,
             &snapshot.objects,
@@ -140,7 +158,9 @@ pub(super) fn encode(snapshot: &LayeredVisibilitySnapshot) -> Result<Bytes> {
         )?;
         let row = RefRow {
             name: name.clone(),
-            objects,
+            relative_to_base,
+            added,
+            removed,
             recent_present: snapshot.transitions.contains_key(name),
             recent,
             history_present: snapshot.incremental_history.contains_key(name),
@@ -162,13 +182,14 @@ pub(super) fn encode(snapshot: &LayeredVisibilitySnapshot) -> Result<Bytes> {
         refs.into_iter().collect(),
     )?;
     let descriptor = Descriptor {
-        version: 1,
+        version: 2,
         catalog_digest: snapshot.catalog_digest.clone(),
         body_bytes: writer.bytes.len() as u64,
         body_hash: *blake3::hash(&writer.bytes).as_bytes(),
         object_count: snapshot.objects.len() as u32,
         member_admission: snapshot.member_admission.is_some(),
         objects,
+        base: base_root,
         refs,
     };
     let header = json(&descriptor)?;
@@ -221,7 +242,7 @@ impl Descriptor {
             "checkpoint visibility catalog digest",
             "layered checkpoint",
         )?;
-        if self.version != 1
+        if self.version != 2
             || self.body_bytes > length.saturating_sub(12)
             || length > MAX_LAYERED_VISIBILITY_BYTES as u64
             || u64::from(self.object_count) > crate::git_visibility::MAX_GIT_VISIBILITY_OBJECTS
@@ -232,6 +253,12 @@ impl Descriptor {
         validate_root(
             self.objects.as_ref(),
             Kind::CheckpointObjects,
+            self.body_bytes,
+            u64::from(self.object_count),
+        )?;
+        validate_root(
+            self.base.as_ref(),
+            Kind::CheckpointSets,
             self.body_bytes,
             u64::from(self.object_count),
         )?;
@@ -268,13 +295,21 @@ impl RefRow {
             || row.name.len() > 4096
             || (!row.recent_present && row.recent.is_some())
             || (!row.history_present && row.history.is_some())
+            || (!row.relative_to_base && row.removed.is_some())
+            || (row.relative_to_base && descriptor.base.is_none())
         {
             return Err(corrupt(
                 "checkpoint ref row differs from its key or coverage",
             ));
         }
         validate_root(
-            row.objects.as_ref(),
+            row.added.as_ref(),
+            Kind::CheckpointSets,
+            descriptor.body_bytes,
+            u64::from(descriptor.object_count),
+        )?;
+        validate_root(
+            row.removed.as_ref(),
             Kind::CheckpointSets,
             descriptor.body_bytes,
             u64::from(descriptor.object_count),
@@ -312,6 +347,24 @@ fn member(value: &[u8], admitted: bool) -> Result<Option<LayeredObjectMember>> {
     Ok(Some(LayeredObjectMember::new(source_index, member_index)))
 }
 
+fn positions(rows: crate::pages::Rows, objects: &[[u8; 20]]) -> Result<Vec<u32>> {
+    rows.into_iter()
+        .map(|(oid, value)| {
+            if !value.is_empty() {
+                return Err(corrupt("checkpoint closure has unexpected payload"));
+            }
+            let oid = oid
+                .as_slice()
+                .try_into()
+                .map_err(|_| corrupt("checkpoint closure OID width is invalid"))?;
+            objects
+                .binary_search(oid)
+                .map(|position| position as u32)
+                .map_err(|_| corrupt("checkpoint closure escapes its retained dictionary"))
+        })
+        .collect()
+}
+
 pub(super) fn decode(bytes: &[u8]) -> Result<LayeredVisibilitySnapshot> {
     let descriptor = Descriptor::decode(bytes)?;
     let body = &bytes[..descriptor.body_bytes as usize];
@@ -347,24 +400,23 @@ pub(super) fn decode(bytes: &[u8]) -> Result<LayeredVisibilitySnapshot> {
     let mut refs = BTreeMap::new();
     let mut recent = BTreeMap::new();
     let mut history = BTreeMap::new();
+    let base = GitVisibilityClosure::from_positions(
+        positions(
+            scan(descriptor.base.as_ref(), Kind::CheckpointSets)?,
+            &objects,
+        )?,
+        objects.len(),
+    )?;
     let ref_rows = scan(descriptor.refs.as_ref(), Kind::CheckpointRefs)?;
     for (key, value) in ref_rows {
         let row = RefRow::decode(&key, &value, &descriptor)?;
-        let mut positions = |root: Option<&PageRef>| -> Result<Vec<u32>> {
-            scan(root, Kind::CheckpointSets)?
-                .into_iter()
-                .map(|(oid, value)| {
-                    if !value.is_empty() {
-                        return Err(corrupt("checkpoint closure has unexpected payload"));
-                    }
-                    ordinal(
-                        &oid.try_into()
-                            .map_err(|_| corrupt("checkpoint closure OID width is invalid"))?,
-                    )
-                })
-                .collect()
+        let added = positions(scan(row.added.as_ref(), Kind::CheckpointSets)?, &objects)?;
+        let removed = positions(scan(row.removed.as_ref(), Kind::CheckpointSets)?, &objects)?;
+        let closure = if row.relative_to_base {
+            base.with_edits(&added, &removed, objects.len())?
+        } else {
+            GitVisibilityClosure::from_positions(added, objects.len())?
         };
-        let closure = positions(row.objects.as_ref())?;
         let mut read_history =
             |root: Option<&PageRef>| -> Result<Vec<GitVisibilityOrdinalTransition>> {
                 let rows = scan(root, Kind::CheckpointTransitions)?;
@@ -382,18 +434,10 @@ pub(super) fn decode(bytes: &[u8]) -> Result<LayeredVisibilitySnapshot> {
                             descriptor.body_bytes,
                             u64::from(descriptor.object_count),
                         )?;
-                        let objects = scan(transition.objects.as_ref(), Kind::CheckpointSets)?
-                            .into_iter()
-                            .map(|(oid, value)| {
-                                if !value.is_empty() {
-                                    return Err(corrupt("transition set has unexpected payload"));
-                                }
-                                ordinal(
-                                    &oid.try_into()
-                                        .map_err(|_| corrupt("transition OID width is invalid"))?,
-                                )
-                            })
-                            .collect::<Result<_>>()?;
+                        let objects = positions(
+                            scan(transition.objects.as_ref(), Kind::CheckpointSets)?,
+                            &objects,
+                        )?;
                         Ok(GitVisibilityOrdinalTransition {
                             from_ordinal: ordinal(&transition.from)?,
                             to_ordinal: ordinal(&transition.to)?,
@@ -408,7 +452,6 @@ pub(super) fn decode(bytes: &[u8]) -> Result<LayeredVisibilitySnapshot> {
         if row.history_present {
             history.insert(row.name.clone(), read_history(row.history.as_ref())?);
         }
-        let closure = GitVisibilityClosure::from_positions(closure, objects.len())?;
         if refs.insert(row.name, closure).is_some() {
             return Err(corrupt("checkpoint visibility repeats a ref"));
         }

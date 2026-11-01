@@ -349,6 +349,118 @@ impl GitVisibilityClosure {
         }
     }
 
+    fn words(&self, object_count: usize) -> impl Iterator<Item = u64> + '_ {
+        let mut cursor = 0;
+        (0..object_count.div_ceil(64)).map(move |index| match self {
+            Self::Bitmap(bitmap) => {
+                let mut word = [0; 8];
+                let bytes = &bitmap[index * 8..bitmap.len().min((index + 1) * 8)];
+                word[..bytes.len()].copy_from_slice(bytes);
+                u64::from_le_bytes(word)
+            }
+            Self::Sparse(positions) => {
+                let mut word = 0;
+                while let Some(position) = positions.get(cursor)
+                    && (*position as usize) < (index + 1) * 64
+                {
+                    word |= 1_u64 << (*position % 64);
+                    cursor += 1;
+                }
+                word
+            }
+        })
+    }
+
+    pub(crate) fn shared_base<'a>(
+        refs: impl ExactSizeIterator<Item = &'a Self>,
+        object_count: usize,
+    ) -> Self {
+        let count = refs.len();
+        if count == 0 {
+            return Self::Sparse(Vec::new());
+        }
+        let bits = (usize::BITS - count.leading_zeros()) as usize;
+        let words = object_count.div_ceil(64);
+        let mut planes = vec![vec![0_u64; words]; bits];
+        // Bit-sliced counts visit compact words, rather than expanding the
+        // complete shared history once per ref. Ties stay outside the base.
+        for closure in refs {
+            for (index, mut carry) in closure.words(object_count).enumerate() {
+                for plane in &mut planes {
+                    let old = plane[index];
+                    plane[index] ^= carry;
+                    carry &= old;
+                    if carry == 0 {
+                        break;
+                    }
+                }
+            }
+        }
+        let threshold = count.div_ceil(2);
+        let mut bitmap = vec![0; object_count.div_ceil(8)];
+        for index in 0..words {
+            let mut equal = if index + 1 == words && !object_count.is_multiple_of(64) {
+                (1_u64 << (object_count % 64)) - 1
+            } else {
+                u64::MAX
+            };
+            let mut selected = 0_u64;
+            for bit in (0..bits).rev() {
+                let frequency = planes[bit][index];
+                if threshold & (1 << bit) != 0 {
+                    equal &= frequency;
+                } else {
+                    selected |= equal & frequency;
+                    equal &= !frequency;
+                }
+            }
+            let end = bitmap.len().min((index + 1) * 8);
+            bitmap[index * 8..end].copy_from_slice(&selected.to_le_bytes()[..end - index * 8]);
+        }
+        Self::Bitmap(bitmap)
+    }
+
+    pub(crate) fn difference(&self, other: &Self, object_count: usize) -> Vec<u32> {
+        let mut positions = Vec::new();
+        for (index, (left, right)) in self
+            .words(object_count)
+            .zip(other.words(object_count))
+            .enumerate()
+        {
+            let mut word = left & !right;
+            while word != 0 {
+                positions.push((index * 64 + word.trailing_zeros() as usize) as u32);
+                word &= word - 1;
+            }
+        }
+        positions
+    }
+
+    pub(crate) fn with_edits(
+        &self,
+        additions: &[u32],
+        removals: &[u32],
+        object_count: usize,
+    ) -> Result<Self> {
+        if additions.iter().any(|position| self.contains(*position)) {
+            return Err(corrupt(
+                "visibility edit adds an object inside the prior closure",
+            ));
+        }
+        let mut closure = self.clone();
+        closure.remove_positions(removals)?;
+        closure.add_positions(additions, object_count)?;
+        // Restore the same compact representation as from_positions without
+        // expanding dense shared closures into a temporary ordinal vector.
+        if object_count.div_ceil(8) >= closure.len() as usize * std::mem::size_of::<u32>() {
+            return Ok(Self::Sparse(closure.positions()));
+        }
+        match closure {
+            Self::Sparse(positions) => Self::from_positions(positions, object_count),
+            bitmap => Ok(bitmap),
+        }
+    }
+
     fn add_positions(&mut self, additions: &[u32], object_count: usize) -> Result<()> {
         match self {
             Self::Sparse(positions) => {
@@ -4353,6 +4465,36 @@ mod tests {
     use super::*;
 
     proptest! {
+        #[test]
+        fn shared_base_and_relative_edits_match_scalar_membership(
+            object_count in 0_usize..260,
+            inputs in prop::collection::vec(prop::collection::vec(0_u32..260, 0..260), 0..12),
+        ) {
+            let refs = inputs.into_iter().enumerate().map(|(index, positions)| {
+                let positions = positions.into_iter().filter(|p| (*p as usize) < object_count)
+                    .collect::<BTreeSet<_>>().into_iter().collect::<Vec<_>>();
+                if index % 2 == 0 {
+                    GitVisibilityClosure::Sparse(positions)
+                } else {
+                    let mut bitmap = vec![0; object_count.div_ceil(8)];
+                    for position in positions { bitmap[position as usize / 8] |= 1 << (position % 8); }
+                    GitVisibilityClosure::Bitmap(bitmap)
+                }
+            }).collect::<Vec<_>>();
+            let base = GitVisibilityClosure::shared_base(refs.iter(), object_count);
+            base.validate(object_count)?;
+            for position in 0..object_count as u32 {
+                let frequency = refs.iter().filter(|r| r.contains(position)).count();
+                prop_assert_eq!(base.contains(position), 2 * frequency > refs.len() + 1);
+            }
+            for reference in refs {
+                let added = reference.difference(&base, object_count);
+                let removed = base.difference(&reference, object_count);
+                let restored = base.with_edits(&added, &removed, object_count)?;
+                prop_assert_eq!(restored, GitVisibilityClosure::from_positions(reference.positions(), object_count)?);
+            }
+        }
+
         #[test]
         fn bitmap_queries_match_sorted_closure_sets(
             closures in prop::collection::vec(prop::collection::vec(0_u8..64, 0..64), 1..8),

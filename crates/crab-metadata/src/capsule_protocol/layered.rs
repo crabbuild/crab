@@ -22,8 +22,8 @@ mod visibility_pages;
 #[cfg(feature = "storage")]
 pub use visibility_pages::LayeredVisibilityReader;
 
-const CHECKPOINT_MAGIC: &[u8; 8] = b"CRBCKP09";
-pub(super) const CHECKPOINT_VERSION: u32 = 9;
+const CHECKPOINT_MAGIC: &[u8; 8] = b"CRBCKP10";
+pub(super) const CHECKPOINT_VERSION: u32 = 10;
 const LAYER_MAGIC: &[u8; 8] = b"CRBPKL01";
 const LAYER_VERSION: u32 = 1;
 const TRAILER_BYTES: usize = 8 + 32 + 8;

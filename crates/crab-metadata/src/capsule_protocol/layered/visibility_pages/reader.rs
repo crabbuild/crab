@@ -119,6 +119,25 @@ impl LayeredVisibilityReader {
         .collect()
     }
 
+    async fn set(
+        &self,
+        store: &Store,
+        root: Option<&PageRef>,
+        keys: &[Vec<u8>],
+        work: &mut PageWork,
+    ) -> Result<Vec<bool>> {
+        self.rows(store, root, Kind::CheckpointSets, keys, work)
+            .await?
+            .into_iter()
+            .map(|value| {
+                if value.as_ref().is_some_and(|value| !value.is_empty()) {
+                    return Err(corrupt("checkpoint closure row has unexpected payload"));
+                }
+                Ok(value.is_some())
+            })
+            .collect()
+    }
+
     /// Return authenticated ref presence without loading closures or transitions.
     pub async fn refs_present(&self, store: &Store, names: &[&str]) -> Result<Vec<bool>> {
         Ok(self
@@ -212,23 +231,23 @@ impl LayeredVisibilityReader {
             return Ok(None);
         };
         let keys = oids.iter().map(|oid| oid.to_vec()).collect::<Vec<_>>();
-        let present = self
-            .rows(
-                store,
-                row.objects.as_ref(),
-                Kind::CheckpointSets,
-                &keys,
-                &mut work,
-            )
-            .await?
-            .into_iter()
-            .map(|value| {
-                if value.as_ref().is_some_and(|value| !value.is_empty()) {
-                    return Err(corrupt("checkpoint closure row has unexpected payload"));
+        let mut present = self
+            .set(store, row.added.as_ref(), &keys, &mut work)
+            .await?;
+        if row.relative_to_base {
+            let base = self
+                .set(store, self.descriptor.base.as_ref(), &keys, &mut work)
+                .await?;
+            let removed = self
+                .set(store, row.removed.as_ref(), &keys, &mut work)
+                .await?;
+            for ((added, base), removed) in present.iter_mut().zip(base).zip(removed) {
+                if (*added && base) || (removed && !base) {
+                    return Err(corrupt("checkpoint closure delta disagrees with its base"));
                 }
-                Ok(value.is_some())
-            })
-            .collect::<Result<Vec<_>>>()?;
+                *added |= base && !removed;
+            }
+        }
         // Loaded closure hits must also belong to the retained dictionary. The
         // dictionary alone cannot grant membership in this or another ref.
         let hits = oids

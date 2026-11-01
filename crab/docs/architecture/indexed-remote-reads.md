@@ -2605,6 +2605,38 @@ corruption/admission tests, GC/retention coverage and a new real RustFS run.
 The earlier 10 GiB matrix does not qualify this new format. RustFS results do
 not establish representative hosted-S3 latency.
 
+### Shared checkpoint closures: format 10 under qualification
+
+Checkpoint format 10 (`CRBCKP10`) retains format 9's copy-on-write catalog and
+replaces absolute per-ref closure pages with visibility descriptor version 2.
+Scattered private OIDs shift fixed-size leaf boundaries, preventing useful page
+sharing across otherwise overlapping histories. The production format-9 encoder
+exceeds its unchanged 128 MiB visibility bound for 256 refs sharing 32,000 OIDs
+with 30 scattered private OIDs each and one small historical outlier ref.
+
+One authenticated base stores common OIDs once. For an OID appearing in `f` of
+`N` refs, base membership costs `1 + N - f` rows rather than `f`; it is selected
+only when `2 * f > N + 1`. Ties stay outside the base. Each ref uses exact
+additions/removals, or its absolute closure when that uses no more rows. This
+keeps a small old tag from encoding removals for the entire common history.
+Recent and historical transition sets remain absolute and unchanged.
+
+Bit-sliced counts visit compact closure words rather than expanding every
+shared OID once per ref. Full decoding clones compact base membership and
+applies checked edits. Canonical re-encoding, page hashes/counts, source-catalog
+binding and dictionary/member admission remain mandatory. Lazy membership uses
+the same base/addition/removal rule; overlapping additions or removals outside
+the base fail. A retained dictionary OID cannot authorize visibility.
+
+All six current remote release tag objects, plus all 19 historical local tag
+objects, were inspected on 2026-11-01; none contains the capsule codec. Format 9
+is unshipped and is rejected by the new root/history/checkpoint readers. Preserve
+existing development namespaces and their matching binaries; upgrade clients
+together and recreate qualification fixtures in a fresh prefix. No fallback
+reader or implicit authoritative conversion is added. Earlier format-9 live
+receipts remain evidence for their recorded binaries; they do not qualify format
+10. Complete fresh RustFS lifecycle and team-scale qualification remain required.
+
 ## Capsule chunk discovery without the retired receipt database
 
 Capsule add and push use `CapsuleChunkIndex`, owned by `crab-metadata`.
