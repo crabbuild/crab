@@ -246,7 +246,7 @@ impl<S> StoreLayout<S> {
         ObjectPath::from(format!("{}/capsule-chunk-index", self.global_prefix))
     }
 
-    /// Prefix containing immutable pages owned by the global capsule hint root.
+    /// Prefix containing immutable packed page objects owned by the global hint root.
     #[must_use]
     pub fn capsule_chunk_pages_prefix(&self) -> ObjectPath {
         global_content_prefix(&self.global_prefix, CAPSULE_CHUNK_PAGE_KIND)

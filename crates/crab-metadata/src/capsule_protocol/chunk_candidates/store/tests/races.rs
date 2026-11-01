@@ -19,6 +19,7 @@ struct Hooks {
     root_reads: AtomicUsize,
     reads: AtomicUsize,
     denied_writes: AtomicUsize,
+    corrupt_run_reads: bool,
 }
 struct ScriptedStore {
     inner: Arc<dyn ObjectStore>,
@@ -83,6 +84,11 @@ impl ObjectStore for ScriptedStore {
                 .await?;
             self.inner.delete(&replacement.retired_page).await?;
         }
+        if self.hooks.corrupt_run_reads && path.as_ref().contains("/capsule-chunk-pages/") {
+            self.inner
+                .put(path, Bytes::from_static(b"damaged run").into())
+                .await?;
+        }
         let result = self.inner.get_opts(path, options).await;
         if let Some((root, barrier)) = &self.hooks.root_barrier
             && root == path
@@ -141,7 +147,13 @@ async fn read_only_lookup_recaptures_after_retired_page_is_swept() {
         .await
         .unwrap();
     let old_root: Root = serde_json::from_slice(&old_body).unwrap();
-    let old_page = old_index.pages.path(&old_root.records.hash);
+    let old_page = old_root
+        .levels
+        .iter()
+        .flatten()
+        .next()
+        .unwrap()
+        .path(&old_index.prefix);
     let old = old_index
         .candidates(layout.store(), &hashes, 1024 * 1024)
         .await
@@ -203,7 +215,7 @@ async fn read_only_lookup_recaptures_after_retired_page_is_swept() {
     assert_eq!(hooks.denied_writes.load(Ordering::Relaxed), 0);
 }
 
-#[tokio::test]
+#[tokio::test(flavor = "multi_thread")]
 async fn concurrent_hint_publishers_merge_after_root_create_conflict() {
     let memory: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
     let plain = StoreLayout::new(Store::new(memory.clone()), "first".to_owned());
@@ -254,4 +266,88 @@ async fn request_budget_failure_precedes_storage_access() {
             .is_err()
     );
     assert_eq!(hooks.reads.load(Ordering::Relaxed), 0);
+}
+
+#[tokio::test]
+async fn failed_run_readback_never_publishes_a_root() {
+    let memory: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+    let store = Store::new(Arc::new(ScriptedStore {
+        inner: memory,
+        read_only: false,
+        hooks: Arc::new(Hooks {
+            corrupt_run_reads: true,
+            ..Hooks::default()
+        }),
+    }));
+    let layout = StoreLayout::new(store.clone(), "source".to_owned());
+    let (catalog, origins, _) = fixture(3, 7);
+    assert!(
+        write_capsule_chunk_candidates(&layout, &catalog, &origins, &|| false)
+            .await
+            .is_err()
+    );
+    assert!(matches!(
+        store
+            .get_with_etag(&layout.capsule_chunk_index_path())
+            .await,
+        Err(StorageError::NotFound { .. })
+    ));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_updates_preserve_both_exact_placement_ids() {
+    let memory: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+    let plain = StoreLayout::new(Store::new(memory.clone()), "base".to_owned());
+    let (base, origins, hashes) = fixture(3000, 3);
+    write_capsule_chunk_candidates(&plain, &base, &origins, &|| false)
+        .await
+        .unwrap();
+    let store = Store::new(Arc::new(ScriptedStore {
+        inner: memory,
+        read_only: false,
+        hooks: Arc::new(Hooks {
+            root_barrier: Some((
+                plain.capsule_chunk_index_path(),
+                tokio::sync::Barrier::new(2),
+            )),
+            ..Hooks::default()
+        }),
+    }));
+    let first = StoreLayout::new(store.clone(), "first".to_owned());
+    let second = StoreLayout::new(store.clone(), "second".to_owned());
+    let (one, one_origins, _) = fixture_from_hashes(5, vec![hashes[0]]);
+    let (two, two_origins, _) = fixture_from_hashes(7, vec![hashes[0]]);
+    let (a, b) = tokio::join!(
+        write_capsule_chunk_candidates(&first, &one, &one_origins, &|| false),
+        write_capsule_chunk_candidates(&second, &two, &two_origins, &|| false)
+    );
+    a.unwrap();
+    b.unwrap();
+    let index = CapsuleChunkIndex::new(&first);
+    for (layout, catalog, origins, seed) in [
+        (&first, &one, &one_origins, 5),
+        (&second, &two, &two_origins, 7),
+    ] {
+        let xorb = MerkleHash::from([seed; 4]);
+        let rows = capsule_chunk_candidate_rows(
+            layout.repo_prefix(),
+            &"2".repeat(64),
+            xorb,
+            &catalog.xorbs()[&xorb.hex()],
+            &origins[&xorb],
+        )
+        .unwrap();
+        let placement = rows.into_iter().find(|(key, _)| key[0] == 0x08).unwrap();
+        let id = CommittedChunkPlacement::decode(&placement.1)
+            .unwrap()
+            .placement_id();
+        let exact = index
+            .candidates_by_id(&store, &[(hashes[0], id)], 1024 * 1024)
+            .await
+            .unwrap();
+        assert_eq!(
+            exact.anchors.values().next().unwrap().source_repo_prefix,
+            layout.repo_prefix()
+        );
+    }
 }

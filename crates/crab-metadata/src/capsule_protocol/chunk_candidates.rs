@@ -17,7 +17,9 @@ pub use crate::key_codec::{capsule_chunk_anchor_key, capsule_chunk_head_key};
 #[cfg(feature = "storage")]
 mod store;
 #[cfg(feature = "storage")]
-pub use store::{CapsuleChunkIndex, write_capsule_chunk_candidates};
+pub use store::{
+    CapsuleChunkIndex, migrate_capsule_chunk_candidates, write_capsule_chunk_candidates,
+};
 
 /// Capsule source and verified physical origin for one xorb.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]

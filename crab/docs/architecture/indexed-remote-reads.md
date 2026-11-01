@@ -2608,13 +2608,26 @@ not establish representative hosted-S3 latency.
 ## Capsule chunk discovery without the retired receipt database
 
 Capsule add and push use `CapsuleChunkIndex`, owned by `crab-metadata`.
-The mutable `{global-prefix}/capsule-chunk-index` descriptor commits to an
-immutable authenticated B+ tree under `capsule-chunk-pages/`. Internal routing
-is paged. Current heads, immutable placement IDs and source anchors share this
-one tree, so replacing a head preserves the exact assertion recorded by an
-already-staged plan. Writers copy only affected paths and retry conditional root
-conflicts against the newer root; concurrent publishers cannot lose each other's
-records. Immutable pages are verified before the root can advertise them.
+The version-2 `{global-prefix}/capsule-chunk-index` descriptor commits to
+size-tiered immutable sorted runs under `capsule-chunk-pages/`. Each run packs
+its authenticated record pages and blocked Bloom filter into one content-addressed
+object. Current heads, immutable placement IDs and source anchors share these
+runs, so replacing a head preserves the assertion recorded by an already-staged
+plan. Writers omit unchanged rows, merge colliding size tiers in memory, verify
+only the final packed replacement, then conditionally publish its root. A
+successful uncontended publication writes at most two objects. Per-row sequences
+preserve head precedence across mixed-size compaction; a run's tier or creation
+time cannot substitute for its rows' sequences. Conditional conflicts reload the
+root and rebase the complete incoming publication.
+
+Authenticated filter blocks avoid unrelated record-page reads. They use 16 bits
+per key and eight probes in 512-bit blocks; a negative requires authenticated
+block coverage. Missing, malformed or corrupt blocks are errors. Full compaction
+and GC reads authenticate the entire object, page closure, row identities and
+filter contents. The root has at most 32 size tiers, each run retains the 2 GiB
+catalog bound, and operations retain aggregate read/materialization admission.
+Compaction remains synchronous and bounded; this is not a billion-entry latency
+qualification.
 
 These records remain advisory. A hit must still prove membership in a captured
 current source catalog and match fresh canonical-origin identity. Index presence,
@@ -2634,12 +2647,19 @@ drains its operation before releasing fences, and rechecks cancellation after
 immutable preparation and before visibility. Namespace renewal loss joins that
 same pre-publication check. Once publication starts, its exact outcome is awaited.
 
-Bucket GC authenticates the root's complete physical page closure, includes its
-identity in durable plan revalidation, and retains every referenced page. It
-collects only unreferenced pages under its existing grace and conditional-delete
-policy. Missing current pages abort planning before any sweep. Global bucket
+Bucket GC authenticates the root's complete physical run closure, includes its
+identity in durable plan revalidation, and retains every referenced run. It
+collects only unreferenced objects under its existing grace and conditional-delete
+policy. Missing current runs abort planning before any sweep. Global bucket
 sweep covers the canonical `.crab` namespace; qualification of lifecycle cleanup
 for managed view-local global scopes remains a release gate.
+
+The paged version-1 hint format is unreleased. Upgrade all clients and publishers,
+then run `crab doctor --migrate-chunk-index` using bucket-administrator credentials.
+Migration preserves every logical row and exact placement ID, verifies the new
+packed run and conditionally replaces the captured root under global GC writer
+admission. Old pages remain for grace-period GC. There is no legacy hint reader
+in normal discovery; committed Git, shard, xorb and catalog formats are unchanged.
 
 The released v1.2.4 tag contains version-1 staged plans with opaque placement and
 origin IDs. A target explicitly advertising the v1 layout therefore retains its
@@ -2652,10 +2672,19 @@ corrupt capsule index.
 Deterministic tests cover selected edits against 100, 10,000 and 100,000 unrelated
 chunks, read-only lookup concurrent with root replacement/page reclamation,
 competing root creates, cancellation before root publication, and GC retention.
+Scattered-history tests additionally bound each publication to two object writes
+and 64 object reads across twelve 3,000-chunk publications. Incremental catalogs
+must omit unchanged rows; migration, mixed-size head precedence, exact IDs,
+corrupt filter rejection and failed run readback have separate regression proof.
 The fixed edit must stay below 512 KiB for both bytes read and written; its lookup
 has a 256 KiB budget. These are encoded-request bounds, not latency claims.
 Full-source RustFS, cache-service, protected receive and final 10 GiB acceptance
 remain separate gates until their receipts pass.
+
+The [grown-index RustFS receipt](../benchmarks/capsule-push-packed-hints-rustfs.md)
+qualifies the packed hint path with a 73,099-record migration, a 200 MiB push,
+forced native/helper CAS contention and pre-migration staged IDs surviving
+compaction. Its local timings do not replace hosted-provider or scale gates.
 
 ## Publication cancellation retains the authoritative outcome
 

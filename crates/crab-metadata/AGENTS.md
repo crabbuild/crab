@@ -54,6 +54,9 @@ Trace one path: `crates/crab-write/src/journal.rs` → `commit_ref_transaction` 
   publication. Read-only discovery can recapture a changed advisory root after a
   missing page; unchanged-root absence/corruption remains an error.
   Source: `crates/crab-metadata/src/capsule_protocol/chunk_candidates/store.rs`.
+  Packed-run encoding and authenticated filters live in `store/run.rs` and
+  `store/filter.rs`. Development format conversion is explicit, doctor-owned
+  migration in `store/migration.rs`; do not add a runtime fallback reader.
 
 - `PointerCatalogInspection` exposes external descriptors only after complete
   precedence/conflict/dependency proof. Await `finish` on all returned paths;

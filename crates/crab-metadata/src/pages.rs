@@ -76,11 +76,15 @@ pub(crate) enum Kind {
     RunCatalogXorbs = 28,
     RunCatalogChunks = 29,
     CapsuleChunkHints = 30,
+    #[cfg(feature = "storage")]
+    CapsuleChunkFilters = 31,
 }
 
 impl Kind {
     fn is_positional(self) -> bool {
         match self {
+            #[cfg(feature = "storage")]
+            Self::CapsuleChunkFilters => true,
             Self::Records
             | Self::Nodes
             | Self::CommitRecords
