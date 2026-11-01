@@ -1,4 +1,5 @@
 use std::collections::BTreeMap;
+use std::sync::Arc;
 
 use bytes::Bytes;
 use serde::{Deserialize, Serialize};
@@ -92,7 +93,7 @@ pub struct CapsuleRun {
     footer_length: u64,
     capsules: Vec<Capsule>,
     git_packs: Vec<PackMemberDescriptor>,
-    admission: Option<CapsuleRunAdmission>,
+    admission: Option<Arc<CapsuleRunAdmission>>,
 }
 
 /// Authenticated control-only view of one capsule run.
@@ -108,7 +109,7 @@ pub struct CapsuleRunControl {
     git_packs: Vec<PackMemberDescriptor>,
     index_pool: Option<RunSectionLocation>,
     visibility_pool: Option<RunSectionLocation>,
-    admission: Option<CapsuleRunAdmission>,
+    admission: Option<Arc<CapsuleRunAdmission>>,
     admission_info: Option<(RunSectionLocation, AdmissionPages)>,
     catalog_info: Option<(RunSectionLocation, CatalogPages)>,
 }
@@ -407,10 +408,10 @@ impl CapsuleRunControl {
                         "capsule run admission descriptor differs from its footer",
                     ));
                 }
-                Some(CapsuleRunAdmission::decode(
+                Some(Arc::new(CapsuleRunAdmission::decode(
                     admission_bytes,
                     footer.git_packs.len(),
-                )?)
+                )?))
             }
         } else {
             if footer_start != 0 || footer_offset != control_offset {
@@ -597,7 +598,7 @@ impl CapsuleRunControl {
     /// Return materialized exact admission; footer-only reads retain a separate paged reader.
     #[must_use]
     pub fn admission(&self) -> Option<&CapsuleRunAdmission> {
-        self.admission.as_ref()
+        self.admission.as_deref()
     }
 
     /// Return the BLAKE3 identity of the authenticated run footer.
@@ -992,7 +993,7 @@ impl CapsuleRun {
         let mut member_offset = 0_usize;
         for run in runs {
             if let (Some(merged), Some(next)) = (admission.as_mut(), run.admission) {
-                merged.append(next, member_offset)?;
+                merged.append(Arc::unwrap_or_clone(next), member_offset)?;
             }
             member_offset = member_offset
                 .checked_add(run.git_packs.len())
@@ -1218,7 +1219,7 @@ impl CapsuleRun {
             footer_length,
             capsules,
             git_packs,
-            admission: admission.map(|(admission, _)| admission),
+            admission: admission.map(|(admission, _)| Arc::new(admission)),
         })
     }
 
@@ -1344,7 +1345,10 @@ impl CapsuleRun {
                     "capsule run admission descriptor differs from its footer",
                 ));
             }
-            Some(CapsuleRunAdmission::decode(bytes, expected_packs.len())?)
+            Some(Arc::new(CapsuleRunAdmission::decode(
+                bytes,
+                expected_packs.len(),
+            )?))
         } else {
             None
         };
@@ -1373,16 +1377,22 @@ impl CapsuleRun {
     /// Recover the authenticated control view from an already verified complete run.
     #[cfg(any(feature = "storage", test))]
     pub fn verified_controls(&self) -> Result<(CapsuleRunControl, Vec<CapsuleControl>)> {
-        let control_offset = usize::try_from(self.control_offset())
-            .map_err(|_| corrupt("capsule run control offset cannot be represented"))?;
-        let control = CapsuleRunControl::decode_suffix(
-            self.bytes.slice(control_offset..),
-            self.bytes.len() as u64,
+        let pointer = super::CapsulePointer::new(
             self.hash(),
+            self.bytes.len() as u64,
+            self.control_offset(),
+            self.control_size(),
+            self.footer_hash(),
             self.level(),
-            &self.transaction_ids(),
+            self.transaction_ids(),
             self.newest_base_root_digest(),
         )?;
+        let footer_start = self.bytes.len() - RUN_TRAILER_BYTES - self.footer_length as usize;
+        let mut control =
+            CapsuleRunControl::decode_footer(self.bytes.slice(footer_start..), &pointer)?;
+        // Complete runs already authenticated every admission byte. Share that
+        // immutable proof instead of decoding and rebuilding its pages again.
+        control.admission = self.admission.clone();
         let mut detached = BTreeMap::new();
         for (hash, kind, range) in control
             .capsule_locations()
@@ -1467,7 +1477,7 @@ impl CapsuleRun {
     /// Return the exact object-to-member admission sidecar, when present.
     #[must_use]
     pub fn admission(&self) -> Option<&CapsuleRunAdmission> {
-        self.admission.as_ref()
+        self.admission.as_deref()
     }
 
     /// Return authenticated lookup-index ranges in pack-member order.
@@ -1947,6 +1957,53 @@ mod tests {
         let mut oid = [0_u8; 20];
         oid[19] = version;
         CapsuleRun::leaf_with_member_oids(encoding_fixture(version), vec![vec![oid]]).unwrap()
+    }
+
+    #[test]
+    fn verified_controls_share_complete_run_admission() {
+        let runs = [
+            encoding_leaf(1),
+            CapsuleRun::compact(vec![encoding_leaf(1), encoding_leaf(2)]).unwrap(),
+        ];
+        for built in runs {
+            for run in [
+                built.clone(),
+                CapsuleRun::decode(built.bytes().clone()).unwrap(),
+            ] {
+                let cloned = run.clone();
+                let (control, _) = run.verified_controls().unwrap();
+                let admission = run.admission().unwrap();
+                assert!(
+                    [cloned.admission().unwrap(), control.admission().unwrap()]
+                        .iter()
+                        .all(|captured| std::ptr::eq(admission, *captured)),
+                    "verified admission must remain shared through cloning and control capture"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn compaction_preserves_retained_admission_ordinals() {
+        let oid = [7; 20];
+        for retain_control in [false, true] {
+            let older =
+                CapsuleRun::leaf_with_member_oids(capsule('1', '2'), vec![vec![oid]]).unwrap();
+            let captured = retain_control.then(|| older.verified_controls().unwrap().0);
+            let newer =
+                CapsuleRun::leaf_with_member_oids(capsule('3', '4'), vec![vec![oid]]).unwrap();
+            let merged = CapsuleRun::compact(vec![older, newer]).unwrap();
+            assert_eq!(
+                merged.admission().unwrap().object_members(&oid),
+                Some(&[0, 1][..])
+            );
+            if let Some(captured) = captured {
+                assert_eq!(
+                    captured.admission().unwrap().object_members(&oid),
+                    Some(&[0][..])
+                );
+            }
+        }
     }
 
     #[test]

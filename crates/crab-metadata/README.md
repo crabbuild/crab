@@ -510,7 +510,9 @@ control boundary and footer hash. This does not change the v1 manifest reader.
 
 An already verified complete run can yield the same authenticated control
 view, including detached visibility/catalog sections, from its resident bytes;
-consumers need not reread its control suffix.
+consumers need not reread its control suffix. Run clones and derived controls
+share the immutable exact admission table without decoding it again. Compaction
+owns its merged table and preserves the member ordinals of retained controls.
 
 ### Compacted runs and admission
 
