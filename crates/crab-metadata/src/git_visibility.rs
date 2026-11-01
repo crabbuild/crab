@@ -371,7 +371,17 @@ impl GitVisibilityClosure {
         if let Self::Bitmap(bitmap) = self
             && bitmap.len() != bitmap_len
         {
-            Arc::make_mut(bitmap).resize(bitmap_len, 0);
+            // Size the final dictionary before detaching a captured bitmap;
+            // clone-then-grow retains doubled buffers across dense ref proofs.
+            if let Some(values) = Arc::get_mut(bitmap) {
+                values.reserve_exact(bitmap_len.saturating_sub(values.len()));
+                values.resize(bitmap_len, 0);
+            } else {
+                let mut resized = Vec::with_capacity(bitmap_len);
+                resized.extend_from_slice(&bitmap[..bitmap.len().min(bitmap_len)]);
+                resized.resize(bitmap_len, 0);
+                *bitmap = Arc::new(resized);
+            }
         }
     }
 
@@ -5330,6 +5340,44 @@ mod tests {
                 )
                 .is_err()
         );
+    }
+
+    #[test]
+    fn bitmap_growth_reserves_only_the_required_dictionary_bytes() {
+        for shared in [true, false] {
+            let expected = vec![0x55; 4096];
+            let bitmap = Arc::new(expected.clone());
+            let captured = shared.then(|| Arc::clone(&bitmap));
+            let mut closure = GitVisibilityClosure::Bitmap(bitmap);
+            let object_count = expected.len() * 8 + 1;
+            let bitmap_len = object_count.div_ceil(8);
+
+            closure.resize_bitmap(bitmap_len);
+
+            let GitVisibilityClosure::Bitmap(grown) = &closure else {
+                panic!("bitmap growth changed the closure representation");
+            };
+            assert_eq!(
+                grown.capacity(),
+                bitmap_len,
+                "dictionary growth retained spare bytes (shared={shared})"
+            );
+            assert_eq!(&grown[..expected.len()], expected.as_slice());
+            assert_eq!(grown[expected.len()], 0);
+            let members = u64::try_from(expected.len() * 4).expect("bounded membership count");
+            assert_eq!(closure.validate(object_count).unwrap(), members);
+
+            let new_position = u32::try_from(object_count - 1).expect("bounded dictionary");
+            assert!(!closure.contains(new_position));
+            closure
+                .add_positions(&[new_position], object_count)
+                .unwrap();
+            assert!(closure.contains(new_position));
+            assert_eq!(closure.validate(object_count).unwrap(), members + 1);
+            if let Some(captured) = captured {
+                assert_eq!(captured.as_slice(), expected.as_slice());
+            }
+        }
     }
 
     #[test]
