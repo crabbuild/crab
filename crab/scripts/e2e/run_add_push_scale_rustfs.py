@@ -28,16 +28,19 @@ MIB = 1024 * 1024
 def verify_parallel_proofs(runner: AddCommitPushSmoke, paths: list[Path]) -> None:
     source_cache = runner.env["CRAB_CACHE_DIR"]
     inventories = []
+    prepared = []
+    # Publishing a proof changes bucket-wide reuse candidates. Classify both
+    # worker modes against the same publication state before comparing them.
     for jobs in (1, 4):
         runner.env["CRAB_CACHE_DIR"] = str(runner.run_root / f"proof-cache-{jobs}")
-        repo, _, _ = runner.prepare_repo(f"proof-workers-{jobs}")
+        repo, remote, _ = runner.prepare_repo(f"proof-workers-{jobs}")
         for index, path in enumerate(paths[:4]):
             with path.open("rb") as source:
                 (repo / f"probe-{index}.bin").write_bytes(source.read(16 * MIB))
         runner.run_crab(repo, ["add", "--jobs", str(jobs), "--jsonl", "*.bin"],
                         name=f"proof classification with {jobs} workers")
         inventories.append(runner.staging_payload_inventory(repo))
-    runner.env["CRAB_CACHE_DIR"] = source_cache
+        prepared.append((jobs, repo, remote))
     reused = (
         inventories[0]["recipe_remote_chunks"]
         + inventories[0]["prepared_payload_chunks"]
@@ -47,6 +50,30 @@ def verify_parallel_proofs(runner: AddCommitPushSmoke, paths: list[Path]) -> Non
         reused > 0 and inventories[0] == inventories[1],
         {"serial": inventories[0], "parallel": inventories[1]},
     )
+    for jobs, repo, remote in prepared:
+        runner.env["CRAB_CACHE_DIR"] = str(runner.run_root / f"proof-cache-{jobs}")
+        expected = {
+            path.name: sha256_file(path) for path in repo.glob("probe-*.bin")
+        }
+        runner.run_git(repo, ["commit", "-m", f"proof with {jobs} workers"])
+        tip = runner.rev_parse(repo, "HEAD")
+        runner.run_crab(repo, ["push", "--jsonl", "origin", "HEAD:refs/heads/main"],
+                        name=f"publish proof with {jobs} workers")
+        reader = runner.run_root / f"proof-reader-{jobs}"
+        runner.env["CRAB_CACHE_DIR"] = str(runner.run_root / f"proof-reader-cache-{jobs}")
+        runner.run_crab(runner.run_root, ["clone", "--lazy", remote, str(reader)],
+                        name=f"cold proof clone with {jobs} workers")
+        runner.check(f"proof-{jobs}-exact-published-tip", runner.rev_parse(reader, "HEAD") == tip)
+        runner.run_crab(reader, ["hydrate", "--all"],
+                        name=f"cold proof hydration with {jobs} workers")
+        for name, digest in expected.items():
+            path = reader / name
+            runner.check(f"proof-{jobs}-{name}-exact-bytes",
+                         path.is_file() and sha256_file(path) == digest)
+        runner.run_git(reader, ["fsck", "--full", "--strict"])
+        runner.check(f"proof-{jobs}-independent-cold-reader",
+                     not (reader / ".git/objects/info/alternates").exists())
+    runner.env["CRAB_CACHE_DIR"] = source_cache
 
 
 def write_transport_report(

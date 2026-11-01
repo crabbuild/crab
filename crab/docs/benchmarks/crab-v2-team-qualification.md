@@ -179,6 +179,15 @@ uses the fixed `INDEX_PACK_TIMEOUT` in `crab/src/git/pack.rs`. No remote heads
 were exposed by the failed seed. IO contention is not ruled out; incoming-pack
 integrity and hostile-input guards must not be disabled to obtain a green run.
 
+The retained Git trace refines that failure: packing 1,620,211 objects took
+1,089.237 seconds; the strict index-pack child exited successfully after
+224.810 seconds. The 300-second outer timer covers the whole installation,
+including blocking-task queueing, source verification/copying and reverse-index
+work. The trace cannot attribute pre-child time among those phases.
+`kubernetes-bootstrap-trace-analysis.json` retains the extracted events. A
+serialized retry must separate the workload from this campaign's other large
+jobs while retaining input and object validation.
+
 ## Harness and verification contracts
 
 The concurrent driver supports read-only source histories. It first publishes
@@ -207,6 +216,34 @@ bytes and rejects missing native JSON success receipts. Existing-reader and
 final-consumer modes have real end-to-end smoke coverage. The local concurrent
 harness suite passes 29 tests; the LFS harness suite passes three. Rust format
 checks pass. CI now wires both Python suites into protocol qualification.
+
+The scale harness now publishes and independently cold-hydrates both the
+serial and four-worker proof repositories. Both classifiers run before either
+publication, preserving the shared reuse-candidate state. The mixed-reuse
+control passes 26 checks: each classifier captures 1,057 remote and four
+prepared chunks; both published tips and all eight cold file hashes match,
+with strict Git fsck and independent caches. Evidence:
+`xet-parallel-proof-order-fixed/artifacts/report.json` and
+`parallel-proof-source-validation.json`.
+
+The first admission-binary large-Xet retry acknowledges all initial 8 GiB
+(add 181.153 seconds; push 403.837 seconds), then its Python SQLite inspector
+fails after a successful Crab proof-classification command. A minimal pure
+SQLite fixture reproduces this host's system-Python/SQLite 3.51.0 read-only WAL
+opening failure; Homebrew Python/SQLite 3.53.4 creates the required sidecars and
+reads the same database. [SQLite documents the sidecar and permission
+requirements for read-only WAL](https://sqlite.org/wal.html#read_only_databases).
+The orchestration now pins its Python executable independently of Git's PATH.
+`sqlite-read-only-reproduction.json` retains the control;
+`xet-proof-inspection-brew/artifacts/report.json` passes both worker inventories.
+The fresh five-version repeat, `large-xet-4x2g-python-pinned`, remains active.
+
+The expanded harness check runs 70 tests: 69 pass and one fails on an existing
+read-phase report-field assertion. The same test fails with all four involved
+modules loaded from unchanged `origin/crab-v2` at `9a9305950f5d`: its expected
+shape omits the meter's existing per-class byte fields. No baseline test was
+changed. Evidence: `qualification-harness-70-tests.log` and
+`baseline-scale-read-phase-test.json`. This remains a verification gap.
 
 The LFS driver uses incompressible SHAKE256 blocks, separate source/consumer
 caches, complete historical fetch and SHA-256 checks. It rejects workload shapes
