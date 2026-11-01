@@ -32,6 +32,29 @@ async function setup(page: Page) {
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
+    if (
+      request.method() === "GET" &&
+      /^\/api\/repos\/team\/project\/(issues|pulls)\/\d+\/projects$/.test(path)
+    )
+      return route.fulfill({
+        json: { items: [], can_manage: access === "write" && !archived },
+      });
+    if (
+      request.method() === "GET" &&
+      /^\/api\/repos\/team\/project\/issues\/\d+\/hierarchy$/.test(path)
+    )
+      return route.fulfill({
+        json: {
+          hierarchy: {
+            parent: null,
+            version: 0,
+            progress: { total: 0, closed: 0 },
+            children: [],
+            next: null,
+          },
+          can_manage: access === "write" && !archived,
+        },
+      });
     if (path.endsWith("/issues/pins") && request.method() === "GET")
       return route.fulfill({
         json: {

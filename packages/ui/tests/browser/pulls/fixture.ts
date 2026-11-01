@@ -171,6 +171,27 @@ export async function mockPullRequest(
     const request = route.request();
     const url = new URL(request.url());
     const path = url.pathname;
+    if (
+      request.method() === "GET" &&
+      /^\/api\/repos\/team\/project\/issues\/\d+\/hierarchy$/.test(path)
+    )
+      return route.fulfill({
+        json: {
+          hierarchy: {
+            parent: null,
+            version: 0,
+            progress: { total: 0, closed: 0 },
+            children: [],
+            next: null,
+          },
+          can_manage: true,
+        },
+      });
+    if (
+      request.method() === "GET" &&
+      /^\/api\/repos\/team\/project\/(issues|pulls)\/\d+\/projects$/.test(path)
+    )
+      return route.fulfill({ json: { items: [], can_manage: true } });
     if (path.endsWith("/issues/pins") && request.method() === "GET")
       return route.fulfill({
         json: { version: 0, items: [], can_manage: true },

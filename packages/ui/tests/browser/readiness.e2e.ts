@@ -85,6 +85,11 @@ async function setup(page: Page, initialDraft: boolean) {
   await page.route("**/api/**", async (route) => {
     const request = route.request();
     const path = new URL(request.url()).pathname;
+    if (
+      request.method() === "GET" &&
+      /^\/api\/repos\/team\/project\/(issues|pulls)\/\d+\/projects$/.test(path)
+    )
+      return route.fulfill({ json: { items: [], can_manage: canManage } });
     if (path.endsWith("/assignees"))
       return route.fulfill({
         json: { items: [], can_manage: canManage && !archived },
