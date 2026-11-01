@@ -128,7 +128,11 @@ impl CapsuleVisibilityReader {
             .offset
             .checked_add(self.descriptor.body_bytes)
             .ok_or_else(|| corrupt("visibility body span overflows"))?;
+        // Reconciliation retains one reader per ref history. Bulk admission
+        // must not retain every replacement set in those long-lived caches;
+        // fork their warm pages and read-ahead boundaries for this scan only.
         self.cache
+            .fork()?
             .scan(
                 store,
                 &self.path,

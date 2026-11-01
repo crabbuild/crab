@@ -68,6 +68,40 @@ fn initial() -> GitVisibilityIndex {
 }
 
 #[tokio::test]
+#[ignore = "explicit large captured-visibility memory qualification"]
+async fn many_ref_replacements_preserve_shared_dictionary_membership() {
+    let layout = StoreLayout::new(
+        Store::new(Arc::new(InMemory::new())),
+        "repositories/many-replacements".into(),
+    );
+    let mut lazy = CapturedVisibility::new(layout.store().clone(), initial(), std::iter::empty());
+    let shared = (1000_u32..33_000)
+        .map(|value| format!("{value:040x}"))
+        .collect::<Vec<_>>();
+    for reference in 1_u8..=128 {
+        let name = format!("refs/heads/developer-{reference}");
+        let mut added = shared.clone();
+        added.push(hex(reference));
+        let edit = GitVisibilityEdit::from_replacement_objects(None, hex(reference), added);
+        let control = control(&layout, &name, None, edit).await;
+        lazy.apply(&control).await.unwrap();
+    }
+    let mut common = [0; 20];
+    common[16..].copy_from_slice(&1000_u32.to_be_bytes());
+    for reference in [1_u8, 64, 128] {
+        let name = format!("refs/heads/developer-{reference}");
+        let layer = lazy.refs[&name];
+        assert_eq!(
+            lazy.contains(Some(layer), &[common, object(reference), object(255)])
+                .await
+                .unwrap(),
+            vec![true, true, false],
+        );
+    }
+    assert_eq!(lazy.dictionary_count, 32_128);
+}
+
+#[tokio::test]
 async fn layered_closures_match_complete_edits_and_preserve_captured_bases() {
     let layout = StoreLayout::new(
         Store::new(Arc::new(InMemory::new())),
