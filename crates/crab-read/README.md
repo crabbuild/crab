@@ -67,6 +67,10 @@ retain their admitted decoded metadata and payloads until the caller releases th
 Captured views share immutable admission tables when cloned. Overlapping
 object-to-pack memberships merge as sets; the remote reader separately orders
 the selected inventory and verifies its indexes and object bytes.
+An exact run-admission miss contributes no pack candidates: replacement closures
+can include inherited objects stored in earlier runs or the checkpoint. Their
+visibility keys remain present. Runs without exact admission retain their
+coarse candidate sets; pack indexes and reconstructed bytes remain verified.
 
 `capsule_protocol::open_git_view_from_root` captures complete refs and catalog
 lookup roots while keeping catalog bodies, frontier visibility and run OID

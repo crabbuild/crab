@@ -2861,7 +2861,9 @@ pub fn layered_fetch_pack_selection(
             Ok(raw) => raw,
             Err(_) => return Ok(None),
         };
-        let Some(pack_ids) = candidates.get(&raw) else {
+        // A visibility key with no placement cannot prove a complete member
+        // selection. Let the caller resolve it through authenticated locators.
+        let Some(pack_ids) = candidates.get(&raw).filter(|pack_ids| !pack_ids.is_empty()) else {
             return Ok(None);
         };
         selected.extend(pack_ids.iter().cloned());
@@ -4948,22 +4950,21 @@ fn extend_frontier_object_admission(
                 continue;
             };
             let entry = admission.entry(oid).or_default();
-            let pack_ids = run_admission
-                .and_then(|run_admission| run_admission.object_members(&oid))
-                .map(|members| {
-                    members
-                        .iter()
-                        .filter_map(|member| {
-                            source
-                                .members()
-                                .get(usize::try_from(*member).ok()?)
-                                .map(|member| member.pack().blake3().to_owned())
-                        })
-                        .collect::<Vec<_>>()
-                })
-                .filter(|pack_ids| !pack_ids.is_empty())
-                .unwrap_or_else(|| all_pack_ids.clone());
-            entry.extend(pack_ids);
+            // Replacement closures include inherited objects outside this run.
+            // Preserve their visibility keys, but an exact admission miss must
+            // not multiply unrelated physical candidates across every ref.
+            if let Some(run_admission) = run_admission {
+                entry.extend(
+                    run_admission
+                        .object_members(&oid)
+                        .into_iter()
+                        .flatten()
+                        .filter_map(|member| source.members().get(*member as usize))
+                        .map(|member| member.pack().blake3().to_owned()),
+                );
+            } else {
+                entry.extend(all_pack_ids.iter().cloned());
+            }
         }
     }
 }

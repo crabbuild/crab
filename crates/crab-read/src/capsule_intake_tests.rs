@@ -10,6 +10,71 @@ use std::io::Cursor;
 const BLOBS: [&[u8]; 2] = [b"first intake member", b"second intake member"];
 
 #[test]
+fn exact_frontier_admission_excludes_inherited_objects_from_unrelated_packs() {
+    use crab_metadata::capsule_protocol::CapsuleVisibilityDelta;
+    use crab_metadata::git_visibility::GitVisibilityEdit;
+
+    let mut admission = BTreeMap::new();
+    let mut expected = BTreeMap::<[u8; 20], BTreeSet<String>>::new();
+    for (name, tip, members) in [
+        ("main", 1_u8, vec![vec![[1; 20]]]),
+        ("branch", 2, vec![vec![[2; 20]], vec![[2; 20], [3; 20]]]),
+    ] {
+        let name = format!("refs/heads/{name}");
+        let tip = ObjectId::from([tip; 20]).to_string();
+        // The replacement closure includes inherited objects: one in the
+        // earlier frontier and one owned by the checkpoint, outside these runs.
+        let objects = if name.ends_with("main") { 1..=1 } else { 1..=4 };
+        let visibility = CapsuleVisibilityDelta::new(BTreeMap::from([(
+            name.clone(),
+            GitVisibilityEdit::from_replacement_objects(
+                None,
+                tip.clone(),
+                objects
+                    .map(|byte| ObjectId::from([byte; 20]).to_string())
+                    .collect(),
+            ),
+        )]))
+        .unwrap();
+        let transaction = CapsuleTransaction::new(
+            &"1".repeat(64),
+            vec![CapsuleRefEdit::new(name, None, Some(tip.clone()), None)],
+        )
+        .unwrap();
+        let packs = members
+            .iter()
+            .enumerate()
+            .map(|(index, oids)| {
+                CapsuleGitPack::new(
+                    Bytes::from(format!("pack-{tip}-{index}")),
+                    Bytes::from_static(b"index"),
+                    Bytes::from_static(b"reverse"),
+                    Bytes::from_static(b"locator"),
+                    "4".repeat(40),
+                    oids.len() as u64,
+                )
+                .unwrap()
+            })
+            .collect();
+        let capsule = Capsule::build(&transaction, packs, Vec::new()).unwrap();
+        let run = CapsuleRun::leaf_with_member_oids(capsule, members.clone()).unwrap();
+        let run = CapsuleRun::decode(run.bytes().clone()).unwrap();
+        let source = PackSourceDescriptor::from_capsule_run(&run).unwrap();
+        for (oids, member) in members.iter().zip(source.members()) {
+            for oid in oids {
+                expected
+                    .entry(*oid)
+                    .or_default()
+                    .insert(member.pack().blake3().to_owned());
+            }
+        }
+        extend_frontier_object_admission(&mut admission, &visibility, &source, run.admission());
+    }
+    expected.insert([4; 20], BTreeSet::new());
+    assert_eq!(admission, expected);
+}
+
+#[test]
 fn overlapping_frontiers_preserve_exact_member_sets() {
     use crab_metadata::capsule_protocol::{
         CapsuleSection, CapsuleSectionKind, CapsuleVisibilityDelta,
@@ -339,6 +404,37 @@ async fn candidate_fixture() -> (StoreLayout<Store>, CapsuleRepositoryView, Caps
     let transaction = CapsuleTransaction::new(initial.digest(), edits).unwrap();
     let candidate = Capsule::build(&transaction, packs, Vec::new()).unwrap();
     (router, view, candidate)
+}
+
+#[tokio::test]
+async fn pack_selection_requires_physical_candidates_for_every_requested_object() {
+    use crab_metadata::capsule_protocol::{LayeredCheckpoint, PointerCatalog};
+    let (_, mut view, candidate) = candidate_fixture().await;
+    let run = CapsuleRun::leaf(candidate).unwrap();
+    let source = PackSourceDescriptor::from_capsule_run(&run).unwrap();
+    let pack = source.members()[0].pack().blake3().to_owned();
+    view.checkpoint = Some(
+        LayeredCheckpoint::build(
+            1,
+            &"1".repeat(64),
+            vec![source],
+            PointerCatalog::new(),
+            None,
+        )
+        .unwrap(),
+    );
+    // Visibility keys may have no frontier placement: an inherited object
+    // can need checkpoint placement that this capture has not materialized.
+    view.frontier_object_admission = Arc::new(BTreeMap::from([
+        ([1; 20], BTreeSet::new()),
+        ([2; 20], BTreeSet::from([pack])),
+    ]));
+    let requested = [ObjectId::from([1; 20]), ObjectId::from([2; 20])];
+    assert!(
+        layered_fetch_pack_selection(&view, &requested)
+            .unwrap()
+            .is_none()
+    );
 }
 
 #[tokio::test]
