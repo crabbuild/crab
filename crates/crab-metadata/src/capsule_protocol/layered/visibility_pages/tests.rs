@@ -21,13 +21,7 @@ fn overlapping_ref_closures_encode_once_with_exact_outlier_membership() {
 #[ignore = "explicit large checkpoint qualification: 1000 refs and 1.6 million shared objects"]
 fn million_object_team_checkpoint_preserves_all_closures_within_the_byte_bound() {
     let snapshot = overlapping_snapshot(1_620_211, 1_000, 30);
-    let started = std::time::Instant::now();
     let encoded = snapshot.encode().unwrap();
-    eprintln!(
-        "checkpoint bytes={}, encode={:?}",
-        encoded.len(),
-        started.elapsed()
-    );
     assert!(encoded.len() < 110 * 1024 * 1024, "{} bytes", encoded.len());
     assert_eq!(
         LayeredVisibilitySnapshot::decode(&encoded).unwrap(),
@@ -254,7 +248,7 @@ async fn fixture(
 }
 
 #[tokio::test]
-async fn paged_control_replay_batches_checkpoint_dictionary_reads() {
+async fn paged_control_replay_keeps_unrequested_checkpoint_history_cold() {
     use crate::capsule_protocol::{
         Capsule, CapsuleRefEdit, CapsuleRun, CapsuleSection, CapsuleSectionKind,
         CapsuleTransaction, CapsuleVisibilityDelta, CapturedVisibility, VisibilityReconciliation,

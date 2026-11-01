@@ -160,17 +160,6 @@ impl SetRoot {
         }
         Ok(())
     }
-    #[cfg(feature = "storage")]
-    pub(crate) fn same(&self, other: &Self) -> bool {
-        self.encoding == other.encoding
-            && self.count == other.count
-            && self.root.hash == other.root.hash
-            && self.root.bytes == other.root.bytes
-            && self.root.count == other.root.count
-            && self.root.height == other.root.height
-            && self.root.first == other.root.first
-            && self.root.last == other.root.last
-    }
 }
 #[derive(Clone)]
 enum Normalized {

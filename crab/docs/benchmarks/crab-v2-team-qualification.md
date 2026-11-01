@@ -550,6 +550,61 @@ do not address the initial cohort's full replacement-capture traffic by
 themselves. The 249 capsule metadata tests, scalar membership property test,
 66 reader tests, 32 publication tests and strict metadata/reader Clippy pass.
 
+The `b65af39e4c79` private release passes fresh format-10 RustFS mixed teams:
+eight clients / 32 commits / 120 checks and 64 clients / 256 commits / 848 checks.
+Both explicitly checkpoint before independent cold historical payload reads and
+finish with clean Git and complete Crab audits without repair. A separate
+200 MiB-per-kind history covers ordinary Git, Xet and LFS, three versions,
+partial edits, rename/delete/merge, native/Git push and explicit checkpoint;
+all 23 checks pass. Its initial push takes 31.864 seconds, following Git update
+47.248 seconds, checkpoint 29.907 seconds and complete audit 9.852 seconds.
+These are whole-command shared-host observations, not exclusive index timing
+or an isolated performance comparison. Evidence: `shared-visibility-live-controller.json`,
+`mixed-history-200m-shared-visibility/report.json`.
+
+The same release independently audits the stopped 3,000-acknowledgement fixture:
+all ten checks pass, including 1,001 exact refs, no failed-round tip visible,
+all 13,001 commits in a cold clone and complete no-repair Crab fsck. That audit
+takes 1,467.860 seconds with maximum RSS 3,232,301,056 bytes. Shared builds overlap;
+this does not establish a speed regression or resolve full-audit cost. The
+original workload remains failed. Evidence: `shared-visibility-baseline-queue.json`,
+`shared-visibility-baseline-audit-controller.json`.
+
+A paged-capture regression at `cc4cc6ede493` reproduces redundant global dictionary
+accounting through the real control-ordering entry point: four independent refs,
+32,000 shared OIDs and one private OID each read 3,083,927 bytes. Removing that
+temporary union reduces the same capture to 141,487 bytes. Exact common/private/
+absent membership and the complete 32,004-object union remain checked. Complete
+materialization still enforces its dictionary limit; paged capture retains
+expected-old, inherited-base, new-tip, deletion and full removal validation.
+Native Xet preparation also uses metadata's catalog-only capture; publishers
+with an existing authorized view retain it. The 250 capsule metadata tests,
+66 reader tests, ten Xet publication tests and file-session ownership test pass,
+as do strict metadata/reader Clippy and minimal feature checks. This in-memory
+I/O regression is not a live team-scale result. Evidence:
+`paged-capture-io-before.log`, `paged-capture-io-after.log`,
+`paged-capture-metadata-tests.log`, `paged-capture-read-tests.log`,
+`paged-capture-xet-tests.log`, `paged-capture-file-session-tests.log`.
+
+The remote branch subsequently incorporates newer `crab-v2` production contracts
+at `a531eacb41e6`, including shared-ordinal visibility deltas and root version 5.
+The lazy-capture refactor is reconciled with those point readers; complete shared
+decoding and canonical dictionary validation remain at the bulk owner. Earlier
+runtime receipts do not qualify that combined tree. Queued old-tree live tests
+were stopped before any product command; their receipts say superseded. Fresh
+combined-tree tests, private installation and runtime proof are separate gates.
+The reconciled source passes 261 capsule metadata tests, 74 reader tests, the
+current-catalog session test, strict metadata/reader all-target Clippy, both
+minimal feature profiles, architecture checks and formatting. The same upstream
+I/O regression fails at 3,083,927 bytes; the reconciled implementation passes
+the unchanged 1 MiB bound in both absolute and shared formats. A broader test
+also catches output admission previously owned only by the deleted fast path;
+the canonical point reader now charges duplicate logical results in both
+formats. Its original failing report is retained as
+`paged-capture-synced-metadata-before-query-admission.log`. Final local proof:
+`paged-capture-synced-metadata-tests.log`, `paged-capture-synced-read-tests.log`,
+`paged-capture-synced-clippy-final.log`, `paged-capture-synced-feature-checks.json`.
+
 The independent stopped-workload audit completes all ten checks with the
 `b72e59c350d0` auditor: exact latest tips for all 1,000 developers, no failed
 round tip visible, independent cold ancestry containing all 13,001 baseline and

@@ -341,46 +341,12 @@ impl VisibilityEditHeader {
     pub fn replaces(&self) -> bool {
         self.replaces
     }
-    /// Return the exact authenticated added-set count.
-    pub fn added_count(&self) -> u32 {
-        self.shared.as_ref().map_or_else(
-            || self.added.as_ref().map_or(0, |root| root.count),
-            |sets| sets.added.as_ref().map_or(0, |root| root.count),
-        )
-    }
     /// Return the exact authenticated removed-set count.
     pub fn removed_count(&self) -> u32 {
         self.shared.as_ref().map_or_else(
             || self.removed.as_ref().map_or(0, |root| root.count),
             |sets| sets.removed.as_ref().map_or(0, |root| root.count),
         )
-    }
-    /// Compare rooted addition identities without treating locations as identities.
-    pub fn same_additions(&self, other: &Self) -> bool {
-        match (&self.shared, &other.shared) {
-            (Some(a), Some(b)) => {
-                return a.binding == b.binding
-                    && match (&a.added, &b.added) {
-                        (None, None) => true,
-                        (Some(a), Some(b)) => a.same(b),
-                        _ => false,
-                    };
-            }
-            (None, None) => {}
-            _ => return false,
-        }
-        match (&self.added, &other.added) {
-            (None, None) => true,
-            (Some(a), Some(b)) => {
-                a.hash == b.hash
-                    && a.bytes == b.bytes
-                    && a.height == b.height
-                    && a.count == b.count
-                    && a.first == b.first
-                    && a.last == b.last
-            }
-            _ => false,
-        }
     }
 }
 
@@ -668,46 +634,5 @@ mod tests {
         let mut extra = body.to_vec();
         extra.push(0);
         assert!(decode(&wire(extra, descriptor)).is_err());
-    }
-    #[cfg(feature = "storage")]
-    #[test]
-    fn equal_local_chunk_numbers_do_not_make_different_oid_dictionaries_equal_sets() {
-        let headers = |delta: &CapsuleVisibilityDelta| {
-            let bytes = delta.encode().unwrap();
-            let descriptor = Descriptor::decode(&bytes).unwrap();
-            crate::pages::scan(
-                &bytes[..descriptor.body_bytes as usize],
-                &descriptor.refs,
-                Kind::VisibilityRefs,
-                "test",
-                &mut BTreeMap::new(),
-            )
-            .unwrap()
-            .into_iter()
-            .map(|(key, value)| VisibilityEditHeader::decode(&key, &value, &descriptor).unwrap())
-            .collect::<Vec<_>>()
-        };
-        let a = headers(&shared_fixture(1));
-        let b = headers(&shared_fixture(3));
-        assert!(a[0].same_additions(&a[1]));
-        assert_eq!(
-            a[0].shared
-                .as_ref()
-                .unwrap()
-                .added
-                .as_ref()
-                .unwrap()
-                .root
-                .hash,
-            b[0].shared
-                .as_ref()
-                .unwrap()
-                .added
-                .as_ref()
-                .unwrap()
-                .root
-                .hash
-        );
-        assert!(!a[0].same_additions(&b[0]));
     }
 }

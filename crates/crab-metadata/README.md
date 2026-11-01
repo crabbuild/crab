@@ -472,12 +472,15 @@ Loaded source/member positions are checked against checkpoint-owned sources,
 before newer frontier sources are appended. Explicit bulk materialization
 verifies the complete section hash and canonical encoding against captured roots.
 
-Paged control replay batches checkpoint dictionary membership for its captured
-additions before applying transactions. Temporary positive and negative results
-avoid repeatedly fetching the same dictionary pages across a long frontier.
-They describe initial retention only: ref ordering, prior closures, removals,
-new-tip membership and the exact retained-object limit remain checked when each
-control is applied. The captured replay releases these temporary results afterward.
+Paged control replay retains captured ref layers and reads selected membership
+pages. It keeps ref ordering, prior closures, removals and new-tip checks without
+scanning unrelated additions to maintain a temporary global dictionary. Complete
+visibility materialization owns dictionary union and its existing object limit.
+Retained dictionary presence never supplies visibility for a new ref.
+Absolute and shared-ordinal delta formats use this same paged owner; shared
+dictionaries are not materialized merely to account for unrelated additions.
+Both formats admit logical lookup output before allocation, including repeated
+OIDs that collapse to one authenticated page key.
 
 Footer-only checkpoints have control offset zero when both optional catalog and
 visibility sections are absent. The storage reader accepts that canonical range
@@ -597,8 +600,10 @@ the pager's encoded-work admission. Complete materialization verifies the captur
 section hash and descriptor, checks canonical delta bytes, and retains immutable
 shared results.
 
-`crab-read` owns lazy closure reconciliation; complete metadata
-capture remains available for maintenance and publication.
+Metadata owns shared lazy closure reconciliation for catalog and Git captures.
+Complete metadata capture remains available for maintenance and publication.
+Native Xet preparation captures catalog roots directly; shared/protected
+publishers keep the lookup from their already authorized captured view.
 
 ### Payload modules and features
 

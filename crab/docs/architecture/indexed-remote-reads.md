@@ -939,10 +939,14 @@ selects the same first visible inherited base as complete reconciliation. Moving
 the source ref later cannot change that captured parent. Prior tips and removals
 are checked through membership lookup; removed OIDs cannot also be added. The
 historical dictionary retains removed objects without making them visible.
-An initial authenticated added root supplies its exact dictionary count; equal
-roots add no objects. Differing actual additions are read and checked against
-the retained dictionary, preserving its existing maximum. Actual edit work can
-still be large; unrelated historical closures remain cold in the initial case.
+Captured layers retain selected membership without constructing a temporary
+global dictionary. Expected-old links, new-tip inclusion and all removal checks
+remain mandatory. Complete visibility-index construction owns dictionary union
+and its existing distinct-object limit; each stored section also retains its
+byte/ref/object bounds. Paged capture does not enumerate unrelated additions for
+accounting. Native Xet publication opens metadata's captured catalog lookup
+directly. Shared/protected publishers keep their existing authorized view, so
+upload preparation cannot widen or recapture those refs.
 
 Bulk `git_visibility_index`, `candidate_git_visibility` and `tip_bound_transitions`
 are asynchronous and materialize the same captured controls only on request.
