@@ -18,8 +18,8 @@ tree `aca03af2d65078886659760ef646b0e192aa05f1`, version 2.0.0. Its private
 `make install` binary has SHA-256
 `ba5144f848cdd6aa2432d7f3f4da857d66d95780532a3c1d8bc434360fe443fd`.
 The later `crab-v2` commit `9a9305950f5` changes UI files only; it is not an
-additional runtime qualification. The results below describe that frozen binary;
-the bounded-read follow-up described below requires separate live qualification.
+additional runtime qualification. The baseline results below describe that frozen
+binary; follow-up builds and live results are identified separately.
 
 Host: macOS ARM64, 12 logical CPUs, 32 GiB RAM, workspace volume, other work
 sharing CPU and IO. Native RustFS 1.0.0-rc.1 and Git LFS 3.7.1. The original
@@ -131,7 +131,7 @@ a full-install case. Their contribution to read cost needs a shared-path fix
 and a controlled before/after measurement; the concurrency bound alone does
 not resolve it.
 
-The next admission follow-up replaces repeated linear candidate deduplication
+The admission follow-up replaces repeated linear candidate deduplication
 with membership sets and shares immutable admission tables across view clones.
 The remote reader already orders selected inventory independently of candidate
 insertion order. An overlap regression preserves every member binding across
@@ -139,9 +139,26 @@ insertion order. An overlap regression preserves every member binding across
 merge sample fell from 1.828 seconds to 0.483 seconds; this is not an end-to-end
 latency result. Eleven minimal-feature tests, 64 targeted capsule tests, four
 publication-enabled consumer tests and crate lint pass. The same team fixture's
-pre-change single-branch fetch takes 328.815 seconds with exact tip/file readback
-and strict Git fsck (`team-fetch5000-bounded-before-sets/report.json`). A release
-build and the corresponding after-change fetch are still required.
+single-branch fetch fell from 328.815 to 111.566 seconds (2.947 times faster)
+on the same 1,000-ref, 5,000-developer-commit fixture. Both independent consumers
+borrowed the verified baseline ODB, used fresh Crab caches and `/usr/bin/git`,
+and passed exact tip/file readback and strict Git fsck. This is one local paired
+observation on a shared host, not a capacity distribution. The remaining
+112-second latency is still too high. Evidence:
+`team-fetch5000-bounded-before-sets/report.json` and
+`team-fetch5000-admission-after/report.json`.
+
+The after-change private `make install` at `40ed136e9957` completed in 678.985
+seconds; binary SHA-256:
+`f004665920beacbb45985280c2be5bdfa85454f42971b28c3c65ceb63c08f13b`.
+`admission-build-report.json` records its source tree and build receipt. The
+64-client follow-up passes 140 checks, including concurrent publications and
+updates, four reader workers, protocol-v2 readback/pulls and clean Crab fsck
+(`admission-native-64/artifacts/report.json`). Mixed Git/Xet/LFS history passes
+21 checks after native/Git publication, cold historical byte comparison,
+rename/delete/merge and clean Crab/Git fsck (`admission-mixed-history/report.json`).
+The 10,000-developer-commit continuation is in progress; it does not yet qualify
+the upper working-day bound.
 
 Kubernetes has 141,757 reachable commits and a 1.30 GiB packed ODB. It passes
 full strict Git fsck with no diagnostics; source HEAD/worktree status are
@@ -199,8 +216,13 @@ local proofs above.
 failed before workspace tests: one deprecated atomic API and seven large-error
 HTTP-server Clippy diagnostics, plus 23 browser failures against 162 passes.
 Those failures are not waived. The gateway's separate sustained-write run also
-failed its throughput-ratio gate (0.7931 versus 0.8); that workload does not
-substitute for native push evidence.
+failed its throughput-ratio gate (0.7931 versus 0.8). At the later bounded-reader
+commit `e769a516e5ad`, [gateway](https://github.com/crabbuild/crab/actions/runs/41280554932),
+[architecture](https://github.com/crabbuild/crab/actions/runs/41280554936), SDK and
+container workflows pass. Its protocol workflow was cancelled after the release
+build and macOS contracts passed; Windows/unit work was interrupted and Git/RustFS
+jobs were skipped. Cancelled/skipped jobs supply no proof. These later results
+do not replace native push evidence or qualify the subsequent admission change.
 
 The original large-repository workflow passed only report-contract checks and
 skipped its live Kubernetes job. This campaign attempted the real input and
