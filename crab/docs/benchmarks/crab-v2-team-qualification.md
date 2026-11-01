@@ -390,6 +390,30 @@ migration requiring proof. Evidence: `gc-admission-before-probe-report.json`,
 `gc-admission-after-probe-report.json`, `gc-admission-poll-probe-report.json`,
 `gc-cas-backoff-candidate.json`.
 
+The next source change replaces the shared writer list with 64 persistent,
+independent claim/history slots and an exclusive sweep gate. Writers validate
+the unchanged open gate after slot CAS, before uploads; a sweep closes the gate
+then verifies every fixed slot. No LIST snapshot, relaxed TTL/quarantine or
+higher CAS-attempt limit is used. Writer-history summation reserves each slot's
+release increment, and initialized missing ledgers fail closed. Existing
+schema-1/2 domains require explicit quiesced migration; old readers are not a
+runtime fallback. Resumable sweeps have separate journal and acquisition IDs.
+
+Preliminary slot-protocol libraries pass real RustFS component profiles with
+20 ms injected GET/PUT delay: 16 workers × 16 cycles in 47.195 seconds and
+64 workers × four cycles in 65.521 seconds, both 256/256 with zero errors,
+zero remaining claims, exact history 512 and a successful final sweep. These
+precede the final acquisition-ID refinement and are not native-push capacity
+qualification. Review found a same-journal resumption race in that candidate;
+the failing regression is retained, and the final source rejects adoption of
+another acquisition. Its 165 coordination tests, all-targets crate Clippy,
+minimal-feature check, CLI consumer check and documentation links pass.
+Private full CLI build, live migration and fresh mixed-team qualification remain
+pending. Evidence: `gc-independent-probe-report.json`,
+`gc-independent-64-probe-report.json`,
+`independent-gc-resumable-context-before.log`,
+`independent-gc-final-identity-tests.log`.
+
 The shared-base page prototype encodes dictionary/set pages for 1,000 refs,
 1,620,211 common objects and 30 private objects per ref into 86,093,652 bytes.
 Every reconstructed synthetic membership is checked, including a retained-only

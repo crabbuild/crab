@@ -12,7 +12,7 @@ Owns lease/admission and active-active write coordination mechanics. Callers cho
 1. `crates/crab-coordination/src/lib.rs` — feature-gated exports.
 2. `crates/crab-coordination/src/push_lock.rs` — `PushLock`: holder-checked lease lifecycle.
 3. `crates/crab-coordination/src/lease_operation.rs` — `while_renewing`: renewal while draining an operation.
-4. `crates/crab-coordination/src/gc_fence.rs` — `GcFenceLease`: shared/exclusive GC admission.
+4. `crates/crab-coordination/src/gc_fence.rs` — public GC lease lifecycle; `gc_fence/{state,writer,sweep}.rs` own canonical schema, private claims and the sweep gate.
 5. `crates/crab-coordination/src/write_coordinator.rs` — `WriteCoordinator / PushTransactionState`: transaction state contract.
 
 Trace one path: `crates/crab-write/src/generation.rs` → `while_renewing` in
@@ -42,9 +42,11 @@ Trace one path: `crates/crab-write/src/generation.rs` → `while_renewing` in
 
 - Check both Unix expiry and monotonic renewal-deadline arithmetic. Reject unrepresentable durations before storage access; retain fresh expiry calculation on each renewal attempt.
   Source: `crates/crab-coordination/src/push_lock.rs`.
-- GC writer acquisition retries refresh their active claim without duplicate
-  holders or a new writer epoch. Expired/quarantined claims remain lost. Holder
-  IDs need entropy across hosts and PID namespaces; never repair malformed state
+- GC writer acquisition retries retain their selected private slot without duplicate
+  holders or a new writer epoch. Sweep admission closes control before checking
+  all fixed slots; writer admission validates control after claiming its slot.
+  Released slot ledgers are persistent history and must never be deleted.
+  Expired/quarantined claims remain lost. Holder IDs need entropy across hosts and PID namespaces; never repair malformed state
   by deduplicating holders. Sources: `gc_fence.rs` and `push_lock.rs` in this crate.
 
 ## Features and platform
