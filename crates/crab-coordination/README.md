@@ -65,6 +65,11 @@ the migrated writer-history base forms the GC journal token. Per-slot budgets
 reserve release increments and prevent aggregate overflow. Writer leases cannot
 return an incomplete token as domain history.
 
+`GcFenceLease::writer_epoch()` now returns `Result<GcWriterEpoch>` and requires
+sweep admission. Rust callers must handle that result; writer acquisition no
+longer observes a complete domain counter. The CLI sweep owner validates and
+caches the complete token before exposing it to GC journals.
+
 Initialization publishes control as unready, creates all zero ledgers, then
 conditionally marks it ready. Interrupted initialization resumes; an initialized
 missing/malformed ledger fails closed. Existing schema-1/2 stores require explicit
