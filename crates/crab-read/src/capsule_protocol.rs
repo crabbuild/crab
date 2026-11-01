@@ -4857,7 +4857,7 @@ async fn assemble_layered_control_view(
             )
         })
         .collect();
-    let checkpoint = match snapshot.record().root().checkpoint() {
+    let mut checkpoint = match snapshot.record().root().checkpoint() {
         Some(pointer) => {
             let checkpoint = if !matches!(read, ControlRead::Complete | ControlRead::Repack) {
                 load_layered_checkpoint_control(router, pointer, limits).await?
@@ -5081,7 +5081,18 @@ async fn assemble_layered_control_view(
         };
         VisibilityReconciliation::Paged(Box::new(initial))
     } else {
-        VisibilityReconciliation::Complete(visibility_index_for_checkpoint(checkpoint.as_ref())?)
+        let index = if matches!(read, ControlRead::Complete) {
+            match checkpoint.as_mut() {
+                Some(checkpoint) => checkpoint
+                    .take_visibility_index(0, &"0".repeat(64), &"0".repeat(64))?
+                    .unwrap_or(visibility_index_for_checkpoint(None)?),
+                None => visibility_index_for_checkpoint(None)?,
+            }
+        } else {
+            // Repack readers reuse the complete ordinal admission proof later.
+            visibility_index_for_checkpoint(checkpoint.as_ref())?
+        };
+        VisibilityReconciliation::Complete(index)
     };
     tracing::debug!(
         elapsed_ms = started.elapsed().as_millis() as u64,

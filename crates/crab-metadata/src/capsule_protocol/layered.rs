@@ -323,6 +323,30 @@ impl LayeredVisibilitySnapshot {
         )
     }
 
+    /// Transfer the validated ordinal proof into an independently editable index.
+    fn into_index(
+        self,
+        generation: u64,
+        pack_index_hash: &str,
+        git_validation_digest: &str,
+        expected_catalog_digest: &str,
+    ) -> Result<GitVisibilityIndex> {
+        if self.catalog_digest != expected_catalog_digest {
+            return Err(corrupt(
+                "layered visibility proof does not match its pack-source catalog",
+            ));
+        }
+        GitVisibilityIndex::from_ordinal_parts(
+            generation,
+            pack_index_hash,
+            git_validation_digest,
+            self.objects,
+            self.refs,
+            self.transitions,
+            self.incremental_history,
+        )
+    }
+
     fn validate(&self) -> Result<()> {
         validate_content_hash(
             &self.catalog_digest,
@@ -1577,6 +1601,29 @@ impl LayeredCheckpoint {
         Ok(None)
     }
 
+    /// Transfer a complete verified visibility index out of an owned checkpoint.
+    ///
+    /// An unshared decoded cache moves into the index instead of retaining a
+    /// second proof during ref edits. Shared checkpoint clones retain their
+    /// immutable cache. The authenticated body remains available for later reads.
+    pub fn take_visibility_index(
+        &mut self,
+        generation: u64,
+        pack_index_hash: &str,
+        git_validation_digest: &str,
+    ) -> Result<Option<GitVisibilityIndex>> {
+        if self.visibility_ordinal_snapshot()?.is_none() {
+            return Ok(None);
+        }
+        let digest = source_catalog_digest(self.sources())?;
+        if let Some(snapshot) = Arc::get_mut(&mut self.visibility).and_then(OnceLock::take) {
+            return snapshot
+                .into_index(generation, pack_index_hash, git_validation_digest, &digest)
+                .map(Some);
+        }
+        self.visibility_index(generation, pack_index_hash, git_validation_digest)
+    }
+
     fn section(&self, kind: CapsuleSectionKind) -> Result<Option<Bytes>> {
         if self.control_only {
             return Err(corrupt(
@@ -2110,6 +2157,77 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_visibility_transfer_preserves_body_and_independent_proofs() {
+        let source = PackLayer::build(&pack())
+            .unwrap()
+            .source_descriptor()
+            .unwrap();
+        let index = GitVisibilityIndex::new(
+            3,
+            "0".repeat(64),
+            "0".repeat(64),
+            BTreeMap::from([
+                ("refs/heads/main".to_owned(), vec!["2".repeat(40)]),
+                ("refs/tags/blob".to_owned(), vec!["2".repeat(40)]),
+            ]),
+        )
+        .unwrap();
+        let visibility = LayeredVisibilitySnapshot::from_index_with_member_admission(
+            &index,
+            &source_catalog_digest(std::slice::from_ref(&source)).unwrap(),
+            vec![LayeredObjectMember::new(0, 0)],
+        )
+        .unwrap();
+        let checkpoint = LayeredCheckpoint::build(
+            3,
+            &"a".repeat(64),
+            vec![source],
+            PointerCatalog::new(),
+            Some(visibility),
+        )
+        .unwrap();
+        for shared in [false, true] {
+            let mut decoded = LayeredCheckpoint::decode(checkpoint.bytes().clone()).unwrap();
+            let dictionary = decoded
+                .visibility_ordinal_snapshot()
+                .unwrap()
+                .unwrap()
+                .objects()
+                .as_ptr();
+            let other = shared.then(|| decoded.clone());
+            let mut taken = decoded
+                .take_visibility_index(3, &"0".repeat(64), &"0".repeat(64))
+                .unwrap()
+                .unwrap();
+            assert_eq!(taken, index);
+            assert_eq!(decoded.visibility.get().is_some(), shared);
+            if !shared {
+                assert_eq!(taken.objects().as_ptr(), dictionary);
+            }
+            assert!(!decoded.is_control_only());
+            assert_eq!(decoded.bytes(), checkpoint.bytes());
+            taken.remove_ref("refs/heads/main");
+            for retained in std::iter::once(&decoded).chain(other.as_ref()) {
+                assert_eq!(
+                    retained
+                        .visibility_index(3, &"0".repeat(64), &"0".repeat(64))
+                        .unwrap()
+                        .unwrap(),
+                    index
+                );
+                assert_eq!(
+                    retained
+                        .visibility_ordinal_snapshot()
+                        .unwrap()
+                        .unwrap()
+                        .member_admission(),
+                    Some([LayeredObjectMember::new(0, 0)].as_slice())
+                );
+            }
+        }
+    }
+
+    #[test]
     fn checkpoint_pointer_binding_checks_every_field_for_full_and_control_reads() {
         let checkpoint = LayeredCheckpoint::build(
             3,
@@ -2288,6 +2406,11 @@ mod tests {
         assert!(
             decoded
                 .to_index(1, &"1".repeat(64), &"2".repeat(64), &"f".repeat(64))
+                .is_err()
+        );
+        assert!(
+            decoded
+                .into_index(1, &"1".repeat(64), &"2".repeat(64), &"f".repeat(64))
                 .is_err()
         );
     }
