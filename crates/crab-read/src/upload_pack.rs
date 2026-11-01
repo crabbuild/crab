@@ -826,7 +826,7 @@ fn plan_from_tip_bound_transitions(
             return Ok(None);
         };
         let Some((have, delta)) =
-            transition_delta_for_haves(ref_transitions, *want, &request.haves)
+            transition_delta_for_haves(ref_transitions, *want, &request.haves)?
         else {
             let direct_haves = request
                 .haves
@@ -878,22 +878,23 @@ fn transition_delta_for_haves(
     transitions: &[CapsuleVisibilityTransition],
     target: ObjectId,
     haves: &[ObjectId],
-) -> Option<(ObjectId, Vec<ObjectId>)> {
-    let (have, path) = transition_path_for_haves(transitions, target, haves)?;
-    // Fold the exact sequence into final-minus-initial state. A
-    // remove-first event was already present in the client's old tip;
-    // an add-first event contributes only when it remains at the target.
+) -> crab_remote_git::Result<Option<(ObjectId, Vec<ObjectId>)>> {
+    let Some((have, path)) = transition_path_for_haves(transitions, target, haves) else {
+        return Ok(None);
+    };
+    // Decode only the selected chain; other refs remain compressed. An add-first
+    // event contributes only if still present; a remove-first event was in the base.
     let mut events = HashMap::<ObjectId, (Option<bool>, bool)>::new();
     for transition in path.iter().rev() {
-        for oid in &transition.added {
-            let event = events.entry(*oid).or_insert((None, false));
+        for oid in transition.added.binary_oids() {
+            let event = events.entry(ObjectId::from(oid?)).or_insert((None, false));
             if event.0.is_none() {
                 event.0 = Some(true);
             }
             event.1 = true;
         }
-        for oid in &transition.removed {
-            let event = events.entry(*oid).or_insert((None, false));
+        for oid in transition.removed.binary_oids() {
+            let event = events.entry(ObjectId::from(oid?)).or_insert((None, false));
             if event.0.is_none() {
                 event.0 = Some(false);
             }
@@ -905,7 +906,7 @@ fn transition_delta_for_haves(
         .filter_map(|(oid, (first, present))| (first == Some(true) && present).then_some(oid))
         .collect::<Vec<_>>();
     delta.sort_unstable();
-    Some((have, delta))
+    Ok(Some((have, delta)))
 }
 
 fn transition_path_for_haves<'a>(
@@ -2807,6 +2808,16 @@ mod tests {
         ObjectId::from_hex(value.to_string().repeat(40).as_bytes()).expect("test object ID")
     }
 
+    fn transition_objects(
+        objects: &[ObjectId],
+    ) -> crab_metadata::git_visibility::GitVisibilityObjects {
+        objects
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .into()
+    }
+
     fn visibility() -> GitVisibilityIndex {
         GitVisibilityIndex::new(
             7,
@@ -2867,23 +2878,60 @@ mod tests {
             CapsuleVisibilityTransition {
                 old_oid: Some(oid('1')),
                 new_oid: oid('2'),
-                added: vec![oid('2'), oid('3')],
-                removed: Vec::new(),
+                added: transition_objects(&[oid('2'), oid('3')]),
+                removed: Default::default(),
             },
             CapsuleVisibilityTransition {
                 old_oid: Some(oid('2')),
                 new_oid: oid('4'),
-                added: vec![oid('4'), oid('5')],
-                removed: vec![oid('3')],
+                added: transition_objects(&[oid('4'), oid('5')]),
+                removed: transition_objects(&[oid('3')]),
             },
         ];
 
-        let (have, delta) =
-            transition_delta_for_haves(&transitions, oid('4'), &[oid('1')]).expect("chain");
+        let (have, delta) = transition_delta_for_haves(&transitions, oid('4'), &[oid('1')])
+            .unwrap()
+            .expect("chain");
 
         assert_eq!(have, oid('1'));
         assert_eq!(delta, [oid('2'), oid('4'), oid('5')]);
-        assert!(transition_delta_for_haves(&transitions, oid('4'), &[oid('9')]).is_none());
+        assert!(
+            transition_delta_for_haves(&transitions, oid('4'), &[oid('9')])
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn selected_transition_membership_errors_stop_pack_planning() {
+        let request = UploadPackRequest {
+            wants: vec![oid('1')],
+            haves: vec![oid('3')],
+            ..Default::default()
+        };
+        let visible = HashMap::from([("refs/heads/main".to_owned(), oid('1'))]);
+        let invalid: crab_metadata::git_visibility::GitVisibilityObjects =
+            vec!["invalid".to_owned()].into();
+        for (added, removed) in [
+            (invalid.clone(), Default::default()),
+            (transition_objects(&[oid('1')]), invalid),
+        ] {
+            let transitions = BTreeMap::from([(
+                "refs/heads/main".to_owned(),
+                vec![CapsuleVisibilityTransition {
+                    old_oid: Some(oid('3')),
+                    new_oid: oid('1'),
+                    added,
+                    removed,
+                }],
+            )]);
+            assert!(matches!(
+                plan_from_tip_bound_transitions(&visible, &transitions, &request, 100),
+                Err(RemoteGitError::Metadata(
+                    crab_metadata::error::MetadataError::CorruptObject { .. }
+                ))
+            ));
+        }
     }
 
     #[test]
@@ -2895,8 +2943,8 @@ mod tests {
                 vec![CapsuleVisibilityTransition {
                     old_oid: Some(oid('3')),
                     new_oid: oid('1'),
-                    added: vec![oid('1')],
-                    removed: Vec::new(),
+                    added: transition_objects(&[oid('1')]),
+                    removed: Default::default(),
                 }],
             ),
             (
@@ -2904,8 +2952,8 @@ mod tests {
                 vec![CapsuleVisibilityTransition {
                     old_oid: Some(oid('4')),
                     new_oid: oid('2'),
-                    added: vec![oid('2')],
-                    removed: Vec::new(),
+                    added: transition_objects(&[oid('2')]),
+                    removed: Default::default(),
                 }],
             ),
         ]);
@@ -2951,8 +2999,8 @@ mod tests {
                 .map(|(old_oid, new_oid)| CapsuleVisibilityTransition {
                     old_oid: Some(old_oid),
                     new_oid,
-                    added: vec![new_oid],
-                    removed: Vec::new(),
+                    added: transition_objects(&[new_oid]),
+                    removed: Default::default(),
                 })
                 .collect();
             let transitions = BTreeMap::from([("refs/heads/main".to_owned(), history)]);
@@ -2972,18 +3020,18 @@ mod tests {
             CapsuleVisibilityTransition {
                 old_oid: Some(oid('1')),
                 new_oid: oid('2'),
-                added: vec![oid('2'), oid('3')],
-                removed: Vec::new(),
+                added: transition_objects(&[oid('2'), oid('3')]),
+                removed: Default::default(),
             },
             CapsuleVisibilityTransition {
                 old_oid: Some(oid('2')),
                 new_oid: oid('4'),
-                added: vec![oid('4'), oid('5')],
-                removed: vec![oid('3')],
+                added: transition_objects(&[oid('4'), oid('5')]),
+                removed: transition_objects(&[oid('3')]),
             },
         ];
         assert_eq!(
-            transition_delta_for_haves(&transitions, oid('4'), &[oid('1'), oid('2')]),
+            transition_delta_for_haves(&transitions, oid('4'), &[oid('1'), oid('2')]).unwrap(),
             Some((oid('2'), vec![oid('4'), oid('5')]))
         );
     }

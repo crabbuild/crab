@@ -313,9 +313,9 @@ pub struct CapsuleVisibilityTransition {
     /// Ref tip made visible by this transition.
     pub new_oid: ObjectId,
     /// Objects added to the prior ref closure.
-    pub added: Vec<ObjectId>,
+    pub added: crab_metadata::git_visibility::GitVisibilityObjects,
     /// Objects removed from the prior ref closure.
-    pub removed: Vec<ObjectId>,
+    pub removed: crab_metadata::git_visibility::GitVisibilityObjects,
 }
 
 /// Authenticated transition history grouped by ref name.
@@ -577,7 +577,7 @@ impl CapsuleRepositoryView {
             .await?
         } else {
             // Footer views already retain complete authenticated controls. Keep
-            // their shared sets compact until a fetch asks for expanded hints.
+            // their shared sets compact until the planner selects a have-to-want chain.
             self.tip_bound_controls.clone()
         };
         for (name, values) in build_tip_bound_transitions(&[], &controls)? {
@@ -1867,32 +1867,14 @@ fn append_tip_bound_transitions(
 ) -> Result<()> {
     for (ref_name, edit) in delta.edits() {
         let (old_oid, new_oid) = tip_bound_transition_endpoints(transaction, ref_name, edit)?;
-        let parse_oid = |value: &str| {
-            ObjectId::from_hex(value.as_bytes()).map_err(|_| {
-                corrupt_path(
-                    "capsule Git visibility",
-                    "visibility transition contains an invalid object ID",
-                )
-            })
-        };
-        let added = edit
-            .added
-            .iter()
-            .map(|oid| parse_oid(oid))
-            .collect::<Result<Vec<_>>>()?;
-        let removed = edit
-            .removed
-            .iter()
-            .map(|oid| parse_oid(oid))
-            .collect::<Result<Vec<_>>>()?;
         output
             .entry(ref_name.clone())
             .or_default()
             .push(CapsuleVisibilityTransition {
                 old_oid,
                 new_oid,
-                added,
-                removed,
+                added: edit.added.clone(),
+                removed: edit.removed.clone(),
             });
     }
     Ok(())
@@ -1916,16 +1898,11 @@ fn append_checkpoint_tip_bound_transitions(
                     )
                 })
             };
-            let added = transition
-                .objects
-                .iter()
-                .map(|oid| parse_oid(oid))
-                .collect::<Result<Vec<_>>>()?;
             output_transitions.push(CapsuleVisibilityTransition {
                 old_oid: Some(parse_oid(&transition.from_oid)?),
                 new_oid: parse_oid(&transition.to_oid)?,
-                added,
-                removed: Vec::new(),
+                added: transition.objects.clone().into(),
+                removed: Default::default(),
             });
         }
     }
@@ -6893,6 +6870,82 @@ mod tests {
                 .to_string()
                 .contains("visibility transition does not match its ref edit")
         );
+    }
+
+    #[test]
+    fn transition_hints_retain_authenticated_memberships_without_expansion() {
+        use crab_metadata::git_visibility::{
+            GIT_VISIBILITY_EDIT_VERSION, GitVisibilityDictionary, GitVisibilityObjects,
+        };
+        for count in [4_u32, 4096] {
+            let objects = (1..=count)
+                .map(|value| format!("{value:040x}"))
+                .collect::<Vec<_>>();
+            let dictionary = GitVisibilityDictionary::new(objects.clone()).unwrap();
+            let added =
+                GitVisibilityObjects::from_shared_ordinals(dictionary, (0..count - 1).collect())
+                    .unwrap();
+            let names = ["refs/heads/main", "refs/heads/alias"];
+            let transaction = CapsuleTransaction::new(
+                &"a".repeat(64),
+                names
+                    .iter()
+                    .map(|name| {
+                        CapsuleRefEdit::new(
+                            *name,
+                            Some("f".repeat(40)),
+                            Some(objects[0].clone()),
+                            None,
+                        )
+                    })
+                    .collect(),
+            )
+            .unwrap();
+            let delta = CapsuleVisibilityDelta::new(
+                names
+                    .iter()
+                    .map(|name| {
+                        (
+                            (*name).to_owned(),
+                            GitVisibilityEdit {
+                                version: GIT_VISIBILITY_EDIT_VERSION,
+                                old_oid: Some("f".repeat(40)),
+                                new_oid: objects[0].clone(),
+                                replaces: false,
+                                added: added.clone(),
+                                removed: Default::default(),
+                            },
+                        )
+                    })
+                    .collect(),
+            )
+            .unwrap();
+            let capsule = Capsule::build(
+                &transaction,
+                Vec::new(),
+                vec![CapsuleSection::new(
+                    CapsuleSectionKind::VisibilityDelta,
+                    delta.encode().unwrap(),
+                )],
+            )
+            .unwrap();
+            let run = CapsuleRun::leaf(capsule).unwrap();
+            let (_, controls) = run.verified_controls().unwrap();
+            let retained = controls[0].visibility_delta().unwrap().unwrap();
+            let hints = build_tip_bound_transitions(&[], &controls).unwrap();
+            for (name, edit) in retained.edits() {
+                let hint = &hints[name][0];
+                assert_eq!(hint.added, edit.added);
+                assert!(!hint.added.contains(objects.last().unwrap()));
+                assert!(
+                    hint.added
+                        .iter()
+                        .zip(edit.added.iter())
+                        .all(|(hint, retained)| std::ptr::eq(hint, retained)),
+                    "transition hints must retain the authenticated set instead of expanding it"
+                );
+            }
+        }
     }
 
     #[tokio::test]

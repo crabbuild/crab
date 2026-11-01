@@ -445,6 +445,11 @@ the record.
 Fetch transition hints accept the same authenticated cross-ref
 closure reuse as visibility application when creating a new branch; existing
 refs still require an exact expected-old match.
+Hints retain immutable list, sparse or bitmap memberships without decoding every
+ref's OIDs. Both Git transports select the exact have-to-want chain before
+decoding its additions and removals; malformed selected OIDs return the original
+metadata error. The complete compressed history remains available when wants
+change across protocol-v2 negotiation rounds.
 
 For ordinary tip-bound Git negotiation, an exact chain from every advertised
 want to a client have is a sufficient cut point. This proof does not establish

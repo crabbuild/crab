@@ -207,6 +207,10 @@ accept both descriptors and reject mixed or unknown versions. The existing
 128 MiB proof ceiling, source/member bindings and checkpoint CAS are unchanged.
 In-memory snapshots retain sparse closures or bitmaps through ordinal remapping
 and restoration, instead of expanding every membership into a separate u32.
+Ordinary in-memory OID lists also share immutable storage when cloned; empty
+lists allocate no shared buffer. Their JSON arrays and validation rules are
+unchanged. Binary membership iteration applies the canonical SHA-1 decoder to
+exact set members, excluding unselected dictionary entries.
 
 Checkpoint footer history projects its recent suffix from validated ordinals
 without rebuilding the complete visibility index. Hints consume only the bytes
