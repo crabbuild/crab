@@ -15,14 +15,14 @@ use axum::{
     Extension, Json, Router,
     extract::{Path, Query, State, rejection::JsonRejection},
     middleware,
-    response::{IntoResponse, Response},
+    response::IntoResponse,
     routing::get,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
 
-type Result<T> = std::result::Result<T, Response>;
+type Result<T> = std::result::Result<T, super::write::ResponseError>;
 
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
@@ -127,7 +127,8 @@ async fn edit(
         return Err(Error::Invalid(
             "Repository identity changed; recover the original action from its repository",
         )
-        .into_response());
+        .into_response()
+        .into());
     }
     let actor = app::actor(&principal).map_err(IntoResponse::into_response)?;
     let submission_id =
@@ -180,9 +181,9 @@ async fn edit(
     let count = match output {
         Outcome::Applied(count) => count,
         Outcome::Rejected(Failure::RequestConflict) => {
-            return Err(Error::RequestConflict.into_response());
+            return Err(Error::RequestConflict.into_response().into());
         }
-        Outcome::Rejected(reason) => return Err(rejected(failure(reason))),
+        Outcome::Rejected(reason) => return Err(rejected(failure(reason)).into()),
     };
     app::membership(&server, &principal, &repo)
         .await

@@ -1,3 +1,4 @@
+use super::write::ResponseError;
 use crate::{
     app::{self, Error, Result},
     auth::Principal,
@@ -11,7 +12,7 @@ use axum::{
     Extension, Json, Router,
     extract::{Path, Query, State, rejection::JsonRejection},
     middleware,
-    response::{IntoResponse, Response},
+    response::IntoResponse,
     routing::{get, post},
 };
 use serde::Deserialize;
@@ -273,24 +274,24 @@ async fn change(
     Extension(principal): Extension<Principal>,
     Path(key): Path<(String, String)>,
     input: std::result::Result<Json<Submission>, JsonRejection>,
-) -> std::result::Result<Json<Outcome>, Response> {
+) -> std::result::Result<Json<Outcome>, ResponseError> {
     // Invalid immutable JSON cannot reach Cellar; admission and transport
     // failures remain unproven so an earlier submission can still recover.
     let Json(input) = input.map_err(Error::from).map_err(super::write::rejected)?;
     submit(server, principal, key, input, false)
         .await
-        .map_err(IntoResponse::into_response)
+        .map_err(|error| error.into_response().into())
 }
 async fn cancel(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
     Path(key): Path<(String, String)>,
     input: std::result::Result<Json<Submission>, JsonRejection>,
-) -> std::result::Result<Json<Outcome>, Response> {
+) -> std::result::Result<Json<Outcome>, ResponseError> {
     let Json(input) = input.map_err(Error::from).map_err(super::write::rejected)?;
     submit(server, principal, key, input, true)
         .await
-        .map_err(IntoResponse::into_response)
+        .map_err(|error| error.into_response().into())
 }
 #[cfg(test)]
 mod tests;

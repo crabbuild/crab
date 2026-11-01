@@ -4,10 +4,7 @@ import { Result } from "@/components/request/result";
 import { Alert, AlertDescription } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select";
+import { FieldSelect } from "@/components/ui/field-select";
 import { useTeamRead } from "./read";
 import type { Commands } from "./commands";
 import type { Member, Role, Roster } from "./model";
@@ -213,17 +210,13 @@ function MemberRow({
         <div className="flex flex-wrap items-center gap-2">
           {manage ? (
             <>
-              <NativeSelect
-                aria-label={`Team role for ${member.profile?.name ?? member.actor}`}
+              <FieldSelect
+                label={`Team role for ${member.profile?.name ?? member.actor}`}
                 value={role}
                 disabled={commands.locked}
-                onChange={(event) => setRole(event.target.value as Role)}
-              >
-                <NativeSelectOption value="member">Member</NativeSelectOption>
-                <NativeSelectOption value="maintainer">
-                  Maintainer
-                </NativeSelectOption>
-              </NativeSelect>
+                onValueChange={(role) => setRole(role as Role)}
+                options={{ member: "Member", maintainer: "Maintainer" }}
+              />
               <Button
                 variant="outline"
                 disabled={commands.locked || role === member.role}

@@ -1,7 +1,6 @@
 import { ProjectDraftReview } from "./review";
 import { useId, useState } from "react";
 import { PlusIcon, Trash2Icon } from "lucide-react";
-import type { Repository } from "@/lib/api";
 import { Button } from "@/components/ui/button";
 import {
   Dialog,
@@ -19,20 +18,17 @@ import {
 } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select";
+import { FieldSelect } from "@/components/ui/field-select";
 import { Checkbox } from "@/components/ui/checkbox";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useProjectCommands, CommandError } from "./commands";
 import type { Project, Field as ProjectField, Layout } from "./model";
 export function ProjectSettings({
-  repo,
+  target,
   project,
   onClose,
 }: {
-  repo: Repository;
+  target: import("./model").ProjectTarget;
   project: Project;
   onClose: () => void;
 }) {
@@ -75,7 +71,7 @@ export function ProjectSettings({
           className="flex min-h-0 flex-col gap-5"
           onSubmit={async (e) => {
             e.preventDefault();
-            const result = await commands.submit(repo, {
+            const command = {
               kind: "edit",
               project: project.id,
               version,
@@ -88,7 +84,14 @@ export function ProjectSettings({
                   .filter(Boolean),
               },
               archived,
-            });
+            } as const;
+            const result =
+              "repo" in target
+                ? await commands.submit(target.repo, command)
+                : await commands.submitOrganization(
+                    target.organization,
+                    command,
+                  );
             if (result?.outcome === "applied") onClose();
           }}
         >
@@ -144,22 +147,26 @@ export function ProjectSettings({
                       Markdown is supported in the project overview.
                     </FieldDescription>
                   </Field>
-                  <Field orientation="horizontal">
-                    <Checkbox
-                      id={`${id}-template`}
-                      checked={draft.is_template}
-                      onCheckedChange={(v) =>
-                        setDraft({ ...draft, is_template: v === true })
-                      }
-                    />
-                    <FieldLabel htmlFor={`${id}-template`}>
-                      Make available as a project template
-                    </FieldLabel>
-                  </Field>
-                  <FieldDescription>
-                    A template copies settings, fields, and views. Issue and PR
-                    memberships remain in their original project.
-                  </FieldDescription>
+                  {"repo" in target && (
+                    <>
+                      <Field orientation="horizontal">
+                        <Checkbox
+                          id={`${id}-template`}
+                          checked={draft.is_template}
+                          onCheckedChange={(v) =>
+                            setDraft({ ...draft, is_template: v === true })
+                          }
+                        />
+                        <FieldLabel htmlFor={`${id}-template`}>
+                          Make available as a project template
+                        </FieldLabel>
+                      </Field>
+                      <FieldDescription>
+                        A template copies settings, fields, and views. Issue and
+                        PR memberships remain in their original project.
+                      </FieldDescription>
+                    </>
+                  )}
                   <Field orientation="horizontal">
                     <Checkbox
                       id={`${id}-archived`}
@@ -175,8 +182,9 @@ export function ProjectSettings({
                     until reopened.
                   </FieldDescription>
                   <FieldDescription>
-                    Access follows this repository’s members and SSO group
-                    grants.
+                    {"repo" in target
+                      ? "Access follows this repository’s members and SSO group grants."
+                      : "Organization members can view this project. Its creator and organization owners manage planning. Repository permissions still protect linked work."}
                   </FieldDescription>
                 </FieldGroup>
               </TabsContent>
@@ -224,35 +232,34 @@ export function ProjectSettings({
                           <FieldLabel htmlFor={`${id}-type-${f.id}`}>
                             Type
                           </FieldLabel>
-                          <NativeSelect
+                          <FieldSelect
+                            label="Field type"
                             id={`${id}-type-${f.id}`}
                             disabled={project.definition.fields.some(
                               (old) => old.id === f.id,
                             )}
                             value={f.definition.kind}
-                            onChange={(e) =>
+                            onValueChange={(type) =>
                               field(i, {
                                 ...f,
                                 definition:
-                                  e.target.value === "select"
+                                  type === "select"
                                     ? { kind: "select", options: ["Option 1"] }
                                     : {
-                                        kind: e.target.value as
+                                        kind: type as
                                           | "text"
                                           | "number"
                                           | "date",
                                       },
                               })
                             }
-                          >
-                            {["text", "number", "date", "select"].map(
-                              (type) => (
-                                <NativeSelectOption key={type}>
-                                  {type}
-                                </NativeSelectOption>
-                              ),
-                            )}
-                          </NativeSelect>
+                            options={{
+                              text: "Text",
+                              number: "Number",
+                              date: "Date",
+                              select: "Single select",
+                            }}
+                          />
                         </Field>
                         <Button
                           type="button"
@@ -351,93 +358,110 @@ export function ProjectSettings({
                           <FieldLabel htmlFor={`${id}-layout-${view.id}`}>
                             Layout
                           </FieldLabel>
-                          <NativeSelect
+                          <FieldSelect
+                            label="View layout"
                             id={`${id}-layout-${view.id}`}
                             value={view.layout}
-                            onChange={(e) =>
+                            onValueChange={(layout) =>
                               setDraft({
                                 ...draft,
                                 views: draft.views.map((v, n) =>
                                   n === i
-                                    ? { ...v, layout: e.target.value as Layout }
+                                    ? { ...v, layout: layout as Layout }
                                     : v,
                                 ),
                               })
                             }
-                          >
-                            {["table", "board", "roadmap"].map((layout) => (
-                              <NativeSelectOption key={layout}>
-                                {layout}
-                              </NativeSelectOption>
-                            ))}
-                          </NativeSelect>
-                        </Field>
-                        <Field>
-                          <FieldLabel htmlFor={`${id}-query-${view.id}`}>
-                            Title filter
-                          </FieldLabel>
-                          <Input
-                            id={`${id}-query-${view.id}`}
-                            maxLength={256}
-                            value={view.query}
-                            onChange={(e) =>
-                              setDraft({
-                                ...draft,
-                                views: draft.views.map((v, n) =>
-                                  n === i ? { ...v, query: e.target.value } : v,
-                                ),
-                              })
-                            }
+                            options={{
+                              table: "Table",
+                              board: "Board",
+                              roadmap: "Roadmap",
+                            }}
                           />
                         </Field>
+                        {"repo" in target && (
+                          <Field>
+                            <FieldLabel htmlFor={`${id}-query-${view.id}`}>
+                              Title filter
+                            </FieldLabel>
+                            <Input
+                              id={`${id}-query-${view.id}`}
+                              maxLength={256}
+                              value={view.query}
+                              onChange={(e) =>
+                                setDraft({
+                                  ...draft,
+                                  views: draft.views.map((v, n) =>
+                                    n === i
+                                      ? { ...v, query: e.target.value }
+                                      : v,
+                                  ),
+                                })
+                              }
+                            />
+                          </Field>
+                        )}
                         <Field>
                           <FieldLabel htmlFor={`${id}-status-${view.id}`}>
                             Status filter
                           </FieldLabel>
-                          <NativeSelect
+                          <FieldSelect
+                            label="Saved view status filter"
                             id={`${id}-status-${view.id}`}
-                            value={view.status ?? ""}
-                            onChange={(e) =>
+                            value={
+                              view.status === null
+                                ? "all"
+                                : `status:${view.status}`
+                            }
+                            onValueChange={(value) =>
                               setDraft({
                                 ...draft,
                                 views: draft.views.map((v, n) =>
                                   n === i
-                                    ? { ...v, status: e.target.value || null }
+                                    ? {
+                                        ...v,
+                                        status:
+                                          value === "all"
+                                            ? null
+                                            : value.slice(7),
+                                      }
                                     : v,
                                 ),
                               })
                             }
-                          >
-                            <NativeSelectOption value="">
-                              All statuses
-                            </NativeSelectOption>
-                            {draft.statuses.map((s) => (
-                              <NativeSelectOption key={s}>
-                                {s}
-                              </NativeSelectOption>
-                            ))}
-                          </NativeSelect>
+                            options={{
+                              all: "All statuses",
+                              ...Object.fromEntries(
+                                draft.statuses.map((status) => [
+                                  `status:${status}`,
+                                  status,
+                                ]),
+                              ),
+                            }}
+                          />
                         </Field>
                       </div>
-                      <Field orientation="horizontal">
-                        <Checkbox
-                          id={`${id}-closed-${view.id}`}
-                          checked={view.hide_closed}
-                          onCheckedChange={(v) =>
-                            setDraft({
-                              ...draft,
-                              views: draft.views.map((value, n) =>
-                                n === i
-                                  ? { ...value, hide_closed: v === true }
-                                  : value,
-                              ),
-                            })
-                          }
-                        />
-                        <FieldLabel htmlFor={`${id}-closed-${view.id}`}>
-                          Hide closed issues and PRs
-                        </FieldLabel>
-                      </Field>
+                      {"repo" in target && (
+                        <Field orientation="horizontal">
+                          <Checkbox
+                            id={`${id}-closed-${view.id}`}
+                            checked={view.hide_closed}
+                            onCheckedChange={(v) =>
+                              setDraft({
+                                ...draft,
+                                views: draft.views.map((value, n) =>
+                                  n === i
+                                    ? { ...value, hide_closed: v === true }
+                                    : value,
+                                ),
+                              })
+                            }
+                          />
+                          <FieldLabel htmlFor={`${id}-closed-${view.id}`}>
+                            Hide closed issues and PRs
+                          </FieldLabel>
+                        </Field>
+                      )}
                       <Button
                         type="button"
                         variant="ghost"
@@ -483,7 +507,7 @@ export function ProjectSettings({
           </fieldset>
           <CommandError />
           <ProjectDraftReview
-            repo={repo}
+            target={target}
             project={project.id}
             onReviewed={(latest) => setVersion(latest.version)}
           />

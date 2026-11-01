@@ -60,6 +60,7 @@ impl Mutation for Bootstrap {
             return Ok(MutationResult::Success(ChangeOutcome::Applied(value)));
         }
         teams::initialize(context)?;
+        super::projects::initialize(context)?;
         context.query("INSERT INTO organization_details(singleton, name, description, created_at_ms, updated_at_ms) VALUES (1, ?, ?, ?, ?)", &[SqlValue::Text(input.name), SqlValue::Text(input.description), SqlValue::Integer(context.now_ms()), SqlValue::Integer(context.now_ms())])?;
         context.query("INSERT INTO organization_members(actor, role, active, version) VALUES (?, 'owner', 1, 1)", &[blob(input.actor)])?;
         context.query(

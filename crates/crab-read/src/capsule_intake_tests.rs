@@ -25,7 +25,7 @@ fn exact_frontier_admission_excludes_inherited_objects_from_unrelated_packs() {
         // The replacement closure includes inherited objects: one in the
         // earlier frontier and one owned by the checkpoint, outside these runs.
         let objects = if name.ends_with("main") { 1..=1 } else { 1..=4 };
-        let visibility = CapsuleVisibilityDelta::new(BTreeMap::from([(
+        let mut edits = BTreeMap::from([(
             name.clone(),
             GitVisibilityEdit::from_replacement_objects(
                 None,
@@ -34,8 +34,11 @@ fn exact_frontier_admission_excludes_inherited_objects_from_unrelated_packs() {
                     .map(|byte| ObjectId::from([byte; 20]).to_string())
                     .collect(),
             ),
-        )]))
-        .unwrap();
+        )]);
+        // The merged reader unions shared replacements before joining exact
+        // physical membership. Repeated inherited misses must remain misses.
+        edits.insert(format!("{name}-alias"), edits[&name].clone());
+        let visibility = CapsuleVisibilityDelta::new(edits).unwrap();
         let transaction = CapsuleTransaction::new(
             &"1".repeat(64),
             vec![CapsuleRefEdit::new(name, None, Some(tip.clone()), None)],
@@ -68,7 +71,8 @@ fn exact_frontier_admission_excludes_inherited_objects_from_unrelated_packs() {
                     .insert(member.pack().blake3().to_owned());
             }
         }
-        extend_frontier_object_admission(&mut admission, &visibility, &source, run.admission());
+        extend_frontier_object_admission(&mut admission, &visibility, &source, run.admission())
+            .unwrap();
     }
     expected.insert([4; 20], BTreeSet::new());
     assert_eq!(admission, expected);
@@ -136,8 +140,8 @@ fn overlapping_frontiers_preserve_exact_member_sets() {
             BTreeSet::from([member]),
         );
         let started = std::time::Instant::now();
-        extend_frontier_object_admission(&mut admission, &delta, &source, None);
-        extend_frontier_object_admission(&mut admission, &delta, &source, None);
+        extend_frontier_object_admission(&mut admission, &delta, &source, None).unwrap();
+        extend_frontier_object_admission(&mut admission, &delta, &source, None).unwrap();
         merge_time += started.elapsed();
     }
     eprintln!("1000 overlapping sources, 128 shared OIDs, repeated merge: {merge_time:?}");

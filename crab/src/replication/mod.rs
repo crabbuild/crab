@@ -9621,7 +9621,7 @@ mod tests {
             &layout,
             base,
             &transaction,
-            &capsule,
+            capsule,
         )
         .await
         .unwrap();
@@ -12317,10 +12317,9 @@ mod tests {
         )
         .unwrap();
         let capsule = Capsule::build(&transaction, Vec::new(), Vec::new()).unwrap();
-        let prepared =
-            prepare_coordinated_publication(&source_layout, base, &transaction, &capsule)
-                .await
-                .unwrap();
+        let prepared = prepare_coordinated_publication(&source_layout, base, &transaction, capsule)
+            .await
+            .unwrap();
         let run_path = source_layout.capsule_path(&prepared.descriptor().run_hash);
         // Model provider replication of the bootstrap root and immutable run;
         // regional mutable ref publication still belongs to the repair path.
@@ -12461,7 +12460,7 @@ mod tests {
         )
         .unwrap();
         let capsule = Capsule::build(&transaction, Vec::new(), Vec::new()).unwrap();
-        let prepared = prepare_coordinated_publication(&layout, base, &transaction, &capsule)
+        let prepared = prepare_coordinated_publication(&layout, base, &transaction, capsule)
             .await
             .unwrap();
         let mut plan = plan_active_active_repair(
@@ -14268,7 +14267,7 @@ mod tests {
             &capsule_layout(store, router),
             base,
             &transaction,
-            &capsule,
+            capsule,
         )
         .await
         .expect("publish capsule ref");

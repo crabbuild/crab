@@ -18,6 +18,41 @@ struct CorruptLifetimeDuringRead {
     source: ObjectPath,
     head: ObjectPath,
     fired: AtomicBool,
+    source_reads: Option<Arc<ConcurrentSourceReads>>,
+}
+
+#[derive(Debug, Default)]
+struct ConcurrentSourceReads {
+    sizes: BTreeMap<ObjectPath, usize>,
+    active_bytes: AtomicUsize,
+    peak_bytes: AtomicUsize,
+    started: AtomicUsize,
+}
+
+struct ActiveSourceRead {
+    reads: Arc<ConcurrentSourceReads>,
+    bytes: usize,
+}
+
+impl Drop for ActiveSourceRead {
+    fn drop(&mut self) {
+        self.reads
+            .active_bytes
+            .fetch_sub(self.bytes, Ordering::SeqCst);
+    }
+}
+
+impl ConcurrentSourceReads {
+    fn begin(self: &Arc<Self>, path: &ObjectPath) -> Option<ActiveSourceRead> {
+        let bytes = *self.sizes.get(path)?;
+        let active = self.active_bytes.fetch_add(bytes, Ordering::SeqCst) + bytes;
+        self.peak_bytes.fetch_max(active, Ordering::SeqCst);
+        self.started.fetch_add(1, Ordering::SeqCst);
+        Some(ActiveSourceRead {
+            reads: self.clone(),
+            bytes,
+        })
+    }
 }
 
 impl std::fmt::Display for CorruptLifetimeDuringRead {
@@ -51,6 +86,17 @@ impl ObjectStore for CorruptLifetimeDuringRead {
         options: GetOptions,
     ) -> object_store::Result<GetResult> {
         let full_body = !options.head && options.range.is_none();
+        let active = full_body
+            .then(|| {
+                self.source_reads
+                    .as_ref()
+                    .and_then(|reads| reads.begin(path))
+            })
+            .flatten();
+        if active.is_some() {
+            // Make simultaneous source requests observable without timer races.
+            tokio::task::yield_now().await;
+        }
         let response = self.inner.get_opts(path, options).await?;
         if full_body && *path == self.source && !self.fired.swap(true, Ordering::SeqCst) {
             self.inner
@@ -189,6 +235,74 @@ struct SourceReads {
 }
 
 #[tokio::test]
+async fn full_source_verification_bounds_concurrent_bytes_and_still_rejects_corruption() {
+    for maximum_bytes in [64 * 1024, 256 * 1024] {
+        for corrupt in [false, true] {
+            let (layout, root, _) = history_fixture().await;
+            let mut sources = Vec::new();
+            let mut sizes = BTreeMap::new();
+            for value in 0..4 {
+                let pack = CapsuleGitPack::new(
+                    Bytes::from(vec![value; 96 * 1024]),
+                    Bytes::from_static(b"index"),
+                    Bytes::from_static(b"reverse"),
+                    Bytes::from_static(b"locator"),
+                    "3".repeat(40),
+                    1,
+                )
+                .unwrap();
+                let layer = PackLayer::build(&pack).unwrap();
+                let path = layout.capsule_pack_layer_path(layer.hash());
+                sizes.insert(path.clone(), layer.bytes().len());
+                let mut bytes = layer.bytes().to_vec();
+                if corrupt && value == 3 {
+                    bytes[0] ^= 1;
+                }
+                layout.store().put(&path, Bytes::from(bytes)).await.unwrap();
+                sources.push(layer.source_descriptor().unwrap());
+            }
+            let largest = *sizes.values().max().unwrap();
+            let reads = Arc::new(ConcurrentSourceReads {
+                sizes,
+                ..Default::default()
+            });
+            let backend = Arc::new(CorruptLifetimeDuringRead {
+                inner: Arc::clone(layout.store().inner()),
+                source: ObjectPath::from("unused-source"),
+                head: ObjectPath::from("unused-head"),
+                fired: AtomicBool::new(false),
+                source_reads: Some(reads.clone()),
+            });
+            let observed = crab_storage::StoreLayout::new(
+                crab_storage::Store::new(backend),
+                layout.repo_prefix().to_owned(),
+            );
+            let result = verify_capsule_sources_with_read_budget(
+                &observed,
+                root.record().root(),
+                &[],
+                &sources,
+                &FsckSourceReadBudget::new(maximum_bytes),
+            )
+            .await;
+            assert_eq!(result.is_err(), corrupt, "{result:?}");
+            let peak = reads.peak_bytes.load(Ordering::SeqCst);
+            assert!(
+                peak <= (maximum_bytes as usize).max(largest),
+                "full-body requests exceeded admission: peak={peak}, target={maximum_bytes}, largest={largest}"
+            );
+            assert_eq!(reads.active_bytes.load(Ordering::SeqCst), 0);
+            if !corrupt {
+                assert_eq!(reads.started.load(Ordering::SeqCst), sources.len());
+                if maximum_bytes as usize >= 2 * largest {
+                    assert!(peak > largest, "small sources lost parallel verification");
+                }
+            }
+        }
+    }
+}
+
+#[tokio::test]
 async fn fsck_rejects_lifetime_corruption_during_original_source_verification() {
     let (layout, root, run) = history_fixture().await;
     let pointer = run_pointer(&run, root.record().digest());
@@ -212,6 +326,7 @@ async fn fsck_rejects_lifetime_corruption_during_original_source_verification() 
         source: layout.capsule_path(run.hash()),
         head,
         fired: AtomicBool::new(false),
+        source_reads: None,
     });
     let observed = crab_storage::StoreLayout::new(
         crab_storage::Store::new(backend.clone()),
@@ -244,6 +359,7 @@ async fn data_checks_reject_browse_corruption_during_xorb_verification() {
                 layout.browse_retained_head_path()
             },
             fired: AtomicBool::new(false),
+            source_reads: None,
         });
         let store = crab_storage::Store::new(backend.clone());
         let checker = StoreChecker::for_capsule_repository(
@@ -431,6 +547,57 @@ impl StorageObserver for SourceReads {
         {
             self.count.fetch_add(1, Ordering::Relaxed);
         }
+    }
+}
+
+#[tokio::test]
+async fn paged_checker_verifies_current_and_historical_source_bodies_once() {
+    for (checkpoints, corrupt) in [(1, false), (1, true), (2, false), (2, true)] {
+        let (layout, mut root, run) = history_fixture().await;
+        let source = PackSourceDescriptor::from_capsule_run(&run).unwrap();
+        for _ in 0..checkpoints {
+            root = checkpoint(
+                &layout,
+                root,
+                source.clone(),
+                run_pointer(&run, run.newest_base_root_digest()),
+                PointerCatalog::new(),
+            )
+            .await;
+        }
+        if corrupt {
+            // Preserve authenticated controls; only the unrequested pack body
+            // changes, so a successful paged capture cannot certify integrity.
+            let mut bytes = run.bytes().to_vec();
+            bytes[source.members()[0].pack().offset() as usize] ^= 1;
+            layout
+                .store()
+                .inner()
+                .put(&layout.capsule_path(run.hash()), Bytes::from(bytes).into())
+                .await
+                .unwrap();
+        }
+        crab_read::capsule_protocol::open_git_view_from_root(
+            &layout,
+            root.clone(),
+            crab_read::capsule_protocol::CapsuleReadLimits {
+                max_capsule_bytes: MAX_FSCK_CAPSULE_BYTES,
+                max_frontier_bytes: MAX_FSCK_FRONTIER_BYTES,
+            },
+        )
+        .await
+        .unwrap();
+        let reads = Arc::new(SourceReads {
+            size: run.bytes().len() as u64,
+            count: AtomicUsize::new(0),
+        });
+        let store =
+            Store::from_storage(layout.store().clone().with_storage_observer(reads.clone()));
+        let result =
+            StoreChecker::for_capsule_repository(store, layout.repo_prefix().to_owned(), root)
+                .await;
+        assert_eq!(result.is_err(), corrupt);
+        assert_eq!(reads.count.load(Ordering::Relaxed), 1);
     }
 }
 

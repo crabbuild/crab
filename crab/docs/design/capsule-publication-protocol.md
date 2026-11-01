@@ -774,6 +774,52 @@ passed; the remaining wall time was local Git negotiation/indexing, not a
 repository-wide object-store walk. A true full clone, shallow/deepen request,
 filter, or incomplete transition proof still uses its strict bounded fallback.
 
+#### Shared transaction visibility sets
+
+Visibility schema 4 represents large multi-ref changes with one sorted OID
+dictionary, a canonical pool of 1,024-bit membership chunks, and exact set roots
+for each ref's added and removed objects. Small sets use sparse ordinals. The
+forward and reverse dictionary pages bind each ordinal to exactly one OID;
+point reads check both directions before using a membership bit. Set identity
+includes the dictionary and chunk-pool roots, so equal local chunk numbers in
+different capsules cannot authorize the same objects implicitly.
+
+Complete decoding checks counts, padding, ordering, disjoint changes and new-tip
+membership, then requires canonical re-encoding. Dictionaries, chunks and
+repeated sets share immutable ownership. Sparse sets remain sparse when decoded.
+Both cold and cached point reads charge the same bounded page-work budget and
+preserve absent-ref results, OID misses, request order and duplicates.
+
+The existing schema-3 encoder and its expanded-work bound remain in place for
+list-based changes. Shared changes select schema 4; both readers enforce the
+same 128 MiB encoded ceiling. The retained `git/git` fixture covers 4,380 refs
+and 854,492 distinct objects. Its complete transaction visibility section is
+126,570,956 bytes and round-trips every canonical OID in every ref closure.
+
+Bulk captured reconciliation admits the complete shared proof once through the
+same canonical decoder, then reuses its immutable memberships. It accounts for
+the union dictionary once per proof, while still checking each edit's old tip,
+new tip and removals against that ref's captured closure. Retained dictionary
+objects never grant ref membership, including after removal or ref deletion.
+Preparing pending controls caches only retention from the pinned checkpoint;
+unapplied controls cannot supply new bases. Ordinary point queries continue to
+use bounded pages without downloading the complete proof.
+
+Native push prepares multiple complete replacement closures with one bounded
+physical Git graph. It verifies structural checksums, handles nested tags and
+non-commit roots, excludes gitlinks and preserves physical ancestry despite
+local replacements, grafts or shallow markers. It transposes memberships
+in blocks into exact pooled chunks without expanding per-ref OID strings. The
+single-ref pack-member and fast-forward delta paths remain available. Preparation
+runs on a blocking worker with cancellation checks so runtime supervision can
+continue. Pack admission still verifies the blob payloads.
+
+The retained fixture's production graph matches every OID and every membership
+bit from the independently native-qualified archive. This qualifies graph
+preparation, the transaction codec, point reads and bulk reconciliation.
+Layered checkpoint sharing, complete-index bulk import and the actual RustFS
+all-ref push still require integration and qualification.
+
 ### 10.4 Shallow, partial, and lazy fetch
 
 Shallow fetch applies Git's requested history boundaries before pack

@@ -81,9 +81,10 @@ pub async fn run_repack_from_root(
         router.repo_prefix().to_owned(),
         router.global_prefix().to_owned(),
     );
-    // Preview needs authenticated counts, not the apply view's retained Git bodies.
+    // Preview needs authenticated pack controls, not complete per-ref membership
+    // sets or the apply view's retained Git bodies. Keep shared admission paged.
     let view = if dry_run {
-        crab_read::capsule_protocol::open_view_from_root_with_metadata(
+        crab_read::capsule_protocol::open_git_view_from_root(
             &layout,
             root,
             crab_read::capsule_protocol::CapsuleReadLimits {

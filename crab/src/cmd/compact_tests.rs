@@ -649,7 +649,7 @@ async fn capsule_compaction_publishes_verified_checkpoint_without_legacy_metadat
             ],
         )
         .unwrap();
-        crab_write::capsule_protocol::publish(&layout, root, &transaction, &capsule)
+        crab_write::capsule_protocol::publish(&layout, root, &transaction, capsule)
             .await
             .unwrap();
 

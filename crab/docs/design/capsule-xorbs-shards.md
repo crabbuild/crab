@@ -1,10 +1,10 @@
 # Protocol v2 Xorb and Shard Integration
 
-Current development checkpoint format is `CRBCKP10` (format 10), with a
-copy-on-write paged catalog and shared-base authenticated visibility. See
-[indexed remote reads](../architecture/indexed-remote-reads.md#shared-checkpoint-closures-format-10-under-qualification)
+Current development checkpoint format is `CRBCKP09` (format 9), with a
+copy-on-write paged catalog and authenticated visibility. See
+[indexed remote reads](../architecture/indexed-remote-reads.md#copy-on-write-checkpoint-catalog-format-9-under-qualification)
 for its implementation and qualification gates. Earlier checkpoint-format records
-below describe historical sources; they do not qualify format 10. Readers reject
+below describe historical sources; they do not qualify format 9. Readers reject
 retired checkpoint formats. Complete current-format production qualification
 remains open.
 

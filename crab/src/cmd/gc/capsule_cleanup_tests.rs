@@ -74,7 +74,7 @@ async fn captured_catalog_pages_survive_checkpoint_replacement_and_gc() {
     )
     .unwrap();
     let capsule = Capsule::build(&transaction, Vec::new(), Vec::new()).unwrap();
-    crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
+    crab_write::capsule_protocol::publish(&layout, base, &transaction, capsule)
         .await
         .unwrap();
     let view = crab_read::capsule_protocol::open_view(
@@ -237,7 +237,7 @@ async fn failed_capsule_view_releases_root_and_sweep_fences() {
     )
     .unwrap();
     let capsule = Capsule::build(&transaction, Vec::new(), Vec::new()).unwrap();
-    crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
+    crab_write::capsule_protocol::publish(&layout, base, &transaction, capsule)
         .await
         .unwrap();
     let limits = crab_read::capsule_protocol::CapsuleReadLimits {

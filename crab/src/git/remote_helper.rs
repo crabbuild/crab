@@ -59,7 +59,7 @@ struct PushResultRefPayload {
 
 /// A ref entry returned by the object store: a SHA and its ref name.
 ///
-/// `peeled` carries the target-commit SHA for annotated tags so the
+/// `peeled` carries the final target-object SHA for annotated tags so the
 /// `list` response can emit the `{peeled} {ref}^{{}}\n` line git
 /// expects for tag disambiguation. Non-tag refs and lightweight tags
 /// leave it `None`.
@@ -1371,15 +1371,18 @@ async fn dispatch_capabilities<W: tokio::io::AsyncWrite + Unpin>(
         let maximum = capsule_fetch_maximum(cache.config());
         let probe = async {
             let capture = capsule_read_capture(&mut cache.read_capture, router, root).await?;
+            if !capture.may_have_layered_cold_clone_packs() {
+                return Ok::<_, CrabError>(None);
+            }
             let view = open_capsule_fetch_view_minimal(capture, maximum, None).await?;
             let direct = view
                 .layered_cold_clone_packs(capture.layout(), maximum)
                 .map(|packs| packs.is_some());
-            Ok::<_, CrabError>((view, direct))
+            Ok::<_, CrabError>(Some((view, direct)))
         }
         .await;
         match probe {
-            Ok((view, direct)) => {
+            Ok(Some((view, direct))) => {
                 // Preserve the eligibility validator's fatal error boundary;
                 // optional probe misses must not hide descriptor corruption.
                 if direct? {
@@ -1390,6 +1393,7 @@ async fn dispatch_capabilities<W: tokio::io::AsyncWrite + Unpin>(
                     );
                 }
             }
+            Ok(None) => {}
             Err(error) => {
                 tracing::debug!(%error, "cold-clone capability probe unavailable; keeping protocol-v2");
             }
@@ -1410,9 +1414,14 @@ fn local_git_object_store_is_empty() -> bool {
     let Ok(git_dir) = super::discover::discover_common_git_dir() else {
         return false;
     };
+    local_git_object_store_is_empty_at(&git_dir)
+}
+
+fn local_git_object_store_is_empty_at(git_dir: &std::path::Path) -> bool {
     let objects = git_dir.join("objects");
     let Ok(entries) = std::fs::read_dir(&objects) else {
-        return true;
+        // Require a readable object database before probing clone optimizations.
+        return false;
     };
     let alternates = objects.join("info").join("alternates");
     if std::fs::read_to_string(alternates)
@@ -2806,7 +2815,7 @@ async fn open_capsule_fetch_view(
         }
     }
     capture
-        .metadata_view(crab_read::capsule_protocol::CapsuleReadLimits {
+        .owned_git_metadata_view(crab_read::capsule_protocol::CapsuleReadLimits {
             max_capsule_bytes: maximum,
             max_frontier_bytes: maximum,
         })
@@ -2882,7 +2891,7 @@ async fn fetch_capsule_packs(
             // heads or loading every Git body would change admission and duplicate
             // the payloads that the installer is about to read.
             view = capture
-                .metadata_view(crab_read::capsule_protocol::CapsuleReadLimits {
+                .owned_git_metadata_view(crab_read::capsule_protocol::CapsuleReadLimits {
                     max_capsule_bytes: maximum,
                     max_frontier_bytes: maximum,
                 })
@@ -3883,6 +3892,44 @@ mod tests {
     use std::sync::MutexGuard;
     use tokio::io::{AsyncReadExt, BufReader, duplex};
 
+    #[test]
+    fn cold_clone_probe_requires_existing_object_database() {
+        let dir = tempfile::tempdir().unwrap();
+        let git_dir = dir.path().join(".git");
+        assert!(!local_git_object_store_is_empty_at(&git_dir));
+        std::fs::create_dir(&git_dir).unwrap();
+        assert!(!local_git_object_store_is_empty_at(&git_dir));
+        std::fs::write(git_dir.join("objects"), b"not a directory").unwrap();
+        assert!(!local_git_object_store_is_empty_at(&git_dir));
+    }
+
+    #[test]
+    fn cold_clone_probe_allows_existing_empty_object_database() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("objects/pack")).unwrap();
+        std::fs::create_dir_all(dir.path().join("objects/info")).unwrap();
+        assert!(local_git_object_store_is_empty_at(dir.path()));
+    }
+
+    #[test]
+    fn cold_clone_probe_rejects_local_objects_and_alternates() {
+        let dir = tempfile::tempdir().unwrap();
+        let objects = dir.path().join("objects");
+        std::fs::create_dir_all(objects.join("pack")).unwrap();
+        std::fs::create_dir_all(objects.join("info")).unwrap();
+        let pack = objects.join("pack/input.pack");
+        std::fs::write(&pack, b"local pack").unwrap();
+        assert!(!local_git_object_store_is_empty_at(dir.path()));
+        std::fs::remove_file(pack).unwrap();
+        std::fs::create_dir(objects.join("ab")).unwrap();
+        let loose = objects.join("ab/object");
+        std::fs::write(&loose, b"local object").unwrap();
+        assert!(!local_git_object_store_is_empty_at(dir.path()));
+        std::fs::remove_file(loose).unwrap();
+        std::fs::write(objects.join("info/alternates"), b"alternate-objects\n").unwrap();
+        assert!(!local_git_object_store_is_empty_at(dir.path()));
+    }
+
     struct DuplexIo {
         reader: BufReader<std::io::Cursor<Vec<u8>>>,
         writer: tokio::io::DuplexStream,
@@ -4098,7 +4145,7 @@ mod tests {
         let capsule =
             crab_metadata::capsule_protocol::Capsule::build(&transaction, Vec::new(), Vec::new())
                 .expect("build capsule-protocol test capsule");
-        crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
+        crab_write::capsule_protocol::publish(&layout, base, &transaction, capsule)
             .await
             .expect("publish capsule-protocol test refs");
     }

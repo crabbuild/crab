@@ -229,7 +229,7 @@ mod tests {
             )
             .unwrap();
             let capsule = Capsule::build(&transaction, Vec::new(), Vec::new()).unwrap();
-            let run = crate::capsule_protocol::capsule_leaf_run(&capsule).unwrap();
+            let run = crate::capsule_protocol::capsule_leaf_run(capsule).unwrap();
             frontier.push(
                 CapsulePointer::new(
                     run.hash(),
@@ -300,14 +300,12 @@ mod tests {
             )
             .unwrap();
             leaves.push(
-                crate::capsule_protocol::capsule_leaf_run(&capsule)
+                crate::capsule_protocol::capsule_leaf_run(capsule.clone())
                     .unwrap()
                     .hash()
                     .to_owned(),
             );
-            publish(&router, base, &transaction, &capsule)
-                .await
-                .unwrap();
+            publish(&router, base, &transaction, capsule).await.unwrap();
         }
         let base = open_root(&router).await.unwrap();
         let head = read_ref_head(&router, base.record().root(), "refs/heads/main")

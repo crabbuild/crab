@@ -169,7 +169,7 @@ async fn capsule_merge_and_nested_tag_preserve_graph_and_first_parent_attributio
     )
     .unwrap();
     let capsule = Capsule::build(&transaction, vec![history.pack], Vec::new()).unwrap();
-    crab_write::capsule_protocol::publish(&repo.layout, root, &transaction, &capsule)
+    crab_write::capsule_protocol::publish(&repo.layout, root, &transaction, capsule)
         .await
         .unwrap();
     counting.reset();

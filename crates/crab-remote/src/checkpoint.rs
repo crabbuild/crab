@@ -1,9 +1,10 @@
 //! Verified Git-pack consolidation for capsule-protocol checkpoints.
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
+use std::time::Instant;
 
 use bytes::Bytes;
 use crab_git::pack::VerifiedPackIdentity;
@@ -16,6 +17,13 @@ use crab_metadata::capsule_protocol::{
 use crab_metadata::capsule_protocol::{PackMemberDescriptor, PackRange, PackSourceKind};
 use crab_storage::{Store, StoreLayout};
 use tokio_util::sync::CancellationToken;
+
+mod base_verification;
+mod scratch;
+pub use scratch::{
+    repack_capsule_checkpoint_from_receipt_with_scratch_limit,
+    repack_capsule_checkpoint_from_root_with_scratch_limit,
+};
 
 const LAYERED_MAX_PHYSICAL_SOURCES: usize = 64;
 // One run can expand to hundreds of local packs; bound clone/index work after roll-up.
@@ -90,10 +98,16 @@ pub struct CapsuleRepackOutcome {
     pub bytes_after: u64,
 }
 
-#[derive(Default)]
-struct CheckpointPublication {
-    work: CheckpointOutcome,
-    committed: Option<(
+/// Logical checkpoint work and the exact immutable metadata committed by its CAS.
+///
+/// Retaining this receipt permits physical maintenance to reuse validated metadata.
+/// Consumers must bind the checkpoint to its committed root before using it.
+#[derive(Debug, Default)]
+pub struct CheckpointPublication {
+    /// Work completed even when a competing root replacement wins publication.
+    pub work: CheckpointOutcome,
+    /// The exact committed root and its complete, authenticated checkpoint.
+    pub committed: Option<(
         crab_metadata::capsule_protocol::RootSnapshot,
         LayeredCheckpoint,
     )>,
@@ -104,6 +118,8 @@ struct CheckpointPublication {
 pub enum CheckpointError {
     #[error("checkpoint pack-body accounting overflowed")]
     AccountingOverflow,
+    #[error("bounded checkpoint maintenance requires native rewriting")]
+    MaintenanceRequiresRewrite,
     #[error("checkpoint consolidation cancelled")]
     Cancelled,
     #[error("capsule repository read failed")]
@@ -155,7 +171,25 @@ pub async fn publish_capsule_checkpoint(
     maximum_bytes: u64,
     cancel: &CancellationToken,
 ) -> Result<CheckpointOutcome, CheckpointError> {
+    Ok(
+        publish_capsule_checkpoint_with_receipt(layout, threshold, maximum_bytes, cancel)
+            .await?
+            .work,
+    )
+}
+
+/// Publish a logical checkpoint while retaining its exact committed metadata.
+///
+/// Admission, cancellation and root CAS rules match [`publish_capsule_checkpoint`].
+/// A CAS loss yields no receipt; retaining metadata never confers publication authority.
+pub async fn publish_capsule_checkpoint_with_receipt(
+    layout: &StoreLayout<Store>,
+    threshold: u32,
+    maximum_bytes: u64,
+    cancel: &CancellationToken,
+) -> Result<CheckpointPublication, CheckpointError> {
     check_cancelled(cancel)?;
+    let started = Instant::now();
     let root = crab_write::capsule_protocol::open_root(layout).await?;
     let limits = crab_read::capsule_protocol::CapsuleReadLimits {
         max_capsule_bytes: maximum_bytes,
@@ -163,7 +197,8 @@ pub async fn publish_capsule_checkpoint(
     };
     let view = crab_read::capsule_protocol::open_view_from_root_with_metadata(layout, root, limits)
         .await?;
-    publish_capsule_checkpoint_from_view(layout, &view, threshold, maximum_bytes, cancel).await
+    checkpoint_phase("capture", started);
+    checkpoint_publication_from_view(layout, &view, threshold, maximum_bytes, cancel).await
 }
 
 /// Run logical checkpointing followed by independently pinned physical maintenance.
@@ -376,20 +411,32 @@ pub async fn publish_capsule_checkpoint_from_view(
     maximum_bytes: u64,
     cancel: &CancellationToken,
 ) -> Result<CheckpointOutcome, CheckpointError> {
+    Ok(
+        checkpoint_publication_from_view(layout, view, threshold, maximum_bytes, cancel)
+            .await?
+            .work,
+    )
+}
+
+async fn checkpoint_publication_from_view(
+    layout: &StoreLayout<Store>,
+    view: &crab_read::capsule_protocol::CapsuleRepositoryView,
+    threshold: u32,
+    maximum_bytes: u64,
+    cancel: &CancellationToken,
+) -> Result<CheckpointPublication, CheckpointError> {
     check_cancelled(cancel)?;
     if view.capsule_count()? < u64::from(threshold) {
-        return Ok(CheckpointOutcome::default());
+        return Ok(CheckpointPublication::default());
     }
+    let started = Instant::now();
     let catalog = CatalogWrite::Durable(
         prepare_capsule_catalog_from_view(layout, view, maximum_bytes)
             .await?
             .map(Box::new),
     );
-    Ok(
-        publish_checkpoint(layout, view, catalog, maximum_bytes, cancel)
-            .await?
-            .work,
-    )
+    checkpoint_phase("catalog", started);
+    publish_checkpoint(layout, view, catalog, maximum_bytes, cancel).await
 }
 
 /// Publish one checkpoint from a pinned view with a replacement pointer catalog.
@@ -488,6 +535,7 @@ async fn publish_checkpoint(
     cancel: &CancellationToken,
 ) -> Result<CheckpointPublication, CheckpointError> {
     check_cancelled(cancel)?;
+    let started = Instant::now();
     let mut sources = checkpoint_sources(view);
     if sources.is_empty() {
         return Ok(CheckpointPublication::default());
@@ -518,6 +566,7 @@ async fn publish_checkpoint(
         member_oids.extend(consolidation.member_oids);
         work = consolidation.work;
     }
+    checkpoint_phase("source_admission", started);
     let mut publication = publish_layered_sources(
         layout,
         view,
@@ -623,18 +672,55 @@ async fn repack_checkpoint_from_view(
 async fn publish_layered_sources(
     layout: &StoreLayout<Store>,
     view: &crab_read::capsule_protocol::CapsuleRepositoryView,
-    mut sources: Vec<PackSourceDescriptor>,
-    mut member_oids: BTreeMap<String, Vec<Vec<[u8; 20]>>>,
+    sources: Vec<PackSourceDescriptor>,
+    member_oids: BTreeMap<String, Vec<Vec<[u8; 20]>>>,
     catalog: CatalogWrite,
     maximum_bytes: u64,
     cancel: &CancellationToken,
 ) -> Result<CheckpointPublication, CheckpointError> {
+    publish_layered_sources_with_policy(
+        layout,
+        view,
+        sources,
+        member_oids,
+        catalog,
+        PublicationPolicy {
+            maximum_bytes,
+            cancel,
+            allow_footer_consolidation: true,
+        },
+    )
+    .await
+}
+
+struct PublicationPolicy<'a> {
+    maximum_bytes: u64,
+    cancel: &'a CancellationToken,
+    allow_footer_consolidation: bool,
+}
+
+async fn publish_layered_sources_with_policy(
+    layout: &StoreLayout<Store>,
+    view: &crab_read::capsule_protocol::CapsuleRepositoryView,
+    mut sources: Vec<PackSourceDescriptor>,
+    mut member_oids: BTreeMap<String, Vec<Vec<[u8; 20]>>>,
+    catalog: CatalogWrite,
+    policy: PublicationPolicy<'_>,
+) -> Result<CheckpointPublication, CheckpointError> {
+    let PublicationPolicy {
+        maximum_bytes,
+        cancel,
+        allow_footer_consolidation,
+    } = policy;
+    let started = Instant::now();
     let visibility_index = view.git_visibility_index().await?;
+    checkpoint_phase("visibility_index", started);
     let generation = view.root().root().generation();
     let root_digest = view.root().digest();
     let mut work = CheckpointOutcome::default();
     let checkpoint = loop {
         check_cancelled(cancel)?;
+        let started = Instant::now();
         let catalog_digest = source_catalog_digest(&sources)?;
         let member_admission = layered_member_admission(
             &visibility_index,
@@ -647,6 +733,8 @@ async fn publish_layered_sources(
             &catalog_digest,
             member_admission,
         )?;
+        checkpoint_phase("visibility_snapshot", started);
+        let started = Instant::now();
         let checkpoint = match catalog.clone() {
             CatalogWrite::New(catalog) => LayeredCheckpoint::build(
                 generation,
@@ -663,21 +751,25 @@ async fn publish_layered_sources(
                 Some(visibility),
             ),
         };
+        checkpoint_phase("encode", started);
         match checkpoint {
             Ok(checkpoint) => break checkpoint,
             Err(crab_metadata::error::MetadataError::CheckpointFooterSize { bytes, maximum })
-                if sources
-                    .iter()
-                    .map(|source| source.members().len())
-                    .sum::<usize>()
-                    > 1 =>
+                if allow_footer_consolidation
+                    && sources
+                        .iter()
+                        .map(|source| source.members().len())
+                        .sum::<usize>()
+                        > 1 =>
             {
                 // A few member-heavy runs can exhaust the footer below its source
                 // count limit. Admit the replacement before any root publication.
+                let started = Instant::now();
                 let start = footer_admission_suffix_start(&sources, bytes, maximum)?;
                 let consolidation =
                     consolidate_layered_suffix(layout, view, sources, start, maximum_bytes, cancel)
                         .await?;
+                checkpoint_phase("footer_consolidation", started);
                 sources = consolidation.sources;
                 member_oids.extend(consolidation.member_oids);
                 work = work.combine(consolidation.work)?;
@@ -691,6 +783,7 @@ async fn publish_layered_sources(
         });
     }
     check_cancelled(cancel)?;
+    let started = Instant::now();
     let result = if view.visible_ref_transactions().is_empty() {
         crab_write::capsule_protocol::publish_layered_checkpoint(
             layout,
@@ -710,6 +803,7 @@ async fn publish_layered_sources(
         )
         .await
     };
+    checkpoint_phase("publish", started);
     let committed = match result {
         Ok(root) => Some((root, checkpoint)),
         Err(crab_write::WriteError::CapsuleRootChanged { .. }) => None,
@@ -717,6 +811,14 @@ async fn publish_layered_sources(
     };
     work.published = committed.is_some();
     Ok(CheckpointPublication { work, committed })
+}
+
+fn checkpoint_phase(phase: &'static str, started: Instant) {
+    tracing::info!(
+        phase,
+        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+        "Git checkpoint phase completed"
+    );
 }
 
 fn footer_admission_suffix_start(
@@ -770,6 +872,38 @@ async fn consolidate_layered_suffix(
     maximum_bytes: u64,
     cancel: &CancellationToken,
 ) -> Result<LayeredConsolidation, CheckpointError> {
+    consolidate_layered_suffix_with_policy(
+        layout,
+        view,
+        sources,
+        selected_start,
+        ConsolidationPolicy {
+            maximum_bytes,
+            cancel,
+            compressed_only: false,
+        },
+    )
+    .await
+}
+
+struct ConsolidationPolicy<'a> {
+    maximum_bytes: u64,
+    cancel: &'a CancellationToken,
+    compressed_only: bool,
+}
+
+async fn consolidate_layered_suffix_with_policy(
+    layout: &StoreLayout<Store>,
+    view: &crab_read::capsule_protocol::CapsuleRepositoryView,
+    sources: Vec<PackSourceDescriptor>,
+    selected_start: usize,
+    policy: ConsolidationPolicy<'_>,
+) -> Result<LayeredConsolidation, CheckpointError> {
+    let ConsolidationPolicy {
+        maximum_bytes,
+        cancel,
+        compressed_only,
+    } = policy;
     if selected_start >= sources.len() {
         return Err(CheckpointError::Repack(
             crab_git::repack::RepackError::SourceIntegrity {
@@ -812,11 +946,12 @@ async fn consolidate_layered_suffix(
     // Pack identities may occur in both the stable prefix and selected suffix.
     // Restrict physical sources as well as members so duplicates cannot pull
     // stable bodies into maintenance or move their authenticated member slots.
+    let capsules = view.repack_capsules()?;
     let installed =
         crab_read::capsule_protocol::install_layered_git_packs_from_store_sources_selected(
             &sources[selected_start..],
             &[],
-            view.capsules(),
+            &capsules,
             layout,
             &git_dir,
             maximum_bytes,
@@ -826,20 +961,65 @@ async fn consolidate_layered_suffix(
         .await?;
     check_cancelled(cancel)?;
     let sources_for_repack = repack_sources(installed, &mut delta_base_ids)?;
-    // Internal bases usually move with the selected bodies. Overlapping OIDs
-    // or cyclic aliases still need verified anchors for native Git's rewrite.
-    delta_base_ids.extend(crab_git::repack::selected_pack_ref_delta_base_ids(
-        &sources_for_repack,
-    )?);
-    let delta_bases =
-        read_layered_delta_bases(layout, view, &delta_base_ids, maximum_bytes, cancel).await?;
+    if compressed_only
+        && !crab_git::repack::supports_compressed_committed_consolidation(&sources_for_repack)?
+    {
+        return Err(CheckpointError::MaintenanceRequiresRewrite);
+    }
+    // Compressed concatenation preserves REF_DELTA streams. Re-verify their
+    // admitted external source/dependency bytes in a fixed-size buffer instead
+    // of reconstructing historical objects that this strategy does not consume.
+    // Native rewriting and older checkpoints still use verified inflated bases.
+    let required_bases = crab_git::repack::selected_pack_ref_delta_base_ids(&sources_for_repack)?;
+    let declared_bases = delta_base_ids.len();
+    let started = Instant::now();
+    let mut verified_source_bytes = 0;
+    let delta_bases = if required_bases.is_empty() {
+        match base_verification::verify_sources(
+            layout,
+            view,
+            &delta_base_ids,
+            maximum_bytes,
+            cancel,
+        )
+        .await?
+        {
+            Some(bytes) => {
+                verified_source_bytes = bytes;
+                Vec::new()
+            }
+            None if compressed_only => return Err(CheckpointError::MaintenanceRequiresRewrite),
+            None => {
+                read_layered_delta_bases(layout, view, &delta_base_ids, maximum_bytes, cancel)
+                    .await?
+            }
+        }
+    } else {
+        delta_base_ids.extend(required_bases);
+        read_layered_delta_bases(layout, view, &delta_base_ids, maximum_bytes, cancel).await?
+    };
+    // Compressed-only maintenance runs beside foreground writes. One index
+    // worker avoids competing with their CPU preparation pool; explicit
+    // foreground maintenance keeps its usual parallelism.
+    let index_concurrency = if compressed_only {
+        1
+    } else {
+        std::thread::available_parallelism().map_or(1, |parallelism| parallelism.get().min(8))
+    };
+    tracing::info!(
+        phase = "base_resolution",
+        declared_bases,
+        inflated_bases = delta_bases.len(),
+        index_workers = index_concurrency,
+        bytes = verified_source_bytes,
+        elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+        "Git checkpoint phase completed"
+    );
     let pack_bytes_read = sources_for_repack.iter().try_fold(0_u64, |total, source| {
         total
             .checked_add(source.size)
             .ok_or(CheckpointError::AccountingOverflow)
     })?;
-    let index_concurrency =
-        std::thread::available_parallelism().map_or(1, |parallelism| parallelism.get().min(8));
     let worker_cancel = cancel.clone();
     let packs = tokio::task::spawn_blocking(move || {
         let replacement = crab_git::repack::consolidate_committed_pack_suffix_with_delta_bases(
@@ -958,7 +1138,15 @@ fn layered_member_admission(
     existing: Option<&LayeredCheckpoint>,
     member_oids: &BTreeMap<String, Vec<Vec<[u8; 20]>>>,
 ) -> Result<Vec<LayeredObjectMember>, CheckpointError> {
-    let mut by_oid = BTreeMap::<[u8; 20], LayeredObjectMember>::new();
+    let mut by_oid = HashMap::<[u8; 20], LayeredObjectMember>::with_capacity(index.objects().len());
+    let mut source_positions = HashMap::with_capacity(sources.len());
+    for (position, source) in sources.iter().enumerate() {
+        // Preserve the first matching descriptor, including on malformed input
+        // that the complete checkpoint validator will subsequently reject.
+        source_positions
+            .entry(source.object_hash())
+            .or_insert(position);
+    }
 
     if let Some(existing) = existing
         && let Some(snapshot) = existing.visibility_ordinal_snapshot()?
@@ -976,10 +1164,7 @@ fn layered_member_admission(
                 .ok_or_else(|| {
                     layered_admission_error("existing visibility source admission is invalid")
                 })?;
-            let Some(source_index) = sources
-                .iter()
-                .position(|source| source.object_hash() == old_source.object_hash())
-            else {
+            let Some(&source_index) = source_positions.get(old_source.object_hash()) else {
                 continue;
             };
             if sources[source_index]
@@ -1026,6 +1211,8 @@ fn layered_member_admission(
         }
     }
 
+    // Lookup iteration order is irrelevant: the authenticated dictionary alone
+    // determines output order, and newly admitted members still override old ones.
     index
         .objects()
         .iter()
@@ -1453,6 +1640,133 @@ mod tests {
             members,
         )
         .unwrap()
+    }
+
+    #[test]
+    fn large_member_admission_preserves_source_order_and_replacement() {
+        const SOURCES: usize = 32;
+        const OBJECTS: usize = SOURCES * 8192;
+
+        fn counted_source(length: usize, count: usize) -> PackSourceDescriptor {
+            let mut value = serde_json::to_value(source(length)).unwrap();
+            value["members"][0]["object_count"] = (count as u64).into();
+            let descriptor: PackSourceDescriptor = serde_json::from_value(value).unwrap();
+            PackSourceDescriptor::new(
+                descriptor.kind(),
+                descriptor.object_hash(),
+                descriptor.object_size(),
+                descriptor.control_offset(),
+                descriptor.control_size(),
+                descriptor.control_hash(),
+                descriptor.members().to_vec(),
+            )
+            .unwrap()
+        }
+
+        fn index(count: usize) -> crab_metadata::git_visibility::GitVisibilityIndex {
+            crab_metadata::git_visibility::GitVisibilityIndex::new(
+                4,
+                "b".repeat(64),
+                "c".repeat(64),
+                BTreeMap::from([(
+                    "refs/heads/main".to_owned(),
+                    (1..=count)
+                        .map(|ordinal| format!("{ordinal:040x}"))
+                        .collect(),
+                )]),
+            )
+            .unwrap()
+        }
+
+        let original_index = index(OBJECTS);
+        let original_sources = (1..=SOURCES)
+            .map(|length| counted_source(length, OBJECTS / SOURCES))
+            .collect::<Vec<_>>();
+        let admission = (0..OBJECTS)
+            .map(|ordinal| LayeredObjectMember::new((ordinal % SOURCES) as u16, 0))
+            .collect();
+        let visibility = LayeredVisibilitySnapshot::from_index_with_member_admission(
+            &original_index,
+            &source_catalog_digest(&original_sources).unwrap(),
+            admission,
+        )
+        .unwrap();
+        let original = LayeredCheckpoint::build_with_catalog_root(
+            4,
+            &"d".repeat(64),
+            original_sources.clone(),
+            None,
+            Some(visibility),
+        )
+        .unwrap();
+
+        // Retained source positions change. A newly admitted member supplies
+        // both a second copy of one old object and one newly visible object.
+        let updated_index = index(OBJECTS + 1);
+        let mut sources = original_sources.into_iter().rev().collect::<Vec<_>>();
+        let added = counted_source(SOURCES + 1, 2);
+        let added_hash = added.object_hash().to_owned();
+        sources.push(added);
+        let member_oids = BTreeMap::from([(
+            added_hash.clone(),
+            vec![vec![
+                updated_index.objects()[0],
+                updated_index.objects()[OBJECTS],
+            ]],
+        )]);
+        let expected = (0..=OBJECTS)
+            .map(|ordinal| {
+                let source = if ordinal == 0 || ordinal == OBJECTS {
+                    SOURCES
+                } else {
+                    SOURCES - 1 - ordinal % SOURCES
+                };
+                LayeredObjectMember::new(source as u16, 0)
+            })
+            .collect::<Vec<_>>();
+
+        let mut measurements = Vec::new();
+        for _ in 0..3 {
+            let started = Instant::now();
+            let actual =
+                layered_member_admission(&updated_index, &sources, Some(&original), &member_oids)
+                    .unwrap();
+            measurements.push(started.elapsed().as_secs_f64() * 1000.0);
+            assert_eq!(actual, expected);
+        }
+        println!(
+            "checkpoint member admission: objects={} sources={} elapsed_ms={measurements:?}",
+            OBJECTS + 1,
+            sources.len(),
+        );
+
+        let catalog_digest = source_catalog_digest(&sources).unwrap();
+        let actual =
+            layered_member_admission(&updated_index, &sources, Some(&original), &member_oids)
+                .unwrap();
+        let actual = LayeredVisibilitySnapshot::from_index_with_member_admission(
+            &updated_index,
+            &catalog_digest,
+            actual,
+        )
+        .unwrap();
+        let expected = LayeredVisibilitySnapshot::from_index_with_member_admission(
+            &updated_index,
+            &catalog_digest,
+            expected,
+        )
+        .unwrap();
+        assert_eq!(actual.encode().unwrap(), expected.encode().unwrap());
+
+        let mut missing = member_oids.clone();
+        missing.get_mut(&added_hash).unwrap()[0][1] = updated_index.objects()[1];
+        assert!(
+            layered_member_admission(&updated_index, &sources, Some(&original), &missing).is_err()
+        );
+        missing.get_mut(&added_hash).unwrap()[0].pop();
+        assert!(
+            layered_member_admission(&updated_index, &sources, Some(&original), &missing).is_err()
+        );
     }
 
     #[test]

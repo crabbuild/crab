@@ -6423,9 +6423,6 @@ main {
   font-size: var(--text-sm);
   min-width: 0;
 }
-.milestone-form input[type="date"] {
-  width: min(100%, 250px);
-}
 .milestone-empty h3 {
   margin-top: 0;
 }
@@ -6601,6 +6598,307 @@ main {
   color: var(--muted-foreground);
 }
 
+.organization-project-shell {
+  display: grid;
+  grid-template-columns: 208px minmax(0, 1fr);
+  min-height: calc(100dvh - 65px);
+}
+.organization-project-nav {
+  padding: --spacing(6) --spacing(4);
+  border-right: 1px solid var(--border);
+  background: var(--muted);
+}
+.organization-project-name {
+  display: block;
+  margin-bottom: --spacing(6);
+  color: var(--foreground);
+  font-weight: 600;
+  overflow-wrap: anywhere;
+}
+.organization-project-nav nav {
+  display: flex;
+  flex-direction: column;
+  gap: --spacing(1);
+}
+.organization-project-nav nav [data-slot="button"] {
+  justify-content: flex-start;
+}
+.organization-project-main {
+  min-width: 0;
+  padding: --spacing(6) --spacing(8);
+}
+.workspace-project-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  flex-wrap: wrap;
+  gap: --spacing(4);
+  margin-bottom: --spacing(6);
+}
+.workspace-project-header > div:first-child {
+  min-width: 0;
+  flex: 1 1 18rem;
+}
+.workspace-project-header h1 {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: --spacing(3);
+  overflow-wrap: anywhere;
+}
+.workspace-project-header p {
+  margin-top: --spacing(2);
+  color: var(--muted-foreground);
+  max-width: 72ch;
+  overflow-wrap: anywhere;
+}
+.workspace-project-back {
+  display: inline-flex;
+  align-items: center;
+  gap: --spacing(2);
+  margin-bottom: --spacing(5);
+  color: var(--muted-foreground);
+  font-size: var(--text-sm);
+}
+.workspace-project-back svg {
+  width: 16px;
+  height: 16px;
+}
+.workspace-project-filters {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: --spacing(3);
+  margin-bottom: --spacing(4);
+}
+.workspace-project-filters > span:last-child {
+  margin-left: auto;
+}
+.workspace-project-search {
+  max-width: 280px;
+  margin-left: auto;
+}
+.workspace-project-link {
+  display: inline-flex;
+  align-items: center;
+  gap: --spacing(3);
+  color: var(--foreground);
+}
+.workspace-project-link > svg {
+  width: 18px;
+  height: 18px;
+  flex-shrink: 0;
+  color: var(--muted-foreground);
+}
+.workspace-project-link strong {
+  display: block;
+  font-weight: 500;
+}
+.workspace-project-link small {
+  display: block;
+  color: var(--muted-foreground);
+  margin-top: --spacing(1);
+  max-width: 56ch;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+.workspace-project-content {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 248px;
+  gap: --spacing(6);
+  padding-top: --spacing(5);
+}
+.workspace-project-work {
+  min-width: 0;
+}
+.workspace-project-work .project-board-column {
+  flex-basis: 220px;
+  min-width: 220px;
+}
+.workspace-project-properties {
+  min-width: 0;
+  border-left: 1px solid var(--border);
+  padding-left: --spacing(5);
+}
+.workspace-project-properties section + section {
+  margin-top: --spacing(6);
+  padding-top: --spacing(5);
+  border-top: 1px solid var(--border);
+}
+.workspace-project-properties header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: --spacing(2);
+  margin-bottom: --spacing(4);
+}
+.workspace-project-properties h2 {
+  font-size: var(--text-sm);
+  font-weight: 600;
+}
+.workspace-project-properties dl {
+  display: flex;
+  flex-direction: column;
+  gap: --spacing(4);
+  font-size: var(--text-caption);
+}
+.workspace-project-properties dl > div {
+  display: grid;
+  grid-template-columns: 80px minmax(0, 1fr);
+  align-items: center;
+  gap: --spacing(2);
+}
+.workspace-project-properties dt {
+  color: var(--muted-foreground);
+}
+.workspace-project-properties dd {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+.workspace-repository {
+  display: flex;
+  align-items: center;
+  gap: --spacing(2);
+  padding: --spacing(2) 0;
+  font-size: var(--text-caption);
+}
+.workspace-repository > svg {
+  width: 16px;
+  height: 16px;
+  flex-shrink: 0;
+  color: var(--muted-foreground);
+}
+.workspace-repository > span {
+  min-width: 0;
+  overflow-wrap: anywhere;
+}
+.workspace-repository strong {
+  font-weight: 500;
+}
+.workspace-repository-choice {
+  padding: --spacing(3) 0;
+  border-bottom: 1px solid var(--border);
+}
+.workspace-work-choice {
+  width: 100%;
+  height: auto;
+  min-height: 36px;
+  justify-content: flex-start;
+  white-space: normal;
+  text-align: left;
+}
+.workspace-work-choice > span {
+  flex: 1;
+  overflow-wrap: anywhere;
+}
+.workspace-work-choice small {
+  color: var(--muted-foreground);
+}
+.workspace-pagination {
+  display: flex;
+  gap: --spacing(2);
+  flex-wrap: wrap;
+  margin-top: --spacing(4);
+}
+.workspace-project-overview {
+  max-width: 76ch;
+  padding: --spacing(1) 0 --spacing(6);
+}
+.workspace-project-overview h2 {
+  font-size: var(--text-base);
+  font-weight: 600;
+  margin-bottom: --spacing(4);
+}
+.workspace-project-progress {
+  margin-top: --spacing(10);
+}
+.workspace-progress-track {
+  height: 8px;
+  display: flex;
+  gap: 2px;
+  border-radius: var(--radius-full);
+  overflow: hidden;
+  background: var(--muted);
+}
+.workspace-progress-track > span {
+  min-width: 0;
+  display: block;
+}
+.workspace-progress-track > .workspace-progress-final {
+  background: var(--foreground);
+}
+.workspace-project-progress dl {
+  margin-top: --spacing(4);
+  display: flex;
+  flex-wrap: wrap;
+  gap: --spacing(5);
+}
+.workspace-project-progress dl > div {
+  display: flex;
+  gap: --spacing(2);
+  font-size: var(--text-sm);
+}
+.workspace-project-progress dt {
+  color: var(--muted-foreground);
+}
+.workspace-project-progress dd {
+  margin: 0;
+  font-variant-numeric: tabular-nums;
+}
+@media (max-width: 1100px) {
+  .organization-project-shell {
+    grid-template-columns: 168px minmax(0, 1fr);
+  }
+  .organization-project-main {
+    padding: --spacing(6);
+  }
+  .workspace-project-content {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .workspace-project-properties {
+    border-left: 0;
+    border-top: 1px solid var(--border);
+    padding: --spacing(5) 0 0;
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: --spacing(6);
+  }
+  .workspace-project-properties section + section {
+    margin-top: 0;
+    padding-top: 0;
+    border-top: 0;
+  }
+}
+@media (max-width: 640px) {
+  .organization-project-shell {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .organization-project-nav {
+    padding: --spacing(3) --spacing(4);
+    border-right: 0;
+    border-bottom: 1px solid var(--border);
+  }
+  .organization-project-name {
+    margin-bottom: --spacing(2);
+  }
+  .organization-project-nav nav {
+    flex-direction: row;
+  }
+  .organization-project-main {
+    padding: --spacing(5) --spacing(4);
+  }
+  .workspace-project-properties {
+    grid-template-columns: minmax(0, 1fr);
+  }
+  .workspace-project-search {
+    margin-left: 0;
+    max-width: none;
+  }
+  .workspace-project-link small {
+    max-width: 30ch;
+  }
+}
 @theme inline {
   --spacing: 0.25rem;
   --text-xs: 0.75rem;

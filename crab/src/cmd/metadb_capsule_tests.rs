@@ -89,7 +89,7 @@ async fn blob_repository(body: &[u8]) -> StoreLayout<Store> {
         )],
     )
     .unwrap();
-    crab_write::capsule_protocol::publish(&layout, root, &transaction, &capsule)
+    crab_write::capsule_protocol::publish(&layout, root, &transaction, capsule)
         .await
         .unwrap();
     layout
@@ -109,7 +109,7 @@ async fn layered_diagnosis_and_rebuild_verify_nonempty_repository_without_rewrit
         .await
         .unwrap();
     let before = root.record().digest().to_owned();
-    assert_eq!(root.record().root().checkpoint().unwrap().format(), 10);
+    assert_eq!(root.record().root().checkpoint().unwrap().format(), 9);
     let diagnosis = diagnose_capsule(&layout, root.clone(), true, &cancel)
         .await
         .unwrap();

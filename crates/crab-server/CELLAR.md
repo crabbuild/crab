@@ -889,6 +889,74 @@ in the preserved preview. Source growth is about 348 production lines for verifi
 group claims, shared role resolution, atomic access-list edits and the group editor;
 there is one canonical grant owner and no additional authorization store.
 
+## Shared organization projects
+
+`cells/organization/projects/` owns cross-repository planning inside the native
+Organization Cell. The organization Projects workspace is
+`/-/organizations/{uuid}/projects`. Fresh private organization bootstrap installs
+`projects/schema.sql`. Update peers and prepare an existing organization through
+the private mTLS listener before serving the new feature:
+
+```sh
+crab-server --config server.toml cells prepare-organization-projects \
+  --organization ORGANIZATION_UUID --actor CURRENT_OWNER_ACTOR_UUID
+```
+
+Organizations that predate team authority must first prepare organization teams.
+Project preparation installs only empty relations/indexes and a ready marker. It
+is transactional and idempotent, preserves organization metadata/memberships and
+other receipts, and never runs from a public read or write. Unprepared reads and
+commands fail closed with `schema_upgrade_required`. Deploy the new peer operation
+and audit-event contract together with the embedded UI; no mixed-version reader
+or fallback exists.
+
+Active organization members can read and create projects. Owners and the creator
+in their current membership incarnation manage a project. Leaving/rejoining does
+not revive creator authority. Project leads are planning metadata, not grants.
+Archival retains all data and rejects item/link/planning writes until reopened.
+Repository projects retain their existing ownership and atomic local issue
+creation/conversion; no implicit migration or ownership inference occurs.
+
+Public `/api/organizations/{id}/projects` reads bounded project pages. `/{project}`
+returns metadata and accessible repository links; `/{project}/items` returns
+planning rows/counts with status/repository filters and version-checked paging.
+`/{project}/candidates?repository=UUID&q=QUERY` searches authorized linked source
+work. POST `/commands` and `/cancel` use the same `{request_id,command}` body.
+Commands are `create`, `edit`, `planning`, `repository`, `item` and `remove`.
+All updates carry the captured project version; an item's source identity cannot
+be replaced. A repository with retained project items cannot be unlinked.
+
+Repository links and work references use stable UUIDs, with source kind/number
+stored only in that project. They never copy titles, source state, assignees or
+private identities. Source metadata is read in bounded repository snapshots,
+then enriched through the existing assignee boundary. Current repository grants
+are checked after enrichment, and organization access/version is checked again
+before returning rows. Inaccessible sources expose only a redacted project row,
+without source UUID/name/number, title or body. Project counts describe planning
+membership, including redacted rows; they make no source-access or merge claims.
+There is no distributed transaction or grant inheritance between Cells.
+
+Permanent actor/payload-bound decisions serialize execution, rejection and
+cancellation. Identical retries recover the original minimal result even after
+source or organization access changes; an old organization member may cancel
+only their own submission. A changed payload conflicts. Source-access proof is
+not part of the submission digest and never substitutes for native organization
+authorization. Failed domain changes roll back before a terminal decision commits.
+
+An organization holds at most 200 projects; a project links 20 repositories and
+holds 5,000 items. Lists seek 30 UUIDs and item pages seek 50, with exact planning
+counts. Definitions reuse validated repository project fields/workflows. Shared
+saved views support layouts and planning-status filters; source title/state
+predicates, custom templates and draft-to-source conversion remain local to
+repository projects. Workflow automation and personal/cross-organization project
+discovery are separate features.
+
+The model follows [GitHub's project ownership and linked-work structure](https://docs.github.com/en/issues/planning-and-tracking-with-projects/learning-about-projects/about-projects)
+and [Linear's project overview and planning properties](https://linear.app/docs/projects).
+Native/HTTP tests live with both project owners. Browser interaction, recovery,
+theme and accessibility tests live in `tests/browser/project-workspaces.e2e.ts`
+and `tests/browser/projects.e2e.ts` under `packages/ui/`.
+
 ## Repository projects and sub-issues
 
 `cells/repository/projects/` owns repository-scoped project definitions, typed

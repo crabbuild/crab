@@ -108,7 +108,7 @@ async fn publish_history(layout: &StoreLayout<Store>, catalog: PointerCatalog, n
         ],
     )
     .unwrap();
-    crab_write::capsule_protocol::publish(layout, root, &transaction, &capsule)
+    crab_write::capsule_protocol::publish(layout, root, &transaction, capsule)
         .await
         .unwrap();
 }

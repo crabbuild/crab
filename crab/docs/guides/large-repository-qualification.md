@@ -111,6 +111,14 @@ under `/Volumes/Workspace/CrabBuild/crabbuild-qualification/<run-id>`. The sourc
 checkout is cloned with `--shared --no-checkout`, is never reset, cleaned, or
 updated, and its initial status and revision are verified again at the end.
 
+Cold-clone evidence follows the operation actually performed. Generated
+upload-pack responses retain planning, repacking, response-byte and read
+telemetry. Direct capsule-pack installation instead reports authenticated pack
+bytes, unique objects, complete visibility verification and installation phases.
+It does not invent response-pack generation or backend request counts. Use the
+request-counting capsule qualification for backend byte throughput and request
+costs; facade observations alone do not measure every provider request.
+
 Remote objects and the workflow's run-scoped RustFS data directory are retained,
 including on failure. The optional `--cleanup-remote` deletes only keys below
 `e2e-large-repository/<run-id>/`, but also runs after a failed qualification.

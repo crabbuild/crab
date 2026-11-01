@@ -39,7 +39,7 @@ impl FlatFileStore {
             return Err(Self::decode_error(path));
         }
         let mut decoded = Vec::with_capacity(value.len() / 2);
-        for pair in value.chunks_exact(2) {
+        for pair in value.as_chunks::<2>().0 {
             let digits = std::str::from_utf8(pair).map_err(|_| Self::decode_error(path))?;
             decoded.push(u8::from_str_radix(digits, 16).map_err(|_| Self::decode_error(path))?);
         }

@@ -298,9 +298,8 @@ for (const mobile of [false, true])
     await expect(
       page.getByRole("status", { name: "Team submission result" }),
     ).toContainText("Add team member completed.");
-    await page
-      .getByRole("combobox", { name: "Team role for Bob" })
-      .selectOption("maintainer");
+    await page.getByRole("combobox", { name: "Team role for Bob" }).click();
+    await page.getByRole("option", { name: "Maintainer", exact: true }).click();
     await page
       .getByRole("listitem")
       .filter({ has: page.getByRole("link", { name: "Bob", exact: true }) })
@@ -313,8 +312,8 @@ for (const mobile of [false, true])
       page.getByRole("status", { name: "Team submission result" }),
     ).toContainText("Update team member role completed.");
     await page
+      .getByRole("navigation", { name: "Team", exact: true })
       .getByRole("link", { name: "Settings", exact: true })
-      .last()
       .click();
     await page.getByLabel("Team name", { exact: true }).fill("My draft");
     state.conflict = true;

@@ -52,13 +52,13 @@ const LAYERED_SIDECAR_MAX_EXTRA_BYTES: u64 = 4 * 1024 * 1024;
 const LAYERED_SIDECAR_MAX_WINDOW_BYTES: u64 = 16 * 1024 * 1024;
 const LAYERED_PACK_MAX_WINDOW_BYTES: u64 = 64 * 1024 * 1024;
 const LAYERED_FULL_MAX_WINDOW_BYTES: u64 = 64 * 1024 * 1024;
-const LAYERED_REPACK_IN_MEMORY_FRONTIER_BYTES: u64 = LAYERED_FULL_MAX_WINDOW_BYTES;
 const LAYERED_SIDECAR_READ_CONCURRENCY: usize = 8;
 const LAYERED_INLINE_FRONTIER_MAX_BYTES: u64 = 128 * 1024 * 1024;
 // Per-ref frontiers are bounded individually, but their union grows with the
 // team. Bound active run loads instead of launching every history at once.
 // Buffered futures own their pointers/controls to keep public reads Send.
 const CAPSULE_FRONTIER_READ_CONCURRENCY: usize = 32;
+const REPACK_INLINE_FRONTIER_MAX_BYTES: u64 = 64 * 1024;
 
 /// Caller-owned memory admission for one capsule-protocol repository view.
 #[derive(Debug, Clone, Copy)]
@@ -137,6 +137,32 @@ impl CapsuleRepositoryCapture {
         &self.layout
     }
 
+    /// Whether this capture may admit a direct layered cold clone.
+    ///
+    /// A negative answer selects complete fetch admission without opening a
+    /// discarded control view. A positive answer still requires every existing
+    /// pack descriptor, visibility and dependency check.
+    #[must_use]
+    pub fn may_have_layered_cold_clone_packs(&self) -> bool {
+        let root = self.root.record().root();
+        if root.checkpoint().is_none() {
+            return true;
+        }
+        // Validated ref states bind their position to the newest frontier
+        // transaction. A newer visible position therefore leaves a suffix
+        // that checkpoint packs alone cannot cover.
+        root.capsule_frontier().is_empty()
+            && self.heads.iter().all(|head| {
+                head.visible(&self.active)
+                    .transaction_id()
+                    .is_none_or(|transaction| {
+                        root.compacted_ref_transactions()
+                            .get(head.ref_name())
+                            .is_some_and(|compacted| compacted == transaction)
+                    })
+            })
+    }
+
     /// Materialize payload-free refs from the captured heads.
     pub fn ref_view(&self) -> Result<CapsuleRefView> {
         let visible =
@@ -176,6 +202,26 @@ impl CapsuleRepositoryCapture {
             &self.heads,
             &self.active,
             ControlRead::Complete,
+        )
+        .await
+    }
+
+    /// Open complete metadata for an owned Git visibility transfer.
+    ///
+    /// This preserves complete validation and the captured ref state while
+    /// moving the decoded checkpoint proof into reconciliation. Maintenance
+    /// readers use [`Self::metadata_view`] to retain that proof for later joins.
+    pub async fn owned_git_metadata_view(
+        &self,
+        limits: CapsuleReadLimits,
+    ) -> Result<CapsuleRepositoryView> {
+        assemble_layered_control_view(
+            &self.layout,
+            self.root.clone(),
+            limits,
+            &self.heads,
+            &self.active,
+            ControlRead::CompleteForGit,
         )
         .await
     }
@@ -411,6 +457,33 @@ impl CapsuleRepositoryView {
         &self.capsules
     }
 
+    /// Reuse complete tiny frontier runs during selected-pack maintenance.
+    ///
+    /// Larger retained fetch runs stay at their authenticated origins for
+    /// maintenance. This bounds additional decoding across the whole frontier,
+    /// while existing selected-member validation still checks every payload.
+    pub fn repack_capsules(&self) -> Result<std::borrow::Cow<'_, [Capsule]>> {
+        let retained_bytes = self
+            .capsule_run_bytes
+            .values()
+            .try_fold(0_usize, |total, bytes| total.checked_add(bytes.len()));
+        if self.capsule_run_bytes.is_empty()
+            || retained_bytes.is_none_or(|bytes| bytes > REPACK_INLINE_FRONTIER_MAX_BYTES as usize)
+            || self
+                .capsule_run_pointers
+                .iter()
+                .any(|pointer| !self.capsule_run_bytes.contains_key(pointer.hash()))
+        {
+            return Ok(std::borrow::Cow::Borrowed(&self.capsules));
+        }
+        let mut capsules = self.capsules.clone();
+        for bytes in self.capsule_run_bytes.values() {
+            let run = CapsuleRun::decode(bytes.clone())?;
+            capsules.extend_from_slice(run.capsules());
+        }
+        Ok(std::borrow::Cow::Owned(capsules))
+    }
+
     /// Return authenticated control-only capsules loaded for a layered view.
     #[must_use]
     pub fn capsule_controls(&self) -> &[CapsuleControl] {
@@ -495,16 +568,20 @@ impl CapsuleRepositoryView {
     /// must not use a partial chain as an authorization proof.
     pub async fn tip_bound_transitions(&self) -> Result<CapsuleTipBoundTransitions> {
         let mut transitions = self.tip_bound_transitions.clone();
-        if let Some(layout) = &self.metadata_layout {
-            let controls = futures_util::stream::iter(self.tip_bound_controls.iter().cloned().map(
+        let controls = if let Some(layout) = &self.metadata_layout {
+            futures_util::stream::iter(self.tip_bound_controls.iter().cloned().map(
                 |control| async move { control.materialize_visibility(layout.store()).await },
             ))
             .buffered(CAPSULE_FRONTIER_READ_CONCURRENCY)
             .try_collect::<Vec<_>>()
-            .await?;
-            for (name, values) in build_tip_bound_transitions(&[], &controls)? {
-                transitions.entry(name).or_default().extend(values);
-            }
+            .await?
+        } else {
+            // Footer views already retain complete authenticated controls. Keep
+            // their shared sets compact until a fetch asks for expanded hints.
+            self.tip_bound_controls.clone()
+        };
+        for (name, values) in build_tip_bound_transitions(&[], &controls)? {
+            transitions.entry(name).or_default().extend(values);
         }
         Ok(transitions)
     }
@@ -1562,7 +1639,13 @@ impl CapsuleRepositoryView {
                 apply_capsule_control_visibility_index(&complete, &mut index)?;
             }
         }
+        self.bind_git_visibility_index(index)
+    }
 
+    fn bind_git_visibility_index(
+        &self,
+        mut index: crab_metadata::git_visibility::GitVisibilityIndex,
+    ) -> Result<crab_metadata::git_visibility::GitVisibilityIndex> {
         let packs = self.git_pack_manifest_entries()?;
         let manifest = self.git_manifest(&packs)?;
         if index.ref_count() != manifest.refs.len()
@@ -1585,6 +1668,41 @@ impl CapsuleRepositoryView {
             &manifest.pack_index_hash,
             &manifest.git_validation_digest,
         )?;
+        Ok(index)
+    }
+
+    /// Transfer a reconciled visibility proof to a caller that owns this view.
+    ///
+    /// Shared views retain independent proofs. Later reads reconstruct the same
+    /// captured state when its reconciled cache has been transferred. A complete
+    /// checkpoint becomes a footer with authenticated paged lookup, so opening
+    /// the physical repository need not retain a second decoded visibility body.
+    pub async fn take_git_visibility_index(
+        &mut self,
+    ) -> Result<crab_metadata::git_visibility::GitVisibilityIndex> {
+        let Some(index) = self.reconciled_visibility.take() else {
+            return self.git_visibility_index().await;
+        };
+        let index = Arc::try_unwrap(index).unwrap_or_else(|shared| (*shared).clone());
+        let index = self.bind_git_visibility_index(index)?;
+        if let (Some(layout), Some(checkpoint)) = (&self.metadata_layout, &self.checkpoint)
+            && !checkpoint.is_control_only()
+        {
+            let maximum = self
+                .root
+                .record()
+                .root()
+                .checkpoint()
+                .ok_or_else(|| ReadError::internal("checkpoint view has no root pointer"))?
+                .size();
+            if let Some(reader) = checkpoint.visibility_reader(layout, maximum)? {
+                self.checkpoint_visibility = Some(Arc::new(reader));
+                self.checkpoint = self
+                    .checkpoint
+                    .take()
+                    .map(LayeredCheckpoint::into_control_only);
+            }
+        }
         Ok(index)
     }
 
@@ -1701,35 +1819,54 @@ impl CapsuleRepositoryView {
     }
 }
 
+fn tip_bound_transition_endpoints(
+    transaction: &crab_metadata::capsule_protocol::CapsuleTransaction,
+    ref_name: &str,
+    edit: &crab_metadata::git_visibility::GitVisibilityEdit,
+) -> Result<(Option<ObjectId>, ObjectId)> {
+    let transaction_edit = transaction
+        .edits()
+        .iter()
+        .find(|candidate| candidate.ref_name() == ref_name)
+        .ok_or_else(|| {
+            corrupt_path(
+                "capsule Git visibility",
+                "visibility transition has no matching ref edit",
+            )
+        })?;
+    // Creation may borrow another committed ref's closure. Ordering and
+    // visibility application already authenticate that base; only an
+    // existing ref requires its own expected-old tip here.
+    if transaction_edit
+        .expected_old()
+        .is_some_and(|old| Some(old) != edit.old_oid.as_deref())
+        || transaction_edit.new_oid() != Some(edit.new_oid.as_str())
+    {
+        return Err(corrupt_path(
+            "capsule Git visibility",
+            "visibility transition does not match its ref edit",
+        ));
+    }
+    let parse_oid = |value: &str| {
+        ObjectId::from_hex(value.as_bytes()).map_err(|_| {
+            corrupt_path(
+                "capsule Git visibility",
+                "visibility transition contains an invalid object ID",
+            )
+        })
+    };
+    let old_oid = edit.old_oid.as_deref().map(parse_oid).transpose()?;
+    let new_oid = parse_oid(&edit.new_oid)?;
+    Ok((old_oid, new_oid))
+}
+
 fn append_tip_bound_transitions(
     output: &mut CapsuleTipBoundTransitions,
     transaction: &crab_metadata::capsule_protocol::CapsuleTransaction,
     delta: &crab_metadata::capsule_protocol::CapsuleVisibilityDelta,
 ) -> Result<()> {
     for (ref_name, edit) in delta.edits() {
-        let transaction_edit = transaction
-            .edits()
-            .iter()
-            .find(|candidate| candidate.ref_name() == ref_name)
-            .ok_or_else(|| {
-                corrupt_path(
-                    "capsule Git visibility",
-                    "visibility transition has no matching ref edit",
-                )
-            })?;
-        // Creation may borrow another committed ref's closure. Ordering and
-        // visibility application already authenticate that base; only an
-        // existing ref requires its own expected-old tip here.
-        if transaction_edit
-            .expected_old()
-            .is_some_and(|old| Some(old) != edit.old_oid.as_deref())
-            || transaction_edit.new_oid() != Some(edit.new_oid.as_str())
-        {
-            return Err(corrupt_path(
-                "capsule Git visibility",
-                "visibility transition does not match its ref edit",
-            ));
-        }
+        let (old_oid, new_oid) = tip_bound_transition_endpoints(transaction, ref_name, edit)?;
         let parse_oid = |value: &str| {
             ObjectId::from_hex(value.as_bytes()).map_err(|_| {
                 corrupt_path(
@@ -1738,8 +1875,6 @@ fn append_tip_bound_transitions(
                 )
             })
         };
-        let old_oid = edit.old_oid.as_deref().map(parse_oid).transpose()?;
-        let new_oid = parse_oid(&edit.new_oid)?;
         let added = edit
             .added
             .iter()
@@ -2338,6 +2473,7 @@ async fn install_layered_cold_clone_packs_from_store(
     let temporary = staging.tempdir_in(&pack_dir)?;
     let mut staged = Vec::with_capacity(admitted.len());
     let mut object_ids = Vec::new();
+    let mut verified_pack_bytes = 0_u64;
     for (ordinal, (admitted, (source, member))) in
         admitted.into_iter().zip(source_members).enumerate()
     {
@@ -2431,12 +2567,16 @@ async fn install_layered_cold_clone_packs_from_store(
             object_count: admitted.object_count,
             identity: verified_identity,
         });
+        verified_pack_bytes = verified_pack_bytes.saturating_add(pack_length);
     }
     // Validate the complete downloaded union before any pack becomes visible.
     // Repeated objects across stable layers are valid and counted only once.
+    let verification_started = std::time::Instant::now();
     object_ids.sort_unstable();
     object_ids.dedup();
     let complete_visibility = view.verify_cold_clone_visibility(&object_ids)?;
+    let visibility_verification_ms = verification_started.elapsed().as_millis() as u64;
+    let installation_started = std::time::Instant::now();
     let mut paths = Vec::with_capacity(staged.len());
     let mut installed_hashes = BTreeSet::new();
     for pack in staged {
@@ -2472,6 +2612,19 @@ async fn install_layered_cold_clone_packs_from_store(
     if cancel.is_cancelled() {
         return Err(ReadError::Cancelled);
     }
+    // Direct installation produces no response pack. Report its actual verified
+    // work so qualification cannot confuse omitted repacking with missing proof.
+    tracing::info!(
+        telemetry_event = "authenticated_pack_install",
+        installed_packs = paths.len(),
+        verified_pack_bytes,
+        verified_objects = object_ids.len(),
+        complete_visibility,
+        visibility_verification_ms,
+        installation_ms = installation_started.elapsed().as_millis() as u64,
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "authenticated Git pack installation completed"
+    );
     Ok(Some(InstalledGitPacks {
         paths,
         complete_visibility,
@@ -4149,7 +4302,10 @@ pub async fn open_view_from_root(
     .await
 }
 
-/// Open a pinned repack view, retaining only a small frontier's pack bodies in memory.
+/// Open pinned repack controls without fetch-transition copies.
+///
+/// Retain at most 64 KiB of complete frontier runs for maintenance payload reuse;
+/// larger frontiers keep their pack bodies cold.
 pub async fn open_view_from_root_for_repack(
     router: &StoreLayout<Store>,
     snapshot: crab_metadata::capsule_protocol::RootSnapshot,
@@ -4157,35 +4313,13 @@ pub async fn open_view_from_root_for_repack(
 ) -> Result<CapsuleRepositoryView> {
     let root = snapshot.record().root();
     let (heads, active) = capture_ref_heads(router, root).await?;
-    let pointers = materialize_visible_ref_heads(root, &heads, &active)
-        .map_err(metadata_control_error)?
-        .pointers;
-    let frontier_bytes = pointers.iter().try_fold(0_u64, |total, pointer| {
-        total
-            .checked_add(pointer.size())
-            .ok_or(ReadError::CapsuleReadLimit {
-                resource: "frontier bytes",
-                maximum: limits.max_frontier_bytes,
-            })
-    })?;
-    if frontier_bytes <= LAYERED_REPACK_IN_MEMORY_FRONTIER_BYTES {
-        return assemble_view(
-            router,
-            snapshot,
-            limits,
-            heads,
-            active,
-            CheckpointLoad::Complete,
-        )
-        .await;
-    }
     assemble_layered_control_view(
         router,
         snapshot,
         limits,
         &heads,
         &active,
-        ControlRead::Complete,
+        ControlRead::Repack,
     )
     .await
 }
@@ -4359,8 +4493,130 @@ pub async fn open_git_view_from_root(
 #[derive(Clone, Copy)]
 enum ControlRead {
     Complete,
+    CompleteForGit,
+    Repack,
     Git,
     Fetch,
+}
+
+/// Bound retained fetch bodies while favoring runs with more transactions per byte.
+/// Maintenance keeps its aggregate, all-or-none limit. The returned flags retain
+/// pointer order; selecting a body never changes control validation or application.
+fn inline_control_runs(
+    read: ControlRead,
+    runs: impl IntoIterator<Item = (u64, usize)>,
+) -> Vec<bool> {
+    let runs = runs.into_iter().collect::<Vec<_>>();
+    let mut inline = vec![false; runs.len()];
+    match read {
+        ControlRead::Fetch => {
+            let mut order = (0..runs.len()).collect::<Vec<_>>();
+            order.sort_by(|&left, &right| {
+                let (left_bytes, left_transactions) = runs[left];
+                let (right_bytes, right_transactions) = runs[right];
+                ((right_transactions as u128) * u128::from(left_bytes))
+                    .cmp(&((left_transactions as u128) * u128::from(right_bytes)))
+                    .then_with(|| left.cmp(&right))
+            });
+            let mut remaining = LAYERED_INLINE_FRONTIER_MAX_BYTES;
+            for index in order {
+                if let Some(next) = remaining.checked_sub(runs[index].0) {
+                    inline[index] = true;
+                    remaining = next;
+                }
+            }
+        }
+        ControlRead::Repack => {
+            if runs
+                .iter()
+                .try_fold(0_u64, |total, (size, _)| total.checked_add(*size))
+                .is_some_and(|total| total <= REPACK_INLINE_FRONTIER_MAX_BYTES)
+            {
+                inline.fill(true);
+            }
+        }
+        ControlRead::Complete | ControlRead::CompleteForGit | ControlRead::Git => {}
+    }
+    inline
+}
+
+#[cfg(test)]
+mod inline_control_tests {
+    use super::*;
+
+    #[test]
+    fn fetch_reads_compacted_runs_within_the_existing_body_budget() {
+        let mib = 1024 * 1024;
+        let mut runs = vec![(9 * mib, 1), (353 * mib, 500)];
+        runs.extend(std::iter::repeat_n((12 * mib, 500), 10));
+        runs.push((24 * 1024, 1));
+        let inline = inline_control_runs(ControlRead::Fetch, runs.iter().copied());
+        assert_eq!(inline, [vec![false, false], vec![true; 11]].concat());
+        let retained = runs
+            .iter()
+            .zip(&inline)
+            .filter(|(_, inline)| **inline)
+            .map(|((bytes, _), _)| bytes)
+            .sum::<u64>();
+        assert_eq!(retained, 120 * mib + 24 * 1024);
+        assert!(retained <= LAYERED_INLINE_FRONTIER_MAX_BYTES);
+    }
+
+    #[test]
+    fn fetch_selection_preserves_order_and_handles_exact_and_overflowing_sizes() {
+        let budget = LAYERED_INLINE_FRONTIER_MAX_BYTES;
+        assert_eq!(
+            inline_control_runs(ControlRead::Fetch, [(budget, 500)]),
+            [true]
+        );
+        assert_eq!(
+            inline_control_runs(
+                ControlRead::Fetch,
+                [(budget + 1, 500), (budget / 2, 1), (budget / 2, 1)]
+            ),
+            [false, true, true],
+        );
+        assert_eq!(
+            inline_control_runs(ControlRead::Fetch, [(budget, 1), (budget, 1)]),
+            [true, false],
+        );
+        assert_eq!(
+            inline_control_runs(
+                ControlRead::Fetch,
+                [(u64::MAX, usize::MAX), (u64::MAX, usize::MAX)]
+            ),
+            [false, false],
+        );
+        assert!(inline_control_runs(ControlRead::Fetch, []).is_empty());
+    }
+
+    #[test]
+    fn maintenance_and_git_control_keep_their_existing_body_policy() {
+        let budget = REPACK_INLINE_FRONTIER_MAX_BYTES;
+        assert_eq!(
+            inline_control_runs(ControlRead::Repack, [(budget / 2, 1), (budget / 2, 500)]),
+            [true, true],
+        );
+        for runs in [
+            vec![(budget, 1), (1, 500)],
+            vec![(u64::MAX, 1), (u64::MAX, 1)],
+        ] {
+            assert_eq!(
+                inline_control_runs(ControlRead::Repack, runs),
+                [false, false]
+            );
+        }
+        for read in [
+            ControlRead::Complete,
+            ControlRead::CompleteForGit,
+            ControlRead::Git,
+        ] {
+            assert_eq!(
+                inline_control_runs(read, [(0, 1), (1, 500)]),
+                [false, false]
+            );
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -4478,7 +4734,7 @@ async fn assemble_view(
                         &visibility,
                         &source,
                         run.admission(),
-                    );
+                    )?;
                 }
             }
             capsule_run_sources.push(source);
@@ -4627,6 +4883,7 @@ async fn assemble_layered_control_view(
     active: &BTreeSet<String>,
     read: ControlRead,
 ) -> Result<CapsuleRepositoryView> {
+    let started = std::time::Instant::now();
     let footer_only = matches!(read, ControlRead::Fetch);
     let mut refs = snapshot.record().root().refs().clone();
     let mut peeled_refs = snapshot.record().root().peeled_refs().clone();
@@ -4649,9 +4906,12 @@ async fn assemble_layered_control_view(
             )
         })
         .collect();
-    let checkpoint = match snapshot.record().root().checkpoint() {
+    let mut checkpoint = match snapshot.record().root().checkpoint() {
         Some(pointer) => {
-            let checkpoint = if !matches!(read, ControlRead::Complete) {
+            let checkpoint = if !matches!(
+                read,
+                ControlRead::Complete | ControlRead::CompleteForGit | ControlRead::Repack
+            ) {
                 load_layered_checkpoint_control(router, pointer, limits).await?
             } else {
                 load_layered_checkpoint(router, pointer, limits).await?
@@ -4660,28 +4920,35 @@ async fn assemble_layered_control_view(
         }
         None => None,
     };
-    // Retain complete small frontiers for pack-index and entry reads. Larger
-    // frontiers keep bounded suffix/range reads instead of resident pack bodies.
-    let inline_frontier = footer_only
-        && pointers
+    tracing::debug!(
+        footer_only,
+        frontier_runs = pointers.len(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "layered control checkpoint opened"
+    );
+    let inline = inline_control_runs(
+        read,
+        pointers
             .iter()
-            .try_fold(0_u64, |total, pointer| total.checked_add(pointer.size()))
-            .is_some_and(|total| total <= LAYERED_INLINE_FRONTIER_MAX_BYTES);
-    let loaded = futures_util::stream::iter(pointers.iter().cloned().map(|pointer| async move {
-        if inline_frontier {
-            let run = load_run(router, &pointer).await?;
-            let (control, capsules) = run.verified_controls()?;
-            Ok::<_, ReadError>((control, capsules, Some(run.bytes().clone())))
-        } else {
-            let (control, capsules) = if matches!(read, ControlRead::Git) {
-                crab_metadata::capsule_protocol::load_capsule_run_git_control(router, &pointer)
-                    .await?
+            .map(|pointer| (pointer.size(), pointer.transaction_ids().len())),
+    );
+    let loaded = futures_util::stream::iter(pointers.iter().cloned().zip(inline).map(
+        |(pointer, inline)| async move {
+            if inline {
+                let run = load_run(router, &pointer).await?;
+                let (control, capsules) = run.verified_controls()?;
+                Ok::<_, ReadError>((control, capsules, Some(run.bytes().clone())))
             } else {
-                load_run_control(router, &pointer).await?
-            };
-            Ok((control, capsules, None))
-        }
-    }))
+                let (control, capsules) = if matches!(read, ControlRead::Git) {
+                    crab_metadata::capsule_protocol::load_capsule_run_git_control(router, &pointer)
+                        .await?
+                } else {
+                    load_run_control(router, &pointer).await?
+                };
+                Ok((control, capsules, None))
+            }
+        },
+    ))
     .buffered(CAPSULE_FRONTIER_READ_CONCURRENCY)
     .try_collect::<Vec<_>>()
     .await?;
@@ -4699,6 +4966,12 @@ async fn assemble_layered_control_view(
         }
         runs.insert(hash, (control, capsules));
     }
+    tracing::debug!(
+        footer_only,
+        frontier_runs = runs.len(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "layered control frontier opened"
+    );
     let catalog_sources = if footer_only {
         None
     } else {
@@ -4722,7 +4995,17 @@ async fn assemble_layered_control_view(
             checkpoint.visibility_transitions(),
         )?;
     }
-    if !matches!(read, ControlRead::Git) {
+    if footer_only {
+        // Validate transaction bindings now without expanding every shared
+        // membership into per-ref ObjectId vectors during capability discovery.
+        for control in &all_capsule_controls {
+            if let Some(delta) = control.visibility_delta()? {
+                for (name, edit) in delta.edits() {
+                    tip_bound_transition_endpoints(control.transaction(), name, edit)?;
+                }
+            }
+        }
+    } else if matches!(read, ControlRead::Complete | ControlRead::CompleteForGit) {
         for (ref_name, transitions) in build_tip_bound_transitions(&[], &all_capsule_controls)? {
             tip_bound_transitions
                 .entry(ref_name)
@@ -4775,12 +5058,18 @@ async fn assemble_layered_control_view(
                         visibility,
                         &source,
                         run.admission(),
-                    );
+                    )?;
                 }
             }
             capsule_run_sources.push(source);
         }
     }
+    tracing::debug!(
+        footer_only,
+        frontier_objects = frontier_object_admission.len(),
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "layered control object admission assembled"
+    );
     let selected = select_ref_control_frontiers(snapshot.record().root(), &ref_frontiers, &runs)
         .map_err(metadata_control_error)?;
     let mut root_capsules = selected.root_controls;
@@ -4796,7 +5085,7 @@ async fn assemble_layered_control_view(
             capsule_controls: Vec::new(),
             tip_bound_transitions,
             metadata_layout: None,
-            tip_bound_controls: Vec::new(),
+            tip_bound_controls: all_capsule_controls,
             refs: expected_refs,
             peeled_refs: expected_peeled,
             visible_ref_transactions,
@@ -4841,8 +5130,23 @@ async fn assemble_layered_control_view(
         };
         VisibilityReconciliation::Paged(Box::new(initial))
     } else {
-        VisibilityReconciliation::Complete(visibility_index_for_checkpoint(checkpoint.as_ref())?)
+        let index = if matches!(read, ControlRead::CompleteForGit) {
+            match checkpoint.as_mut() {
+                Some(checkpoint) => checkpoint
+                    .take_visibility_index(0, &"0".repeat(64), &"0".repeat(64))?
+                    .unwrap_or(visibility_index_for_checkpoint(None)?),
+                None => visibility_index_for_checkpoint(None)?,
+            }
+        } else {
+            // Maintenance readers reuse the complete ordinal admission proof later.
+            visibility_index_for_checkpoint(checkpoint.as_ref())?
+        };
+        VisibilityReconciliation::Complete(index)
     };
+    tracing::debug!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "layered control base visibility opened"
+    );
     for capsule in &root_capsules {
         visibility
             .apply(capsule)
@@ -4858,6 +5162,10 @@ async fn assemble_layered_control_view(
     )
     .await
     .map_err(metadata_control_error)?;
+    tracing::debug!(
+        elapsed_ms = started.elapsed().as_millis() as u64,
+        "layered control ref visibility reconciled"
+    );
     for capsule in &ordered {
         apply_control_refs(capsule, &mut refs, &mut peeled_refs).map_err(metadata_control_error)?;
     }
@@ -4929,7 +5237,7 @@ fn extend_frontier_object_admission(
     visibility: &crab_metadata::capsule_protocol::CapsuleVisibilityDelta,
     source: &PackSourceDescriptor,
     run_admission: Option<&crab_metadata::capsule_protocol::CapsuleRunAdmission>,
-) {
+) -> Result<()> {
     let all_pack_ids = source
         .members()
         .iter()
@@ -4939,34 +5247,48 @@ fn extend_frontier_object_admission(
     all_pack_ids.sort_unstable();
     all_pack_ids.dedup();
     if all_pack_ids.is_empty() {
-        return;
+        return Ok(());
     }
-    for edit in visibility.edits().values() {
-        for oid in &edit.added {
-            let Ok(oid) = gix_hash::ObjectId::from_hex(oid.as_bytes()) else {
-                continue;
-            };
-            let Ok(oid) = oid.as_bytes().try_into() else {
-                continue;
-            };
-            let entry = admission.entry(oid).or_default();
-            // Replacement closures include inherited objects outside this run.
-            // Preserve their visibility keys, but an exact admission miss must
-            // not multiply unrelated physical candidates across every ref.
-            if let Some(run_admission) = run_admission {
-                entry.extend(
-                    run_admission
-                        .object_members(&oid)
-                        .into_iter()
-                        .flatten()
-                        .filter_map(|member| source.members().get(*member as usize))
-                        .map(|member| member.pack().blake3().to_owned()),
-                );
-            } else {
-                entry.extend(all_pack_ids.iter().cloned());
-            }
+    let Some(first) = visibility.edits().values().next() else {
+        return Ok(());
+    };
+    // Repeated histories share exact membership chunks. Join those bits once
+    // before resolving source/member bindings, instead of redoing each OID for
+    // every ref. Dictionary retention by itself never grants membership.
+    let union;
+    let added = if visibility.edits().len() == 1 {
+        &first.added
+    } else {
+        union = crab_metadata::git_visibility::GitVisibilityObjects::union(
+            visibility.edits().values().map(|edit| &edit.added),
+        )?;
+        &union
+    };
+    for oid in added {
+        let Ok(oid) = gix_hash::ObjectId::from_hex(oid.as_bytes()) else {
+            continue;
+        };
+        let Ok(oid) = oid.as_bytes().try_into() else {
+            continue;
+        };
+        let entry = admission.entry(oid).or_default();
+        // Replacement closures include inherited objects outside this run.
+        // Preserve their visibility keys, but an exact admission miss must
+        // not multiply unrelated physical candidates across every ref.
+        if let Some(run_admission) = run_admission {
+            entry.extend(
+                run_admission
+                    .object_members(&oid)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|member| source.members().get(*member as usize))
+                    .map(|member| member.pack().blake3().to_owned()),
+            );
+        } else {
+            entry.extend(all_pack_ids.iter().cloned());
         }
     }
+    Ok(())
 }
 
 fn state_digest(root: &RootRecord, transactions: &BTreeMap<String, String>) -> String {
@@ -5328,6 +5650,42 @@ mod tests {
         max_frontier_bytes: 8 * 1024 * 1024,
     };
 
+    #[tokio::test]
+    async fn partial_retained_runs_do_not_become_complete_repack_input() {
+        let inner = Arc::new(InMemory::new());
+        seed_one_capsule(inner.clone(), None).await;
+        let router = StoreLayout::new(Store::new(inner), "repositories/test".to_owned());
+        let root = load_root(&router).await.unwrap();
+        let capture = CapsuleRepositoryCapture::from_root(router, root)
+            .await
+            .unwrap();
+        let mut view = capture.layered_control_view(TEST_LIMITS).await.unwrap();
+        assert!(matches!(
+            view.repack_capsules().unwrap(),
+            std::borrow::Cow::Owned(capsules) if capsules.len() == 1
+        ));
+
+        // Model another admitted source whose body was not selected for retention.
+        // The complete tiny cached run cannot stand in for this missing source.
+        let pointer = &view.capsule_run_pointers[0];
+        let uncached = CapsulePointer::new(
+            "f".repeat(64),
+            pointer.size(),
+            pointer.control_offset(),
+            pointer.control_size(),
+            pointer.footer_hash(),
+            pointer.level(),
+            pointer.transaction_ids().to_vec(),
+            pointer.newest_base_root_digest(),
+        )
+        .unwrap();
+        view.capsule_run_pointers.push(uncached);
+        assert!(matches!(
+            view.repack_capsules().unwrap(),
+            std::borrow::Cow::Borrowed(capsules) if capsules.is_empty()
+        ));
+    }
+
     #[derive(Default)]
     struct RecordingObserver {
         observations: Mutex<Vec<StorageObservation>>,
@@ -5359,6 +5717,14 @@ mod tests {
     }
 
     async fn seed_one_capsule(inner: Arc<InMemory>, pointer_transaction_id: Option<String>) {
+        seed_one_capsule_with_visibility(inner, pointer_transaction_id, None).await;
+    }
+
+    async fn seed_one_capsule_with_visibility(
+        inner: Arc<InMemory>,
+        pointer_transaction_id: Option<String>,
+        visibility: Option<CapsuleVisibilityDelta>,
+    ) {
         let store = Store::new(inner);
         let router = StoreLayout::new(store.clone(), "repositories/test".to_owned());
         let initial = RootRecord::encode(
@@ -5388,7 +5754,15 @@ mod tests {
                 )
                 .unwrap(),
             ],
-            Vec::new(),
+            visibility
+                .map(|delta| {
+                    CapsuleSection::new(
+                        CapsuleSectionKind::VisibilityDelta,
+                        delta.encode().unwrap(),
+                    )
+                })
+                .into_iter()
+                .collect(),
         )
         .unwrap();
         let run = CapsuleRun::leaf(capsule).unwrap();
@@ -6089,6 +6463,57 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn owned_visibility_transfer_reuses_dictionary_and_preserves_captured_state() {
+        for committed in [false, true] {
+            let inner = Arc::new(InMemory::new());
+            seed_prepared_multi_ref(inner.clone(), committed, committed).await;
+            let router = StoreLayout::new(Store::new(inner), "repositories/test".into());
+            let root = load_root(&router).await.unwrap();
+            let mut view = open_view_from_root_with_metadata(&router, root, TEST_LIMITS)
+                .await
+                .unwrap();
+            let expected = view.git_visibility_index().await.unwrap();
+            let snapshot = view.git_snapshot().unwrap();
+            let dictionary = view
+                .reconciled_visibility
+                .as_ref()
+                .unwrap()
+                .objects()
+                .as_ptr();
+            let taken = view.take_git_visibility_index().await.unwrap();
+            assert_eq!(taken.objects().as_ptr(), dictionary);
+            assert_eq!(taken, expected);
+            assert_eq!(view.git_visibility_index().await.unwrap(), expected);
+            assert_eq!(view.git_snapshot().unwrap(), snapshot);
+        }
+    }
+
+    #[tokio::test]
+    async fn shared_and_paged_visibility_transfer_preserves_independent_proofs() {
+        let inner = Arc::new(InMemory::new());
+        seed_prepared_multi_ref(inner.clone(), true, true).await;
+        let router = StoreLayout::new(Store::new(inner), "repositories/test".into());
+        let root = load_root(&router).await.unwrap();
+        for paged in [false, true] {
+            let mut view = if paged {
+                open_git_view_from_root(&router, root.clone(), TEST_LIMITS).await
+            } else {
+                open_view_from_root_with_metadata(&router, root.clone(), TEST_LIMITS).await
+            }
+            .unwrap();
+            let other = view.clone();
+            let expected = other.git_visibility_index().await.unwrap();
+            let mut taken = view.take_git_visibility_index().await.unwrap();
+            assert_eq!(taken, expected);
+            for name in view.refs().keys() {
+                taken.remove_ref(name);
+            }
+            assert_eq!(view.git_visibility_index().await.unwrap(), expected);
+            assert_eq!(other.git_visibility_index().await.unwrap(), expected);
+        }
+    }
+
+    #[tokio::test]
     async fn git_metadata_view_preserves_references_visibility_and_catalog() {
         for committed in [false, true] {
             let inner = Arc::new(InMemory::new());
@@ -6445,6 +6870,54 @@ mod tests {
     }
 
     #[tokio::test]
+    async fn layered_control_rejects_mismatched_transition_before_hint_expansion() {
+        let inner = Arc::new(InMemory::new());
+        let delta = CapsuleVisibilityDelta::new(BTreeMap::from([(
+            "refs/heads/main".to_owned(),
+            GitVisibilityEdit::from_replacement_objects(None, "6".repeat(40), vec!["6".repeat(40)]),
+        )]))
+        .unwrap();
+        seed_one_capsule_with_visibility(inner.clone(), None, Some(delta)).await;
+        let router = StoreLayout::new(Store::new(inner), "repositories/test".to_owned());
+        let result = open_view_from_root_with_layered_control(
+            &router,
+            load_root(&router).await.unwrap(),
+            TEST_LIMITS,
+        )
+        .await;
+        let Err(error) = result else {
+            panic!("mismatched transition must reject the view");
+        };
+        assert!(
+            error
+                .to_string()
+                .contains("visibility transition does not match its ref edit")
+        );
+    }
+
+    #[tokio::test]
+    async fn layered_control_defers_transition_objects_until_requested() {
+        let inner = Arc::new(InMemory::new());
+        seed_prepared_multi_ref(inner.clone(), true, true).await;
+        let router = StoreLayout::new(Store::new(inner), "repositories/test".to_owned());
+        let root = load_root(&router).await.unwrap();
+        let view = open_view_from_root_with_layered_control(&router, root.clone(), TEST_LIMITS)
+            .await
+            .unwrap();
+        assert!(
+            view.tip_bound_transitions.is_empty(),
+            "capability discovery must retain compact controls without expanding memberships"
+        );
+        let complete = open_view_from_root_with_metadata(&router, root, TEST_LIMITS)
+            .await
+            .unwrap();
+        let expected = complete.tip_bound_transitions().await.unwrap();
+        assert_eq!(expected.len(), 2);
+        assert_eq!(view.tip_bound_transitions().await.unwrap(), expected);
+        assert_eq!(view.tip_bound_transitions().await.unwrap(), expected);
+    }
+
+    #[tokio::test]
     async fn bounded_layered_control_reads_the_complete_frontier_once() {
         let inner = Arc::new(InMemory::new());
         seed_one_capsule(inner.clone(), None).await;
@@ -6504,7 +6977,15 @@ mod tests {
             let source = layer.source_descriptor().unwrap();
             let visibility = include_visibility.then(|| {
                 crab_metadata::capsule_protocol::LayeredVisibilitySnapshot::from_index(
-                    &visibility_index(BTreeMap::new()),
+                    &visibility_index(
+                        current
+                            .record()
+                            .root()
+                            .refs()
+                            .iter()
+                            .map(|(name, tip)| (name.clone(), vec![tip.clone()]))
+                            .collect(),
+                    ),
                     &crab_metadata::capsule_protocol::source_catalog_digest(std::slice::from_ref(
                         &source,
                     ))
@@ -6549,7 +7030,7 @@ mod tests {
                 .root()
                 .install_checkpoint(
                     current.record().digest(),
-                    checkpoint_pointer,
+                    checkpoint_pointer.clone(),
                     Some(history.pointer().unwrap()),
                 )
                 .unwrap();
@@ -6586,26 +7067,153 @@ mod tests {
                 &[layer.source_descriptor().unwrap()]
             );
             assert!(view.layered_checkpoint().unwrap().is_control_only());
-            let observations = observer.observations.lock().unwrap();
-            assert_eq!(
-                observations.iter().map(|read| read.bytes_read).sum::<u64>(),
-                root.bytes().len() as u64 + checkpoint.bytes().len() as u64
-                    - checkpoint.control_offset()
-            );
-            let operations = observations
-                .iter()
-                .filter(|observation| observation.outcome == StorageOutcome::Success)
-                .map(|observation| observation.operation)
-                .collect::<Vec<_>>();
-            assert_eq!(
-                operations,
-                vec![
-                    StorageOperation::Get,
-                    StorageOperation::List,
-                    StorageOperation::List,
-                    StorageOperation::Range
-                ]
-            );
+            {
+                let observations = observer.observations.lock().unwrap();
+                assert_eq!(
+                    observations.iter().map(|read| read.bytes_read).sum::<u64>(),
+                    root.bytes().len() as u64 + checkpoint.bytes().len() as u64
+                        - checkpoint.control_offset()
+                );
+                let operations = observations
+                    .iter()
+                    .filter(|observation| observation.outcome == StorageOutcome::Success)
+                    .map(|observation| observation.operation)
+                    .collect::<Vec<_>>();
+                assert_eq!(
+                    operations,
+                    vec![
+                        StorageOperation::Get,
+                        StorageOperation::List,
+                        StorageOperation::List,
+                        StorageOperation::Range
+                    ]
+                );
+            }
+
+            let mut capture = CapsuleRepositoryCapture::from_root(
+                router.clone(),
+                load_root(&router).await.unwrap(),
+            )
+            .await
+            .unwrap();
+            if include_visibility {
+                let complete =
+                    open_view_from_root_with_metadata(&router, capture.root.clone(), TEST_LIMITS)
+                        .await
+                        .unwrap();
+                assert!(
+                    complete
+                        .layered_checkpoint()
+                        .unwrap()
+                        .cached_visibility_bytes()
+                        .is_some_and(|bytes| bytes > 0),
+                    "complete metadata view lost its decoded checkpoint proof"
+                );
+                let captured = capture.metadata_view(TEST_LIMITS).await.unwrap();
+                assert!(
+                    captured
+                        .layered_checkpoint()
+                        .unwrap()
+                        .cached_visibility_bytes()
+                        .is_some_and(|bytes| bytes > 0)
+                );
+                let git = capture.owned_git_metadata_view(TEST_LIMITS).await.unwrap();
+                assert_eq!(
+                    git.layered_checkpoint().unwrap().cached_visibility_bytes(),
+                    None
+                );
+                assert_eq!(
+                    git.git_snapshot().unwrap(),
+                    complete.git_snapshot().unwrap()
+                );
+                assert_eq!(
+                    git.git_visibility_index().await.unwrap(),
+                    complete.git_visibility_index().await.unwrap()
+                );
+            }
+            observer.observations.lock().unwrap().clear();
+            assert!(capture.may_have_layered_cold_clone_packs());
+            let base = crab_metadata::capsule_protocol::CapsuleRefHead::from_root(
+                "refs/heads/main",
+                capture.root.record().root().ref_epoch().to_owned(),
+                Some("2".repeat(40)),
+                None,
+            )
+            .unwrap();
+            capture.heads = vec![base.clone()];
+            assert!(capture.may_have_layered_cold_clone_packs());
+            let prior = current.record().root().capsule_frontier()[0].clone();
+            let compacted_root = current
+                .record()
+                .root()
+                .install_ref_checkpoint(
+                    current.record().digest(),
+                    checkpoint_pointer,
+                    history.pointer().unwrap(),
+                    current.record().root().refs().clone(),
+                    current.record().root().peeled_refs().clone(),
+                    BTreeMap::from([(
+                        "refs/heads/main".to_owned(),
+                        prior.transaction_ids()[0].clone(),
+                    )]),
+                )
+                .unwrap();
+            capture.root = current
+                .committed_successor(
+                    RootRecord::encode(compacted_root).unwrap(),
+                    current.etag().clone(),
+                )
+                .unwrap();
+            let compacted = base
+                .successor_state(
+                    &capture.active,
+                    Some("2".repeat(40)),
+                    None,
+                    prior.transaction_ids()[0].clone(),
+                    vec![prior.clone()],
+                )
+                .unwrap();
+            capture.heads = vec![base.commit(compacted).unwrap()];
+            assert!(capture.may_have_layered_cold_clone_packs());
+            let next_id = "7".repeat(64);
+            let next = CapsulePointer::new(
+                prior.hash(),
+                prior.size(),
+                prior.control_offset(),
+                prior.control_size(),
+                prior.footer_hash(),
+                prior.level(),
+                vec![next_id.clone()],
+                prior.newest_base_root_digest(),
+            )
+            .unwrap();
+            for oid in [None, Some("3".repeat(40))] {
+                let state = base
+                    .successor_state(
+                        &BTreeSet::new(),
+                        oid,
+                        None,
+                        next_id.clone(),
+                        vec![next.clone()],
+                    )
+                    .unwrap();
+                capture.heads = vec![base.commit(state.clone()).unwrap()];
+                capture.active.clear();
+                assert!(!capture.may_have_layered_cold_clone_packs());
+                let activation = "6".repeat(64);
+                capture.heads = vec![
+                    base.prepare(
+                        base.visible(&BTreeSet::new()).clone(),
+                        activation.clone(),
+                        state,
+                    )
+                    .unwrap(),
+                ];
+                assert!(capture.may_have_layered_cold_clone_packs());
+                capture.active.insert(activation);
+                assert!(!capture.may_have_layered_cold_clone_packs());
+            }
+            assert!(observer.observations.lock().unwrap().is_empty());
         }
     }
 

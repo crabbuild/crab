@@ -516,6 +516,12 @@ checkpoint or live qualification. The production-codec follow-up below addresses
 the synthetic encoding failure; the original maintenance receipt stays failed.
 Evidence: `checkpoint-base-probe-report.json`.
 
+The following format-10 measurements describe commit `b65af39e4c79` before
+integration with `crab-v2`. The merge retains the base branch's format-9 shared
+bitmap codec instead; the shared-base experiment and its scalar helper are
+superseded. These receipts remain historical and do not qualify the integrated
+codec or its latency.
+
 The format-10 production visibility codec stores one common base plus exact
 per-ref changes, choosing absolute sets for small outlier refs. The original
 256-ref/32,000-common-OID regression now passes below 8 MiB without relaxing

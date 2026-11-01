@@ -6,10 +6,7 @@ import { Button } from "@/components/ui/button";
 import { Badge } from "@/components/ui/badge";
 import { Field, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select";
+import { FieldSelect } from "@/components/ui/field-select";
 import { TeamFields } from "./form";
 import { TeamPages } from "./members";
 import { TeamDetail } from "./team";
@@ -246,30 +243,28 @@ function CreationPolicy({
             <FieldLabel className="sr-only" htmlFor="team-creation">
               Who can create teams
             </FieldLabel>
-            <NativeSelect
+            <FieldSelect
               id="team-creation"
+              label="Who can create teams"
               value={policy.member_creation ? "members" : "owners"}
               disabled={commands.locked}
-              onChange={(event) =>
+              onValueChange={(value) =>
                 void commands.submit(
                   id,
                   actor,
                   {
                     kind: "policy",
                     version: policy.version,
-                    member_creation: event.target.value === "members",
+                    member_creation: value === "members",
                   },
                   "Update team creation permission",
                 )
               }
-            >
-              <NativeSelectOption value="members">
-                All organization members
-              </NativeSelectOption>
-              <NativeSelectOption value="owners">
-                Organization owners only
-              </NativeSelectOption>
-            </NativeSelect>
+              options={{
+                members: "All organization members",
+                owners: "Organization owners only",
+              }}
+            />
           </Field>
         </section>
       )}

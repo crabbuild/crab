@@ -55,7 +55,7 @@ async fn source_probe_observes_ref_only_publication_and_same_state_index_changes
     )
     .unwrap();
     let capsule = Capsule::build(&transaction, Vec::new(), Vec::new()).unwrap();
-    crab_write::capsule_protocol::publish(&repository.layout, root, &transaction, &capsule)
+    crab_write::capsule_protocol::publish(&repository.layout, root, &transaction, capsule)
         .await
         .unwrap();
     assert_eq!(

@@ -87,7 +87,7 @@ async fn publish_pack(
         ));
     }
     let capsule = Capsule::build(&transaction, vec![pack], sections).unwrap();
-    crab_write::capsule_protocol::publish(layout, root, &transaction, &capsule)
+    crab_write::capsule_protocol::publish(layout, root, &transaction, capsule)
         .await
         .unwrap();
 }
@@ -133,7 +133,7 @@ async fn layered_history_verification_preserves_historical_refs_and_bytes() {
     let (layout, root) = fixture().await;
     let chain = history_chain(&layout, &root).await.unwrap();
     let oldest = chain.last().unwrap();
-    assert_eq!(oldest.checkpoint().format(), 10);
+    assert_eq!(oldest.checkpoint().format(), 9);
 
     let verified = verify_history(
         &layout,

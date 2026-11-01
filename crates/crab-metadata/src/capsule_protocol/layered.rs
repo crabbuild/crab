@@ -22,8 +22,8 @@ mod visibility_pages;
 #[cfg(feature = "storage")]
 pub use visibility_pages::LayeredVisibilityReader;
 
-const CHECKPOINT_MAGIC: &[u8; 8] = b"CRBCKP10";
-pub(super) const CHECKPOINT_VERSION: u32 = 10;
+const CHECKPOINT_MAGIC: &[u8; 8] = b"CRBCKP09";
+pub(super) const CHECKPOINT_VERSION: u32 = 9;
 const LAYER_MAGIC: &[u8; 8] = b"CRBPKL01";
 const LAYER_VERSION: u32 = 1;
 const TRAILER_BYTES: usize = 8 + 32 + 8;
@@ -179,6 +179,53 @@ impl LayeredVisibilitySnapshot {
         self.member_admission.as_deref()
     }
 
+    fn retained_bytes(&self) -> usize {
+        let mut bytes = std::mem::size_of::<Self>()
+            .saturating_add(self.catalog_digest.capacity())
+            .saturating_add(self.objects.capacity().saturating_mul(20))
+            .saturating_add(self.member_admission.as_ref().map_or(0, |members| {
+                members
+                    .capacity()
+                    .saturating_mul(std::mem::size_of::<LayeredObjectMember>())
+            }));
+        // Include map nodes and spare vector capacity, including repeated sets
+        // whose shared wire pages can be much smaller than their resident values.
+        if !self.refs.is_empty() {
+            bytes = bytes.saturating_add(1024);
+        }
+        for (name, positions) in &self.refs {
+            bytes = bytes
+                .saturating_add(128)
+                .saturating_add(name.capacity())
+                .saturating_add(match positions {
+                    GitVisibilityClosure::Sparse(values) => values.capacity().saturating_mul(4),
+                    GitVisibilityClosure::Bitmap(values) => values
+                        .capacity()
+                        .saturating_add(std::mem::size_of::<Vec<u8>>())
+                        .saturating_add(2 * std::mem::size_of::<usize>()),
+                });
+        }
+        for map in [&self.transitions, &self.incremental_history] {
+            if !map.is_empty() {
+                bytes = bytes.saturating_add(1024);
+            }
+            for (name, transitions) in map {
+                bytes = bytes
+                    .saturating_add(128)
+                    .saturating_add(name.capacity())
+                    .saturating_add(
+                        transitions
+                            .capacity()
+                            .saturating_mul(std::mem::size_of::<GitVisibilityOrdinalTransition>()),
+                    );
+                for transition in transitions {
+                    bytes = bytes.saturating_add(transition.objects.capacity().saturating_mul(4));
+                }
+            }
+        }
+        bytes
+    }
+
     /// Return the stable digest of the complete visibility object dictionary.
     ///
     /// The digest is stored in the checkpoint footer so a cold reader can
@@ -272,6 +319,30 @@ impl LayeredVisibilitySnapshot {
             self.refs.clone(),
             self.transitions.clone(),
             self.incremental_history.clone(),
+        )
+    }
+
+    /// Transfer the validated ordinal proof into an independently editable index.
+    fn into_index(
+        self,
+        generation: u64,
+        pack_index_hash: &str,
+        git_validation_digest: &str,
+        expected_catalog_digest: &str,
+    ) -> Result<GitVisibilityIndex> {
+        if self.catalog_digest != expected_catalog_digest {
+            return Err(corrupt(
+                "layered visibility proof does not match its pack-source catalog",
+            ));
+        }
+        GitVisibilityIndex::from_ordinal_parts(
+            generation,
+            pack_index_hash,
+            git_validation_digest,
+            self.objects,
+            self.refs,
+            self.transitions,
+            self.incremental_history,
         )
     }
 
@@ -991,6 +1062,7 @@ struct LayerSectionLocation {
 #[derive(Debug, Clone)]
 pub struct LayeredCheckpoint {
     bytes: Bytes,
+    owned_buffer_bytes: Option<usize>,
     hash: String,
     footer_hash: String,
     footer: CheckpointFooter,
@@ -1175,11 +1247,16 @@ impl LayeredCheckpoint {
             footer_bytes = serde_json::to_vec(&footer)
                 .map_err(|source| MetadataError::CapsuleVisibilityRecord { source })?;
         }
+        // Appending the footer to a full visibility buffer must not double its
+        // retained capacity and unnecessarily exclude it from the bounded pool.
+        body.reserve_exact(footer_bytes.len() + TRAILER_BYTES);
         body.extend_from_slice(&footer_bytes);
         body.extend_from_slice(&(footer_bytes.len() as u64).to_be_bytes());
         body.extend_from_slice(blake3::hash(&footer_bytes).as_bytes());
         body.extend_from_slice(CHECKPOINT_MAGIC);
+        let owned_buffer_bytes = body.capacity();
         let mut checkpoint = Self::decode(Bytes::from(body))?;
+        checkpoint.owned_buffer_bytes = Some(owned_buffer_bytes);
         checkpoint.catalog_objects = catalog_objects;
         Ok(checkpoint)
     }
@@ -1204,6 +1281,7 @@ impl LayeredCheckpoint {
             object_size,
             control_offset,
             control_only: false,
+            owned_buffer_bytes: None,
             catalog_objects: BTreeMap::new(),
             visibility: Arc::new(OnceLock::new()),
         })
@@ -1269,6 +1347,7 @@ impl LayeredCheckpoint {
             object_size,
             control_offset: footer_start,
             control_only: true,
+            owned_buffer_bytes: None,
             catalog_objects: BTreeMap::new(),
             visibility: Arc::new(OnceLock::new()),
         })
@@ -1337,6 +1416,54 @@ impl LayeredCheckpoint {
     #[must_use]
     pub const fn is_control_only(&self) -> bool {
         self.control_only
+    }
+
+    /// Drop materialized bodies and caches while retaining validated control metadata.
+    #[must_use]
+    pub fn into_control_only(mut self) -> Self {
+        self.bytes = Bytes::new();
+        self.owned_buffer_bytes = None;
+        self.control_only = true;
+        self.catalog_objects.clear();
+        self.visibility = Arc::new(OnceLock::new());
+        self
+    }
+
+    /// Conservatively charge encoded buffers, footer data and decoded visibility.
+    ///
+    /// Only locally built checkpoints have a known backing-buffer allocation;
+    /// decoded inputs may be small slices retaining much larger buffers. This
+    /// retention estimate does not replace pointer or visibility authentication.
+    #[must_use]
+    pub fn retained_metadata_bytes(&self) -> Option<usize> {
+        let owned_buffer_bytes = self.owned_buffer_bytes?;
+        if self.control_only {
+            return None;
+        }
+        let visibility = if self
+            .footer
+            .sections
+            .iter()
+            .any(|section| section.kind == CapsuleSectionKind::VisibilityOrdinalSnapshot)
+        {
+            self.cached_visibility_bytes()?
+        } else {
+            0
+        };
+        let control: usize = self.control_size().try_into().ok()?;
+        let mut bytes = std::mem::size_of::<Self>()
+            .saturating_add(owned_buffer_bytes)
+            .saturating_add(control.saturating_mul(4))
+            .saturating_add(visibility);
+        if !self.catalog_objects.is_empty() {
+            bytes = bytes.saturating_add(1024);
+        }
+        for object in self.catalog_objects.values() {
+            bytes = bytes
+                .saturating_add(256)
+                .saturating_add(object.len().saturating_mul(2));
+        }
+        Some(bytes)
     }
 
     /// Verify every identity field of the root's authenticated checkpoint pointer.
@@ -1453,6 +1580,14 @@ impl LayeredCheckpoint {
         Ok(Some(self.visibility.get_or_init(|| snapshot)))
     }
 
+    /// Return resident bytes of an already verified visibility proof without decoding it.
+    #[must_use]
+    pub fn cached_visibility_bytes(&self) -> Option<usize> {
+        self.visibility
+            .get()
+            .map(LayeredVisibilitySnapshot::retained_bytes)
+    }
+
     /// Decode visibility bound to this source inventory and the caller's Git identity.
     pub fn visibility_index(
         &self,
@@ -1471,6 +1606,29 @@ impl LayeredCheckpoint {
                 .map(Some);
         }
         Ok(None)
+    }
+
+    /// Transfer a complete verified visibility index out of an owned checkpoint.
+    ///
+    /// An unshared decoded cache moves into the index instead of retaining a
+    /// second proof during ref edits. Shared checkpoint clones retain their
+    /// immutable cache. The authenticated body remains available for later reads.
+    pub fn take_visibility_index(
+        &mut self,
+        generation: u64,
+        pack_index_hash: &str,
+        git_validation_digest: &str,
+    ) -> Result<Option<GitVisibilityIndex>> {
+        if self.visibility_ordinal_snapshot()?.is_none() {
+            return Ok(None);
+        }
+        let digest = source_catalog_digest(self.sources())?;
+        if let Some(snapshot) = Arc::get_mut(&mut self.visibility).and_then(OnceLock::take) {
+            return snapshot
+                .into_index(generation, pack_index_hash, git_validation_digest, &digest)
+                .map(Some);
+        }
+        self.visibility_index(generation, pack_index_hash, git_validation_digest)
     }
 
     fn section(&self, kind: CapsuleSectionKind) -> Result<Option<Bytes>> {
@@ -1948,6 +2106,135 @@ mod tests {
     }
 
     #[test]
+    fn checkpoint_control_demotion_releases_body_and_decoded_visibility() {
+        let source = PackLayer::build(&pack())
+            .unwrap()
+            .source_descriptor()
+            .unwrap();
+        let index = GitVisibilityIndex::new(
+            3,
+            "0".repeat(64),
+            "0".repeat(64),
+            BTreeMap::from([("refs/heads/main".to_owned(), vec!["2".repeat(40)])]),
+        )
+        .unwrap();
+        let visibility = LayeredVisibilitySnapshot::from_index(
+            &index,
+            &source_catalog_digest(std::slice::from_ref(&source)).unwrap(),
+        )
+        .unwrap();
+        let checkpoint = LayeredCheckpoint::build(
+            3,
+            &"a".repeat(64),
+            vec![source],
+            PointerCatalog::new(),
+            Some(visibility),
+        )
+        .unwrap();
+        let expected = LayeredCheckpoint::decode_control(
+            checkpoint
+                .bytes()
+                .slice(checkpoint.control_offset() as usize..),
+            checkpoint.bytes().len() as u64,
+            checkpoint.control_offset(),
+            checkpoint.hash(),
+            checkpoint.footer_hash(),
+        )
+        .unwrap();
+        for shared in [false, true] {
+            let decoded = LayeredCheckpoint::decode(checkpoint.bytes().clone()).unwrap();
+            decoded.visibility_ordinal_snapshot().unwrap();
+            let cache = Arc::downgrade(&decoded.visibility);
+            let other = shared.then(|| decoded.clone());
+            let control = decoded.into_control_only();
+            assert_eq!(cache.upgrade().is_some(), shared);
+            assert_eq!(control, expected);
+            assert!(control.bytes().is_empty());
+            assert!(control.visibility_ordinal_snapshot().is_err());
+            if let Some(other) = other {
+                assert_eq!(
+                    other
+                        .visibility_index(3, &"0".repeat(64), &"0".repeat(64))
+                        .unwrap()
+                        .unwrap(),
+                    index
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn checkpoint_visibility_transfer_preserves_body_and_independent_proofs() {
+        let source = PackLayer::build(&pack())
+            .unwrap()
+            .source_descriptor()
+            .unwrap();
+        let index = GitVisibilityIndex::new(
+            3,
+            "0".repeat(64),
+            "0".repeat(64),
+            BTreeMap::from([
+                ("refs/heads/main".to_owned(), vec!["2".repeat(40)]),
+                ("refs/tags/blob".to_owned(), vec!["2".repeat(40)]),
+            ]),
+        )
+        .unwrap();
+        let visibility = LayeredVisibilitySnapshot::from_index_with_member_admission(
+            &index,
+            &source_catalog_digest(std::slice::from_ref(&source)).unwrap(),
+            vec![LayeredObjectMember::new(0, 0)],
+        )
+        .unwrap();
+        let checkpoint = LayeredCheckpoint::build(
+            3,
+            &"a".repeat(64),
+            vec![source],
+            PointerCatalog::new(),
+            Some(visibility),
+        )
+        .unwrap();
+        for shared in [false, true] {
+            let mut decoded = LayeredCheckpoint::decode(checkpoint.bytes().clone()).unwrap();
+            let dictionary = decoded
+                .visibility_ordinal_snapshot()
+                .unwrap()
+                .unwrap()
+                .objects()
+                .as_ptr();
+            let other = shared.then(|| decoded.clone());
+            let mut taken = decoded
+                .take_visibility_index(3, &"0".repeat(64), &"0".repeat(64))
+                .unwrap()
+                .unwrap();
+            assert_eq!(taken, index);
+            assert_eq!(decoded.visibility.get().is_some(), shared);
+            if !shared {
+                assert_eq!(taken.objects().as_ptr(), dictionary);
+            }
+            assert!(!decoded.is_control_only());
+            assert_eq!(decoded.bytes(), checkpoint.bytes());
+            taken.remove_ref("refs/heads/main");
+            for retained in std::iter::once(&decoded).chain(other.as_ref()) {
+                assert_eq!(
+                    retained
+                        .visibility_index(3, &"0".repeat(64), &"0".repeat(64))
+                        .unwrap()
+                        .unwrap(),
+                    index
+                );
+                assert_eq!(
+                    retained
+                        .visibility_ordinal_snapshot()
+                        .unwrap()
+                        .unwrap()
+                        .member_admission(),
+                    Some([LayeredObjectMember::new(0, 0)].as_slice())
+                );
+            }
+        }
+    }
+
+    #[test]
     fn checkpoint_pointer_binding_checks_every_field_for_full_and_control_reads() {
         let checkpoint = LayeredCheckpoint::build(
             3,
@@ -2126,6 +2413,11 @@ mod tests {
         assert!(
             decoded
                 .to_index(1, &"1".repeat(64), &"2".repeat(64), &"f".repeat(64))
+                .is_err()
+        );
+        assert!(
+            decoded
+                .into_index(1, &"1".repeat(64), &"2".repeat(64), &"f".repeat(64))
                 .is_err()
         );
     }

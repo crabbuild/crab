@@ -96,6 +96,20 @@ async fn project_sources_show_live_issues_pulls_links_and_native_search() {
     assert_eq!(items.items[0].assignees[0].name, "Current assignee");
     assert_eq!(items.items[0].work.as_ref().unwrap().title, "Current title");
     assert_eq!(items.items[0].links[0].title, "Implementation PR");
+    let unfiltered = cell
+        .client
+        .query::<Candidates>(
+            &cell.target,
+            None,
+            CandidateQuery {
+                q: String::new(),
+                kind: None,
+            },
+        )
+        .await
+        .unwrap()
+        .output;
+    assert_eq!(unfiltered.len(), 2);
     let matches = cell
         .client
         .query::<Candidates>(

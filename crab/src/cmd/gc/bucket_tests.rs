@@ -157,7 +157,7 @@ async fn publish_capsule_pointer_catalog(store: &Store, repo: &str) -> (String, 
         )],
     )
     .unwrap();
-    crab_write::capsule_protocol::publish(&router, base, &transaction, &capsule)
+    crab_write::capsule_protocol::publish(&router, base, &transaction, capsule)
         .await
         .unwrap();
     (shard_hash, xorb_hash)
@@ -753,7 +753,7 @@ async fn registry_repair_and_bucket_marks_preserve_capsule_catalog_shards() {
     )
     .unwrap();
     let capsule = Capsule::build(&transaction, Vec::new(), Vec::new()).unwrap();
-    crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
+    crab_write::capsule_protocol::publish(&layout, base, &transaction, capsule)
         .await
         .unwrap();
     let moved_roots = bucket_root_snapshot_streaming(&store, &registry, &HashSet::new())

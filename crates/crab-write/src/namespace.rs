@@ -6,9 +6,15 @@ use std::{
 
 use crab_coordination::{CoordinationError, GIT_REF_NAMESPACE_RESOURCE, PushLockAcquireContext};
 use crab_storage::{Store, StoreLayout};
+use futures_util::StreamExt;
 use tokio_util::sync::CancellationToken;
 
 use crate::WriteError;
+
+#[cfg(test)]
+mod cleanup_tests;
+
+const NAMESPACE_RELEASE_CONCURRENCY: usize = 32;
 
 /// Serialize only ref-name changes that can participate in the same Git D/F conflict.
 ///
@@ -70,6 +76,8 @@ where
     };
     let scoped = cancel.child_token();
     let mut leases = Vec::with_capacity(resources.len());
+    let namespace_count = resources.len();
+    let acquire_started = (namespace_count > NAMESPACE_RELEASE_CONCURRENCY).then(Instant::now);
     for resource in resources {
         let mut context = PushLockAcquireContext::new(Arc::clone(store.inner()));
         let mut attempt = 0;
@@ -111,6 +119,14 @@ where
         };
         leases.push(crab_coordination::RenewingPushLock::start(lease, &scoped));
     }
+    if let Some(started) = acquire_started {
+        tracing::info!(
+            phase = "namespace_acquire",
+            namespaces = namespace_count,
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "Git namespace lease phase finished"
+        );
+    }
     let outcome = operation(scoped).await;
     release_leases(leases).await;
     outcome
@@ -123,8 +139,18 @@ fn namespace_resource(ref_name: &str) -> String {
 }
 
 async fn release_leases(leases: Vec<crab_coordination::RenewingPushLock>) {
-    for lease in leases.into_iter().rev() {
-        lease.release().await;
+    let count = leases.len();
+    let started = (count > NAMESPACE_RELEASE_CONCURRENCY).then(Instant::now);
+    futures_util::stream::iter(leases.into_iter().rev())
+        .for_each_concurrent(NAMESPACE_RELEASE_CONCURRENCY, |lease| lease.release())
+        .await;
+    if let Some(started) = started {
+        tracing::info!(
+            phase = "namespace_release",
+            namespaces = count,
+            elapsed_ms = started.elapsed().as_secs_f64() * 1000.0,
+            "Git namespace lease owners drained"
+        );
     }
 }
 

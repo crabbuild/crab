@@ -8,15 +8,25 @@ import {
 } from "react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { endpoint, type Repository } from "@/lib/api";
-import type { Command, Outcome } from "./model";
+import { type Repository } from "@/lib/api";
+import {
+  projectEndpoint,
+  type Command,
+  type Outcome,
+  type ProjectTarget,
+} from "./model";
+import type { WorkspaceCommand } from "./workspace/model";
 interface Intent {
   account: string;
-  repo: Repository;
-  body: { request_id: string; command: Command };
+  target: ProjectTarget;
+  body: { request_id: string; command: Command | WorkspaceCommand };
 }
 interface Commands {
   submit: (repo: Repository, command: Command) => Promise<Outcome | undefined>;
+  submitOrganization: (
+    organization: string,
+    command: WorkspaceCommand,
+  ) => Promise<Outcome | undefined>;
   locked: boolean;
   generation: number;
   error?: string;
@@ -62,13 +72,15 @@ export function ProjectCommandsProvider({
       // The captured repository, account, UUID, and payload survive route changes.
       // An unproven response never releases the intent or permits a replacement write.
       const response = await fetch(
-        endpoint(captured.repo, `projects/${cancel ? "cancel" : "commands"}`),
+        projectEndpoint(captured.target, cancel ? "cancel" : "commands"),
         {
           method: "POST",
           headers: {
             "Content-Type": "application/json",
             "X-CSRF-Token": csrf,
-            "X-Crab-Repository-Id": captured.repo.id,
+            ...("repo" in captured.target
+              ? { "X-Crab-Repository-Id": captured.target.repo.id }
+              : {}),
           },
           body: JSON.stringify(captured.body),
           signal: AbortSignal.timeout(35000),
@@ -138,12 +150,15 @@ export function ProjectCommandsProvider({
       setPending(false);
     }
   }
-  function submit(repo: Repository, command: Command) {
+  function submit(
+    target: Intent["target"],
+    command: Command | WorkspaceCommand,
+  ) {
     if (!account || current.current || busy.current)
       return Promise.resolve(undefined);
     const captured: Intent = {
       account,
-      repo: { ...repo },
+      target,
       body: { request_id: crypto.randomUUID(), command },
     };
     current.current = captured;
@@ -156,7 +171,9 @@ export function ProjectCommandsProvider({
   return (
     <Context
       value={{
-        submit,
+        submit: (repo, command) => submit({ repo: { ...repo } }, command),
+        submitOrganization: (organization, command) =>
+          submit({ organization }, command),
         locked: !!intent,
         generation,
         error,

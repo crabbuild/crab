@@ -575,3 +575,20 @@ crab-server --config server.toml cells prepare-projects --owner OWNER --name NAM
 ```
 
 See `CELLAR.md` for schema ownership, command recovery, bounds and access rules.
+
+## Shared projects
+
+Open an organization's Projects tab or
+`/-/organizations/ORGANIZATION_UUID/projects` to plan across multiple repositories.
+Members create projects; their creator and organization owners manage planning.
+Link accessible repositories, add their current issues/PRs, and organize draft
+notes with statuses, priorities, dates, custom fields and saved views. The
+overview contains a project brief, lead, delivery status/health and timeframe.
+
+Repository permissions remain independent. Shared readers without source access
+see redacted items; linking a repository grants no access to it and never moves
+or copies its issues. Existing repository projects retain their own ACL/model.
+Fresh organization bootstrap prepares shared projects. Existing organizations
+require `cells prepare-organization-projects --organization UUID --actor OWNER_UUID`
+through the private mTLS listener after updating all peers; prepare teams first
+when upgrading an organization that predates team authority. See `CELLAR.md`.

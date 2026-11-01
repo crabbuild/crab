@@ -1,6 +1,23 @@
-import type { Repository, RepositoryAssignee } from "@/lib/api";
+import { endpoint, type Repository, type RepositoryAssignee } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
 export type Subject = { kind: "issue" | "pull"; number: number };
+export type ProjectTarget = { repo: Repository } | { organization: string };
+export function projectEndpoint(
+  target: ProjectTarget,
+  action = "",
+  parameters: Record<string, string | undefined> = {},
+) {
+  if ("repo" in target)
+    return endpoint(
+      target.repo,
+      `projects${action ? `/${action}` : ""}`,
+      parameters,
+    );
+  const query = new URLSearchParams();
+  for (const [key, value] of Object.entries(parameters))
+    if (value !== undefined) query.set(key, value);
+  return `/api/organizations/${target.organization}/projects${action ? `/${action}` : ""}?${query}`;
+}
 export interface Work {
   subject: Subject;
   title: string;
@@ -51,6 +68,8 @@ export interface Item {
   values: Record<string, string>;
 }
 export interface Row {
+  repository?: Pick<Repository, "id" | "owner" | "name"> | null;
+  restricted?: boolean;
   item: Item;
   work: Work | null;
   assignees: RepositoryAssignee[];
@@ -105,7 +124,10 @@ export type Outcome =
 export function projectHref(repo: Repository, project?: string) {
   return repoHref(repo, { view: "projects", project });
 }
-export function workHref(repo: Repository, subject: Subject) {
+export function workHref(
+  repo: Pick<Repository, "owner" | "name">,
+  subject: Subject,
+) {
   return repoHref(repo, {
     view: subject.kind === "issue" ? "issues" : "pulls",
     issue: subject.kind === "issue" ? String(subject.number) : undefined,

@@ -7,7 +7,7 @@ use gix_pack::data::entry::Header;
 use sha1::{Digest, Sha1};
 
 use super::{RepackError, RepackSource, io_error};
-use crate::pack_locator::{PackLocationIter, PackObjectLocation};
+use crate::pack_locator::{PackIndexEntry, PackLocationIter, PackObjectLocation};
 
 pub(super) struct Requirements {
     pub(super) rewrite: bool,
@@ -118,12 +118,15 @@ pub(super) fn write_body(
     output: &mut impl Write,
     sha1: &mut Sha1,
     content: &mut blake3::Hasher,
-) -> Result<u64, RepackError> {
+    committed: bool,
+) -> Result<(u64, Option<Vec<PackIndexEntry>>), RepackError> {
     let mut output = HashedWriter {
         output,
         sha1,
         content,
+        written: 12,
     };
+    let mut index = committed.then(Vec::new);
     let mut emitted = HashSet::new();
     let mut buffer = vec![0_u8; 1024 * 1024];
     for source in sources {
@@ -181,23 +184,40 @@ pub(super) fn write_body(
             if header_len >= location.entry_len || header_len > prefix_len as u64 {
                 return Err(invalid(source, "entry header exceeds its committed range"));
             }
-            // First-source precedence is safe only for independently closed packs:
-            // mixing representations from mutually dependent thin packs can form
-            // a delta cycle even when their original union was decodable.
-            let header =
-                closed_header(source, &locations, &source_objects, location, entry.header)?;
+            // Ordinary response unions require locally closed sources. The
+            // committed owner additionally proves the chosen dependency graph
+            // acyclic and authenticates bases outside the selected inventory.
+            let header = if committed {
+                relocated_header(source, &locations, location, entry.header)?
+            } else {
+                closed_header(source, &locations, &source_objects, location, entry.header)?
+            };
             let emit = emitted.insert(location.oid);
             let mut crc = crc32fast::Hasher::new();
+            let mut output_crc = crc32fast::Hasher::new();
+            let offset = output.written;
             crc.update(&buffer[..prefix_len]);
             if emit {
                 if preserve_offsets {
-                    output
-                        .write_all(&buffer[..prefix_len])
+                    write_entry(&mut output, &mut output_crc, &buffer[..prefix_len])
                         .map_err(|error| io_error("write intact pack union entry", error))?;
                 } else {
-                    header
-                        .write_to(entry.decompressed_size, &mut output)
-                        .and_then(|_| output.write_all(&buffer[header_len as usize..prefix_len]))
+                    let mut encoded = [0_u8; 64];
+                    let length = {
+                        let mut cursor = std::io::Cursor::new(encoded.as_mut_slice());
+                        header
+                            .write_to(entry.decompressed_size, &mut cursor)
+                            .map_err(|error| io_error("encode pack union entry header", error))?;
+                        cursor.position() as usize
+                    };
+                    write_entry(&mut output, &mut output_crc, &encoded[..length])
+                        .and_then(|()| {
+                            write_entry(
+                                &mut output,
+                                &mut output_crc,
+                                &buffer[header_len as usize..prefix_len],
+                            )
+                        })
                         .map_err(|error| io_error("write pack union entry header", error))?;
                 }
             }
@@ -209,8 +229,7 @@ pub(super) fn write_body(
                     .map_err(|error| io_error("read pack union entry body", error))?;
                 crc.update(&buffer[..length]);
                 if emit {
-                    output
-                        .write_all(&buffer[..length])
+                    write_entry(&mut output, &mut output_crc, &buffer[..length])
                         .map_err(|error| io_error("write pack union entry body", error))?;
                 }
                 remaining -= length as u64;
@@ -221,15 +240,49 @@ pub(super) fn write_body(
                     "entry CRC does not match its committed index",
                 ));
             }
+            if emit && let Some(index) = &mut index {
+                index.push(PackIndexEntry {
+                    oid: location.oid,
+                    offset,
+                    crc32: output_crc.finalize(),
+                });
+            }
         }
     }
-    Ok(emitted.len() as u64)
+    Ok((emitted.len() as u64, index))
+}
+
+fn write_entry(
+    output: &mut impl Write,
+    crc: &mut crc32fast::Hasher,
+    bytes: &[u8],
+) -> std::io::Result<()> {
+    output.write_all(bytes)?;
+    crc.update(bytes);
+    Ok(())
 }
 
 fn closed_header(
     source: &RepackSource,
     locations: &[PackObjectLocation],
     source_objects: &[gix_hash::ObjectId],
+    location: &PackObjectLocation,
+    header: Header,
+) -> Result<Header, RepackError> {
+    if let Header::RefDelta { base_id } = header
+        && source_objects.binary_search(&base_id).is_err()
+    {
+        return Err(invalid(
+            source,
+            "overlapping structural union requires self-contained sources",
+        ));
+    }
+    relocated_header(source, locations, location, header)
+}
+
+fn relocated_header(
+    source: &RepackSource,
+    locations: &[PackObjectLocation],
     location: &PackObjectLocation,
     header: Header,
 ) -> Result<Header, RepackError> {
@@ -244,12 +297,6 @@ fn closed_header(
                 base_id: locations[position].oid,
             })
         }
-        Header::RefDelta { base_id } if source_objects.binary_search(&base_id).is_err() => {
-            Err(invalid(
-                source,
-                "overlapping structural union requires self-contained sources",
-            ))
-        }
         _ => Ok(header),
     }
 }
@@ -258,11 +305,16 @@ struct HashedWriter<'a, W> {
     output: &'a mut W,
     sha1: &'a mut Sha1,
     content: &'a mut blake3::Hasher,
+    written: u64,
 }
 
 impl<W: Write> Write for HashedWriter<'_, W> {
     fn write(&mut self, bytes: &[u8]) -> std::io::Result<usize> {
         let count = self.output.write(bytes)?;
+        self.written = self
+            .written
+            .checked_add(count as u64)
+            .ok_or_else(|| std::io::Error::other("pack union offset overflow"))?;
         self.sha1.update(&bytes[..count]);
         self.content.update(&bytes[..count]);
         Ok(count)

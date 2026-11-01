@@ -119,6 +119,12 @@ enum TagReadPolicy {
     Strict,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum TagTargetPolicy {
+    CommitOnly,
+    AnyObject,
+}
+
 fn annotated_tag_refs_with_policy(
     git_dir: &Path,
     policy: TagReadPolicy,
@@ -165,7 +171,9 @@ fn annotated_tag_refs_with_policy(
             }
         };
 
-        let Some(peeled_commit) = peel_annotated_tag_to_commit(&odb, tag_oid, policy)? else {
+        let Some(peeled_commit) =
+            peel_annotated_tag(&odb, tag_oid, policy, TagTargetPolicy::CommitOnly)?
+        else {
             continue;
         };
 
@@ -179,7 +187,7 @@ fn annotated_tag_refs_with_policy(
     Ok(tags)
 }
 
-/// Build a `ref_name -> peeled commit SHA` map for annotated tags in `refs`.
+/// Build a `ref_name -> peeled object SHA` map for annotated tags in `refs`.
 ///
 /// The input map should contain direct ref targets. Non-tag refs and
 /// lightweight tags produce no entries.
@@ -196,7 +204,7 @@ pub fn peeled_tag_refs_at(
 
 /// Find annotated tags among supplied object targets, including raw-OID keys.
 ///
-/// Returns peeled commit targets without resolving the keys as local refs.
+/// Returns final commit, tree, or blob targets without resolving the keys as local refs.
 pub fn peeled_revision_targets_at(
     git_dir: &Path,
     targets: &BTreeMap<String, String>,
@@ -234,21 +242,27 @@ fn peeled_targets_at<'a>(
             }
         };
 
-        let Some(peeled_commit) = peel_annotated_tag_to_commit(&odb, oid, TagReadPolicy::Lenient)?
+        let Some(peeled_object) = peel_annotated_tag(
+            &odb,
+            oid,
+            TagReadPolicy::Lenient,
+            TagTargetPolicy::AnyObject,
+        )?
         else {
             continue;
         };
 
-        out.insert(ref_name.clone(), peeled_commit.to_hex().to_string());
+        out.insert(ref_name.clone(), peeled_object.to_hex().to_string());
     }
 
     Ok(out)
 }
 
-fn peel_annotated_tag_to_commit(
+fn peel_annotated_tag(
     odb: &impl Find,
     tag_oid: ObjectId,
     policy: TagReadPolicy,
+    target_policy: TagTargetPolicy,
 ) -> Result<Option<ObjectId>> {
     let mut current = tag_oid;
     for depth in 0..10 {
@@ -295,6 +309,7 @@ fn peel_annotated_tag_to_commit(
         match tag.target_kind {
             gix_object::Kind::Commit => return Ok(Some(current)),
             gix_object::Kind::Tag => continue,
+            _ if target_policy == TagTargetPolicy::AnyObject => return Ok(Some(current)),
             other => {
                 debug!(tag = %tag_oid, target = %current, kind = ?other, "tag peel: tag target is not a commit");
                 return Ok(None);
@@ -366,6 +381,50 @@ mod tests {
             peeled.get("refs/tags/v1").map(String::as_str),
             Some(git(repo.path(), &["rev-parse", "v1^{}"]).as_str())
         );
+    }
+
+    #[test]
+    fn peeled_revision_targets_match_native_blob_tree_and_nested_tags() {
+        let repo = git_repo_with_tags();
+        let git_dir = repo.path().join(".git");
+        let blob = git(repo.path(), &["hash-object", "-w", "file.txt"]);
+        let tree = git(repo.path(), &["rev-parse", "HEAD^{tree}"]);
+        for (name, target) in [("blob-tag", blob.as_str()), ("tree-tag", tree.as_str())] {
+            git(repo.path(), &["tag", "-a", name, target, "-m", name]);
+        }
+        git(
+            repo.path(),
+            &["tag", "-a", "nested-blob", "blob-tag", "-m", "nested"],
+        );
+        for raw_keys in [false, true] {
+            let mut targets = BTreeMap::new();
+            let mut expected = BTreeMap::new();
+            for name in ["v1", "blob-tag", "tree-tag", "nested-blob", "light"] {
+                let oid = git(repo.path(), &["rev-parse", name]);
+                let key = if raw_keys {
+                    oid.clone()
+                } else {
+                    format!("refs/tags/{name}")
+                };
+                targets.insert(key.clone(), oid);
+                if name != "light" {
+                    expected.insert(
+                        key,
+                        git(repo.path(), &["rev-parse", &format!("{name}^{{}}")]),
+                    );
+                }
+            }
+            assert_eq!(
+                peeled_revision_targets_at(&git_dir, &targets).unwrap(),
+                expected
+            );
+            if !raw_keys {
+                assert_eq!(peeled_tag_refs_at(&git_dir, &targets).unwrap(), expected);
+            }
+        }
+        let followed = annotated_tag_refs_strict_at(&git_dir).unwrap();
+        assert_eq!(followed.len(), 1);
+        assert_eq!(followed[0].name, "refs/tags/v1");
     }
 
     #[test]

@@ -388,7 +388,7 @@ async fn adopt_rejects_a_v2_root_with_missing_scoped_pointer_data() {
         )],
     )
     .unwrap();
-    crab_write::capsule_protocol::publish(&layout, base, &transaction, &capsule)
+    crab_write::capsule_protocol::publish(&layout, base, &transaction, capsule)
         .await
         .unwrap();
 

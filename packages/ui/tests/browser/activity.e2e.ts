@@ -11,6 +11,27 @@ async function repository(page: Page) {
   const unexpected: string[] = [];
   await page.route("**/api/**", async (route) => {
     const path = new URL(route.request().url()).pathname;
+    if (
+      route.request().method() === "GET" &&
+      /^\/api\/repos\/team\/project\/(issues|pulls)\/\d+\/projects$/.test(path)
+    )
+      return route.fulfill({ json: { items: [], can_manage: true } });
+    if (
+      route.request().method() === "GET" &&
+      /^\/api\/repos\/team\/project\/issues\/\d+\/hierarchy$/.test(path)
+    )
+      return route.fulfill({
+        json: {
+          hierarchy: {
+            parent: null,
+            version: 0,
+            progress: { total: 0, closed: 0 },
+            children: [],
+            next: null,
+          },
+          can_manage: true,
+        },
+      });
     if (path === "/api/session")
       return route.fulfill({
         json: { authenticated: true, mode: "local", user: null, csrf: null },

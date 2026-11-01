@@ -1,5 +1,10 @@
 import { useState } from "react";
-import { Building2Icon, SettingsIcon, UsersIcon } from "lucide-react";
+import {
+  Building2Icon,
+  SettingsIcon,
+  UsersIcon,
+  FolderKanbanIcon,
+} from "lucide-react";
 import { Link } from "@/components/navigation/link";
 import { Result } from "@/components/request/result";
 import { useMutation } from "@/components/discussion/mutations";
@@ -9,10 +14,7 @@ import { Button } from "@/components/ui/button";
 import { Field, FieldGroup, FieldLabel } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select";
+import { FieldSelect } from "@/components/ui/field-select";
 import { useRequest } from "@/lib/api";
 import { MutationError } from "./feedback";
 import type {
@@ -65,6 +67,12 @@ export function OrganizationPage({
               aria-label="Organization"
               className="mb-6 flex flex-wrap gap-2 border-b pb-3"
             >
+              <Button asChild variant="ghost">
+                <Link href={`/-/organizations/${id}/projects`}>
+                  <FolderKanbanIcon data-icon="inline-start" />
+                  Projects
+                </Link>
+              </Button>
               {[
                 { key: "people", label: "People", icon: UsersIcon },
                 { key: "teams", label: "Teams", icon: UsersIcon },
@@ -253,17 +261,13 @@ function MemberRow({
         <div className="flex flex-wrap items-center gap-2">
           {canManage ? (
             <>
-              <NativeSelect
-                aria-label={`Role for ${name}`}
+              <FieldSelect
+                label={`Role for ${name}`}
                 value={role}
                 disabled={mutation.pending}
-                onChange={(event) =>
-                  setRole(event.target.value as OrganizationRole)
-                }
-              >
-                <NativeSelectOption value="member">Member</NativeSelectOption>
-                <NativeSelectOption value="owner">Owner</NativeSelectOption>
-              </NativeSelect>
+                onValueChange={(role) => setRole(role as OrganizationRole)}
+                options={{ member: "Member", owner: "Owner" }}
+              />
               <Button
                 variant="outline"
                 disabled={mutation.pending || role === member.role}

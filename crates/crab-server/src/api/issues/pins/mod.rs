@@ -1,5 +1,8 @@
 use crate::{
-    api::{profiles::attribution::Authors, write::rejected},
+    api::{
+        profiles::attribution::Authors,
+        write::{ResponseError, rejected},
+    },
     app::{self, Error},
     auth::Principal,
     cells::repository::issues::pins::{self, GetPins, Outcome, SetPins},
@@ -8,7 +11,7 @@ use crate::{
 use axum::{
     Extension, Json,
     extract::{Path, State, rejection::JsonRejection},
-    response::{IntoResponse, Response},
+    response::IntoResponse,
 };
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -51,7 +54,7 @@ pub(super) async fn set(
     Extension(principal): Extension<Principal>,
     Path(key): Path<(String, String)>,
     input: std::result::Result<Json<Input>, JsonRejection>,
-) -> std::result::Result<Json<Value>, Response> {
+) -> std::result::Result<Json<Value>, ResponseError> {
     let repo = app::repository(&server, &principal, &key).map_err(IntoResponse::into_response)?;
     let Json(input) = input
         .map_err(Error::from)
@@ -83,17 +86,17 @@ pub(super) async fn set(
     .map_err(IntoResponse::into_response)?;
     let version = match result {
         Outcome::Applied(version) => version,
-        Outcome::RequestConflict => return Err(Error::RequestConflict.into_response()),
-        Outcome::Invalid => return Err(rejected(Error::Invalid("Select distinct valid issues"))),
-        Outcome::Limit => {
-            return Err(rejected(Error::Invalid(
-                "A repository can pin up to three issues",
-            )));
+        Outcome::RequestConflict => return Err(Error::RequestConflict.into_response().into()),
+        Outcome::Invalid => {
+            return Err(rejected(Error::Invalid("Select distinct valid issues")).into());
         }
-        Outcome::Archived => return Err(rejected(Error::Archived)),
-        Outcome::Forbidden => return Err(rejected(Error::PinPermission)),
-        Outcome::NotFound => return Err(rejected(Error::NotFound)),
-        Outcome::Conflict => return Err(rejected(Error::Conflict)),
+        Outcome::Limit => {
+            return Err(rejected(Error::Invalid("A repository can pin up to three issues")).into());
+        }
+        Outcome::Archived => return Err(rejected(Error::Archived).into()),
+        Outcome::Forbidden => return Err(rejected(Error::PinPermission).into()),
+        Outcome::NotFound => return Err(rejected(Error::NotFound).into()),
+        Outcome::Conflict => return Err(rejected(Error::Conflict).into()),
     };
     app::membership(&server, &principal, &repo)
         .await
