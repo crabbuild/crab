@@ -266,3 +266,13 @@ boundary. Native and HTTP tests stay with those owners. Private preparation
 reuses `server/management/lifecycle.rs` and `cli/lifecycle.rs` through
 `cells prepare-projects`. The browser owner is `packages/ui/src/features/projects/`;
 its account/repository-bound command provider stays above route loading.
+
+`cells/organization/projects/` owns organization project definitions, planning
+properties, UUID-bound repository links/items, creator membership incarnations
+and permanent submissions. `api/organizations/projects/` composes independent
+source grants with bounded current work enrichment. Both project scopes share
+canonical source metadata in `cells/repository/projects/reads.rs`; never copy
+source titles/states into organization records or treat project access as a
+repository grant. Private preparation is `cells prepare-organization-projects`.
+The browser workspace lives under `packages/ui/src/features/projects/workspace/`;
+its shared submission controller retains the original organization/account/body.

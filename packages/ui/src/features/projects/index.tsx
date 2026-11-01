@@ -19,10 +19,7 @@ import {
   InputGroupAddon,
   InputGroupInput,
 } from "@/components/ui/input-group";
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select";
+import { FieldSelect } from "@/components/ui/field-select";
 import {
   Empty,
   EmptyHeader,
@@ -356,24 +353,28 @@ function ProjectWorkspace({
                 onChange={(e) => setSearch(e.target.value)}
               />
             </InputGroup>
-            <NativeSelect
-              aria-label="Filter project status"
-              value={status}
-              onChange={(e) => filters({ status: e.target.value })}
-            >
-              <NativeSelectOption value="">All statuses</NativeSelectOption>
-              {project.definition.statuses.map((s) => (
-                <NativeSelectOption key={s}>{s}</NativeSelectOption>
-              ))}
-            </NativeSelect>
-            <NativeSelect
-              aria-label="Filter work state"
+            <FieldSelect
+              label="Filter project status"
+              value={status ? `status:${status}` : "all"}
+              onValueChange={(value) =>
+                filters({ status: value === "all" ? "" : value.slice(7) })
+              }
+              options={{
+                all: "All statuses",
+                ...Object.fromEntries(
+                  project.definition.statuses.map((status) => [
+                    `status:${status}`,
+                    status,
+                  ]),
+                ),
+              }}
+            />
+            <FieldSelect
+              label="Filter work state"
               value={String(hidden)}
-              onChange={(e) => filters({ hide_closed: e.target.value })}
-            >
-              <NativeSelectOption value="false">All work</NativeSelectOption>
-              <NativeSelectOption value="true">Open work</NativeSelectOption>
-            </NativeSelect>
+              onValueChange={(value) => filters({ hide_closed: value })}
+              options={{ false: "All work", true: "Open work" }}
+            />
             <Button variant="outline" type="submit">
               Apply
             </Button>
@@ -510,7 +511,7 @@ function ProjectWorkspace({
       )}
       {settings && (
         <ProjectSettings
-          repo={repo}
+          target={{ repo }}
           project={project}
           onClose={() => setSettings(false)}
         />

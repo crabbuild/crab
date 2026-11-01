@@ -26,6 +26,7 @@ use crate::{
 };
 
 mod invitations;
+mod projects;
 mod teams;
 
 #[cfg(test)]
@@ -42,6 +43,7 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
             get(member).put(save_member).delete(remove_member),
         )
         .layer(axum::extract::DefaultBodyLimit::max(8192))
+        .merge(projects::routes())
         .route_layer(middleware::from_fn_with_state(server, app::admit))
 }
 async fn actor(server: &Server, principal: &Principal) -> Result<Uuid> {

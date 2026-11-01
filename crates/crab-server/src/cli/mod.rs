@@ -96,6 +96,13 @@ enum CellsCommand {
         #[arg(long)]
         actor: uuid::Uuid,
     },
+    /// Prepare shared projects for an existing organization using its current owner.
+    PrepareOrganizationProjects {
+        #[arg(long)]
+        organization: uuid::Uuid,
+        #[arg(long)]
+        actor: uuid::Uuid,
+    },
     /// Prepare canonical issue closure metadata in restartable bounded frames.
     PrepareIssueState {
         #[arg(long)]
@@ -316,6 +323,20 @@ async fn cells(config: &crab_server::Config, command: CellsCommand) -> crab_serv
             organization,
             actor,
         } => teams::prepare(config, organization, actor).await?,
+        CellsCommand::PrepareOrganizationProjects {
+            organization,
+            actor,
+        } => management_request(
+            config,
+            reqwest::Method::POST,
+            &format!("/internal/organizations/{organization}/projects"),
+            Some(&serde_json::json!({"actor":actor})),
+        )
+        .await?
+        .bytes()
+        .await
+        .map_err(|source| crab_server::Error::Healthcheck { source })?
+        .to_vec(),
         CellsCommand::PrepareIssueState { owner, name } => {
             lifecycle::prepare(config, &owner, &name, lifecycle::Scope::Issue).await?
         }

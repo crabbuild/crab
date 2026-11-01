@@ -19,11 +19,9 @@ import {
   FieldDescription,
 } from "@/components/ui/field";
 import { Input } from "@/components/ui/input";
+import { DatePicker } from "@/components/ui/date-picker";
 import { Textarea } from "@/components/ui/textarea";
-import {
-  NativeSelect,
-  NativeSelectOption,
-} from "@/components/ui/native-select";
+import { FieldSelect } from "@/components/ui/field-select";
 import { Link } from "@/components/navigation/link";
 import { useProjectCommands, CommandError } from "./commands";
 import {
@@ -174,28 +172,24 @@ export function ItemEditor({
               {!row && (
                 <Field>
                   <FieldLabel htmlFor={`${id}-mode`}>Add</FieldLabel>
-                  <NativeSelect
+                  <FieldSelect
+                    label="Add"
                     id={`${id}-mode`}
                     value={mode}
-                    onChange={(e) => {
-                      setMode(e.target.value);
+                    onValueChange={(value) => {
+                      setMode(value);
                       setItem({
                         ...blankItem(project.definition.statuses[0]),
                         id: item.id,
                       });
                       setPicked(null);
                     }}
-                  >
-                    <NativeSelectOption value="issue">
-                      Create an issue
-                    </NativeSelectOption>
-                    <NativeSelectOption value="existing">
-                      Existing issue or pull request
-                    </NativeSelectOption>
-                    <NativeSelectOption value="draft">
-                      Draft note
-                    </NativeSelectOption>
-                  </NativeSelect>
+                    options={{
+                      issue: "Create an issue",
+                      existing: "Existing issue or pull request",
+                      draft: "Draft note",
+                    }}
+                  />
                 </Field>
               )}
               {mode === "existing" && !existing && !picked && (
@@ -288,55 +282,50 @@ export function ItemEditor({
               <div className="project-field-grid">
                 <Field>
                   <FieldLabel htmlFor={`${id}-status`}>Status</FieldLabel>
-                  <NativeSelect
+                  <FieldSelect
+                    label="Status"
                     id={`${id}-status`}
                     value={item.status}
-                    onChange={(e) =>
-                      setItem({ ...item, status: e.target.value })
-                    }
-                  >
-                    {definition.statuses.map((s) => (
-                      <NativeSelectOption key={s}>{s}</NativeSelectOption>
-                    ))}
-                  </NativeSelect>
+                    onValueChange={(status) => setItem({ ...item, status })}
+                    options={Object.fromEntries(
+                      definition.statuses.map((status) => [status, status]),
+                    )}
+                  />
                 </Field>
                 <Field>
                   <FieldLabel htmlFor={`${id}-priority`}>Priority</FieldLabel>
-                  <NativeSelect
+                  <FieldSelect
+                    label="Priority"
                     id={`${id}-priority`}
-                    value={item.priority}
-                    onChange={(e) =>
-                      setItem({ ...item, priority: Number(e.target.value) })
+                    value={String(item.priority)}
+                    onValueChange={(priority) =>
+                      setItem({ ...item, priority: Number(priority) })
                     }
-                  >
-                    {priorities.map((label, i) => (
-                      <NativeSelectOption key={i} value={i}>
-                        {label}
-                      </NativeSelectOption>
-                    ))}
-                  </NativeSelect>
+                    options={Object.fromEntries(
+                      priorities.map((label, index) => [String(index), label]),
+                    )}
+                  />
                 </Field>
                 <Field>
                   <FieldLabel htmlFor={`${id}-start`}>Start date</FieldLabel>
-                  <Input
+                  <DatePicker
                     id={`${id}-start`}
-                    type="date"
-                    value={item.start ?? ""}
-                    onChange={(e) =>
-                      setItem({ ...item, start: e.target.value || null })
-                    }
+                    label="Start date"
+                    max={item.end ?? undefined}
+                    value={item.start}
+                    disabled={commands.locked}
+                    onValueChange={(start) => setItem({ ...item, start })}
                   />
                 </Field>
                 <Field>
                   <FieldLabel htmlFor={`${id}-end`}>Target date</FieldLabel>
-                  <Input
+                  <DatePicker
                     id={`${id}-end`}
-                    type="date"
+                    label="Target date"
                     min={item.start ?? undefined}
-                    value={item.end ?? ""}
-                    onChange={(e) =>
-                      setItem({ ...item, end: e.target.value || null })
-                    }
+                    value={item.end}
+                    disabled={commands.locked}
+                    onValueChange={(end) => setItem({ ...item, end })}
                   />
                 </Field>
                 {definition.fields.map((field) => (
@@ -345,32 +334,51 @@ export function ItemEditor({
                       {field.name}
                     </FieldLabel>
                     {field.definition.kind === "select" ? (
-                      <NativeSelect
+                      <FieldSelect
+                        label={field.name}
                         id={`${id}-${field.id}`}
-                        value={item.values[field.id] ?? ""}
-                        onChange={(e) => {
+                        value={String(
+                          field.definition.options.indexOf(
+                            item.values[field.id] ?? "",
+                          ),
+                        )}
+                        onValueChange={(index) => {
                           const values = { ...item.values };
-                          if (e.target.value) values[field.id] = e.target.value;
+                          if (field.definition.kind !== "select") return;
+                          if (index !== "-1")
+                            values[field.id] =
+                              field.definition.options[Number(index)];
                           else delete values[field.id];
                           setItem({ ...item, values });
                         }}
-                      >
-                        <NativeSelectOption value="">
-                          Not set
-                        </NativeSelectOption>
-                        {field.definition.options.map((option) => (
-                          <NativeSelectOption key={option}>
-                            {option}
-                          </NativeSelectOption>
-                        ))}
-                      </NativeSelect>
+                        options={{
+                          "-1": "Not set",
+                          ...Object.fromEntries(
+                            field.definition.options.map((option, index) => [
+                              String(index),
+                              option,
+                            ]),
+                          ),
+                        }}
+                      />
+                    ) : field.definition.kind === "date" ? (
+                      <DatePicker
+                        id={`${id}-${field.id}`}
+                        label={field.name}
+                        value={item.values[field.id] || null}
+                        disabled={commands.locked}
+                        onValueChange={(date) => {
+                          const values = { ...item.values };
+                          if (date) values[field.id] = date;
+                          else delete values[field.id];
+                          setItem({ ...item, values });
+                        }}
+                      />
                     ) : (
                       <Input
                         id={`${id}-${field.id}`}
                         type={
-                          field.definition.kind === "text"
-                            ? "text"
-                            : field.definition.kind
+                          field.definition.kind === "number" ? "number" : "text"
                         }
                         step={
                           field.definition.kind === "number" ? "any" : undefined
@@ -392,7 +400,7 @@ export function ItemEditor({
           </fieldset>
           <CommandError />
           <ProjectDraftReview
-            repo={repo}
+            target={{ repo }}
             project={project.id}
             onReviewed={(latest) => {
               setVersion(latest.version);

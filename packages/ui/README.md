@@ -165,9 +165,8 @@ is explicitly bootstrapped through the server's private management CLI; opening 
 page never creates authority. People, pending invitations, recipient decisions
 and profile settings use native organization APIs with version checks. Public
 username search selects stable accounts; invitations currently use a manually
-shared link, with no email delivery. Organization discovery, owner-name routing,
-cross-repository Projects are still separate work. Standalone teams use the
-native organization authority described below.
+shared link, with no email delivery. Organization discovery and owner-name routing
+are still separate work. Standalone teams use native organization authority.
 
 The shared composer retains one original comment/state intent through uncertain
 responses, metadata refresh and PR tabs. Retry original action recovers that
@@ -209,5 +208,40 @@ repository archival apply everywhere. Prepare existing Cells using the private
 `cells prepare-projects` command documented in `crates/crab-server/CELLAR.md`.
 
 Browser coverage is `tests/browser/projects.e2e.ts`; native coverage lives beside
-`cells/repository/projects/` and `api/projects/`. Organization-wide projects and
-workflow automation are separate work.
+`cells/repository/projects/` and `api/projects/`.
+
+### Shared organization projects
+
+The organization **Projects** workspace at `/-/organizations/{uuid}/projects`
+coordinates work across repositories. Projects have a brief, delivery status,
+health, lead, start/target dates, linked repositories, drafts, typed planning
+fields, and saved table/board/roadmap views. Repository and planning-status
+filters query the native project collection; rows include current source titles,
+states, assignees, parents, progress and linked work. Planning status remains
+separate from closing an issue or merging a PR.
+
+`src/features/projects/workspace/` owns the organization library, workspace and
+source-aware item/repository editors. Shared selectors, views, settings and the
+account-bound submission controller stay in `src/features/projects/`. Metadata
+refresh keeps open editors mounted and waits for the confirmed project version
+before enabling another write. A stale pagination cursor offers a first-page
+reset. Project and organization planning dropdowns use the owned shadcn Select.
+Project, custom-field and milestone dates use the shared DatePicker, composed
+from the owned Calendar, Popover and Select. Dates remain nullable `YYYY-MM-DD`
+civil dates; selecting or clearing a date never converts it through UTC. Start
+and target controls constrain each other, and the native API validates ranges.
+
+Current organization members can read and create projects; the creator in their
+current membership incarnation and organization owners manage them. Project
+access grants no source repository access. Inaccessible work is redacted, and
+repository UUIDs prevent name reuse from redirecting project references. Source
+permissions are refreshed after enrichment; native organization authority is
+checked again before returning a composed response.
+
+Shared projects link existing work and support draft notes. Source creation,
+draft conversion, title/state saved filters and custom project templates remain
+repository-scoped. Linking does not migrate repository projects or grant team
+access. Workflow automation and cross-organization/personal project discovery are
+separate features. Preparation and API contracts are in
+`crates/crab-server/CELLAR.md`; browser proof is
+`tests/browser/project-workspaces.e2e.ts`.

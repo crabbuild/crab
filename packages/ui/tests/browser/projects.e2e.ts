@@ -1,4 +1,5 @@
 import { test, expect, type Page } from "@playwright/test";
+import { pickDate } from "./date-picker";
 import {
   expectNoAccessibilityViolations,
   selectDarkTheme,
@@ -288,7 +289,13 @@ test("templates, linked issue and PR items, board moves, roadmap dates, saved se
   await setup(page);
   await create(page);
   await page.getByRole("button", { name: "Add item", exact: true }).click();
-  await page.getByLabel("Add", { exact: true }).selectOption("existing");
+  await page.getByLabel("Add", { exact: true }).click();
+  await page
+    .getByRole("option", {
+      name: "Existing issue or pull request",
+      exact: true,
+    })
+    .click();
   await page
     .getByRole("button", { name: "Ship project management #1" })
     .click();
@@ -299,12 +306,11 @@ test("templates, linked issue and PR items, board moves, roadmap dates, saved se
     page.getByRole("link", { name: "Ship project management", exact: true }),
   ).toBeVisible();
   await expect(page.getByText("1/2", { exact: true })).toBeVisible();
-  await page
-    .getByLabel("Status for Ship project management")
-    .selectOption("In progress");
+  await page.getByLabel("Status for Ship project management").click();
+  await page.getByRole("option", { name: "In progress", exact: true }).click();
   await expect(
     page.getByLabel("Status for Ship project management"),
-  ).toHaveValue("In progress");
+  ).toHaveText("In progress");
   await page.getByRole("tab", { name: "Board", exact: true }).click();
   await expect(
     page
@@ -317,8 +323,8 @@ test("templates, linked issue and PR items, board moves, roadmap dates, saved se
   await page
     .getByRole("button", { name: "Edit Ship project management", exact: true })
     .click();
-  await page.getByLabel("Start date", { exact: true }).fill("2026-10-01");
-  await page.getByLabel("Target date", { exact: true }).fill("2026-10-31");
+  await pickDate(page, "Start date", "2026-10-01");
+  await pickDate(page, "Target date", "2026-10-31");
   await page.getByRole("button", { name: "Save item", exact: true }).click();
   await page.getByRole("tab", { name: "Roadmap", exact: true }).click();
   await expect(
@@ -403,7 +409,8 @@ test("editing a draft keeps it a draft and read-only users have no project write
   const fixture = await setup(page);
   await create(page);
   await page.getByRole("button", { name: "Add item", exact: true }).click();
-  await page.getByLabel("Add", { exact: true }).selectOption("draft");
+  await page.getByLabel("Add", { exact: true }).click();
+  await page.getByRole("option", { name: "Draft note", exact: true }).click();
   await page.getByLabel("Title", { exact: true }).fill("Explore an idea");
   await page
     .getByRole("button", { name: "Add to project", exact: true })
