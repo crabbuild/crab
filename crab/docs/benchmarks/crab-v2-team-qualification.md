@@ -36,6 +36,26 @@ the user's manual-demo data. No bucket-wide Crab GC was invoked.
 
 ## Results
 
+Current root-5/checkpoint-9 runtime `4c01b9127c90` passes fresh eight-client
+and 64-client mixed Git/Xet/LFS runs: 120 and 848 checks, 32 and 256 commits,
+explicit checkpoint, both historical payload versions and full no-repair
+audits. A separate source-deletion/repack/repository-GC survival control passes
+22 checks. These receipts do not reuse the older checkpoint-10 namespaces.
+
+Its 1,000-developer/eight-commits-each campaign remains incomplete. The first
+three 1,000-push batches acknowledge every push: initial mixed native pushes
+take 1,922.175 seconds and 5,022,602 requests; code-only Git pushes take 772.529
+seconds and 2,027,716 requests; code-only native pushes take 133.877 seconds
+and 6,000 requests. Shared-host service p95 is 51.317, 18.202 and 4.314 seconds,
+respectively. A concurrent single-branch cold clone succeeds in 93.492 seconds
+but downloads 1,984,426,092 bytes in 9,784 requests. After a reporting-argument
+failure, its separately sealed continuation verifies strict Git fsck and exact
+cold 1 MiB Xet bytes; hydration alone takes 18.051 seconds and 14,670 requests.
+The original failed wrapper is retained. These costs remain too high.
+Evidence: `paged-capture-synced-live-proof.json`,
+`paged-capture-synced-team-partial-2-batches.json` (three completed batches),
+and `paged-capture-synced-concurrent-read-continuation.json`.
+
 | Surface | Observed result | Evidence beneath the retained root |
 | --- | --- | --- |
 | Normal Git and small Xet matrix | 195 checks pass: native/helper workflows, refs/tags, atomic rejection, shallow reads, missing/corrupt objects, restaging, overlap and cold reuse | `git-xet-conformance/artifacts/report.json` |

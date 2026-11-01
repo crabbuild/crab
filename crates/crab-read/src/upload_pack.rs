@@ -793,13 +793,13 @@ fn authorize_wants(
 
 fn plan_from_tip_bound_transitions(
     visible: &HashMap<String, ObjectId>,
-    transitions: &CapsuleTipBoundTransitions,
+    transitions: Option<&CapsuleTipBoundTransitions>,
     request: &UploadPackRequest,
     maximum_objects: u64,
 ) -> crab_remote_git::Result<Option<PackPlan>> {
     if request.haves.is_empty() {
         tracing::debug!(
-            transition_refs = transitions.len(),
+            transition_refs = transitions.map_or(0, CapsuleTipBoundTransitions::len),
             "tip-bound transition planning skipped without client haves"
         );
         return Ok(None);
@@ -817,14 +817,12 @@ fn plan_from_tip_bound_transitions(
     let mut common_haves = HashSet::new();
     let mut object_ids = Vec::new();
     for (ref_name, want) in selected_refs.iter().zip(&request.wants) {
-        let Some(ref_transitions) = transitions.get(*ref_name) else {
-            tracing::debug!(
-                ref_name = *ref_name,
-                transition_refs = transitions.len(),
-                "tip-bound transition planning skipped because the advertised ref has no transitions"
-            );
-            return Ok(None);
-        };
+        // The advertised tip itself is an authenticated zero-length chain.
+        // A client that already has it needs neither history nor object reads.
+        let ref_transitions = transitions
+            .and_then(|transitions| transitions.get(*ref_name))
+            .map(Vec::as_slice)
+            .unwrap_or_default();
         let Some((have, delta)) =
             transition_delta_for_haves(ref_transitions, *want, &request.haves)?
         else {
@@ -956,12 +954,9 @@ async fn plan_with_operation(
     tracing::debug!("upload-pack plan authorization completed");
     let started = Instant::now();
     let maximum_objects = operation.max_logical_objects();
-    if let VisibilitySource::TipBound {
-        refs,
-        transitions: Some(transitions),
-    } = visibility
+    if let VisibilitySource::TipBound { refs, transitions } = visibility
         && let Some(plan) =
-            plan_from_tip_bound_transitions(refs, transitions, request, maximum_objects)?
+            plan_from_tip_bound_transitions(refs, *transitions, request, maximum_objects)?
     {
         tracing::info!(
             telemetry_event = "visibility_plan",
@@ -2903,6 +2898,27 @@ mod tests {
     }
 
     #[test]
+    fn tip_bound_existing_tip_needs_no_transition_history() {
+        let request = UploadPackRequest {
+            wants: vec![oid('1')],
+            haves: vec![oid('1')],
+            ..Default::default()
+        };
+        let visible = HashMap::from([("refs/heads/main".to_owned(), oid('1'))]);
+        let transitions = BTreeMap::new();
+        for transitions in [None, Some(&transitions)] {
+            let plan = plan_from_tip_bound_transitions(&visible, transitions, &request, 100)
+                .unwrap()
+                .expect("an advertised tip already present needs no transfer");
+
+            assert_eq!(
+                (plan.object_ids, plan.common_haves),
+                (vec![], vec![oid('1')])
+            );
+        }
+    }
+
+    #[test]
     fn selected_transition_membership_errors_stop_pack_planning() {
         let request = UploadPackRequest {
             wants: vec![oid('1')],
@@ -2926,7 +2942,7 @@ mod tests {
                 }],
             )]);
             assert!(matches!(
-                plan_from_tip_bound_transitions(&visible, &transitions, &request, 100),
+                plan_from_tip_bound_transitions(&visible, Some(&transitions), &request, 100),
                 Err(RemoteGitError::Metadata(
                     crab_metadata::error::MetadataError::CorruptObject { .. }
                 ))

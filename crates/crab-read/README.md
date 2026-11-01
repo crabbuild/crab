@@ -67,6 +67,14 @@ retain their admitted decoded metadata and payloads until the caller releases th
 Captured views share immutable admission tables when cloned. Overlapping
 object-to-pack memberships merge as sets; the remote reader separately orders
 the selected inventory and verifies its indexes and object bytes.
+All view modes derive physical Git inventory, byte admission and snapshot
+identity from authenticated pack-source descriptors. A frontier-only control
+view therefore retains the same inventory before its first checkpoint without
+materializing capsules or hashing their pack bodies again.
+An advertised tip already present at the client needs no transition history or
+remote object reads. Classic follow-tags requests with advertised tags use
+complete visibility to include their tag-object closure; tag-free requests keep
+ordinary tip-bound admission.
 An exact run-admission miss contributes no pack candidates: replacement closures
 can include inherited objects stored in earlier runs or the checkpoint. Their
 visibility keys remain present. Runs without exact admission retain their
