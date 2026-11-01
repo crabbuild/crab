@@ -56,6 +56,7 @@ the user's manual-demo data. No bucket-wide Crab GC was invoked.
 | Parallel 1,000-client preparation | Failed on two remote-root GETs; no developer branches published in this attempt | `medium-team-1000-parallel/artifacts/report.json` |
 | Direct single-branch read at 1,000 refs | Correct bytes and protocol v2; fetch took 256.654 seconds | `medium-team-1000-direct/artifacts/report.json` |
 | Four 2 GiB Xet files | Original second push failed a metadata-page identity/header check; direct retry acknowledged. Fresh cold clone reconstructed all 8 GiB exactly and passed strict Git fsck | `large-xet-4x2g-retry/artifacts/report.json`, `xet-cold-recovery-report.json` |
+| Five-version admission-binary repeat | All five 8 GiB versions publish and repack; the parent harness stops on a stale staging counter. Cold/recovery continuation is separate and retains immutable parent hashes | `large-xet-4x2g-python-pinned/artifacts/report.json`, `large-xet-cold-continuation-3-controller.json` |
 | Xet older version | 504 exact-content checks pass: four historical 2 GiB files plus 500 code files, followed by strict Git fsck | `xet-history0-readback.json` |
 | Three 2 GiB LFS versions | Original historical fetch failed after final-checkout success. Retry fetched all three OIDs and verified all 6 GiB exactly | `large-lfs/report.json`, `lfs-history-retry-report.json` |
 | Real Kubernetes history | Bootstrap failed at the 300-second index-pack guard; zero of 1,000 requested incremental pushes ran | `kubernetes-1000/artifacts/report.json` |
@@ -236,7 +237,27 @@ requirements for read-only WAL](https://sqlite.org/wal.html#read_only_databases)
 The orchestration now pins its Python executable independently of Git's PATH.
 `sqlite-read-only-reproduction.json` retains the control;
 `xet-proof-inspection-brew/artifacts/report.json` passes both worker inventories.
-The fresh five-version repeat, `large-xet-4x2g-python-pinned`, remains active.
+The fresh repeat, `large-xet-4x2g-python-pinned`, publishes and repacks all five
+versions, then stops on the cold-consumer assertion's local-payload counter.
+Git clean produces 8,274 unique `prepared_payload_chunks` and zero
+`chunk_payloads`; the verifier now measures that producer's prepared rows.
+`crates/crab-staging/src/index.rs` gives `chunk_hash` a unique constraint in
+that table. The threshold remains 4,096.
+
+The cold/recovery continuation records SHA-256 identities for the immutable
+failed parent report and five-version history manifest. Its 513 MiB cold Git
+consumer adds one 1,433,275-byte xorb and passes independent full-file SHA-256
+readback. Current-version cold hydration and rehydration pass; all five
+historical versions and restore/republish are still running through the
+existing verification helpers. The continuation does not relabel the failed
+parent as a successful full run.
+
+The pinned repeat's initial 8 GiB push takes 461.613 seconds; progress spans
+441.898 seconds in uploading and 15.298 seconds in finalization. Its first
+partial-edit push takes 4.336 seconds, with a 1.200-second finalization span.
+These are operation-label spans, not exclusive CPU timings; request and
+body-byte totals remain in `capsule-xet-transport.json`. Extracted progress:
+`large-xet-progress-phase-observations.json`.
 
 The expanded harness check runs 70 tests: 69 pass and one fails on an existing
 read-phase report-field assertion. The same test fails with all four involved
@@ -274,8 +295,9 @@ do not replace native push evidence or qualify the subsequent admission change.
 
 The original large-repository workflow passed only report-contract checks and
 skipped its live Kubernetes job. This campaign attempted the real input and
-retains its failure. The complete five-version Xet stress profile did not finish;
-its successful recovery controls cover two published versions. Multi-GiB raw
+retains its failure. The complete five-version parent run still reports failure on its stale
+staging assertion. All five publication/repack phases pass; its cold-byte and
+recovery continuation remains incomplete. Multi-GiB raw
 Git blobs, 1,000 simultaneous processes, mixed-protocol 1,000-writer load,
 provider capacity, an eight-hour open-loop workload and repeated isolated
 performance distributions remain outside the completed evidence.

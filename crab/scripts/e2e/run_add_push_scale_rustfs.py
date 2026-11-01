@@ -814,7 +814,9 @@ def verify(
                    name="dehydrated source preserves Git index")
     runner.run_git(consumer, ["add", "model.bin"])
     inventory = runner.staging_payload_inventory(consumer)
-    runner.check("cold-consumer-exceeds-one-candidate-page", inventory["chunk_payloads"] > 4096, inventory)
+    # Git clean stages prepared xorbs; their unique chunk rows measure the
+    # deferred lookup batch exercised by this cold-consumer case.
+    runner.check("cold-consumer-exceeds-one-candidate-page", inventory["prepared_payload_chunks"] > 4096, inventory)
     runner.run_git(consumer, ["commit", "-m", "reuse chunks with a distinct file hash"])
     before = runner.list_keys(".crab/xorbs/")
     before_inventory = object_inventory(runner, ".crab/xorbs/")
