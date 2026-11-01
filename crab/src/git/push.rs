@@ -424,6 +424,8 @@ impl fmt::Debug for ActiveActiveWriteCoordinator {
 /// Configuration for the push pipeline.
 #[derive(Debug, Clone)]
 pub struct PushConfig {
+    /// Optional caller-owned display; service and background publishers stay silent.
+    pub progress: Option<Arc<crate::git::progress::NativePushProgress>>,
     /// Maximum concurrent uploads; Git pack transactions are additionally capped at four.
     pub upload_concurrency: usize,
     /// Maximum number of concurrent HEAD/LIST requests for the HEAD-check
@@ -577,6 +579,7 @@ const DEFAULT_LOCK_TTL: Duration = Duration::from_secs(300);
 impl Default for PushConfig {
     fn default() -> Self {
         Self {
+            progress: None,
             upload_concurrency: DEFAULT_UPLOAD_CONCURRENCY,
             head_check_concurrency: crate::core::config::DEFAULT_PUSH_HEAD_CHECK_CONCURRENCY,
             max_retries: DEFAULT_MAX_RETRIES,
@@ -627,6 +630,7 @@ impl PushConfig {
     #[must_use]
     pub fn from_config(config: &crate::core::config::Config) -> Self {
         Self {
+            progress: None,
             upload_concurrency: config.upload_concurrency,
             head_check_concurrency: config.push_head_check_concurrency,
             max_retries: config.max_retries,
@@ -3024,6 +3028,7 @@ mod tests {
                 None,
                 1,
                 true,
+                None,
                 &CancellationToken::new(),
             )
             .await
@@ -3058,6 +3063,7 @@ mod tests {
                 None,
                 1,
                 true,
+                None,
                 &CancellationToken::new(),
             )
             .await

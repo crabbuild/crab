@@ -5,6 +5,21 @@ integration surfaces should be recorded here before release.
 
 ## Unreleased
 
+## 2.0.0 - 2026-10-31
+
+### CLI
+
+- Replaced per-page global chunk-hint rewrites with verified packed runs,
+  size-tiered compaction, and authenticated negative filters. Added explicit
+  `crab doctor --migrate-chunk-index` conversion preserving exact placement IDs.
+
+- Restored Capsule push progress for `crab push` and the Git remote helper,
+  including live phases, verified transfer totals, and JSONL progress events.
+- Added colored transfer bars for Xet xorbs, shards, and capsules, individual
+  activity rows for concurrent uploads, elapsed time, throughput, and estimated
+  time remaining. Short terminals summarize additional workers; redirected
+  output retains plain phase updates.
+
 ### Cell Runtime
 
 - Consolidated SQLite replication on the canonical `CellRuntime`/`CellReplica`

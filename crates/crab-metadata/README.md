@@ -66,11 +66,28 @@ section, pooled index, catalog, and admission verification; the wire format is u
 
 `capsule_protocol::CapsuleChunkIndex` reads paged global advisory chunk heads
 and exact placement IDs without opening the released manifest receipt database.
-`write_capsule_chunk_candidates` conditionally publishes verified immutable pages
-after ref visibility, under caller-held GC writer admission. Readers need no
-write grant; hints still require current source-catalog and canonical-origin
-proof. `CapsuleChunkIndex::objects` authenticates the physical closure for GC;
-it does not make hints authoritative payload roots.
+`write_capsule_chunk_candidates` publishes packed immutable sorted runs after
+ref visibility, under caller-held global GC writer admission. Unchanged rows are
+omitted from new runs. Size-tiered compaction uploads only the final merged run
+before one root CAS. Per-row
+publication sequences preserve head precedence across mixed-size compaction
+and CAS retries; exact placement identities and source anchors remain immutable.
+Authenticated blocked Bloom pages skip absent keys without opening unrelated
+record pages. Missing or corrupt filter pages are errors, never negative hints.
+Readers need no write grant and retain aggregate read/materialization bounds.
+Hints still require current source-catalog and canonical-origin proof.
+`CapsuleChunkIndex::objects` verifies every live run, its pages, and its filter
+contents before GC; hints do not become authoritative payload roots.
+
+Hint root version 2 replaces the unreleased paged version 1. Upgrade clients and
+publishers together, then run `crab doctor --migrate-chunk-index` from a repository
+using bucket-administrator credentials. Migration retains every logical record,
+including old exact placement IDs, verifies the packed replacement, and CASes
+the captured old root while holding global GC writer admission. Cancellation or
+a failed conditional write never advertises a partial migration or overwrites a
+concurrent root; old pages remain for ordinary grace-period collection. Normal
+lookup has no legacy-format fallback. Committed
+Git refs, catalogs, xorbs, and shards use their existing formats and paths.
 
 Pointer catalogs keep shard/xorb payloads
 external while authenticating their identities and reconstruction closure.

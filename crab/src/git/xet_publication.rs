@@ -44,6 +44,7 @@ pub(crate) async fn prepare_delta(
     metrics: Option<&Metrics>,
     upload_concurrency: usize,
     publish_gc_roots: bool,
+    progress: Option<&super::progress::NativePushProgress>,
     cancel: &CancellationToken,
 ) -> Result<(
     crab_metadata::capsule_protocol::PointerCatalog,
@@ -351,6 +352,22 @@ pub(crate) async fn prepare_delta(
 
     drop(requested);
 
+    if let Some(progress) = progress {
+        let bytes = prepared_candidates
+            .iter()
+            .map(|candidate| candidate.bytes)
+            .sum();
+        progress.set_upload_totals(prepared_candidates.len() as u64, bytes);
+        let all_planned = prepared_files.iter().all(|(_, _, chunks, _)| {
+            chunks
+                .iter()
+                .all(|(hash, _)| candidate_chunks.contains(hash))
+        });
+        if all_planned {
+            progress.mark_upload_totals_final();
+            progress.set_phase(super::progress::NativePushProgress::PHASE_UPLOADING);
+        }
+    }
     let uploads = futures_util::stream::iter(prepared_candidates.into_iter().enumerate().map(
         |(ordinal, planned)| async move {
             check_cancelled(cancel)?;
@@ -374,6 +391,13 @@ pub(crate) async fn prepare_delta(
             let bytes = Bytes::from(bytes);
             let (entry, xorb_placements) =
                 verify_prepared_xorb(&path, planned_hash, &planned, bytes.clone())?;
+            let _upload = progress.and_then(|progress| {
+                progress.track_upload(
+                    super::progress::UploadKind::Xorb,
+                    &planned_hash.hex(),
+                    planned.bytes,
+                )
+            });
             let (entry, xorb_placements, created, origin) = publish_xorb_candidate(
                 layout,
                 caching_store,
@@ -384,6 +408,9 @@ pub(crate) async fn prepare_delta(
             )
             .await?;
             let uploaded_bytes = if created { entry.encoded_size() } else { 0 };
+            if let Some(progress) = progress {
+                progress.finish_upload(planned.bytes, uploaded_bytes);
+            }
             Ok::<_, CrabError>((
                 ordinal,
                 planned_hash,
@@ -467,6 +494,17 @@ pub(crate) async fn prepare_delta(
             .map_err(std::io::Error::other)??;
             builder = next_builder;
             for result in completed {
+                let expected_bytes = result.bytes.len() as u64;
+                let _upload = progress.and_then(|progress| {
+                    progress.track_upload(
+                        super::progress::UploadKind::Xorb,
+                        &result.hash.hex(),
+                        expected_bytes,
+                    )
+                });
+                if let Some(progress) = progress {
+                    progress.plan_upload(expected_bytes);
+                }
                 let uploaded_bytes = publish_built_xorb(
                     layout,
                     caching_store,
@@ -477,6 +515,9 @@ pub(crate) async fn prepare_delta(
                     &mut origins,
                 )
                 .await?;
+                if let Some(progress) = progress {
+                    progress.finish_upload(expected_bytes, uploaded_bytes);
+                }
                 xorb_bytes_uploaded = xorb_bytes_uploaded.saturating_add(uploaded_bytes);
                 if let Some(metrics) = metrics {
                     metrics.add_bytes_uploaded(uploaded_bytes);
@@ -486,7 +527,22 @@ pub(crate) async fn prepare_delta(
         let finalized = tokio::task::spawn_blocking(move || builder.finalize())
             .await
             .map_err(std::io::Error::other)??;
+        if let Some(progress) = progress {
+            for result in &finalized {
+                progress.plan_upload(result.bytes.len() as u64);
+            }
+            progress.mark_upload_totals_final();
+            progress.set_phase(super::progress::NativePushProgress::PHASE_UPLOADING);
+        }
         for result in finalized {
+            let expected_bytes = result.bytes.len() as u64;
+            let _upload = progress.and_then(|progress| {
+                progress.track_upload(
+                    super::progress::UploadKind::Xorb,
+                    &result.hash.hex(),
+                    expected_bytes,
+                )
+            });
             let uploaded_bytes = publish_built_xorb(
                 layout,
                 caching_store,
@@ -497,6 +553,9 @@ pub(crate) async fn prepare_delta(
                 &mut origins,
             )
             .await?;
+            if let Some(progress) = progress {
+                progress.finish_upload(expected_bytes, uploaded_bytes);
+            }
             xorb_bytes_uploaded = xorb_bytes_uploaded.saturating_add(uploaded_bytes);
             if let Some(metrics) = metrics {
                 metrics.add_bytes_uploaded(uploaded_bytes);
@@ -504,6 +563,10 @@ pub(crate) async fn prepare_delta(
         }
     }
 
+    if let Some(progress) = progress {
+        progress.mark_upload_totals_final();
+        progress.set_phase(super::progress::NativePushProgress::PHASE_METADATA);
+    }
     for (file_hash, file_size, chunks, _) in prepared_files {
         check_cancelled(cancel)?;
         let ordered_hashes = chunks.iter().map(|(hash, _)| *hash).collect::<Vec<_>>();
@@ -536,9 +599,19 @@ pub(crate) async fn prepare_delta(
     }
 
     let shards = shard_session.finalize()?;
+    if let Some(progress) = progress {
+        progress.set_meta_total(shards.len() as u64);
+    }
     let mut shard_hashes = Vec::with_capacity(shards.len());
     let mut shards_uploaded = 0_u64;
     for (bytes, hash) in &shards {
+        let _upload = progress.and_then(|progress| {
+            progress.track_upload(
+                super::progress::UploadKind::Shard,
+                &hash.hex(),
+                bytes.len() as u64,
+            )
+        });
         let path = layout.shard_path(hash);
         let bytes = Bytes::from(bytes.clone());
         let created = layout
@@ -553,6 +626,9 @@ pub(crate) async fn prepare_delta(
                 .await;
         }
         shard_hashes.push(hash.hex());
+        if let Some(progress) = progress {
+            progress.inc_meta();
+        }
     }
     // Registry partitions are monotonic. Re-registering the pinned catalog
     // would rewrite every historical partition on each push without adding
@@ -1260,6 +1336,7 @@ mod tests {
                     None,
                     4,
                     true,
+                    None,
                     &CancellationToken::new(),
                 )
                 .await
@@ -1339,6 +1416,7 @@ mod tests {
             None,
             4,
             true,
+            None,
             &CancellationToken::new(),
         )
         .await
@@ -1420,6 +1498,7 @@ mod tests {
                 None,
                 1,
                 false,
+                None,
                 &CancellationToken::new(),
             )
             .await;
@@ -1570,6 +1649,7 @@ mod tests {
                     None,
                     1,
                     false,
+                    None,
                     &CancellationToken::new(),
                 )
                 .await
@@ -1702,6 +1782,7 @@ mod tests {
                 None,
                 concurrency,
                 false,
+                None,
                 &CancellationToken::new(),
             )
             .await
@@ -1745,6 +1826,7 @@ mod tests {
                 None,
                 4,
                 true,
+                None,
                 &CancellationToken::new(),
             )
             .await
@@ -1808,6 +1890,7 @@ mod tests {
             None,
             4,
             true,
+            None,
             &CancellationToken::new(),
         )
         .await

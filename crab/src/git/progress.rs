@@ -3,13 +3,15 @@
 //! Output goes to stderr so it doesn't interfere with the remote helper's
 //! stdout protocol channel. All methods are no-ops when progress is disabled.
 //!
-//! The push progress display mimics git-lfs style:
+//! Interactive pushes show aggregate bars and real concurrent object activity:
 //! ```text
-//! Enumerating objects: 42 files
-//! Uploading data objects: 100% (4/4), 256 MiB | 48.2 MiB/s
-//! Updating refs: done.
+//! / Uploading data                                      5.2s
+//!   Xet xorbs  ############------------  50%  128.0 MiB/256.0 MiB
+//!     xorb a7c38e23  ----###---------  64.0 MiB in flight
 //! ```
 
+use std::collections::BTreeMap;
+use std::fmt::Write as _;
 use std::io::{Stderr, Stdout, Write};
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -559,14 +561,17 @@ pub struct NativePushProgress {
     enabled: bool,
     /// Whether to use ANSI color codes in output.
     color: bool,
-    /// Whether to show per-file and per-xorb detail.
+    /// Whether to include transfer-object counts on wide terminals.
     verbose: bool,
     /// Output routing backend (TTY / Line / JSONL / Silent).
     backend: ProgressBackend,
+    started: Instant,
+    terminal_outcome: AtomicU8,
+    next_upload_id: AtomicU64,
+    active_uploads: Mutex<BTreeMap<u64, ActiveUpload>>,
 
     // Phase tracking
     phase: AtomicU8,
-    phase_started: Mutex<Instant>,
 
     // Packing counters
     pack_files_total: AtomicU64,
@@ -609,12 +614,71 @@ pub struct NativePushProgress {
     completion_tracker: Arc<CompletionTracker>,
 }
 
+#[derive(Clone, Copy)]
+pub(crate) enum UploadKind {
+    Xorb,
+    Shard,
+    Capsule,
+}
+
+impl UploadKind {
+    fn label(self) -> &'static str {
+        match self {
+            Self::Xorb => "Xet xorbs",
+            Self::Shard => "Shards",
+            Self::Capsule => "Capsule",
+        }
+    }
+
+    fn color(self) -> u8 {
+        match self {
+            Self::Xorb => 36,
+            Self::Shard => 35,
+            Self::Capsule => 33,
+        }
+    }
+}
+
+#[derive(Clone)]
+struct ActiveUpload {
+    kind: UploadKind,
+    name: String,
+    bytes: u64,
+    started: Instant,
+}
+
+pub(crate) struct UploadProgressGuard<'a> {
+    progress: &'a NativePushProgress,
+    id: u64,
+}
+
+impl Drop for UploadProgressGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut uploads) = self.progress.active_uploads.lock() {
+            uploads.remove(&self.id);
+        }
+    }
+}
+
+impl std::fmt::Debug for NativePushProgress {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("NativePushProgress")
+            .field("enabled", &self.enabled)
+            .field("phase", &self.phase())
+            .finish_non_exhaustive()
+    }
+}
+
 impl NativePushProgress {
+    fn live_terminal() -> bool {
+        is_tty() && !std::env::var("TERM").is_ok_and(|term| term == "dumb")
+    }
+
     /// Create a new progress tracker.
     ///
     /// When `enabled` is false, all reporting methods become no-ops.
     /// When `color` is false, ANSI escape codes are omitted.
-    /// When `verbose` is true, per-file and per-xorb detail is shown.
+    /// Wide terminals include transfer-object counts when `verbose` is true.
     ///
     /// Uses TTY/Line backend based on TTY detection (legacy behavior).
     /// Prefer [`NativePushProgress::with_mode`] for new call sites.
@@ -622,7 +686,7 @@ impl NativePushProgress {
     pub fn new(enabled: bool, color: bool, verbose: bool) -> Self {
         let backend = if !enabled {
             ProgressBackend::Silent
-        } else if is_tty() {
+        } else if Self::live_terminal() {
             ProgressBackend::Tty {
                 stderr: std::io::stderr(),
             }
@@ -649,7 +713,7 @@ impl NativePushProgress {
     ) -> Self {
         let (enabled, backend) = match mode {
             OutputMode::Text => {
-                let backend = if is_tty() {
+                let backend = if Self::live_terminal() {
                     ProgressBackend::Tty {
                         stderr: std::io::stderr(),
                     }
@@ -687,7 +751,7 @@ impl NativePushProgress {
     ) -> Self {
         let (enabled, backend) = match mode {
             OutputMode::Text => {
-                let backend = if is_tty() {
+                let backend = if Self::live_terminal() {
                     ProgressBackend::Tty {
                         stderr: std::io::stderr(),
                     }
@@ -719,8 +783,11 @@ impl NativePushProgress {
             color,
             verbose,
             backend,
+            started: Instant::now(),
+            terminal_outcome: AtomicU8::new(0),
+            next_upload_id: AtomicU64::new(0),
+            active_uploads: Mutex::new(BTreeMap::new()),
             phase: AtomicU8::new(0),
-            phase_started: Mutex::new(Instant::now()),
             pack_files_total: AtomicU64::new(0),
             pack_files_done: AtomicU64::new(0),
             pack_xorbs_produced: AtomicU64::new(0),
@@ -756,6 +823,30 @@ impl NativePushProgress {
         self.enabled
     }
 
+    /// Track an in-flight immutable object until success, error, or cancellation.
+    pub(crate) fn track_upload(
+        &self,
+        kind: UploadKind,
+        name: &str,
+        bytes: u64,
+    ) -> Option<UploadProgressGuard<'_>> {
+        if !self.enabled {
+            return None;
+        }
+        let mut uploads = self.active_uploads.lock().ok()?;
+        let id = self.next_upload_id.fetch_add(1, Relaxed);
+        uploads.insert(
+            id,
+            ActiveUpload {
+                kind,
+                name: name.chars().take(10).collect(),
+                bytes,
+                started: Instant::now(),
+            },
+        );
+        Some(UploadProgressGuard { progress: self, id })
+    }
+
     /// Whether color output is enabled.
     pub fn use_color(&self) -> bool {
         self.color
@@ -769,6 +860,11 @@ impl NativePushProgress {
     /// Read the current pipeline phase.
     pub fn phase(&self) -> u8 {
         self.phase.load(Relaxed)
+    }
+
+    pub(crate) fn finish(&self, succeeded: bool) {
+        self.terminal_outcome
+            .store(if succeeded { 1 } else { 2 }, Release);
     }
 
     /// Shared group-progress backing the `CompletionTracker`.
@@ -973,7 +1069,23 @@ impl NativePushProgress {
         self.upload_bytes_total.store(bytes, Relaxed);
     }
 
-    /// Mark the streaming upload totals as complete and immutable.
+    pub(crate) fn plan_upload(&self, bytes: u64) {
+        self.pack_xorbs_produced.fetch_add(1, Relaxed);
+        self.upload_xorbs_total.fetch_add(1, Relaxed);
+        self.upload_bytes_total.fetch_add(bytes, Relaxed);
+    }
+
+    pub(crate) fn finish_upload(&self, expected_bytes: u64, written_bytes: u64) {
+        if written_bytes == 0 {
+            // A verified existing encoding is reuse, not a completed upload.
+            self.upload_xorbs_total.fetch_sub(1, Relaxed);
+            self.upload_bytes_total.fetch_sub(expected_bytes, Relaxed);
+        } else {
+            self.inc_upload_xorb(written_bytes);
+        }
+    }
+
+    /// Close the producer; verified reuse may still reduce the final transfer total.
     pub(crate) fn mark_upload_totals_final(&self) {
         self.upload_totals_final.store(true, Release);
     }
@@ -1006,9 +1118,6 @@ impl NativePushProgress {
     /// Start the repository discovery phase before totals are known.
     pub fn begin_discovery(&self) {
         self.set_phase(Self::PHASE_DISCOVERING);
-        if matches!(self.backend, ProgressBackend::Line { .. }) {
-            eprintln!("Discovering changes...");
-        }
     }
 
     /// Start Git pack generation before its object and byte totals are known.
@@ -1021,34 +1130,18 @@ impl NativePushProgress {
         self.git_bytes_total.store(0, Relaxed);
         self.git_bytes_done.store(0, Relaxed);
         self.set_phase(Self::PHASE_GIT_PACKING);
-        if matches!(self.backend, ProgressBackend::Line { .. }) {
-            eprintln!("Packing Git objects...");
-        }
     }
 
     /// Start concurrent data packing and Git reachability preparation.
     pub fn begin_push_preparation(&self) {
         self.set_phase(Self::PHASE_STREAMING);
-        if matches!(self.backend, ProgressBackend::Line { .. }) {
-            eprintln!("Preparing data and Git objects...");
-        }
     }
 
     /// Record generated Git pack totals and transition to transfer progress.
     pub fn set_git_upload_totals(&self, packs: u64, objects: u64, bytes: u64) {
-        let pack_elapsed = self.phase_elapsed();
         self.git_packs_total.store(packs, Relaxed);
         self.git_objects_total.store(objects, Relaxed);
         self.git_bytes_total.store(bytes, Relaxed);
-        if matches!(self.backend, ProgressBackend::Line { .. }) {
-            eprintln!(
-                "Packing Git objects: {objects} objects in {packs} packs ({})  {} {}",
-                format_bytes(bytes),
-                self.checkmark(),
-                Self::fmt_elapsed(pack_elapsed),
-            );
-            eprintln!("Verifying Git packs...");
-        }
         self.set_phase(Self::PHASE_GIT_VERIFYING);
     }
 
@@ -1058,9 +1151,6 @@ impl NativePushProgress {
             return;
         }
         self.set_phase(Self::PHASE_GIT_UPLOADING);
-        if matches!(self.backend, ProgressBackend::Line { .. }) {
-            eprintln!("Uploading Git objects...");
-        }
     }
 
     /// Mark one pack body durable and advance to sidecar publication when ready.
@@ -1070,9 +1160,6 @@ impl NativePushProgress {
             return;
         }
         self.set_phase(Self::PHASE_GIT_PUBLISHING);
-        if matches!(self.backend, ProgressBackend::Line { .. }) {
-            eprintln!("Publishing Git metadata...");
-        }
     }
 
     /// Add durable or already-present Git pack bytes to transfer progress.
@@ -1363,208 +1450,19 @@ impl NativePushProgress {
     pub const PHASE_GIT_UPLOADING: u8 = 8;
     /// Phase: publishing Git pack indexes and locator metadata.
     pub const PHASE_GIT_PUBLISHING: u8 = 9;
-    /// Phase: atomically publishing repository metadata and refs.
+    /// Phase: finishing advisory indexes and releasing publication leases.
     pub const PHASE_FINALIZING: u8 = 10;
 
     /// Set the current pipeline phase.
     pub fn set_phase(&self, phase: u8) {
-        if let Ok(mut started) = self.phase_started.lock() {
-            *started = Instant::now();
+        let previous = self.phase.swap(phase, Relaxed);
+        if self.enabled && previous != phase && matches!(self.backend, ProgressBackend::Line { .. })
+        {
+            eprintln!("{}...", Self::phase_label(phase));
         }
-        self.phase.store(phase, Relaxed);
     }
 
     // -- Live progress rendering --------------------------------------------
-
-    fn phase_elapsed(&self) -> Duration {
-        self.phase_started
-            .lock()
-            .map(|started| started.elapsed())
-            .unwrap_or_default()
-    }
-
-    fn render_discovery_line(&self) -> String {
-        format!(
-            "Discovering changes: {:.1}s elapsed",
-            self.phase_elapsed().as_secs_f64()
-        )
-    }
-
-    fn render_git_pack_line(&self) -> String {
-        format!(
-            "Packing Git objects: {:.1}s elapsed",
-            self.phase_elapsed().as_secs_f64()
-        )
-    }
-
-    fn render_git_verify_line(&self) -> String {
-        format!(
-            "Verifying Git packs: {:.1}s elapsed",
-            self.phase_elapsed().as_secs_f64()
-        )
-    }
-
-    fn render_git_publish_line(&self) -> String {
-        format!(
-            "Publishing Git metadata: {:.1}s elapsed",
-            self.phase_elapsed().as_secs_f64()
-        )
-    }
-
-    fn render_git_prepare_line(&self) -> String {
-        format!(
-            "Preparing Git objects: {:.1}s elapsed",
-            self.phase_elapsed().as_secs_f64()
-        )
-    }
-
-    fn render_finalizing_line(&self) -> String {
-        format!(
-            "Finalizing push: {:.1}s elapsed",
-            self.phase_elapsed().as_secs_f64()
-        )
-    }
-
-    /// Render the packing progress line.
-    fn render_pack_line(&self) -> String {
-        let done = self.pack_files_done.load(Relaxed);
-        let total = self.pack_files_total.load(Relaxed);
-        let xorbs = self.pack_xorbs_produced.load(Relaxed);
-        let bytes = self.pack_bytes_done.load(Relaxed);
-        let total_bytes = self.pack_bytes_total.load(Relaxed);
-
-        let fraction = if total_bytes > 0 {
-            bytes as f64 / total_bytes as f64
-        } else if total > 0 {
-            done as f64 / total as f64
-        } else {
-            0.0
-        };
-        let pct = (fraction * 100.0).min(100.0) as u64;
-        let bar = render_bar(fraction, 30, self.color);
-        let bytes_str = format_bytes(bytes);
-        let byte_progress = if total_bytes > 0 {
-            format!("{bytes_str} / {}", format_bytes(total_bytes))
-        } else {
-            bytes_str
-        };
-
-        format!(
-            "Packing:            {bar} {pct:>3}%  {done}/{total} files, {xorbs} xorbs ({byte_progress})"
-        )
-    }
-
-    /// Render the upload progress line.
-    fn render_upload_line(&self) -> String {
-        let done = self.upload_xorbs_done.load(Relaxed);
-        let total = self.upload_xorbs_total.load(Relaxed);
-
-        // Prefer file-level completion when the tracker has been populated
-        // (streaming pipeline). The tracker correctly attributes shared
-        // xorbs across files, which raw counters can't express. Falls back
-        // to the atomic upload bytes when the tracker is empty.
-        let (tracker_done, tracker_total) = self.completion_tracker.status();
-        let (bytes_done, bytes_total) = if tracker_total > 0 {
-            (tracker_done, tracker_total)
-        } else {
-            (
-                self.upload_bytes_done.load(Relaxed),
-                self.upload_bytes_total.load(Relaxed),
-            )
-        };
-
-        // Both counters must complete before the bar can complete: uploaded
-        // bytes may land before the corresponding xorb future is reaped.
-        let fraction = if bytes_total > 0 && total > 0 {
-            (bytes_done as f64 / bytes_total as f64).min(done as f64 / total as f64)
-        } else if bytes_total > 0 {
-            bytes_done as f64 / bytes_total as f64
-        } else if total > 0 {
-            done as f64 / total as f64
-        } else {
-            0.0
-        };
-        let pct = (fraction * 100.0).min(100.0) as u64;
-        let bar = render_bar(fraction, 30, self.color);
-        let bytes_str = format_bytes(bytes_done);
-
-        // Smoothed transfer rate (EWMA with 3s half-life). None until
-        // enough observations; decays toward zero during stalls.
-        let rate = self
-            .speed_tracker
-            .lock()
-            .ok()
-            .and_then(|t| t.rates().1)
-            .unwrap_or(0.0);
-        let rate_str = format_rate(rate);
-
-        format!("Uploading xorbs:    {bar} {pct:>3}%  {done}/{total}, {bytes_str} | {rate_str}")
-    }
-
-    fn render_streaming_upload_line(&self) -> String {
-        if self.upload_totals_are_final() {
-            return self.render_upload_line();
-        }
-
-        let done = self.upload_xorbs_done.load(Relaxed);
-        let packed_so_far = self.upload_xorbs_total.load(Relaxed);
-        let bytes_str = format_bytes(self.upload_bytes_done.load(Relaxed));
-        let rate = self
-            .speed_tracker
-            .lock()
-            .ok()
-            .and_then(|tracker| tracker.rates().1)
-            .unwrap_or(0.0);
-        let rate_str = format_rate(rate);
-
-        format!(
-            "Uploading xorbs:    streaming  {done} uploaded, {packed_so_far} packed so far, {bytes_str} | {rate_str}"
-        )
-    }
-
-    /// Render the metadata upload progress line.
-    fn render_meta_line(&self) -> String {
-        let done = self.meta_done.load(Relaxed);
-        let total = self.meta_total.load(Relaxed);
-
-        let fraction = if total > 0 {
-            done as f64 / total as f64
-        } else {
-            0.0
-        };
-        let pct = (fraction * 100.0).min(100.0) as u64;
-        let bar = render_bar(fraction, 30, self.color);
-
-        format!("Uploading metadata: {bar} {pct:>3}%  {done}/{total} entries")
-    }
-
-    fn render_git_upload_line(&self) -> String {
-        let done = self.git_pack_bodies_done.load(Relaxed);
-        let total = self.git_packs_total.load(Relaxed);
-        let bytes = self.git_bytes_done.load(Relaxed);
-        let total_bytes = self.git_bytes_total.load(Relaxed);
-        let fraction = if total_bytes > 0 {
-            bytes as f64 / total_bytes as f64
-        } else if total > 0 {
-            done as f64 / total as f64
-        } else {
-            0.0
-        };
-        let pct = (fraction * 100.0).min(100.0) as u64;
-        let bar = render_bar(fraction, 30, self.color);
-        let rate = self
-            .git_speed_tracker
-            .lock()
-            .ok()
-            .and_then(|tracker| tracker.rates().1)
-            .unwrap_or(0.0);
-        format!(
-            "Uploading Git objects: {bar} {pct:>3}%  {done}/{total} packs, {} / {} | {}",
-            format_bytes(bytes),
-            format_bytes(total_bytes),
-            format_rate(rate),
-        )
-    }
 
     fn git_upload_payload(&self) -> ProgressPayload {
         let rate = self
@@ -1590,6 +1488,14 @@ impl NativePushProgress {
     /// line(s), and writes to stderr with `\r\x1b[2K` for in-place updates.
     /// In JSONL mode, emits a structured progress event through the stream.
     fn render_live(&self, prev_lines: &mut usize) {
+        let bytes = self.upload_bytes_done.load(Relaxed);
+        if let Ok(mut tracker) = self.speed_tracker.lock() {
+            tracker.update(bytes, bytes);
+        }
+        let bytes = self.git_bytes_done.load(Relaxed);
+        if let Ok(mut tracker) = self.git_speed_tracker.lock() {
+            tracker.update(bytes, bytes);
+        }
         match &self.backend {
             ProgressBackend::Jsonl { stream } => {
                 self.emit_jsonl_progress(stream);
@@ -1779,10 +1685,11 @@ impl NativePushProgress {
             },
             Self::PHASE_FINALIZING => ProgressPayload {
                 operation: "finalizing_push".to_owned(),
-                current: 0,
-                total: 0,
-                bytes: 0,
-                total_bytes: 0,
+                current: self.upload_xorbs_done.load(Relaxed) + self.git_packs_done.load(Relaxed),
+                total: self.upload_xorbs_total.load(Relaxed) + self.git_packs_total.load(Relaxed),
+                bytes: self.upload_bytes_done.load(Relaxed) + self.git_bytes_done.load(Relaxed),
+                total_bytes: self.upload_bytes_total.load(Relaxed)
+                    + self.git_bytes_total.load(Relaxed),
                 rate_bytes_per_sec: 0.0,
                 xorbs_produced: None,
             },
@@ -1793,36 +1700,290 @@ impl NativePushProgress {
 
     /// Render live progress to stderr using in-place TTY updates.
     fn render_live_tty(&self, prev_lines: &mut usize) {
-        let phase = self.phase.load(Relaxed);
-        let lines = match phase {
-            Self::PHASE_DISCOVERING => vec![self.render_discovery_line()],
-            Self::PHASE_PACKING => vec![self.render_pack_line()],
-            Self::PHASE_UPLOADING => vec![self.render_upload_line()],
-            Self::PHASE_STREAMING => {
-                let mut lines = Vec::new();
-                if self.pack_files_total.load(Relaxed) > 0
-                    || self.upload_xorbs_total.load(Relaxed) > 0
-                {
-                    lines.push(self.render_pack_line());
-                    lines.push(self.render_streaming_upload_line());
-                }
-                lines.push(self.render_git_prepare_line());
-                lines
-            }
-            Self::PHASE_METADATA => vec![self.render_meta_line()],
-            Self::PHASE_GIT_PACKING => vec![self.render_git_pack_line()],
-            Self::PHASE_GIT_VERIFYING => vec![self.render_git_verify_line()],
-            Self::PHASE_GIT_UPLOADING => vec![self.render_git_upload_line()],
-            Self::PHASE_GIT_PUBLISHING => vec![self.render_git_publish_line()],
-            Self::PHASE_FINALIZING => vec![self.render_finalizing_line()],
-            _ => Vec::new(),
-        };
+        let (height, width) = console::Term::stderr().size();
+        let width = usize::from(width).saturating_sub(1).max(1);
+        // Leave room for the shell and Git's result; never scroll a live frame.
+        let height = usize::from(height).saturating_sub(4).max(2);
+        let lines = self.render_terminal_lines(width, height, self.started.elapsed());
         render_tty_frame(&mut std::io::stderr().lock(), &lines, prev_lines);
     }
 
-    /// Emit a final newline after the live progress lines so subsequent
-    /// output starts on a fresh line.
+    fn phase_label(phase: u8) -> &'static str {
+        match phase {
+            Self::PHASE_PACKING => "Packing data",
+            Self::PHASE_STREAMING => "Preparing data",
+            Self::PHASE_UPLOADING => "Uploading data",
+            Self::PHASE_METADATA => "Writing metadata",
+            Self::PHASE_GIT_PACKING => "Preparing Git history",
+            Self::PHASE_GIT_VERIFYING => "Preparing repository state",
+            Self::PHASE_GIT_UPLOADING => "Uploading repository state",
+            Self::PHASE_GIT_PUBLISHING => "Publishing refs",
+            Self::PHASE_FINALIZING => "Finalizing push",
+            _ => "Preparing push",
+        }
+    }
+
+    fn paint(&self, text: &str, color: u8, bold: bool) -> String {
+        if self.color {
+            let weight = if bold { "1;" } else { "" };
+            format!("\x1b[{weight}{color}m{text}\x1b[0m")
+        } else {
+            text.to_owned()
+        }
+    }
+
+    fn render_lane(&self, kind: UploadKind, payload: &ProgressPayload, width: usize) -> String {
+        let known = payload.total > 0 || payload.total_bytes > 0;
+        let complete =
+            known && payload.current >= payload.total && payload.bytes >= payload.total_bytes;
+        let color = if complete { 32 } else { kind.color() };
+        let label = self.paint(&format!("{:<9}", kind.label()), color, true);
+        if !known {
+            return format!(
+                "  {label}  {} uploaded; planning",
+                format_bytes(payload.bytes)
+            );
+        }
+        let mut fraction = if payload.total_bytes > 0 {
+            payload.bytes as f64 / payload.total_bytes as f64
+        } else {
+            payload.current as f64 / payload.total as f64
+        };
+        // A full body is not durable until the object's acknowledgment arrives.
+        if !complete {
+            fraction = fraction.min(0.99);
+        }
+        let fraction = fraction.clamp(0.0, 1.0);
+        let amount = if payload.total_bytes > 0 && width >= 64 {
+            format!(
+                "{}/{}",
+                format_bytes(payload.bytes),
+                format_bytes(payload.total_bytes)
+            )
+        } else {
+            format!("{}/{}", payload.current, payload.total)
+        };
+        let mut metrics = format!(" {:>3}%  {amount}", (fraction * 100.0) as u64);
+        if width >= 80 && payload.rate_bytes_per_sec > 0.0 && !complete {
+            let _ = write!(metrics, "  {}", format_rate(payload.rate_bytes_per_sec));
+            let remaining = payload.total_bytes.saturating_sub(payload.bytes);
+            if width >= 96 && remaining > 0 {
+                let eta = (remaining as f64 / payload.rate_bytes_per_sec).ceil() as u64;
+                let _ = write!(metrics, "  ETA {eta}s");
+            }
+        }
+        if (self.verbose || width >= 110) && payload.total_bytes > 0 && width >= 100 {
+            let _ = write!(metrics, "  {}/{} objects", payload.current, payload.total);
+        }
+        let metrics = self.paint(&metrics, color, false);
+        let bar_width = width
+            .saturating_sub(console::measure_text_width(&metrics) + 14)
+            .min(28);
+        if bar_width >= 6 {
+            let filled = (fraction * bar_width as f64).round() as usize;
+            let filled = if complete {
+                filled
+            } else {
+                filled.min(bar_width - 1)
+            };
+            let bar = if self.color {
+                format!(
+                    "{}{}",
+                    self.paint(&"█".repeat(filled), color, true),
+                    self.paint(&"░".repeat(bar_width - filled), 90, false)
+                )
+            } else {
+                render_bar(filled as f64 / bar_width as f64, bar_width, false)
+            };
+            format!("  {label}  {bar}{metrics}")
+        } else {
+            format!("  {label}{metrics}")
+        }
+    }
+
+    fn render_terminal_lines(&self, width: usize, height: usize, elapsed: Duration) -> Vec<String> {
+        let Some(payload) = self.build_jsonl_progress_payload() else {
+            return Vec::new();
+        };
+        let phase = self.phase();
+        let outcome = self.terminal_outcome.load(Acquire);
+        let (marker, label) = match outcome {
+            1 => ('+', "Push complete"),
+            2 => ('!', "Push stopped"),
+            _ => (
+                ['|', '/', '-', '\\'][(elapsed.as_millis() / 100 % 4) as usize],
+                Self::phase_label(phase),
+            ),
+        };
+        let tick = elapsed.as_millis() as usize / 100;
+        let elapsed = format!("{:.1}s", elapsed.as_secs_f64());
+        let title_width = width.saturating_sub(elapsed.len() + 1);
+        let title = format!("{marker} {label}");
+        let title = console::truncate_str(&title, title_width, "");
+        let gap = width.saturating_sub(console::measure_text_width(&title) + elapsed.len());
+        let color = match outcome {
+            1 => 32,
+            2 => 33,
+            _ => 36,
+        };
+        let header = format!(
+            "{}{}{}",
+            self.paint(&title, color, true),
+            " ".repeat(gap),
+            self.paint(&elapsed, 90, false)
+        );
+        let mut lines = vec![header];
+        if outcome != 0 {
+            let bytes = self.upload_bytes_done.load(Relaxed) + self.git_bytes_done.load(Relaxed);
+            lines.push(format!("  {} uploaded", format_bytes(bytes)));
+        } else {
+            let hint = match phase {
+                Self::PHASE_GIT_PUBLISHING => Some("Committing refs after verified uploads"),
+                Self::PHASE_FINALIZING => Some("Updating repository indexes"),
+                _ => None,
+            };
+            if let Some(hint) = hint {
+                lines.push(format!("  {hint}"));
+            }
+            let xet_total = self.upload_xorbs_total.load(Relaxed);
+            let xet_bytes = self.upload_bytes_done.load(Relaxed);
+            let active = self
+                .active_uploads
+                .lock()
+                .map(|uploads| uploads.values().cloned().collect::<Vec<_>>())
+                .unwrap_or_default();
+            if xet_total > 0
+                || xet_bytes > 0
+                || active.iter().any(|u| matches!(u.kind, UploadKind::Xorb))
+            {
+                let final_totals = self.upload_totals_are_final() || phase == Self::PHASE_UPLOADING;
+                let xet = ProgressPayload {
+                    operation: "uploading".to_owned(),
+                    current: self.upload_xorbs_done.load(Relaxed),
+                    total: if final_totals { xet_total } else { 0 },
+                    bytes: xet_bytes,
+                    total_bytes: if final_totals {
+                        self.upload_bytes_total.load(Relaxed)
+                    } else {
+                        0
+                    },
+                    rate_bytes_per_sec: self
+                        .speed_tracker
+                        .lock()
+                        .ok()
+                        .and_then(|t| t.rates().1)
+                        .unwrap_or(0.0),
+                    xorbs_produced: None,
+                };
+                lines.push(self.render_lane(UploadKind::Xorb, &xet, width));
+            }
+            if self.meta_total.load(Relaxed) > 0 {
+                let shards = ProgressPayload {
+                    operation: "uploading_metadata".to_owned(),
+                    current: self.meta_done.load(Relaxed),
+                    total: self.meta_total.load(Relaxed),
+                    bytes: 0,
+                    total_bytes: 0,
+                    rate_bytes_per_sec: 0.0,
+                    xorbs_produced: None,
+                };
+                lines.push(self.render_lane(UploadKind::Shard, &shards, width));
+            }
+            if self.git_upload_started.load(Relaxed) {
+                lines.push(self.render_lane(
+                    UploadKind::Capsule,
+                    &self.git_upload_payload(),
+                    width,
+                ));
+            }
+            if lines.len() == 1 {
+                let hint = match phase {
+                    Self::PHASE_DISCOVERING => "Checking refs and outgoing changes",
+                    Self::PHASE_GIT_PACKING | Self::PHASE_GIT_VERIFYING => {
+                        "Building and verifying outgoing history"
+                    }
+                    _ if payload.bytes > 0 => "Preparing remaining data",
+                    _ => "Checking staged data and reusable objects",
+                };
+                lines.push(format!("  {hint}"));
+            }
+            if !active.is_empty() && lines.len() < height {
+                let slots = height.saturating_sub(lines.len() + 1).min(8);
+                let shown = if active.len() <= slots + 1 {
+                    active.len()
+                } else {
+                    slots
+                };
+                for upload in active.iter().take(shown) {
+                    let color = upload.kind.color();
+                    // Immutable writes expose a verified acknowledgment, not a
+                    // wire-byte callback. Pulse activity; never invent a percentage.
+                    let pulse = tick % 12;
+                    let track = (0..12)
+                        .map(|i| {
+                            let lit = (i + 12 - pulse) % 12 < 3;
+                            if self.color {
+                                self.paint(
+                                    if lit { "█" } else { "░" },
+                                    if lit { color } else { 90 },
+                                    lit,
+                                )
+                            } else {
+                                if lit { "#" } else { "-" }.to_owned()
+                            }
+                        })
+                        .collect::<String>();
+                    let kind = match upload.kind {
+                        UploadKind::Xorb => "xorb",
+                        UploadKind::Shard => "shard",
+                        UploadKind::Capsule => "capsule",
+                    };
+                    let name = self.paint(&format!("{kind} {}", upload.name), color, false);
+                    let detail = if width >= 80 {
+                        format!(
+                            " {} in flight  {:.1}s",
+                            format_bytes(upload.bytes),
+                            upload.started.elapsed().as_secs_f64()
+                        )
+                    } else {
+                        " in flight".to_owned()
+                    };
+                    lines.push(format!("    {name}  {track}{detail}"));
+                }
+                if active.len() > shown {
+                    lines.push(format!(
+                        "    + {} more uploads in flight",
+                        active.len() - shown
+                    ));
+                }
+            }
+        }
+        lines.truncate(height.max(1));
+        lines
+            .into_iter()
+            .map(|line| console::truncate_str(&line, width, "").into_owned())
+            .collect()
+    }
+
+    // Preserve the final counts despite throttling, and finish the display
+    // before the caller writes its authoritative result.
     fn finalize_live(&self, prev_lines: usize) {
+        if let Some(payload) = self.build_jsonl_progress_payload() {
+            // Periodic updates are throttled. The final snapshot must retain
+            // acknowledged bytes even when the last upload finishes between ticks.
+            let output = match &self.backend {
+                ProgressBackend::Jsonl { stream } => {
+                    stream.lock().ok().map(|mut s| s.emit_snapshot(payload))
+                }
+                ProgressBackend::JsonlStderr { stream } => {
+                    stream.lock().ok().map(|mut s| s.emit_snapshot(payload))
+                }
+                _ => None,
+            };
+            if let Some(output) = output {
+                crate::core::output::report_progress_output(output);
+            }
+        }
         if prev_lines > 0 {
             eprintln!();
         }
@@ -1922,6 +2083,206 @@ fn render_tty_frame<W: Write>(writer: &mut W, lines: &[String], prev_lines: &mut
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn concurrent_uploads_have_distinct_rows_and_drop_removes_only_the_owner() {
+        let progress = NativePushProgress::new(true, true, false);
+        progress.set_upload_totals(2, 200);
+        progress.mark_upload_totals_final();
+        progress.set_phase(NativePushProgress::PHASE_UPLOADING);
+        let first = progress.track_upload(UploadKind::Xorb, "aaaa111111", 100);
+        let _second = progress.track_upload(UploadKind::Xorb, "bbbb222222", 100);
+        let lines = progress.render_terminal_lines(120, 24, Duration::from_secs(2));
+        assert!(
+            ["xorb aaaa111111", "xorb bbbb222222"]
+                .iter()
+                .all(|name| lines.iter().any(|line| line.contains(name))),
+            "{lines:?}"
+        );
+        drop(first);
+        let lines = progress.render_terminal_lines(120, 24, Duration::from_secs(2));
+        assert!(
+            !lines.iter().any(|line| line.contains("aaaa111111"))
+                && lines.iter().any(|line| line.contains("bbbb222222")),
+            "{lines:?}"
+        );
+    }
+
+    #[tokio::test]
+    async fn cancelling_an_upload_removes_its_activity_row() {
+        let progress = Arc::new(NativePushProgress::new(true, false, false));
+        let (ready, started) = tokio::sync::oneshot::channel();
+        let reporter = Arc::clone(&progress);
+        let upload = tokio::spawn(async move {
+            let _guard = reporter.track_upload(UploadKind::Xorb, "cancelled", 100);
+            let _ = ready.send(());
+            std::future::pending::<()>().await;
+        });
+        started.await.unwrap();
+        upload.abort();
+        assert!(upload.await.unwrap_err().is_cancelled());
+        assert!(progress.active_uploads.lock().unwrap().is_empty());
+    }
+
+    #[test]
+    fn rich_frames_fit_terminal_height_and_summarize_hidden_workers() {
+        let progress = NativePushProgress::new(true, true, false);
+        progress.set_phase(NativePushProgress::PHASE_UPLOADING);
+        let _uploads = (0..16)
+            .map(|id| progress.track_upload(UploadKind::Xorb, &format!("{id:010x}"), 100))
+            .collect::<Vec<_>>();
+        for width in [20, 40, 80, 120] {
+            for height in [2, 4, 8, 24] {
+                let lines = progress.render_terminal_lines(width, height, Duration::from_secs(2));
+                assert!(
+                    lines.len() <= height
+                        && lines
+                            .iter()
+                            .all(|line| console::measure_text_width(line) <= width),
+                    "{width}x{height}: {lines:?}"
+                );
+                if height >= 4 && width >= 40 {
+                    assert!(
+                        lines
+                            .iter()
+                            .any(|line| line.contains("more uploads in flight")),
+                        "{lines:?}"
+                    );
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn transfer_categories_keep_independent_counts_and_colors() {
+        let progress = NativePushProgress::new(true, true, false);
+        progress.set_upload_totals(2, 200);
+        progress.mark_upload_totals_final();
+        progress.inc_upload_xorb(100);
+        progress.set_meta_total(4);
+        progress.inc_meta();
+        progress.set_git_upload_totals(1, 0, 300);
+        progress.begin_git_upload();
+        let lines = progress.render_terminal_lines(120, 24, Duration::from_secs(2));
+        for (label, fraction, color) in [
+            ("Xet xorbs", "50%", "36m"),
+            ("Shards", "25%", "35m"),
+            ("Capsule", "0%", "33m"),
+        ] {
+            assert!(
+                lines.iter().any(|line| line.contains(label)
+                    && line.contains(fraction)
+                    && line.contains(color)),
+                "{lines:?}"
+            );
+        }
+    }
+
+    #[test]
+    fn compact_frames_fit_narrow_and_wide_terminals() {
+        for width in [1, 12, 20, 40, 80, 120] {
+            for color in [false, true] {
+                let progress = NativePushProgress::new(true, color, true);
+                progress.set_upload_totals(4, 400_000_000);
+                progress.inc_upload_xorb(100_000_000);
+                progress.set_phase(NativePushProgress::PHASE_UPLOADING);
+                let lines = progress.render_terminal_lines(width, 24, Duration::from_secs(12));
+                assert!(
+                    lines
+                        .iter()
+                        .all(|line| console::measure_text_width(line) <= width),
+                    "width={width}, color={color}: {lines:?}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn transfer_completion_requires_bytes_and_object_acknowledgements() {
+        let progress = NativePushProgress::new(true, false, false);
+        progress.set_upload_totals(2, 200);
+        progress.add_upload_bytes(200);
+        progress.inc_upload_xorb_bytes_already_reported();
+        progress.set_phase(NativePushProgress::PHASE_UPLOADING);
+        let lines = progress.render_terminal_lines(80, 24, Duration::from_secs(2));
+        let bar = lines[1]
+            .split_whitespace()
+            .find(|word| word.chars().all(|c| matches!(c, '#' | '-')))
+            .unwrap();
+        assert!(!lines[1].contains("100%") && bar.contains('-'), "{lines:?}");
+    }
+
+    #[test]
+    fn transfer_percentage_follows_bytes_for_unequal_objects() {
+        let progress = NativePushProgress::new(true, false, false);
+        progress.set_upload_totals(2, 1000);
+        progress.inc_upload_xorb(900);
+        progress.set_phase(NativePushProgress::PHASE_UPLOADING);
+        let lines = progress.render_terminal_lines(80, 24, Duration::from_secs(2));
+        assert!(lines[1].contains("90%"), "{lines:?}");
+    }
+
+    #[test]
+    fn verified_reuse_is_excluded_from_transfer_totals() {
+        let progress = NativePushProgress::new(true, false, false);
+        progress.plan_upload(100);
+        progress.plan_upload(200);
+        progress.finish_upload(100, 0);
+        progress.finish_upload(200, 200);
+        progress.set_phase(NativePushProgress::PHASE_UPLOADING);
+        let payload = progress.build_jsonl_progress_payload().unwrap();
+        assert_eq!(
+            (
+                payload.current,
+                payload.total,
+                payload.bytes,
+                payload.total_bytes
+            ),
+            (1, 1, 200, 200)
+        );
+    }
+
+    #[test]
+    fn publishing_refs_stays_active_after_payload_transfer_completes() {
+        let progress = NativePushProgress::new(true, false, false);
+        progress.set_git_upload_totals(1, 0, 100);
+        progress.begin_git_upload();
+        progress.add_git_upload_bytes(100);
+        progress.finish_git_pack_body();
+        let lines = progress.render_terminal_lines(80, 24, Duration::from_secs(2));
+        assert!(
+            lines[0].contains("Publishing refs") && !lines[1].contains("100%"),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn streaming_uploads_do_not_guess_a_percentage() {
+        let progress = NativePushProgress::new(true, false, false);
+        progress.plan_upload(100);
+        progress.inc_upload_xorb(100);
+        progress.begin_push_preparation();
+        let lines = progress.render_terminal_lines(80, 24, Duration::from_secs(2));
+        assert!(
+            lines[1].contains("uploaded") && !lines[1].contains('%'),
+            "{lines:?}"
+        );
+    }
+
+    #[test]
+    fn finished_frames_replace_the_spinner_with_the_actual_outcome() {
+        for (succeeded, label) in [(true, "+ Push complete"), (false, "! Push stopped")] {
+            let progress = NativePushProgress::new(true, false, false);
+            progress.set_phase(NativePushProgress::PHASE_FINALIZING);
+            progress.add_upload_bytes(1024);
+            progress.finish(succeeded);
+            let lines = progress.render_terminal_lines(80, 24, Duration::from_secs(2));
+            assert!(
+                lines[0].starts_with(label) && lines[1].contains("1.0 KiB uploaded"),
+                "{lines:?}"
+            );
+        }
+    }
 
     // -- render_bar ----------------------------------------------------------
 
@@ -2109,28 +2470,6 @@ mod tests {
     }
 
     #[test]
-    fn discovery_phase_renders_before_totals_are_known() {
-        let p = NativePushProgress::new(true, false, false);
-        p.begin_discovery();
-
-        let line = p.render_discovery_line();
-
-        assert!(line.starts_with("Discovering changes:"));
-        assert!(line.contains("elapsed"));
-    }
-
-    #[test]
-    fn git_pack_phase_renders_while_pack_objects_is_running() {
-        let p = NativePushProgress::new(true, false, false);
-        p.begin_git_pack();
-
-        let line = p.render_git_pack_line();
-
-        assert!(line.starts_with("Packing Git objects:"));
-        assert!(line.contains("elapsed"));
-    }
-
-    #[test]
     fn git_pack_lifecycle_distinguishes_local_and_remote_work() {
         let p = NativePushProgress::new(true, false, false);
         p.begin_git_pack();
@@ -2154,26 +2493,6 @@ mod tests {
     }
 
     #[test]
-    fn git_upload_progress_tracks_pack_bytes_and_completion() {
-        let p = NativePushProgress::new(true, false, false);
-        p.set_git_upload_totals(2, 100, 1024);
-        p.begin_git_upload();
-        p.add_git_upload_bytes(512);
-        p.finish_git_pack_body();
-
-        let halfway = p.render_git_upload_line();
-        assert!(halfway.contains(" 50%"));
-        assert!(halfway.contains("1/2 packs"));
-        assert!(halfway.contains("512 B / 1.0 KiB"));
-
-        p.add_git_upload_bytes(512);
-        p.finish_git_pack_body();
-        let complete = p.render_git_upload_line();
-        assert!(complete.contains("100%"));
-        assert!(complete.contains("2/2 packs"));
-    }
-
-    #[test]
     fn git_upload_jsonl_uses_distinct_operation() {
         let p = NativePushProgress::new(true, false, false);
         p.set_git_upload_totals(1, 10, 2048);
@@ -2189,106 +2508,6 @@ mod tests {
         assert_eq!(payload.total, 1);
         assert_eq!(payload.bytes, 1024);
         assert_eq!(payload.total_bytes, 2048);
-    }
-
-    // -- render_pack_line ----------------------------------------------------
-
-    #[test]
-    fn render_pack_line_zero_progress_no_color() {
-        let p = NativePushProgress::new(true, false, false);
-        p.set_pack_totals(42, 0);
-        let line = p.render_pack_line();
-        assert!(line.starts_with("Packing:"));
-        assert!(line.contains("0/42 files"));
-        assert!(line.contains("  0%"));
-    }
-
-    #[test]
-    fn render_pack_line_half_progress() {
-        let p = NativePushProgress::new(true, false, false);
-        p.set_pack_totals(10, 1024 * 1024);
-        for _ in 0..5 {
-            p.inc_pack_file();
-        }
-        p.pack_bytes_done.store(512 * 1024, Relaxed);
-        p.pack_xorbs_produced.store(2, Relaxed);
-        let line = p.render_pack_line();
-        assert!(line.contains("5/10 files"));
-        assert!(line.contains(" 50%"));
-        assert!(line.contains("2 xorbs"));
-    }
-
-    #[test]
-    fn render_pack_line_zero_total_shows_zero_percent() {
-        let p = NativePushProgress::new(true, false, false);
-        let line = p.render_pack_line();
-        assert!(line.contains("  0%"));
-        assert!(line.contains("0/0 files"));
-    }
-
-    #[test]
-    fn render_pack_line_advances_by_bytes_with_one_active_file() {
-        let p = NativePushProgress::new(true, false, false);
-        p.set_pack_totals(1, 1024 * 1024);
-        p.add_pack_bytes(512 * 1024);
-        p.set_pack_xorbs_produced(8);
-
-        let line = p.render_pack_line();
-
-        assert!(line.contains(" 50%"));
-        assert!(line.contains("0/1 files"));
-        assert!(line.contains("8 xorbs"));
-        assert!(line.contains("512.0 KiB / 1.0 MiB"));
-    }
-
-    // -- render_upload_line --------------------------------------------------
-
-    #[test]
-    fn render_upload_line_shows_rate() {
-        let p = NativePushProgress::new(true, false, false);
-        p.set_upload_totals(12, 1024 * 1024 * 1024);
-        for _ in 0..4 {
-            p.inc_upload_xorb(64 * 1024 * 1024);
-        }
-        let line = p.render_upload_line();
-        assert!(line.starts_with("Uploading xorbs:"));
-        assert!(line.contains("4/12"));
-        assert!(line.contains("|")); // rate separator
-    }
-
-    #[test]
-    fn render_upload_line_reserves_100_percent_for_all_xorbs_complete() {
-        let p = NativePushProgress::new(true, false, false);
-        p.set_upload_totals(2, 64 * 1024 * 1024);
-        p.inc_upload_xorb(64 * 1024 * 1024);
-
-        let incomplete = p.render_upload_line();
-        assert!(!incomplete.contains("100%"));
-        assert!(incomplete.contains("1/2"));
-
-        p.inc_upload_xorb(0);
-        let complete = p.render_upload_line();
-        assert!(complete.contains("100%"));
-        assert!(complete.contains("2/2"));
-    }
-
-    #[test]
-    fn streaming_upload_waits_for_final_total_before_showing_percentage() {
-        let p = NativePushProgress::new(true, false, false);
-        p.set_upload_totals(17, 17 * 64 * 1024 * 1024);
-        for _ in 0..16 {
-            p.inc_upload_xorb(64 * 1024 * 1024);
-        }
-
-        let streaming = p.render_streaming_upload_line();
-        assert!(!streaming.contains("94%"));
-        assert!(streaming.contains("16 uploaded"));
-        assert!(streaming.contains("17 packed so far"));
-
-        p.mark_upload_totals_final();
-        let final_total = p.render_streaming_upload_line();
-        assert!(final_total.contains("94%"));
-        assert!(final_total.contains("16/17"));
     }
 
     #[test]
@@ -2307,20 +2526,6 @@ mod tests {
         let final_total = p.build_jsonl_progress_payload().expect("final payload");
         assert_eq!(final_total.total, 17);
         assert_eq!(final_total.total_bytes, 17 * 64 * 1024 * 1024);
-    }
-
-    // -- render_meta_line ----------------------------------------------------
-
-    #[test]
-    fn render_meta_line_complete() {
-        let p = NativePushProgress::new(true, false, false);
-        p.set_meta_total(5);
-        for _ in 0..5 {
-            p.inc_meta();
-        }
-        let line = p.render_meta_line();
-        assert!(line.contains("100%"));
-        assert!(line.contains("5/5 entries"));
     }
 
     #[test]
@@ -2405,7 +2610,7 @@ mod tests {
         // Both outcomes are valid depending on the test environment.
         let p = Arc::new(NativePushProgress::new(true, false, false));
         let result = p.start_ticker();
-        if is_tty() {
+        if NativePushProgress::live_terminal() {
             // TTY environment: ticker should start.
             let (handle, cancel) = result.expect("ticker should start on TTY");
             cancel.cancel();

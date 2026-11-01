@@ -204,6 +204,58 @@ pub async fn run_doctor(mode: OutputMode, cache_service_active_probe: bool) -> R
     run_doctor_in(&cwd, mode, cache_service_active_probe).await
 }
 
+/// Migrate development global hints without changing committed repository data.
+pub async fn migrate_chunk_index(mode: OutputMode, cancel: &CancellationToken) -> Result<()> {
+    let root = std::env::current_dir()?;
+    let url = ProjectConfig::remote_url(&root)?;
+    let parsed = crate::git::url::CrabUrl::parse(&url)?;
+    let config = Config::resolve_for_repo(&root)?;
+    let store = crate::auth::build_repository_url_store(&config, &parsed, "doctor", cancel).await?;
+    let router = crate::storage::StoreLayout::new(store.clone(), parsed.repo_path);
+    let layout = crab_storage::StoreLayout::with_global_prefix(
+        store.as_storage().clone(),
+        router.repo_prefix().to_owned(),
+        router.global_prefix().to_owned(),
+    );
+    let admission =
+        crate::maintenance::GcGlobalWriterLease::acquire(&store, router.global_prefix(), cancel)
+            .await?;
+    let result =
+        crab_metadata::capsule_protocol::migrate_capsule_chunk_candidates(&layout, &|| {
+            cancel.is_cancelled()
+        })
+        .await
+        .map_err(CrabError::from);
+    // Drain migration before releasing global admission on success or error.
+    let release = admission.release().await;
+    let migrated = match (result, release) {
+        (Ok(migrated), Ok(())) => migrated,
+        (Err(error), _) | (Ok(_), Err(error)) => return Err(error),
+    };
+    let detail = if migrated {
+        "Migrated global chunk hints to verified packed runs."
+    } else {
+        "Global chunk hints require no migration."
+    };
+    if mode == OutputMode::Json {
+        emit_json(
+            "doctor",
+            "1.0",
+            DoctorPayload {
+                checks: vec![CheckResult::ok("chunk hint index", detail)],
+                summary: DoctorSummary {
+                    ok: 1,
+                    warn: 0,
+                    fail: 0,
+                },
+            },
+        )?;
+    } else {
+        println!("{detail}");
+    }
+    Ok(())
+}
+
 /// Collect a redacted cache-service support bundle for incidents.
 pub async fn run_cache_service_support_bundle(
     mode: OutputMode,
