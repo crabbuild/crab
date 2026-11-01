@@ -51,6 +51,7 @@ the user's manual-demo data. No bucket-wide Crab GC was invoked.
 | 10,000 developer commits, admission follow-up | Five more 1,000-update rounds acknowledged; one independent cold consumer matches all 1,000 final tips/files and all 20,001 baseline/developer commits; 2,010 checks pass | `team-10000-admission/artifacts/report.json`, `team-10000-summary.json` |
 | Team checkpoint maintenance | Repack fails after 529.058 seconds because its visibility proof exceeds the byte bound; all 1,001 exact refs remain unchanged; the queued reader phase does not run | `team-maintenance-and-1000-readers/artifacts/report.json`, `team-maintenance-failure-ref-verification.json` |
 | Mixed team smoke | Eight native publications succeed; all eight ordinary Git updates fail in LFS pre-push discovery on unavailable remote exclusion tips; serialized reproduction confirms the cause | `mixed-team-8-smoke/artifacts/report.json`, `mixed-team-missing-boundary-reproduction.json` |
+| Shared LFS discovery follow-up | Rebuilt release passes 118 checks: eight clients, 32 developer commits, alternating native/Git batches, both historical payload versions, cold bytes and clean Crab/Git audits | `mixed-team-8-lfs-fixed/artifacts/report.json`, `lfs-boundary-build-report.json` |
 | Complete team object-store audit | Three expired read-admission leases; no Git-object or data-chain findings. Both audits report failure with zero repairs. Recovery remains a separate check | `team-final-fsck-retry.json`, `team-fsck-diagnostic.jsonl` |
 | Complete team-store recovery | Follow-up binary passes the full audit in repair mode: three leases repaired, zero repair failures; independent origin reads verify released tombstones and unchanged holders | `team-fsck-bounded-repair.jsonl`, `team-lease-recovery-verification.json` |
 | Bounded-reader follow-up, 64 clients | All 140 checks pass: 64 publications, 64 updates, concurrent protocol-v2 readbacks/pulls and fsck; uses the follow-up binary identified below | `bounded-frontier-64/artifacts/report.json` |
@@ -264,6 +265,18 @@ then fails after 529.058 seconds: `checkpoint visibility proof exceeds its byte
 bound`. All 1,001 exact refs remain unchanged in independent before/after
 advertisements. The post-maintenance clone, 1,000-reader phase and final audit
 do not run. This is a maintenance failure, not a reader-capacity result.
+The separate audit after that failure passes with zero errors, repairs or
+repair failures: `team-failed-maintenance-audit.jsonl`.
+
+A synthetic probe linked to the actual existing metadata encoder isolates the
+failure without Git transfer or storage writes. With 32,000 common objects,
+256 identical refs encode to 1,669,563 bytes. Adding 30 private objects per ref
+produces 42,625,970 bytes for 64 refs and exceeds the unchanged 128 MiB bound
+at 256 refs. Evidence: `checkpoint-visibility-probe-report.json`; the library
+and probe hashes are retained in `checkpoint-visibility-probe-build.json`.
+This is codec evidence, not a real Git repository qualification. The full
+decoder requires canonical re-encoding, so changing page construction also
+requires proving the reader and persistent-data contract.
 
 The new mixed team driver stages ordinary Git, Xet and LFS files twice per
 developer, alternates native/Git push batches, and checks both payload versions
@@ -279,7 +292,14 @@ the original source with the expected missing-object error and passes across
 regular, bare, shared and linked-worktree repositories. Required missing tips
 still fail. The feature-disabled suite separately passes 457 tests and fails
 two existing migration glob assertions; those tests remain unchanged.
-Fresh release-binary smoke and full mixed team qualification remain pending.
+The private `make install` build at `5504b40561a8` passes and has SHA-256
+`d6631394ef2d8baeee63fdaddb0e625daa387b396f74422937d16686b88d31f6`.
+Its fresh eight-client smoke passes all 118 checks in 73.556 seconds: all 32
+developer commits are acknowledged across alternating native/Git batches,
+both payload versions reconstruct exactly, and Crab/Git audits pass without
+repair. A 64-client continuation is active; the queued 1,000-client profile
+uses eight commits per developer, with its second payload version published
+through ordinary Git. Full mixed team capacity remains pending.
 This driver exercises Crab's LFS filters
 and managed hook, not unmodified Git LFS transfer-agent load.
 
