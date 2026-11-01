@@ -6354,6 +6354,32 @@ mod tests {
 
     #[tokio::test(flavor = "multi_thread")]
     async fn yaml_cache_replay_anchors_artifacts_to_repository_root() {
+        // Other tests change and remove the process cwd. A child owns this
+        // fixture's ancestor until every replay assertion has completed.
+        const CHILD: &str = "CRAB_TEST_WORKFLOW_CACHE_REPLAY_CHILD";
+        let Some(completed) = std::env::var_os(CHILD) else {
+            let root = TempDir::new().unwrap();
+            let completed = root.path().join("completed");
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args([
+                    "--exact",
+                    "cmd::run::tests::yaml_cache_replay_anchors_artifacts_to_repository_root",
+                    "--nocapture",
+                ])
+                .current_dir(root.path())
+                .env(CHILD, &completed)
+                .output()
+                .unwrap();
+            assert!(
+                output.status.success(),
+                "cache replay child failed:\nstdout:\n{}\nstderr:\n{}",
+                String::from_utf8_lossy(&output.stdout),
+                String::from_utf8_lossy(&output.stderr)
+            );
+            assert!(completed.is_file(), "cache replay child did not complete");
+            return;
+        };
+
         // Both possible destinations stay inside this disposable fixture. No
         // process-wide cwd mutation is needed to expose the wrong-root write.
         let cwd = std::env::current_dir().unwrap();
@@ -6509,6 +6535,7 @@ mod tests {
             b"local edit"
         );
         assert!(!cwd.join(&relative).exists());
+        fs::write(PathBuf::from(completed), b"complete").unwrap();
     }
 
     #[tokio::test(flavor = "multi_thread")]

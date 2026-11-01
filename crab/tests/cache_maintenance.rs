@@ -516,7 +516,16 @@ async fn doctor_reports_missing_unsafe_corrupt_and_over_budget_cache_without_mut
                 std::fs::Permissions::from_mode(0o777),
             )
             .unwrap(),
-            "corrupt" => std::fs::write(root.join(".catalog.sqlite"), b"invalid sqlite").unwrap(),
+            "corrupt" => {
+                let catalog = root.join(".catalog.sqlite");
+                // Commit the test image before damaging it; retained WAL pages
+                // can otherwise supply the intact header during inspection.
+                rusqlite::Connection::open(&catalog)
+                    .unwrap()
+                    .execute_batch("PRAGMA journal_mode = DELETE;")
+                    .unwrap();
+                std::fs::write(catalog, b"invalid sqlite").unwrap();
+            }
             "over-budget" => {
                 let config = temp.path().join(crab::core::config::REPO_CONFIG_REL);
                 std::fs::create_dir_all(config.parent().unwrap()).unwrap();
