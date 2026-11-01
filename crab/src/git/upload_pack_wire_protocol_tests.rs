@@ -353,7 +353,7 @@ fn reachable_non_tip_want_is_accepted_when_enabled() {
 
 #[tokio::test]
 async fn missing_capsule_payload_is_reported_after_discovery() {
-    let (layout, _, tip) = Box::pin(capsule_negotiation::fixture(false)).await;
+    let (layout, _, tip) = Box::pin(capsule_negotiation::fixture(false, true)).await;
     let root = crab_write::capsule_protocol::open_root(&layout)
         .await
         .unwrap();

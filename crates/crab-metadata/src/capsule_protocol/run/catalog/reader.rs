@@ -118,6 +118,14 @@ impl RunCatalogSource {
         let Some(root) = &self.pages.roots[position] else {
             return Ok(output);
         };
+        // Verified catalog footer bounds prove absence, as in object-backed
+        // catalogs. Keep this here: Git locator/graph readers require their
+        // root pages even for misses, so the shared cache cannot skip them.
+        if keys.iter().all(|key| {
+            key.len() == KINDS[position].key_bytes() && (*key < root.first || *key > root.last)
+        }) {
+            return Ok(output);
+        }
         let rows = cache
             .lookup(
                 store,

@@ -10,13 +10,26 @@ use std::collections::BTreeMap;
 
 const LIMIT: u64 = 8 * 1024 * 1024;
 
-pub(super) async fn fixture(rewrite: bool) -> (StoreLayout<Store>, ObjectId, ObjectId) {
+pub(super) async fn fixture(
+    rewrite: bool,
+    checkpoint: bool,
+) -> (StoreLayout<Store>, ObjectId, ObjectId) {
     let store = Store::new(Arc::new(object_store::memory::InMemory::new()));
     let layout = StoreLayout::new(store, "repositories/negotiation".to_owned());
     crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
         .await
         .unwrap();
     let seed = Box::pin(publish_commit(&layout, None, false, "seed")).await;
+    if checkpoint {
+        crab_remote::checkpoint::publish_capsule_checkpoint(
+            &layout,
+            0,
+            LIMIT,
+            &CancellationToken::new(),
+        )
+        .await
+        .unwrap();
+    }
     let tip = Box::pin(publish_commit(&layout, Some(seed), rewrite, "incremental")).await;
     (layout, seed, tip)
 }
@@ -122,22 +135,12 @@ async fn publish_commit(
     crab_write::capsule_protocol::publish(layout, root, &transaction, capsule)
         .await
         .unwrap();
-    if previous.is_none() {
-        crab_remote::checkpoint::publish_capsule_checkpoint(
-            layout,
-            0,
-            LIMIT,
-            &CancellationToken::new(),
-        )
-        .await
-        .unwrap();
-    }
     tip
 }
 
 #[tokio::test]
 async fn authenticated_transition_finishes_negotiation_without_done() {
-    let (layout, seed, tip) = fixture(false).await;
+    let (layout, seed, tip) = fixture(false, true).await;
     let root = crab_write::capsule_protocol::open_root(&layout)
         .await
         .unwrap();
@@ -203,7 +206,7 @@ async fn authenticated_transition_finishes_negotiation_without_done() {
 
 #[tokio::test]
 async fn unknown_have_does_not_finish_negotiation_or_send_a_pack() {
-    let (layout, _, tip) = fixture(false).await;
+    let (layout, _, tip) = fixture(false, true).await;
     let root = crab_write::capsule_protocol::open_root(&layout)
         .await
         .unwrap();
@@ -255,57 +258,59 @@ async fn unknown_have_does_not_finish_negotiation_or_send_a_pack() {
 
 #[tokio::test]
 async fn rewritten_branch_uses_the_authenticated_base_without_acknowledging_it() {
-    let (layout, seed, tip) = fixture(true).await;
-    let root = crab_write::capsule_protocol::open_root(&layout)
-        .await
-        .unwrap();
-    let mut request = packet(b"command=fetch\n");
-    request.extend_from_slice(b"0001");
-    request.extend(packet(format!("want {tip}\n").as_bytes()));
-    request.extend(packet(format!("have {seed}\n").as_bytes()));
-    request.extend_from_slice(b"0000");
-    let runtime = Arc::new(RemoteGitRuntime::default());
-    let mut input = BufReader::new(Cursor::new(request));
-    let mut output = Vec::new();
-    let cancellation = CancellationToken::new();
-    let result = serve(
-        &mut input,
-        &mut output,
-        layout.store(),
-        layout.repo_prefix(),
-        &[],
-        &FetchAdmissionPolicy::default(),
-        false,
-        root,
-        &runtime,
-        &cancellation,
-    )
-    .await;
-    runtime.shutdown().await;
-    result.unwrap();
-    let mut response = BufReader::new(Cursor::new(&output[1..]));
-    while read_packet(&mut response, &cancellation).await.unwrap() != Packet::Flush {}
-    assert_eq!(
-        read_packet(&mut response, &cancellation).await.unwrap(),
-        Packet::Data(b"acknowledgments\n".to_vec())
-    );
-    assert_eq!(
-        read_packet(&mut response, &cancellation).await.unwrap(),
-        Packet::Data(b"ready\n".to_vec())
-    );
-    assert_eq!(
-        read_packet(&mut response, &cancellation).await.unwrap(),
-        Packet::Delimiter
-    );
-    assert_eq!(
-        read_packet(&mut response, &cancellation).await.unwrap(),
-        Packet::Data(b"packfile\n".to_vec())
-    );
+    for checkpoint in [false, true] {
+        let (layout, seed, tip) = fixture(true, checkpoint).await;
+        let root = crab_write::capsule_protocol::open_root(&layout)
+            .await
+            .unwrap();
+        let mut request = packet(b"command=fetch\n");
+        request.extend_from_slice(b"0001");
+        request.extend(packet(format!("want {tip}\n").as_bytes()));
+        request.extend(packet(format!("have {seed}\n").as_bytes()));
+        request.extend_from_slice(b"0000");
+        let runtime = Arc::new(RemoteGitRuntime::default());
+        let mut input = BufReader::new(Cursor::new(request));
+        let mut output = Vec::new();
+        let cancellation = CancellationToken::new();
+        let result = serve(
+            &mut input,
+            &mut output,
+            layout.store(),
+            layout.repo_prefix(),
+            &[],
+            &FetchAdmissionPolicy::default(),
+            false,
+            root,
+            &runtime,
+            &cancellation,
+        )
+        .await;
+        runtime.shutdown().await;
+        result.unwrap();
+        let mut response = BufReader::new(Cursor::new(&output[1..]));
+        while read_packet(&mut response, &cancellation).await.unwrap() != Packet::Flush {}
+        assert_eq!(
+            read_packet(&mut response, &cancellation).await.unwrap(),
+            Packet::Data(b"acknowledgments\n".to_vec())
+        );
+        assert_eq!(
+            read_packet(&mut response, &cancellation).await.unwrap(),
+            Packet::Data(b"ready\n".to_vec())
+        );
+        assert_eq!(
+            read_packet(&mut response, &cancellation).await.unwrap(),
+            Packet::Delimiter
+        );
+        assert_eq!(
+            read_packet(&mut response, &cancellation).await.unwrap(),
+            Packet::Data(b"packfile\n".to_vec())
+        );
+    }
 }
 
 #[tokio::test(flavor = "multi_thread")]
 async fn complete_view_promotion_keeps_advertised_capsule_ref_state() {
-    let (layout, _, tip) = Box::pin(fixture(false)).await;
+    let (layout, _, tip) = Box::pin(fixture(false, true)).await;
     let root = crab_write::capsule_protocol::open_root(&layout)
         .await
         .unwrap();

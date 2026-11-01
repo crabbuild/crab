@@ -278,10 +278,11 @@ pub fn run_lfs_pre_push(
     // Validate the complete batch before resolving cloud access. The cap is
     // local hook admission policy, not a limit on Git repository size.
     let updates = read_pre_push(std::io::stdin().lock(), 16 * 1024 * 1024)?;
-    run_lfs_pre_push_batch(remote, &updates, cancel)
+    run_lfs_pre_push_batch(Path::new("."), remote, &updates, cancel)
 }
 
 fn run_lfs_pre_push_batch(
+    repo_dir: &Path,
     remote: Option<&str>,
     updates: &[PrePushUpdate],
     cancel: &CancellationToken,
@@ -293,12 +294,23 @@ fn run_lfs_pre_push_batch(
         return Ok(());
     }
 
-    let ctx = super::block_on_runtime(resolve_lfs_remote_context(
-        "push",
-        remote,
-        Path::new("."),
+    // Git already supplied a local base for each changed ref. Prove the local
+    // range empty before paying for the whole remote ref inventory. A nonempty
+    // range still needs the cross-ref exclusions, locks and verified uploads.
+    if collect_pointers_from_range_in_with_base_refs(
+        repo_dir,
+        &local_shas,
+        &remote_shas,
+        &[],
         cancel,
-    ))?;
+    )?
+    .is_empty()
+    {
+        return Ok(());
+    }
+
+    let ctx =
+        super::block_on_runtime(resolve_lfs_remote_context("push", remote, repo_dir, cancel))?;
 
     // Ref updates contain only the refs Git is changing. Excluding every
     // published remote tip prevents a multi-branch push from rescanning
@@ -306,7 +318,8 @@ fn run_lfs_pre_push_batch(
     let published_ref_tips = load_remote_ref_tips(&ctx)?;
 
     // Collect LFS pointers from the commits being pushed.
-    let pointers = collect_pointers_from_range_with_base_refs(
+    let pointers = collect_pointers_from_range_in_with_base_refs(
+        repo_dir,
         &local_shas,
         &remote_shas,
         &published_ref_tips,
@@ -398,22 +411,6 @@ fn collect_push_pointers(
         retain(path, pointer)?;
     }
     Ok(pointers)
-}
-
-/// Collect `(path, LfsPointer)` pairs from a commit range being pushed.
-fn collect_pointers_from_range_with_base_refs(
-    local_shas: &[String],
-    remote_shas: &[String],
-    published_ref_tips: &[String],
-    cancel: &CancellationToken,
-) -> Result<Vec<(String, LfsPointer)>> {
-    collect_pointers_from_range_in_with_base_refs(
-        Path::new("."),
-        local_shas,
-        remote_shas,
-        published_ref_tips,
-        cancel,
-    )
 }
 
 fn load_remote_ref_tips(ctx: &super::store_setup::LfsRemoteContext) -> Result<Vec<String>> {

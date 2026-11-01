@@ -742,79 +742,25 @@ impl CapsuleRepositoryView {
     /// Return the number of Git packs authenticated by this exact view.
     #[must_use]
     pub fn git_pack_count(&self) -> usize {
-        if let Some(checkpoint) = self.layered_checkpoint() {
-            return self.layered_pack_members(checkpoint).count();
-        }
-        self.capsules
-            .iter()
-            .map(|capsule| capsule.git_packs().len())
-            .sum::<usize>()
-            .saturating_add(
-                self.capsule_controls
-                    .iter()
-                    .map(|capsule| capsule.git_packs().len())
-                    .sum(),
-            )
+        self.source_pack_members().count()
     }
 
     /// Return the total authenticated Git pack-body bytes in this exact view.
     pub fn git_pack_bytes(&self) -> Result<u64> {
-        if let Some(checkpoint) = self.layered_checkpoint() {
-            return self
-                .layered_pack_members(checkpoint)
-                .try_fold(0_u64, |total, member| {
-                    total.checked_add(member.pack().length()).ok_or_else(|| {
-                        ReadError::internal("layered checkpoint Git pack byte total overflowed")
-                    })
-                });
-        }
-        let total = self
-            .capsules
-            .iter()
-            .flat_map(|capsule| capsule.git_packs().iter().map(move |pack| (capsule, pack)))
-            .try_fold(0_u64, |total, (capsule, pack)| {
-                total
-                    .checked_add(capsule.section_bytes(pack.pack_section())?.len() as u64)
-                    .ok_or_else(|| ReadError::internal("capsule Git pack byte total overflowed"))
-            })?;
-        self.capsule_controls
-            .iter()
-            .flat_map(CapsuleControl::git_packs)
-            .try_fold(total, |total, pack| {
-                total
-                    .checked_add(pack.pack().length())
-                    .ok_or_else(|| ReadError::internal("capsule Git pack byte total overflowed"))
-            })
+        self.source_pack_members().try_fold(0_u64, |total, pack| {
+            total
+                .checked_add(pack.pack().length())
+                .ok_or_else(|| ReadError::internal("capsule Git pack byte total overflowed"))
+        })
     }
 
     /// Return the total Git objects declared by the authenticated pack inventory.
     pub fn git_object_count(&self) -> Result<u64> {
-        if let Some(checkpoint) = self.layered_checkpoint() {
-            return self
-                .layered_pack_members(checkpoint)
-                .try_fold(0_u64, |total, member| {
-                    total
-                        .checked_add(member.object_count())
-                        .ok_or_else(|| ReadError::internal("layered Git object count overflowed"))
-                });
-        }
-        let total =
-            self.capsules
-                .iter()
-                .flat_map(Capsule::git_packs)
-                .try_fold(0_u64, |total, pack| {
-                    total
-                        .checked_add(pack.object_count())
-                        .ok_or_else(|| ReadError::internal("capsule Git object count overflowed"))
-                })?;
-        self.capsule_controls
-            .iter()
-            .flat_map(CapsuleControl::git_packs)
-            .try_fold(total, |total, pack| {
-                total
-                    .checked_add(pack.object_count())
-                    .ok_or_else(|| ReadError::internal("capsule Git object count overflowed"))
-            })
+        self.source_pack_members().try_fold(0_u64, |total, pack| {
+            total
+                .checked_add(pack.object_count())
+                .ok_or_else(|| ReadError::internal("capsule Git object count overflowed"))
+        })
     }
 
     /// Return a digest that changes with the root or any visible per-ref position.
@@ -1726,45 +1672,15 @@ impl CapsuleRepositoryView {
         &self,
     ) -> Result<Vec<crab_metadata::manifests::PackManifestEntry>> {
         let mut entries = Vec::new();
-        if let Some(checkpoint) = self.layered_checkpoint() {
-            for member in self.layered_pack_members(checkpoint) {
-                let pack_id = member.pack().blake3().to_owned();
-                entries.push(crab_metadata::manifests::PackManifestEntry {
-                    pack_id: pack_id.clone(),
-                    size: member.pack().length(),
-                    content_hash: pack_id,
-                    ref_tips: Vec::new(),
-                    object_count: member.object_count(),
-                });
-            }
-        }
-        if self.layered_checkpoint().is_none() {
-            for capsule in &self.capsules {
-                for descriptor in capsule.git_packs() {
-                    let pack = capsule.section_bytes(descriptor.pack_section())?;
-                    let pack_id = blake3::hash(&pack).to_hex().to_string();
-                    entries.push(crab_metadata::manifests::PackManifestEntry {
-                        pack_id: pack_id.clone(),
-                        size: pack.len() as u64,
-                        content_hash: pack_id,
-                        ref_tips: Vec::new(),
-                        object_count: descriptor.object_count(),
-                    });
-                }
-            }
-            for member in self
-                .capsule_controls
-                .iter()
-                .flat_map(CapsuleControl::git_packs)
-            {
-                entries.push(crab_metadata::manifests::PackManifestEntry {
-                    pack_id: member.pack().blake3().to_owned(),
-                    size: member.pack().length(),
-                    content_hash: member.pack().blake3().to_owned(),
-                    ref_tips: Vec::new(),
-                    object_count: member.object_count(),
-                });
-            }
+        for member in self.source_pack_members() {
+            let pack_id = member.pack().blake3().to_owned();
+            entries.push(crab_metadata::manifests::PackManifestEntry {
+                pack_id: pack_id.clone(),
+                size: member.pack().length(),
+                content_hash: pack_id,
+                ref_tips: Vec::new(),
+                object_count: member.object_count(),
+            });
         }
         // A pack can occur in multiple runs. Snapshot and reader identities
         // must bind the same physical inventory regardless of source order.
@@ -1782,16 +1698,15 @@ impl CapsuleRepositoryView {
         Ok(entries)
     }
 
-    fn layered_pack_members<'a>(
-        &'a self,
-        checkpoint: &'a LayeredCheckpoint,
-    ) -> impl Iterator<Item = &'a PackMemberDescriptor> {
+    fn source_pack_members(&self) -> impl Iterator<Item = &PackMemberDescriptor> {
         // A frontier run can also belong to the checkpoint. Count each physical
         // source once, but include new runs in both metrics and visibility identity.
         let mut sources = BTreeSet::new();
-        checkpoint
-            .sources()
+        // Every read mode authenticates these descriptors. Footer-only views
+        // have no materialized capsules, even before the first checkpoint.
+        self.checkpoint
             .iter()
+            .flat_map(|checkpoint| checkpoint.sources())
             .chain(&self.capsule_run_sources)
             .filter(move |source| sources.insert(source.object_hash()))
             .flat_map(PackSourceDescriptor::members)
@@ -6892,6 +6807,35 @@ mod tests {
             error
                 .to_string()
                 .contains("visibility transition does not match its ref edit")
+        );
+    }
+
+    #[tokio::test]
+    async fn frontier_control_inventory_matches_complete_metadata_without_a_checkpoint() {
+        let inner = Arc::new(InMemory::new());
+        seed_prepared_multi_ref(inner.clone(), true, true).await;
+        let router = StoreLayout::new(Store::new(inner), "repositories/test".to_owned());
+        let root = load_root(&router).await.unwrap();
+        assert!(root.record().root().checkpoint().is_none());
+        let complete = open_view_from_root_with_metadata(&router, root.clone(), TEST_LIMITS)
+            .await
+            .unwrap();
+        let controls = open_view_from_root_with_layered_control(&router, root, TEST_LIMITS)
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                controls.git_pack_count(),
+                controls.git_pack_bytes().unwrap(),
+                controls.git_object_count().unwrap(),
+                controls.git_snapshot().unwrap()
+            ),
+            (
+                complete.git_pack_count(),
+                complete.git_pack_bytes().unwrap(),
+                complete.git_object_count().unwrap(),
+                complete.git_snapshot().unwrap()
+            ),
         );
     }
 

@@ -578,7 +578,6 @@ where
     R: AsyncBufRead + Unpin,
     W: AsyncWrite + Unpin,
 {
-    let layered = capsule_root.record().root().checkpoint().is_some();
     let capture = crab_read::capsule_protocol::CapsuleRepositoryCapture::from_root(
         crab_storage::StoreLayout::new(store.clone(), prefix.to_owned()),
         capsule_root,
@@ -668,8 +667,10 @@ where
                     .await;
                 }
                 if fetch_snapshot.is_none() {
-                    let footer_only = layered
-                        && tip_bound_fetch_eligible(&fetch, fetch_policy, &visible_ref_names);
+                    // The captured tips and frontier authenticate ordinary fetches
+                    // even before a checkpoint; maintenance state is not admission.
+                    let footer_only =
+                        tip_bound_fetch_eligible(&fetch, fetch_policy, &visible_ref_names);
                     let admitted = match open_capsule_repository_from_capture(
                         &capture,
                         footer_only,
