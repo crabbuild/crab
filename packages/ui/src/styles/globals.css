@@ -6544,11 +6544,6 @@ main {
   margin-top: --spacing(3);
 }
 
-/* Enabled activity controls must regain readable text contrast immediately. */
-.activity-panel button {
-  transition-property: background-color, border-color;
-}
-
 .linked-work ul {
   list-style: none;
   padding: 0;

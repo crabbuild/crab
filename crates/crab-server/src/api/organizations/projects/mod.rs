@@ -1,5 +1,6 @@
 use super::{actor, read_error};
 use crate::{
+    api::write::ResponseError,
     app::{self, Error, Result},
     auth::Principal,
     cells::{
@@ -13,7 +14,7 @@ use crate::{
 use axum::{
     Extension, Json, Router,
     extract::{Path, Query, State, rejection::JsonRejection},
-    response::{IntoResponse, Response},
+    response::IntoResponse,
     routing::{get, post},
 };
 use serde::Deserialize;
@@ -369,26 +370,26 @@ async fn change(
     Extension(principal): Extension<Principal>,
     Path(id): Path<Uuid>,
     input: std::result::Result<Json<Submission>, JsonRejection>,
-) -> std::result::Result<Json<projects::Outcome>, Response> {
+) -> std::result::Result<Json<projects::Outcome>, ResponseError> {
     let Json(input) = input
         .map_err(Error::from)
         .map_err(crate::api::write::rejected)?;
     submit(server, principal, id, input, false)
         .await
-        .map_err(IntoResponse::into_response)
+        .map_err(|error| error.into_response().into())
 }
 async fn cancel(
     State(server): State<Arc<Server>>,
     Extension(principal): Extension<Principal>,
     Path(id): Path<Uuid>,
     input: std::result::Result<Json<Submission>, JsonRejection>,
-) -> std::result::Result<Json<projects::Outcome>, Response> {
+) -> std::result::Result<Json<projects::Outcome>, ResponseError> {
     let Json(input) = input
         .map_err(Error::from)
         .map_err(crate::api::write::rejected)?;
     submit(server, principal, id, input, true)
         .await
-        .map_err(IntoResponse::into_response)
+        .map_err(|error| error.into_response().into())
 }
 
 #[cfg(test)]
