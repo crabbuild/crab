@@ -561,27 +561,57 @@ impl CapsuleRepositoryView {
         &self.frontier_object_admission
     }
 
-    /// Return authenticated visibility transitions without loading pack bodies.
+    /// Return authenticated visibility transitions for requested captured refs.
     ///
     /// This is used only to avoid re-walking a known ref update. The returned
     /// transitions remain bound to the loaded root and controls; a consumer
     /// must not use a partial chain as an authorization proof.
-    pub async fn tip_bound_transitions(&self) -> Result<CapsuleTipBoundTransitions> {
-        let mut transitions = self.tip_bound_transitions.clone();
-        let controls = if let Some(layout) = &self.metadata_layout {
-            futures_util::stream::iter(self.tip_bound_controls.iter().cloned().map(
-                |control| async move { control.materialize_visibility(layout.store()).await },
-            ))
-            .buffered(CAPSULE_FRONTIER_READ_CONCURRENCY)
-            .try_collect::<Vec<_>>()
-            .await?
-        } else {
-            // Footer views already retain complete authenticated controls. Keep
-            // their shared sets compact until a fetch asks for expanded hints.
-            self.tip_bound_controls.clone()
-        };
+    pub async fn tip_bound_transitions(
+        &self,
+        ref_names: &[String],
+    ) -> Result<CapsuleTipBoundTransitions> {
+        let names = ref_names
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let mut transitions = self
+            .tip_bound_transitions
+            .iter()
+            .filter(|(name, _)| names.contains(name.as_str()))
+            .map(|(name, values)| (name.clone(), values.clone()))
+            .collect::<CapsuleTipBoundTransitions>();
+        // Transaction headers already authenticate which refs a control edits.
+        // Keep unrelated histories cold; selected sections still receive their
+        // complete hash, edit and object-set validation before supplying hints.
+        let selected = self
+            .tip_bound_controls
+            .iter()
+            .filter(|control| {
+                control
+                    .transaction()
+                    .edits()
+                    .iter()
+                    .any(|edit| names.contains(edit.ref_name()))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let controls =
+            if let Some(layout) = &self.metadata_layout {
+                futures_util::stream::iter(selected.into_iter().map(|control| async move {
+                    control.materialize_visibility(layout.store()).await
+                }))
+                .buffered(CAPSULE_FRONTIER_READ_CONCURRENCY)
+                .try_collect::<Vec<_>>()
+                .await?
+            } else {
+                // Footer views already retain complete authenticated controls. Keep
+                // their shared sets compact until a fetch asks for expanded hints.
+                selected
+            };
         for (name, values) in build_tip_bound_transitions(&[], &controls)? {
-            transitions.entry(name).or_default().extend(values);
+            if names.contains(name.as_str()) {
+                transitions.entry(name).or_default().extend(values);
+            }
         }
         Ok(transitions)
     }
@@ -6855,10 +6885,11 @@ mod tests {
         let complete = open_view_from_root_with_metadata(&router, root, TEST_LIMITS)
             .await
             .unwrap();
-        let expected = complete.tip_bound_transitions().await.unwrap();
+        let names = view.refs().keys().cloned().collect::<Vec<_>>();
+        let expected = complete.tip_bound_transitions(&names).await.unwrap();
         assert_eq!(expected.len(), 2);
-        assert_eq!(view.tip_bound_transitions().await.unwrap(), expected);
-        assert_eq!(view.tip_bound_transitions().await.unwrap(), expected);
+        assert_eq!(view.tip_bound_transitions(&names).await.unwrap(), expected);
+        assert_eq!(view.tip_bound_transitions(&names).await.unwrap(), expected);
     }
 
     #[tokio::test]

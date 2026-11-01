@@ -19,7 +19,14 @@ pub(super) async fn fixture(
     crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
         .await
         .unwrap();
-    let seed = Box::pin(publish_commit(&layout, None, false, "seed")).await;
+    let seed = Box::pin(publish_commit(
+        &layout,
+        "refs/heads/main",
+        None,
+        false,
+        "seed",
+    ))
+    .await;
     if checkpoint {
         crab_remote::checkpoint::publish_capsule_checkpoint(
             &layout,
@@ -30,12 +37,20 @@ pub(super) async fn fixture(
         .await
         .unwrap();
     }
-    let tip = Box::pin(publish_commit(&layout, Some(seed), rewrite, "incremental")).await;
+    let tip = Box::pin(publish_commit(
+        &layout,
+        "refs/heads/main",
+        Some(seed),
+        rewrite,
+        "incremental",
+    ))
+    .await;
     (layout, seed, tip)
 }
 
 async fn publish_commit(
     layout: &StoreLayout<Store>,
+    ref_name: &str,
     previous: Option<ObjectId>,
     rewrite: bool,
     message: &str,
@@ -96,7 +111,7 @@ async fn publish_commit(
     let transaction = CapsuleTransaction::new(
         root.record().digest(),
         vec![CapsuleRefEdit::new(
-            "refs/heads/main",
+            ref_name,
             previous.map(|oid: ObjectId| oid.to_string()),
             Some(tip.to_string()),
             None,
@@ -121,8 +136,7 @@ async fn publish_commit(
         ),
     };
     let visibility =
-        CapsuleVisibilityDelta::new(BTreeMap::from([("refs/heads/main".to_owned(), visibility)]))
-            .unwrap();
+        CapsuleVisibilityDelta::new(BTreeMap::from([(ref_name.to_owned(), visibility)])).unwrap();
     let capsule = Capsule::build(
         &transaction,
         vec![pack],
@@ -257,6 +271,174 @@ async fn unknown_have_does_not_finish_negotiation_or_send_a_pack() {
 }
 
 #[tokio::test]
+async fn later_negotiation_wants_load_their_own_captured_transitions() {
+    let (layout, _, main_tip) = fixture(false, false).await;
+    let other_seed = Box::pin(publish_commit(
+        &layout,
+        "refs/heads/other",
+        None,
+        false,
+        "other seed",
+    ))
+    .await;
+    let other_tip = Box::pin(publish_commit(
+        &layout,
+        "refs/heads/other",
+        Some(other_seed),
+        false,
+        "other update",
+    ))
+    .await;
+    let root = crab_write::capsule_protocol::open_root(&layout)
+        .await
+        .unwrap();
+    let mut request = Vec::new();
+    for (want, have) in [(main_tip, ObjectId::from([9; 20])), (other_tip, other_seed)] {
+        request.extend(packet(b"command=fetch\n"));
+        request.extend_from_slice(b"0001");
+        request.extend(packet(format!("want {want}\n").as_bytes()));
+        request.extend(packet(format!("have {have}\n").as_bytes()));
+        request.extend_from_slice(b"0000");
+    }
+    let runtime = Arc::new(RemoteGitRuntime::default());
+    let mut input = BufReader::new(Cursor::new(request));
+    let mut output = Vec::new();
+    let cancellation = CancellationToken::new();
+    let result = serve(
+        &mut input,
+        &mut output,
+        layout.store(),
+        layout.repo_prefix(),
+        &[],
+        &FetchAdmissionPolicy::default(),
+        false,
+        root,
+        &runtime,
+        &cancellation,
+    )
+    .await;
+    runtime.shutdown().await;
+    result.unwrap();
+    let mut response = BufReader::new(Cursor::new(&output[1..]));
+    while read_packet(&mut response, &cancellation).await.unwrap() != Packet::Flush {}
+    for expected in [
+        Packet::Data(b"acknowledgments\n".to_vec()),
+        Packet::Data(b"NAK\n".to_vec()),
+        Packet::Flush,
+        Packet::ResponseEnd,
+        Packet::Data(b"acknowledgments\n".to_vec()),
+        Packet::Data(b"ready\n".to_vec()),
+        Packet::Delimiter,
+        Packet::Data(b"packfile\n".to_vec()),
+    ] {
+        assert_eq!(
+            read_packet(&mut response, &cancellation).await.unwrap(),
+            expected
+        );
+    }
+    let mut pack = Vec::new();
+    loop {
+        match read_packet(&mut response, &cancellation).await.unwrap() {
+            Packet::Data(bytes) => {
+                assert_eq!(bytes[0], 1);
+                pack.extend_from_slice(&bytes[1..]);
+            }
+            Packet::Flush => break,
+            other => panic!("unexpected pack packet: {other:?}"),
+        }
+    }
+    assert_eq!(&pack[..12], b"PACK\0\0\0\x02\0\0\0\x01");
+    assert_eq!(
+        &pack[pack.len() - 20..],
+        Sha1::digest(&pack[..pack.len() - 20]).as_slice()
+    );
+}
+
+#[tokio::test]
+async fn reachable_non_tip_wants_keep_complete_admission_across_negotiation() {
+    for checkpoint in [false, true] {
+        for allow_any in [false, true] {
+            let (layout, seed, tip) = fixture(false, checkpoint).await;
+            let root = crab_write::capsule_protocol::open_root(&layout)
+                .await
+                .unwrap();
+            let policy = FetchAdmissionPolicy {
+                allow_any_sha_in_want: allow_any,
+                allow_reachable_sha_in_want: !allow_any,
+                ..FetchAdmissionPolicy::default()
+            };
+            let mut request = Vec::new();
+            for (want, done) in [(tip, false), (seed, false), (seed, true)] {
+                request.extend(packet(b"command=fetch\n"));
+                request.extend_from_slice(b"0001");
+                request.extend(packet(format!("want {want}\n").as_bytes()));
+                if done {
+                    request.extend(packet(b"done\n"));
+                } else {
+                    request.extend(packet(
+                        format!("have {}\n", ObjectId::from([9; 20])).as_bytes(),
+                    ));
+                }
+                request.extend_from_slice(b"0000");
+            }
+            let runtime = Arc::new(RemoteGitRuntime::default());
+            let mut input = BufReader::new(Cursor::new(request));
+            let mut output = Vec::new();
+            let cancellation = CancellationToken::new();
+            let result = serve(
+                &mut input,
+                &mut output,
+                layout.store(),
+                layout.repo_prefix(),
+                &[],
+                &policy,
+                false,
+                root,
+                &runtime,
+                &cancellation,
+            )
+            .await;
+            runtime.shutdown().await;
+            result.unwrap();
+            let mut response = BufReader::new(Cursor::new(&output[1..]));
+            while read_packet(&mut response, &cancellation).await.unwrap() != Packet::Flush {}
+            for expected in [
+                Packet::Data(b"acknowledgments\n".to_vec()),
+                Packet::Data(b"NAK\n".to_vec()),
+                Packet::Flush,
+                Packet::ResponseEnd,
+                Packet::Data(b"acknowledgments\n".to_vec()),
+                Packet::Data(b"NAK\n".to_vec()),
+                Packet::Flush,
+                Packet::ResponseEnd,
+                Packet::Data(b"packfile\n".to_vec()),
+            ] {
+                assert_eq!(
+                    read_packet(&mut response, &cancellation).await.unwrap(),
+                    expected
+                );
+            }
+            let mut pack = Vec::new();
+            loop {
+                match read_packet(&mut response, &cancellation).await.unwrap() {
+                    Packet::Data(bytes) => {
+                        assert_eq!(bytes[0], 1);
+                        pack.extend_from_slice(&bytes[1..]);
+                    }
+                    Packet::Flush => break,
+                    other => panic!("unexpected pack packet: {other:?}"),
+                }
+            }
+            assert_eq!(&pack[..12], b"PACK\0\0\0\x02\0\0\0\x02");
+            assert_eq!(
+                &pack[pack.len() - 20..],
+                Sha1::digest(&pack[..pack.len() - 20]).as_slice()
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn rewritten_branch_uses_the_authenticated_base_without_acknowledging_it() {
     for checkpoint in [false, true] {
         let (layout, seed, tip) = fixture(true, checkpoint).await;
@@ -380,7 +562,14 @@ async fn complete_view_promotion_keeps_advertised_capsule_ref_state() {
                 .unwrap()
                 .contains(&tip.to_string())
         );
-        let advanced = Box::pin(publish_commit(&layout, Some(tip), false, "concurrent")).await;
+        let advanced = Box::pin(publish_commit(
+            &layout,
+            "refs/heads/main",
+            Some(tip),
+            false,
+            "concurrent",
+        ))
+        .await;
         assert_eq!(
             crab_write::capsule_protocol::open_root(&layout)
                 .await

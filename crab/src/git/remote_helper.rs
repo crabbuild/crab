@@ -3069,6 +3069,11 @@ async fn fetch_capsule_incremental_packs(
         ..Default::default()
     };
     let planning_started = std::time::Instant::now();
+    let requested_refs = crab_read::tip_bound_requested_refs(
+        &repository.refs().entries,
+        &visible_ref_names,
+        &request.wants,
+    )?;
     // This caller admits only ordinary advertised-ref fetches. Use the same
     // tip-bound planner for empty-base frontiers and checkpointed repositories;
     // it proves haves and physical dependencies before direct installation.
@@ -3076,7 +3081,7 @@ async fn fetch_capsule_incremental_packs(
         &repository,
         &visible_ref_names,
         &request,
-        Some(&view.tip_bound_transitions().await?),
+        Some(&view.tip_bound_transitions(&requested_refs).await?),
         cancel,
     )
     .await

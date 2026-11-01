@@ -180,10 +180,12 @@ async fn large_ref_frontiers_bound_active_reads_without_dropping_refs() {
     struct Reads {
         active: AtomicUsize,
         peak: AtomicUsize,
+        total: AtomicUsize,
     }
     impl StorageObserver for Reads {
         fn started(&self, operation: StorageOperation) {
             if matches!(operation, StorageOperation::Get | StorageOperation::Range) {
+                self.total.fetch_add(1, Ordering::SeqCst);
                 let active = self.active.fetch_add(1, Ordering::SeqCst) + 1;
                 self.peak.fetch_max(active, Ordering::SeqCst);
             }
@@ -306,8 +308,20 @@ async fn large_ref_frontiers_bound_active_reads_without_dropping_refs() {
         assert!((2..=32).contains(&peak), "{mode}: {peak} concurrent reads");
         assert_eq!(reads.active.load(Ordering::SeqCst), 0, "{mode}");
         if mode == "git" {
+            reads.total.store(0, Ordering::SeqCst);
+            let selected = vec!["refs/heads/developer-042".to_owned()];
+            let transitions = send(view.tip_bound_transitions(&selected)).await.unwrap();
+            assert_eq!(
+                (
+                    transitions.keys().cloned().collect::<Vec<_>>(),
+                    reads.total.load(Ordering::SeqCst)
+                ),
+                (selected, 1),
+                "one requested ref must not expand every developer's history"
+            );
             reads.peak.store(0, Ordering::SeqCst);
-            let transitions = send(view.tip_bound_transitions()).await.unwrap();
+            let names = expected.keys().cloned().collect::<Vec<_>>();
+            let transitions = send(view.tip_bound_transitions(&names)).await.unwrap();
             assert_eq!(transitions.len(), expected.len());
             let peak = reads.peak.load(Ordering::SeqCst);
             assert!(

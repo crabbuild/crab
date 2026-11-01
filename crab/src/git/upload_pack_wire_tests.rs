@@ -277,26 +277,62 @@ fn tip_bound_fetch_is_limited_to_ordinary_advertised_ref_updates() {
         ],
         ..FetchRequest::default()
     };
+    let refs = RepositoryRefs::from_maps(
+        "refs/heads/main",
+        &std::collections::BTreeMap::from([("refs/heads/main".to_owned(), "1".repeat(40))]),
+        &std::collections::BTreeMap::new(),
+    )
+    .unwrap();
     let visible_refs = vec!["refs/heads/main".to_owned()];
-    assert!(tip_bound_fetch_eligible(&request, &policy, &visible_refs));
+    assert!(tip_bound_fetch_eligible(
+        &request,
+        &policy,
+        &refs,
+        &visible_refs
+    ));
 
     let mut changed = request.clone();
     changed.include_tags = true;
-    assert!(tip_bound_fetch_eligible(&changed, &policy, &visible_refs));
+    assert!(tip_bound_fetch_eligible(
+        &changed,
+        &policy,
+        &refs,
+        &visible_refs
+    ));
     let visible_refs_with_tag = vec!["refs/heads/main".to_owned(), "refs/tags/release".to_owned()];
     assert!(!tip_bound_fetch_eligible(
         &changed,
         &policy,
+        &refs,
         &visible_refs_with_tag
     ));
     changed = request.clone();
     changed
         .shallow
         .push(ObjectId::from_hex(b"1111111111111111111111111111111111111111").expect("object ID"));
-    assert!(!tip_bound_fetch_eligible(&changed, &policy, &visible_refs));
+    assert!(!tip_bound_fetch_eligible(
+        &changed,
+        &policy,
+        &refs,
+        &visible_refs
+    ));
     changed = request.clone();
     changed.filter = UploadPackFilter::BlobNone;
-    assert!(!tip_bound_fetch_eligible(&changed, &policy, &visible_refs));
+    assert!(!tip_bound_fetch_eligible(
+        &changed,
+        &policy,
+        &refs,
+        &visible_refs
+    ));
+
+    changed = request.clone();
+    changed.wants = vec![ObjectId::from([9; 20])];
+    assert!(!tip_bound_fetch_eligible(
+        &changed,
+        &policy,
+        &refs,
+        &visible_refs
+    ));
 
     let denied_policy = FetchAdmissionPolicy {
         allow_tip_sha_in_want: false,
@@ -305,6 +341,7 @@ fn tip_bound_fetch_is_limited_to_ordinary_advertised_ref_updates() {
     assert!(!tip_bound_fetch_eligible(
         &request,
         &denied_policy,
+        &refs,
         &visible_refs
     ));
 }

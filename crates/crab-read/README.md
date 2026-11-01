@@ -62,6 +62,11 @@ captured catalog before selecting the replica.
 
 Complete and control-only views load at most 32 frontier runs concurrently.
 Paged transition materialization uses the same bound and preserves input order.
+Fetch callers expand transitions only for the planner's requested visible refs;
+unrelated transaction histories stay cold. Protocol-v2 negotiation adds new
+wanted refs from the same capture and retains already loaded transitions.
+Historical non-tip wants require complete visibility under the caller's policy;
+their ordinary wire shape does not make them advertised tips.
 This limits active work across the union of per-ref histories; full views still
 retain their admitted decoded metadata and payloads until the caller releases them.
 Captured views share immutable admission tables when cloned. Overlapping
@@ -124,9 +129,10 @@ bulk readers and checkpoint writers still enforce it before exposing a complete
 proof. Each stored visibility section retains its byte/ref/object bounds and
 canonical decoder.
 
-`git_visibility_index`, `candidate_git_visibility` and
-`tip_bound_transitions` asynchronously materialize captured controls only when
-bulk inspection needs them. They do not recapture refs or switch origins.
+`git_visibility_index` and `candidate_git_visibility` asynchronously materialize
+captured controls for bulk inspection. `tip_bound_transitions` requires explicit
+ref names and materializes only controls editing those refs, validating each
+selected section completely. These methods do not recapture refs or switch origins.
 
 Metadata owns the stable ref capture, control selection, visibility reconciliation
 and transaction ordering used by Git views and current-state catalog lookup.

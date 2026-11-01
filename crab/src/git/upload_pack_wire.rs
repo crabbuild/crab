@@ -105,11 +105,41 @@ enum UploadPackVisibilityProof {
     /// The root and per-ref controls authenticate the advertised tips; the
     /// shared planner then walks the complete closure from those tips.
     TipBound {
-        transitions: Arc<crab_read::capsule_protocol::CapsuleTipBoundTransitions>,
+        view: Box<crab_read::capsule_protocol::CapsuleRepositoryView>,
+        transitions: crab_read::capsule_protocol::CapsuleTipBoundTransitions,
     },
 }
 
 impl UploadPackVisibilityProof {
+    async fn load_wanted_transitions(
+        &mut self,
+        repository: &RemoteGitRepository,
+        visible_ref_names: &[String],
+        wants: &[ObjectId],
+    ) -> Result<()> {
+        let Self::TipBound { view, transitions } = self else {
+            return Ok(());
+        };
+        let mut names = crab_read::tip_bound_requested_refs(
+            &repository.refs().entries,
+            visible_ref_names,
+            wants,
+        )?;
+        names.retain(|name| !transitions.contains_key(name));
+        if names.is_empty() {
+            return Ok(());
+        }
+        // Later negotiation rounds can add wants. Expand only those refs from
+        // the original capture; recapturing could invalidate advertised tips.
+        // Ordinary negotiation retains its session read-admission slot.
+        let mut selected = view.tip_bound_transitions(&names).await?;
+        for name in names {
+            selected.entry(name).or_default();
+        }
+        transitions.extend(selected);
+        Ok(())
+    }
+
     fn object_count_for_refs(&self, refs: &[String]) -> usize {
         match self {
             Self::Materialized(visibility) => {
@@ -670,7 +700,7 @@ where
                     // The captured tips and frontier authenticate ordinary fetches
                     // even before a checkpoint; maintenance state is not admission.
                     let footer_only =
-                        tip_bound_fetch_eligible(&fetch, fetch_policy, &visible_ref_names);
+                        tip_bound_fetch_eligible(&fetch, fetch_policy, &refs, &visible_ref_names);
                     let admitted = match open_capsule_repository_from_capture(
                         &capture,
                         footer_only,
@@ -695,7 +725,12 @@ where
                     fetch.done && negotiated_haves.is_empty() && cold_clone_pack.is_none();
                 if tip_bound
                     && (cold_clone_needs_complete_view
-                        || !tip_bound_fetch_eligible(&fetch, fetch_policy, &visible_ref_names))
+                        || !tip_bound_fetch_eligible(
+                            &fetch,
+                            fetch_policy,
+                            &refs,
+                            &visible_ref_names,
+                        ))
                 {
                     // Ref heads are mutable even while the root digest stays fixed.
                     // Promotion must reuse this session's capture or a concurrent
@@ -723,7 +758,7 @@ where
                 if fetch.done {
                     fetch.haves = negotiated_haves.clone();
                 }
-                let (repository, proof) = fetch_snapshot.as_ref().ok_or_else(|| {
+                let (repository, proof) = fetch_snapshot.as_mut().ok_or_else(|| {
                     CrabError::Internal("upload-pack did not retain fetch admission".to_owned())
                 })?;
                 if let Err(error) = validate_fetch_admission(
@@ -735,10 +770,17 @@ where
                 ) {
                     return reject_protocol_request(writer, error, cancellation).await;
                 }
+                if let Err(error) = proof
+                    .load_wanted_transitions(repository, &visible_ref_names, &fetch.wants)
+                    .await
+                {
+                    return reject_protocol_request(writer, error, cancellation).await;
+                }
+                let (repository, proof) = (&*repository, &*proof);
                 if !fetch.done {
                     let common_haves = common_haves(proof, &fetch, &visible_ref_names);
                     let transition_ready = match proof {
-                        UploadPackVisibilityProof::TipBound { transitions } => {
+                        UploadPackVisibilityProof::TipBound { transitions, .. } => {
                             tip_bound_transitions_cover_wants(
                                 &repository.refs().entries,
                                 &visible_ref_names,
@@ -866,7 +908,7 @@ fn validate_fetch_admission(
         }
 
         UploadPackVisibilityProof::TipBound { .. } => {
-            if !tip_bound_fetch_eligible(request, policy, visible_ref_names) {
+            if !tip_bound_fetch_eligible(request, policy, repository.refs(), visible_ref_names) {
                 return Err(protocol(
                     "tip-bound upload-pack proof cannot authorize this fetch shape",
                 ));
@@ -901,6 +943,7 @@ fn visible_reachable_wants_allowed(request: &FetchRequest, policy: &FetchAdmissi
 fn tip_bound_fetch_eligible(
     request: &FetchRequest,
     policy: &FetchAdmissionPolicy,
+    refs: &RepositoryRefs,
     visible_ref_names: &[String],
 ) -> bool {
     // Git sends include-tag for ordinary fetches even when the advertised view
@@ -919,6 +962,9 @@ fn tip_bound_fetch_eligible(
         && request.deepen_not.is_empty()
         && !request.deepen_relative
         && matches!(request.filter, UploadPackFilter::None)
+        // Reachable historical wants need complete visibility, even when
+        // their wire shape is ordinary. A tip-only proof cannot authorize them.
+        && crab_read::tip_bound_requested_refs(&refs.entries, visible_ref_names, &request.wants).is_ok()
 }
 
 fn merge_negotiated_haves(
@@ -994,12 +1040,10 @@ async fn open_capsule_repository_from_capture(
     let provider = format!("{:?}:{}:{}", bucket.cloud, bucket.host, bucket.container);
     let identity =
         RepositoryIdentity::new(provider, prefix.to_owned(), 1).map_err(CrabError::from)?;
-    let proof = if tip_bound {
-        UploadPackVisibilityProof::TipBound {
-            transitions: Arc::new(view.tip_bound_transitions().await?),
-        }
+    let visibility = if tip_bound {
+        None
     } else {
-        UploadPackVisibilityProof::Materialized(view.take_git_visibility_index().await?)
+        Some(view.take_git_visibility_index().await?)
     };
     tracing::debug!(
         elapsed_ms = started.elapsed().as_millis() as u64,
@@ -1016,6 +1060,13 @@ async fn open_capsule_repository_from_capture(
             None,
         )
         .await?;
+    let proof = match visibility {
+        Some(visibility) => UploadPackVisibilityProof::Materialized(visibility),
+        None => UploadPackVisibilityProof::TipBound {
+            view: Box::new(view),
+            transitions: Default::default(),
+        },
+    };
     tracing::debug!(
         elapsed_ms = started.elapsed().as_millis() as u64,
         "upload-pack repository opened"
@@ -1410,12 +1461,12 @@ async fn write_preplanned_cached_fetch_response<W: AsyncWrite + Unpin>(
                 .await
             }
 
-            UploadPackVisibilityProof::TipBound { transitions } => {
+            UploadPackVisibilityProof::TipBound { transitions, .. } => {
                 plan_upload_pack_tip_bound_with_transitions(
                     repository,
                     visible_ref_names,
                     semantic_request,
-                    Some(transitions.as_ref()),
+                    Some(transitions),
                     cancellation,
                 )
                 .await
@@ -1553,12 +1604,12 @@ async fn write_fetch_response<W: AsyncWrite + Unpin>(
             .await
         }
 
-        UploadPackVisibilityProof::TipBound { transitions } => {
+        UploadPackVisibilityProof::TipBound { transitions, .. } => {
             plan_upload_pack_tip_bound_with_transitions(
                 repository,
                 visible_ref_names,
                 &semantic_request,
-                Some(transitions.as_ref()),
+                Some(transitions),
                 cancellation,
             )
             .await
