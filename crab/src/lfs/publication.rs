@@ -48,34 +48,18 @@ pub(crate) async fn publish_reachable_objects(
     }
 
     let scan_dir = git_dir.clone();
-    let scan_tips = tips.clone();
-    let scan_remote_tips = remote_tips.clone();
     let scan_cancel = cancel.clone();
-    // A partial clone can advertise remote refs whose tips are absent from
-    // this local ODB. Such tips cannot be passed as `^<tip>` boundaries to
-    // `git rev-list`; Git rejects the whole scan with "bad object". Only
-    // locally resolvable remote tips are valid exclusion boundaries here.
-    let (scan_remote_tips, entries) = tokio::task::spawn_blocking(move || {
-        let scan_remote_tips = locally_available_remote_tips(&scan_dir, &scan_remote_tips);
-        let entries = crate::lfs::discovery::collect_pointers_from_range_in(
+    let entries = tokio::task::spawn_blocking(move || {
+        crate::lfs::discovery::collect_pointers_from_range_in(
             &scan_dir,
-            &scan_tips,
-            &scan_remote_tips,
+            &tips,
+            &remote_tips,
             &scan_cancel,
-        )?;
-        Ok::<_, CrabError>((scan_remote_tips, entries))
+        )
     })
     .await
     .map_err(|error| CrabError::Io(std::io::Error::other(error)))??;
     check_cancelled(cancel)?;
-    if scan_remote_tips.len() != remote_tips.len() {
-        tracing::debug!(
-            remote_tips = remote_tips.len(),
-            local_remote_tips = scan_remote_tips.len(),
-            "omitting unavailable remote tips from LFS dependency scan"
-        );
-    }
-
     if entries.is_empty() {
         return Ok(Vec::new());
     }
@@ -200,23 +184,6 @@ pub(crate) async fn publish_reachable_objects(
         .await?;
 
     Ok(object_keys)
-}
-
-fn locally_available_remote_tips(git_dir: &std::path::Path, remote_tips: &[String]) -> Vec<String> {
-    use gix_object::Exists;
-
-    let objects_dir = crate::git::discover::resolve_common_dir(git_dir).join("objects");
-    let Ok(odb) = gix_odb::at(&objects_dir) else {
-        return Vec::new();
-    };
-
-    remote_tips
-        .iter()
-        .filter_map(|tip| {
-            let oid = gix_hash::ObjectId::from_hex(tip.as_bytes()).ok()?;
-            odb.exists(&oid).then(|| tip.clone())
-        })
-        .collect()
 }
 
 fn transfer_request(pointer: &LfsPointer) -> TransferRequest {

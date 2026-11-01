@@ -49,6 +49,8 @@ the user's manual-demo data. No bucket-wide Crab GC was invoked.
 | 1,000 developer branch publications | All 1,000 acknowledged; later direct-origin audit matches every exact source tip | `medium-team-1000/artifacts/report.json`, `team-1000-ack-audit.json` |
 | Four additional rounds | All 4,000 updates pass; independent cold clone matches 1,000 final tips and files, passes strict Git fsck, and contains all 15,001 baseline/developer commits | `team-5000-direct/artifacts/report.json` |
 | 10,000 developer commits, admission follow-up | Five more 1,000-update rounds acknowledged; one independent cold consumer matches all 1,000 final tips/files and all 20,001 baseline/developer commits; 2,010 checks pass | `team-10000-admission/artifacts/report.json`, `team-10000-summary.json` |
+| Team checkpoint maintenance | Repack fails after 529.058 seconds because its visibility proof exceeds the byte bound; all 1,001 exact refs remain unchanged; the queued reader phase does not run | `team-maintenance-and-1000-readers/artifacts/report.json`, `team-maintenance-failure-ref-verification.json` |
+| Mixed team smoke | Eight native publications succeed; all eight ordinary Git updates fail in LFS pre-push discovery on unavailable remote exclusion tips; serialized reproduction confirms the cause | `mixed-team-8-smoke/artifacts/report.json`, `mixed-team-missing-boundary-reproduction.json` |
 | Complete team object-store audit | Three expired read-admission leases; no Git-object or data-chain findings. Both audits report failure with zero repairs. Recovery remains a separate check | `team-final-fsck-retry.json`, `team-fsck-diagnostic.jsonl` |
 | Complete team-store recovery | Follow-up binary passes the full audit in repair mode: three leases repaired, zero repair failures; independent origin reads verify released tombstones and unchanged holders | `team-fsck-bounded-repair.jsonl`, `team-lease-recovery-verification.json` |
 | Bounded-reader follow-up, 64 clients | All 140 checks pass: 64 publications, 64 updates, concurrent protocol-v2 readbacks/pulls and fsck; uses the follow-up binary identified below | `bounded-frontier-64/artifacts/report.json` |
@@ -57,6 +59,7 @@ the user's manual-demo data. No bucket-wide Crab GC was invoked.
 | Direct single-branch read at 1,000 refs | Correct bytes and protocol v2; fetch took 256.654 seconds | `medium-team-1000-direct/artifacts/report.json` |
 | Four 2 GiB Xet files | Original second push failed a metadata-page identity/header check; direct retry acknowledged. Fresh cold clone reconstructed all 8 GiB exactly and passed strict Git fsck | `large-xet-4x2g-retry/artifacts/report.json`, `xet-cold-recovery-report.json` |
 | Five-version admission-binary repeat | All five 8 GiB versions publish and repack; the parent harness stops on a stale staging counter. Cold/recovery continuation is separate and retains immutable parent hashes | `large-xet-4x2g-python-pinned/artifacts/report.json`, `large-xet-cold-continuation-3-controller.json` |
+| Five-version cold readback and recovery | 4,587 checks pass: all historical file hashes, oldest-version restore, latest-version republish, fresh readback and complete Crab audit with zero errors or repairs | `large-xet-4x2g-python-pinned/cold-read-continuation-3/artifacts/report.json` |
 | Xet older version | 504 exact-content checks pass: four historical 2 GiB files plus 500 code files, followed by strict Git fsck | `xet-history0-readback.json` |
 | Three 2 GiB LFS versions | Original historical fetch failed after final-checkout success. Retry fetched all three OIDs and verified all 6 GiB exactly | `large-lfs/report.json`, `lfs-history-retry-report.json` |
 | Real Kubernetes history | Bootstrap failed at the 300-second index-pack guard; zero of 1,000 requested incremental pushes ran | `kubernetes-1000/artifacts/report.json` |
@@ -247,10 +250,38 @@ that table. The threshold remains 4,096.
 The cold/recovery continuation records SHA-256 identities for the immutable
 failed parent report and five-version history manifest. Its 513 MiB cold Git
 consumer adds one 1,433,275-byte xorb and passes independent full-file SHA-256
-readback. Current-version cold hydration and rehydration pass; all five
-historical versions and restore/republish are still running through the
-existing verification helpers. The continuation does not relabel the failed
-parent as a successful full run.
+readback. The continuation passes 4,587 checks in 2,881.453 seconds using the
+existing verification helpers: current-version hydration and rehydration,
+all five historical versions (four 2 GiB files plus 500 code files each),
+oldest-version restore and fresh clone, latest-version republish and fresh
+readback, then a complete Crab audit with zero errors, repairs or repair
+failures. Both recorded parent SHA-256 identities remain unchanged. The
+continuation does not relabel the failed parent as a successful full run.
+
+The maintenance experiment on the 10,000-commit team fixture measures a
+119.820-second single-branch fetch before maintenance. Repository-scoped repack
+then fails after 529.058 seconds: `checkpoint visibility proof exceeds its byte
+bound`. All 1,001 exact refs remain unchanged in independent before/after
+advertisements. The post-maintenance clone, 1,000-reader phase and final audit
+do not run. This is a maintenance failure, not a reader-capacity result.
+
+The new mixed team driver stages ordinary Git, Xet and LFS files twice per
+developer, alternates native/Git push batches, and checks both payload versions
+using separate consumer data caches. Its eight-client smoke exposes an LFS
+hook failure: all eight initial native publications succeed, but all eight
+ordinary Git updates fail on `git rev-list: bad object`. An explicit serial
+scan confirms one actor has only one of eight published tips locally; using
+only its local exclusion succeeds. The shared range collector now owns local
+negative-boundary filtering for the hook, native publication and mirror paths;
+the duplicate publication-only filter is removed. All 459 LFS tests pass with
+the release-enabled `gix-pathmatch` feature. The corrected regression fails on
+the original source with the expected missing-object error and passes across
+regular, bare, shared and linked-worktree repositories. Required missing tips
+still fail. The feature-disabled suite separately passes 457 tests and fails
+two existing migration glob assertions; those tests remain unchanged.
+Fresh release-binary smoke and full mixed team qualification remain pending.
+This driver exercises Crab's LFS filters
+and managed hook, not unmodified Git LFS transfer-agent load.
 
 The pinned repeat's initial 8 GiB push takes 461.613 seconds; progress spans
 441.898 seconds in uploading and 15.298 seconds in finalization. Its first
@@ -293,11 +324,18 @@ build and macOS contracts passed; Windows/unit work was interrupted and Git/Rust
 jobs were skipped. Cancelled/skipped jobs supply no proof. These later results
 do not replace native push evidence or qualify the subsequent admission change.
 
+At `da81e1d26126`, architecture, SDK and container workflows pass; protocol
+qualification is still running. The [gateway run](https://github.com/crabbuild/crab/actions/runs/41292984961)
+passes integrity for 106,435 acknowledged small-object writes, but fails its
+terminal throughput gate: 0.767015 against a minimum of 0.8. Retained-report
+verification correctly fails the job. This is another failed performance
+result, not a waiver or a Git push throughput measurement.
+
 The original large-repository workflow passed only report-contract checks and
 skipped its live Kubernetes job. This campaign attempted the real input and
 retains its failure. The complete five-version parent run still reports failure on its stale
-staging assertion. All five publication/repack phases pass; its cold-byte and
-recovery continuation remains incomplete. Multi-GiB raw
+staging assertion. All five publication/repack phases pass; its separately
+recorded cold-byte and recovery continuation passes. Multi-GiB raw
 Git blobs, 1,000 simultaneous processes, mixed-protocol 1,000-writer load,
 provider capacity, an eight-hour open-loop workload and repeated isolated
 performance distributions remain outside the completed evidence.
