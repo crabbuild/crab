@@ -343,10 +343,54 @@ cohort's cancellation logs do not identify the renewal source; this regression
 does not alone establish that all 13 cancellations have the same cause.
 The rebuilt release also passes the fresh eight-client mixed workload: 118
 checks, 32 acknowledged developer commits, cold historical Xet/LFS hashes and
-clean Crab/Git audits in 57.306 seconds. The 64-client rerun is active, followed
-by the queued 1,000-client profile; neither is a completed capacity result.
+clean Crab/Git audits in 57.306 seconds. Its 64-client rerun passes all 846
+checks and 256 acknowledged commits in 466.085 seconds. The fresh 1,000-client
+initial cohort fails on two shared global GC-fence CAS conflicts. Queued work
+is stopped and active subprocesses drain. Its 187 completed receipts contain
+185 acknowledgements and two failures; a separate audit verifies every exact
+acknowledged tip, no failed/unattributed ref visible, and complete clean fsck
+without repair. This remains a failed initial cohort, not an 8,000-commit pass.
 Evidence: `mixed-team-8-push-bases-fixed/artifacts/report.json`,
-`mixed-team-push-bases-fixed-controller.json`.
+`mixed-team-push-bases-fixed-controller.json`,
+`mixed-team-1000-push-bases-partial-audit-controller.json`.
+
+Checkpoint export also retained the full ref-membership matrix as integer
+vectors. The source follow-up keeps the existing sparse/bitmap representation
+across that private boundary, clones already canonical dictionaries without
+per-ref remapping, and expands at most one closure during encoding. No stored
+format changes. On the same 1,001-ref fixture with 32,000 common objects and
+30 private objects per actor, one paired debug-process observation changes
+peak RSS from 175,767,552 to 44,548,096 bytes and elapsed time from 3.441 to
+0.470 seconds. This is not a product throughput distribution. Seven focused
+tests, 35 storage-enabled layered tests and crate Clippy pass. Dense and sparse
+wire controls produce byte-identical 6,830,087-byte and 250,613-byte sections
+with the old full-feature and new minimal libraries. Private CLI verification
+remains pending. Evidence: `ordinal-export-before-rss.json`,
+`ordinal-export-canonical-rss.json`, `checkpoint-wire-identity-report.json`.
+
+An isolated GC component probe confirms that retry scheduling alone is
+insufficient. Sixteen workers perform sixteen writer admission/release cycles
+each against real RustFS, with upstream `ThrottledStore` adding 20 ms per
+GET/PUT. The original owner fails after 555.239 seconds at final sweep
+admission; its reporter stops before emitting per-operation counts, so those
+counts are unavailable. An adaptive-backoff candidate completes 256 cycles
+without errors, but a refined candidate later completes only 255: one CAS
+budget exhaustion remains. The latter drains with zero writers/quarantines
+and allows a sweep. Both failed points remain failed. The candidate patch is
+archived outside the repository and removed from the source; it is not a
+qualified fix. Independent writer claims are the next ownership change to
+evaluate, with sweep exclusion, writer-history epochs and explicit format
+migration requiring proof. Evidence: `gc-admission-before-probe-report.json`,
+`gc-admission-after-probe-report.json`, `gc-admission-poll-probe-report.json`,
+`gc-cas-backoff-candidate.json`.
+
+The shared-base page prototype encodes dictionary/set pages for 1,000 refs,
+1,620,211 common objects and 30 private objects per ref into 86,093,652 bytes.
+Every reconstructed synthetic membership is checked, including a retained-only
+object that must remain invisible. This excludes format headers, automatic
+base selection, actual Git/catalog data and migration; it is not an integrated
+checkpoint or live qualification. The 128-MiB failure remains unresolved.
+Evidence: `checkpoint-base-probe-report.json`.
 
 The pinned repeat's initial 8 GiB push takes 461.613 seconds; progress spans
 441.898 seconds in uploading and 15.298 seconds in finalization. Its first

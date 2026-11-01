@@ -211,7 +211,7 @@ fn validate_sorted_oids(objects: &[String], field: &str) -> Result<()> {
 pub type GitVisibilityOid = [u8; 20];
 
 #[derive(Debug, Clone, PartialEq, Eq)]
-enum GitVisibilityClosure {
+pub(crate) enum GitVisibilityClosure {
     Sparse(Vec<u32>),
     Bitmap(Vec<u8>),
 }
@@ -242,7 +242,7 @@ pub struct GitVisibilityCheckpointTransition {
 }
 
 impl GitVisibilityClosure {
-    fn from_positions(positions: Vec<u32>, object_count: usize) -> Result<Self> {
+    pub(crate) fn from_positions(positions: Vec<u32>, object_count: usize) -> Result<Self> {
         let bitmap_len = object_count.div_ceil(8);
         if bitmap_len >= positions.len().saturating_mul(std::mem::size_of::<u32>()) {
             return Ok(Self::Sparse(positions));
@@ -259,7 +259,7 @@ impl GitVisibilityClosure {
         Ok(Self::Bitmap(bitmap))
     }
 
-    fn validate(&self, object_count: usize) -> Result<u64> {
+    pub(crate) fn validate(&self, object_count: usize) -> Result<u64> {
         match self {
             Self::Sparse(positions) => {
                 let mut previous = None;
@@ -306,7 +306,7 @@ impl GitVisibilityClosure {
         }
     }
 
-    fn contains(&self, position: u32) -> bool {
+    pub(crate) fn contains(&self, position: u32) -> bool {
         match self {
             Self::Sparse(positions) => positions.binary_search(&position).is_ok(),
             Self::Bitmap(bitmap) => usize::try_from(position)
@@ -342,7 +342,7 @@ impl GitVisibilityClosure {
         }
     }
 
-    fn positions(&self) -> Vec<u32> {
+    pub(crate) fn positions(&self) -> Vec<u32> {
         match self {
             Self::Sparse(positions) => positions.clone(),
             Self::Bitmap(bitmap) => bitmap_positions(bitmap),
@@ -476,7 +476,7 @@ pub(crate) struct GitVisibilityOrdinalTransition {
 pub(crate) struct GitVisibilityOrdinalParts {
     pub(crate) objects: Vec<GitVisibilityOid>,
     pub(crate) remap: Vec<u32>,
-    pub(crate) refs: BTreeMap<String, Vec<u32>>,
+    pub(crate) refs: BTreeMap<String, GitVisibilityClosure>,
     pub(crate) transitions: BTreeMap<String, Vec<GitVisibilityOrdinalTransition>>,
     pub(crate) incremental_history: BTreeMap<String, Vec<GitVisibilityOrdinalTransition>>,
 }
@@ -1489,19 +1489,28 @@ impl GitVisibilityIndex {
     /// capsule checkpoint proof.
     pub(crate) fn ordinal_parts(&self) -> Result<GitVisibilityOrdinalParts> {
         self.validate()?;
-        // Ref updates append unseen objects to preserve existing ordinals; the wire
-        // snapshot still needs canonical OID order, so remap every ordinal here.
+        // Ref updates append unseen objects without reordering existing ordinals.
+        // Checkpoints require canonical OID order and matching closure positions.
         let (objects, remap) = canonical_ordinal_dictionary(&self.objects)?;
-        let refs = self
-            .refs
-            .iter()
-            .map(|(name, closure)| {
-                Ok((
-                    name.clone(),
-                    remap_ordinal_positions(closure.positions(), &remap)?,
-                ))
-            })
-            .collect::<Result<_>>()?;
+        // Keep dense closures as bitmaps across the checkpoint boundary. An
+        // integer vector for every ref retains the whole membership matrix.
+        // Already canonical dictionaries need no per-object ref remapping.
+        let refs = if objects == self.objects {
+            self.refs.clone()
+        } else {
+            self.refs
+                .iter()
+                .map(|(name, closure)| {
+                    Ok((
+                        name.clone(),
+                        GitVisibilityClosure::from_positions(
+                            remap_ordinal_positions(closure.positions(), &remap)?,
+                            objects.len(),
+                        )?,
+                    ))
+                })
+                .collect::<Result<_>>()?
+        };
         let transitions = remap_ordinal_transitions(
             ordinal_transitions(&self.transitions, &self.positions)?,
             &remap,
@@ -1525,21 +1534,12 @@ impl GitVisibilityIndex {
         pack_index_hash: impl Into<String>,
         git_validation_digest: impl Into<String>,
         objects: Vec<GitVisibilityOid>,
-        refs: BTreeMap<String, Vec<u32>>,
+        refs: BTreeMap<String, GitVisibilityClosure>,
         transitions: BTreeMap<String, Vec<GitVisibilityOrdinalTransition>>,
         incremental_history: BTreeMap<String, Vec<GitVisibilityOrdinalTransition>>,
     ) -> Result<Self> {
         let positions = build_positions(&objects)?;
         let object_count = objects.len();
-        let refs = refs
-            .into_iter()
-            .map(|(name, positions_for_ref)| {
-                Ok((
-                    name,
-                    GitVisibilityClosure::from_positions(positions_for_ref, object_count)?,
-                ))
-            })
-            .collect::<Result<BTreeMap<_, _>>>()?;
         let transitions = restore_ordinal_transitions(transitions, &objects, object_count)?;
         let incremental_history =
             restore_ordinal_transitions(incremental_history, &objects, object_count)?;
@@ -4468,6 +4468,57 @@ mod tests {
     }
 
     #[test]
+    fn ordinal_export_round_trips_thousand_ref_shared_history() {
+        let object = |value: u32| format!("{value:040x}");
+        let common = 32_000;
+        let private = 30;
+        let count = 1000;
+        let mut index = GitVisibilityIndex::new(
+            4,
+            "a".repeat(64),
+            "c".repeat(64),
+            BTreeMap::from([
+                (
+                    "refs/heads/main".to_owned(),
+                    (0..common).map(object).collect(),
+                ),
+                (
+                    "refs/heads/retained".to_owned(),
+                    (common..common + count * private).map(object).collect(),
+                ),
+            ]),
+        )
+        .unwrap();
+        index.remove_ref("refs/heads/retained");
+        let base = index.refs["refs/heads/main"].clone();
+        for actor in 0..count {
+            let mut closure = base.clone();
+            let added = (0..private)
+                .map(|offset| {
+                    let oid = decode_oid(&object(common + actor * private + offset)).unwrap();
+                    index.positions[&oid]
+                })
+                .collect::<Vec<_>>();
+            closure.add_positions(&added, index.objects.len()).unwrap();
+            index
+                .refs
+                .insert(format!("refs/heads/actor-{actor:04}"), closure);
+        }
+        let parts = index.ordinal_parts().unwrap();
+        let restored = GitVisibilityIndex::from_ordinal_parts(
+            index.generation,
+            index.pack_index_hash.clone(),
+            index.git_validation_digest.clone(),
+            parts.objects,
+            parts.refs,
+            parts.transitions,
+            parts.incremental_history,
+        )
+        .unwrap();
+        assert_eq!(restored, index);
+    }
+
+    #[test]
     fn ordinal_parts_canonicalize_unsorted_dictionary_and_remap_closures() {
         let objects = vec![
             decode_oid(&"b".repeat(40)).expect("valid object"),
@@ -4511,7 +4562,7 @@ mod tests {
             ]
         );
         assert_eq!(parts.remap, vec![1, 0, 2]);
-        assert_eq!(parts.refs["refs/heads/main"], vec![0, 1, 2]);
+        assert_eq!(parts.refs["refs/heads/main"].positions(), vec![0, 1, 2]);
         let transition = &parts.transitions["refs/heads/main"][0];
         assert_eq!(transition.from_ordinal, 1);
         assert_eq!(transition.to_ordinal, 2);

@@ -124,7 +124,7 @@ pub(super) fn encode(snapshot: &LayeredVisibilitySnapshot) -> Result<Bytes> {
     let objects = optional_tree(&mut writer, Kind::CheckpointObjects, dictionary)?;
     let mut refs = BTreeMap::new();
     for (name, positions) in &snapshot.refs {
-        let objects = object_set(&mut writer, &snapshot.objects, positions)?;
+        let objects = object_set(&mut writer, &snapshot.objects, &positions.positions())?;
         let recent = transitions(
             &mut writer,
             &snapshot.objects,
@@ -408,6 +408,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<LayeredVisibilitySnapshot> {
         if row.history_present {
             history.insert(row.name.clone(), read_history(row.history.as_ref())?);
         }
+        let closure = GitVisibilityClosure::from_positions(closure, objects.len())?;
         if refs.insert(row.name, closure).is_some() {
             return Err(corrupt("checkpoint visibility repeats a ref"));
         }

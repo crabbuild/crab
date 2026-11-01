@@ -7,7 +7,7 @@ use serde::{Deserialize, Serialize};
 use crate::capsule_protocol::{CapsuleGitPack, CapsuleRun, CapsuleSectionKind, PointerCatalog};
 use crate::error::{MetadataError, Result};
 use crate::git_visibility::{
-    GitVisibilityCheckpointTransition, GitVisibilityIndex, GitVisibilityOid,
+    GitVisibilityCheckpointTransition, GitVisibilityClosure, GitVisibilityIndex, GitVisibilityOid,
     GitVisibilityOrdinalTransition, MAX_CHECKPOINT_FOOTER_TRANSITIONS_PER_REF, encode_oid,
 };
 use crate::validation::{validate_content_hash, validate_sha1};
@@ -50,17 +50,16 @@ pub fn visibility_object_set_digest(objects: &[GitVisibilityOid]) -> String {
     hasher.finalize().to_hex().to_string()
 }
 
-/// Compact, source-set-bound visibility proof for the layered checkpoint.
+/// Source-bound visibility proof for a layered checkpoint.
 ///
-/// The dictionary is encoded once as raw SHA-1 bytes. Ref closures and
-/// incremental transitions use canonical sparse ordinals or bitmaps, so the
-/// warm fetch path does not download repeated hexadecimal OIDs for every ref.
+/// Dense ref closures remain compact bitmaps in memory. The canonical page
+/// encoding binds each closure and incremental transition to the OID dictionary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayeredVisibilitySnapshot {
     catalog_digest: String,
     objects: Vec<GitVisibilityOid>,
     member_admission: Option<Vec<LayeredObjectMember>>,
-    refs: BTreeMap<String, Vec<u32>>,
+    refs: BTreeMap<String, GitVisibilityClosure>,
     transitions: BTreeMap<String, Vec<GitVisibilityOrdinalTransition>>,
     incremental_history: BTreeMap<String, Vec<GitVisibilityOrdinalTransition>>,
 }
@@ -310,7 +309,7 @@ impl LayeredVisibilitySnapshot {
         }
         for (name, closure) in &self.refs {
             validate_visibility_ref(name)?;
-            validate_positions(closure, object_count)?;
+            closure.validate(object_count)?;
         }
         validate_transition_map(&self.transitions, &self.refs, object_count, 64)?;
         validate_transition_map(
@@ -378,7 +377,7 @@ fn validate_position_order(positions: &[u32]) -> Result<()> {
 
 fn validate_transition_map(
     transitions: &BTreeMap<String, Vec<GitVisibilityOrdinalTransition>>,
-    refs: &BTreeMap<String, Vec<u32>>,
+    refs: &BTreeMap<String, GitVisibilityClosure>,
     object_count: usize,
     maximum: usize,
 ) -> Result<()> {
@@ -398,8 +397,8 @@ fn validate_transition_map(
                 || usize::try_from(entry.to_ordinal)
                     .ok()
                     .is_none_or(|value| value >= object_count)
-                || reference.binary_search(&entry.from_ordinal).is_err()
-                || reference.binary_search(&entry.to_ordinal).is_err()
+                || !reference.contains(entry.from_ordinal)
+                || !reference.contains(entry.to_ordinal)
             {
                 return Err(corrupt(
                     "layered visibility transition endpoints are invalid",
@@ -409,7 +408,7 @@ fn validate_transition_map(
             if entry
                 .objects
                 .iter()
-                .any(|position| reference.binary_search(position).is_err())
+                .any(|position| !reference.contains(*position))
             {
                 return Err(corrupt(
                     "layered visibility transition escapes its ref closure",
