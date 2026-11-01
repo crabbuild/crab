@@ -49,7 +49,9 @@ pub(super) async fn acquire(
                         )
                     })?;
             }
-            slot.writer = Some(Holder::new(&holder, now, ttl)?);
+            let writer = Holder::new(&holder, now, ttl)?;
+            let expires_at_backend = writer.expires_at_backend;
+            slot.writer = Some(writer);
             match update(
                 store,
                 &Path::from(key.as_str()),
@@ -77,6 +79,7 @@ pub(super) async fn acquire(
                     let checked = lease.inner.control().await;
                     if matches!(&checked, Ok((fresh, _)) if fresh.epoch == control.epoch && fresh.sweep.is_none())
                     {
+                        lease.inner.validate_expiry(expires_at_backend).await?;
                         return Ok(lease);
                     }
                     let primary = checked.err().unwrap_or_else(|| conflict(&path));
@@ -180,6 +183,7 @@ pub(super) async fn mutate(inner: &LeaseInner, mutation: Mutation) -> Result<()>
                 slot.epoch = next_epoch(path, slot.epoch)?;
             }
         }
+        let expiry = slot.writer.as_ref().map(|writer| writer.expires_at_backend);
         match update(
             &inner.store,
             &Path::from(path.as_str()),
@@ -190,6 +194,9 @@ pub(super) async fn mutate(inner: &LeaseInner, mutation: Mutation) -> Result<()>
         {
             Ok(_) => {
                 inner.control().await?;
+                if let Some(expiry) = expiry {
+                    inner.validate_expiry(expiry).await?;
+                }
                 return Ok(());
             }
             Err(error) if conditional_conflict(&error) => continue,

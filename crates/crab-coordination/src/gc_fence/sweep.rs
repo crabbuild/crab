@@ -133,14 +133,11 @@ async fn finish(
 
 async fn scan(inner: &LeaseInner, control: &Control) -> Result<u64> {
     let now = backend_unix_time(&inner.store, &Path::from(inner.path.as_str())).await?;
-    let mut history = control.writer_epoch;
     let mut holders = std::collections::HashSet::new();
+    let mut slots = Vec::with_capacity(GC_FENCE_MAX_WRITERS);
     for index in 0..GC_FENCE_MAX_WRITERS {
         let key = slot_path(&inner.path, &control.incarnation, index);
-        let (slot, _) = load_slot(&inner.store, &key, control).await?;
-        history = history
-            .checked_add(slot.epoch)
-            .ok_or_else(|| malformed(&key, "writer history sum exhausted"))?;
+        let (slot, version) = load_slot(&inner.store, &key, control).await?;
         if let Some(writer) = &slot.writer {
             if !holders.insert(writer.holder.clone()) {
                 return Err(malformed(&key, "duplicate writer holder across slots"));
@@ -149,12 +146,53 @@ async fn scan(inner: &LeaseInner, control: &Control) -> Result<u64> {
                 return Err(held(&inner.domain, writer, false, control.epoch));
             }
         }
+        slots.push((key, slot, version));
+    }
+    // Validate the complete snapshot before cleanup can erase an expired
+    // duplicate holder. Malformed ledgers must remain errors, not repairs.
+    let mut history = control.writer_epoch;
+    for (key, slot, version) in slots {
+        let epoch = retire_expired(inner, &key, control, (slot, version), now).await?;
+        history = history
+            .checked_add(epoch)
+            .ok_or_else(|| malformed(&key, "writer history sum exhausted"))?;
     }
     validate(inner).await?;
     Ok(history)
 }
 
-pub(super) async fn validate(inner: &LeaseInner) -> Result<()> {
+async fn retire_expired(
+    inner: &LeaseInner,
+    key: &str,
+    control: &Control,
+    loaded: (Slot, UpdateVersion),
+    mut now: i64,
+) -> Result<u64> {
+    let (mut slot, mut version) = loaded;
+    for _ in 0..GC_FENCE_MAX_CAS_ATTEMPTS {
+        let Some(writer) = &slot.writer else {
+            return Ok(slot.epoch);
+        };
+        if writer.blocks(now) {
+            return Err(held(&inner.domain, writer, false, control.epoch));
+        }
+        // Revoke the expired version before granting destructive admission.
+        // A suspended old renewal must not succeed after this sweep's scan.
+        slot.writer = None;
+        slot.epoch = next_epoch(key, slot.epoch)?;
+        match update(&inner.store, &Path::from(key), encode(key, &slot)?, version).await {
+            Ok(_) => return Ok(slot.epoch),
+            Err(error) if conditional_conflict(&error) => {
+                now = backend_unix_time(&inner.store, &Path::from(inner.path.as_str())).await?;
+                (slot, version) = load_slot(&inner.store, key, control).await?;
+            }
+            Err(source) => return Err(store_error(key, source)),
+        }
+    }
+    Err(conflict(key))
+}
+
+pub(super) async fn validate(inner: &LeaseInner) -> Result<i64> {
     let Claim::Sweep {
         epoch,
         ref acquisition,
@@ -163,8 +201,8 @@ pub(super) async fn validate(inner: &LeaseInner) -> Result<()> {
     else {
         return Err(inner.lost());
     };
-    let now = backend_unix_time(&inner.store, &Path::from(inner.path.as_str())).await?;
     let (control, _) = inner.control().await?;
+    let now = backend_unix_time(&inner.store, &Path::from(inner.path.as_str())).await?;
     if control.epoch != epoch
         || control.acquisition.as_ref() != Some(acquisition)
         || !control
@@ -174,7 +212,7 @@ pub(super) async fn validate(inner: &LeaseInner) -> Result<()> {
     {
         return Err(inner.lost());
     }
-    Ok(())
+    Ok(now)
 }
 
 pub(super) async fn mutate(inner: &LeaseInner, renew: bool) -> Result<()> {
@@ -208,6 +246,7 @@ pub(super) async fn mutate(inner: &LeaseInner, renew: bool) -> Result<()> {
             control.acquisition = None;
             control.epoch = next_epoch(&inner.path, control.epoch)?;
         }
+        let expiry = control.sweep.as_ref().map(|sweep| sweep.expires_at_backend);
         match update(
             &inner.store,
             &Path::from(inner.path.as_str()),
@@ -216,7 +255,12 @@ pub(super) async fn mutate(inner: &LeaseInner, renew: bool) -> Result<()> {
         )
         .await
         {
-            Ok(_) => return Ok(()),
+            Ok(_) => {
+                if let Some(expiry) = expiry {
+                    inner.validate_expiry(expiry).await?;
+                }
+                return Ok(());
+            }
             Err(error) if conditional_conflict(&error) => continue,
             Err(source) => return Err(store_error(&inner.path, source)),
         }

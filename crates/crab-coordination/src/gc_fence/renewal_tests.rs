@@ -8,6 +8,7 @@ struct PausedUpdateStore {
     pause: AtomicBool,
     lose_response: AtomicBool,
     pause_get_path: Mutex<Option<String>>,
+    clock_advance_secs: std::sync::atomic::AtomicU64,
     entered: tokio::sync::Notify,
     resume: tokio::sync::Notify,
 }
@@ -70,7 +71,12 @@ impl ObjectStore for PausedUpdateStore {
             self.entered.notify_one();
             self.resume.notified().await;
         }
-        self.inner.get_opts(path, options).await
+        let mut result = self.inner.get_opts(path, options).await?;
+        if path.as_ref().ends_with("/clock") {
+            result.meta.last_modified +=
+                Duration::from_secs(self.clock_advance_secs.load(Ordering::SeqCst));
+        }
+        Ok(result)
     }
 
     fn delete_stream(
@@ -438,4 +444,148 @@ async fn resumable_context_cannot_adopt_another_live_acquisition() {
     ));
     second.renew().await.unwrap();
     second.release().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn suspended_writer_renewal_cannot_succeed_after_expiry_and_sweep() {
+    let backend = Arc::new(PausedUpdateStore::default());
+    let store: Arc<dyn ObjectStore> = backend.clone();
+    let writer = GcFenceLease::acquire_writer(&store, "repo", TTL)
+        .await
+        .unwrap();
+    backend.pause.store(true, Ordering::SeqCst);
+    let renewing = writer.clone();
+    let task = tokio::spawn(async move { renewing.renew().await });
+    tokio::time::timeout(Duration::from_secs(5), backend.entered.notified())
+        .await
+        .unwrap();
+    backend.clock_advance_secs.store(
+        DEFAULT_GC_FENCE_QUARANTINE.as_secs() + TTL.as_secs() + 1,
+        Ordering::SeqCst,
+    );
+    let sweep = GcFenceLease::acquire_sweep(&store, "repo", TTL)
+        .await
+        .unwrap();
+    backend.resume.notify_one();
+    let result = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(result, Err(CoordinationError::GcFenceLost { .. })));
+    sweep.release().await.unwrap();
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn suspended_writer_acquisition_cannot_return_an_expired_claim() {
+    let backend = Arc::new(PausedUpdateStore::default());
+    let store: Arc<dyn ObjectStore> = backend.clone();
+    ready_control(&store, &gc_fence_path("repo").unwrap())
+        .await
+        .unwrap();
+    backend.pause.store(true, Ordering::SeqCst);
+    let writing_store = store.clone();
+    let task =
+        tokio::spawn(
+            async move { GcFenceLease::acquire_writer(&writing_store, "repo", TTL).await },
+        );
+    tokio::time::timeout(Duration::from_secs(5), backend.entered.notified())
+        .await
+        .unwrap();
+    backend
+        .clock_advance_secs
+        .store(TTL.as_secs() + 1, Ordering::SeqCst);
+    backend.resume.notify_one();
+    let result = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(result, Err(CoordinationError::GcFenceLost { .. })));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn suspended_sweep_renewal_cannot_return_expired_ownership() {
+    let backend = Arc::new(PausedUpdateStore::default());
+    let store: Arc<dyn ObjectStore> = backend.clone();
+    let sweep = GcFenceLease::acquire_sweep(&store, "repo", TTL)
+        .await
+        .unwrap();
+    backend.pause.store(true, Ordering::SeqCst);
+    let renewing = sweep.clone();
+    let task = tokio::spawn(async move { renewing.renew().await });
+    tokio::time::timeout(Duration::from_secs(5), backend.entered.notified())
+        .await
+        .unwrap();
+    backend
+        .clock_advance_secs
+        .store(TTL.as_secs() + 1, Ordering::SeqCst);
+    backend.resume.notify_one();
+    let result = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(result, Err(CoordinationError::GcFenceLost { .. })));
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn expired_slot_retirement_cannot_erase_a_racing_live_claim() {
+    let backend = Arc::new(PausedUpdateStore::default());
+    let store: Arc<dyn ObjectStore> = backend.clone();
+    let writer = GcFenceLease::acquire_writer(&store, "repo", TTL)
+        .await
+        .unwrap();
+    super::tests::expire(&store, &writer, 1).await;
+    let Claim::Writer { path, .. } = &writer.inner.claim else {
+        unreachable!();
+    };
+    *backend.pause_get_path.lock().await = Some(path.clone());
+    let sweeping_store = store.clone();
+    let task =
+        tokio::spawn(
+            async move { GcFenceLease::acquire_sweep(&sweeping_store, "repo", TTL).await },
+        );
+    tokio::time::timeout(Duration::from_secs(5), backend.entered.notified())
+        .await
+        .unwrap();
+    backend.pause.store(true, Ordering::SeqCst);
+    backend.resume.notify_one();
+    tokio::time::timeout(Duration::from_secs(5), backend.entered.notified())
+        .await
+        .unwrap();
+    let (control, _) = load_control(&store, &writer.inner.path).await.unwrap();
+    let (mut slot, version) = load_slot(&store, path, &control).await.unwrap();
+    let now = backend_unix_time(&store, &Path::from(path.as_str()))
+        .await
+        .unwrap();
+    // A contender can have read open control before this sweep closed it.
+    // Its outstanding slot CAS must still be respected until it drains.
+    slot.epoch += 2;
+    slot.writer = Some(Holder::new("late-contender", now, TTL).unwrap());
+    let expected = encode(path, &slot).unwrap();
+    update(
+        &store,
+        &Path::from(path.as_str()),
+        expected.clone(),
+        version,
+    )
+    .await
+    .unwrap();
+    backend.resume.notify_one();
+    let result = tokio::time::timeout(Duration::from_secs(5), task)
+        .await
+        .unwrap()
+        .unwrap();
+    assert!(matches!(
+        result,
+        Err(CoordinationError::GcFenceHeld { sweep: false, .. })
+    ));
+    assert_eq!(
+        store
+            .get(&Path::from(path.as_str()))
+            .await
+            .unwrap()
+            .bytes()
+            .await
+            .unwrap(),
+        expected
+    );
 }

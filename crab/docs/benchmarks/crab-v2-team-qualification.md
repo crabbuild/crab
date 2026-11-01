@@ -429,6 +429,20 @@ queued, not qualified. Evidence: `gc-independent-probe-report.json`,
 `gc-migration-verification-controller.json`,
 `mixed-team-independent-gc-controller.json`.
 
+Additional deterministic provider-clock tests expose an expiry gap in the
+`d57bf520441e` candidate: a suspended writer acquisition or renewal can return
+success after expiry; renewal can do so after a sweep has acquired admission.
+The regressions fail before the fix. The source follow-up checks provider time
+after successful acquisition/renewal and conditionally retires past-quarantine
+slot versions before a sweep is exposed. A complete slot snapshot is validated
+before retirement, preserving duplicate-holder corruption as an error. A racing
+fresh claim survives retirement's stale CAS. All 170 coordination tests,
+all-targets Clippy and the CLI consumer check pass. A private rebuild and new
+live verification are pending. The running mixed-1,000 profile remains evidence
+for its pinned preceding binary, not this expiry boundary or the final source.
+Evidence: `gc-suspended-writer-before.log`, `gc-expiry-final-tests.log`,
+`gc-expiry-final-clippy.log`, `gc-expiry-final-consumer.log`.
+
 The shared-base page prototype encodes dictionary/set pages for 1,000 refs,
 1,620,211 common objects and 30 private objects per ref into 86,093,652 bytes.
 Every reconstructed synthetic membership is checked, including a retained-only

@@ -149,6 +149,20 @@ impl LeaseInner {
         Ok((control, version))
     }
 
+    async fn validate_expiry(&self, expires_at_backend: i64) -> Result<()> {
+        let path = match &self.claim {
+            Claim::Writer { path, .. } => path,
+            Claim::Sweep { .. } => &self.path,
+        };
+        // A successful conditional request may have been suspended beyond
+        // its lease. Recheck provider time before exposing live ownership.
+        let now = backend_unix_time(&self.store, &Path::from(path.as_str())).await?;
+        if expires_at_backend <= now {
+            return Err(self.lost());
+        }
+        Ok(())
+    }
+
     async fn release(&self, committed: bool) -> Result<()> {
         let _guard = self.operation.lock().await;
         if self.released.load(Ordering::Acquire) {
@@ -192,8 +206,7 @@ impl GcFenceLease {
         if self.inner.released.load(Ordering::Acquire) {
             return Err(self.inner.lost());
         }
-        sweep::validate(&self.inner).await?;
-        backend_unix_time(&self.inner.store, &Path::from(self.inner.path.as_str())).await
+        sweep::validate(&self.inner).await
     }
 
     /// Acquire shared writer admission through one private conditional slot.

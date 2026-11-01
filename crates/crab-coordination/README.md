@@ -49,6 +49,11 @@ slot before returning exclusive admission. A late stale contender cannot upload;
 an admitted live writer or expired claim inside the 24-hour uncertainty window
 blocks sweeping. Each resumable sweep also has a distinct acquisition ID, so
 concurrent contexts sharing a journal ID cannot adopt each other’s live claim.
+A sweep conditionally retires expired slots after quarantine, revoking pending
+old writes before destructive admission. Validate the whole slot snapshot
+before cleanup so duplicate expired holders cannot disappear as a repair.
+Acquisition and renewal recheck backend expiry after conditional success; a
+suspended successful PUT alone cannot establish live ownership.
 No LIST snapshot is part of this exclusion proof. Sweep phases pay a bounded
 64-slot read; ordinary writers avoid the shared conditional-write hotspot.
 

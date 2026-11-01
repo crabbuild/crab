@@ -13,7 +13,7 @@ fn writer_key(lease: &GcFenceLease) -> &str {
     path
 }
 
-async fn expire(store: &Arc<dyn ObjectStore>, lease: &GcFenceLease, expiry: i64) {
+pub(super) async fn expire(store: &Arc<dyn ObjectStore>, lease: &GcFenceLease, expiry: i64) {
     let (mut control, _) = load_control(store, &lease.inner.path).await.unwrap();
     match &lease.inner.claim {
         Claim::Writer { path, .. } => {
@@ -475,4 +475,46 @@ fn missing_nullable_authority_is_malformed_not_released() {
     let mut value = serde_json::to_value(Slot::empty(&control)).unwrap();
     value.as_object_mut().unwrap().remove("writer");
     assert!(decode::<Slot>("slot", &serde_json::to_vec(&value).unwrap()).is_err());
+}
+
+#[tokio::test]
+async fn sweep_preserves_duplicate_expired_claims_as_corruption() {
+    let store = memory_store();
+    let writer = GcFenceLease::acquire_writer(&store, "repo", TTL)
+        .await
+        .unwrap();
+    expire(&store, &writer, 1).await;
+    let path = writer_key(&writer).to_owned();
+    let other = if path.ends_with("/00") {
+        format!("{}/01", path.rsplit_once('/').unwrap().0)
+    } else {
+        format!("{}/00", path.rsplit_once('/').unwrap().0)
+    };
+    let body = store
+        .get(&Path::from(path.as_str()))
+        .await
+        .unwrap()
+        .bytes()
+        .await
+        .unwrap();
+    store
+        .put(&Path::from(other.as_str()), body.clone().into())
+        .await
+        .unwrap();
+    assert!(matches!(
+        GcFenceLease::acquire_sweep(&store, "repo", TTL).await,
+        Err(CoordinationError::GcFenceMalformed { .. })
+    ));
+    for key in [path, other] {
+        assert_eq!(
+            store
+                .get(&Path::from(key))
+                .await
+                .unwrap()
+                .bytes()
+                .await
+                .unwrap(),
+            body
+        );
+    }
 }
