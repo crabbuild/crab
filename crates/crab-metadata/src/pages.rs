@@ -75,6 +75,7 @@ pub(crate) enum Kind {
     RunCatalogShards = 27,
     RunCatalogXorbs = 28,
     RunCatalogChunks = 29,
+    #[cfg(feature = "storage")]
     CapsuleChunkHints = 30,
     VisibilityDictionary = 31,
     VisibilityOrdinals = 32,
@@ -147,6 +148,7 @@ impl Kind {
             Self::ObjectLocators => 20,
             #[cfg(feature = "remote-index")]
             Self::PackOffsets => 12,
+            #[cfg(feature = "storage")]
             Self::CapsuleChunkHints => 33,
             _ => 4,
         }

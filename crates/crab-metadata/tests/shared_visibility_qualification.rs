@@ -1,4 +1,5 @@
 //! Explicit full-input codec qualification; the retained fixture is outside source control.
+#[cfg(feature = "storage")]
 use bytes::Bytes;
 #[cfg(feature = "storage")]
 use crab_metadata::capsule_protocol::VisibilityChange;
