@@ -1788,6 +1788,16 @@ async fn dispatch_batch<W: tokio::io::AsyncWrite + Unpin>(
                                 key: "capsule-protocol push store".to_owned(),
                                 origin: "push requires a resolved object store".to_owned(),
                             })?;
+                    // Git owns stdout and negotiates quiet/progress per session.
+                    // Keep the shared publisher's display on this caller's stderr.
+                    push_config.progress = options.progress.then(|| {
+                        Arc::new(super::progress::NativePushProgress::with_mode_stderr(
+                            console::colors_enabled_stderr(),
+                            options.verbosity > 1,
+                            progress_mode,
+                            jsonl_stderr_stream.cloned(),
+                        ))
+                    });
                     match crate::git::capsule_push::run(
                         &push_config,
                         &specs,

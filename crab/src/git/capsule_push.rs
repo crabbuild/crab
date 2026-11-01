@@ -9,6 +9,7 @@ use crab_staging::StagingAreaReadOnly;
 use crab_xet::hash::MerkleHash;
 use gix_object::{Exists, Find, FindHeader};
 use tokio_util::sync::CancellationToken;
+use tokio_util::task::AbortOnDropHandle;
 
 use crate::core::error::{CrabError, Result, check_cancelled};
 use crate::core::metrics::Metrics;
@@ -48,35 +49,18 @@ pub async fn run(
     PushResult,
     Option<crab_read::capsule_protocol::CapsuleRefView>,
 )> {
-    validate_publication_plan_context(config)?;
-    let Some(plan_id) = config.mirror_plan_id.as_deref() else {
-        return run_inner(
-            config,
-            specs,
-            store,
-            router,
-            advertised,
-            hidden_ref_patterns,
-            staging,
-            caching_store,
-            metrics,
-            cancel,
-        )
-        .await;
-    };
-    let layout = crab_storage::StoreLayout::with_global_prefix(
-        store.as_storage().clone(),
-        router.repo_prefix().to_owned(),
-        router.global_prefix().to_owned(),
-    );
-    crab_remote::publication::with_capsule_plan(
-        store.as_storage(),
-        &layout,
-        plan_id,
-        config.lock_ttl,
-        cancel,
-        |cancel| async move {
-            run_inner(
+    let ticker = config.progress.as_ref().and_then(|progress| {
+        progress.begin_discovery();
+        progress.start_ticker().map(|(handle, cancel)| {
+            // Dropping the publication future must not detach its redraw task.
+            let stop_on_drop = cancel.clone().drop_guard();
+            (AbortOnDropHandle::new(handle), cancel, stop_on_drop)
+        })
+    });
+    let result = async {
+        validate_publication_plan_context(config)?;
+        let Some(plan_id) = config.mirror_plan_id.as_deref() else {
+            return run_inner(
                 config,
                 specs,
                 store,
@@ -86,12 +70,48 @@ pub async fn run(
                 staging,
                 caching_store,
                 metrics,
-                &cancel,
+                cancel,
             )
-            .await
-        },
-    )
-    .await
+            .await;
+        };
+        let layout = crab_storage::StoreLayout::with_global_prefix(
+            store.as_storage().clone(),
+            router.repo_prefix().to_owned(),
+            router.global_prefix().to_owned(),
+        );
+        crab_remote::publication::with_capsule_plan(
+            store.as_storage(),
+            &layout,
+            plan_id,
+            config.lock_ttl,
+            cancel,
+            |cancel| async move {
+                run_inner(
+                    config,
+                    specs,
+                    store,
+                    router,
+                    advertised,
+                    hidden_ref_patterns,
+                    staging,
+                    caching_store,
+                    metrics,
+                    &cancel,
+                )
+                .await
+            },
+        )
+        .await
+    }
+    .await;
+    if let Some(progress) = &config.progress {
+        progress.finish(result.as_ref().is_ok_and(|(result, _)| result.all_ok()));
+    }
+    if let Some((handle, cancel, _stop_on_drop)) = ticker {
+        cancel.cancel();
+        let _ = handle.await;
+    }
+    result
 }
 
 fn validate_publication_plan_context(config: &PushConfig) -> Result<()> {
@@ -326,6 +346,9 @@ async fn run_inner(
         return Err(CrabError::Cancelled);
     }
 
+    if let Some(progress) = &config.progress {
+        progress.begin_git_pack();
+    }
     let prepared = prepare_git_packs(
         &common_git_dir,
         remote_refs,
@@ -334,6 +357,11 @@ async fn run_inner(
         config.force_full_graph,
     )
     .await?;
+    if let Some(progress) = &config.progress {
+        let bytes = prepared.pointers.iter().map(|pointer| pointer.size).sum();
+        progress.set_pack_totals(prepared.pointers.len() as u64, bytes);
+        progress.begin_push_preparation();
+    }
     if !prepared.pointers.is_empty()
         && let Some(staging) = staging
         && !staging.unresolved_publication_intents()?.is_empty()
@@ -427,6 +455,7 @@ async fn run_inner(
                     metrics,
                     config.upload_concurrency,
                     config.protected_push.is_none(),
+                    config.progress.as_deref(),
                     cancel,
                 )
                 .await?;
@@ -471,8 +500,19 @@ async fn run_inner(
                 prepared.packs,
                 sections,
             )?;
+            if let Some(progress) = &config.progress {
+                progress.set_git_upload_totals(1, 0, capsule.bytes().len() as u64);
+                progress.begin_git_upload();
+            }
             check_cancelled(cancel)?;
             if let Some(session) = config.protected_push.as_ref() {
+                let _upload = config.progress.as_ref().and_then(|progress| {
+                    progress.track_upload(
+                        super::progress::UploadKind::Capsule,
+                        "publish",
+                        capsule.bytes().len() as u64,
+                    )
+                });
                 let outcome = super::protected_push::finalize_capsule_push(
                     session,
                     store,
@@ -483,6 +523,10 @@ async fn run_inner(
                     cancel,
                 )
                 .await?;
+                if let Some(progress) = &config.progress {
+                    progress.add_git_upload_bytes(capsule.bytes().len() as u64);
+                    progress.finish_git_pack_body();
+                }
                 return Ok(Some(outcome));
             }
             let payload_objects = if config.active_active_replication.is_some() {
@@ -555,6 +599,12 @@ async fn run_inner(
             }
         })
         .await;
+    if publication.as_ref().is_ok_and(Option::is_some)
+        && let Some(progress) = &config.progress
+    {
+        progress.inc_git_pack();
+        progress.set_phase(super::progress::NativePushProgress::PHASE_FINALIZING);
+    }
     // Root visibility precedes advisory discovery, while global admission
     // still pins immutable hint pages until their own root becomes durable.
     let hint_indexed = if publication.as_ref().is_ok_and(Option::is_some)
@@ -709,6 +759,13 @@ async fn publish_capsule(
     cancel: &CancellationToken,
 ) -> Result<CapsulePublishAttempt> {
     check_cancelled(cancel)?;
+    let upload = config.progress.as_ref().and_then(|progress| {
+        progress.track_upload(
+            super::progress::UploadKind::Capsule,
+            "publish",
+            capsule.bytes().len() as u64,
+        )
+    });
     let Some(replication) = config.active_active_replication.as_ref() else {
         let publish = async {
             let prepared = crab_write::capsule_protocol::prepare_publication_with_ref_head_bases(
@@ -719,6 +776,11 @@ async fn publish_capsule(
                 push_ref_head_bases,
             )
             .await?;
+            drop(upload);
+            if let Some(progress) = &config.progress {
+                progress.add_git_upload_bytes(capsule.bytes().len() as u64);
+                progress.finish_git_pack_body();
+            }
             // Ref/GC renewal may fail while immutable preparation runs. Check
             // its scoped token before visibility, then resolve the commit fully.
             if cancel.is_cancelled() {
@@ -750,6 +812,11 @@ async fn publish_capsule(
             push_ref_head_bases,
         )
         .await?;
+    drop(upload);
+    if let Some(progress) = &config.progress {
+        progress.add_git_upload_bytes(capsule.bytes().len() as u64);
+        progress.finish_git_pack_body();
+    }
     let descriptor = prepared.descriptor().clone();
     let refs = transaction
         .edits()

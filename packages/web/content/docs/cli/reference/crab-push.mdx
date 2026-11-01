@@ -72,13 +72,33 @@ after a failure.
 | `--dry-run` | Disabled | Show what would be pushed without uploading |
 | `-f, --force` | Disabled | Bypass client fast-forward checks; server policy still applies |
 | `--follow-tags` | Disabled | Also push missing annotated tags whose commits are reachable from the refs being pushed |
-| `-v, --verbose` | Disabled | Show per-step timing and per-file progress |
+| `-v, --verbose` | Disabled | Include transfer object counts in the live progress display |
 | `--no-incremental` | Disabled | Publish the complete outgoing Git and LFS closure instead of excluding objects reachable from current remote tips |
 | `--no-color` | Disabled | Disable ANSI color |
 | `--json` | Disabled | Emit one terminal JSON envelope |
 | `--jsonl` | Disabled | Stream JSONL progress and a terminal result |
 
 ## Examples
+
+Interactive pushes show the current phase and elapsed time, with separate
+colored bars for Xet xorbs, shards, and the capsule. Bars advance on verified
+bytes and object acknowledgments. Wider terminals include throughput and an
+estimated time remaining. Ref publication and final indexing remain visible
+after uploads finish.
+
+Each concurrent object upload has its own activity row with its identity,
+size, and elapsed time. Xorbs and shards include a shortened hash.
+These rows pulse while awaiting a verified acknowledgment;
+they do not estimate unobserved network bytes. Rows disappear on completion,
+error, or cancellation. The display fits the terminal height and summarizes
+additional active uploads when space is limited. Shards and capsule publication
+appear when their dependencies are ready; upload rows reflect actual concurrency.
+
+The display adapts to terminal width. Redirected output and `TERM=dumb` use
+plain phase updates on stderr. `--no-color` disables color while retaining live
+updates. `--json` emits only its final result; `--jsonl` streams progress on
+stdout. Git-helper progress stays on stderr so Git's protocol stdout stays clean.
+JSONL includes a final progress snapshot before its terminal result.
 
 ### Push the current branch
 
