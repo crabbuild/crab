@@ -311,7 +311,17 @@ failed; the later Git update rounds never run. This is not an 8,000-commit pass.
 This driver exercises Crab's LFS filters
 and managed hook, not unmodified Git LFS transfer-agent load.
 
-Two further source fixes are awaiting release-binary RustFS verification.
+Two further source fixes have a private release build at `41a647b03415`,
+SHA-256 `1e30b5d0366f3392642c5e25eb6603d1552672087d58855572cef61a36ced0d2`.
+Its `make install` completes in 575.079 seconds. The default-base retention
+control passes 18 checks: 975,233 request-body bytes and 11 HTTP requests for
+the new branch, versus 6,998,988 bytes and nine requests in the earlier selected
+view control. Both independent cold consumers recover all 10,002 commits after
+source-ref deletion and after repack, with strict Git fsck and clean complete
+Crab audit. GC is dry-run only; physical reclamation is not qualified.
+Evidence: `push-bases-build-report.json`,
+`default-base-retention-fixed/artifacts/report.json`.
+
 New destinations capture the published default HEAD as a packing exclusion
 when it is visible and locally available. Independent full visibility evidence
 and retained source runs remain authoritative. The pre-fix regression uploads
@@ -331,6 +341,12 @@ release already retry these collisions. CLI push and shared derived-index
 maintenance use this owner, so the fix belongs in coordination. The live failed
 cohort's cancellation logs do not identify the renewal source; this regression
 does not alone establish that all 13 cancellations have the same cause.
+The rebuilt release also passes the fresh eight-client mixed workload: 118
+checks, 32 acknowledged developer commits, cold historical Xet/LFS hashes and
+clean Crab/Git audits in 57.306 seconds. The 64-client rerun is active, followed
+by the queued 1,000-client profile; neither is a completed capacity result.
+Evidence: `mixed-team-8-push-bases-fixed/artifacts/report.json`,
+`mixed-team-push-bases-fixed-controller.json`.
 
 The pinned repeat's initial 8 GiB push takes 461.613 seconds; progress spans
 441.898 seconds in uploading and 15.298 seconds in finalization. Its first
@@ -379,6 +395,12 @@ passes integrity for 106,435 acknowledged small-object writes, but fails its
 terminal throughput gate: 0.767015 against a minimum of 0.8. Retained-report
 verification correctly fails the job. This is another failed performance
 result, not a waiver or a Git push throughput measurement.
+
+At `50eee4f8dfa9`, architecture, SDK and container workflows pass; protocol
+qualification is cancelled. The [gateway run](https://github.com/crabbuild/crab/actions/runs/41297400188)
+again passes integrity but fails retained-report verification: terminal
+throughput ratio 0.772382 against 0.8. These results do not qualify the later
+packing-base and GC-renewal change.
 
 The original large-repository workflow passed only report-contract checks and
 skipped its live Kubernetes job. This campaign attempted the real input and
