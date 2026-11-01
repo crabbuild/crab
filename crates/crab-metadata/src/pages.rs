@@ -622,7 +622,7 @@ mod tests {
             let root = writer.tree(kind, rows.clone()).unwrap();
             let body = writer.bytes.as_slice();
             let size = body.len() as u64;
-            assert_eq!(body.as_ref(), expected);
+            assert_eq!(body, expected);
             assert!(
                 matches!(decode(body, &root, kind, size, "fixture"), Ok(Page::Leaf(actual)) if actual == rows)
             );
