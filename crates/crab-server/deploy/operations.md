@@ -94,6 +94,8 @@ Normal termination uses native `Preserve` shutdown for restart at the same peer
 address. Public handlers and background work drain before Cellar; the private
 peer transport remains available until native shutdown finishes. The server
 has a 110-second shutdown deadline and reports an incomplete drain as an error.
+Cellar has 90 seconds within that deadline to complete a progressing handoff;
+its 25-second no-progress bound still detects a stalled drain.
 The chart retains its pre-stop routing delay and termination grace period.
 
 For permanent scale-down, keep a successor running and send an authenticated

@@ -364,6 +364,9 @@ pub async fn serve(config: Config) -> Result<()> {
                   break match result {
                       Some(Ok(Err(error))) => Err(error),
                       Some(Err(error)) => Err(error.into()),
+                      // Draining cancels these loops before the Cellar handoff.
+                      // Their normal completion must preserve a successful stop.
+                      _ if cancellation.is_cancelled() => Ok(()),
                       _ => Err(crate::Error::Config("server background task stopped unexpectedly")),
                   };
               },

@@ -58,6 +58,11 @@ retire a healthy Cell while Crab was still awaiting its reply. A client timeout
 still leaves a mutation unconfirmed; only the native proof permits an applied
 acknowledgement.
 
+Cellar handoff has a 90-second total budget within the server's 110-second
+shutdown deadline. Its 25-second no-progress limit remains unchanged. The SDK's
+40-second total default cut a progressing ten-repository drain while its last
+large snapshot was still being published.
+
 Replication uses 32 MiB multipart parts. The pinned LTX client uploads parts
 serially; its default 5 MiB parts made a roughly 190 MB restored snapshot require
 37 separate part requests. Larger parts bound that request overhead without
@@ -549,6 +554,14 @@ replica restoration and snapshot publication on its next use.
 
 ## Operator changes
 
+Existing GC-fence schema 1/2 requires the explicit
+[`crab migrate gc-fence`](https://crab.build/docs/cli/reference/crab-migrate)
+upgrade before serving. Quiesce all writers and sweepers, inspect each repository
+and shared metadata domain, then apply the migration with `--apply --quiesced`.
+Recorded holders or quarantine must be resolved with the previous binary first;
+never delete the fence to bypass migration. Upgrade all clients before reopening
+traffic. This is separate from native Cell schema preparation.
+
 Private initialization and preparation frames share the bounded application
 admission pool. Background Git indexing uses separate maintenance slots, so a
 long rebuild cannot prevent preparation of another Cell. Application saturation
@@ -660,8 +673,13 @@ and requires one item and one attributed history entry for each recovered
 submission. It leaves the preview running and retains private failure evidence.
 It warms the organization before submission; cold first-use availability remains
 separate. Handoff starts another native server with an independent local cache,
-then scales down the original owner through private mTLS. Backup stops every
-writer, copies the complete configured root to a new local fixture bucket,
+then scales down the original owner through private mTLS. Handoff acquires
+ownership before demand-driven restore finishes. After each transition, the
+harness waits up to six minutes for all ten private Cell checks
+to report prepared project and projection state, retaining each diagnostic
+attempt. Recovery timing includes that wait; ordinary HTTP budgets stay unchanged.
+Backup stops every writer, copies the complete configured root to a new local
+fixture bucket,
 compares every object's SHA-256, size and application metadata, verifies both
 inventories remained stable, and starts restoration with another empty cache.
 Only its own restore bucket and generated successor cache are cleanup targets.

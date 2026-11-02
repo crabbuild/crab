@@ -66,6 +66,7 @@ def main():
     proxy = None
     cleanup_backup = None
     serial = 0
+    diagnostic_serial = 0
     tls = ssl.create_default_context(cafile=config["cells"]["peer_ca"])
     tls.load_cert_chain(config["cells"]["peer_certificate"], config["cells"]["peer_private_key"])
     management = "https://" + config["management_listen"]
@@ -177,6 +178,8 @@ def main():
         return result
 
     def diagnostics():
+        nonlocal diagnostic_serial
+        diagnostic_serial += 1
         results = []
         for owner, name in names:
             started = time.monotonic()
@@ -189,7 +192,7 @@ def main():
             except (urllib.error.URLError, TimeoutError, ConnectionError) as error:
                 result = {"status": None, "error": str(error)}
             results.append(dict(result, repository=owner + "/" + name, elapsed=time.monotonic() - started))
-        (run / f"cell-diagnostics-{serial}.json").write_text(json.dumps(results, indent=2))
+        (run / f"cell-diagnostics-{serial}-{diagnostic_serial}.json").write_text(json.dumps(results, indent=2))
         return all(result["status"] == 200 and all(result["body"][feature]["state"] == "ready" for feature in ["projects", "projection"]) for result in results)
 
     def pending_fixture(name):
@@ -219,11 +222,21 @@ def main():
 
     def recovered(name, artifacts, pending, before, started, **proof):
         nonlocal browser
+        # Handoff adopts ownership before demand-driven restore finishes. Probe
+        # every Cell before state comparison, retaining transient diagnostics.
+        deadline = time.monotonic() + 360
+        while True:
+            assert server.poll() is None, "Replacement exited during Cell recovery"
+            ready = diagnostics()
+            if time.monotonic() > deadline:
+                raise TimeoutError("Native Cells did not become ready within six minutes")
+            if ready:
+                break
+            time.sleep(0.25)
         assert refs() == original_refs, "Git references changed across recovery"
         after = snapshot()
         (artifacts / "after.json").write_text(json.dumps(after, indent=2))
         assert after == before, "Project fields, items, or history changed across recovery"
-        assert diagnostics(), "Native Cell diagnostics failed"
         resume = artifacts / "resume.json"
         temporary = resume.with_suffix(".tmp")
         temporary.write_text(json.dumps({"request_id": pending["input"]["request_id"]}))

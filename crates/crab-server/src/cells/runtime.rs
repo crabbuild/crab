@@ -163,7 +163,7 @@ pub(crate) async fn start_with_bucket(
     };
     // The SDK worker includes the namespace fetch while a cold replica restores.
     // Keep its recovery budget; CellClient separately bounds ordinary calls.
-    let node_config = NodeConfig::new(
+    let mut node_config = NodeConfig::new(
         ActorIdentity {
             node: node_name,
             region: config
@@ -176,6 +176,9 @@ pub(crate) async fn start_with_bucket(
         actor,
         config.cells.data_dir.join("cellar"),
     );
+    // Large Cells publish handoff snapshots before releasing ownership. Keep
+    // the SDK's no-progress bound, with time inside the 110-second server drain.
+    node_config.shutdown.total_ms = 90_000;
     let replica_storage = ReplicaStorage::new(
         bucket.store.clone(),
         ReplicaStorageOptions {
