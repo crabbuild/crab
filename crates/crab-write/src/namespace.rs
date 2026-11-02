@@ -86,20 +86,25 @@ where
     let mut attempt = 0;
     let leases = loop {
         let stopped = CancellationToken::new();
-        let mut acquisitions = futures_util::stream::iter(resources.iter_mut())
-            .map(|(resource, context)| {
+        // Own pending contexts across I/O so spawned publishers keep a Send future.
+        let pending = std::mem::take(&mut resources);
+        resources.reserve(namespace_count);
+        let mut acquisitions = futures_util::stream::iter(pending)
+            .map(|(resource, mut context)| {
                 let scoped = &scoped;
                 let stopped = &stopped;
                 async move {
-                    if scoped.is_cancelled() || stopped.is_cancelled() {
-                        return Ok(None);
-                    }
-                    let lease = context
-                        .acquire_internal(layout.repo_prefix(), resource, ttl)
-                        .await?;
-                    Ok(Some(crab_coordination::RenewingPushLock::start(
-                        lease, scoped,
-                    )))
+                    let result = if scoped.is_cancelled() || stopped.is_cancelled() {
+                        Ok(None)
+                    } else {
+                        context
+                            .acquire_internal(layout.repo_prefix(), &resource, ttl)
+                            .await
+                            .map(|lease| {
+                                Some(crab_coordination::RenewingPushLock::start(lease, scoped))
+                            })
+                    };
+                    (resource, context, result)
                 }
             })
             .buffer_unordered(NAMESPACE_CONCURRENCY);
@@ -108,7 +113,8 @@ where
         // A failed parallel claim may race successful backend writes. Drain
         // every attempt, then release the whole partial set before waiting;
         // retaining it across contention would allow cyclic ownership.
-        while let Some(result) = acquisitions.next().await {
+        while let Some((resource, context, result)) = acquisitions.next().await {
+            resources.push((resource, context));
             match result {
                 Ok(Some(lease)) => leases.push(lease),
                 Ok(None) => {}

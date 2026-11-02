@@ -198,6 +198,29 @@ async fn overlapping_namespace_batches_wait_without_cyclic_ownership() {
     assert!(first.is_ok() && second.is_ok(), "{first:?}; {second:?}");
 }
 
+#[tokio::test(flavor = "multi_thread")]
+async fn namespace_publication_can_run_in_a_spawned_task() {
+    async fn publish(store: &Store, layout: &StoreLayout<Store>, cancel: &CancellationToken) {
+        let refs = vec!["refs/heads/spawned".to_owned()];
+        with_ref_namespaces_wait(
+            store,
+            layout,
+            &refs,
+            Duration::from_secs(60),
+            Duration::ZERO,
+            cancel,
+            |_| async { Ok::<_, WriteError>(()) },
+        )
+        .await
+        .unwrap();
+    }
+    let store = Store::new(Arc::new(InMemory::new()));
+    let layout = StoreLayout::new(store.clone(), "repositories/namespace-spawned".to_owned());
+    tokio::spawn(async move { publish(&store, &layout, &CancellationToken::new()).await })
+        .await
+        .unwrap();
+}
+
 #[tokio::test]
 async fn namespace_cleanup_overlaps_io_and_drains_before_success_or_failure_returns() {
     for fail_operation in [false, true] {
