@@ -15,6 +15,15 @@ pub struct CapsuleRunAdmissionReader {
 }
 
 impl CapsuleRunAdmissionReader {
+    pub(in crate::capsule_protocol) fn prefetch(&mut self, body: Bytes) -> Result<()> {
+        self.pages
+            .validate_region(body.len() as u64, self.pages.member_count as usize)?;
+        // Prefetch supplies transport only. Selected pages still authenticate
+        // and consume the same query budget before counts or OIDs are exposed.
+        self.cache = PageCache::for_prefetched_region(self.offset, body)?;
+        Ok(())
+    }
+
     pub(in crate::capsule_protocol::run) fn new(
         layout: &StoreLayout<Store>,
         hash: &str,

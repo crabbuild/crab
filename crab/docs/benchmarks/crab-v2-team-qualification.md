@@ -1,7 +1,8 @@
 # Crab v2 team and large-file qualification
 
-Status: **8,000-push mixed-history integrity, 10,000-commit cold readback and
-large-file byte checks pass; team-scale performance is not qualified**.
+Status: **Pinned integrity evidence and historical performance failures**.
+Latest combined-build qualification and gate status are tracked in
+[PR #640](https://github.com/crabbuild/crab/pull/640).
 The original object-store audit found three
 expired read-admission leases left by interrupted tests, with no Git-object or
 data-chain findings. Built-in recovery passed; all three released tombstones
@@ -159,7 +160,10 @@ Git 2.56.0. The candidate retains native object connectivity checks in an isolat
 ref database over the actual installed objects, with supervised child lifetime.
 All 15 connectivity tests now pass on native Git 2.56.0. The new scan and clone
 changes pass all 331 affected tests plus Clippy, architecture and formatting
-checks. Their private install and final combined-build qualification remain pending.
+checks. The `e1c9da0edde` private install passes the actual native Git 2.56
+full/partial-clone lifecycle (92 checks). Its full CI passes all nine jobs and
+protocol qualification passes all 11 jobs, including current Git, Windows and
+macOS. Sustained team performance remains pending at that revision.
 Evidence: `clone-refdb-connectivity-native256-before.json`,
 `clone-refdb-connectivity-evidence-map.json`, `clone-refdb-lfs-final-checks.json`.
 
@@ -173,10 +177,35 @@ matrix and conservative scope guards pass. A live baseline passes 20 checks:
 missing LFS bytes reject publication without changing refs, positive bytes
 publish, and a cold independent consumer verifies exact ordinary/LFS bytes.
 Trace2 observes one LFS walk per ordinary native push and two per ordinary Git
-push (managed hook plus helper). Candidate trace confirmation and sustained
-performance measurements remain pending.
+push (managed hook plus helper). The `e1c9da0edde` candidate passes the same
+20 live checks with zero ordinary native walks and one Git managed-hook walk.
+Positive and missing-payload paths still discover LFS objects; missing bytes
+preserve remote refs. Cold exact ordinary/LFS bytes and the no-repair audit pass.
+Sustained performance measurements remain pending.
 Evidence: `exact-empty-lfs-delta-evidence-map.json`,
 `exact-delta-lfs-baseline-live-controller.json`.
+
+The next metadata candidate reproduces and reduces repeated control reads.
+One 64-ref capture uses 128 reads instead of 320 for small publication leaves,
+and 256 for leaves containing a 64 KiB opaque payload. These provider-read
+counters exclude listing and write operations; live meters retain every HTTP
+operation. The latter fixture also
+limits fetched bytes to keep those payloads cold. Small leaf suffixes reuse
+prefetched admission pages without decoding OID tables; compacted histories
+retain their original paged opening. Complete small-source reads validate the
+source hash and share the same footer/page decoder. Tight query budgets, ref
+reconciliation, catalog precedence and GC authority remain in place.
+
+Pooled bulk visibility materialization also reuses point-proof blocks: a
+32-control regression falls from 32 cold/warm GETs to one/zero, while cached
+corruption still fails the complete section hash/descriptor/canonical checks.
+Git views retain selected-transition reads rather than prefetching whole leaf
+visibility sections. At the time of those counter checks,
+broader caller checks, the final private install and live performance qualification
+were pending. These counters do not establish team capacity.
+Evidence: `pooled-visibility-before.json`,
+`small-leaf-catalog-before.json`, `metadata-range-coalescing-before.json`,
+`metadata-range-canonical-final.log`.
 
 Full CI on `a4cd9ae8cf4e` passes 4,167 CLI library tests but fails six. The two
 primary helper failures reproduce unchanged on `43dc00d82d8`: an already-held

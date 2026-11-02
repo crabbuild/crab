@@ -109,8 +109,8 @@ mod tests {
     use crate::capsule_protocol::{CapsuleRefEdit, CapsuleSection};
     use crate::git_visibility::GitVisibilityEdit;
 
-    fn compacted() -> CapsuleRun {
-        let leaves = (1..=2)
+    fn compacted(count: usize) -> CapsuleRun {
+        let leaves = (1..=count)
             .map(|version| {
                 let oid = format!("{version:040x}");
                 let tx = CapsuleTransaction::new(
@@ -156,7 +156,7 @@ mod tests {
 
     #[test]
     fn invalid_pool_routing_fails_full_and_footer_only_decoding() {
-        let run = compacted();
+        let run = compacted(2);
         for change in ["missing", "offset", "length", "hash"] {
             let mut footer = run.footer.clone();
             match change {
@@ -186,7 +186,7 @@ mod tests {
 
     #[test]
     fn re_signed_pool_cannot_replace_original_capsule_evidence() {
-        let run = compacted();
+        let run = compacted(2);
         let mut footer = run.footer.clone();
         let pool = footer.visibility_pool.as_mut().unwrap();
         let mut body = run.bytes()[..run.control_offset() as usize].to_vec();
@@ -195,5 +195,122 @@ mod tests {
             .to_hex()
             .to_string();
         assert!(CapsuleRun::decode(resign(body, &footer)).is_err());
+    }
+
+    #[cfg(feature = "storage")]
+    async fn stored_run(
+        run: &CapsuleRun,
+    ) -> (
+        crab_storage::StoreLayout<crab_storage::Store>,
+        crate::capsule_protocol::CapsulePointer,
+        Arc<std::sync::atomic::AtomicUsize>,
+    ) {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        let reads = Arc::new(AtomicUsize::new(0));
+        let observed = reads.clone();
+        let store = crab_storage::Store::new(Arc::new(object_store::memory::InMemory::new()))
+            .with_read_request_observer(Arc::new(move |_| {
+                observed.fetch_add(1, Ordering::SeqCst);
+            }));
+        let layout = crab_storage::StoreLayout::new(store, "pooled-visibility".into());
+        layout
+            .store()
+            .create_strict(&layout.capsule_path(run.hash()), run.bytes().clone())
+            .await
+            .unwrap();
+        let pointer = crate::capsule_protocol::CapsulePointer::new(
+            run.hash(),
+            run.bytes().len() as u64,
+            run.control_offset(),
+            run.control_size(),
+            run.footer_hash(),
+            run.level(),
+            run.transaction_ids(),
+            run.newest_base_root_digest(),
+        )
+        .unwrap();
+        (layout, pointer, reads)
+    }
+
+    #[cfg(feature = "storage")]
+    #[tokio::test(flavor = "multi_thread")]
+    async fn bulk_visibility_reuses_pooled_proof_reads() {
+        use std::sync::atomic::Ordering;
+        let run = compacted(32);
+        let expected = run
+            .capsules()
+            .iter()
+            .map(|capsule| capsule.visibility_delta().unwrap().unwrap())
+            .collect::<Vec<_>>();
+        let (layout, pointer, reads) = stored_run(&run).await;
+        let mut observations = Vec::new();
+        for warm in [false, true] {
+            let (_, controls) =
+                crate::capsule_protocol::load_capsule_run_git_control(&layout, &pointer)
+                    .await
+                    .unwrap();
+            if warm {
+                for control in &controls {
+                    control
+                        .paged_visibility()
+                        .unwrap()
+                        .headers(layout.store(), &["refs/heads/main"])
+                        .await
+                        .unwrap();
+                }
+            }
+            reads.store(0, Ordering::SeqCst);
+            let materialized = futures_util::future::try_join_all(
+                controls
+                    .iter()
+                    .map(|control| control.materialize_visibility(layout.store())),
+            )
+            .await
+            .unwrap();
+            for (actual, expected) in materialized.iter().zip(&expected) {
+                assert_eq!(actual.visibility_delta().unwrap(), Some(expected));
+            }
+            observations.push(reads.load(Ordering::SeqCst));
+        }
+        assert_eq!(
+            observations,
+            [1, 0],
+            "cold/warm bulk reads must reuse the run's proof blocks"
+        );
+    }
+
+    #[cfg(feature = "storage")]
+    #[tokio::test]
+    async fn bulk_visibility_authenticates_corruption_in_warm_proof_blocks() {
+        use std::sync::atomic::Ordering;
+        let run = compacted(2);
+        let (layout, pointer, reads) = stored_run(&run).await;
+        let pool = run.footer.visibility_pool.as_ref().unwrap();
+        let first = run.footer.capsules[0].visibility.as_ref().unwrap();
+        let mut bytes = run.bytes().to_vec();
+        // Point headers do not decode this trailer, but their read-ahead block
+        // contains it. Bulk reuse must still authenticate the complete section.
+        bytes[(pool.offset + first.length - 1) as usize] ^= 1;
+        layout
+            .store()
+            .put_overwrite(&layout.capsule_path(run.hash()), bytes.into())
+            .await
+            .unwrap();
+        let (_, controls) =
+            crate::capsule_protocol::load_capsule_run_git_control(&layout, &pointer)
+                .await
+                .unwrap();
+        controls[0]
+            .paged_visibility()
+            .unwrap()
+            .headers(layout.store(), &["refs/heads/main"])
+            .await
+            .unwrap();
+        reads.store(0, Ordering::SeqCst);
+        let rejected = controls[0]
+            .materialize_visibility(layout.store())
+            .await
+            .is_err();
+        assert_eq!((rejected, reads.load(Ordering::SeqCst)), (true, 0));
     }
 }

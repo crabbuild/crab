@@ -6,7 +6,7 @@ pub(crate) mod object;
 #[cfg(feature = "storage")]
 mod cache;
 #[cfg(feature = "storage")]
-pub(crate) use cache::{PageCache, PageWork};
+pub(crate) use cache::{PageCache, PageWork, READ_AHEAD_BYTES};
 
 use crate::error::{MetadataError, Result};
 use crate::validation::corrupt_object;

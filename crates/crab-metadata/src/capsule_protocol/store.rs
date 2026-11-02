@@ -432,27 +432,81 @@ pub async fn load_capsule_run_control(
 
 /// Load complete reference controls while validating admission counts through authenticated pages.
 ///
-/// OID admission remains cold; reference reconciliation still validates complete visibility edits.
+/// OID admission stays undecoded; large admission regions remain paged.
+/// Reference reconciliation still validates complete visibility edits.
 pub async fn load_capsule_run_git_control(
     router: &StoreLayout<Store>,
     pointer: &super::CapsulePointer,
 ) -> Result<(CapsuleRunControl, Vec<CapsuleControl>)> {
+    load_run_git_control(router, pointer, false).await
+}
+
+// Catalog callers admit complete small leaves; Git views keep bodies cold.
+// Both plans keep OIDs paged and share the same footer/page validation.
+pub(super) async fn load_run_git_control(
+    router: &StoreLayout<Store>,
+    pointer: &super::CapsulePointer,
+    inline: bool,
+) -> Result<(CapsuleRunControl, Vec<CapsuleControl>)> {
     super::root::validate_capsule_pointer(pointer)?;
     let path = router.capsule_path(pointer.hash());
-    let start = pointer
-        .size()
-        .checked_sub(CapsuleRunControl::trailer_bytes())
-        .ok_or_else(|| corrupt(&path, "capsule run is shorter than its trailer"))?;
-    let trailer = router
-        .store()
-        .range_get(&path, start..pointer.size())
-        .await?;
-    let range = CapsuleRunControl::footer_range(&trailer, pointer)?;
-    let footer = router.store().range_get(&path, range).await?;
+    // A publication leaf can share one control read with its small admission
+    // pages. Compacted histories retain selected-member paging.
+    let prefetch = inline
+        || (pointer.level() == 0 && pointer.control_size() <= crate::pages::READ_AHEAD_BYTES);
+    let start = if inline {
+        0
+    } else if prefetch {
+        pointer.control_offset()
+    } else {
+        pointer
+            .size()
+            .checked_sub(CapsuleRunControl::trailer_bytes())
+            .ok_or_else(|| corrupt(&path, "capsule run is shorter than its trailer"))?
+    };
+    let body = if inline {
+        router
+            .store()
+            .get_immutable_bounded(&path, pointer.size())
+            .await?
+    } else {
+        router
+            .store()
+            .range_get(&path, start..pointer.size())
+            .await?
+    };
+    if body.len() as u64 != pointer.size() - start {
+        return Err(corrupt(&path, "capsule control read is truncated"));
+    }
+    if inline && blake3::hash(&body).to_hex().as_str() != pointer.hash() {
+        return Err(corrupt(
+            &path,
+            "capsule run content hash differs from its pointer",
+        ));
+    }
+    let trailer_start = body
+        .len()
+        .saturating_sub(CapsuleRunControl::trailer_bytes() as usize);
+    let range = CapsuleRunControl::footer_range(&body[trailer_start..], pointer)?;
+    let (footer, admission) = if prefetch {
+        let offset = usize::try_from(range.start - start)
+            .map_err(|_| corrupt(&path, "capsule footer offset cannot be represented"))?;
+        let admission_start = usize::try_from(pointer.control_offset() - start)
+            .map_err(|_| corrupt(&path, "capsule admission offset cannot be represented"))?;
+        (
+            body.slice(offset..),
+            Some(body.slice(admission_start..offset)),
+        )
+    } else {
+        (router.store().range_get(&path, range).await?, None)
+    };
     let control = CapsuleRunControl::decode_footer(footer, pointer)?;
-    if let Some(reader) =
+    if let Some(mut reader) =
         control.admission_reader(router, super::run::MAX_RUN_FOOTER_BYTES as u64)?
     {
+        if let Some(body) = admission {
+            reader.prefetch(body)?;
+        }
         let counts = reader.counts(router.store()).await?;
         if counts.len() != control.git_packs().len()
             || counts
@@ -466,7 +520,8 @@ pub async fn load_capsule_run_git_control(
             ));
         }
     }
-    let capsules = control.materialize_capsules_with_paged_visibility(router)?;
+    let inline_source = inline.then_some(body);
+    let capsules = control.materialize_capsules_with_paged_visibility(router, inline_source)?;
     Ok((control, capsules))
 }
 

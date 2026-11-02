@@ -188,7 +188,12 @@ impl CapsuleVisibilityReader {
             .offset
             .checked_add(self.length)
             .ok_or_else(|| corrupt("visibility source span overflows"))?;
-        let bytes = store.range_get(&self.path, self.offset..end).await?;
+        // Bulk transitions share encoded pool blocks with point proofs. Reusing
+        // transport bytes must still pass the full section hash and decoder below.
+        let bytes = self
+            .cache
+            .read_range(store, &self.path, self.offset..end, self.maximum)
+            .await?;
         if blake3::hash(&bytes).to_hex().as_str() != self.hash
             || Descriptor::decode(&bytes)? != self.descriptor
         {

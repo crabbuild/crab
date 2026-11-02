@@ -57,6 +57,7 @@ async fn run_pointer_binding_is_identical_for_full_and_control_reads() {
     load_capsule_run_git_control(&layout, &pointer)
         .await
         .unwrap();
+    load_run_git_control(&layout, &pointer, true).await.unwrap();
     for field in ["footer_hash", "control_boundary"] {
         let mut changed = serde_json::to_value(&pointer).unwrap();
         if field == "footer_hash" {
@@ -80,7 +81,35 @@ async fn run_pointer_binding_is_identical_for_full_and_control_reads() {
                 .is_err(),
             "paged Git control: {field}"
         );
+        assert!(load_run_git_control(&layout, &changed, true).await.is_err());
     }
+}
+
+#[tokio::test]
+async fn inline_control_rejects_unrequested_source_corruption() {
+    let (layout, pointer, _) = run_fixture().await;
+    let path = layout.capsule_path(pointer.hash());
+    let mut body = layout
+        .store()
+        .get_immutable_bounded(&path, pointer.size())
+        .await
+        .unwrap()
+        .to_vec();
+    body[0] ^= 1;
+    layout
+        .store()
+        .put_overwrite(&path, body.into())
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            load_capsule_run_git_control(&layout, &pointer)
+                .await
+                .is_ok(),
+            load_run_git_control(&layout, &pointer, true).await.is_err(),
+        ),
+        (true, true),
+    );
 }
 
 #[tokio::test]
@@ -145,6 +174,25 @@ async fn run_control_includes_verified_member_admission_in_one_read() {
         assert_eq!(control.git_packs(), run.git_packs());
         assert_eq!(capsules.len(), count);
         assert_eq!(reads.load(Ordering::SeqCst), 1, "run with {count} capsules");
+        reads.store(0, Ordering::SeqCst);
+        let (paged, _) = load_capsule_run_git_control(&layout, &pointer)
+            .await
+            .unwrap();
+        assert!(paged.admission().is_none(), "OID admission stays undecoded");
+        let expected_reads = if count == 1 { 1 } else { 3 };
+        assert_eq!(
+            reads.load(Ordering::SeqCst),
+            expected_reads,
+            "leaf or compacted control plan"
+        );
+        if count == 1 {
+            reads.store(0, Ordering::SeqCst);
+            let (inline, _) = load_run_git_control(&layout, &pointer, true).await.unwrap();
+            assert_eq!(
+                (inline.admission().is_none(), reads.load(Ordering::SeqCst)),
+                (true, 1)
+            );
+        }
         for offset in [pointer.control_offset() - 1, pointer.control_offset() + 1] {
             let mut changed = serde_json::to_value(&pointer).unwrap();
             changed["control_offset"] = offset.into();
