@@ -107,8 +107,34 @@ Windows protocol CI on the same published head passes deadline and abandonment
 cleanup but fails external thin-base reconstruction with an unresolved delta.
 The candidate uses the existing workspace path-normalization dependency at the
 native Git object-directory boundary. Exact reconstructed-byte assertions remain;
-the fixture also checks the stored base OID. New Windows verification is pending.
-Evidence: `windows-owned-indexer-failure.json`.
+the fixture also checks the stored base OID. The subsequent `562dd108f78` Windows
+job passes all three pack-install contracts on Git 2.56.0.windows.3, including
+full/external-thin bytes, deadline drain and abandoned workspace ownership.
+Evidence: `windows-owned-indexer-failure.json`, `windows-private-pack-reuse-proof.json`.
+
+The `562dd108f78` private install passes fresh eight/64-client mixed runs
+(120/848 checks), 22 retention checks and real warm/historical Git/Xet reads.
+Kubernetes seed publication now completes: native `index-pack --fsck-objects`
+exits successfully in 217.609 seconds within the unchanged 300-second guard.
+The full incremental replay and sustained gates remain pending. The previous
+failed Kubernetes reports remain failed.
+Evidence: `private-pack-reuse-verification-controller.json`,
+`private-pack-reuse-k8s-bootstrap-observation.json`.
+
+The next Xet candidate uses staged xorb identities only as discovery hints.
+Current captured catalog descriptors supply actual chunk positions and lengths;
+reverse-chunk discovery still resolves every remaining outgoing hash. File
+conflict checks, foreign-origin revalidation, visibility reconciliation and GC
+admission remain in place. Its real ingestion/preparation/reconstruction
+regression fails before the change with equal provider reads for local, valid
+and stale-position staging hints. Afterward, that controlled fixture uses nine
+reads without a hint and seven with valid or stale-position hints; every case
+uploads no reused payload and reconstructs exactly. All 274 affected Xet, push,
+helper and capsule tests pass, as do CI Clippy, architecture and formatting checks.
+Fresh RustFS measurements remain required; complete ref advertisement and catalog
+capture still scale with the current repository state.
+Evidence: `staged-catalog-placement-before.json`,
+`staged-catalog-placement-final-checks.json`, `staged-catalog-placement-evidence-map.json`.
 
 Full CI on `a4cd9ae8cf4e` passes 4,167 CLI library tests but fails six. The two
 primary helper failures reproduce unchanged on `43dc00d82d8`: an already-held
