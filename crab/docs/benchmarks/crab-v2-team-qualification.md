@@ -207,6 +207,13 @@ Evidence: `pooled-visibility-before.json`,
 `small-leaf-catalog-before.json`, `metadata-range-coalescing-before.json`,
 `metadata-range-canonical-final.log`.
 
+The bulk-read follow-up reproduces a cold 8 MiB scan issuing 128 GETs and
+evicting a warmed point proof. Large cold spans now use one exact transfer;
+complete warm spans remain transfer-free. All 774 metadata tests pass, including
+unchanged byte ceilings and proof authentication. Combined caller, installed
+runtime and team qualification remain required for this follow-up.
+Evidence: `cold-bulk-range-before.json`, `cold-bulk-range-after.json`.
+
 Full CI on `a4cd9ae8cf4e` passes 4,167 CLI library tests but fails six. The two
 primary helper failures reproduce unchanged on `43dc00d82d8`: an already-held
 replica tip lacks transition history, and a follow-tags fetch omits a missing

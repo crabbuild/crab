@@ -613,6 +613,8 @@ than treating it as absence.
 
 Bulk materialization shares encoded run proof blocks with point readers. Each
 section still passes its complete hash, descriptor and canonical-delta checks.
+Large ranges reuse a completely warm span; a cold large range uses one transfer
+without filling or evicting the point cache.
 Read-ahead stays inside the caller's byte ceiling; tight ceilings select exact
 ranges, with the same planning rule for cold and warm caches.
 
