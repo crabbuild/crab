@@ -44,7 +44,9 @@ def main():
     assert host in ["127.0.0.1", "localhost"], "Use an isolated loopback preview"
     assert urllib.parse.urlsplit(args.ui_origin).hostname in ["127.0.0.1", "localhost"]
     with socket.socket() as probe:
+        probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         probe.bind((host, int(port)))
+        probe.listen(1)
     repositories = json.loads(args.repositories.read_text())
     names = [(repo["owner"], repo["name"]) for repo in repositories]
     assert len(names) == len(set(names)) == 10, "Expected ten distinct real repositories"
