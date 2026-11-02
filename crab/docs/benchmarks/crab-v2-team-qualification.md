@@ -80,6 +80,22 @@ Evidence: `mixed-history-2g-frontier-fetch/report.json`,
 `frontier-normalized-large-proof.json`, `frontier-normalized-k8s-controller.json`,
 `frontier-k8s-index-timeout-diagnosis.json`, `k8s-index-isolation.json`.
 
+Full CI on `a4cd9ae8cf4e` passes 4,167 CLI library tests but fails six. The two
+primary helper failures reproduce unchanged on `43dc00d82d8`: an already-held
+replica tip lacks transition history, and a follow-tags fetch omits a missing
+annotated tag. Four later LFS tests acquire the shared mutex poisoned by those
+panics. The private `43dc00d82d8` build was stopped before live verification.
+The follow-up preserves empty advertised-tip deltas, routes follow-tags with
+advertised tags through complete visibility and retains warm connectivity
+markers. Broader tests and a new private install remain required.
+The same parent's gateway soak verifies all 111,459 acknowledged writes and
+their exact listing, but fails its unchanged performance gate: terminal p95
+ratio 1.632235 exceeds 1.5, and throughput ratio 0.781116 is below 0.8.
+Retained diagnostics show increasing checkpoint capture and visibility work;
+they do not yet establish its cause. Neither CI failure is waived.
+Evidence: `a4-parent-ci-failures.json`, `parent-ci-helper-reproduction.json`,
+`fetch-view-lazy-build-stop.json`, `gateway-a4-soak-diagnostic.json`.
+
 Current root-5/checkpoint-9 runtime `4c01b9127c90` passes fresh eight-client
 and 64-client mixed Git/Xet/LFS runs: 120 and 848 checks, 32 and 256 commits,
 explicit checkpoint, both historical payload versions and full no-repair

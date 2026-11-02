@@ -71,6 +71,10 @@ transition sections retain complete hash and object-set validation. Actual pack
 downloads own payload reads; maintenance alone retains small complete runs.
 Historical non-tip wants require complete visibility under the caller's policy;
 their ordinary wire shape does not make them advertised tips.
+An advertised tip already present in client haves needs no transition history
+to prove an empty delta. Missing history still cannot prove any different base.
+Classic follow-tags fetches use complete visibility when tags are advertised,
+matching the protocol-v2 policy, and retain annotated-tag object installation.
 This limits active work across the union of per-ref histories; full views still
 retain their admitted decoded metadata and payloads until the caller releases them.
 Captured views share immutable admission tables when cloned. Overlapping
