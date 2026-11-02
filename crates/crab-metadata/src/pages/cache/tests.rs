@@ -2,6 +2,129 @@ use super::*;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[tokio::test]
+async fn cold_bulk_ranges_use_one_transfer_and_preserve_point_proofs() {
+    let mut writer = Writer::default();
+    let root = writer
+        .tree(Kind::VisibilityChanges, vec![(vec![1; 20], vec![])])
+        .unwrap();
+    writer
+        .bytes
+        .resize(CACHE_BYTES + READ_AHEAD_BYTES as usize, 0);
+    let expected = bytes::Bytes::from(writer.bytes);
+    let reads = Arc::new(AtomicU64::new(0));
+    let observed = reads.clone();
+    let store = Store::new(Arc::new(object_store::memory::InMemory::new()))
+        .with_read_request_observer(Arc::new(move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+        }));
+    let path = object_store::path::Path::from("proof");
+    store.create_strict(&path, expected.clone()).await.unwrap();
+    let region = 0..expected.len() as u64;
+    let cache = PageCache::for_region(region.clone());
+    let point = cache
+        .fetch(
+            &store,
+            &path,
+            0,
+            region.clone(),
+            &root,
+            Kind::VisibilityChanges,
+        )
+        .await
+        .unwrap();
+    reads.store(0, Ordering::SeqCst);
+    let bulk = cache
+        .read_range(&store, &path, region.clone(), u64::MAX)
+        .await
+        .unwrap();
+    let bulk_reads = reads.swap(0, Ordering::SeqCst);
+    let retained = cache
+        .fetch(&store, &path, 0, region, &root, Kind::VisibilityChanges)
+        .await
+        .unwrap();
+    assert_eq!(
+        (
+            bulk == expected,
+            bulk_reads,
+            reads.load(Ordering::SeqCst),
+            Arc::ptr_eq(&point, &retained)
+        ),
+        (true, 1, 0, true),
+    );
+}
+
+#[tokio::test]
+async fn fully_warm_bulk_ranges_reuse_blocks_without_a_transfer() {
+    let reads = Arc::new(AtomicU64::new(0));
+    let observed = reads.clone();
+    let store = Store::new(Arc::new(object_store::memory::InMemory::new()))
+        .with_read_request_observer(Arc::new(move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+        }));
+    let path = object_store::path::Path::from("proof");
+    let expected = bytes::Bytes::from(vec![23; 3 * READ_AHEAD_BYTES as usize]);
+    store.create_strict(&path, expected.clone()).await.unwrap();
+    let region = 0..expected.len() as u64;
+    let cache = PageCache::for_region(region.clone());
+    for offset in (0..region.end).step_by(READ_AHEAD_BYTES as usize) {
+        cache
+            .read_range(&store, &path, offset..offset + 1, u64::MAX)
+            .await
+            .unwrap();
+    }
+    reads.store(0, Ordering::SeqCst);
+    let bulk = cache
+        .read_range(&store, &path, region, u64::MAX)
+        .await
+        .unwrap();
+    assert_eq!((bulk, reads.load(Ordering::SeqCst)), (expected, 0));
+}
+
+#[tokio::test]
+async fn oversized_point_pages_keep_admission_and_the_decoded_cache() {
+    let key = vec![1; 4];
+    let value = vec![7; READ_AHEAD_BYTES as usize + 1];
+    let mut writer = Writer::default();
+    let root = writer
+        .tree(Kind::Records, vec![(key.clone(), value.clone())])
+        .unwrap();
+    let reads = Arc::new(AtomicU64::new(0));
+    let observed = reads.clone();
+    let store = Store::new(Arc::new(object_store::memory::InMemory::new()))
+        .with_read_request_observer(Arc::new(move |_| {
+            observed.fetch_add(1, Ordering::SeqCst);
+        }));
+    let path = object_store::path::Path::from("proof");
+    let region = 0..writer.bytes.len() as u64;
+    store
+        .create_strict(&path, writer.bytes.into())
+        .await
+        .unwrap();
+    let cache = PageCache::for_region(region.clone());
+    let mut observations = Vec::new();
+    for _ in 0..2 {
+        reads.store(0, Ordering::SeqCst);
+        let mut work = PageWork::new(region.end, 0);
+        let result = cache
+            .lookup(
+                &store,
+                &path,
+                0,
+                region.clone(),
+                &root,
+                Kind::Records,
+                std::slice::from_ref(&key),
+                &mut work,
+            )
+            .await
+            .unwrap();
+        assert_eq!(result, [Some(value.clone())]);
+        observations.push((reads.load(Ordering::SeqCst), work.bytes));
+    }
+    assert_eq!(observations, [(1, region.end), (0, region.end)]);
+}
+
+#[tokio::test]
 async fn bulk_ranges_preserve_tight_budgets_with_cold_and_warm_blocks() {
     let bytes = Arc::new(AtomicU64::new(0));
     let observed = bytes.clone();

@@ -285,22 +285,106 @@ jobs:
           retention-days: 30
 
 
-  pinned-capsule-performance:
-    name: Pinned Kubernetes performance (isolated Linux)
+
+  pinned-product-build:
+    name: Build one pinned official installation
     if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/crab-v2-perf-qualification-41072'
     needs: report-contract
     runs-on: ubuntu-24.04
     timeout-minutes: 180
+    outputs:
+      artifact_id: ${{ steps.install-artifact.outputs.artifact-id }}
+      artifact_digest: ${{ steps.install-artifact.outputs.artifact-digest }}
+    env:
+      QUAL_ROOT: ${{ github.workspace }}-final-build
+      CARGO_TARGET_DIR: ${{ github.workspace }}-final-build/cargo
+      CARGO_BUILD_JOBS: '2'
+      PYTHONDONTWRITEBYTECODE: '1'
+      PRODUCT_HEAD: 4938b757f45b5f2763c0ea8279056938935214c5
+      PRODUCT_TREE: 3afdebe89c5c1dfcff0b3c14351df1a7db69b2c1
+    steps:
+      - name: Checkout the exact product revision
+        uses: actions/checkout@v4
+        with:
+          ref: 4938b757f45b5f2763c0ea8279056938935214c5
+          fetch-depth: 0
+
+      - name: Set up Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Prepare the disposable build runner
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet
+          sudo apt-get update -y
+          sudo apt-get install -y libfuse3-dev
+          mkdir -p "$QUAL_ROOT/provenance" "$QUAL_ROOT/bundle" "$CARGO_TARGET_DIR"
+          test "$(git rev-parse HEAD)" = "$PRODUCT_HEAD"
+          test "$(git rev-parse HEAD^{tree})" = "$PRODUCT_TREE"
+          test -z "$(git status --porcelain)"
+          df -h > "$QUAL_ROOT/provenance/disk-before.txt"
+
+      - name: Official private make install with all variants
+        run: |
+          set -euo pipefail
+          prefix="$QUAL_ROOT/install/bin"
+          make -C crab install "PREFIX=$prefix" "CARGO_BIN=$prefix" \
+            "TARGET_DIR=$CARGO_TARGET_DIR" 'RELEASE_FLAGS=--release --locked' \
+            2>&1 | tee "$QUAL_ROOT/provenance/build.log"
+          "$prefix/crab" version --json > "$QUAL_ROOT/provenance/version.json"
+          python3 - <<'PYBUILD'
+          import hashlib,json,os,subprocess
+          from pathlib import Path
+          r=Path(os.environ['QUAL_ROOT']);p=r/'install/bin';v=json.loads((r/'provenance/version.json').read_text())['data']
+          assert v['crab_version']=='2.0.0' and os.environ['PRODUCT_HEAD'].startswith(v['git_sha'])
+          assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()==os.environ['PRODUCT_HEAD']
+          assert not subprocess.check_output(['git','status','--porcelain'],text=True).strip()
+          files={x.name:hashlib.sha256(x.read_bytes()).hexdigest() for x in p.iterdir() if x.is_file()}
+          assert {'crab','git-remote-crab','crab-cache-server','crab-fuse-mount','crab-nfs-mount'}<=set(files)
+          result={'status':'ok','commit':os.environ['PRODUCT_HEAD'],'tree':os.environ['PRODUCT_TREE'],'version':v,'binary':str(p/'crab'),'binary_sha256':files['crab'],'installed_files_sha256':files,'method':'official make install, complete FUSE/noFUSE/mount/cache variants','build_log_sha256':hashlib.sha256((r/'provenance/build.log').read_bytes()).hexdigest()}
+          (r/'bundle/install.json').write_text(json.dumps(result,indent=2)+'\n')
+          PYBUILD
+          tar -C "$prefix" -czf "$QUAL_ROOT/bundle/installed.tar.gz" crab git-remote-crab
+
+      - name: Upload the shared installed binary
+        id: install-artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-official-install-${{ github.run_id }}
+          path: ${{ env.QUAL_ROOT }}/bundle/*
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 7
+
+      - name: Retain official build diagnostics
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-official-build-${{ github.run_id }}
+          path: ${{ env.QUAL_ROOT }}/provenance/**
+          if-no-files-found: error
+          retention-days: 30
+
+  pinned-final-runtime:
+    name: Pinned final runtime (${{ matrix.profile }})
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/crab-v2-perf-qualification-41072'
+    needs: pinned-product-build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
     permissions:
       contents: read
       actions: read
+    strategy:
+      fail-fast: false
+      matrix:
+        profile: [team, history, kubernetes]
     env:
-      QUAL_ROOT: ${{ github.workspace }}-pinned-kubernetes
-      PRODUCT_HEAD: 41072d6d46706e58339a09e4cf82a1f48ce4369a
-      BUILD_COMMIT: b0cab09190b430d2208b71617b012512a57238f2
-      PRODUCT_TREE: 0cf6a9ee24b4c976b203bb68053c8ee97423ef88
-      PRODUCER_RUN: '41524637833'
-      SOURCE_COMMIT: 12eb5840594c0b9b1454b6b809d2aa2c9447c9b9
+      QUAL_ROOT: ${{ github.workspace }}-final-${{ matrix.profile }}
+      PRODUCT_HEAD: 4938b757f45b5f2763c0ea8279056938935214c5
+      PRODUCT_TREE: 3afdebe89c5c1dfcff0b3c14351df1a7db69b2c1
+      INSTALL_ARTIFACT: ${{ needs.pinned-product-build.outputs.artifact_id }}
+      INSTALL_ARTIFACT_DIGEST: ${{ needs.pinned-product-build.outputs.artifact_digest }}
       AWS_ACCESS_KEY_ID: crab
       AWS_SECRET_ACCESS_KEY: crab
       AWS_REGION: us-east-1
@@ -312,103 +396,62 @@ jobs:
       RUSTFS_IMAGE: ghcr.io/rustfs/rustfs@sha256:bffcab0c9d647aab0055d1c69d340b202d0909966b385932d4ead1aeb7602858
       PYTHONDONTWRITEBYTECODE: '1'
     steps:
-      - name: Checkout the immutable artifact build source
+      - name: Checkout the exact product revision
         uses: actions/checkout@v4
         with:
-          ref: b0cab09190b430d2208b71617b012512a57238f2
+          ref: 4938b757f45b5f2763c0ea8279056938935214c5
           fetch-depth: 0
 
-      - name: Prepare the dedicated ephemeral runner
+      - name: Prepare the independent disposable runtime
         run: |
           set -euo pipefail
           test "$RUNNER_ENVIRONMENT" = github-hosted
-          # This disposable runner needs room for independent full Git consumers.
           sudo rm -rf /usr/local/lib/android /usr/share/dotnet
           sudo apt-get update -y
           sudo apt-get install -y libfuse3-dev git-lfs
           pipx install awscli
           echo "$HOME/.local/bin" >> "$GITHUB_PATH"
-          mkdir -p "$QUAL_ROOT/release" "$QUAL_ROOT/provenance"
-          test "$(git rev-parse HEAD)" = "$BUILD_COMMIT"
+          mkdir -p "$QUAL_ROOT/provenance" "$QUAL_ROOT/bin" "$QUAL_ROOT/drivers"
+          test "$(git rev-parse HEAD)" = "$PRODUCT_HEAD"
           test "$(git rev-parse HEAD^{tree})" = "$PRODUCT_TREE"
-          test "$(git rev-parse "$PRODUCT_HEAD^{tree}")" = "$PRODUCT_TREE"
-          echo 'c613499c3c0427753af2a8ad3cbe006badeb7a384c0132129e299f61ae026da7  crab/scripts/e2e/run_capsule_k8s_rustfs.py' | sha256sum --check --strict
+          git fetch --no-tags origin "$GITHUB_SHA"
+          for name in fixture.py team.py pooled.py large.py; do
+            git show "$GITHUB_SHA:.github/qualification/$name" > "$QUAL_ROOT/drivers/$name"
+          done
+          sha256sum "$QUAL_ROOT"/drivers/*.py > "$QUAL_ROOT/provenance/drivers-sha256.txt"
+          echo 'cd8d8e5b05a093a2ff844a80e09ce15d7711275a2eb0948aa1fb61621a04a6cf  crab/scripts/e2e/run_capsule_k8s_rustfs.py' | sha256sum --check --strict
           echo 'f708954c4c121509512f9fb7d5249ceac748f3b63d06e38b45824ac6977cd802  crab/scripts/e2e/run_concurrent_push_smoke.py' | sha256sum --check --strict
+          echo '2e5ec81d120ab4d3f018805b3f7809e15e9b29ec1b5d2cf1bf20e960ce3f4e41  crab/scripts/e2e/run_mixed_team_rustfs.py' | sha256sum --check --strict
+          git --version > "$QUAL_ROOT/provenance/git-version.txt"
+          df -h > "$QUAL_ROOT/provenance/disk-before.txt"
 
-      - name: Download and verify the pinned CI release artifact
-        timeout-minutes: 50
+      - name: Verify and unpack the same official installation
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -euo pipefail
-          gh api "repos/crabbuild/crab/actions/runs/$PRODUCER_RUN" > "$QUAL_ROOT/provenance/producer.json"
-          python3 - <<'PY'
-          import json, os
+          gh api "repos/crabbuild/crab/actions/artifacts/$INSTALL_ARTIFACT/zip" > "$QUAL_ROOT/install.zip"
+          python3 - <<'PYINSTALL'
+          import hashlib,json,os,tarfile,zipfile
           from pathlib import Path
-          r=Path(os.environ['QUAL_ROOT'])
-          p=json.loads((r/'provenance/producer.json').read_text())
-          assert p['head_sha']==os.environ['PRODUCT_HEAD'] and p['event']=='pull_request'
-          PY
-          found=false
-          for _ in $(seq 1 270); do
-            gh api "repos/crabbuild/crab/actions/runs/$PRODUCER_RUN/artifacts" > "$QUAL_ROOT/provenance/artifacts.json"
-            artifact_id=$(python3 - <<'PY'
-          import json, os
-          from pathlib import Path
-          r=Path(os.environ['QUAL_ROOT'])
-          matches=[a for a in json.loads((r/'provenance/artifacts.json').read_text())['artifacts'] if a['name']=='crab-protocol-v2-linux-x86_64-'+os.environ['PRODUCER_RUN']]
-          assert len(matches)<=1
-          if matches:
-              a=matches[0];assert not a['expired'] and a['digest'].startswith('sha256:')
-              (r/'provenance/artifact.json').write_text(json.dumps(a,indent=2)+'\n')
-              print(a['id'])
-          PY
-          )
-            if test -n "$artifact_id"; then found=true; break; fi
-            sleep 10
-          done
-          test "$found" = true
-          gh api "repos/crabbuild/crab/actions/artifacts/$artifact_id/zip" > "$QUAL_ROOT/artifact.zip"
-          python3 - <<'PY'
-          import hashlib,json,os,zipfile
-          from pathlib import Path
-          r=Path(os.environ['QUAL_ROOT']);a=json.loads((r/'provenance/artifact.json').read_text())
-          assert 'sha256:'+hashlib.sha256((r/'artifact.zip').read_bytes()).hexdigest()==a['digest']
-          with zipfile.ZipFile(r/'artifact.zip') as z:
-              assert z.namelist()==['crab-protocol-v2-linux-x86_64.tar.gz']
-              z.extractall(r/'release')
-          PY
-          test "$(tar -tzf "$QUAL_ROOT/release/crab-protocol-v2-linux-x86_64.tar.gz")" = crab
-          tar -xzf "$QUAL_ROOT/release/crab-protocol-v2-linux-x86_64.tar.gz" -C "$QUAL_ROOT/release"
-          "$QUAL_ROOT/release/crab" version --json > "$QUAL_ROOT/provenance/version.json"
-          python3 - <<'PY'
-          import hashlib,json,os
-          from pathlib import Path
-          r=Path(os.environ['QUAL_ROOT']);v=json.loads((r/'provenance/version.json').read_text())['data']
-          assert v['crab_version']=='2.0.0' and os.environ['BUILD_COMMIT'].startswith(v['git_sha'])
-          (r/'provenance/binary-sha256.txt').write_text(hashlib.sha256((r/'release/crab').read_bytes()).hexdigest()+'\n')
-          PY
+          r=Path(os.environ['QUAL_ROOT']);body=(r/'install.zip').read_bytes()
+          assert hashlib.sha256(body).hexdigest()==os.environ['INSTALL_ARTIFACT_DIGEST'].removeprefix('sha256:')
+          with zipfile.ZipFile(r/'install.zip') as z:
+              assert set(z.namelist())=={'install.json','installed.tar.gz'}
+              z.extractall(r/'bundle')
+          p=json.loads((r/'bundle/install.json').read_text());assert p['status']=='ok' and p['commit']==os.environ['PRODUCT_HEAD'] and p['tree']==os.environ['PRODUCT_TREE']
+          with tarfile.open(r/'bundle/installed.tar.gz') as t:
+              assert set(t.getnames())=={'crab','git-remote-crab'}
+              assert t.getmember('crab').isfile() and t.getmember('git-remote-crab').issym() and t.getmember('git-remote-crab').linkname=='crab'
+              t.extractall(r/'bin',filter='data')
+          assert hashlib.sha256((r/'bin/crab').read_bytes()).hexdigest()==p['binary_sha256']
+          p['producer_binary']=p['binary'];p['binary']=str(r/'bin/crab');p['artifact_id']=os.environ['INSTALL_ARTIFACT'];p['artifact_digest']=os.environ['INSTALL_ARTIFACT_DIGEST']
+          (r/'provenance/install.json').write_text(json.dumps(p,indent=2)+'\n')
+          PYINSTALL
+          "$QUAL_ROOT/bin/crab" version --json > "$QUAL_ROOT/provenance/runtime-version.json"
+          echo "$QUAL_ROOT/bin" >> "$GITHUB_PATH"
 
-      - name: Fetch the pinned complete Kubernetes input
-        run: |
-          set -euo pipefail
-          source="$HOME/Workspace/Github/kubernetes/kubernetes"
-          test ! -e "$source"
-          mkdir -p "$source"
-          git -C "$source" init
-          git -C "$source" remote add origin https://github.com/kubernetes/kubernetes.git
-          git -C "$source" fetch --no-tags origin "$SOURCE_COMMIT"
-          git -C "$source" checkout --detach "$SOURCE_COMMIT"
-          test -z "$(git -C "$source" status --porcelain)"
-          test "$(git -C "$source" rev-parse HEAD)" = "$SOURCE_COMMIT"
-          git --version > "$QUAL_ROOT/provenance/git-version.txt"
-          df -h > "$QUAL_ROOT/provenance/disk-before.txt"
-          python3 - <<'PY'
-          import os,shutil
-          assert shutil.disk_usage(os.environ['QUAL_ROOT']).free>=20*1024**3
-          PY
-
-      - name: Start pinned RustFS and create the isolated bucket
+      - name: Start the pinned isolated RustFS
         run: |
           set -euo pipefail
           mkdir -p "$QUAL_ROOT/rustfs"
@@ -424,42 +467,105 @@ jobs:
           test "$ready" = true
           docker exec pinned-rustfs rustfs --version > "$QUAL_ROOT/provenance/rustfs-version.txt"
           test "$(head -n 1 "$QUAL_ROOT/provenance/rustfs-version.txt")" = 'rustfs 1.0.0'
-          aws --endpoint-url "$AWS_ENDPOINT_URL" s3api create-bucket --bucket pinned-kubernetes
 
-      - name: Run the unchanged 1000-commit and 500-commit-fetch gates
+      - name: Generate the common deterministic 10000-commit fixture
+        if: matrix.profile != 'kubernetes'
+        run: python3 "$QUAL_ROOT/drivers/fixture.py"
+
+      - name: Metered 64-developer complete workday
+        if: matrix.profile == 'team'
+        run: python3 "$QUAL_ROOT/drivers/team.py" --agents 64 --label metered-64 --meter
+
+      - name: Direct 64-developer matched complete workday
+        if: matrix.profile == 'team'
         run: |
           set -euo pipefail
+          python3 "$QUAL_ROOT/drivers/team.py" --agents 64 --label direct-64
+          python3 - <<'PYMATCH'
+          import json,os
+          from pathlib import Path
+          r=Path(os.environ['QUAL_ROOT']);reports=[json.loads((r/m/'final-workday-10-64/artifacts/report.json').read_text()) for m in ['metered-64','direct-64']]
+          assert all(d['status']=='ok' for d in reports)
+          for i in range(64):assert [v['files'] for v in reports[0]['artifacts']['payload_history'][str(i)]]==[v['files'] for v in reports[1]['artifacts']['payload_history'][str(i)]]
+          (r/'provenance/matched-64.json').write_text(json.dumps({'status':'ok','agents':64,'versions':2,'kinds':['Git','Xet','LFS'],'metered_batches':reports[0]['push_batches'],'direct_batches':reports[1]['push_batches'],'scope':'Sequential paired counter/measurement-overhead probe on one isolated runner; fresh buckets/caches, exact identical payload bytes. No AWS claim.'},indent=2)+'\n')
+          PYMATCH
+
+      - name: Direct 1000-developer 10000-push complete integrity and latency gates
+        if: matrix.profile == 'team'
+        run: python3 "$QUAL_ROOT/drivers/team.py" --agents 1000 --label direct-1000
+
+      - name: Native Git 2.56 full and partial-clone lifecycle
+        if: matrix.profile == 'history'
+        run: |
+          python3 crab/scripts/e2e/run_protocol_v2_partial_clone_rustfs_smoke.py \
+            --crab-bin "$QUAL_ROOT/bin/crab" --git-bin /usr/bin/git \
+            --bucket crab-final-native-protocol --endpoint-url "$AWS_ENDPOINT_URL" \
+            --root "$QUAL_ROOT" --run-id native-protocol --source-root "$GITHUB_WORKSPACE"
+
+      - name: Actual large pooled proof transfer and every blob byte
+        if: matrix.profile == 'history'
+        run: python3 "$QUAL_ROOT/drivers/pooled.py"
+
+      - name: Three historical 2GiB Xet and LFS versions with independent cold readback
+        if: matrix.profile == 'history'
+        run: python3 "$QUAL_ROOT/drivers/large.py"
+
+      - name: Fetch the pinned complete Kubernetes source
+        if: matrix.profile == 'kubernetes'
+        run: |
+          set -euo pipefail
+          source="$HOME/Workspace/Github/kubernetes/kubernetes"
+          test ! -e "$source"
+          mkdir -p "$source"
+          git -C "$source" init
+          git -C "$source" remote add origin https://github.com/kubernetes/kubernetes.git
+          git -C "$source" fetch --no-tags origin 12eb5840594c0b9b1454b6b809d2aa2c9447c9b9
+          git -C "$source" checkout --detach 12eb5840594c0b9b1454b6b809d2aa2c9447c9b9
+          test -z "$(git -C "$source" status --porcelain)"
+          test "$(git -C "$source" rev-parse HEAD)" = 12eb5840594c0b9b1454b6b809d2aa2c9447c9b9
+          aws --endpoint-url "$AWS_ENDPOINT_URL" s3api create-bucket --bucket pinned-kubernetes
+
+      - name: Full 1000-commit and 500-commit-fetch gates with approved native maintenance policy
+        if: matrix.profile == 'kubernetes'
+        run: |
           python3 crab/scripts/e2e/run_capsule_k8s_rustfs.py \
             --source "$HOME/Workspace/Github/kubernetes/kubernetes" \
-            --crab-bin "$QUAL_ROOT/release/crab" --git-bin /usr/bin/git \
+            --crab-bin "$QUAL_ROOT/bin/crab" --git-bin /usr/bin/git \
             --root "$QUAL_ROOT/runs" --run-id pinned-kubernetes \
             --endpoint-url "$AWS_ENDPOINT_URL" --bucket pinned-kubernetes \
             --commits 1000 --interval 500
 
-      - name: Retain diagnostics
+      - name: Retain runtime diagnostics and source/binary guards
         if: always()
         run: |
           mkdir -p "$QUAL_ROOT/provenance"
           docker logs pinned-rustfs > "$QUAL_ROOT/provenance/rustfs.log" 2>&1 || true
           df -h > "$QUAL_ROOT/provenance/disk-after.txt"
-          python3 - <<'PYREPORT'
-          import json,os
+          python3 - <<'PYEND'
+          import hashlib,json,os,subprocess
           from pathlib import Path
-          r=Path(os.environ['QUAL_ROOT'])/'runs/pinned-kubernetes/artifacts'
-          p=r/'report.json'
+          r=Path(os.environ['QUAL_ROOT']);p=r/'provenance/install.json'
           if p.exists():
-              d=json.loads(p.read_text())
-              print(json.dumps({k:d.get(k) for k in ['status','metrics','correctness','maintenance','error']},indent=2))
-          PYREPORT
+              d=json.loads(p.read_text());assert hashlib.sha256(Path(d['binary']).read_bytes()).hexdigest()==d['binary_sha256']
+              assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()==os.environ['PRODUCT_HEAD']
+              assert not subprocess.check_output(['git','status','--porcelain'],text=True).strip()
+          PYEND
           docker rm -f pinned-rustfs >/dev/null 2>&1 || true
 
-      - name: Upload pinned performance evidence
+      - name: Upload complete pinned runtime evidence
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: pinned-kubernetes-${{ github.run_id }}-${{ github.run_attempt }}
+          name: final-runtime-${{ matrix.profile }}-${{ github.run_id }}
           path: |
             ${{ env.QUAL_ROOT }}/provenance/**
+            ${{ env.QUAL_ROOT }}/drivers/**
             ${{ env.QUAL_ROOT }}/runs/pinned-kubernetes/artifacts/**
+            ${{ env.QUAL_ROOT }}/pooled/artifacts/**
+            ${{ env.QUAL_ROOT }}/pooled/logs/**
+            ${{ env.QUAL_ROOT }}/native-protocol/artifacts/**
+            ${{ env.QUAL_ROOT }}/large/report.json
+            ${{ env.QUAL_ROOT }}/*/final-workday-*/artifacts/**
+            ${{ env.QUAL_ROOT }}/*/final-workday-*/logs/**
           if-no-files-found: error
           retention-days: 30

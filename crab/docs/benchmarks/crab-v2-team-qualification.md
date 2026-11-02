@@ -207,6 +207,21 @@ Evidence: `pooled-visibility-before.json`,
 `small-leaf-catalog-before.json`, `metadata-range-coalescing-before.json`,
 `metadata-range-canonical-final.log`.
 
+The bulk-read follow-up reproduces a cold 8 MiB scan issuing 128 GETs and
+evicting a warmed point proof. Large cold spans now use one exact transfer;
+complete warm spans remain transfer-free. All 774 metadata tests pass, including
+unchanged byte ceilings and proof authentication. Combined caller, installed
+runtime and team qualification remain required for this follow-up.
+Evidence: `cold-bulk-range-before.json`, `cold-bulk-range-after.json`.
+
+Git 2.56 qualification permits the client's native automatic maintenance while
+retaining the 10-second fetch limit and one received pack stream. Trace2 binds
+each allowed repack to a direct native auto-maintenance child of the fetch;
+helper/manual repacks, multiple or unfinished receivers, maintenance failures
+and unfinished background work still fail. Physical pack inventory changes
+remain visible in the report. Earlier no-repack failures retain their original
+verdicts; the revised policy requires a fresh complete replay.
+
 Full CI on `a4cd9ae8cf4e` passes 4,167 CLI library tests but fails six. The two
 primary helper failures reproduce unchanged on `43dc00d82d8`: an already-held
 replica tip lacks transition history, and a follow-tags fetch omits a missing

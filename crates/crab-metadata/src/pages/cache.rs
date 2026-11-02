@@ -454,11 +454,28 @@ impl PageCache {
         {
             return Ok(store.range_get(path, range).await?);
         }
+        // Cold bulk scans use one transfer without evicting point proofs.
+        // Pin complete warm spans so concurrent eviction cannot manufacture I/O.
+        let warm = if length > READ_AHEAD_BYTES {
+            let cache = self.state()?;
+            blocks
+                .iter()
+                .map(|block| cache.blocks.get(&block.start).cloned())
+                .collect::<Option<Vec<_>>>()
+        } else {
+            None
+        };
+        if length > READ_AHEAD_BYTES && warm.is_none() {
+            return Ok(store.range_get(path, range).await?);
+        }
         let capacity = usize::try_from(length)
             .map_err(|_| corruption("metadata range length cannot be represented"))?;
         let mut bytes = Vec::with_capacity(capacity);
-        for block in blocks {
-            let body = self.read_block(store, path, block.clone()).await?;
+        for (index, block) in blocks.into_iter().enumerate() {
+            let body = match warm.as_ref().and_then(|bodies| bodies.get(index)) {
+                Some(body) => body.clone(),
+                None => self.read_block(store, path, block.clone()).await?,
+            };
             let start = range.start.max(block.start) - block.start;
             let end = range.end.min(block.end) - block.start;
             bytes.extend_from_slice(
