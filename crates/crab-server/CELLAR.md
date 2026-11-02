@@ -684,8 +684,11 @@ compares every object's SHA-256, size and application metadata, verifies both
 inventories remained stable, and starts restoration with another empty cache.
 Only its own restore bucket and generated successor cache are cleanup targets.
 Allow space for the complete root plus restore cache. `--phases` selects a subset
-for diagnosis; a subset pass does not qualify the omitted phases. AWS CLI and a
-loopback S3 fixture are required for the full-root phase.
+for diagnosis; a subset pass does not qualify the omitted phases. A loopback S3
+fixture and Python `boto3` are required for the full-root phase. Install `boto3`
+in the interpreter used for qualification. Full-root transfer uses bounded
+GET/PUT streams with 32 MiB multipart parts and verifies every copied object's
+bytes and metadata; it does not require server-side `CopyObject` support.
 
 Directory/profile native tests cover explicit preparation, authority/receipt
 isolation, concurrent handle claims, qualified identity separation, stable IDs,
