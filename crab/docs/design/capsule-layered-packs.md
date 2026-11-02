@@ -43,9 +43,14 @@ record](../benchmarks/capsule-v2-kubernetes-5000-rustfs-ga.md) distinguishes
 this capacity stop from the later complete replay. Fetch latency, Xet, and
 parity gates remain open.
 
-Current fetch acceptance requires exact-tip correctness, one installed pack,
-no fetch-triggered repack, and p95 latency at or below 10 seconds. Fetch
-request count is diagnostic only. Historical entries retain the harness
+Current fetch acceptance requires exact-tip correctness, one received pack
+stream, and p95 latency at or below 10 seconds. Trace2 must prove the receiver
+completed successfully. Native Git automatic maintenance may rewrite local
+packs; only descendants of the fetch client's own `maintenance --auto` or
+`gc --auto` session are allowed. Maintenance must finish successfully before
+final qualification. Physical pack additions/removals and background duration
+remain diagnostic evidence. Fetch request count is diagnostic only.
+Historical entries retain the harness
 verdict and request threshold used at the time; a request-count-only failure
 is not a current fetch blocker.
 

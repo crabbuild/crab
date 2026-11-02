@@ -296,20 +296,78 @@ def new_pack_ids(before: set[str], after: set[str]) -> list[str]:
     return sorted(after - before)
 
 
-def require_at_most_one_new_pack(
-    ordinal: int, before: set[str], after: set[str]
-) -> list[str]:
-    removed = before - after
-    if removed:
-        raise RuntimeError(
-            f"incremental fetch at {ordinal} removed {len(removed)} installed local packs"
-        )
-    installed = new_pack_ids(before, after)
-    if len(installed) > 1:
-        raise RuntimeError(
-            f"incremental fetch at {ordinal} installed {len(installed)} local packs"
-        )
-    return installed
+def git_fetch_pack_contract(trace_path: Path) -> dict[str, Any]:
+    events = list(git_trace_events(trace_path))
+    entry = next((event for event in events if event.get("event") == "start"), {})
+    root = entry.get("sid")
+    automatic = {
+        event["sid"] for event in events
+        if event.get("event") == "start" and isinstance(event.get("sid"), str)
+        and event["sid"].rpartition("/")[0] == root
+        and "--auto" in event.get("argv", [])
+        and len(event.get("argv", [])) > 1
+        and Path(event["argv"][0]).name in {"git", "git.exe"}
+        and event["argv"][1] in {"maintenance", "gc"}
+    }
+
+    def native(sid: str) -> bool:
+        return any(sid == parent or sid.startswith(parent + "/") for parent in automatic)
+
+    children = [event for event in events if event.get("event") == "child_start"]
+    receivers = [
+        event for event in children
+        if not native(event.get("sid", ""))
+        and any(arg in {"index-pack", "unpack-objects"} for arg in event.get("argv", []))
+    ]
+    if len(receivers) != 1:
+        raise RuntimeError(f"expected one received pack stream, observed {len(receivers)}")
+    completed = {
+        (event.get("sid"), event.get("child_id")) for event in events
+        if event.get("event") == "child_exit" and event.get("code") == 0
+    }
+    receiver = receivers[0]
+    if (receiver.get("sid"), receiver.get("child_id")) not in completed:
+        raise RuntimeError("fetch pack receiver did not finish successfully")
+    if (not isinstance(root, str) or entry.get("argv", [None, None])[1:2] != ["fetch"]
+            or not (receiver.get("sid") == root or receiver.get("sid", "").startswith(root + "/"))
+            or not any(event.get("event") == "exit" and event.get("sid") == root
+                       and event.get("code") == 0 for event in events)):
+        raise RuntimeError("fetch transport provenance is incomplete")
+    repacks = []
+    for event in children:
+        if "repack" not in event.get("argv", []):
+            continue
+        if not native(event.get("sid", "")):
+            raise RuntimeError("fetch repack ran outside native automatic maintenance")
+        repacks.append(event["argv"])
+    maintenance = [event for event in events if native(event.get("sid", ""))]
+    if any(event.get("event") in {"exit", "atexit", "child_exit"}
+           and event.get("code") != 0 for event in maintenance):
+        raise RuntimeError("native automatic maintenance failed")
+    started = {event["sid"] for event in maintenance if event.get("event") == "start"}
+    exited = {event["sid"] for event in maintenance if event.get("event") == "atexit"}
+    pending = {
+        (event.get("sid"), event.get("child_id")) for event in maintenance
+        if event.get("event") == "child_start"
+    }
+    # A detached parent's first atexit does not finish its background work.
+    # Require the enclosing session to close after its observed children.
+    closed = all(
+        next((event.get("event") == "atexit" and event["sid"] == sid
+              for event in reversed(maintenance)
+              if event["sid"] == sid or event["sid"].startswith(sid + "/")), False)
+        for sid in automatic
+    )
+    return {
+        "received_pack_streams": 1,
+        "native_repack_events": repacks,
+        "native_maintenance_complete": started <= exited and pending <= completed and closed,
+        "native_maintenance_ms": [
+            max((round(float(event["t_abs"]) * 1000, 3) for event in maintenance
+                 if event.get("event") == "atexit" and event["sid"] == sid), default=None)
+            for sid in sorted(automatic)
+        ],
+    }
 
 
 def parse_repack_summary(stdout: str) -> dict[str, int]:
@@ -866,8 +924,8 @@ class Qualification:
         name = f"incremental-fetch-{ordinal:05}"
         diagnostics = self.root / "artifacts" / "fetch-diagnostics" / f"{name}.stderr.log"
         elapsed, requests, resources, _ = self.run(
-            # Exercise Git's normal maintenance policy; inventory and Trace2
-            # checks must detect an unexpected local repack, not suppress it.
+            # Keep native maintenance enabled. Trace2 distinguishes its private
+            # pack rewrites from the single stream delivered by the transport.
             [self.args.git_bin, "fetch", "origin"],
             self.incremental,
             meter=True,
@@ -884,7 +942,8 @@ class Qualification:
             },
         )
         packs_after = git_pack_inventory(self.incremental)
-        installed_packs = require_at_most_one_new_pack(ordinal, packs_before, packs_after)
+        contract = git_fetch_pack_contract(self.trace_path(name))
+        installed_packs = new_pack_ids(packs_before, packs_after)
         actual = self.git(["rev-parse", "refs/remotes/origin/main"], self.incremental)
         if actual != expected:
             raise RuntimeError(f"fetch at {ordinal} returned {actual}, expected {expected}")
@@ -899,6 +958,8 @@ class Qualification:
                 "object_store": requests,
                 "tip": actual,
                 "new_local_packs": installed_packs,
+                "removed_local_packs": sorted(packs_before - packs_after),
+                "git_pack_contract": contract,
                 "local_pack_count": len(packs_after),
                 "resources": resources,
             }
@@ -952,13 +1013,17 @@ class Qualification:
             for path in sorted(self.trace2_root.glob("*.jsonl"))
             for event in git_auto_maintenance_events(path)
         ]
+        fetch_traces = sorted(self.trace2_root.glob("incremental-fetch-*.jsonl"))
+        if len(fetch_traces) != expected_fetches:
+            raise RuntimeError("incremental fetch pack evidence is missing")
+        contracts = [git_fetch_pack_contract(path) for path in fetch_traces]
+        if any(not contract["native_maintenance_complete"] for contract in contracts):
+            raise RuntimeError("native automatic maintenance has not completed")
         fetch_repacks = [
             event
-            for path in sorted(self.trace2_root.glob("incremental-fetch-*.jsonl"))
+            for path in fetch_traces
             for event in git_repack_events(path)
         ]
-        if fetch_repacks:
-            raise RuntimeError(f"Git repacked during incremental fetch: {fetch_repacks}")
         fetch_metrics = fetch_summary(fetches)
         fetch_gate = fetch_performance_gate(
             fetch_metrics, commits=self.args.commits, interval=self.args.interval
@@ -1006,6 +1071,7 @@ class Qualification:
             "push_windows": push_windows,
             "git_auto_maintenance_events": auto_events,
             "git_fetch_repack_events": fetch_repacks,
+            "git_fetch_pack_contracts": contracts,
         }
         self.report["status"] = "failed" if performance_status == "failed" else "passed"
         self.report["finished_at"] = now()
