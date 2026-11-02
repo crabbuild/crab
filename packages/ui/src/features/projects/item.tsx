@@ -1,4 +1,4 @@
-import { ProjectDraftReview } from "./review";
+import { ProjectItemReview } from "./review";
 import { useId, useState } from "react";
 import { CircleDotIcon, GitPullRequestIcon } from "lucide-react";
 import { endpoint, useRequest, type Repository } from "@/lib/api";
@@ -31,7 +31,9 @@ import {
   type Project,
   type Row,
   type Work,
+  type Item,
 } from "./model";
+import { useProjectDraft } from "./drafts";
 export function WorkPicker({
   repo,
   onSelect,
@@ -95,27 +97,53 @@ export function ItemEditor({
   repo,
   project,
   row,
+  draftItem,
   onClose,
 }: {
   repo: Repository;
   project: Project;
   row?: Row;
+  draftItem?: string;
   onClose: () => void;
 }) {
-  const [item, setItem] = useState(
-    () => row?.item ?? blankItem(project.definition.statuses[0]),
+  const saved = useProjectDraft(
+    { target: { repo }, project: project.id, item: row?.item.id ?? draftItem },
+    {
+      kind: "item",
+      item: row?.item ?? blankItem(project.definition.statuses[0]),
+      mode: row ? (row.item.subject ? "existing" : "draft") : "issue",
+      parent: "",
+      repository: repo.id,
+      work: row?.work ?? null,
+      version: row?.version ?? 0,
+      definition: project.definition,
+      existing: !!row,
+      restricted: false,
+    },
   );
-  const [mode, setMode] = useState(
-    row ? (row.item.subject ? "existing" : "draft") : "issue",
-  );
-  const [parent, setParent] = useState("");
-  const [picked, setPicked] = useState<Work | null>(row?.work ?? null);
+  const {
+    item,
+    mode,
+    parent,
+    work: picked,
+    version,
+    definition,
+    existing: wasExisting,
+  } = saved.value;
+  const setItem = (item: Item) => saved.update({ item });
+  const setMode = (mode: "issue" | "existing" | "draft") =>
+    saved.update({ mode });
+  const setParent = (parent: string) => saved.update({ parent });
+  const setPicked = (work: Work | null) => saved.update({ work });
+  const setVersion = (version: number) => saved.update({ version });
+  const setDefinition = (definition: Project["definition"]) =>
+    saved.update({ definition });
   const commands = useProjectCommands();
   const id = useId();
-  const [version, setVersion] = useState(project.version);
-  const [definition, setDefinition] = useState(project.definition);
-  const existing = !!row?.item.subject;
+  const existing = wasExisting && !!item.subject;
   async function save(convert = false) {
+    const checkpoint = saved.checkpoint();
+    if (!checkpoint) return;
     const value = {
       ...item,
       title: item.subject ? "" : item.title.trim(),
@@ -132,6 +160,7 @@ export function ItemEditor({
             parent: parent ? Number(parent) : null,
           }
         : { kind: "item", project: project.id, version, item: value },
+      checkpoint,
     );
     if (result?.outcome === "applied") onClose();
   }
@@ -153,7 +182,7 @@ export function ItemEditor({
       >
         <DialogHeader>
           <DialogTitle>
-            {row ? "Project item" : "Add work to project"}
+            {wasExisting ? "Project item" : "Add work to project"}
           </DialogTitle>
           <DialogDescription>
             {project.definition.name} · Changes to planning fields apply to this
@@ -169,7 +198,7 @@ export function ItemEditor({
         >
           <fieldset disabled={commands.locked} className="project-form-scroll">
             <FieldGroup>
-              {!row && (
+              {!wasExisting && (
                 <Field>
                   <FieldLabel htmlFor={`${id}-mode`}>Add</FieldLabel>
                   <FieldSelect
@@ -177,6 +206,12 @@ export function ItemEditor({
                     id={`${id}-mode`}
                     value={mode}
                     onValueChange={(value) => {
+                      if (
+                        value !== "issue" &&
+                        value !== "existing" &&
+                        value !== "draft"
+                      )
+                        return;
                       setMode(value);
                       setItem({
                         ...blankItem(project.definition.statuses[0]),
@@ -398,17 +433,24 @@ export function ItemEditor({
               </div>
             </FieldGroup>
           </fieldset>
+          {saved.feedback}
           <CommandError />
-          <ProjectDraftReview
+          <ProjectItemReview
             target={{ repo }}
             project={project.id}
-            onReviewed={(latest) => {
-              setVersion(latest.version);
+            draft={item}
+            onReviewed={(latest, saved, useSaved) => {
+              setVersion(saved.version);
               setDefinition(latest.definition);
+              if (useSaved) {
+                setItem(saved.item);
+                setPicked(saved.work);
+                setMode(saved.item.subject ? "existing" : "draft");
+              }
             }}
           />
           <DialogFooter>
-            {row && !row.item.subject && (
+            {wasExisting && !item.subject && (
               <Button
                 type="button"
                 variant="outline"
@@ -418,18 +460,24 @@ export function ItemEditor({
                 Convert to issue
               </Button>
             )}
-            {row && (
+            {wasExisting && (
               <Button
                 type="button"
                 variant="destructive"
                 disabled={commands.locked}
                 onClick={async () => {
-                  const result = await commands.submit(repo, {
-                    kind: "remove",
-                    project: project.id,
-                    version,
-                    item: item.id,
-                  });
+                  const checkpoint = saved.checkpoint();
+                  if (!checkpoint) return;
+                  const result = await commands.submit(
+                    repo,
+                    {
+                      kind: "remove",
+                      project: project.id,
+                      version,
+                      item: item.id,
+                    },
+                    checkpoint,
+                  );
                   if (result?.outcome === "applied") onClose();
                 }}
               >
@@ -446,7 +494,7 @@ export function ItemEditor({
             >
               {commands.locked
                 ? "Saving…"
-                : row
+                : wasExisting
                   ? "Save item"
                   : "Add to project"}
             </Button>

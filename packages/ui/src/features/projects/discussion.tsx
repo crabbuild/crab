@@ -137,7 +137,7 @@ function AddMembership({
             const result = await commands.submit(repo, {
               kind: "item",
               project: project.id,
-              version: project.version,
+              version: 0,
               item: { ...blankItem(project.definition.statuses[0]), subject },
             });
             if (result?.outcome === "applied") onClose();

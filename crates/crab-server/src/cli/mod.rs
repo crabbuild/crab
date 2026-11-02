@@ -103,6 +103,13 @@ enum CellsCommand {
         #[arg(long)]
         actor: uuid::Uuid,
     },
+    /// Inspect project preparation without changing organization data.
+    OrganizationProjectsStatus {
+        #[arg(long)]
+        organization: uuid::Uuid,
+        #[arg(long)]
+        actor: uuid::Uuid,
+    },
     /// Prepare canonical issue closure metadata in restartable bounded frames.
     PrepareIssueState {
         #[arg(long)]
@@ -119,6 +126,13 @@ enum CellsCommand {
     },
     /// Prepare project and sub-issue storage for an existing repository.
     PrepareProjects {
+        #[arg(long)]
+        owner: String,
+        #[arg(long)]
+        name: String,
+    },
+    /// Rebuild derived Git projection storage with snapshot-owned collection.
+    PrepareProjectionState {
         #[arg(long)]
         owner: String,
         #[arg(long)]
@@ -326,17 +340,17 @@ async fn cells(config: &crab_server::Config, command: CellsCommand) -> crab_serv
         CellsCommand::PrepareOrganizationProjects {
             organization,
             actor,
-        } => management_request(
-            config,
-            reqwest::Method::POST,
-            &format!("/internal/organizations/{organization}/projects"),
-            Some(&serde_json::json!({"actor":actor})),
-        )
-        .await?
-        .bytes()
-        .await
-        .map_err(|source| crab_server::Error::Healthcheck { source })?
-        .to_vec(),
+        } => lifecycle::prepare_organization_projects(config, organization, actor).await?,
+        CellsCommand::OrganizationProjectsStatus {
+            organization,
+            actor,
+        } => {
+            management_body(
+                config,
+                &format!("/internal/organizations/{organization}/projects?actor={actor}"),
+            )
+            .await?
+        }
         CellsCommand::PrepareIssueState { owner, name } => {
             lifecycle::prepare(config, &owner, &name, lifecycle::Scope::Issue).await?
         }
@@ -345,6 +359,9 @@ async fn cells(config: &crab_server::Config, command: CellsCommand) -> crab_serv
         }
         CellsCommand::PrepareProjects { owner, name } => {
             lifecycle::prepare(config, &owner, &name, lifecycle::Scope::Project).await?
+        }
+        CellsCommand::PrepareProjectionState { owner, name } => {
+            lifecycle::prepare(config, &owner, &name, lifecycle::Scope::Projection).await?
         }
         CellsCommand::PrepareReviewState { owner, name } => {
             lifecycle::prepare(config, &owner, &name, lifecycle::Scope::Review).await?
@@ -438,7 +455,9 @@ async fn management_request(
         // PEM identities use Rustls; additive workspace features can select
         // Native TLS by default, which rejects this identity before connecting.
         .use_rustls_tls()
-        .timeout(Duration::from_secs(10))
+        // A native operation may use its full 30-second budget before returning
+        // a terminal or pending result. Do not abandon that answer at ten seconds.
+        .timeout(Duration::from_secs(35))
         .https_only(true)
         .identity(identity)
         .tls_built_in_root_certs(false);

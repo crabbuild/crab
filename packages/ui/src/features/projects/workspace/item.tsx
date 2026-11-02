@@ -24,8 +24,10 @@ import {
   projectEndpoint,
   type Row,
   type Work,
+  type Item,
 } from "../model";
-import { ProjectDraftReview } from "../review";
+import { useProjectDraft } from "../drafts";
+import { ProjectItemReview } from "../review";
 import { FieldSelect } from "@/components/ui/field-select";
 import type { Detail } from "./model";
 
@@ -33,36 +35,65 @@ export function WorkspaceItemEditor({
   organization,
   detail,
   row,
+  draftItem,
   onClose,
 }: {
   organization: string;
   detail: Detail;
   row?: Row;
+  draftItem?: string;
   onClose: () => void;
 }) {
-  const [item, setItem] = useState(
-    row?.item ?? blankItem(detail.project.definition.statuses[0]),
+  const saved = useProjectDraft(
+    {
+      target: { organization },
+      project: detail.project.id,
+      item: row?.item.id ?? draftItem,
+    },
+    {
+      kind: "item",
+      item: row?.item ?? blankItem(detail.project.definition.statuses[0]),
+      mode: row
+        ? row.work
+          ? "existing"
+          : "draft"
+        : detail.repositories.length
+          ? "existing"
+          : "draft",
+      repository: row?.repository?.id ?? detail.repositories[0]?.id ?? "",
+      parent: "",
+      work: row?.work ?? null,
+      version: row?.version ?? 0,
+      definition: detail.project.definition,
+      existing: !!row,
+      restricted: !!row?.restricted,
+    },
   );
-  const [mode, setMode] = useState(
-    row
-      ? row.work
-        ? "existing"
-        : "draft"
-      : detail.repositories.length
-        ? "existing"
-        : "draft",
-  );
-  const [repository, setRepository] = useState(
-    row?.repository?.id ?? detail.repositories[0]?.id ?? "",
-  );
+  const {
+    item,
+    mode,
+    repository,
+    work: picked,
+    version,
+    definition,
+    existing: wasExisting,
+    restricted,
+  } = saved.value;
+  const setItem = (item: Item) => saved.update({ item });
+  const setMode = (mode: string) => {
+    if (mode === "existing" || mode === "draft") saved.update({ mode });
+  };
+  const setRepository = (repository: string) => saved.update({ repository });
+  const setPicked = (work: Work | null | undefined) =>
+    saved.update({ work: work ?? null });
+  const setVersion = (version: number) => saved.update({ version });
+  const setDefinition = (definition: typeof detail.project.definition) =>
+    saved.update({ definition });
   const [query, setQuery] = useState("");
-  const [picked, setPicked] = useState(row?.work);
-  const [version, setVersion] = useState(detail.project.version);
-  const [definition, setDefinition] = useState(detail.project.definition);
   const id = useId();
   const commands = useProjectCommands();
   const candidates = useRequest<{ items: Work[] }>(
-    mode === "existing" && !row && repository
+    mode === "existing" && !wasExisting && repository
       ? projectEndpoint({ organization }, `${detail.project.id}/candidates`, {
           repository,
           q: query,
@@ -76,12 +107,18 @@ export function WorkspaceItemEditor({
     setItem({ ...item, values });
   }
   async function remove() {
-    const result = await commands.submitOrganization(organization, {
-      kind: "remove",
-      project: detail.project.id,
-      version,
-      item: item.id,
-    });
+    const checkpoint = saved.checkpoint();
+    if (!checkpoint) return;
+    const result = await commands.submitOrganization(
+      organization,
+      {
+        kind: "remove",
+        project: detail.project.id,
+        version,
+        item: item.id,
+      },
+      checkpoint,
+    );
     if (result?.outcome === "applied") onClose();
   }
   return (
@@ -94,7 +131,7 @@ export function WorkspaceItemEditor({
       <DialogContent className="max-h-[calc(100dvh-2rem)] overflow-y-auto sm:max-w-2xl">
         <DialogHeader>
           <DialogTitle>
-            {row ? "Project item" : "Add work to project"}
+            {wasExisting ? "Project item" : "Add work to project"}
           </DialogTitle>
           <DialogDescription>
             {detail.project.definition.name} · Planning fields apply to this
@@ -105,22 +142,29 @@ export function WorkspaceItemEditor({
           className="flex flex-col gap-5"
           onSubmit={async (event) => {
             event.preventDefault();
-            const result = await commands.submitOrganization(organization, {
-              kind: "item",
-              project: detail.project.id,
-              version,
-              repository: mode === "existing" ? repository : null,
-              item: {
-                ...item,
-                subject: mode === "existing" ? (picked?.subject ?? null) : null,
-                title: mode === "existing" ? "" : item.title.trim(),
-                body: mode === "existing" ? "" : item.body,
+            const checkpoint = saved.checkpoint();
+            if (!checkpoint) return;
+            const result = await commands.submitOrganization(
+              organization,
+              {
+                kind: "item",
+                project: detail.project.id,
+                version,
+                repository: mode === "existing" ? repository : null,
+                item: {
+                  ...item,
+                  subject:
+                    mode === "existing" ? (picked?.subject ?? null) : null,
+                  title: mode === "existing" ? "" : item.title.trim(),
+                  body: mode === "existing" ? "" : item.body,
+                },
               },
-            });
+              checkpoint,
+            );
             if (result?.outcome === "applied") onClose();
           }}
         >
-          {row?.restricted ? (
+          {restricted ? (
             <Alert>
               <AlertDescription>
                 Repository access is required to edit this item. You can remove
@@ -130,7 +174,7 @@ export function WorkspaceItemEditor({
           ) : (
             <fieldset disabled={commands.locked}>
               <FieldGroup>
-                {!row ? (
+                {!wasExisting ? (
                   <Tabs value={mode} onValueChange={setMode}>
                     <TabsList aria-label="Work source">
                       <TabsTrigger value="existing">
@@ -226,10 +270,11 @@ export function WorkspaceItemEditor({
                       </p>
                     </TabsContent>
                   </Tabs>
-                ) : row.work ? (
+                ) : picked ? (
                   <p className="font-medium">
-                    {row.repository?.owner}/{row.repository?.name} #
-                    {row.work.subject.number} · {row.work.title}
+                    {detail.repositories.find((repo) => repo.id === repository)
+                      ?.name ?? "Linked work"}{" "}
+                    #{picked.subject.number} · {picked.title}
                   </p>
                 ) : null}
                 {mode === "draft" && (
@@ -370,17 +415,25 @@ export function WorkspaceItemEditor({
               </FieldGroup>
             </fieldset>
           )}
+          {saved.feedback}
           <CommandError />
-          <ProjectDraftReview
+          <ProjectItemReview
             target={{ organization }}
             project={detail.project.id}
-            onReviewed={(project) => {
-              setVersion(project.version);
+            draft={item}
+            onReviewed={(project, saved, useSaved) => {
+              setVersion(saved.version);
               setDefinition(project.definition);
+              if (useSaved) {
+                setItem(saved.item);
+                setRepository(saved.repository?.id ?? "");
+                setPicked(saved.work);
+                setMode(saved.item.subject ? "existing" : "draft");
+              }
             }}
           />
           <DialogFooter>
-            {row && (
+            {wasExisting && (
               <Button
                 variant="destructive"
                 disabled={commands.locked}
@@ -396,7 +449,7 @@ export function WorkspaceItemEditor({
             >
               Cancel
             </Button>
-            {!row?.restricted && (
+            {!restricted && (
               <Button
                 type="submit"
                 disabled={
@@ -406,7 +459,7 @@ export function WorkspaceItemEditor({
               >
                 {commands.pending
                   ? "Saving…"
-                  : row
+                  : wasExisting
                     ? "Save item"
                     : "Add to project"}
               </Button>

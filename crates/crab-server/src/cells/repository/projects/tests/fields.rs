@@ -51,7 +51,7 @@ async fn typed_fields_workflow_edits_and_archival_preserve_stored_values() {
             &cell,
             Command::Item {
                 project,
-                version: 2,
+                version: 0,
                 item: draft.clone()
             }
         )
@@ -64,7 +64,7 @@ async fn typed_fields_workflow_edits_and_archival_preserve_stored_values() {
             &cell,
             Command::Item {
                 project,
-                version: 2,
+                version: 0,
                 item: draft.clone()
             }
         )
@@ -123,7 +123,7 @@ async fn typed_fields_workflow_edits_and_archival_preserve_stored_values() {
             &cell,
             Command::Item {
                 project,
-                version: 4,
+                version: 0,
                 item: draft
             }
         )

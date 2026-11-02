@@ -40,6 +40,10 @@ pub(crate) async fn initialize_repository(config: &Config, repository: Uuid) -> 
         .build()
         .map_err(|source| Error::Cell(super::Error::sdk(source)))?;
     let node_name = format!("crab-init-{}", Uuid::now_v7());
+    let mut budget = crate::server::capacity::CellRuntimeBudget::from_resources(
+        crate::resources::local_resources(local.path(), config.cells.local_disk_limit_bytes)?,
+    )?;
+    budget.max_active_cells = 1;
     let started = match super::runtime::start(
         &maintenance,
         public.local_addr()?,
@@ -47,7 +51,7 @@ pub(crate) async fn initialize_repository(config: &Config, repository: Uuid) -> 
         node_name.clone(),
         client.clone(),
         client,
-        1,
+        budget,
     )
     .await
     {

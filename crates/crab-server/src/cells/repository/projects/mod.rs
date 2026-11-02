@@ -13,10 +13,12 @@ use uuid::Uuid;
 
 mod commands;
 pub(crate) mod hierarchy;
+mod history;
 pub(crate) mod preparation;
 mod reads;
 mod templates;
 pub(crate) use commands::{Change, Command, Outcome, Request};
+pub(crate) use history::{GetHistory, HistoryQuery};
 pub(crate) use reads::{
     CandidateQuery, Candidates, GetProject, ItemQuery, Items, ListProjects, Memberships,
     ProjectQuery, WorkSummaries,

@@ -592,3 +592,30 @@ Fresh organization bootstrap prepares shared projects. Existing organizations
 require `cells prepare-organization-projects --organization UUID --actor OWNER_UUID`
 through the private mTLS listener after updating all peers; prepare teams first
 when upgrading an organization that predates team authority. See `CELLAR.md`.
+
+Both project scopes use independent item revisions: new items start with
+`version: 0`; edits/removals carry the row's `version`. Collection revisions
+still protect pagination and project settings. A same-item conflict retains the
+browser draft and offers a saved-value comparison before an explicit retry.
+
+The History view records actor, time, collection revision and changed fields.
+`GET .../projects/{id}/history` reads newest first; `before=REVISION` reads older
+entries and `after=REVISION` reads forward for workers, ten per page. Repository
+access and organization membership still apply; restricted source references
+and private identity claims are not returned.
+
+Existing project Cells require the preparation commands above for item revision
+format 2, even when the original project tables already exist. Preparation
+resumes in bounded frames and does not invent history for earlier edits. Deploy
+all peers and the embedded UI together.
+
+Unconfirmed submissions are checkpointed before sending in account-bound,
+per-tab session storage. Reload offers recovery with the original UUID, route
+and payload; another account cannot replay it. Storage failure prevents a new
+write. Closing the tab clears this browser checkpoint; permanent server decisions
+remain available to an identical request. Unsubmitted item, creation, settings
+and planning-property drafts retain their fields and captured revisions in the
+same account's tab session. Resume, export or discard them from the project
+workspace. A confirmed applied result clears only its matching draft; a rejected
+or cancelled submission retains it. Storage failures preserve the current form
+and expose retry actions before any new submission.

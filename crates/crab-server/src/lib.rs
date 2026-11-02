@@ -69,6 +69,14 @@ pub enum Error {
     Coordination(#[from] crab_coordination::CoordinationError),
     #[error("embedded Cell runtime initialization failed")]
     Cell(#[from] cells::Error),
+    #[error(
+        "repository Cell verification failed for {repository}; inspect private Cell status and Cellar recovery/output-gate timing"
+    )]
+    CellVerification {
+        repository: uuid::Uuid,
+        #[source]
+        source: cells::Error,
+    },
     #[error("private Cell TLS setup failed: {context}")]
     PeerTls {
         context: &'static str,

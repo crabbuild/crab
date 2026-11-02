@@ -6,6 +6,7 @@ pub(super) enum Scope {
     Pull,
     Review,
     Project,
+    Projection,
 }
 
 pub(super) async fn prepare(
@@ -21,17 +22,33 @@ pub(super) async fn prepare(
         Scope::Pull => ("pull-state", &["pull", "bulk"]),
         Scope::Review => ("review-state", &[]),
         Scope::Project => ("project-state", &[]),
+        Scope::Projection => ("projection-state", &[]),
     };
     let path = format!("/internal/repositories/{owner}/{name}/{state}");
-    let mut body = frames(config, &path).await?;
+    let mut body = frames(config, &path, None).await?;
     for kind in submissions {
         let path = format!("/internal/repositories/{owner}/{name}/discussion-submissions/{kind}");
-        body = frames(config, &path).await?;
+        body = frames(config, &path, None).await?;
     }
     Ok(body)
 }
-async fn frames(config: &Config, path: &str) -> Result<Vec<u8>> {
-    let mut body = management_body(config, path).await?;
+pub(super) async fn prepare_organization_projects(
+    config: &Config,
+    organization: uuid::Uuid,
+    actor: uuid::Uuid,
+) -> Result<Vec<u8>> {
+    frames(
+        config,
+        &format!("/internal/organizations/{organization}/projects"),
+        Some(actor),
+    )
+    .await
+}
+async fn frames(config: &Config, path: &str, actor: Option<uuid::Uuid>) -> Result<Vec<u8>> {
+    let status = actor
+        .map(|actor| format!("{path}?actor={actor}"))
+        .unwrap_or_else(|| path.to_owned());
+    let mut body = management_body(config, &status).await?;
     loop {
         let status: LifecycleStatus = serde_json::from_slice(&body)?;
         let version = match status {
@@ -42,16 +59,15 @@ async fn frames(config: &Config, path: &str) -> Result<Vec<u8>> {
                 version
             }
         };
-        body = management_request(
-            config,
-            reqwest::Method::POST,
-            path,
-            Some(&serde_json::json!({"version":version})),
-        )
-        .await?
-        .bytes()
-        .await
-        .map_err(|source| crab_server::Error::Healthcheck { source })?
-        .to_vec();
+        let input = match actor {
+            Some(actor) => serde_json::json!({"actor":actor,"version":version}),
+            None => serde_json::json!({"version":version}),
+        };
+        body = management_request(config, reqwest::Method::POST, path, Some(&input))
+            .await?
+            .bytes()
+            .await
+            .map_err(|source| crab_server::Error::Healthcheck { source })?
+            .to_vec();
     }
 }

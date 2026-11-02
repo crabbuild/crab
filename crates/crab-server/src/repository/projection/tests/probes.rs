@@ -35,6 +35,56 @@ async fn indexed_fixture() -> (Arc<Server>, Arc<Repository>) {
 }
 
 #[tokio::test]
+async fn unchanged_projection_reconciliation_does_not_publish_a_mutation() {
+    let server = fixtures::fixture().await;
+    let repository = server
+        .repositories
+        .get(&("team".into(), "repo".into()))
+        .unwrap();
+    crate::test_support::git::publish_blob_at_current(&repository.layout, b"Stable projection\n")
+        .await;
+    crab_remote::browse_indexes::ensure(
+        &repository.layout,
+        &repository.identity,
+        Arc::clone(&server.runtime),
+        server.options,
+        2 * 1024 * 1024 * 1024,
+        &server.cancellation,
+    )
+    .await
+    .unwrap();
+    let context = || crate::repository::maintenance::ProjectionContext {
+        repository_id: repository.id,
+        client: server.cells.as_ref().map(|router| (**router).clone()),
+        metrics: server.metrics.clone(),
+        identity: repository.identity.clone(),
+        runtime: Arc::clone(&server.runtime),
+        options: server.options,
+    };
+    reconcile(&repository.layout, context(), &server.cancellation)
+        .await
+        .unwrap();
+    let cell = server.cells().unwrap().repository(repository.id).unwrap();
+    let before = cell
+        .client
+        .query::<projection::GetProjectionState>(&cell.target, None, projection::ProjectionState)
+        .await
+        .unwrap()
+        .receipt;
+    reconcile(&repository.layout, context(), &server.cancellation)
+        .await
+        .unwrap();
+    let after = cell
+        .client
+        .query::<projection::GetProjectionState>(&cell.target, None, projection::ProjectionState)
+        .await
+        .unwrap()
+        .receipt;
+    assert_eq!(after, before);
+    fixtures::close(&server).await;
+}
+
+#[tokio::test]
 async fn source_probe_observes_ref_only_publication_and_same_state_index_changes() {
     let (server, repository) = indexed_fixture().await;
     let first = current_source(&repository, &server, &server.cancellation)

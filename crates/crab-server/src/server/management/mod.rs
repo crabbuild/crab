@@ -24,6 +24,18 @@ mod lifecycle;
 mod organizations;
 mod search;
 
+fn admit(server: &Server) -> crate::app::Result<tokio::sync::SemaphorePermit<'_>> {
+    if server.cancellation.is_cancelled() {
+        return Err(crate::app::Error::CellUnavailable);
+    }
+    // Operator frames are bounded Cell commands. Sharing Git maintenance slots
+    // lets long indexing passes prevent preparation of another repository.
+    server
+        .app_admission
+        .try_acquire()
+        .map_err(|_| crate::app::Error::CellUnavailable)
+}
+
 pub(crate) fn router(server: Arc<Server>, peers: Router) -> Router {
     Router::new()
         .merge(search::routes())
@@ -63,16 +75,19 @@ async fn cell_status(
     let Some(router) = server.cells() else {
         return StatusCode::SERVICE_UNAVAILABLE.into_response();
     };
+    let started = std::time::Instant::now();
     let result: Result<_> = async {
         let cell = router.repository(repository.id)?;
         let state = cell.client.query::<crate::cells::repository::GetRepositoryLifecycle>(&repository.id, None, ()).await?;
-        Ok(json!({"runtime": "cellar", "version": "0.1.0", "repository": repository.id, "revision": state.receipt.revision, "lifecycle": state.output}))
+        let projects = cell.client.query::<crate::cells::repository::projects::preparation::GetState>(&repository.id, None, ()).await?;
+        let projection = cell.client.query::<crate::cells::repository::projection::preparation::GetState>(&repository.id, None, ()).await?;
+        Ok(json!({"runtime": "cellar", "version": "0.1.0", "repository": repository.id, "revision": state.receipt.revision, "lifecycle": state.output, "projects":projects.output, "projection":projection.output, "elapsed_ms":started.elapsed().as_millis()}))
     }.await;
     match result {
         Ok(value) => Json(value).into_response(),
         Err(error) => {
-            tracing::warn!(error = %error, "repository Cell status failed");
-            StatusCode::SERVICE_UNAVAILABLE.into_response()
+            tracing::warn!(repository = %repository.id, error = ?error, "repository Cell status failed");
+            (StatusCode::SERVICE_UNAVAILABLE, Json(json!({"repository":repository.id,"status":"verification_failed","elapsed_ms":started.elapsed().as_millis(),"action":"Inspect cell_verification and Cellar cell_route_timing/durable_wait logs for this repository; use private preparation status commands after recovery succeeds."}))).into_response()
         }
     }
 }
@@ -142,6 +157,49 @@ async fn render_metrics(State(server): State<Arc<Server>>) -> Response {
         let resources = services.sample_metrics();
         body.push_str(&services.event_metrics().prometheus());
         body.push_str(&format!("# TYPE crab_cellar_pending_events gauge\ncrab_cellar_pending_events {}\n# TYPE crab_cellar_retired_events_total counter\ncrab_cellar_retired_events_total {}\n# TYPE crab_cellar_rss_bytes gauge\ncrab_cellar_rss_bytes {}\n# TYPE crab_cellar_open_file_descriptors gauge\ncrab_cellar_open_file_descriptors {}\n", work.pending_events, work.retired_events, resources.rss_bytes, resources.open_fds));
+        if let Some(load) = services.node_load() {
+            for (name, kind, value) in [
+                (
+                    "owned_cells",
+                    "gauge",
+                    load.owned_cells.load(Ordering::Acquire).to_string(),
+                ),
+                (
+                    "resident_cells",
+                    "gauge",
+                    load.resident_cells.load(Ordering::Acquire).to_string(),
+                ),
+                (
+                    "restoring_cells",
+                    "gauge",
+                    load.restoring.load(Ordering::Acquire).to_string(),
+                ),
+                (
+                    "ownership_confirmed",
+                    "gauge",
+                    u8::from(load.ownership_confirmed.load(Ordering::Acquire)).to_string(),
+                ),
+                (
+                    "memory_pressured",
+                    "gauge",
+                    u8::from(load.pressured.load(Ordering::Acquire)).to_string(),
+                ),
+                (
+                    "native_draining",
+                    "gauge",
+                    u8::from(load.draining.load(Ordering::Acquire)).to_string(),
+                ),
+                (
+                    "shed_cells_total",
+                    "counter",
+                    load.shed_cells.load(Ordering::Acquire).to_string(),
+                ),
+            ] {
+                body.push_str(&format!(
+                    "# TYPE crab_cellar_{name} {kind}\ncrab_cellar_{name} {value}\n"
+                ));
+            }
+        }
     }
     (
         [
@@ -239,6 +297,86 @@ mod tests {
     use super::*;
     use axum::{body::Body, extract::Request};
     use tower::ServiceExt;
+
+    async fn prepare_projection(server: &Arc<Server>, version: u64) -> Response {
+        router(Arc::clone(server), Router::new())
+            .oneshot(
+                Request::post("/internal/repositories/team/repo/projection-state")
+                    .header("content-type", "application/json")
+                    .body(Body::from(json!({"version":version}).to_string()))
+                    .unwrap(),
+            )
+            .await
+            .unwrap()
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn operator_preparation_advances_while_git_maintenance_is_saturated() {
+        use crate::cells::repository::projection::{preparation, tests::Historical};
+        let server = crate::test_support::server::fixture().await;
+        let cell = server
+            .cells()
+            .unwrap()
+            .repository(
+                server
+                    .repositories
+                    .get(&("team".into(), "repo".into()))
+                    .unwrap()
+                    .id,
+            )
+            .unwrap();
+        cell.client
+            .command::<Historical>(&cell.target, crate::app::mutation_identity().unwrap(), 0)
+            .await
+            .unwrap();
+        let _indexing = server
+            .maintenance_admission
+            .acquire_many(MAINTENANCE_ADMISSION_CAPACITY as u32)
+            .await
+            .unwrap();
+        let response = prepare_projection(&server, 0).await;
+        let persisted = cell
+            .client
+            .query::<preparation::GetState>(&cell.target, None, ())
+            .await
+            .unwrap()
+            .output;
+        crate::test_support::server::close(&server).await;
+        assert_eq!(
+            (response.status(), persisted),
+            (
+                StatusCode::OK,
+                crate::LifecycleStatus::Migrating {
+                    version: 1,
+                    copied: 1
+                }
+            )
+        );
+    }
+
+    #[tokio::test(flavor = "multi_thread")]
+    async fn operator_preparation_respects_application_capacity_and_shutdown() {
+        let server = crate::test_support::server::fixture().await;
+        let occupied = server
+            .app_admission
+            .acquire_many(APP_ADMISSION_CAPACITY as u32)
+            .await
+            .unwrap();
+        let busy = prepare_projection(&server, 0).await.status();
+        drop(occupied);
+        let available = prepare_projection(&server, 0).await.status();
+        server.cancellation.cancel();
+        let draining = prepare_projection(&server, 0).await.status();
+        crate::test_support::server::close(&server).await;
+        assert_eq!(
+            (busy, available, draining),
+            (
+                StatusCode::SERVICE_UNAVAILABLE,
+                StatusCode::OK,
+                StatusCode::SERVICE_UNAVAILABLE
+            )
+        );
+    }
 
     #[tokio::test]
     async fn scale_down_requests_native_handoff_and_cancels_admission() {

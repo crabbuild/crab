@@ -2,14 +2,16 @@ use super::super::collaboration::lifecycle::{
     LifecycleStatus, PrepareLifecycleInput, PrepareLifecycleOutcome,
 };
 use super::*;
+use crate::cells::planning;
 const KEY: &str = "projects/v1/prepared";
 pub(in crate::cells::repository) fn initialize(context: &Transaction<'_>) -> Result<()> {
     context.install_schema(include_str!("schema.sql"))?;
-    context.put_document(KEY, &1u8)
+    context.put_document(KEY, &1u8)?;
+    planning::initialize(context)
 }
 pub(super) fn ensure_ready(context: &Transaction<'_>) -> Result<()> {
     match context.document::<u8>(KEY)? {
-        Some(1) => Ok(()),
+        Some(1) => planning::ensure_ready(context),
         None => Err(Error::SchemaUnavailable),
         _ => Err(Error::Invalid("unsupported project format")),
     }
@@ -22,7 +24,7 @@ impl Read for GetState {
     type Output = LifecycleStatus;
     fn execute(context: &mut Transaction<'_>, (): ()) -> Result<Self::Output> {
         match context.document::<u8>(KEY)? {
-            Some(1) => Ok(LifecycleStatus::Ready),
+            Some(1) => planning::status(context),
             None => Ok(LifecycleStatus::Outdated),
             _ => Err(Error::Invalid("unsupported project format")),
         }
@@ -44,15 +46,23 @@ impl Mutation for Prepare {
                 state,
             )));
         }
-        if input.version != 0 {
+        let version = match state {
+            LifecycleStatus::Migrating { version, .. } => version,
+            _ => 0,
+        };
+        if input.version != version {
             return Ok(MutationResult::Rejected(PrepareLifecycleOutcome::Conflict(
                 state,
             )));
         }
-        initialize(context)?;
+        if context.document::<u8>(KEY)?.is_none() {
+            initialize(context)?;
+        } else {
+            planning::prepare(context, planning::Owner::Repository, input.version)?;
+        }
         advance_revision(context)?;
         Ok(MutationResult::Success(PrepareLifecycleOutcome::Applied(
-            LifecycleStatus::Ready,
+            GetState::execute(context, ())?,
         )))
     }
 }

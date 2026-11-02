@@ -28,7 +28,7 @@ pub(super) fn routes() -> Router<Arc<Server>> {
         )
         .route(
             "/internal/organizations/{id}/projects",
-            post(prepare_projects),
+            get(project_state).post(prepare_projects),
         )
         .layer(axum::extract::DefaultBodyLimit::max(32 * 1024))
 }
@@ -50,13 +50,7 @@ async fn bootstrap(
     }
     input.owner.validate().map_err(Error::Cell)?;
     organization::details(&input.name, &input.description).map_err(Error::Cell)?;
-    if server.cancellation.is_cancelled() {
-        return Err(Error::CellUnavailable);
-    }
-    let _permit = server
-        .maintenance_admission
-        .try_acquire()
-        .map_err(|_| Error::CellUnavailable)?;
+    let _permit = super::admit(&server)?;
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
     // Bootstrap is explicit private operator work. The qualified account is
     // registered without a profile; no catalog owner string acquires authority.
@@ -103,15 +97,9 @@ async fn bootstrap(
 async fn prepare_projects(
     State(server): State<Arc<Server>>,
     Path(id): Path<Uuid>,
-    Json(input): Json<Caller>,
-) -> Result<Json<bool>> {
-    if server.cancellation.is_cancelled() {
-        return Err(Error::CellUnavailable);
-    }
-    let _permit = server
-        .maintenance_admission
-        .try_acquire()
-        .map_err(|_| Error::CellUnavailable)?;
+    Json(input): Json<organization::projects::PrepareInput>,
+) -> Result<Json<crate::LifecycleStatus>> {
+    let _permit = super::admit(&server)?;
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
     let result = app::command_output(
         cells
@@ -123,6 +111,19 @@ async fn prepare_projects(
             .await,
     )?;
     Ok(Json(result))
+}
+
+async fn project_state(
+    State(server): State<Arc<Server>>,
+    Path(id): Path<Uuid>,
+    Query(input): Query<Caller>,
+) -> Result<Json<crate::LifecycleStatus>> {
+    let cells = server.cells().ok_or(Error::CellUnavailable)?;
+    Ok(Json(app::query_output(
+        cells
+            .query::<organization::projects::GetPreparation>(Address::Organization(id), None, input)
+            .await,
+    )?))
 }
 
 async fn team_state(
@@ -143,13 +144,7 @@ async fn prepare_teams(
     Path(id): Path<Uuid>,
     Json(input): Json<teams::PrepareInput>,
 ) -> Result<Json<teams::OrganizationTeamState>> {
-    if server.cancellation.is_cancelled() {
-        return Err(Error::CellUnavailable);
-    }
-    let _permit = server
-        .maintenance_admission
-        .try_acquire()
-        .map_err(|_| Error::CellUnavailable)?;
+    let _permit = super::admit(&server)?;
     let cells = server.cells().ok_or(Error::CellUnavailable)?;
     let state = app::command_output(
         cells

@@ -39,6 +39,7 @@ pub(crate) struct ProjectionStateView {
     pub ready_epoch: Option<u64>,
     pub source_token: Option<String>,
     pub generation: Option<u64>,
+    pub collection_epoch: Option<u64>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -116,6 +117,7 @@ impl Mutation for ApplyProjectionBatch {
         context: &mut Transaction<'_>,
         input: Self::Input,
     ) -> crate::cells::Result<MutationResult<Self::Output>> {
+        preparation::ensure_ready(context)?;
         if input.source.len() > MAX_SOURCE_BYTES || input.payload.len() > MAX_BATCH_BYTES {
             return Err(crate::cells::Error::Invalid(
                 "projection batch exceeds input limit",
@@ -173,10 +175,7 @@ impl Mutation for ApplyProjectionBatch {
                 supersede(context, input.epoch_id)?;
                 None
             }
-            OP_COLLECT => {
-                collect(context)?;
-                None
-            }
+            OP_COLLECT => collect(context)?,
             _ => {
                 return Err(crate::cells::Error::Invalid("unknown projection operation"));
             }
@@ -198,6 +197,7 @@ impl Read for GetProjectionState {
         context: &mut Transaction<'_>,
         _input: Self::Input,
     ) -> crate::cells::Result<Self::Output> {
+        preparation::ensure_ready(context)?;
         let result = context.sql(&SqlBatch {
             statements: vec![statement(
                 "SELECT s.ready_epoch, e.source_token, e.manifest_generation FROM git_projection_state s LEFT JOIN git_projection_epochs e ON e.epoch_id = s.ready_epoch WHERE s.singleton = 1",
@@ -213,6 +213,7 @@ impl Read for GetProjectionState {
             ready_epoch: optional_u64(row, 0)?,
             source_token: optional_text(row, 1)?,
             generation: optional_u64(row, 2)?,
+            collection_epoch: mutation::collection_epoch(context)?,
         })
     }
 }
@@ -264,6 +265,7 @@ fn attribution(
     context: &Transaction<'_>,
     request: &AttributionQuery,
 ) -> crate::cells::Result<AttributionResponse> {
+    preparation::ensure_ready(context)?;
     if request.source_token.len() > 128
         || request.commit_oid.len() != 20
         || request.paths.len() > 200
@@ -335,8 +337,8 @@ fn attribution(
         for component in path.split(|byte| *byte == b'/') {
             let edge_result = context.sql(&SqlBatch {
                 statements: vec![statement(
-                    "SELECT child_hash FROM git_attribution_edges WHERE parent_hash = ? AND component = ?",
-                    vec![SqlValue::Blob(node_hash.clone()), SqlValue::Blob(component.to_vec())],
+                    "SELECT child_hash FROM git_attribution_edges WHERE epoch_id=? AND parent_hash = ? AND component = ?",
+                    vec![integer(epoch_id)?, SqlValue::Blob(node_hash.clone()), SqlValue::Blob(component.to_vec())],
                 )],
             })?;
             let Some(edge_row) = edge_result[0].rows.first() else {
@@ -349,8 +351,8 @@ fn attribution(
         }
         let node_result = context.sql(&SqlBatch {
             statements: vec![statement(
-                "SELECT last_change_ordinal FROM git_attribution_nodes WHERE node_hash = ?",
-                vec![SqlValue::Blob(node_hash)],
+                "SELECT last_change_ordinal FROM git_attribution_nodes WHERE epoch_id=? AND node_hash = ?",
+                vec![integer(epoch_id)?, SqlValue::Blob(node_hash)],
             )],
         })?;
         let Some(node_row) = node_result[0].rows.first() else {
@@ -367,7 +369,7 @@ fn attribution(
         };
         let commit_result = context.sql(&SqlBatch {
             statements: vec![statement(
-                "SELECT ec.commit_oid, c.author_name, c.author_time, c.message_preview FROM git_epoch_commits ec JOIN git_commits c ON c.oid = ec.commit_oid WHERE ec.epoch_id = ? AND ec.ordinal = ?",
+                "SELECT commit_oid, author_name, author_time, message_preview FROM git_epoch_commits WHERE epoch_id = ? AND ordinal = ?",
                 vec![integer(epoch_id)?, integer(change_ordinal)?],
             )],
         })?;
@@ -392,9 +394,12 @@ fn attribution(
 }
 
 mod mutation;
+pub(crate) mod preparation;
 use mutation::{apply_attribution, apply_commits, apply_refs, begin, collect, promote, supersede};
 
 mod storage;
+#[cfg(test)]
+pub(crate) mod tests;
 use storage::{
     blob, decode_payload, execute_statements, integer, optional_text, optional_text_value,
     optional_u64, require_epoch, result_i64, result_text, result_u64, statement, text,
@@ -405,6 +410,7 @@ pub(in crate::cells::repository) fn ready_epoch(
     context: &Transaction<'_>,
     token: &str,
 ) -> crate::cells::Result<u64> {
+    preparation::ensure_ready(context)?;
     let result=context.query("SELECT s.ready_epoch,e.source_token FROM git_projection_state s LEFT JOIN git_projection_epochs e ON e.epoch_id=s.ready_epoch WHERE s.singleton=1",&[])?;
     let row = result
         .rows

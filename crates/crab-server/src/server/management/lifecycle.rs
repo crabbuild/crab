@@ -16,6 +16,11 @@ use std::sync::Arc;
 pub(super) fn routes() -> Router<Arc<Server>> {
     Router::new()
         .route(
+            "/internal/repositories/{owner}/{name}/projection-state",
+            get(status::<crate::cells::repository::projection::preparation::GetState>)
+                .post(prepare::<crate::cells::repository::projection::preparation::Prepare>),
+        )
+        .route(
             "/internal/repositories/{owner}/{name}/project-state",
             get(status::<crate::cells::repository::projects::preparation::GetState>)
                 .post(prepare::<crate::cells::repository::projects::preparation::Prepare>),
@@ -60,13 +65,7 @@ async fn prepare<
     Path(key): Path<(String, String)>,
     Json(input): Json<PrepareLifecycleInput>,
 ) -> Result<Json<LifecycleStatus>> {
-    if server.cancellation.is_cancelled() {
-        return Err(Error::CellUnavailable);
-    }
-    let _permit = server
-        .maintenance_admission
-        .try_acquire()
-        .map_err(|_| Error::CellUnavailable)?;
+    let _permit = super::admit(&server)?;
     let repository = server.repositories.get(&key).ok_or(Error::NotFound)?;
     let cell = app::repository_cell(&server, &repository)?;
     match app::command_output(
@@ -111,13 +110,7 @@ async fn prepare_submissions(
     )>,
     Json(input): Json<PrepareLifecycleInput>,
 ) -> Result<Json<LifecycleStatus>> {
-    if server.cancellation.is_cancelled() {
-        return Err(Error::CellUnavailable);
-    }
-    let _permit = server
-        .maintenance_admission
-        .try_acquire()
-        .map_err(|_| Error::CellUnavailable)?;
+    let _permit = super::admit(&server)?;
     let repository = server
         .repositories
         .get(&(owner, name))

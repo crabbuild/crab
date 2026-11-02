@@ -75,6 +75,7 @@ async function setup(page: Page) {
     values: Record<string, string>;
   };
   const items = new Map<string, Entry[]>();
+  const revisions = new Map<string, number>();
   const decisions = new Map<string, object>();
   const submissions: { request_id: string; command: object }[] = [];
   let lose = false;
@@ -175,13 +176,16 @@ async function setup(page: Page) {
         items.set(id, []);
       } else {
         const project = projects.get(id)!;
-        expect(project.version).toBe(command.version);
+        if (command.kind === "item")
+          expect(command.version).toBe(revisions.get(command.item.id) ?? 0);
+        else expect(project.version).toBe(command.version);
         project.version++;
         if (command.kind === "edit") {
           project.definition = command.definition;
           project.archived = command.archived;
         }
         if (command.kind === "item") {
+          revisions.set(command.item.id, command.version + 1);
           const current = items.get(id)!;
           const index = current.findIndex(
             (item) => item.id === command.item.id,
@@ -207,7 +211,13 @@ async function setup(page: Page) {
       const project = projects.get(match[1])!;
       if (!match[2])
         return route.fulfill({ json: { project, can_manage: writable } });
-      const entries = items.get(project.id)!;
+      const entries = items
+        .get(project.id)!
+        .filter(
+          (item) =>
+            !url.searchParams.has("item") ||
+            item.id === url.searchParams.get("item"),
+        );
       const counts: Record<string, number> = {};
       for (const item of entries)
         counts[item.status] = (counts[item.status] ?? 0) + 1;
@@ -221,6 +231,7 @@ async function setup(page: Page) {
             counts,
             next: null,
             items: entries.map((item) => ({
+              version: revisions.get(item.id),
               item,
               work: item.subject
                 ? {
@@ -349,7 +360,7 @@ test("templates, linked issue and PR items, board moves, roadmap dates, saved se
     await page.evaluate(() => document.documentElement.scrollWidth),
   ).toBeLessThanOrEqual(390);
 });
-test("an uncertain command retains its UUID and payload across navigation and recovers without duplicate projects", async ({
+test("an uncertain command retains its UUID and payload across reload and navigation without duplicate projects", async ({
   page,
 }) => {
   const fixture = await setup(page);
@@ -361,6 +372,10 @@ test("an uncertain command retains its UUID and payload across navigation and re
     .getByRole("button", { name: "Create project", exact: true })
     .click();
   await expect(page.getByRole("dialog").getByRole("alert")).toBeVisible();
+  await page.reload();
+  await expect(
+    page.getByRole("button", { name: "Retry submission", exact: true }),
+  ).toBeVisible();
   await page.evaluate(() => {
     history.pushState(null, "", "/team/project/issues");
     window.dispatchEvent(new PopStateEvent("popstate"));
@@ -439,6 +454,52 @@ test("editing a draft keeps it a draft and read-only users have no project write
   await expect(
     page.getByRole("combobox", { name: "Status for Explore an idea" }),
   ).toHaveCount(0);
+});
+
+test("repository item and settings drafts restore through reload with their original fields", async ({
+  page,
+}) => {
+  const state = await setup(page);
+  await create(page);
+  await page.getByRole("button", { name: "Add item", exact: true }).click();
+  await page.getByLabel("Add", { exact: true }).click();
+  await page.getByRole("option", { name: "Draft note", exact: true }).click();
+  await page
+    .getByLabel("Title", { exact: true })
+    .fill("Unsubmitted repository task");
+  await page
+    .getByLabel("Description", { exact: true })
+    .fill("Preserve the full draft body.");
+  await page.reload();
+  await page
+    .getByRole("button", { name: "Resume item draft", exact: true })
+    .click();
+  await expect(page.getByLabel("Title", { exact: true })).toHaveValue(
+    "Unsubmitted repository task",
+  );
+  await expect(page.getByLabel("Description", { exact: true })).toHaveValue(
+    "Preserve the full draft body.",
+  );
+  await page
+    .getByRole("button", { name: "Add to project", exact: true })
+    .click();
+  await expect(page.getByRole("dialog")).toHaveCount(0);
+  expect(state.submissions.at(-1)?.command).toMatchObject({
+    kind: "item",
+    version: 0,
+    item: { subject: null, body: "Preserve the full draft body." },
+  });
+  await page.getByRole("button", { name: "Settings", exact: true }).click();
+  await page
+    .getByLabel("Project README", { exact: true })
+    .fill("# Unfinished project brief\n\nKeep the original revision.");
+  await page.reload();
+  await page
+    .getByRole("button", { name: "Resume settings draft", exact: true })
+    .click();
+  await expect(page.getByLabel("Project README", { exact: true })).toHaveValue(
+    "# Unfinished project brief\n\nKeep the original revision.",
+  );
 });
 
 test("a proven input rejection releases the form so it can be corrected", async ({

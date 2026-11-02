@@ -73,9 +73,19 @@ pub(crate) struct Request {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Outcome {
-    Applied { project: Option<Uuid>, version: u64 },
+    Applied {
+        project: Option<Uuid>,
+        version: u64,
+    },
     Cancelled,
-    Rejected { reason: String },
+    Rejected {
+        reason: String,
+    },
+    ItemConflict {
+        project: Uuid,
+        item: Uuid,
+        version: u64,
+    },
     RequestConflict,
 }
 #[derive(Deserialize, Serialize)]
@@ -182,6 +192,14 @@ fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResul
             creator_epoch: epoch(context, input.actor)?,
         };
         save(context, &project)?;
+        history::append(
+            context,
+            input,
+            &project,
+            ledger::Target::Project,
+            None,
+            Some(history::project_snapshot(&project)),
+        )?;
         advance(
             context,
             input.actor,
@@ -200,7 +218,9 @@ fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResul
     let Some(mut project) = load(context, project_id)? else {
         return Ok(rejected("Project not found"));
     };
-    if project.version != input.command.version() {
+    if !matches!(input.command, Command::Item { .. } | Command::Remove { .. })
+        && project.version != input.command.version()
+    {
         return Ok(rejected(
             "The project changed. Review its current version before saving your draft.",
         ));
@@ -211,6 +231,9 @@ fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResul
     if project.archived && !matches!(input.command, Command::Edit { .. }) {
         return Ok(rejected("Archived projects are read-only"));
     }
+    let mut event_target = ledger::Target::Project;
+    let mut before = Some(history::project_snapshot(&project));
+    let mut after = None;
     match &input.command {
         Command::Edit {
             definition,
@@ -255,6 +278,9 @@ fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResul
                     "Choose a current organization member and valid start/target dates",
                 ));
             }
+            event_target = ledger::Target::Properties;
+            before = Some(serde_json::to_value(&project.properties)?);
+            after = Some(serde_json::to_value(properties)?);
             project.properties = properties.clone();
         }
         Command::Repository {
@@ -266,6 +292,9 @@ fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResul
                 ));
             }
             let linked_repositories = repositories(context, project_id)?;
+            event_target = ledger::Target::Repository { id: *repository };
+            before = Some(serde_json::json!({"linked":linked_repositories.contains(repository)}));
+            after = Some(serde_json::json!({"linked":linked}));
             if *linked {
                 if !linked_repositories.contains(repository)
                     && linked_repositories.len() >= MAX_REPOSITORIES
@@ -281,6 +310,7 @@ fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResul
         Command::Item {
             repository,
             item: next,
+            version,
             ..
         } => {
             if !next.valid(&project.definition) || repository.is_some() != next.subject.is_some() {
@@ -293,6 +323,17 @@ fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResul
                 return Ok(rejected("Choose accessible work from a linked repository"));
             }
             let old = item(context, project_id, next.id)?;
+            let current = ledger::item_version(context, project_id, next.id)?;
+            if old.is_some() && current == 0 {
+                return Err(Error::Invalid("stored project item has no revision"));
+            }
+            if *version != current || old.is_none() && *version != 0 {
+                return Ok(MutationResult::Rejected(Outcome::ItemConflict {
+                    project: project_id,
+                    item: next.id,
+                    version: current,
+                }));
+            }
             if old.as_ref().is_some_and(|old| {
                 old.repository != *repository || old.item.subject != next.subject
             }) {
@@ -331,12 +372,49 @@ fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResul
                 item: next.clone(),
             };
             context.query("INSERT INTO organization_project_items(project,id,repository,kind,number,status,data) VALUES(?,?,?,?,?,?,?) ON CONFLICT(project,id) DO UPDATE SET status=excluded.status,data=excluded.data",&[blob(project_id),blob(next.id),repository_value,kind,number,SqlValue::Text(next.status.clone()),SqlValue::Text(serde_json::to_string(&data)?)])?;
+            ledger::advance_item(context, project_id, next.id)?;
+            event_target = ledger::Target::Item {
+                id: next.id,
+                source: repository.and_then(|repository| {
+                    next.subject.map(|subject| ledger::Source {
+                        repository,
+                        subject,
+                    })
+                }),
+            };
+            before = old
+                .as_ref()
+                .map(|old| history::item_snapshot(&old.item))
+                .transpose()?;
+            after = Some(history::item_snapshot(next)?);
         }
-        Command::Remove { item, .. } => {
+        Command::Remove {
+            item: id, version, ..
+        } => {
+            let old = item(context, project_id, *id)?;
+            let current = ledger::item_version(context, project_id, *id)?;
+            let Some(old) = old.filter(|_| current == *version) else {
+                return Ok(MutationResult::Rejected(Outcome::ItemConflict {
+                    project: project_id,
+                    item: *id,
+                    version: current,
+                }));
+            };
             context.query(
                 "DELETE FROM organization_project_items WHERE project=? AND id=?",
-                &[blob(project_id), blob(*item)],
+                &[blob(project_id), blob(*id)],
             )?;
+            ledger::advance_item(context, project_id, *id)?;
+            event_target = ledger::Target::Item {
+                id: *id,
+                source: old.repository.and_then(|repository| {
+                    old.item.subject.map(|subject| ledger::Source {
+                        repository,
+                        subject,
+                    })
+                }),
+            };
+            before = Some(history::item_snapshot(&old.item)?);
         }
         Command::Create { .. } => {
             return Err(Error::Invalid("project create reached item dispatch"));
@@ -347,6 +425,10 @@ fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResul
         u64::try_from(context.now_ms()).map_err(|_| Error::Invalid("project clock is negative"))?,
     );
     save(context, &project)?;
+    if matches!(event_target, ledger::Target::Project) {
+        after = Some(history::project_snapshot(&project));
+    }
+    history::append(context, input, &project, event_target, before, after)?;
     advance(
         context,
         input.actor,

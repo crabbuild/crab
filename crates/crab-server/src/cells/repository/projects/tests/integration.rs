@@ -49,7 +49,7 @@ async fn project_sources_show_live_issues_pulls_links_and_native_search() {
         &cell,
         Command::Item {
             project: id,
-            version: 1,
+            version: 0,
             item: entry(1),
         },
     )
@@ -65,7 +65,7 @@ async fn project_sources_show_live_issues_pulls_links_and_native_search() {
         &cell,
         Command::Item {
             project: id,
-            version: 2,
+            version: 0,
             item: pull,
         },
     )
@@ -141,7 +141,7 @@ async fn project_sources_show_live_issues_pulls_links_and_native_search() {
     fixtures::close(&server).await;
 }
 #[tokio::test(flavor = "multi_thread")]
-async fn concurrent_edits_have_one_winner_and_rejected_submissions_remain_terminal() {
+async fn distinct_items_succeed_independently_and_rejected_submissions_remain_terminal() {
     let server = fixtures::fixture().await;
     let cell = server
         .cells()
@@ -155,7 +155,7 @@ async fn concurrent_edits_have_one_winner_and_rejected_submissions_remain_termin
             &cell,
             Command::Item {
                 project: id,
-                version: 1,
+                version: 0,
                 item: Item {
                     subject: None,
                     title: format!("Task {i}"),
@@ -171,7 +171,7 @@ async fn concurrent_edits_have_one_winner_and_rejected_submissions_remain_termin
             .iter()
             .filter(|r| matches!(r, Outcome::Applied { .. }))
             .count(),
-        1
+        8
     );
     let request = Request {
         request_id: Uuid::now_v7(),
@@ -202,20 +202,33 @@ async fn concurrent_edits_have_one_winner_and_rejected_submissions_remain_termin
 }
 
 pub(crate) struct Historical;
+#[derive(Deserialize, Serialize)]
+pub(crate) enum HistoricalState {
+    NoProjects,
+    NoItemRevisions,
+}
 impl Mutation for Historical {
     const CLASS: &'static str = crate::cells::repository::CLASS;
     const ID: u32 = 59000;
-    type Input = ();
+    type Input = HistoricalState;
     type Output = ();
-    fn execute(context: &mut Transaction<'_>, (): ()) -> Result<MutationResult<()>> {
-        for table in [
-            "repository_issue_parents",
-            "repository_project_items",
-            "repository_projects",
-        ] {
-            context.query(&format!("DROP TABLE {table}"), &[])?;
+    fn execute(
+        context: &mut Transaction<'_>,
+        state: HistoricalState,
+    ) -> Result<MutationResult<()>> {
+        if matches!(state, HistoricalState::NoProjects) {
+            for table in [
+                "repository_issue_parents",
+                "repository_project_items",
+                "repository_projects",
+            ] {
+                context.query(&format!("DROP TABLE {table}"), &[])?;
+            }
+            context.delete_document("projects/v1/prepared")?;
         }
-        context.delete_document("projects/v1/prepared")?;
+        context.delete_document("planning/v2/state")?;
+        context.query("DROP TABLE planning_history", &[])?;
+        context.query("DROP TABLE planning_item_revisions", &[])?;
         Ok(MutationResult::Success(()))
     }
 }
@@ -232,7 +245,7 @@ async fn existing_cells_require_explicit_preparation_without_rewriting_issues() 
         .unwrap();
     seed(&cell, 1).await;
     cell.client
-        .command::<Historical>(&cell.target, identity(), ())
+        .command::<Historical>(&cell.target, identity(), HistoricalState::NoProjects)
         .await
         .unwrap();
     assert!(
@@ -299,7 +312,7 @@ async fn native_restart_retains_projects_items_parent_edges_and_submission_decis
         &cell,
         Command::Item {
             project: id,
-            version: 1,
+            version: 0,
             item: entry(2),
         },
     )

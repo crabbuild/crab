@@ -58,6 +58,11 @@ impl Host {
                 .with_graceful_shutdown(stopped.cancelled_owned())
                 .await
         });
+        let budget = crate::server::capacity::CellRuntimeBudget::from_resources(
+            crate::resources::local_resources(directory, config.cells.local_disk_limit_bytes)
+                .unwrap(),
+        )
+        .unwrap();
         let cells = crate::cells::runtime::start_with_bucket(
             &config,
             public.local_addr().unwrap(),
@@ -65,7 +70,7 @@ impl Host {
             name.into(),
             transport.http.clone(),
             transport.stream_http.clone(),
-            16,
+            budget,
             bucket,
             crate::cells::application::compiled().unwrap(),
         )

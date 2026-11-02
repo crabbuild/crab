@@ -1,22 +1,26 @@
-import { endpoint, type Repository, type RepositoryAssignee } from "@/lib/api";
+import { type Repository, type RepositoryAssignee } from "@/lib/api";
 import { repoHref } from "@/lib/repository-route";
 export type Subject = { kind: "issue" | "pull"; number: number };
-export type ProjectTarget = { repo: Repository } | { organization: string };
+export type ProjectRepository = Pick<
+  Repository,
+  "id" | "owner" | "name" | "archived"
+>;
+export type ProjectTarget =
+  | { repo: ProjectRepository }
+  | { organization: string };
 export function projectEndpoint(
   target: ProjectTarget,
   action = "",
   parameters: Record<string, string | undefined> = {},
 ) {
-  if ("repo" in target)
-    return endpoint(
-      target.repo,
-      `projects${action ? `/${action}` : ""}`,
-      parameters,
-    );
   const query = new URLSearchParams();
   for (const [key, value] of Object.entries(parameters))
     if (value !== undefined) query.set(key, value);
-  return `/api/organizations/${target.organization}/projects${action ? `/${action}` : ""}?${query}`;
+  const root =
+    "repo" in target
+      ? `/api/repos/${encodeURIComponent(target.repo.owner)}/${encodeURIComponent(target.repo.name)}`
+      : `/api/organizations/${target.organization}`;
+  return `${root}/projects${action ? `/${action}` : ""}?${query}`;
 }
 export interface Work {
   subject: Subject;
@@ -68,6 +72,7 @@ export interface Item {
   values: Record<string, string>;
 }
 export interface Row {
+  version: number;
   repository?: Pick<Repository, "id" | "owner" | "name"> | null;
   restricted?: boolean;
   item: Item;
@@ -120,8 +125,17 @@ export type Command =
 export type Outcome =
   | { outcome: "applied"; project: string | null; version: number }
   | { outcome: "cancelled" }
-  | { outcome: "rejected"; reason: string };
-export function projectHref(repo: Repository, project?: string) {
+  | { outcome: "rejected"; reason: string }
+  | {
+      outcome: "item_conflict";
+      project: string;
+      item: string;
+      version: number;
+    };
+export function projectHref(
+  repo: Pick<Repository, "owner" | "name">,
+  project?: string,
+) {
   return repoHref(repo, { view: "projects", project });
 }
 export function workHref(

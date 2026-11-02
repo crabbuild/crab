@@ -40,13 +40,7 @@ async fn rebuild(
     Path(key): Path<(String, String)>,
     Json(input): Json<RebuildSearchInput>,
 ) -> app::Result<Response> {
-    if server.cancellation.is_cancelled() {
-        return Ok(StatusCode::SERVICE_UNAVAILABLE.into_response());
-    }
-    let _permit = server
-        .maintenance_admission
-        .try_acquire()
-        .map_err(|_| app::Error::CellUnavailable)?;
+    let _permit = super::admit(&server)?;
     let repository = server.repositories.get(&key).ok_or(app::Error::NotFound)?;
     let cell = app::repository_cell(&server, &repository)?;
     let result = app::command_output(

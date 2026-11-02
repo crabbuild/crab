@@ -143,6 +143,7 @@ impl Read for GetProject {
 #[serde(deny_unknown_fields)]
 pub(crate) struct ItemQuery {
     pub project: Uuid,
+    pub item: Option<Uuid>,
     pub after: Option<Uuid>,
     pub revision: Option<u64>,
     pub query: String,
@@ -152,6 +153,7 @@ pub(crate) struct ItemQuery {
 #[derive(Debug, Deserialize, Serialize)]
 #[serde(deny_unknown_fields)]
 pub(crate) struct Row {
+    pub version: u64,
     pub item: Item,
     pub work: Option<SubjectSummary>,
     pub assignees: Vec<super::super::assignments::Assignee>,
@@ -199,9 +201,11 @@ impl Read for Items {
         if input.after.is_some() && input.revision != Some(revision) {
             return Err(Error::StaleSearch);
         }
-        let predicate = "FROM repository_project_items p LEFT JOIN repository_issues i ON p.kind=0 AND p.number=i.number LEFT JOIN repository_pulls r ON p.kind=1 AND p.number=r.number WHERE p.project=? AND (? IS NULL OR p.status=?) AND (?=0 OR COALESCE(i.state,r.state,0)=0) AND instr(lower(COALESCE(i.title,r.title,json_extract(p.data,'$.title'))),lower(?))>0";
+        let predicate = "FROM repository_project_items p LEFT JOIN repository_issues i ON p.kind=0 AND p.number=i.number LEFT JOIN repository_pulls r ON p.kind=1 AND p.number=r.number WHERE p.project=? AND (? IS NULL OR p.id=?) AND (? IS NULL OR p.status=?) AND (?=0 OR COALESCE(i.state,r.state,0)=0) AND instr(lower(COALESCE(i.title,r.title,json_extract(p.data,'$.title'))),lower(?))>0";
         let mut args = vec![
             id(project.id),
+            input.item.map(id).unwrap_or(SqlValue::Null),
+            input.item.map(id).unwrap_or(SqlValue::Null),
             input
                 .status
                 .clone()
@@ -235,6 +239,10 @@ impl Read for Items {
             if !entry.valid(&project.definition) {
                 return Err(Error::Invalid("stored project item is invalid"));
             }
+            let version = crate::cells::planning::item_version(context, project.id, entry.id)?;
+            if version == 0 {
+                return Err(Error::Invalid("stored project item has no revision"));
+            }
             let assignees = match row.get(1) {
                 Some(SqlValue::Blob(bytes)) => super::super::assignments::decode(bytes)?,
                 Some(SqlValue::Null) => vec![],
@@ -249,6 +257,7 @@ impl Read for Items {
                 None
             };
             items.push(Row {
+                version,
                 assignees: details
                     .as_ref()
                     .map(|details| details.assignees.clone())

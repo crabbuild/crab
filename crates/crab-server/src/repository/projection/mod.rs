@@ -59,21 +59,28 @@ pub(crate) async fn reconcile(
     let cell = client.repository(context.repository_id)?;
     let target = cell.target;
     let client = cell.client.clone();
-    let result = build_epoch(
-        store,
-        layout,
-        options,
-        &repository,
-        &client,
-        &target,
-        &source,
-        &snapshot,
-        &context.metrics,
-        cancellation,
-    )
-    .await;
+    let current = state(&client, target).await?;
+    // The verified source is immutable. Reusing it is read-only; collection
+    // still resumes from retired epoch rows after a process interruption.
+    let result = if current.source_token.as_deref() == Some(source.source_token.as_str()) {
+        Ok(true)
+    } else {
+        build_epoch(
+            store,
+            layout,
+            options,
+            &repository,
+            &client,
+            &target,
+            &source,
+            &snapshot,
+            &context.metrics,
+            cancellation,
+        )
+        .await
+    };
     let result = match result {
-        Ok(true) => collect_epochs(&client, &target, &source)
+        Ok(true) => collect_epochs(&client, &target, &source, cancellation)
             .await
             .map(|()| Some(source)),
         Ok(false) => Ok(None),
@@ -99,17 +106,24 @@ async fn collect_epochs(
     client: &CellClient,
     target: &Uuid,
     source: &projection::SourceIdentity,
+    cancellation: &CancellationToken,
 ) -> crate::Result<()> {
-    apply_batch(
-        client,
-        target,
-        projection::OP_COLLECT,
-        0,
-        &serde_json::to_vec(source)?,
-        Vec::new(),
-    )
-    .await
-    .map(|_| ())
+    let mut pending = state(client, *target).await?.collection_epoch;
+    let source = serde_json::to_vec(source)?;
+    while pending.is_some() {
+        check_cancelled(cancellation)?;
+        pending = apply_batch(
+            client,
+            target,
+            projection::OP_COLLECT,
+            0,
+            &source,
+            Vec::new(),
+        )
+        .await?
+        .epoch_id;
+    }
+    Ok(())
 }
 
 /// Derive the exact source identity used by Cell epoch promotion and reads.

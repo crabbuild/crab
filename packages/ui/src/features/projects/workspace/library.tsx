@@ -29,6 +29,7 @@ import {
 import { useProjectCommands } from "../commands";
 import { projectEndpoint } from "../model";
 import { NewProject } from "./forms";
+import { DraftRecovery } from "../drafts";
 import {
   statuses,
   health,
@@ -93,6 +94,11 @@ export function ProjectLibrary({
           </Button>
         )}
       </header>
+      <DraftRecovery
+        scope={{ target: { organization }, project: null }}
+        disabled={!resource.data?.can_create}
+        onResume={() => setCreating(true)}
+      />
       <div className="workspace-project-filters">
         <Tabs
           value={archived ? "archived" : "active"}

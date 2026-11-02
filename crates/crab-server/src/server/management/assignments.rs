@@ -79,13 +79,7 @@ async fn migrate(
     Path(key): Path<(String, String)>,
     Json(input): Json<Input>,
 ) -> Result<Response> {
-    if server.cancellation.is_cancelled() {
-        return Err(Error::CellUnavailable);
-    }
-    let _permit = server
-        .maintenance_admission
-        .try_acquire()
-        .map_err(|_| Error::CellUnavailable)?;
+    let _permit = super::admit(&server)?;
     if input.records.len() > 8 || input.records.iter().any(|r| r.mappings.len() > 10) {
         return Err(Error::Invalid(
             "Assignment migration frame exceeds its record limit",
