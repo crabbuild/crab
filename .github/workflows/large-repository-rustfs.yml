@@ -71,6 +71,12 @@ on:
   schedule:
     - cron: "31 7 * * 0"
   workflow_dispatch:
+    inputs:
+      phase:
+        description: Qualification phase
+        type: choice
+        default: full
+        options: [full, metrics]
 
 permissions:
   contents: read
@@ -288,7 +294,7 @@ jobs:
 
   pinned-product-build:
     name: Build one pinned official installation
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/crab-v2-perf-qualification-41072'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/crab-v2-perf-qualification-41072' && inputs.phase != 'metrics'
     needs: report-contract
     runs-on: ubuntu-24.04
     timeout-minutes: 180
@@ -368,7 +374,7 @@ jobs:
 
   pinned-final-runtime:
     name: Pinned final runtime (${{ matrix.profile }})
-    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/crab-v2-perf-qualification-41072'
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/crab-v2-perf-qualification-41072' && inputs.phase != 'metrics'
     needs: pinned-product-build
     runs-on: ubuntu-24.04
     timeout-minutes: 360
@@ -565,6 +571,194 @@ jobs:
             ${{ env.QUAL_ROOT }}/pooled/logs/**
             ${{ env.QUAL_ROOT }}/native-protocol/artifacts/**
             ${{ env.QUAL_ROOT }}/large/report.json
+            ${{ env.QUAL_ROOT }}/*/final-workday-*/artifacts/**
+            ${{ env.QUAL_ROOT }}/*/final-workday-*/logs/**
+          if-no-files-found: error
+          retention-days: 30
+
+  pinned-native-request-runtime:
+    name: Calibrated native1000developer request and latency evidence
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/codex/crab-v2-perf-qualification-41072' && inputs.phase == 'metrics'
+    needs: report-contract
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
+    permissions:
+      contents: read
+      actions: read
+    env:
+      QUAL_ROOT: ${{ github.workspace }}-final-native-counter
+      PRODUCT_HEAD: 4938b757f45b5f2763c0ea8279056938935214c5
+      PRODUCT_TREE: 3afdebe89c5c1dfcff0b3c14351df1a7db69b2c1
+      AWS_ACCESS_KEY_ID: crab
+      AWS_SECRET_ACCESS_KEY: crab
+      AWS_REGION: us-east-1
+      AWS_DEFAULT_REGION: us-east-1
+      AWS_ALLOW_HTTP: 'true'
+      AWS_EC2_METADATA_DISABLED: 'true'
+      AWS_ENDPOINT_URL: http://127.0.0.1:9000
+      AWS_ENDPOINT_URL_S3: http://127.0.0.1:9000
+      RUSTFS_IMAGE: ghcr.io/rustfs/rustfs@sha256:bffcab0c9d647aab0055d1c69d340b202d0909966b385932d4ead1aeb7602858
+      PYTHONDONTWRITEBYTECODE: '1'
+    steps:
+      - name: Checkout the exact product revision
+        uses: actions/checkout@v4
+        with:
+          ref: 4938b757f45b5f2763c0ea8279056938935214c5
+          fetch-depth: 0
+
+      - name: Prepare the independent disposable runtime
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          sudo rm -rf /usr/local/lib/android /usr/share/dotnet
+          sudo apt-get update -y
+          sudo apt-get install -y libfuse3-dev git-lfs nginx
+          pipx install awscli
+          echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+          mkdir -p "$QUAL_ROOT/provenance" "$QUAL_ROOT/bin" "$QUAL_ROOT/drivers"
+          test "$(git rev-parse HEAD)" = "$PRODUCT_HEAD"
+          test "$(git rev-parse HEAD^{tree})" = "$PRODUCT_TREE"
+          git fetch --no-tags origin "$GITHUB_SHA"
+          for name in fixture.py team.py native_meter.py setup_native_meter.py calibrate_native_meter.py; do
+            git show "$GITHUB_SHA:.github/qualification/$name" > "$QUAL_ROOT/drivers/$name"
+          done
+          sha256sum "$QUAL_ROOT"/drivers/*.py > "$QUAL_ROOT/provenance/drivers-sha256.txt"
+          echo 'cd8d8e5b05a093a2ff844a80e09ce15d7711275a2eb0948aa1fb61621a04a6cf  crab/scripts/e2e/run_capsule_k8s_rustfs.py' | sha256sum --check --strict
+          echo 'f708954c4c121509512f9fb7d5249ceac748f3b63d06e38b45824ac6977cd802  crab/scripts/e2e/run_concurrent_push_smoke.py' | sha256sum --check --strict
+          echo '2e5ec81d120ab4d3f018805b3f7809e15e9b29ec1b5d2cf1bf20e960ce3f4e41  crab/scripts/e2e/run_mixed_team_rustfs.py' | sha256sum --check --strict
+          lscpu > "$QUAL_ROOT/provenance/cpu.txt"
+          free -b > "$QUAL_ROOT/provenance/memory.txt"
+          uname -a > "$QUAL_ROOT/provenance/kernel.txt"
+          nginx -V > "$QUAL_ROOT/provenance/nginx-version.txt" 2>&1
+          git --version > "$QUAL_ROOT/provenance/git-version.txt"
+          df -h > "$QUAL_ROOT/provenance/disk-before.txt"
+
+      - name: Verify and unpack the same official installation
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api repos/crabbuild/crab/actions/runs/41545272686 > "$QUAL_ROOT/provenance/producer-run.json"
+          gh api repos/crabbuild/crab/actions/runs/41545272686/jobs > "$QUAL_ROOT/provenance/producer-jobs.json"
+          gh api repos/crabbuild/crab/actions/runs/41545272686/artifacts > "$QUAL_ROOT/provenance/producer-artifacts.json"
+          python3 - <<'PYPRODUCER'
+          import json,os
+          from pathlib import Path
+          r=Path(os.environ['QUAL_ROOT'])/'provenance'
+          p=json.loads((r/'producer-run.json').read_text());assert p['head_sha']=='625abf24dc0d85c52c6ce9d5f4a35fc436fec76d' and p['event']=='workflow_dispatch'
+          j=json.loads((r/'producer-jobs.json').read_text())['jobs'];j=[x for x in j if x['name']=='Build one pinned official installation'];assert len(j)==1 and j[0]['conclusion']=='success'
+          a=json.loads((r/'producer-artifacts.json').read_text())['artifacts'];a=[x for x in a if x['name']=='final-official-install-41545272686'];assert len(a)==1 and not a[0]['expired'] and a[0]['digest'].startswith('sha256:')
+          (r/'producer-artifact.json').write_text(json.dumps(a[0],indent=2)+'\n')
+          PYPRODUCER
+          INSTALL_ARTIFACT=$(python3 -c 'import json,os,pathlib;print(json.loads((pathlib.Path(os.environ["QUAL_ROOT"])/"provenance/producer-artifact.json").read_text())["id"])')
+          INSTALL_ARTIFACT_DIGEST=$(python3 -c 'import json,os,pathlib;print(json.loads((pathlib.Path(os.environ["QUAL_ROOT"])/"provenance/producer-artifact.json").read_text())["digest"])')
+          export INSTALL_ARTIFACT INSTALL_ARTIFACT_DIGEST
+          gh api "repos/crabbuild/crab/actions/artifacts/$INSTALL_ARTIFACT/zip" > "$QUAL_ROOT/install.zip"
+          python3 - <<'PYINSTALL'
+          import hashlib,json,os,tarfile,zipfile
+          from pathlib import Path
+          r=Path(os.environ['QUAL_ROOT']);body=(r/'install.zip').read_bytes()
+          assert hashlib.sha256(body).hexdigest()==os.environ['INSTALL_ARTIFACT_DIGEST'].removeprefix('sha256:')
+          with zipfile.ZipFile(r/'install.zip') as z:
+              assert set(z.namelist())=={'install.json','installed.tar.gz'}
+              z.extractall(r/'bundle')
+          p=json.loads((r/'bundle/install.json').read_text());assert p['status']=='ok' and p['commit']==os.environ['PRODUCT_HEAD'] and p['tree']==os.environ['PRODUCT_TREE']
+          with tarfile.open(r/'bundle/installed.tar.gz') as t:
+              assert set(t.getnames())=={'crab','git-remote-crab'}
+              assert t.getmember('crab').isfile() and t.getmember('git-remote-crab').issym() and t.getmember('git-remote-crab').linkname=='crab'
+              t.extractall(r/'bin',filter='data')
+          assert hashlib.sha256((r/'bin/crab').read_bytes()).hexdigest()==p['binary_sha256']
+          p['producer_binary']=p['binary'];p['binary']=str(r/'bin/crab');p['artifact_id']=os.environ['INSTALL_ARTIFACT'];p['artifact_digest']=os.environ['INSTALL_ARTIFACT_DIGEST']
+          (r/'provenance/install.json').write_text(json.dumps(p,indent=2)+'\n')
+          PYINSTALL
+          "$QUAL_ROOT/bin/crab" version --json > "$QUAL_ROOT/provenance/runtime-version.json"
+          echo "$QUAL_ROOT/bin" >> "$GITHUB_PATH"
+
+      - name: Start the pinned isolated RustFS
+        run: |
+          set -euo pipefail
+          mkdir -p "$QUAL_ROOT/rustfs"
+          sudo chown 10001:10001 "$QUAL_ROOT/rustfs"
+          docker run -d --name pinned-rustfs -p 9000:9000 \
+            -e RUSTFS_ACCESS_KEY=crab -e RUSTFS_SECRET_KEY=crab \
+            -v "$QUAL_ROOT/rustfs:/data" "$RUSTFS_IMAGE" server /data --address :9000
+          ready=false
+          for _ in $(seq 1 90); do
+            if aws --endpoint-url "$AWS_ENDPOINT_URL" s3api list-buckets >/dev/null 2>&1; then ready=true; break; fi
+            sleep 1
+          done
+          test "$ready" = true
+          docker exec pinned-rustfs rustfs --version > "$QUAL_ROOT/provenance/rustfs-version.txt"
+          test "$(head -n 1 "$QUAL_ROOT/provenance/rustfs-version.txt")" = 'rustfs 1.0.0'
+
+
+      - name: Generate the exact matched input
+        run: python3 "$QUAL_ROOT/drivers/fixture.py"
+
+      - name: Start and calibrate the native streaming meter
+        run: |
+          set -euo pipefail
+          python3 "$QUAL_ROOT/drivers/setup_native_meter.py"
+          python3 "$QUAL_ROOT/drivers/calibrate_native_meter.py"
+
+      - name: Native metered matched64developer complete workday
+        env:
+          AWS_ENDPOINT_URL: http://127.0.0.1:19020
+          AWS_ENDPOINT_URL_S3: http://127.0.0.1:19020
+        run: python3 "$QUAL_ROOT/drivers/team.py" --agents 64 --label native-64 --native-meter
+
+      - name: Direct matched64developer complete workday
+        run: |
+          set -euo pipefail
+          python3 "$QUAL_ROOT/drivers/team.py" --agents 64 --label native-control-64
+          python3 - <<'PYMATCH'
+          import json,os
+          from pathlib import Path
+          r=Path(os.environ['QUAL_ROOT']);ds=[json.loads((r/m/'final-workday-10-64/artifacts/report.json').read_text()) for m in ['native-64','native-control-64']]
+          assert all(d['status']=='ok' for d in ds)
+          for i in range(64):assert [x['files'] for x in ds[0]['artifacts']['payload_history'][str(i)]]==[x['files'] for x in ds[1]['artifacts']['payload_history'][str(i)]]
+          (r/'provenance/native-matched-64.json').write_text(json.dumps({'status':'ok','agents':64,'versions':2,'native_meter_batches':ds[0]['push_batches'],'direct_batches':ds[1]['push_batches'],'native_meter_snapshots':ds[0]['request_snapshots'],'scope':'Exact same payload bytes on one isolated runner; native meter and direct server timings retained, no AWS claim.'},indent=2)+'\n')
+          PYMATCH
+
+      - name: Native metered1000developer10000push integrity request and latency gates
+        env:
+          AWS_ENDPOINT_URL: http://127.0.0.1:19020
+          AWS_ENDPOINT_URL_S3: http://127.0.0.1:19020
+        run: python3 "$QUAL_ROOT/drivers/team.py" --agents 1000 --label native-1000 --native-meter
+
+      - name: Retain native counter diagnostics
+        if: always()
+        run: |
+          set -euo pipefail
+          test "$RUNNER_ENVIRONMENT" = github-hosted
+          mkdir -p "$QUAL_ROOT/provenance"
+          docker logs pinned-rustfs > "$QUAL_ROOT/provenance/rustfs.log" 2>&1 || true
+          df -h > "$QUAL_ROOT/provenance/disk-after.txt"
+          if test -f "$QUAL_ROOT/metrics/nginx.pid"; then
+            nginx -p "$QUAL_ROOT/metrics" -c "$QUAL_ROOT/metrics/nginx.conf" -s quit || true
+          fi
+          docker rm -f pinned-rustfs >/dev/null 2>&1 || true
+          python3 - <<'PYEND'
+          import hashlib,json,os,subprocess
+          from pathlib import Path
+          r=Path(os.environ['QUAL_ROOT']);p=r/'provenance/install.json'
+          if p.exists():
+              d=json.loads(p.read_text());assert hashlib.sha256(Path(d['binary']).read_bytes()).hexdigest()==d['binary_sha256']
+              assert subprocess.check_output(['git','rev-parse','HEAD'],text=True).strip()==os.environ['PRODUCT_HEAD']
+              assert not subprocess.check_output(['git','status','--porcelain'],text=True).strip()
+          PYEND
+
+      - name: Upload complete native request and integrity evidence
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: final-native-counter-${{ github.run_id }}
+          path: |
+            ${{ env.QUAL_ROOT }}/provenance/**
+            ${{ env.QUAL_ROOT }}/drivers/**
+            ${{ env.QUAL_ROOT }}/metrics/*.json*
+            ${{ env.QUAL_ROOT }}/metrics/*.conf
+            ${{ env.QUAL_ROOT }}/metrics/*.log
             ${{ env.QUAL_ROOT }}/*/final-workday-*/artifacts/**
             ${{ env.QUAL_ROOT }}/*/final-workday-*/logs/**
           if-no-files-found: error

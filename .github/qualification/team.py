@@ -19,7 +19,9 @@ p = argparse.ArgumentParser()
 p.add_argument('--agents', type=int, choices=[8, 64, 1000], required=True)
 p.add_argument('--label', required=True)
 p.add_argument('--meter', action='store_true')
+p.add_argument('--native-meter', action='store_true')
 a = p.parse_args()
+assert not (a.meter and a.native_meter)
 build = json.loads((root / 'provenance/install.json').read_text())
 binary = Path(build['binary'])
 assert build['status'] == 'ok' and hashlib.sha256(binary.read_bytes()).hexdigest() == build['binary_sha256']
@@ -30,7 +32,7 @@ assert not receipt.exists()
 state = {'status': 'running', 'started_at': time.time(), 'source_commit': build['commit'],
          'binary_sha256': build['binary_sha256'], 'driver_sha256': hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
          'source_hashes': source_hashes, 'agents': a.agents, 'commits_per_developer': 10,
-         'workers': 16, 'request_meter': a.meter,
+         'workers': 16, 'request_meter': 'native' if a.native_meter else 'python' if a.meter else 'none',
          'scope': 'Local RustFS on an isolated hosted runner; 16 active writers, not1000simultaneous arrivals. All historical Git/Xet/LFS bytes and full no-repair audit. Metered snapshots include client preparation; service timing is push-command wall time. No AWS capacity/cost claim.'}
 
 def save():
@@ -39,6 +41,16 @@ def save():
     temporary.replace(receipt)
 
 class Team(MixedTeam):
+    def __init__(self, args):
+        super().__init__(args)
+        if a.native_meter:
+            from native_meter import NativeMeter
+            self.request_proxy = NativeMeter(args.endpoint_url, f'{args.bucket}/{q.REMOTE_PREFIX}/{self.run_id}', root / 'metrics/access.jsonl')
+            self.env = self.build_env()
+            self.report.env = q.redact_env(self.env)
+            self.report.cost_model = {'basis': 'AllHTTPattempts through a calibrated native streaming meter; canonical phase snapshots',
+                                     'request_counts_available': True,
+                                     'limitations': ['No AWS capacity/prices/billing claim', 'Body bytes use Content-Length/NGINX body_bytes_sent; unknown chunked request lengths retained in final meter state']}
     def verify_payloads(self, index):
         super().verify_payloads(index)
         if self.args.agents != 1000:
@@ -81,6 +93,8 @@ try:
     assert code == 0 and data['status'] == 'ok'
     assert source_hashes == {n: hashlib.sha256((repo / 'crab/scripts/e2e' / n).read_bytes()).hexdigest() for n in source_names}
     assert hashlib.sha256(binary.read_bytes()).hexdigest() == build['binary_sha256']
+    if a.native_meter:
+        state['native_meter_total'] = s.request_proxy.snapshot(include_paths=False)
     batches = data['push_batches']
     assert len(batches) == 10 and all(b['jobs'] == a.agents and b['successful'] == a.agents for b in batches)
     samples = [x['command']['duration_ms'] for k in ['branch_fanout', 'branch_updates'] for x in data[k]]
