@@ -46,6 +46,61 @@ application writes. A second failure remains pending; admission closure and
 terminal request errors do not trigger replay. Reads retain Cellar's native
 routing policy.
 
+Ordinary typed calls retain a 30-second client budget. Repository recovery
+verification uses the SDK's five-minute worker budget: replica restore is a
+sequence of individually bounded storage operations whose total scales with its
+history. The stateless worker waits for that namespace fetch, so it retains the
+SDK default rather than imposing the ordinary request budget on cold recovery.
+Operation/lease budgets remain SDK-enforced. Durability proof uses the same
+30-second budget as ordinary typed calls: a restored database's first mutation
+can capture a complete image, so the SDK's shorter ten-second default could
+retire a healthy Cell while Crab was still awaiting its reply. A client timeout
+still leaves a mutation unconfirmed; only the native proof permits an applied
+acknowledgement.
+
+Replication uses 32 MiB multipart parts. The pinned LTX client uploads parts
+serially; its default 5 MiB parts made a roughly 190 MB restored snapshot require
+37 separate part requests. Larger parts bound that request overhead without
+changing the durability acknowledgement rule or introducing an environment knob.
+
+Git browse projection format 2 stores commit summaries, attribution nodes and
+edges under their immutable source epoch. Collection keeps the current source,
+the two most recently verified snapshots, and active builds. It seals a retired
+epoch before draining at most 256 rows per native command, children before nodes.
+The epoch remains a durable cleanup checkpoint until empty. Returning to a source
+whose earlier epoch is collecting creates a new epoch; partially reclaimed data
+cannot become ready again. Collection does not traverse the complete attribution
+graph, and reconciliation of an unchanged, fully collected source is read-only.
+
+Update all peers, then explicitly prepare each existing repository:
+
+```sh
+crab-server --config server.toml cells prepare-projection-state --owner OWNER --name NAME
+```
+
+Private `GET /internal/repositories/{owner}/{name}/projection-state` exposes
+outdated/migrating/ready preparation. POST advances the matching version, one
+batch of at most 256 full primary keys per transaction. A table is dropped only
+after its final batch leaves it empty; populated-table DROP would perform an
+unbounded implicit DELETE. Table progress and the independent frame revision
+survive process loss. This explicit rebuild discards the previous Git
+browse projection and lets ordinary background ingestion repopulate it from
+authenticated object storage. Git objects/refs, projects, issues, submissions and
+history are not migrated or removed. Ordinary requests never install this schema.
+Preparation may resume after process loss; it does not qualify a mixed-version
+fleet. Until preparation/rebuilding completes, derived browse consumers may
+report preparation/indexing required. Per-Cell management diagnostics include
+both project and projection preparation state.
+
+Startup verification, private management, runtime supervision and shutdown
+signals share the server lifecycle loop. Public serving and background
+projection/integrity work start only after all repository Cells are verified;
+readiness remains closed during verification. An interrupted verification call
+is dropped before draining ingress. Structured `cell_verification` logs identify
+the repository UUID, progress, elapsed time, revision and failure. Private
+`/internal/repositories/{owner}/{name}/cell` also reports project preparation state
+and returns a targeted diagnostic when verification fails.
+
 Native target addresses distinguish Repository and Organization UUIDs from Directory. This
 changes the private peer application envelope: upgrade the fleet together;
 mixed-version operation is not supported or qualified. The compiled script name
@@ -479,10 +534,26 @@ scale-down. The last node must use normal termination instead.
 Public work drains before the native node; private transport stays available
 until native shutdown finishes. Incomplete drains produce an error. Native event
 metrics and process resource samples are exported alongside Crab HTTP metrics.
+Native owned/resident/restoring Cell counts, ownership confirmation, memory
+pressure, shedding and native drain state are exported from the SDK's live load.
+These management metrics do not issue Cell queries, so they remain inspectable
+while a repository is restoring or its request path is unavailable.
 CPU-bound capsule and leaf-run encoding use blocking workers so large Git
 publications leave the async executor available for lease renewal.
 
+Resident Cells are bounded by resource-derived admission and the SDK memory
+pressure policy, using the effective host or cgroup memory limit. The SDK sheds
+at its ordinary 80% and hard 95% memory watermarks. There is no idle eviction
+timer: repeatedly releasing an otherwise affordable repository would force cold
+replica restoration and snapshot publication on its next use.
+
 ## Operator changes
+
+Private initialization and preparation frames share the bounded application
+admission pool. Background Git indexing uses separate maintenance slots, so a
+long rebuild cannot prevent preparation of another Cell. Application saturation
+or shutdown rejects the operator frame before dispatch; status reads remain
+available for diagnosis.
 
 Supported `cells` commands are `capacity --json [--live]`, `metrics`,
 `status --owner OWNER --name NAME`, `runtime`, `initialize-directory`, and
@@ -566,6 +637,37 @@ python3 crates/crab-server/tests/qualify_cellar_process.py \
   --binary "$CARGO_TARGET_DIR/debug/crab-server" \
   --artifacts "$CARGO_TARGET_DIR/cellar-process-proof"
 ```
+
+`tests/qualify_project_process.py` exercises clean restart, SIGKILL, native handoff
+and full-root backup/restore against an existing ten-repository preview. Stop only its Crab process first; keep its
+object store and UI development server running, and supply the preview's AWS
+environment. Use a disposable qualification project rather than user work:
+
+```sh
+python3 crates/crab-server/tests/qualify_project_process.py \
+  --binary "$CARGO_TARGET_DIR/release/crab-server" \
+  --config PREVIEW/server.toml --repositories PREVIEW/repositories.json \
+  --pid-file PREVIEW/crab-server.pid --organization ORGANIZATION_UUID \
+  --project QUALIFICATION_PROJECT_UUID --artifacts ARTIFACT_DIRECTORY
+```
+
+The browser alternates between losing a committed reply (restart/handoff) and
+losing the request before it reaches the server (crash/restore). It retains the original request through
+process replacement, then reloads and replays it. Its tab and public origin stay
+unchanged during handoff and restore. The harness compares all ten repositories'
+references and all repository/organization projects' fields, items and complete history,
+and requires one item and one attributed history entry for each recovered
+submission. It leaves the preview running and retains private failure evidence.
+It warms the organization before submission; cold first-use availability remains
+separate. Handoff starts another native server with an independent local cache,
+then scales down the original owner through private mTLS. Backup stops every
+writer, copies the complete configured root to a new local fixture bucket,
+compares every object's SHA-256, size and application metadata, verifies both
+inventories remained stable, and starts restoration with another empty cache.
+Only its own restore bucket and generated successor cache are cleanup targets.
+Allow space for the complete root plus restore cache. `--phases` selects a subset
+for diagnosis; a subset pass does not qualify the omitted phases. AWS CLI and a
+loopback S3 fixture are required for the full-root phase.
 
 Directory/profile native tests cover explicit preparation, authority/receipt
 isolation, concurrent handle claims, qualified identity separation, stable IDs,
@@ -903,7 +1005,8 @@ crab-server --config server.toml cells prepare-organization-projects \
 ```
 
 Organizations that predate team authority must first prepare organization teams.
-Project preparation installs only empty relations/indexes and a ready marker. It
+Project preparation installs new relations/indexes and seeds item revisions in
+restartable frames of 64 existing items. It
 is transactional and idempotent, preserves organization metadata/memberships and
 other receipts, and never runs from a public read or write. Unprepared reads and
 commands fail closed with `schema_upgrade_required`. Deploy the new peer operation
@@ -923,8 +1026,10 @@ planning rows/counts with status/repository filters and version-checked paging.
 `/{project}/candidates?repository=UUID&q=QUERY` searches authorized linked source
 work. POST `/commands` and `/cancel` use the same `{request_id,command}` body.
 Commands are `create`, `edit`, `planning`, `repository`, `item` and `remove`.
-All updates carry the captured project version; an item's source identity cannot
-be replaced. A repository with retained project items cannot be unlinked.
+Project definitions, properties and links carry the captured project version.
+Item commands carry their own row revision, with zero for a new item. An item's
+source identity cannot be replaced. A repository with retained project items
+cannot be unlinked.
 
 Repository links and work references use stable UUIDs, with source kind/number
 stored only in that project. They never copy titles, source state, assignees or
@@ -969,7 +1074,8 @@ explicit private preparation after all serving peers have been updated:
 crab-server --config server.toml cells prepare-projects --owner OWNER --name NAME
 ```
 
-Preparation installs only empty project/parent relations and indexes; it does not
+Preparation installs project/parent relations and indexes when absent, and seeds
+item revision format 2 in restartable frames of 64 existing items. It does not
 rewrite issues, PRs, assignments, discussion indexes, or their receipts. Ordinary
 reads and commands return `schema_upgrade_required` until prepared. There is no
 serving-time DDL or historical-reader fallback.
@@ -987,8 +1093,17 @@ permanent issuer/subject/payload-bound decision together. A rejection rolls back
 domain work before its decision is recorded. Cancellation either recovers that
 decision or fences an unapplied command. Immutable JSON/body-limit rejections use the existing proven-rejection response
 marker; authority/transport failures remain unproven. An uncertain browser submission retains
-its account, repository UUID, payload, and UUID above route loading, warns before
-unload, and permits only retry/cancellation until resolved. Conflicting settings
+its account, repository UUID, payload, and UUID in per-tab session storage before
+sending, warns before unload, and permits only retry/cancellation until resolved.
+Reload restores that exact intent after matching its account; storage failure
+prevents a new submission. Tab closure ends this browser checkpoint. Unsubmitted
+item/creation/settings/planning-property drafts save their complete editable
+fields and original revisions in separate account/authority/project/item-bound
+records. Workspace controls resume, export or explicitly discard these drafts.
+Rejected and cancelled submissions retain them; applied decisions clear only the
+exact captured draft, including after reload. A storage failure leaves current
+text available and blocks a new submission until checkpointing succeeds.
+Conflicting settings
 and item drafts retain the version on which editing started.
 
 Built-in templates seed workflows, typed fields, and table/board/roadmap views.
@@ -1017,5 +1132,43 @@ replacing a newer relationship. Parent activity appears in both issue timelines.
 Creating a sub-issue from its parent is one native transaction. Child progress
 reads canonical issue states and updates immediately when children close/reopen.
 
-This is repository project management. Cross-repository organization projects,
-project-specific ACLs, workflow automation and analytics are outside this slice.
+This is repository project management. Organization projects have the independent
+authority described above; project-specific ACLs, workflow automation and
+analytics are outside this slice.
+
+## Project item revisions and history
+
+`cells/planning/` owns shared item revision tombstones and append-only history;
+each project owner performs authorization and domain validation. Fresh Cells
+initialize format 2. Existing Cells require the private preparation above;
+ordinary serving never installs its DDL or reads an older format. The private
+organization status command is `cells organization-projects-status
+--organization UUID --actor OWNER_UUID`. Status reports outdated, migrating
+with copied count/revision, or ready. Update all peers and the UI together.
+
+Item create uses revision zero; edit, removal and repository draft conversion use
+the item row's revision. The native transaction advances both that item revision
+and the project collection revision. Two different items can change independently;
+same-item stale edits return permanent `item_conflict` decisions containing only
+the project/item UUID and current item revision. Tombstones prevent a delayed
+create or edit resurrecting a removed item. Definitions, links and planning
+properties retain project-version comparison; collection paging remains checked.
+Stored submission receipts retain their original payload/decision and are not
+rewritten by preparation.
+
+Successful project changes append actor, target, time, collection revision and
+previous/new planning values in the same domain transaction. Field paths use
+JSON Pointer escaping; each custom value has its own path. Rejections, cancellation
+and identical replay do not append changes. Preparation seeds revision one for
+existing items without fabricating past actors or history.
+
+Both project APIs expose `/{project}/history`: newest-first by default,
+`before=REVISION` for older UI entries, or `after=REVISION` for ascending worker
+consumption, with ten entries and an exclusive next cursor. Both directions
+cannot be requested together. Immutable entries remain stable during concurrent
+appends. Reads still require current project authority, final membership checks,
+and independent source grants. Public actors contain account IDs, recorded names
+and public profiles, never qualified authentication claims. History shows the
+public account ID when an organization actor has no public name. Organization history redacts
+inaccessible source IDs and subjects; planning fields remain project-owned.
+The browser History tab and same-item comparison reuse the shared shadcn controls.

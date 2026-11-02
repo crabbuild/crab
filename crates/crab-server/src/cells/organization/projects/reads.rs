@@ -89,11 +89,17 @@ pub(crate) struct ItemsQuery {
     pub version: Option<u64>,
     pub status: Option<String>,
     pub repository: Option<Uuid>,
+    pub item: Option<Uuid>,
+}
+#[derive(Clone, Debug, Deserialize, Serialize)]
+pub(crate) struct Entry {
+    pub record: Item,
+    pub version: u64,
 }
 #[derive(Clone, Debug, Deserialize, Serialize)]
 pub(crate) struct ItemPage {
     pub view: View,
-    pub items: Vec<Item>,
+    pub items: Vec<Entry>,
     pub next: Option<Uuid>,
     pub counts: BTreeMap<String, u64>,
     pub total: u64,
@@ -133,23 +139,31 @@ impl Read for Items {
             .clone()
             .map(SqlValue::Text)
             .unwrap_or(SqlValue::Null);
-        let counts=context.query("SELECT status,COUNT(*) FROM organization_project_items WHERE project=? AND (? IS NULL OR repository=?) GROUP BY status",&[blob(input.project),repository.clone(),repository.clone()])?.rows.iter().map(|row|Ok((text(&row[0])?,uint(&row[1])?))).collect::<Result<BTreeMap<_,_>>>()?;
+        let selected = input.item.map(blob).unwrap_or(SqlValue::Null);
+        let counts=context.query("SELECT status,COUNT(*) FROM organization_project_items WHERE project=? AND (? IS NULL OR repository=?) AND (? IS NULL OR id=?) GROUP BY status",&[blob(input.project),repository.clone(),repository.clone(),selected.clone(),selected.clone()])?.rows.iter().map(|row|Ok((text(&row[0])?,uint(&row[1])?))).collect::<Result<BTreeMap<_,_>>>()?;
         let total = match &input.status {
             Some(status) => *counts.get(status).unwrap_or(&0),
             None => counts.values().sum(),
         };
-        let rows=context.query("SELECT data FROM organization_project_items WHERE project=? AND id>? AND (? IS NULL OR status=?) AND (? IS NULL OR repository=?) ORDER BY id LIMIT 51",&[blob(input.project),blob(input.after.unwrap_or(Uuid::nil())),status.clone(),status,repository.clone(),repository])?;
+        let rows=context.query("SELECT data FROM organization_project_items WHERE project=? AND id>? AND (? IS NULL OR status=?) AND (? IS NULL OR repository=?) AND (? IS NULL OR id=?) ORDER BY id LIMIT 51",&[blob(input.project),blob(input.after.unwrap_or(Uuid::nil())),status.clone(),status,repository.clone(),repository,selected.clone(),selected])?;
         let mut items = rows
             .rows
             .iter()
-            .map(|row| serde_json::from_str::<Item>(&text(&row[0])?).map_err(Error::from))
+            .map(|row| {
+                let record = serde_json::from_str::<Item>(&text(&row[0])?)?;
+                let version = ledger::item_version(context, input.project, record.item.id)?;
+                if version == 0 {
+                    return Err(Error::Invalid("project item revision is missing"));
+                }
+                Ok(Entry { record, version })
+            })
             .collect::<Result<Vec<_>>>()?;
         let more = items.len() > 50;
         items.truncate(50);
         Ok(Some(ItemPage {
             view,
             next: if more {
-                items.last().map(|item| item.item.id)
+                items.last().map(|item| item.record.item.id)
             } else {
                 None
             },

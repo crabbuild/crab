@@ -21,6 +21,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::{collections::BTreeMap, sync::Arc};
 use uuid::Uuid;
+mod history;
 
 pub(super) fn routes() -> Router<Arc<Server>> {
     Router::new()
@@ -28,6 +29,10 @@ pub(super) fn routes() -> Router<Arc<Server>> {
         .route("/api/organizations/{id}/projects/commands", post(change))
         .route("/api/organizations/{id}/projects/cancel", post(cancel))
         .route("/api/organizations/{id}/projects/{project}", get(detail))
+        .route(
+            "/api/organizations/{id}/projects/{project}/history",
+            get(history::read),
+        )
         .route(
             "/api/organizations/{id}/projects/{project}/items",
             get(items),
@@ -157,6 +162,7 @@ struct Filter {
     version: Option<u64>,
     status: Option<String>,
     repository: Option<Uuid>,
+    item: Option<Uuid>,
 }
 async fn items(
     State(server): State<Arc<Server>>,
@@ -177,6 +183,7 @@ async fn items(
                 version: input.version,
                 status: input.status,
                 repository: input.repository,
+                item: input.item,
             },
         )
         .await
@@ -184,7 +191,8 @@ async fn items(
         .output
         .ok_or(Error::NotFound)?;
     let mut grouped: BTreeMap<Uuid, Vec<Subject>> = BTreeMap::new();
-    for item in &page.items {
+    for entry in &page.items {
+        let item = &entry.record;
         if let (Some(repo), Some(subject)) = (item.repository, item.item.subject) {
             grouped.entry(repo).or_default().push(subject);
         }
@@ -237,12 +245,13 @@ async fn items(
         }
         repositories.insert(id, repository(&repo));
     }
-    let rows=page.items.into_iter().map(|record|{
+    let rows=page.items.into_iter().map(|entry|{
+        let record = entry.record;
         let mut item=record.item;
         let summary=record.repository.and_then(|repo|item.subject.and_then(|subject|work.get(&(repo,subject.kind as u8,subject.number))));
         let restricted=item.subject.is_some() && summary.is_none();
         if restricted { item.subject=None;item.title="Private or unavailable item".into();item.body.clear(); }
-        json!({"item":item,"repository":if restricted{None}else{record.repository.and_then(|id|repositories.get(&id))},"restricted":restricted,"work":summary.map(|(details,_)|&details.work),"assignees":summary.map(|(_,assignees)|assignees).cloned().unwrap_or_default(),"parent":summary.and_then(|(details,_)|details.parent.as_ref()),"progress":summary.and_then(|(details,_)|details.progress.as_ref()),"links":summary.map(|(details,_)|details.links.as_slice()).unwrap_or_default(),"more_links":summary.is_some_and(|(details,_)|details.more_links)})
+        json!({"item":item,"version":entry.version,"repository":if restricted{None}else{record.repository.and_then(|id|repositories.get(&id))},"restricted":restricted,"work":summary.map(|(details,_)|&details.work),"assignees":summary.map(|(_,assignees)|assignees).cloned().unwrap_or_default(),"parent":summary.and_then(|(details,_)|details.parent.as_ref()),"progress":summary.and_then(|(details,_)|details.progress.as_ref()),"links":summary.map(|(details,_)|details.links.as_slice()).unwrap_or_default(),"more_links":summary.is_some_and(|(details,_)|details.more_links)})
     }).collect::<Vec<_>>();
     let current = project(&server, id, actor, selected).await?;
     app::account(&principal)?;

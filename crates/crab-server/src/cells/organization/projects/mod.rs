@@ -5,8 +5,11 @@ use crate::cells::repository::projects as planning;
 use std::collections::BTreeMap;
 
 mod commands;
+mod history;
 mod reads;
+use crate::cells::planning as ledger;
 pub(crate) use commands::{Change, Command, Outcome, Request};
+pub(crate) use history::{GetHistory, HistoryQuery};
 pub(crate) use reads::{Get, Items, ItemsQuery, List, ListQuery, ProjectKey, View};
 
 const READY: &str = "organization/projects/v1/ready";
@@ -61,11 +64,12 @@ fn ensure_ready(context: &Transaction<'_>) -> Result<()> {
     if context.document::<bool>(READY)? != Some(true) {
         return Err(Error::SchemaUnavailable);
     }
-    Ok(())
+    ledger::ensure_ready(context)
 }
 pub(in crate::cells::organization) fn initialize(context: &Transaction<'_>) -> Result<()> {
     context.install_schema(include_str!("schema.sql"))?;
-    context.put_document(READY, &true)
+    context.put_document(READY, &true)?;
+    ledger::initialize(context)
 }
 fn epoch(context: &Transaction<'_>, person: Uuid) -> Result<u64> {
     let rows = context.query(
@@ -141,24 +145,50 @@ fn properties_valid(context: &Transaction<'_>, properties: &Properties) -> Resul
         })
 }
 pub(crate) struct Prepare;
-impl Mutation for Prepare {
+#[derive(Clone, Debug, Deserialize, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct PrepareInput {
+    pub actor: Uuid,
+    pub version: u64,
+}
+pub(crate) struct GetPreparation;
+impl Read for GetPreparation {
     const CLASS: &'static str = super::CLASS;
     const ID: u32 = 30;
     type Input = Caller;
-    type Output = bool;
-    fn execute(context: &mut Transaction<'_>, _: Caller) -> Result<MutationResult<bool>> {
+    type Output = crate::cells::repository::collaboration::lifecycle::LifecycleStatus;
+    fn execute(context: &mut Transaction<'_>, _: Caller) -> Result<Self::Output> {
+        ledger::status(context)
+    }
+}
+impl Mutation for Prepare {
+    const CLASS: &'static str = super::CLASS;
+    const ID: u32 = 30;
+    type Input = PrepareInput;
+    type Output = crate::cells::repository::collaboration::lifecycle::LifecycleStatus;
+    fn execute(
+        context: &mut Transaction<'_>,
+        input: PrepareInput,
+    ) -> Result<MutationResult<Self::Output>> {
         teams::ensure_ready(context)?;
         if context.document::<bool>(READY)? != Some(true) {
             initialize(context)?;
         }
-        Ok(MutationResult::Success(true))
+        Ok(MutationResult::Success(ledger::prepare(
+            context,
+            ledger::Owner::Organization,
+            input.version,
+        )?))
     }
 }
 pub(in crate::cells::organization) fn handles(operation: u32, mutation: bool) -> bool {
     if mutation {
         matches!(operation, Prepare::ID | Change::ID)
     } else {
-        matches!(operation, List::ID | Get::ID | Items::ID)
+        matches!(
+            operation,
+            GetPreparation::ID | List::ID | Get::ID | Items::ID | GetHistory::ID
+        )
     }
 }
 pub(in crate::cells::organization) fn authorize(
@@ -174,7 +204,7 @@ pub(in crate::cells::organization) fn authorize(
     let who: Person = serde_json::from_value(input.clone())?;
     actor(who.actor)?;
     let membership = member(context, who.actor)?;
-    if mutation && operation == Prepare::ID {
+    if operation == Prepare::ID {
         return if membership.is_some_and(|member| member.active && member.role == Role::Owner) {
             Ok(())
         } else {

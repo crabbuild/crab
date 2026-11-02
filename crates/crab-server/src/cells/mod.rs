@@ -7,6 +7,7 @@ mod client;
 pub(crate) mod directory;
 mod initializer;
 pub(crate) mod organization;
+pub(crate) mod planning;
 mod records;
 pub(crate) mod runtime;
 pub(crate) use initializer::initialize_repository;

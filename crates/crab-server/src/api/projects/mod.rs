@@ -19,6 +19,7 @@ use serde::Deserialize;
 use serde_json::{Value, json};
 use std::sync::Arc;
 use uuid::Uuid;
+mod history;
 
 pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
     Router::new()
@@ -34,6 +35,10 @@ pub(super) fn routes(server: Arc<Server>) -> Router<Arc<Server>> {
         .route("/api/repos/{owner}/{name}/projects/commands", post(change))
         .route("/api/repos/{owner}/{name}/projects/cancel", post(cancel))
         .route("/api/repos/{owner}/{name}/projects/{project}", get(detail))
+        .route(
+            "/api/repos/{owner}/{name}/projects/{project}/history",
+            get(history::read),
+        )
         .route(
             "/api/repos/{owner}/{name}/projects/{project}/items",
             get(items),
@@ -116,6 +121,7 @@ async fn detail(
 #[derive(Default, Deserialize)]
 #[serde(default, deny_unknown_fields)]
 struct Filter {
+    item: Option<Uuid>,
     after: Option<Uuid>,
     revision: Option<u64>,
     q: String,
@@ -138,6 +144,7 @@ async fn items(
                 None,
                 projects::ItemQuery {
                     project,
+                    item: input.item,
                     after: input.after,
                     revision: input.revision,
                     query: input.q,

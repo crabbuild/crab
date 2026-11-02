@@ -6868,6 +6868,7 @@ main {
 @media (max-width: 640px) {
   .organization-project-shell {
     grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: auto 1fr;
   }
   .organization-project-nav {
     padding: --spacing(3) --spacing(4);

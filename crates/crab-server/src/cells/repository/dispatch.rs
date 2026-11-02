@@ -13,6 +13,7 @@ pub(in crate::cells) fn dispatch_mutation(
     input: serde_json::Value,
 ) -> crate::cells::Result<MutationResult<serde_json::Value>> {
     let maintenance = id == projects::preparation::Prepare::ID
+        || id == projection::preparation::Prepare::ID
         || id == <search::index::RebuildIndex as Mutation>::ID
         || id == <assignments::MigrateAssignments as Mutation>::ID
         || id == issues::lifecycle::PrepareIssueLifecycle::ID
@@ -33,10 +34,16 @@ pub(in crate::cells) fn dispatch_mutation(
         || id == collaboration::state::tests::FailedPreparation::ID
         || id == issues::lifecycle::tests::Historical::ID
         || id == pulls::lifecycle::tests::Historical::ID;
+    #[cfg(test)]
+    let maintenance = maintenance || id == projection::tests::Historical::ID;
     if !maintenance {
         search::index::ensure_ready(context)?;
     }
     let result = match id {
+        #[cfg(test)]
+        projection::tests::Historical::ID => {
+            invoke_mutation::<projection::tests::Historical>(context, input)
+        }
         #[cfg(test)]
         projects::tests::Historical::ID => {
             invoke_mutation::<projects::tests::Historical>(context, input)
@@ -44,6 +51,9 @@ pub(in crate::cells) fn dispatch_mutation(
         projects::Change::ID => invoke_mutation::<projects::Change>(context, input),
         projects::preparation::Prepare::ID => {
             invoke_mutation::<projects::preparation::Prepare>(context, input)
+        }
+        projection::preparation::Prepare::ID => {
+            invoke_mutation::<projection::preparation::Prepare>(context, input)
         }
         #[cfg(test)]
         collaboration::creation::tests::ExhaustProgress::ID => {
@@ -210,11 +220,21 @@ pub(in crate::cells) fn dispatch_read(
     input: serde_json::Value,
 ) -> crate::cells::Result<serde_json::Value> {
     match id {
+        #[cfg(test)]
+        projection::tests::Inspect::ID => invoke_read::<projection::tests::Inspect>(context, input),
+        #[cfg(test)]
+        projection::tests::InspectHistorical::ID => {
+            invoke_read::<projection::tests::InspectHistorical>(context, input)
+        }
+        projection::preparation::GetState::ID => {
+            invoke_read::<projection::preparation::GetState>(context, input)
+        }
         projects::preparation::GetState::ID => {
             invoke_read::<projects::preparation::GetState>(context, input)
         }
         projects::ListProjects::ID => invoke_read::<projects::ListProjects>(context, input),
         projects::GetProject::ID => invoke_read::<projects::GetProject>(context, input),
+        projects::GetHistory::ID => invoke_read::<projects::GetHistory>(context, input),
         projects::Candidates::ID => invoke_read::<projects::Candidates>(context, input),
         projects::WorkSummaries::ID => invoke_read::<projects::WorkSummaries>(context, input),
         projects::Items::ID => invoke_read::<projects::Items>(context, input),

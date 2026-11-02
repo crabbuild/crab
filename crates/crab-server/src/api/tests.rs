@@ -47,6 +47,7 @@ fn stale_projection_uses_canonical_attribution_when_path_state_is_published() {
         ready_epoch: Some(1),
         source_token: Some("previous".into()),
         generation: Some(1),
+        collection_epoch: None,
     };
 
     assert_eq!(
@@ -62,6 +63,7 @@ fn stale_projection_without_path_state_remains_indexing() {
         ready_epoch: None,
         source_token: None,
         generation: None,
+        collection_epoch: None,
     };
 
     assert_eq!(
@@ -77,6 +79,7 @@ fn matching_projection_is_preferred_over_canonical_attribution() {
         ready_epoch: Some(2),
         source_token: Some("current".into()),
         generation: Some(2),
+        collection_epoch: None,
     };
 
     assert_eq!(
@@ -92,6 +95,7 @@ fn newer_path_state_waits_when_the_request_pinned_the_previous_generation() {
         ready_epoch: Some(1),
         source_token: Some("previous".into()),
         generation: Some(1),
+        collection_epoch: None,
     };
 
     assert_eq!(

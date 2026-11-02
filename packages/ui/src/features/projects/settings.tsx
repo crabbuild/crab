@@ -1,5 +1,5 @@
 import { ProjectDraftReview } from "./review";
-import { useId, useState } from "react";
+import { useId } from "react";
 import { PlusIcon, Trash2Icon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import {
@@ -23,6 +23,7 @@ import { Checkbox } from "@/components/ui/checkbox";
 import { Tabs, TabsContent, TabsList, TabsTrigger } from "@/components/ui/tabs";
 import { useProjectCommands, CommandError } from "./commands";
 import type { Project, Field as ProjectField, Layout } from "./model";
+import { useProjectDraft } from "./drafts";
 export function ProjectSettings({
   target,
   project,
@@ -32,10 +33,22 @@ export function ProjectSettings({
   project: Project;
   onClose: () => void;
 }) {
-  const [draft, setDraft] = useState(project.definition);
-  const [statuses, setStatuses] = useState(draft.statuses.join("\n"));
-  const [archived, setArchived] = useState(project.archived);
-  const [version, setVersion] = useState(project.version);
+  const saved = useProjectDraft(
+    { target, project: project.id },
+    {
+      kind: "settings",
+      definition: project.definition,
+      statuses: project.definition.statuses.join("\n"),
+      archived: project.archived,
+      version: project.version,
+    },
+  );
+  const { definition: draft, statuses, archived, version } = saved.value;
+  const setDraft = (definition: Project["definition"]) =>
+    saved.update({ definition });
+  const setStatuses = (statuses: string) => saved.update({ statuses });
+  const setArchived = (archived: boolean) => saved.update({ archived });
+  const setVersion = (version: number) => saved.update({ version });
   const commands = useProjectCommands();
   const id = useId();
   function field(index: number, value: ProjectField) {
@@ -85,12 +98,15 @@ export function ProjectSettings({
               },
               archived,
             } as const;
+            const checkpoint = saved.checkpoint();
+            if (!checkpoint) return;
             const result =
               "repo" in target
-                ? await commands.submit(target.repo, command)
+                ? await commands.submit(target.repo, command, checkpoint)
                 : await commands.submitOrganization(
                     target.organization,
                     command,
+                    checkpoint,
                   );
             if (result?.outcome === "applied") onClose();
           }}
@@ -505,6 +521,7 @@ export function ProjectSettings({
               </TabsContent>
             </Tabs>
           </fieldset>
+          {saved.feedback}
           <CommandError />
           <ProjectDraftReview
             target={target}

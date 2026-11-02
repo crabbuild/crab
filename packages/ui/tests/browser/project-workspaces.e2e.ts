@@ -72,6 +72,7 @@ async function fixture(page: Page) {
   };
   const linked = new Set<string>();
   const items: { item: Item; repository: string | null }[] = [];
+  const revisions = new Map<string, number>();
   const decisions = new Map<string, Outcome>();
   const submissions: { request_id: string; command: WorkspaceCommand }[] = [];
   let lose = false;
@@ -161,7 +162,30 @@ async function fixture(page: Page) {
             definition: { ...project.definition, name: command.name },
           };
           outcome = { outcome: "applied", project: project.id, version: 1 };
-        } else if (command.version !== project.version)
+        } else if (
+          (command.kind === "item" || command.kind === "remove") &&
+          command.version !==
+            (revisions.get(
+              typeof command.item === "string" ? command.item : command.item.id,
+            ) ?? 0)
+        )
+          outcome = {
+            outcome: "item_conflict",
+            project: project.id,
+            item:
+              typeof command.item === "string" ? command.item : command.item.id,
+            version:
+              revisions.get(
+                typeof command.item === "string"
+                  ? command.item
+                  : command.item.id,
+              ) ?? 0,
+          };
+        else if (
+          command.kind !== "item" &&
+          command.kind !== "remove" &&
+          command.version !== project.version
+        )
           outcome = {
             outcome: "rejected",
             reason:
@@ -174,6 +198,7 @@ async function fixture(page: Page) {
             else linked.delete(command.repository);
           }
           if (command.kind === "item") {
+            revisions.set(command.item.id, command.version + 1);
             const row = { item: command.item, repository: command.repository };
             const index = items.findIndex(
               (item) => item.item.id === command.item.id,
@@ -182,6 +207,7 @@ async function fixture(page: Page) {
             else items[index] = row;
           }
           if (command.kind === "remove") {
+            revisions.set(command.item, command.version + 1);
             const index = items.findIndex(
               (item) => item.item.id === command.item,
             );
@@ -229,6 +255,8 @@ async function fixture(page: Page) {
       const matching = items.filter(
         (row) =>
           (!repository || row.repository === repository) &&
+          (!url.searchParams.has("item") ||
+            row.item.id === url.searchParams.get("item")) &&
           (!status || row.item.status === status),
       );
       const counts: Record<string, number> = {};
@@ -241,6 +269,7 @@ async function fixture(page: Page) {
           page: {
             project,
             items: matching.map((row) => ({
+              version: revisions.get(row.item.id),
               item: row.item,
               repository:
                 repositories.find((repo) => repo.id === row.repository) ?? null,
@@ -268,6 +297,12 @@ async function fixture(page: Page) {
   return {
     submissions,
     items,
+    editFirstItem(title: string) {
+      const row = items[0];
+      row.item = { ...row.item, title };
+      revisions.set(row.item.id, (revisions.get(row.item.id) ?? 0) + 1);
+      project = { ...project, version: project.version + 1 };
+    },
     addDateField() {
       project.definition.fields.push({
         id: "01900000-0000-7000-8000-000000000031",
@@ -377,6 +412,238 @@ test("one project coordinates matching issue numbers across repositories with pl
   expect(
     await page.evaluate(() => document.documentElement.scrollWidth),
   ).toBeLessThanOrEqual(390);
+});
+
+test("a same-item conflict shows the saved edit and keeps the local draft for an explicit retry", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  await page.goto(`${home}/${projectId}`);
+  await page
+    .getByRole("button", { name: "Add work", exact: true })
+    .first()
+    .click();
+  const editor = page.getByRole("dialog");
+  await editor.getByLabel("Title", { exact: true }).fill("Original plan");
+  await editor
+    .getByRole("button", { name: "Add to project", exact: true })
+    .click();
+  await expect(editor).toHaveCount(0);
+  await page
+    .getByRole("button", { name: "Edit Original plan", exact: true })
+    .click();
+  await editor.getByLabel("Title", { exact: true }).fill("My retained draft");
+  state.editFirstItem("Teammate's saved plan");
+  await editor.getByRole("button", { name: "Save item", exact: true }).click();
+  await expect(editor.getByRole("alert")).toContainText(
+    "Your draft is preserved",
+  );
+  await editor
+    .getByRole("button", { name: "Review saved item", exact: true })
+    .click();
+  await expect(
+    editor.getByRole("cell", { name: "Teammate's saved plan", exact: true }),
+  ).toBeVisible();
+  await expect(
+    editor.getByRole("cell", { name: "My retained draft", exact: true }),
+  ).toBeVisible();
+  await editor
+    .getByRole("button", {
+      name: "Keep my draft against this revision",
+      exact: true,
+    })
+    .click();
+  await editor.getByRole("button", { name: "Save item", exact: true }).click();
+  await expect(editor).toHaveCount(0);
+  expect(state.items[0].item.title).toBe("My retained draft");
+  expect(state.submissions.at(-1)?.command).toMatchObject({
+    kind: "item",
+    version: 2,
+  });
+  expect(state.submissions.at(-1)?.request_id).not.toBe(
+    state.submissions.at(-2)?.request_id,
+  );
+});
+
+test("project history presents attributed field changes without overflowing a mobile viewport", async ({
+  page,
+}) => {
+  await fixture(page);
+  await page.route(
+    `**/api/organizations/${organization}/projects/${projectId}/history*`,
+    (route) =>
+      route.fulfill({
+        json: {
+          items: [
+            {
+              version: 3,
+              at_ms: Date.UTC(2026, 10, 1),
+              actor: { id: actor, profile: { name: "Alice" } },
+              target: {
+                kind: "item",
+                id: "01900000-0000-7000-8000-000000000088",
+                source: null,
+                restricted: false,
+              },
+              changes: [
+                { field: "/status", before: "Todo", after: "In progress" },
+              ],
+            },
+          ],
+          next: null,
+        },
+      }),
+  );
+  await page.setViewportSize({ width: 390, height: 844 });
+  await page.goto(`${home}/${projectId}`);
+  await page.getByRole("tab", { name: "History", exact: true }).click();
+  const history = page.getByRole("region", {
+    name: "Project history",
+    exact: true,
+  });
+  await expect(history).toContainText("Alice");
+  await expect(history).toContainText("Revision 3");
+  await history
+    .getByRole("button", { name: "View 1 field changes", exact: true })
+    .click();
+  await expect(
+    history.getByRole("cell", { name: "Todo", exact: true }),
+  ).toBeVisible();
+  await expect(
+    history.getByRole("cell", { name: "In progress", exact: true }),
+  ).toBeVisible();
+  expect(
+    await page.evaluate(() => document.documentElement.scrollWidth),
+  ).toBeLessThanOrEqual(390);
+  await expectNoAccessibilityViolations(page);
+  await page.screenshot({
+    path: test.info().outputPath("project-history-mobile.png"),
+  });
+});
+
+test("an unfinished item draft survives reload and account changes without adopting a newer item revision", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  await page.goto(`${home}/${projectId}`);
+  await page
+    .getByRole("button", { name: "Add work", exact: true })
+    .first()
+    .click();
+  const editor = page.getByRole("dialog");
+  await editor.getByLabel("Title", { exact: true }).fill("Original task");
+  await editor
+    .getByRole("button", { name: "Add to project", exact: true })
+    .click();
+  await expect(editor).toHaveCount(0);
+  const originalId = state.items[0].item.id;
+  await page
+    .getByRole("button", { name: "Edit Original task", exact: true })
+    .click();
+  await editor
+    .getByLabel("Title", { exact: true })
+    .fill("Alice's unfinished draft");
+  await editor
+    .getByLabel("Description", { exact: true })
+    .fill("Retain this text through reload.");
+  state.editFirstItem("Bob's committed edit");
+  await page.route("**/api/session", (route) =>
+    route.fulfill({
+      json: {
+        authenticated: true,
+        mode: "oidc",
+        csrf: "bob-csrf",
+        user: { issuer: "test", subject: "bob", name: "Bob" },
+      },
+    }),
+  );
+  await page.reload();
+  await expect(
+    page.getByRole("heading", { name: "Platform release", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Resume item draft", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByText("Alice's unfinished draft", { exact: true }),
+  ).toHaveCount(0);
+  await page.unroute("**/api/session");
+  await page.reload();
+  await page
+    .getByRole("button", { name: "Resume item draft", exact: true })
+    .click();
+  await expect(editor.getByLabel("Title", { exact: true })).toHaveValue(
+    "Alice's unfinished draft",
+  );
+  await expect(editor.getByLabel("Description", { exact: true })).toHaveValue(
+    "Retain this text through reload.",
+  );
+  await editor.getByRole("button", { name: "Save item", exact: true }).click();
+  expect(state.submissions.at(-1)?.command).toMatchObject({
+    kind: "item",
+    version: 1,
+    item: { id: originalId },
+  });
+  await expect(editor.getByRole("alert")).toContainText(
+    "Your draft is preserved",
+  );
+  await editor
+    .getByRole("button", { name: "Review saved item", exact: true })
+    .click();
+  await expect(
+    editor.getByRole("cell", { name: "Bob's committed edit", exact: true }),
+  ).toBeVisible();
+  await editor
+    .getByRole("button", {
+      name: "Keep my draft against this revision",
+      exact: true,
+    })
+    .click();
+  await editor.getByRole("button", { name: "Save item", exact: true }).click();
+  await expect(editor).toHaveCount(0);
+  await page.reload();
+  await expect(
+    page.getByRole("button", { name: "Resume item draft", exact: true }),
+  ).toHaveCount(0);
+});
+
+test("unfinished project creation and planning properties restore their captured values", async ({
+  page,
+}) => {
+  await fixture(page);
+  await page.goto(home);
+  await page.getByRole("button", { name: "New project", exact: true }).click();
+  await page
+    .getByLabel("Project name", { exact: true })
+    .fill("Unsubmitted launch");
+  await page.reload();
+  await page
+    .getByRole("button", { name: "Resume new project draft", exact: true })
+    .click();
+  await expect(page.getByLabel("Project name", { exact: true })).toHaveValue(
+    "Unsubmitted launch",
+  );
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Cancel", exact: true })
+    .click();
+  await page.goto(`${home}/${projectId}?view=overview`);
+  await page
+    .getByRole("complementary", { name: "Project details", exact: true })
+    .getByRole("button", { name: "Edit", exact: true })
+    .click();
+  const editor = page.getByRole("dialog", {
+    name: "Project properties",
+    exact: true,
+  });
+  await pickDate(page, "Target date", "2026-11-20");
+  await page.reload();
+  await page
+    .getByRole("button", { name: "Resume properties draft", exact: true })
+    .click();
+  await expect(
+    editor.getByRole("button", { name: /^Target date:/ }),
+  ).toContainText("Nov 20, 2026");
 });
 test.describe("project date selection", () => {
   test.use({ timezoneId: "Pacific/Kiritimati" });
@@ -516,4 +783,184 @@ test("stale project filters can be reset without losing the workspace", async ({
   await expect(
     page.getByRole("combobox", { name: "Filter by status", exact: true }),
   ).toHaveText("All statuses");
+});
+
+test("a lost submission survives reload and stays bound to its original account", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  await page.goto(home);
+  state.loseNext();
+  await page.getByRole("button", { name: "New project", exact: true }).click();
+  await page
+    .getByLabel("Project name", { exact: true })
+    .fill("Reload recovery");
+  await page
+    .getByRole("button", { name: "Create project", exact: true })
+    .click();
+  await expect(
+    page
+      .getByRole("dialog")
+      .getByRole("button", { name: "Retry submission", exact: true }),
+  ).toBeVisible();
+  const original = structuredClone(state.submissions[0]);
+  await page.route("**/api/session", (route) =>
+    route.fulfill({
+      json: {
+        authenticated: true,
+        mode: "oidc",
+        csrf: "bob-csrf",
+        user: { issuer: "test", subject: "bob", name: "Bob" },
+      },
+    }),
+  );
+  await page.reload();
+  await expect(
+    page.getByRole("heading", { name: "Projects", exact: true }),
+  ).toBeVisible();
+  await expect(
+    page.getByRole("button", { name: "Retry submission", exact: true }),
+  ).toHaveCount(0);
+  expect(state.submissions).toHaveLength(1);
+  await page.unroute("**/api/session");
+  await page.reload();
+  await page
+    .getByRole("button", { name: "Retry submission", exact: true })
+    .click();
+  await expect(
+    page.getByText("Project submission", { exact: true }),
+  ).toHaveCount(0);
+  expect(state.submissions[1]).toEqual(original);
+  await page.reload();
+  await expect(
+    page.getByRole("button", { name: "Retry submission", exact: true }),
+  ).toHaveCount(0);
+  await expect(
+    page.getByRole("button", { name: "Resume new project draft", exact: true }),
+  ).toHaveCount(0);
+  await page.getByRole("button", { name: "New project", exact: true }).click();
+  await expect(page.getByLabel("Project name", { exact: true })).toHaveValue(
+    "",
+  );
+});
+
+test("a failed recovery checkpoint prevents the new native request", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  await page.addInitScript(() => {
+    const setItem = Storage.prototype.setItem;
+    let full = true;
+    window.addEventListener("qualification-storage-available", () => {
+      full = false;
+    });
+    Storage.prototype.setItem = function (key: string, value: string) {
+      if (full && key.startsWith("crab.projects.submission."))
+        throw new DOMException("Storage full", "QuotaExceededError");
+      setItem.call(this, key, value);
+    };
+  });
+  await page.goto(home);
+  await page.getByRole("button", { name: "New project", exact: true }).click();
+  await page.getByLabel("Project name", { exact: true }).fill("Unsent project");
+  await page
+    .getByRole("button", { name: "Create project", exact: true })
+    .click();
+  await expect(page.getByRole("dialog").getByRole("alert")).toBeVisible();
+  expect(state.submissions).toHaveLength(0);
+  await page.evaluate(() =>
+    window.dispatchEvent(new Event("qualification-storage-available")),
+  );
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Retry recovery storage", exact: true })
+    .click();
+  await page
+    .getByRole("dialog")
+    .getByRole("button", { name: "Create project", exact: true })
+    .click();
+  await expect(
+    page.getByRole("heading", { name: "Unsent project", exact: true }),
+  ).toBeVisible();
+  expect(state.submissions).toHaveLength(1);
+});
+
+test("draft storage failure retains the local text and prevents an uncheckpointed submission", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  await page.addInitScript(() => {
+    const write = Storage.prototype.setItem;
+    Storage.prototype.setItem = function (key: string, value: string) {
+      if (key.startsWith("crab.projects.draft."))
+        throw new DOMException("Storage unavailable", "QuotaExceededError");
+      write.call(this, key, value);
+    };
+  });
+  await page.goto(home);
+  await page.getByRole("button", { name: "New project", exact: true }).click();
+  const editor = page.getByRole("dialog");
+  await editor
+    .getByLabel("Project name", { exact: true })
+    .fill("Keep this local text");
+  await expect(editor.getByRole("alert")).toContainText("could not be saved");
+  await editor
+    .getByRole("button", { name: "Create project", exact: true })
+    .click();
+  await expect(editor.getByRole("alert")).toContainText(
+    "No submission was sent",
+  );
+  await expect(editor.getByLabel("Project name", { exact: true })).toHaveValue(
+    "Keep this local text",
+  );
+  expect(state.submissions).toHaveLength(0);
+});
+
+test("an unsupported draft stays exportable and cannot be silently overwritten", async ({
+  page,
+}) => {
+  const state = await fixture(page);
+  await page.goto(home);
+  await page.getByRole("button", { name: "New project", exact: true }).click();
+  await page
+    .getByLabel("Project name", { exact: true })
+    .fill("Retained format");
+  const original = await page.evaluate(() => {
+    const key = Object.keys(sessionStorage).find((key) =>
+      key.startsWith("crab.projects.draft."),
+    )!;
+    const saved = JSON.parse(sessionStorage.getItem(key)!);
+    saved.format = 999;
+    const content = JSON.stringify(saved);
+    sessionStorage.setItem(key, content);
+    return { key, content };
+  });
+  await page.reload();
+  await expect(
+    page.getByRole("link", { name: "Export create draft", exact: true }),
+  ).toBeVisible();
+  await page
+    .getByRole("button", { name: "Resume new project draft", exact: true })
+    .click();
+  const editor = page.getByRole("dialog");
+  await expect(editor.getByRole("alert")).toContainText(
+    "saved record has been retained",
+  );
+  await editor
+    .getByLabel("Project name", { exact: true })
+    .fill("Replacement must not erase it");
+  await editor
+    .getByRole("button", { name: "Create project", exact: true })
+    .click();
+  expect(state.submissions).toHaveLength(0);
+  expect(
+    await page.evaluate((key) => sessionStorage.getItem(key), original.key),
+  ).toBe(original.content);
+  await editor.getByRole("button", { name: "Cancel", exact: true }).click();
+  await page
+    .getByRole("button", { name: "Discard create draft", exact: true })
+    .click();
+  await expect(
+    page.getByRole("button", { name: "Resume new project draft", exact: true }),
+  ).toHaveCount(0);
 });

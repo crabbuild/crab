@@ -256,7 +256,7 @@ pub async fn serve(config: Config) -> Result<()> {
         node_name,
         transport.http.clone(),
         transport.stream_http.clone(),
-        budget.max_active_cells,
+        budget,
     )
     .await;
     let started = match started {
@@ -296,7 +296,7 @@ pub async fn serve(config: Config) -> Result<()> {
         )),
         catalog: Some(catalog),
         catalog_healthy: AtomicBool::new(true),
-        node_healthy: AtomicBool::new(true),
+        node_healthy: AtomicBool::new(false),
         cell_capacity: capacity,
         metrics,
     });
@@ -308,18 +308,6 @@ pub async fn serve(config: Config) -> Result<()> {
             .await
     }));
     let mut background = tokio::task::JoinSet::new();
-    let refresh = server.clone();
-    background.spawn(async move {
-        background::refresh_catalog(refresh).await;
-        Ok(())
-    });
-    let projection = server.clone();
-    background.spawn(async move { background::sweep_projections(projection).await });
-    let integrity = server.clone();
-    background.spawn(async move {
-        crate::integrity::run(integrity).await;
-        Ok(())
-    });
     let stop = cancellation.clone();
     let public_app = http::router(server.clone());
     let public = async move {
@@ -331,41 +319,58 @@ pub async fn serve(config: Config) -> Result<()> {
     let mut management_ended = false;
     let mut node_ended = false;
     let mut public_ended = false;
-    let ready = started
-        .client
-        .verify_repositories(
+    // The block drops an interrupted verification call before shutdown drains
+    // ingress; retaining its request would hold that drain open unnecessarily.
+    let primary: Result<()> = {
+        let recovery = started.client.verify_repositories(
             server
                 .repositories
                 .values()
                 .iter()
                 .map(|repository| repository.id)
                 .collect(),
-        )
-        .await;
-    let primary: Result<()> = match ready {
-        Err(error) => Err(error),
-        Ok(()) => tokio::select! {
-        result = &mut public => { public_ended = true; result.map_err(Into::into) },
-        result = &mut management_task => {
-            management_ended = true;
-            result.map_err(crate::Error::from).and_then(|result| result.map_err(Into::into))
-                .and(Err(crate::Error::Config("management listener stopped unexpectedly")))
-        },
-        result = node.finished() => {
-            node_ended = true;
-            result.map_err(crate::cells::Error::sdk).map_err(crate::Error::Cell)
-                .and(Err(crate::Error::Config("Cellar stopped unexpectedly")))
-        },
-        result = background.join_next() => {
-            match result {
-                Some(Ok(Err(error))) => Err(error),
-                Some(Err(error)) => Err(error.into()),
-                _ => Err(crate::Error::Config("server background task stopped unexpectedly")),
+        );
+        let shutdown = shutdown_signal();
+        tokio::pin!(recovery, shutdown);
+        let mut verified = false;
+        // Startup participates in the same lifecycle loop as serving. Signals,
+        // peer/runtime failures and management cancellation must drain a restoring
+        // node too; readiness probes must not launch maintenance before verification.
+        loop {
+            tokio::select! {
+              result = &mut recovery, if !verified => {
+                  if let Err(error) = result { break Err(error); }
+                  verified = true;
+                  server.node_healthy.store(true, Ordering::Release);
+                  let refresh = server.clone();
+                  background.spawn(async move { background::refresh_catalog(refresh).await; Ok(()) });
+                  let projection = server.clone();
+                  background.spawn(async move { background::sweep_projections(projection).await });
+                  let integrity = server.clone();
+                  background.spawn(async move { crate::integrity::run(integrity).await; Ok(()) });
+              },
+              result = &mut public, if verified => { public_ended = true; break result.map_err(Into::into); },
+              result = &mut management_task => {
+                  management_ended = true;
+                  break result.map_err(crate::Error::from).and_then(|result| result.map_err(Into::into))
+                      .and(Err(crate::Error::Config("management listener stopped unexpectedly")));
+              },
+              result = node.finished() => {
+                  node_ended = true;
+                  break result.map_err(crate::cells::Error::sdk).map_err(crate::Error::Cell)
+                      .and(Err(crate::Error::Config("Cellar stopped unexpectedly")));
+              },
+              result = background.join_next(), if verified => {
+                  break match result {
+                      Some(Ok(Err(error))) => Err(error),
+                      Some(Err(error)) => Err(error.into()),
+                      _ => Err(crate::Error::Config("server background task stopped unexpectedly")),
+                  };
+              },
+              () = &mut shutdown => break Ok(()),
+              () = cancellation.cancelled() => break Ok(()),
             }
-        },
-        () = shutdown_signal() => Ok(()),
-        () = cancellation.cancelled() => Ok(()),
-        },
+        }
     };
     server.node_healthy.store(false, Ordering::Release);
     cancellation.cancel();

@@ -22,6 +22,7 @@ import {
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
 import { Tabs, TabsList, TabsTrigger, TabsContent } from "@/components/ui/tabs";
 import { useProjectCommands, CommandError } from "./commands";
+import { DraftRecovery, useProjectDraft } from "./drafts";
 import {
   projectHref,
   type Listing,
@@ -55,8 +56,24 @@ export function CreateProject({ repo }: { repo: Repository }) {
       mounted.current = false;
     };
   }, []);
-  const [name, setName] = useState("");
-  const [choice, setChoice] = useState("builtin:team-planning");
+  const saved = useProjectDraft(
+    { target: { repo }, project: null },
+    {
+      kind: "create",
+      name: "",
+      template: "builtin:team-planning",
+      sourceVersion: null as number | null,
+    },
+  );
+  const { name, template: choice } = saved.value;
+  const setName = (name: string) => saved.update({ name });
+  const setChoice = (template: string) =>
+    saved.update({
+      template,
+      sourceVersion:
+        custom.data?.items.find((project) => project.id === template)
+          ?.version ?? null,
+    });
   const [search, setSearch] = useState("");
   const [after, setAfter] = useState<string>();
   const templates = useRequest<{ items: Template[] }>(
@@ -82,117 +99,91 @@ export function CreateProject({ repo }: { repo: Repository }) {
         kind: "copy" as const,
         id: crypto.randomUUID(),
         source: source.id,
-        version: source.version,
+        version: saved.value.sourceVersion ?? 0,
         name: name.trim(),
       };
     }
-    const result = await commands.submit(repo, command);
+    const checkpoint = saved.checkpoint();
+    if (!checkpoint) return;
+    const result = await commands.submit(repo, command, checkpoint);
     if (mounted.current && result?.outcome === "applied" && result.project) {
       setOpen(false);
       navigate(projectHref(repo, result.project));
     }
   }
   return (
-    <Dialog
-      open={open}
-      onOpenChange={(value) => {
-        if (!commands.locked) setOpen(value);
-      }}
-    >
-      <DialogTrigger asChild>
-        <Button>
-          <PlusIcon data-icon="inline-start" />
-          New project
-        </Button>
-      </DialogTrigger>
-      <DialogContent
-        className="project-template-dialog"
-        onEscapeKeyDown={(e) => {
-          if (commands.locked) e.preventDefault();
-        }}
-        onInteractOutside={(e) => {
-          if (commands.locked) e.preventDefault();
+    <>
+      <DraftRecovery
+        scope={{ target: { repo }, project: null }}
+        onResume={() => setOpen(true)}
+      />
+      <Dialog
+        open={open}
+        onOpenChange={(value) => {
+          if (!commands.locked) setOpen(value);
         }}
       >
-        <DialogHeader>
-          <DialogTitle>Create a project</DialogTitle>
-          <DialogDescription>
-            Bring issues, sub-issues, and pull requests into one plan.
-          </DialogDescription>
-        </DialogHeader>
-        <form
-          onSubmit={(e) => {
-            e.preventDefault();
-            void create();
+        <DialogTrigger asChild>
+          <Button>
+            <PlusIcon data-icon="inline-start" />
+            New project
+          </Button>
+        </DialogTrigger>
+        <DialogContent
+          className="project-template-dialog"
+          onEscapeKeyDown={(e) => {
+            if (commands.locked) e.preventDefault();
           }}
-          className="flex min-h-0 flex-col gap-5"
+          onInteractOutside={(e) => {
+            if (commands.locked) e.preventDefault();
+          }}
         >
-          <FieldGroup>
-            <Field>
-              <FieldLabel htmlFor="project-name">Project name</FieldLabel>
-              <Input
-                id="project-name"
-                value={name}
-                onChange={(e) => setName(e.target.value)}
-                maxLength={100}
-                disabled={commands.locked}
-                placeholder="e.g. Next release"
-                required
+          <DialogHeader>
+            <DialogTitle>Create a project</DialogTitle>
+            <DialogDescription>
+              Bring issues, sub-issues, and pull requests into one plan.
+            </DialogDescription>
+          </DialogHeader>
+          <form
+            onSubmit={(e) => {
+              e.preventDefault();
+              void create();
+            }}
+            className="flex min-h-0 flex-col gap-5"
+          >
+            <FieldGroup>
+              <Field>
+                <FieldLabel htmlFor="project-name">Project name</FieldLabel>
+                <Input
+                  id="project-name"
+                  value={name}
+                  onChange={(e) => setName(e.target.value)}
+                  maxLength={100}
+                  disabled={commands.locked}
+                  placeholder="e.g. Next release"
+                  required
+                />
+              </Field>
+            </FieldGroup>
+            <InputGroup>
+              <InputGroupAddon>
+                <SearchIcon />
+              </InputGroupAddon>
+              <InputGroupInput
+                aria-label="Search project templates"
+                placeholder="Search templates…"
+                value={search}
+                onChange={(e) => setSearch(e.target.value)}
               />
-            </Field>
-          </FieldGroup>
-          <InputGroup>
-            <InputGroupAddon>
-              <SearchIcon />
-            </InputGroupAddon>
-            <InputGroupInput
-              aria-label="Search project templates"
-              placeholder="Search templates…"
-              value={search}
-              onChange={(e) => setSearch(e.target.value)}
-            />
-          </InputGroup>
-          <Tabs defaultValue="featured" className="min-h-0">
-            <TabsList>
-              <TabsTrigger value="featured">Templates</TabsTrigger>
-              <TabsTrigger value="custom">From this repository</TabsTrigger>
-            </TabsList>
-            <TabsContent value="featured" className="project-template-scroll">
-              <Result state={templates}>
-                {(data) => (
-                  <RadioGroup
-                    value={choice}
-                    onValueChange={setChoice}
-                    disabled={commands.locked}
-                    className="project-template-grid"
-                  >
-                    {data.items
-                      .filter((t) =>
-                        `${t.definition.name} ${t.description}`
-                          .toLowerCase()
-                          .includes(search.toLowerCase()),
-                      )
-                      .map((t) => (
-                        <label className="project-template-choice" key={t.id}>
-                          <TemplatePreview definition={t.definition} />
-                          <div>
-                            <RadioGroupItem
-                              value={`builtin:${t.id}`}
-                              aria-label={t.definition.name}
-                            />
-                            <strong>{t.definition.name}</strong>
-                            <p>{t.description}</p>
-                          </div>
-                        </label>
-                      ))}
-                  </RadioGroup>
-                )}
-              </Result>
-            </TabsContent>
-            <TabsContent value="custom" className="project-template-scroll">
-              <Result state={custom}>
-                {(data) => (
-                  <>
+            </InputGroup>
+            <Tabs defaultValue="featured" className="min-h-0">
+              <TabsList>
+                <TabsTrigger value="featured">Templates</TabsTrigger>
+                <TabsTrigger value="custom">From this repository</TabsTrigger>
+              </TabsList>
+              <TabsContent value="featured" className="project-template-scroll">
+                <Result state={templates}>
+                  {(data) => (
                     <RadioGroup
                       value={choice}
                       onValueChange={setChoice}
@@ -200,53 +191,91 @@ export function CreateProject({ repo }: { repo: Repository }) {
                       className="project-template-grid"
                     >
                       {data.items
-                        .filter((p) =>
-                          p.definition.name
+                        .filter((t) =>
+                          `${t.definition.name} ${t.description}`
                             .toLowerCase()
                             .includes(search.toLowerCase()),
                         )
-                        .map((p) => (
-                          <label className="project-template-choice" key={p.id}>
-                            <TemplatePreview definition={p.definition} />
+                        .map((t) => (
+                          <label className="project-template-choice" key={t.id}>
+                            <TemplatePreview definition={t.definition} />
                             <div>
                               <RadioGroupItem
-                                value={p.id}
-                                aria-label={p.definition.name}
+                                value={`builtin:${t.id}`}
+                                aria-label={t.definition.name}
                               />
-                              <strong>{p.definition.name}</strong>
-                              <p>{p.definition.description}</p>
+                              <strong>{t.definition.name}</strong>
+                              <p>{t.description}</p>
                             </div>
                           </label>
                         ))}
                     </RadioGroup>
-                    {!data.items.length && (
-                      <p className="muted p-4">
-                        Mark a project as a template in its settings to reuse
-                        its workflow, fields, and views.
-                      </p>
-                    )}
-                    {data.next && (
-                      <Button
-                        type="button"
-                        variant="outline"
-                        onClick={() => setAfter(data.next!)}
+                  )}
+                </Result>
+              </TabsContent>
+              <TabsContent value="custom" className="project-template-scroll">
+                <Result state={custom}>
+                  {(data) => (
+                    <>
+                      <RadioGroup
+                        value={choice}
+                        onValueChange={setChoice}
+                        disabled={commands.locked}
+                        className="project-template-grid"
                       >
-                        More templates
-                      </Button>
-                    )}
-                  </>
-                )}
-              </Result>
-            </TabsContent>
-          </Tabs>
-          <CommandError />
-          <DialogFooter>
-            <Button type="submit" disabled={!name.trim() || commands.locked}>
-              {commands.locked ? "Creating…" : "Create project"}
-            </Button>
-          </DialogFooter>
-        </form>
-      </DialogContent>
-    </Dialog>
+                        {data.items
+                          .filter((p) =>
+                            p.definition.name
+                              .toLowerCase()
+                              .includes(search.toLowerCase()),
+                          )
+                          .map((p) => (
+                            <label
+                              className="project-template-choice"
+                              key={p.id}
+                            >
+                              <TemplatePreview definition={p.definition} />
+                              <div>
+                                <RadioGroupItem
+                                  value={p.id}
+                                  aria-label={p.definition.name}
+                                />
+                                <strong>{p.definition.name}</strong>
+                                <p>{p.definition.description}</p>
+                              </div>
+                            </label>
+                          ))}
+                      </RadioGroup>
+                      {!data.items.length && (
+                        <p className="muted p-4">
+                          Mark a project as a template in its settings to reuse
+                          its workflow, fields, and views.
+                        </p>
+                      )}
+                      {data.next && (
+                        <Button
+                          type="button"
+                          variant="outline"
+                          onClick={() => setAfter(data.next!)}
+                        >
+                          More templates
+                        </Button>
+                      )}
+                    </>
+                  )}
+                </Result>
+              </TabsContent>
+            </Tabs>
+            {saved.feedback}
+            <CommandError />
+            <DialogFooter>
+              <Button type="submit" disabled={!name.trim() || commands.locked}>
+                {commands.locked ? "Creating…" : "Create project"}
+              </Button>
+            </DialogFooter>
+          </form>
+        </DialogContent>
+      </Dialog>
+    </>
   );
 }

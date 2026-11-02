@@ -33,13 +33,7 @@ async fn status(State(server): State<Arc<Server>>) -> app::Result<Json<Value>> {
     }
 }
 async fn initialize(State(server): State<Arc<Server>>) -> app::Result<impl IntoResponse> {
-    if server.cancellation.is_cancelled() {
-        return Err(app::Error::CellUnavailable);
-    }
-    let _permit = server
-        .maintenance_admission
-        .try_acquire()
-        .map_err(|_| app::Error::CellUnavailable)?;
+    let _permit = super::admit(&server)?;
     let cells = server.cells().ok_or(app::Error::CellUnavailable)?;
     cells
         .initialize(Address::Directory)
@@ -49,13 +43,7 @@ async fn initialize(State(server): State<Arc<Server>>) -> app::Result<impl IntoR
 }
 
 async fn migrate(State(server): State<Arc<Server>>) -> app::Result<Json<Value>> {
-    if server.cancellation.is_cancelled() {
-        return Err(app::Error::CellUnavailable);
-    }
-    let _permit = server
-        .maintenance_admission
-        .try_acquire()
-        .map_err(|_| app::Error::CellUnavailable)?;
+    let _permit = super::admit(&server)?;
     let cells = server.cells().ok_or(app::Error::CellUnavailable)?;
     let result = app::command_output(
         cells
@@ -69,13 +57,7 @@ async fn register(
     State(server): State<Arc<Server>>,
     Json(identities): Json<Vec<IdentityKey>>,
 ) -> app::Result<Json<Value>> {
-    if server.cancellation.is_cancelled() {
-        return Err(app::Error::CellUnavailable);
-    }
-    let _permit = server
-        .maintenance_admission
-        .try_acquire()
-        .map_err(|_| app::Error::CellUnavailable)?;
+    let _permit = super::admit(&server)?;
     let cells = server.cells().ok_or(app::Error::CellUnavailable)?;
     let result = cells
         .command::<RegisterAccounts>(Address::Directory, app::mutation_identity()?, identities)

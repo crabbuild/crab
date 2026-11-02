@@ -34,6 +34,9 @@ import { ItemEditor } from "./item";
 import { ProjectSettings } from "./settings";
 import { ProjectBoard, ProjectTable, ProjectRoadmap } from "./views";
 import { useProjectCommands } from "./commands";
+import { ProjectHistory } from "./history";
+import { DraftRecovery } from "./drafts";
+import { checkpointDraft, itemDraft, readDraft } from "./draft-storage";
 import {
   projectHref,
   type Listing,
@@ -209,7 +212,7 @@ function ProjectWorkspace({
   canManage: boolean;
 }) {
   const [project, setProject] = useState(initial);
-  const [editing, setEditing] = useState<Row | "new">();
+  const [editing, setEditing] = useState<Row | "new" | { draft: string }>();
   const [settings, setSettings] = useState(false);
   const selected =
     project.definition.views.find((v) => v.id === url.searchParams.get("pv")) ??
@@ -259,13 +262,38 @@ function ProjectWorkspace({
   const editable =
     manager && !repo.archived && !project.archived && !commands.locked;
   async function changeStatus(row: Row, status: string) {
-    await commands.submit(repo, {
-      kind: "item",
-      project: project.id,
-      version: project.version,
+    if (!commands.account) return;
+    const scope = { target: { repo }, project: project.id, item: row.item.id };
+    const previous = readDraft(commands.account, scope, "item");
+    if (previous?.kind === "item") {
+      checkpointDraft(commands.account, scope, {
+        ...previous,
+        item: { ...previous.item, status },
+      });
+      setEditing(row);
+      return;
+    }
+    const checkpoint = checkpointDraft(commands.account, scope, {
+      ...itemDraft(project, row, repo.id),
       item: { ...row.item, status },
     });
+    await commands.submit(
+      repo,
+      {
+        kind: "item",
+        project: project.id,
+        version: row.version,
+        item: { ...row.item, status },
+      },
+      checkpoint,
+    );
   }
+  const editingRow =
+    typeof editing === "object" && "item" in editing ? editing : undefined;
+  const draftItem =
+    typeof editing === "object" && "draft" in editing
+      ? editing.draft
+      : undefined;
   const Icon =
     selected.layout === "table"
       ? ListIcon
@@ -306,8 +334,18 @@ function ProjectWorkspace({
           )}
         </div>
       </header>
+      <DraftRecovery
+        scope={{ target: { repo }, project: project.id }}
+        disabled={!manager || repo.archived || project.archived}
+        onResume={({ kind, item }) => {
+          if (kind === "settings") setSettings(true);
+          if (kind === "item") setEditing({ draft: item });
+        }}
+      />
       <Tabs
-        value={selected.id}
+        value={
+          url.searchParams.get("pv") === "history" ? "history" : selected.id
+        }
         onValueChange={(pv) =>
           filters({
             pv,
@@ -318,6 +356,7 @@ function ProjectWorkspace({
         }
       >
         <TabsList variant="line" className="project-view-tabs">
+          <TabsTrigger value="history">History</TabsTrigger>
           {project.definition.views.map((view) => {
             const ViewIcon =
               view.layout === "board"
@@ -333,6 +372,13 @@ function ProjectWorkspace({
             );
           })}
         </TabsList>
+        <TabsContent value="history">
+          <ProjectHistory
+            target={{ repo }}
+            project={project.id}
+            definition={project.definition}
+          />
+        </TabsContent>
         <TabsContent value={selected.id}>
           <form
             className="project-filter-bar"
@@ -503,9 +549,11 @@ function ProjectWorkspace({
       </Tabs>
       {editing && (
         <ItemEditor
+          key={draftItem ?? editingRow?.item.id ?? "new"}
           repo={repo}
           project={project}
-          row={editing === "new" ? undefined : editing}
+          row={editingRow}
+          draftItem={draftItem}
           onClose={() => setEditing(undefined)}
         />
       )}

@@ -25,6 +25,9 @@ import {
 import { DiscussionMarkdown } from "@/components/discussion/markdown";
 import type { OrganizationView } from "@/features/organizations/model";
 import { useProjectCommands } from "../commands";
+import { ProjectHistory } from "../history";
+import { DraftRecovery } from "../drafts";
+import { checkpointDraft, itemDraft, readDraft } from "../draft-storage";
 import { projectEndpoint, type ItemPage, type Row } from "../model";
 import { ProjectSettings } from "../settings";
 import { ProjectBoard, ProjectTable, ProjectRoadmap } from "../views";
@@ -143,7 +146,7 @@ function PlanningWorkspace({
   const { project } = detail;
   const commands = useProjectCommands();
   const generation = useRef(commands.generation);
-  const [editing, setEditing] = useState<Row | "new">();
+  const [editing, setEditing] = useState<Row | "new" | { draft: string }>();
   const [settings, setSettings] = useState(false);
   const [properties, setProperties] = useState(false);
   const overview = url.searchParams.get("view") === "overview";
@@ -185,14 +188,43 @@ function PlanningWorkspace({
     detail.can_manage && !project.archived && !commands.locked && !refreshing;
   async function changeStatus(row: Row, status: string) {
     if (row.restricted) return;
-    await commands.submitOrganization(organization, {
-      kind: "item",
+    if (!commands.account) return;
+    const scope = {
+      target: { organization },
       project: project.id,
-      version: project.version,
-      repository: row.repository?.id ?? null,
+      item: row.item.id,
+    };
+    const previous = readDraft(commands.account, scope, "item");
+    if (previous?.kind === "item") {
+      checkpointDraft(commands.account, scope, {
+        ...previous,
+        item: { ...previous.item, status },
+      });
+      setEditing(row);
+      return;
+    }
+    const checkpoint = checkpointDraft(commands.account, scope, {
+      ...itemDraft(project, row, row.repository?.id ?? ""),
       item: { ...row.item, status },
     });
+    await commands.submitOrganization(
+      organization,
+      {
+        kind: "item",
+        project: project.id,
+        version: row.version,
+        repository: row.repository?.id ?? null,
+        item: { ...row.item, status },
+      },
+      checkpoint,
+    );
   }
+  const editingRow =
+    typeof editing === "object" && "item" in editing ? editing : undefined;
+  const draftItem =
+    typeof editing === "object" && "draft" in editing
+      ? editing.draft
+      : undefined;
   const requestedLayout = url.searchParams.get("layout");
   const layout =
     requestedLayout === "table" ||
@@ -245,20 +277,41 @@ function PlanningWorkspace({
           )}
         </div>
       </header>
+      <DraftRecovery
+        scope={{ target: { organization }, project: project.id }}
+        disabled={!detail.can_manage}
+        onResume={({ kind, item }) => {
+          if (kind === "settings") setSettings(true);
+          if (kind === "properties") setProperties(true);
+          if (kind === "item") setEditing({ draft: item });
+        }}
+      />
       <Tabs
-        value={overview ? "overview" : selected.id}
+        value={
+          url.searchParams.get("view") === "history"
+            ? "history"
+            : overview
+              ? "overview"
+              : selected.id
+        }
         onValueChange={(value) =>
           filters({
-            view: value === "overview" ? "overview" : undefined,
-            pv: value === "overview" ? undefined : value,
+            view:
+              value === "overview" || value === "history" ? value : undefined,
+            pv: value === "overview" || value === "history" ? undefined : value,
             status: undefined,
             repository: undefined,
             layout: undefined,
           })
         }
       >
-        <TabsList variant="line" aria-label="Project views">
+        <TabsList
+          variant="line"
+          className="project-view-tabs"
+          aria-label="Project views"
+        >
           <TabsTrigger value="overview">Overview</TabsTrigger>
+          <TabsTrigger value="history">History</TabsTrigger>
           {project.definition.views.map((view) => {
             const Icon =
               view.layout === "board"
@@ -274,6 +327,13 @@ function PlanningWorkspace({
             );
           })}
         </TabsList>
+        <TabsContent value="history">
+          <ProjectHistory
+            target={{ organization }}
+            project={project.id}
+            definition={project.definition}
+          />
+        </TabsContent>
         <TabsContent value={overview ? "overview" : selected.id}>
           <div className="workspace-project-content">
             <div className="workspace-project-work">
@@ -525,10 +585,11 @@ function PlanningWorkspace({
       </Tabs>
       {editing && (
         <WorkspaceItemEditor
-          key={editing === "new" ? "new" : editing.item.id}
+          key={draftItem ?? editingRow?.item.id ?? "new"}
           organization={organization}
           detail={detail}
-          row={editing === "new" ? undefined : editing}
+          row={editingRow}
+          draftItem={draftItem}
           onClose={() => setEditing(undefined)}
         />
       )}

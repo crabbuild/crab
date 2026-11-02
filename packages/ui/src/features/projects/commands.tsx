@@ -1,31 +1,40 @@
 import {
   createContext,
+  Fragment,
   useContext,
   useEffect,
+  useCallback,
   useRef,
   useState,
   type ReactNode,
 } from "react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Button } from "@/components/ui/button";
-import { type Repository } from "@/lib/api";
 import {
   projectEndpoint,
   type Command,
   type Outcome,
-  type ProjectTarget,
+  type ProjectRepository,
 } from "./model";
 import type { WorkspaceCommand } from "./workspace/model";
-interface Intent {
-  account: string;
-  target: ProjectTarget;
-  body: { request_id: string; command: Command | WorkspaceCommand };
-}
+import { clearDraft, type DraftCheckpoint } from "./draft-storage";
+import {
+  readProjectIntent,
+  removeProjectIntent,
+  saveProjectIntent,
+  type ProjectIntent as Intent,
+} from "./journal";
 interface Commands {
-  submit: (repo: Repository, command: Command) => Promise<Outcome | undefined>;
+  account: string | null;
+  submit: (
+    repo: ProjectRepository,
+    command: Command,
+    draft?: DraftCheckpoint,
+  ) => Promise<Outcome | undefined>;
   submitOrganization: (
     organization: string,
     command: WorkspaceCommand,
+    draft?: DraftCheckpoint,
   ) => Promise<Outcome | undefined>;
   locked: boolean;
   generation: number;
@@ -33,6 +42,8 @@ interface Commands {
   clearError: () => void;
   pending: boolean;
   canRecover: boolean;
+  storageBlocked: boolean;
+  retryStorage: () => void;
   recover: (cancel: boolean) => Promise<Outcome | undefined>;
 }
 const Context = createContext<Commands | null>(null);
@@ -57,6 +68,35 @@ export function ProjectCommandsProvider({
   const [generation, setGeneration] = useState(0);
   const [error, setError] = useState<string>();
   const [pending, setPending] = useState(false);
+  const [journalError, setJournalError] = useState<string>();
+  const activeAccount = useRef(account);
+  activeAccount.current = account;
+  const retryStorage = useCallback(() => {
+    if (!account || (current.current && current.current.account !== account))
+      return;
+    try {
+      if (current.current) {
+        saveProjectIntent(current.current);
+        setJournalError(undefined);
+        return;
+      }
+      const saved = readProjectIntent(account);
+      setJournalError(undefined);
+      if (!saved) return;
+      current.current = saved;
+      setIntent(saved);
+      setError(
+        "A project submission was interrupted. Recover its saved result before making more changes.",
+      );
+    } catch (failure) {
+      setJournalError(
+        failure instanceof Error
+          ? failure.message
+          : "Project recovery storage is unavailable.",
+      );
+    }
+  }, [account]);
+  useEffect(retryStorage, [retryStorage]);
   useEffect(() => {
     if (!intent) return;
     const preserve = (event: BeforeUnloadEvent) => event.preventDefault();
@@ -64,11 +104,14 @@ export function ProjectCommandsProvider({
     return () => window.removeEventListener("beforeunload", preserve);
   }, [intent]);
   async function send(captured: Intent, cancel: boolean) {
-    if (busy.current || account !== captured.account) return;
+    if (busy.current || activeAccount.current !== captured.account) return;
     busy.current = true;
     setPending(true);
     setError(undefined);
     try {
+      // Recovery must use the persisted intent, including its original target.
+      // Never turn a lost response into a replacement submission after reload.
+      saveProjectIntent(captured);
       // The captured repository, account, UUID, and payload survive route changes.
       // An unproven response never releases the intent or permits a replacement write.
       const response = await fetch(
@@ -89,6 +132,7 @@ export function ProjectCommandsProvider({
       if (response.status === 401)
         window.dispatchEvent(new Event("crab-session-expired"));
       const result: unknown = await response.json().catch(() => null);
+      if (activeAccount.current !== captured.account) return;
       const rejected =
         !response.ok &&
         response.headers.get("X-Crab-Write-Outcome") === "rejected";
@@ -112,9 +156,26 @@ export function ProjectCommandsProvider({
         !value ||
         (value.outcome !== "applied" &&
           value.outcome !== "cancelled" &&
-          value.outcome !== "rejected")
+          value.outcome !== "rejected" &&
+          value.outcome !== "item_conflict")
       )
         throw new Error("The server acknowledgement was invalid.");
+      if (value.outcome === "item_conflict") {
+        const command = captured.body.command;
+        if (
+          (command.kind !== "item" &&
+            command.kind !== "remove" &&
+            command.kind !== "create_issue") ||
+          value.project !== command.project ||
+          value.item !==
+            (typeof command.item === "string"
+              ? command.item
+              : command.item.id) ||
+          !Number.isSafeInteger(value.version) ||
+          value.version < 0
+        )
+          throw new Error("The conflict did not match this submission.");
+      }
       if (value.outcome === "applied") {
         const command = captured.body.command;
         const expected =
@@ -133,9 +194,17 @@ export function ProjectCommandsProvider({
           );
         setGeneration((previous) => previous + 1);
       }
+      if (activeAccount.current !== captured.account) return;
+      if (value.outcome === "applied" && captured.draft)
+        clearDraft(captured.draft);
+      removeProjectIntent(captured);
       current.current = null;
       setIntent(null);
       if (value.outcome === "rejected") setError(value.reason);
+      if (value.outcome === "item_conflict")
+        setError(
+          "This item changed since you opened it. Your draft is preserved. Review the saved item before saving again.",
+        );
       completion.current?.(value);
       completion.current = null;
       return value;
@@ -153,14 +222,36 @@ export function ProjectCommandsProvider({
   function submit(
     target: Intent["target"],
     command: Command | WorkspaceCommand,
+    draft?: DraftCheckpoint,
   ) {
-    if (!account || current.current || busy.current)
+    if (!account || current.current || busy.current || journalError)
       return Promise.resolve(undefined);
     const captured: Intent = {
       account,
-      target,
+      target:
+        "repo" in target
+          ? {
+              repo: {
+                id: target.repo.id,
+                owner: target.repo.owner,
+                name: target.repo.name,
+                archived: target.repo.archived,
+              },
+            }
+          : target,
       body: { request_id: crypto.randomUUID(), command },
+      ...(draft ? { draft } : {}),
     };
+    try {
+      saveProjectIntent(captured);
+    } catch (failure) {
+      setJournalError(
+        failure instanceof Error
+          ? failure.message
+          : "Project recovery storage is unavailable. No changes were sent.",
+      );
+      return Promise.resolve(undefined);
+    }
     current.current = captured;
     setIntent(captured);
     return new Promise<Outcome | undefined>((resolve) => {
@@ -171,15 +262,19 @@ export function ProjectCommandsProvider({
   return (
     <Context
       value={{
-        submit: (repo, command) => submit({ repo: { ...repo } }, command),
-        submitOrganization: (organization, command) =>
-          submit({ organization }, command),
+        account,
+        submit: (repo, command, draft) =>
+          submit({ repo: { ...repo } }, command, draft),
+        submitOrganization: (organization, command, draft) =>
+          submit({ organization }, command, draft),
         locked: !!intent,
         generation,
-        error,
+        error: journalError ?? error,
         pending,
         clearError: () => setError(undefined),
         canRecover: !!intent && intent.account === account,
+        storageBlocked: !!journalError,
+        retryStorage,
         recover: (cancel) =>
           current.current
             ? send(current.current, cancel)
@@ -234,7 +329,22 @@ export function ProjectCommandsProvider({
           </AlertDescription>
         </Alert>
       )}
-      {children}
+      <Fragment key={account}>{children}</Fragment>
+      {journalError && (
+        <Alert variant="destructive" className="project-feedback" role="alert">
+          <AlertTitle>Project recovery is unavailable</AlertTitle>
+          <AlertDescription>
+            <p>{journalError}</p>
+            <p>
+              No new changes will be sent until the saved session can be
+              recovered.
+            </p>
+            <Button variant="outline" size="sm" onClick={retryStorage}>
+              Retry recovery storage
+            </Button>
+          </AlertDescription>
+        </Alert>
+      )}
     </Context>
   );
 }
@@ -247,7 +357,12 @@ export function CommandError() {
       <p role="alert" className="error">
         {commands.error}
       </p>
-      {commands.locked &&
+      {commands.storageBlocked ? (
+        <Button type="button" variant="outline" onClick={commands.retryStorage}>
+          Retry recovery storage
+        </Button>
+      ) : (
+        commands.locked &&
         (commands.canRecover ? (
           <div className="flex flex-wrap gap-2">
             <Button
@@ -271,7 +386,8 @@ export function CommandError() {
           <p>
             Sign in with the account that started this submission to recover it.
           </p>
-        ))}
+        ))
+      )}
     </div>
   );
 }

@@ -1,4 +1,5 @@
 use super::*;
+use crate::cells::planning as ledger;
 #[derive(Clone, Debug, Deserialize, Serialize)]
 #[serde(tag = "kind", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Command {
@@ -58,9 +59,19 @@ pub(crate) struct Request {
 #[derive(Clone, Debug, Deserialize, Serialize, PartialEq, Eq)]
 #[serde(tag = "outcome", rename_all = "snake_case", deny_unknown_fields)]
 pub(crate) enum Outcome {
-    Applied { project: Option<Uuid>, version: u64 },
+    Applied {
+        project: Option<Uuid>,
+        version: u64,
+    },
     Cancelled,
-    Rejected { reason: String },
+    Rejected {
+        reason: String,
+    },
+    ItemConflict {
+        project: Uuid,
+        item: Uuid,
+        version: u64,
+    },
     RequestConflict,
 }
 fn rejected(reason: &str) -> MutationResult<Outcome> {
@@ -129,6 +140,7 @@ fn new_project(
     id: Uuid,
     mut definition: Definition,
     name: &str,
+    actor: &RepositoryAuthor,
 ) -> Result<MutationResult<Outcome>> {
     definition.name = name.into();
     definition.is_template = false;
@@ -145,16 +157,22 @@ fn new_project(
         ));
     }
     let now = super::super::timestamp(context.now_ms())?;
-    save(
+    let project = Project {
+        id,
+        definition,
+        version: 1,
+        archived: false,
+        created_at: now,
+        updated_at: now,
+    };
+    save(context, &project)?;
+    history::append(
         context,
-        &Project {
-            id,
-            definition,
-            version: 1,
-            archived: false,
-            created_at: now,
-            updated_at: now,
-        },
+        actor,
+        &project,
+        ledger::Target::Project,
+        None,
+        Some(history::project_snapshot(&project)),
     )?;
     advance_revision(context)?;
     Ok(MutationResult::Success(Outcome::Applied {
@@ -171,7 +189,7 @@ fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResul
             let Some(template) = templates().into_iter().find(|t| t.id == *template) else {
                 return Ok(rejected("Unknown project template"));
             };
-            return new_project(context, *id, template.definition, name);
+            return new_project(context, *id, template.definition, name, &input.actor);
         }
         Command::Copy {
             id,
@@ -187,7 +205,7 @@ fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResul
                     "The source project changed; reload before copying",
                 ));
             }
-            return new_project(context, *id, project.definition, name);
+            return new_project(context, *id, project.definition, name, &input.actor);
         }
         Command::SubIssue {
             parent,
@@ -220,77 +238,14 @@ fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResul
         } => return hierarchy::change(context, *child, *parent, *version, &input.actor),
         _ => {}
     }
-    if let Command::CreateIssue {
-        project,
-        version,
-        item: entry,
-        parent,
-    } = &input.command
-    {
-        let Some(current) = load(context, *project)? else {
-            return Ok(rejected("Project not found"));
-        };
-        if current.version != *version || current.archived {
-            return Ok(rejected(
-                "The project changed or is archived; refresh before creating an issue",
-            ));
-        }
-        if entry.subject.is_some() || !entry.valid(&current.definition) {
-            return Ok(rejected("Invalid new issue"));
-        }
-        if item(context, *project, entry.id)?.is_some_and(|old| old.subject.is_some()) {
-            return Ok(rejected(
-                "This project item is already an issue or pull request",
-            ));
-        }
-        let created = super::super::CreateIssue::execute(
-            context,
-            super::super::CreateIssueInput {
-                submission_id: *input.request_id.as_bytes(),
-                author: input.actor.clone(),
-                title: entry.title.clone(),
-                body: entry.body.clone(),
-                metadata: Default::default(),
-            },
-        )?;
-        let MutationResult::Success(super::super::CreateIssueOutcome::Created(issue)) = created
-        else {
-            return Err(Error::Invalid("project issue creation failed"));
-        };
-        if let Some(parent) = parent
-            && let MutationResult::Rejected(outcome) =
-                hierarchy::change(context, issue.number, Some(*parent), 0, &input.actor)?
-        {
-            return Ok(MutationResult::Rejected(outcome));
-        }
-        // Converting a draft and creating/attaching its canonical issue share
-        // this transaction; a rejected membership cannot leave an orphan issue.
-        context.query(
-            "DELETE FROM repository_project_items WHERE project=? AND id=?",
-            &[id(*project), id(entry.id)],
-        )?;
-        let mut entry = entry.clone();
-        entry.subject = Some(Subject {
-            kind: SubjectKind::Issue,
-            number: issue.number,
-        });
-        entry.title.clear();
-        entry.body.clear();
-        let converted = Request {
-            command: Command::Item {
-                project: *project,
-                version: *version,
-                item: entry,
-            },
-            ..input.clone()
-        };
-        return apply(context, &converted);
-    }
     let (project_id, version) = match &input.command {
         Command::Edit {
             project, version, ..
         }
         | Command::Item {
+            project, version, ..
+        }
+        | Command::CreateIssue {
             project, version, ..
         }
         | Command::Remove {
@@ -301,11 +256,14 @@ fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResul
     let Some(mut project) = load(context, project_id)? else {
         return Ok(rejected("Project not found"));
     };
-    if project.version != version {
+    if matches!(input.command, Command::Edit { .. }) && project.version != version {
         return Ok(rejected(
             "This project changed; refresh and review before saving",
         ));
     }
+    let mut event_target = ledger::Target::Project;
+    let mut before = Some(history::project_snapshot(&project));
+    let mut after = None;
     match &input.command {
         Command::Edit {
             definition,
@@ -345,7 +303,7 @@ fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResul
             project.definition = definition.clone();
             project.archived = *archived;
         }
-        Command::Item { item: entry, .. } => {
+        Command::Item { item: entry, .. } | Command::CreateIssue { item: entry, .. } => {
             if project.archived {
                 return Ok(rejected("Reopen the project before changing items"));
             }
@@ -353,6 +311,17 @@ fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResul
                 return Ok(rejected("Invalid project item fields or dates"));
             }
             let previous = item(context, project_id, entry.id)?;
+            let current = ledger::item_version(context, project_id, entry.id)?;
+            if previous.is_some() && current == 0 {
+                return Err(Error::Invalid("stored project item has no revision"));
+            }
+            if version != current || previous.is_none() && version != 0 {
+                return Ok(MutationResult::Rejected(Outcome::ItemConflict {
+                    project: project_id,
+                    item: entry.id,
+                    version: current,
+                }));
+            }
             if previous
                 .as_ref()
                 .is_some_and(|old| old.subject != entry.subject)
@@ -394,7 +363,46 @@ fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResul
                     return Ok(rejected("This project has reached its 1,000-item limit"));
                 }
             }
-            context.query("INSERT INTO repository_project_items(project,id,kind,number,status,data) VALUES (?,?,?,?,?,?) ON CONFLICT(project,id) DO UPDATE SET status=excluded.status,data=excluded.data",&[id(project_id),id(entry.id),entry.subject.map(|s|SqlValue::Integer(kind(s))).unwrap_or(SqlValue::Null),entry.subject.map(|s|integer(s.number)).transpose()?.unwrap_or(SqlValue::Null),SqlValue::Text(entry.status.clone()),SqlValue::Text(serde_json::to_string(entry)?)])?;
+            let mut entry = entry.clone();
+            if let Command::CreateIssue { parent, .. } = &input.command {
+                if entry.subject.is_some() {
+                    return Ok(rejected("This item is already an issue or pull request"));
+                }
+                // Conversion shares the canonical upsert and its item precondition.
+                // A rejected parent or membership rolls back the new issue too.
+                let created = super::super::CreateIssue::execute(
+                    context,
+                    super::super::CreateIssueInput {
+                        submission_id: *input.request_id.as_bytes(),
+                        author: input.actor.clone(),
+                        title: entry.title.clone(),
+                        body: entry.body.clone(),
+                        metadata: Default::default(),
+                    },
+                )?;
+                let MutationResult::Success(super::super::CreateIssueOutcome::Created(issue)) =
+                    created
+                else {
+                    return Err(Error::Invalid("project issue creation failed"));
+                };
+                if let Some(parent) = parent
+                    && let MutationResult::Rejected(outcome) =
+                        hierarchy::change(context, issue.number, Some(*parent), 0, &input.actor)?
+                {
+                    return Ok(MutationResult::Rejected(outcome));
+                }
+                entry.subject = Some(Subject {
+                    kind: SubjectKind::Issue,
+                    number: issue.number,
+                });
+                entry.title.clear();
+                entry.body.clear();
+            }
+            event_target = history::item_target(context, &entry)?;
+            before = previous.as_ref().map(ledger::item_snapshot).transpose()?;
+            after = Some(ledger::item_snapshot(&entry)?);
+            context.query("INSERT INTO repository_project_items(project,id,kind,number,status,data) VALUES (?,?,?,?,?,?) ON CONFLICT(project,id) DO UPDATE SET kind=excluded.kind,number=excluded.number,status=excluded.status,data=excluded.data",&[id(project_id),id(entry.id),entry.subject.map(|s|SqlValue::Integer(kind(s))).unwrap_or(SqlValue::Null),entry.subject.map(|s|integer(s.number)).transpose()?.unwrap_or(SqlValue::Null),SqlValue::Text(entry.status.clone()),SqlValue::Text(serde_json::to_string(&entry)?)])?;
+            ledger::advance_item(context, project_id, entry.id)?;
             if let Some(subject) = entry.subject {
                 activity::append(
                     context,
@@ -411,13 +419,23 @@ fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResul
             if project.archived {
                 return Ok(rejected("Reopen the project before changing items"));
             }
-            let Some(entry) = item(context, project_id, *item_id)? else {
-                return Ok(rejected("Project item not found"));
-            };
+            let previous = item(context, project_id, *item_id)?;
+            let current = ledger::item_version(context, project_id, *item_id)?;
+            if previous.is_none() || version != current {
+                return Ok(MutationResult::Rejected(Outcome::ItemConflict {
+                    project: project_id,
+                    item: *item_id,
+                    version: current,
+                }));
+            }
+            let entry = previous.ok_or(Error::Invalid("project item disappeared"))?;
+            event_target = history::item_target(context, &entry)?;
+            before = Some(ledger::item_snapshot(&entry)?);
             context.query(
                 "DELETE FROM repository_project_items WHERE project=? AND id=?",
                 &[id(project_id), id(*item_id)],
             )?;
+            ledger::advance_item(context, project_id, *item_id)?;
             if let Some(subject) = entry.subject {
                 activity::append(
                     context,
@@ -435,6 +453,10 @@ fn apply(context: &mut Transaction<'_>, input: &Request) -> Result<MutationResul
     project.version = super::super::collaboration::next_version(project.version)?;
     project.updated_at = super::super::timestamp(context.now_ms())?;
     save(context, &project)?;
+    if matches!(input.command, Command::Edit { .. }) {
+        after = Some(history::project_snapshot(&project));
+    }
+    history::append(context, &input.actor, &project, event_target, before, after)?;
     advance_revision(context)?;
     Ok(MutationResult::Success(Outcome::Applied {
         project: Some(project.id),

@@ -8,7 +8,8 @@ const FILE_DESCRIPTOR_RESERVE_MINIMUM: usize = 128;
 
 #[derive(Clone, Copy, Debug, serde::Serialize)]
 pub(crate) struct CellRuntimeBudget {
-    pub(super) max_active_cells: usize,
+    pub(crate) max_active_cells: usize,
+    memory_limit_bytes: u64,
     local_disk_bytes: u64,
     pub(super) disk_reserve_bytes: u64,
 }
@@ -54,12 +55,17 @@ impl CellRuntimeBudget {
         }
         Ok(Self {
             max_active_cells,
+            memory_limit_bytes: resources.memory_bytes,
             local_disk_bytes,
             disk_reserve_bytes,
         })
     }
     pub(crate) fn local_disk(self) -> crate::local_disk::DiskBudget {
         crate::local_disk::DiskBudget::new(self.local_disk_bytes)
+    }
+
+    pub(crate) fn pressure(self) -> cellar::sdk::PressureConfig {
+        cellar::sdk::PressureConfig::from_limits(Some(self.memory_limit_bytes), None)
     }
 }
 
@@ -128,6 +134,20 @@ mod tests {
             CellRuntimeBudget::from_resources(local_resources(64 * GIB, 1000 * GIB, 1_000_000))
                 .unwrap();
         assert_eq!(budget.max_active_cells, 768);
+    }
+
+    #[test]
+    fn cell_runtime_budget_enables_pressure_below_the_effective_memory_limit() {
+        let budget =
+            CellRuntimeBudget::from_resources(local_resources(10 * GIB, 100 * GIB, 10_000))
+                .unwrap();
+        assert_eq!(
+            budget.pressure(),
+            cellar::sdk::PressureConfig {
+                high_bytes: Some(8 * GIB),
+                rss_hard_bytes: Some(10 * GIB / 100 * 95),
+            }
+        );
     }
 
     #[test]

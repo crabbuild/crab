@@ -134,6 +134,7 @@ async fn items(
                 version: None,
                 status: None,
                 repository: None,
+                item: None,
             },
         )
         .await
@@ -149,7 +150,7 @@ async fn same_issue_number_in_two_repositories_is_distinct_work() {
     let b = Uuid::now_v7();
     link(client, organization, owner, project, 1, a).await;
     link(client, organization, owner, project, 2, b).await;
-    for (version, record) in [(3, work(a)), (4, work(b))] {
+    for record in [work(a), work(b)] {
         write::<Change>(
             client,
             organization,
@@ -157,7 +158,7 @@ async fn same_issue_number_in_two_repositories_is_distinct_work() {
                 owner,
                 Command::Item {
                     project,
-                    version,
+                    version: 0,
                     repository: record.repository,
                     item: record.item,
                 },
@@ -170,7 +171,7 @@ async fn same_issue_number_in_two_repositories_is_distinct_work() {
     assert_eq!(
         page.items
             .iter()
-            .filter_map(|item| item.repository)
+            .filter_map(|item| item.record.repository)
             .collect::<std::collections::BTreeSet<_>>(),
         [a, b].into()
     );
@@ -240,7 +241,7 @@ async fn unlinking_a_repository_cannot_erase_project_work() {
             owner,
             Command::Item {
                 project,
-                version: 2,
+                version: 0,
                 repository: record.repository,
                 item: record.item,
             },
@@ -302,6 +303,96 @@ async fn stale_planning_edits_preserve_the_saved_project() {
             .status,
         Status::Planned
     );
+    fixtures::close(&server).await;
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn different_members_can_edit_distinct_items_from_the_same_collection() {
+    let (server, organization, owner, project) = setup().await;
+    let client = &server.cells().unwrap();
+    let colleague = Uuid::now_v7();
+    join(client, organization, owner, colleague, 0).await;
+    write::<ChangeMember>(
+        client,
+        organization,
+        MemberChange {
+            actor: owner,
+            member: colleague,
+            version: 1,
+            role: Some(Role::Owner),
+        },
+    )
+    .await
+    .unwrap();
+    let mut drafts = [work(Uuid::now_v7()), work(Uuid::now_v7())];
+    for (index, record) in drafts.iter_mut().enumerate() {
+        record.repository = None;
+        record.item.subject = None;
+        record.item.title = format!("Deliverable {index}");
+        let result = write::<Change>(
+            client,
+            organization,
+            request(
+                owner,
+                Command::Item {
+                    project,
+                    version: 0,
+                    repository: None,
+                    item: record.item.clone(),
+                },
+            ),
+        )
+        .await
+        .unwrap();
+        assert!(matches!(result, Outcome::Applied { .. }));
+    }
+    drafts[0].item.priority = 1;
+    drafts[1].item.priority = 2;
+    let (first, second) = tokio::join!(
+        write::<Change>(
+            client,
+            organization,
+            request(
+                owner,
+                Command::Item {
+                    project,
+                    version: 1,
+                    repository: None,
+                    item: drafts[0].item.clone(),
+                }
+            )
+        ),
+        write::<Change>(
+            client,
+            organization,
+            request(
+                colleague,
+                Command::Item {
+                    project,
+                    version: 1,
+                    repository: None,
+                    item: drafts[1].item.clone(),
+                }
+            )
+        ),
+    );
+    assert!(matches!(
+        (first.unwrap(), second.unwrap()),
+        (Outcome::Applied { .. }, Outcome::Applied { .. })
+    ));
+    let saved = items(client, organization, owner, project).await;
+    for record in drafts {
+        assert_eq!(
+            saved
+                .items
+                .iter()
+                .find(|row| row.record.item.id == record.item.id)
+                .unwrap()
+                .record
+                .item,
+            record.item
+        );
+    }
     fixtures::close(&server).await;
 }
 #[tokio::test]
@@ -426,7 +517,10 @@ impl Mutation for WithoutProjects {
     type Output = bool;
     fn execute(context: &mut Transaction<'_>, _: Caller) -> Result<MutationResult<bool>> {
         context.delete_document(READY)?;
+        context.delete_document("planning/v2/state")?;
         for table in [
+            "planning_history",
+            "planning_item_revisions",
             "organization_project_items",
             "organization_project_repositories",
             "organization_projects",
@@ -454,13 +548,28 @@ async fn existing_organizations_require_explicit_idempotent_preparation() {
         )
         .await;
     assert!(matches!(missing, Err(Error::SchemaUnavailable)));
-    write::<Prepare>(client, organization, Caller { actor: owner })
+    write::<Prepare>(
+        client,
+        organization,
+        PrepareInput {
+            actor: owner,
+            version: 0,
+        },
+    )
+    .await
+    .unwrap();
+    assert_eq!(
+        write::<Prepare>(
+            client,
+            organization,
+            PrepareInput {
+                actor: owner,
+                version: 0
+            }
+        )
         .await
-        .unwrap();
-    assert!(
-        write::<Prepare>(client, organization, Caller { actor: owner })
-            .await
-            .unwrap()
+        .unwrap(),
+        crate::LifecycleStatus::Ready
     );
     let record = client
         .query::<super::super::GetOrganization>(

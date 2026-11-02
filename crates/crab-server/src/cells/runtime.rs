@@ -1,4 +1,4 @@
-use std::{net::SocketAddr, sync::Arc, time::Duration};
+use std::{net::SocketAddr, sync::Arc};
 
 use cellar::{
     bucket::Bucket,
@@ -93,7 +93,7 @@ pub(crate) async fn start(
     node_name: String,
     peer_http: reqwest::Client,
     stream_http: reqwest::Client,
-    max_resident: usize,
+    budget: crate::server::capacity::CellRuntimeBudget,
 ) -> Result<RunningCells> {
     let bucket = bucket(config)?;
     start_with_bucket(
@@ -103,7 +103,7 @@ pub(crate) async fn start(
         node_name,
         peer_http,
         stream_http,
-        max_resident,
+        budget,
         bucket,
         application::compiled()?,
     )
@@ -121,7 +121,7 @@ pub(crate) async fn start_with_bucket(
     node_name: String,
     peer_http: reqwest::Client,
     stream_http: reqwest::Client,
-    max_resident: usize,
+    budget: crate::server::capacity::CellRuntimeBudget,
     bucket: Bucket,
     application: Arc<dyn cellar::sdk::Application>,
 ) -> Result<RunningCells> {
@@ -135,6 +135,7 @@ pub(crate) async fn start_with_bucket(
     let signer = Arc::new(PeerProbeSigner::generate());
     let advertise =
         &config.cells.peer_advertise[url::Position::BeforeHost..url::Position::AfterPort];
+    let max_resident = budget.max_active_cells;
     let actor = ActorOptions {
         core: ActorPolicy {
             max_resident,
@@ -150,15 +151,19 @@ pub(crate) async fn start_with_bucket(
             owner_log_recovery_backoff_ms: 1_000,
             owner_log_recovery_attempts: 10,
             alarm_resident_ms: 1_000,
-            idle_evict_ms: Some(60_000),
-            pressure: Default::default(),
+            // Timer eviction repeatedly restores and snapshots cold repositories.
+            // Retain them until resource pressure requires shedding instead.
+            idle_evict_ms: None,
+            pressure: budget.pressure(),
         },
         lease_ttl_ms: 10_000,
         placement_weight: 1,
         generation: signer.public_key_hex(),
         resume_generation: None,
     };
-    let mut node_config = NodeConfig::new(
+    // The SDK worker includes the namespace fetch while a cold replica restores.
+    // Keep its recovery budget; CellClient separately bounds ordinary calls.
+    let node_config = NodeConfig::new(
         ActorIdentity {
             node: node_name,
             region: config
@@ -171,17 +176,18 @@ pub(crate) async fn start_with_bucket(
         actor,
         config.cells.data_dir.join("cellar"),
     );
-    node_config.runtime.handler_budget = Duration::from_secs(30);
     let replica_storage = ReplicaStorage::new(
         bucket.store.clone(),
         ReplicaStorageOptions {
             prefix: bucket.prefix.clone(),
+            // LTX sends parts serially. Larger bounded parts keep restored
+            // snapshots from spending the proof budget on request round trips.
+            part_size: 32 * 1024 * 1024,
             timestamp_metadata_key: if bucket.scheme() == "az" {
                 cellar::sdk::ReplicaTimestampMetadataKey::Underscore
             } else {
                 cellar::sdk::ReplicaTimestampMetadataKey::Litestream
             },
-            ..Default::default()
         },
     )
     .map_err(Error::sdk)?;
@@ -205,7 +211,13 @@ pub(crate) async fn start_with_bucket(
             lease_bucket: bucket.clone(),
             bucket,
             replica_storage,
-            replication: ReplicationOptions::default(),
+            // A restored database's first write captures its complete image.
+            // Let proof use the request budget instead of retiring a healthy
+            // Cell after the SDK's shorter default while Crab still awaits it.
+            replication: ReplicationOptions {
+                durability_timeout: super::client::REQUEST_BUDGET,
+                ..Default::default()
+            },
             log_transport,
             log: Default::default(),
             fleet_durability: config.cells.durability == CellDurabilityMode::Fleet,
@@ -309,6 +321,10 @@ pub(crate) async fn test_node_with_application(
     };
     let bucket = Bucket::open_dev(&directory.join("objects.sqlite")).unwrap();
     let http = reqwest::Client::builder().no_proxy().build().unwrap();
+    let budget = crate::server::capacity::CellRuntimeBudget::from_resources(
+        crate::resources::local_resources(directory, config.cells.local_disk_limit_bytes).unwrap(),
+    )
+    .unwrap();
     start_with_bucket(
         &config,
         public_address,
@@ -316,7 +332,7 @@ pub(crate) async fn test_node_with_application(
         "crab-test".into(),
         http.clone(),
         http,
-        32,
+        budget,
         bucket,
         application,
     )

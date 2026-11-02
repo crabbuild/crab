@@ -79,6 +79,7 @@ async fn page(cell: &RepositoryCell, project: Uuid) -> ItemPage {
             None,
             ItemQuery {
                 project,
+                item: None,
                 after: None,
                 revision: None,
                 query: String::new(),
@@ -123,7 +124,7 @@ async fn templates_create_real_views_and_copied_definitions_without_copying_memb
         &cell,
         Command::Item {
             project: source,
-            version: 1,
+            version: 0,
             item: entry(1),
         },
     )
@@ -192,7 +193,7 @@ async fn project_retries_cancel_conflicts_and_field_validation_preserve_canonica
             &cell,
             Command::Item {
                 project: id,
-                version: 1,
+                version: 0,
                 item: item.clone()
             }
         )
@@ -204,12 +205,12 @@ async fn project_retries_cancel_conflicts_and_field_validation_preserve_canonica
             &cell,
             Command::Item {
                 project: id,
-                version: 1,
+                version: 0,
                 item: item.clone()
             }
         )
         .await,
-        Outcome::Rejected { .. }
+        Outcome::ItemConflict { version: 1, .. }
     ));
     let mut duplicate = item.clone();
     duplicate.id = Uuid::now_v7();
@@ -218,7 +219,7 @@ async fn project_retries_cancel_conflicts_and_field_validation_preserve_canonica
             &cell,
             Command::Item {
                 project: id,
-                version: 2,
+                version: 0,
                 item: duplicate
             }
         )
@@ -232,7 +233,7 @@ async fn project_retries_cancel_conflicts_and_field_validation_preserve_canonica
             &cell,
             Command::Item {
                 project: id,
-                version: 2,
+                version: 0,
                 item: bad
             }
         )
@@ -415,7 +416,7 @@ async fn issue_creation_conversion_and_parent_assignment_share_one_transaction()
         &cell,
         Command::Item {
             project: id,
-            version: 1,
+            version: 0,
             item: draft.clone(),
         },
     )
@@ -425,7 +426,7 @@ async fn issue_creation_conversion_and_parent_assignment_share_one_transaction()
             &cell,
             Command::CreateIssue {
                 project: id,
-                version: 2,
+                version: 1,
                 item: draft.clone(),
                 parent: Some(999)
             }
@@ -446,7 +447,7 @@ async fn issue_creation_conversion_and_parent_assignment_share_one_transaction()
             &cell,
             Command::CreateIssue {
                 project: id,
-                version: 2,
+                version: 1,
                 item: draft,
                 parent: Some(1)
             }
@@ -494,7 +495,7 @@ async fn pages_count_all_matching_work_and_reject_stale_cursors() {
                 &cell,
                 Command::Item {
                     project: id,
-                    version: i + 1,
+                    version: 0,
                     item: draft
                 }
             )
@@ -506,6 +507,7 @@ async fn pages_count_all_matching_work_and_reject_stale_cursors() {
     assert_eq!((first.total, first.items.len()), (51, 50));
     let query = ItemQuery {
         project: id,
+        item: None,
         after: first.next,
         revision: Some(first.revision),
         query: String::new(),
@@ -531,7 +533,7 @@ async fn pages_count_all_matching_work_and_reject_stale_cursors() {
         &cell,
         Command::Item {
             project: id,
-            version: 52,
+            version: 0,
             item: draft,
         },
     )
@@ -547,4 +549,5 @@ async fn pages_count_all_matching_work_and_reject_stale_cursors() {
 
 mod fields;
 mod integration;
+mod recovery;
 pub(crate) use integration::Historical;

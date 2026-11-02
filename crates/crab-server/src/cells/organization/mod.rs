@@ -331,6 +331,8 @@ pub(in crate::cells) fn dispatch_read(
     input: Value,
 ) -> Result<Value> {
     match operation {
+        projects::GetPreparation::ID => invoke_read::<projects::GetPreparation>(context, input),
+        projects::GetHistory::ID => invoke_read::<projects::GetHistory>(context, input),
         projects::List::ID => invoke_read::<projects::List>(context, input),
         projects::Get::ID => invoke_read::<projects::Get>(context, input),
         projects::Items::ID => invoke_read::<projects::Items>(context, input),

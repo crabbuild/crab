@@ -6,7 +6,7 @@ pub(super) fn begin(
 ) -> crate::cells::Result<Option<u64>> {
     let existing = context.sql(&SqlBatch {
         statements: vec![statement(
-            "SELECT epoch_id, state FROM git_projection_epochs WHERE source_token = ?",
+            "SELECT epoch_id, state FROM git_projection_epochs WHERE source_token = ? AND state <> 'collecting'",
             vec![text(&source.source_token)],
         )],
     })?;
@@ -29,37 +29,16 @@ pub(super) fn begin(
             update_probe_state(context, source)?;
             return Ok(None);
         }
-        if state == "superseded" || state == "failed" {
-            context.sql(&SqlBatch {
-                statements: vec![
-                    statement(
-                        "DELETE FROM git_projection_refs WHERE epoch_id = ?",
-                        vec![integer(epoch_id)?],
-                    ),
-                    statement(
-                        "DELETE FROM git_epoch_commits WHERE epoch_id = ?",
-                        vec![integer(epoch_id)?],
-                    ),
-                    statement(
-                        "DELETE FROM git_attribution_roots WHERE epoch_id = ?",
-                        vec![integer(epoch_id)?],
-                    ),
-                    statement(
-                        "UPDATE git_projection_epochs SET state = 'building', started_at_ms = ?, verified_at_ms = NULL WHERE epoch_id = ?",
-                        vec![
-                            integer(u64::try_from(context.now_ms()).map_err(|_| {
-                                crate::cells::Error::Invalid(
-                                    "projection timestamp is negative",
-                                )
-                            })?)?,
-                            integer(epoch_id)?,
-                        ],
-                    ),
-                ],
-            })?;
+        if state == "building" {
+            update_probe_state(context, source)?;
+            return Ok(Some(epoch_id));
         }
-        update_probe_state(context, source)?;
-        return Ok(Some(epoch_id));
+        // A retired snapshot may already be partially reclaimed. Seal it and
+        // allocate another epoch instead of reviving incomplete derived data.
+        context.query(
+            "UPDATE git_projection_epochs SET state='collecting' WHERE epoch_id=?",
+            &[integer(epoch_id)?],
+        )?;
     }
     let result = context.sql(&SqlBatch {
         statements: vec![statement(
@@ -153,23 +132,17 @@ pub(super) fn apply_commits(
     epoch_id: u64,
     rows: &[CommitRow],
 ) -> crate::cells::Result<()> {
-    let mut statements = Vec::with_capacity(rows.len().saturating_mul(2));
+    let mut statements = Vec::with_capacity(rows.len());
     for row in rows {
         statements.push(statement(
-            "INSERT OR IGNORE INTO git_commits(oid, author_name, author_time, message_preview) VALUES (?, ?, ?, ?)",
-            vec![
-                SqlValue::Blob(row.oid.clone()),
-                SqlValue::Blob(row.author_name.clone()),
-                SqlValue::Integer(row.author_time),
-                SqlValue::Blob(row.message_preview.clone()),
-            ],
-        ));
-        statements.push(statement(
-            "INSERT OR REPLACE INTO git_epoch_commits(epoch_id, ordinal, commit_oid) VALUES (?, ?, ?)",
+            "INSERT OR REPLACE INTO git_epoch_commits(epoch_id, ordinal, commit_oid, author_name, author_time, message_preview) VALUES (?, ?, ?, ?, ?, ?)",
             vec![
                 integer(epoch_id)?,
                 integer(u64::from(row.ordinal))?,
                 SqlValue::Blob(row.oid.clone()),
+                SqlValue::Blob(row.author_name.clone()),
+                SqlValue::Integer(row.author_time),
+                SqlValue::Blob(row.message_preview.clone()),
             ],
         ));
     }
@@ -185,8 +158,9 @@ pub(super) fn apply_attribution(
     let mut statements = Vec::new();
     for node in &batch.nodes {
         statements.push(statement(
-            "INSERT OR IGNORE INTO git_attribution_nodes(node_hash, last_change_ordinal, encoded_bytes) VALUES (?, ?, ?)",
+            "INSERT OR IGNORE INTO git_attribution_nodes(epoch_id, node_hash, last_change_ordinal, encoded_bytes) VALUES (?, ?, ?, ?)",
             vec![
+                integer(epoch_id)?,
                 SqlValue::Blob(node.node_hash.clone()),
                 node.last_change_ordinal
                     .map_or(SqlValue::Null, |value| SqlValue::Integer(i64::from(value))),
@@ -196,8 +170,9 @@ pub(super) fn apply_attribution(
     }
     for edge in &batch.edges {
         statements.push(statement(
-            "INSERT OR REPLACE INTO git_attribution_edges(parent_hash, component, child_hash) VALUES (?, ?, ?)",
+            "INSERT OR REPLACE INTO git_attribution_edges(epoch_id, parent_hash, component, child_hash) VALUES (?, ?, ?, ?)",
             vec![
+                integer(epoch_id)?,
                 SqlValue::Blob(edge.parent_hash.clone()),
                 SqlValue::Blob(edge.component.clone()),
                 SqlValue::Blob(edge.child_hash.clone()),
@@ -262,15 +237,11 @@ fn verify_epoch(
                 vec![integer(epoch_id)?],
             ),
             statement(
-                "SELECT 1 FROM git_epoch_commits ec LEFT JOIN git_commits c ON c.oid = ec.commit_oid WHERE ec.epoch_id = ? AND c.oid IS NULL LIMIT 1",
-                vec![integer(epoch_id)?],
-            ),
-            statement(
                 "SELECT 1 FROM git_epoch_commits ec LEFT JOIN git_attribution_roots ar ON ar.epoch_id = ec.epoch_id AND ar.commit_ordinal = ec.ordinal WHERE ec.epoch_id = ? AND ar.root_hash IS NULL LIMIT 1",
                 vec![integer(epoch_id)?],
             ),
             statement(
-                "SELECT 1 FROM git_attribution_roots ar LEFT JOIN git_attribution_nodes n ON n.node_hash = ar.root_hash WHERE ar.epoch_id = ? AND n.node_hash IS NULL LIMIT 1",
+                "SELECT 1 FROM git_attribution_roots ar LEFT JOIN git_attribution_nodes n ON n.epoch_id=ar.epoch_id AND n.node_hash = ar.root_hash WHERE ar.epoch_id = ? AND n.node_hash IS NULL LIMIT 1",
                 vec![integer(epoch_id)?],
             ),
         ],
@@ -289,9 +260,8 @@ fn verify_epoch(
             "projection commit ordinals are not contiguous",
         ));
     }
-    if !result[1].rows.is_empty()
-        || (source.path_state_hash.is_some() && !result[2].rows.is_empty())
-        || (source.path_state_hash.is_some() && !result[3].rows.is_empty())
+    if source.path_state_hash.is_some()
+        && (!result[1].rows.is_empty() || !result[2].rows.is_empty())
     {
         return Err(crate::cells::Error::Invalid(
             "projection epoch has dangling rows",
@@ -310,77 +280,61 @@ pub(super) fn supersede(context: &Transaction<'_>, epoch_id: u64) -> crate::cell
     Ok(())
 }
 
-pub(super) fn collect(context: &Transaction<'_>) -> crate::cells::Result<()> {
-    let keep = r#"
-        WITH keep(epoch_id) AS (
-            SELECT ready_epoch
-            FROM git_projection_state
-            WHERE singleton = 1 AND ready_epoch IS NOT NULL
-            UNION
-            SELECT epoch_id
-            FROM (
-                SELECT epoch_id
-                FROM git_projection_epochs
-                WHERE state = 'ready'
-                ORDER BY verified_at_ms DESC
-                LIMIT 2
-            )
-            UNION
-            SELECT epoch_id
-            FROM git_projection_epochs
-            WHERE state IN ('building', 'verifying')
-        )
-    "#;
-    execute_statements(
-        context,
-        vec![
-            statement(
-                &format!(
-                    "{keep}DELETE FROM git_projection_refs WHERE epoch_id NOT IN (SELECT epoch_id FROM keep)"
-                ),
-                vec![],
-            ),
-            statement(
-                &format!(
-                    "{keep}DELETE FROM git_attribution_roots WHERE epoch_id NOT IN (SELECT epoch_id FROM keep)"
-                ),
-                vec![],
-            ),
-            statement(
-                &format!(
-                    "{keep}DELETE FROM git_epoch_commits WHERE epoch_id NOT IN (SELECT epoch_id FROM keep)"
-                ),
-                vec![],
-            ),
-            statement(
-                &format!(
-                    "{keep}DELETE FROM git_projection_epochs WHERE epoch_id NOT IN (SELECT epoch_id FROM keep)"
-                ),
-                vec![],
-            ),
-            statement(
-                "DELETE FROM git_commits WHERE oid IN (SELECT oid FROM git_commits WHERE oid NOT IN (SELECT commit_oid FROM git_epoch_commits) LIMIT 256)",
-                vec![],
-            ),
-            statement(
-                r#"
-                    DELETE FROM git_attribution_nodes
-                    WHERE node_hash IN (
-                        WITH RECURSIVE reachable(node_hash) AS (
-                            SELECT root_hash FROM git_attribution_roots
-                            UNION
-                            SELECT e.child_hash
-                            FROM git_attribution_edges e
-                            JOIN reachable r ON r.node_hash = e.parent_hash
-                        )
-                        SELECT node_hash
-                        FROM git_attribution_nodes
-                        WHERE node_hash NOT IN (SELECT node_hash FROM reachable)
-                        LIMIT 256
-                    )
-                "#,
-                vec![],
-            ),
-        ],
-    )
+pub(super) fn collection_epoch(context: &Transaction<'_>) -> crate::cells::Result<Option<u64>> {
+    let result = context.query(
+        "WITH keep(epoch_id) AS (SELECT ready_epoch FROM git_projection_state WHERE ready_epoch IS NOT NULL UNION SELECT epoch_id FROM (SELECT epoch_id FROM git_projection_epochs WHERE state='ready' ORDER BY verified_at_ms DESC, epoch_id DESC LIMIT 2) UNION SELECT epoch_id FROM git_projection_epochs WHERE state IN ('building','verifying')) SELECT epoch_id FROM git_projection_epochs WHERE state='collecting' OR epoch_id NOT IN (SELECT epoch_id FROM keep) ORDER BY (state='collecting') DESC, epoch_id LIMIT 1",
+        &[],
+    )?;
+    result
+        .rows
+        .first()
+        .map(|row| optional_u64(row, 0))
+        .transpose()
+        .map(Option::flatten)
+}
+
+pub(super) fn collect(context: &Transaction<'_>) -> crate::cells::Result<Option<u64>> {
+    let Some(epoch) = collection_epoch(context)? else {
+        return Ok(None);
+    };
+    context.query(
+        "UPDATE git_projection_epochs SET state='collecting' WHERE epoch_id=?",
+        &[integer(epoch)?],
+    )?;
+    // Snapshot ownership makes reclamation a range delete. Children drain
+    // before nodes, so FK checks use an empty epoch range instead of scanning
+    // another snapshot. Retain the epoch row until every bounded batch finishes.
+    for (table, columns) in [
+        ("git_projection_refs", "name"),
+        ("git_attribution_roots", "commit_ordinal"),
+        ("git_epoch_commits", "ordinal"),
+        ("git_attribution_edges", "parent_hash,component"),
+        ("git_attribution_nodes", "node_hash"),
+    ] {
+        let select =
+            format!("SELECT {columns} FROM {table} WHERE epoch_id=? ORDER BY {columns} LIMIT 256");
+        let rows = context.query(&select, &[integer(epoch)?])?.rows;
+        if rows.is_empty() {
+            continue;
+        }
+        // SQLite 3.45 can scan an epoch for a tuple-IN DELETE. Complete point
+        // keys keep the work bound independent of the remaining snapshot size.
+        let keys = columns
+            .split(',')
+            .map(|column| format!("{column}=?"))
+            .collect::<Vec<_>>()
+            .join(" AND ");
+        let delete = format!("DELETE FROM {table} WHERE epoch_id=? AND {keys}");
+        for row in rows {
+            let mut parameters = vec![integer(epoch)?];
+            parameters.extend(row);
+            context.query(&delete, &parameters)?;
+        }
+        return Ok(Some(epoch));
+    }
+    context.query(
+        "DELETE FROM git_projection_epochs WHERE epoch_id=?",
+        &[integer(epoch)?],
+    )?;
+    collection_epoch(context)
 }

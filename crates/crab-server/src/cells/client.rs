@@ -12,6 +12,7 @@ use super::{
     Address, Error, Result,
     application::{self, Mutation, MutationIdentity, Read},
 };
+pub(super) const REQUEST_BUDGET: Duration = Duration::from_secs(30);
 
 #[derive(Clone)]
 pub(crate) struct CellClient {
@@ -56,9 +57,30 @@ impl CellClient {
     }
 
     pub(crate) async fn verify_repositories(&self, repositories: Vec<Uuid>) -> crate::Result<()> {
-        for repository in repositories {
-            self.query::<super::repository::GetRepositoryLifecycle>(&repository, None, ())
-                .await?;
+        let total = repositories.len();
+        for (index, repository) in repositories.into_iter().enumerate() {
+            let started = std::time::Instant::now();
+            tracing::info!(event = "cell_verification", %repository, completed = index, total, phase = "checking", "verifying repository Cell");
+            // Cellar restore is a sequence of bounded store requests whose total
+            // scales with the replica. Startup must allow its native recovery
+            // budget rather than cancel a healthy cold restore as a UI request.
+            match self
+                .query_with_budget::<super::repository::GetRepositoryLifecycle>(
+                    Address::Repository(repository),
+                    None,
+                    (),
+                    cellar::sdk::RuntimePolicy::default().handler_budget,
+                )
+                .await
+            {
+                Ok(state) => {
+                    tracing::info!(event = "cell_verification", %repository, completed = index + 1, total, elapsed_ms = started.elapsed().as_millis(), revision = state.receipt.revision, phase = "verified", "repository Cell verified")
+                }
+                Err(source) => {
+                    tracing::warn!(event = "cell_verification", %repository, completed = index, total, elapsed_ms = started.elapsed().as_millis(), error = ?source, phase = "failed", "repository Cell verification failed; inspect Cellar restore and output-gate timing");
+                    return Err(crate::Error::CellVerification { repository, source });
+                }
+            }
         }
         Ok(())
     }
@@ -71,8 +93,15 @@ impl CellClient {
     }
 
     pub(crate) async fn initialize(&self, target: impl Into<Address>) -> Result<()> {
-        self.call(target.into(), application::INITIALIZE, None, (), None)
-            .await?;
+        self.call(
+            target.into(),
+            application::INITIALIZE,
+            None,
+            (),
+            None,
+            REQUEST_BUDGET,
+        )
+        .await?;
         Ok(())
     }
 
@@ -87,7 +116,7 @@ impl CellClient {
             return Err(Error::Invalid("command belongs to another Cell authority"));
         }
         let reply = self
-            .call(target, C::ID, Some(identity), input, None)
+            .call(target, C::ID, Some(identity), input, None, REQUEST_BUDGET)
             .await?;
         let output = serde_json::from_value(reply.output)?;
         Ok(Committed {
@@ -105,7 +134,17 @@ impl CellClient {
         minimum: Option<Receipt>,
         input: Q::Input,
     ) -> Result<Observed<Q::Output>> {
-        let target = target.into();
+        self.query_with_budget::<Q>(target.into(), minimum, input, REQUEST_BUDGET)
+            .await
+    }
+
+    async fn query_with_budget<Q: Read>(
+        &self,
+        target: Address,
+        minimum: Option<Receipt>,
+        input: Q::Input,
+        budget: Duration,
+    ) -> Result<Observed<Q::Output>> {
         if target.class() != Q::CLASS {
             return Err(Error::Invalid("query belongs to another Cell authority"));
         }
@@ -119,6 +158,7 @@ impl CellClient {
                 None,
                 input,
                 minimum.map(|receipt| receipt.revision),
+                budget,
             )
             .await?;
         let output = serde_json::from_value(reply.output)?;
@@ -138,6 +178,7 @@ impl CellClient {
         mutation: Option<MutationIdentity>,
         input: impl Serialize,
         minimum: Option<u64>,
+        budget: Duration,
     ) -> Result<application::Reply> {
         let request = application::Request {
             target,
@@ -174,7 +215,7 @@ impl CellClient {
                 _ => Err(Error::Unavailable),
             }
         };
-        let result = tokio::time::timeout(Duration::from_secs(30), async {
+        let result = tokio::time::timeout(budget, async {
             let result = attempt().await;
             // Cellar cannot replay ambiguous peer failures. Crab's atomic receipt
             // permits one identical mutation retry, within the original deadline,

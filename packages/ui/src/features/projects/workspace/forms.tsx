@@ -21,6 +21,7 @@ import type {
   Membership,
   OrganizationPage,
 } from "@/features/organizations/model";
+import { useProjectDraft } from "../drafts";
 
 export function NewProject({
   organization,
@@ -29,8 +30,18 @@ export function NewProject({
   organization: string;
   onClose: () => void;
 }) {
-  const [name, setName] = useState("");
-  const [template, setTemplate] = useState("board");
+  const saved = useProjectDraft(
+    { target: { organization }, project: null },
+    {
+      kind: "create",
+      name: "",
+      template: "board",
+      sourceVersion: null as number | null,
+    },
+  );
+  const { name, template } = saved.value;
+  const setName = (name: string) => saved.update({ name });
+  const setTemplate = (template: string) => saved.update({ template });
   const commands = useProjectCommands();
   const id = useId();
   const mounted = useRef(true);
@@ -59,12 +70,18 @@ export function NewProject({
           onSubmit={async (event) => {
             event.preventDefault();
             const project = crypto.randomUUID();
-            const result = await commands.submitOrganization(organization, {
-              kind: "create",
-              id: project,
-              name: name.trim(),
-              template,
-            });
+            const checkpoint = saved.checkpoint();
+            if (!checkpoint) return;
+            const result = await commands.submitOrganization(
+              organization,
+              {
+                kind: "create",
+                id: project,
+                name: name.trim(),
+                template,
+              },
+              checkpoint,
+            );
             if (mounted.current && result?.outcome === "applied")
               navigate(workspaceHref(organization, project));
           }}
@@ -99,6 +116,7 @@ export function NewProject({
               </Field>
             </FieldGroup>
           </fieldset>
+          {saved.feedback}
           <CommandError />
           <DialogFooter>
             <Button
@@ -127,8 +145,18 @@ export function ProjectProperties({
   detail: Detail;
   onClose: () => void;
 }) {
-  const [draft, setDraft] = useState(detail.project.properties);
-  const [version, setVersion] = useState(detail.project.version);
+  const saved = useProjectDraft(
+    { target: { organization }, project: detail.project.id },
+    {
+      kind: "properties",
+      properties: detail.project.properties,
+      version: detail.project.version,
+    },
+  );
+  const { properties: draft, version } = saved.value;
+  const setDraft = (properties: typeof detail.project.properties) =>
+    saved.update({ properties });
+  const setVersion = (version: number) => saved.update({ version });
   const [after, setAfter] = useState<string>();
   const commands = useProjectCommands();
   const id = useId();
@@ -164,12 +192,18 @@ export function ProjectProperties({
           className="flex flex-col gap-5"
           onSubmit={async (event) => {
             event.preventDefault();
-            const result = await commands.submitOrganization(organization, {
-              kind: "planning",
-              project: detail.project.id,
-              version,
-              properties: draft,
-            });
+            const checkpoint = saved.checkpoint();
+            if (!checkpoint) return;
+            const result = await commands.submitOrganization(
+              organization,
+              {
+                kind: "planning",
+                project: detail.project.id,
+                version,
+                properties: draft,
+              },
+              checkpoint,
+            );
             if (result?.outcome === "applied") onClose();
           }}
         >
@@ -269,6 +303,7 @@ export function ProjectProperties({
               </div>
             </FieldGroup>
           </fieldset>
+          {saved.feedback}
           <CommandError />
           <ProjectDraftReview
             target={{ organization }}

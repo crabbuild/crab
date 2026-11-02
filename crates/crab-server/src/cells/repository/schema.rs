@@ -21,6 +21,7 @@ pub(in crate::cells) fn initialize(
             ));
         }
         context.install_schema(include_str!("../schema.sql"))?;
+        projection::preparation::initialize(context)?;
         super::issues::lifecycle::initialize(context)?;
         super::pulls::lifecycle::initialize(context)?;
         review_dismissals::initialize(context)?;
@@ -60,6 +61,8 @@ pub(in crate::cells) fn initialize(
             | (collaboration::submissions::preparation::Prepare::ID, true)
             | (projects::preparation::GetState::ID, false)
             | (projects::preparation::Prepare::ID, true)
+            | (projection::preparation::GetState::ID, false)
+            | (projection::preparation::Prepare::ID, true)
             | (GetRepositoryLifecycle::ID, false)
             | (GetBranchProtections::ID, false)
             | (search::index::GetSearchIndexStatus::ID, false)

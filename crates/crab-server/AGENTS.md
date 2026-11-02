@@ -276,3 +276,24 @@ source titles/states into organization records or treat project access as a
 repository grant. Private preparation is `cells prepare-organization-projects`.
 The browser workspace lives under `packages/ui/src/features/projects/workspace/`;
 its shared submission controller retains the original organization/account/body.
+
+`cells/planning/` owns format-2 per-item revision tombstones, bounded preparation
+and append-only project changes for both native project owners. Domain commands
+append history within their transaction; ordinary reads require prepared format.
+`api/projects/history.rs` and `api/organizations/projects/history.rs` enrich only
+public actors and currently accessible sources. Browser history and saved-item
+comparison live beside the shared project command controller; its per-account,
+per-tab journal checkpoints immutable submissions before HTTP effects.
+`draft-storage.ts` owns versioned draft envelopes and exact acknowledgement
+cleanup; `drafts.tsx` restores captured form revisions and exposes scoped recovery.
+Never rebuild a pending command from current form values or rebase a restored
+draft silently onto the latest item/project revision.
+
+`cells/repository/projection/` owns snapshot-partitioned Git browse data.
+Its explicit `preparation.rs` rebuilds only derived tables; existing repositories
+require `cells prepare-projection-state`. Preparation clears bounded full-key
+batches before dropping empty old tables; populated-table DROP is unbounded.
+Collection seals retired epochs and
+deletes bounded child/node ranges before deleting their checkpoint. Never revive
+a collecting epoch or replace this with a full attribution-graph traversal.
+Unchanged-source reconciliation remains read-only while pending cleanup resumes.

@@ -178,6 +178,75 @@ async function openDiscussion(page: Page) {
   };
 }
 
+test("adding an issue to a project uses a new item revision independently of project settings", async ({
+  page,
+}) => {
+  await openDiscussion(page);
+  const project = {
+    id: "00000000-0000-4000-8000-000000000010",
+    definition: {
+      name: "Delivery",
+      description: "",
+      readme: "",
+      statuses: ["Todo"],
+      fields: [],
+      views: [
+        {
+          id: "00000000-0000-4000-8000-000000000011",
+          name: "Table",
+          layout: "table",
+          query: "",
+          status: null,
+          hide_closed: false,
+        },
+      ],
+      is_template: false,
+    },
+    version: 7,
+    archived: false,
+    created_at: 1,
+    updated_at: 1,
+  };
+  const root = "/api/repos/team/project/projects";
+  await page.route(
+    (url) => url.pathname === root,
+    (route) =>
+      route.fulfill({
+        json: { items: [project], next: null, can_manage: true },
+      }),
+  );
+  await page.route(
+    (url) => url.pathname === `${root}/commands`,
+    (route) => {
+      const { command } = route.request().postDataJSON();
+      return route.fulfill({
+        json:
+          command.version === 0
+            ? { outcome: "applied", project: project.id, version: 8 }
+            : {
+                outcome: "item_conflict",
+                project: project.id,
+                item: command.item.id,
+                version: 0,
+              },
+      });
+    },
+  );
+  await page
+    .getByRole("button", { name: "Add to a project", exact: true })
+    .click();
+  const dialog = page.getByRole("dialog", {
+    name: "Add to a project",
+    exact: true,
+  });
+  await dialog.getByLabel("Project", { exact: true }).click();
+  await page.getByRole("option", { name: "Delivery", exact: true }).click();
+  await dialog
+    .getByRole("button", { name: "Add to project", exact: true })
+    .click();
+  await expect(dialog).toHaveCount(0);
+});
+
 test("issue editing and state changes retain a keyboard continuation point", async ({
   page,
 }) => {

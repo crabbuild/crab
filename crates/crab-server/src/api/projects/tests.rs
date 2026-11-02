@@ -35,13 +35,22 @@ async fn projects_are_native_versioned_and_repository_authorized() {
         "Release"
     );
     h.write(Method::POST,&format!("{ROOT}/issues"),&alice,json!({"request_id":Uuid::now_v7(),"title":"Native linked issue","body":"Private discussion body"})).await.error_for_status().unwrap();
-    h.write(Method::POST,&path,&alice,json!({"request_id":Uuid::now_v7(),"command":{"kind":"item","project":id,"version":1,"item":{"id":Uuid::now_v7(),"subject":{"kind":"issue","number":1},"title":"","body":"","status":"Todo","priority":0,"start":null,"end":null,"values":{}}}})).await.error_for_status().unwrap();
+    h.write(Method::POST,&path,&alice,json!({"request_id":Uuid::now_v7(),"command":{"kind":"item","project":id,"version":0,"item":{"id":Uuid::now_v7(),"subject":{"kind":"issue","number":1},"title":"","body":"","status":"Todo","priority":0,"start":null,"end":null,"values":{}}}})).await.error_for_status().unwrap();
     let page = h.json(&format!("{ROOT}/projects/{id}/items"), &alice).await;
     assert_eq!(
         page["page"]["items"][0]["work"]["title"],
         "Native linked issue"
     );
+    let history = h
+        .json(&format!("{ROOT}/projects/{id}/history?after=0"), &alice)
+        .await;
+    assert_eq!(history["items"].as_array().unwrap().len(), 2);
+    assert_eq!(
+        history["items"][1]["target"]["source"]["subject"]["number"],
+        1
+    );
     for private in ["alice-id", "Private discussion body", "issuer"] {
+        assert!(!history.to_string().contains(private));
         assert!(!page.to_string().contains(private));
     }
     assert_eq!(
