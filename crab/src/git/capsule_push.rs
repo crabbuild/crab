@@ -471,15 +471,21 @@ async fn run_inner(
         Box::pin(async {
             // LFS bytes share the ref visibility boundary with Git and Xet data.
             // Publishing them here also covers mirror batches that own hook stdin.
-            let lfs_objects = crate::lfs::publication::publish_reachable_objects(
-                store.as_storage().clone(),
-                router.repo_prefix().to_owned(),
-                common_git_dir.clone(),
-                lfs_tips,
-                lfs_remote_tips,
-                cancel,
-            )
-            .await?;
+            // The verified exact delta can prove absence without walking history
+            // again. Positive or unproven ranges still need path/lock discovery.
+            let lfs_objects = if prepared.lfs_delta_empty {
+                Vec::new()
+            } else {
+                crate::lfs::publication::publish_reachable_objects(
+                    store.as_storage().clone(),
+                    router.repo_prefix().to_owned(),
+                    common_git_dir.clone(),
+                    lfs_tips,
+                    lfs_remote_tips,
+                    cancel,
+                )
+                .await?
+            };
             let (prepared_pointer_delta, prepared_xet_stats) =
                 super::xet_publication::prepare_delta(
                     &layout,
@@ -1192,13 +1198,15 @@ struct PreparedGitPush {
     pointers: Vec<crab_types::pointer::Pointer>,
     /// Exact new-ref object set only when pack exclusions equal its prior tip.
     visibility_objects: Option<Vec<gix_hash::ObjectId>>,
+    /// An exact validated ref delta has no nonempty LFS pointer blobs.
+    lfs_delta_empty: bool,
 }
 
 async fn prepare_generated_git_packs(
     git_dir: &Path,
     generated: Vec<crate::git::pack::PackedFileData>,
     max_input_size: u64,
-    retain_visibility_objects: bool,
+    exact_ref_delta: bool,
 ) -> Result<PreparedGitPush> {
     let evidence_dir = Arc::new(
         tempfile::Builder::new()
@@ -1207,7 +1215,8 @@ async fn prepare_generated_git_packs(
     );
     let mut packs = Vec::with_capacity(generated.len());
     let mut pointers = Vec::new();
-    let mut visibility_objects = retain_visibility_objects.then(Vec::new);
+    let mut visibility_objects = exact_ref_delta.then(Vec::new);
+    let mut lfs_delta_empty = exact_ref_delta;
     let max_visibility_objects =
         crab_metadata::git_visibility::MAX_SYNCHRONOUS_GIT_VISIBILITY_OBJECTS as usize;
     for generated in generated {
@@ -1248,6 +1257,7 @@ async fn prepare_generated_git_packs(
             objects.extend(object_ids.iter().copied());
         }
         let inventory = inspect_generated_objects(git_dir, &object_ids)?;
+        lfs_delta_empty &= !inventory.has_lfs_objects;
         pointers.extend(inventory.pointers);
         let checksum =
             gix_hash::ObjectId::from_hex(installed.git_sha1.as_bytes()).map_err(|error| {
@@ -1272,6 +1282,7 @@ async fn prepare_generated_git_packs(
         packs,
         pointers,
         visibility_objects,
+        lfs_delta_empty,
     })
 }
 
@@ -1293,6 +1304,7 @@ fn locally_available_remote_tips(
 struct GeneratedObjectInventory {
     kinds: Vec<gix_object::Kind>,
     pointers: Vec<crab_types::pointer::Pointer>,
+    has_lfs_objects: bool,
 }
 
 // Native index-pack has already validated the generated pack. Inspect local
@@ -1312,6 +1324,7 @@ fn inspect_generated_objects(
     .map_err(|error| CrabError::Internal(format!("failed to open local Git objects: {error}")))?;
     let mut buffer = Vec::new();
     let mut pointers = Vec::new();
+    let mut has_lfs_objects = false;
     let mut kinds = Vec::with_capacity(object_ids.len());
     for oid in object_ids {
         let header = objects
@@ -1325,7 +1338,9 @@ fn inspect_generated_objects(
             })?;
         kinds.push(header.kind);
         if header.kind != gix_object::Kind::Blob
-            || header.size > crab_types::pointer::MAX_POINTER_SIZE as u64
+            || header.size
+                > crab_types::pointer::MAX_POINTER_SIZE
+                    .max(crab_git::lfs_pointer::MAX_LFS_POINTER_SIZE) as u64
         {
             continue;
         }
@@ -1346,8 +1361,16 @@ fn inspect_generated_objects(
         if let Ok(pointer) = crab_types::pointer::Pointer::parse(data.data) {
             pointers.push(pointer);
         }
+        has_lfs_objects |= matches!(
+            crab_git::classify(data.data),
+            crab_git::PointerKind::Lfs(pointer) if pointer.size > 0
+        );
     }
-    Ok(GeneratedObjectInventory { kinds, pointers })
+    Ok(GeneratedObjectInventory {
+        kinds,
+        pointers,
+        has_lfs_objects,
+    })
 }
 
 fn map_push_pack_error(error: CrabError) -> CrabError {
