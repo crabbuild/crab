@@ -36,6 +36,24 @@ the user's manual-demo data. No bucket-wide Crab GC was invoked.
 
 ## Results
 
+Follow-up `a4cd9ae8cf4e` passes fresh eight-client and 64-client mixed runs
+(120/848 checks, 32/256 commits), plus 22 source-deletion/repack/repository-GC
+survival checks. Both historical payload versions, checkpoint and full no-repair
+audits pass. Real warm fetches under requested protocol versions 0 and 2 pass
+exact-tip/Git integrity checks and a separate cold-cache historical Xet hash
+check, but each fetch still reads 1,044,186,371 bytes in 6,311 requests. Its
+requested-ref transition follow-up remains under validation.
+Evidence: `frontier-fetch-live-proof.json`, `frontier-fetch-live-read-probe.json`.
+
+The same runtime rejects the first mixed push containing a 2 GiB ordinary Git
+blob: its 2,148,138,761-byte pack exceeds Crab's default 2,147,483,648-byte
+per-pack admission limit. No ref publishes. Separate staging verification,
+unchanged staging inventory and a full remote audit without repair pass; this
+does not exercise Xet/LFS publication. The original lifecycle remains failed.
+A separate profile with 256 MiB ordinary Git and 2 GiB each Xet/LFS is running;
+no product limit changes. Evidence: `mixed-history-2g-frontier-fetch/report.json`,
+`frontier-raw-limit-rejection-audit.json`, `frontier-normalized-large-controller.json`.
+
 Current root-5/checkpoint-9 runtime `4c01b9127c90` passes fresh eight-client
 and 64-client mixed Git/Xet/LFS runs: 120 and 848 checks, 32 and 256 commits,
 explicit checkpoint, both historical payload versions and full no-repair

@@ -684,6 +684,23 @@ pub fn tip_bound_transitions_cover_wants(
     })
 }
 
+/// Select canonical visible ref names for advertised wanted tips.
+///
+/// Aliases use the planner's lexicographic choice. Hidden or non-tip wants
+/// return `UnauthorizedObject`; repeated wants return one ref name.
+pub fn tip_bound_requested_refs(
+    references: &[RepositoryRef],
+    visible_ref_names: &[String],
+    wants: &[ObjectId],
+) -> Result<Vec<String>> {
+    let visible = tip_bound_visible_refs(references, visible_ref_names);
+    let names = selected_tip_bound_refs(&visible, wants).ok_or(ReadError::UnauthorizedObject)?;
+    let mut names = names.into_iter().map(str::to_owned).collect::<Vec<_>>();
+    names.sort_unstable();
+    names.dedup();
+    Ok(names)
+}
+
 fn tip_bound_visible_refs(
     references: &[RepositoryRef],
     visible_ref_names: &[String],
@@ -2847,6 +2864,27 @@ mod tests {
                 peeled: None,
             },
         ]
+    }
+
+    #[test]
+    fn requested_transition_refs_follow_the_planner_alias_choice_and_visibility() {
+        let mut references = references();
+        references.push(RepositoryRef {
+            name: "refs/heads/alias".to_owned(),
+            target: oid('1'),
+            peeled: None,
+        });
+        let visible = vec!["refs/heads/main".to_owned(), "refs/heads/alias".to_owned()];
+        assert_eq!(
+            tip_bound_requested_refs(&references, &visible, &[oid('1'), oid('1')]).unwrap(),
+            ["refs/heads/alias"]
+        );
+        for want in [oid('2'), oid('9')] {
+            assert!(matches!(
+                tip_bound_requested_refs(&references, &visible, &[want]),
+                Err(ReadError::UnauthorizedObject)
+            ));
+        }
     }
 
     #[test]
