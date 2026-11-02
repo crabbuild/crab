@@ -1211,18 +1211,15 @@ async fn prepare_generated_git_packs(
     let max_visibility_objects =
         crab_metadata::git_visibility::MAX_SYNCHRONOUS_GIT_VISIBILITY_OBJECTS as usize;
     for generated in generated {
+        let generated = Arc::new(generated);
         if generated.object_count == 0 {
             continue;
         }
         let directory = Arc::clone(&evidence_dir);
-        let installed = install_generated_pack_file(
-            directory,
-            generated.pack_path.as_ref(),
-            &generated.pack_blake3_hex,
-            max_input_size,
-        )
-        .await
-        .map_err(map_push_pack_error)?;
+        let installed =
+            install_generated_pack_file(directory, Arc::clone(&generated), max_input_size)
+                .await
+                .map_err(map_push_pack_error)?;
         let mut locations = crab_git::pack_locator::PackLocationIter::open(
             &installed.idx_path,
             &installed.rev_path,

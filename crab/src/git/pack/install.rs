@@ -1,30 +1,16 @@
 //! File-backed pack installation with owned indexing and cleanup lifetimes.
 
 use std::fs::File;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Output};
 use std::sync::Arc;
 use std::time::Duration;
 
 use tokio_util::sync::CancellationToken;
 
-use super::{INDEX_PACK_TIMEOUT, InstalledPack};
+use super::{INDEX_PACK_TIMEOUT, InstalledPack, PackedFileData};
 use crate::core::error::{CrabError, Result};
 use crate::git::process;
-
-enum InstallDirectory {
-    Repository(PathBuf),
-    Temporary(Arc<tempfile::TempDir>),
-}
-
-impl InstallDirectory {
-    fn path(&self) -> &Path {
-        match self {
-            Self::Repository(path) => path,
-            Self::Temporary(directory) => directory.path(),
-        }
-    }
-}
 
 /// Verify and install a downloaded pack without materializing its body in memory.
 pub async fn install_pack_file_locally(
@@ -34,9 +20,8 @@ pub async fn install_pack_file_locally(
     max_input_size: u64,
     fsck_objects: bool,
 ) -> Result<InstalledPack> {
-    let directory = InstallDirectory::Repository(pack_dir.to_owned());
     install_file(
-        directory,
+        pack_dir,
         pack_tmp_path,
         canonical_name,
         max_input_size,
@@ -54,9 +39,8 @@ pub async fn install_pack_file_locally_with_timeout(
     max_input_size: u64,
     fsck_objects: bool,
 ) -> Result<InstalledPack> {
-    let directory = InstallDirectory::Repository(pack_dir.to_owned());
     install_file(
-        directory,
+        pack_dir,
         pack_tmp_path,
         canonical_name,
         max_input_size,
@@ -68,42 +52,55 @@ pub async fn install_pack_file_locally_with_timeout(
 
 pub(crate) async fn install_generated_pack_file(
     directory: Arc<tempfile::TempDir>,
-    pack_tmp_path: &Path,
-    canonical_name: &str,
+    pack: Arc<PackedFileData>,
     max_input_size: u64,
 ) -> Result<InstalledPack> {
-    // The worker retains the enclosing evidence directory if its awaiting push
-    // is dropped. Cleanup must not remove index-pack's outputs while it exits.
-    let directory = InstallDirectory::Temporary(directory);
-    install_file(
-        directory,
-        pack_tmp_path,
-        canonical_name,
-        max_input_size,
-        true,
-        Some(INDEX_PACK_TIMEOUT),
-    )
+    let git_sha1 = gix_hash::ObjectId::from_hex(pack.git_sha1.as_bytes()).map_err(|error| {
+        CrabError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+    })?;
+    let identity = crab_git::pack::VerifiedPackIdentity {
+        git_sha1: git_sha1.as_bytes().try_into().map_err(|error| {
+            CrabError::Io(std::io::Error::new(std::io::ErrorKind::InvalidData, error))
+        })?,
+        content_hash: pack.pack_blake3,
+    };
+    let error_pack_id = pack.pack_blake3_hex.clone();
+    // Generation already checked both hashes. Retain its private source and
+    // output directory through cancellation, so linking the source is safe.
+    run_install(Some(INDEX_PACK_TIMEOUT), error_pack_id, move |cancel| {
+        crab_git::pack::install_pack_file_from_path_with_indexer(
+            directory.path(),
+            pack.pack_path.as_ref(),
+            &pack.pack_blake3_hex,
+            max_input_size,
+            true,
+            Some(identity),
+            |command, input| run_indexer(command, input, &cancel),
+        )
+    })
     .await
 }
 
 async fn install_file(
-    directory: InstallDirectory,
+    pack_dir: &Path,
     pack_tmp_path: &Path,
     canonical_name: &str,
     max_input_size: u64,
     fsck_objects: bool,
     timeout: Option<Duration>,
 ) -> Result<InstalledPack> {
+    let pack_dir = pack_dir.to_owned();
     let source = pack_tmp_path.to_owned();
     let canonical_name = canonical_name.to_owned();
     let error_pack_id = canonical_name.clone();
     run_install(timeout, error_pack_id, move |cancel| {
         crab_git::pack::install_pack_file_from_path_with_indexer(
-            directory.path(),
+            &pack_dir,
             &source,
             &canonical_name,
             max_input_size,
             fsck_objects,
+            None,
             |command, input| run_indexer(command, input, &cancel),
         )
     })

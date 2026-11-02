@@ -91,6 +91,18 @@ Clippy and architecture checks. Final runtime qualification remains pending.
 The original failed Kubernetes reports remain failed.
 Evidence: `owned-pack-indexer-checks.json`.
 
+The `d47e1cb8c06` private install passes fresh mixed eight/64-client runs
+(120/848 checks), 22 retention checks, real warm/historical Git fetching and
+historical Xet bytes. Kubernetes bootstrap still exceeds the unchanged 300-second
+installation deadline; no incremental pushes run. Generation takes 142.799
+seconds, and installation spends about 33 seconds before starting Git. The owned
+indexer exits before scratch cleanup; the earlier missing-output error is absent.
+The next candidate reuses generation's verified SHA-1/BLAKE3 and private source
+instead of rereading and copying it, retaining native object validation. Its final
+runtime qualification is pending; the failed replay remains failed.
+Evidence: `owned-pack-indexer-verification-controller.json`,
+`owned-pack-indexer-k8s-controller.json`, `private-pack-reuse-before.json`.
+
 Full CI on `a4cd9ae8cf4e` passes 4,167 CLI library tests but fails six. The two
 primary helper failures reproduce unchanged on `43dc00d82d8`: an already-held
 replica tip lacks transition history, and a follow-tags fetch omits a missing

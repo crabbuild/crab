@@ -83,6 +83,12 @@ checks. Temporary reverse-index cleanup also covers cancellation after Git start
 writing an optional sidecar. The existing synchronous entry points retain native
 Git execution.
 
+Private generated packs can carry `VerifiedPackIdentity` into supervised indexing.
+The caller retains an immutable source through the worker; shared installation
+reuses its verified checksums and hard-links the body when supported. Native
+object validation and sidecar checks still run. Borrowed sources retain copying
+and checksum verification, so later caller writes cannot mutate installed packs.
+
 Generated objects use `sha1dc` for hardware-accelerated SHA-1 with collision
 detection. Their IDs include the standard Git loose-object header; a detected
 collision returns the existing Gitoxide collision error and standard digest.
