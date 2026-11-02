@@ -191,6 +191,7 @@ jobs:
         run: |
           cargo test -p crab --lib cmd::mirror --locked --features gix-transport,testing
           cargo test -p crab --lib git::process::tests --locked --features gix-transport
+          cargo test -p crab --lib git::pack::install::tests --locked --features gix-transport
           cargo test -p crab --lib lfs::publication::tests --locked --features gix-transport
           cargo test -p crab --lib lfs::coordinator::tests --locked --features gix-transport
           cargo test -p crab --lib lfs::discovery::tests --locked --features gix-transport
@@ -340,6 +341,7 @@ jobs:
 
       - name: Run hook composition and frozen-ref discovery contracts
         run: |
+          cargo test -p crab --lib git::pack::install::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
           cargo test -p crab --lib cmd::install::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
           cargo test -p crab --lib cmd::lfs::install::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
           cargo test -p crab --lib cmd::push::followtag_tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport

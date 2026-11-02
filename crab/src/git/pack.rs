@@ -20,6 +20,13 @@ use crate::git::push::RefUpdate;
 pub use crab_git::pack::InstalledPack;
 use crab_metadata::manifests::PackManifestEntry;
 
+mod install;
+pub(crate) use install::install_generated_pack_file;
+pub use install::{
+    install_pack_file_locally, install_pack_file_locally_with_timeout,
+    install_thin_pack_file_locally_with_timeout,
+};
+
 /// Configuration for push pack generation.
 #[derive(Debug, Clone)]
 pub struct PushPackConfig {
@@ -1268,11 +1275,7 @@ fn packed_bytes_to_temp_file(packed: PackedData) -> Result<PackedFileData> {
 // Local pack installation
 // ---------------------------------------------------------------------------
 
-/// How long to wait for `git index-pack` before giving up and cleaning up.
-///
-/// Indexing is CPU-bound and roughly linear in object count — a 1 GB pack
-/// indexes in a few seconds on modern hardware. We allow 5 minutes so
-/// abnormal packs don't hang a push indefinitely.
+/// Deadline for local pack installation, including checksums and copying.
 const INDEX_PACK_TIMEOUT: Duration = Duration::from_secs(300);
 
 /// Install a pack into `.git/objects/pack/` with a matching `.idx`.
@@ -1378,47 +1381,6 @@ pub async fn install_pack_locally(
     })
     .await
     .map_err(|e| CrabError::Internal(format!("install_pack join: {e}")))?
-}
-
-/// Install a pack already downloaded to a temporary file.
-///
-/// This avoids materializing large fetch packs in memory: callers stream
-/// remote bytes to `pack_tmp_path`, then this function verifies the pack,
-/// runs `git index-pack`, and atomically renames the `.pack`/`.idx`
-/// pair into place under `canonical_name`.
-pub async fn install_pack_file_locally(
-    pack_dir: &Path,
-    pack_tmp_path: &Path,
-    canonical_name: &str,
-    max_input_size: u64,
-    fsck_objects: bool,
-) -> Result<InstalledPack> {
-    let pack_dir = pack_dir.to_owned();
-    let pack_tmp_path = pack_tmp_path.to_owned();
-    let canonical_name = canonical_name.to_owned();
-    let error_pack_id = canonical_name.clone();
-    tokio::task::spawn_blocking(move || {
-        crab_git::pack::install_pack_file_from_path(
-            &pack_dir,
-            &pack_tmp_path,
-            &canonical_name,
-            max_input_size,
-            fsck_objects,
-        )
-    })
-    .await
-    .map_err(|e| CrabError::Internal(format!("install_pack_file join: {e}")))?
-    .map_err(|error| match error {
-        crab_git::pack::PackError::ObjectFsckFailed { git_sha1, stderr } => {
-            CrabError::FetchMalformedObject {
-                pack_id: error_pack_id,
-                oid: git_sha1,
-                kind: "pack".to_owned(),
-                detail: stderr,
-            }
-        }
-        error => CrabError::from(error),
-    })
 }
 
 /// Verify that every requested ref tip resolves after the fetch batch lands.
@@ -1899,82 +1861,6 @@ pub async fn install_pack_locally_with_timeout(
         Ok(res) => res,
         Err(_) => Err(CrabError::Internal(format!(
             "git index-pack exceeded timeout of {}s",
-            INDEX_PACK_TIMEOUT.as_secs()
-        ))),
-    }
-}
-
-/// Timeout wrapper around [`install_pack_file_locally`].
-pub async fn install_pack_file_locally_with_timeout(
-    pack_dir: &Path,
-    pack_tmp_path: &Path,
-    canonical_name: &str,
-    max_input_size: u64,
-    fsck_objects: bool,
-) -> Result<InstalledPack> {
-    match tokio::time::timeout(
-        INDEX_PACK_TIMEOUT,
-        install_pack_file_locally(
-            pack_dir,
-            pack_tmp_path,
-            canonical_name,
-            max_input_size,
-            fsck_objects,
-        ),
-    )
-    .await
-    {
-        Ok(res) => res,
-        Err(_) => Err(CrabError::Internal(format!(
-            "git index-pack exceeded timeout of {}s",
-            INDEX_PACK_TIMEOUT.as_secs()
-        ))),
-    }
-}
-
-/// Repair and install a generated thin fetch pack whose bases are already in
-/// the local Git object database.
-pub async fn install_thin_pack_file_locally_with_timeout(
-    pack_dir: &Path,
-    pack_tmp_path: &Path,
-    canonical_name: &str,
-    max_input_size: u64,
-    fsck_objects: bool,
-) -> Result<InstalledPack> {
-    let pack_dir = pack_dir.to_owned();
-    let pack_tmp_path = pack_tmp_path.to_owned();
-    let canonical_name = canonical_name.to_owned();
-    let error_pack_id = canonical_name.clone();
-    match tokio::time::timeout(
-        INDEX_PACK_TIMEOUT,
-        tokio::task::spawn_blocking(move || {
-            crab_git::pack::install_thin_pack_file_from_path(
-                &pack_dir,
-                &pack_tmp_path,
-                &canonical_name,
-                max_input_size,
-                fsck_objects,
-            )
-        }),
-    )
-    .await
-    {
-        Ok(Ok(result)) => result.map_err(|error| match error {
-            crab_git::pack::PackError::ObjectFsckFailed { git_sha1, stderr } => {
-                CrabError::FetchMalformedObject {
-                    pack_id: error_pack_id,
-                    oid: git_sha1,
-                    kind: "pack".to_owned(),
-                    detail: stderr,
-                }
-            }
-            error => CrabError::from(error),
-        }),
-        Ok(Err(error)) => Err(CrabError::Internal(format!(
-            "install_thin_pack_file join: {error}"
-        ))),
-        Err(_) => Err(CrabError::Internal(format!(
-            "git index-pack --fix-thin exceeded timeout of {}s",
             INDEX_PACK_TIMEOUT.as_secs()
         ))),
     }

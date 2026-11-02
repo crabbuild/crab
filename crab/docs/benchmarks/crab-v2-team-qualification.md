@@ -80,6 +80,17 @@ Evidence: `mixed-history-2g-frontier-fetch/report.json`,
 `frontier-normalized-large-proof.json`, `frontier-normalized-k8s-controller.json`,
 `frontier-k8s-index-timeout-diagnosis.json`, `k8s-index-isolation.json`.
 
+The indexing-lifetime follow-up retains the 300-second deadline and object
+validation. File-backed CLI installers cancel and reap the indexing process tree
+and join its pipes before returning a deadline error. Generated push evidence
+also remains owned by the worker when its awaiting operation is dropped, so
+cleanup cannot remove a live indexer's output directory. Dedicated deadline,
+drop and real full/thin-pack byte checks cover that boundary. Shared Git,
+CLI pack, helper, wire, push and LFS regression groups pass, as do shared Git
+Clippy and architecture checks. Final runtime qualification remains pending.
+The original failed Kubernetes reports remain failed.
+Evidence: `owned-pack-indexer-checks.json`.
+
 Full CI on `a4cd9ae8cf4e` passes 4,167 CLI library tests but fails six. The two
 primary helper failures reproduce unchanged on `43dc00d82d8`: an already-held
 replica tip lacks transition history, and a follow-tags fetch omits a missing
@@ -112,6 +123,11 @@ but downloads 1,984,426,092 bytes in 9,784 requests. After a reporting-argument
 failure, its separately sealed continuation verifies strict Git fsck and exact
 cold 1 MiB Xet bytes; hydration alone takes 18.051 seconds and 14,670 requests.
 The original failed wrapper is retained. These costs remain too high.
+All eight batches have since acknowledged 8,000 pushes with sixteen parallel
+workers. The mixed Git update batch takes 15,030.170 seconds, with service p95
+364.178 seconds. Cold historical payload readback and the final no-repair audit
+are still running; successful publication alone is not complete qualification.
+Evidence: `paged-capture-synced-team-8000-publications.json`.
 Evidence: `paged-capture-synced-live-proof.json`,
 `paged-capture-synced-team-partial-2-batches.json` (three completed batches),
 and `paged-capture-synced-concurrent-read-continuation.json`.

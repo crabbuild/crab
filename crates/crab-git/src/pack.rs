@@ -295,6 +295,29 @@ pub fn install_pack_file_from_path(
     max_input_size: u64,
     fsck_objects: bool,
 ) -> Result<InstalledPack> {
+    install_pack_file_from_path_with_indexer(
+        pack_dir,
+        pack_tmp_path,
+        canonical_name,
+        max_input_size,
+        fsck_objects,
+        native_index_pack,
+    )
+}
+
+/// Install a pack with caller-owned indexing process supervision.
+///
+/// The indexer must execute the supplied command, feed any supplied file to
+/// stdin and stop and reap its child before returning. This function selects
+/// validation flags and verifies the resulting pack and sidecar identities.
+pub fn install_pack_file_from_path_with_indexer(
+    pack_dir: &Path,
+    pack_tmp_path: &Path,
+    canonical_name: &str,
+    max_input_size: u64,
+    fsck_objects: bool,
+    mut indexer: impl FnMut(Command, Option<std::fs::File>) -> Result<std::process::Output>,
+) -> Result<InstalledPack> {
     install_pack_file_from_path_with_identity(
         pack_dir,
         pack_tmp_path,
@@ -302,6 +325,7 @@ pub fn install_pack_file_from_path(
         max_input_size,
         fsck_objects,
         None,
+        &mut indexer,
     )
 }
 
@@ -319,6 +343,29 @@ pub fn install_thin_pack_file_from_path(
     max_input_size: u64,
     fsck_objects: bool,
 ) -> Result<InstalledPack> {
+    install_thin_pack_file_from_path_with_indexer(
+        pack_dir,
+        pack_tmp_path,
+        canonical_name,
+        max_input_size,
+        fsck_objects,
+        native_index_pack,
+    )
+}
+
+/// Repair and install a thin pack with caller-owned indexing process supervision.
+///
+/// The indexer must execute the supplied command, consume its input and stop and
+/// reap its child before returning. External-base, repaired identity and sidecar
+/// checks remain owned here.
+pub fn install_thin_pack_file_from_path_with_indexer(
+    pack_dir: &Path,
+    pack_tmp_path: &Path,
+    canonical_name: &str,
+    max_input_size: u64,
+    fsck_objects: bool,
+    mut indexer: impl FnMut(Command, Option<std::fs::File>) -> Result<std::process::Output>,
+) -> Result<InstalledPack> {
     install_thin_pack(
         pack_dir,
         pack_tmp_path,
@@ -326,6 +373,7 @@ pub fn install_thin_pack_file_from_path(
         max_input_size,
         fsck_objects,
         None,
+        &mut indexer,
     )
 }
 
@@ -347,6 +395,7 @@ pub fn install_thin_pack_with_content_identity(
         max_input_size,
         false,
         Some(expected_objects),
+        &mut native_index_pack,
     )
 }
 
@@ -357,6 +406,7 @@ fn install_thin_pack(
     max_input_size: u64,
     fsck_objects: bool,
     expected_objects: Option<&std::collections::BTreeSet<gix_hash::ObjectId>>,
+    indexer: &mut impl FnMut(Command, Option<std::fs::File>) -> Result<std::process::Output>,
 ) -> Result<InstalledPack> {
     let size = std::fs::metadata(pack_tmp_path)
         .map_err(|source| io_error(format!("metadata {}", pack_tmp_path.display()), source))?
@@ -416,12 +466,8 @@ fn install_thin_pack(
     if fsck_objects {
         index_pack.arg("--fsck-objects");
     }
-    let output = index_pack
-        .arg("--stdin")
-        .arg(&repaired_pack)
-        .stdin(input)
-        .output()
-        .map_err(|source| io_error("spawn git index-pack --fix-thin", source))?;
+    index_pack.arg("--stdin").arg(&repaired_pack);
+    let output = indexer(index_pack, Some(input))?;
     if !output.status.success() {
         let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
         return Err(if fsck_objects {
@@ -516,6 +562,7 @@ pub(crate) fn install_pack_file_from_path_with_identity(
     max_input_size: u64,
     fsck_objects: bool,
     verified_identity: Option<VerifiedPackIdentity>,
+    indexer: &mut impl FnMut(Command, Option<std::fs::File>) -> Result<std::process::Output>,
 ) -> Result<InstalledPack> {
     let size = std::fs::metadata(pack_tmp_path)
         .map_err(|source| io_error(format!("metadata {}", pack_tmp_path.display()), source))?
@@ -576,14 +623,18 @@ pub(crate) fn install_pack_file_from_path_with_identity(
     )?;
     let pack_tmp = copy_pack_to_install_temp(pack_dir, pack_tmp_path)?;
     let pack_tmp_path = pack_tmp.into_temp_path();
+    let installed = InstalledPack {
+        git_sha1,
+        pack_path: final_pack,
+        idx_path: final_idx,
+        rev_path: final_rev,
+    };
     install_pack_file_blocking(
         pack_dir,
         pack_tmp_path.as_ref(),
-        &git_sha1,
-        &final_pack,
-        &final_idx,
-        &final_rev,
+        installed,
         fsck_objects,
+        indexer,
     )
 }
 
@@ -959,12 +1010,14 @@ fn valid_content_hash(value: &str) -> bool {
 fn install_pack_file_blocking(
     pack_dir: &Path,
     pack_tmp_path: &Path,
-    git_sha1: &str,
-    final_pack: &Path,
-    final_idx: &Path,
-    final_rev: &Path,
+    installed: InstalledPack,
     fsck_objects: bool,
+    indexer: &mut impl FnMut(Command, Option<std::fs::File>) -> Result<std::process::Output>,
 ) -> Result<InstalledPack> {
+    let git_sha1 = installed.git_sha1.as_str();
+    let final_pack = &installed.pack_path;
+    let final_idx = &installed.idx_path;
+    let final_rev = &installed.rev_path;
     let idx_tmp = tempfile::Builder::new()
         .prefix(".crab-idx-")
         .suffix(".idx")
@@ -978,6 +1031,10 @@ fn install_pack_file_blocking(
     let idx_tmp_path = idx_tmp.path().to_owned();
     let _idx_guard = idx_tmp;
     let _ = std::fs::remove_file(&idx_tmp_path);
+    // A cancelled indexer can leave this optional sidecar before returning an
+    // error. Retain its cleanup owner until the supervised child has stopped.
+    let rev_tmp_path = tempfile::TempPath::try_from_path(idx_tmp_path.with_extension("rev"))
+        .map_err(|source| io_error("track temporary pack reverse index", source))?;
 
     let mut index_pack = Command::new("git");
     if let Some(git_dir) = pack_dir
@@ -1002,16 +1059,9 @@ fn install_pack_file_blocking(
         // checked separately by the reachability owner after all packs land.
         index_pack.arg("--fsck-objects");
     }
-    let output = index_pack
-        .arg("-o")
-        .arg(&idx_tmp_path)
-        .arg(pack_tmp_path)
-        .output()
-        .map_err(|source| io_error("spawn git index-pack", source))?;
-
-    let rev_tmp_path = idx_tmp_path.with_extension("rev");
+    index_pack.arg("-o").arg(&idx_tmp_path).arg(pack_tmp_path);
+    let output = indexer(index_pack, None)?;
     if !output.status.success() {
-        let _ = std::fs::remove_file(&rev_tmp_path);
         let error = if fsck_objects {
             PackError::ObjectFsckFailed {
                 git_sha1: git_sha1.to_owned(),
@@ -1027,7 +1077,6 @@ fn install_pack_file_blocking(
     }
 
     if !idx_tmp_path.exists() {
-        let _ = std::fs::remove_file(&rev_tmp_path);
         return Err(PackError::IndexMissing { path: idx_tmp_path });
     }
 
@@ -1035,7 +1084,6 @@ fn install_pack_file_blocking(
         Ok(reported) if reported == git_sha1 => {}
         Ok(reported) => {
             let _ = std::fs::remove_file(&idx_tmp_path);
-            let _ = std::fs::remove_file(&rev_tmp_path);
             return Err(PackError::PackHashMismatch {
                 trailer: git_sha1.to_owned(),
                 index: reported,
@@ -1061,7 +1109,6 @@ fn install_pack_file_blocking(
 
     if let Err(source) = std::fs::rename(&rev_tmp_path, final_rev) {
         let _ = std::fs::remove_file(final_idx);
-        let _ = std::fs::remove_file(&rev_tmp_path);
         return Err(io_error(
             format!("rename {}", rev_tmp_path.display()),
             source,
@@ -1077,12 +1124,19 @@ fn install_pack_file_blocking(
         ));
     }
 
-    Ok(InstalledPack {
-        git_sha1: git_sha1.to_owned(),
-        pack_path: final_pack.to_owned(),
-        idx_path: final_idx.to_owned(),
-        rev_path: final_rev.to_owned(),
-    })
+    Ok(installed)
+}
+
+fn native_index_pack(
+    mut command: Command,
+    input: Option<std::fs::File>,
+) -> Result<std::process::Output> {
+    if let Some(input) = input {
+        command.stdin(input);
+    }
+    command
+        .output()
+        .map_err(|source| io_error("spawn git index-pack", source))
 }
 
 /// Verify a pack file's SHA-1 trailer and return its hexadecimal identity.
@@ -1851,6 +1905,33 @@ mod tests {
         assert!(matches!(err, PackError::InvalidPackFile { .. }));
         assert!(!dir.path().join("pack-bad.pack").exists());
         assert!(!dir.path().join("pack-bad.idx").exists());
+    }
+
+    #[test]
+    fn cancelled_indexer_removes_all_temporary_sidecars() {
+        let (fixture, index, _) = pack_index_fixture();
+        let source = index.with_extension("pack");
+        let destination = fixture.path().join("cancelled-install");
+        let result = install_pack_file_from_path_with_indexer(
+            &destination,
+            &source,
+            "cancelled",
+            0,
+            true,
+            |command, _input| {
+                let args = command.get_args().collect::<Vec<_>>();
+                let output = args.windows(2).find(|args| args[0] == "-o").unwrap()[1];
+                std::fs::write(Path::new(output).with_extension("rev"), b"partial").unwrap();
+                Err(PackError::Cancelled)
+            },
+        );
+        assert_eq!(
+            (
+                matches!(result, Err(PackError::Cancelled)),
+                std::fs::read_dir(destination).unwrap().count()
+            ),
+            (true, 0),
+        );
     }
 
     #[test]
