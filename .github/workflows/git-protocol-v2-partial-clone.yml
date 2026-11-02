@@ -191,6 +191,7 @@ jobs:
         run: |
           cargo test -p crab --lib cmd::mirror --locked --features gix-transport,testing
           cargo test -p crab --lib git::process::tests --locked --features gix-transport
+          cargo test -p crab --lib git::connectivity::tests --locked --features gix-transport
           cargo test -p crab --lib git::pack::install::tests --locked --features gix-transport
           cargo test -p crab --lib lfs::publication::tests --locked --features gix-transport
           cargo test -p crab --lib lfs::coordinator::tests --locked --features gix-transport
@@ -363,6 +364,7 @@ jobs:
         run: |
           cargo test -p crab --lib cmd::mirror::process::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
           cargo test -p crab --lib git::process::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
+          cargo test -p crab --lib git::connectivity::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
           cargo test -p crab --lib lfs::publication::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
           cargo test -p crab --lib lfs::coordinator::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport
           cargo test -p crab --lib lfs::discovery::tests --locked --no-default-features --features simd-accel,tier,watch,nfs,gix-pathmatch,gix-transport

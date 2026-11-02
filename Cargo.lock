@@ -2094,6 +2094,7 @@ dependencies = [
  "crc32fast",
  "dashmap",
  "dotenvy",
+ "dunce",
  "filetime",
  "flate2",
  "fs4",
