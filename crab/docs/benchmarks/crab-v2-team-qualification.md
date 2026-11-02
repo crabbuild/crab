@@ -103,6 +103,13 @@ runtime qualification is pending; the failed replay remains failed.
 Evidence: `owned-pack-indexer-verification-controller.json`,
 `owned-pack-indexer-k8s-controller.json`, `private-pack-reuse-before.json`.
 
+Windows protocol CI on the same published head passes deadline and abandonment
+cleanup but fails external thin-base reconstruction with an unresolved delta.
+The candidate uses the existing workspace path-normalization dependency at the
+native Git object-directory boundary. Exact reconstructed-byte assertions remain;
+the fixture also checks the stored base OID. New Windows verification is pending.
+Evidence: `windows-owned-indexer-failure.json`.
+
 Full CI on `a4cd9ae8cf4e` passes 4,167 CLI library tests but fails six. The two
 primary helper failures reproduce unchanged on `43dc00d82d8`: an already-held
 replica tip lacks transition history, and a follow-tags fetch omits a missing

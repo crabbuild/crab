@@ -420,7 +420,9 @@ fn install_thin_pack(
         .tempdir_in(pack_dir)
         .map_err(|source| io_error("create repaired thin-pack workspace", source))?;
     initialize_bare_git_dir(workspace.path())?;
-    let objects_dir = std::fs::canonicalize(objects_dir)
+    // Native Git must receive a Win32-compatible path rather than an
+    // unnecessary verbatim prefix that can hide external delta bases.
+    let objects_dir = dunce::canonicalize(objects_dir)
         .map_err(|source| io_error("resolve thin-pack base object directory", source))?;
     let repaired_pack = workspace.path().join("repaired.pack");
     let repaired_idx = repaired_pack.with_extension("idx");

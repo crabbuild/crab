@@ -88,6 +88,8 @@ The caller retains an immutable source through the worker; shared installation
 reuses its verified checksums and hard-links the body when supported. Native
 object validation and sidecar checks still run. Borrowed sources retain copying
 and checksum verification, so later caller writes cannot mutate installed packs.
+Thin-pack repair canonicalizes the owning object directory into a native-Git
+compatible Windows path before supplying external bases.
 
 Generated objects use `sha1dc` for hardware-accelerated SHA-1 with collision
 detection. Their IDs include the standard Git loose-object header; a detected

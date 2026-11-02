@@ -174,11 +174,13 @@ async fn supervised_full_and_external_thin_installs_preserve_object_bytes() {
         );
         let input = fixture.path().join("base-input");
         std::fs::write(&input, &base_data).unwrap();
-        git_output(
+        let written = git_output(
             &destination,
             &["hash-object", "-w", "--stdin"],
             Some(File::open(input).unwrap()),
         );
+        let expected_base = base.to_string();
+        assert_eq!(written.stdout.trim_ascii(), expected_base.as_bytes());
         let pack_dir = destination.join("objects/pack");
         let installed = if thin {
             install_thin_pack_file_locally_with_timeout(

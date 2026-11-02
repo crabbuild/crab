@@ -2416,6 +2416,7 @@ dependencies = [
  "bytes",
  "crab-types",
  "crc32fast",
+ "dunce",
  "flate2",
  "gix",
  "gix-attributes",
