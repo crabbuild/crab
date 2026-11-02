@@ -295,7 +295,7 @@ jobs:
       contents: read
       actions: read
     env:
-      QUAL_ROOT: ${{ github.workspace }}/../crab-pinned-kubernetes
+      QUAL_ROOT: ${{ github.workspace }}-pinned-kubernetes
       PRODUCT_HEAD: 41072d6d46706e58339a09e4cf82a1f48ce4369a
       BUILD_COMMIT: b0cab09190b430d2208b71617b012512a57238f2
       PRODUCT_TREE: 0cf6a9ee24b4c976b203bb68053c8ee97423ef88
@@ -442,6 +442,15 @@ jobs:
           mkdir -p "$QUAL_ROOT/provenance"
           docker logs pinned-rustfs > "$QUAL_ROOT/provenance/rustfs.log" 2>&1 || true
           df -h > "$QUAL_ROOT/provenance/disk-after.txt"
+          python3 - <<'PYREPORT'
+          import json,os
+          from pathlib import Path
+          r=Path(os.environ['QUAL_ROOT'])/'runs/pinned-kubernetes/artifacts'
+          p=r/'report.json'
+          if p.exists():
+              d=json.loads(p.read_text())
+              print(json.dumps({k:d.get(k) for k in ['status','metrics','correctness','maintenance','error']},indent=2))
+          PYREPORT
           docker rm -f pinned-rustfs >/dev/null 2>&1 || true
 
       - name: Upload pinned performance evidence
