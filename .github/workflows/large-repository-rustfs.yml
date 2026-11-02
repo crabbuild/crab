@@ -295,7 +295,7 @@ jobs:
       contents: read
       actions: read
     env:
-      QUAL_ROOT: ${{ runner.temp }}/crab-pinned-kubernetes
+      QUAL_ROOT: ${{ github.workspace }}/../crab-pinned-kubernetes
       PRODUCT_HEAD: 41072d6d46706e58339a09e4cf82a1f48ce4369a
       BUILD_COMMIT: b0cab09190b430d2208b71617b012512a57238f2
       PRODUCT_TREE: 0cf6a9ee24b4c976b203bb68053c8ee97423ef88
@@ -450,7 +450,7 @@ jobs:
         with:
           name: pinned-kubernetes-${{ github.run_id }}-${{ github.run_attempt }}
           path: |
-            ${{ runner.temp }}/crab-pinned-kubernetes/provenance/**
-            ${{ runner.temp }}/crab-pinned-kubernetes/runs/pinned-kubernetes/artifacts/**
+            ${{ env.QUAL_ROOT }}/provenance/**
+            ${{ env.QUAL_ROOT }}/runs/pinned-kubernetes/artifacts/**
           if-no-files-found: error
           retention-days: 30
