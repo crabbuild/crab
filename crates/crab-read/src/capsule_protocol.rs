@@ -193,6 +193,25 @@ impl CapsuleRepositoryCapture {
         .await
     }
 
+    /// Open ordinary wire-fetch controls with object sets deferred until selected.
+    ///
+    /// Only advertised-tip planning may use this view. Complete visibility and
+    /// catalog consumers must use [`Self::metadata_view`] instead.
+    pub async fn tip_bound_control_view(
+        &self,
+        limits: CapsuleReadLimits,
+    ) -> Result<CapsuleRepositoryView> {
+        assemble_layered_control_view(
+            &self.layout,
+            self.root.clone(),
+            limits,
+            &self.heads,
+            &self.active,
+            ControlRead::TipBoundFetch,
+        )
+        .await
+    }
+
     /// Open complete metadata without Git bodies or a second ref-head capture.
     pub async fn metadata_view(&self, limits: CapsuleReadLimits) -> Result<CapsuleRepositoryView> {
         assemble_layered_control_view(
@@ -4419,6 +4438,7 @@ enum ControlRead {
     Repack,
     Git,
     Fetch,
+    TipBoundFetch,
 }
 
 /// Bound retained fetch bodies while favoring runs with more transactions per byte.
@@ -4457,7 +4477,10 @@ fn inline_control_runs(
                 inline.fill(true);
             }
         }
-        ControlRead::Complete | ControlRead::CompleteForGit | ControlRead::Git => {}
+        ControlRead::Complete
+        | ControlRead::CompleteForGit
+        | ControlRead::Git
+        | ControlRead::TipBoundFetch => {}
     }
     inline
 }
@@ -4806,7 +4829,7 @@ async fn assemble_layered_control_view(
     read: ControlRead,
 ) -> Result<CapsuleRepositoryView> {
     let started = std::time::Instant::now();
-    let footer_only = matches!(read, ControlRead::Fetch);
+    let footer_only = matches!(read, ControlRead::Fetch | ControlRead::TipBoundFetch);
     let mut refs = snapshot.record().root().refs().clone();
     let mut peeled_refs = snapshot.record().root().peeled_refs().clone();
     let visible = materialize_visible_ref_heads(snapshot.record().root(), heads, active)
@@ -4861,12 +4884,16 @@ async fn assemble_layered_control_view(
                 let (control, capsules) = run.verified_controls()?;
                 Ok::<_, ReadError>((control, capsules, Some(run.bytes().clone())))
             } else {
-                let (control, capsules) = if matches!(read, ControlRead::Git) {
-                    crab_metadata::capsule_protocol::load_capsule_run_git_control(router, &pointer)
-                        .await?
-                } else {
-                    load_run_control(router, &pointer).await?
-                };
+                let (control, capsules) =
+                    if matches!(read, ControlRead::Git | ControlRead::TipBoundFetch) {
+                        crab_metadata::capsule_protocol::load_capsule_run_git_control(
+                            router, &pointer,
+                        )
+                        .await
+                        .map_err(metadata_control_error)?
+                    } else {
+                        load_run_control(router, &pointer).await?
+                    };
                 Ok((control, capsules, None))
             }
         },
@@ -4921,7 +4948,12 @@ async fn assemble_layered_control_view(
         // Validate transaction bindings now without expanding every shared
         // membership into per-ref ObjectId vectors during capability discovery.
         for control in &all_capsule_controls {
-            if let Some(delta) = control.visibility_delta()? {
+            if matches!(read, ControlRead::TipBoundFetch) {
+                let _ = control
+                    .paged_visibility_headers(router.store())
+                    .await
+                    .map_err(metadata_control_error)?;
+            } else if let Some(delta) = control.visibility_delta()? {
                 for (name, edit) in delta.edits() {
                     tip_bound_transition_endpoints(control.transaction(), name, edit)?;
                 }
@@ -4972,7 +5004,7 @@ async fn assemble_layered_control_view(
                 capsule_run_member_oids.insert(pointer.hash().to_owned(), member_oids);
             }
             for capsule in capsules {
-                if !matches!(read, ControlRead::Git)
+                if !matches!(read, ControlRead::Git | ControlRead::TipBoundFetch)
                     && let Some(visibility) = capsule.visibility_delta()?
                 {
                     extend_frontier_object_admission(
@@ -5006,7 +5038,7 @@ async fn assemble_layered_control_view(
             capsules: Vec::new(),
             capsule_controls: Vec::new(),
             tip_bound_transitions,
-            metadata_layout: None,
+            metadata_layout: matches!(read, ControlRead::TipBoundFetch).then(|| router.clone()),
             tip_bound_controls: all_capsule_controls,
             refs: expected_refs,
             peeled_refs: expected_peeled,
@@ -6801,12 +6833,20 @@ mod tests {
         .unwrap();
         seed_one_capsule_with_visibility(inner.clone(), None, Some(delta)).await;
         let router = StoreLayout::new(Store::new(inner), "repositories/test".to_owned());
-        let result = open_view_from_root_with_layered_control(
-            &router,
-            load_root(&router).await.unwrap(),
-            TEST_LIMITS,
-        )
-        .await;
+        let root = load_root(&router).await.unwrap();
+        let capture = CapsuleRepositoryCapture::from_root(router.clone(), root.clone())
+            .await
+            .unwrap();
+        let paged = capture.tip_bound_control_view(TEST_LIMITS).await;
+        let paged_error = paged.as_ref().err().map(ToString::to_string);
+        assert!(
+            matches!(
+                paged,
+                Err(error) if error.to_string().contains("visibility evidence differs from its ref edit")
+            ),
+            "paged intake error: {paged_error:?}"
+        );
+        let result = open_view_from_root_with_layered_control(&router, root, TEST_LIMITS).await;
         let Err(error) = result else {
             panic!("mismatched transition must reject the view");
         };
@@ -6903,23 +6943,30 @@ mod tests {
         let complete = open_view_from_root_with_metadata(&router, root.clone(), TEST_LIMITS)
             .await
             .unwrap();
-        let controls = open_view_from_root_with_layered_control(&router, root, TEST_LIMITS)
+        let capture = CapsuleRepositoryCapture::from_root(router.clone(), root.clone())
             .await
             .unwrap();
-        assert_eq!(
-            (
-                controls.git_pack_count(),
-                controls.git_pack_bytes().unwrap(),
-                controls.git_object_count().unwrap(),
-                controls.git_snapshot().unwrap()
-            ),
-            (
-                complete.git_pack_count(),
-                complete.git_pack_bytes().unwrap(),
-                complete.git_object_count().unwrap(),
-                complete.git_snapshot().unwrap()
-            ),
-        );
+        for controls in [
+            open_view_from_root_with_layered_control(&router, root, TEST_LIMITS)
+                .await
+                .unwrap(),
+            capture.tip_bound_control_view(TEST_LIMITS).await.unwrap(),
+        ] {
+            assert_eq!(
+                (
+                    controls.git_pack_count(),
+                    controls.git_pack_bytes().unwrap(),
+                    controls.git_object_count().unwrap(),
+                    controls.git_snapshot().unwrap()
+                ),
+                (
+                    complete.git_pack_count(),
+                    complete.git_pack_bytes().unwrap(),
+                    complete.git_object_count().unwrap(),
+                    complete.git_snapshot().unwrap()
+                ),
+            );
+        }
     }
 
     #[tokio::test]

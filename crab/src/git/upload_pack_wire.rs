@@ -1016,7 +1016,14 @@ async fn open_capsule_repository_from_capture(
     };
     let (mut view, direct_pack, tip_bound) =
         if footer_only && (!cold_clone || capture.may_have_layered_cold_clone_packs()) {
-            let footer_view = capture.layered_control_view(limits).await?;
+            // Cold streaming and classic installation retain complete member
+            // admission. Warm wire fetches load only selected transition sets
+            // from this same capture, keeping unrelated dictionaries cold.
+            let footer_view = if cold_clone {
+                capture.layered_control_view(limits).await?
+            } else {
+                capture.tip_bound_control_view(limits).await?
+            };
             let direct_pack = footer_view
                 .layered_cold_clone_pack(layout, options.operation_limits().max_response_bytes)
                 .map_err(CrabError::from)?;
