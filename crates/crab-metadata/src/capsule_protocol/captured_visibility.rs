@@ -203,53 +203,6 @@ impl CapturedVisibility {
         Ok(None)
     }
 
-    async fn headers(
-        &self,
-        control: &CapsuleControl,
-    ) -> Result<
-        Option<(
-            Arc<CapsuleVisibilityReader>,
-            Vec<Option<VisibilityEditHeader>>,
-        )>,
-    > {
-        let Some(reader) = control.paged_visibility() else {
-            if control.has_visibility() {
-                return Err(corrupt_path(
-                    "capsule Git visibility",
-                    "Git control is not paged",
-                ));
-            }
-            return Ok(None);
-        };
-        let edits = control.transaction().edits();
-        let live = edits.iter().filter(|edit| edit.new_oid().is_some()).count();
-        if reader.ref_count() as usize != live {
-            return Err(corrupt_path(
-                "capsule Git visibility",
-                "visibility evidence has missing or uncommitted refs",
-            ));
-        }
-        let names = edits.iter().map(|edit| edit.ref_name()).collect::<Vec<_>>();
-        let headers = reader.headers(&self.store, &names).await?;
-        for (edit, header) in edits.iter().zip(&headers) {
-            match (edit.new_oid(), header) {
-                (None, None) => {}
-                (Some(new), Some(header))
-                    if header.new_oid() == new
-                        && edit
-                            .expected_old()
-                            .is_none_or(|old| header.old_oid() == Some(old)) => {}
-                _ => {
-                    return Err(corrupt_path(
-                        "capsule Git visibility",
-                        "visibility evidence differs from its ref edit",
-                    ));
-                }
-            }
-        }
-        Ok(Some((reader.clone(), headers)))
-    }
-
     /// Check expected ref values and captured prior-closure availability.
     pub async fn ready(
         &self,
@@ -264,7 +217,7 @@ impl CapturedVisibility {
         {
             return Ok(false);
         }
-        let Some((_, headers)) = self.headers(control).await? else {
+        let Some((_, headers)) = control.paged_visibility_headers(&self.store).await? else {
             return Ok(true);
         };
         for (edit, header) in control.transaction().edits().iter().zip(headers) {
@@ -287,7 +240,7 @@ impl CapturedVisibility {
 
     /// Apply one authenticated control without widening to mutable ref state.
     pub async fn apply(&mut self, control: &CapsuleControl) -> Result<()> {
-        let Some((reader, headers)) = self.headers(control).await? else {
+        let Some((reader, headers)) = control.paged_visibility_headers(&self.store).await? else {
             // No payload skips OID changes, not deletion of an entire ref.
             // Prior layers still anchor already captured descendant closures.
             for edit in control.transaction().edits() {

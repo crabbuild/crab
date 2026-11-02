@@ -280,7 +280,7 @@ async fn large_ref_frontiers_bound_active_reads_without_dropping_refs() {
         max_capsule_bytes: u64::MAX,
         max_frontier_bytes: u64::MAX,
     };
-    for mode in ["complete", "metadata", "git", "fetch"] {
+    for mode in ["complete", "metadata", "git", "fetch", "tip-bound"] {
         reads.peak.store(0, Ordering::SeqCst);
         let view = match mode {
             "complete" => send(open_view_from_root(&layout, root.clone(), limits)).await,
@@ -293,6 +293,15 @@ async fn large_ref_frontiers_bound_active_reads_without_dropping_refs() {
                 .await
             }
             "git" => send(open_git_view_from_root(&layout, root.clone(), limits)).await,
+            "tip-bound" => {
+                let capture = send(CapsuleRepositoryCapture::from_root(
+                    layout.clone(),
+                    root.clone(),
+                ))
+                .await
+                .unwrap();
+                send(capture.tip_bound_control_view(limits)).await
+            }
             _ => {
                 send(open_view_from_root_with_layered_control(
                     &layout,
@@ -307,7 +316,7 @@ async fn large_ref_frontiers_bound_active_reads_without_dropping_refs() {
         let peak = reads.peak.load(Ordering::SeqCst);
         assert!((2..=32).contains(&peak), "{mode}: {peak} concurrent reads");
         assert_eq!(reads.active.load(Ordering::SeqCst), 0, "{mode}");
-        if mode == "git" {
+        if matches!(mode, "git" | "tip-bound") {
             reads.total.store(0, Ordering::SeqCst);
             let selected = vec!["refs/heads/developer-042".to_owned()];
             let transitions = send(view.tip_bound_transitions(&selected)).await.unwrap();

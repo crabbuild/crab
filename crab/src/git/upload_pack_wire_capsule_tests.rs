@@ -10,6 +10,114 @@ use std::collections::BTreeMap;
 
 const LIMIT: u64 = 8 * 1024 * 1024;
 
+#[tokio::test]
+async fn ordinary_fetch_opening_keeps_visibility_objects_cold() {
+    use crab_metadata::capsule_protocol::{CapsulePointer, CapsuleRun, RepositoryRoot, RootRecord};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    let read_bytes = Arc::new(AtomicU64::new(0));
+    let observed = read_bytes.clone();
+    let store = Store::new(Arc::new(object_store::memory::InMemory::new()))
+        .with_read_byte_observer(Arc::new(move |size| {
+            observed.fetch_add(size, Ordering::Relaxed);
+        }));
+    let layout = StoreLayout::new(store, "repositories/control-intake".into());
+    let initial =
+        RootRecord::encode(RepositoryRoot::initial(&"1".repeat(64), "refs/heads/main").unwrap())
+            .unwrap();
+    crab_metadata::capsule_protocol::create_root(&layout, initial.clone())
+        .await
+        .unwrap();
+    let objects = (1u32..=32_000)
+        .map(|index| format!("{index:040x}"))
+        .collect::<Vec<_>>();
+    let tip = objects.last().unwrap().clone();
+    let transaction = CapsuleTransaction::new(
+        initial.digest(),
+        vec![CapsuleRefEdit::new(
+            "refs/heads/main",
+            None,
+            Some(tip.clone()),
+            None,
+        )],
+    )
+    .unwrap();
+    let visibility = CapsuleVisibilityDelta::new(BTreeMap::from([(
+        "refs/heads/main".into(),
+        GitVisibilityEdit::from_replacement_objects(None, tip.clone(), objects),
+    )]))
+    .unwrap();
+    let capsule = Capsule::build(
+        &transaction,
+        Vec::new(),
+        vec![CapsuleSection::new(
+            CapsuleSectionKind::VisibilityDelta,
+            visibility.encode().unwrap(),
+        )],
+    )
+    .unwrap();
+    let run = CapsuleRun::leaf(capsule).unwrap();
+    layout
+        .store()
+        .create_strict(&layout.capsule_path(run.hash()), run.bytes().clone())
+        .await
+        .unwrap();
+    let pointer = CapsulePointer::new(
+        run.hash(),
+        run.bytes().len() as u64,
+        run.control_offset(),
+        run.control_size(),
+        run.footer_hash(),
+        run.level(),
+        run.transaction_ids(),
+        run.newest_base_root_digest(),
+    )
+    .unwrap();
+    let next = RootRecord::encode(
+        initial
+            .root()
+            .advance(
+                initial.digest(),
+                BTreeMap::from([("refs/heads/main".into(), tip)]),
+                BTreeMap::new(),
+                vec![pointer],
+                transaction.id().unwrap().as_str(),
+            )
+            .unwrap(),
+    )
+    .unwrap();
+    layout
+        .store()
+        .put_overwrite(&layout.capsule_root_path(), next.bytes().clone())
+        .await
+        .unwrap();
+    let capture = crab_read::capsule_protocol::CapsuleRepositoryCapture::from_root(
+        layout.clone(),
+        crab_metadata::capsule_protocol::load_root(&layout)
+            .await
+            .unwrap(),
+    )
+    .await
+    .unwrap();
+    let runtime = Arc::new(RemoteGitRuntime::default());
+    read_bytes.store(0, Ordering::Relaxed);
+    let result = open_capsule_repository_from_capture(
+        &capture,
+        true,
+        false,
+        &runtime,
+        &CancellationToken::new(),
+    )
+    .await;
+    let bytes = read_bytes.load(Ordering::Relaxed);
+    runtime.shutdown().await;
+    let (_, proof, _) = result.unwrap();
+    assert!(
+        matches!(proof, UploadPackVisibilityProof::TipBound { .. }) && bytes < 64 * 1024,
+        "ordinary fetch opening read {bytes} bytes before selecting any requested transitions"
+    );
+}
+
 pub(super) async fn fixture(
     rewrite: bool,
     checkpoint: bool,
