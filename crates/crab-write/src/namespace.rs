@@ -14,7 +14,7 @@ use crate::WriteError;
 #[cfg(test)]
 mod cleanup_tests;
 
-const NAMESPACE_RELEASE_CONCURRENCY: usize = 32;
+const NAMESPACE_CONCURRENCY: usize = 32;
 
 /// Serialize only ref-name changes that can participate in the same Git D/F conflict.
 ///
@@ -61,10 +61,16 @@ where
     F: FnOnce(CancellationToken) -> Fut,
     Fut: Future<Output = std::result::Result<T, E>>,
 {
-    let resources = ref_names
+    let mut resources = ref_names
         .iter()
         .map(|name| namespace_resource(name))
-        .collect::<std::collections::BTreeSet<_>>();
+        .collect::<std::collections::BTreeSet<_>>()
+        .into_iter()
+        .map(|resource| {
+            let context = PushLockAcquireContext::new(Arc::clone(store.inner()));
+            (resource, context)
+        })
+        .collect::<Vec<_>>();
     let deadline = if wait.is_zero() {
         None
     } else {
@@ -75,50 +81,82 @@ where
         })?)
     };
     let scoped = cancel.child_token();
-    let mut leases = Vec::with_capacity(resources.len());
     let namespace_count = resources.len();
-    let acquire_started = (namespace_count > NAMESPACE_RELEASE_CONCURRENCY).then(Instant::now);
-    for resource in resources {
-        let mut context = PushLockAcquireContext::new(Arc::clone(store.inner()));
-        let mut attempt = 0;
-        let lease = loop {
+    let acquire_started = (namespace_count > NAMESPACE_CONCURRENCY).then(Instant::now);
+    let mut attempt = 0;
+    let leases = loop {
+        let stopped = CancellationToken::new();
+        // Own pending contexts across I/O so spawned publishers keep a Send future.
+        let pending = std::mem::take(&mut resources);
+        resources.reserve(namespace_count);
+        let mut acquisitions = futures_util::stream::iter(pending)
+            .map(|(resource, mut context)| {
+                let scoped = &scoped;
+                let stopped = &stopped;
+                async move {
+                    let result = if scoped.is_cancelled() || stopped.is_cancelled() {
+                        Ok(None)
+                    } else {
+                        context
+                            .acquire_internal(layout.repo_prefix(), &resource, ttl)
+                            .await
+                            .map(|lease| {
+                                Some(crab_coordination::RenewingPushLock::start(lease, scoped))
+                            })
+                    };
+                    (resource, context, result)
+                }
+            })
+            .buffer_unordered(NAMESPACE_CONCURRENCY);
+        let mut leases = Vec::with_capacity(namespace_count);
+        let mut failure = None;
+        // A failed parallel claim may race successful backend writes. Drain
+        // every attempt, then release the whole partial set before waiting;
+        // retaining it across contention would allow cyclic ownership.
+        while let Some((resource, context, result)) = acquisitions.next().await {
+            resources.push((resource, context));
+            match result {
+                Ok(Some(lease)) => leases.push(lease),
+                Ok(None) => {}
+                Err(error) => {
+                    stopped.cancel();
+                    match failure {
+                        None => failure = Some(error),
+                        Some(CoordinationError::PushLockHeld { .. })
+                            if !matches!(error, CoordinationError::PushLockHeld { .. }) =>
+                        {
+                            failure = Some(error);
+                        }
+                        _ => {}
+                    }
+                }
+            }
+        }
+        let Some(error) = failure else {
             if scoped.is_cancelled() {
                 release_leases(leases).await;
                 return Err(E::from(WriteError::Cancelled));
             }
-            match context
-                .acquire_internal(layout.repo_prefix(), &resource, ttl)
-                .await
-            {
-                Ok(lease) => break lease,
-                Err(error @ CoordinationError::PushLockHeld { .. }) => {
-                    let Some(deadline) = deadline else {
-                        release_leases(leases).await;
-                        return Err(E::from(WriteError::from(error)));
-                    };
-                    let remaining = deadline.saturating_duration_since(Instant::now());
-                    if remaining.is_zero() {
-                        release_leases(leases).await;
-                        return Err(E::from(WriteError::from(error)));
-                    }
-                    let delay = crate::journal::push_lock_wait_delay(attempt, remaining);
-                    attempt = attempt.saturating_add(1);
-                    tokio::select! {
-                        () = scoped.cancelled() => {
-                            release_leases(leases).await;
-                            return Err(E::from(WriteError::Cancelled));
-                        },
-                        () = tokio::time::sleep(delay) => {}
-                    }
-                }
-                Err(error) => {
-                    release_leases(leases).await;
-                    return Err(E::from(WriteError::from(error)));
-                }
-            }
+            break leases;
         };
-        leases.push(crab_coordination::RenewingPushLock::start(lease, &scoped));
-    }
+        release_leases(leases).await;
+        if !matches!(error, CoordinationError::PushLockHeld { .. }) {
+            return Err(E::from(WriteError::from(error)));
+        }
+        let Some(deadline) = deadline else {
+            return Err(E::from(WriteError::from(error)));
+        };
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if remaining.is_zero() {
+            return Err(E::from(WriteError::from(error)));
+        }
+        let delay = crate::journal::push_lock_wait_delay(attempt, remaining);
+        attempt = attempt.saturating_add(1);
+        tokio::select! {
+            () = scoped.cancelled() => return Err(E::from(WriteError::Cancelled)),
+            () = tokio::time::sleep(delay) => {}
+        }
+    };
     if let Some(started) = acquire_started {
         tracing::info!(
             phase = "namespace_acquire",
@@ -140,9 +178,9 @@ fn namespace_resource(ref_name: &str) -> String {
 
 async fn release_leases(leases: Vec<crab_coordination::RenewingPushLock>) {
     let count = leases.len();
-    let started = (count > NAMESPACE_RELEASE_CONCURRENCY).then(Instant::now);
+    let started = (count > NAMESPACE_CONCURRENCY).then(Instant::now);
     futures_util::stream::iter(leases.into_iter().rev())
-        .for_each_concurrent(NAMESPACE_RELEASE_CONCURRENCY, |lease| lease.release())
+        .for_each_concurrent(NAMESPACE_CONCURRENCY, |lease| lease.release())
         .await;
     if let Some(started) = started {
         tracing::info!(
