@@ -521,8 +521,9 @@ Sources: [catalog writer](../../../crates/crab-metadata/src/git_object_locator/w
 | `R/locks/internal/generated-pack-{request-hash}/lock` | Coalescing production of one generated-pack request | Lease protocol; request-derived resource names can accumulate tombstones |
 | `R/locks/internal/git-read-admission-{slot}/lock` | Bounded Git-read admission slot | Lease protocol; capacity comes from admission policy |
 | `R/locks/internal/push-admission/slots/{slot}` | Bounded push-admission slot | Admission lease; decimal slot, not a Git ref |
-| `D/locks/internal/gc-fence/state` | Coordination between writers and a destructive sweep in domain `D` | Dedicated fence state with epochs/holders; not a `PushLock` JSON body |
-| `{coordination-anchor}/clock` | Backend-time probe for the corresponding coordination object | Empty overwritten object; anchors include a lease `lock`, the push-admission `slots` prefix, or GC-fence `state` |
+| `D/locks/internal/gc-fence/state` | Sweep gate and domain incarnation for GC admission | Schema-3 control; initialized only after all writer ledgers exist |
+| `D/locks/internal/gc-fence/state/writers/{incarnation}/{slot02}` | Independent writer admission and monotonic history | 64 fixed slots; released ledgers persist and are never GC candidates |
+| `{coordination-anchor}/clock` | Backend-time probe for the corresponding coordination object | Empty overwritten object; anchors include a lease `lock`, the push-admission `slots` prefix, GC-fence control `state`, or an individual writer slot |
 | `R/locks/files/{path-hash}` | Native file lock | File-lock owner/payload and released-state protocol |
 | `R/lfs/locks/{path-hash}` | Git LFS protocol lock | LFS file-lock protocol; distinct from push leases |
 

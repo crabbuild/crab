@@ -47,6 +47,13 @@ on stdin/stdout.
 
 Both modes store objects in the same location.
 
+Push discovery excludes published history only when the boundary object is
+present in the local Git object database, including alternates and linked
+worktrees. Other developers' advertised tips may be absent in a single-branch
+clone. Omitting those negative boundaries scans more history; it never omits
+required dependencies. Missing required tips and corrupt pointers remain errors.
+The pre-push hook, native publication and mirror collector share this rule.
+
 ## Dual Pointer System
 
 ### Detection Logic

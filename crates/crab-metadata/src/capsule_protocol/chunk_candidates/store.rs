@@ -32,6 +32,22 @@ struct Root {
     levels: Vec<Option<Run>>,
 }
 
+struct RunCache {
+    run: Run,
+    layer: usize,
+    pages: PageCache,
+}
+
+impl RunCache {
+    fn new(run: &Run, layer: usize) -> Self {
+        Self {
+            run: run.clone(),
+            layer,
+            pages: PageCache::default(),
+        }
+    }
+}
+
 impl Root {
     fn decode(body: &[u8]) -> Result<Self> {
         let version: Version = serde_json::from_slice(body)
@@ -182,25 +198,27 @@ impl CapsuleChunkIndex {
         store: &Store,
         root: &Root,
         keys: &[Vec<u8>],
-        caches: &[PageCache],
+        caches: &mut Vec<Option<RunCache>>,
         work: &mut PageWork,
         attempt: usize,
     ) -> Result<Vec<Option<Vec<u8>>>> {
         let mut output: Vec<Option<(u64, Vec<u8>)>> = vec![None; keys.len()];
+        caches.resize_with(root.levels.len(), || None);
         for (index, run) in root.levels.iter().enumerate() {
             let Some(run) = run else {
                 continue;
             };
+            // A root retry does not change immutable runs in unrelated tiers.
+            // Keep their cache/source ID; replace both when routing changes.
+            // One cache per tier retains the existing bounded working set.
+            let cache =
+                caches[index].get_or_insert_with(|| RunCache::new(run, attempt * LEVELS + index));
+            if cache.run != *run {
+                *cache = RunCache::new(run, attempt * LEVELS + index);
+            }
             let path = run.path(&self.prefix);
             let possible = run
-                .filter_candidates(
-                    store,
-                    &path,
-                    &caches[index],
-                    attempt * LEVELS + index,
-                    keys,
-                    work,
-                )
+                .filter_candidates(store, &path, &cache.pages, cache.layer, keys, work)
                 .await?;
             let positions = possible
                 .iter()
@@ -214,11 +232,12 @@ impl CapsuleChunkIndex {
                 .iter()
                 .map(|index| keys[*index].clone())
                 .collect::<Vec<_>>();
-            let values = caches[index]
+            let values = cache
+                .pages
                 .lookup(
                     store,
                     &path,
-                    attempt * LEVELS + index,
+                    cache.layer,
                     0..run.bytes,
                     &run.records,
                     KIND,
@@ -259,15 +278,13 @@ impl CapsuleChunkIndex {
         work: &mut PageWork,
         attempt: usize,
     ) -> Result<CapsuleChunkCandidates> {
-        let caches = (0..root.levels.len())
-            .map(|_| PageCache::default())
-            .collect::<Vec<_>>();
+        let mut caches = Vec::new();
         let keys = requests
             .iter()
             .map(|(_, key, _)| key.to_vec())
             .collect::<Vec<_>>();
         let values = self
-            .lookup(store, root, &keys, &caches, work, attempt)
+            .lookup(store, root, &keys, &mut caches, work, attempt)
             .await?;
         let mut output = CapsuleChunkCandidates::default();
         let mut anchors = BTreeSet::new();
@@ -299,7 +316,7 @@ impl CapsuleChunkIndex {
             .map(|id| capsule_chunk_anchor_key(id).to_vec())
             .collect::<Vec<_>>();
         let values = self
-            .lookup(store, root, &keys, &caches, work, attempt)
+            .lookup(store, root, &keys, &mut caches, work, attempt)
             .await?;
         for (id, value) in anchors.into_iter().zip(values) {
             let value =
@@ -381,16 +398,14 @@ impl CapsuleChunkIndex {
         }
         let keys = rows.iter().map(|(key, _)| key.clone()).collect::<Vec<_>>();
         let mut work = PageWork::new(maximum, 0);
+        let mut caches = Vec::new();
         for attempt in 0..WRITE_ATTEMPTS {
             if cancelled() {
                 return Err(MetadataError::CapsuleHintCancelled);
             }
             let snapshot = self.load(store, &mut work).await?;
             let previous = if let Some((root, _)) = &snapshot {
-                let caches = (0..root.levels.len())
-                    .map(|_| PageCache::default())
-                    .collect::<Vec<_>>();
-                self.lookup(store, root, &keys, &caches, &mut work, attempt)
+                self.lookup(store, root, &keys, &mut caches, &mut work, attempt)
                     .await?
             } else {
                 vec![None; rows.len()]

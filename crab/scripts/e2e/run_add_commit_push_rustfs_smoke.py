@@ -2294,7 +2294,7 @@ class AddCommitPushSmoke:
         self.run_crab(repo, args + ["--apply", "--quiesced"], name="apply coordination migration")
         status, _, upgraded = self.signed_s3_request("GET", key)
         state = json.loads(upgraded)
-        self.check("migration-persists-new-incarnation", status == 200 and state["schema_version"] == 2 and bool(state["incarnation"]))
+        self.check("migration-persists-new-incarnation", status == 200 and state["schema_version"] == 3 and state["ready"] and bool(state["incarnation"]))
         self.run_crab(repo, args + ["--apply", "--quiesced"], name="repeat coordination migration")
         status, _, repeated = self.signed_s3_request("GET", key)
         self.check("migration-repeat-is-idempotent", status == 200 and repeated == upgraded)

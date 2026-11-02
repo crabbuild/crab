@@ -72,6 +72,8 @@ omitted from new runs. Size-tiered compaction uploads only the final merged run
 before one root CAS. Per-row
 publication sequences preserve head precedence across mixed-size compaction
 and CAS retries; exact placement identities and source anchors remain immutable.
+Publication retries retain bounded page caches for unchanged run descriptors;
+replacing a tier's run resets its cache and page-admission identity together.
 Authenticated blocked Bloom pages skip absent keys without opening unrelated
 record pages. Missing or corrupt filter pages are errors, never negative hints.
 Readers need no write grant and retain aggregate read/materialization bounds.
@@ -205,6 +207,10 @@ accept both descriptors and reject mixed or unknown versions. The existing
 128 MiB proof ceiling, source/member bindings and checkpoint CAS are unchanged.
 In-memory snapshots retain sparse closures or bitmaps through ordinal remapping
 and restoration, instead of expanding every membership into a separate u32.
+Ordinary in-memory OID lists also share immutable storage when cloned; empty
+lists allocate no shared buffer. Their JSON arrays and validation rules are
+unchanged. Binary membership iteration applies the canonical SHA-1 decoder to
+exact set members, excluding unselected dictionary entries.
 
 Checkpoint footer history projects its recent suffix from validated ordinals
 without rebuilding the complete visibility index. Hints consume only the bytes
@@ -267,6 +273,9 @@ complete opening and history-amplification qualification remain required.
 Ref deletion removes its live visibility closure even when the capsule has no
 visibility payload. Retained dictionary objects cannot supply a new ref's base;
 complete and paged reconciliation enforce the same deletion boundary.
+Bulk visibility-set inspection uses a scan-owned fork of the reader's warm cache
+and read-ahead boundaries. Full scans do not seed long-lived per-ref caches with
+complete replacement sets; point lookups keep their existing resident limits.
 
 ### External pointer catalogs
 
@@ -455,7 +464,7 @@ shared-session initialization can retry after that dependency is repaired.
 
 Layered checkpoint visibility uses authenticated dictionary, ref-closure and
 transition pages, shared by readers and recovery. Checkpoint pointers require
-explicit format 6 (`CRBCKP06`); retired or missing formats are rejected. No
+explicit format 9 (`CRBCKP09`); retired or missing formats are rejected. No
 release tag contains this layered format; the released v1 protocol is unchanged.
 
 Footer roots bind the visibility section, retained-object count and ordered
@@ -467,12 +476,15 @@ Loaded source/member positions are checked against checkpoint-owned sources,
 before newer frontier sources are appended. Explicit bulk materialization
 verifies the complete section hash and canonical encoding against captured roots.
 
-Paged control replay batches checkpoint dictionary membership for its captured
-additions before applying transactions. Temporary positive and negative results
-avoid repeatedly fetching the same dictionary pages across a long frontier.
-They describe initial retention only: ref ordering, prior closures, removals,
-new-tip membership and the exact retained-object limit remain checked when each
-control is applied. The captured replay releases these temporary results afterward.
+Paged control replay retains captured ref layers and reads selected membership
+pages. It keeps ref ordering, prior closures, removals and new-tip checks without
+scanning unrelated additions to maintain a temporary global dictionary. Complete
+visibility materialization owns dictionary union and its existing object limit.
+Retained dictionary presence never supplies visibility for a new ref.
+Absolute and shared-ordinal delta formats use this same paged owner; shared
+dictionaries are not materialized merely to account for unrelated additions.
+Both formats admit logical lookup output before allocation, including repeated
+OIDs that collapse to one authenticated page key.
 
 Footer-only checkpoints have control offset zero when both optional catalog and
 visibility sections are absent. The storage reader accepts that canonical range
@@ -498,7 +510,9 @@ control boundary and footer hash. This does not change the v1 manifest reader.
 
 An already verified complete run can yield the same authenticated control
 view, including detached visibility/catalog sections, from its resident bytes;
-consumers need not reread its control suffix.
+consumers need not reread its control suffix. Run clones and derived controls
+share the immutable exact admission table without decoding it again. Compaction
+owns its merged table and preserves the member ordinals of retained controls.
 
 ### Compacted runs and admission
 
@@ -592,8 +606,10 @@ the pager's encoded-work admission. Complete materialization verifies the captur
 section hash and descriptor, checks canonical delta bytes, and retains immutable
 shared results.
 
-`crab-read` owns lazy closure reconciliation; complete metadata
-capture remains available for maintenance and publication.
+Metadata owns shared lazy closure reconciliation for catalog and Git captures.
+Complete metadata capture remains available for maintenance and publication.
+Native Xet preparation captures catalog roots directly; shared/protected
+publishers keep the lookup from their already authorized captured view.
 
 ### Payload modules and features
 

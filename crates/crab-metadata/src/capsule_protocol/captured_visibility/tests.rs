@@ -6,6 +6,7 @@ use crate::capsule_protocol::{
 use crate::git_visibility::GitVisibilityEdit;
 use crab_storage::StoreLayout;
 use object_store::memory::InMemory;
+use std::collections::BTreeSet;
 
 fn hex(value: u8) -> String {
     format!("{value:040x}")
@@ -84,6 +85,142 @@ fn initial() -> GitVisibilityIndex {
 }
 
 #[tokio::test]
+async fn ordering_paged_replacements_does_not_scan_unrequested_history() {
+    for shared in [false, true] {
+        check_paged_replacement_reads(shared).await;
+    }
+}
+
+async fn check_paged_replacement_reads(shared: bool) {
+    use crab_storage::{StorageObservation, StorageObserver, StorageOperation};
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[derive(Default)]
+    struct Reads(AtomicU64);
+    impl StorageObserver for Reads {
+        fn started(&self, _: StorageOperation) {}
+        fn finished(&self, observation: StorageObservation) {
+            self.0.fetch_add(observation.bytes_read, Ordering::Relaxed);
+        }
+    }
+    let reads = Arc::new(Reads::default());
+    let store = Store::new(Arc::new(InMemory::new())).with_storage_observer(reads.clone());
+    let layout = StoreLayout::new(store, "repositories/capture-io".into());
+    let common = (1000_u32..33_000)
+        .map(|oid| format!("{oid:040x}"))
+        .collect::<Vec<_>>();
+    let mut pending = BTreeMap::new();
+    for reference in 1..=4 {
+        let name = format!("refs/heads/developer-{reference}");
+        let mut objects = common.clone();
+        objects.push(hex(reference));
+        let edit = if shared {
+            use crate::git_visibility::{
+                GIT_VISIBILITY_EDIT_VERSION, GitVisibilityDictionary, GitVisibilityObjects,
+            };
+            objects.sort_unstable();
+            let count = objects.len() as u32;
+            let dictionary = GitVisibilityDictionary::new(objects).unwrap();
+            GitVisibilityEdit {
+                version: GIT_VISIBILITY_EDIT_VERSION,
+                old_oid: None,
+                new_oid: hex(reference),
+                replaces: true,
+                added: GitVisibilityObjects::from_shared_ordinals(
+                    dictionary.clone(),
+                    (0..count).collect(),
+                )
+                .unwrap(),
+                removed: GitVisibilityObjects::from_shared_ordinals(dictionary, vec![]).unwrap(),
+            }
+        } else {
+            GitVisibilityEdit::from_replacement_objects(None, hex(reference), objects)
+        };
+        let control = control(&layout, &name, None, edit).await;
+        pending.insert(control.transaction_id().to_owned(), control);
+    }
+    reads.0.store(0, Ordering::Relaxed);
+    let captured = CapturedVisibility::new(layout.store().clone(), initial(), std::iter::empty());
+    let mut visibility = VisibilityReconciliation::Paged(Box::new(captured));
+    let ordered = crate::capsule_protocol::order_ref_controls(
+        &BTreeMap::new(),
+        &BTreeMap::new(),
+        &mut visibility,
+        &BTreeMap::new(),
+        pending,
+    )
+    .await
+    .unwrap();
+    let bytes = reads.0.load(Ordering::Relaxed);
+    let VisibilityReconciliation::Paged(captured) = visibility else {
+        unreachable!()
+    };
+    let mut common = [0; 20];
+    common[16..].copy_from_slice(&1000_u32.to_be_bytes());
+    for reference in 1..=4 {
+        let layer = captured.refs[&format!("refs/heads/developer-{reference}")];
+        assert_eq!(
+            captured
+                .contains(Some(layer), &[common, object(reference), object(255)])
+                .await
+                .unwrap(),
+            [true, true, false]
+        );
+    }
+    assert!(
+        ordered.len() == 4 && bytes < 1024 * 1024,
+        "capture read {bytes} bytes (shared={shared})"
+    );
+    let mut full = initial();
+    for control in ordered {
+        let complete = control
+            .materialize_visibility(layout.store())
+            .await
+            .unwrap();
+        apply_transaction_visibility_index(
+            complete.transaction(),
+            complete.visibility_delta().unwrap(),
+            &mut full,
+        )
+        .unwrap();
+    }
+    assert_eq!(full.objects().len(), 32_004);
+}
+
+#[tokio::test]
+#[ignore = "explicit large captured-visibility memory qualification"]
+async fn many_ref_replacements_preserve_captured_membership() {
+    let layout = StoreLayout::new(
+        Store::new(Arc::new(InMemory::new())),
+        "repositories/many-replacements".into(),
+    );
+    let mut lazy = CapturedVisibility::new(layout.store().clone(), initial(), std::iter::empty());
+    let shared = (1000_u32..33_000)
+        .map(|value| format!("{value:040x}"))
+        .collect::<Vec<_>>();
+    for reference in 1_u8..=128 {
+        let name = format!("refs/heads/developer-{reference}");
+        let mut added = shared.clone();
+        added.push(hex(reference));
+        let edit = GitVisibilityEdit::from_replacement_objects(None, hex(reference), added);
+        let control = control(&layout, &name, None, edit).await;
+        lazy.apply(&control).await.unwrap();
+    }
+    let mut common = [0; 20];
+    common[16..].copy_from_slice(&1000_u32.to_be_bytes());
+    for reference in [1_u8, 64, 128] {
+        let name = format!("refs/heads/developer-{reference}");
+        let layer = lazy.refs[&name];
+        assert_eq!(
+            lazy.contains(Some(layer), &[common, object(reference), object(255)])
+                .await
+                .unwrap(),
+            vec![true, true, false],
+        );
+    }
+}
+
+#[tokio::test]
 async fn layered_closures_match_complete_edits_and_preserve_captured_bases() {
     let layout = StoreLayout::new(
         Store::new(Arc::new(InMemory::new())),
@@ -135,10 +272,7 @@ async fn layered_closures_match_complete_edits_and_preserve_captured_bases() {
             )
         })
         .collect::<BTreeMap<_, _>>();
-    assert_eq!(
-        (actual, lazy.dictionary_count),
-        (expected, full.objects().len() as u64)
-    );
+    assert_eq!(actual, expected);
 }
 
 #[tokio::test]
@@ -171,22 +305,19 @@ async fn removed_invisible_objects_do_not_supply_new_ref_bases() {
         GitVisibilityEdit::from_delta_objects(Some(hex(3)), hex(4), vec![hex(4)], vec![]),
     )
     .await;
-    assert_eq!(
-        (
-            lazy.dictionary_contains(&[object(3)]).await.unwrap(),
-            lazy.ready(
+    assert!(
+        !lazy
+            .ready(
                 &branch,
                 &BTreeMap::from([("refs/heads/main".into(), hex(2))])
             )
             .await
             .unwrap()
-        ),
-        (vec![true], false)
     );
 }
 
 #[tokio::test]
-async fn deleted_ref_objects_remain_in_dictionary_but_cannot_supply_new_bases() {
+async fn deleted_refs_cannot_supply_captured_new_bases() {
     let layout = StoreLayout::new(
         Store::new(Arc::new(InMemory::new())),
         "repositories/deleted".into(),
@@ -221,13 +352,7 @@ async fn deleted_ref_objects_remain_in_dictionary_but_cannot_supply_new_bases() 
         GitVisibilityEdit::from_delta_objects(Some(hex(3)), hex(4), vec![hex(4)], vec![]),
     )
     .await;
-    assert_eq!(
-        (
-            lazy.dictionary_contains(&[object(3)]).await.unwrap(),
-            lazy.ready(&branch, &BTreeMap::new()).await.unwrap()
-        ),
-        (vec![true], false)
-    );
+    assert!(!lazy.ready(&branch, &BTreeMap::new()).await.unwrap());
 }
 
 #[tokio::test]
@@ -293,7 +418,7 @@ fn shared_edit(
 }
 
 #[tokio::test]
-async fn shared_dictionaries_count_union_once_without_widening_ref_memberships() {
+async fn shared_captures_preserve_exact_ref_memberships() {
     let layout = StoreLayout::new(
         Store::new(Arc::new(InMemory::new())),
         "repositories/shared-union".into(),
@@ -313,18 +438,6 @@ async fn shared_dictionaries_count_union_once_without_widening_ref_memberships()
         ]),
     )
     .await;
-    // Loading a verified compact snapshot is preparatory, never retention or authority.
-    both.paged_visibility()
-        .unwrap()
-        .prepare_reconciliation(layout.store())
-        .await
-        .unwrap();
-    assert_eq!(
-        lazy.dictionary_contains(&[object(1), object(4)])
-            .await
-            .unwrap(),
-        vec![false; 2]
-    );
     let borrowed = control(
         &layout,
         "refs/heads/borrowed",
@@ -334,7 +447,6 @@ async fn shared_dictionaries_count_union_once_without_widening_ref_memberships()
     .await;
     assert!(!lazy.ready(&borrowed, &BTreeMap::new()).await.unwrap());
     lazy.apply(&both).await.unwrap();
-    assert_eq!(lazy.dictionary_count, 4);
     let wants = (1..=5).map(object).collect::<Vec<_>>();
     assert_eq!(
         lazy.contains(Some(lazy.refs["refs/heads/main"]), &wants)
@@ -357,11 +469,6 @@ async fn shared_dictionaries_count_union_once_without_widening_ref_memberships()
     )
     .await;
     lazy.apply(&update).await.unwrap();
-    assert_eq!(lazy.dictionary_count, 5);
-    assert_eq!(
-        lazy.dictionary_contains(&[object(3)]).await.unwrap(),
-        vec![true]
-    );
     assert_eq!(
         lazy.contains(Some(lazy.refs["refs/heads/main"]), &[object(3), object(5)])
             .await
@@ -396,7 +503,6 @@ async fn shared_dictionaries_count_union_once_without_widening_ref_memberships()
     )
     .await;
     lazy.apply(&legacy).await.unwrap();
-    assert_eq!(lazy.dictionary_count, 6);
     let overlap = control(
         &layout,
         "refs/heads/overlap",
@@ -405,13 +511,6 @@ async fn shared_dictionaries_count_union_once_without_widening_ref_memberships()
     )
     .await;
     lazy.apply(&overlap).await.unwrap();
-    assert_eq!(lazy.dictionary_count, 7);
-    assert_eq!(
-        lazy.dictionary_contains(&(1..=8).map(object).collect::<Vec<_>>())
-            .await
-            .unwrap(),
-        vec![true, true, true, true, true, true, true, false]
-    );
     let deletion = CapsuleTransaction::new(
         &"1".repeat(64),
         vec![CapsuleRefEdit::new(
@@ -425,11 +524,6 @@ async fn shared_dictionaries_count_union_once_without_widening_ref_memberships()
     let run = CapsuleRun::leaf(Capsule::build(&deletion, vec![], vec![]).unwrap()).unwrap();
     let (_, controls) = run.verified_controls().unwrap();
     lazy.apply(&controls[0]).await.unwrap();
-    assert_eq!(lazy.dictionary_count, 7);
-    assert_eq!(
-        lazy.dictionary_contains(&[object(2)]).await.unwrap(),
-        vec![true]
-    );
     let deleted_base = control(
         &layout,
         "refs/heads/deleted-base",
@@ -438,6 +532,21 @@ async fn shared_dictionaries_count_union_once_without_widening_ref_memberships()
     )
     .await;
     assert!(!lazy.ready(&deleted_base, &BTreeMap::new()).await.unwrap());
+    let mut complete = initial();
+    for control in [&both, &update, &legacy, &overlap] {
+        let capsule = control
+            .materialize_visibility(layout.store())
+            .await
+            .unwrap();
+        apply_transaction_visibility_index(
+            capsule.transaction(),
+            capsule.visibility_delta().unwrap(),
+            &mut complete,
+        )
+        .unwrap();
+    }
+    complete.remove_ref("refs/heads/feature");
+    assert_eq!(complete.objects().len(), 7);
 }
 
 #[tokio::test]
@@ -475,16 +584,19 @@ async fn shared_removal_cannot_borrow_another_refs_dictionary_entries() {
             .to_string()
             .contains("outside the prior closure")
     );
-    assert_eq!(lazy.dictionary_count, 2);
     assert_eq!(
-        lazy.dictionary_contains(&[object(2)]).await.unwrap(),
-        vec![false]
+        lazy.contains(
+            Some(lazy.refs["refs/heads/main"]),
+            &[object(1), object(2), object(9)]
+        )
+        .await
+        .unwrap(),
+        vec![true, false, false]
     );
-    assert!(lazy.shared_dictionaries.is_empty());
 }
 
 #[tokio::test]
-async fn appended_initial_dictionary_entries_are_counted_by_retention_identity() {
+async fn appended_initial_objects_preserve_captured_membership() {
     let layout = StoreLayout::new(
         Store::new(Arc::new(InMemory::new())),
         "repositories/appended-dictionary".into(),
@@ -508,12 +620,6 @@ async fn appended_initial_dictionary_entries_are_counted_by_retention_identity()
         initial,
         std::iter::once("refs/heads/main".into()),
     );
-    assert_eq!(
-        lazy.dictionary_contains(&[object(1), object(4)])
-            .await
-            .unwrap(),
-        vec![true; 2]
-    );
     let branch = control(
         &layout,
         "refs/heads/new",
@@ -522,11 +628,19 @@ async fn appended_initial_dictionary_entries_are_counted_by_retention_identity()
     )
     .await;
     lazy.apply(&branch).await.unwrap();
-    assert_eq!(lazy.dictionary_count, 3);
+    assert_eq!(
+        lazy.contains(
+            Some(lazy.refs["refs/heads/new"]),
+            &(1..=4).map(object).collect::<Vec<_>>()
+        )
+        .await
+        .unwrap(),
+        vec![true, false, true, true]
+    );
 }
 
 #[tokio::test]
-async fn preparing_shared_controls_caches_only_initial_checkpoint_retention() {
+async fn shared_checkpoint_captures_wait_for_their_visible_parent() {
     use crate::capsule_protocol::PointerCatalog;
     use crate::capsule_protocol::{
         CapsuleGitPack, LayeredCheckpoint, LayeredObjectMember, LayeredVisibilitySnapshot,
@@ -620,19 +734,6 @@ async fn preparing_shared_controls_caches_only_initial_checkpoint_retention() {
         shared_edit(Some(4), 5, &[5], &[], false),
     )
     .await;
-    captured
-        .prepare_controls([&first, &second].into_iter())
-        .await
-        .unwrap();
-    assert_eq!(captured.dictionary_count, 3);
-    assert!(captured.shared_dictionaries.is_empty());
-    assert_eq!(
-        captured
-            .dictionary_contains(&(1..=5).map(object).collect::<Vec<_>>())
-            .await
-            .unwrap(),
-        vec![true, true, true, false, false]
-    );
     assert!(
         !captured
             .ready(
@@ -643,7 +744,6 @@ async fn preparing_shared_controls_caches_only_initial_checkpoint_retention() {
             .unwrap()
     );
     captured.apply(&first).await.unwrap();
-    assert_eq!(captured.dictionary_count, 4);
     assert!(
         captured
             .ready(
@@ -654,12 +754,14 @@ async fn preparing_shared_controls_caches_only_initial_checkpoint_retention() {
             .unwrap()
     );
     captured.apply(&second).await.unwrap();
-    assert_eq!(captured.dictionary_count, 5);
     assert_eq!(
         captured
-            .dictionary_contains(&(1..=6).map(object).collect::<Vec<_>>())
+            .contains(
+                Some(captured.refs["refs/heads/new"]),
+                &(1..=6).map(object).collect::<Vec<_>>()
+            )
             .await
             .unwrap(),
-        vec![true, true, true, true, true, false]
+        vec![true, true, false, true, true, false]
     );
 }

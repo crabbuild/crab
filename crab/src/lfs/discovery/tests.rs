@@ -104,6 +104,84 @@ fn range_scan_does_not_fall_back_when_rev_list_fails() {
 }
 
 #[test]
+fn range_scan_omits_unavailable_remote_boundaries() {
+    let (dir, _, old_pointer) = pointer_object_fixture();
+    let git = |args: &[&str]| {
+        let output = git_command_in(dir.path(), GitObjectAccess::LocalOnly)
+            .env("GIT_ALLOW_PROTOCOL", "file")
+            .args([
+                "-c",
+                "user.name=Test",
+                "-c",
+                "user.email=test@example.invalid",
+            ])
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "{output:?}");
+        String::from_utf8(output.stdout).unwrap().trim().to_owned()
+    };
+    git(&["add", "asset.bin"]);
+    git(&["commit", "--quiet", "-m", "published dependency"]);
+    let base = git(&["rev-parse", "HEAD"]);
+    let pointer = LfsPointer {
+        oid: [5; 32],
+        ..old_pointer
+    };
+    std::fs::write(dir.path().join("new.bin"), pointer.serialize()).unwrap();
+    git(&["add", "new.bin"]);
+    git(&["commit", "--quiet", "-m", "new dependency"]);
+    let head = git(&["rev-parse", "HEAD"]);
+
+    git(&["clone", "--quiet", "--bare", ".", "bare.git"]);
+    git(&[
+        "clone",
+        "--quiet",
+        "--shared",
+        "--no-checkout",
+        ".",
+        "shared",
+    ]);
+    git(&["worktree", "add", "--quiet", "--detach", "linked", &head]);
+    for path in [
+        dir.path().to_path_buf(),
+        dir.path().join(".git"),
+        dir.path().join("bare.git"),
+        dir.path().join("shared"),
+        dir.path().join("linked"),
+    ] {
+        let entries = collect_pointers_from_range_in_with_base_refs(
+            &path,
+            std::slice::from_ref(&head),
+            &[base.clone(), "f".repeat(40)],
+            &[base.clone(), "e".repeat(40)],
+            &CancellationToken::new(),
+        )
+        .unwrap();
+        assert_eq!(
+            entries,
+            vec![("new.bin".to_owned(), pointer.clone())],
+            "{path:?}"
+        );
+    }
+}
+
+#[test]
+fn range_scan_rejects_an_unavailable_required_tip() {
+    let (dir, _, _) = pointer_object_fixture();
+    let result = collect_pointers_from_range_in_with_base_refs(
+        dir.path(),
+        &["f".repeat(40)],
+        &["e".repeat(40)],
+        &[],
+        &CancellationToken::new(),
+    );
+    assert!(
+        matches!(result, Err(CrabError::Internal(message)) if message.contains("git rev-list failed"))
+    );
+}
+
+#[test]
 fn range_scan_streams_line_delimited_rev_list_and_cat_file_records() {
     let dir = tempfile::tempdir().unwrap();
     for args in [

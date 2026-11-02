@@ -44,7 +44,7 @@ pub async fn run_gc_fence_upgrade(
     let changed = crab_coordination::upgrade_gc_fence(store.inner(), domain, apply).await?;
     if changed {
         println!(
-            "GC fence upgraded to schema 2. Keep older writers stopped; restart GC with a fresh plan."
+            "GC fence upgraded to schema 3. Keep older writers stopped; restart GC with a fresh plan."
         );
     } else {
         println!("GC fence validated; no state changed.");

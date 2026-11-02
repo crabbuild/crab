@@ -63,10 +63,12 @@ supplied object IDs rather than resolving the current branch. Branches,
 tags, and differently named destinations can appear in the same batch;
 deletions do not require LFS uploads.
 
-Before scanning history, direct pre-push reads all published remote tips from
-the v2 root and its transaction-consistent per-ref heads. This refs-only read
-does not download capsule Git payloads. If no v2 root exists, Crab reads the v1
-manifest; a present but corrupt v2 root is an error and never triggers fallback.
+Direct pre-push first scans the local range identified by Git's supplied object
+IDs. A range with no outgoing LFS pointers needs no LFS remote access. When
+pointers exist, Crab reads published tips from the Capsule root and its
+transaction-consistent per-ref heads to exclude history already published on
+other refs. Missing or corrupt Capsule authority fails the command. Lock checks
+and verified uploads finish before Git publishes the refs.
 
 The input limit is 16 MiB. Malformed records, duplicate destination refs,
 mixed object-ID formats, invalid UTF-8, and a missing final newline fail the
@@ -101,6 +103,8 @@ Large introduced objects are streamed and hashed through a reused 64 KiB
 buffer, adding a full read even when they are ordinary Git files. The scanner
 accepts SHA-1 and SHA-256 Git OIDs; this does not extend Crab's native remote
 support profile. Zero-size LFS pointers retain their existing no-upload behavior.
+When the local pre-push scan finds LFS pointers, discovery runs again with
+published remote tips to exclude history already available on other refs.
 
 Cancellation waits for scan processes and pipe workers before cache ownership
 returns. These are scan/accounting limits, not a total-process RSS guarantee

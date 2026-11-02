@@ -229,8 +229,24 @@ pub(crate) fn collect_pointers_from_range_in_with_base_refs(
     exclusions.extend(base_manifest_refs.iter().cloned());
     let mut exclusions = exclusions.into_iter().collect::<Vec<_>>();
     exclusions.sort_unstable();
-    for sha in exclusions {
-        args.push(format!("^{sha}"));
+    if !exclusions.is_empty() {
+        use gix_object::Exists;
+
+        // Advertised tips may be absent in a single-branch or partial clone.
+        // Only local objects can bound rev-list; omitting a negative expands
+        // the scan, while required positive tips must still resolve normally.
+        let (repository, _) = gix_discover::upwards(repo_dir).map_err(io::Error::other)?;
+        let (git_dir, _) = repository.into_repository_and_work_tree_directories();
+        let objects_dir = crate::git::discover::resolve_common_dir(&git_dir).join("objects");
+        let objects = gix_odb::at(objects_dir).map_err(io::Error::other)?;
+        for sha in exclusions {
+            check_cancelled(cancel)?;
+            let oid = gix_hash::ObjectId::from_hex(sha.as_bytes())
+                .map_err(|source| io::Error::new(io::ErrorKind::InvalidData, source))?;
+            if objects.exists(&oid) {
+                args.push(format!("^{sha}"));
+            }
+        }
     }
     let mut entries = Vec::new();
     visit_lfs_blobs_in_git_command(

@@ -4,10 +4,12 @@
 from __future__ import annotations
 
 import argparse
+from concurrent.futures import ThreadPoolExecutor
 import http.client
 import json
 import os
 import socket
+import subprocess
 import sys
 import tempfile
 import threading
@@ -23,6 +25,7 @@ from unittest.mock import Mock, call, patch
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from run_concurrent_push_smoke import (
+    CommandRecord,
     ConcurrentPushSmoke,
     RequestCountingProxy,
     SmokeError,
@@ -31,6 +34,107 @@ from run_concurrent_push_smoke import (
     push_failure_stages,
     store_category,
 )
+
+
+class SourceClientTest(unittest.TestCase):
+    def test_failed_read_cancels_queued_clients(self) -> None:
+        submitted = threading.Event()
+        release = threading.Event()
+        visited = []
+
+        class Pool(ThreadPoolExecutor):
+            count = 0
+
+            def submit(self, *args, **kwargs):
+                future = super().submit(*args, **kwargs)
+                self.count += 1
+                if self.count == 20:
+                    submitted.set()
+                return future
+
+            def shutdown(self, *args, **kwargs):
+                release.set()
+                return super().shutdown(*args, **kwargs)
+
+        def read(index):
+            visited.append(index)
+            if index == 0:
+                submitted.wait(timeout=5)
+                raise SmokeError("failed first reader")
+            release.wait(timeout=5)
+            return {}
+
+        with tempfile.TemporaryDirectory() as directory:
+            smoke = object.__new__(ConcurrentPushSmoke)
+            smoke.args = SimpleNamespace(agents=20, max_parallel_readers=1)
+            smoke.branch_readers = Path(directory)
+            smoke.read_branch_tip = read
+            with patch("run_concurrent_push_smoke.concurrent.futures.ThreadPoolExecutor", Pool):
+                with self.assertRaises(SmokeError):
+                    smoke.verify_branch_tip_reads()
+            self.assertLessEqual(len(visited), 2)
+
+    def test_native_success_requires_the_requested_json_receipt(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            output = root / "stdout"
+            output.write_text("")
+            for client, expected in (("native", "missing-json"), ("git", "ok")):
+                with self.subTest(client=client):
+                    smoke = object.__new__(ConcurrentPushSmoke)
+                    smoke.args = SimpleNamespace(push_client=client, git_bin="git", push_timeout=1)
+                    smoke.push_args = Mock(return_value=["crab", "push", "--json"])
+                    smoke.run_cmd = Mock(return_value=CommandRecord(
+                        "push", [], str(root), 0, 1, str(output), str(output)))
+                    result = smoke.run_push_job("agent", "refs/heads/main", root, "HEAD:refs/heads/main")
+                    self.assertEqual(result.status, expected)
+
+    def test_sparse_clients_preserve_unchecked_baseline_paths_in_new_commits(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            baseline = root / "cold-baseline"
+            baseline.mkdir()
+            env = os.environ | {"GIT_CONFIG_GLOBAL": os.devnull, "GIT_CONFIG_NOSYSTEM": "1"}
+
+            def git(repo, args, **_kwargs):
+                return subprocess.run(["git", "-C", str(repo), *args], env=env,
+                                      check=True, capture_output=True, text=True).stdout.strip()
+
+            git(baseline, ["init", "-b", "main"])
+            git(baseline, ["config", "user.name", "Qualification"])
+            git(baseline, ["config", "user.email", "test@example.invalid"])
+            (baseline / "src").mkdir()
+            (baseline / "src/original.txt").write_text("preserved baseline\n")
+            git(baseline, ["add", "src"])
+            git(baseline, ["commit", "-m", "baseline"])
+            original = git(baseline, ["rev-parse", "HEAD:src/original.txt"])
+            smoke = object.__new__(ConcurrentPushSmoke)
+            smoke.run_root = root
+            smoke.remote_url = "crab://qualification/isolated"
+            smoke.run_git = git
+            smoke.run_crab = Mock()
+            client = root / "client"
+            smoke.shared_client(client)
+            self.assertFalse((client / "src/original.txt").exists())
+            git(client, ["config", "user.name", "Qualification"])
+            git(client, ["config", "user.email", "test@example.invalid"])
+            (client / "agents").mkdir()
+            (client / "agents/change.txt").write_text("developer commit\n")
+            git(client, ["add", "agents/change.txt"])
+            git(client, ["commit", "-m", "developer change"])
+            self.assertEqual(git(client, ["rev-parse", "HEAD:src/original.txt"]), original)
+
+    def test_long_command_names_fit_log_filename_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            smoke = object.__new__(ConcurrentPushSmoke)
+            smoke.command_lock = threading.Lock()
+            smoke.command_index = 0
+            smoke.logs = Path(directory)
+            paths = [smoke.next_log_paths("git clone " + "路径" * 200) for _ in range(2)]
+            for pair in paths:
+                for path in pair:
+                    path.write_text("retained evidence")
+            self.assertNotEqual(paths[0], paths[1])
 
 
 class FsckGateTest(unittest.TestCase):

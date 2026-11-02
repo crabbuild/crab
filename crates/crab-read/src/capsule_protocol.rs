@@ -15,7 +15,6 @@ use crab_metadata::capsule_protocol::{
     select_ref_control_frontiers, select_ref_journal_controls,
 };
 use crab_storage::{Store, StoreLayout};
-use futures_util::future::try_join_all;
 use futures_util::{StreamExt, TryStreamExt};
 use gix_hash::ObjectId;
 use std::collections::{BTreeMap, BTreeSet};
@@ -55,6 +54,10 @@ const LAYERED_PACK_MAX_WINDOW_BYTES: u64 = 64 * 1024 * 1024;
 const LAYERED_FULL_MAX_WINDOW_BYTES: u64 = 64 * 1024 * 1024;
 const LAYERED_SIDECAR_READ_CONCURRENCY: usize = 8;
 const LAYERED_INLINE_FRONTIER_MAX_BYTES: u64 = 128 * 1024 * 1024;
+// Per-ref frontiers are bounded individually, but their union grows with the
+// team. Bound active run loads instead of launching every history at once.
+// Buffered futures own their pointers/controls to keep public reads Send.
+const CAPSULE_FRONTIER_READ_CONCURRENCY: usize = 32;
 const REPACK_INLINE_FRONTIER_MAX_BYTES: u64 = 64 * 1024;
 
 /// Caller-owned memory admission for one capsule-protocol repository view.
@@ -251,8 +254,10 @@ pub struct CapsuleRepositoryView {
     catalog_sources: Option<Vec<crab_metadata::capsule_protocol::RunCatalogSource>>,
     capsule_run_bytes: BTreeMap<String, Bytes>,
     capsule_run_indexes: BTreeMap<String, Vec<PackRange>>,
-    capsule_run_member_oids: BTreeMap<String, Vec<Vec<[u8; 20]>>>,
-    frontier_object_admission: BTreeMap<[u8; 20], Vec<String>>,
+    // Fetch and integrity callers clone captured views. Share these immutable
+    // tables so each clone does not copy the complete team placement inventory.
+    capsule_run_member_oids: Arc<BTreeMap<String, Vec<Vec<[u8; 20]>>>>,
+    frontier_object_admission: Arc<BTreeMap<[u8; 20], BTreeSet<String>>>,
 }
 
 impl std::fmt::Debug for CapsuleRepositoryView {
@@ -308,9 +313,9 @@ pub struct CapsuleVisibilityTransition {
     /// Ref tip made visible by this transition.
     pub new_oid: ObjectId,
     /// Objects added to the prior ref closure.
-    pub added: Vec<ObjectId>,
+    pub added: crab_metadata::git_visibility::GitVisibilityObjects,
     /// Objects removed from the prior ref closure.
-    pub removed: Vec<ObjectId>,
+    pub removed: crab_metadata::git_visibility::GitVisibilityObjects,
 }
 
 /// Authenticated transition history grouped by ref name.
@@ -552,31 +557,61 @@ impl CapsuleRepositoryView {
     /// Return exact frontier object-to-source-member candidates derived from
     /// authenticated visibility deltas.
     #[must_use]
-    pub fn frontier_object_admission(&self) -> &BTreeMap<[u8; 20], Vec<String>> {
+    pub fn frontier_object_admission(&self) -> &BTreeMap<[u8; 20], BTreeSet<String>> {
         &self.frontier_object_admission
     }
 
-    /// Return authenticated visibility transitions without loading pack bodies.
+    /// Return authenticated visibility transitions for requested captured refs.
     ///
     /// This is used only to avoid re-walking a known ref update. The returned
     /// transitions remain bound to the loaded root and controls; a consumer
     /// must not use a partial chain as an authorization proof.
-    pub async fn tip_bound_transitions(&self) -> Result<CapsuleTipBoundTransitions> {
-        let mut transitions = self.tip_bound_transitions.clone();
-        let controls = if let Some(layout) = &self.metadata_layout {
-            try_join_all(
-                self.tip_bound_controls
+    pub async fn tip_bound_transitions(
+        &self,
+        ref_names: &[String],
+    ) -> Result<CapsuleTipBoundTransitions> {
+        let names = ref_names
+            .iter()
+            .map(String::as_str)
+            .collect::<BTreeSet<_>>();
+        let mut transitions = self
+            .tip_bound_transitions
+            .iter()
+            .filter(|(name, _)| names.contains(name.as_str()))
+            .map(|(name, values)| (name.clone(), values.clone()))
+            .collect::<CapsuleTipBoundTransitions>();
+        // Transaction headers already authenticate which refs a control edits.
+        // Keep unrelated histories cold; selected sections still receive their
+        // complete hash, edit and object-set validation before supplying hints.
+        let selected = self
+            .tip_bound_controls
+            .iter()
+            .filter(|control| {
+                control
+                    .transaction()
+                    .edits()
                     .iter()
-                    .map(|control| control.materialize_visibility(layout.store())),
-            )
-            .await?
-        } else {
-            // Footer views already retain complete authenticated controls. Keep
-            // their shared sets compact until a fetch asks for expanded hints.
-            self.tip_bound_controls.clone()
-        };
+                    .any(|edit| names.contains(edit.ref_name()))
+            })
+            .cloned()
+            .collect::<Vec<_>>();
+        let controls =
+            if let Some(layout) = &self.metadata_layout {
+                futures_util::stream::iter(selected.into_iter().map(|control| async move {
+                    control.materialize_visibility(layout.store()).await
+                }))
+                .buffered(CAPSULE_FRONTIER_READ_CONCURRENCY)
+                .try_collect::<Vec<_>>()
+                .await?
+            } else {
+                // Footer views already retain complete authenticated controls. Keep
+                // their shared sets compact until the planner selects a have-to-want chain.
+                selected
+            };
         for (name, values) in build_tip_bound_transitions(&[], &controls)? {
-            transitions.entry(name).or_default().extend(values);
+            if names.contains(name.as_str()) {
+                transitions.entry(name).or_default().extend(values);
+            }
         }
         Ok(transitions)
     }
@@ -737,79 +772,25 @@ impl CapsuleRepositoryView {
     /// Return the number of Git packs authenticated by this exact view.
     #[must_use]
     pub fn git_pack_count(&self) -> usize {
-        if let Some(checkpoint) = self.layered_checkpoint() {
-            return self.layered_pack_members(checkpoint).count();
-        }
-        self.capsules
-            .iter()
-            .map(|capsule| capsule.git_packs().len())
-            .sum::<usize>()
-            .saturating_add(
-                self.capsule_controls
-                    .iter()
-                    .map(|capsule| capsule.git_packs().len())
-                    .sum(),
-            )
+        self.source_pack_members().count()
     }
 
     /// Return the total authenticated Git pack-body bytes in this exact view.
     pub fn git_pack_bytes(&self) -> Result<u64> {
-        if let Some(checkpoint) = self.layered_checkpoint() {
-            return self
-                .layered_pack_members(checkpoint)
-                .try_fold(0_u64, |total, member| {
-                    total.checked_add(member.pack().length()).ok_or_else(|| {
-                        ReadError::internal("layered checkpoint Git pack byte total overflowed")
-                    })
-                });
-        }
-        let total = self
-            .capsules
-            .iter()
-            .flat_map(|capsule| capsule.git_packs().iter().map(move |pack| (capsule, pack)))
-            .try_fold(0_u64, |total, (capsule, pack)| {
-                total
-                    .checked_add(capsule.section_bytes(pack.pack_section())?.len() as u64)
-                    .ok_or_else(|| ReadError::internal("capsule Git pack byte total overflowed"))
-            })?;
-        self.capsule_controls
-            .iter()
-            .flat_map(CapsuleControl::git_packs)
-            .try_fold(total, |total, pack| {
-                total
-                    .checked_add(pack.pack().length())
-                    .ok_or_else(|| ReadError::internal("capsule Git pack byte total overflowed"))
-            })
+        self.source_pack_members().try_fold(0_u64, |total, pack| {
+            total
+                .checked_add(pack.pack().length())
+                .ok_or_else(|| ReadError::internal("capsule Git pack byte total overflowed"))
+        })
     }
 
     /// Return the total Git objects declared by the authenticated pack inventory.
     pub fn git_object_count(&self) -> Result<u64> {
-        if let Some(checkpoint) = self.layered_checkpoint() {
-            return self
-                .layered_pack_members(checkpoint)
-                .try_fold(0_u64, |total, member| {
-                    total
-                        .checked_add(member.object_count())
-                        .ok_or_else(|| ReadError::internal("layered Git object count overflowed"))
-                });
-        }
-        let total =
-            self.capsules
-                .iter()
-                .flat_map(Capsule::git_packs)
-                .try_fold(0_u64, |total, pack| {
-                    total
-                        .checked_add(pack.object_count())
-                        .ok_or_else(|| ReadError::internal("capsule Git object count overflowed"))
-                })?;
-        self.capsule_controls
-            .iter()
-            .flat_map(CapsuleControl::git_packs)
-            .try_fold(total, |total, pack| {
-                total
-                    .checked_add(pack.object_count())
-                    .ok_or_else(|| ReadError::internal("capsule Git object count overflowed"))
-            })
+        self.source_pack_members().try_fold(0_u64, |total, pack| {
+            total
+                .checked_add(pack.object_count())
+                .ok_or_else(|| ReadError::internal("capsule Git object count overflowed"))
+        })
     }
 
     /// Return a digest that changes with the root or any visible per-ref position.
@@ -1304,6 +1285,8 @@ impl CapsuleRepositoryView {
         // A ready physical index resolves every placement before hint paths run.
         // Checkpoint visibility decoding already validates source/member bounds.
         // Only unindexed placement needs the complete admission dictionary here.
+        // Candidate membership is a set; the reader orders selected inventory.
+        // Linear duplicate scans multiply work across overlapping team histories.
         let mut preferred_object_admission_by_oid =
             object_index.is_none().then(std::collections::HashMap::new);
         if let Some(admission_by_oid) = preferred_object_admission_by_oid.as_mut()
@@ -1328,8 +1311,8 @@ impl CapsuleRepositoryView {
                     .map_err(|error| corrupt_path("layered visibility", error.to_string()))?;
                 admission_by_oid
                     .entry(*oid)
-                    .or_insert_with(Vec::new)
-                    .push(pack_id);
+                    .or_insert_with(BTreeSet::new)
+                    .insert(pack_id);
             }
         }
         for (oid, pack_ids) in self.frontier_object_admission() {
@@ -1337,10 +1320,10 @@ impl CapsuleRepositoryView {
                 let pack_id = crab_xet::hash::MerkleHash::from_hex(pack_id)
                     .map_err(|error| corrupt_path("frontier admission", error.to_string()))?;
                 if let Some(admission) = preferred_object_admission_by_oid.as_mut() {
-                    let entry = admission.entry(*oid).or_insert_with(Vec::new);
-                    if !entry.contains(&pack_id) {
-                        entry.push(pack_id);
-                    }
+                    admission
+                        .entry(*oid)
+                        .or_insert_with(BTreeSet::new)
+                        .insert(pack_id);
                 }
             }
         }
@@ -1352,17 +1335,20 @@ impl CapsuleRepositoryView {
                 .map_err(|error| corrupt_path("capsule run admission", error.to_string()))?;
             if let Some(admission) = preferred_object_admission_by_oid.as_mut() {
                 for oid in object_ids {
-                    let entry = admission.entry(oid).or_insert_with(Vec::new);
-                    if !entry.contains(&pack_id) {
-                        entry.push(pack_id);
-                    }
+                    admission
+                        .entry(oid)
+                        .or_insert_with(BTreeSet::new)
+                        .insert(pack_id);
                 }
             }
         }
         let admitted_pack_ids = preferred_object_admission_by_oid
             .iter()
             .flat_map(|admission| admission.values())
-            .flat_map(|pack_ids| pack_ids.iter().map(ToString::to_string))
+            .flat_map(|pack_ids| pack_ids.iter().copied())
+            .collect::<BTreeSet<_>>()
+            .into_iter()
+            .map(|pack_id| pack_id.to_string())
             .collect::<BTreeSet<_>>();
         let frontier_pack_ids = self
             .capsule_run_sources
@@ -1574,7 +1560,12 @@ impl CapsuleRepositoryView {
         if let Some(admission) = preferred_object_admission_by_oid
             && !admission.is_empty()
         {
-            lookup_sources = lookup_sources.with_preferred_object_admission(admission);
+            lookup_sources = lookup_sources.with_preferred_object_admission(
+                admission
+                    .into_iter()
+                    .map(|(oid, packs)| (oid, packs.into_iter().collect()))
+                    .collect(),
+            );
         }
         crab_remote_git::RemoteGitRepository::from_snapshot_with_lookup_sources(
             layout,
@@ -1711,45 +1702,15 @@ impl CapsuleRepositoryView {
         &self,
     ) -> Result<Vec<crab_metadata::manifests::PackManifestEntry>> {
         let mut entries = Vec::new();
-        if let Some(checkpoint) = self.layered_checkpoint() {
-            for member in self.layered_pack_members(checkpoint) {
-                let pack_id = member.pack().blake3().to_owned();
-                entries.push(crab_metadata::manifests::PackManifestEntry {
-                    pack_id: pack_id.clone(),
-                    size: member.pack().length(),
-                    content_hash: pack_id,
-                    ref_tips: Vec::new(),
-                    object_count: member.object_count(),
-                });
-            }
-        }
-        if self.layered_checkpoint().is_none() {
-            for capsule in &self.capsules {
-                for descriptor in capsule.git_packs() {
-                    let pack = capsule.section_bytes(descriptor.pack_section())?;
-                    let pack_id = blake3::hash(&pack).to_hex().to_string();
-                    entries.push(crab_metadata::manifests::PackManifestEntry {
-                        pack_id: pack_id.clone(),
-                        size: pack.len() as u64,
-                        content_hash: pack_id,
-                        ref_tips: Vec::new(),
-                        object_count: descriptor.object_count(),
-                    });
-                }
-            }
-            for member in self
-                .capsule_controls
-                .iter()
-                .flat_map(CapsuleControl::git_packs)
-            {
-                entries.push(crab_metadata::manifests::PackManifestEntry {
-                    pack_id: member.pack().blake3().to_owned(),
-                    size: member.pack().length(),
-                    content_hash: member.pack().blake3().to_owned(),
-                    ref_tips: Vec::new(),
-                    object_count: member.object_count(),
-                });
-            }
+        for member in self.source_pack_members() {
+            let pack_id = member.pack().blake3().to_owned();
+            entries.push(crab_metadata::manifests::PackManifestEntry {
+                pack_id: pack_id.clone(),
+                size: member.pack().length(),
+                content_hash: pack_id,
+                ref_tips: Vec::new(),
+                object_count: member.object_count(),
+            });
         }
         // A pack can occur in multiple runs. Snapshot and reader identities
         // must bind the same physical inventory regardless of source order.
@@ -1767,16 +1728,15 @@ impl CapsuleRepositoryView {
         Ok(entries)
     }
 
-    fn layered_pack_members<'a>(
-        &'a self,
-        checkpoint: &'a LayeredCheckpoint,
-    ) -> impl Iterator<Item = &'a PackMemberDescriptor> {
+    fn source_pack_members(&self) -> impl Iterator<Item = &PackMemberDescriptor> {
         // A frontier run can also belong to the checkpoint. Count each physical
         // source once, but include new runs in both metrics and visibility identity.
         let mut sources = BTreeSet::new();
-        checkpoint
-            .sources()
+        // Every read mode authenticates these descriptors. Footer-only views
+        // have no materialized capsules, even before the first checkpoint.
+        self.checkpoint
             .iter()
+            .flat_map(|checkpoint| checkpoint.sources())
             .chain(&self.capsule_run_sources)
             .filter(move |source| sources.insert(source.object_hash()))
             .flat_map(PackSourceDescriptor::members)
@@ -1852,32 +1812,14 @@ fn append_tip_bound_transitions(
 ) -> Result<()> {
     for (ref_name, edit) in delta.edits() {
         let (old_oid, new_oid) = tip_bound_transition_endpoints(transaction, ref_name, edit)?;
-        let parse_oid = |value: &str| {
-            ObjectId::from_hex(value.as_bytes()).map_err(|_| {
-                corrupt_path(
-                    "capsule Git visibility",
-                    "visibility transition contains an invalid object ID",
-                )
-            })
-        };
-        let added = edit
-            .added
-            .iter()
-            .map(|oid| parse_oid(oid))
-            .collect::<Result<Vec<_>>>()?;
-        let removed = edit
-            .removed
-            .iter()
-            .map(|oid| parse_oid(oid))
-            .collect::<Result<Vec<_>>>()?;
         output
             .entry(ref_name.clone())
             .or_default()
             .push(CapsuleVisibilityTransition {
                 old_oid,
                 new_oid,
-                added,
-                removed,
+                added: edit.added.clone(),
+                removed: edit.removed.clone(),
             });
     }
     Ok(())
@@ -1901,16 +1843,11 @@ fn append_checkpoint_tip_bound_transitions(
                     )
                 })
             };
-            let added = transition
-                .objects
-                .iter()
-                .map(|oid| parse_oid(oid))
-                .collect::<Result<Vec<_>>>()?;
             output_transitions.push(CapsuleVisibilityTransition {
                 old_oid: Some(parse_oid(&transition.from_oid)?),
                 new_oid: parse_oid(&transition.to_oid)?,
-                added,
-                removed: Vec::new(),
+                added: transition.objects.clone().into(),
+                removed: Default::default(),
             });
         }
     }
@@ -2999,7 +2936,9 @@ pub fn layered_fetch_pack_selection(
             Ok(raw) => raw,
             Err(_) => return Ok(None),
         };
-        let Some(pack_ids) = candidates.get(&raw) else {
+        // A visibility key with no placement cannot prove a complete member
+        // selection. Let the caller resolve it through authenticated locators.
+        let Some(pack_ids) = candidates.get(&raw).filter(|pack_ids| !pack_ids.is_empty()) else {
             return Ok(None);
         };
         selected.extend(pack_ids.iter().cloned());
@@ -4410,8 +4349,8 @@ pub fn compacted_view_from_checkpoint(
         catalog_sources: Some(Vec::new()),
         capsule_run_bytes: BTreeMap::new(),
         capsule_run_indexes: BTreeMap::new(),
-        capsule_run_member_oids: BTreeMap::new(),
-        frontier_object_admission: BTreeMap::new(),
+        capsule_run_member_oids: Arc::default(),
+        frontier_object_admission: Arc::default(),
     })
 }
 
@@ -4664,7 +4603,14 @@ async fn assemble_view(
             None => Ok(None),
         }
     };
-    let runs = try_join_all(pointers.iter().map(|pointer| load_run(router, pointer)));
+    let runs = futures_util::stream::iter(
+        pointers
+            .iter()
+            .cloned()
+            .map(|pointer| async move { load_run(router, &pointer).await }),
+    )
+    .buffered(CAPSULE_FRONTIER_READ_CONCURRENCY)
+    .try_collect::<Vec<_>>();
     let (checkpoint, runs) = tokio::try_join!(checkpoint, runs)?;
     let root_transactions = snapshot
         .record()
@@ -4846,8 +4792,8 @@ async fn assemble_view(
         catalog_sources,
         capsule_run_bytes: BTreeMap::new(),
         capsule_run_indexes,
-        capsule_run_member_oids,
-        frontier_object_admission,
+        capsule_run_member_oids: Arc::new(capsule_run_member_oids),
+        frontier_object_admission: Arc::new(frontier_object_admission),
     })
 }
 
@@ -4908,28 +4854,25 @@ async fn assemble_layered_control_view(
             .iter()
             .map(|pointer| (pointer.size(), pointer.transaction_ids().len())),
     );
-    let loaded = try_join_all(
-        pointers
-            .iter()
-            .zip(inline)
-            .map(|(pointer, inline)| async move {
-                if inline {
-                    let run = load_run(router, pointer).await?;
-                    let (control, capsules) = run.verified_controls()?;
-                    Ok::<_, ReadError>((control, capsules, Some(run.bytes().clone())))
-                } else {
-                    let (control, capsules) = if matches!(read, ControlRead::Git) {
-                        crab_metadata::capsule_protocol::load_capsule_run_git_control(
-                            router, pointer,
-                        )
+    let loaded = futures_util::stream::iter(pointers.iter().cloned().zip(inline).map(
+        |(pointer, inline)| async move {
+            if inline {
+                let run = load_run(router, &pointer).await?;
+                let (control, capsules) = run.verified_controls()?;
+                Ok::<_, ReadError>((control, capsules, Some(run.bytes().clone())))
+            } else {
+                let (control, capsules) = if matches!(read, ControlRead::Git) {
+                    crab_metadata::capsule_protocol::load_capsule_run_git_control(router, &pointer)
                         .await?
-                    } else {
-                        load_run_control(router, pointer).await?
-                    };
-                    Ok((control, capsules, None))
-                }
-            }),
-    )
+                } else {
+                    load_run_control(router, &pointer).await?
+                };
+                Ok((control, capsules, None))
+            }
+        },
+    ))
+    .buffered(CAPSULE_FRONTIER_READ_CONCURRENCY)
+    .try_collect::<Vec<_>>()
     .await?;
     let mut runs = BTreeMap::new();
     let mut capsule_run_bytes = BTreeMap::new();
@@ -5075,8 +5018,8 @@ async fn assemble_layered_control_view(
             catalog_sources,
             capsule_run_bytes,
             capsule_run_indexes,
-            capsule_run_member_oids,
-            frontier_object_admission,
+            capsule_run_member_oids: Arc::new(capsule_run_member_oids),
+            frontier_object_admission: Arc::new(frontier_object_admission),
         });
     }
     let journal_capsules =
@@ -5183,8 +5126,8 @@ async fn assemble_layered_control_view(
         catalog_sources,
         capsule_run_bytes,
         capsule_run_indexes,
-        capsule_run_member_oids,
-        frontier_object_admission,
+        capsule_run_member_oids: Arc::new(capsule_run_member_oids),
+        frontier_object_admission: Arc::new(frontier_object_admission),
     })
 }
 
@@ -5212,7 +5155,7 @@ fn member_oids_for_capsule_run(run: &CapsuleRun) -> Option<Vec<Vec<[u8; 20]>>> {
 }
 
 fn extend_frontier_object_admission(
-    admission: &mut BTreeMap<[u8; 20], Vec<String>>,
+    admission: &mut BTreeMap<[u8; 20], BTreeSet<String>>,
     visibility: &crab_metadata::capsule_protocol::CapsuleVisibilityDelta,
     source: &PackSourceDescriptor,
     run_admission: Option<&crab_metadata::capsule_protocol::CapsuleRunAdmission>,
@@ -5251,25 +5194,20 @@ fn extend_frontier_object_admission(
             continue;
         };
         let entry = admission.entry(oid).or_default();
-        let pack_ids = run_admission
-            .and_then(|run_admission| run_admission.object_members(&oid))
-            .map(|members| {
-                members
-                    .iter()
-                    .filter_map(|member| {
-                        source
-                            .members()
-                            .get(usize::try_from(*member).ok()?)
-                            .map(|member| member.pack().blake3().to_owned())
-                    })
-                    .collect::<Vec<_>>()
-            })
-            .filter(|pack_ids| !pack_ids.is_empty())
-            .unwrap_or_else(|| all_pack_ids.clone());
-        for pack_id in &pack_ids {
-            if !entry.iter().any(|candidate| candidate == pack_id) {
-                entry.push(pack_id.clone());
-            }
+        // Replacement closures include inherited objects outside this run.
+        // Preserve their visibility keys, but an exact admission miss must
+        // not multiply unrelated physical candidates across every ref.
+        if let Some(run_admission) = run_admission {
+            entry.extend(
+                run_admission
+                    .object_members(&oid)
+                    .into_iter()
+                    .flatten()
+                    .filter_map(|member| source.members().get(*member as usize))
+                    .map(|member| member.pack().blake3().to_owned()),
+            );
+        } else {
+            entry.extend(all_pack_ids.iter().cloned());
         }
     }
     Ok(())
@@ -6879,6 +6817,111 @@ mod tests {
         );
     }
 
+    #[test]
+    fn transition_hints_retain_authenticated_memberships_without_expansion() {
+        use crab_metadata::git_visibility::{
+            GIT_VISIBILITY_EDIT_VERSION, GitVisibilityDictionary, GitVisibilityObjects,
+        };
+        for count in [4_u32, 4096] {
+            let objects = (1..=count)
+                .map(|value| format!("{value:040x}"))
+                .collect::<Vec<_>>();
+            let dictionary = GitVisibilityDictionary::new(objects.clone()).unwrap();
+            let added =
+                GitVisibilityObjects::from_shared_ordinals(dictionary, (0..count - 1).collect())
+                    .unwrap();
+            let names = ["refs/heads/main", "refs/heads/alias"];
+            let transaction = CapsuleTransaction::new(
+                &"a".repeat(64),
+                names
+                    .iter()
+                    .map(|name| {
+                        CapsuleRefEdit::new(
+                            *name,
+                            Some("f".repeat(40)),
+                            Some(objects[0].clone()),
+                            None,
+                        )
+                    })
+                    .collect(),
+            )
+            .unwrap();
+            let delta = CapsuleVisibilityDelta::new(
+                names
+                    .iter()
+                    .map(|name| {
+                        (
+                            (*name).to_owned(),
+                            GitVisibilityEdit {
+                                version: GIT_VISIBILITY_EDIT_VERSION,
+                                old_oid: Some("f".repeat(40)),
+                                new_oid: objects[0].clone(),
+                                replaces: false,
+                                added: added.clone(),
+                                removed: Default::default(),
+                            },
+                        )
+                    })
+                    .collect(),
+            )
+            .unwrap();
+            let capsule = Capsule::build(
+                &transaction,
+                Vec::new(),
+                vec![CapsuleSection::new(
+                    CapsuleSectionKind::VisibilityDelta,
+                    delta.encode().unwrap(),
+                )],
+            )
+            .unwrap();
+            let run = CapsuleRun::leaf(capsule).unwrap();
+            let (_, controls) = run.verified_controls().unwrap();
+            let retained = controls[0].visibility_delta().unwrap().unwrap();
+            let hints = build_tip_bound_transitions(&[], &controls).unwrap();
+            for (name, edit) in retained.edits() {
+                let hint = &hints[name][0];
+                assert_eq!(hint.added, edit.added);
+                assert!(!hint.added.contains(objects.last().unwrap()));
+                assert!(
+                    hint.added
+                        .iter()
+                        .zip(edit.added.iter())
+                        .all(|(hint, retained)| std::ptr::eq(hint, retained)),
+                    "transition hints must retain the authenticated set instead of expanding it"
+                );
+            }
+        }
+    }
+
+    #[tokio::test]
+    async fn frontier_control_inventory_matches_complete_metadata_without_a_checkpoint() {
+        let inner = Arc::new(InMemory::new());
+        seed_prepared_multi_ref(inner.clone(), true, true).await;
+        let router = StoreLayout::new(Store::new(inner), "repositories/test".to_owned());
+        let root = load_root(&router).await.unwrap();
+        assert!(root.record().root().checkpoint().is_none());
+        let complete = open_view_from_root_with_metadata(&router, root.clone(), TEST_LIMITS)
+            .await
+            .unwrap();
+        let controls = open_view_from_root_with_layered_control(&router, root, TEST_LIMITS)
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                controls.git_pack_count(),
+                controls.git_pack_bytes().unwrap(),
+                controls.git_object_count().unwrap(),
+                controls.git_snapshot().unwrap()
+            ),
+            (
+                complete.git_pack_count(),
+                complete.git_pack_bytes().unwrap(),
+                complete.git_object_count().unwrap(),
+                complete.git_snapshot().unwrap()
+            ),
+        );
+    }
+
     #[tokio::test]
     async fn layered_control_defers_transition_objects_until_requested() {
         let inner = Arc::new(InMemory::new());
@@ -6895,10 +6938,11 @@ mod tests {
         let complete = open_view_from_root_with_metadata(&router, root, TEST_LIMITS)
             .await
             .unwrap();
-        let expected = complete.tip_bound_transitions().await.unwrap();
+        let names = view.refs().keys().cloned().collect::<Vec<_>>();
+        let expected = complete.tip_bound_transitions(&names).await.unwrap();
         assert_eq!(expected.len(), 2);
-        assert_eq!(view.tip_bound_transitions().await.unwrap(), expected);
-        assert_eq!(view.tip_bound_transitions().await.unwrap(), expected);
+        assert_eq!(view.tip_bound_transitions(&names).await.unwrap(), expected);
+        assert_eq!(view.tip_bound_transitions(&names).await.unwrap(), expected);
     }
 
     #[tokio::test]

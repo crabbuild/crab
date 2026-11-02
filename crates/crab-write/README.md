@@ -45,6 +45,13 @@ missing marker is repaired before its prepared state is used.
 The repository root changes only for checkpoint and maintenance work, so distinct existing
 refs share no foreground mutable object.
 
+Ref-name creation/deletion acquires independent conflict-domain leases with at
+most 32 admission requests in flight. Each successful claim starts renewal
+immediately. Contention and cancellation drain outstanding claims and release
+the partial set before returning or retrying, preventing cyclic batch ownership.
+Per-domain acquisition contexts retain their backend-clock and existing-key
+proof across retries. Final namespace validation still runs under every lease.
+
 After a failed per-ref conditional write, v2 reads back the exact candidate.
 Matching bytes confirm commit even if a lost create reply retried into an
 already-exists error. An unchanged original head permits bounded retry of a

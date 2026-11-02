@@ -29,7 +29,7 @@ crab migrate <SUBCOMMAND> [OPTIONS]
 | `crab migrate import` | Rewrite selected history, replacing matching regular Git blobs with verified Crab pointers |
 | `crab migrate export` | Rewrite selected history, reconstructing matching Crab pointers as verified regular Git blobs |
 | `crab migrate from-dvc` | Convert a `dvc.yaml` pipeline to `crab.yaml` |
-| `crab migrate gc-fence` | Inspect or explicitly upgrade one quiesced coordination domain to schema 2 |
+| `crab migrate gc-fence` | Inspect or explicitly upgrade one quiesced coordination domain to schema 3 |
 
 ## Examples
 
@@ -68,9 +68,11 @@ file.
 
 ## GC coordination upgrade
 
-Schema 2 binds GC writer epochs to a domain incarnation. Deleting and
-recreating a fence can no longer reuse the identity sealed into a GC plan.
-New domains use schema 2; existing schema-1 domains require explicit migration.
+Schema 3 replaces the shared writer list with 64 independent writer slots and
+one sweep gate. Released slots retain monotonic history for GC resume checks;
+they must never be deleted or reset. New domains initialize schema 3. Existing
+schema-1/2 domains require explicit migration. Domain incarnation (when present)
+and accumulated writer history are preserved.
 Older binaries, including v1.0.1, refuse the new fence. This is not a rolling
 upgrade: stop **all** writers and sweepers sharing the physical domain first,
 including protected services, maintenance jobs and other repositories using
@@ -91,14 +93,16 @@ the same global data domain.
    crab migrate gc-fence --remote crab://bucket/org/repo --domain org/repo --apply --quiesced
    ```
 
-4. Upgrade all clients before restarting them. Start a fresh GC plan; schema-1
-   journals cannot resume under the new binary. Do not restore an old fence or
+4. Upgrade all clients before restarting them. Start a fresh GC plan after migrating
+   either retired schema. Do not restore an old fence or
    journal as a rollback procedure. A data restore requires quiescence and a
    new GC inventory; arbitrary out-of-band restoration of coordination state
    cannot be detected reliably on unversioned storage.
 
-Inspection performs no object writes. Apply uses one conditional update;
-conflicts require reinspection. Reapplying an already upgraded domain changes
+Inspection performs no object writes. Apply creates the 64 zero-history slot
+ledgers, then conditionally replaces the originally inspected control record;
+conflicts require reinspection. Interrupted slot preparation can be repeated
+while clients remain stopped. Reapplying a complete upgraded domain changes
 nothing. Migration changes only the selected fence, not Git refs, payloads or
 other domains. Read-only use of an older binary is a separate compatibility
 contract; it does not authorize older writers against upgraded domains.

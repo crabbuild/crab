@@ -2736,12 +2736,21 @@ async fn fetch_packs(
         .await?;
         return Ok(FetchBatchResult::default());
     }
+    // Annotated tags need complete tag-object visibility beyond the requested
+    // ref tips. Tag-free follow-tags requests retain ordinary fetch admission.
+    let followtags_requires_complete_view = options.followtags
+        && capture
+            .ref_view()?
+            .refs()
+            .keys()
+            .any(|name| name.starts_with("refs/tags/"));
     if fetch_options.depth.is_some()
         || fetch_options.deepen_since.is_some()
         || !fetch_options.deepen_not.is_empty()
         || fetch_options.deepen_relative
         || options.filter.is_some()
         || !config.transfer_hide_refs.is_empty()
+        || followtags_requires_complete_view
     {
         fetch_capsule_constrained_pack(
             router,
@@ -2877,9 +2886,9 @@ async fn fetch_capsule_packs(
             )));
         }
     }
-    // Warm layered fetches must not reinstall the stable inventory. Without
-    // local haves there is no authorized delta base, so install complete packs.
-    if haves.is_empty() || view.layered_checkpoint().is_none() {
+    // A warm fetch has a client base independently of checkpoint maintenance.
+    // Reinstalling the whole frontier also installs unrelated ref objects.
+    if haves.is_empty() {
         let layout = capture.layout();
         let direct_layered_cold_clone =
             haves.is_empty() && view.layered_cold_clone_packs(layout, maximum)?.is_some();
@@ -3069,28 +3078,22 @@ async fn fetch_capsule_incremental_packs(
         ..Default::default()
     };
     let planning_started = std::time::Instant::now();
-    let plan = if view
-        .layered_checkpoint()
-        .is_some_and(|checkpoint| checkpoint.is_control_only())
-    {
-        crab_read::plan_upload_pack_tip_bound_with_transitions(
-            &repository,
-            &visible_ref_names,
-            &request,
-            Some(&view.tip_bound_transitions().await?),
-            cancel,
-        )
-        .await
-    } else {
-        crab_read::plan_upload_pack(
-            &repository,
-            &view.git_visibility_index().await?,
-            &visible_ref_names,
-            &request,
-            cancel,
-        )
-        .await
-    }
+    let requested_refs = crab_read::tip_bound_requested_refs(
+        &repository.refs().entries,
+        &visible_ref_names,
+        &request.wants,
+    )?;
+    // This caller admits only ordinary advertised-ref fetches. Use the same
+    // tip-bound planner for empty-base frontiers and checkpointed repositories;
+    // it proves haves and physical dependencies before direct installation.
+    let plan = crab_read::plan_upload_pack_tip_bound_with_transitions(
+        &repository,
+        &visible_ref_names,
+        &request,
+        Some(&view.tip_bound_transitions(&requested_refs).await?),
+        cancel,
+    )
+    .await
     .map_err(CrabError::from)?;
     let planning_ms = planning_started.elapsed().as_millis() as u64;
     let mut member_admission_ms = 0;
@@ -3342,8 +3345,16 @@ async fn fetch_capsule_incremental_packs(
         connectivity_ms,
         "incremental fetch proved connectivity without response pack"
     );
+    // An empty delta can still carry Git's requested connectivity proof.
+    // Its kept pack must contain the tips before Git can consume that proof.
+    let connectivity_lock = if plan.object_ids.is_empty() {
+        crate::git::pack::create_connectivity_proof_pack(&git_dir, &ref_tips, view.root().digest())
+            .await?
+    } else {
+        None
+    };
     Ok(FetchBatchResult {
-        connectivity_lock: None,
+        connectivity_lock,
         connectivity_ok: true,
     })
 }
@@ -5761,6 +5772,46 @@ mod tests {
                 "failed and successful fetches release admission"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn classic_capsule_warm_fetch_leaves_unrequested_tags_uninstalled() {
+        let (source, store, router, commits, tag) = capsule_history_fixture().await;
+        let target = tempfile::tempdir().expect("target repository");
+        run_git(target.path(), &["init", "-q"]);
+        run_git(
+            target.path(),
+            &[
+                "fetch",
+                "--no-tags",
+                source.path().to_str().expect("source path"),
+                &commits[0],
+            ],
+        );
+        run_git(
+            target.path(),
+            &["update-ref", "refs/remotes/origin/main", &commits[0]],
+        );
+        let git_dir = target.path().join(".git");
+        let _guard = GitEnvCwdGuard::set(target.path(), &git_dir, target.path());
+        let context = test_context(store, router.repo_prefix());
+        let input = format!("fetch {} refs/heads/main\n\n", commits[2]);
+        let (_, result) =
+            run_with_context(&input, context, tokio_util::sync::CancellationToken::new()).await;
+        result.expect("fetch main without a checkpoint");
+        assert!(git_object_exists(target.path(), &commits[2]));
+        assert!(!git_object_exists(target.path(), &tag));
+        assert_eq!(
+            run_git(
+                target.path(),
+                &["show", &format!("{}:history.txt", commits[2])]
+            ),
+            b"generation 3\n"
+        );
+        run_git(
+            target.path(),
+            &["fsck", "--strict", "--full", "--no-dangling"],
+        );
     }
 
     #[tokio::test]

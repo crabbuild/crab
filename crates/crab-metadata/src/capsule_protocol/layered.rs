@@ -50,11 +50,10 @@ pub fn visibility_object_set_digest(objects: &[GitVisibilityOid]) -> String {
     hasher.finalize().to_hex().to_string()
 }
 
-/// Compact, source-set-bound visibility proof for the layered checkpoint.
+/// Source-bound visibility proof for a layered checkpoint.
 ///
-/// The dictionary is encoded once as raw SHA-1 bytes. Ref closures and
-/// incremental transitions use canonical sparse ordinals or bitmaps, so the
-/// warm fetch path does not download repeated hexadecimal OIDs for every ref.
+/// Dense ref closures remain compact bitmaps in memory. The canonical page
+/// encoding binds each closure and incremental transition to the OID dictionary.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct LayeredVisibilitySnapshot {
     catalog_digest: String,

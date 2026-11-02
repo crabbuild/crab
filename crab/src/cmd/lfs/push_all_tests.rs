@@ -44,6 +44,35 @@ fn commit(root: &Path) {
 }
 
 #[test]
+fn code_only_pre_push_needs_no_lfs_remote_access() {
+    let _guard = crate::test::git_repo::CleanGitEnvGuard::new();
+    let dir = tempfile::tempdir().unwrap();
+    let root = dir.path();
+    git(root, &["init", "-q", "-b", "main"]);
+    fs::write(
+        root.join("asset.lfs"),
+        pointer(b"published payload").serialize(),
+    )
+    .unwrap();
+    commit(root);
+    let base = git(root, &["rev-parse", "HEAD"]);
+    fs::write(root.join("code.txt"), b"code only\n").unwrap();
+    commit(root);
+    let update = PrePushUpdate {
+        local_oid: Some(git(root, &["rev-parse", "HEAD"])),
+        remote_ref: "refs/heads/release".to_owned(),
+        remote_oid: Some(base),
+    };
+    run_lfs_pre_push_batch(
+        root,
+        Some("unconfigured"),
+        &[update],
+        &CancellationToken::new(),
+    )
+    .expect("an empty outgoing LFS range requires no remote store");
+}
+
+#[test]
 fn bulk_push_includes_replaced_and_deleted_versions_without_old_tip_refs() {
     let _guard = crate::test::git_repo::CleanGitEnvGuard::new();
     let dir = tempfile::tempdir().unwrap();

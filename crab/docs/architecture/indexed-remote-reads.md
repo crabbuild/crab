@@ -939,10 +939,14 @@ selects the same first visible inherited base as complete reconciliation. Moving
 the source ref later cannot change that captured parent. Prior tips and removals
 are checked through membership lookup; removed OIDs cannot also be added. The
 historical dictionary retains removed objects without making them visible.
-An initial authenticated added root supplies its exact dictionary count; equal
-roots add no objects. Differing actual additions are read and checked against
-the retained dictionary, preserving its existing maximum. Actual edit work can
-still be large; unrelated historical closures remain cold in the initial case.
+Captured layers retain selected membership without constructing a temporary
+global dictionary. Expected-old links, new-tip inclusion and all removal checks
+remain mandatory. Complete visibility-index construction owns dictionary union
+and its existing distinct-object limit; each stored section also retains its
+byte/ref/object bounds. Paged capture does not enumerate unrelated additions for
+accounting. Native Xet publication opens metadata's captured catalog lookup
+directly. Shared/protected publishers keep their existing authorized view, so
+upload preparation cannot widen or recapture those refs.
 
 Bulk `git_visibility_index`, `candidate_git_visibility` and `tip_bound_transitions`
 are asynchronous and materialize the same captured controls only on request.
@@ -2604,6 +2608,22 @@ acceptance requires changed-catalog byte bounds, old/new cold reconstruction,
 corruption/admission tests, GC/retention coverage and a new real RustFS run.
 The earlier 10 GiB matrix does not qualify this new format. RustFS results do
 not establish representative hosted-S3 latency.
+
+### Shared checkpoint closure integration
+
+Checkpoint format 9 (`CRBCKP09`) keeps the shared dictionary, interned bitmap
+chunks and sparse ref sets already on `crab-v2`. Its visibility descriptor 2
+remains the canonical large-overlap encoding; descriptor 1 keeps its existing
+ordinary-checkpoint bytes. The alternative shared-base format-10 experiment
+is superseded and is not emitted or accepted by the integrated reader.
+
+The team-scale closure and retained-only membership regressions run against
+this shared codec. Bounded frontier loads, scan-owned page-cache forks and exact
+run-member admission are composed with the same authenticated dictionary and
+per-ref sets. Dictionary retention still grants no visibility. Earlier
+format-10 measurements in the team qualification record describe that experiment
+only; they do not qualify the integrated source or replace fresh lifecycle and
+performance evidence.
 
 ## Capsule chunk discovery without the retired receipt database
 

@@ -16,7 +16,7 @@ pub(crate) struct PageCache {
     block_reads: [futures_util::lock::Mutex<()>; 4],
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Clone, Default)]
 struct State {
     pages: BTreeMap<(usize, u64), (Kind, PageRef, Arc<Page>)>,
     order: VecDeque<Entry>,
@@ -24,7 +24,7 @@ struct State {
     blocks: BTreeMap<u64, bytes::Bytes>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 enum Entry {
     Page((usize, u64)),
     Block(u64),
@@ -122,6 +122,16 @@ impl PageWork {
 }
 
 impl PageCache {
+    /// Fork warm pages and read-ahead boundaries for the same captured source.
+    pub(crate) fn fork(&self) -> Result<Self> {
+        let state = self.state()?.clone();
+        Ok(Self {
+            state: Mutex::new(state),
+            read_ahead: self.read_ahead.clone(),
+            ..Self::default()
+        })
+    }
+
     pub(crate) fn for_region(region: std::ops::Range<u64>) -> Self {
         Self {
             read_ahead: Some(region),
@@ -474,6 +484,96 @@ fn page_weight(reference: &PageRef, page: &Page) -> usize {
 mod tests {
     use super::*;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[tokio::test]
+    async fn bulk_forks_reuse_warm_blocks_without_retaining_scan_pages() {
+        let mut writer = Writer::default();
+        let warm = writer
+            .tree(Kind::VisibilityChanges, vec![(vec![1; 20], vec![])])
+            .unwrap();
+        // Separate proof blocks keep read-ahead from warming the scanned page.
+        writer.bytes.resize(READ_AHEAD_BYTES as usize, 0);
+        let expected = vec![(vec![2; 20], vec![])];
+        let cold = writer
+            .tree(Kind::VisibilityChanges, expected.clone())
+            .unwrap();
+        let bytes = Arc::new(AtomicU64::new(0));
+        let observed = bytes.clone();
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()))
+            .with_read_byte_observer(Arc::new(move |count| {
+                observed.fetch_add(count, Ordering::SeqCst);
+            }));
+        let path = object_store::path::Path::from("proof");
+        let region = 0..writer.bytes.len() as u64;
+        store
+            .create_strict(&path, writer.bytes.into())
+            .await
+            .unwrap();
+        let cache = PageCache::for_region(region.clone());
+        cache
+            .fetch(
+                &store,
+                &path,
+                0,
+                region.clone(),
+                &warm,
+                Kind::VisibilityChanges,
+            )
+            .await
+            .unwrap();
+        bytes.store(0, Ordering::SeqCst);
+        let fork = cache.fork().unwrap();
+        fork.fetch(
+            &store,
+            &path,
+            0,
+            region.clone(),
+            &warm,
+            Kind::VisibilityChanges,
+        )
+        .await
+        .unwrap();
+        let fork_warm_bytes = bytes.swap(0, Ordering::SeqCst);
+        let scanned = fork
+            .scan(
+                &store,
+                &path,
+                0,
+                region.clone(),
+                &cold,
+                Kind::VisibilityChanges,
+                &mut PageWork::new(u64::MAX, 0),
+            )
+            .await
+            .unwrap();
+        drop(fork);
+        bytes.store(0, Ordering::SeqCst);
+        cache
+            .fetch(
+                &store,
+                &path,
+                0,
+                region.clone(),
+                &warm,
+                Kind::VisibilityChanges,
+            )
+            .await
+            .unwrap();
+        let parent_warm_bytes = bytes.swap(0, Ordering::SeqCst);
+        cache
+            .fetch(&store, &path, 0, region, &cold, Kind::VisibilityChanges)
+            .await
+            .unwrap();
+        assert_eq!(
+            (
+                scanned,
+                fork_warm_bytes,
+                parent_warm_bytes,
+                bytes.load(Ordering::SeqCst) > 0
+            ),
+            (expected, 0, 0, true),
+        );
+    }
 
     #[tokio::test]
     async fn coalesced_reads_stay_inside_proof_region_and_charge_cold_and_warm_work() {

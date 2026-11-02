@@ -684,6 +684,23 @@ pub fn tip_bound_transitions_cover_wants(
     })
 }
 
+/// Select canonical visible ref names for advertised wanted tips.
+///
+/// Aliases use the planner's lexicographic choice. Hidden or non-tip wants
+/// return `UnauthorizedObject`; repeated wants return one ref name.
+pub fn tip_bound_requested_refs(
+    references: &[RepositoryRef],
+    visible_ref_names: &[String],
+    wants: &[ObjectId],
+) -> Result<Vec<String>> {
+    let visible = tip_bound_visible_refs(references, visible_ref_names);
+    let names = selected_tip_bound_refs(&visible, wants).ok_or(ReadError::UnauthorizedObject)?;
+    let mut names = names.into_iter().map(str::to_owned).collect::<Vec<_>>();
+    names.sort_unstable();
+    names.dedup();
+    Ok(names)
+}
+
 fn tip_bound_visible_refs(
     references: &[RepositoryRef],
     visible_ref_names: &[String],
@@ -793,13 +810,13 @@ fn authorize_wants(
 
 fn plan_from_tip_bound_transitions(
     visible: &HashMap<String, ObjectId>,
-    transitions: &CapsuleTipBoundTransitions,
+    transitions: Option<&CapsuleTipBoundTransitions>,
     request: &UploadPackRequest,
     maximum_objects: u64,
 ) -> crab_remote_git::Result<Option<PackPlan>> {
     if request.haves.is_empty() {
         tracing::debug!(
-            transition_refs = transitions.len(),
+            transition_refs = transitions.map_or(0, CapsuleTipBoundTransitions::len),
             "tip-bound transition planning skipped without client haves"
         );
         return Ok(None);
@@ -817,16 +834,14 @@ fn plan_from_tip_bound_transitions(
     let mut common_haves = HashSet::new();
     let mut object_ids = Vec::new();
     for (ref_name, want) in selected_refs.iter().zip(&request.wants) {
-        let Some(ref_transitions) = transitions.get(*ref_name) else {
-            tracing::debug!(
-                ref_name = *ref_name,
-                transition_refs = transitions.len(),
-                "tip-bound transition planning skipped because the advertised ref has no transitions"
-            );
-            return Ok(None);
-        };
+        // The advertised tip itself is an authenticated zero-length chain.
+        // A client that already has it needs neither history nor object reads.
+        let ref_transitions = transitions
+            .and_then(|transitions| transitions.get(*ref_name))
+            .map(Vec::as_slice)
+            .unwrap_or_default();
         let Some((have, delta)) =
-            transition_delta_for_haves(ref_transitions, *want, &request.haves)
+            transition_delta_for_haves(ref_transitions, *want, &request.haves)?
         else {
             let direct_haves = request
                 .haves
@@ -878,22 +893,23 @@ fn transition_delta_for_haves(
     transitions: &[CapsuleVisibilityTransition],
     target: ObjectId,
     haves: &[ObjectId],
-) -> Option<(ObjectId, Vec<ObjectId>)> {
-    let (have, path) = transition_path_for_haves(transitions, target, haves)?;
-    // Fold the exact sequence into final-minus-initial state. A
-    // remove-first event was already present in the client's old tip;
-    // an add-first event contributes only when it remains at the target.
+) -> crab_remote_git::Result<Option<(ObjectId, Vec<ObjectId>)>> {
+    let Some((have, path)) = transition_path_for_haves(transitions, target, haves) else {
+        return Ok(None);
+    };
+    // Decode only the selected chain; other refs remain compressed. An add-first
+    // event contributes only if still present; a remove-first event was in the base.
     let mut events = HashMap::<ObjectId, (Option<bool>, bool)>::new();
     for transition in path.iter().rev() {
-        for oid in &transition.added {
-            let event = events.entry(*oid).or_insert((None, false));
+        for oid in transition.added.binary_oids() {
+            let event = events.entry(ObjectId::from(oid?)).or_insert((None, false));
             if event.0.is_none() {
                 event.0 = Some(true);
             }
             event.1 = true;
         }
-        for oid in &transition.removed {
-            let event = events.entry(*oid).or_insert((None, false));
+        for oid in transition.removed.binary_oids() {
+            let event = events.entry(ObjectId::from(oid?)).or_insert((None, false));
             if event.0.is_none() {
                 event.0 = Some(false);
             }
@@ -905,7 +921,7 @@ fn transition_delta_for_haves(
         .filter_map(|(oid, (first, present))| (first == Some(true) && present).then_some(oid))
         .collect::<Vec<_>>();
     delta.sort_unstable();
-    Some((have, delta))
+    Ok(Some((have, delta)))
 }
 
 fn transition_path_for_haves<'a>(
@@ -955,12 +971,9 @@ async fn plan_with_operation(
     tracing::debug!("upload-pack plan authorization completed");
     let started = Instant::now();
     let maximum_objects = operation.max_logical_objects();
-    if let VisibilitySource::TipBound {
-        refs,
-        transitions: Some(transitions),
-    } = visibility
+    if let VisibilitySource::TipBound { refs, transitions } = visibility
         && let Some(plan) =
-            plan_from_tip_bound_transitions(refs, transitions, request, maximum_objects)?
+            plan_from_tip_bound_transitions(refs, *transitions, request, maximum_objects)?
     {
         tracing::info!(
             telemetry_event = "visibility_plan",
@@ -2807,6 +2820,16 @@ mod tests {
         ObjectId::from_hex(value.to_string().repeat(40).as_bytes()).expect("test object ID")
     }
 
+    fn transition_objects(
+        objects: &[ObjectId],
+    ) -> crab_metadata::git_visibility::GitVisibilityObjects {
+        objects
+            .iter()
+            .map(ToString::to_string)
+            .collect::<Vec<_>>()
+            .into()
+    }
+
     fn visibility() -> GitVisibilityIndex {
         GitVisibilityIndex::new(
             7,
@@ -2844,6 +2867,27 @@ mod tests {
     }
 
     #[test]
+    fn requested_transition_refs_follow_the_planner_alias_choice_and_visibility() {
+        let mut references = references();
+        references.push(RepositoryRef {
+            name: "refs/heads/alias".to_owned(),
+            target: oid('1'),
+            peeled: None,
+        });
+        let visible = vec!["refs/heads/main".to_owned(), "refs/heads/alias".to_owned()];
+        assert_eq!(
+            tip_bound_requested_refs(&references, &visible, &[oid('1'), oid('1')]).unwrap(),
+            ["refs/heads/alias"]
+        );
+        for want in [oid('2'), oid('9')] {
+            assert!(matches!(
+                tip_bound_requested_refs(&references, &visible, &[want]),
+                Err(ReadError::UnauthorizedObject)
+            ));
+        }
+    }
+
+    #[test]
     fn catalog_selection_deduplicates_without_losing_pack_order() {
         let mut objects = vec![oid('3'), oid('1'), oid('3'), oid('2')];
 
@@ -2867,23 +2911,81 @@ mod tests {
             CapsuleVisibilityTransition {
                 old_oid: Some(oid('1')),
                 new_oid: oid('2'),
-                added: vec![oid('2'), oid('3')],
-                removed: Vec::new(),
+                added: transition_objects(&[oid('2'), oid('3')]),
+                removed: Default::default(),
             },
             CapsuleVisibilityTransition {
                 old_oid: Some(oid('2')),
                 new_oid: oid('4'),
-                added: vec![oid('4'), oid('5')],
-                removed: vec![oid('3')],
+                added: transition_objects(&[oid('4'), oid('5')]),
+                removed: transition_objects(&[oid('3')]),
             },
         ];
 
-        let (have, delta) =
-            transition_delta_for_haves(&transitions, oid('4'), &[oid('1')]).expect("chain");
+        let (have, delta) = transition_delta_for_haves(&transitions, oid('4'), &[oid('1')])
+            .unwrap()
+            .expect("chain");
 
         assert_eq!(have, oid('1'));
         assert_eq!(delta, [oid('2'), oid('4'), oid('5')]);
-        assert!(transition_delta_for_haves(&transitions, oid('4'), &[oid('9')]).is_none());
+        assert!(
+            transition_delta_for_haves(&transitions, oid('4'), &[oid('9')])
+                .unwrap()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn tip_bound_existing_tip_needs_no_transition_history() {
+        let request = UploadPackRequest {
+            wants: vec![oid('1')],
+            haves: vec![oid('1')],
+            ..Default::default()
+        };
+        let visible = HashMap::from([("refs/heads/main".to_owned(), oid('1'))]);
+        let transitions = BTreeMap::new();
+        for transitions in [None, Some(&transitions)] {
+            let plan = plan_from_tip_bound_transitions(&visible, transitions, &request, 100)
+                .unwrap()
+                .expect("an advertised tip already present needs no transfer");
+
+            assert_eq!(
+                (plan.object_ids, plan.common_haves),
+                (vec![], vec![oid('1')])
+            );
+        }
+    }
+
+    #[test]
+    fn selected_transition_membership_errors_stop_pack_planning() {
+        let request = UploadPackRequest {
+            wants: vec![oid('1')],
+            haves: vec![oid('3')],
+            ..Default::default()
+        };
+        let visible = HashMap::from([("refs/heads/main".to_owned(), oid('1'))]);
+        let invalid: crab_metadata::git_visibility::GitVisibilityObjects =
+            vec!["invalid".to_owned()].into();
+        for (added, removed) in [
+            (invalid.clone(), Default::default()),
+            (transition_objects(&[oid('1')]), invalid),
+        ] {
+            let transitions = BTreeMap::from([(
+                "refs/heads/main".to_owned(),
+                vec![CapsuleVisibilityTransition {
+                    old_oid: Some(oid('3')),
+                    new_oid: oid('1'),
+                    added,
+                    removed,
+                }],
+            )]);
+            assert!(matches!(
+                plan_from_tip_bound_transitions(&visible, Some(&transitions), &request, 100),
+                Err(RemoteGitError::Metadata(
+                    crab_metadata::error::MetadataError::CorruptObject { .. }
+                ))
+            ));
+        }
     }
 
     #[test]
@@ -2895,8 +2997,8 @@ mod tests {
                 vec![CapsuleVisibilityTransition {
                     old_oid: Some(oid('3')),
                     new_oid: oid('1'),
-                    added: vec![oid('1')],
-                    removed: Vec::new(),
+                    added: transition_objects(&[oid('1')]),
+                    removed: Default::default(),
                 }],
             ),
             (
@@ -2904,8 +3006,8 @@ mod tests {
                 vec![CapsuleVisibilityTransition {
                     old_oid: Some(oid('4')),
                     new_oid: oid('2'),
-                    added: vec![oid('2')],
-                    removed: Vec::new(),
+                    added: transition_objects(&[oid('2')]),
+                    removed: Default::default(),
                 }],
             ),
         ]);
@@ -2951,8 +3053,8 @@ mod tests {
                 .map(|(old_oid, new_oid)| CapsuleVisibilityTransition {
                     old_oid: Some(old_oid),
                     new_oid,
-                    added: vec![new_oid],
-                    removed: Vec::new(),
+                    added: transition_objects(&[new_oid]),
+                    removed: Default::default(),
                 })
                 .collect();
             let transitions = BTreeMap::from([("refs/heads/main".to_owned(), history)]);
@@ -2972,18 +3074,18 @@ mod tests {
             CapsuleVisibilityTransition {
                 old_oid: Some(oid('1')),
                 new_oid: oid('2'),
-                added: vec![oid('2'), oid('3')],
-                removed: Vec::new(),
+                added: transition_objects(&[oid('2'), oid('3')]),
+                removed: Default::default(),
             },
             CapsuleVisibilityTransition {
                 old_oid: Some(oid('2')),
                 new_oid: oid('4'),
-                added: vec![oid('4'), oid('5')],
-                removed: vec![oid('3')],
+                added: transition_objects(&[oid('4'), oid('5')]),
+                removed: transition_objects(&[oid('3')]),
             },
         ];
         assert_eq!(
-            transition_delta_for_haves(&transitions, oid('4'), &[oid('1'), oid('2')]),
+            transition_delta_for_haves(&transitions, oid('4'), &[oid('1'), oid('2')]).unwrap(),
             Some((oid('2'), vec![oid('4'), oid('5')]))
         );
     }

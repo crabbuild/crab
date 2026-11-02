@@ -16,6 +16,7 @@ const GC_RUN_FENCE_TTL: Duration = Duration::from_secs(60);
 /// Renewable exclusive fence for one repo or bucket GC domain.
 pub(crate) struct GcSweepLease {
     fence: GcFenceLease,
+    epoch: crab_coordination::GcWriterEpoch,
     heartbeat: GcFenceHeartbeat,
 }
 
@@ -152,8 +153,13 @@ impl GcSweepLease {
         let fence = GcFenceLease::acquire_sweep(store.inner(), domain, GC_FENCE_TTL)
             .await
             .map_err(CrabError::from)?;
+        let epoch = fence.writer_epoch().map_err(CrabError::from)?;
         let heartbeat = GcFenceHeartbeat::spawn(&fence, cancel.clone(), GC_FENCE_TTL / 3);
-        Ok(Self { fence, heartbeat })
+        Ok(Self {
+            fence,
+            heartbeat,
+            epoch,
+        })
     }
 
     /// Acquire a sweep that can reclaim only this GC run's expired incarnation.
@@ -169,8 +175,13 @@ impl GcSweepLease {
             GcFenceLease::acquire_resumable_sweep(store.inner(), domain, &holder, GC_RUN_FENCE_TTL)
                 .await
                 .map_err(CrabError::from)?;
+        let epoch = fence.writer_epoch().map_err(CrabError::from)?;
         let heartbeat = GcFenceHeartbeat::spawn(&fence, cancel.clone(), GC_RUN_FENCE_TTL / 3);
-        Ok(Self { fence, heartbeat })
+        Ok(Self {
+            fence,
+            heartbeat,
+            epoch,
+        })
     }
 
     pub(crate) async fn read_retention_time(&self) -> Result<i64> {
@@ -187,7 +198,7 @@ impl GcSweepLease {
     }
 
     pub(crate) fn epoch(&self) -> crab_coordination::GcWriterEpoch {
-        self.fence.writer_epoch()
+        self.epoch.clone()
     }
 }
 

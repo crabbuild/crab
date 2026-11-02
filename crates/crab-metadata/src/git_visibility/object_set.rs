@@ -1,5 +1,7 @@
 //! Exact immutable memberships sharing a validated object dictionary and bitmap chunks.
-use super::{MAX_GIT_VISIBILITY_OBJECTS, Result, corrupt, validate_sorted_oids};
+use super::{
+    GitVisibilityOid, MAX_GIT_VISIBILITY_OBJECTS, Result, corrupt, decode_oid, validate_sorted_oids,
+};
 use std::sync::Arc;
 
 use serde::{Deserialize, Deserializer, Serialize, Serializer, ser::SerializeSeq};
@@ -51,7 +53,8 @@ pub struct GitVisibilityObjects(Storage);
 
 #[derive(Debug, Clone)]
 enum Storage {
-    List(Vec<String>),
+    // Cloned hints retain immutable OIDs; empty sets need no shared allocation.
+    List(Option<Arc<[String]>>),
     Shared(Shared),
     Sparse {
         dictionary: Arc<GitVisibilityDictionary>,
@@ -153,7 +156,7 @@ impl GitVisibilityObjects {
     #[must_use]
     pub fn len(&self) -> usize {
         match &self.0 {
-            Storage::List(objects) => objects.len(),
+            Storage::List(objects) => objects.as_deref().unwrap_or_default().len(),
             Storage::Shared(set) => set.count,
             Storage::Sparse { positions, .. } => positions.len(),
         }
@@ -227,7 +230,7 @@ impl GitVisibilityObjects {
     /// Iterate exact OIDs in canonical order without allocating per-ref strings.
     pub fn iter(&self) -> GitVisibilityObjectIter<'_> {
         GitVisibilityObjectIter(match &self.0 {
-            Storage::List(objects) => Iter::List(objects.iter()),
+            Storage::List(objects) => Iter::List(objects.as_deref().unwrap_or_default().iter()),
             Storage::Sparse {
                 dictionary,
                 positions,
@@ -244,10 +247,17 @@ impl GitVisibilityObjects {
         })
     }
 
+    /// Decode each membership as a binary SHA-1 identity, retaining canonical OID errors.
+    pub fn binary_oids(&self) -> impl Iterator<Item = Result<GitVisibilityOid>> + '_ {
+        self.iter().map(|oid| decode_oid(oid))
+    }
+
     #[must_use]
     pub fn contains(&self, oid: &str) -> bool {
         match &self.0 {
             Storage::List(objects) => objects
+                .as_deref()
+                .unwrap_or_default()
                 .binary_search_by(|value| value.as_str().cmp(oid))
                 .is_ok(),
             Storage::Sparse {
@@ -272,7 +282,10 @@ impl GitVisibilityObjects {
     /// Return the canonical set position or insertion point, as with a sorted slice.
     pub fn binary_search(&self, oid: &str) -> std::result::Result<usize, usize> {
         match &self.0 {
-            Storage::List(objects) => objects.binary_search_by(|value| value.as_str().cmp(oid)),
+            Storage::List(objects) => objects
+                .as_deref()
+                .unwrap_or_default()
+                .binary_search_by(|value| value.as_str().cmp(oid)),
             Storage::Sparse {
                 dictionary,
                 positions,
@@ -317,7 +330,9 @@ impl GitVisibilityObjects {
 
     pub(super) fn validate(&self, field: &str) -> Result<()> {
         match &self.0 {
-            Storage::List(objects) => validate_sorted_oids(objects.iter(), field),
+            Storage::List(objects) => {
+                validate_sorted_oids(objects.as_deref().unwrap_or_default().iter(), field)
+            }
             // Construction proved dictionary order, all ordinals and padding. Both
             // the dictionary and chunks are immutable and privately retained.
             Storage::Shared(_) | Storage::Sparse { .. } => Ok(()),
@@ -348,7 +363,7 @@ impl GitVisibilityObjects {
 
 impl From<Vec<String>> for GitVisibilityObjects {
     fn from(objects: Vec<String>) -> Self {
-        Self(Storage::List(objects))
+        Self(Storage::List((!objects.is_empty()).then(|| objects.into())))
     }
 }
 impl Default for GitVisibilityObjects {
@@ -472,6 +487,44 @@ mod tests {
         )
         .unwrap()
     }
+
+    #[test]
+    fn binary_memberships_preserve_gaps_across_list_sparse_and_bitmap_sets() {
+        let dictionary = dictionary(2051);
+        let positions = [0_u32, 7, 1023, 1024, 2050];
+        let expected = positions.map(|position| {
+            let mut oid = [0; 20];
+            oid[16..].copy_from_slice(&position.to_be_bytes());
+            oid
+        });
+        let list: GitVisibilityObjects = positions
+            .iter()
+            .map(|position| format!("{position:040x}"))
+            .collect::<Vec<_>>()
+            .into();
+        let sparse =
+            GitVisibilityObjects::from_shared_ordinals(dictionary.clone(), positions.to_vec())
+                .unwrap();
+        let bitmap = objects(dictionary, &[0, 7, 1023, 1024, 2050]);
+        for set in [list, sparse, bitmap] {
+            assert_eq!(
+                set.binary_oids().collect::<Result<Vec<_>>>().unwrap(),
+                expected
+            );
+        }
+    }
+
+    #[test]
+    fn binary_memberships_reject_noncanonical_list_oids() {
+        for invalid in ["0".repeat(39), "g".repeat(40), "A".repeat(40)] {
+            let set: GitVisibilityObjects = vec![invalid].into();
+            assert!(matches!(
+                set.binary_oids().next().unwrap(),
+                Err(crate::error::MetadataError::CorruptObject { .. })
+            ));
+        }
+    }
+
     #[test]
     fn union_keeps_shared_dictionary_gaps_and_sparse_boundaries_exact() {
         let dictionary = dictionary(3500);

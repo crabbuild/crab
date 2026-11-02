@@ -6,10 +6,159 @@ use std::sync::{
     atomic::{AtomicUsize, Ordering},
 };
 
+#[test]
+fn overlapping_ref_closures_encode_once_with_exact_outlier_membership() {
+    let snapshot = overlapping_snapshot(32_000, 256, 30);
+    let encoded = snapshot.encode().unwrap();
+    assert!(encoded.len() < 8 * 1024 * 1024, "{} bytes", encoded.len());
+    assert_eq!(
+        LayeredVisibilitySnapshot::decode(&encoded).unwrap(),
+        snapshot
+    );
+}
+
+#[test]
+#[ignore = "explicit large checkpoint qualification: 1000 refs and 1.6 million shared objects"]
+fn million_object_team_checkpoint_preserves_all_closures_within_the_byte_bound() {
+    let snapshot = overlapping_snapshot(1_620_211, 1_000, 30);
+    let encoded = snapshot.encode().unwrap();
+    assert!(encoded.len() < 110 * 1024 * 1024, "{} bytes", encoded.len());
+    assert_eq!(
+        LayeredVisibilitySnapshot::decode(&encoded).unwrap(),
+        snapshot
+    );
+}
+
+fn overlapping_snapshot(common: usize, count: usize, per_ref: usize) -> LayeredVisibilitySnapshot {
+    let oid = |position: usize| {
+        let mut oid = [0; 20];
+        oid.copy_from_slice(&blake3::hash(&(position as u64).to_be_bytes()).as_bytes()[..20]);
+        oid
+    };
+    // Scattered insertions shift ordinary fixed-size leaf boundaries. Keep
+    // their real shape instead of appending private OIDs after the common set.
+    let mut objects = (0..common + count * per_ref + 1)
+        .map(oid)
+        .collect::<Vec<_>>();
+    objects.sort_unstable();
+    let position = |index| objects.binary_search(&oid(index)).unwrap() as u32;
+    let mut shared = vec![0_u8; objects.len().div_ceil(8)];
+    for index in 0..common {
+        let position = position(index) as usize;
+        shared[position / 8] |= 1 << (position % 8);
+    }
+    let mut refs = BTreeMap::new();
+    for reference in 0..count {
+        let mut bitmap = shared.clone();
+        for index in common + reference * per_ref..common + (reference + 1) * per_ref {
+            let position = position(index) as usize;
+            bitmap[position / 8] |= 1 << (position % 8);
+        }
+        refs.insert(
+            format!("refs/heads/developer-{reference}"),
+            GitVisibilityClosure::Bitmap(bitmap.into()),
+        );
+    }
+    refs.insert(
+        "refs/tags/old-release".to_owned(),
+        GitVisibilityClosure::Sparse(vec![position(0)]),
+    );
+    LayeredVisibilitySnapshot {
+        catalog_digest: "1".repeat(64),
+        member_admission: Some(vec![LayeredObjectMember::new(0, 0); objects.len()]),
+        objects,
+        refs,
+        transitions: BTreeMap::new(),
+        incremental_history: BTreeMap::new(),
+    }
+}
+
 fn object(value: u32) -> [u8; 20] {
     let mut oid = [0; 20];
     oid[16..].copy_from_slice(&value.to_be_bytes());
     oid
+}
+
+async fn reader_for_bytes(bytes: Bytes) -> (StoreLayout<Store>, LayeredVisibilityReader) {
+    let descriptor = Descriptor::decode(&bytes).unwrap();
+    let layout = StoreLayout::new(
+        Store::new(Arc::new(InMemory::new())),
+        "base-pages".to_owned(),
+    );
+    let hash = blake3::hash(&bytes).to_hex().to_string();
+    let range = PackRange::new(0, &bytes).unwrap();
+    layout
+        .store()
+        .put_overwrite(&layout.capsule_checkpoint_path(&hash), bytes)
+        .await
+        .unwrap();
+    let reader =
+        LayeredVisibilityReader::new(&layout, &hash, range, descriptor, Vec::new(), 128 * 1024)
+            .unwrap();
+    (layout, reader)
+}
+
+#[tokio::test]
+async fn shared_membership_matches_each_ref_and_keeps_retention_separate() {
+    let objects = (1..=200).map(object).collect::<Vec<_>>();
+    let mut refs = BTreeMap::new();
+    for index in 0..6 {
+        let positions = match index {
+            4 => (0..99).chain(std::iter::once(101)).collect(),
+            5 => vec![0],
+            _ => (0..100).chain(std::iter::once(100 + index)).collect(),
+        };
+        refs.insert(
+            format!("refs/heads/{index}"),
+            GitVisibilityClosure::from_positions(positions, objects.len()).unwrap(),
+        );
+    }
+    let snapshot = LayeredVisibilitySnapshot {
+        catalog_digest: source_catalog_digest(&[]).unwrap(),
+        objects,
+        member_admission: None,
+        refs,
+        transitions: BTreeMap::new(),
+        incremental_history: BTreeMap::new(),
+    };
+    let bytes = snapshot.encode().unwrap();
+    assert_eq!(LayeredVisibilitySnapshot::decode(&bytes).unwrap(), snapshot);
+    let (layout, reader) = reader_for_bytes(bytes).await;
+    let mut requested = (0..=201).map(object).collect::<Vec<_>>();
+    requested.extend([object(100), object(200)]);
+    for (name, closure) in &snapshot.refs {
+        let expected = requested
+            .iter()
+            .map(|oid| {
+                snapshot
+                    .objects
+                    .binary_search(oid)
+                    .ok()
+                    .is_some_and(|p| closure.contains(p as u32))
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(
+            reader
+                .contains_in_ref(layout.store(), name, &requested)
+                .await
+                .unwrap(),
+            Some(expected)
+        );
+    }
+    assert!(
+        reader
+            .contains_in_ref(layout.store(), "refs/heads/missing", &requested)
+            .await
+            .unwrap()
+            .is_none()
+    );
+    assert_eq!(
+        reader
+            .dictionary_contains(layout.store(), &[object(200)])
+            .await
+            .unwrap(),
+        [true]
+    );
 }
 
 async fn fixture(
@@ -99,7 +248,7 @@ async fn fixture(
 }
 
 #[tokio::test]
-async fn paged_control_replay_batches_checkpoint_dictionary_reads() {
+async fn paged_control_replay_keeps_unrequested_checkpoint_history_cold() {
     use crate::capsule_protocol::{
         Capsule, CapsuleRefEdit, CapsuleRun, CapsuleSection, CapsuleSectionKind,
         CapsuleTransaction, CapsuleVisibilityDelta, CapturedVisibility, VisibilityReconciliation,

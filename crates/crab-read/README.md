@@ -60,6 +60,31 @@ captured catalog before selecting the replica.
 
 ### Captured Git views
 
+Complete and control-only views load at most 32 frontier runs concurrently.
+Paged transition materialization uses the same bound and preserves input order.
+Fetch callers expand transitions only for the planner's requested visible refs;
+unrelated transaction histories stay cold. Protocol-v2 negotiation adds new
+wanted refs from the same capture and retains already loaded transitions.
+Historical non-tip wants require complete visibility under the caller's policy;
+their ordinary wire shape does not make them advertised tips.
+This limits active work across the union of per-ref histories; full views still
+retain their admitted decoded metadata and payloads until the caller releases them.
+Captured views share immutable admission tables when cloned. Overlapping
+object-to-pack memberships merge as sets; the remote reader separately orders
+the selected inventory and verifies its indexes and object bytes.
+All view modes derive physical Git inventory, byte admission and snapshot
+identity from authenticated pack-source descriptors. A frontier-only control
+view therefore retains the same inventory before its first checkpoint without
+materializing capsules or hashing their pack bodies again.
+An advertised tip already present at the client needs no transition history or
+remote object reads. Classic follow-tags requests with advertised tags use
+complete visibility to include their tag-object closure; tag-free requests keep
+ordinary tip-bound admission.
+An exact run-admission miss contributes no pack candidates: replacement closures
+can include inherited objects stored in earlier runs or the checkpoint. Their
+visibility keys remain present. Runs without exact admission retain their
+coarse candidate sets; pack indexes and reconstructed bytes remain verified.
+
 `capsule_protocol::open_git_view_from_root` captures complete refs and catalog
 lookup roots while keeping catalog bodies, frontier visibility and run OID
 admission paged. It validates
@@ -100,13 +125,18 @@ the inherited base when its source ref later moves, and dictionary retention
 never supplies visibility for a new ref. Deletion-only capsules remove their
 live ref closure even without an OID payload, in both full-body and control reads.
 
-Initial rooted additions use their
-authenticated count; differing actual delta additions/removals remain admitted
-work.
+Captured layers query authenticated membership without building a global OID
+dictionary. Expected-old links, new-tip membership, complete removal validation
+and per-query page-byte admission remain required. Complete
+`GitVisibilityIndex` construction owns the distinct-object dictionary limit;
+bulk readers and checkpoint writers still enforce it before exposing a complete
+proof. Each stored visibility section retains its byte/ref/object bounds and
+canonical decoder.
 
-`git_visibility_index`, `candidate_git_visibility` and
-`tip_bound_transitions` asynchronously materialize captured controls only when
-bulk inspection needs them. They do not recapture refs or switch origins.
+`git_visibility_index` and `candidate_git_visibility` asynchronously materialize
+captured controls for bulk inspection. `tip_bound_transitions` requires explicit
+ref names and materializes only controls editing those refs, validating each
+selected section completely. These methods do not recapture refs or switch origins.
 
 Metadata owns the stable ref capture, control selection, visibility reconciliation
 and transaction ordering used by Git views and current-state catalog lookup.
@@ -429,6 +459,11 @@ the record.
 Fetch transition hints accept the same authenticated cross-ref
 closure reuse as visibility application when creating a new branch; existing
 refs still require an exact expected-old match.
+Hints retain immutable list, sparse or bitmap memberships without decoding every
+ref's OIDs. Both Git transports select the exact have-to-want chain before
+decoding its additions and removals; malformed selected OIDs return the original
+metadata error. The complete compressed history remains available when wants
+change across protocol-v2 negotiation rounds.
 
 For ordinary tip-bound Git negotiation, an exact chain from every advertised
 want to a client have is a sufficient cut point. This proof does not establish

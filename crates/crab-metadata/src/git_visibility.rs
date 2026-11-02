@@ -1015,12 +1015,6 @@ impl GitVisibilityIndex {
         &self.objects
     }
 
-    /// Dictionary retention is independent of current per-ref authorization.
-    #[cfg(feature = "storage")]
-    pub(crate) fn retains(&self, oid: &GitVisibilityOid) -> bool {
-        self.positions.contains_key(oid)
-    }
-
     /// Build a normalized proof from ref-rooted object sets.
     pub fn new(
         generation: u64,
@@ -4644,6 +4638,57 @@ mod tests {
             index.object_count_for_refs(["refs/heads/main", "refs/heads/main"]),
             2
         );
+    }
+
+    #[test]
+    fn ordinal_export_round_trips_thousand_ref_shared_history() {
+        let object = |value: u32| format!("{value:040x}");
+        let common = 32_000;
+        let private = 30;
+        let count = 1000;
+        let mut index = GitVisibilityIndex::new(
+            4,
+            "a".repeat(64),
+            "c".repeat(64),
+            BTreeMap::from([
+                (
+                    "refs/heads/main".to_owned(),
+                    (0..common).map(object).collect(),
+                ),
+                (
+                    "refs/heads/retained".to_owned(),
+                    (common..common + count * private).map(object).collect(),
+                ),
+            ]),
+        )
+        .unwrap();
+        index.remove_ref("refs/heads/retained");
+        let base = index.refs["refs/heads/main"].clone();
+        for actor in 0..count {
+            let mut closure = base.clone();
+            let added = (0..private)
+                .map(|offset| {
+                    let oid = decode_oid(&object(common + actor * private + offset)).unwrap();
+                    index.positions[&oid]
+                })
+                .collect::<Vec<_>>();
+            closure.add_positions(&added, index.objects.len()).unwrap();
+            index
+                .refs
+                .insert(format!("refs/heads/actor-{actor:04}"), closure);
+        }
+        let parts = index.ordinal_parts().unwrap();
+        let restored = GitVisibilityIndex::from_ordinal_parts(
+            index.generation,
+            index.pack_index_hash.clone(),
+            index.git_validation_digest.clone(),
+            parts.objects,
+            parts.refs,
+            parts.transitions,
+            parts.incremental_history,
+        )
+        .unwrap();
+        assert_eq!(restored, index);
     }
 
     #[test]

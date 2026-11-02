@@ -4,7 +4,14 @@ use object_store::{
     CopyOptions, GetOptions, GetResult, ListResult, MultipartUpload, ObjectMeta, ObjectStore,
     ObjectStoreExt, PutMultipartOptions, PutOptions, PutPayload, PutResult,
 };
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+
+struct RootWritePause {
+    path: Path,
+    armed: AtomicBool,
+    entered: tokio::sync::Notify,
+    resume: tokio::sync::Notify,
+}
 
 struct Replacement {
     trigger: Path,
@@ -20,6 +27,9 @@ struct Hooks {
     reads: AtomicUsize,
     denied_writes: AtomicUsize,
     corrupt_run_reads: bool,
+    root_write_pause: Option<RootWritePause>,
+    tracked_run: Option<Path>,
+    tracked_reads: AtomicUsize,
 }
 struct ScriptedStore {
     inner: Arc<dyn ObjectStore>,
@@ -54,6 +64,14 @@ impl ObjectStore for ScriptedStore {
             self.hooks.denied_writes.fetch_add(1, Ordering::Relaxed);
             return Err(denied(path));
         }
+        if let Some(pause) = &self.hooks.root_write_pause
+            && pause.path == *path
+            && matches!(options.mode, object_store::PutMode::Update(_))
+            && pause.armed.swap(false, Ordering::SeqCst)
+        {
+            pause.entered.notify_one();
+            pause.resume.notified().await;
+        }
         self.inner.put_opts(path, body, options).await
     }
     async fn put_multipart_opts(
@@ -68,6 +86,9 @@ impl ObjectStore for ScriptedStore {
         self.inner.put_multipart_opts(path, options).await
     }
     async fn get_opts(&self, path: &Path, options: GetOptions) -> object_store::Result<GetResult> {
+        if self.hooks.tracked_run.as_ref() == Some(path) {
+            self.hooks.tracked_reads.fetch_add(1, Ordering::Relaxed);
+        }
         self.hooks.reads.fetch_add(1, Ordering::Relaxed);
         let replacement = {
             let mut pending = self.hooks.replacement.lock().unwrap();
@@ -348,6 +369,124 @@ async fn concurrent_updates_preserve_both_exact_placement_ids() {
         assert_eq!(
             exact.anchors.values().next().unwrap().source_repo_prefix,
             layout.repo_prefix()
+        );
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn root_retry_reuses_only_unchanged_run_pages() {
+    for replace_existing_head in [false, true] {
+        let memory: Arc<dyn ObjectStore> = Arc::new(object_store::memory::InMemory::new());
+        let plain = StoreLayout::new(Store::new(memory.clone()), "base".to_owned());
+        let (base, origins, hashes) = fixture(3000, 3);
+        write_capsule_chunk_candidates(&plain, &base, &origins, &|| false)
+            .await
+            .unwrap();
+        let first_seed = StoreLayout::new(plain.store().clone(), "first".to_owned());
+        let racer = StoreLayout::new(plain.store().clone(), "racer".to_owned());
+        let (one, one_origins, _) = fixture_from_hashes(5, vec![hashes[0]]);
+        let other_hash = if replace_existing_head {
+            hashes[0]
+        } else {
+            hashes[1]
+        };
+        let (two, two_origins, _) = fixture_from_hashes(7, vec![other_hash]);
+        if replace_existing_head {
+            write_capsule_chunk_candidates(&first_seed, &one, &one_origins, &|| false)
+                .await
+                .unwrap();
+            write_capsule_chunk_candidates(&racer, &two, &two_origins, &|| false)
+                .await
+                .unwrap();
+            // Reuse the captured proof: a fresh timestamp creates another
+            // immutable anchor instead of isolating a mutable-head update.
+            let (head, _, _) = fixture_from_hashes(3, vec![hashes[0]]);
+            write_capsule_chunk_candidates(&plain, &head, &origins, &|| false)
+                .await
+                .unwrap();
+        }
+        let index = CapsuleChunkIndex::new(&plain);
+        let root = index
+            .load(plain.store(), &mut PageWork::new(16 * 1024 * 1024, 0))
+            .await
+            .unwrap()
+            .unwrap()
+            .0;
+        let large = root
+            .levels
+            .iter()
+            .flatten()
+            .max_by_key(|run| run.bytes)
+            .unwrap();
+        let hooks = Arc::new(Hooks {
+            root_write_pause: Some(RootWritePause {
+                path: plain.capsule_chunk_index_path(),
+                armed: AtomicBool::new(true),
+                entered: tokio::sync::Notify::new(),
+                resume: tokio::sync::Notify::new(),
+            }),
+            tracked_run: Some(large.path(&index.prefix)),
+            ..Hooks::default()
+        });
+        let first = StoreLayout::new(
+            Store::new(Arc::new(ScriptedStore {
+                inner: memory,
+                read_only: false,
+                hooks: hooks.clone(),
+            })),
+            "first".to_owned(),
+        );
+        let task = tokio::spawn(async move {
+            write_capsule_chunk_candidates(&first, &one, &one_origins, &|| false).await
+        });
+        let pause = hooks.root_write_pause.as_ref().unwrap();
+        tokio::time::timeout(std::time::Duration::from_secs(30), pause.entered.notified())
+            .await
+            .unwrap();
+        let before = hooks.tracked_reads.load(Ordering::Relaxed);
+        write_capsule_chunk_candidates(&racer, &two, &two_origins, &|| false)
+            .await
+            .unwrap();
+        let changed = index
+            .load(plain.store(), &mut PageWork::new(16 * 1024 * 1024, 0))
+            .await
+            .unwrap()
+            .unwrap()
+            .0;
+        assert!(changed.levels.iter().flatten().any(|run| run == large));
+        if replace_existing_head {
+            assert!(
+                root.levels
+                    .iter()
+                    .zip(&changed.levels)
+                    .any(|(old, new)| old.is_some() && new.is_some() && old != new)
+            );
+        }
+        pause.resume.notify_one();
+        tokio::time::timeout(std::time::Duration::from_secs(30), task)
+            .await
+            .unwrap()
+            .unwrap()
+            .unwrap();
+        let found = index
+            .candidates(plain.store(), &hashes[..2], 16 * 1024 * 1024)
+            .await
+            .unwrap();
+        let second_source = if replace_existing_head {
+            "base"
+        } else {
+            "racer"
+        };
+        for (hash, source) in [(hashes[0], "first"), (hashes[1], second_source)] {
+            let placement = &found.placements[&<[u8; 32]>::from(hash)];
+            assert_eq!(
+                found.anchors[&placement.source_anchor_id].source_repo_prefix,
+                source
+            );
+        }
+        assert_eq!(
+            (before > 0, hooks.tracked_reads.load(Ordering::Relaxed)),
+            (true, before)
         );
     }
 }

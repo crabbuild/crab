@@ -91,6 +91,31 @@ async fn fixture(
 }
 
 #[tokio::test]
+async fn run_catalog_misses_outside_authenticated_bounds_do_not_read_pages() {
+    let (layout, _, lookup, reads) = fixture(PointerCatalog::new(), 256 * 1024).await;
+    let expected = catalog(1);
+    let lookup = append_run(&layout, lookup, vec![expected.clone()]).await;
+    reads.store(0, Ordering::SeqCst);
+    let absent = ["f".repeat(64)];
+    for selected in [
+        lookup.files(layout.store(), &absent).await.unwrap(),
+        lookup.shards(layout.store(), &absent).await.unwrap(),
+        lookup.xorbs(layout.store(), &absent).await.unwrap(),
+        lookup.chunks(layout.store(), &absent).await.unwrap(),
+    ] {
+        assert_eq!(selected, PointerCatalog::new());
+    }
+    assert_eq!(reads.load(Ordering::SeqCst), 0);
+    assert_eq!(
+        lookup
+            .files(layout.store(), &["0".repeat(64)])
+            .await
+            .unwrap(),
+        expected
+    );
+}
+
+#[tokio::test]
 async fn fixed_file_and_chunk_queries_read_selected_closure_as_history_grows() {
     for count in [100, 20_000] {
         let (layout, _, lookup, reads) = fixture(catalog(count), 512 * 1024).await;

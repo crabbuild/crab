@@ -41,17 +41,50 @@ a released slot needs one GET and one conditional PUT (plus a failed create for
 a new acquisition context). A diagnostic expiry can avoid a backend-clock probe
 only when declining admission; reclaiming a live claim still checks backend age.
 
-GC writer fences have a distinct post-commit release: once the authoritative
-publication record durably roots every uploaded object, the writer can remove
-its holder with a direct CAS and does not need the backend-clock probes that
-protect abandoned uploads with quarantine. Error and cancellation paths must
-continue using ordinary release.
+GC admission uses schema 3: one control record closes admission for a sweep;
+64 independent, persistent writer slots hold ordinary writers. A writer reads
+an open control, conditionally owns a slot, then verifies unchanged control
+before uploading anything. A sweep closes control first and reads every known
+slot before returning exclusive admission. A late stale contender cannot upload;
+an admitted live writer or expired claim inside the 24-hour uncertainty window
+blocks sweeping. Each resumable sweep also has a distinct acquisition ID, so
+concurrent contexts sharing a journal ID cannot adopt each other’s live claim.
+A sweep conditionally retires expired slots after quarantine, revoking pending
+old writes before destructive admission. Validate the whole slot snapshot
+before cleanup so duplicate expired holders cannot disappear as a repair.
+Acquisition and renewal recheck backend expiry after conditional success; a
+suspended successful PUT alone cannot establish live ownership.
+No LIST snapshot is part of this exclusion proof. Sweep phases pay a bounded
+64-slot read; ordinary writers avoid the shared conditional-write hotspot.
 
-GC writer acquisition retries refresh an already-installed active claim without
-adding another holder or advancing writer history. Expired and quarantined claims
-remain lost. Generated holder IDs retain a diagnostic PID and use UUID entropy
-across hosts and container namespaces; PIDs and wall clocks alone are insufficient.
-Malformed stored fence state remains an error and is never silently repaired.
+Ordinary admission, renewal and release never update the shared control or its
+clock. Private slot clocks use backend-authored time. Slot admission and release
+advance monotonic history; renewal does not. Released slots are tombstones and
+must never be deleted or reset. Under exclusive admission, the complete sum plus
+the migrated writer-history base forms the GC journal token. Per-slot budgets
+reserve release increments and prevent aggregate overflow. Writer leases cannot
+return an incomplete token as domain history.
+
+`GcFenceLease::writer_epoch()` now returns `Result<GcWriterEpoch>` and requires
+sweep admission. Rust callers must handle that result; writer acquisition no
+longer observes a complete domain counter. The CLI sweep owner validates and
+caches the complete token before exposing it to GC journals.
+
+Initialization publishes control as unready, creates all zero ledgers, then
+conditionally marks it ready. Interrupted initialization resumes; an initialized
+missing/malformed ledger fails closed. Existing schema-1/2 stores require explicit
+externally quiesced `crab migrate gc-fence`; ordinary admission rejects them.
+Migration preserves the domain incarnation when present and writer-history base,
+refuses every recorded holder/quarantine even if expired, prepares zero ledgers,
+then publishes schema 3 with the original control's CAS token. Old binaries must
+remain stopped; use a fresh GC plan after upgrade.
+
+GC writer fences retain a distinct post-commit release: after authoritative
+publication durably roots every uploaded object, this release can clear its own
+expired holder without a clock probe. Error and cancellation paths must use
+ordinary release. Lost conditional-write responses retain the selected slot and
+recognize its already-installed claim without creating another holder/history.
+Malformed state is never deduplicated or repaired by normal admission.
 
 Read retention uses a private conditional claim for each immutable capture.
 `GcReadBarrier` observes both repository and global sweep history before capture;
