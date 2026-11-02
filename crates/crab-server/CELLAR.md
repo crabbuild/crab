@@ -63,6 +63,15 @@ shutdown deadline. Its 25-second no-progress limit remains unchanged. The SDK's
 40-second total default cut a progressing ten-repository drain while its last
 large snapshot was still being published.
 
+Paged replicas use foreground faulting with background prefetch disabled through
+the SDK's supported `hydrate_bytes_per_second = 0` policy. A native shutdown
+capture proved `Hydrator::step` dereferenced a null `sqlite3_vfs_find` result after
+the registration was removed. Stored-state preparation cannot repair that live
+lifetime race. Foreground VFS reads retain their own reader/hydration references;
+paged handoff keeps the complete L0 chain and epoch GC pins that chain while the
+fill is disabled. Re-enable background hydration only after an SDK lifetime fix
+is released and the ten-repository process qualification passes with it.
+
 Replication uses 32 MiB multipart parts. The pinned LTX client uploads parts
 serially; its default 5 MiB parts made a roughly 190 MB restored snapshot require
 37 separate part requests. Larger parts bound that request overhead without

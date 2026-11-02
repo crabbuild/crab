@@ -219,6 +219,10 @@ pub(crate) async fn start_with_bucket(
             // Cell after the SDK's shorter default while Crab still awaits it.
             replication: ReplicationOptions {
                 durability_timeout: super::client::REQUEST_BUDGET,
+                // The pinned SDK's prefetcher can dereference an unregistered
+                // VFS during shutdown. Keep on-demand paging until its
+                // background hydration lifetime is fixed and qualified.
+                hydrate_bytes_per_second: 0,
                 ..Default::default()
             },
             log_transport,
