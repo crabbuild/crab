@@ -50,8 +50,6 @@ export interface OrchestratorTask {
   worktreePath?: string;
   /** How the task workspace was chosen. */
   worktreeMode?: "auto" | "primary" | "existing";
-  /** Kanban task/card ID associated with this agent session. */
-  kanbanCardId?: string;
   /** Agent Workflow run ID associated with this chat/session. */
   workflowRunId?: string;
   /** Agent Workflow node run ID associated with a workflow-spawned chat. */

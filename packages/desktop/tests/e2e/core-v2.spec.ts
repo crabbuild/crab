@@ -119,6 +119,9 @@ test("packaged desktop opens and reads a real repository through its v2 agent", 
     }, root);
     expect(text.text).toBe("Crab Desktop v2 real-sidecar smoke\n");
     await expect(page.getByText(path.basename(root), { exact: true }).first()).toBeVisible();
+    await expect(page.getByRole("button", { name: "Kanban Board", exact: true })).toHaveCount(0);
+    expect(await page.evaluate(() => Object.hasOwn(window.crab, "kanban"))).toBe(false);
+    await expect(page.getByRole("button", { name: "Chat", exact: true })).toBeVisible();
     await page.getByRole("button", { name: "Explorer", exact: true }).click();
     await page.screenshot({ path: test.info().outputPath("repository-opened.png") });
     await page.locator('[role="treeitem"][data-item-path="desktop-smoke.txt"]').click();

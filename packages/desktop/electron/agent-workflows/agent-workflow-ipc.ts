@@ -13,7 +13,6 @@ import {
   AgentWorkflowTriggerStore,
 } from "./persistence";
 import { AgentWorkflowRunner } from "./runner";
-import { AgentWorkflowKanbanProjection } from "./kanban-projection";
 import { validateAgentWorkflowDefinition } from "./validator";
 import { AgentWorkflowTriggerScheduler } from "./trigger-scheduler";
 import { AgentWorkflowWebhookServer } from "./webhook-server";
@@ -26,7 +25,6 @@ export function registerAgentWorkflowIpc(
   const definitionStore = new AgentWorkflowDefinitionStore();
   const runStore = new AgentWorkflowRunStore();
   const triggerStore = new AgentWorkflowTriggerStore();
-  const kanbanProjection = new AgentWorkflowKanbanProjection();
   const orchestrator = getOrchestrator();
 
   if (!orchestrator) {
@@ -38,19 +36,6 @@ export function registerAgentWorkflowIpc(
 
   runner.on("run-updated", (run) => {
     getMainWindow()?.webContents.send("agent-workflow:run-updated", run);
-    kanbanProjection.upsertRunProjection(run)
-      .then((projection) => {
-        if (!projection) return;
-        getMainWindow()?.webContents.send("kanban:board-updated", projection);
-      })
-      .catch((err: unknown) => {
-        const message = errorMessage(err);
-        console.error("[agent-workflow] kanban projection failed:", err);
-        getMainWindow()?.webContents.send("agent-workflow:projection-error", {
-          runId: run.id,
-          message,
-        });
-      });
   });
   runner.on("node-event", (event) => {
     getMainWindow()?.webContents.send("agent-workflow:node-event", event);

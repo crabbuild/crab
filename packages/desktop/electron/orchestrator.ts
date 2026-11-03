@@ -105,8 +105,6 @@ export interface Task {
   codexThreadId?: string;
   /** Per-task chat UI state (collapse/expand, compact view, etc.). */
   uiState?: PersistedChatUIState;
-  /** Kanban card ID associated with this task (for pipeline tracking). */
-  kanbanCardId?: string;
   /** Agent Workflow run ID associated with this task. */
   workflowRunId?: string;
   /** Agent Workflow node run ID associated with this task. */
@@ -163,7 +161,6 @@ export interface PersistedTask {
   remoteProfileId?: string;
   codexThreadId?: string;
   uiState?: PersistedChatUIState;
-  kanbanCardId?: string;
   workflowRunId?: string;
   workflowNodeRunId?: string;
   planFirst?: boolean;
@@ -1942,7 +1939,6 @@ export class Orchestrator extends EventEmitter {
           remoteProfileId: rest.remoteProfileId,
           codexThreadId: rest.codexThreadId,
           uiState: rest.uiState,
-          kanbanCardId: rest.kanbanCardId,
           workflowRunId: rest.workflowRunId,
           workflowNodeRunId: rest.workflowNodeRunId,
           planFirst: rest.planFirst,
@@ -1995,7 +1991,6 @@ export class Orchestrator extends EventEmitter {
       remoteProfileId: task.remoteProfileId,
       codexThreadId: task.codexThreadId,
       uiState: task.uiState,
-      kanbanCardId: task.kanbanCardId,
       workflowRunId: task.workflowRunId,
       workflowNodeRunId: task.workflowNodeRunId,
       planFirst: task.planFirst,

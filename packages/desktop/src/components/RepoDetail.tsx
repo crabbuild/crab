@@ -29,7 +29,6 @@ import { TimeMachineView } from "../views/TimeMachineView";
 import { WorktreeCompareView } from "../views/WorktreeCompareView";
 import { CrossRepoBranchCompareView, CrossRepoCompareTarget } from "../views/CrossRepoBranchCompareView";
 import { AgentTasksView } from "../views/AgentTasksView";
-import { KanbanView } from "../views/KanbanView";
 import { SkillsView } from "../views/SkillsView";
 import { BrowserView } from "../views/BrowserView";
 import { MergeEditor } from "./MergeEditor";
@@ -62,7 +61,6 @@ const KNOWN_VIEWS: SidebarView[] = [
   "crab",
   "workflows",
   "agent-workflows",
-  "kanban",
   "terminal",
   "dashboard",
   "health",
@@ -109,7 +107,7 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
         const fullPaneViews: SidebarView[] = [
           "settings", "dashboard", "health", "terminal", "crab",
           "workflows", "agent-workflows", "orchestrator", "changes", "timeline",
-          "pull-requests", "worktrees", "kanban", "skills",
+          "pull-requests", "worktrees", "skills",
         ];
         if (!fullPaneViews.includes(savedView) && !session.activeFile) {
           return "dashboard";
@@ -195,7 +193,7 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
     if (!repo.forge_provider) hidden.push("pull-requests");
     if (!features.sshRemoteEnabled) hidden.push("ssh");
     // Agentic features moved to beyond-desktop
-    hidden.push("kanban", "agent-workflows", "browser");
+    hidden.push("agent-workflows", "browser");
     return hidden;
   }, [repo.forge_provider, features.sshRemoteEnabled]);
 
@@ -289,19 +287,6 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
     };
     window.addEventListener("crab:open-agent-task", handler);
     return () => window.removeEventListener("crab:open-agent-task", handler);
-  }, [repo.path, setActiveView]);
-
-  useEffect(() => {
-    const handler = (event: Event) => {
-      const detail = (event as CustomEvent<{ taskId?: string; repoPath?: string }>).detail;
-      if (!detail?.taskId || detail.repoPath !== repo.path) return;
-      setActiveView("kanban");
-      window.setTimeout(() => {
-        window.dispatchEvent(new CustomEvent("crab:select-kanban-task", { detail }));
-      }, 0);
-    };
-    window.addEventListener("crab:open-kanban-task", handler);
-    return () => window.removeEventListener("crab:open-kanban-task", handler);
   }, [repo.path, setActiveView]);
 
   // Editor tabs (existing). Keys collide-proof via `rev::path`.
@@ -935,7 +920,7 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
   const fullPaneActiveViews: SidebarView[] = [
     "settings", "dashboard", "health", "terminal", "crab",
     "workflows", "agent-workflows", "orchestrator", "changes", "timeline",
-    "pull-requests", "worktrees", "kanban", "browser", "skills",
+    "pull-requests", "worktrees", "browser", "skills",
   ];
   const showDashboardFallback =
     !hasOpenTabs &&
@@ -952,7 +937,7 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
           views={views}
           onViewChange={setActiveView}
           requestedView={requestedView}
-          fullPaneViews={["settings", "dashboard", "health", "terminal", "crab", "workflows", "agent-workflows", "orchestrator", "changes", "ssh", "kanban", "browser", "skills"]}
+          fullPaneViews={["settings", "dashboard", "health", "terminal", "crab", "workflows", "agent-workflows", "orchestrator", "changes", "ssh", "browser", "skills"]}
           hiddenViews={hiddenViews}
           badges={conflictCount > 0 ? { timeline: conflictCount } : undefined}
           main={
@@ -992,8 +977,6 @@ export function RepoDetail({ repo, navEntry, onNavigate, isRestoringRef, activit
                 />
               ) : activeView === "terminal" ? (
                 null
-              ) : activeView === "kanban" ? (
-                <KanbanView repoPath={repo.path} />
               ) : activeView === "browser" ? (
                 <BrowserView repoPath={repo.path} />
               ) : activeView === "skills" ? (

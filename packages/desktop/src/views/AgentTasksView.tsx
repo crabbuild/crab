@@ -7,7 +7,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
-import { Columns3, MessageSquare, GitCompare, Terminal, MoreHorizontal, Pin, Users, FolderTree } from "lucide-react";
+import { MessageSquare, GitCompare, Terminal, MoreHorizontal, Pin, Users, FolderTree } from "lucide-react";
 import { OpenRepo } from "../state";
 import { TaskList } from "../components/orchestrator/TaskList";
 import { OrchestratorTask } from "../components/orchestrator/TaskCard";
@@ -80,7 +80,6 @@ function mapBackendTask(t: any): OrchestratorTask {
     agents: t.agents,
     worktreePath: t.worktreePath,
     worktreeMode: t.worktreeMode,
-    kanbanCardId: t.kanbanCardId,
     pinnedAt: t.pinnedAt,
     parentTaskId: t.parentTaskId,
     rootTaskId: t.rootTaskId,
@@ -1141,8 +1140,7 @@ export function AgentTasksView({ repo, onOpenAgentManager }: Props) {
             }
             // If in-memory has more messages (live streaming) but is
             // missing the initial user message, prepend it. This handles
-            // tasks spawned from kanban where the user prompt was
-            // persisted to the DB but never added to in-memory state.
+            // tasks whose initial prompt was persisted before this view mounted.
             if (existing.length > 0 && existing[0].role !== "user") {
               const dbUserMsg = result.messages!.find((m) => m.role === "user");
               if (dbUserMsg && !existing.some((m) => m.id === dbUserMsg.id)) {
@@ -2475,23 +2473,6 @@ export function AgentTasksView({ repo, onOpenAgentManager }: Props) {
               />
               <KeyboardShortcutsButton />
               <CompactViewToggle taskId={selectedTask.id} />
-              {selectedTask.kanbanCardId && (
-                <button
-                  type="button"
-                  onClick={() => {
-                    window.dispatchEvent(
-                      new CustomEvent("crab:open-kanban-task", {
-                        detail: { taskId: selectedTask.kanbanCardId, repoPath: repo.path },
-                      }),
-                    );
-                  }}
-                  className="flex items-center gap-1 px-3 py-2 text-xs text-gx-muted transition hover:text-gx-text"
-                  title="Open linked kanban task"
-                >
-                  <Columns3 size={12} />
-                  <span className="hidden lg:inline">Task</span>
-                </button>
-              )}
               <button
                 type="button"
                 onClick={() => setContextPanelOpen(!contextPanelOpen)}

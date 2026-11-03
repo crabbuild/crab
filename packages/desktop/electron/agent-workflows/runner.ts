@@ -106,7 +106,7 @@ export class AgentWorkflowRunner extends EventEmitter {
 
     const now = Date.now();
     const trigger = options.trigger ?? {
-      type: options.parentRunId ? "sub_workflow" as const : options.sourceTaskId ? "chat" as const : options.sourceCardId ? "kanban" as const : "builder" as const,
+      type: options.parentRunId ? "sub_workflow" as const : options.sourceTaskId ? "chat" as const : "builder" as const,
     };
     const run: AgentWorkflowRun = {
       id: randomUUID(),
@@ -115,8 +115,6 @@ export class AgentWorkflowRunner extends EventEmitter {
       repoPath,
       status: "queued",
       trigger,
-      sourceBoardId: options.sourceBoardId,
-      sourceCardId: options.sourceCardId,
       sourceTaskId: options.sourceTaskId,
       parentRunId: options.parentRunId,
       parentNodeRunId: options.parentNodeRunId,
@@ -764,7 +762,6 @@ export class AgentWorkflowRunner extends EventEmitter {
       if (run.sourceTaskId) {
         await this.orchestrator.setTaskParent(task.id, run.sourceTaskId);
       }
-      if (run.sourceCardId) task.kanbanCardId = run.sourceCardId;
       if (node.planFirst) task.planFirst = true;
       if (node.model) (task as Task & { model?: string }).model = node.model;
       if (node.intelligence) (task as Task & { reasoningLevel?: string }).reasoningLevel = node.intelligence;
@@ -1001,8 +998,6 @@ export class AgentWorkflowRunner extends EventEmitter {
     });
 
     const childRun = await this.startRun(run.repoPath, childDefinition, {
-      sourceBoardId: run.sourceBoardId,
-      sourceCardId: run.sourceCardId,
       sourceTaskId: run.sourceTaskId,
       input,
       trigger: { type: "sub_workflow" },
@@ -1059,8 +1054,6 @@ export class AgentWorkflowRunner extends EventEmitter {
     });
 
     const childRun = await this.startRun(run.repoPath, childDefinition, {
-      sourceBoardId: run.sourceBoardId,
-      sourceCardId: run.sourceCardId,
       sourceTaskId: run.sourceTaskId,
       input,
       trigger: { type: "sub_workflow" },
@@ -1408,7 +1401,6 @@ export class AgentWorkflowRunner extends EventEmitter {
       `Node: ${node.title}`,
       `Run ID: ${run.id}`,
       `Node Run ID: ${nodeRun.id}`,
-      run.sourceCardId ? `Source Kanban card: ${run.sourceCardId}` : "",
       run.input ? `Run input:\n${JSON.stringify(run.input, null, 2)}` : "",
       upstreamSummaries ? `Activated upstream outputs:\n${upstreamSummaries}` : "",
       "Instructions:",

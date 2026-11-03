@@ -1,0 +1,17 @@
+{
+  "detector": {
+    "ignoreRules": [],
+    "ignoreFiles": [],
+    "ignoreValues": [
+      {
+        "rule": "side-tab",
+        "value": "*",
+        "files": [
+          "packages/desktop/src/index.css"
+        ],
+        "createdAt": "2026-11-03T07:27:37.550Z",
+        "reason": "Agent review: the flagged .prose-agent blockquote border marks quoted Markdown content, not a card accent; git blame confirms it predates Kanban removal."
+      }
+    ]
+  }
+}

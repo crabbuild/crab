@@ -177,8 +177,6 @@ export interface AgentWorkflowRun {
   repoPath: string;
   status: WorkflowRunStatus;
   trigger?: WorkflowRunTriggerSource;
-  sourceBoardId?: string;
-  sourceCardId?: string;
   sourceTaskId?: string;
   parentRunId?: string;
   parentNodeRunId?: string;
@@ -219,7 +217,7 @@ export interface AgentWorkflowEdgeRun {
 }
 
 export interface WorkflowRunTriggerSource {
-  type: "builder" | "chat" | "kanban" | "schedule" | "sub_workflow" | "retry" | "webhook";
+  type: "builder" | "chat" | "schedule" | "sub_workflow" | "retry" | "webhook";
   triggerId?: string;
   scheduledAt?: number;
 }
@@ -284,12 +282,9 @@ export interface AgentWorkflowValidationResult {
 }
 
 export interface AgentWorkflowStartRunOptions {
-  sourceBoardId?: string;
-  sourceCardId?: string;
   sourceTaskId?: string;
   createSourceTask?: boolean;
   sourceTaskTitle?: string;
-  projectToKanban?: boolean;
   input?: Record<string, unknown>;
   trigger?: WorkflowRunTriggerSource;
   parentRunId?: string;

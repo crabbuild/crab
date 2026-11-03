@@ -7,7 +7,6 @@ import {
   GitGraph,
   GitPullRequest,
   HeartPulse,
-  Kanban,
   LayoutDashboard,
   Monitor,
   Package,
@@ -34,7 +33,6 @@ export type SidebarView =
   | "crab"
   | "workflows"
   | "agent-workflows"
-  | "kanban"
   | "terminal"
   | "dashboard"
   | "health"
@@ -62,7 +60,6 @@ export const VIEWS: ViewDef[] = [
   { id: "worktrees", label: "Worktrees & Branches", icon: FolderTree },
   { id: "timeline", label: "Timeline & Conflicts", icon: GitGraph },
   { id: "pull-requests", label: "Pull Requests", icon: GitPullRequest },
-  { id: "kanban", label: "Kanban Board", icon: Kanban },
   { id: "agent-workflows", label: "Agent Workflows", icon: Blocks },
   { id: "workflows", label: "Data Workflows", icon: Workflow },
   { id: "browser", label: "Browser", icon: Globe },
