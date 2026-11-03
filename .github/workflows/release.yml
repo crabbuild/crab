@@ -80,6 +80,9 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
           fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: packages/desktop/.nvmrc
 
       - name: Validate release tag
         id: release
@@ -1479,7 +1482,7 @@ jobs:
           name: Crab-desktop-Linux-X64
           path: desktop-input/linux-x64
 
-      - uses: actions/setup-node@v4
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
         with:
           node-version-file: packages/desktop/.nvmrc
           cache: npm
