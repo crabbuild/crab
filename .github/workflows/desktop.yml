@@ -118,9 +118,9 @@ jobs:
           RELEASE_BUILD: ${{ env.SIGN_RELEASE }}
         run: |
           if [ "$RELEASE_BUILD" = true ] && [ "$RUNNER_OS" != Linux ]; then
-            npx electron-builder --publish never --config.forceCodeSigning=true
+            node scripts/package.mjs --config.forceCodeSigning=true
           else
-            npx electron-builder --publish never
+            node scripts/package.mjs
           fi
       - name: Verify signed and notarized macOS application
         if: ${{ env.SIGN_RELEASE == 'true' && runner.os == 'macOS' }}

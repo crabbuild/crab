@@ -63,7 +63,8 @@ Windows x64 artifacts. Pull requests build unsigned installers and test the
 unpacked application from the same build. The Crab release workflow calls it
 again for the tagged source. Alpha builds are unsigned downloads; later release
 channels require signed and notarized macOS builds and a signed Windows
-installer. Packaging commands never publish on their own.
+installer. `scripts/package.mjs` selects the matching update channel for all
+packaging commands. Publication runs only through the release workflow.
 
 Configure these repository Actions secrets before creating a signed Crab release:
 
