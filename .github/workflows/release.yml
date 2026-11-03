@@ -80,6 +80,9 @@ jobs:
         with:
           ref: ${{ github.event_name == 'workflow_dispatch' && inputs.tag || github.ref }}
           fetch-depth: 0
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: packages/desktop/.nvmrc
 
       - name: Validate release tag
         id: release
@@ -106,7 +109,7 @@ jobs:
             exit 1
           fi
 
-          for manifest in crab/Cargo.toml crates/crab-auth-server/Cargo.toml crates/crab-cache-server/Cargo.toml; do
+          for manifest in crab/Cargo.toml crates/crab-auth-server/Cargo.toml crates/crab-cache-server/Cargo.toml packages/desktop/agent/Cargo.toml; do
             manifest_version="$(sed -n 's/^version = "\(.*\)"/\1/p' "$manifest" | head -1)"
             if [ "$manifest_version" != "$version" ]; then
               echo "::error::$manifest has $manifest_version, expected $version."
@@ -114,7 +117,7 @@ jobs:
             fi
           done
 
-          for package in crab crab-auth-server crab-cache-server; do
+          for package in crab crab-auth-server crab-cache-server crab-desktop-agent; do
             lock_version="$(awk -v package="$package" '
               $0 == "name = \"" package "\"" { found = 1; next }
               found && /^version = / { gsub(/^version = \"|\"$/, ""); print; exit }
@@ -124,6 +127,15 @@ jobs:
               exit 1
             fi
           done
+
+          node - "$version" <<'NODE'
+          const version = process.argv[2];
+          const desktop = require('./packages/desktop/package.json');
+          const lock = require('./packages/desktop/package-lock.json');
+          if (desktop.version !== version || lock.version !== version || lock.packages[''].version !== version) {
+            throw new Error(`Desktop package and lockfile versions must match ${version}`);
+          }
+          NODE
 
           if ! grep -Eq "^## ${version} - [0-9]{4}-[0-9]{2}-[0-9]{2}$" CHANGELOG.md; then
             echo "::error::CHANGELOG.md must contain a dated ${version} release section."
@@ -149,6 +161,23 @@ jobs:
             echo "source_sha=$source_sha"
             echo "source_short_sha=$source_short_sha"
           } >> "$GITHUB_OUTPUT"
+
+  desktop:
+    name: Build desktop release
+    needs: prepare
+    uses: ./.github/workflows/desktop.yml
+    with:
+      release: true
+      source_ref: ${{ needs.prepare.outputs.source_sha }}
+      version: ${{ needs.prepare.outputs.version }}
+    secrets:
+      MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+      MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+      APPLE_ID: ${{ secrets.APPLE_ID }}
+      APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+      APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+      WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+      WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
 
   workflow-release-gate:
     name: Workflow release gate (RustFS)
@@ -1419,10 +1448,10 @@ jobs:
   # ---------------------------------------------------------------------------
   publish:
     name: Publish release
-    needs: [prepare, build, protocol-v2-release-gate, protocol-v2-git-compatibility-release-gate, protocol-v2-aws-release-gate, protocol-v2-platform-release-gate]
-    if: ${{ always() && needs.prepare.result == 'success' && needs.build.result == 'success' && needs.protocol-v2-release-gate.result == 'success' && needs.protocol-v2-git-compatibility-release-gate.result == 'success' && (needs.protocol-v2-aws-release-gate.result == 'success' || needs.protocol-v2-aws-release-gate.result == 'skipped') && (needs.protocol-v2-platform-release-gate.result == 'success' || needs.protocol-v2-platform-release-gate.result == 'skipped') }}
+    needs: [prepare, build, desktop, protocol-v2-release-gate, protocol-v2-git-compatibility-release-gate, protocol-v2-aws-release-gate, protocol-v2-platform-release-gate]
+    if: ${{ always() && needs.prepare.result == 'success' && needs.build.result == 'success' && needs.desktop.result == 'success' && needs.protocol-v2-release-gate.result == 'success' && needs.protocol-v2-git-compatibility-release-gate.result == 'success' && (needs.protocol-v2-aws-release-gate.result == 'success' || needs.protocol-v2-aws-release-gate.result == 'skipped') && (needs.protocol-v2-platform-release-gate.result == 'success' || needs.protocol-v2-platform-release-gate.result == 'skipped') }}
     runs-on: ubuntu-latest
-    timeout-minutes: 20
+    timeout-minutes: 40
     permissions:
       contents: write
     steps:
@@ -1435,6 +1464,34 @@ jobs:
           pattern: crab-*
           path: dist
           merge-multiple: true
+
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: Crab-desktop-macOS-ARM64
+          path: desktop-input/mac-arm64
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: Crab-desktop-macOS-X64
+          path: desktop-input/mac-x64
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: Crab-desktop-Windows-X64
+          path: desktop-input/windows-x64
+      - uses: actions/download-artifact@634f93cb2916e3fdff6788551b99b062d0335ce0 # v5
+        with:
+          name: Crab-desktop-Linux-X64
+          path: desktop-input/linux-x64
+
+      - uses: actions/setup-node@49933ea5288caeca8642d1e84afbd3f7d6820020 # v4
+        with:
+          node-version-file: packages/desktop/.nvmrc
+          cache: npm
+          cache-dependency-path: packages/desktop/package-lock.json
+      - name: Install release metadata dependency
+        working-directory: packages/desktop
+        run: npm ci --omit=dev --ignore-scripts
+      - name: Verify and assemble desktop release assets
+        run: node packages/desktop/scripts/assemble-release.mjs '${{ needs.prepare.outputs.version }}' desktop-input dist/desktop
 
       - name: Generate checksums
         working-directory: dist
@@ -1513,6 +1570,7 @@ jobs:
           VERSION="${{ needs.prepare.outputs.version }}"
           SOURCE_SHA="${{ needs.prepare.outputs.source_sha }}"
           FILES=(dist/crab-*.tar.gz dist/crab-*.zip dist/SHA256SUMS.txt)
+          FILES+=(dist/desktop/*)
           existing="$(gh release view "$TAG" --repo "$RELEASE_REPO" --json isDraft --jq .isDraft 2>/dev/null || true)"
           if [ "$existing" = "false" ]; then
             echo "::error::Release $TAG is already published and cannot be replaced." >&2

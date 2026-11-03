@@ -37,6 +37,10 @@ scratch directory instead of the developer's Workspace volume.
 `resources/native/<os>-<arch>/`. `build:renderer` emits `dist/` and
 `build:electron` emits `dist-electron/`. `build` runs all three.
 
+The desktop logo comes from `packages/web/crab.optimized.svg`. Run
+`npm run build:icons` after changing it; this requires `rsvg-convert` and uses
+macOS `iconutil` to regenerate the checked-in `.icns` file.
+
 For live renderer development, run `npm run build:agent` once, then `npm run dev`.
 This compiles the Electron entry point and starts Vite and Electron together.
 
@@ -55,10 +59,24 @@ build. The PTY daemon and its native dependencies ship together outside ASAR.
 `build:electron` also copies the agent manifests and verifies the daemon entry.
 
 The `Desktop v2` GitHub Actions workflow builds macOS arm64/x64, Linux x64, and
-Windows x64 artifacts. It builds unsigned installers and tests the unpacked application from that
-same build, alongside the Rust and JavaScript checks. CI artifacts are not signed
-or notarized public releases; release signing credentials and evidence must be
-provided by the release environment. Packaging commands never publish.
+Windows x64 artifacts. Pull requests build unsigned installers and test the
+unpacked application from the same build. The Crab release workflow calls it
+again for the tagged source, requiring signed and notarized macOS builds and a
+signed Windows installer. Packaging commands never publish on their own.
+
+Configure these repository Actions secrets before creating a Crab release:
+
+- `MAC_CSC_LINK` and `MAC_CSC_KEY_PASSWORD`: Developer ID Application signing
+  certificate (base64-encoded PKCS#12 or an electron-builder supported link)
+  and its password.
+- `APPLE_ID`, `APPLE_APP_SPECIFIC_PASSWORD`, and `APPLE_TEAM_ID`: credentials
+  for notarization with the same Apple developer team.
+- `WIN_CSC_LINK` and `WIN_CSC_KEY_PASSWORD`: Windows code-signing certificate
+  (base64-encoded PKCS#12 or an electron-builder supported link) and its password.
+
+All releases must use the same macOS signing identity and Windows publisher
+identity as installed builds so their platform updaters accept the replacement.
+If a signing secret is missing, the release fails before publication.
 
 ## Desktop updates
 
@@ -70,11 +88,16 @@ short informational notice and a link to releases; network or malformed metadata
 errors display a concise failure. Detailed diagnostics stay in the updater log.
 
 Full installer builds generate `app-update.yml` inside the app and matching
-`latest*.yml` files beside the installers. The desktop CI artifact includes those
-metadata files. Publish them with the matching desktop binaries in the canonical
-Crab release when release qualification and signing are complete. The desktop CI
-workflow does not publish releases or change existing CLI-only releases. Public
-update checks do not require a GitHub authentication token.
+`latest*.yml` files beside the installers. The release workflow verifies their
+versions and hashes, combines both macOS architectures into `latest-mac.yml`,
+and publishes them with the desktop installers and `SHA256SUMS-desktop.txt` in
+the same release as the CLI. The version-bump script updates the desktop package,
+lockfile, and agent along with the other shipped products. Public update checks
+do not require a GitHub authentication token. Existing CLI-only releases remain
+unchanged; desktop updates become available from a subsequent Crab release.
+
+The Linux channel includes both AppImage and DEB updates. Installing a DEB
+update can require an administrator authorization prompt.
 
 ## Built-in storage authentication
 

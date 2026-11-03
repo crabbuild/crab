@@ -103,11 +103,17 @@ shutdown. Seven failed against the old source before the fix. The packaged E2E
 uses the real GitHub provider and Electron HTTP session with a local release
 fixture, covering absent metadata, a valid newer desktop version and corrupt
 metadata through the production preload and rendered banner. Linux's unpacked
-smoke skips this scenario because `AppImageUpdater.isUpdaterActive` requires the
-installed AppImage runtime; its common GitHub-provider handling is covered by the
-focused tests. Full installer builds now precede packaged checks in CI, and CI
-retains the generated `latest*.yml` files alongside installer artifacts. Publishing
-qualified/signed desktop binaries and metadata remains a release gate.
+smoke skips this scenario because it does not represent an installed package.
+
+Release assembly checks the actual installer hashes and update metadata, combines
+both macOS architectures, and requires AppImage and DEB update entries. Tests
+exercise electron-updater's real macOS architecture selection, including Rosetta,
+and its Linux file selection. A local assembly also checked the existing macOS
+arm64 DMG, ZIP, and blockmaps; other platform inputs were fixtures. A rebuilt
+unsigned macOS arm64 app passed the packaged updater and repository smoke tests.
+The hosted release builds and signs the macOS and Windows artifacts before publication.
+Actual signed cross-platform installation and updates still require configured
+signing credentials and qualification in the release environment.
 
 ## JavaScript failure resolution
 

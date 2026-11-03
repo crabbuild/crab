@@ -6,6 +6,10 @@ import { tmpdir } from "node:os";
 import { createHash, randomUUID } from "node:crypto";
 import { createServer } from "node:http";
 
+const desktopVersion: string = JSON.parse(readFileSync(path.resolve(__dirname, "../../package.json"), "utf8")).version;
+const [major, minor, patch] = desktopVersion.split(".").map(Number);
+const nextVersion = `${major}.${minor}.${patch + 1}`;
+
 function packagedExecutable(): string {
   const release = path.resolve(__dirname, "../../release");
   const candidates = process.platform === "darwin"
@@ -24,7 +28,7 @@ async function call(page: Page, method: string, params: unknown): Promise<Record
 }
 
 test("packaged updater handles CLI-only releases and genuine desktop updates", async () => {
-  test.skip(process.platform === "linux", "electron-updater disables checks outside the installed AppImage runtime");
+  test.skip(process.platform === "linux", "The unpacked Linux build is not an installed AppImage or DEB");
   test.setTimeout(90_000);
   const root = mkdtempSync(path.join(process.env.CARGO_TARGET_DIR ?? tmpdir(), "desktop-updater-"));
   const requests: string[] = [];
@@ -35,14 +39,14 @@ test("packaged updater handles CLI-only releases and genuine desktop updates", a
     response.setHeader("Cache-Control", "no-store");
     if (url.pathname === "/crabbuild/crab/releases.atom") {
       response.setHeader("Content-Type", "application/atom+xml");
-      response.end('<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>Crab v2.0.1</title><link href="https://github.com/crabbuild/crab/releases/tag/v2.0.1"/><content>Desktop release</content></entry></feed>');
+      response.end(`<feed xmlns="http://www.w3.org/2005/Atom"><entry><title>Crab v${nextVersion}</title><link href="https://github.com/crabbuild/crab/releases/tag/v${nextVersion}"/><content>Desktop release</content></entry></feed>`);
     } else if (url.pathname === "/crabbuild/crab/releases/latest") {
       response.setHeader("Content-Type", "application/json");
-      response.end(JSON.stringify({ tag_name: "v2.0.1" }));
-    } else if (url.pathname.startsWith("/crabbuild/crab/releases/download/v2.0.1/") && url.pathname.endsWith(".yml")) {
+      response.end(JSON.stringify({ tag_name: `v${nextVersion}` }));
+    } else if (url.pathname.startsWith(`/crabbuild/crab/releases/download/v${nextVersion}/`) && url.pathname.endsWith(".yml")) {
       if (metadata === "missing") { response.writeHead(404); response.end("No desktop metadata"); return; }
       response.setHeader("Content-Type", "text/yaml");
-      response.end(metadata === "invalid" ? "version: [invalid" : `version: 2.0.1\nfiles:\n  - url: Crab-2.0.1.zip\n    sha512: ${Buffer.alloc(64).toString("base64")}\n    size: 1\n`);
+      response.end(metadata === "invalid" ? "version: [invalid" : `version: ${nextVersion}\nfiles:\n  - url: Crab-${nextVersion}.zip\n    sha512: ${Buffer.alloc(64).toString("base64")}\n    size: 1\n`);
     } else { response.writeHead(404); response.end("Unexpected release request"); }
   });
   await new Promise<void>(resolve => server.listen(0, "127.0.0.1", resolve));
@@ -71,7 +75,7 @@ test("packaged updater handles CLI-only releases and genuine desktop updates", a
     expect(requests.every(url => url.startsWith("/crabbuild/crab/"))).toBe(true);
     await page.screenshot({ path: test.info().outputPath("desktop-updater.png") });
     metadata = "published";
-    expect((await check()).version).toBe("2.0.1");
+    expect((await check()).version).toBe(nextVersion);
     await expect(page.getByRole("button", { name: "Download", exact: true })).toBeVisible();
     expect(requests.some(url => url.endsWith(".zip"))).toBe(false);
     metadata = "invalid";
@@ -95,7 +99,7 @@ test("packaged desktop opens and reads a real repository through its v2 agent", 
   git(["-c", "user.name=Desktop test", "-c", "user.email=test@example.invalid", "-c", "commit.gpgsign=false", "commit", "-m", "Desktop fixture"]);
   const application = await electron.launch({ executablePath, args: [`--user-data-dir=${path.join(root, "profile")}`] });
   try {
-    expect(await application.evaluate(({ app }) => app.getVersion())).toBe("2.0.0");
+    expect(await application.evaluate(({ app }) => app.getVersion())).toBe(desktopVersion);
     const page = await application.firstWindow();
     await expect(page.locator("#root > *").first()).toBeVisible();
     await page.getByRole("button", { name: "Skip", exact: true }).click();
@@ -103,7 +107,7 @@ test("packaged desktop opens and reads a real repository through its v2 agent", 
     await expect.poll(() => page.evaluate(async () => {
       const bridge = (window as unknown as { crab: { rpc: (method: string, params: unknown) => Promise<{ pong?: string }> } }).crab;
       try { return (await bridge.rpc("ping", {})).pong; } catch { return undefined; }
-    })).toBe("2.0.0");
+    })).toBe(desktopVersion);
     const text = await page.evaluate(async root => {
       const bridge = (window as unknown as { crab: { rpc: (method: string, params: unknown) => Promise<Record<string, unknown>> } }).crab;
       const handle = await bridge.rpc("open_local", { repo_id: "smoke", path: root });
@@ -157,7 +161,7 @@ test("native v2 add, push, remote reconstruction, clone and hydration", async ()
     await expect(page.locator("#root > *").first()).toBeVisible();
     await page.getByRole("button", { name: "Skip", exact: true }).click();
     await page.getByRole("button", { name: "No thanks", exact: true }).click();
-    await expect.poll(async () => { try { return (await call(page, "ping", {})).pong; } catch { return undefined; } }).toBe("2.0.0");
+    await expect.poll(async () => { try { return (await call(page, "ping", {})).pong; } catch { return undefined; } }).toBe(desktopVersion);
     expect(await application.evaluate(() => process.env.AWS_ACCESS_KEY_ID === "invalid-ambient-access" && process.env.AWS_ENDPOINT_URL === "http://127.0.0.1:1")).toBe(true);
     const handle = await call(page, "open_local", { repo_id: "source", path: source });
     await page.evaluate(({ handle, source }) => {
@@ -226,7 +230,7 @@ test("native v2 add, push, remote reconstruction, clone and hydration", async ()
     const restarted = await electron.launch({ executablePath, env: appEnv, args: [`--user-data-dir=${path.join(root, "profile")}`] });
     try {
       const restored = await restarted.firstWindow();
-      await expect.poll(async () => { try { return (await call(restored, "ping", {})).pong; } catch { return undefined; } }).toBe("2.0.0");
+      await expect.poll(async () => { try { return (await call(restored, "ping", {})).pong; } catch { return undefined; } }).toBe(desktopVersion);
       await call(restored, "open_local", { repo_id: "restored", path: clone });
       expect((await call(restored, "storage_connections_list", { repo_id: "restored" })).selected_id).toBe(storage_connection_id);
       expect((await call(restored, "storage_config_verify", { repo_id: "restored" })).ok).toBe(true);
