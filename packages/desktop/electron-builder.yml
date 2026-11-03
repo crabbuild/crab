@@ -1,0 +1,71 @@
+appId: dev.crab.desktop
+productName: Crab
+directories:
+  output: release
+  buildResources: build
+files:
+  - dist/**/*
+  - dist-electron/**/*
+  - package.json
+  - node_modules/typescript-language-server/**/*
+  - node_modules/vscode-languageserver/**/*
+  - node_modules/vscode-languageserver-protocol/**/*
+  - node_modules/vscode-languageserver-types/**/*
+  - node_modules/vscode-jsonrpc/**/*
+  - node_modules/typescript/**/*
+asarUnpack:
+  - dist-electron/daemon/**/*
+  - node_modules/node-pty/**/*
+  - node_modules/@xterm/headless/**/*
+  - node_modules/@xterm/addon-serialize/**/*
+  - node_modules/typescript-language-server/**/*
+  - node_modules/typescript/**/*
+  - node_modules/zstd-napi/**/*
+extraResources:
+  - from: resources/native/${os}-${arch}
+    to: agent
+  - from: resources/shell-integration
+    to: shell-integration
+beforePack: scripts/verify-native.cjs
+artifactName: Crab-${version}-${os}-${arch}.${ext}
+icon: build/icon.png
+publish:
+  provider: github
+  owner: crabbuild
+  repo: crab
+  releaseType: release
+mac:
+  icon: build/icon.icns
+  target:
+    - dmg
+    - zip
+  category: public.app-category.developer-tools
+  darkModeSupport: true
+  entitlements: build/entitlements.mac.plist
+  entitlementsInherit: build/entitlements.mac.plist
+dmg:
+  title: Crab
+  iconSize: 80
+  contents:
+    - x: 130
+      y: 220
+    - x: 410
+      y: 220
+      type: link
+      path: /Applications
+linux:
+  icon: build/icon.png
+  target:
+    - AppImage
+    - deb
+  category: Development
+  executableName: crab
+win:
+  icon: build/icon.png
+  target:
+    - nsis
+nsis:
+  oneClick: false
+  allowToChangeInstallationDirectory: true
+  installerIcon: build/icon.ico
+  uninstallerIcon: build/icon.ico

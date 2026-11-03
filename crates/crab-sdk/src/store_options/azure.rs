@@ -21,6 +21,7 @@ pub struct AzureOptions {
 enum Token {
     Bearer(String),
     Sas(String),
+    AccessKey(String),
 }
 
 impl std::fmt::Debug for AzureOptions {
@@ -32,6 +33,17 @@ impl std::fmt::Debug for AzureOptions {
 }
 
 impl AzureOptions {
+    /// Select a nonempty storage account access key, validated by the provider at build.
+    pub fn access_key(account: &str, container: &str, key: &str) -> Result<Self> {
+        if key.is_empty() {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "Azure access key must be nonempty",
+            ));
+        }
+        Self::new(account, container, Token::AccessKey(key.to_owned()))
+    }
+
     /// Select a nonempty bearer token containing only visible ASCII characters.
     pub fn bearer(account: &str, container: &str, token: &str) -> Result<Self> {
         // The provider constructs an HTTP header with an unchecked conversion.
@@ -89,6 +101,11 @@ impl AzureOptions {
         // Bearer and SAS credentials may grant different scopes on one target.
         // Include the authorization kind and value before the transport identity.
         let token = match self.token {
+            Token::AccessKey(value) => {
+                namespace.update(b"access_key\0");
+                namespace.update(value.as_bytes());
+                crab_storage::AzureAuthorization::AccessKey(value)
+            }
             Token::Bearer(value) => {
                 namespace.update(b"bearer\0");
                 namespace.update(value.as_bytes());
@@ -125,6 +142,9 @@ impl AzureOptions {
             ),
         ];
         match &self.token {
+            Token::AccessKey(key) => {
+                environment.push(("AZURE_STORAGE_ACCESS_KEY".into(), key.clone().into()));
+            }
             Token::Bearer(token) => {
                 environment.push(("AZURE_STORAGE_TOKEN".into(), token.clone().into()));
             }
@@ -136,12 +156,7 @@ impl AzureOptions {
             environment.push(("AZURE_STORAGE_ENDPOINT".into(), endpoint.clone().into()));
         }
         Ok(super::LocalTransport {
-            remote: format!(
-                "crab://{}/{}/{}",
-                self.account,
-                self.container,
-                locator.direct_prefix()?
-            ),
+            remote: format!("crab://{}/{}", self.container, locator.direct_prefix()?),
             environment,
         })
     }

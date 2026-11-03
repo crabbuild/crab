@@ -1,0 +1,84 @@
+name: Desktop v2
+on:
+  pull_request:
+    branches: [main, crab-v2]
+    paths: ['packages/desktop/**', 'crab/**', 'crates/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/desktop.yml']
+  push:
+    branches: [main, crab-v2]
+    paths: ['packages/desktop/**', 'crab/**', 'crates/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/desktop.yml']
+  workflow_dispatch:
+permissions:
+  contents: read
+concurrency:
+  group: desktop-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+jobs:
+  build:
+    name: Desktop (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 180
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [macos-15, macos-15-intel, ubuntu-24.04, windows-2025]
+    env:
+      CARGO_TARGET_DIR: ${{ runner.temp }}/crab-desktop-target
+      CARGO_INCREMENTAL: 0
+      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+    defaults:
+      run:
+        shell: bash
+        working-directory: packages/desktop
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: packages/desktop/.nvmrc
+          cache: npm
+          cache-dependency-path: packages/desktop/package-lock.json
+      - uses: dtolnay/rust-toolchain@master
+        with:
+          toolchain: 1.97.0
+          components: rustfmt
+      - name: Install Linux build and Electron dependencies
+        if: runner.os == 'Linux'
+        run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev libgtk-3-0 libnss3 libasound2t64 libgbm1 xvfb
+      - run: npm ci
+      - run: npm run typecheck
+      - run: npm run test:build
+      - name: Test native desktop integration
+        run: cargo test --release -p crab-desktop-agent --locked
+      - name: Build desktop runtime and application
+        run: npm run build
+      - name: Build unsigned installers and unpacked application
+        run: npx electron-builder --publish never
+      - name: Smoke packaged Electron and the real sidecar
+        if: matrix.os == 'macos-15-intel'
+        run: npm run test:e2e-smoke
+      - name: Smoke packaged Electron under Xvfb
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npm run test:e2e-smoke
+      - uses: actions/setup-python@v5
+        if: matrix.os == 'macos-15' || runner.os == 'Windows'
+        with:
+          python-version: '3.12'
+      - name: Install isolated storage qualification tools
+        if: matrix.os == 'macos-15' || runner.os == 'Windows'
+        run: python -m pip install awscli
+      - name: Qualify native v2 storage through the packaged app
+        if: matrix.os == 'macos-15' || runner.os == 'Windows'
+        run: python scripts/qualify-v2.py
+      - uses: actions/upload-artifact@v4
+        with:
+          name: Crab-desktop-${{ runner.os }}-${{ runner.arch }}
+          path: |
+            packages/desktop/release/*.dmg
+            packages/desktop/release/*.zip
+            packages/desktop/release/*.AppImage
+            packages/desktop/release/*.deb
+            packages/desktop/release/*.exe
+            packages/desktop/release/*.blockmap
+            packages/desktop/release/latest*.yml
+          if-no-files-found: error
+      - name: Broad desktop regression suite
+        run: npm test -- --maxWorkers 2 --minWorkers 1

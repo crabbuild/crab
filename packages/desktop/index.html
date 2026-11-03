@@ -1,0 +1,42 @@
+<!doctype html>
+<html lang="en" class="theme-dark">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <link rel="icon" type="image/svg+xml" href="/icon.svg" />
+    <title>Crab</title>
+    <script>
+      /* Apply the persisted theme before React mounts so the user
+         doesn't see a flash from the default dark palette. We only
+         read the small slice of settings needed to decide the theme;
+         the full settings object loads once React boots. */
+      (function () {
+        try {
+          var raw = localStorage.getItem("crab.settings.v1");
+          var theme = "dark";
+          if (raw) {
+            var parsed = JSON.parse(raw);
+            if (parsed && typeof parsed.theme === "string") theme = parsed.theme;
+          }
+          var root = document.documentElement;
+          root.classList.remove("theme-dark", "theme-light", "theme-hc-dark", "theme-hc-light", "dark");
+          if (theme === "system") {
+            var mq = window.matchMedia("(prefers-color-scheme: light)");
+            var isDark = !mq.matches;
+            root.classList.add(isDark ? "theme-dark" : "theme-light");
+            if (isDark) root.classList.add("dark");
+          } else {
+            root.classList.add("theme-" + theme);
+            if (theme === "dark" || theme === "hc-dark") root.classList.add("dark");
+          }
+        } catch (_e) {
+          document.documentElement.classList.add("theme-dark", "dark");
+        }
+      })();
+    </script>
+  </head>
+  <body class="antialiased">
+    <div id="root"></div>
+    <script type="module" src="/src/main.tsx"></script>
+  </body>
+</html>

@@ -1,0 +1,26 @@
+{
+  "type": "aider",
+  "name": "Aider",
+  "binary": "aider",
+  "args": ["--message", "{prompt}", "--yes", "--no-stream", "--no-auto-commits"],
+  "env": {},
+  "interactionModel": "text",
+  "versionFlag": "--version",
+  "eventMapping": {
+    "typeField": "type",
+    "typeMap": {},
+    "fieldMap": {},
+    "contentField": "content",
+    "errorField": "error"
+  },
+  "capabilities": {
+    "supportsPlanMode": false,
+    "supportsStreaming": false,
+    "supportsToolUse": false,
+    "supportsIteration": false,
+    "supportsApprovalModes": false
+  },
+  "requiredEnv": [
+    { "name": "ANTHROPIC_API_KEY", "label": "Anthropic API Key (or OPENAI_API_KEY)", "secret": true }
+  ]
+}

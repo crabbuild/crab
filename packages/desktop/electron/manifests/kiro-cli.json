@@ -1,0 +1,24 @@
+{
+  "type": "kiro-cli",
+  "name": "Kiro CLI",
+  "binary": "kiro-cli",
+  "args": ["chat", "{prompt}"],
+  "env": {},
+  "interactionModel": "text",
+  "versionFlag": "--version",
+  "eventMapping": {
+    "typeField": "type",
+    "typeMap": {},
+    "fieldMap": {},
+    "contentField": "content",
+    "errorField": "error"
+  },
+  "capabilities": {
+    "supportsPlanMode": false,
+    "supportsStreaming": false,
+    "supportsToolUse": true,
+    "supportsIteration": false,
+    "supportsApprovalModes": false,
+    "terminalOnly": true
+  }
+}

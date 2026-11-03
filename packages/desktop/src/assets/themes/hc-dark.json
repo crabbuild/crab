@@ -1,0 +1,21 @@
+{
+  "id": "hc-dark",
+  "name": "High Contrast Dark",
+  "colorScheme": "dark",
+  "colors": {
+    "gx-bg": "0 0 0",
+    "gx-bg-sub": "0 0 0",
+    "gx-surface": "12 12 12",
+    "gx-surface-hover": "24 24 24",
+    "gx-border": "110 110 110",
+    "gx-muted": "200 200 200",
+    "gx-text": "255 255 255",
+    "gx-accent": "100 170 255",
+    "gx-accent-hover": "80 150 240",
+    "gx-success": "90 255 150",
+    "gx-warn": "255 220 50",
+    "gx-warning": "255 220 50",
+    "gx-error": "255 100 100",
+    "gx-info": "80 210 255"
+  }
+}

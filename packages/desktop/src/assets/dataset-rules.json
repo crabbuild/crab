@@ -1,0 +1,113 @@
+{
+  "rules": [
+    {
+      "kind": "checkpoint",
+      "globs": [
+        "**/*.pt",
+        "**/*.pth",
+        "**/*.ckpt",
+        "**/*.safetensors",
+        "**/*.bin",
+        "**/*.onnx",
+        "**/*.pb",
+        "**/*.tflite",
+        "**/*.h5",
+        "**/*.keras"
+      ],
+      "minBytes": 1048576
+    },
+    {
+      "kind": "checkpoint",
+      "globs": [
+        "**/model-?????-of-?????.safetensors",
+        "**/pytorch_model-?????-of-?????.bin",
+        "**/model.safetensors.index.json",
+        "**/pytorch_model.bin.index.json"
+      ]
+    },
+    {
+      "kind": "tokenizer",
+      "globs": [
+        "**/tokenizer.json",
+        "**/tokenizer_config.json",
+        "**/vocab.txt",
+        "**/vocab.json",
+        "**/merges.txt",
+        "**/spiece.model",
+        "**/sentencepiece.bpe.model",
+        "**/special_tokens_map.json",
+        "**/added_tokens.json"
+      ]
+    },
+    {
+      "kind": "notebook",
+      "globs": ["**/*.ipynb"]
+    },
+    {
+      "kind": "training-data",
+      "globs": [
+        "**/train/**",
+        "**/training/**"
+      ]
+    },
+    {
+      "kind": "training-data",
+      "globs": [
+        "**/*.parquet",
+        "**/*.arrow",
+        "**/*.csv",
+        "**/*.jsonl"
+      ],
+      "minBytes": 10485760
+    },
+    {
+      "kind": "eval-data",
+      "globs": [
+        "**/eval/**",
+        "**/test/**",
+        "**/val/**",
+        "**/validation/**"
+      ]
+    },
+    {
+      "kind": "config",
+      "globs": [
+        "**/config.json",
+        "**/params.yaml",
+        "**/params.yml",
+        "**/requirements.txt",
+        "**/pyproject.toml",
+        "**/setup.cfg",
+        "**/setup.py",
+        "**/Makefile",
+        "**/Dockerfile",
+        "**/.env",
+        "**/.env.*",
+        "**/generation_config.json",
+        "**/preprocessor_config.json",
+        "**/training_args.bin"
+      ]
+    },
+    {
+      "kind": "code",
+      "globs": [
+        "**/*.py",
+        "**/*.rs",
+        "**/*.ts",
+        "**/*.js",
+        "**/*.go",
+        "**/*.java",
+        "**/*.c",
+        "**/*.cpp",
+        "**/*.h",
+        "**/*.hpp",
+        "**/*.rb",
+        "**/*.scala",
+        "**/*.kt",
+        "**/*.swift",
+        "**/*.sh",
+        "**/*.bash"
+      ]
+    }
+  ]
+}

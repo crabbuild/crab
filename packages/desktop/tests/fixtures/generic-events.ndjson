@@ -1,0 +1,8 @@
+{"type":"thinking","timestamp":1700000001000,"content":"Planning the implementation approach."}
+{"type":"text","timestamp":1700000002000,"content":"Starting work on the feature."}
+{"type":"tool_use","timestamp":1700000003000,"tool":"read","input":{"path":"src/main.rs"}}
+{"type":"tool_result","timestamp":1700000004000,"tool":"read","output":"fn main() { ... }"}
+{"type":"file_edit","timestamp":1700000005000,"path":"src/main.rs","diff":"+ async fn main()"}
+{"type":"command_run","timestamp":1700000006000,"command":"cargo build","stdout":"Compiling...","exitCode":0}
+{"type":"error","timestamp":1700000007000,"error":"Something went wrong"}
+{"type":"done","timestamp":1700000008000,"content":"All tasks completed successfully."}

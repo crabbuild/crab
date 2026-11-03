@@ -1,0 +1,494 @@
+//! Format-specific previewers.
+//!
+//! Each previewer takes a local file path (the working tree copy of a
+//! hydrated file) and returns a small JSON payload the renderer can
+//! display directly. Parsing happens here rather than in the renderer
+//! because:
+//!
+//!   1. Large files (Parquet, safetensors, NumPy archives) have footer
+//!      or header sections we can read cheaply without slurping the
+//!      whole blob. Doing that in Rust keeps peak memory bounded.
+//!   2. The renderer's JS parsers either don't exist (safetensors) or
+//!      happily try to `ArrayBuffer` the whole file (Parquet JS libs),
+//!      which blows up on 20 GB datasets.
+//!   3. Keeping parser crates on the agent side means the renderer
+//!      bundle stays small — Monaco already pushes it to ~6 MB.
+//!
+//! Every function here returns `Result<Value>` with the agent's
+//! error type so dispatch in `handlers.rs` stays symmetric.
+
+use std::fs::File;
+use std::io::{Read, Seek, SeekFrom};
+use std::path::Path;
+
+use serde_json::{Value, json};
+
+use crate::{AgentError, Result};
+
+/// Default row cap for a Parquet preview when the caller doesn't
+/// specify one. 200 rows is a balanced default: one row-group read,
+/// under 1 MB of JSON for most schemas.
+pub const DEFAULT_PARQUET_PREVIEW_ROWS: usize = 200;
+
+/// Parquet schema + row-group metadata + first `max_rows` rows as JSON.
+pub fn parquet(path: &Path, max_rows: usize) -> Result<Value> {
+    use arrow::json::{WriterBuilder, writer::JsonArray};
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+
+    // Upper bound: refuse anything silly so a "max_rows: 1_000_000"
+    // request can't blow the agent's heap.
+    let max_rows = max_rows.clamp(1, 5000);
+
+    let file = File::open(path).map_err(AgentError::Io)?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)
+        .map_err(|e| AgentError::Other(format!("parquet: {e}")))?;
+
+    // Capture metadata into owned values up front. The builder is
+    // consumed by `.build()` below, but we want schema info and
+    // per-column stats in the response — so we extract them now
+    // while the builder is still alive.
+    let meta = builder.metadata().clone();
+    let file_md = meta.file_metadata();
+    let num_rows = file_md.num_rows();
+    let num_row_groups = meta.num_row_groups();
+    let num_columns = file_md.schema().get_fields().len();
+    let created_by = file_md.created_by().map(std::string::ToString::to_string);
+
+    // Column summary from the Arrow schema — Parquet's own logical
+    // types are noisy; the Arrow-projected schema is what a user
+    // actually cares about.
+    let arrow_schema = builder.schema().clone();
+    let columns: Vec<Value> = arrow_schema
+        .fields()
+        .iter()
+        .map(|f| {
+            json!({
+                "name": f.name(),
+                "type": f.data_type().to_string(),
+                "nullable": f.is_nullable(),
+            })
+        })
+        .collect();
+
+    // Per-column basic stats from the first row group. Bounded and
+    // fast; a full scan would be unreasonable on multi-GB files.
+    let mut stats: Vec<Value> = Vec::with_capacity(num_columns);
+    if num_row_groups > 0 {
+        let rg = meta.row_group(0);
+        for col in rg.columns() {
+            let s = col.statistics();
+            stats.push(json!({
+                "column": col.column_descr().name(),
+                "null_count": s.and_then(|s| s.null_count_opt()),
+                "distinct_count": s.and_then(|s| s.distinct_count_opt()),
+                "compression": format!("{:?}", col.compression()),
+                "compressed_size": col.compressed_size(),
+                "uncompressed_size": col.uncompressed_size(),
+            }));
+        }
+    }
+
+    // Read first row group, capped to N rows. Consumes the builder.
+    let reader = builder
+        .with_batch_size(max_rows)
+        .with_limit(max_rows)
+        .build()
+        .map_err(|e| AgentError::Other(format!("parquet reader: {e}")))?;
+
+    let mut rows_json: Vec<u8> = Vec::new();
+    {
+        let mut writer = WriterBuilder::new()
+            .with_explicit_nulls(true)
+            .build::<_, JsonArray>(&mut rows_json);
+        for batch in reader {
+            let batch = batch.map_err(|e| AgentError::Other(format!("parquet batch: {e}")))?;
+            writer
+                .write(&batch)
+                .map_err(|e| AgentError::Other(format!("arrow→json: {e}")))?;
+        }
+        writer
+            .finish()
+            .map_err(|e| AgentError::Other(format!("arrow→json: {e}")))?;
+    }
+    let rows: Value = serde_json::from_slice(&rows_json).unwrap_or(json!([]));
+
+    Ok(json!({
+        "kind": "parquet",
+        "num_rows": num_rows,
+        "num_row_groups": num_row_groups,
+        "num_columns": num_columns,
+        "created_by": created_by,
+        "columns": columns,
+        "row_group_stats": stats,
+        "preview_rows": rows,
+        "preview_row_count": rows.as_array().map_or(0, Vec::len),
+    }))
+}
+
+/// Safetensors header: the file starts with an 8-byte little-endian
+/// `u64` giving the JSON header byte length, followed by the header
+/// JSON, followed by raw tensor bytes. We read header-only; tensor
+/// data stays untouched.
+pub fn safetensors(path: &Path) -> Result<Value> {
+    let mut file = File::open(path).map_err(AgentError::Io)?;
+    let mut len_buf = [0u8; 8];
+    file.read_exact(&mut len_buf).map_err(AgentError::Io)?;
+    let header_len = u64::from_le_bytes(len_buf) as usize;
+
+    if header_len > 100 * 1024 * 1024 {
+        return Err(AgentError::Other(format!(
+            "safetensors header reports {header_len} bytes, refusing (sanity cap 100 MiB)"
+        )));
+    }
+
+    let mut header_bytes = vec![0u8; header_len];
+    file.read_exact(&mut header_bytes).map_err(AgentError::Io)?;
+
+    let header: Value = serde_json::from_slice(&header_bytes)
+        .map_err(|e| AgentError::Other(format!("safetensors header JSON: {e}")))?;
+
+    // Derive a summary: tensor count, total param count, total bytes,
+    // dtype histogram. Handles the common HF weights layout where the
+    // header is an object of `{name: {dtype, shape, data_offsets}}`
+    // plus an optional `__metadata__` sibling.
+    let mut tensor_count = 0u64;
+    let mut total_params: u128 = 0;
+    let mut total_bytes: u128 = 0;
+    let mut dtype_hist: std::collections::BTreeMap<String, u64> = std::collections::BTreeMap::new();
+    let mut tensors: Vec<Value> = Vec::new();
+
+    if let Some(obj) = header.as_object() {
+        for (name, tensor) in obj {
+            if name == "__metadata__" {
+                continue;
+            }
+            let Some(tobj) = tensor.as_object() else {
+                continue;
+            };
+            let dtype = tobj.get("dtype").and_then(Value::as_str).unwrap_or("");
+            let shape: Vec<i64> = tobj
+                .get("shape")
+                .and_then(Value::as_array)
+                .map(|a| a.iter().filter_map(Value::as_i64).collect())
+                .unwrap_or_default();
+            let offsets: Option<(u64, u64)> = tobj
+                .get("data_offsets")
+                .and_then(Value::as_array)
+                .and_then(|a| {
+                    let s = a.first()?.as_u64()?;
+                    let e = a.get(1)?.as_u64()?;
+                    Some((s, e))
+                });
+            let nbytes = offsets.map(|(s, e)| e.saturating_sub(s)).unwrap_or(0);
+            let numel: i64 = if shape.is_empty() {
+                1
+            } else {
+                shape.iter().product()
+            };
+
+            tensor_count += 1;
+            total_params += u128::from(numel.max(0) as u64);
+            total_bytes += u128::from(nbytes);
+            *dtype_hist.entry(dtype.to_owned()).or_insert(0) += 1;
+
+            tensors.push(json!({
+                "name": name,
+                "dtype": dtype,
+                "shape": shape,
+                "nbytes": nbytes,
+            }));
+        }
+    }
+
+    tensors.sort_by(|a, b| {
+        a["name"]
+            .as_str()
+            .unwrap_or("")
+            .cmp(b["name"].as_str().unwrap_or(""))
+    });
+
+    let metadata = header
+        .as_object()
+        .and_then(|o| o.get("__metadata__"))
+        .cloned()
+        .unwrap_or(Value::Null);
+
+    Ok(json!({
+        "kind": "safetensors",
+        "header_bytes": header_len,
+        "tensor_count": tensor_count,
+        "total_params": total_params.to_string(),
+        "total_bytes": total_bytes.to_string(),
+        "dtype_histogram": dtype_hist,
+        "metadata": metadata,
+        "tensors": tensors,
+    }))
+}
+
+/// NumPy `.npy` header parse.
+pub fn numpy_npy(path: &Path) -> Result<Value> {
+    let file = File::open(path).map_err(AgentError::Io)?;
+    let npy = npyz::NpyFile::new(file).map_err(|e| AgentError::Other(format!("npy: {e}")))?;
+    let header = npy.header();
+    let shape: Vec<u64> = header.shape().to_vec();
+    let dtype = format!("{:?}", header.dtype());
+    let order = format!("{:?}", header.order());
+    let total_len: u128 = shape.iter().map(|&d| u128::from(d)).product();
+
+    Ok(json!({
+        "kind": "npy",
+        "shape": shape,
+        "dtype": dtype,
+        "order": order,
+        "num_elements": total_len.to_string(),
+    }))
+}
+
+/// NumPy `.npz` archive: list the contained `.npy` members with
+/// shapes/dtypes. Implemented by treating the `.npz` as a zip archive
+/// and parsing each member's npy header.
+pub fn numpy_npz(path: &Path) -> Result<Value> {
+    let file = File::open(path).map_err(AgentError::Io)?;
+    let mut archive =
+        zip::ZipArchive::new(file).map_err(|e| AgentError::Other(format!("npz zip: {e}")))?;
+    let mut members: Vec<Value> = Vec::new();
+    for i in 0..archive.len() {
+        let mut entry = archive
+            .by_index(i)
+            .map_err(|e| AgentError::Other(format!("npz member {i}: {e}")))?;
+        let name = entry.name().to_owned();
+        if !name.ends_with(".npy") {
+            continue;
+        }
+        let size = entry.size();
+        // Slurp the (typically small) member to parse its npy header.
+        let mut buf = Vec::with_capacity(size as usize);
+        entry.read_to_end(&mut buf).map_err(AgentError::Io)?;
+        match npyz::NpyFile::new(std::io::Cursor::new(buf)) {
+            Ok(npy) => {
+                let header = npy.header();
+                members.push(json!({
+                    "name": name.trim_end_matches(".npy"),
+                    "shape": header.shape().to_vec(),
+                    "dtype": format!("{:?}", header.dtype()),
+                    "nbytes": size,
+                }));
+            }
+            Err(e) => {
+                members.push(json!({
+                    "name": name.trim_end_matches(".npy"),
+                    "error": format!("{e}"),
+                }));
+            }
+        }
+    }
+    Ok(json!({
+        "kind": "npz",
+        "members": members,
+    }))
+}
+
+/// Zip archive member listing.
+pub fn zip_archive(path: &Path) -> Result<Value> {
+    let file = File::open(path).map_err(AgentError::Io)?;
+    let mut archive =
+        zip::ZipArchive::new(file).map_err(|e| AgentError::Other(format!("zip: {e}")))?;
+    let mut members: Vec<Value> = Vec::with_capacity(archive.len());
+    let mut total_compressed: u128 = 0;
+    let mut total_uncompressed: u128 = 0;
+    for i in 0..archive.len() {
+        let entry = archive
+            .by_index(i)
+            .map_err(|e| AgentError::Other(format!("zip member {i}: {e}")))?;
+        total_compressed += u128::from(entry.compressed_size());
+        total_uncompressed += u128::from(entry.size());
+        members.push(json!({
+            "name": entry.name(),
+            "is_dir": entry.is_dir(),
+            "size": entry.size(),
+            "compressed": entry.compressed_size(),
+            "crc32": entry.crc32(),
+        }));
+    }
+    Ok(json!({
+        "kind": "zip",
+        "member_count": members.len(),
+        "total_compressed": total_compressed.to_string(),
+        "total_uncompressed": total_uncompressed.to_string(),
+        "members": members,
+    }))
+}
+
+/// Jupyter notebook metadata: kernel info, cell counts, output presence.
+///
+/// Notebooks are JSON files with a well-known schema (nbformat 4+).
+/// We parse the top-level structure and extract summary metadata
+/// without loading cell contents into memory beyond what serde needs.
+pub fn notebook_meta(path: &Path) -> Result<Value> {
+    let mut file = File::open(path).map_err(AgentError::Io)?;
+    let mut contents = String::new();
+    file.read_to_string(&mut contents).map_err(AgentError::Io)?;
+
+    let nb: Value = serde_json::from_str(&contents)
+        .map_err(|e| AgentError::Other(format!("notebook JSON parse: {e}")))?;
+
+    let obj = nb
+        .as_object()
+        .ok_or_else(|| AgentError::Other("notebook: top-level value is not an object".into()))?;
+
+    // nbformat version
+    let nbformat = obj.get("nbformat").and_then(Value::as_u64);
+
+    // Kernel metadata — try multiple paths used across nbformat versions.
+    let kernelspec = obj
+        .get("metadata")
+        .and_then(Value::as_object)
+        .and_then(|m| m.get("kernelspec"))
+        .and_then(Value::as_object);
+
+    let kernel_name = kernelspec
+        .and_then(|ks| {
+            ks.get("display_name")
+                .and_then(Value::as_str)
+                .or_else(|| ks.get("name").and_then(Value::as_str))
+        })
+        .map(String::from);
+
+    let kernel_language = kernelspec
+        .and_then(|ks| ks.get("language").and_then(Value::as_str))
+        .or_else(|| {
+            obj.get("metadata")
+                .and_then(Value::as_object)
+                .and_then(|m| m.get("language_info"))
+                .and_then(Value::as_object)
+                .and_then(|li| li.get("name").and_then(Value::as_str))
+        })
+        .map(String::from);
+
+    // Cell statistics
+    let cells = obj.get("cells").and_then(Value::as_array);
+    let cell_count = cells.map(Vec::len).unwrap_or(0);
+
+    let (code_cell_count, markdown_cell_count, has_outputs) = cells
+        .map(|cells| {
+            let mut code = 0usize;
+            let mut markdown = 0usize;
+            let mut any_output = false;
+            for cell in cells {
+                let cell_type = cell.get("cell_type").and_then(Value::as_str).unwrap_or("");
+                match cell_type {
+                    "code" => {
+                        code += 1;
+                        if !any_output {
+                            any_output = cell
+                                .get("outputs")
+                                .and_then(Value::as_array)
+                                .is_some_and(|o| !o.is_empty());
+                        }
+                    }
+                    "markdown" => markdown += 1,
+                    _ => {}
+                }
+            }
+            (code, markdown, any_output)
+        })
+        .unwrap_or((0, 0, false));
+
+    Ok(json!({
+        "kind": "notebook",
+        "kernel_name": kernel_name,
+        "kernel_language": kernel_language,
+        "nbformat": nbformat,
+        "cell_count": cell_count,
+        "code_cell_count": code_cell_count,
+        "markdown_cell_count": markdown_cell_count,
+        "has_outputs": has_outputs,
+    }))
+}
+
+/// PyTorch checkpoint preview.
+///
+/// PyTorch checkpoints are typically ZIP archives containing pickled
+/// state dicts (e.g. `archive/data.pkl`, `archive/data/0`, etc.).
+/// We parse the ZIP structure to extract metadata without loading
+/// tensors or unpickling Python objects.
+///
+/// For older pickle-only `.pt` files that aren't valid ZIPs, we fall
+/// back to reporting basic file info.
+pub fn torch_checkpoint(path: &Path) -> Result<Value> {
+    let file_size = std::fs::metadata(path).map_err(AgentError::Io)?.len();
+
+    let file = File::open(path).map_err(AgentError::Io)?;
+
+    // Try to open as a ZIP archive. PyTorch's `torch.save` uses
+    // zipfile by default since PyTorch 1.6+.
+    let mut archive = match zip::ZipArchive::new(file) {
+        Ok(a) => a,
+        Err(_) => {
+            // Not a valid ZIP — likely an older pickle-only format.
+            return Ok(json!({
+                "kind": "torch_checkpoint",
+                "format": "pickle",
+                "file_size_bytes": file_size,
+                "zip_entries": [],
+                "has_optimizer": false,
+                "num_tensors": 0,
+            }));
+        }
+    };
+
+    let mut zip_entries: Vec<String> = Vec::with_capacity(archive.len());
+    let mut num_tensors: u64 = 0;
+    let mut has_optimizer = false;
+
+    for i in 0..archive.len() {
+        let entry = match archive.by_index_raw(i) {
+            Ok(e) => e,
+            Err(_) => continue,
+        };
+        let name = entry.name().to_owned();
+
+        // Each tensor is stored as a separate file under `data/` or
+        // `archive/data/` with a numeric name (0, 1, 2, …).
+        if name.contains("data/") && !name.ends_with('/') {
+            // Exclude the pkl files from the tensor count.
+            if !name.ends_with(".pkl") {
+                num_tensors += 1;
+            }
+        }
+
+        // Heuristic: optimizer state is present if any entry name
+        // contains "optimizer".
+        if !has_optimizer {
+            let lower = name.to_lowercase();
+            if lower.contains("optimizer") {
+                has_optimizer = true;
+            }
+        }
+
+        zip_entries.push(name);
+    }
+
+    Ok(json!({
+        "kind": "torch_checkpoint",
+        "format": "pytorch",
+        "file_size_bytes": file_size,
+        "zip_entries": zip_entries,
+        "has_optimizer": has_optimizer,
+        "num_tensors": num_tensors,
+    }))
+}
+
+/// Peek at a file's first N bytes for magic-number sniffing when the
+/// extension is ambiguous. Currently unused; left here because the
+/// pattern shows up repeatedly and future formats (HDF5, etc.) will
+/// want it.
+#[allow(dead_code)]
+pub fn peek(path: &Path, n: usize) -> Result<Vec<u8>> {
+    let mut file = File::open(path).map_err(AgentError::Io)?;
+    let mut buf = vec![0u8; n];
+    let read = file.read(&mut buf).map_err(AgentError::Io)?;
+    buf.truncate(read);
+    file.seek(SeekFrom::Start(0)).ok();
+    Ok(buf)
+}

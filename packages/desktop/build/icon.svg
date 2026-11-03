@@ -1,0 +1,27 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024" fill="none">
+  <!-- Background: rounded rectangle with Crab brand gradient -->
+  <rect width="1024" height="1024" rx="228" fill="url(#bg-gradient)"/>
+
+  <!-- Git-branch-plus icon scaled and centered (lucide icon, ISC license) -->
+  <g transform="translate(192, 192) scale(26.667)" stroke="white" stroke-width="1.5" stroke-linecap="round" stroke-linejoin="round">
+    <!-- Vertical branch line -->
+    <path d="M6 3v12"/>
+    <!-- Top-right circle (branch head) -->
+    <path d="M18 9a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/>
+    <!-- Bottom-left circle (current branch) -->
+    <path d="M6 21a3 3 0 1 0 0-6 3 3 0 0 0 0 6z"/>
+    <!-- Curved connector -->
+    <path d="M15 6a9 9 0 0 0-9 9"/>
+    <!-- Plus vertical -->
+    <path d="M18 15v6"/>
+    <!-- Plus horizontal -->
+    <path d="M21 18h-6"/>
+  </g>
+
+  <defs>
+    <linearGradient id="bg-gradient" x1="0" y1="0" x2="1024" y2="1024" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#6366f1"/>
+      <stop offset="100%" stop-color="#8b5cf6"/>
+    </linearGradient>
+  </defs>
+</svg>

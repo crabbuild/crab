@@ -24,6 +24,7 @@ CrabBuild/
 ├── crab/              Rust CLI, remote helper, and product/server composition
 ├── crates/            Shared Rust contracts, data plane, storage, and orchestration
 ├── packages/web/      Next.js marketing site and Fumadocs documentation
+├── packages/desktop/ Electron desktop application and Rust sidecar
 ├── packages/ui/      React repository application served by crab-server
 ├── diagram/           Architecture diagrams and rendered assets
 ├── .github/workflows/ CI, release, service, and evidence workflows
@@ -32,11 +33,11 @@ CrabBuild/
 └── .codex/            Repository-local Codex skills
 ```
 
-Cargo workspace: 25 members — 24 crates under `crates/`, plus `crab`.
+Cargo workspace: 26 members — 24 crates under `crates/`, `crab`, and
+`packages/desktop/agent`.
 `crates/crab-sdk` is an unpublished SDK under construction; its delivery gates
-live in `crab/docs/architecture/crab-sdk.md`. There is no desktop application
-or Python package; desktop material under `packages/web/` is documentation and
-marketing content.
+live in `crab/docs/architecture/crab-sdk.md`. The desktop application lives under `packages/desktop/`; its Rust sidecar
+composes native v2 SDK reads and the bundled CLI. There is no Python package.
 
 ## Architecture
 

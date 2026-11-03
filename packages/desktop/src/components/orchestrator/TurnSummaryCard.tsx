@@ -1,0 +1,422 @@
+/**
+ * Turn-level summary card rendered at the bottom of a completed Turn
+ * when the agent edited at least one file.
+ *
+ * Shows: "Edited N files  +X −Y  [Undo]  [Review]"
+ * Body: per-file rows with +X −Y deltas, first three visible by
+ * default with a "Show N more files ›" disclosure for the rest.
+ * Each file row expands inline to a <UnifiedDiff> of that file's diff.
+ */
+
+import { useState, useCallback, useMemo } from "react";
+import {
+  ChevronDown,
+  ChevronRight,
+  Eye,
+  FileText,
+  SearchCheck,
+  ThumbsUp,
+  ThumbsDown,
+  Undo2,
+} from "lucide-react";
+import type { Turn } from "../../lib/turn-derivation";
+import type { AgentEvent } from "../../../electron/orchestrator-adapters";
+import { parseDiffStats } from "../../lib/unified-diff-stats";
+import { UnifiedDiff } from "./UnifiedDiff";
+import { useHunkActions } from "./tool-cards/HunkActionsContext";
+import { publishToast } from "../../lib/toasts";
+import {
+  isUnifiedDiff,
+  isPartialDiff,
+  synthesizeUnifiedDiff,
+} from "../../lib/codex-diff";
+
+// ── Types ───────────────────────────────────────────────────────────
+
+export interface FileEditInfo {
+  path: string;
+  added: number;
+  removed: number;
+  /** The raw diff string from the event, used for inline expansion. */
+  diff: string;
+  /** The event for revert purposes. */
+  event: AgentEvent;
+}
+
+interface Props {
+  turn: Turn;
+  /** Called when the user clicks Review — opens the Diff tab. */
+  onReview?: () => void;
+  /** Called when the user clicks "Agent Review" — triggers codex review mode. */
+  onAgentReview?: () => void;
+  /** Called when user rates this turn (thumbs up/down). */
+  onFeedback?: (rating: number) => void;
+  /** Task ID for agent review RPC. */
+  taskId?: string;
+}
+
+// ── Helpers ─────────────────────────────────────────────────────────
+
+/** Default number of files shown before the disclosure. */
+const VISIBLE_FILE_COUNT = 3;
+
+/**
+ * Extract per-file edit info from the turn's events.
+ * Groups by path, accumulating stats. Keeps the last event per path
+ * for the diff body (later edits to the same file supersede earlier ones).
+ */
+export function extractFileEdits(events: AgentEvent[]): FileEditInfo[] {
+  const byPath = new Map<string, FileEditInfo>();
+
+  for (const event of events) {
+    if (event.type !== "file_edit" || !event.path) continue;
+
+    const input = event.input as Record<string, unknown> | undefined;
+    const diffField = String(event.diff ?? input?.diff ?? "");
+    const stats = parseDiffStats(diffField);
+
+    const existing = byPath.get(event.path);
+    if (existing) {
+      existing.added += stats.added;
+      existing.removed += stats.removed;
+      // Keep the latest diff for inline expansion
+      if (diffField) existing.diff = diffField;
+      existing.event = event;
+    } else {
+      byPath.set(event.path, {
+        path: event.path,
+        added: stats.added,
+        removed: stats.removed,
+        diff: diffField,
+        event,
+      });
+    }
+  }
+
+  return [...byPath.values()];
+}
+
+// ── Component ───────────────────────────────────────────────────────
+
+export function TurnSummaryCard({ turn, onReview, onAgentReview, onFeedback, taskId }: Props) {
+  // Only render when the turn is complete and has file edits
+  if (!turn.complete || turn.fileEditCount === 0) return null;
+
+  const [showAll, setShowAll] = useState(false);
+  const [expandedFiles, setExpandedFiles] = useState<Set<string>>(new Set());
+  const [undoState, setUndoState] = useState<"idle" | "reverting" | "reverted" | "error">("idle");
+
+  const hunkContext = useHunkActions();
+
+  const fileEdits = useMemo(() => extractFileEdits(turn.events), [turn.events]);
+
+  const visibleFiles = showAll
+    ? fileEdits
+    : fileEdits.slice(0, VISIBLE_FILE_COUNT);
+  const hiddenCount = fileEdits.length - VISIBLE_FILE_COUNT;
+
+  const toggleFileExpanded = useCallback((path: string) => {
+    setExpandedFiles((prev) => {
+      const next = new Set(prev);
+      if (next.has(path)) {
+        next.delete(path);
+      } else {
+        next.add(path);
+      }
+      return next;
+    });
+  }, []);
+
+  /**
+   * Undo action: iterate the turn's file_edit events in reverse arrival
+   * order, calling revertHunk for every hunk of every edited file.
+   */
+  const handleUndo = useCallback(async () => {
+    if (!hunkContext?.taskId) return;
+    setUndoState("reverting");
+
+    // Collect file_edit events in reverse arrival order
+    const fileEditEvents = [...turn.events]
+      .filter((e) => e.type === "file_edit" && e.path)
+      .reverse();
+
+    try {
+      for (const event of fileEditEvents) {
+        const input = event.input as Record<string, unknown> | undefined;
+        const filePath = event.path ?? String(input?.file_path ?? input?.path ?? "");
+        const oldString = String(input?.old_string ?? "");
+        const newString = String(input?.new_string ?? "");
+        const content = String(input?.content ?? "");
+        const kind = input?.kind as string | undefined;
+
+        const patch = {
+          filePath,
+          oldString: kind === "add" ? "" : oldString,
+          newString: kind === "add" ? content : newString,
+        };
+
+        const result = await (window as any).crab?.orchestrator?.revertHunk(
+          hunkContext.taskId,
+          patch,
+        );
+
+        if (!result?.success) {
+          // Continue reverting other files even if one fails
+          console.warn(`Revert failed for ${filePath}: ${result?.error ?? "unknown"}`);
+        }
+      }
+
+      setUndoState("reverted");
+      publishToast({
+        kind: "success",
+        title: "Turn reverted",
+        body: `${fileEditEvents.length} file edit(s) reverted`,
+      });
+    } catch (err: any) {
+      setUndoState("error");
+      publishToast({
+        kind: "error",
+        title: "Undo failed",
+        body: err?.message ?? String(err),
+      });
+    }
+  }, [turn.events, hunkContext]);
+
+  /**
+   * Review action: open the existing Diff tab, scrolling to the first file.
+   */
+  const handleReview = useCallback(() => {
+    onReview?.();
+  }, [onReview]);
+
+  /** Trigger codex agent review mode on the live connection. */
+  const handleAgentReview = useCallback(async () => {
+    if (!taskId) return;
+    try {
+      const result = await window.crab.orchestrator.startReview(taskId);
+      if (!result.success) throw new Error(result.error ?? "Could not start agent review");
+      publishToast({ kind: "success", title: "Agent review started", body: "Codex will review the changes and provide feedback." });
+    } catch (err: unknown) {
+      publishToast({ kind: "error", title: "Review failed", body: err instanceof Error ? err.message : "Could not start agent review" });
+    }
+    onAgentReview?.();
+  }, [taskId, onAgentReview]);
+
+  /** Send turn feedback (thumbs up/down) to Codex. */
+  const [feedbackSent, setFeedbackSent] = useState(false);
+  const handleFeedback = useCallback(async (rating: number) => {
+    if (!taskId || feedbackSent) return;
+    try {
+      await (window as any).crab?.orchestrator?.uploadFeedback?.(taskId, { rating, comment: rating >= 4 ? "Good" : "Needs improvement" });
+      setFeedbackSent(true);
+    } catch {
+      // Best-effort — feedback is non-critical.
+    }
+    onFeedback?.(rating);
+  }, [taskId, feedbackSent, onFeedback]);
+
+  /** Short filename for display. */
+  const shortPath = (fullPath: string) => {
+    const parts = fullPath.split("/");
+    return parts[parts.length - 1] ?? fullPath;
+  };
+
+  /** Directory portion of the path. */
+  const dirPath = (fullPath: string) => {
+    const idx = fullPath.lastIndexOf("/");
+    return idx > 0 ? fullPath.slice(0, idx) : "";
+  };
+
+  return (
+    <div className="rounded-md border border-gx-border/40 bg-gx-surface/30 overflow-hidden">
+      {/* Header */}
+      <div className="flex items-center gap-2 px-3 py-2">
+        <FileText size={12} className="shrink-0 text-gx-accent" />
+        <span className="text-[11px] font-medium text-gx-text">
+          Edited {turn.fileEditCount} file{turn.fileEditCount !== 1 ? "s" : ""}
+        </span>
+
+        {/* Aggregate +X −Y */}
+        {(turn.totalAdded > 0 || turn.totalRemoved > 0) && (
+          <span className="flex items-center gap-1.5 text-[10px] font-mono">
+            {turn.totalAdded > 0 && (
+              <span className="text-gx-success">+{turn.totalAdded}</span>
+            )}
+            {turn.totalRemoved > 0 && (
+              <span className="text-gx-error">−{turn.totalRemoved}</span>
+            )}
+          </span>
+        )}
+
+        <span className="flex-1" />
+
+        {/* Undo button */}
+        {undoState === "reverted" ? (
+          <span className="inline-flex items-center gap-0.5 text-[10px] text-gx-warn">
+            <Undo2 size={10} /> Reverted
+          </span>
+        ) : (
+          <button
+            type="button"
+            disabled={undoState === "reverting" || !hunkContext?.taskId}
+            onClick={() => void handleUndo()}
+            className="inline-flex items-center gap-1 rounded border border-gx-error/30 bg-gx-error/5 px-1.5 py-0.5 text-[10px] text-gx-error hover:bg-gx-error/15 transition disabled:opacity-50"
+            title="Revert all edits in this turn"
+          >
+            <Undo2 size={10} />
+            Undo
+          </button>
+        )}
+
+        {/* Feedback buttons */}
+        {!feedbackSent ? (
+          <>
+            <button
+              type="button"
+              onClick={() => handleFeedback(4)}
+              className="inline-flex items-center gap-1 rounded border border-gx-success/30 bg-gx-success/5 px-1.5 py-0.5 text-[10px] text-gx-success hover:bg-gx-success/15 transition"
+              title="Good result"
+            >
+              <ThumbsUp size={10} />
+            </button>
+            <button
+              type="button"
+              onClick={() => handleFeedback(1)}
+              className="inline-flex items-center gap-1 rounded border border-gx-error/30 bg-gx-error/5 px-1.5 py-0.5 text-[10px] text-gx-error hover:bg-gx-error/15 transition"
+              title="Needs improvement"
+            >
+              <ThumbsDown size={10} />
+            </button>
+          </>
+        ) : (
+          <span className="text-[10px] text-gx-muted italic">Thanks!</span>
+        )}
+
+        {/* Agent Review button — triggers codex review mode */}
+        <button
+          type="button"
+          onClick={handleAgentReview}
+          className="inline-flex items-center gap-1 rounded border border-gx-info/30 bg-gx-info/5 px-1.5 py-0.5 text-[10px] text-gx-info hover:bg-gx-info/15 transition"
+          title="Ask Codex to review the changes"
+        >
+          <SearchCheck size={10} />
+          Agent Review
+        </button>
+
+        {/* Review button — opens Diff tab */}
+        <button
+          type="button"
+          onClick={handleReview}
+          className="inline-flex items-center gap-1 rounded border border-gx-accent/30 bg-gx-accent/5 px-1.5 py-0.5 text-[10px] text-gx-accent hover:bg-gx-accent/15 transition"
+          title="Open Diff tab to review changes"
+        >
+          <Eye size={10} />
+          Review
+        </button>
+      </div>
+
+      {/* File list */}
+      <div className="border-t border-gx-border/30">
+        {visibleFiles.map((file) => (
+          <FileRow
+            key={file.path}
+            file={file}
+            expanded={expandedFiles.has(file.path)}
+            onToggle={() => toggleFileExpanded(file.path)}
+            shortPath={shortPath(file.path)}
+            dirPath={dirPath(file.path)}
+          />
+        ))}
+
+        {/* "Show N more files" disclosure */}
+        {hiddenCount > 0 && !showAll && (
+          <button
+            type="button"
+            onClick={() => setShowAll(true)}
+            className="flex w-full items-center gap-1.5 px-3 py-1.5 text-[10px] text-gx-accent hover:bg-gx-surface-hover transition"
+          >
+            <ChevronRight size={9} />
+            Show {hiddenCount} more file{hiddenCount !== 1 ? "s" : ""} ›
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── FileRow sub-component ───────────────────────────────────────────
+
+function FileRow({
+  file,
+  expanded,
+  onToggle,
+  shortPath: short,
+  dirPath: dir,
+}: {
+  file: FileEditInfo;
+  expanded: boolean;
+  onToggle: () => void;
+  shortPath: string;
+  dirPath: string;
+}) {
+  /** Prepare the diff for rendering via UnifiedDiff. */
+  const preparedDiff = useMemo(() => {
+    if (!file.diff) return null;
+    if (isUnifiedDiff(file.diff) || isPartialDiff(file.diff)) {
+      return synthesizeUnifiedDiff(file.diff, file.path, "update");
+    }
+    // If it's raw +/- lines, synthesize a unified diff
+    return synthesizeUnifiedDiff(file.diff, file.path, "update");
+  }, [file.diff, file.path]);
+
+  return (
+    <div className="border-t border-gx-border/20 first:border-t-0">
+      <button
+        type="button"
+        onClick={onToggle}
+        className="flex w-full items-center gap-2 px-3 py-1.5 text-left hover:bg-gx-surface-hover transition"
+        aria-expanded={expanded}
+      >
+        {expanded
+          ? <ChevronDown size={9} className="shrink-0 text-gx-muted/60" />
+          : <ChevronRight size={9} className="shrink-0 text-gx-muted/60" />
+        }
+
+        {/* File name */}
+        <span className="min-w-0 flex-1 flex items-baseline gap-1 truncate">
+          <span className="text-[10px] text-gx-text/90 font-medium truncate">
+            {short}
+          </span>
+          {dir && (
+            <span className="text-[9px] text-gx-muted/60 truncate">{dir}</span>
+          )}
+        </span>
+
+        {/* Per-file +X −Y */}
+        {(file.added > 0 || file.removed > 0) && (
+          <span className="flex items-center gap-1 shrink-0 text-[9px] font-mono">
+            {file.added > 0 && (
+              <span className="text-gx-success">+{file.added}</span>
+            )}
+            {file.removed > 0 && (
+              <span className="text-gx-error">−{file.removed}</span>
+            )}
+          </span>
+        )}
+      </button>
+
+      {/* Inline diff expansion */}
+      {expanded && preparedDiff && (
+        <div className="border-t border-gx-border/20 max-h-[320px] overflow-auto bg-gx-bg/30">
+          <UnifiedDiff patch={preparedDiff} />
+        </div>
+      )}
+
+      {expanded && !preparedDiff && (
+        <div className="border-t border-gx-border/20 px-3 py-2 text-[10px] text-gx-muted italic">
+          No diff available
+        </div>
+      )}
+    </div>
+  );
+}

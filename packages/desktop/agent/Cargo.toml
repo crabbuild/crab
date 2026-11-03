@@ -1,0 +1,138 @@
+[package]
+name = "crab-desktop-agent"
+version = "2.0.0"
+edition = "2024"
+license = "Apache-2.0"
+description = "JSON-RPC sidecar for Crab Desktop. Speaks NDJSON over stdio and delegates to crab-sdk + the crab CLI."
+
+[[bin]]
+name = "crab-desktop-agent"
+path = "src/main.rs"
+
+[dependencies]
+# Read-side verbs go through the SDK.
+crab-sdk = { workspace = true, features = ["content", "managed", "local"] }
+crab-git = { workspace = true }
+crab-storage = { workspace = true }
+crab-cache = { workspace = true, features = ["local-cache"] }
+crab-auth = { workspace = true }
+crab-auth-store = { workspace = true, features = ["managed-service"] }
+crab-workflow = { workspace = true }
+
+# Async runtime. We pin the same major as the rest of the workspace so
+# the shared lock stays narrow.
+tokio = { workspace = true, features = [
+    "rt-multi-thread",
+    "macros",
+    "io-util",
+    "io-std",
+    "process",
+    "sync",
+    "time",
+    "signal",
+] }
+
+# JSON-RPC payloads. `rpc.rs` does its own framing; we only need
+# structural serde for params and results.
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+# Errors + logs, matching workspace conventions.
+thiserror = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+tracing-appender = "0.2"
+
+# HTTP client for forge + experiment provider APIs.
+reqwest = { workspace = true, features = [
+    "json",
+    "rustls-tls",
+] }
+
+# Async trait support for provider interfaces.
+async-trait = { workspace = true }
+
+# Unique identifiers for operation records.
+uuid = { version = "1", features = ["v4", "serde"] }
+
+# Timestamps for operation records.
+chrono = { version = "0.4", features = ["serde"] }
+
+# Path utilities.
+dirs = "5"
+
+# TOML parsing for config file reading.
+toml = { workspace = true }
+
+# YAML parsing for workflow files.
+serde_yaml = { workspace = true }
+
+# Background indexer cache — LSM over local filesystem.
+slatedb = "=0.15.0"
+object_store = { workspace = true, features = ["fs"] }
+
+# Cancellation tokens for cooperative task shutdown.
+tokio-util = { workspace = true }
+
+# Filesystem watcher for incremental refresh (Pillar I.3).
+notify = "7"
+
+# Byte containers re-exported by crab-sdk — we do not ship raw bytes
+# back over JSON-RPC, but we do base64-encode small previews.
+base64 = "0.22"
+bytes = { workspace = true }
+
+# Stream adapters for `walk()` consumers (used by `list_stream`).
+futures-util = { workspace = true }
+
+# URL parsing for forge provider detection from remote URLs.
+url = "2"
+
+# Regex for search-and-replace across files.
+regex = "1"
+
+# Format parsers. These land on the agent side so the renderer
+# stays small — parsing a 20 GB Parquet in JS is a non-starter.
+parquet = { version = "55", default-features = false, features = [
+    "arrow",
+    "snap",
+    "lz4",
+    "zstd",
+    "async",
+] }
+arrow = { version = "55", default-features = false, features = ["json"] }
+
+# Safetensors header parsing. Reads the leading u64 + JSON blob
+# without touching tensor bytes, so a 100 GB HF model previews in ms.
+safetensors = "0.4"
+
+# SQLite table listing + query preview.
+rusqlite = { workspace = true }
+
+# DuckDB for SQL analytics over SQLite / Parquet / CSV files.
+duckdb = { version = "1.20000.1", features = ["bundled"] }
+
+# ONNX model + protobuf descriptor parsing.
+prost = "0.13"
+prost-types = "0.13"
+
+# Zip archive listing (first-class HF / dataset archive format).
+zip = { version = "2", default-features = false, features = ["deflate"] }
+
+# NumPy .npy / .npz header parse.
+npyz = "0.8"
+
+# Unix statvfs for disk-free queries in agent_health.
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
+[dev-dependencies]
+crab-sdk = { workspace = true, features = ["write"] }
+# Real filesystem + git-repo fixtures for hunk-staging tests.
+# Using a temp dir + shelling out to `git init` keeps tests hermetic
+# without pulling a second git implementation into the agent.
+tempfile = { workspace = true }
+
+# Property testing for anchor staleness under simulated concurrent edits.
+# Pinned to the workspace-wide major.
+proptest = "1"

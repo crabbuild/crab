@@ -1,0 +1,21 @@
+{
+  "id": "light",
+  "name": "Light",
+  "colorScheme": "light",
+  "colors": {
+    "gx-bg": "250 250 252",
+    "gx-bg-sub": "255 255 255",
+    "gx-surface": "244 245 249",
+    "gx-surface-hover": "233 236 243",
+    "gx-border": "221 224 232",
+    "gx-muted": "100 110 125",
+    "gx-text": "23 27 35",
+    "gx-accent": "44 109 239",
+    "gx-accent-hover": "30 94 219",
+    "gx-success": "22 163 74",
+    "gx-warn": "180 135 0",
+    "gx-warning": "180 135 0",
+    "gx-error": "220 38 38",
+    "gx-info": "2 132 199"
+  }
+}
