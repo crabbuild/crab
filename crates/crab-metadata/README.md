@@ -882,6 +882,12 @@ region and source spans without fetching its body. Captured run sources feed
 batched file, shard, xorb and reverse-chunk lookup through the checkpoint
 reader's shared cache and aggregate budget. Exact selected capsule ordering
 controls file precedence; unselected occurrences cannot introduce conflicts.
+Independent run queries overlap in at most 32 lanes while results retain source
+order. Large key sets reduce that concurrency to bound transient vectors. All
+lanes share one admission state for encoded pages, object identities and decoded
+copies; warm pages consume the same query budget as cold pages. Admission guards
+are released before storage I/O, so concurrency does not reset a source's budget
+or hold a synchronous lock through an await.
 
 Nested recipes retain authenticated page references into their original catalog
 sections and must match the aggregate's logical-value commitment.

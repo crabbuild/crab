@@ -205,7 +205,7 @@ async fn reused_nested_pages_cannot_amplify_materialization_past_budget() {
     let mut work = PageWork::new(256 * 1024, 0);
     let result = pages.full(&store, &mut work).await;
     assert!(
-        result.is_err() && work.bytes <= 256 * 1024,
+        result.is_err() && work.bytes().unwrap() <= 256 * 1024,
         "shared physical pages must not grant unbounded materialization"
     );
 }

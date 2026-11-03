@@ -136,7 +136,7 @@ impl ObjectPages {
         if keys.iter().any(|key| key.len() != kind.key_bytes())
             || (keys.len() as u64)
                 .checked_mul((kind.key_bytes() + std::mem::size_of::<Option<Vec<u8>>>()) as u64)
-                .is_none_or(|bytes| bytes > work.maximum)
+                .is_none_or(|bytes| bytes > work.maximum())
         {
             return Err(corruption(
                 "object query keys exceed their shape or byte limit",
@@ -263,7 +263,8 @@ impl ObjectPages {
                 .checked_add(4)?
                 .checked_add(value.len() as u64)
         });
-        if incoming_bytes.is_none_or(|bytes| bytes > work.maximum.saturating_sub(work.bytes)) {
+        let available = work.maximum().saturating_sub(work.bytes()?);
+        if incoming_bytes.is_none_or(|bytes| bytes > available) {
             return Err(corruption("object edit input exceeds its byte limit"));
         }
         let work = futures_util::lock::Mutex::new(work);

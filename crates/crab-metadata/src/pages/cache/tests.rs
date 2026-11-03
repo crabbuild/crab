@@ -1,4 +1,33 @@
 use super::*;
+
+#[tokio::test(flavor = "multi_thread")]
+async fn concurrent_admission_shares_page_and_materialization_limits() {
+    for mode in 0..3 {
+        let work = PageWork::new(64, 0);
+        let ready = Arc::new(tokio::sync::Barrier::new(33));
+        let mut tasks = Vec::new();
+        for layer in 0..32 {
+            let mut work = work.clone();
+            let ready = ready.clone();
+            tasks.push(tokio::spawn(async move {
+                ready.wait().await;
+                match mode {
+                    0 => work.admit(0, 0, 16),
+                    1 => work.admit(layer, 0, 16),
+                    _ => work.admit_materialized(64),
+                }
+                .is_ok()
+            }));
+        }
+        ready.wait().await;
+        let mut admitted = 0;
+        for task in tasks {
+            admitted += usize::from(task.await.unwrap());
+        }
+        let expected = [(32, 16), (4, 64), (4, 0)][mode];
+        assert_eq!((admitted, work.bytes().unwrap()), expected);
+    }
+}
 use std::sync::atomic::{AtomicU64, Ordering};
 
 #[tokio::test]
@@ -119,7 +148,7 @@ async fn oversized_point_pages_keep_admission_and_the_decoded_cache() {
             .await
             .unwrap();
         assert_eq!(result, [Some(value.clone())]);
-        observations.push((reads.load(Ordering::SeqCst), work.bytes));
+        observations.push((reads.load(Ordering::SeqCst), work.bytes().unwrap()));
     }
     assert_eq!(observations, [(1, region.end), (0, region.end)]);
 }
@@ -291,7 +320,12 @@ async fn coalesced_reads_stay_inside_proof_region_and_charge_cold_and_warm_work(
         .await
         .is_err();
     assert_eq!(
-        (cold, work.bytes, rejected, bytes.load(Ordering::SeqCst)),
+        (
+            cold,
+            work.bytes().unwrap(),
+            rejected,
+            bytes.load(Ordering::SeqCst)
+        ),
         (region.end - region.start, cold, true, 0)
     );
 }

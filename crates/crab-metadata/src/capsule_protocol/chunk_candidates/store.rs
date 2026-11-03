@@ -334,7 +334,7 @@ impl CapsuleChunkIndex {
         work: &mut PageWork,
     ) -> Result<Option<(Root, crab_storage::store::ETag)>> {
         let (body, etag) = match store
-            .get_with_etag_bounded(&self.root, ROOT_BYTES.min(work.maximum))
+            .get_with_etag_bounded(&self.root, ROOT_BYTES.min(work.maximum()))
             .await
         {
             Ok(body) => body,

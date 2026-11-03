@@ -5,6 +5,7 @@ use crate::capsule_protocol::pointer::object::{CatalogPages, shard_from_rows, xo
 use crate::capsule_protocol::run::catalog::{CatalogOrigin, CatalogValue};
 use crate::pages::{PageCache, PageWork};
 use crab_storage::Store;
+use futures_util::StreamExt;
 use std::collections::BTreeSet;
 use std::sync::Arc;
 
@@ -113,10 +114,33 @@ impl PointerCatalogLookup {
                 }
             }
         }
-        for (index, run) in self.runs.iter().enumerate() {
-            let rows = run
-                .lookup(store, &self.cache, index + 1, &self.ranks, kind, keys, work)
-                .await?;
+        // Source rows retain publication order and one admission budget. Large
+        // key sets bound transient vectors; index items keep shared hydration
+        // futures Send while independent source reads overlap.
+        let concurrency = (self.maximum
+            / (keys.len() as u64).saturating_mul(QUERY_KEY_BYTES).max(1))
+        .clamp(1, 32) as usize;
+        let shared = work.clone();
+        let mut reads = futures_util::stream::iter(0..self.runs.len())
+            .map(|index| {
+                let mut work = shared.clone();
+                async move {
+                    let run = &self.runs[index];
+                    run.lookup(
+                        store,
+                        &self.cache,
+                        index + 1,
+                        &self.ranks,
+                        kind,
+                        keys,
+                        &mut work,
+                    )
+                    .await
+                }
+            })
+            .buffered(concurrency);
+        while let Some(rows) = reads.next().await {
+            let rows = rows?;
             for (result, rows) in output.iter_mut().zip(rows) {
                 result.extend(rows);
             }
@@ -228,10 +252,7 @@ impl PointerCatalogLookup {
     ) -> Result<PointerCatalog> {
         let mut work = self.work();
         // Cached bindings skip page decoding, not the aggregate input budget.
-        admit(
-            &mut work,
-            (cached_files as u64).saturating_mul(QUERY_KEY_BYTES),
-        )?;
+        work.admit_bytes((cached_files as u64).saturating_mul(QUERY_KEY_BYTES))?;
         let hashes = requested(files, &mut work)?;
         let mut shards = requested(shards, &mut work)?;
         let xorbs = requested(xorbs, &mut work)?;
@@ -408,19 +429,8 @@ fn keys(hashes: &BTreeSet<String>) -> Result<Vec<Vec<u8>>> {
         .collect()
 }
 
-fn admit(work: &mut PageWork, bytes: u64) -> Result<()> {
-    work.bytes = work
-        .bytes
-        .checked_add(bytes)
-        .ok_or_else(|| corrupt("catalog query byte count overflows"))?;
-    if work.bytes > work.maximum {
-        return Err(corrupt("catalog query exceeds its byte limit"));
-    }
-    Ok(())
-}
-
 fn requested(hashes: &[String], work: &mut PageWork) -> Result<BTreeSet<String>> {
-    admit(work, (hashes.len() as u64).saturating_mul(QUERY_KEY_BYTES))?;
+    work.admit_bytes((hashes.len() as u64).saturating_mul(QUERY_KEY_BYTES))?;
     for value in hashes {
         hash(value)?;
     }

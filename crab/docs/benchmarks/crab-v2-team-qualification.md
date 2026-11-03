@@ -18,29 +18,36 @@ were independently read back with their original holders preserved.
 
 ## Latest team-scale diagnostic
 
-The private ARM64 Linux build at `5bb744cd2bd` passes the matched
-64-developer/640-push response-byte and request gates: 52.0% fewer capsule GETs,
-16.1% fewer capsule response bytes and 17.5% fewer conservative all-metadata
-response bytes. Candidate p95 is 2.766 seconds overall and 3.987 seconds in the
-slowest batch. Both historical audits and fsck without repair pass. These
-foreground push measurements include compaction; known upload bytes increase
-5.6% and are reported separately.
+The private ARM64 Linux build at `cbdc300ed806` passes fresh matched
+64-developer/640-push gates: capsule GETs fall from 112,484 to 54,123 (51.9%),
+capsule response bytes fall 15.8% and conservative all-metadata response bytes
+fall 17.2%. Candidate p95 is 3.412 seconds overall and 4.430 seconds in the
+slowest batch. Both independent historical audits pass 918 checks and fsck
+without repair. Foreground compaction is included; declared request-body bytes
+increase 5.8%, with zero unknown body lengths, and remain separately reported.
+Both builds use the same isolated RustFS instance and Workspace-backed test disk.
 
-That build fails the first sealed 1,000-developer batch's latency gate despite
-acknowledging all 1,000 pushes: p95 is 21.968 seconds, maximum 26.317 seconds.
-The batch makes 2,468,385 capsule GETs and receives 14,689,102,104 capsule response
-bytes. Its receipt remains immutable; later diagnostic work cannot replace
-those timings. The complete 10,000-push historical audit and matched
-1,000-developer budget remain pending.
+That exact build still fails the first 1,000-developer batch: all 1,000 pushes
+succeed, but p95 is 19.499 seconds and maximum latency is 25.277 seconds. The
+planned round-zero pause seals the original timings before stopping generation;
+the batch makes 3,043,750 HTTP requests. An independent audit verifies every
+acknowledgement, clean writer tip and all 1,001 remote refs. Historical bytes,
+fsck and the remaining 9,000 pushes are not yet verified for this paused cohort.
+The matched 1,000-developer request/byte comparison remains pending.
 
-The follow-up exercises large paged new-tip proofs and selected compacted
-members in the existing bounded capture waves. The original implementation
-fails a deterministic 64-ref proof-latency regression with 1.072 seconds of
-simulated I/O delay. Ordered prior-closure, removal and final-membership checks
-remain required. A separate tier-boundary regression reproduces ordinary
-compaction waiting for too many already compacted sources. These source fixes
-require a fresh combined Linux build and replay; passing scoped tests does not
-qualify team-scale performance.
+The previous `5bb744cd2bd` run remains a failed diagnostic: its first batch has
+21.968-second p95, 2,468,385 capsule GETs and 14,689,102,104 capsule response
+bytes. Its sealed five-batch prefix retains 5,000 acknowledgements. Later
+diagnostic work never replaces the original timings or establishes full history.
+
+`cbdc300ed806` includes bounded new-tip proof prefetch and ordinary compaction
+tier completion; 881 dedicated Linux checks and private all-variant installation
+pass. Complete catalog capture and subsequent selected-source queries still
+grow with ref state. The next reader change overlaps independent run queries
+without changing source order or resetting their shared admission budget. A
+deterministic 64-source regression reproduces 640 ms of serial provider waits;
+the bounded implementation passes its 40 ms limit. This simulated I/O result
+does not establish the required 10,000-push latency, byte or integrity gates.
 
 ## Resuming a qualification audit
 

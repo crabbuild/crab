@@ -642,3 +642,37 @@ async fn query_page_budget_is_shared_across_runs_including_warm_sources() {
         if reason.contains("byte limit"))
     );
 }
+
+#[tokio::test(start_paused = true)]
+async fn catalog_sources_overlap_reads_without_changing_publication_order() {
+    use object_store::throttle::{ThrottleConfig, ThrottledStore};
+    use std::time::Duration;
+
+    let origin = Arc::new(ThrottledStore::new(
+        InMemory::new(),
+        ThrottleConfig::default(),
+    ));
+    let layout = StoreLayout::new(Store::new(origin.clone()), "catalog-waves".to_owned());
+    let mut lookup = PointerCatalogLookup::empty(1024 * 1024);
+    for count in 1..=64 {
+        lookup = append_run(&layout, lookup, vec![catalog(count)]).await;
+    }
+    origin.config_mut(|config| config.wait_get_per_call = Duration::from_millis(10));
+    let started = tokio::time::Instant::now();
+    let rows = lookup
+        .rows(
+            layout.store(),
+            Kind::CatalogFiles,
+            &[vec![0; 32]],
+            &mut PageWork::new(lookup.maximum, QUERY_KEY_BYTES),
+        )
+        .await
+        .unwrap();
+    let elapsed = started.elapsed();
+    let ranks = rows[0].iter().map(|value| value.rank).collect::<Vec<_>>();
+    assert_eq!(
+        (ranks, elapsed <= Duration::from_millis(40)),
+        ((1..=64).collect::<Vec<_>>(), true),
+        "independent catalog sources serialized their provider waits: {elapsed:?}"
+    );
+}
