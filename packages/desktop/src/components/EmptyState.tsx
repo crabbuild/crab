@@ -7,7 +7,7 @@ export function EmptyState() {
         <div className="mx-auto mb-4 flex h-14 w-14 items-center justify-center rounded-full border border-gx-border bg-gx-surface">
           <span
             aria-hidden="true"
-            className="h-8 w-8 bg-gx-accent"
+            className="h-10 w-10 bg-gx-text"
             style={{ mask: `url("${crabLogo}") center / contain no-repeat` }}
           />
         </div>

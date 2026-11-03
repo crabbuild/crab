@@ -12,21 +12,15 @@ if ! command -v rsvg-convert >/dev/null; then
   exit 1
 fi
 
-# The source uses a 400-unit viewBox; keep the existing rounded desktop tile.
+# The white outline keeps the black tile visible against dark desktop backgrounds.
 cat > "$APP_SVG" <<'EOF'
 <svg xmlns="http://www.w3.org/2000/svg" width="1024" height="1024" viewBox="0 0 1024 1024">
-  <rect width="1024" height="1024" rx="228" fill="url(#background)"/>
-  <g transform="translate(80 80) scale(2.16)" fill="white">
+  <rect x="14" y="14" width="996" height="996" rx="216" fill="black" stroke="white" stroke-width="20"/>
+  <g transform="translate(-88 -109) scale(3)" fill="white">
 EOF
 sed '1d;$d' "$SOURCE_SVG" >> "$APP_SVG"
 cat >> "$APP_SVG" <<'EOF'
   </g>
-  <defs>
-    <linearGradient id="background" x1="0" y1="0" x2="1024" y2="1024" gradientUnits="userSpaceOnUse">
-      <stop offset="0%" stop-color="#6366f1"/>
-      <stop offset="100%" stop-color="#8b5cf6"/>
-    </linearGradient>
-  </defs>
 </svg>
 EOF
 
