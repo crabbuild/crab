@@ -16,6 +16,32 @@ expired read-admission leases left by interrupted tests, with no Git-object or
 data-chain findings. Built-in recovery passed; all three released tombstones
 were independently read back with their original holders preserved.
 
+## Latest team-scale diagnostic
+
+The private ARM64 Linux build at `5bb744cd2bd` passes the matched
+64-developer/640-push response-byte and request gates: 52.0% fewer capsule GETs,
+16.1% fewer capsule response bytes and 17.5% fewer conservative all-metadata
+response bytes. Candidate p95 is 2.766 seconds overall and 3.987 seconds in the
+slowest batch. Both historical audits and fsck without repair pass. These
+foreground push measurements include compaction; known upload bytes increase
+5.6% and are reported separately.
+
+That build fails the first sealed 1,000-developer batch's latency gate despite
+acknowledging all 1,000 pushes: p95 is 21.968 seconds, maximum 26.317 seconds.
+The batch makes 2,468,385 capsule GETs and receives 14,689,102,104 capsule response
+bytes. Its receipt remains immutable; later diagnostic work cannot replace
+those timings. The complete 10,000-push historical audit and matched
+1,000-developer budget remain pending.
+
+The follow-up exercises large paged new-tip proofs and selected compacted
+members in the existing bounded capture waves. The original implementation
+fails a deterministic 64-ref proof-latency regression with 1.072 seconds of
+simulated I/O delay. Ordered prior-closure, removal and final-membership checks
+remain required. A separate tier-boundary regression reproduces ordinary
+compaction waiting for too many already compacted sources. These source fixes
+require a fresh combined Linux build and replay; passing scoped tests does not
+qualify team-scale performance.
+
 ## Resuming a qualification audit
 
 `run_mixed_team_rustfs.py` accepts `--phase push`, `--phase verify` and the

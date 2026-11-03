@@ -78,12 +78,22 @@ fn window(frontier: &[CapsulePointer]) -> Result<Option<Range<usize>>> {
         }
         return Ok(Some(first..end));
     }
-    if !CAPSULE_REF_COMPACTION_FAN_IN.is_power_of_two() {
+    if CAPSULE_REF_COMPACTION_FAN_IN < 2 || !CAPSULE_REF_COMPACTION_FAN_IN.is_power_of_two() {
         return Err(WriteError::Internal(
-            "capsule compaction fan-in is not a power of two".to_owned(),
+            "capsule compaction fan-in must be a power of two greater than one".to_owned(),
         ));
     }
     let level = suffix[suffix.len() - 1].level();
+    // Early runs already contain several leaves. Complete the first ordinary
+    // tier at 32 capsules; already completed tiers stay outside that suffix.
+    let ordinary_start = suffix
+        .iter()
+        .rposition(|pointer| pointer.capsule_count() as usize >= CAPSULE_REF_COMPACTION_FAN_IN)
+        .map_or(start, |index| start + index + 1);
+    let ordinary_count: usize = frontier[ordinary_start..]
+        .iter()
+        .map(|pointer| pointer.capsule_count() as usize)
+        .sum();
     let recent = &suffix[suffix.len().saturating_sub(SMALL_RUN_FAN_IN)..];
     let small = recent.len() == SMALL_RUN_FAN_IN
         && recent.iter().all(|pointer| pointer.level() == level)
@@ -92,21 +102,25 @@ fn window(frontier: &[CapsulePointer]) -> Result<Option<Range<usize>>> {
             .map(|pointer| u128::from(pointer.size()))
             .sum::<u128>()
             <= SMALL_RUN_INPUT_BYTES;
-    let (fan_in, byte_budget) = if small {
-        (SMALL_RUN_FAN_IN, SMALL_RUN_INPUT_BYTES)
+    let fan_in = if small {
+        SMALL_RUN_FAN_IN
     } else {
-        (CAPSULE_REF_COMPACTION_FAN_IN, COMPACTION_INPUT_BYTES)
+        CAPSULE_REF_COMPACTION_FAN_IN
     };
-    if suffix
-        .iter()
-        .rev()
-        .take_while(|p| p.level() == level)
-        .count()
-        < fan_in
-    {
-        return Ok(None);
-    }
-    let mut first = frontier.len() - fan_in;
+    let mut first = if ordinary_count >= CAPSULE_REF_COMPACTION_FAN_IN {
+        ordinary_start
+    } else {
+        if suffix
+            .iter()
+            .rev()
+            .take_while(|p| p.level() == level)
+            .count()
+            < fan_in
+        {
+            return Ok(None);
+        }
+        frontier.len() - fan_in
+    };
     let mut count: usize = frontier[first..]
         .iter()
         .map(|p| p.capsule_count() as usize)
@@ -118,7 +132,12 @@ fn window(frontier: &[CapsulePointer]) -> Result<Option<Range<usize>>> {
         .iter()
         .map(|pointer| u128::from(pointer.size()))
         .sum();
-    let mut next_level = level + fan_in.ilog2() as u8;
+    let byte_budget = if bytes <= SMALL_RUN_INPUT_BYTES {
+        SMALL_RUN_INPUT_BYTES
+    } else {
+        COMPACTION_INPUT_BYTES
+    };
+    let mut next_level = count.next_power_of_two().ilog2() as u8;
     while first > start
         && frontier[first - 1].level() == next_level
         && count + frontier[first - 1].capsule_count() as usize <= MAX_CAPSULES_PER_RUN
@@ -315,6 +334,32 @@ mod tests {
         let mut frontier = vec![pointer(0, 2 * 1024 * 1024, 4)];
         frontier.extend((1..=4).map(|index| pointer(index, 16 * 1024, 1)));
         assert_eq!(window(&frontier).unwrap(), Some(1..5));
+    }
+
+    #[test]
+    fn ordinary_compaction_keeps_original_tier_boundaries() {
+        for level in 0..5 {
+            let members = 1 << level;
+            let segments = CAPSULE_REF_COMPACTION_FAN_IN / members;
+            let frontier = (0..segments)
+                .map(|index| pointer(index, 512 * 1024, members))
+                .collect::<Vec<_>>();
+            assert_eq!(
+                window(&frontier).unwrap(),
+                Some(0..segments),
+                "level {level}"
+            );
+        }
+    }
+
+    #[test]
+    fn small_tier_completion_cannot_carry_a_larger_historical_run() {
+        let frontier = vec![
+            pointer(0, 2 * 1024 * 1024, 32),
+            pointer(1, 300 * 1024, 16),
+            pointer(2, 300 * 1024, 16),
+        ];
+        assert_eq!(window(&frontier).unwrap(), Some(1..3));
     }
 
     #[test]
