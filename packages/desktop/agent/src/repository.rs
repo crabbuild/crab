@@ -106,7 +106,10 @@ impl BrowseSession {
         // product root so diagnostics and cache clearing cover desktop reads too.
         let content = ContentCache::new(&content_root, 512 * 1024 * 1024)?;
         let mut builder = Client::builder().managed(managed).content_cache(content);
-        let locator = if url.starts_with("crab://") {
+        let locator = if let Some(connection) = crate::storage_auth::current() {
+            builder = builder.direct_store(connection.options()?);
+            RepositoryLocator::new(&connection.repository_prefix(url)?)?
+        } else if url.starts_with("crab://") {
             let resolver = crab_auth_store::ManagedRepositoryResolver::new(cache);
             match resolver
                 .classify(url)
@@ -118,23 +121,43 @@ impl BrowseSession {
                     &repo.repository,
                 )?,
                 crab_git::RepositoryLocator::Direct(repo) => {
-                    builder = builder.direct_store(DirectStoreOptions::s3_from_env(&repo.bucket)?);
+                    let options = match crab_storage::resolve_static_env_provider()? {
+                        crab_storage::StorageProviderKind::S3 => {
+                            DirectStoreOptions::s3_from_env(&repo.bucket)?
+                        }
+                        crab_storage::StorageProviderKind::Gcs => {
+                            DirectStoreOptions::gcs_from_env(&repo.bucket)?
+                        }
+                        crab_storage::StorageProviderKind::Azure => {
+                            let account = std::env::var("AZURE_STORAGE_ACCOUNT_NAME").map_err(|_| AgentError::Other("AZURE_STORAGE_ACCOUNT_NAME is required for default Azure credentials".into()))?;
+                            DirectStoreOptions::azure_from_env(&account, &repo.bucket)?
+                        }
+                        crab_storage::StorageProviderKind::Local => {
+                            return Err(AgentError::Other(
+                                "Local storage is not a cloud repository provider".into(),
+                            ));
+                        }
+                    };
+                    builder = builder.direct_store(options);
                     RepositoryLocator::new(&repo.repo_prefix)?
                 }
             }
         } else {
             let parsed = crab_git::RepositoryUrl::parse(url)?;
             let scheme = url.split_once("://").map(|p| p.0).unwrap_or_default();
+            let mut prefix = parsed.repo_prefix.clone();
             let store = match scheme {
                 "s3" => DirectStoreOptions::s3_from_env(&parsed.bucket)?,
                 "gs" | "gcs" => DirectStoreOptions::gcs_from_env(&parsed.bucket)?,
                 "az" | "azure" => {
-                    let account = std::env::var("AZURE_STORAGE_ACCOUNT").map_err(|_| {
-                        AgentError::Other(
-                            "AZURE_STORAGE_ACCOUNT is required for Azure repositories".into(),
-                        )
-                    })?;
-                    DirectStoreOptions::azure_from_env(&account, &parsed.bucket)?
+                    let (container, repository) =
+                        parsed.repo_prefix.split_once('/').ok_or_else(|| {
+                            AgentError::Other(
+                                "Azure URLs require an account, container, and repository".into(),
+                            )
+                        })?;
+                    prefix = repository.to_owned();
+                    DirectStoreOptions::azure_from_env(&parsed.bucket, container)?
                 }
                 _ => {
                     return Err(AgentError::Other(
@@ -143,7 +166,7 @@ impl BrowseSession {
                 }
             };
             builder = builder.direct_store(store);
-            RepositoryLocator::new(&parsed.repo_prefix)?
+            RepositoryLocator::new(&prefix)?
         };
         let client = builder.build()?;
         let repository = match client.open(OpenOptions::remote(locator)).await {

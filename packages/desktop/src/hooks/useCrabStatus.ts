@@ -5,10 +5,10 @@ import { rpc, StorageConfig } from "../ipc";
  * Initialization status for crab large-file management in a repo.
  *
  * - "loading": checking status
- * - "uninitialized": no .crab/config.toml found
+ * - "uninitialized": no v2 crab.toml and object-store remote found
  * - "no-storage": initialized but no storage provider configured
  * - "no-credentials": storage configured but credentials missing
- * - "ready": fully configured and ready for tracking/push
+ * - "ready": initialized locally; connectivity is verified separately
  * - "error": failed to check status
  */
 export type CrabStatus =
@@ -72,6 +72,15 @@ export function useCrabStatus(repoId: string | undefined): CrabStatusResult {
   useEffect(() => {
     check();
   }, [check]);
+
+  useEffect(() => {
+    const changed = (event: Event) => {
+      const target = (event as CustomEvent<{ repo_id?: string }>).detail?.repo_id;
+      if (!target || target === repoId) void check();
+    };
+    window.addEventListener("crab:storage-connection-changed", changed);
+    return () => window.removeEventListener("crab:storage-connection-changed", changed);
+  }, [check, repoId]);
 
   return { status, config, error, refresh: check };
 }

@@ -1,9 +1,8 @@
+import { StorageConfigSection } from "../views/StorageConfigSection";
 import { useCallback,useEffect,useState } from "react";
-import clsx from "clsx";
 import {
 Cloud,
 GitBranch,
-Globe,
 Loader2,
 Plus,
 Trash2,
@@ -35,16 +34,17 @@ interface Props {
 }
 
 function classifyRemote(url: string): RemoteKind {
-  if (url.startsWith("crab://") || url.startsWith("gs://") || url.startsWith("az://")) {
+  if (/^(crab|s3|gs|gcs|az|azure):\/\//.test(url)) {
     return "crab";
   }
   return "git";
 }
 
 function remoteProviderLabel(url: string): string {
-  if (url.startsWith("crab://")) return "S3 (Crab)";
-  if (url.startsWith("gs://")) return "GCS";
-  if (url.startsWith("az://")) return "Azure";
+  if (url.startsWith("crab://")) return "Crab storage";
+  if (url.startsWith("s3://")) return "S3";
+  if (url.startsWith("gs://") || url.startsWith("gcs://")) return "GCS";
+  if (url.startsWith("az://") || url.startsWith("azure://")) return "Azure";
   if (url.includes("github.com")) return "GitHub";
   if (url.includes("gitlab.com") || url.includes("gitlab")) return "GitLab";
   if (url.includes("bitbucket.org") || url.includes("bitbucket")) return "Bitbucket";
@@ -104,23 +104,17 @@ export function RemoteManagerPopover({ open, onClose, onPushTo }: Props) {
     const crabRemotes = remotes.filter((r) => r.kind === "crab" && r.status === "unchecked");
     if (crabRemotes.length === 0) return;
 
-    // Verify the storage config (applies to the primary crab remote).
-    rpc.storageConfigVerify(activeRepo.repo_id).then((result) => {
-      setRemotes((prev) =>
-        prev.map((r) =>
-          r.kind === "crab"
-            ? { ...r, status: result.ok ? "connected" : "failed" }
-            : r,
-        ),
-      );
-    }).catch(() => {
-      setRemotes((prev) =>
-        prev.map((r) =>
-          r.kind === "crab" ? { ...r, status: "failed" } : r,
-        ),
-      );
+    let cancelled = false;
+    Promise.all(crabRemotes.map(async remote => {
+      try { const result = await rpc.storageConfigVerify(activeRepo.repo_id, remote.name); return [remote.name, result.ok] as const; }
+      catch { return [remote.name, false] as const; }
+    })).then(results => {
+      if (cancelled) return;
+      const checked = new Map(results);
+      setRemotes(previous => previous.map(remote => checked.has(remote.name) ? { ...remote, status: checked.get(remote.name) ? "connected" : "failed" } : remote));
     });
-  }, [open, activeRepo, remotes.length]);
+    return () => { cancelled = true; };
+  }, [open, activeRepo, remotes]);
 
   async function handleRemove(name: string) {
     if (!activeRepo) return;
@@ -296,276 +290,31 @@ function RemoteRow({
 
 // ── Add remote form ──────────────────────────────────────────────────
 
-type AddRemoteType = "crab-s3" | "crab-gcs" | "crab-azure" | "git";
-
-const ADD_REMOTE_TYPES: { value: AddRemoteType; label: string; icon: typeof Cloud }[] = [
-  { value: "crab-s3", label: "AWS S3", icon: Cloud },
-  { value: "crab-gcs", label: "Google Cloud", icon: Cloud },
-  { value: "crab-azure", label: "Azure Blob", icon: Cloud },
-  { value: "git", label: "Git Server", icon: Globe },
-];
-
-function AddRemoteForm({
-  onAdded,
-  onCancel,
-}: {
-  onAdded: () => void;
-  onCancel: () => void;
-}) {
+function AddRemoteForm({ onAdded, onCancel }: { onAdded: () => void; onCancel: () => void }) {
   const activeRepo = useActiveRepo();
-  const [type, setType] = useState<AddRemoteType>("git");
   const [name, setName] = useState("");
   const [url, setUrl] = useState("");
-  const [bucket, setBucket] = useState("");
-  const [prefix, setPrefix] = useState("");
-  const [region, setRegion] = useState("us-east-1");
-  // Credential fields
-  const [accessKeyId, setAccessKeyId] = useState("");
-  const [secretAccessKey, setSecretAccessKey] = useState("");
-  const [gcpServiceAccountJson, setGcpServiceAccountJson] = useState("");
-  const [azureConnectionString, setAzureConnectionString] = useState("");
+  const [connection, setConnection] = useState("");
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const objectStore = /^(crab|s3|gs|gcs|az|azure):\/\//.test(url.trim());
 
-  function buildUrl(): string {
-    switch (type) {
-      case "crab-s3":
-        return `crab://${bucket}${prefix ? `/${prefix}` : ""}`;
-      case "crab-gcs":
-        return `gs://${bucket}${prefix ? `/${prefix}` : ""}`;
-      case "crab-azure":
-        return `az://${bucket}${prefix ? `/${prefix}` : ""}`;
-      case "git":
-        return url;
-    }
-  }
-
-  function providerKey(): string {
-    switch (type) {
-      case "crab-s3": return "s3";
-      case "crab-gcs": return "gcs";
-      case "crab-azure": return "azure";
-      default: return "";
-    }
-  }
-
-  async function handleAdd() {
-    if (!activeRepo || !name.trim()) return;
-    const remoteUrl = buildUrl();
-    if (!remoteUrl.trim()) return;
-
-    setSaving(true);
-    setError(null);
+  async function add() {
+    if (!activeRepo) return;
+    setSaving(true); setError(null);
     try {
-      // Add the git remote.
-      await rpc.gitRemoteAdd(activeRepo.repo_id, name.trim(), remoteUrl.trim());
-
-      // For object-store remotes, also configure storage + credentials.
-      if (type !== "git" && bucket.trim()) {
-        const credentials: Record<string, string> = {};
-        if (type === "crab-s3") {
-          if (accessKeyId) credentials.access_key_id = accessKeyId;
-          if (secretAccessKey) credentials.secret_access_key = secretAccessKey;
-        } else if (type === "crab-gcs") {
-          if (gcpServiceAccountJson) credentials.service_account_json = gcpServiceAccountJson;
-        } else if (type === "crab-azure") {
-          if (azureConnectionString) credentials.connection_string = azureConnectionString;
-        }
-
-        await rpc.storageConfigSet(activeRepo.repo_id, {
-          provider: providerKey(),
-          bucket: bucket.trim(),
-          prefix: prefix.trim() || undefined,
-          region: type === "crab-s3" ? region : undefined,
-          credentials: Object.keys(credentials).length > 0 ? credentials : undefined,
-        });
-      }
-
+      if (objectStore) await rpc.storageConnectionBind(activeRepo.repo_id, connection || null);
+      await rpc.gitRemoteAdd(activeRepo.repo_id, name.trim(), url.trim());
       onAdded();
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    } finally {
-      setSaving(false);
-    }
+    } catch (error) { setError(error instanceof Error ? error.message : String(error)); }
+    finally { setSaving(false); }
   }
 
-  const isObjectStore = type !== "git";
-  const canSave = name.trim() && (isObjectStore ? bucket.trim() : url.trim());
-
-  return (
-    <div className="border-t border-gx-border p-3 space-y-3">
-      <div className="text-xs font-semibold text-gx-text">Add Remote</div>
-
-      {/* Type selector */}
-      <div className="flex flex-wrap gap-1.5">
-        {ADD_REMOTE_TYPES.map((t) => (
-          <button
-            key={t.value}
-            type="button"
-            className={clsx(
-              "rounded border px-2 py-1 text-[10px] font-medium transition",
-              type === t.value
-                ? "border-gx-accent bg-gx-accent/10 text-gx-accent"
-                : "border-gx-border text-gx-muted hover:border-gx-accent/50",
-            )}
-            onClick={() => setType(t.value)}
-          >
-            {t.label}
-          </button>
-        ))}
-      </div>
-
-      {/* Name */}
-      <div>
-        <label className="mb-0.5 block text-[10px] text-gx-muted">Remote name</label>
-        <input
-          type="text"
-          className="w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-xs focus-visible:outline-none focus:border-gx-accent"
-          value={name}
-          onChange={(e) => setName(e.target.value)}
-          placeholder={isObjectStore ? "storage" : "origin"}
-        />
-      </div>
-
-      {/* URL fields */}
-      {isObjectStore ? (
-        <>
-          <div>
-            <label className="mb-0.5 block text-[10px] text-gx-muted">
-              {type === "crab-azure" ? "Container" : "Bucket"}
-            </label>
-            <input
-              type="text"
-              className="w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-xs focus-visible:outline-none focus:border-gx-accent"
-              value={bucket}
-              onChange={(e) => setBucket(e.target.value)}
-              placeholder="my-bucket"
-            />
-          </div>
-          <div>
-            <label className="mb-0.5 block text-[10px] text-gx-muted">
-              Prefix <span className="text-gx-muted/60">(optional)</span>
-            </label>
-            <input
-              type="text"
-              className="w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-xs focus-visible:outline-none focus:border-gx-accent"
-              value={prefix}
-              onChange={(e) => setPrefix(e.target.value)}
-              placeholder="team/project"
-            />
-          </div>
-          {/* Region (S3 only) */}
-          {type === "crab-s3" && (
-            <div>
-              <label className="mb-0.5 block text-[10px] text-gx-muted">Region</label>
-              <input
-                type="text"
-                className="w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-xs focus-visible:outline-none focus:border-gx-accent"
-                value={region}
-                onChange={(e) => setRegion(e.target.value)}
-                placeholder="us-east-1"
-              />
-            </div>
-          )}
-          {/* Credentials */}
-          {type === "crab-s3" && (
-            <div className="space-y-1.5">
-              <label className="block text-[10px] text-gx-muted">
-                Credentials <span className="text-gx-muted/60">(optional — uses env/IAM if empty)</span>
-              </label>
-              <input
-                type="password"
-                className="w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-xs focus-visible:outline-none focus:border-gx-accent"
-                value={accessKeyId}
-                onChange={(e) => setAccessKeyId(e.target.value)}
-                placeholder="AWS Access Key ID"
-                autoComplete="off"
-              />
-              <input
-                type="password"
-                className="w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-xs focus-visible:outline-none focus:border-gx-accent"
-                value={secretAccessKey}
-                onChange={(e) => setSecretAccessKey(e.target.value)}
-                placeholder="AWS Secret Access Key"
-                autoComplete="off"
-              />
-            </div>
-          )}
-          {type === "crab-gcs" && (
-            <div>
-              <label className="mb-0.5 block text-[10px] text-gx-muted">
-                Service Account JSON <span className="text-gx-muted/60">(optional)</span>
-              </label>
-              <textarea
-                className="h-16 w-full rounded border border-gx-border bg-gx-bg-sub p-1.5 font-mono text-[10px] focus-visible:outline-none focus:border-gx-accent"
-                value={gcpServiceAccountJson}
-                onChange={(e) => setGcpServiceAccountJson(e.target.value)}
-                placeholder='{"type":"service_account",...}'
-              />
-            </div>
-          )}
-          {type === "crab-azure" && (
-            <div>
-              <label className="mb-0.5 block text-[10px] text-gx-muted">
-                Connection String <span className="text-gx-muted/60">(optional)</span>
-              </label>
-              <input
-                type="password"
-                className="w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-xs focus-visible:outline-none focus:border-gx-accent"
-                value={azureConnectionString}
-                onChange={(e) => setAzureConnectionString(e.target.value)}
-                placeholder="DefaultEndpointsProtocol=https;AccountName=..."
-                autoComplete="off"
-              />
-            </div>
-          )}
-          <p className="text-[9px] text-gx-muted">
-            Credentials are stored in your OS keychain, never written to disk.
-          </p>
-          {/* Preview */}
-          {bucket && (
-            <div className="rounded bg-gx-bg-sub px-2 py-1 font-mono text-[10px] text-gx-muted">
-              {buildUrl()}
-            </div>
-          )}
-        </>
-      ) : (
-        <div>
-          <label className="mb-0.5 block text-[10px] text-gx-muted">URL</label>
-          <input
-            type="text"
-            className="w-full rounded border border-gx-border bg-gx-bg-sub px-2 py-1 text-xs focus-visible:outline-none focus:border-gx-accent"
-            value={url}
-            onChange={(e) => setUrl(e.target.value)}
-            placeholder="https://github.com/user/repo.git"
-          />
-          <p className="mt-0.5 text-[9px] text-gx-muted">
-            Supports GitHub, GitLab, Bitbucket, or any git URL (HTTPS/SSH).
-          </p>
-        </div>
-      )}
-
-      {/* Actions */}
-      <div className="flex items-center gap-2">
-        <button
-          type="button"
-          className="btn btn-primary text-xs"
-          onClick={handleAdd}
-          disabled={saving || !canSave}
-        >
-          {saving ? <Loader2 size={10} className="animate-spin" /> : <Plus size={10} />}
-          Add Remote
-        </button>
-        <button type="button" className="btn text-xs" onClick={onCancel}>
-          Cancel
-        </button>
-      </div>
-
-      {error && (
-        <div className="rounded border border-gx-error/40 bg-gx-error/10 p-1.5 text-[10px] text-gx-error">
-          {error}
-        </div>
-      )}
-    </div>
-  );
+  return <div className="space-y-3 border-t border-gx-border p-3">
+    <label className="block text-xs text-gx-muted">Remote name<input className="input mt-1 w-full" value={name} onChange={event => setName(event.target.value)} disabled={saving} /></label>
+    <label className="block text-xs text-gx-muted">Remote URL<input className="input mt-1 w-full" value={url} onChange={event => setUrl(event.target.value)} disabled={saving} placeholder="crab://bucket/repository or a Git URL" /></label>
+    {objectStore && <StorageConfigSection onSelect={setConnection} selectedId={connection} />}
+    {error && <p role="alert" className="break-words text-xs text-gx-error">{error}</p>}
+    <div className="flex gap-2"><button type="button" className="btn btn-primary text-xs" disabled={saving || !name.trim() || !url.trim()} onClick={() => void add()}>{saving && <Loader2 size={13} className="animate-spin" />}Add remote</button><button type="button" className="btn text-xs" onClick={onCancel} disabled={saving}>Cancel</button></div>
+  </div>;
 }

@@ -2702,6 +2702,7 @@ dependencies = [
  "crab-cache",
  "crab-git",
  "crab-sdk",
+ "crab-storage",
  "crab-workflow",
  "dirs 5.0.1",
  "duckdb",

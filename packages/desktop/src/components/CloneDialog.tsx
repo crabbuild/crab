@@ -1,4 +1,5 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { StorageConfigSection } from "../views/StorageConfigSection";
+import { useEffect, useMemo, useRef, useState } from "react";
 import clsx from "clsx";
 import {
   AlertCircle,
@@ -6,12 +7,9 @@ import {
   ChevronDown,
   ChevronRight,
   ExternalLink,
-  Eye,
-  EyeOff,
   FolderOpen,
   GitBranch,
   Globe,
-  Key,
   Loader2,
   Lock,
   Server,
@@ -33,7 +31,6 @@ type RepoProvider =
   | "crab"
   | "url";
 
-type CloudCredentialProvider = "aws" | "gcp" | "azure";
 
 interface ProviderDef {
   id: RepoProvider;
@@ -60,26 +57,6 @@ interface AdvancedOptions {
   dissociate: boolean;
   reference: string;
 }
-
-interface CloudCredentials {
-  provider: CloudCredentialProvider;
-  // AWS
-  awsAccessKeyId: string;
-  awsSecretAccessKey: string;
-  awsSessionToken: string;
-  awsRegion: string;
-  awsProfile: string;
-  // GCP
-  gcpProjectId: string;
-  gcpServiceAccountKey: string;
-  // Azure
-  azureStorageAccount: string;
-  azureStorageKey: string;
-  azureConnectionString: string;
-  azureTenantId: string;
-}
-
-// ─── Provider definitions ───────────────────────────────────────────
 
 function GitHubIcon() {
   return (
@@ -178,23 +155,6 @@ const DEFAULT_ADVANCED: AdvancedOptions = {
   reference: "",
 };
 
-const DEFAULT_CREDENTIALS: CloudCredentials = {
-  provider: "aws",
-  awsAccessKeyId: "",
-  awsSecretAccessKey: "",
-  awsSessionToken: "",
-  awsRegion: "us-east-1",
-  awsProfile: "",
-  gcpProjectId: "",
-  gcpServiceAccountKey: "",
-  azureStorageAccount: "",
-  azureStorageKey: "",
-  azureConnectionString: "",
-  azureTenantId: "",
-};
-
-// ─── Integration status helpers ─────────────────────────────────────
-
 type IntegrationStatus = "unknown" | "checking" | "connected" | "not_connected";
 
 function useIntegrationStatus(provider: RepoProvider) {
@@ -290,9 +250,7 @@ export function CloneDialog({ open, onClose, targetWorkspaceRootPath }: Props) {
   const [error, setError] = useState<string | null>(null);
   const [showAdvanced, setShowAdvanced] = useState(false);
   const [advanced, setAdvanced] = useState<AdvancedOptions>(DEFAULT_ADVANCED);
-  const [credentials, setCredentials] = useState<CloudCredentials>(DEFAULT_CREDENTIALS);
-  const [showCredentials, setShowCredentials] = useState(false);
-  const [showSecrets, setShowSecrets] = useState<Record<string, boolean>>({});
+  const [storageConnectionId, setStorageConnectionId] = useState("");
   const [cloneJobId, setCloneJobId] = useState<string | null>(null);
 
   const { addRepo } = useStore();
@@ -347,9 +305,6 @@ export function CloneDialog({ open, onClose, targetWorkspaceRootPath }: Props) {
     setError(null);
   }, [provider]);
 
-  const toggleSecret = useCallback((key: string) => {
-    setShowSecrets((prev) => ({ ...prev, [key]: !prev[key] }));
-  }, []);
 
   if (!open) return null;
 
@@ -391,10 +346,7 @@ export function CloneDialog({ open, onClose, targetWorkspaceRootPath }: Props) {
         }
       }
 
-      // For crab provider, store credentials in keychain before cloning
-      if (provider === "crab" && showCredentials) {
-        await storeCrabCredentials();
-      }
+
 
       // Generate a job ID so we can track progress lines
       const jobId = nextJobId("clone");
@@ -416,7 +368,7 @@ export function CloneDialog({ open, onClose, targetWorkspaceRootPath }: Props) {
       }
 
       // Build clone args based on advanced options
-      await rpc.clone(url, finalDest, jobId, authToken, forgeId);
+      await rpc.clone(url, finalDest, jobId, authToken, forgeId, provider === "crab" ? storageConnectionId || undefined : undefined);
 
       const handle = await rpc.openLocal(finalDest);
       addRepo({
@@ -443,51 +395,13 @@ export function CloneDialog({ open, onClose, targetWorkspaceRootPath }: Props) {
     }
   }
 
-  async function storeCrabCredentials() {
-    const { provider: cp } = credentials;
-    const keyPrefix = "crab.cloud";
-
-    if (cp === "aws") {
-      if (credentials.awsAccessKeyId) {
-        await window.crab.keychain.set(`${keyPrefix}.aws.access_key_id`, credentials.awsAccessKeyId);
-      }
-      if (credentials.awsSecretAccessKey) {
-        await window.crab.keychain.set(`${keyPrefix}.aws.secret_access_key`, credentials.awsSecretAccessKey);
-      }
-      if (credentials.awsSessionToken) {
-        await window.crab.keychain.set(`${keyPrefix}.aws.session_token`, credentials.awsSessionToken);
-      }
-      if (credentials.awsRegion) {
-        await window.crab.keychain.set(`${keyPrefix}.aws.region`, credentials.awsRegion);
-      }
-    } else if (cp === "gcp") {
-      if (credentials.gcpProjectId) {
-        await window.crab.keychain.set(`${keyPrefix}.gcp.project_id`, credentials.gcpProjectId);
-      }
-      if (credentials.gcpServiceAccountKey) {
-        await window.crab.keychain.set(`${keyPrefix}.gcp.service_account_key`, credentials.gcpServiceAccountKey);
-      }
-    } else if (cp === "azure") {
-      if (credentials.azureStorageAccount) {
-        await window.crab.keychain.set(`${keyPrefix}.azure.storage_account`, credentials.azureStorageAccount);
-      }
-      if (credentials.azureStorageKey) {
-        await window.crab.keychain.set(`${keyPrefix}.azure.storage_key`, credentials.azureStorageKey);
-      }
-      if (credentials.azureConnectionString) {
-        await window.crab.keychain.set(`${keyPrefix}.azure.connection_string`, credentials.azureConnectionString);
-      }
-    }
-  }
-
   function resetState() {
     setUrl("");
     setDest("");
     setError(null);
     setShowAdvanced(false);
     setAdvanced(DEFAULT_ADVANCED);
-    setCredentials(DEFAULT_CREDENTIALS);
-    setShowCredentials(false);
+    setStorageConnectionId("");
     setCloneJobId(null);
   }
 
@@ -620,17 +534,7 @@ export function CloneDialog({ open, onClose, targetWorkspaceRootPath }: Props) {
           )}
           {(!isWorkspaceClone && (!repoSlug || dest.endsWith(repoSlug) || !dest)) && <div className="mb-4" />}
 
-          {/* Cloud credentials section (Crab only) */}
-          {provider === "crab" && (
-            <CloudCredentialsSection
-              credentials={credentials}
-              setCredentials={setCredentials}
-              showCredentials={showCredentials}
-              setShowCredentials={setShowCredentials}
-              showSecrets={showSecrets}
-              toggleSecret={toggleSecret}
-            />
-          )}
+          {provider === "crab" && <StorageConfigSection onSelect={setStorageConnectionId} selectedId={storageConnectionId} />}
 
           {/* Advanced options */}
           <AdvancedOptionsSection
@@ -820,185 +724,6 @@ function IntegrationBanner({
 
   return null;
 }
-
-// ─── Cloud credentials section ──────────────────────────────────────
-
-function CloudCredentialsSection({
-  credentials,
-  setCredentials,
-  showCredentials,
-  setShowCredentials,
-  showSecrets,
-  toggleSecret,
-}: {
-  credentials: CloudCredentials;
-  setCredentials: React.Dispatch<React.SetStateAction<CloudCredentials>>;
-  showCredentials: boolean;
-  setShowCredentials: (v: boolean) => void;
-  showSecrets: Record<string, boolean>;
-  toggleSecret: (key: string) => void;
-}) {
-  return (
-    <div className="mb-4">
-      <button
-        type="button"
-        className="flex w-full items-center gap-2 rounded-lg border border-gx-border bg-gx-bg-sub px-3 py-2.5 text-xs text-gx-muted hover:border-gx-accent/50 hover:text-gx-text transition"
-        onClick={() => setShowCredentials(!showCredentials)}
-      >
-        {showCredentials ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-        <Key size={14} />
-        <span className="font-medium">Cloud Credentials</span>
-        <span className="ml-auto text-[10px] opacity-60">
-          {credentials.provider.toUpperCase()}
-        </span>
-      </button>
-
-      {showCredentials && (
-        <div className="mt-2 rounded-lg border border-gx-border bg-gx-bg-sub p-4">
-          {/* Cloud provider tabs */}
-          <div className="mb-3 flex gap-1 rounded-md border border-gx-border bg-gx-bg p-0.5">
-            {(["aws", "gcp", "azure"] as CloudCredentialProvider[]).map((cp) => (
-              <button
-                key={cp}
-                type="button"
-                className={clsx(
-                  "flex-1 rounded px-3 py-1.5 text-xs font-medium transition",
-                  credentials.provider === cp
-                    ? "bg-gx-accent text-white"
-                    : "text-gx-muted hover:text-gx-text",
-                )}
-                onClick={() => setCredentials((prev) => ({ ...prev, provider: cp }))}
-              >
-                {cp === "aws" ? "AWS / S3" : cp === "gcp" ? "GCP / GCS" : "Azure Blob"}
-              </button>
-            ))}
-          </div>
-
-          {/* AWS credentials */}
-          {credentials.provider === "aws" && (
-            <div className="space-y-2">
-              <CredentialField
-                label="AWS Profile (optional)"
-                value={credentials.awsProfile}
-                onChange={(v) => setCredentials((p) => ({ ...p, awsProfile: v }))}
-                placeholder="default"
-                hint="Leave empty to use explicit keys below"
-              />
-              <div className="my-2 flex items-center gap-2 text-[10px] text-gx-muted">
-                <div className="h-px flex-1 bg-gx-border" />
-                or provide keys directly
-                <div className="h-px flex-1 bg-gx-border" />
-              </div>
-              <CredentialField
-                label="Access Key ID"
-                value={credentials.awsAccessKeyId}
-                onChange={(v) => setCredentials((p) => ({ ...p, awsAccessKeyId: v }))}
-                placeholder="AKIAIOSFODNN7EXAMPLE"
-              />
-              <SecretField
-                label="Secret Access Key"
-                value={credentials.awsSecretAccessKey}
-                onChange={(v) => setCredentials((p) => ({ ...p, awsSecretAccessKey: v }))}
-                placeholder="wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY"
-                visible={showSecrets["awsSecret"] ?? false}
-                onToggle={() => toggleSecret("awsSecret")}
-              />
-              <SecretField
-                label="Session Token (optional)"
-                value={credentials.awsSessionToken}
-                onChange={(v) => setCredentials((p) => ({ ...p, awsSessionToken: v }))}
-                placeholder="FwoGZXIvYXdzE..."
-                visible={showSecrets["awsToken"] ?? false}
-                onToggle={() => toggleSecret("awsToken")}
-              />
-              <CredentialField
-                label="Region"
-                value={credentials.awsRegion}
-                onChange={(v) => setCredentials((p) => ({ ...p, awsRegion: v }))}
-                placeholder="us-east-1"
-              />
-            </div>
-          )}
-
-          {/* GCP credentials */}
-          {credentials.provider === "gcp" && (
-            <div className="space-y-2">
-              <CredentialField
-                label="Project ID"
-                value={credentials.gcpProjectId}
-                onChange={(v) => setCredentials((p) => ({ ...p, gcpProjectId: v }))}
-                placeholder="my-project-123456"
-              />
-              <div>
-                <label className="mb-1 block text-xs text-gx-muted">
-                  Service Account Key (JSON)
-                </label>
-                <textarea
-                  className="input-field w-full resize-y font-mono text-xs"
-                  rows={4}
-                  placeholder='{"type": "service_account", ...}'
-                  value={credentials.gcpServiceAccountKey}
-                  onChange={(e) =>
-                    setCredentials((p) => ({ ...p, gcpServiceAccountKey: e.target.value }))
-                  }
-                />
-                <p className="mt-0.5 text-[10px] text-gx-muted">
-                  Paste the full JSON key file content, or leave empty to use Application Default Credentials.
-                </p>
-              </div>
-            </div>
-          )}
-
-          {/* Azure credentials */}
-          {credentials.provider === "azure" && (
-            <div className="space-y-2">
-              <CredentialField
-                label="Storage Account"
-                value={credentials.azureStorageAccount}
-                onChange={(v) => setCredentials((p) => ({ ...p, azureStorageAccount: v }))}
-                placeholder="mystorageaccount"
-              />
-              <SecretField
-                label="Storage Key"
-                value={credentials.azureStorageKey}
-                onChange={(v) => setCredentials((p) => ({ ...p, azureStorageKey: v }))}
-                placeholder="base64-encoded-key..."
-                visible={showSecrets["azureKey"] ?? false}
-                onToggle={() => toggleSecret("azureKey")}
-              />
-              <div className="my-2 flex items-center gap-2 text-[10px] text-gx-muted">
-                <div className="h-px flex-1 bg-gx-border" />
-                or use connection string
-                <div className="h-px flex-1 bg-gx-border" />
-              </div>
-              <SecretField
-                label="Connection String"
-                value={credentials.azureConnectionString}
-                onChange={(v) => setCredentials((p) => ({ ...p, azureConnectionString: v }))}
-                placeholder="DefaultEndpointsProtocol=https;AccountName=..."
-                visible={showSecrets["azureConn"] ?? false}
-                onToggle={() => toggleSecret("azureConn")}
-              />
-              <CredentialField
-                label="Tenant ID (optional)"
-                value={credentials.azureTenantId}
-                onChange={(v) => setCredentials((p) => ({ ...p, azureTenantId: v }))}
-                placeholder="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
-              />
-            </div>
-          )}
-
-          <p className="mt-3 text-[10px] text-gx-muted">
-            <Lock size={10} className="mr-1 inline" />
-            Credentials are stored securely in your OS keychain and never leave this device.
-          </p>
-        </div>
-      )}
-    </div>
-  );
-}
-
-// ─── Advanced options section ───────────────────────────────────────
 
 function AdvancedOptionsSection({
   advanced,
@@ -1311,73 +1036,5 @@ function Checkbox({
     >
       {checked && <Check size={10} strokeWidth={3} />}
     </button>
-  );
-}
-
-function CredentialField({
-  label,
-  value,
-  onChange,
-  placeholder,
-  hint,
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  placeholder?: string;
-  hint?: string;
-}) {
-  return (
-    <div>
-      <label className="mb-0.5 block text-xs text-gx-muted">{label}</label>
-      <input
-        type="text"
-        className="input-field w-full font-mono text-xs"
-        placeholder={placeholder}
-        value={value}
-        onChange={(e) => onChange(e.target.value)}
-      />
-      {hint && <p className="mt-0.5 text-[10px] text-gx-muted">{hint}</p>}
-    </div>
-  );
-}
-
-function SecretField({
-  label,
-  value,
-  onChange,
-  placeholder,
-  visible,
-  onToggle,
-}: {
-  label: string;
-  value: string;
-  onChange: (v: string) => void;
-  placeholder?: string;
-  visible: boolean;
-  onToggle: () => void;
-}) {
-  return (
-    <div>
-      <label className="mb-0.5 block text-xs text-gx-muted">{label}</label>
-      <div className="flex gap-1">
-        <input
-          type={visible ? "text" : "password"}
-          className="input-field flex-1 font-mono text-xs"
-          placeholder={placeholder}
-          value={value}
-          onChange={(e) => onChange(e.target.value)}
-        />
-        <button
-          type="button"
-          className="rounded border border-gx-border bg-gx-bg px-2 text-gx-muted hover:text-gx-text transition"
-          onClick={onToggle}
-          aria-label={visible ? "Hide" : "Show"}
-          title={visible ? "Hide" : "Show"}
-        >
-          {visible ? <EyeOff size={12} /> : <Eye size={12} />}
-        </button>
-      </div>
-    </div>
   );
 }

@@ -180,8 +180,10 @@ impl From<crate::AgentError> for RpcError {
                 })),
             ),
             E::PathNotFound { .. } => (1004, None),
-            E::Cache(_)
+            E::Storage(_)
+            | E::Cache(_)
             | E::Utf8(_)
+            | E::ParsedUrl(_)
             | E::Url(_)
             | E::Auth(_)
             | E::Config(_)

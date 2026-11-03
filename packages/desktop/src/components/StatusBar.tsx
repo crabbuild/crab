@@ -6,7 +6,7 @@ import { SidecarChips } from "./SidecarChips";
 import { TaskListPopover } from "./TaskListPopover";
 import { RemoteManagerPopover } from "./RemoteManagerPopover";
 import { StatusBarToolbar } from "./StatusBarToolbar";
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useRef, useState } from "react";
 import clsx from "clsx";
 
 interface Props {
@@ -168,11 +168,15 @@ function RemoteStatusChip({ onClick: _onClick }: { onClick?: () => void }) {
   const [latency, setLatency] = useState<number | null>(null);
   const [popoverOpen, setPopoverOpen] = useState(false);
 
+  const generation = useRef(0);
+
   const verify = useCallback(async () => {
     if (!activeRepo) return;
+    const request = ++generation.current;
     setStatus("verifying");
     try {
       const result = await rpc.storageConfigVerify(activeRepo.repo_id);
+      if (request !== generation.current) return;
       if (result.ok) {
         setStatus("connected");
         setLatency(result.latency_ms);
@@ -180,22 +184,24 @@ function RemoteStatusChip({ onClick: _onClick }: { onClick?: () => void }) {
         setStatus("failed");
       }
     } catch {
-      setStatus("failed");
+      if (request === generation.current) setStatus("failed");
     }
   }, [activeRepo]);
 
-  // Auto-verify on mount (debounced).
   useEffect(() => {
+    generation.current++;
+    setStatus("unchecked"); setLatency(null);
     if (!activeRepo) return;
+    let cancelled = false;
     const timer = setTimeout(() => {
-      // Only verify if we have a configured repo.
-      rpc.storageConfigGet(activeRepo.repo_id).then((config) => {
-        if (config.configured) {
-          verify();
-        }
-      }).catch(() => undefined);
+      rpc.storageConfigGet(activeRepo.repo_id).then(config => { if (!cancelled && config.configured) void verify(); }).catch(() => undefined);
     }, 1500);
-    return () => clearTimeout(timer);
+    const changed = (event: Event) => {
+      const target = (event as CustomEvent<{ repo_id?: string }>).detail?.repo_id;
+      if (!target || target === activeRepo.repo_id) { setLatency(null); void verify(); }
+    };
+    window.addEventListener("crab:storage-connection-changed", changed);
+    return () => { cancelled = true; generation.current++; clearTimeout(timer); window.removeEventListener("crab:storage-connection-changed", changed); };
   }, [activeRepo, verify]);
 
   if (!activeRepo) return null;

@@ -993,8 +993,7 @@ pub async fn workflow_exp_start(
 
 /// Stop experiment workers (shells out to CLI).
 pub async fn workflow_exp_stop(work_dir: &Path) -> Result<Value> {
-    let crab_bin = shellout::resolve_crab_bin();
-    let output = tokio::process::Command::new(&crab_bin)
+    let output = shellout::command()?
         .args(["exp", "stop"])
         .current_dir(work_dir)
         .output()

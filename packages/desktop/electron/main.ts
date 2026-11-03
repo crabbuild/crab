@@ -1,10 +1,11 @@
-import { app,BrowserWindow,dialog,ipcMain,Notification,shell } from "electron";
+import { app,BrowserWindow,dialog,ipcMain,Notification,shell,safeStorage } from "electron";
 import * as path from "node:path";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import { execFile } from "node:child_process";
 
 import { Agent } from "./agent";
+import { StorageConnections } from "./storage-connections";
 import { nativeBinaries } from "./native-binaries";
 import { loadEnvGlobal,loadEnvLayered } from "./env-loader";
 import { getUserShellBaseEnv } from "./env/userShellEnv";
@@ -80,6 +81,15 @@ loadEnvGlobal();
 
 let mainWindow: BrowserWindow | null = null;
 let agent: Agent | null = null;
+let resolveAgentReady!: () => void;
+let rejectAgentReady!: (reason: unknown) => void;
+const agentReady = new Promise<void>((resolve, reject) => {
+  resolveAgentReady = resolve;
+  rejectAgentReady = reject;
+});
+// The window can issue RPC before shell/PTY startup has finished. Keep those
+// requests pending until the native ping succeeds, or surface its real failure.
+void agentReady.catch(() => {});
 const sidecarManager = new SidecarManager();
 const lspManager = new LspManager();
 let isShuttingDown = false;
@@ -316,8 +326,10 @@ function registerIpc(skillManager: SkillManager) {
   // and open_url, registers the provider synchronously before returning
   // the RepoHandle to the renderer (prevents race conditions).
   ipcMain.handle("crab:rpc", async (_evt, method: string, params: unknown) => {
+    await agentReady;
     if (!agent) throw new Error("agent not running");
 
+    if (method.startsWith("storage_connections_")) return agent.request(method, params);
     const registry = getProviderRegistry();
 
     // Handle repo open methods: register provider before returning handle.
@@ -2529,17 +2541,10 @@ app.whenReady().then(async () => {
 
     const mainSettings = readMainSettings();
 
-    // In packaged builds, enable the file appender by default so
-    // crash dumps and support diagnostics have log context. In dev
-    // mode, stderr is sufficient.
-    const agentArgs: string[] = [];
-    if (!isDev) {
-      const logsDir = agentLogsDir();
-      if (!fs.existsSync(logsDir)) {
-        fs.mkdirSync(logsDir, { recursive: true });
-      }
-      agentArgs.push("--log-file", path.join(logsDir, "agent.log"));
-    }
+    // Persist only main-process-redacted logs; the native file sink would
+    // write provider diagnostics before saved credentials can be removed.
+    const logsDir = isDev ? undefined : agentLogsDir();
+    if (logsDir) fs.mkdirSync(logsDir, { recursive: true, mode: 0o700 });
 
     const runtime = nativeBinaries({
       packaged: app.isPackaged,
@@ -2551,7 +2556,16 @@ app.whenReady().then(async () => {
     // Main-process worktrees, Git helpers and the sidecar must use the same release.
     process.env.CRAB_BIN = runtime.crab;
     process.env.PATH = `${path.dirname(runtime.crab)}${path.delimiter}${process.env.PATH ?? ""}`;
-    agent = new Agent(runtime.agent, agentEnvFor(mainSettings.agentLogLevel), agentArgs);
+    const storageConnections = new StorageConnections(
+      path.join(app.getPath("userData"), "storage-connections.enc"), safeStorage, process.platform,
+    );
+    agent = new Agent(runtime.agent, agentEnvFor(mainSettings.agentLogLevel), [], storageConnections);
+    if (logsDir) agent.on("stderr", (line: string) => {
+      const day = new Date().toISOString().slice(0, 10);
+      fs.appendFile(path.join(logsDir, `agent.log.${day}`), `${line}\n`, { mode: 0o600 }, error => {
+        if (error) console.warn("[crab-desktop] Could not append agent log.");
+      });
+    });
     agent.on("notification", (method, params) => {
       if (!mainWindow || mainWindow.isDestroyed() || mainWindow.webContents.isDestroyed()) {
         return;
@@ -2581,7 +2595,8 @@ app.whenReady().then(async () => {
 
     // Fire-and-forget; we don't want to block the window on the
     // agent's ping round-trip. Failures bubble into the catch below.
-    agent.start().catch((err) => {
+    agent.start().then(resolveAgentReady).catch((err) => {
+      rejectAgentReady(err);
       const message = err instanceof Error ? err.message : String(err);
       mainWindow?.webContents.send("crab:event", {
         method: "agent/failed",
@@ -2589,6 +2604,7 @@ app.whenReady().then(async () => {
       });
     });
   } catch (err) {
+    rejectAgentReady(err);
     const message = err instanceof Error ? err.message : String(err);
     mainWindow?.webContents.send("crab:event", {
       method: "agent/failed",

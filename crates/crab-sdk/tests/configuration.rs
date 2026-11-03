@@ -165,3 +165,48 @@ fn invalid_cloud_names_fail_before_building_a_client() {
         ErrorKind::InvalidInput
     );
 }
+
+#[test]
+fn service_account_and_account_key_configuration_redacts_secrets() {
+    use crab_sdk::storage::{AzureOptions, GcsOptions};
+    let secret = "fixture-private-credential";
+    let gcs = GcsOptions::service_account("bucket", secret).unwrap();
+    let azure = AzureOptions::access_key("account", "container", secret).unwrap();
+    assert!(!format!("{gcs:?} {azure:?}").contains(secret));
+    assert!(GcsOptions::service_account("bucket", "").is_err());
+    assert!(AzureOptions::access_key("account", "container", "").is_err());
+}
+
+#[cfg(feature = "local")]
+#[test]
+fn explicit_cli_configuration_replaces_inherited_credentials_without_mutating_the_process() {
+    use crab_sdk::storage::{DirectStoreOptions, GcsOptions, S3Options};
+    use std::ffi::OsStr;
+    let mut command = std::process::Command::new("git");
+    command.env("AWS_SESSION_TOKEN", "fixture-stale-token");
+    let selected = DirectStoreOptions::s3(
+        S3Options::new("bucket", "region", "fixture-id", "fixture-secret").unwrap(),
+    );
+    selected.configure_command(&mut command).unwrap();
+    let env = command
+        .get_envs()
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(env[OsStr::new("AWS_SESSION_TOKEN")], None);
+    assert_eq!(
+        env[OsStr::new("AWS_ACCESS_KEY_ID")],
+        Some(OsStr::new("fixture-id"))
+    );
+    let mut command = std::process::Command::new("git");
+    command.env("GOOGLE_APPLICATION_CREDENTIALS", "fixture-stale-file");
+    DirectStoreOptions::gcs(GcsOptions::service_account("bucket", "fixture-json").unwrap())
+        .configure_command(&mut command)
+        .unwrap();
+    let env = command
+        .get_envs()
+        .collect::<std::collections::HashMap<_, _>>();
+    assert_eq!(env[OsStr::new("GOOGLE_APPLICATION_CREDENTIALS")], None);
+    assert_eq!(
+        env[OsStr::new("GOOGLE_SERVICE_ACCOUNT_KEY")],
+        Some(OsStr::new("fixture-json"))
+    );
+}

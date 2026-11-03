@@ -100,7 +100,9 @@ pub async fn git_push(work_dir: &Path, params: &PushParams) -> Result<Value> {
 /// Run a git command and return `{ status: 0, stdout, stderr }` on
 /// success, or `AgentError::Cli` on non-zero exit.
 async fn run_git(work_dir: &Path, args: &[&str]) -> Result<Value> {
-    let out = tokio::process::Command::new("git")
+    let mut command = tokio::process::Command::new("git");
+    crate::storage_auth::configure_command(&mut command)?;
+    let out = command
         .args(args)
         .current_dir(work_dir)
         .output()
@@ -146,7 +148,8 @@ pub struct RemoteSetUrlParams {
 
 /// Add a new remote. Equivalent to `git remote add <name> <url>`.
 pub async fn git_remote_add(work_dir: &Path, params: &RemoteAddParams) -> Result<Value> {
-    run_git(work_dir, &["remote", "add", &params.name, &params.url]).await
+    let url = crate::storage_auth::command_url(&params.url)?;
+    run_git(work_dir, &["remote", "add", &params.name, &url]).await
 }
 
 /// Remove a remote. Equivalent to `git remote remove <name>`.
@@ -156,7 +159,8 @@ pub async fn git_remote_remove(work_dir: &Path, params: &RemoteRemoveParams) -> 
 
 /// Change the URL of an existing remote. Equivalent to `git remote set-url <name> <url>`.
 pub async fn git_remote_set_url(work_dir: &Path, params: &RemoteSetUrlParams) -> Result<Value> {
-    run_git(work_dir, &["remote", "set-url", &params.name, &params.url]).await
+    let url = crate::storage_auth::command_url(&params.url)?;
+    run_git(work_dir, &["remote", "set-url", &params.name, &url]).await
 }
 
 // ---- Tests -----------------------------------------------------------

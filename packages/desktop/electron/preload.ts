@@ -155,8 +155,12 @@ const ALLOWED_METHODS = new Set([
   "crab_reset_files",
   "crab_init",
   "storage_config_get",
-  "storage_config_set",
   "storage_config_verify",
+  "storage_connections_list",
+  "storage_connections_save",
+  "storage_connections_remove",
+  "storage_connections_test",
+  "storage_connections_bind",
   // Workflow engine — visual DAG editor
   "workflow_list",
   "workflow_get",

@@ -3,7 +3,7 @@
 Electron desktop application in the Crab monorepo. The React renderer talks to
 Electron over context-isolated IPC. Electron supervises `crab-desktop-agent`,
 which uses native v2 SDK snapshots for remote reads, Git for local browsing, and
-the matching Crab CLI for writes, hydration, authentication, and workflow runs.
+the matching Crab CLI for writes, hydration, and workflow runs.
 The package includes the CLI, Git remote helper, NFS helper, and agent. An older
 CLI on the user's PATH cannot override the bundled runtime.
 
@@ -60,6 +60,45 @@ Electron smoke before producing unsigned installers. CI artifacts are not signed
 or notarized public releases; release signing credentials and evidence must be
 provided by the release environment. Packaging commands never publish.
 
+## Built-in storage authentication
+
+Open **Settings → Storage & Cache → Storage connections**. Add a named connection,
+choose its provider, enter credentials, and select **Test connection**. The test
+performs a real, read-only bucket/container listing with a 30-second deadline;
+it verifies read/list access, not write permission. Save the connection, then
+choose **Use connection** for the open repository. Clone and Crab setup use the
+same picker and connection test.
+
+| Provider | Built-in credentials | Repository URL |
+| --- | --- | --- |
+| AWS / S3-compatible, including R2 and MinIO | Access key, secret key, optional session token; signing region and optional endpoint | `s3://bucket/repository` or `crab://bucket/repository` |
+| Google Cloud Storage | Service-account JSON; Signed authentication tokens refresh through the provider | `gs://bucket/repository` or `crab://bucket/repository` |
+| Azure Blob | Storage account plus account key **or** SAS query string | `az://account/container/repository` or `crab://container/repository` |
+
+Credentials are encrypted with Electron's OS-backed `safeStorage` in the app's
+user-data directory. Only metadata and a connection ID return to the renderer.
+The OS keyring must be available; Linux's plaintext `basic_text` backend is
+refused. Unsaved form values clear on save, cancel, or provider change. Credentials
+never belong in repository URLs. Connections and local checkout selections
+survive restart; cloning records the selection for the destination checkout.
+Two endpoints with the same bucket name retain separate identities.
+
+The selected connection supplies explicit SDK credentials and an isolated CLI
+subprocess environment. It does not change global shell credentials. Repository
+URLs must match its provider and bucket/container. **Forget** closes bound remote
+SDK sessions and leaves an actionable missing-connection state; choose another
+connection or explicitly select **Use default credentials**. Reconnect failures
+never silently revert to the previous identity. To rotate credentials, add a new
+connection, select it, then forget the old connection.
+
+Default credentials retain the core environment chain. Use a configured
+`crab://` remote with `CRAB_STORAGE_PROVIDER` and the provider's environment
+credentials. Explicit core auth policy, including OIDC, remains authoritative;
+saved static credentials do not bypass it. Local connections are device-local
+and are never forwarded to SSH hosts. Forge tokens remain separate. Re-enter legacy desktop cloud-keychain credentials
+in the connection form; v1 `.crab/config.toml` is no longer read. Repository
+configuration uses v2 `crab.toml`.
+
 ## Checks
 
 Run `npm run build:agent` first so JavaScript subprocess tests use the matching
@@ -95,6 +134,7 @@ credentials, bucket, cache, and user-data directory.
   remain unavailable, rather than displaying invented successful counts.
 - Workflow parsing, graph construction, templates, and DVC conversion use
   `crab-workflow`; status, queue mutation, and execution use the bundled CLI.
+- Renderer RPC waits for the native startup ping and surfaces startup errors.
 - Closing a remote session drains its SDK client. Agent shutdown cancels and joins outstanding requests
   before closing its SDK clients and SlateDB index.
 

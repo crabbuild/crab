@@ -32,6 +32,7 @@ mod preview;
 mod repository;
 mod rpc;
 mod shellout;
+mod storage_auth;
 mod system_health;
 mod watcher;
 mod workflow;
@@ -51,6 +52,11 @@ use crate::rpc::{Notification, Request, Response, ResponseBody, RpcError};
 /// [`RpcError::from`]; the binary itself only exits on stdin EOF.
 #[derive(Debug, thiserror::Error)]
 pub enum AgentError {
+    #[error("invalid repository URL")]
+    ParsedUrl(#[from] url::ParseError),
+    #[error(transparent)]
+    Storage(#[from] crab_storage::StorageError),
+
     #[error("I/O error: {0}")]
     Io(#[from] std::io::Error),
 

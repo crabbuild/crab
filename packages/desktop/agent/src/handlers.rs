@@ -72,7 +72,7 @@ impl State {
             .ok_or_else(|| AgentError::RepoNotOpen(id.to_owned()))
     }
 
-    async fn get_work_dir(&self, id: &str) -> Result<PathBuf> {
+    pub(crate) async fn get_work_dir(&self, id: &str) -> Result<PathBuf> {
         let guard = self.repos.read().await;
         let repo = guard
             .get(id)
@@ -123,8 +123,20 @@ impl State {
 /// Top-level dispatch. Matches on the incoming method name and
 /// delegates to a typed handler. Unknown methods surface as
 /// [`AgentError::UnknownMethod`].
-pub async fn handle(state: &State, req: Request, out: SharedStdout) -> Result<Value> {
+pub async fn handle(state: &State, mut req: Request, out: SharedStdout) -> Result<Value> {
+    let auth = req
+        .params
+        .as_object_mut()
+        .and_then(|params| params.remove("__storage_auth"))
+        .map(serde_json::from_value::<crate::storage_auth::Connection>)
+        .transpose()
+        .map_err(|_| AgentError::Other("Invalid storage connection credentials".into()))?;
+    crate::storage_auth::scope(auth, handle_request(state, req, out)).await
+}
+
+async fn handle_request(state: &State, req: Request, out: SharedStdout) -> Result<Value> {
     let Request { method, params, .. } = req;
+    crate::storage_auth::validate_target(state, &method, &params).await?;
     match method.as_str() {
         "ping" => Ok(json!({ "pong": env!("CARGO_PKG_VERSION") })),
         "managed_profiles" => crate::managed_service::profiles(),
@@ -248,20 +260,21 @@ pub async fn handle(state: &State, req: Request, out: SharedStdout) -> Result<Va
             crab_init(&work_dir, p).await
         }
         "storage_config_get" => {
-            let p: StorageConfigGetParams = decode(&method, params)?;
-            let work_dir = state.get_work_dir(&p.repo_id).await?;
-            storage_config_get(&work_dir).await
-        }
-        "storage_config_set" => {
-            let p: StorageConfigSetParams = decode(&method, params)?;
-            let work_dir = state.get_work_dir(&p.repo_id).await?;
-            storage_config_set(&work_dir, p).await
+            let p: RepoIdParams = decode(&method, params)?;
+            let repo = state.get(&p.repo_id).await?;
+            crate::storage_auth::repository_config(repo.work_dir.as_deref(), &repo.url).await
         }
         "storage_config_verify" => {
-            let p: StorageConfigVerifyParams = decode(&method, params)?;
-            let work_dir = state.get_work_dir(&p.repo_id).await?;
-            storage_config_verify(&work_dir).await
+            let p: StorageVerifyParams = decode(&method, params)?;
+            let repo = state.get(&p.repo_id).await?;
+            crate::storage_auth::test_repository(
+                repo.work_dir.as_deref(),
+                &repo.url,
+                p.remote.as_deref(),
+            )
+            .await
         }
+        "storage_connection_test" => crate::storage_auth::test_connection().await,
         "git_checkout" => {
             let p: crate::git_branches::CheckoutParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
@@ -519,14 +532,9 @@ pub async fn handle(state: &State, req: Request, out: SharedStdout) -> Result<Va
         "storage_summary" => {
             let p: RepoIdParams = decode(&method, params)?;
             let work_dir = state.get_work_dir(&p.repo_id).await?;
-            let credentials = crate::credential_store::resolve_storage_credentials(&work_dir).await;
             let (usage, metadata) = tokio::try_join!(
-                shellout::run_json(Some(&work_dir), &["du", "--json"], &credentials.env_vars),
-                shellout::run_json(
-                    Some(&work_dir),
-                    &["metadb", "diagnose", "--json"],
-                    &credentials.env_vars
-                ),
+                shellout::run_json(Some(&work_dir), &["du", "--json"], &[]),
+                shellout::run_json(Some(&work_dir), &["metadb", "diagnose", "--json"], &[]),
             )?;
             Ok(json!({ "usage": usage, "metadata": metadata }))
         }
@@ -2914,7 +2922,7 @@ async fn crab_diff_file(state: &State, p: GitDiffFileParams) -> Result<Value> {
     // Allow up to 60s for shard resolution from S3.
     let result = tokio::time::timeout(
         std::time::Duration::from_secs(60),
-        tokio::process::Command::new(shellout::resolve_crab_bin())
+        shellout::command()?
             .args(&args)
             .current_dir(&work_dir)
             .output(),
@@ -4386,7 +4394,11 @@ struct CloneParams {
 
 async fn clone_repo(p: CloneParams, out: SharedStdout) -> Result<Value> {
     let dest_str = p.dest.display().to_string();
-    let effective_url = rewrite_url_with_token(&p.url, p.token.as_deref(), p.provider.as_deref());
+    let effective_url = match crate::storage_auth::current() {
+        Some(connection) => connection.cli_url(&p.url)?,
+        None if crate::storage_auth::cloud_url(&p.url) => crate::storage_auth::command_url(&p.url)?,
+        None => rewrite_url_with_token(&p.url, p.token.as_deref(), p.provider.as_deref()),
+    };
 
     // The URL passed to the CLI must not leak the token into logs.
     // `run_streaming` logs the args at debug level, so we use the
@@ -4519,7 +4531,9 @@ async fn push(p: JobParams, out: SharedStdout) -> Result<Value> {
     // Crab push is driven through `git push`; the remote helper
     // takes over. Calling `git push` here keeps the UI aligned with
     // standard git workflow.
-    let git = tokio::process::Command::new("git")
+    let mut command = tokio::process::Command::new("git");
+    crate::storage_auth::configure_command(&mut command)?;
+    let git = command
         .arg("push")
         .current_dir(&p.cwd)
         .stdout(std::process::Stdio::piped())
@@ -4567,13 +4581,12 @@ async fn crab_add_structured(
         args.push("--dry-run".into());
     }
     args.extend(p.patterns);
-    let credentials = crate::credential_store::resolve_storage_credentials(work_dir).await;
     let summary = shellout::run_structured(
         "add",
         &p.job_id,
         work_dir,
         &args,
-        &credentials.env_vars,
+        &[],
         "crab/add_progress",
         out,
     )
@@ -4603,13 +4616,12 @@ async fn crab_push_structured(
     if let Some(remote) = p.remote {
         args.push(remote);
     }
-    let credentials = crate::credential_store::resolve_storage_credentials(work_dir).await;
     let mut summary = shellout::run_structured(
         "push",
         &p.job_id,
         work_dir,
         &args,
-        &credentials.env_vars,
+        &[],
         "crab/push_progress",
         out,
     )
@@ -4648,15 +4660,12 @@ struct StagingCleanParams {
 
 /// Run `crab staging clean` to purge stale data and reclaim disk.
 async fn staging_clean(work_dir: &std::path::Path, prune_abandoned: bool) -> Result<Value> {
-    use tokio::process::Command;
-
-    let crab_bin = shellout::resolve_crab_bin();
     let mut args = vec!["staging", "clean"];
     if prune_abandoned {
         args.push("--prune-abandoned");
     }
 
-    let output = Command::new(&crab_bin)
+    let output = shellout::command()?
         .args(&args)
         .current_dir(work_dir)
         .stdin(std::process::Stdio::null())
@@ -4751,13 +4760,12 @@ async fn crab_reset_files(work_dir: &std::path::Path, paths: &[String]) -> Resul
         return Ok(json!({ "ok": true, "files_reset": 0, "output": "no matching files found" }));
     }
 
-    let crab_bin = shellout::resolve_crab_bin();
     let mut args: Vec<&str> = vec!["reset"];
     for p in &resolved_paths {
         args.push(p.as_str());
     }
 
-    let output = Command::new(&crab_bin)
+    let output = shellout::command()?
         .args(&args)
         .current_dir(work_dir)
         .stdin(std::process::Stdio::null())
@@ -4779,11 +4787,11 @@ async fn crab_reset_files(work_dir: &std::path::Path, paths: &[String]) -> Resul
     Ok(json!({ "ok": true, "output": stdout.trim(), "files_reset": resolved_paths.len() }))
 }
 
-// ---------------- storage_config ----------------
-
-#[derive(Debug, Deserialize)]
-struct StorageConfigGetParams {
+#[derive(Deserialize)]
+struct StorageVerifyParams {
     repo_id: String,
+    #[serde(default)]
+    remote: Option<String>,
 }
 
 // ---------------- crab_init ----------------
@@ -4795,422 +4803,32 @@ struct CrabInitParams {
     url: String,
 }
 
-/// Initialize a repository for crab large-file management.
-///
-/// Runs `crab init <url>` which creates `.crab/config.toml`, registers
-/// the `filter.crab` driver in the local git config, and prepares the
-/// repo for chunking, dedup, and push operations.
+/// Initialize native v2 metadata and Git wiring using the matched CLI.
 async fn crab_init(work_dir: &std::path::Path, p: CrabInitParams) -> Result<Value> {
-    use tokio::process::Command;
-
-    let crab_bin = shellout::resolve_crab_bin();
-
-    // Resolve storage credentials so verify can use them after init.
-    let storage_creds = crate::credential_store::resolve_storage_credentials(work_dir).await;
-
-    let mut cmd = Command::new(&crab_bin);
-    cmd.args(["init", &p.url])
+    let url = match crate::storage_auth::current() {
+        Some(connection) => connection.cli_url(&p.url)?,
+        None => crate::storage_auth::command_url(&p.url)?,
+    };
+    let mut command = shellout::command()?;
+    command.args(["init", &url]);
+    if let Some(connection) = crate::storage_auth::current() {
+        command.args(["--storage-provider", connection.provider()]);
+    }
+    let output = command
         .current_dir(work_dir)
         .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-
-    // Inject keychain-resolved credentials as env vars.
-    for (key, value) in &storage_creds.env_vars {
-        cmd.env(key, value);
-    }
-
-    let output = cmd.output().await.map_err(AgentError::Io)?;
-
-    if output.status.success() {
-        // Also set the git remote so `git push` routes through the remote helper.
-        let _ = Command::new("git")
-            .args(["remote", "set-url", "origin", &p.url])
-            .current_dir(work_dir)
-            .output()
-            .await;
-
-        // If no remote named "origin" exists, add it.
-        let _ = Command::new("git")
-            .args(["remote", "add", "origin", &p.url])
-            .current_dir(work_dir)
-            .output()
-            .await;
-
-        Ok(json!({
-            "ok": true,
-            "url": p.url,
-            "config_path": work_dir.join(".crab").join("config.toml").display().to_string(),
-        }))
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        Ok(json!({
-            "ok": false,
-            "error": stderr,
-        }))
-    }
-}
-
-/// Read the current backend storage configuration from `.crab/config.toml`.
-async fn storage_config_get(work_dir: &std::path::Path) -> Result<Value> {
-    let config_path = work_dir.join(".crab").join("config.toml");
-    if !config_path.exists() {
-        return Ok(json!({
-            "configured": false,
-            "provider": null,
-            "bucket": null,
-            "prefix": null,
-            "region": null,
-            "has_credentials": false,
-        }));
-    }
-
-    let content = tokio::fs::read_to_string(&config_path)
-        .await
-        .map_err(AgentError::Io)?;
-
-    // Parse TOML to extract storage-relevant fields.
-    let parsed: toml::Value = content
-        .parse()
-        .unwrap_or(toml::Value::Table(toml::map::Map::new()));
-    let table = parsed.as_table();
-
-    let remote_url = table
-        .and_then(|t| t.get("remote"))
-        .and_then(|v| v.as_table())
-        .and_then(|t| t.get("url"))
-        .and_then(|v| v.as_str());
-
-    // Infer provider from URL or explicit config.
-    let (provider, bucket, prefix, region) = if let Some(url) = remote_url {
-        if url.starts_with("crab://") || url.starts_with("s3://") {
-            let stripped = url
-                .trim_start_matches("crab://")
-                .trim_start_matches("s3://");
-            let parts: Vec<&str> = stripped.splitn(2, '/').collect();
-            let bucket = parts.first().map(|s| s.to_string());
-            let prefix = parts.get(1).map(|s| s.to_string());
-            let region = table
-                .and_then(|t| t.get("remote"))
-                .and_then(|v| v.as_table())
-                .and_then(|t| t.get("region"))
-                .and_then(|v| v.as_str())
-                .map(|s| s.to_string());
-            ("s3".to_string(), bucket, prefix, region)
-        } else if url.starts_with("gs://") {
-            let stripped = url.trim_start_matches("gs://");
-            let parts: Vec<&str> = stripped.splitn(2, '/').collect();
-            (
-                "gcs".to_string(),
-                parts.first().map(|s| s.to_string()),
-                parts.get(1).map(|s| s.to_string()),
-                None,
-            )
-        } else if url.starts_with("az://") || url.starts_with("azure://") {
-            let stripped = url
-                .trim_start_matches("az://")
-                .trim_start_matches("azure://");
-            let parts: Vec<&str> = stripped.splitn(2, '/').collect();
-            (
-                "azure".to_string(),
-                parts.first().map(|s| s.to_string()),
-                parts.get(1).map(|s| s.to_string()),
-                None,
-            )
-        } else {
-            ("unknown".to_string(), None, None, None)
-        }
-    } else {
-        ("none".to_string(), None, None, None)
-    };
-
-    // Check if credentials exist in environment or OS keychain.
-    let has_env_credentials = std::env::var("AWS_ACCESS_KEY_ID").is_ok()
-        || std::env::var("GOOGLE_APPLICATION_CREDENTIALS").is_ok()
-        || std::env::var("AZURE_STORAGE_CONNECTION_STRING").is_ok();
-
-    // Also check the OS keychain for stored credentials.
-    let has_keychain_credentials = if let Some(ref b) = bucket {
-        let key_prefix = format!("crab-storage.{b}");
-        match provider.as_str() {
-            "s3" => {
-                crate::credential_store::get_credential(&format!("{key_prefix}.aws.access_key_id"))
-                    .await
-                    .is_some()
-            }
-            "gcs" => crate::credential_store::get_credential(&format!(
-                "{key_prefix}.gcp.service_account_key"
-            ))
-            .await
-            .is_some(),
-            "azure" => {
-                crate::credential_store::get_credential(&format!(
-                    "{key_prefix}.azure.connection_string"
-                ))
-                .await
-                .is_some()
-                    || crate::credential_store::get_credential(&format!(
-                        "{key_prefix}.azure.storage_key"
-                    ))
-                    .await
-                    .is_some()
-            }
-            _ => false,
-        }
-    } else {
-        false
-    };
-
-    let has_credentials = has_env_credentials || has_keychain_credentials;
-
-    Ok(json!({
-        "configured": remote_url.is_some(),
-        "provider": provider,
-        "bucket": bucket,
-        "prefix": prefix,
-        "region": region,
-        "remote_url": remote_url,
-        "has_credentials": has_credentials,
-    }))
-}
-
-#[derive(Debug, Deserialize)]
-struct StorageConfigSetParams {
-    repo_id: String,
-    provider: String,
-    bucket: String,
-    #[serde(default)]
-    prefix: Option<String>,
-    #[serde(default)]
-    region: Option<String>,
-    /// Credentials are passed here for the agent to forward to the
-    /// main process keychain. They are NOT written to disk.
-    #[serde(default)]
-    credentials: Option<Value>,
-}
-
-/// Write backend storage configuration. Non-secret parts go to
-/// `.crab/config.toml`; credentials are stored in the OS keychain.
-async fn storage_config_set(
-    work_dir: &std::path::Path,
-    p: StorageConfigSetParams,
-) -> Result<Value> {
-    let crab_dir = work_dir.join(".crab");
-    tokio::fs::create_dir_all(&crab_dir)
-        .await
-        .map_err(AgentError::Io)?;
-
-    let config_path = crab_dir.join("config.toml");
-
-    // Build the remote URL based on provider.
-    let remote_url = match p.provider.as_str() {
-        "s3" => {
-            let prefix = p.prefix.as_deref().unwrap_or("");
-            if prefix.is_empty() {
-                format!("crab://{}", p.bucket)
-            } else {
-                format!("crab://{}/{}", p.bucket, prefix)
-            }
-        }
-        "gcs" => {
-            let prefix = p.prefix.as_deref().unwrap_or("");
-            if prefix.is_empty() {
-                format!("gs://{}", p.bucket)
-            } else {
-                format!("gs://{}/{}", p.bucket, prefix)
-            }
-        }
-        "azure" => {
-            let prefix = p.prefix.as_deref().unwrap_or("");
-            if prefix.is_empty() {
-                format!("az://{}", p.bucket)
-            } else {
-                format!("az://{}/{}", p.bucket, prefix)
-            }
-        }
-        _ => {
-            return Err(AgentError::Other(format!(
-                "unsupported provider: {}",
-                p.provider
-            )));
-        }
-    };
-
-    // Write config.toml with the remote URL and region.
-    let mut config_content = format!("[remote]\nurl = \"{remote_url}\"\n");
-    if let Some(ref region) = p.region {
-        config_content.push_str(&format!("region = \"{region}\"\n"));
-    }
-
-    tokio::fs::write(&config_path, &config_content)
-        .await
-        .map_err(AgentError::Io)?;
-
-    // Store credentials in the OS keychain if provided.
-    if let Some(ref credentials) = p.credentials {
-        let key_prefix = format!("crab-storage.{}", p.bucket);
-        match p.provider.as_str() {
-            "s3" => {
-                if let Some(ak) = credentials.get("access_key_id").and_then(|v| v.as_str()) {
-                    crate::credential_store::set_credential(
-                        &format!("{key_prefix}.aws.access_key_id"),
-                        ak,
-                    )
-                    .await;
-                }
-                if let Some(sk) = credentials
-                    .get("secret_access_key")
-                    .and_then(|v| v.as_str())
-                {
-                    crate::credential_store::set_credential(
-                        &format!("{key_prefix}.aws.secret_access_key"),
-                        sk,
-                    )
-                    .await;
-                }
-                if let Some(st) = credentials.get("session_token").and_then(|v| v.as_str()) {
-                    crate::credential_store::set_credential(
-                        &format!("{key_prefix}.aws.session_token"),
-                        st,
-                    )
-                    .await;
-                }
-                if let Some(ref region) = p.region {
-                    crate::credential_store::set_credential(
-                        &format!("{key_prefix}.aws.region"),
-                        region,
-                    )
-                    .await;
-                }
-            }
-            "gcs" => {
-                if let Some(sa) = credentials
-                    .get("service_account_json")
-                    .and_then(|v| v.as_str())
-                {
-                    crate::credential_store::set_credential(
-                        &format!("{key_prefix}.gcp.service_account_key"),
-                        sa,
-                    )
-                    .await;
-                }
-                if let Some(pid) = credentials.get("project_id").and_then(|v| v.as_str()) {
-                    crate::credential_store::set_credential(
-                        &format!("{key_prefix}.gcp.project_id"),
-                        pid,
-                    )
-                    .await;
-                }
-            }
-            "azure" => {
-                if let Some(cs) = credentials
-                    .get("connection_string")
-                    .and_then(|v| v.as_str())
-                {
-                    crate::credential_store::set_credential(
-                        &format!("{key_prefix}.azure.connection_string"),
-                        cs,
-                    )
-                    .await;
-                }
-                if let Some(acct) = credentials.get("storage_account").and_then(|v| v.as_str()) {
-                    crate::credential_store::set_credential(
-                        &format!("{key_prefix}.azure.storage_account"),
-                        acct,
-                    )
-                    .await;
-                }
-                if let Some(key) = credentials.get("storage_key").and_then(|v| v.as_str()) {
-                    crate::credential_store::set_credential(
-                        &format!("{key_prefix}.azure.storage_key"),
-                        key,
-                    )
-                    .await;
-                }
-            }
-            _ => {}
-        }
-    }
-
-    // Also set the git remote so `git push` routes through the remote helper.
-    let _ = tokio::process::Command::new("git")
-        .args(["remote", "set-url", "origin", &remote_url])
-        .current_dir(work_dir)
+        .kill_on_drop(true)
         .output()
-        .await;
-
-    // If no remote exists yet, add it.
-    let _ = tokio::process::Command::new("git")
-        .args(["remote", "add", "origin", &remote_url])
-        .current_dir(work_dir)
-        .output()
-        .await;
-
-    // Ensure the filter driver is registered so clean/smudge works.
-    let crab_bin = shellout::resolve_crab_bin();
-    let _ = tokio::process::Command::new(&crab_bin)
-        .args(["init", &remote_url])
-        .current_dir(work_dir)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .output()
-        .await;
-
-    Ok(json!({
-        "ok": true,
-        "remote_url": remote_url,
-        "config_path": config_path.display().to_string(),
-    }))
-}
-
-#[derive(Debug, Deserialize)]
-struct StorageConfigVerifyParams {
-    repo_id: String,
-}
-
-/// Verify connectivity to the configured backend by running
-/// `crab doctor --json` which checks remote access as part of its
-/// health check suite.
-async fn storage_config_verify(work_dir: &std::path::Path) -> Result<Value> {
-    use std::time::Instant;
-    use tokio::process::Command;
-
-    let crab_bin = shellout::resolve_crab_bin();
-    let start = Instant::now();
-
-    // Resolve storage credentials from the OS keychain.
-    let storage_creds = crate::credential_store::resolve_storage_credentials(work_dir).await;
-
-    let mut cmd = Command::new(&crab_bin);
-    cmd.args(["doctor", "--json"])
-        .current_dir(work_dir)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::piped())
-        .stderr(std::process::Stdio::piped());
-
-    // Inject keychain-resolved credentials as env vars.
-    for (key, value) in &storage_creds.env_vars {
-        cmd.env(key, value);
+        .await?;
+    if !output.status.success() {
+        return Err(AgentError::Cli {
+            status: output.status.code().unwrap_or(-1),
+            stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
+        });
     }
-
-    let output = cmd.output().await.map_err(AgentError::Io)?;
-
-    let latency_ms = start.elapsed().as_millis() as u64;
-
-    if output.status.success() {
-        Ok(json!({
-            "ok": true,
-            "latency_ms": latency_ms,
-        }))
-    } else {
-        let stderr = String::from_utf8_lossy(&output.stderr).into_owned();
-        Ok(json!({
-            "ok": false,
-            "latency_ms": latency_ms,
-            "error": stderr,
-        }))
-    }
+    Ok(
+        json!({ "ok": true, "url": url, "config_path": work_dir.join("crab.toml").display().to_string() }),
+    )
 }
 
 // ---------------- crab_add_auto ----------------
@@ -5235,15 +4853,10 @@ async fn crab_add_auto(work_dir: &std::path::Path, p: CrabAddAutoParams) -> Resu
     use tokio::process::Command;
     use tracing::{debug, warn};
 
-    let crab_bin = shellout::resolve_crab_bin();
     let mut tracked: u64 = 0;
     let mut errors: Vec<Value> = Vec::new();
     let mut succeeded_paths: Vec<String> = Vec::new();
     let mut patterns_added: Vec<String> = Vec::new();
-
-    // Resolve storage credentials from OS keychain so crab add can
-    // access the remote for dedup lookups.
-    let storage_creds = crate::credential_store::resolve_storage_credentials(work_dir).await;
 
     // Step 1: Ensure all unique file extensions are tracked in .gitattributes.
     // This is idempotent — `crab track` is a no-op if the pattern already exists.
@@ -5254,7 +4867,7 @@ async fn crab_add_auto(work_dir: &std::path::Path, p: CrabAddAutoParams) -> Resu
             if seen_extensions.insert(ext_lower.clone()) {
                 let glob = format!("*.{}", ext_lower);
                 debug!(glob = %glob, "crab_add_auto: ensuring pattern is tracked");
-                let track_output = Command::new(&crab_bin)
+                let track_output = shellout::command()?
                     .args(["track", &glob])
                     .current_dir(work_dir)
                     .stdin(std::process::Stdio::null())
@@ -5277,16 +4890,14 @@ async fn crab_add_auto(work_dir: &std::path::Path, p: CrabAddAutoParams) -> Resu
     // Step 2: Run `crab add` for each file path.
     for path in &p.paths {
         debug!(path = %path, "crab_add_auto: running crab add");
-        let mut cmd = Command::new(&crab_bin);
+        let mut cmd = shellout::command()?;
         cmd.args(["add", path])
             .current_dir(work_dir)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
-        for (key, value) in &storage_creds.env_vars {
-            cmd.env(key, value);
-        }
+        crate::storage_auth::configure_command(&mut cmd)?;
 
         let output = cmd.output().await.map_err(AgentError::Io)?;
 
@@ -5382,12 +4993,9 @@ async fn crab_track_and_add(work_dir: &std::path::Path, p: CrabTrackAndAddParams
     use tokio::process::Command;
     use tracing::{debug, warn};
 
-    let crab_bin = shellout::resolve_crab_bin();
     let mut patterns_added: Vec<String> = Vec::new();
     let mut files_tracked: Vec<Value> = Vec::new();
     let mut errors: Vec<Value> = Vec::new();
-
-    let storage_creds = crate::credential_store::resolve_storage_credentials(work_dir).await;
 
     // Step 1: Register patterns.
     let mut seen_extensions: HashSet<String> = HashSet::new();
@@ -5397,7 +5005,7 @@ async fn crab_track_and_add(work_dir: &std::path::Path, p: CrabTrackAndAddParams
             if seen_extensions.insert(ext_lower.clone()) {
                 let glob = format!("*.{}", ext_lower);
                 debug!(glob = %glob, "crab_track_and_add: registering pattern");
-                let output = Command::new(&crab_bin)
+                let output = shellout::command()?
                     .args(["track", &glob])
                     .current_dir(work_dir)
                     .stdin(std::process::Stdio::null())
@@ -5420,16 +5028,14 @@ async fn crab_track_and_add(work_dir: &std::path::Path, p: CrabTrackAndAddParams
     // Step 2: Run `crab add` for each file.
     for path in &p.paths {
         debug!(path = %path, "crab_track_and_add: running crab add");
-        let mut cmd = Command::new(&crab_bin);
+        let mut cmd = shellout::command()?;
         cmd.args(["add", path])
             .current_dir(work_dir)
             .stdin(std::process::Stdio::null())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::piped());
 
-        for (key, value) in &storage_creds.env_vars {
-            cmd.env(key, value);
-        }
+        crate::storage_auth::configure_command(&mut cmd)?;
 
         let output = cmd.output().await.map_err(AgentError::Io)?;
 
@@ -6041,7 +5647,9 @@ async fn git_diff_name_only(state: &State, p: GitDiffNameOnlyParams) -> Result<V
 
 /// Shared helper for simple git commands that return status + output.
 async fn run_git_simple(work_dir: &std::path::Path, args: &[&str]) -> Result<Value> {
-    let out = tokio::process::Command::new("git")
+    let mut command = tokio::process::Command::new("git");
+    crate::storage_auth::configure_command(&mut command)?;
+    let out = command
         .args(args)
         .current_dir(work_dir)
         .output()

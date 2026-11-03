@@ -1,3 +1,4 @@
+import type { StorageConnectionInfo, StorageConnectionInput, StorageConnectionStatus } from "../electron/storage-connection-types";
 // Typed wrapper around the `window.crab` bridge exposed by
 // `electron/preload.ts`. Centralising the types here keeps components
 // free of `unknown` assertions and makes the agent's RPC surface
@@ -2155,11 +2156,11 @@ export const rpc = {
   managedCreateRepository: (service: string, repository: string) =>
     call<ManagedRepository>("managed_create_repository", { service, repository }),
 
-  openLocal: (path: string) =>
-    call<RepoHandle>("open_local", { repo_id: nextRepoId("local"), path }),
+  openLocal: (path: string, storage_connection_id?: string | null) =>
+    call<RepoHandle>("open_local", { repo_id: nextRepoId("local"), path, ...(storage_connection_id !== undefined ? { storage_connection_id } : {}) }),
 
-  openUrl: (url: string) =>
-    call<RepoHandle>("open_url", { repo_id: nextRepoId("url"), url }),
+  openUrl: (url: string, storage_connection_id?: string | null) =>
+    call<RepoHandle>("open_url", { repo_id: nextRepoId("url"), url, ...(storage_connection_id !== undefined ? { storage_connection_id } : {}) }),
 
   close: (repo_id: string) => call<{ closed: string }>("close", { repo_id }),
 
@@ -2476,13 +2477,14 @@ export const rpc = {
   cacheClear: () =>
     call<{ method: string; stdout?: string; reason?: string; cleared?: string }>("cache_clear"),
 
-  clone: (url: string, dest: string, jobId = nextJobId("clone"), token?: string, provider?: string) =>
+  clone: (url: string, dest: string, jobId = nextJobId("clone"), token?: string, provider?: string, storage_connection_id?: string) =>
     call<{ status: number; dest: string }>("clone", {
       job_id: jobId,
       url,
       dest,
       ...(token ? { token } : {}),
       ...(provider ? { provider } : {}),
+      ...(storage_connection_id ? { storage_connection_id } : {}),
     }),
 
   status: (cwd: string, jobId = nextJobId("status")) =>
@@ -2845,26 +2847,22 @@ export const rpc = {
   crabInit: (repo_id: string, url: string) =>
     call<{ ok: boolean; url?: string; config_path?: string; error?: string }>("crab_init", { repo_id, url }),
 
-  storageConfigGet: (repo_id: string) =>
-    call<StorageConfig>("storage_config_get", { repo_id }),
+  storageConfigGet: (repo_id: string) => call<StorageConfig>("storage_config_get", { repo_id }),
+  storageConfigVerify: (repo_id: string, remote?: string) => call<StorageVerifyResult>("storage_config_verify", { repo_id, remote }),
 
-  storageConfigSet: (
-    repo_id: string,
-    config: {
-      provider: string;
-      bucket: string;
-      prefix?: string;
-      region?: string;
-      credentials?: Record<string, string>;
-    },
-  ) =>
-    call<{ ok: boolean; remote_url: string; config_path: string }>(
-      "storage_config_set",
-      { repo_id, ...config },
-    ),
-
-  storageConfigVerify: (repo_id: string) =>
-    call<StorageVerifyResult>("storage_config_verify", { repo_id }),
+  storageConnections: (repo_id?: string) => call<StorageConnectionStatus>("storage_connections_list", { repo_id }),
+  storageConnectionSave: (connection: StorageConnectionInput) => call<StorageConnectionInfo>("storage_connections_save", { connection }),
+  storageConnectionRemove: async (id: string) => {
+    const result = await call<{ ok: boolean }>("storage_connections_remove", { id });
+    window.dispatchEvent(new CustomEvent("crab:storage-connection-changed"));
+    return result;
+  },
+  storageConnectionTest: (connection: StorageConnectionInput | string) => call<StorageVerifyResult>("storage_connections_test", typeof connection === "string" ? { id: connection } : { connection }),
+  storageConnectionBind: async (repo_id: string, id: string | null) => {
+    const result = await call<{ ok: boolean }>("storage_connections_bind", { repo_id, id });
+    window.dispatchEvent(new CustomEvent("crab:storage-connection-changed", { detail: { repo_id } }));
+    return result;
+  },
 
   storageSummary: (repo_id: string) => call<StorageSummary>("storage_summary", { repo_id }),
 

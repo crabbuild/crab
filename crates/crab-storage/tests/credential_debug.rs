@@ -25,6 +25,9 @@ fn object_store_credentials_redact_each_provider_secret() {
         ObjectStoreCredentials::Gcp {
             access_token: SECRET.into(),
         },
+        ObjectStoreCredentials::GcpServiceAccount {
+            service_account_key: SECRET.into(),
+        },
         ObjectStoreCredentials::Azure {
             account: "account".into(),
             token: AzureAuthorization::Bearer(SECRET.into()),
@@ -39,10 +42,11 @@ fn object_store_credentials_redact_each_provider_secret() {
 }
 
 #[test]
-fn azure_authorization_redacts_both_authorization_forms() {
+fn azure_authorization_redacts_every_authorization_form() {
     for token in [
         AzureAuthorization::Bearer(SECRET.into()),
         AzureAuthorization::Sas(SECRET.into()),
+        AzureAuthorization::AccessKey(SECRET.into()),
     ] {
         assert_redacted(&token);
     }

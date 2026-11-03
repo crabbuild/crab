@@ -4,6 +4,7 @@ import * as readline from "node:readline";
 import * as path from "node:path";
 import * as fs from "node:fs";
 import { app, dialog } from "electron";
+import type { StorageConnections } from "./storage-connections";
 
 // Narrow JSON-RPC 2.0 types. The agent sends three frame shapes:
 //   - success response: { jsonrpc, id, result }
@@ -59,7 +60,7 @@ export class Agent extends EventEmitter {
   private recentStderrLines: string[] = [];
   private static readonly MAX_STDERR_LINES = 500;
 
-  constructor(binary: string, env: NodeJS.ProcessEnv = process.env, extraArgs: string[] = []) {
+  constructor(binary: string, env: NodeJS.ProcessEnv = process.env, extraArgs: string[] = [], private storageConnections?: StorageConnections) {
     super();
     this.binary = binary;
     this.env = env;
@@ -87,12 +88,14 @@ export class Agent extends EventEmitter {
 
     // Capture stderr lines into a ring buffer for crash dumps.
     const stderrRl = readline.createInterface({ input: child.stderr });
-    stderrRl.on("line", (line) => {
+    stderrRl.on("line", (rawLine) => {
+      const line = this.storageConnections?.redactText(rawLine) ?? rawLine;
       this.recentStderrLines.push(line);
       if (this.recentStderrLines.length > Agent.MAX_STDERR_LINES) {
         this.recentStderrLines.shift();
       }
       process.stderr.write(`[agent] ${line}\n`);
+      this.emit("stderr", line);
     });
 
     child.on("exit", (code, signal) => {
@@ -131,6 +134,13 @@ export class Agent extends EventEmitter {
   }
 
   async request(method: string, params: unknown): Promise<unknown> {
+    if (this.storageConnections) {
+      return this.storageConnections.request(method, params, (name, payload) => this.sendRequest(name, payload));
+    }
+    return this.sendRequest(method, params);
+  }
+
+  private async sendRequest(method: string, params: unknown): Promise<unknown> {
     if (!this.child) throw new Error("agent not running");
     const id = String(this.nextId++);
     const frame = JSON.stringify({ jsonrpc: "2.0", id, method, params }) + "\n";
@@ -162,7 +172,7 @@ export class Agent extends EventEmitter {
     try {
       frame = JSON.parse(line) as RpcFrame;
     } catch (err) {
-      process.stderr.write(`[agent] malformed frame: ${line}\n`);
+      process.stderr.write("[agent] malformed RPC frame\n");
       return;
     }
 
@@ -182,7 +192,10 @@ export class Agent extends EventEmitter {
       return;
     }
 
-    // Notification.
+    // Progress is log text; repository content responses must remain byte-exact.
+    if (frame.method === "progress/line" && frame.params && typeof frame.params === "object" && "line" in frame.params && typeof frame.params.line === "string") {
+      frame.params.line = this.storageConnections?.redactText(frame.params.line) ?? frame.params.line;
+    }
     this.emit("notification", frame.method, frame.params);
   }
 

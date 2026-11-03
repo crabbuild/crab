@@ -23,16 +23,62 @@ contracts. The relevant owners are `crates/crab-sdk/src/builder.rs`,
 
 - TypeScript renderer and Electron type checks pass.
 - Native runtime staging and packaging checks pass (3 build tests).
-- Full JavaScript suite passes: 4,048 tests in 221 files, zero failures or skips,
-  using `npm test -- --maxWorkers 2 --minWorkers 1`.
-- 246 Rust agent tests pass, including a real native-v2 repository on private RustFS.
+- Before the provider-auth changes, the full JavaScript suite passed 4,048 tests
+  in 221 files. Auth integration runs cover 4,074 tests; each latest broad run
+  passed 4,073 and exposed one of the existing issues recorded below.
+- All 27 focused storage-connection tests pass, including a regression that
+  failed before fixing credential redaction during an in-flight forget.
+- 251 Rust agent tests pass, including a real native-v2 repository on private
+  RustFS and real Azure HTTP listings with account-key and SAS authentication.
+- SDK configuration tests (9), provider Debug redaction tests (2), Azure CLI
+  placement, provider option tests (6), and the minimal SDK feature build pass.
 - Packaged app qualification covers local browsing, add, push, byte-identical
   remote reconstruction, clone, dehydrate/hydrate, remote refs, verified v2
   diagnostics, and real argv workflow execution after load/save.
   The UI smoke completes the fresh profile’s welcome and telemetry prompts,
   selects a file in the rendered tree, and verifies its editor text.
+  Storage auth is exercised through the rendered form: failed and successful
+  read/list tests, OS-backed encrypted save, per-repository selection, Git fetch,
+  SDK reads and CLI writes with deliberately invalid ambient credentials, then
+  a real app restart that recovers the cloned checkout's saved connection.
 - `scripts/qualify-v2.py` provides the disposable storage fixture used by CI;
   it uses the existing SDK qualification tool's pinned RustFS binary and checksum.
+
+## Built-in storage connections
+
+The main process owns encrypted saved connections and checkout bindings through
+Electron 33 `safeStorage`. The renderer receives metadata only. S3 access keys
+and optional session tokens, inline GCS service-account JSON, and Azure account
+keys or SAS tokens feed the same explicit provider constructors used by SDK
+reads. CLI subprocesses use the SDK's scoped environment policy rather than
+mutating process-wide credentials. Repository URL checks prevent a selected
+identity from crossing provider or bucket/container boundaries.
+
+The shared form replaces cloud credential forms in clone, setup, settings, and
+the Remote Manager. Its connection test performs a real read-only listing,
+reports a bounded failure in the UI, and does not claim write permission.
+Forgotten connections close SDK sessions and preserve missing-connection bindings
+rather than silently switching to ambient credentials. Explicit selections are
+persisted before opening/cloning so a failed encrypted write creates no cloud
+session or unbound checkout. Native stderr, persisted logs, progress lines, and
+public IPC errors pass through main-process credential redaction. In-flight
+operations retain redaction coverage when their connection is forgotten.
+Renderer RPC waits for the native startup ping rather than failing while shell
+and PTY initialization is still running.
+
+Dependency proof: locked `object_store` 0.14.1 accepts inline
+`GOOGLE_SERVICE_ACCOUNT_KEY`, refreshes service-account self-signed JWTs, and
+accepts Azure account keys through `with_access_key`. SAS strings use its parser,
+which decodes signatures once. Electron 33.4.11 provides the synchronous
+`safeStorage` methods; Linux `basic_text` is explicitly rejected. Default core
+auth policy remains authoritative, including OIDC; explicit desktop credentials
+are not an override for that policy.
+
+Focused coverage includes encrypted round trips, restart recovery, concurrent
+saves and requests, provider input validation, all credential forms, matching
+URL targets, failed reconnects, removal, persistence failures, and redaction.
+Live public-cloud GCS/Azure accounts and OS keyrings on Linux/Windows remain
+qualification gates; saved configuration tests do not substitute for them.
 
 ## JavaScript failure resolution
 
@@ -72,6 +118,15 @@ The changed owners and regression evidence are:
 | `electron/lsp-server.ts` | Real installed `typescript-language-server` 5.1.3 and TypeScript 5.9.3 completion; dependency waits for configuration only when that client capability is advertised |
 
 ## Launch gates still open
+
+Two broad JavaScript runs exposed unchanged pre-auth test issues:
+`daemon-legacy-adapter` can restore an exited mock session when its 50 ms poll
+races its 50 ms assertion wait; its focused 24-test rerun passes.
+`orchestrator-settings` can generate `__proto__` as an agent type, then lose its
+manually assigned configuration during JSON serialization (seed `494924895`,
+path `13:1:0:0`). Both source/test pairs are unchanged from pre-auth commit
+`c39ff89dfccb9da02727c2204b26f155b84252b9`. These remain broad-suite launch gates;
+no baseline, ignore list, or expected-failure file was changed to hide them.
 
 `npm run lint` is blocked by the imported package's missing ESLint 9 flat
 configuration. Installation reports 63 dependency audit findings, including

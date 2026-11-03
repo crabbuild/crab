@@ -37,7 +37,9 @@ pub enum ObjectStoreCredentials {
     },
     /// GCP OAuth2 access token.
     Gcp { access_token: String },
-    /// Azure bearer or SAS token.
+    /// GCS service account JSON; the provider refreshes signed authentication tokens.
+    GcpServiceAccount { service_account_key: String },
+    /// Azure bearer, SAS token, or account key.
     Azure {
         account: String,
         token: AzureAuthorization,
@@ -59,7 +61,7 @@ impl ObjectStoreCredentials {
         match self {
             Self::StaticEnv { provider } => *provider,
             Self::Aws { .. } => StorageProviderKind::S3,
-            Self::Gcp { .. } => StorageProviderKind::Gcs,
+            Self::Gcp { .. } | Self::GcpServiceAccount { .. } => StorageProviderKind::Gcs,
             Self::Azure { .. } => StorageProviderKind::Azure,
         }
     }
@@ -73,6 +75,8 @@ pub enum AzureAuthorization {
     Bearer(String),
     /// SAS query string.
     Sas(String),
+    /// Storage account access key.
+    AccessKey(String),
 }
 
 impl std::fmt::Debug for AzureAuthorization {
@@ -80,6 +84,7 @@ impl std::fmt::Debug for AzureAuthorization {
         match self {
             Self::Bearer(_) => f.write_str("Bearer(<redacted>)"),
             Self::Sas(_) => f.write_str("Sas(<redacted>)"),
+            Self::AccessKey(_) => f.write_str("AccessKey(<redacted>)"),
         }
     }
 }
@@ -314,6 +319,34 @@ pub fn resolve_static_env_provider_value(value: Option<&str>) -> Result<StorageP
     })
 }
 
+fn build_gcs_object_store(
+    bucket: &str,
+    builder: GoogleCloudStorageBuilder,
+    client_options: Option<object_store::ClientOptions>,
+) -> Result<BuiltObjectStore> {
+    let provider = StorageProviderKind::Gcs;
+    let builder = builder
+        .with_bucket_name(bucket)
+        .with_http_connector(crate::transport_read_admission::ReadAdmissionConnector::default())
+        .with_client_options(client_options.unwrap_or_else(default_client_options));
+    let (builder, target_identity) = target::gcs(builder, bucket)?;
+    let (builder, multipart_identity) = gcs_multipart_builder(builder, bucket)?;
+    let gcs = Arc::new(
+        builder
+            .build()
+            .map_err(|source| provider_config_error(provider, bucket, source))?,
+    );
+    Ok(BuiltObjectStore {
+        inner: gcs.clone() as Arc<dyn ObjectStore>,
+        provider,
+        multipart_identity: Some(multipart_identity),
+        signer: None,
+        multipart: Some(gcs),
+        target_identity,
+        immutable_write_verification: ImmutableWriteVerification::ReadbackRequired,
+    })
+}
+
 /// Builds an object-store backend from provider credentials.
 ///
 /// The returned signer is present only for providers whose concrete
@@ -396,28 +429,26 @@ fn build_object_store_inner(
             let credential_provider = Arc::new(StaticCredentialProvider::new(GcpCredential {
                 bearer: access_token,
             }));
-            let builder = GoogleCloudStorageBuilder::new()
-                .with_bucket_name(bucket)
-                .with_credentials(credential_provider)
-                .with_http_connector(
-                    crate::transport_read_admission::ReadAdmissionConnector::default(),
-                )
-                .with_client_options(client_options.unwrap_or_else(default_client_options));
-            let (builder, target_identity) = target::gcs(builder, bucket)?;
-            let (builder, multipart_identity) = gcs_multipart_builder(builder, bucket)?;
-            let gcs = builder
-                .build()
-                .map_err(|source| provider_config_error(provider, bucket, source))?;
-            let gcs = Arc::new(gcs);
-            Ok(BuiltObjectStore {
-                inner: gcs.clone() as Arc<dyn ObjectStore>,
-                provider,
-                multipart_identity: Some(multipart_identity),
-                signer: None,
-                multipart: Some(gcs),
-                target_identity,
-                immutable_write_verification: ImmutableWriteVerification::ReadbackRequired,
-            })
+            build_gcs_object_store(
+                bucket,
+                GoogleCloudStorageBuilder::new().with_credentials(credential_provider),
+                client_options,
+            )
+        }
+        ObjectStoreCredentials::GcpServiceAccount {
+            service_account_key,
+        } => {
+            if endpoint.is_some() {
+                return Err(StorageError::InvalidStaticEnvTarget {
+                    target: bucket.to_owned(),
+                    reason: "custom GCS endpoints are not supported".to_owned(),
+                });
+            }
+            build_gcs_object_store(
+                bucket,
+                GoogleCloudStorageBuilder::new().with_service_account_key(service_account_key),
+                client_options,
+            )
         }
         ObjectStoreCredentials::Azure { account, token } => {
             let builder = MicrosoftAzureBuilder::new()
@@ -433,6 +464,7 @@ fn build_object_store_inner(
             };
             let builder = match token {
                 AzureAuthorization::Bearer(token) => builder.with_bearer_token_authorization(token),
+                AzureAuthorization::AccessKey(key) => builder.with_access_key(key),
                 AzureAuthorization::Sas(sas) => {
                     // The builder decodes the SAS before encoding request query
                     // pairs. Passing encoded pairs directly corrupts signatures.

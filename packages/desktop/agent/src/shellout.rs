@@ -21,12 +21,18 @@ use tracing::{debug, warn};
 
 use crate::{AgentError, Result, SharedStdout, notify};
 
+pub fn command() -> Result<Command> {
+    let mut command = Command::new(resolve_crab_bin());
+    crate::storage_auth::configure_command(&mut command)?;
+    Ok(command)
+}
+
 pub async fn run_json(
     cwd: Option<&std::path::Path>,
     args: &[&str],
     env_vars: &[(String, String)],
 ) -> Result<serde_json::Value> {
-    let mut command = Command::new(resolve_crab_bin());
+    let mut command = self::command()?;
     command
         .args(args)
         .envs(env_vars.iter().map(|(key, value)| (key, value)))
@@ -58,7 +64,7 @@ pub async fn run_structured(
     event_method: &str,
     out: SharedStdout,
 ) -> Result<serde_json::Value> {
-    let mut child = Command::new(resolve_crab_bin())
+    let mut child = command()?
         .args(args)
         .envs(env_vars.iter().map(|(key, value)| (key, value)))
         .current_dir(cwd)
@@ -162,8 +168,8 @@ pub async fn run_streaming(
 }
 
 /// Run `crab <args>` with additional environment variables injected.
-/// Used by the structured add/push handlers to inject credentials from
-/// the OS keychain without writing them to disk.
+/// Request-scoped provider credentials are applied by `command`; callers may
+/// add operation-specific variables without modifying the agent environment.
 pub async fn run_streaming_with_env(
     op: &str,
     job_id: &str,
@@ -175,7 +181,7 @@ pub async fn run_streaming_with_env(
     let bin = resolve_crab_bin();
     debug!(op, job_id, bin = %bin.display(), "spawning crab");
 
-    let mut cmd = Command::new(&bin);
+    let mut cmd = command()?;
     cmd.args(args);
     cmd.stdout(Stdio::piped());
     cmd.stderr(Stdio::piped());

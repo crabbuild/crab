@@ -40,7 +40,7 @@ enum DirectTarget {
     Azure(AzureOptions),
 }
 
-/// Explicit GCS bucket and static bearer token; no default credential chain is used.
+/// Explicit GCS bucket and authorization; no default credential chain is used.
 #[derive(Clone)]
 #[cfg_attr(
     not(feature = "remote"),
@@ -48,7 +48,17 @@ enum DirectTarget {
 )]
 pub struct GcsOptions {
     bucket: String,
-    access_token: String,
+    authorization: GcsAuthorization,
+}
+
+#[derive(Clone)]
+#[cfg_attr(
+    not(feature = "remote"),
+    expect(dead_code, reason = "Configuration is consumed by remote builds")
+)]
+enum GcsAuthorization {
+    Bearer(String),
+    ServiceAccount(String),
 }
 
 impl std::fmt::Debug for GcsOptions {
@@ -58,6 +68,20 @@ impl std::fmt::Debug for GcsOptions {
 }
 
 impl GcsOptions {
+    /// Select service account JSON whose signed tokens are refreshed by the provider.
+    pub fn service_account(bucket: &str, service_account_key: &str) -> Result<Self> {
+        if !valid_cloud_name(bucket) || service_account_key.trim().is_empty() {
+            return Err(Error::new(
+                ErrorKind::InvalidInput,
+                "GCS requires a bare bucket and service account JSON",
+            ));
+        }
+        Ok(Self {
+            bucket: bucket.to_owned(),
+            authorization: GcsAuthorization::ServiceAccount(service_account_key.to_owned()),
+        })
+    }
+
     /// Validate a bare bucket and nonempty bearer token without resolving credentials.
     pub fn new(bucket: &str, access_token: &str) -> Result<Self> {
         if !valid_cloud_name(bucket) || access_token.is_empty() {
@@ -68,7 +92,7 @@ impl GcsOptions {
         }
         Ok(Self {
             bucket: bucket.to_owned(),
-            access_token: access_token.to_owned(),
+            authorization: GcsAuthorization::Bearer(access_token.to_owned()),
         })
     }
 }
@@ -158,6 +182,23 @@ enum CloudTarget {
 }
 
 impl DirectStoreOptions {
+    /// Apply isolated provider credentials and placement to a CLI subprocess.
+    /// Explicit credentials clear inherited provider credentials and endpoints.
+    #[cfg(feature = "local")]
+    pub fn configure_command(&self, command: &mut std::process::Command) -> Result<()> {
+        for (key, value) in self.scoped_local_environment()? {
+            match value {
+                Some(value) => {
+                    command.env(key, value);
+                }
+                None => {
+                    command.env_remove(key);
+                }
+            }
+        }
+        Ok(())
+    }
+
     /// Select explicit Azure configuration without provider environment overrides.
     #[must_use]
     pub fn azure(options: AzureOptions) -> Self {
@@ -240,15 +281,23 @@ impl DirectStoreOptions {
                 // broader token's content cache after selecting a different one.
                 let mut namespace =
                     blake3::Hasher::new_derive_key("crab SDK explicit GCS cache v1");
-                namespace.update(options.access_token.as_bytes());
-                build_explicit(
-                    &options.bucket,
-                    crab_storage::ObjectStoreCredentials::Gcp {
-                        access_token: options.access_token,
-                    },
-                    None,
-                    namespace,
-                )
+                let credentials = match options.authorization {
+                    GcsAuthorization::Bearer(token) => {
+                        namespace.update(b"bearer\0");
+                        namespace.update(token.as_bytes());
+                        crab_storage::ObjectStoreCredentials::Gcp {
+                            access_token: token,
+                        }
+                    }
+                    GcsAuthorization::ServiceAccount(key) => {
+                        namespace.update(b"service_account\0");
+                        namespace.update(key.as_bytes());
+                        crab_storage::ObjectStoreCredentials::GcpServiceAccount {
+                            service_account_key: key,
+                        }
+                    }
+                };
+                build_explicit(&options.bucket, credentials, None, namespace)
             }
             DirectTarget::S3(options) => {
                 // Transport identity intentionally excludes credentials. Keep
@@ -356,10 +405,11 @@ impl DirectStoreOptions {
                 ("s3", options.bucket.as_str(), repository_prefix.clone())
             }
             DirectTarget::Gcs(options) => {
-                environment.push((
-                    "GOOGLE_BEARER_TOKEN".into(),
-                    options.access_token.clone().into(),
-                ));
+                let (key, value) = match &options.authorization {
+                    GcsAuthorization::Bearer(token) => ("GOOGLE_BEARER_TOKEN", token),
+                    GcsAuthorization::ServiceAccount(json) => ("GOOGLE_SERVICE_ACCOUNT_KEY", json),
+                };
+                environment.push((key.into(), value.clone().into()));
                 ("gcs", options.bucket.as_str(), repository_prefix.clone())
             }
             DirectTarget::Azure(options) => {
@@ -372,8 +422,8 @@ impl DirectStoreOptions {
                 ("gcs", bucket.as_str(), repository_prefix.clone())
             }
             DirectTarget::Cloud(CloudTarget::Azure { account, container }) => {
-                let prefix = format!("{container}/{repository_prefix}");
-                ("azure", account.as_str(), prefix)
+                environment.push(("AZURE_STORAGE_ACCOUNT_NAME".into(), account.clone().into()));
+                ("azure", container.as_str(), repository_prefix.clone())
             }
             DirectTarget::Filesystem(_) => {
                 return Ok(LocalTransport {
@@ -505,28 +555,16 @@ impl DirectStoreOptions {
         let prefix = match &self.target {
             DirectTarget::S3(options) if authority == options.bucket => path,
             DirectTarget::Gcs(options) if authority == options.bucket => path,
-            DirectTarget::Azure(options) if authority == options.account => path
-                .strip_prefix(&format!("{}/", options.container))
-                .ok_or_else(|| {
-                    Error::new(
-                        ErrorKind::InvalidInput,
-                        "Azure remote container does not match",
-                    )
-                })?,
+            // Crab CLI remotes name the container; account placement is in the
+            // provider environment. Raw az:// input carries both explicitly.
+            DirectTarget::Azure(options) if authority == options.container => path,
             DirectTarget::Cloud(CloudTarget::S3(bucket) | CloudTarget::Gcs(bucket))
                 if authority == bucket =>
             {
                 path
             }
-            DirectTarget::Cloud(CloudTarget::Azure { account, container })
-                if authority == account =>
-            {
-                path.strip_prefix(&format!("{container}/")).ok_or_else(|| {
-                    Error::new(
-                        ErrorKind::InvalidInput,
-                        "Azure remote container does not match",
-                    )
-                })?
+            DirectTarget::Cloud(CloudTarget::Azure { container, .. }) if authority == container => {
+                path
             }
             _ => {
                 return Err(Error::new(
@@ -703,5 +741,39 @@ mod tests {
             .status()
             .unwrap();
         assert!(status.success());
+    }
+}
+
+#[cfg(all(test, feature = "local"))]
+mod azure_cli_placement_tests {
+    use super::*;
+
+    #[test]
+    fn explicit_and_default_azure_auth_use_container_authority_and_account_environment() {
+        let locator = crate::RepositoryLocator::new("repository").unwrap();
+        let options = [
+            DirectStoreOptions::azure(
+                AzureOptions::access_key("account", "container", "YWJj").unwrap(),
+            ),
+            DirectStoreOptions::azure_from_env("account", "container").unwrap(),
+        ];
+        for options in options {
+            let transport = options.local_transport(&locator).unwrap();
+            assert_eq!(transport.remote, "crab://container/repository");
+            assert!(
+                transport
+                    .environment
+                    .iter()
+                    .any(|(key, value)| key == "AZURE_STORAGE_ACCOUNT_NAME" && value == "account")
+            );
+            assert_eq!(
+                options
+                    .locator_from_remote(&transport.remote)
+                    .unwrap()
+                    .direct_prefix()
+                    .unwrap(),
+                "repository"
+            );
+        }
     }
 }

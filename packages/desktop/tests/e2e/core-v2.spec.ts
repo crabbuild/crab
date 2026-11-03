@@ -85,34 +85,65 @@ test("native v2 add, push, remote reconstruction, clone and hydration", async ()
   for (let index = 0; index < bytes.length; index++) bytes[index] = (index * 31 + (index >>> 9)) % 251;
   writeFileSync(path.join(source, "data.bin"), bytes);
   const digest = (data: Uint8Array) => createHash("sha256").update(data).digest("hex");
-  const application = await electron.launch({ executablePath, env, args: [`--user-data-dir=${path.join(root, "profile")}`] });
+  // Deliberately wrong ambient credentials and placement prove the saved
+  // connection is used by both SDK reads and CLI subprocesses.
+  const appEnv = { ...env, AWS_ACCESS_KEY_ID: "invalid-ambient-access", AWS_SECRET_ACCESS_KEY: "invalid-ambient-secret", AWS_SESSION_TOKEN: "invalid-ambient-session", AWS_ENDPOINT_URL: "http://127.0.0.1:1", AWS_ENDPOINT_URL_S3: "http://127.0.0.1:1" };
+  const application = await electron.launch({ executablePath, env: appEnv, args: [`--user-data-dir=${path.join(root, "profile")}`] });
   try {
     const page = await application.firstWindow();
     await expect(page.locator("#root > *").first()).toBeVisible();
     await page.getByRole("button", { name: "Skip", exact: true }).click();
     await page.getByRole("button", { name: "No thanks", exact: true }).click();
     await expect.poll(async () => { try { return (await call(page, "ping", {})).pong; } catch { return undefined; } }).toBe("2.0.0");
+    expect(await application.evaluate(() => process.env.AWS_ACCESS_KEY_ID === "invalid-ambient-access" && process.env.AWS_ENDPOINT_URL === "http://127.0.0.1:1")).toBe(true);
     const handle = await call(page, "open_local", { repo_id: "source", path: source });
     await page.evaluate(({ handle, source }) => {
       window.dispatchEvent(new CustomEvent("crab:repo-opened", { detail: { handle, path: source } }));
     }, { handle, source });
     await expect(page.getByText("source", { exact: true }).first()).toBeVisible();
+    await page.getByRole("button", { name: "Settings", exact: true }).click();
+    await page.getByRole("button", { name: "Storage & Cache", exact: true }).click();
+    const connections = page.getByRole("region", { name: "Storage connections" });
+    await connections.getByRole("button", { name: "Add connection", exact: true }).click();
+    await connections.getByLabel("Connection name", { exact: true }).fill("Qualification storage");
+    await connections.getByLabel("Bucket", { exact: true }).fill(process.env.CRAB_SDK_TEST_S3_BUCKET!);
+    await connections.getByLabel("Signing region", { exact: true }).fill(process.env.AWS_REGION!);
+    await connections.getByLabel("Endpoint URL (optional)", { exact: true }).fill("http://127.0.0.1:1");
+    await connections.getByLabel("Access key ID", { exact: true }).fill(process.env.AWS_ACCESS_KEY_ID!);
+    await connections.getByLabel("Secret access key", { exact: true }).fill(process.env.AWS_SECRET_ACCESS_KEY!);
+    await connections.getByRole("button", { name: "Test connection", exact: true }).click();
+    await expect(connections.getByRole("alert")).toContainText("Cannot list this bucket", { timeout: 40_000 });
+    await connections.getByLabel("Endpoint URL (optional)", { exact: true }).fill(process.env.AWS_ENDPOINT_URL!);
+    await connections.getByRole("button", { name: "Test connection", exact: true }).click();
+    await expect(connections.getByRole("status")).toContainText("Bucket read/list access verified", { timeout: 40_000 });
+    await connections.getByRole("button", { name: "Save connection", exact: true }).click();
+    await connections.getByRole("button", { name: "Use connection", exact: true }).click();
+    await expect(connections.getByRole("status")).toContainText("Connection selected for this repository");
+    const saved = await call(page, "storage_connections_list", { repo_id: "source" });
+    const storage_connection_id = saved.selected_id;
+    expect(typeof storage_connection_id).toBe("string");
+    expect(saved.connections).toEqual([expect.objectContaining({ name: "Qualification storage" })]);
+    expect((saved.connections as object[])[0]).not.toHaveProperty("credentials");
+    const encrypted = readFileSync(path.join(root, "profile", "storage-connections.enc"));
+    expect(encrypted.includes(Buffer.from(process.env.AWS_SECRET_ACCESS_KEY!))).toBe(false);
+    await page.screenshot({ path: test.info().outputPath("desktop-storage-connections.png") });
     const add = await call(page, "crab_add_structured", { repo_id: "source", job_id: randomUUID(), patterns: ["data.bin"] });
     expect((add.summary as { files_staged: number }).files_staged).toBe(1);
     await call(page, "git_add_paths", { repo_id: "source", paths: ["data.bin", ".gitattributes", "crab.toml"] });
     await call(page, "git_commit", { repo_id: "source", message: "Publish native v2 fixture", sign: false });
     const push = await call(page, "crab_push_structured", { repo_id: "source", job_id: randomUUID(), remote: "origin" });
     expect((push.summary as { refs_pushed: number }).refs_pushed).toBe(1);
+    expect((await call(page, "git_fetch_all", { repo_id: "source" })).status).toBe(0);
     const storage = await call(page, "storage_summary", { repo_id: "source" });
     expect((storage.metadata as { protocol: string }).protocol).toBe("capsule-v2");
-    await call(page, "open_url", { repo_id: "remote", url });
+    await call(page, "open_url", { repo_id: "remote", url, storage_connection_id });
     const content = await call(page, "read_bytes", { repo_id: "remote", path: "data.bin", max_bytes: bytes.length + 1 });
     expect(digest(Buffer.from(content.bytes_b64 as string, "base64"))).toBe(digest(bytes));
     await call(page, "dehydrate", { job_id: randomUUID(), cwd: source, patterns: ["data.bin"] });
     expect(readFileSync(path.join(source, "data.bin")).length).toBeLessThan(1024);
     await call(page, "hydrate", { job_id: randomUUID(), cwd: source, patterns: ["data.bin"] });
     expect(digest(readFileSync(path.join(source, "data.bin")))).toBe(digest(bytes));
-    await call(page, "clone", { job_id: randomUUID(), url, dest: clone });
+    await call(page, "clone", { job_id: randomUUID(), url, dest: clone, storage_connection_id });
     await call(page, "hydrate", { job_id: randomUUID(), cwd: clone, patterns: ["data.bin"] });
     expect(digest(readFileSync(path.join(clone, "data.bin")))).toBe(digest(bytes));
     const refs = await call(page, "list_refs", { repo_id: "remote" });
@@ -128,6 +159,16 @@ test("native v2 add, push, remote reconstruction, clone and hydration", async ()
     expect(readFileSync(path.join(source, "report.txt"), "utf8")).toBe("workflow v2");
     await call(page, "close", { repo_id: "remote" });
     await page.screenshot({ path: test.info().outputPath("desktop-v2-storage.png") });
+    await application.close();
+    const restarted = await electron.launch({ executablePath, env: appEnv, args: [`--user-data-dir=${path.join(root, "profile")}`] });
+    try {
+      const restored = await restarted.firstWindow();
+      await expect.poll(async () => { try { return (await call(restored, "ping", {})).pong; } catch { return undefined; } }).toBe("2.0.0");
+      await call(restored, "open_local", { repo_id: "restored", path: clone });
+      expect((await call(restored, "storage_connections_list", { repo_id: "restored" })).selected_id).toBe(storage_connection_id);
+      expect((await call(restored, "storage_config_verify", { repo_id: "restored" })).ok).toBe(true);
+    } finally { await restarted.close(); }
+
   } finally {
     await application.close();
     rmSync(root, { recursive: true, force: true });
