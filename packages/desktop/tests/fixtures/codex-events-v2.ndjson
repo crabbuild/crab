@@ -1,0 +1,8 @@
+{"type":"thread.started","thread_id":"0199a213-81c0-7800-8aa1-bbab2a035a53"}
+{"type":"turn.started"}
+{"type":"item.started","item":{"id":"item_1","type":"command_execution","command":"cargo test","status":"in_progress"}}
+{"type":"item.completed","item":{"id":"item_1","type":"command_execution","command":"cargo test","status":"completed","aggregated_output":"running 42 tests\ntest result: ok. 42 passed","exit_code":0,"duration_ms":12345}}
+{"type":"item.completed","item":{"id":"item_2","type":"reasoning","text":"Analyzing the codebase structure for the refactoring task."}}
+{"type":"item.completed","item":{"id":"item_3","type":"agent_message","text":"Refactoring complete. All tests pass."}}
+{"type":"item.completed","item":{"id":"item_4","type":"file_change","status":"completed","changes":[{"path":"src/git/push.rs","kind":"update","diff":"- pub fn push_xorbs\n+ pub async fn push_xorbs"}]}}
+{"type":"turn.completed","usage":{"input_tokens":24763,"cached_input_tokens":24448,"output_tokens":122,"reasoning_output_tokens":64}}

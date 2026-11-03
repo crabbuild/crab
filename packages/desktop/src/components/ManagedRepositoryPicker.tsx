@@ -1,0 +1,454 @@
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import clsx from "clsx";
+import {
+  AlertCircle,
+  Building2,
+  Check,
+  Cloud,
+  Loader2,
+  Plus,
+  RefreshCw,
+  Server,
+} from "lucide-react";
+import {
+  nextJobId,
+  rpc,
+  type ManagedOrganization,
+  type ManagedProfilesResponse,
+  type ManagedRepository,
+} from "../ipc";
+import {
+  managedErrorDetails,
+  managedRepositoryAccess,
+  type ManagedErrorDetails,
+} from "../lib/managed-service";
+import { useJobLines } from "../lib/useJobLines";
+
+interface Props {
+  selectedUrl: string;
+  onSelectRepository: (url: string) => void;
+}
+
+const ACCESS_TONE = {
+  success: "border-gx-success/30 bg-gx-success/10 text-gx-success",
+  warn: "border-gx-warn/30 bg-gx-warn/10 text-gx-warn",
+  muted: "border-gx-border bg-gx-bg-sub text-gx-muted",
+  error: "border-gx-error/30 bg-gx-error/10 text-gx-error",
+} as const;
+
+export function ManagedRepositoryPicker({ selectedUrl, onSelectRepository }: Props) {
+  const [profiles, setProfiles] = useState<ManagedProfilesResponse | null>(null);
+  const [authority, setAuthority] = useState("");
+  const [organizations, setOrganizations] = useState<ManagedOrganization[]>([]);
+  const [organizationCursor, setOrganizationCursor] = useState<string | null>(null);
+  const [organization, setOrganization] = useState("");
+  const [repositories, setRepositories] = useState<ManagedRepository[]>([]);
+  const [repositoryCursor, setRepositoryCursor] = useState<string | null>(null);
+  const [serviceOrigin, setServiceOrigin] = useState("https://crab.build");
+  const [repositorySlug, setRepositorySlug] = useState("");
+  const [loadingProfiles, setLoadingProfiles] = useState(true);
+  const [loadingOrganizations, setLoadingOrganizations] = useState(false);
+  const [loadingRepositories, setLoadingRepositories] = useState(false);
+  const [signingIn, setSigningIn] = useState(false);
+  const [creating, setCreating] = useState(false);
+  const [loginJobId, setLoginJobId] = useState<string | null>(null);
+  const [error, setError] = useState<ManagedErrorDetails | null>(null);
+  const organizationRequest = useRef(0);
+  const repositoryRequest = useRef(0);
+  const loginLines = useJobLines(loginJobId);
+  const loadingCatalog = loadingOrganizations || loadingRepositories;
+
+  const applyProfiles = useCallback((result: ManagedProfilesResponse) => {
+    setProfiles(result);
+    const selected = result.active_authority ?? result.profiles[0]?.authority ?? "";
+    setAuthority(selected);
+  }, []);
+
+  const loadProfiles = useCallback(async () => {
+    setLoadingProfiles(true);
+    setError(null);
+    try {
+      applyProfiles(await rpc.managedProfiles());
+    } catch (cause) {
+      setError(managedErrorDetails(cause));
+    } finally {
+      setLoadingProfiles(false);
+    }
+  }, [applyProfiles]);
+
+  const loadOrganizations = useCallback(async (
+    service: string,
+    cursor?: string,
+    append = false,
+  ) => {
+    const request = ++organizationRequest.current;
+    setLoadingOrganizations(true);
+    setError(null);
+    try {
+      const page = await rpc.managedOrganizations(service, cursor);
+      if (request !== organizationRequest.current) return;
+      setOrganizations((current) => append ? [...current, ...page.organizations] : page.organizations);
+      setOrganizationCursor(page.next_cursor);
+      if (!append) {
+        setOrganization((current) =>
+          page.organizations.some((item) => item.slug === current)
+            ? current
+            : page.organizations[0]?.slug ?? "",
+        );
+      }
+    } catch (cause) {
+      if (request === organizationRequest.current) {
+        setError(managedErrorDetails(cause));
+      }
+    } finally {
+      if (request === organizationRequest.current) {
+        setLoadingOrganizations(false);
+      }
+    }
+  }, []);
+
+  const loadRepositories = useCallback(async (
+    service: string,
+    organizationSlug: string,
+    cursor?: string,
+    append = false,
+  ) => {
+    const request = ++repositoryRequest.current;
+    setLoadingRepositories(true);
+    setError(null);
+    try {
+      const page = await rpc.managedRepositories(service, organizationSlug, cursor);
+      if (request !== repositoryRequest.current) return;
+      setRepositories((current) => append ? [...current, ...page.repositories] : page.repositories);
+      setRepositoryCursor(page.next_cursor);
+    } catch (cause) {
+      if (request === repositoryRequest.current) {
+        setError(managedErrorDetails(cause));
+      }
+    } finally {
+      if (request === repositoryRequest.current) {
+        setLoadingRepositories(false);
+      }
+    }
+  }, []);
+
+  useEffect(() => {
+    void loadProfiles();
+  }, [loadProfiles]);
+
+  useEffect(() => {
+    setOrganizations([]);
+    setOrganization("");
+    setRepositories([]);
+    setOrganizationCursor(null);
+    setRepositoryCursor(null);
+    onSelectRepository("");
+    if (authority) {
+      void loadOrganizations(authority);
+    } else {
+      organizationRequest.current += 1;
+      setLoadingOrganizations(false);
+    }
+  }, [authority, loadOrganizations, onSelectRepository]);
+
+  useEffect(() => {
+    setRepositories([]);
+    setRepositoryCursor(null);
+    onSelectRepository("");
+    if (authority && organization) {
+      void loadRepositories(authority, organization);
+    } else {
+      repositoryRequest.current += 1;
+      setLoadingRepositories(false);
+    }
+  }, [authority, organization, loadRepositories, onSelectRepository]);
+
+  const activeOrganization = useMemo(
+    () => organizations.find((item) => item.slug === organization),
+    [organization, organizations],
+  );
+
+  async function selectProfile(nextAuthority: string) {
+    setError(null);
+    try {
+      const result = await rpc.managedSelectProfile(nextAuthority);
+      applyProfiles(result);
+      setAuthority(nextAuthority);
+    } catch (cause) {
+      setError(managedErrorDetails(cause));
+    }
+  }
+
+  async function signIn() {
+    const origin = serviceOrigin.trim();
+    if (!origin) return;
+    const jobId = nextJobId("managed-login");
+    setLoginJobId(jobId);
+    setSigningIn(true);
+    setError(null);
+    try {
+      applyProfiles(await rpc.managedLogin(origin, jobId));
+    } catch (cause) {
+      setError(managedErrorDetails(cause));
+    } finally {
+      setSigningIn(false);
+      setLoginJobId(null);
+    }
+  }
+
+  async function createRepository() {
+    const slug = repositorySlug.trim();
+    if (!authority || !organization || !slug) return;
+    setCreating(true);
+    setError(null);
+    try {
+      const created = await rpc.managedCreateRepository(
+        authority,
+        `${organization}/${slug}`,
+      );
+      setRepositorySlug("");
+      setRepositories((current) => [created, ...current]);
+      if (managedRepositoryAccess(created).canClone) {
+        onSelectRepository(created.canonical_url);
+      }
+    } catch (cause) {
+      setError(managedErrorDetails(cause));
+    } finally {
+      setCreating(false);
+    }
+  }
+
+  if (loadingProfiles && profiles === null) {
+    return (
+      <div className="flex items-center justify-center rounded-lg border border-gx-border bg-gx-bg-sub py-10 text-sm text-gx-muted">
+        <Loader2 size={16} className="mr-2 animate-spin" />
+        Loading managed services…
+      </div>
+    );
+  }
+
+  return (
+    <div className="space-y-4">
+      <section className="rounded-lg border border-gx-border bg-gx-bg-sub p-3">
+        <div className="flex items-start gap-3">
+          <div className="rounded-md bg-gx-accent/10 p-2 text-gx-accent">
+            <Cloud size={18} />
+          </div>
+          <div className="min-w-0 flex-1">
+            <h3 className="text-sm font-medium text-gx-text">
+              {profiles?.profiles.length ? "Managed service" : "Connect a managed service"}
+            </h3>
+            <p className="mt-0.5 text-[11px] text-gx-muted">
+              Sign in to Crab Cloud or an enterprise deployment. Credentials stay in the shared Crab token store.
+            </p>
+          </div>
+        </div>
+
+        {profiles?.profiles.length ? (
+          <div className="mt-3 grid gap-2 sm:grid-cols-[1fr_auto]">
+            <label className="min-w-0">
+              <span className="mb-1 block text-[11px] text-gx-muted">Service profile</span>
+              <select
+                className="input-field w-full text-sm"
+                value={authority}
+                onChange={(event) => void selectProfile(event.target.value)}
+              >
+                {profiles.profiles.map((profile) => (
+                  <option key={profile.authority} value={profile.authority}>
+                    {profile.authority}{profile.discovered ? "" : " (not discovered)"}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              className="btn self-end"
+              onClick={() => authority && void loadOrganizations(authority)}
+              disabled={!authority || loadingCatalog}
+            >
+              <RefreshCw size={13} className={loadingCatalog ? "animate-spin" : ""} />
+              Refresh
+            </button>
+          </div>
+        ) : null}
+
+        <div className="mt-3 flex gap-2">
+          <input
+            className="input-field min-w-0 flex-1 font-mono text-xs"
+            aria-label="Managed service origin"
+            value={serviceOrigin}
+            onChange={(event) => setServiceOrigin(event.target.value)}
+            placeholder="https://crab.build"
+          />
+          <button
+            type="button"
+            className="btn btn-primary shrink-0"
+            onClick={() => void signIn()}
+            disabled={signingIn || !serviceOrigin.trim()}
+          >
+            {signingIn ? <Loader2 size={13} className="animate-spin" /> : <Server size={13} />}
+            {profiles?.profiles.length ? "Add service" : "Sign in"}
+          </button>
+        </div>
+        {signingIn && loginLines.length > 0 && (
+          <p className="mt-2 truncate font-mono text-[10px] text-gx-muted">
+            {loginLines[loginLines.length - 1]?.line}
+          </p>
+        )}
+      </section>
+
+      {profiles?.profiles.length && authority ? (
+        <>
+          <section className="rounded-lg border border-gx-border p-3">
+            <div className="flex items-end gap-2">
+              <label className="min-w-0 flex-1">
+                <span className="mb-1 flex items-center gap-1 text-[11px] text-gx-muted">
+                  <Building2 size={12} /> Organization
+                </span>
+                <select
+                  className="input-field w-full text-sm"
+                  value={organization}
+                  onChange={(event) => setOrganization(event.target.value)}
+                  disabled={organizations.length === 0}
+                >
+                  {organizations.length === 0 && <option value="">No organizations</option>}
+                  {organizations.map((item) => (
+                    <option key={item.id} value={item.slug}>
+                      {item.slug}{item.state === "active" ? "" : ` (${item.state})`}
+                    </option>
+                  ))}
+                </select>
+              </label>
+              {organizationCursor && (
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={() => void loadOrganizations(authority, organizationCursor, true)}
+                  disabled={loadingCatalog}
+                >
+                  More
+                </button>
+              )}
+            </div>
+
+            <div className="mt-3 flex gap-2 border-t border-gx-border pt-3">
+              <input
+                className="input-field min-w-0 flex-1 font-mono text-xs"
+                aria-label="New repository name"
+                value={repositorySlug}
+                onChange={(event) => setRepositorySlug(event.target.value)}
+                placeholder="new-repository"
+                disabled={activeOrganization?.state !== "active"}
+              />
+              <button
+                type="button"
+                className="btn shrink-0"
+                onClick={() => void createRepository()}
+                disabled={
+                  creating ||
+                  activeOrganization?.state !== "active" ||
+                  !repositorySlug.trim()
+                }
+              >
+                {creating ? <Loader2 size={13} className="animate-spin" /> : <Plus size={13} />}
+                Create
+              </button>
+            </div>
+          </section>
+
+          <section aria-label="Managed repository catalog">
+            <div className="mb-2 flex items-center justify-between">
+              <h3 className="text-xs font-medium uppercase tracking-wide text-gx-muted">
+                Repositories
+              </h3>
+              {repositoryCursor && (
+                <button
+                  type="button"
+                  className="text-[11px] text-gx-accent hover:text-gx-accent-hover"
+                  onClick={() => void loadRepositories(
+                    authority,
+                    organization,
+                    repositoryCursor,
+                    true,
+                  )}
+                  disabled={loadingCatalog}
+                >
+                  Load more
+                </button>
+              )}
+            </div>
+            <div className="space-y-2">
+              {!loadingCatalog && repositories.length === 0 && (
+                <div className="rounded-lg border border-dashed border-gx-border px-4 py-7 text-center text-xs text-gx-muted">
+                  No repositories are visible in this organization.
+                </div>
+              )}
+              {repositories.map((repository) => {
+                const access = managedRepositoryAccess(repository);
+                const selected = selectedUrl === repository.canonical_url;
+                return (
+                  <button
+                    key={repository.repository_id}
+                    type="button"
+                    className={clsx(
+                      "w-full rounded-lg border p-3 text-left transition",
+                      selected
+                        ? "border-gx-accent bg-gx-accent/10"
+                        : "border-gx-border bg-gx-bg-sub hover:border-gx-accent/50",
+                      !access.canClone && "cursor-not-allowed opacity-75",
+                    )}
+                    onClick={() => access.canClone && onSelectRepository(repository.canonical_url)}
+                    disabled={!access.canClone}
+                  >
+                    <div className="flex items-start gap-2">
+                      <div className="min-w-0 flex-1">
+                        <div className="flex items-center gap-2">
+                          <span className="truncate font-mono text-xs text-gx-text">
+                            {repository.canonical_url}
+                          </span>
+                          {selected && <Check size={13} className="shrink-0 text-gx-accent" />}
+                        </div>
+                        <p className="mt-1 text-[10px] text-gx-muted">{access.detail}</p>
+                      </div>
+                      <span className={clsx(
+                        "shrink-0 rounded border px-1.5 py-0.5 text-[10px]",
+                        ACCESS_TONE[access.tone],
+                      )}>
+                        {access.label}
+                      </span>
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </section>
+        </>
+      ) : null}
+
+      {loadingCatalog && repositories.length === 0 && authority && (
+        <div className="flex items-center justify-center py-4 text-xs text-gx-muted">
+          <Loader2 size={14} className="mr-2 animate-spin" /> Loading catalog…
+        </div>
+      )}
+
+      {error && (
+        <div className="flex items-start gap-2 rounded-lg border border-gx-error/40 bg-gx-error/10 p-3 text-xs text-gx-error">
+          <AlertCircle size={14} className="mt-0.5 shrink-0" />
+          <div>
+            <p>{error.message}</p>
+            {error.remediation && <p className="mt-1 opacity-80">{error.remediation}</p>}
+            <button
+              type="button"
+              className="mt-2 font-medium underline underline-offset-2"
+              onClick={() => authority
+                ? void loadOrganizations(authority)
+                : void loadProfiles()}
+            >
+              Retry
+            </button>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}

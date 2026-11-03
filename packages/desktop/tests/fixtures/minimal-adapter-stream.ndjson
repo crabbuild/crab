@@ -1,0 +1,8 @@
+{"type":"text","timestamp":1700000001000,"content":"I will help you with that task."}
+{"type":"text","timestamp":1700000002000,"content":"Let me analyze the requirements first."}
+{"type":"done","timestamp":1700000003000}
+{"type":"text","timestamp":1700000010000,"content":"Now implementing the second part."}
+{"type":"text","timestamp":1700000011000,"content":"Here is the solution."}
+{"type":"done","timestamp":1700000012000}
+{"type":"text","timestamp":1700000020000,"content":"Final summary of changes made."}
+{"type":"done","timestamp":1700000021000}

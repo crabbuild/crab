@@ -1,0 +1,2 @@
+# Cross-compiled agent binaries are placed here during CI builds.
+# See .kiro/specs/crab-desktop-ssh-remote/design.md section 21.

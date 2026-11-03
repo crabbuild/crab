@@ -27,6 +27,7 @@ members = [
     "crates/crab-write",
     "crates/crab-xet",
     "crab",
+    "packages/desktop/agent",
 ]
 [workspace.package]
 edition = "2024"

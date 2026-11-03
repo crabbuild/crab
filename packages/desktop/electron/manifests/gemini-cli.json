@@ -1,0 +1,42 @@
+{
+  "type": "gemini-cli",
+  "name": "Gemini CLI",
+  "binary": "gemini",
+  "args": ["-p", "{prompt}", "--output-format", "stream-json", "--sandbox", "none"],
+  "env": {},
+  "interactionModel": "stdio",
+  "versionFlag": "--version",
+  "eventMapping": {
+    "typeField": "type",
+    "typeMap": {
+      "init": "generic",
+      "message": "text",
+      "tool_use": "tool_use",
+      "tool_result": "tool_result",
+      "error": "error",
+      "result": "done"
+    },
+    "fieldMap": {
+      "file": "path",
+      "diff": "diff"
+    },
+    "contentField": "content",
+    "errorField": "error",
+    "toolField": "tool",
+    "usageField": "usage",
+    "usageMapping": {
+      "inputTokens": "input_tokens",
+      "outputTokens": "output_tokens"
+    }
+  },
+  "capabilities": {
+    "supportsPlanMode": false,
+    "supportsStreaming": true,
+    "supportsToolUse": true,
+    "supportsIteration": false,
+    "supportsApprovalModes": false
+  },
+  "requiredEnv": [
+    { "name": "GEMINI_API_KEY", "label": "Gemini API Key", "secret": true }
+  ]
+}

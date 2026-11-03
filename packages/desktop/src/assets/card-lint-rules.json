@@ -1,0 +1,50 @@
+{
+  "rules": [
+    {
+      "id": "license-missing",
+      "field": "license",
+      "check": "required",
+      "message": "License is not specified",
+      "severity": "warning"
+    },
+    {
+      "id": "model-size-missing",
+      "field": "model_size",
+      "check": "required",
+      "message": "Model size is not declared",
+      "severity": "warning",
+      "appliesTo": ["model"]
+    },
+    {
+      "id": "no-eval-metrics",
+      "field": "eval_results",
+      "check": "required",
+      "message": "No evaluation metrics provided",
+      "severity": "warning",
+      "appliesTo": ["model"]
+    },
+    {
+      "id": "language-missing",
+      "field": "language",
+      "check": "required",
+      "message": "Language is not specified",
+      "severity": "warning"
+    },
+    {
+      "id": "pipeline-tag-missing",
+      "field": "pipeline_tag",
+      "check": "required",
+      "message": "Pipeline tag is not specified",
+      "severity": "warning",
+      "appliesTo": ["model"]
+    },
+    {
+      "id": "description-too-short",
+      "field": "__body__",
+      "check": "min_length",
+      "value": 50,
+      "message": "Card description is too short (< 50 chars)",
+      "severity": "warning"
+    }
+  ]
+}

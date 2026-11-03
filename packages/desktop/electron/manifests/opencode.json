@@ -1,0 +1,42 @@
+{
+  "type": "opencode",
+  "name": "OpenCode",
+  "binary": "opencode",
+  "args": ["serve", "--port", "4096", "--dir", "{cwd}"],
+  "env": {},
+  "interactionModel": "http",
+  "httpEndpoint": "http://localhost:4096",
+  "versionFlag": "--version",
+  "eventMapping": {
+    "typeField": "type",
+    "typeMap": {
+      "message.part.text": "text",
+      "message.part.tool_use": "tool_use",
+      "message.part.tool_result": "tool_result",
+      "message.complete": "done",
+      "error": "error"
+    },
+    "fieldMap": {
+      "file": "path",
+      "diff": "diff"
+    },
+    "contentField": "content",
+    "errorField": "error",
+    "toolField": "tool",
+    "usageField": "usage",
+    "usageMapping": {
+      "inputTokens": "input_tokens",
+      "outputTokens": "output_tokens"
+    }
+  },
+  "capabilities": {
+    "supportsPlanMode": true,
+    "supportsStreaming": true,
+    "supportsToolUse": true,
+    "supportsIteration": true,
+    "supportsApprovalModes": false
+  },
+  "requiredEnv": [
+    { "name": "ANTHROPIC_API_KEY", "label": "Anthropic API Key", "secret": true }
+  ]
+}

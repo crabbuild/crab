@@ -1,0 +1,623 @@
+import { useCallback, useRef, useState, useEffect, type KeyboardEvent } from "react";
+import clsx from "clsx";
+import {
+  AlertCircle,
+  Check,
+  ChevronRight,
+  FileText,
+  Loader2,
+  MoreHorizontal,
+  Pencil,
+  RefreshCw,
+  Save,
+  Send,
+  Trash2,
+  Undo2,
+  X,
+} from "lucide-react";
+import type { ReviewThread as ReviewThreadType, ThreadComment } from "../../review/types";
+import type { OptimisticThreadComment, OptimisticReviewThread } from "../../review/useOptimisticThreads";
+
+// ── Types ────────────────────────────────────────────────────────────
+
+export interface ReviewThreadProps {
+  thread: ReviewThreadType | OptimisticReviewThread;
+  /** Current user login for isMine checks */
+  currentUser: string;
+  /** Whether the current user has write access (for apply suggestion) */
+  hasWriteAccess: boolean;
+  /** Callbacks */
+  onReply(threadId: string, body: string): Promise<void> | void;
+  onResolve(threadId: string, resolved: boolean): Promise<void> | void;
+  onEditComment(commentId: string, body: string): Promise<void>;
+  onDeleteComment(commentId: string): Promise<void>;
+  onApplySuggestion(commentId: string): Promise<void>;
+  /** Called when user clicks Retry on a failed optimistic reply. */
+  onRetryReply?(threadId: string, tempId: string): void;
+  /** Called when user dismisses a failed optimistic reply. */
+  onDismissFailedReply?(threadId: string, tempId: string): void;
+  /** Called when user dismisses the inline resolve/unresolve error. */
+  onDismissResolveError?(threadId: string): void;
+}
+
+// ── Helpers ──────────────────────────────────────────────────────────
+
+function formatRelativeDate(iso: string): string {
+  try {
+    const d = new Date(iso);
+    if (Number.isNaN(d.getTime())) return iso;
+    const delta = (Date.now() - d.getTime()) / 1000;
+    if (delta < 60) return "just now";
+    if (delta < 3600) return `${Math.floor(delta / 60)}m ago`;
+    if (delta < 86400) return `${Math.floor(delta / 3600)}h ago`;
+    if (delta < 604800) return `${Math.floor(delta / 86400)}d ago`;
+    return d.toLocaleDateString();
+  } catch {
+    return iso;
+  }
+}
+
+// ── Component ────────────────────────────────────────────────────────
+
+/**
+ * Renders a review thread anchored to a file:line in the diff.
+ *
+ * Features:
+ * - Header with file:line anchor and Resolve/Unresolve button
+ * - Chronological comment list with author, timestamp, body
+ * - Overflow menu (Edit/Delete) on own comments
+ * - Reply input at the bottom
+ * - Collapsed state when resolved (single-line summary, expandable)
+ * - Outdated styling (reduced opacity, strikethrough on anchor)
+ */
+export function ReviewThreadComponent({
+  thread,
+  currentUser,
+  hasWriteAccess: _hasWriteAccess,
+  onReply,
+  onResolve,
+  onEditComment,
+  onDeleteComment,
+  onApplySuggestion: _onApplySuggestion,
+  onRetryReply,
+  onDismissFailedReply,
+  onDismissResolveError,
+}: ReviewThreadProps) {
+  const [expanded, setExpanded] = useState(!thread.resolved);
+  const [replyBody, setReplyBody] = useState("");
+  const [replyLoading, setReplyLoading] = useState(false);
+  const replyRef = useRef<HTMLTextAreaElement>(null);
+
+  // Extract resolve error from optimistic thread data.
+  const resolveError = "resolveError" in thread ? (thread as OptimisticReviewThread).resolveError : undefined;
+
+  // Sync expanded state when resolved status changes externally.
+  useEffect(() => {
+    setExpanded(!thread.resolved);
+  }, [thread.resolved]);
+
+  const handleReply = useCallback(async () => {
+    const trimmed = replyBody.trim();
+    if (!trimmed || replyLoading) return;
+    setReplyLoading(true);
+    try {
+      await onReply(thread.threadId, trimmed);
+      setReplyBody("");
+    } finally {
+      setReplyLoading(false);
+    }
+  }, [replyBody, replyLoading, onReply, thread.threadId]);
+
+  const handleReplyKeyDown = useCallback(
+    (e: KeyboardEvent<HTMLTextAreaElement>) => {
+      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        handleReply();
+      }
+    },
+    [handleReply],
+  );
+
+  const handleResolve = useCallback(() => {
+    onResolve(thread.threadId, !thread.resolved);
+  }, [onResolve, thread.threadId, thread.resolved]);
+
+  const firstComment = thread.comments[0];
+  const summaryText = firstComment
+    ? firstComment.body.slice(0, 100) + (firstComment.body.length > 100 ? "…" : "")
+    : "";
+
+  // Resolved + collapsed: render single-line summary
+  if (thread.resolved && !expanded) {
+    return (
+      <div
+        className={clsx(
+          "my-1 rounded border border-gx-border bg-gx-surface shadow-sm",
+          thread.outdated && "opacity-60",
+        )}
+      >
+        <button
+          type="button"
+          className="flex w-full items-center gap-2 px-3 py-2 text-left text-[11px] text-gx-muted hover:bg-gx-surface-hover"
+          onClick={() => setExpanded(true)}
+          aria-label="Expand resolved thread"
+        >
+          <ChevronRight size={12} className="shrink-0" />
+          <Check size={12} className="shrink-0 text-green-400" />
+          <span className="truncate">
+            <span className="font-medium text-gx-text">{firstComment?.author ?? "Unknown"}</span>
+            {" · "}
+            {summaryText}
+          </span>
+        </button>
+        {resolveError && (
+          <div className="flex items-center justify-between border-t border-red-500/30 bg-red-500/5 px-3 py-1.5">
+            <span className="flex items-center gap-1.5 text-[10px] text-red-400">
+              <AlertCircle size={10} />
+              {resolveError}
+            </span>
+            {onDismissResolveError && (
+              <button
+                type="button"
+                className="inline-flex items-center rounded p-0.5 text-red-400 hover:bg-red-500/10"
+                onClick={() => onDismissResolveError(thread.threadId)}
+                aria-label="Dismiss resolve error"
+              >
+                <X size={10} />
+              </button>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  }
+
+  return (
+    <div
+      className={clsx(
+        "my-1 rounded border border-gx-border bg-gx-surface shadow-sm",
+        thread.outdated && "opacity-60",
+      )}
+      aria-label={`Review thread on ${thread.path}:${thread.line}`}
+    >
+      {/* Header: file:line anchor + Resolve/Unresolve */}
+      <div className="flex items-center justify-between border-b border-gx-border/50 px-3 py-1.5">
+        <div className="flex items-center gap-1.5 text-[10px] text-gx-muted">
+          <FileText size={10} className="shrink-0" />
+          <span
+            className={clsx(
+              "font-mono",
+              thread.outdated && "line-through",
+            )}
+          >
+            {thread.path}:{thread.line}
+          </span>
+          {thread.outdated && (
+            <span className="inline-flex items-center rounded bg-orange-500/15 px-1.5 py-0.5 text-[9px] font-medium text-orange-400">
+              Outdated
+            </span>
+          )}
+        </div>
+        <button
+          type="button"
+          className={clsx(
+            "inline-flex items-center gap-1 rounded px-1.5 py-0.5 text-[10px]",
+            thread.resolved
+              ? "text-gx-muted hover:bg-orange-500/10 hover:text-orange-400"
+              : "text-gx-muted hover:bg-green-500/10 hover:text-green-400",
+          )}
+          onClick={handleResolve}
+          aria-label={thread.resolved ? "Unresolve thread" : "Resolve thread"}
+        >
+          {thread.resolved ? (
+            <>
+              <Undo2 size={10} />
+              Unresolve
+            </>
+          ) : (
+            <>
+              <Check size={10} />
+              Resolve
+            </>
+          )}
+        </button>
+      </div>
+
+      {/* Inline error from failed resolve/unresolve */}
+      {resolveError && (
+        <div className="flex items-center justify-between border-b border-red-500/30 bg-red-500/5 px-3 py-1.5">
+          <span className="flex items-center gap-1.5 text-[10px] text-red-400">
+            <AlertCircle size={10} />
+            {resolveError}
+          </span>
+          {onDismissResolveError && (
+            <button
+              type="button"
+              className="inline-flex items-center rounded p-0.5 text-red-400 hover:bg-red-500/10"
+              onClick={() => onDismissResolveError(thread.threadId)}
+              aria-label="Dismiss resolve error"
+            >
+              <X size={10} />
+            </button>
+          )}
+        </div>
+      )}
+
+      {/* Comments */}
+      <div className="divide-y divide-gx-border/30">
+        {thread.comments.map((comment) => {
+          const optimistic = comment as OptimisticThreadComment;
+          if (optimistic.failed) {
+            return (
+              <FailedCommentItem
+                key={comment.id}
+                comment={optimistic}
+                threadId={thread.threadId}
+                onRetry={onRetryReply}
+                onDismiss={onDismissFailedReply}
+              />
+            );
+          }
+          if (optimistic.pending) {
+            return (
+              <PendingCommentItem key={comment.id} comment={optimistic} />
+            );
+          }
+          return (
+            <CommentItem
+              key={comment.id}
+              comment={comment}
+              currentUser={currentUser}
+              onEdit={onEditComment}
+              onDelete={onDeleteComment}
+            />
+          );
+        })}
+      </div>
+
+      {/* Reply input */}
+      <div className="border-t border-gx-border/50 px-3 py-2">
+        <textarea
+          ref={replyRef}
+          className="w-full resize-y rounded border border-gx-border bg-gx-bg-sub p-2 text-[11px] leading-relaxed text-gx-text placeholder:text-gx-muted focus:border-gx-accent focus-visible:outline-none"
+          rows={2}
+          placeholder="Write a reply…"
+          value={replyBody}
+          onChange={(e) => setReplyBody(e.target.value)}
+          onKeyDown={handleReplyKeyDown}
+          aria-label={`Reply to thread on ${thread.path}:${thread.line}`}
+        />
+        <div className="mt-1.5 flex items-center justify-end">
+          <button
+            type="button"
+            className="inline-flex items-center gap-1 rounded bg-gx-accent/10 px-2 py-1 text-[10px] text-gx-accent hover:bg-gx-accent/20 disabled:cursor-not-allowed disabled:opacity-50"
+            disabled={!replyBody.trim() || replyLoading}
+            onClick={handleReply}
+            aria-label="Submit reply"
+          >
+            <Send size={10} />
+            {replyLoading ? "Sending…" : "Reply"}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── CommentItem ──────────────────────────────────────────────────────
+
+interface CommentItemProps {
+  comment: ThreadComment;
+  currentUser: string;
+  onEdit(commentId: string, body: string): Promise<void>;
+  onDelete(commentId: string): Promise<void>;
+}
+
+function CommentItem({ comment, currentUser, onEdit, onDelete }: CommentItemProps) {
+  const [menuOpen, setMenuOpen] = useState(false);
+  const [editing, setEditing] = useState(false);
+  const [editBody, setEditBody] = useState(comment.body);
+  const [editLoading, setEditLoading] = useState(false);
+  const [editError, setEditError] = useState<string | null>(null);
+  const [deleteConfirm, setDeleteConfirm] = useState(false);
+  const [deleteLoading, setDeleteLoading] = useState(false);
+  const [deleteError, setDeleteError] = useState<string | null>(null);
+  const textareaRef = useRef<HTMLTextAreaElement>(null);
+  const menuRef = useRef<HTMLDivElement>(null);
+
+  const isMine = comment.isMine || comment.author === currentUser;
+
+  useEffect(() => {
+    if (editing) {
+      textareaRef.current?.focus();
+    }
+  }, [editing]);
+
+  // Close menu on outside click.
+  useEffect(() => {
+    if (!menuOpen) return;
+    const handler = (e: MouseEvent) => {
+      if (menuRef.current && !menuRef.current.contains(e.target as Node)) {
+        setMenuOpen(false);
+      }
+    };
+    document.addEventListener("mousedown", handler);
+    return () => document.removeEventListener("mousedown", handler);
+  }, [menuOpen]);
+
+  const handleStartEdit = useCallback(() => {
+    setEditBody(comment.body);
+    setEditing(true);
+    setMenuOpen(false);
+  }, [comment.body]);
+
+  const handleSaveEdit = useCallback(async () => {
+    const trimmed = editBody.trim();
+    if (!trimmed || editLoading) return;
+    setEditLoading(true);
+    setEditError(null);
+    try {
+      await onEdit(comment.id, trimmed);
+      setEditing(false);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Failed to save edit";
+      setEditError(message);
+    } finally {
+      setEditLoading(false);
+    }
+  }, [editBody, editLoading, onEdit, comment.id]);
+
+  const handleCancelEdit = useCallback(() => {
+    setEditBody(comment.body);
+    setEditing(false);
+    setEditError(null);
+  }, [comment.body]);
+
+  const handleEditKeyDown = useCallback(
+    (e: KeyboardEvent<HTMLTextAreaElement>) => {
+      if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
+        e.preventDefault();
+        handleSaveEdit();
+      } else if (e.key === "Escape") {
+        e.preventDefault();
+        handleCancelEdit();
+      }
+    },
+    [handleSaveEdit, handleCancelEdit],
+  );
+
+  const handleDelete = useCallback(() => {
+    setMenuOpen(false);
+    setDeleteConfirm(true);
+  }, []);
+
+  const handleConfirmDelete = useCallback(async () => {
+    setDeleteLoading(true);
+    setDeleteError(null);
+    try {
+      await onDelete(comment.id);
+      setDeleteConfirm(false);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : "Failed to delete comment";
+      setDeleteError(message);
+    } finally {
+      setDeleteLoading(false);
+    }
+  }, [onDelete, comment.id]);
+
+  return (
+    <div className="px-3 py-2">
+      {/* Comment header: author + timestamp + overflow menu */}
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-1.5 text-[10px]">
+          <span className="font-medium text-gx-text">@{comment.author}</span>
+          <span className="text-gx-muted">·</span>
+          <span className="text-gx-muted">{formatRelativeDate(comment.createdAt)}</span>
+          {comment.edited && (
+            <span className="text-gx-muted italic">(edited)</span>
+          )}
+        </div>
+
+        {isMine && !editing && (
+          <div className="relative" ref={menuRef}>
+            <button
+              type="button"
+              className="inline-flex items-center rounded p-0.5 text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+              onClick={() => setMenuOpen((v) => !v)}
+              aria-label="Comment actions"
+              aria-expanded={menuOpen}
+            >
+              <MoreHorizontal size={12} />
+            </button>
+
+            {menuOpen && (
+              <div className="absolute right-0 top-full z-10 mt-1 min-w-[100px] rounded border border-gx-border bg-gx-surface py-1 shadow-lg">
+                <button
+                  type="button"
+                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[10px] text-gx-text hover:bg-gx-surface-hover"
+                  onClick={handleStartEdit}
+                >
+                  <Pencil size={10} />
+                  Edit
+                </button>
+                <button
+                  type="button"
+                  className="flex w-full items-center gap-2 px-3 py-1.5 text-left text-[10px] text-red-400 hover:bg-red-500/10"
+                  onClick={handleDelete}
+                >
+                  <Trash2 size={10} />
+                  Delete
+                </button>
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+
+      {/* Comment body: read-only or edit mode */}
+      <div className="mt-1">
+        {editing ? (
+          <>
+            <textarea
+              ref={textareaRef}
+              className="w-full resize-y rounded border border-gx-border bg-gx-bg-sub p-2 text-[11px] leading-relaxed text-gx-text placeholder:text-gx-muted focus:border-gx-accent focus-visible:outline-none"
+              rows={3}
+              value={editBody}
+              onChange={(e) => setEditBody(e.target.value)}
+              onKeyDown={handleEditKeyDown}
+              aria-label="Edit comment body"
+            />
+            {editError && (
+              <div className="mt-1 flex items-center gap-1.5 text-[10px] text-red-400">
+                <AlertCircle size={10} />
+                {editError}
+              </div>
+            )}
+            <div className="mt-1.5 flex items-center justify-end gap-2">
+              <button
+                type="button"
+                className="inline-flex items-center gap-1 rounded px-2 py-1 text-[10px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+                onClick={handleCancelEdit}
+                aria-label="Cancel editing"
+              >
+                <X size={10} />
+                Cancel
+              </button>
+              <button
+                type="button"
+                className="inline-flex items-center gap-1 rounded bg-gx-accent/10 px-2 py-1 text-[10px] text-gx-accent hover:bg-gx-accent/20 disabled:cursor-not-allowed disabled:opacity-50"
+                disabled={!editBody.trim() || editLoading}
+                onClick={handleSaveEdit}
+                aria-label="Save comment changes"
+              >
+                <Save size={10} />
+                {editLoading ? "Saving…" : "Save"}
+              </button>
+            </div>
+          </>
+        ) : (
+          <p className="whitespace-pre-wrap text-[11px] leading-relaxed text-gx-text">
+            {comment.body}
+          </p>
+        )}
+      </div>
+
+      {/* Delete confirmation */}
+      {deleteConfirm && (
+        <div className="mt-2 flex items-center gap-2 rounded border border-red-500/30 bg-red-500/5 px-2 py-1.5">
+          <span className="text-[10px] text-red-400">Delete this comment?</span>
+          <button
+            type="button"
+            className="inline-flex items-center gap-1 rounded bg-red-500/15 px-2 py-0.5 text-[10px] text-red-400 hover:bg-red-500/25 disabled:cursor-not-allowed disabled:opacity-50"
+            onClick={handleConfirmDelete}
+            disabled={deleteLoading}
+            aria-label="Confirm delete"
+          >
+            {deleteLoading ? "Deleting…" : "Delete"}
+          </button>
+          <button
+            type="button"
+            className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+            onClick={() => { setDeleteConfirm(false); setDeleteError(null); }}
+            disabled={deleteLoading}
+            aria-label="Cancel delete"
+          >
+            Cancel
+          </button>
+          {deleteError && (
+            <span className="flex items-center gap-1 text-[10px] text-red-400">
+              <AlertCircle size={10} />
+              {deleteError}
+            </span>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── PendingCommentItem ───────────────────────────────────────────────
+
+interface PendingCommentItemProps {
+  comment: OptimisticThreadComment;
+}
+
+/** Renders an optimistic reply that is still being sent to the server. */
+function PendingCommentItem({ comment }: PendingCommentItemProps) {
+  return (
+    <div className="px-3 py-2 opacity-70">
+      <div className="flex items-center gap-1.5 text-[10px]">
+        <span className="font-medium text-gx-text">@{comment.author}</span>
+        <span className="text-gx-muted">·</span>
+        <span className="inline-flex items-center gap-1 text-gx-muted">
+          <Loader2 size={10} className="animate-spin" />
+          Sending…
+        </span>
+      </div>
+      <div className="mt-1">
+        <p className="whitespace-pre-wrap text-[11px] leading-relaxed text-gx-text">
+          {comment.body}
+        </p>
+      </div>
+    </div>
+  );
+}
+
+// ── FailedCommentItem ────────────────────────────────────────────────
+
+interface FailedCommentItemProps {
+  comment: OptimisticThreadComment;
+  threadId: string;
+  onRetry?(threadId: string, tempId: string): void;
+  onDismiss?(threadId: string, tempId: string): void;
+}
+
+/** Renders a reply that failed to publish, with a red indicator and retry/dismiss actions. */
+function FailedCommentItem({ comment, threadId, onRetry, onDismiss }: FailedCommentItemProps) {
+  return (
+    <div className="border-l-2 border-red-500 px-3 py-2">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-1.5 text-[10px]">
+          <span className="font-medium text-gx-text">@{comment.author}</span>
+          <span className="text-gx-muted">·</span>
+          <span className="inline-flex items-center gap-1 text-red-400">
+            <AlertCircle size={10} />
+            Failed
+          </span>
+        </div>
+      </div>
+      <div className="mt-1">
+        <p className="whitespace-pre-wrap text-[11px] leading-relaxed text-gx-text">
+          {comment.body}
+        </p>
+      </div>
+      {comment.failureMessage && (
+        <p className="mt-1 text-[10px] text-red-400">{comment.failureMessage}</p>
+      )}
+      <div className="mt-1.5 flex items-center gap-2">
+        {onRetry && (
+          <button
+            type="button"
+            className="inline-flex items-center gap-1 rounded bg-gx-accent/10 px-2 py-0.5 text-[10px] text-gx-accent hover:bg-gx-accent/20"
+            onClick={() => onRetry(threadId, comment.id)}
+            aria-label="Retry sending reply"
+          >
+            <RefreshCw size={10} />
+            Retry
+          </button>
+        )}
+        {onDismiss && (
+          <button
+            type="button"
+            className="inline-flex items-center gap-1 rounded px-2 py-0.5 text-[10px] text-gx-muted hover:bg-gx-surface-hover hover:text-gx-text"
+            onClick={() => onDismiss(threadId, comment.id)}
+            aria-label="Dismiss failed reply"
+          >
+            <X size={10} />
+            Dismiss
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}

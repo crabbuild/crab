@@ -1,0 +1,11 @@
+{
+  "_doc": {
+    "about": "PTY daemon resource quota configuration. Copy to ~/.crab/desktop/daemon/quotas.json and adjust as needed. Missing keys fall back to defaults. Send SIGHUP to the daemon to reload without restart.",
+    "maxConcurrentSessions": "Maximum number of live PTY sessions the daemon will hold at once. New spawn requests are refused with quota-exceeded:maxConcurrentSessions once this limit is reached. Default: 50.",
+    "maxMemoryMb": "Maximum heap usage (MB) before new sessions are refused. Checked at spawn time via process.memoryUsage().heapUsed. Default: 1024.",
+    "maxSessionLifetimeHours": "Positive values kill sessions older than this many hours. Use 0 to disable age-based killing. Default: 0."
+  },
+  "maxConcurrentSessions": 50,
+  "maxMemoryMb": 1024,
+  "maxSessionLifetimeHours": 0
+}

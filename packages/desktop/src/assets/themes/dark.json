@@ -1,0 +1,21 @@
+{
+  "id": "dark",
+  "name": "Dark",
+  "colorScheme": "dark",
+  "colors": {
+    "gx-bg": "15 17 21",
+    "gx-bg-sub": "11 13 18",
+    "gx-surface": "23 26 33",
+    "gx-surface-hover": "30 34 43",
+    "gx-border": "36 40 50",
+    "gx-muted": "138 147 165",
+    "gx-text": "231 234 241",
+    "gx-accent": "79 140 255",
+    "gx-accent-hover": "61 118 224",
+    "gx-success": "74 222 128",
+    "gx-warn": "250 204 21",
+    "gx-warning": "250 204 21",
+    "gx-error": "248 113 113",
+    "gx-info": "56 189 248"
+  }
+}

@@ -1,0 +1,24 @@
+{
+  "type": "pi",
+  "name": "Pi",
+  "binary": "pi",
+  "args": ["{prompt}"],
+  "env": {},
+  "interactionModel": "text",
+  "versionFlag": "--version",
+  "eventMapping": {
+    "typeField": "type",
+    "typeMap": {},
+    "fieldMap": {},
+    "contentField": "content",
+    "errorField": "error"
+  },
+  "capabilities": {
+    "supportsPlanMode": false,
+    "supportsStreaming": false,
+    "supportsToolUse": false,
+    "supportsIteration": false,
+    "supportsApprovalModes": false,
+    "terminalOnly": true
+  }
+}
