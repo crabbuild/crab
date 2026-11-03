@@ -5,17 +5,26 @@ Reuse the concurrent driver's CLI, receipts and request meter. Supply --source,
 --skip-same-branch, --consumer-mode cold-final and at least one update round.
 Each developer publishes ordinary Git, Xet and LFS content twice; other rounds
 change code. Cold payload readers borrow only independently fetched Git objects.
+Use --phase push to seal acknowledgements without claiming verified integrity.
+Use --phase verify with the original arguments and --run-id to audit that cohort
+in a fresh consumer directory on the same filesystem and persistent backend.
 """
 
 from __future__ import annotations
 
+import argparse
 import concurrent.futures
 import hashlib
+import json
+import os
+import tempfile
 import time
 from dataclasses import asdict
 from pathlib import Path
 
-from run_concurrent_push_smoke import ConcurrentPushSmoke, SmokeError, parse_args
+from run_concurrent_push_smoke import (
+    ConcurrentPushSmoke, SmokeError, SmokeReport, parse_args, redact_env, utc_now,
+)
 from run_lfs_qualification import hash_file, write_deterministic
 
 
@@ -91,6 +100,106 @@ class MixedTeam(ConcurrentPushSmoke):
         agent, dst, repo, _ = self.prepare(index, 0)
         return agent, dst, repo
 
+    def save_batch(self, round_index: int, records: list[dict]) -> None:
+        # Preserve failed batches too. A later verification attempt must never
+        # replace the original acknowledgements or latency samples.
+        self.write_report(force=True)
+        self.write_checkpoint(self.artifacts / f"push-batch-{round_index:02d}.json", {
+            "schema": "crab.mixed-team-push-batch", "run_id": self.run_id,
+            "round": round_index, "batch": self.report.push_batches[-1],
+            "pushes": records, "payload_history": self.payload_history,
+            "request_snapshots": self.report.request_snapshots[-1:],
+            "native_push_http": self.report.artifacts.get("native_push_http", [])[-1:],
+        })
+        print(json.dumps({"phase": "push-batch", "round": round_index,
+                          **self.report.push_batches[-1]}), flush=True)
+
+    def run_branch_fanout(self) -> None:
+        try:
+            super().run_branch_fanout()
+        finally:
+            if self.report.branch_fanout:
+                self.save_batch(0, self.report.branch_fanout)
+
+    @staticmethod
+    def write_checkpoint(path: Path, body: dict) -> None:
+        temporary = path.with_suffix(".tmp")
+        temporary.write_text(json.dumps(body, indent=2, sort_keys=True) + "\n")
+        # Publish only a complete file, and reject an attempt to overwrite a
+        # retained receipt, including one produced by a failed run.
+        try:
+            os.link(temporary, path)
+        finally:
+            temporary.unlink()
+
+    def checkpoint_identity(self) -> dict:
+        return {
+            "remote_url": self.remote_url, "endpoint_url": self.args.endpoint_url,
+            "agents": self.args.agents, "rounds": self.args.branch_update_rounds,
+            "source": str(self.args.source),
+            "binary_sha256": hashlib.sha256(Path(self.args.crab_bin).read_bytes()).hexdigest(),
+            "git_binary_sha256": hashlib.sha256(Path(self.args.git_bin).read_bytes()).hexdigest(),
+            "drivers": {name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+                        for name in ("run_mixed_team_rustfs.py", "run_concurrent_push_smoke.py")},
+        }
+
+    def seal_pushes(self) -> None:
+        expected = self.args.agents * (1 + self.args.branch_update_rounds)
+        records = self.report.branch_fanout + self.report.branch_updates
+        if (len(records) != expected or len(self.report.push_batches) != 1 + self.args.branch_update_rounds
+                or any(row["status"] != "ok" or row["command"]["exit_code"] != 0 for row in records)):
+            raise SmokeError("cannot seal incomplete or rejected pushes")
+        branches = [f"refs/heads/agent-{index:03d}" for index in range(self.args.agents)]
+        for round_index, batch in enumerate(self.report.push_batches):
+            cohort = (self.report.branch_fanout if round_index == 0 else
+                      [row for row in self.report.branch_updates if row["round"] == round_index])
+            if (sorted(row["branch"] for row in cohort) != branches
+                    or batch["jobs"] != self.args.agents or batch["successful"] != self.args.agents):
+                raise SmokeError("cannot seal a missing or duplicated branch acknowledgement")
+        refs = {f"refs/heads/agent-{index:03d}": self.git_value(
+                    self.branch_agents / f"branch-agent-{index:03d}", ["rev-parse", "HEAD"])
+                for index in range(self.args.agents)}
+        self.write_report(force=True)
+        report = asdict(self.report)
+        report["status"] = "pushes-complete"
+        self.write_checkpoint(self.artifacts / "push-checkpoint.json", {
+            "schema": "crab.mixed-team-push-checkpoint", "identity": self.checkpoint_identity(),
+            "expected_refs": refs, "report": report,
+        })
+
+    def resume_verification(self) -> None:
+        checkpoint = self.artifacts / "push-checkpoint.json"
+        raw = checkpoint.read_bytes()
+        saved = json.loads(raw)
+        if (saved.get("schema") != "crab.mixed-team-push-checkpoint"
+                or saved.get("identity") != self.checkpoint_identity()
+                or saved["report"]["status"] != "pushes-complete"):
+            raise SmokeError("verification checkpoint identity does not match this run")
+        self.report = SmokeReport(**saved["report"])
+        self.command_index = len(self.report.commands)
+        self.source_identity = self.report.workload["source_identity"]
+        self.payload_history = {int(index): versions for index, versions in
+                                self.report.artifacts["payload_history"].items()}
+        # Each attempt gets new logs, Git consumers and data caches. Keep the
+        # original writers and the sealed push report as read-only evidence.
+        self.run_root = Path(tempfile.mkdtemp(prefix="verification-", dir=self.run_root))
+        self.verification_report_started = True
+        self.logs = self.run_root / "logs"
+        self.artifacts = self.run_root / "artifacts"
+        (self.run_root / "tmp").mkdir()
+        self.env = self.build_env()
+        self.report.root = str(self.run_root)
+        self.report.env = redact_env(self.env)
+        self.report.status = "verifying"
+        self.report.artifacts["push_checkpoint"] = str(checkpoint)
+        self.report.artifacts["push_checkpoint_sha256"] = hashlib.sha256(raw).hexdigest()
+        self.write_report(force=True)
+        self.check("verification-source-unchanged", self.source_state() == self.source_identity)
+        for name, oid in saved["expected_refs"].items():
+            writer = self.branch_agents / f"branch-{name.removeprefix('refs/heads/')}"
+            self.check(f"verification-{name}-writer-unchanged",
+                       self.git_value(writer, ["rev-parse", "HEAD"]) == oid)
+
     def run_branch_updates(self) -> None:
         updates = []
         for round_index in range(1, self.args.branch_update_rounds + 1):
@@ -107,11 +216,12 @@ class MixedTeam(ConcurrentPushSmoke):
             updates.extend({"round": round_index, "client": self.args.push_client, **asdict(result)}
                            for result in results)
             self.report.branch_updates = updates
+            self.request_snapshot(f"mixed-round-{round_index}-{self.args.push_client}", request_before,
+                                  attempted_pushes=len(results), successful_pushes=len(results))
+            self.save_batch(round_index, updates[-len(results):])
             self.check(f"mixed-round-{round_index}-all-acknowledged",
                        len(results) == self.args.agents
                        and all(result.status == "ok" and result.command.exit_code == 0 for result in results))
-            self.request_snapshot(f"mixed-round-{round_index}-{self.args.push_client}", request_before,
-                                  attempted_pushes=len(results), successful_pushes=len(results))
             self.write_report(force=True)
 
     def verify_payloads(self, index: int) -> None:
@@ -160,9 +270,57 @@ class MixedTeam(ConcurrentPushSmoke):
                 raise
         self.check("source-checkout-preserved-after-payload-reads", self.source_state() == self.source_identity)
 
+    def run(self) -> int:
+        phase = getattr(self.args, "phase", "all")
+        self.verification_report_started = False
+        if phase != "verify" and self.run_root.exists():
+            print(f"FAILED: refusing to overwrite retained run: {self.run_root}")
+            return 1
+        try:
+            if phase == "verify":
+                self.resume_verification()
+            else:
+                self.preflight()
+                self.init_seed()
+                self.run_branch_fanout()
+                self.run_branch_updates()
+                self.seal_pushes()
+            if phase != "push":
+                self.verify_cold_team()
+                self.run_fsck()
+            self.report.status = "pushes-complete" if phase == "push" else "ok"
+            self.write_report(force=True)
+            print(f"{self.report.status}: {self.artifacts / 'report.json'}")
+            return 0
+        except Exception as error:
+            self.report.status = "failed"
+            self.report.checks.append({"name": "exception", "ok": False,
+                                       "detail": {"error": str(error)}, "timestamp": utc_now()})
+            # A rejected resume must not rewrite an existing push report.
+            if phase != "verify" or self.verification_report_started:
+                self.write_report(force=True)
+            print(f"FAILED: {error}")
+            return 1
+        finally:
+            if self.request_proxy is not None:
+                try:
+                    if phase != "verify" or self.verification_report_started:
+                        path = self.artifacts / "request-meter-total.json"
+                        path.write_text(json.dumps(self.request_proxy.snapshot(include_paths=False), indent=2) + "\n")
+                        self.report.artifacts["request_meter_total"] = str(path)
+                        self.write_report(force=True)
+                finally:
+                    self.request_proxy.close()
+
 
 def main() -> int:
-    args = parse_args()
+    parser = argparse.ArgumentParser(add_help=False)
+    parser.add_argument("--phase", choices=["all", "push", "verify"], default="all")
+    phase, remaining = parser.parse_known_args()
+    args = parse_args(remaining)
+    args.phase = phase.phase
+    if args.phase == "verify" and not args.run_id:
+        raise SmokeError("verification requires the original --run-id")
     if (not args.source or args.branch_update_rounds < 1 or not args.skip_same_branch
             or args.skip_branch_fanout or args.consumer_mode != "cold-final"
             or args.push_client != "native" or args.skip_fsck or args.crash_boundary or args.marker_faults):
