@@ -49,6 +49,15 @@ deterministic 64-source regression reproduces 640 ms of serial provider waits;
 the bounded implementation passes its 40 ms limit. This simulated I/O result
 does not establish the required 10,000-push latency, byte or integrity gates.
 
+Full CI on `cbdc300ed806` completes the workspace tests but fails an obsolete
+version-guard fixture: `>=0.1.0` does not accept the declared
+`2.0.0-alpha.1` prerelease. The CLI library reports 4,182 passed, one failed and
+eight ignored tests. The follow-up derives the positive fixture from the actual
+declared version and checks stable-only range exclusion explicitly. Production
+guard behavior remains byte-identical to the merged base and follows the
+[SemVer requirement contract](https://docs.rs/semver/1.0.28/semver/struct.VersionReq.html).
+The final combined revision still requires green full CI and a fresh replay.
+
 ## Resuming a qualification audit
 
 `run_mixed_team_rustfs.py` accepts `--phase push`, `--phase verify` and the

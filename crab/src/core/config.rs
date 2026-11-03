@@ -3665,10 +3665,20 @@ mod tests {
     #[test]
     fn version_guard_passes_when_binary_satisfies_requirement() {
         let mut cfg = Config::default();
-        // The binary version is CARGO_PKG_VERSION (0.1.0). A requirement
-        // that accepts any 0.1.x should pass.
-        cfg.required_cli_version = Some(semver::VersionReq::parse(">=0.1.0").unwrap());
-        cfg.check_version_guard().expect("0.1.0 satisfies >=0.1.0");
+        // Prereleases require an explicit comparator for that version; a
+        // hardcoded stable lower bound does not accept a newer prerelease.
+        let requirement = format!(">={}", Config::BINARY_VERSION);
+        cfg.required_cli_version = Some(semver::VersionReq::parse(&requirement).unwrap());
+        cfg.check_version_guard()
+            .expect("declared version satisfies its inclusive lower bound");
+    }
+
+    #[test]
+    fn version_guard_stable_lower_bound_excludes_prereleases() {
+        let current = semver::Version::parse(Config::BINARY_VERSION).unwrap();
+        let mut cfg = Config::default();
+        cfg.required_cli_version = Some(semver::VersionReq::parse(">=0.0.0").unwrap());
+        assert_eq!(cfg.check_version_guard().is_ok(), current.pre.is_empty());
     }
 
     #[test]
