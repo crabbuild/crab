@@ -18,7 +18,29 @@ were independently read back with their original holders preserved.
 
 ## Latest team-scale diagnostic
 
-Published `f8c39617de7` passes [full exact-head CI](https://github.com/crabbuild/crab/actions/runs/41666489890)
+Published `8cdf15d1949` passes 899 dedicated Linux checks, official private
+all-variant installation, 776 old-format readback checks, and an 80-push smoke
+with 134 history/no-repair checks. Its matched 64-developer replay completes
+640 pushes per build and 918 independent history/no-repair checks each. All
+43,076 reachable Git objects also match the original seed/writer bytes.
+Candidate p95 passes at 5.445 seconds overall and 6.816 seconds worst batch.
+Capsule GETs fall 62.1% (112,403 to 42,630) and capsule response bytes fall 5.2%,
+but conservative all-metadata response bytes increase from 499,072,312 to
+609,527,236: **22.1% more, failing the byte budget**. Known request-body bytes
+increase 13.6%; all foreground compaction is included, with zero unknown lengths.
+The controller stops before generating its 1,000-developer cohort. Full
+[exact-head CI](https://github.com/crabbuild/crab/actions/runs/41689953288) is pending.
+
+Raw request recount attributes 126,406,083 response bytes to checkpoint GETs and
+20,097,372 to a pack-layer GET. The next change uses 4 KiB leaves for shared
+checkpoint proofs while retaining declared version-1/2 bytes; capsule visibility
+read-ahead stops at 16 KiB. Focused regressions reproduce 2,128,338 bytes for
+64 scattered ref proofs and 24,785 bytes for one selected capsule tip. They pass
+at 808,020 and 8,437 bytes respectively. All 130 focused visibility checks pass,
+with two existing ignores. These local proof-byte results do not qualify Linux
+push latency, the matched byte budget or a complete 10,000-push replay.
+
+The preceding `f8c39617de7` passes [full exact-head CI](https://github.com/crabbuild/crab/actions/runs/41666489890)
 and all matched 64-developer gates: 51.8% fewer capsule GETs, 15.3% fewer capsule
 response bytes, 16.3% fewer conservative all-metadata response bytes, and
 2.947-second overall / 3.477-second worst-batch p95. Both independent audits pass
@@ -52,8 +74,9 @@ and subsequent head rebase. Current catalog capture now retries verified
 same-repository/epoch root replacements; explicitly pinned snapshot lookup keeps
 its original replay precedence. The lifecycle regression, eight capture tests,
 three ordering tests, strict metadata Clippy and payload-only compilation pass.
-The new foreground hook, full combined Linux build, fresh team replay, historical
-audit, request/byte gates and new exact-head CI remain unqualified end to end.
+Its subsequent `8cdf15d1949` installation, readback and 64-developer proofs are
+recorded above. The combined branch remains unqualified end to end; neither its
+failed byte comparison nor the new focused page tests close the team-scale gates.
 
 The following earlier results remain retained:
 

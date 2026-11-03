@@ -112,10 +112,11 @@ not widen that retry window. Current-state catalog lookups reuse that owner toge
 control-selection and visibility machinery; full maintenance materialization
 remains explicit.
 
-Catalog capture fully authenticates individual publication leaves up to 32 KiB
-in one source read. The existing aggregate control-byte bound admits the extra
-body bytes before I/O. Paged visibility readers reuse those verified bytes and
-still validate every selected page and ref transition. Compacted histories keep
+Catalog capture coalesces single-ref visibility bodies up to 16 KiB, excluding
+payloads and duplicate descriptor bytes. Larger edits retain selected-page reads
+instead of transferring unrelated changes for every captured tip. The existing
+aggregate control-byte bound admits read-ahead before I/O. Paged readers still
+validate every selected page and ref transition. Compacted histories keep
 selected-member paging. Catalog capture fetches mandatory scalar and new-tip
 point proofs in bounded concurrent waves for both leaves and selected compacted
 members. Ordered reconciliation still validates prior closures, removed objects
@@ -225,8 +226,12 @@ sets used by capsule visibility schema 4. Each ref has its own authenticated set
 root; retained dictionary entries never grant ref access. Its single dictionary
 also retains objects whose last ref was deleted. Source/member bindings use
 fixed-width ordinal chunks, with exact coverage and final-chunk length checks,
-so they do not duplicate the OID dictionary. New readers
-accept both descriptors and reject mixed or unknown versions. The existing
+so they do not duplicate the OID dictionary. Descriptor 3 retains those shared
+memberships with 4 KiB leaves and 32 KiB directories for scattered checkpoint
+tip proofs. New readers accept all three descriptors and reject mixed or unknown
+versions. Complete decoding rebuilds each declared version with its original
+geometry; versions 1/2 retain their exact immutable bytes. Upgrade readers before
+writers: older readers reject descriptor 3. The existing
 128 MiB proof ceiling, source/member bindings and checkpoint CAS are unchanged.
 In-memory snapshots retain sparse closures or bitmaps through ordinal remapping
 and restoration, instead of expanding every membership into a separate u32.
@@ -907,8 +912,9 @@ checkpointed file precedence must not silently replace the supplied replay base.
 
 Checkpoint visibility shares heavily overlapping ref memberships before the
 128 MiB format ceiling becomes a concern. More than four memberships per retained
-OID, spanning at least two ordinary page bodies, selects the existing version-2
-dictionary/bitmap encoding. Sparse small checkpoints retain version 1. Complete
+OID, spanning at least two ordinary page bodies, selects shared dictionary/bitmap
+encoding. Split shared leaves use descriptor 3; unsplit trees retain version 2.
+Sparse small checkpoints retain version 1. Complete
 validation rebuilds the declared version's canonical bytes, preserving both
 shipped layouts even when the writer's selection policy changes. Upgrade readers
 before writers, as required by the visibility-format changes in this branch.

@@ -31,9 +31,109 @@ fn declared_checkpoint_layouts_preserve_immutable_history() {
         blake3::hash(&legacy).to_hex().as_str(),
         "100e4536b5f5112a8728b011dae5acab41492201da761db2ef218d0d6b51119d"
     );
-    for bytes in [legacy, snapshot.encode().unwrap()] {
+    let shared = encode_version(&snapshot, Some(2)).unwrap();
+    assert_eq!(
+        blake3::hash(&shared).to_hex().as_str(),
+        "5fc430bd1d557cab198fd53001414249cee8fe1836e85cbb13b83bf357a01234"
+    );
+    for bytes in [legacy, shared, snapshot.encode().unwrap()] {
         assert_eq!(LayeredVisibilitySnapshot::decode(&bytes).unwrap(), snapshot);
     }
+}
+
+#[test]
+fn checkpoint_geometry_is_bound_to_its_declared_version() {
+    let snapshot = overlapping_snapshot(32_000, 32, 30);
+    for (encoded_version, declared_version) in [(2, 3), (3, 2)] {
+        let encoded = encode_version(&snapshot, Some(encoded_version)).unwrap();
+        let mut descriptor = Descriptor::decode(&encoded).unwrap();
+        let mut relabeled = encoded[..descriptor.body_bytes as usize].to_vec();
+        descriptor.version = declared_version;
+        let header = json(&descriptor).unwrap();
+        relabeled.extend_from_slice(&header);
+        crate::pages::put_u32(&mut relabeled, header.len()).unwrap();
+        relabeled.extend_from_slice(MAGIC);
+        assert!(LayeredVisibilitySnapshot::decode(&relabeled).is_err());
+    }
+}
+
+#[tokio::test]
+async fn scattered_checkpoint_tips_keep_membership_proofs_bounded() {
+    use std::sync::atomic::Ordering::Relaxed;
+
+    let mut snapshot = overlapping_snapshot(32_000, 64, 30);
+    let pack = CapsuleGitPack::new(
+        Bytes::from_static(b"pack"),
+        Bytes::from_static(b"index"),
+        Bytes::from_static(b"reverse"),
+        Bytes::from_static(b"locator"),
+        "1".repeat(40),
+        snapshot.objects.len() as u64,
+    )
+    .unwrap();
+    let source = PackLayer::build(&pack)
+        .unwrap()
+        .source_descriptor()
+        .unwrap();
+    snapshot.catalog_digest = source_catalog_digest(std::slice::from_ref(&source)).unwrap();
+    let bytes = snapshot.encode().unwrap();
+    let descriptor = Descriptor::decode(&bytes).unwrap();
+    let hash = blake3::hash(&bytes).to_hex().to_string();
+    let range = PackRange::new(0, &bytes).unwrap();
+    let received = Arc::new(AtomicUsize::new(0));
+    let observed = received.clone();
+    let store =
+        Store::new(Arc::new(InMemory::new())).with_read_byte_observer(Arc::new(move |bytes| {
+            observed.fetch_add(bytes as usize, Relaxed);
+        }));
+    let layout = StoreLayout::new(store, "scattered-checkpoint-tips".to_owned());
+    layout
+        .store()
+        .create_strict(&layout.capsule_checkpoint_path(&hash), bytes)
+        .await
+        .unwrap();
+    let reader = LayeredVisibilityReader::new(
+        &layout,
+        &hash,
+        range,
+        descriptor,
+        vec![source],
+        4 * 1024 * 1024,
+    )
+    .unwrap();
+    let names = snapshot.refs.keys().map(String::as_str).collect::<Vec<_>>();
+    assert!(
+        reader
+            .refs_present(layout.store(), &names)
+            .await
+            .unwrap()
+            .into_iter()
+            .all(|present| present)
+    );
+    let oid = |index: u64| -> [u8; 20] {
+        blake3::hash(&index.to_be_bytes()).as_bytes()[..20]
+            .try_into()
+            .unwrap()
+    };
+    for reference in 0..64_u64 {
+        assert_eq!(
+            reader
+                .contains_in_ref(
+                    layout.store(),
+                    &format!("refs/heads/developer-{reference}"),
+                    &[
+                        oid(32_000 + reference * 30),
+                        oid(32_000 + ((reference + 1) % 64) * 30)
+                    ],
+                )
+                .await
+                .unwrap(),
+            Some(vec![true, false]),
+        );
+    }
+    let bytes = received.load(Relaxed);
+    eprintln!("scattered checkpoint membership proof bytes: {bytes}");
+    assert!(bytes <= 1024 * 1024, "{bytes} proof bytes for 64 ref tips");
 }
 
 #[test]
@@ -581,7 +681,7 @@ async fn overlapping_ref_checkpoints_keep_memberships_compact() {
     );
     let encoded = snapshot.encode().unwrap();
     let descriptor = Descriptor::decode(&encoded).unwrap();
-    assert_eq!(descriptor.version, 2);
+    assert_eq!(descriptor.version, 3);
     let mut legacy = descriptor.clone();
     legacy.version = 1;
     assert!(legacy.validate(encoded.len() as u64).is_err());
@@ -589,7 +689,7 @@ async fn overlapping_ref_checkpoints_keep_memberships_compact() {
     missing.shared = None;
     assert!(missing.validate(encoded.len() as u64).is_err());
     let mut unknown = descriptor.clone();
-    unknown.version = 3;
+    unknown.version = 4;
     assert!(unknown.validate(encoded.len() as u64).is_err());
     assert!(encoded.len() < 4 * 1024 * 1024);
     let decoded = LayeredVisibilitySnapshot::decode(&encoded).unwrap();

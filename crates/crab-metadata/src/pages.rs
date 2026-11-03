@@ -206,9 +206,9 @@ impl Default for Writer {
 }
 
 impl Writer {
-    pub(crate) fn for_point_queries() -> Self {
+    pub(crate) fn with_leaf_target(leaf_target_bytes: usize) -> Self {
         Self {
-            leaf_target_bytes: 8 * 1024,
+            leaf_target_bytes,
             ..Self::default()
         }
     }

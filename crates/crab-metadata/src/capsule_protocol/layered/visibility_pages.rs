@@ -110,14 +110,20 @@ pub(super) fn encode(snapshot: &LayeredVisibilitySnapshot) -> Result<Bytes> {
 
 fn encode_version(snapshot: &LayeredVisibilitySnapshot, version: Option<u32>) -> Result<Bytes> {
     snapshot.validate()?;
-    let mut writer = Writer::default();
-    // Both layouts shipped. Validate stored pages with their declared layout;
+    // Versions 1 and 2 shipped. Validate pages with their declared layout;
     // changing the writer's size policy must never invalidate immutable history.
     let use_shared = match version {
         Some(1) => false,
-        Some(2) => true,
+        Some(2 | 3) => true,
         None => shared_encoding(snapshot),
         _ => return Err(corrupt("checkpoint visibility page version is unsupported")),
+    };
+    let mut writer = if use_shared && matches!(version, None | Some(3)) {
+        // Reconciliation probes scattered tips across the shared history. A
+        // larger capsule-edit leaf repeats that history for every captured ref.
+        Writer::with_leaf_target(4 * 1024)
+    } else {
+        Writer::default()
     };
     let objects = if use_shared {
         snapshot
@@ -220,8 +226,19 @@ fn encode_version(snapshot: &LayeredVisibilitySnapshot, version: Option<u32>) ->
         Kind::CheckpointRefs,
         refs.into_iter().collect(),
     )?;
+    // A split shared leaf benefits from point geometry. Unsplit trees retain
+    // version 2 bytes; declared versions 1/2 always use their original geometry.
+    let version = version.unwrap_or_else(|| {
+        if use_shared && writer.has_branches() {
+            3
+        } else if use_shared {
+            2
+        } else {
+            1
+        }
+    });
     let descriptor = Descriptor {
-        version: if use_shared { 2 } else { 1 },
+        version,
         catalog_digest: snapshot.catalog_digest.clone(),
         body_bytes: writer.bytes.len() as u64,
         body_hash: *blake3::hash(&writer.bytes).as_bytes(),
@@ -283,7 +300,7 @@ impl Descriptor {
         )?;
         if !matches!(
             (self.version, self.shared.is_some()),
-            (1, false) | (2, true)
+            (1, false) | (2 | 3, true)
         ) || self.body_bytes > length.saturating_sub(12)
             || length > MAX_LAYERED_VISIBILITY_BYTES as u64
             || u64::from(self.object_count) > crate::git_visibility::MAX_GIT_VISIBILITY_OBJECTS

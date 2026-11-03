@@ -58,11 +58,12 @@ impl CapsuleVisibilityReader {
         use std::sync::atomic::Ordering::Relaxed;
 
         let bytes = self.descriptor.body_bytes;
-        // Coalesce a bounded single-ref proof region, excluding payloads and
-        // duplicate descriptor bytes. Reserve aggregate headroom before I/O
-        // and retain each query's normal page admission and authentication.
+        // Coalesce at most two 8 KiB point leaves. Larger edits keep selected
+        // paging instead of charging unrelated changes to every captured tip.
+        // Reserve headroom before I/O; page admission and hashes still apply.
         if self.ref_count() == 1
-            && bytes <= crate::pages::READ_AHEAD_BYTES.min(self.maximum)
+            && bytes <= (crate::pages::TARGET_BYTES / 2) as u64
+            && bytes <= self.maximum
             && headroom
                 .try_update(Relaxed, Relaxed, |remaining| remaining.checked_sub(bytes))
                 .is_ok()
@@ -540,6 +541,70 @@ mod tests {
                 "shared={shared}, shipped/new proof bytes and requests: {observations:?}"
             );
         }
+    }
+
+    #[tokio::test]
+    async fn larger_leaf_edits_keep_selected_membership_reads() {
+        use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+
+        let name = "refs/heads/main";
+        let oid = format!("{:040x}", 1_000);
+        let transaction = CapsuleTransaction::new(
+            &"1".repeat(64),
+            vec![CapsuleRefEdit::new(name, None, Some(oid.clone()), None)],
+        )
+        .unwrap();
+        let delta = CapsuleVisibilityDelta::new(BTreeMap::from([(
+            name.to_owned(),
+            GitVisibilityEdit::from_replacement_objects(
+                None,
+                oid.clone(),
+                (1..=1_000).map(|value| format!("{value:040x}")).collect(),
+            ),
+        )]))
+        .unwrap();
+        let capsule = Capsule::build(
+            &transaction,
+            vec![],
+            vec![CapsuleSection::new(
+                CapsuleSectionKind::VisibilityDelta,
+                delta.encode().unwrap(),
+            )],
+        )
+        .unwrap();
+        let run = CapsuleRun::leaf(capsule.clone()).unwrap();
+        let received = Arc::new(AtomicU64::new(0));
+        let observed = received.clone();
+        let store = Store::new(Arc::new(object_store::memory::InMemory::new()))
+            .with_read_byte_observer(Arc::new(move |bytes| {
+                observed.fetch_add(bytes, Relaxed);
+            }));
+        let layout = StoreLayout::new(store, "repositories/selected-leaf".into());
+        layout
+            .store()
+            .create_strict(&layout.capsule_path(run.hash()), run.bytes().clone())
+            .await
+            .unwrap();
+        let (control, _) = run.verified_controls().unwrap();
+        let mut reader = control
+            .visibility_reader(&layout, capsule.hash(), crate::pages::READ_AHEAD_BYTES)
+            .unwrap()
+            .unwrap();
+        let body_bytes = reader.descriptor.body_bytes;
+        reader.coalesce_small_edit(&AtomicU64::new(crate::pages::READ_AHEAD_BYTES));
+        assert_eq!(
+            reader
+                .lookup(layout.store(), name, &[decode_oid(&oid).unwrap()])
+                .await
+                .unwrap(),
+            Some(vec![Some(VisibilityChange::Added)]),
+        );
+        let bytes = received.load(Relaxed);
+        eprintln!("selected membership proof: {bytes} of {body_bytes} body bytes");
+        assert!(
+            bytes < body_bytes,
+            "{bytes} bytes fetched for a selected tip"
+        );
     }
 
     #[tokio::test]

@@ -67,7 +67,7 @@ fn encode_version(delta: &CapsuleVisibilityDelta, version: Option<u32>) -> Resul
         _ => return Err(contract_error("visibility page version is unsupported")),
     };
     let mut writer = if matches!(version, None | Some(POINT_VERSION)) {
-        Writer::for_point_queries()
+        Writer::with_leaf_target(8 * 1024)
     } else {
         Writer::default()
     };
