@@ -1,8 +1,9 @@
 # Crab v2 team and large-file qualification
 
 Status: **Combined revision under qualification; historical failures retained**.
-Latest combined-build qualification and gate status are tracked in
-[PR #640](https://github.com/crabbuild/crab/pull/640).
+PR #640 is merged. The subsequent contention, small-run compaction and
+qualification follow-up is tracked in [PR #645](https://github.com/crabbuild/crab/pull/645).
+That follow-up is not yet team-scale qualified.
 The target branch's `84812774d5a` fetch changes are integrated with the metadata
 and indexing fixes. Warm classic and wire fetches use paged controls and the
 same scalar binding validator; cold installation retains complete member
@@ -14,6 +15,32 @@ The original object-store audit found three
 expired read-admission leases left by interrupted tests, with no Git-object or
 data-chain findings. Built-in recovery passed; all three released tombstones
 were independently read back with their original holders preserved.
+
+## Resuming a qualification audit
+
+`run_mixed_team_rustfs.py` accepts `--phase push`, `--phase verify` and the
+combined default `--phase all`. A push-only run reports `pushes-complete`, not
+verified integrity. Every drained batch retains an immutable
+`artifacts/push-batch-NN.json`, including rejected commands and its original
+latency distribution. After every requested push is acknowledged exactly once
+per branch and round, `artifacts/push-checkpoint.json` seals the report, expected
+writer tips, driver and binary identities.
+
+Run the same command with `--phase verify` and the original `--run-id` to perform
+historical Git/Xet/LFS readback and the no-repair fsck in a fresh `verification-*`
+child directory. Keep the same persistent RustFS backend, filesystem, source,
+Git/Crab binaries and drivers. Mismatched identities fail before modifying any
+push evidence. Failed audit attempts remain available; a subsequent attempt
+uses new consumers and caches. This resumes verification of a complete push
+cohort; it does not infer acknowledgements for an interrupted batch or resume
+partially prepared writers.
+
+The merged stable-capture implementation reproduces its exhausted-retry failure
+with a deterministic 900 ms write burst. The follow-up permits 32 bounded
+attempts, reusing each final listing as the next starting inventory. Identical
+provider identities, active-epoch filtering and fresh activation resolution
+remain required. Fifteen store/capture tests and strict metadata/writer Clippy
+pass locally. The longer burst proof is not a 64- or 1,000-developer live result.
 
 ## Scope and provenance
 

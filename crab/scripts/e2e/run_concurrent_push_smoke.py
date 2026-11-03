@@ -2612,7 +2612,7 @@ class ConcurrentPushSmoke:
                     self.request_proxy.close()
 
 
-def parse_args() -> argparse.Namespace:
+def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--root", type=Path, default=DEFAULT_ROOT)
     parser.add_argument("--bucket", default=DEFAULT_BUCKET)
@@ -2648,7 +2648,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--skip-fsck", action="store_true")
     parser.add_argument("--no-request-capture", action="store_true")
     parser.add_argument("--max-locator-requests-per-success", type=float)
-    args = parser.parse_args()
+    args = parser.parse_args(argv)
     if args.agents < 1 or args.same_branch_agents < 1 or args.max_parallel_pushes < 1:
         parser.error("agent and push worker counts must be positive")
     if args.push_client == "git" and (args.rebase_on_non_fast_forward or not args.skip_same_branch):
