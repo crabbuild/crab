@@ -37,7 +37,6 @@ type TaskRow = {
   remote_profile_id: string | null;
   codex_thread_id: string | null;
   ui_state_json: string | null;
-  kanban_card_id: string | null;
   workflow_run_id: string | null;
   workflow_node_run_id: string | null;
   plan_first: number;
@@ -216,7 +215,6 @@ export class OrchestratorTaskDatabase {
       remoteProfileId: row.remote_profile_id ?? undefined,
       codexThreadId: row.codex_thread_id ?? undefined,
       uiState: decodeJson<PersistedTask["uiState"]>(row.ui_state_json, undefined),
-      kanbanCardId: row.kanban_card_id ?? undefined,
       workflowRunId: row.workflow_run_id ?? undefined,
       workflowNodeRunId: row.workflow_node_run_id ?? undefined,
       planFirst: row.plan_first === 1 || undefined,
@@ -239,7 +237,7 @@ export class OrchestratorTaskDatabase {
         id, title, prompt, agent_type, status, branch, worktree_path,
         worktree_mode, base_ref, base_branch, repo_path, created_at,
         started_at, completed_at, exit_code, pr_url, pr_number, is_remote,
-        remote_profile_id, codex_thread_id, ui_state_json, kanban_card_id,
+        remote_profile_id, codex_thread_id, ui_state_json,
         workflow_run_id, workflow_node_run_id, plan_first, model,
         reasoning_level, pinned_at, parent_task_id, root_task_id,
         spawned_by_agent_id, spawned_role, last_activity_at, sidebar_label,
@@ -249,7 +247,7 @@ export class OrchestratorTaskDatabase {
         @worktree_path, @worktree_mode, @base_ref, @base_branch, @repo_path,
         @created_at, @started_at, @completed_at, @exit_code, @pr_url,
         @pr_number, @is_remote, @remote_profile_id, @codex_thread_id,
-        @ui_state_json, @kanban_card_id, @workflow_run_id,
+        @ui_state_json, @workflow_run_id,
         @workflow_node_run_id, @plan_first, @model, @reasoning_level,
         @pinned_at, @parent_task_id, @root_task_id, @spawned_by_agent_id,
         @spawned_role, @last_activity_at, @sidebar_label, @sidebar_group,
@@ -276,7 +274,6 @@ export class OrchestratorTaskDatabase {
         remote_profile_id = excluded.remote_profile_id,
         codex_thread_id = excluded.codex_thread_id,
         ui_state_json = excluded.ui_state_json,
-        kanban_card_id = excluded.kanban_card_id,
         workflow_run_id = excluded.workflow_run_id,
         workflow_node_run_id = excluded.workflow_node_run_id,
         plan_first = excluded.plan_first,
@@ -336,7 +333,6 @@ export class OrchestratorTaskDatabase {
           remote_profile_id: task.remoteProfileId ?? null,
           codex_thread_id: task.codexThreadId ?? null,
           ui_state_json: encodeJson(task.uiState),
-          kanban_card_id: task.kanbanCardId ?? null,
           workflow_run_id: task.workflowRunId ?? null,
           workflow_node_run_id: task.workflowNodeRunId ?? null,
           plan_first: task.planFirst ? 1 : 0,
@@ -402,7 +398,6 @@ export class OrchestratorTaskDatabase {
         remote_profile_id TEXT,
         codex_thread_id TEXT,
         ui_state_json TEXT,
-        kanban_card_id TEXT,
         workflow_run_id TEXT,
         workflow_node_run_id TEXT,
         plan_first INTEGER NOT NULL DEFAULT 0,
@@ -466,7 +461,6 @@ export class OrchestratorTaskDatabase {
     this.ensureColumn("tasks", "remote_profile_id", "TEXT");
     this.ensureColumn("tasks", "codex_thread_id", "TEXT");
     this.ensureColumn("tasks", "ui_state_json", "TEXT");
-    this.ensureColumn("tasks", "kanban_card_id", "TEXT");
     this.ensureColumn("tasks", "workflow_run_id", "TEXT");
     this.ensureColumn("tasks", "workflow_node_run_id", "TEXT");
     this.ensureColumn("tasks", "plan_first", "INTEGER NOT NULL DEFAULT 0");

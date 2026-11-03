@@ -21,8 +21,6 @@ export interface TokenUsage {
   cacheWriteTokens: number;
   timestamp: number;
   turnId: string;
-  /** Optional Kanban card ID to associate this usage with a specific card. */
-  cardId?: string;
 }
 
 export interface WorkspaceCost {
@@ -82,20 +80,13 @@ export class CostTracker extends EventEmitter {
    * Records a token usage event for a workspace. Creates the workspace
    * entry if it doesn't exist, appends the usage record, and recalculates
    * the estimated cost. Emits `budget-warning` if the budget is exceeded.
-   *
-   * When `cardId` is provided, the usage record is tagged with the Kanban
-   * card ID so analytics can attribute costs to individual cards.
    */
   recordUsage(
     workspaceId: string,
     usage: TokenUsage,
     agentType: string,
     model: string,
-    cardId?: string,
   ): void {
-    if (cardId) {
-      usage = { ...usage, cardId };
-    }
     let entry = this.costs.get(workspaceId);
 
     if (!entry) {

@@ -55,7 +55,6 @@ import { bridgeSyncEventsToRenderer,bridgeAgentDeployToRenderer } from "./ssh-ip
 import { RemoteWorkspaceOrchestrator } from "./remote-workspace-orchestrator";
 import { registerRemoteWorkspaceIpc } from "./remote-workspace-ipc";
 import { registerMountIpc } from "./mount-ipc";
-import { registerKanbanIpc } from "./kanban/kanban-ipc";
 import { browserManager } from "./browser/browser-manager";
 import { registerAgentWorkflowIpc } from "./agent-workflows/agent-workflow-ipc";
 import { LspManager } from "./lsp-manager";
@@ -310,9 +309,6 @@ function registerIpc(skillManager: SkillManager) {
 
   // Mount IPC handlers (VFS mount management via coordinator socket).
   registerMountIpc();
-
-  // Kanban IPC handlers (board sync, automation, pipeline lifecycle).
-  registerKanbanIpc(ipcMain, () => mainWindow);
 
   // Browser IPC handlers (guest lifecycle, downloads, viewport, devtools).
   browserManager.registerIpcHandlers(ipcMain);

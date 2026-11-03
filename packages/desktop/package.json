@@ -61,7 +61,6 @@
     "electron-log": "^5.4.4",
     "electron-updater": "^6.8.3",
     "fuse.js": "^7.3.0",
-    "liquidjs": "^10.27.0",
     "lucide-react": "^1.14.0",
     "marked": "^15.0.0",
     "minimatch": "^10.2.5",

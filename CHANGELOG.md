@@ -5,6 +5,11 @@ integration surfaces should be recorded here before release.
 
 ## Unreleased
 
+### Desktop
+
+- Removed the desktop Kanban board, tracker integrations, and board automation.
+  Agent tasks and workflows remain available; existing task history is retained.
+
 ## 2.0.0-alpha.1 - 2026-11-02
 
 This is the first Crab v2 alpha. Download the platform CLI archive or desktop

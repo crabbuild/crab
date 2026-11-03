@@ -622,105 +622,6 @@ html.theme-hc-light {
   }
 }
 
-/* ── Kanban spring animations and transitions ─────────────────────── */
-
-/* Spring-like settle for card drops.
-   Approximates stiffness 300, damping 25, mass 0.8 with a cubic-bezier
-   that overshoots slightly then settles — natural spring feel. */
-@keyframes kanban-spring-drop {
-  0% {
-    transform: scale(1.02) translateY(-4px);
-    opacity: 0.8;
-  }
-  40% {
-    transform: scale(0.99) translateY(1px);
-    opacity: 1;
-  }
-  70% {
-    transform: scale(1.005) translateY(-0.5px);
-  }
-  100% {
-    transform: scale(1) translateY(0);
-  }
-}
-
-/* Card enter — fade in */
-@keyframes kanban-fade-in {
-  from {
-    opacity: 0;
-  }
-  to {
-    opacity: 1;
-  }
-}
-
-/* Card exit — fade out */
-@keyframes kanban-fade-out {
-  from {
-    opacity: 1;
-  }
-  to {
-    opacity: 0;
-  }
-}
-
-/* Detail panel slide in from right */
-@keyframes kanban-slide-in-right {
-  from {
-    transform: translateX(100%);
-  }
-  to {
-    transform: translateX(0);
-  }
-}
-
-/* Detail panel slide out to right */
-@keyframes kanban-slide-out-right {
-  from {
-    transform: translateX(0);
-  }
-  to {
-    transform: translateX(100%);
-  }
-}
-
-@layer utilities {
-  /* Animation utilities */
-  .animate-kanban-spring-drop {
-    animation: kanban-spring-drop 350ms cubic-bezier(0.34, 1.56, 0.64, 1) forwards;
-  }
-  .animate-kanban-fade-in {
-    animation: kanban-fade-in 150ms ease-out forwards;
-  }
-  .animate-kanban-fade-out {
-    animation: kanban-fade-out 150ms ease-out forwards;
-  }
-  .animate-kanban-slide-in-right {
-    animation: kanban-slide-in-right 200ms ease-out forwards;
-  }
-  .animate-kanban-slide-out-right {
-    animation: kanban-slide-out-right 150ms ease-out forwards;
-  }
-
-  /* Transition utilities */
-  .transition-kanban-column-collapse {
-    transition: width 200ms ease-out;
-  }
-  .transition-kanban-density {
-    transition: padding 150ms ease-out, max-height 150ms ease-out;
-  }
-
-  /* GPU hint for active drag cards */
-  .kanban-drag-active {
-    will-change: transform;
-  }
-
-  /* Apply will-change: transform to all cards during active drag operations */
-  .kanban-dragging [role="button"] {
-    will-change: transform;
-  }
-}
-
 /* Browser loading progress bar — Chrome-style thin blue line */
 @keyframes browser-loading-indeterminate {
   0% { transform: scaleX(0); transform-origin: left; }
@@ -751,16 +652,5 @@ html.theme-hc-light {
   }
   .tool-group-slide-in {
     animation: none;
-  }
-  .animate-kanban-spring-drop,
-  .animate-kanban-fade-in,
-  .animate-kanban-fade-out,
-  .animate-kanban-slide-in-right,
-  .animate-kanban-slide-out-right {
-    animation: none;
-  }
-  .transition-kanban-column-collapse,
-  .transition-kanban-density {
-    transition: none;
   }
 }
