@@ -7,6 +7,30 @@ on:
     branches: [main, crab-v2]
     paths: ['packages/desktop/**', 'crab/**', 'crates/**', 'Cargo.toml', 'Cargo.lock', '.github/workflows/desktop.yml']
   workflow_dispatch:
+  workflow_call:
+    inputs:
+      release:
+        type: boolean
+        default: false
+      source_ref:
+        type: string
+      version:
+        type: string
+    secrets:
+      MAC_CSC_LINK:
+        required: false
+      MAC_CSC_KEY_PASSWORD:
+        required: false
+      APPLE_ID:
+        required: false
+      APPLE_APP_SPECIFIC_PASSWORD:
+        required: false
+      APPLE_TEAM_ID:
+        required: false
+      WIN_CSC_LINK:
+        required: false
+      WIN_CSC_KEY_PASSWORD:
+        required: false
 permissions:
   contents: read
 concurrency:
@@ -22,15 +46,18 @@ jobs:
       matrix:
         os: [macos-15, macos-15-intel, ubuntu-24.04, windows-2025]
     env:
-      CARGO_TARGET_DIR: ${{ runner.temp }}/crab-desktop-target
       CARGO_INCREMENTAL: 0
-      CSC_IDENTITY_AUTO_DISCOVERY: 'false'
+      CSC_IDENTITY_AUTO_DISCOVERY: ${{ inputs.release && 'true' || 'false' }}
     defaults:
       run:
         shell: bash
         working-directory: packages/desktop
     steps:
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ inputs.source_ref || github.sha }}
+      - name: Set isolated Cargo target directory
+        run: echo "CARGO_TARGET_DIR=$RUNNER_TEMP/crab-desktop-target" >> "$GITHUB_ENV"
       - uses: actions/setup-node@v4
         with:
           node-version-file: packages/desktop/.nvmrc
@@ -44,14 +71,70 @@ jobs:
         if: runner.os == 'Linux'
         run: sudo apt-get update && sudo apt-get install -y pkg-config libssl-dev libgtk-3-0 libnss3 libasound2t64 libgbm1 xvfb
       - run: npm ci
+      - name: Validate release version
+        if: ${{ inputs.release }}
+        env:
+          RELEASE_VERSION: ${{ inputs.version }}
+        run: |
+          node -e 'const p = require("./package.json"); if (!process.env.RELEASE_VERSION || p.version !== process.env.RELEASE_VERSION) { throw new Error("Desktop version does not match release tag"); }'
+      - name: Require macOS signing and notarization credentials
+        if: ${{ inputs.release && runner.os == 'macOS' }}
+        env:
+          MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
+          MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_APP_SPECIFIC_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          for name in MAC_CSC_LINK MAC_CSC_KEY_PASSWORD APPLE_ID APPLE_APP_SPECIFIC_PASSWORD APPLE_TEAM_ID; do
+            if [ -z "${!name:-}" ]; then echo "::error::$name is required for desktop release signing."; exit 1; fi
+          done
+      - name: Require Windows signing credentials
+        if: ${{ inputs.release && runner.os == 'Windows' }}
+        env:
+          WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
+          WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
+        run: |
+          for name in WIN_CSC_LINK WIN_CSC_KEY_PASSWORD; do
+            if [ -z "${!name:-}" ]; then echo "::error::$name is required for desktop release signing."; exit 1; fi
+          done
       - run: npm run typecheck
       - run: npm run test:build
       - name: Test native desktop integration
         run: cargo test --release -p crab-desktop-agent --locked
       - name: Build desktop runtime and application
         run: npm run build
-      - name: Build unsigned installers and unpacked application
-        run: npx electron-builder --publish never
+      - name: Build installers and unpacked application
+        env:
+          CSC_LINK: ${{ inputs.release && runner.os == 'macOS' && secrets.MAC_CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ inputs.release && runner.os == 'macOS' && secrets.MAC_CSC_KEY_PASSWORD || '' }}
+          APPLE_ID: ${{ inputs.release && runner.os == 'macOS' && secrets.APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ inputs.release && runner.os == 'macOS' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ inputs.release && runner.os == 'macOS' && secrets.APPLE_TEAM_ID || '' }}
+          WIN_CSC_LINK: ${{ inputs.release && runner.os == 'Windows' && secrets.WIN_CSC_LINK || '' }}
+          WIN_CSC_KEY_PASSWORD: ${{ inputs.release && runner.os == 'Windows' && secrets.WIN_CSC_KEY_PASSWORD || '' }}
+          RELEASE_BUILD: ${{ inputs.release }}
+        run: |
+          if [ "$RELEASE_BUILD" = true ] && [ "$RUNNER_OS" != Linux ]; then
+            npx electron-builder --publish never --config.forceCodeSigning=true
+          else
+            npx electron-builder --publish never
+          fi
+      - name: Verify signed and notarized macOS application
+        if: ${{ inputs.release && runner.os == 'macOS' }}
+        run: |
+          app="release/mac${{ runner.arch == 'ARM64' && '-arm64' || '' }}/Crab.app"
+          codesign --verify --deep --strict "$app"
+          xcrun stapler validate "$app"
+      - name: Verify signed Windows installer and updater publisher
+        if: ${{ inputs.release && runner.os == 'Windows' }}
+        shell: pwsh
+        run: |
+          $installer = Get-ChildItem release/Crab-*-win-x64.exe | Select-Object -First 1
+          if (-not $installer -or (Get-AuthenticodeSignature $installer.FullName).Status -ne 'Valid') {
+            throw 'Desktop installer is missing a valid Authenticode signature.'
+          }
+          node -e "const fs=require('fs'), yaml=require('yaml'); const config=yaml.parse(fs.readFileSync('release/win-unpacked/resources/app-update.yml','utf8')); if (!config.publisherName || !config.publisherName.length) throw Error('Updater publisher identity is missing');"
       - name: Smoke packaged Electron and the real sidecar
         if: matrix.os == 'macos-15-intel'
         run: npm run test:e2e-smoke

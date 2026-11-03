@@ -55,6 +55,7 @@ dmg:
       path: /Applications
 linux:
   icon: build/icon.png
+  maintainer: Crab <release@crabbuild.com>
   target:
     - AppImage
     - deb
@@ -67,5 +68,3 @@ win:
 nsis:
   oneClick: false
   allowToChangeInstallationDirectory: true
-  installerIcon: build/icon.ico
-  uninstallerIcon: build/icon.ico

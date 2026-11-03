@@ -19,8 +19,10 @@ PRODUCT_MANIFESTS=(
     "$CRAB_DIR/Cargo.toml"
     "$WORKSPACE_DIR/crates/crab-auth-server/Cargo.toml"
     "$WORKSPACE_DIR/crates/crab-cache-server/Cargo.toml"
+    "$WORKSPACE_DIR/packages/desktop/agent/Cargo.toml"
 )
 WORKSPACE_MANIFEST="$WORKSPACE_DIR/Cargo.toml"
+DESKTOP_DIR="$WORKSPACE_DIR/packages/desktop"
 
 if [[ ! -f "$CARGO_LOCK" ]]; then
     echo "error: workspace lockfile is missing" >&2
@@ -45,6 +47,15 @@ for manifest in "${PRODUCT_MANIFESTS[@]}"; do
         exit 1
     fi
 done
+node - "$DESKTOP_DIR" "$CURRENT" <<'NODE'
+const dir = process.argv[2];
+const version = process.argv[3];
+const desktop = require(`${dir}/package.json`);
+const lock = require(`${dir}/package-lock.json`);
+if (desktop.version !== version || lock.version !== version || lock.packages[''].version !== version) {
+    throw new Error(`Desktop package and lockfile versions must match ${version}`);
+}
+NODE
 
 IFS='.' read -r MAJOR MINOR PATCH <<< "$CURRENT"
 
@@ -88,6 +99,8 @@ for i in "${!PRODUCT_MANIFESTS[@]}"; do
 done
 cp "$CARGO_LOCK" "$backup_dir/Cargo.lock"
 cp "$WORKSPACE_MANIFEST" "$backup_dir/Cargo.toml"
+cp "$DESKTOP_DIR/package.json" "$backup_dir/package.json"
+cp "$DESKTOP_DIR/package-lock.json" "$backup_dir/package-lock.json"
 restore_on_error() {
     status=$?
     trap - EXIT
@@ -97,6 +110,8 @@ restore_on_error() {
         done
         cp "$backup_dir/Cargo.lock" "$CARGO_LOCK"
         cp "$backup_dir/Cargo.toml" "$WORKSPACE_MANIFEST"
+        cp "$backup_dir/package.json" "$DESKTOP_DIR/package.json"
+        cp "$backup_dir/package-lock.json" "$DESKTOP_DIR/package-lock.json"
     fi
     rm -r "$backup_dir"
     exit "$status"
@@ -122,6 +137,7 @@ else
         "$WORKSPACE_MANIFEST"
 fi
 (cd "$WORKSPACE_DIR" && cargo metadata --format-version 1 >/dev/null)
+npm --prefix "$DESKTOP_DIR" version "$NEW_VERSION" --no-git-tag-version --ignore-scripts --allow-same-version >/dev/null
 trap - EXIT
 rm -r "$backup_dir"
 
