@@ -118,6 +118,16 @@ body bytes before I/O. Paged visibility readers reuse those verified bytes and
 still validate every selected page and ref transition. Compacted histories keep
 selected-member paging. This changes neither catalog precedence nor GC authority.
 
+Large new capsule visibility sections use descriptor version 5 with an 8 KiB leaf target
+and the existing 32 KiB directory target. This reduces cold tip-membership proof
+bytes without reducing directory fan-out. Page hashes, scalar bindings, set
+membership and complete canonical reconstruction remain required. Versions 3
+and 4 shipped in `v2.0.0-alpha.1`; their exact encodings remain readable and are
+verified with their original geometry. Upgrade all readers before enabling new
+writers: alpha.1 readers reject version 5. Existing immutable history needs no
+rewrite or repair. Sections requiring no leaf split retain their original
+version 3 or 4 encoding and immutable identities.
+
 Run controls retain each capsule's own pack directory in capsule-relative
 coordinates. The run directory keeps physical transport coordinates separately.
 Logical capsule equality compares authenticated visibility section identities

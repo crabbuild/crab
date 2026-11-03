@@ -189,13 +189,34 @@ impl PageRef {
     }
 }
 
-#[derive(Default)]
 pub(crate) struct Writer {
     pub(crate) bytes: Vec<u8>,
     pages: std::collections::BTreeMap<[u8; 32], PageRef>,
+    leaf_target_bytes: usize,
+}
+
+impl Default for Writer {
+    fn default() -> Self {
+        Self {
+            bytes: Vec::new(),
+            pages: std::collections::BTreeMap::new(),
+            leaf_target_bytes: TARGET_BYTES,
+        }
+    }
 }
 
 impl Writer {
+    pub(crate) fn for_point_queries() -> Self {
+        Self {
+            leaf_target_bytes: 8 * 1024,
+            ..Self::default()
+        }
+    }
+
+    pub(crate) fn has_branches(&self) -> bool {
+        self.pages.values().any(|page| page.height > 0)
+    }
+
     pub(crate) fn tree(&mut self, kind: Kind, rows: Rows) -> Result<PageRef> {
         validate_rows(kind, &rows)?;
         self.tree_from_iter(kind, rows.into_iter().map(Ok))
@@ -234,7 +255,7 @@ impl Writer {
             if row_bytes > MAX_BYTES - HEADER {
                 return Err(corruption("metadata row exceeds the page bound"));
             }
-            if count > 0 && pending.len() + row_bytes > TARGET_BYTES {
+            if count > 0 && pending.len() + row_bytes > self.leaf_target_bytes {
                 pending[10..HEADER].copy_from_slice(&count.to_le_bytes());
                 level.push(self.append(pending, 0, count, first, previous.clone())?);
                 pending = header(kind, 0, 0);
@@ -255,6 +276,8 @@ impl Writer {
             pending[10..HEADER].copy_from_slice(&count.to_le_bytes());
             level.push(self.append(pending, 0, count, first, previous)?);
         }
+        // Small point leaves cut read bytes; keep directory fan-out unchanged
+        // so this change does not also reduce routing capacity per request.
         let fanout = (TARGET_BYTES - HEADER) / ref_bytes(kind);
         while level.len() > 1 {
             let mut parents = Vec::new();
