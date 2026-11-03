@@ -64,7 +64,7 @@ impl CapsuleVisibilityReader {
         if self.ref_count() == 1
             && bytes <= crate::pages::READ_AHEAD_BYTES.min(self.maximum)
             && headroom
-                .fetch_update(Relaxed, Relaxed, |remaining| remaining.checked_sub(bytes))
+                .try_update(Relaxed, Relaxed, |remaining| remaining.checked_sub(bytes))
                 .is_ok()
         {
             self.cache =

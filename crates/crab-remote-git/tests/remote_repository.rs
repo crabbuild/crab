@@ -210,7 +210,7 @@ impl ObjectStore for CountingStore {
                 .fetch_add(1, Ordering::SeqCst);
             if self
                 .throttled_generated_pack_descriptor_gets
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                     remaining.checked_sub(1)
                 })
                 .is_ok()

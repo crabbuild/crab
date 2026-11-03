@@ -29,7 +29,7 @@ fn charge(
     amount: u64,
 ) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
     counter
-        .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
+        .try_update(Ordering::SeqCst, Ordering::SeqCst, |left| {
             left.checked_sub(amount)
         })
         .map(|_| ())
