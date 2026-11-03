@@ -13,10 +13,6 @@ use crate::{Result, WriteError};
 // A large historical run remains a stable source. Rewriting it to append small
 // commits amplifies both network traffic and peak memory with repository size.
 const COMPACTION_INPUT_BYTES: u128 = 64 * 1024 * 1024;
-// Global catalog capture pays once per physical run. Fold tiny histories early,
-// but cap every carry so a small append cannot repeatedly copy large sources.
-const SMALL_RUN_INPUT_BYTES: u128 = 1024 * 1024;
-const SMALL_RUN_FAN_IN: usize = 4;
 
 fn window(frontier: &[CapsulePointer]) -> Result<Option<Range<usize>>> {
     if frontier.len() > MAX_CAPSULE_REF_FRONTIER {
@@ -84,29 +80,16 @@ fn window(frontier: &[CapsulePointer]) -> Result<Option<Range<usize>>> {
         ));
     }
     let level = suffix[suffix.len() - 1].level();
-    let recent = &suffix[suffix.len().saturating_sub(SMALL_RUN_FAN_IN)..];
-    let small = recent.len() == SMALL_RUN_FAN_IN
-        && recent.iter().all(|pointer| pointer.level() == level)
-        && recent
-            .iter()
-            .map(|pointer| u128::from(pointer.size()))
-            .sum::<u128>()
-            <= SMALL_RUN_INPUT_BYTES;
-    let (fan_in, byte_budget) = if small {
-        (SMALL_RUN_FAN_IN, SMALL_RUN_INPUT_BYTES)
-    } else {
-        (CAPSULE_REF_COMPACTION_FAN_IN, COMPACTION_INPUT_BYTES)
-    };
     if suffix
         .iter()
         .rev()
         .take_while(|p| p.level() == level)
         .count()
-        < fan_in
+        < CAPSULE_REF_COMPACTION_FAN_IN
     {
         return Ok(None);
     }
-    let mut first = frontier.len() - fan_in;
+    let mut first = frontier.len() - CAPSULE_REF_COMPACTION_FAN_IN;
     let mut count: usize = frontier[first..]
         .iter()
         .map(|p| p.capsule_count() as usize)
@@ -114,19 +97,13 @@ fn window(frontier: &[CapsulePointer]) -> Result<Option<Range<usize>>> {
     if count > MAX_CAPSULES_PER_RUN {
         return Ok(None);
     }
-    let mut bytes: u128 = frontier[first..]
-        .iter()
-        .map(|pointer| u128::from(pointer.size()))
-        .sum();
-    let mut next_level = level + fan_in.ilog2() as u8;
+    let mut next_level = level + CAPSULE_REF_COMPACTION_FAN_IN.ilog2() as u8;
     while first > start
         && frontier[first - 1].level() == next_level
         && count + frontier[first - 1].capsule_count() as usize <= MAX_CAPSULES_PER_RUN
-        && bytes + u128::from(frontier[first - 1].size()) <= byte_budget
     {
         first -= 1;
         count += frontier[first].capsule_count() as usize;
-        bytes += u128::from(frontier[first].size());
         next_level += 1;
     }
     Ok(Some(first..frontier.len()))

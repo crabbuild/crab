@@ -1,0 +1,19 @@
+{
+  "schema": "crab.matched-pre-coalescing-control",
+  "candidate": "7ebde956c5d46ca7d702a1e96ff86bb4895061a3",
+  "historical_paging_source": "de1f43cfbe1b854afd90e16de78c149fd6bcb840",
+  "normal_compaction_source": "8973972745deaf87fd23efee670d4b58067c399b",
+  "disabled": [
+    "small leaf admission/footer read-ahead and catalog visibility coalescing",
+    "early small-run compaction"
+  ],
+  "common": [
+    "32-attempt inventory capture and identity/activation validation",
+    "selected scalar proof scheduling",
+    "all publication, Git/Xet/LFS, indexing and integrity code",
+    "release version and dependency lock",
+    "all tests retained unchanged"
+  ],
+  "capture_function_sha256": "295fd37040a5c67a6696a30f880942b025aa8cc0a42b332b73fea02b53c0d75e",
+  "scope": "Experimental benchmark source only; not a deployable fix or passing CI result."
+}

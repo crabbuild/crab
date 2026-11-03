@@ -441,56 +441,28 @@ pub async fn load_capsule_run_git_control(
     load_run_git_control(router, pointer, None).await
 }
 
-// Catalog capture can coalesce small visibility bodies within admitted headroom.
-// Git views retain selected paging; both paths keep payloads cold and authenticate pages.
+// Experimental control uses historical exact paging and current authentication.
 pub(super) async fn load_run_git_control(
     router: &StoreLayout<Store>,
     pointer: &super::CapsulePointer,
-    read_ahead: Option<&std::sync::atomic::AtomicU64>,
+    _read_ahead: Option<&std::sync::atomic::AtomicU64>,
 ) -> Result<(CapsuleRunControl, Vec<CapsuleControl>)> {
     super::root::validate_capsule_pointer(pointer)?;
     let path = router.capsule_path(pointer.hash());
-    // A publication leaf can share one control read with its small admission
-    // pages. Compacted histories retain selected-member paging.
-    let prefetch = pointer.level() == 0 && pointer.control_size() <= crate::pages::READ_AHEAD_BYTES;
-    let start = if prefetch {
-        pointer.control_offset()
-    } else {
-        pointer
-            .size()
-            .checked_sub(CapsuleRunControl::trailer_bytes())
-            .ok_or_else(|| corrupt(&path, "capsule run is shorter than its trailer"))?
-    };
-    let body = router
+    let start = pointer
+        .size()
+        .checked_sub(CapsuleRunControl::trailer_bytes())
+        .ok_or_else(|| corrupt(&path, "capsule run is shorter than its trailer"))?;
+    let trailer = router
         .store()
         .range_get(&path, start..pointer.size())
         .await?;
-    if body.len() as u64 != pointer.size() - start {
-        return Err(corrupt(&path, "capsule control read is truncated"));
-    }
-    let trailer_start = body
-        .len()
-        .saturating_sub(CapsuleRunControl::trailer_bytes() as usize);
-    let range = CapsuleRunControl::footer_range(&body[trailer_start..], pointer)?;
-    let (footer, admission) = if prefetch {
-        let offset = usize::try_from(range.start - start)
-            .map_err(|_| corrupt(&path, "capsule footer offset cannot be represented"))?;
-        let admission_start = usize::try_from(pointer.control_offset() - start)
-            .map_err(|_| corrupt(&path, "capsule admission offset cannot be represented"))?;
-        (
-            body.slice(offset..),
-            Some(body.slice(admission_start..offset)),
-        )
-    } else {
-        (router.store().range_get(&path, range).await?, None)
-    };
+    let range = CapsuleRunControl::footer_range(&trailer, pointer)?;
+    let footer = router.store().range_get(&path, range).await?;
     let control = CapsuleRunControl::decode_footer(footer, pointer)?;
-    if let Some(mut reader) =
+    if let Some(reader) =
         control.admission_reader(router, super::run::MAX_RUN_FOOTER_BYTES as u64)?
     {
-        if let Some(body) = admission {
-            reader.prefetch(body)?;
-        }
         let counts = reader.counts(router.store()).await?;
         if counts.len() != control.git_packs().len()
             || counts
@@ -504,7 +476,7 @@ pub(super) async fn load_run_git_control(
             ));
         }
     }
-    let capsules = control.materialize_capsules_with_paged_visibility(router, read_ahead)?;
+    let capsules = control.materialize_capsules_with_paged_visibility(router, None)?;
     Ok((control, capsules))
 }
 
