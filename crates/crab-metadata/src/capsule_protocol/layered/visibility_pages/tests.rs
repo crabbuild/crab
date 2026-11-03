@@ -7,6 +7,36 @@ use std::sync::{
 };
 
 #[test]
+fn small_overlapping_checkpoints_share_ref_memberships() {
+    let snapshot = overlapping_snapshot(32_000, 32, 30);
+    let encoded = snapshot.encode().unwrap();
+    eprintln!(
+        "small checkpoint: {} bytes, {}",
+        encoded.len(),
+        blake3::hash(&encoded)
+    );
+    assert!(encoded.len() < 4 * 1024 * 1024, "{} bytes", encoded.len());
+    assert_eq!(
+        LayeredVisibilitySnapshot::decode(&encoded).unwrap(),
+        snapshot
+    );
+}
+
+#[test]
+fn declared_checkpoint_layouts_preserve_immutable_history() {
+    let snapshot = overlapping_snapshot(32_000, 32, 30);
+    let legacy = encode_version(&snapshot, Some(1)).unwrap();
+    // Captured from the shipped encoder before changing the selection policy.
+    assert_eq!(
+        blake3::hash(&legacy).to_hex().as_str(),
+        "100e4536b5f5112a8728b011dae5acab41492201da761db2ef218d0d6b51119d"
+    );
+    for bytes in [legacy, snapshot.encode().unwrap()] {
+        assert_eq!(LayeredVisibilitySnapshot::decode(&bytes).unwrap(), snapshot);
+    }
+}
+
+#[test]
 fn overlapping_ref_closures_encode_once_with_exact_outlier_membership() {
     let snapshot = overlapping_snapshot(32_000, 256, 30);
     let encoded = snapshot.encode().unwrap();

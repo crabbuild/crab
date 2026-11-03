@@ -172,7 +172,7 @@ impl ChunkVerifier {
                 }) => continue,
                 Err(error) => return Err(error.into()),
             };
-            let lookup = crab_metadata::capsule_protocol::load_pointer_catalog_lookup_from_root(
+            let lookup = crab_metadata::capsule_protocol::load_current_pointer_catalog_lookup(
                 &layout, &root,
             )
             .await?;

@@ -105,11 +105,20 @@ fn transitions(
 }
 
 pub(super) fn encode(snapshot: &LayeredVisibilitySnapshot) -> Result<Bytes> {
+    encode_version(snapshot, None)
+}
+
+fn encode_version(snapshot: &LayeredVisibilitySnapshot, version: Option<u32>) -> Result<Bytes> {
     snapshot.validate()?;
     let mut writer = Writer::default();
-    // Preserve legacy bytes for ordinary checkpoints. Shared checkpoints bind
-    // OIDs once and encode the member join as compact ordinal chunks.
-    let use_shared = shared_encoding(snapshot);
+    // Both layouts shipped. Validate stored pages with their declared layout;
+    // changing the writer's size policy must never invalidate immutable history.
+    let use_shared = match version {
+        Some(1) => false,
+        Some(2) => true,
+        None => shared_encoding(snapshot),
+        _ => return Err(corrupt("checkpoint visibility page version is unsupported")),
+    };
     let objects = if use_shared {
         snapshot
             .member_admission
@@ -162,7 +171,12 @@ pub(super) fn encode(snapshot: &LayeredVisibilitySnapshot) -> Result<Bytes> {
     let mut refs = BTreeMap::new();
     for (name, positions) in &snapshot.refs {
         let (objects, shared) = if use_shared {
-            (None, roots.next().expect("one shared set per ref"))
+            (
+                None,
+                roots
+                    .next()
+                    .ok_or_else(|| corrupt("shared checkpoint ref set is absent"))?,
+            )
         } else {
             (
                 object_set(&mut writer, &snapshot.objects, &positions.positions())?,
@@ -555,7 +569,7 @@ pub(super) fn decode(bytes: &[u8]) -> Result<LayeredVisibilitySnapshot> {
         incremental_history: history,
     };
     snapshot.validate()?;
-    if snapshot.encode()?.as_ref() != bytes {
+    if encode_version(&snapshot, Some(descriptor.version))?.as_ref() != bytes {
         return Err(corrupt("checkpoint visibility pages are not canonical"));
     }
     #[cfg(feature = "storage")]
@@ -564,9 +578,17 @@ pub(super) fn decode(bytes: &[u8]) -> Result<LayeredVisibilitySnapshot> {
 }
 
 fn shared_encoding(snapshot: &LayeredVisibilitySnapshot) -> bool {
-    snapshot.refs.values().fold(0u64, |bytes, closure| {
-        bytes.saturating_add(closure.len().saturating_mul(24))
-    }) > (MAX_LAYERED_VISIBILITY_BYTES / 2) as u64
+    let memberships = snapshot
+        .refs
+        .values()
+        .fold(0u64, |count, closure| count.saturating_add(closure.len()));
+    let bytes = memberships.saturating_mul(24);
+    // Frequent small checkpoints must not repeat a shared repository history
+    // for each ref. Require substantial overlap and at least two page bodies
+    // before paying for a dictionary and its reverse identity index.
+    bytes > (MAX_LAYERED_VISIBILITY_BYTES / 2) as u64
+        || (bytes > 2 * crate::pages::TARGET_BYTES as u64
+            && memberships > (snapshot.objects.len() as u64).saturating_mul(4))
 }
 
 fn shared_sets(

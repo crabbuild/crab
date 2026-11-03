@@ -389,8 +389,7 @@ impl FileIndexLookupSession {
         let router = crab_storage::StoreLayout::new(storage.clone(), repo_prefix.to_owned());
         let catalog = match crate::capsule_protocol::load_root(&router).await {
             Ok(root) => {
-                crate::capsule_protocol::load_pointer_catalog_lookup_from_root(&router, &root)
-                    .await?
+                crate::capsule_protocol::load_current_pointer_catalog_lookup(&router, &root).await?
             }
             Err(MetadataError::Storage {
                 source: crab_storage::StorageError::NotFound { .. },

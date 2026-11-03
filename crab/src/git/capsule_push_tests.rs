@@ -1405,6 +1405,167 @@ async fn real_git_incremental_push_round_trips_with_bounded_requests() {
 }
 
 #[tokio::test(flavor = "multi_thread")]
+async fn xet_push_checkpoints_accumulated_git_history_and_releases_admission() {
+    use crab_staging::stream::{StreamStageProgress, stage_reader_streaming};
+
+    let _git_env = crate::test::git_repo::CleanGitEnvGuard::new();
+    let source = tempfile::tempdir().unwrap();
+    git(source.path(), &["init", "-b", "main"]);
+    git(source.path(), &["config", "user.name", "Crab Test"]);
+    git(
+        source.path(),
+        &["config", "user.email", "crab@example.invalid"],
+    );
+    let store = crate::storage::store::Store::from_storage(crab_storage::Store::new(Arc::new(
+        InMemory::new(),
+    )));
+    let router = crate::storage::StoreLayout::new(store.clone(), "repos/checkpoint".to_owned());
+    let layout =
+        crab_storage::StoreLayout::new(store.as_storage().clone(), router.repo_prefix().to_owned());
+    crab_write::capsule_protocol::initialize(&layout, &"1".repeat(64), "refs/heads/main")
+        .await
+        .unwrap();
+    let config = PushConfig {
+        git_dir: Some(source.path().join(".git")),
+        ..Default::default()
+    };
+    let spec = PushSpec {
+        force: false,
+        src: "refs/heads/main".to_owned(),
+        dst: "refs/heads/main".to_owned(),
+    };
+    let cancel = CancellationToken::new();
+    for index in 0..crab_metadata::capsule_protocol::CAPSULE_REF_COMPACTION_FAN_IN {
+        commit(source.path(), &format!("version {index}"));
+        let (result, _) = run(
+            &config,
+            std::slice::from_ref(&spec),
+            &store,
+            &router,
+            None,
+            &[],
+            None,
+            None,
+            None,
+            &cancel,
+        )
+        .await
+        .unwrap();
+        assert!(result.all_ok());
+    }
+    let before = crab_metadata::capsule_protocol::load_root(&layout)
+        .await
+        .unwrap();
+    assert!(before.record().root().checkpoint().is_none());
+    let staging_root = source.path().join(".crab/staging");
+    let staging = crab_staging::StagingArea::open(staging_root.clone())
+        .await
+        .unwrap();
+    let staged = stage_reader_streaming(
+        &mut std::io::Cursor::new(b"checkpoint payload"),
+        Path::new("model.bin"),
+        &staging,
+        StreamStageProgress::default(),
+        &cancel,
+    )
+    .await
+    .unwrap();
+    staging
+        .delegate_publication(&[(&staged.batch_id, Path::new("model.bin"))])
+        .unwrap();
+    let pointer = crab_types::pointer::Pointer {
+        file_hash: staged.file_hash,
+        size: staged.size,
+        shard_hint: None,
+    };
+    std::fs::write(source.path().join("model.bin"), pointer.serialize()).unwrap();
+    git(source.path(), &["add", "model.bin"]);
+    git(source.path(), &["commit", "-m", "managed payload"]);
+    let tip = git(source.path(), &["rev-parse", "HEAD"]);
+    staging.close().await.unwrap();
+    let staging = Arc::new(StagingAreaReadOnly::open(staging_root).await.unwrap());
+    let (result, _) = run(
+        &config,
+        std::slice::from_ref(&spec),
+        &store,
+        &router,
+        None,
+        &[],
+        Some(&staging),
+        None,
+        None,
+        &cancel,
+    )
+    .await
+    .unwrap();
+    let after = crab_metadata::capsule_protocol::load_root(&layout)
+        .await
+        .unwrap();
+    assert!(result.all_ok() && after.record().root().checkpoint().is_some());
+    let visible = crab_read::capsule_protocol::read_visible_refs(&layout)
+        .await
+        .unwrap();
+    assert_eq!(visible.get("refs/heads/main"), Some(&tip));
+    // Other writers can checkpoint while a push retains its admitted Git base.
+    // A later head rebases onto that checkpoint; Xet discovery needs current
+    // catalog authority rather than replaying it through the older Git base.
+    commit(source.path(), "after checkpoint");
+    let (result, _) = run(
+        &config,
+        &[spec],
+        &store,
+        &router,
+        None,
+        &[],
+        None,
+        None,
+        None,
+        &cancel,
+    )
+    .await
+    .unwrap();
+    assert!(result.all_ok());
+    let admission = crate::maintenance::GcWriterLeases::acquire(
+        &store,
+        layout.global_prefix(),
+        layout.repo_prefix(),
+        &cancel,
+    )
+    .await
+    .unwrap();
+    admission
+        .run(async {
+            let (delta, _) = super::super::xet_publication::prepare_delta(
+                &layout,
+                &before,
+                &[pointer],
+                None,
+                None,
+                None,
+                4,
+                true,
+                None,
+                &cancel,
+            )
+            .await?;
+            assert!(delta.is_empty());
+            Ok(())
+        })
+        .await
+        .unwrap();
+    for domain in [layout.global_prefix(), layout.repo_prefix()] {
+        let sweep = crab_coordination::GcFenceLease::acquire_sweep(
+            layout.store().inner(),
+            domain,
+            std::time::Duration::from_secs(60),
+        )
+        .await
+        .unwrap();
+        sweep.release().await.unwrap();
+    }
+}
+
+#[tokio::test(flavor = "multi_thread")]
 async fn capsule_push_retires_staging_only_after_confirmed_ref_publication() {
     use bstr::ByteSlice;
     use crab_staging::stream::{StreamStageProgress, stage_reader_streaming};

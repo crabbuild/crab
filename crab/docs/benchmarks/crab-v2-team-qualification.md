@@ -18,6 +18,45 @@ were independently read back with their original holders preserved.
 
 ## Latest team-scale diagnostic
 
+Published `f8c39617de7` passes [full exact-head CI](https://github.com/crabbuild/crab/actions/runs/41666489890)
+and all matched 64-developer gates: 51.8% fewer capsule GETs, 15.3% fewer capsule
+response bytes, 16.3% fewer conservative all-metadata response bytes, and
+2.947-second overall / 3.477-second worst-batch p95. Both independent audits pass
+918 checks. Its first 1,000-developer batch still fails at 33.961-second p95.
+All 1,000 actual acknowledgements and 1,001 refs are independently verified;
+generation stops at its planned round-zero checkpoint. Historical bytes,
+no-repair fsck and the remaining 9,000 pushes are pending for that cohort.
+
+A native Linux release probe on that frozen dataset opens one catalog session
+with 5,010 requests and 26,366,593 response bytes before selected file lookup.
+The selected lookup then uses five reads / 1,994 bytes and 14.265 ms. These are
+isolated diagnostic timings, not team push qualification. A task-owned copied
+33-ref subset demonstrates that existing checkpoint publication reduces later
+capture requests from 170 to 38 and bytes from 868,524 to 77,543. Publication
+takes 2.426 seconds, reads 47,937,722 bytes and writes 14,099,935 bytes; maintenance
+cost is retained rather than excluded from the comparison.
+
+The next combined change elects one foreground checkpoint owner after a direct
+Xet push observes the existing 32-capsule threshold. It also selects the existing
+shared checkpoint representation earlier for heavily overlapping refs. The
+regression first produces 22,779,612 bytes, then 2,097,992 bytes with identical
+memberships. Fourteen focused checkpoint tests pass, including the original
+version-1 byte hash and declared-layout decoding. A live RustFS codec diagnostic
+reads the original checkpoint, publishes the shared replacement (14.0 MB becomes
+2.51 MB), and verifies old/new selected results against the complete catalog.
+That diagnostic uses a macOS debug example and establishes no Linux push latency.
+The real-Git lifecycle test reproduces the missing foreground checkpoint with
+the hook removed and passes with it restored, including GC sweep admission after
+cleanup. Extending the test reproduces a stale-base failure after a checkpoint
+and subsequent head rebase. Current catalog capture now retries verified
+same-repository/epoch root replacements; explicitly pinned snapshot lookup keeps
+its original replay precedence. The lifecycle regression, eight capture tests,
+three ordering tests, strict metadata Clippy and payload-only compilation pass.
+The new foreground hook, full combined Linux build, fresh team replay, historical
+audit, request/byte gates and new exact-head CI remain unqualified end to end.
+
+The following earlier results remain retained:
+
 The private ARM64 Linux build at `cbdc300ed806` passes fresh matched
 64-developer/640-push gates: capsule GETs fall from 112,484 to 54,123 (51.9%),
 capsule response bytes fall 15.8% and conservative all-metadata response bytes
@@ -56,7 +95,8 @@ eight ignored tests. The follow-up derives the positive fixture from the actual
 declared version and checks stable-only range exclusion explicitly. Production
 guard behavior remains byte-identical to the merged base and follows the
 [SemVer requirement contract](https://docs.rs/semver/1.0.28/semver/struct.VersionReq.html).
-The final combined revision still requires green full CI and a fresh replay.
+Its corrected `f8c3961` successor passes full CI above. Further source changes
+still require green full CI and a fresh replay.
 
 ## Resuming a qualification audit
 

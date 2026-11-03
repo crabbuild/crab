@@ -669,6 +669,38 @@ async fn run_inner(
     } else {
         false
     };
+    // Fold the complete captured catalog before its per-ref suffix grows without
+    // bound. Direct writers already retain GC admission; protected/replicated
+    // publication cannot advertise new checkpoint objects through this root CAS.
+    if publication.as_ref().is_ok_and(Option::is_some)
+        && gc_writer.is_some()
+        && config.active_active_replication.is_none()
+        && layout.store().staging_write_prefix().is_none()
+        && xet_stats.pending_catalog_capsules
+            >= crab_metadata::capsule_protocol::CAPSULE_REF_COMPACTION_FAN_IN
+    {
+        let maintenance = crab_write::generation::with_generation_owner::<_, CrabError>(
+            layout.store(),
+            &layout,
+            config.lock_ttl,
+            cancel,
+            async {
+                crab_remote::checkpoint::publish_capsule_checkpoint(
+                    &layout,
+                    crab_metadata::capsule_protocol::CAPSULE_REF_COMPACTION_FAN_IN as u32,
+                    crab_metadata::capsule_protocol::MAX_CATALOG_BYTES,
+                    cancel,
+                )
+                .await?;
+                Ok(())
+            },
+        );
+        // This ref is already committed. Failed maintenance leaves its previous
+        // exact root intact and must not turn that acknowledgement into rejection.
+        if let Err(error) = Box::pin(maintenance).await {
+            tracing::warn!(%error, "capsule committed; catalog checkpoint maintenance failed");
+        }
+    }
     let release = match gc_writer {
         Some(writer) => writer.release().await,
         None => Ok(()),

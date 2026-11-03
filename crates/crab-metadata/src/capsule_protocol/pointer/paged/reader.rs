@@ -50,6 +50,12 @@ impl PointerCatalogLookup {
         }
     }
 
+    /// Return the selected logical capsules not covered by the checkpoint catalog.
+    #[must_use]
+    pub fn pending_capsule_count(&self) -> usize {
+        self.ranks.len()
+    }
+
     /// Capture physical runs and the exact selected logical-capsule publication order.
     ///
     /// Unselected occurrences contribute neither file precedence nor conflicts.

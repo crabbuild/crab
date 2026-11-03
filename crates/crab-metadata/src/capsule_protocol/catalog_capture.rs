@@ -15,7 +15,7 @@ use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
-/// Capture current-state catalog roots with bounded metadata-only reads.
+/// Capture catalog roots against the supplied checkpoint replay base.
 ///
 /// The caller retains the captured roots against GC. Missing dependencies remain
 /// errors. Control intake and each selected catalog query use the format byte bound.
@@ -24,6 +24,44 @@ pub async fn load_pointer_catalog_lookup_from_root(
     root: &RootSnapshot,
 ) -> Result<PointerCatalogLookup> {
     capture(layout, root).await?.lookup(layout)
+}
+
+/// Capture current catalog authority across same-epoch checkpoint replacement.
+///
+/// The caller retains GC admission. The initial root anchors repository identity
+/// and epoch; explicit snapshot lookup remains bound to its supplied checkpoint.
+pub async fn load_current_pointer_catalog_lookup(
+    layout: &StoreLayout<Store>,
+    initial: &RootSnapshot,
+) -> Result<PointerCatalogLookup> {
+    let mut root = initial.clone();
+    for attempt in 0_u32..32 {
+        let result = load_pointer_catalog_lookup_from_root(layout, &root).await;
+        let current = super::load_root(layout).await?;
+        if current.record().root().repository_id() != initial.record().root().repository_id()
+            || current.record().root().ref_epoch() != initial.record().root().ref_epoch()
+        {
+            return Err(MetadataError::CapsuleContract {
+                record: "current catalog",
+                reason: "repository authority changed during catalog capture".to_owned(),
+            });
+        }
+        if current.record().digest() == root.record().digest() {
+            return result;
+        }
+        // A checkpoint can retire the ref-head prefix that the initial root
+        // still needs. Retry only after proving root replacement; errors under
+        // unchanged authority remain errors, including missing immutable pages.
+        drop(result);
+        root = current;
+        if attempt < 31 {
+            tokio::time::sleep(std::time::Duration::from_millis(10_u64 << attempt.min(4))).await;
+        }
+    }
+    Err(MetadataError::CapsuleContract {
+        record: "current catalog",
+        reason: "repository root changed during every bounded catalog capture".to_owned(),
+    })
 }
 
 /// Inspect the complete catalog from one authenticated current-state control capture.
@@ -242,6 +280,37 @@ mod tests {
     use crate::git_visibility::GitVisibilityEdit;
     use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
+
+    #[tokio::test]
+    async fn current_catalog_does_not_recapture_another_repository_or_epoch() {
+        for field in ["repository_id", "ref_epoch"] {
+            let layout = StoreLayout::new(
+                Store::new(Arc::new(object_store::memory::InMemory::new())),
+                "repositories/current-authority".to_owned(),
+            );
+            let initial = RootRecord::encode(
+                RepositoryRoot::initial(&"1".repeat(64), "refs/heads/main").unwrap(),
+            )
+            .unwrap();
+            let root = create_root(&layout, initial.clone()).await.unwrap();
+            let mut replacement = serde_json::to_value(initial.root()).unwrap();
+            replacement[field] = serde_json::Value::String("2".repeat(64));
+            let replacement =
+                RootRecord::encode(serde_json::from_value(replacement).unwrap()).unwrap();
+            layout
+                .store()
+                .put_overwrite(&layout.capsule_root_path(), replacement.bytes().clone())
+                .await
+                .unwrap();
+            assert!(matches!(
+                load_current_pointer_catalog_lookup(&layout, &root).await,
+                Err(MetadataError::CapsuleContract {
+                    record: "current catalog",
+                    ..
+                })
+            ));
+        }
+    }
 
     async fn capture_reads(
         file_data_bytes: usize,

@@ -29,6 +29,7 @@ pub(crate) struct XetPublicationStats {
     pub shards_uploaded: u64,
     pub xorb_bytes_uploaded: u64,
     pub origins: HashMap<MerkleHash, crab_metadata::receipts::OriginReceipt>,
+    pub pending_catalog_capsules: usize,
 }
 
 #[expect(
@@ -61,8 +62,8 @@ pub(crate) async fn prepare_delta(
     // Xet planning needs captured catalog roots, not Git pack intake or
     // physical placement inventory. Keep capture and query budgets with metadata.
     let lookup =
-        crab_metadata::capsule_protocol::load_pointer_catalog_lookup_from_root(layout, base)
-            .await?;
+        crab_metadata::capsule_protocol::load_current_pointer_catalog_lookup(layout, base).await?;
+    let pending_catalog_capsules = lookup.pending_capsule_count();
 
     let mut pointer_sizes = BTreeMap::<MerkleHash, u64>::new();
     for pointer in pointers {
@@ -101,7 +102,13 @@ pub(crate) async fn prepare_delta(
         .collect::<Result<Vec<_>>>()?;
     drop(base_files);
     if unresolved.is_empty() {
-        return Ok((PointerCatalog::new(), XetPublicationStats::default()));
+        return Ok((
+            PointerCatalog::new(),
+            XetPublicationStats {
+                pending_catalog_capsules,
+                ..Default::default()
+            },
+        ));
     }
     let staging = staging.ok_or_else(|| {
         let (file_hash, size) = unresolved[0];
@@ -708,6 +715,7 @@ pub(crate) async fn prepare_delta(
             shards_uploaded,
             xorb_bytes_uploaded,
             origins,
+            pending_catalog_capsules,
         },
     ))
 }

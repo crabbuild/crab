@@ -889,6 +889,30 @@ copies; warm pages consume the same query budget as cold pages. Admission guards
 are released before storage I/O, so concurrency does not reset a source's budget
 or hold a synchronous lock through an await.
 
+The captured lookup reports its uncheckpointed logical capsule count. Direct
+CLI Xet pushes use that count to elect one foreground checkpoint owner once
+the suffix reaches the existing 32-capsule fan-in. The owner retains GC admission
+and uses the existing exact-root/ref-position checkpoint CAS; losing election or
+failing maintenance cannot revoke the already committed ref. Protected staging
+and replicated publication retain their existing publication owners: a local
+root CAS cannot certify their new checkpoint objects.
+
+Current-state lookup uses `load_current_pointer_catalog_lookup`: it checks the
+root again after capture and retries a same-epoch checkpoint replacement, with
+32 attempts and capped backoff. Repository/epoch changes fail; missing or corrupt
+dependencies under an unchanged root remain errors. CLI planning, add-time chunk
+verification, current file lookup and binding diagnosis share this owner.
+`load_pointer_catalog_lookup_from_root` retains explicit snapshot semantics:
+checkpointed file precedence must not silently replace the supplied replay base.
+
+Checkpoint visibility shares heavily overlapping ref memberships before the
+128 MiB format ceiling becomes a concern. More than four memberships per retained
+OID, spanning at least two ordinary page bodies, selects the existing version-2
+dictionary/bitmap encoding. Sparse small checkpoints retain version 1. Complete
+validation rebuilds the declared version's canonical bytes, preserving both
+shipped layouts even when the writer's selection policy changes. Upgrade readers
+before writers, as required by the visibility-format changes in this branch.
+
 Nested recipes retain authenticated page references into their original catalog
 sections and must match the aggregate's logical-value commitment.
 

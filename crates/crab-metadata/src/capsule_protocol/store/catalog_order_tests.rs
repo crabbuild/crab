@@ -390,6 +390,13 @@ async fn checkpoint_replay_base_binds_catalog_precedence() {
     }
     // A checkpoint is an authority boundary, not a transparent reader shortcut.
     // It freezes the old replay base even when later visible refs supply an old tip.
+    let current = crate::capsule_protocol::load_current_pointer_catalog_lookup(&layout, &root)
+        .await
+        .unwrap()
+        .files(layout.store(), std::slice::from_ref(&file))
+        .await
+        .unwrap();
+    assert_eq!(current.files()[&file].shard_hash(), borrowed_shard);
     assert_eq!(
         (before.files()[&file].shard_hash().to_owned(), winners),
         (borrowed_shard.clone(), vec![original_shard, borrowed_shard])
