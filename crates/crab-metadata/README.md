@@ -116,7 +116,11 @@ Catalog capture fully authenticates individual publication leaves up to 32 KiB
 in one source read. The existing aggregate control-byte bound admits the extra
 body bytes before I/O. Paged visibility readers reuse those verified bytes and
 still validate every selected page and ref transition. Compacted histories keep
-selected-member paging. This changes neither catalog precedence nor GC authority.
+selected-member paging. Catalog capture fetches mandatory scalar and new-tip
+point proofs in bounded concurrent waves for both leaves and selected compacted
+members. Ordered reconciliation still validates prior closures, removed objects
+and resulting tip membership. Unselected members and payloads remain cold.
+This changes neither catalog precedence nor GC authority.
 
 Large new capsule visibility sections use descriptor version 5 with an 8 KiB leaf target
 and the existing 32 KiB directory target. This reduces cold tip-membership proof

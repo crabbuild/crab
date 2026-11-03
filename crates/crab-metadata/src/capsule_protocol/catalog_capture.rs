@@ -8,10 +8,10 @@ use super::{
     select_ref_control_frontiers, select_ref_journal_controls,
 };
 use crate::error::{MetadataError, Result};
-use crate::git_visibility::GitVisibilityIndex;
+use crate::git_visibility::{GitVisibilityIndex, decode_oid};
 use crab_storage::{Store, StoreLayout};
 use futures_util::{StreamExt, TryStreamExt};
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::AtomicU64;
 
@@ -136,26 +136,28 @@ async fn capture(layout: &StoreLayout<Store>, snapshot: &RootSnapshot) -> Result
     .await?;
     let selected = select_ref_control_frontiers(root, &visible.frontiers, &runs)?;
     let pending = select_ref_journal_controls(root, &selected.required, &runs)?;
-    // Validated single-member runs are leaves; pooled members keep demand paging.
-    let leaf_transactions = runs
-        .values()
-        .filter_map(|(_, capsules)| match capsules.as_slice() {
-            [capsule] => Some(capsule.transaction_id()),
-            _ => None,
-        })
-        .collect::<BTreeSet<_>>();
-    // Fetch selected scalar proofs before serial history reconciliation. Small
-    // leaves then fill their admitted metadata blocks concurrently; unselected
-    // compacted members and payloads remain cold.
-    let leaves = selected
-        .root_controls
-        .iter()
-        .chain(pending.values())
-        .filter(|control| leaf_transactions.contains(control.transaction_id()));
-    futures_util::stream::iter(leaves)
+    // Reconciliation must check every selected new tip. Fetch those immutable
+    // point proofs in bounded waves; serial closure ordering still validates
+    // prior tips, removals and final membership before accepting the catalog.
+    let controls = selected.root_controls.iter().chain(pending.values());
+    futures_util::stream::iter(controls)
         .map(Ok::<_, MetadataError>)
         .try_for_each_concurrent(32, |control| async move {
-            control.paged_visibility_headers(layout.store()).await?;
+            if let Some((reader, headers)) =
+                control.paged_visibility_headers(layout.store()).await?
+            {
+                for (edit, header) in control.transaction().edits().iter().zip(headers) {
+                    if let Some(header) = header {
+                        let _ = reader
+                            .lookup(
+                                layout.store(),
+                                edit.ref_name(),
+                                &[decode_oid(header.new_oid())?],
+                            )
+                            .await?;
+                    }
+                }
+            }
             Ok(())
         })
         .await?;
@@ -238,10 +240,13 @@ mod tests {
     #[cfg(feature = "file-index-reader")]
     use crate::file_index_lookup::FileIndexLookupSession;
     use crate::git_visibility::GitVisibilityEdit;
+    use std::collections::BTreeSet;
     use std::sync::atomic::{AtomicUsize, Ordering};
 
-    async fn leaf_capture_reads(
+    async fn capture_reads(
         file_data_bytes: usize,
+        objects_per_ref: usize,
+        history_len: usize,
         delay: std::time::Duration,
     ) -> (usize, usize, u64, std::time::Duration) {
         let reads = Arc::new(AtomicUsize::new(0));
@@ -272,7 +277,11 @@ mod tests {
         let count = 64;
         for index in 1..=count {
             let name = format!("refs/heads/agent-{index:04}");
-            let oid = format!("{index:040x}");
+            let last_object = index * objects_per_ref;
+            let mut oid = format!("{last_object:040x}");
+            let objects = (last_object - objects_per_ref + 1..=last_object)
+                .map(|object| format!("{object:040x}"))
+                .collect();
             let transaction = CapsuleTransaction::new(
                 root.record().digest(),
                 vec![CapsuleRefEdit::new(&name, None, Some(oid.clone()), None)],
@@ -280,7 +289,7 @@ mod tests {
             .unwrap();
             let visibility = CapsuleVisibilityDelta::new(BTreeMap::from([(
                 name.clone(),
-                GitVisibilityEdit::from_replacement_objects(None, oid.clone(), vec![oid.clone()]),
+                GitVisibilityEdit::from_replacement_objects(None, oid.clone(), objects),
             )]))
             .unwrap();
             let mut sections = vec![CapsuleSection::new(
@@ -293,8 +302,56 @@ mod tests {
                     bytes::Bytes::from(vec![17; file_data_bytes]),
                 ));
             }
-            let run = CapsuleRun::leaf(Capsule::build(&transaction, Vec::new(), sections).unwrap())
+            let first =
+                CapsuleRun::leaf(Capsule::build(&transaction, Vec::new(), sections).unwrap())
+                    .unwrap();
+            let mut leaves = vec![first];
+            for update in 1..history_len {
+                let next = format!(
+                    "{:040x}",
+                    count * objects_per_ref + index * history_len + update
+                );
+                let transaction = CapsuleTransaction::new(
+                    root.record().digest(),
+                    vec![CapsuleRefEdit::new(
+                        &name,
+                        Some(oid.clone()),
+                        Some(next.clone()),
+                        None,
+                    )],
+                )
                 .unwrap();
+                let visibility = CapsuleVisibilityDelta::new(BTreeMap::from([(
+                    name.clone(),
+                    GitVisibilityEdit::from_delta_objects(
+                        Some(oid),
+                        next.clone(),
+                        vec![next.clone()],
+                        Vec::new(),
+                    ),
+                )]))
+                .unwrap();
+                leaves.push(
+                    CapsuleRun::leaf(
+                        Capsule::build(
+                            &transaction,
+                            Vec::new(),
+                            vec![CapsuleSection::new(
+                                CapsuleSectionKind::VisibilityDelta,
+                                visibility.encode().unwrap(),
+                            )],
+                        )
+                        .unwrap(),
+                    )
+                    .unwrap(),
+                );
+                oid = next;
+            }
+            let run = if leaves.len() == 1 {
+                leaves.pop().unwrap()
+            } else {
+                CapsuleRun::compact(leaves).unwrap()
+            };
             layout
                 .store()
                 .create_strict(&layout.capsule_path(run.hash()), run.bytes().clone())
@@ -323,7 +380,7 @@ mod tests {
                     &BTreeSet::new(),
                     Some(oid),
                     None,
-                    transaction.id().unwrap(),
+                    run.transaction_ids().last().unwrap().clone(),
                     vec![pointer],
                 )
                 .unwrap();
@@ -366,7 +423,7 @@ mod tests {
 
     #[tokio::test]
     async fn small_ref_leaf_capture_coalesces_metadata_only() {
-        let (count, observed, _, _) = leaf_capture_reads(0, std::time::Duration::ZERO).await;
+        let (count, observed, _, _) = capture_reads(0, 1, 1, std::time::Duration::ZERO).await;
         assert_eq!(
             observed,
             3 * count,
@@ -377,7 +434,7 @@ mod tests {
     #[tokio::test]
     async fn large_ref_leaves_keep_payloads_cold_and_coalesce_metadata() {
         let (count, observed, _, _) =
-            leaf_capture_reads(64 * 1024, std::time::Duration::ZERO).await;
+            capture_reads(64 * 1024, 1, 1, std::time::Duration::ZERO).await;
         assert_eq!(
             observed,
             3 * count,
@@ -387,8 +444,9 @@ mod tests {
 
     #[tokio::test]
     async fn catalog_capture_keeps_small_leaf_payloads_cold() {
-        let (count, _, baseline, _) = leaf_capture_reads(0, std::time::Duration::ZERO).await;
-        let (_, _, with_payload, _) = leaf_capture_reads(8 * 1024, std::time::Duration::ZERO).await;
+        let (count, _, baseline, _) = capture_reads(0, 1, 1, std::time::Duration::ZERO).await;
+        let (_, _, with_payload, _) =
+            capture_reads(8 * 1024, 1, 1, std::time::Duration::ZERO).await;
         assert!(
             with_payload <= baseline + (count * 256) as u64,
             "payload changed control traffic from {baseline} to {with_payload} bytes"
@@ -398,10 +456,32 @@ mod tests {
     #[tokio::test(start_paused = true)]
     async fn leaf_proof_latency_is_bounded_by_concurrent_waves() {
         let delay = std::time::Duration::from_millis(8);
-        let (_, _, _, elapsed) = leaf_capture_reads(0, delay).await;
+        let (_, _, _, elapsed) = capture_reads(0, 1, 1, delay).await;
         assert!(
             elapsed <= delay * 16,
             "capture serialized proof reads: {elapsed:?}"
+        );
+    }
+
+    #[tokio::test(start_paused = true)]
+    async fn paged_new_tip_proofs_follow_concurrent_capture_waves() {
+        let delay = std::time::Duration::from_millis(8);
+        for (objects, history) in [(4096, 1), (1, 4)] {
+            let (_, _, _, elapsed) = capture_reads(0, objects, history, delay).await;
+            assert!(
+                elapsed <= delay * 16,
+                "capture serialized {objects}-object/{history}-edit tip proofs: {elapsed:?}"
+            );
+        }
+    }
+
+    #[tokio::test]
+    async fn paged_tip_capture_reads_only_mandatory_proof_pages() {
+        let (count, reads, _, _) = capture_reads(0, 4096, 1, std::time::Duration::ZERO).await;
+        assert_eq!(
+            reads,
+            count * 5,
+            "head, run, scalar, directory and tip leaf"
         );
     }
 
