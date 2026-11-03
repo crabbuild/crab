@@ -242,6 +242,25 @@ read/byte counts and compacted-run paging. This is a simulated round-trip proof,
 not a team latency result; fresh installed/Linux qualification remains required.
 Evidence: `visibility-waves-before.log`, `visibility-leaf-waves-final-all.log`.
 
+The corrected matched 64-developer Linux diagnostic passes all 854 correctness
+checks on both builds, but `9dac0cdd815` still fails the accepted cost gates.
+Independent raw-log recount finds 59,823 versus 113,439 capsule GETs (47.264%
+fewer), and 415,349,972 versus 406,453,516 capsule response bytes (2.189% more).
+All-metadata response bytes also increase. Candidate service p95 is 7.413 seconds,
+with every batch below ten seconds. This remains a failed cost result, not
+1,000-developer qualification.
+
+The next writer follow-up folds four small equal-level tail sources only when
+all input, including older carries, fits 1 MiB. Larger histories retain the
+existing batching and byte-pressure rules. A current-catalog regression first
+needs 27 reads for three refs with four versions each; the new bound is at most
+12 reads for three refs at four, eight and sixteen versions. Capsule bytes,
+source retention, large-source preservation and publication boundaries remain
+checked. Foreground compaction traffic must be included in live request/byte
+qualification; the capture-only regression does not establish its total cost.
+Evidence: `metadata-only-64-independent-comparison.json`,
+`tiny-history-before.log`, `tiny-history-final-write.log`.
+
 The bulk-read follow-up reproduces a cold 8 MiB scan issuing 128 GETs and
 evicting a warmed point proof. Large cold spans now use one exact transfer;
 complete warm spans remain transfer-free. All 775 metadata tests pass, including

@@ -67,9 +67,11 @@ commit-vs-abort records, root maintenance and rollback keep their own protocols.
 
 Ref-frontier compaction gathers one selected contiguous window, then
 performs one final `CapsuleRun::compact` on a blocking worker. Ordinary push and
-coordinated repair share this path. The 32-run batching policy bounds interim
-frontiers; the normal count target rolls each newest 500-capsule window into
-one CRBRUN01 run.
+coordinated repair share this path. Four equal-level tail runs can fold early
+when their combined input is at most 1 MiB. Every older carry must fit that same
+budget, so small appends do not repeatedly copy large historical runs. Larger
+inputs retain 32-run batching; the normal count target rolls each newest
+500-capsule window into one CRBRUN01 run.
 
 A 64 MiB input-byte budget also triggers prefix compaction;
 large historical runs remain stable so appending small commits does not rewrite

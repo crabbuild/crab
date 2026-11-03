@@ -2808,7 +2808,19 @@ mod tests {
     }
 
     #[tokio::test]
-    async fn frontier_compacts_at_32_equal_level_runs_without_rewriting_history() {
+    async fn larger_runs_batch_at_thirty_two_and_retain_sources() {
+        // Tiny inputs fold earlier; larger leaves exercise the normal batching tier.
+        let capsule = |transaction: &CapsuleTransaction| {
+            Capsule::build(
+                transaction,
+                Vec::new(),
+                vec![crab_metadata::capsule_protocol::CapsuleSection::new(
+                    crab_metadata::capsule_protocol::CapsuleSectionKind::FileData,
+                    bytes::Bytes::from(vec![7; 512 * 1024]),
+                )],
+            )
+            .unwrap()
+        };
         let inner = Arc::new(InMemory::new());
         let observer = Arc::new(RecordingObserver::default());
         let store = Store::new(inner)
