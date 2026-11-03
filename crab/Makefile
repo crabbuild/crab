@@ -844,20 +844,21 @@ release-list:
 release-metadata-check:
 	@set -eu; \
 	version=$$(grep -m1 '^version' Cargo.toml | cut -d '"' -f2); \
-	for manifest in Cargo.toml ../crates/crab-auth-server/Cargo.toml ../crates/crab-cache-server/Cargo.toml; do \
+	for manifest in Cargo.toml ../crates/crab-auth-server/Cargo.toml ../crates/crab-cache-server/Cargo.toml ../packages/desktop/agent/Cargo.toml; do \
 		manifest_version=$$(grep -m1 '^version' "$$manifest" | cut -d '"' -f2); \
 		if [ "$$manifest_version" != "$$version" ]; then \
 			echo "$$manifest has $$manifest_version, expected $$version" >&2; \
 			exit 1; \
 		fi; \
 	done; \
-	for package in crab crab-auth-server crab-cache-server; do \
+	for package in crab crab-auth-server crab-cache-server crab-desktop-agent; do \
 		lock_version=$$(awk -v package="$$package" '$$0 == "name = \"" package "\"" { found = 1; next } found && /^version = / { gsub(/^version = \"|\"$$/, ""); print; exit }' ../Cargo.lock); \
 		if [ "$$lock_version" != "$$version" ]; then \
 			echo "Cargo.lock has $$package $$lock_version, expected $$version" >&2; \
 			exit 1; \
 		fi; \
 	done; \
+	node -e 'const v=process.argv[1], p=require("../packages/desktop/package.json"), l=require("../packages/desktop/package-lock.json"); if(p.version!==v || l.version!==v || l.packages[""].version!==v) throw Error("Desktop version does not match release");' "$$version"; \
 	if ! grep -Eq "^## $$version - [0-9]{4}-[0-9]{2}-[0-9]{2}$$" ../CHANGELOG.md; then \
 		echo "CHANGELOG.md has no dated $$version release section" >&2; \
 		exit 1; \
@@ -921,7 +922,7 @@ release-ci: release-metadata-check
 		if [ -n "$(NFS_RELEASE_VERIFY_ARGS)" ]; then \
 			set -- "$$@" -f "nfs_release_verify_args=$(NFS_RELEASE_VERIFY_ARGS)"; \
 		fi; \
-		gh workflow run release.yml "$$@"
+		gh workflow run release.yml --ref "$$TAG" "$$@"
 
 # --- Homebrew tap ---
 

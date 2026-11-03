@@ -47,7 +47,8 @@ test('Windows installer icon can be generated from the configured image', async 
   assert.ok(result.icons?.some((icon) => icon.file.endsWith('.ico')));
 });
 
-function fixture(t) {
+function fixture(t, releaseVersion = version) {
+  const version = releaseVersion;
   const root = mkdtempSync(path.join(tmpdir(), 'crab-desktop-release-'));
   t.after(() => rmSync(root, { recursive: true, force: true }));
   const input = path.join(root, 'input');
@@ -61,13 +62,25 @@ function fixture(t) {
       writeFileSync(path.join(folder, url), data);
       return { url, sha512: createHash('sha512').update(data).digest('base64'), size: data.length };
     });
-    writeFileSync(path.join(folder, channel), JSON.stringify({ version, files, path: files[0].url, sha512: files[0].sha512, releaseDate: '2026-01-01T00:00:00.000Z' }));
+    const prefix = version.includes('-') ? version.split('-')[1].split('.')[0] : 'latest';
+    writeFileSync(path.join(folder, channel.replace('latest', prefix)), JSON.stringify({ version, files, path: files[0].url, sha512: files[0].sha512, releaseDate: '2026-01-01T00:00:00.000Z' }));
   }
   const blockmap = `Crab-${version}-mac-arm64.zip.blockmap`;
   writeFileSync(path.join(input, 'mac-arm64', blockmap), 'blockmap');
   const assemble = () => spawnSync(process.execPath, [script, version, input, output], { encoding: 'utf8' });
   return { input, output, assemble, blockmap };
 }
+
+test('publishes alpha metadata without a stable update channel', (t) => {
+  const version = '2.0.0-alpha.1';
+  const { output, assemble } = fixture(t, version);
+  const result = assemble();
+  assert.equal(result.status, 0, result.stderr);
+  for (const name of ['alpha-mac.yml', 'alpha.yml', 'alpha-linux.yml']) {
+    assert.equal(parse(readFileSync(path.join(output, name), 'utf8')).version, version);
+  }
+  assert.throws(() => readFileSync(path.join(output, 'latest-mac.yml')), { code: 'ENOENT' });
+});
 
 test('assembles update channels, installers and verifiable checksums for all platforms', async (t) => {
   const { input, output, assemble, blockmap } = fixture(t);

@@ -47,7 +47,9 @@ jobs:
         os: [macos-15, macos-15-intel, ubuntu-24.04, windows-2025]
     env:
       CARGO_INCREMENTAL: 0
-      CSC_IDENTITY_AUTO_DISCOVERY: ${{ inputs.release && 'true' || 'false' }}
+      # Alpha installers are unsigned downloads; later release channels require signing.
+      SIGN_RELEASE: ${{ inputs.release && !contains(inputs.version, '-alpha.') }}
+      CSC_IDENTITY_AUTO_DISCOVERY: ${{ inputs.release && !contains(inputs.version, '-alpha.') && 'true' || 'false' }}
     defaults:
       run:
         shell: bash
@@ -78,7 +80,7 @@ jobs:
         run: |
           node -e 'const p = require("./package.json"); if (!process.env.RELEASE_VERSION || p.version !== process.env.RELEASE_VERSION) { throw new Error("Desktop version does not match release tag"); }'
       - name: Require macOS signing and notarization credentials
-        if: ${{ inputs.release && runner.os == 'macOS' }}
+        if: ${{ env.SIGN_RELEASE == 'true' && runner.os == 'macOS' }}
         env:
           MAC_CSC_LINK: ${{ secrets.MAC_CSC_LINK }}
           MAC_CSC_KEY_PASSWORD: ${{ secrets.MAC_CSC_KEY_PASSWORD }}
@@ -90,7 +92,7 @@ jobs:
             if [ -z "${!name:-}" ]; then echo "::error::$name is required for desktop release signing."; exit 1; fi
           done
       - name: Require Windows signing credentials
-        if: ${{ inputs.release && runner.os == 'Windows' }}
+        if: ${{ env.SIGN_RELEASE == 'true' && runner.os == 'Windows' }}
         env:
           WIN_CSC_LINK: ${{ secrets.WIN_CSC_LINK }}
           WIN_CSC_KEY_PASSWORD: ${{ secrets.WIN_CSC_KEY_PASSWORD }}
@@ -106,14 +108,14 @@ jobs:
         run: npm run build
       - name: Build installers and unpacked application
         env:
-          CSC_LINK: ${{ inputs.release && runner.os == 'macOS' && secrets.MAC_CSC_LINK || '' }}
-          CSC_KEY_PASSWORD: ${{ inputs.release && runner.os == 'macOS' && secrets.MAC_CSC_KEY_PASSWORD || '' }}
-          APPLE_ID: ${{ inputs.release && runner.os == 'macOS' && secrets.APPLE_ID || '' }}
-          APPLE_APP_SPECIFIC_PASSWORD: ${{ inputs.release && runner.os == 'macOS' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
-          APPLE_TEAM_ID: ${{ inputs.release && runner.os == 'macOS' && secrets.APPLE_TEAM_ID || '' }}
-          WIN_CSC_LINK: ${{ inputs.release && runner.os == 'Windows' && secrets.WIN_CSC_LINK || '' }}
-          WIN_CSC_KEY_PASSWORD: ${{ inputs.release && runner.os == 'Windows' && secrets.WIN_CSC_KEY_PASSWORD || '' }}
-          RELEASE_BUILD: ${{ inputs.release }}
+          CSC_LINK: ${{ env.SIGN_RELEASE == 'true' && runner.os == 'macOS' && secrets.MAC_CSC_LINK || '' }}
+          CSC_KEY_PASSWORD: ${{ env.SIGN_RELEASE == 'true' && runner.os == 'macOS' && secrets.MAC_CSC_KEY_PASSWORD || '' }}
+          APPLE_ID: ${{ env.SIGN_RELEASE == 'true' && runner.os == 'macOS' && secrets.APPLE_ID || '' }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ env.SIGN_RELEASE == 'true' && runner.os == 'macOS' && secrets.APPLE_APP_SPECIFIC_PASSWORD || '' }}
+          APPLE_TEAM_ID: ${{ env.SIGN_RELEASE == 'true' && runner.os == 'macOS' && secrets.APPLE_TEAM_ID || '' }}
+          WIN_CSC_LINK: ${{ env.SIGN_RELEASE == 'true' && runner.os == 'Windows' && secrets.WIN_CSC_LINK || '' }}
+          WIN_CSC_KEY_PASSWORD: ${{ env.SIGN_RELEASE == 'true' && runner.os == 'Windows' && secrets.WIN_CSC_KEY_PASSWORD || '' }}
+          RELEASE_BUILD: ${{ env.SIGN_RELEASE }}
         run: |
           if [ "$RELEASE_BUILD" = true ] && [ "$RUNNER_OS" != Linux ]; then
             npx electron-builder --publish never --config.forceCodeSigning=true
@@ -121,13 +123,13 @@ jobs:
             npx electron-builder --publish never
           fi
       - name: Verify signed and notarized macOS application
-        if: ${{ inputs.release && runner.os == 'macOS' }}
+        if: ${{ env.SIGN_RELEASE == 'true' && runner.os == 'macOS' }}
         run: |
           app="release/mac${{ runner.arch == 'ARM64' && '-arm64' || '' }}/Crab.app"
           codesign --verify --deep --strict "$app"
           xcrun stapler validate "$app"
       - name: Verify signed Windows installer and updater publisher
-        if: ${{ inputs.release && runner.os == 'Windows' }}
+        if: ${{ env.SIGN_RELEASE == 'true' && runner.os == 'Windows' }}
         shell: pwsh
         run: |
           $installer = Get-ChildItem release/Crab-*-win-x64.exe | Select-Object -First 1
@@ -162,6 +164,9 @@ jobs:
             packages/desktop/release/*.exe
             packages/desktop/release/*.blockmap
             packages/desktop/release/latest*.yml
+            packages/desktop/release/alpha*.yml
+            packages/desktop/release/beta*.yml
+            packages/desktop/release/rc*.yml
           if-no-files-found: error
       - name: Broad desktop regression suite
         run: npm test -- --maxWorkers 2 --minWorkers 1

@@ -5,15 +5,16 @@ import path from 'node:path';
 import { parse, stringify } from 'yaml';
 
 const [version, input, output] = process.argv.slice(2);
-if (!version || !input || !output || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)$/.test(version)) {
+if (!version || !input || !output || !/^(0|[1-9]\d*)\.(0|[1-9]\d*)\.(0|[1-9]\d*)(-(alpha|beta|rc)\.(0|[1-9]\d*))?$/.test(version)) {
   throw new Error('Usage: node scripts/assemble-release.mjs <version> <input-dir> <output-dir>');
 }
 
+const channel = version.includes('-') ? version.split('-')[1].split('.')[0] : 'latest';
 const platforms = [
-  { dir: 'mac-arm64', channel: 'latest-mac.yml', files: [`Crab-${version}-mac-arm64.zip`, `Crab-${version}-mac-arm64.dmg`] },
-  { dir: 'mac-x64', channel: 'latest-mac.yml', files: [`Crab-${version}-mac-x64.zip`, `Crab-${version}-mac-x64.dmg`] },
-  { dir: 'windows-x64', channel: 'latest.yml', files: [`Crab-${version}-win-x64.exe`] },
-  { dir: 'linux-x64', channel: 'latest-linux.yml', files: [`Crab-${version}-linux-x86_64.AppImage`, `Crab-${version}-linux-amd64.deb`] },
+  { dir: 'mac-arm64', channel: `${channel}-mac.yml`, files: [`Crab-${version}-mac-arm64.zip`, `Crab-${version}-mac-arm64.dmg`] },
+  { dir: 'mac-x64', channel: `${channel}-mac.yml`, files: [`Crab-${version}-mac-x64.zip`, `Crab-${version}-mac-x64.dmg`] },
+  { dir: 'windows-x64', channel: `${channel}.yml`, files: [`Crab-${version}-win-x64.exe`] },
+  { dir: 'linux-x64', channel: `${channel}-linux.yml`, files: [`Crab-${version}-linux-x86_64.AppImage`, `Crab-${version}-linux-amd64.deb`] },
 ];
 
 async function digest(file) {
@@ -78,9 +79,9 @@ if (JSON.stringify(policy(arm)) !== JSON.stringify(policy(x64))) {
 }
 const mac = { ...arm, files: [...arm.files, ...x64.files] };
 for (const [name, content] of [
-  ['latest-mac.yml', stringify(mac)],
-  ['latest.yml', stringify(windows)],
-  ['latest-linux.yml', stringify(linux)],
+  [`${channel}-mac.yml`, stringify(mac)],
+  [`${channel}.yml`, stringify(windows)],
+  [`${channel}-linux.yml`, stringify(linux)],
 ]) {
   const data = Buffer.from(content);
   assets.set(name, { data, sha256: createHash('sha256').update(data).digest('hex') });

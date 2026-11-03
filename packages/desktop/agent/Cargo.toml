@@ -1,6 +1,6 @@
 [package]
 name = "crab-desktop-agent"
-version = "2.0.0"
+version = "2.0.0-alpha.1"
 edition = "2024"
 license = "Apache-2.0"
 description = "JSON-RPC sidecar for Crab Desktop. Speaks NDJSON over stdio and delegates to crab-sdk + the crab CLI."

@@ -75,6 +75,7 @@ jobs:
       version: ${{ steps.release.outputs.version }}
       source_sha: ${{ steps.release.outputs.source_sha }}
       source_short_sha: ${{ steps.release.outputs.source_short_sha }}
+      prerelease: ${{ steps.release.outputs.prerelease }}
     steps:
       - uses: actions/checkout@df4cb1c069e1874edd31b4311f1884172cec0e10 # v6
         with:
@@ -93,8 +94,8 @@ jobs:
           set -euo pipefail
 
           tag="$REQUESTED_TAG"
-          if [[ ! "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
-            echo "::error::Release tag must be stable SemVer such as v1.2.3, got '$tag'."
+          if [[ ! "$tag" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)(-(alpha|beta|rc)\.(0|[1-9][0-9]*))?$ ]]; then
+            echo "::error::Release tag must be SemVer such as v1.2.3 or v2.0.0-alpha.1, got '$tag'."
             exit 1
           fi
 
@@ -147,15 +148,22 @@ jobs:
             exit 1
           fi
 
-          git fetch --no-tags origin main
-          if ! git merge-base --is-ancestor HEAD origin/main; then
-            echo "::error::$tag is not reachable from origin/main."
+          prerelease=false
+          release_branch=main
+          if [[ "$version" == *-* ]]; then
+            prerelease=true
+            release_branch=crab-v2
+          fi
+          git fetch --no-tags origin "$release_branch"
+          if ! git merge-base --is-ancestor HEAD "origin/$release_branch"; then
+            echo "::error::$tag is not reachable from origin/$release_branch."
             exit 1
           fi
 
           source_sha="$(git rev-parse HEAD)"
           source_short_sha="$(git rev-parse --short HEAD)"
           {
+            echo "prerelease=$prerelease"
             echo "tag=$tag"
             echo "version=$version"
             echo "source_sha=$source_sha"
@@ -1569,6 +1577,7 @@ jobs:
           TAG="${{ needs.prepare.outputs.tag }}"
           VERSION="${{ needs.prepare.outputs.version }}"
           SOURCE_SHA="${{ needs.prepare.outputs.source_sha }}"
+          PRERELEASE="${{ needs.prepare.outputs.prerelease }}"
           FILES=(dist/crab-*.tar.gz dist/crab-*.zip dist/SHA256SUMS.txt)
           FILES+=(dist/desktop/*)
           existing="$(gh release view "$TAG" --repo "$RELEASE_REPO" --json isDraft --jq .isDraft 2>/dev/null || true)"
@@ -1591,7 +1600,7 @@ jobs:
             echo "::error::Could not extract release notes for $VERSION from CHANGELOG.md." >&2
             exit 1
           fi
-          printf '\n---\n\nSource commit: %s\n\nVerify an archive with: %s\n' \
+          printf '\n---\n\nSource commit: %s\n\nVerify a CLI archive with: %s\n' \
             "$SOURCE_SHA" \
             "gh attestation verify <archive> --repo ${GITHUB_REPOSITORY}" \
             >> "$notes_file"
@@ -1607,14 +1616,18 @@ jobs:
           gh release upload "$TAG" dist/crab-release.json \
             --repo "$RELEASE_REPO"
 
-          gh release edit "$TAG" --repo "$RELEASE_REPO" \
-            --draft=false \
-            --latest
+          if [ "$PRERELEASE" = true ]; then
+            gh release edit "$TAG" --repo "$RELEASE_REPO" --draft=false --prerelease --latest=false
+          else
+            gh release edit "$TAG" --repo "$RELEASE_REPO" \
+              --draft=false \
+              --latest
+          fi
 
   homebrew:
     name: Update Homebrew tap
     needs: [prepare, publish]
-    if: ${{ needs.prepare.result == 'success' && needs.publish.result == 'success' }}
+    if: ${{ needs.prepare.result == 'success' && needs.publish.result == 'success' && needs.prepare.outputs.prerelease == 'false' }}
     runs-on: ubuntu-latest
     timeout-minutes: 10
     permissions:

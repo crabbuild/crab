@@ -5,7 +5,25 @@ integration surfaces should be recorded here before release.
 
 ## Unreleased
 
-## 2.0.0 - 2026-10-31
+## 2.0.0-alpha.1 - 2026-11-02
+
+This is the first Crab v2 alpha. Download the platform CLI archive or desktop
+installer from the GitHub prerelease. Stable updates and Homebrew remain on
+the current stable release.
+
+### Desktop
+
+- Added the Electron desktop app with the matching v2 CLI and native SDK sidecar,
+  separate local and remote workspaces, and saved S3-compatible, GCS, and Azure
+  storage connections with built-in connection testing.
+- Added macOS Apple silicon and Intel installers, Windows x64 NSIS, and Linux
+  x64 AppImage and DEB downloads, with a larger monochrome Crab app icon.
+- Alpha desktop installers are unsigned. On macOS, use Privacy & Security to
+  allow the app after the first launch attempt; macOS automatic updates are
+  unavailable for this unsigned alpha. Windows may show a publisher warning.
+  Download later alphas manually from the release page.
+- Platform manifests and checksum files accompany the downloadable artifacts.
+
 
 ### CLI
 
