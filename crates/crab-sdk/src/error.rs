@@ -40,7 +40,7 @@ impl OperationId {
     pub(crate) fn allocate() -> Result<Self> {
         use std::sync::atomic::{AtomicU64, Ordering};
         static NEXT: AtomicU64 = AtomicU64::new(1);
-        NEXT.fetch_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
+        NEXT.try_update(Ordering::Relaxed, Ordering::Relaxed, |value| {
             value.checked_add(1)
         })
         .map(Self)

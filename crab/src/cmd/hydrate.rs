@@ -364,7 +364,7 @@ impl HydrateProgress {
             return;
         }
         let total = self.total_bytes.load(Relaxed);
-        let _ = self.bytes_done.fetch_update(Relaxed, Relaxed, |current| {
+        let _ = self.bytes_done.try_update(Relaxed, Relaxed, |current| {
             let next = current.saturating_add(bytes);
             Some(if total > 0 { next.min(total) } else { next })
         });

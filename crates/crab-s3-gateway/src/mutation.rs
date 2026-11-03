@@ -863,7 +863,7 @@ impl BranchState {
             .saturating_add(tree.estimated_bytes());
         if self
             .warm_bytes
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
                 used.checked_add(bytes)
                     .filter(|next| *next <= MAX_WARM_BRANCH_STATE_BYTES)
             })
@@ -1060,7 +1060,7 @@ impl WriteAdmission {
         }
         if self
             .warm_bytes
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |used| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |used| {
                 used.checked_add(bytes)
                     .filter(|next| *next <= MAX_WARM_BRANCH_STATE_BYTES)
             })
@@ -1161,7 +1161,7 @@ impl WriteAdmission {
         };
         queue
             .admitted
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |value| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |value| {
                 (value < MAX_QUEUED_WRITES_PER_REF).then_some(value + 1)
             })
             .map_err(|_| Error::Overloaded)?;

@@ -29,10 +29,6 @@ pub(crate) struct SharedLease {
 }
 
 impl SharedLease {
-    #[allow(
-        deprecated,
-        reason = "the workspace MSRV predates the replacement atomic update API"
-    )]
     pub(crate) fn release(&mut self) -> bool {
         let Some(budget) = self.budget.take() else {
             return false;
@@ -41,7 +37,7 @@ impl SharedLease {
         // caller must never join a producer whose cancellation is inevitable.
         let previous = budget
             .waiters
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
                 Some(if count == 1 { usize::MAX } else { count - 1 })
             });
         if previous == Ok(1) {
@@ -77,17 +73,13 @@ impl SharedBudget {
         self.cancellation.clone()
     }
 
-    #[allow(
-        deprecated,
-        reason = "the workspace MSRV predates the replacement atomic update API"
-    )]
     pub(crate) async fn register(
         self: &Arc<Self>,
         budget: &OperationBudget,
         cancellation: &CancellationToken,
     ) -> Option<(Rejection, SharedLease)> {
         self.waiters
-            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |count| {
+            .try_update(Ordering::AcqRel, Ordering::Acquire, |count| {
                 (count < usize::MAX - 1).then(|| count + 1)
             })
             .ok()?;

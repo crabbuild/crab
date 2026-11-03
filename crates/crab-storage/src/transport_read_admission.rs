@@ -392,7 +392,7 @@ mod tests {
 
         async fn request(&self) -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
             self.remaining
-                .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
+                .try_update(Ordering::SeqCst, Ordering::SeqCst, |remaining| {
                     remaining.checked_sub(1)
                 })
                 .map(|_| ())
